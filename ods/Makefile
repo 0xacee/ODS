@@ -149,6 +149,10 @@ test: ## Run unit and contract tests
 	@echo "=== issue-to-pr security check ==="
 	@bash tests/test-issue-to-pr-security.sh
 	@echo ""
+	@echo "=== Python type-check workflow contract ==="
+	@bash tests/test-python-type-check-workflow.sh
+	@python3 tests/test-mypy-regression-gate.py
+	@echo ""
 	@echo "=== CLI user-extension dependency resolution ==="
 	@bash tests/test-cli-user-extension-deps.sh
 	@echo ""

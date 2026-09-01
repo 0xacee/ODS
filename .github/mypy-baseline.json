@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "mypy_version": "2.3.1",
+    "normalization": "sorted path, message, and error code; line and column numbers ignored"
+  },
+  "dashboard-api": {
+    "errors": 152,
+    "digest": "4d344125089dda723c6dabea8c787c3c2051fec0a523dd36d9d237c8483d4b47"
+  },
+  "privacy-shield": {
+    "errors": 6,
+    "digest": "71ef29e415bab4302a1eee7f270847580c5b8efc50e133524a26baacf93a15b3"
+  },
+  "scripts": {
+    "errors": 9,
+    "digest": "e86cd7f42ebe9fca47a700ed2360e34e3ee39829b87301b81854da9d2627af16"
+  },
+  "token-spy": {
+    "errors": 7,
+    "digest": "4843c79853c23ee8734b4765ebe0c26d4fc80851c347ce19a003e3372f5dedb5"
+  }
+}
