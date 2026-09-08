@@ -100,6 +100,19 @@ def test_actual_multiagent_config_overrules_false_isolation_claim():
         plan_preferences(source, {"contextTokens": 65536}, caps())
 
 
+@pytest.mark.parametrize("preferences", [{"contextTokens": 32768}, {"maxOutputTokens": 4096}])
+def test_same_budget_preference_does_not_rewrite_other_agents_compaction(preferences):
+    source = config()
+    source["agents"]["list"].append({"id": "other"})
+    source["agents"]["defaults"] = {"compaction": {"reserveTokens": 14000, "keepRecentTokens": 1200}}
+    before = copy.deepcopy(source)
+    plan = plan_preferences(source, preferences, caps())
+    assert plan["document"]["agents"]["defaults"] == source["agents"]["defaults"]
+    assert plan["preview"]["sharedCompactionChange"] is False
+    assert not any(name.startswith("compaction") for name in plan["state"]["fields"])
+    assert restore_preferences(plan["document"], plan["state"]) == before
+
+
 def test_new_agent_refuses_rollback_of_shared_compaction():
     plan = plan_preferences(config(), {"compactionMode": "safeguard"}, caps())
     plan["document"]["agents"]["list"].append({"id": "other"})

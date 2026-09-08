@@ -228,9 +228,15 @@ def plan_preferences(current, preferences, capabilities, *, previous=None):
         caps["pixelOnlyRuntime"] = False
     preview = preview_preferences(desired, caps)
     values = {name: value for name, value in desired.items() if value is not None}
-    if "contextTokens" in values or "maxOutputTokens" in values:
+    budget_changed = (preview["proposed"]["contextTokens"] != caps["activeContextTokens"]
+                      or preview["proposed"]["maxOutputTokens"] != caps["activeMaxOutputTokens"])
+    if budget_changed:
         for name in ("compactionReserveTokens", "compactionReserveFloorTokens", "compactionKeepRecentTokens"):
             values[name] = preview["proposed"][name]
+    # Check the actual write set as well as the preview. Naming an unchanged
+    # Pixel budget must not silently claim global settings used by other agents.
+    if not caps["pixelOnlyRuntime"] and any(LEAVES[name][0] == "defaults" for name in values):
+        raise SettingsError("shared-compaction-requires-pixel-isolation")
     if "contextTokens" in values:
         values["_pluginContext"] = values["contextTokens"]
     parents = {LEAVES[name][:index] for name in values for index in range(1, len(LEAVES[name]))}
