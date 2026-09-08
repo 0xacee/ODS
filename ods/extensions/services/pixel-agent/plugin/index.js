@@ -204,6 +204,7 @@ export default definePluginEntry({
       executionHost: executionHostForAgent(api.config, AGENT_ID),
     });
     accessRuntime ??= createAccessRuntime({config: () => api.config,
+      settingsConfig: typeof api.runtime?.config?.current === 'function' ? () => api.runtime.config.current() : undefined,
       createTools: createOpenClawCodingTools, resolveSandbox: resolveSandboxContext,
       execControl: () => execCancellationControl, runtimeVersion: OPENCLAW_VERSION,
       hooksAllowed: api.config?.plugins?.entries?.["pixel-ods"]?.hooks?.allowConversationAccess === true});
@@ -282,6 +283,10 @@ export default definePluginEntry({
           else if (value.operation === "probe") {
             managedRuntime?.assertTransition();
             result = await accessRuntime.probe(value.token);
+          }
+          else if (value.operation === "settings-readback") {
+            managedRuntime?.assertTransition();
+            result = accessRuntime.readSettings(value.token, value.revision);
           }
           else throw new Error();
           sendJson(res, 200, result);
