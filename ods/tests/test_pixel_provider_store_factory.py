@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 from pixel_provider import store_factory as F
+from pixel_provider.host_api import _directory
 from pixel_provider.store import ProviderStore, StoreError
 from pixel_provider.vault import CredentialStore
 from pixel_provider.windows_store import WindowsProviderStore
@@ -14,6 +15,15 @@ from pixel_provider.windows_vault import WindowsCredentialStore
 
 
 class StoreFactory(unittest.TestCase):
+    def test_legacy_scope_directory_helper_retains_its_platform_boundary(self):
+        if os.name == 'posix':
+            self.assertEqual(_directory('/not-created-by-this-test'),
+                             Path('/not-created-by-this-test/pixel-providers'))
+        else:
+            with self.assertRaises(StoreError) as context:
+                _directory('/not-created-by-this-test')
+            self.assertEqual(context.exception.code, 'unsupported-platform')
+
     def test_actual_platform_selects_correct_explicit_classes_without_io(self):
         if os.name == 'nt':
             value, classes = r'C:\not-created-by-this-test', (WindowsProviderStore, WindowsCredentialStore)

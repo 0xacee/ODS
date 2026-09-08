@@ -67,6 +67,21 @@ class NativeHostHTTP(unittest.TestCase):
             self.assertEqual(self.request(method, {}, token='wrong')[0], 403)
         self.assert_pristine()
 
+    def test_separate_scope_api_is_not_silently_native_enabled(self):
+        self.assertEqual(self.request(), (200, default_config()))
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=3)
+        try:
+            connection.request('POST', '/v1/pixel/provider-scopes/status',
+                               body=json.dumps({'chatId': 'native-not-qualified'}),
+                               headers={'Authorization': 'Bearer synthetic-provider-test-key',
+                                        'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 400)  # Existing scope API's non-conflict StoreError mapping.
+            self.assertEqual(json.loads(response.read())['code'], 'unsupported-platform')
+        finally:
+            connection.close()
+        self.assert_pristine()
+
     def test_first_save_reload_and_stale_revision_use_real_native_custody(self):
         status, saved = self.save()
         self.assertEqual(status, 200, saved)

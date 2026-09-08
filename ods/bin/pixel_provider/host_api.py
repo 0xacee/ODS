@@ -1,6 +1,9 @@
 """Host-owned provider Settings. Saving is not runtime activation."""
 
+import os
+
 from .config import default_config, public_config
+from .store import StoreError
 from .vault import validate_edit
 from .store_factory import (
     credential_store,
@@ -9,6 +12,17 @@ from .store_factory import (
     provider_directory,
     provider_store,
 )
+
+
+def _directory(data_dir):
+    """Compatibility boundary for existing, still-POSIX scope storage callers.
+
+    Settings uses provider_directory directly. Keeping this guard prevents the
+    separate ScopeStore from silently claiming native Windows qualification.
+    """
+    if os.name != "posix":
+        raise StoreError("unsupported-platform")
+    return provider_directory(data_dir)
 
 
 def get_configuration(data_dir):
