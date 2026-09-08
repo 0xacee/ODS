@@ -188,11 +188,14 @@ def _path(path):
 
 
 @contextmanager
-def open_private(path, *, directory=False):
+def open_private(path, *, directory=False, missing_ok=False):
     api = _api()
-    if type(directory) is not bool:
+    if type(directory) is not bool or type(missing_ok) is not bool or (missing_ok and not directory):
         raise WindowsCustodyError('invalid-request')
     value, root, parts = _path(path)
+    # A missing final directory has no descriptor to inspect. Identity must
+    # still be checked so that absence never bypasses impersonation refusal.
+    _user_sid(api)
     if api.GetDriveTypeW(root) != 3:
         raise WindowsCustodyError('unsupported-volume')
     fs, serial, maximum, flags = C.create_unicode_buffer(64), U32(), U32(), U32()
@@ -220,6 +223,10 @@ def open_private(path, *, directory=False):
         access = READ_CONTROL | READ_ATTRIBUTES | (LIST_DIRECTORY if directory else 0x80000000)
         handle = api.CreateFileW(value, access, 3 if directory else 1, None, 3, 0x02200000, None)
         if handle in (None, INVALID_HANDLE):
+            if missing_ok and C.get_last_error() == 2:  # ERROR_FILE_NOT_FOUND, final component ONLY
+                yield None
+                _user_sid(api)
+                return
             raise WindowsCustodyError('open-failed')
         handles.append(handle)
         identity = inspect_private(handle, directory=directory)

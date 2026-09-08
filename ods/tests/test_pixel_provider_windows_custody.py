@@ -141,6 +141,10 @@ class NativeCustody(unittest.TestCase):
             self.assertTrue(set_thread(None, impersonation), C.get_last_error())
             try:
                 self.assertDenied(self.file)
+                with self.assertRaises(W.WindowsCustodyError) as context:
+                    with W.open_private(self.directory / 'absent', directory=True, missing_ok=True):
+                        self.fail('Missing directory bypassed impersonation refusal')
+                self.assertEqual(context.exception.code, 'impersonation-not-supported')
             finally:
                 self.assertTrue(revert(), C.get_last_error())
         finally:
@@ -214,6 +218,35 @@ class NativeCustody(unittest.TestCase):
         with W.open_private(empty, directory=True):
             with self.assertRaises(OSError):
                 os.rename(empty, self.directory / 'renamed-empty')
+
+    def test_optional_missing_directory_pins_ancestors_without_creating_state(self):
+        missing = self.directory / 'missing'
+        with W.open_private(missing, directory=True, missing_ok=True) as handle:
+            self.assertIsNone(handle)
+            self.assertFalse(missing.exists())
+            for ancestor in (self.directory, self.root):
+                with self.assertRaises(OSError):
+                    os.rename(ancestor, ancestor.with_name(ancestor.name + '-moved'))
+        self.assertFalse(missing.exists())
+        with self.assertRaises(W.WindowsCustodyError):
+            with W.open_private(missing / 'also-missing', directory=True, missing_ok=True):
+                self.fail('Missing ancestor treated as a pristine root')
+
+    def test_optional_missing_directory_does_not_admit_existing_unsafe_objects(self):
+        for path in (self.root, self.file):
+            with self.assertRaises(W.WindowsCustodyError):
+                with W.open_private(path, directory=True, missing_ok=True):
+                    self.fail('Unsafe existing target treated as missing')
+        with W.open_private(self.directory, directory=True, missing_ok=True) as handle:
+            self.assertIsInstance(handle, int)
+            W.inspect_private(handle, directory=True)
+
+    def test_optional_directory_arguments_are_strict(self):
+        for directory, missing_ok in ((False, True), (True, 1), (True, None), (1, True)):
+            with self.assertRaises(W.WindowsCustodyError) as context:
+                with W.open_private(self.directory, directory=directory, missing_ok=missing_ok):
+                    self.fail('Invalid optional directory arguments accepted')
+            self.assertEqual(context.exception.code, 'invalid-request')
 
     def test_path_budget_uses_utf16_units_and_rejects_unpaired_surrogates(self):
         for path in ('C:\\' + '\U0001f331' * 120, 'C:\\invalid\ud800'):
