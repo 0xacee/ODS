@@ -6402,6 +6402,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_pixel_ops_status(parse_qs(parsed.query, keep_blank_values=True))
         elif path == "/v1/pixel/providers":
             self._handle_pixel_providers(save=False)
+        elif path == "/v1/pixel/settings" and not parsed.query:
+            self._handle_pixel_settings(save=False)
         elif path == "/v1/pixel/advice-runtime":
             self._handle_pixel_advice_runtime()
         elif path == "/v1/pixel/inference-sharing":
@@ -6925,6 +6927,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_remote_provider_proof()
         elif self.path == "/v1/pixel/providers/save":
             self._handle_pixel_providers(save=True)
+        elif self.path == "/v1/pixel/settings/save":
+            self._handle_pixel_settings(save=True)
         elif self.path in {"/v1/pixel/advice/start", "/v1/pixel/advice/status", "/v1/pixel/advice/cancel"}:
             self._handle_pixel_advice(self.path.rsplit('/', 1)[1])
         elif self.path in {"/v1/pixel/handoff/list", "/v1/pixel/handoff/status", "/v1/pixel/handoff/decide"}:
@@ -7158,6 +7162,52 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, status, {'error': 'Advisory request failed', 'code': exc.code}, no_store=True)
         except (ImportError, OSError, ValueError, TypeError, KeyError):
             json_response(self, 503, {'error': 'Advisory service unavailable'}, no_store=True)
+
+    def _handle_pixel_settings(self, *, save):
+        """Owner preferences persistence, not runtime activation or privilege change."""
+        if not check_auth(self):
+            return
+        try:
+            from pixel_settings.host_api import get_settings, save_settings
+            from pixel_provider.store import MAX_BYTES, StoreError, decode_document
+        except ImportError:
+            json_response(self, 503, {"error": "Pixel settings are unavailable"}, no_store=True)
+            return
+        try:
+            if save:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,9}", lengths[0])
+                        or self.headers.get("Transfer-Encoding") is not None):
+                    json_response(self, 400, {"error": "Invalid settings request framing"}, no_store=True)
+                    return
+                length = int(lengths[0])
+                if length > MAX_BYTES:
+                    json_response(self, 413, {"error": "Settings request exceeds size limit"}, no_store=True)
+                    return
+                if length == 0:
+                    json_response(self, 400, {"error": "Settings request is required"}, no_store=True)
+                    return
+                old_timeout = self.connection.gettimeout()
+                try:
+                    self.connection.settimeout(10)
+                    raw = self.rfile.read(length)
+                finally:
+                    self.connection.settimeout(old_timeout)
+                if len(raw) != length:
+                    raise StoreError("malformed-json")
+                result = save_settings(DATA_DIR, decode_document(raw))
+            else:
+                result = get_settings(DATA_DIR)
+        except StoreError as exc:
+            status = 409 if exc.code == "stale-revision" else 503
+            if save and exc.code in {"invalid-request", "invalid-config", "malformed-json"}:
+                status = 400
+            json_response(self, status, {"error": "Pixel settings request failed", "code": exc.code}, no_store=True)
+            return
+        except (OSError, ValueError, TypeError, RecursionError):
+            json_response(self, 503, {"error": "Pixel settings are unavailable"}, no_store=True)
+            return
+        json_response(self, 200, result, no_store=True)
 
     def _handle_pixel_providers(self, *, save):
         """Provider Settings only; does not activate routes or change privileges."""
