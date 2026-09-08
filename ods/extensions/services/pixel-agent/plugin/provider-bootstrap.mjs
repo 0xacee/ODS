@@ -13,6 +13,11 @@ const BLOCK = Object.freeze({outcome: 'block', reason: 'ods-provider-bootstrap-u
 const MODEL = {primary: 'ods-policy/managed', fallbacks: []};
 const PROVIDER = {baseUrl: 'http://127.0.0.1:1/v1', api: 'openai-completions', apiKey: 'ods-policy-unavailable',
   models: [{id: 'managed', name: 'ODS managed', contextWindow: 32768, maxTokens: 4096, reasoning: false, input: ['text']}]};
+// OpenClaw's runtime config adds these exact defaults before plugin registration.
+// Admit the raw placeholder or that normalized form, never a projection that
+// discards unknown endpoint, auth, model or transport options.
+const NORMALIZED_PROVIDER = {...PROVIDER, models: [{...PROVIDER.models[0],
+  cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}, api: PROVIDER.api}]};
 export const managedProviderRequiredHooks = Object.freeze(['before_model_resolve', 'before_agent_run', 'agent_end']);
 
 function object(value) {
@@ -76,10 +81,11 @@ export function createManagedProviderBootstrap({deployment, readConfig,
     if (matches.length !== 1) fail();
     const agent = matches[0];
     const plugin = object(object(object(root.plugins).entries)['pixel-ods']);
+    const provider = canonical(object(object(root.models).providers)['ods-policy']);
     if (plugin.enabled !== true || object(plugin.hooks).allowConversationAccess !== true ||
         canonical(object(plugin.config).managedProvider) !== expectedBinding ||
         canonical(agent.model) !== canonical(MODEL) ||
-        canonical(object(object(root.models).providers)['ods-policy']) !== canonical(PROVIDER)) fail();
+        ![canonical(PROVIDER), canonical(NORMALIZED_PROVIDER)].includes(provider)) fail();
     for (const scope of [root, agent]) {
       if (Object.keys(object(object(scope.tools ?? {}).byProvider ?? {})).length) fail();
     }

@@ -64,6 +64,52 @@ test('owner bootstrap composes fixed private commands and frozen policy without 
   await f.bootstrap.shutdown();
 });
 
+const normalizedPlaceholder = config => Object.assign(config.models.providers['ods-policy'].models[0],
+  {cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}, api: 'openai-completions'});
+
+test('exact runtime-normalized placeholder admits and cleans up without editing config', async () => {
+  const f = fixture({changeConfig: normalizedPlaceholder}), initial = clone(f.config);
+  const run = await f.prepare();
+  assert.equal((await f.bootstrap.beforeAgentRun({}, run.resolved)).outcome, 'pass');
+  assert.equal(run.send(), 'stream');
+  await f.bootstrap.agentEnd({}, run.context);
+  assert.equal(f.releases.length, 1); assert.deepEqual(f.config, initial);
+  await f.bootstrap.shutdown();
+});
+
+for (const [name, change] of [
+  ['endpoint', p => p.baseUrl = 'http://127.0.0.1:8000/v1'],
+  ['credential', p => p.apiKey = 'unexpected-key'],
+  ['provider API', p => p.api = 'openai-responses'],
+  ['provider headers', p => p.headers = {Authorization: 'unexpected'}],
+  ['model ID', p => p.models[0].id = 'other'],
+  ['model name', p => p.models[0].name = 'other'],
+  ['additional model', p => p.models.push(clone(p.models[0]))],
+  ['model API', p => p.models[0].api = 'openai-responses'],
+  ['model headers', p => p.models[0].headers = {Authorization: 'unexpected'}],
+  ['model context', p => p.models[0].contextWindow++],
+  ['model reasoning', p => p.models[0].reasoning = true],
+  ['nonzero cost', p => p.models[0].cost.input = 1],
+  ['cost type', p => p.models[0].cost.input = '0'],
+  ['extra cost', p => p.models[0].cost.extra = 0],
+  ['missing cost', p => delete p.models[0].cost.cacheWrite],
+  ['only cost', p => delete p.models[0].api],
+  ['only API', p => delete p.models[0].cost],
+]) test('normalized placeholder still rejects unexpected ' + name, () => {
+  assert.throws(() => fixture({changeConfig: config => {
+    normalizedPlaceholder(config); change(config.models.providers['ods-policy']);
+  }}), /unavailable/);
+});
+
+test('normalized placeholder authority drift revokes a prepared route and cannot revive it', async () => {
+  const f = fixture({changeConfig: normalizedPlaceholder}), initial = clone(f.config), run = await f.prepare();
+  f.config.models.providers['ods-policy'].models[0].api = 'openai-responses';
+  assert.equal((await f.bootstrap.beforeAgentRun({}, run.resolved)).outcome, 'block');
+  f.config = initial;
+  assert.equal((await f.bootstrap.beforeModelResolve({}, ctx())).modelOverride, 'unavailable');
+  assert.throws(run.send, /unavailable/); await f.bootstrap.shutdown();
+});
+
 for (const [name, change] of [
   ['revision', c => c.plugins.entries['pixel-ods'].config.managedProvider.revision++],
   ['activation identity', c => c.plugins.entries['pixel-ods'].config.managedProvider.activationId = randomUUID()],
