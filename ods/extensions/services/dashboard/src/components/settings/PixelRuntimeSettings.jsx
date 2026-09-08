@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { readSettings, prepareSettingsSave, GROUPS, CONTROLS } from './pixelRuntimeSettingsForm';
+import PixelSettingsRuntime from './PixelSettingsRuntime';
 
 function scalarToString(value) {
   if (value === null || value === undefined) return '';
@@ -46,6 +47,14 @@ export default function PixelRuntimeSettings() {
   const [notice, setNotice] = useState(null);
   const [stale, setStale] = useState(false);
   const [pending, setPending] = useState(false);
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
+  const runtimeBusyRef = useRef(false);
+  const runtimeBusyChanged = useCallback((value) => {
+    if (value && pendingRef.current) return false;
+    runtimeBusyRef.current = value;
+    setRuntimeBusy(value);
+    return true;
+  }, []);
 
   const mountedRef = useRef(true);
   const seqRef = useRef(0);
@@ -65,7 +74,7 @@ export default function PixelRuntimeSettings() {
   }, []);
 
   const loadSettings = useCallback(() => {
-    if (pendingRef.current) return;
+    if (pendingRef.current || runtimeBusyRef.current) return;
     const seq = seqRef.current + 1;
     seqRef.current = seq;
     setPending(true);
@@ -120,12 +129,12 @@ export default function PixelRuntimeSettings() {
   }, [loadSettings, clearAbort]);
 
   const hasChanges = Object.keys(rawChanges).length > 0;
-  const canSave = snapshot && hasChanges && !stale && !pending && snapshot.revision < Number.MAX_SAFE_INTEGER;
-  const canReload = !pending;
-  const canCancel = hasChanges && !pending;
+  const canSave = snapshot && hasChanges && !stale && !pending && !runtimeBusy && snapshot.revision < Number.MAX_SAFE_INTEGER;
+  const canReload = !pending && !runtimeBusy;
+  const canCancel = hasChanges && !pending && !runtimeBusy;
 
   const handleSave = useCallback(() => {
-    if (pendingRef.current || !canSave) return;
+    if (pendingRef.current || runtimeBusyRef.current || !canSave) return;
     const seq = seqRef.current + 1;
     seqRef.current = seq;
     setPending(true);
@@ -189,7 +198,7 @@ export default function PixelRuntimeSettings() {
   }, [canSave, snapshot, rawChanges, clearAbort, doRequest]);
 
   const handleReload = useCallback(() => {
-    if (pendingRef.current || pending) return;
+    if (pendingRef.current || runtimeBusyRef.current || pending) return;
     if (hasChanges) {
       if (!window.confirm('Discard unsaved edits and reload?')) return;
     }
@@ -197,14 +206,14 @@ export default function PixelRuntimeSettings() {
   }, [pending, hasChanges, loadSettings]);
 
   const handleCancel = useCallback(() => {
-    if (pendingRef.current || pending) return;
+    if (pendingRef.current || runtimeBusyRef.current || pending) return;
     setRawChanges({});
     setError(null);
     setNotice(null);
   }, [pending]);
 
   const handleChange = useCallback((controlName, value) => {
-    if (pendingRef.current) return;
+    if (pendingRef.current || runtimeBusyRef.current) return;
     setNotice(null);
     setRawChanges((prev) => ({ ...prev, [controlName]: value }));
   }, []);
@@ -231,7 +240,7 @@ export default function PixelRuntimeSettings() {
         <select
           id={fieldId}
           className="w-full min-w-0 rounded border border-theme-border bg-theme-bg px-3 py-2 text-theme-text"
-          disabled={pending || !snapshot}
+          disabled={pending || runtimeBusy || !snapshot}
           value={value}
           onChange={(e) => handleChange(controlName, e.target.value)}
           aria-describedby={hasHelp ? helpId : undefined}
@@ -244,7 +253,7 @@ export default function PixelRuntimeSettings() {
         <select
           id={fieldId}
           className="w-full min-w-0 rounded border border-theme-border bg-theme-bg px-3 py-2 text-theme-text"
-          disabled={pending || !snapshot}
+          disabled={pending || runtimeBusy || !snapshot}
           value={value}
           onChange={(e) => handleChange(controlName, e.target.value)}
           aria-describedby={hasHelp ? helpId : undefined}
@@ -258,7 +267,7 @@ export default function PixelRuntimeSettings() {
           type="number"
           id={fieldId}
           className="w-full min-w-0 rounded border border-theme-border bg-theme-bg px-3 py-2 text-theme-text"
-          disabled={pending || !snapshot}
+          disabled={pending || runtimeBusy || !snapshot}
           value={value}
           min={CONTROLS[controlName].min}
           max={CONTROLS[controlName].max}
@@ -285,7 +294,7 @@ export default function PixelRuntimeSettings() {
     <section aria-labelledby="pixel-runtime-title" className="rounded-lg border border-theme-border bg-theme-card p-5 text-theme-text space-y-4 min-w-0">
       <h2 id="pixel-runtime-title" className="text-lg font-semibold">Pixel runtime settings</h2>
       <p className="text-sm text-theme-text-muted">Saving preferences does not apply them to Pixel.</p>
-      <p className="text-sm text-theme-text-muted">This form does not inspect the active runtime, model support, or backend capacity.</p>
+      <p className="text-sm text-theme-text-muted">Inspect runtime support below, then apply your saved preferences when Pixel is idle.</p>
       {stale && (
         <div className="text-sm text-amber-600">Connection stale. Reload before saving.</div>
       )}
@@ -323,6 +332,8 @@ export default function PixelRuntimeSettings() {
           Cancel Pixel edits
         </button>
       </div>
+      <PixelSettingsRuntime savedRevision={snapshot?.revision ?? null} saving={pending}
+        blocked={hasChanges || stale || !snapshot} onBusyChange={runtimeBusyChanged} />
     </section>
   );
 }

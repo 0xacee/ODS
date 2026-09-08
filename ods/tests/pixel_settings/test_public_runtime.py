@@ -21,6 +21,7 @@ def response(status="not-applied"):
              "appliedRevision": None, "capabilities": caps, "pending": False, "lastVerifiedAt": None, "reason": None}
     if status in ("applied", "saved-changes"):
         value.update(appliedRevision=3 if status == "applied" else 2, lastVerifiedAt="2026-09-08T16:00:00Z")
+    if status == "restored": value.update(lastVerifiedAt="2026-09-08T16:00:00Z")
     if status == "pending": value.update(pending=True, capabilities=None)
     if status == "unavailable": return public.unavailable("settings-controller-unavailable")
     return value
@@ -33,7 +34,7 @@ def dashboard_public():
     return result
 
 
-@pytest.mark.parametrize("state", ["not-applied", "applied", "saved-changes", "pending", "unavailable"])
+@pytest.mark.parametrize("state", ["not-applied", "applied", "saved-changes", "restored", "pending", "unavailable"])
 def test_host_and_dashboard_runtime_contract_agree(state):
     value = response(state)
     assert public.normalize_runtime(value) == dashboard_public().normalize_runtime(value) == value
@@ -47,6 +48,7 @@ def test_host_and_dashboard_runtime_contract_agree(state):
     ("unavailable", "pending", False), ("unavailable", "revision", "a" * 64),
     ("unavailable", "reason", "secret/key/with/path"), ("not-applied", "revision", "bad"),
     ("not-applied", "private", "do-not-echo"),
+    ("restored", "lastVerifiedAt", None), ("restored", "appliedRevision", 3),
 ])
 def test_inconsistent_runtime_metadata_is_rejected_in_both_boundaries(state, field, value):
     document = response(state)

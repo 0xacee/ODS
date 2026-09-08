@@ -347,16 +347,21 @@ def status(bridge):
     with _store(bridge, exclusive=False) as directory:
         saved, _config, config_hash, caps, source_hash = _inputs(bridge, directory)
         owner = bridge.worker("settings-status")
+    if owner["pending"]:
+        raise AccessError("settings-recovery-journal-missing")
     proof_file = bridge.state / "settings-verified.json"
     proof = _read(proof_file, 0, 8192)[0] if proof_file.exists() else {}
     applied = (not owner["pending"] and snapshot["runtime_verified"] is True
                and proof.get("configSha256") == config_hash and proof.get("pid") == snapshot["_native"]["pid"]
-               and _revision(proof.get("settingsRevision")) and proof.get("settingsRevision") == owner["managedRevision"]
+               and (_revision(proof.get("settingsRevision"))
+                    or proof.get("settingsRevision") is None and proof.get("outcome") == "rolled-back")
+               and proof.get("settingsRevision") == owner["managedRevision"]
                and all(proof.get(key) == value for key, value in _identity(bridge).items())
                and proof.get("boundary") == bridge.unit_boundary())
     state = "pending" if owner["pending"] else "not-applied"
     if applied:
-        state = "applied" if owner["managedRevision"] == saved["revision"] else "saved-changes"
+        state = ("restored" if owner["managedRevision"] is None else
+                 "applied" if owner["managedRevision"] == saved["revision"] else "saved-changes")
     return {"status": state,
             "revision": _inspection_revision(snapshot, source_hash, None), "settingsRevision": saved["revision"],
             "appliedRevision": owner["managedRevision"] if applied else None, "capabilities": caps,

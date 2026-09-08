@@ -4,7 +4,7 @@ import re
 
 from .contract import SettingsError, _capabilities
 
-STATES = {"not-applied", "applied", "saved-changes", "pending", "unavailable"}
+STATES = {"not-applied", "applied", "saved-changes", "restored", "pending", "unavailable"}
 KEYS = {"schemaVersion", "status", "revision", "settingsRevision", "appliedRevision",
         "capabilities", "pending", "lastVerifiedAt", "reason"}
 
@@ -60,8 +60,9 @@ def normalize_runtime(value):
             if value["appliedRevision"] is not None or value["lastVerifiedAt"] is not None:
                 raise SettingsError("invalid-settings-response")
         else:
-            if (not _revision(value["appliedRevision"])
-                    or (value["appliedRevision"] == value["settingsRevision"]) != (value["status"] == "applied")):
+            if (value["status"] == "restored" and value["appliedRevision"] is not None
+                    or value["status"] != "restored" and (not _revision(value["appliedRevision"])
+                    or (value["appliedRevision"] == value["settingsRevision"]) != (value["status"] == "applied"))):
                 raise SettingsError("invalid-settings-response")
             timestamp = value["lastVerifiedAt"]
             if type(timestamp) is not str or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z", timestamp):

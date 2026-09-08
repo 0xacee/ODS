@@ -67,7 +67,7 @@ export const GROUPS = [
       reasoningVisibility: 'Reasoning visibility',
     },
     help: {
-      thinking: 'Requested reasoning effort, subject to model support. Not applied yet.',
+      thinking: 'Requested reasoning effort, subject to model support. Saving alone does not apply it.',
       reasoningVisibility: 'Provider-supplied reasoning when available, separately from progress summaries. No hidden prompts or fabricated thoughts.',
       verbosity: 'Runtime tool-output detail level; does not guarantee longer prose.',
     },

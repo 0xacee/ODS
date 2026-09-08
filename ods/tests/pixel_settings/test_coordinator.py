@@ -128,7 +128,12 @@ def test_mismatch_rolls_back_exact_bytes_without_claiming_applied(adapter):
     result = c.change(adapter, request(adapter))
     assert result == {"outcome": "rolled-back", "appliedRevision": None}
     assert adapter.path.read_bytes() == before and adapter.log.count("restart") == 2
-    assert c.status(adapter)["status"] == "not-applied"
+    status = c.status(adapter)
+    assert status["status"] == "restored" and status["appliedRevision"] is None
+    assert status["lastVerifiedAt"] is not None
+    adapter.started += 1
+    stale = c.status(adapter)
+    assert stale["status"] == "not-applied" and stale["lastVerifiedAt"] is None
 
 
 @pytest.mark.parametrize("failure", ["preinvoke", "lost-reply"])
@@ -152,6 +157,31 @@ def test_partial_release_recovery_reproves_and_releases_both(adapter):
     adapter.fail = None
     assert c.change(adapter, request(adapter, "recover"))["outcome"] == "applied"
     assert adapter.log.count("restart") == 1 and adapter.native_phase == adapter.edge_phase == "idle"
+
+
+def test_browser_transport_replay_after_lost_reply_cannot_apply_twice(adapter):
+    original = request(adapter)
+    adapter.failure = "lost-reply"
+    with pytest.raises(AccessError): c.change(adapter, original)
+    committed = adapter.path.read_bytes()
+    log = list(adapter.log)
+    with pytest.raises(AccessError, match="settings-inspection-changed"):
+        c.change(adapter, original)
+    assert adapter.path.read_bytes() == committed and adapter.log == log
+    adapter.failure = None
+    assert c.change(adapter, request(adapter, "recover"))["outcome"] == "applied"
+    assert adapter.path.read_bytes() == committed and adapter.log.count("restart") == 1
+
+
+def test_orphan_owner_pending_does_not_advertise_unauthorized_recovery(adapter, monkeypatch):
+    original = adapter.worker
+    monkeypatch.setattr(adapter, "worker", lambda operation="status", **kwargs:
+                        dict(original(operation, **kwargs), pending=True) if operation == "settings-status"
+                        else original(operation, **kwargs))
+    before = adapter.path.read_bytes()
+    with pytest.raises(AccessError, match="settings-recovery-journal-missing"):
+        c.status(adapter)
+    assert not adapter.pending() and not adapter.log and adapter.path.read_bytes() == before
 
 
 def test_no_owner_write_partial_release_is_also_recoverable(adapter):

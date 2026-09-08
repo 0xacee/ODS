@@ -147,7 +147,7 @@ def normalize_runtime(value):
             "capabilities", "pending", "lastVerifiedAt", "reason"}
     if (type(value) is not dict or set(value) != keys or type(value["schemaVersion"]) is not int
             or value["schemaVersion"] != 1 or type(value["status"]) is not str
-            or value["status"] not in ("not-applied", "applied", "saved-changes", "pending", "unavailable")):
+            or value["status"] not in ("not-applied", "applied", "saved-changes", "restored", "pending", "unavailable")):
         raise ValueError("invalid-settings-response")
     if value["status"] == "unavailable":
         reason = value["reason"]
@@ -168,8 +168,9 @@ def normalize_runtime(value):
             if value["appliedRevision"] is not None or value["lastVerifiedAt"] is not None:
                 raise ValueError("invalid-settings-response")
         else:
-            if (not _runtime_revision(value["appliedRevision"])
-                    or (value["appliedRevision"] == value["settingsRevision"]) != (value["status"] == "applied")):
+            if (value["status"] == "restored" and value["appliedRevision"] is not None
+                    or value["status"] != "restored" and (not _runtime_revision(value["appliedRevision"])
+                    or (value["appliedRevision"] == value["settingsRevision"]) != (value["status"] == "applied"))):
                 raise ValueError("invalid-settings-response")
             timestamp = value["lastVerifiedAt"]
             if type(timestamp) is not str or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z", timestamp):

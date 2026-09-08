@@ -2,6 +2,9 @@ import { StrictMode } from 'react'
 import { act, fireEvent, render, screen, waitFor } from '../../test/test-utils'
 import PixelRuntimeSettings from './PixelRuntimeSettings'
 
+// Persistence tests remain independent; actual composition is covered separately.
+vi.mock('./PixelSettingsRuntime', () => ({ default: () => null }))
+
 const doc = (preferences = {}, revision = 0) => ({
   configuration: { schemaVersion: 1, revision, preferences },
   runtime: { status: 'not-applied', reason: 'settings-runtime-not-integrated' },
