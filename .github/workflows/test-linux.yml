@@ -46,6 +46,7 @@ jobs:
       - name: Settings transaction and access preservation contracts
         run: |
           python -m pytest -q tests/pixel_settings/test_contract.py tests/pixel_settings/test_projection.py \
+            tests/pixel_settings/test_runtime.py tests/pixel_settings/test_coordinator.py \
             extensions/services/pixel-agent/tests/test_settings_transaction.py \
             extensions/services/pixel-agent/tests/test_settings_worker_protocol.py \
             extensions/services/pixel-agent/tests/test_access_bridge.py \
