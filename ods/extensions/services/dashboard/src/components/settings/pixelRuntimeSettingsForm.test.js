@@ -14,6 +14,14 @@ it('reads sparse preferences without defaults and copies them independently', ()
   expect(Object.keys(CONTROLS)).toHaveLength(20)
 })
 
+it('reads new persistence-only marker without asserting runtime state', () => {
+  const value = envelope({ contextTokens: 65536 }, 3)
+  value.runtime = { status: 'not-inspected', reason: 'runtime-status-separate' }
+  expect(readSettings(value)).toEqual({ revision: 3, preferences: { contextTokens: 65536 } })
+  value.runtime.reason = 'settings-runtime-not-integrated'
+  expect(() => readSettings(value)).toThrow()
+})
+
 it('rejects incomplete, private, malformed or non-plain envelopes', () => {
   for (const input of [null, [], {}, { configuration: envelope().configuration },
     { ...envelope(), secret: 'private' },

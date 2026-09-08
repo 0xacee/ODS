@@ -148,8 +148,9 @@ export function readSettings(payload, expectedRevision) {
   if (payload.configuration.revision < 0 || payload.configuration.revision > Number.MAX_SAFE_INTEGER) throw new Error('Revision out of range');
   if (!validatePreferences(payload.configuration.preferences)) throw new Error('Invalid preferences');
   if (!isPlainObject(payload.runtime)) throw new Error('Missing runtime');
-  if (payload.runtime.status !== 'not-applied') throw new Error('Unexpected runtime status');
-  if (payload.runtime.reason !== 'settings-runtime-not-integrated') throw new Error('Unexpected runtime reason');
+  const oldHost = payload.runtime.status === 'not-applied' && payload.runtime.reason === 'settings-runtime-not-integrated';
+  const currentHost = payload.runtime.status === 'not-inspected' && payload.runtime.reason === 'runtime-status-separate';
+  if (!oldHost && !currentHost) throw new Error('Unexpected persistence runtime marker');
   const allowedRoot = new Set(['configuration', 'runtime']);
   for (const k of Object.keys(payload)) {
     if (!allowedRoot.has(k)) throw new Error(`Unknown root field: ${k}`);

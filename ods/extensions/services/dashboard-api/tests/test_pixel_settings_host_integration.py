@@ -77,7 +77,7 @@ def test_actual_proxy_save_reset_reload_and_conflict(actual_stack, tmp_path):
     assert reset.status_code == 200, reset.text
     assert reset.json()["configuration"]["preferences"] == {
         "contextTokens": None, "temperature": 1, "compactionNotify": True}
-    assert reset.json()["runtime"]["status"] == "not-applied"
+    assert reset.json()["runtime"]["status"] == "not-inspected"
     assert client.get("/api/pixel/settings").json() == reset.json()
     assert client.post("/api/pixel/settings/save", json={"expectedRevision": 1, "changes": {}}).status_code == 409
     assert handler.posts == 3
@@ -116,3 +116,98 @@ def test_lost_success_response_is_not_retried_and_reload_recovers(actual_stack, 
     assert reloaded.status_code == 200
     assert reloaded.json()["configuration"] == {
         "schemaVersion": 1, "revision": 1, "preferences": {"verbosity": "full"}}
+
+
+@pytest.fixture
+def controller_stub(actual_stack, monkeypatch):
+    """Real dashboard/host HTTP, explicitly simulated privileged controller."""
+    import pixel_access_client
+    from pixel_settings import host_api
+    monkeypatch.setattr(host_api.platform, "system", lambda: "Linux")
+    calls = []
+    state = {"status": "pending", "revision": "a" * 64, "settingsRevision": 3,
+             "appliedRevision": None, "pending": True, "capabilities": None, "lastVerifiedAt": None}
+
+    def request(operation, body=None, **kwargs):
+        calls.append((operation, body, kwargs))
+        if operation == "settings-status": return 200, dict(state)
+        return 200, {"outcome": "rolled-back", "appliedRevision": None}
+
+    monkeypatch.setattr(pixel_access_client, "request_access", request)
+    return calls, state
+
+
+def test_runtime_inspection_and_recovery_use_actual_host_path(actual_stack, controller_stub, tmp_path):
+    client, _agent, handler = actual_stack
+    calls, _state = controller_stub
+    # Recovery remains inspectable even if the preferences file cannot be loaded.
+    assert client.post("/api/pixel/settings/save", json={"expectedRevision": 0, "changes": {}}).status_code == 200
+    (tmp_path / "pixel-providers/pixel-settings.json").write_bytes(b"corrupt")
+    assert client.get("/api/pixel/settings").status_code == 503
+    result = client.get("/api/pixel/settings/runtime")
+    assert result.status_code == 200, result.text
+    assert result.json()["pending"] is True
+    assert result.headers["cache-control"] == "no-store"
+    payload = {"operation": "recover", "revision": result.json()["revision"], "settingsRevision": 3}
+    outcome = client.post("/api/pixel/settings/runtime", json=payload)
+    assert outcome.status_code == 200, outcome.text
+    assert outcome.json() == {"outcome": "rolled-back", "appliedRevision": None}
+    assert calls == [("settings-status", None, {"settings_data_dir": tmp_path}),
+                     ("settings-change", payload, {"settings_data_dir": tmp_path})]
+    assert handler.posts == 2
+
+
+@pytest.mark.parametrize("extra", [{"path": "/etc"}, {"data_dir_id": "b" * 64}, {"capabilities": {}}])
+def test_runtime_rejects_public_control_target_before_actual_host(actual_stack, controller_stub, extra):
+    client, _agent, handler = actual_stack
+    calls, _state = controller_stub
+    response = client.post("/api/pixel/settings/runtime", json={"operation": "apply", "revision": "a" * 64,
+                                                              "settingsRevision": 3, **extra})
+    assert response.status_code == 400
+    assert handler.posts == 0 and calls == []
+
+
+def test_runtime_lifecycle_conflict_does_not_call_controller(actual_stack, controller_stub):
+    client, agent, _handler = actual_stack
+    calls, _state = controller_stub
+    acquired, _active = agent._begin_model_lifecycle("model_switch")
+    assert acquired
+    try:
+        response = client.post("/api/pixel/settings/runtime", json={"operation": "apply", "revision": "a" * 64, "settingsRevision": 3})
+        assert response.status_code == 409
+        assert calls == []
+    finally:
+        agent._end_model_lifecycle("model_switch")
+
+
+@pytest.mark.parametrize("failure", ["lost", "wrong-revision", "private-error"])
+def test_runtime_uncertainty_no_retry_no_secret_and_lifecycle_released(actual_stack, controller_stub, monkeypatch, failure):
+    import pixel_access_client
+    client, agent, handler = actual_stack
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append((args, kwargs))
+        if failure == "lost": raise OSError("private-sentinel/full/path")
+        if failure == "wrong-revision": return 200, {"outcome": "applied", "appliedRevision": 4}
+        return 503, {"error": "private-sentinel/full/path"}
+    monkeypatch.setattr(pixel_access_client, "request_access", fail)
+    result = client.post("/api/pixel/settings/runtime", json={"operation": "apply", "revision": "a" * 64, "settingsRevision": 3})
+    assert result.status_code == 503
+    assert "private-sentinel" not in result.text
+    assert len(calls) == 1 and handler.posts == 1
+    acquired, _active = agent._begin_model_lifecycle("model_switch")
+    assert acquired
+    agent._end_model_lifecycle("model_switch")
+
+
+def test_missing_root_controller_leaves_save_usable(actual_stack, controller_stub, monkeypatch):
+    import pixel_access_client
+    client, _agent, _handler = actual_stack
+    def missing(*_args, **_kwargs): raise FileNotFoundError("private-controller-path")
+    monkeypatch.setattr(pixel_access_client, "request_access", missing)
+    result = client.get("/api/pixel/settings/runtime")
+    assert result.status_code == 200
+    assert result.json()["status"] == "unavailable" and result.json()["pending"] is None
+    assert "private-controller-path" not in result.text
+    saved = client.post("/api/pixel/settings/save", json={"expectedRevision": 0, "changes": {"verbosity": "full"}})
+    assert saved.status_code == 200

@@ -24,7 +24,7 @@ it('renders 20 accessible controls with automatic values and no write on a new i
   expect(screen.getAllByRole('spinbutton').length + screen.getAllByRole('combobox').length).toBe(20)
   expect(screen.getByLabelText('Reasoning visibility')).toHaveValue('')
   expect(save()).toBeDisabled()
-  expect(screen.getByText('Saved preferences are not applied to Pixel yet.')).toBeVisible()
+  expect(screen.getByText('Saving preferences does not apply them to Pixel.')).toBeVisible()
   expect(fetchMock.mock.calls.every(([, options]) => options.method !== 'POST')).toBe(true)
 })
 

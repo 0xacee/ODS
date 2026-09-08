@@ -13,7 +13,7 @@ from host_agent_client import (
     AgentUnavailable,
     async_request_json as request_agent_json,
 )
-from pixel_settings_public import normalize_edit, normalize_response
+from pixel_settings_public import normalize_edit, normalize_response, normalize_runtime, normalize_runtime_change, normalize_runtime_outcome
 from routers.pixel_providers import (
     _check_depth,
     _constant,
@@ -26,7 +26,7 @@ from security import verify_api_key
 router = APIRouter(tags=["pixel-settings"])
 
 
-async def _body(request: Request) -> dict[str, Any]:
+async def _body(request: Request, validator=normalize_edit) -> dict[str, Any]:
     raw = bytearray()
     async for chunk in request.stream():
         if len(raw) + len(chunk) > MAX_BYTES:
@@ -41,14 +41,14 @@ async def _body(request: Request) -> dict[str, Any]:
             parse_float=_float,
             parse_constant=_constant,
         )
-        return normalize_edit(value)
+        return validator(value)
     except (ValueError, RecursionError):
         raise HTTPException(400, "Invalid settings request") from None
 
 
-async def _request(method: str, path: str, payload: Any = None):
+async def _request(method: str, path: str, payload: Any = None, *, validator=normalize_response, timeout=10):
     try:
-        raw = await request_agent_json(method, path, payload=payload, timeout=10)
+        raw = await request_agent_json(method, path, payload=payload, timeout=timeout)
     except AgentHTTPError as exc:
         code = exc.status_code if exc.status_code in (400, 409, 413, 503) else 502
         raise HTTPException(code, "Settings request failed") from None
@@ -57,7 +57,7 @@ async def _request(method: str, path: str, payload: Any = None):
     except AgentProtocolError:
         raise HTTPException(502, "Invalid settings response") from None
     try:
-        normalized = normalize_response(raw)
+        normalized = validator(raw)
     except (ValueError, TypeError, RecursionError):
         raise HTTPException(502, "Invalid settings response") from None
     return normalized
@@ -82,4 +82,18 @@ async def save_settings(request: Request, _key: str = Depends(verify_api_key)):
             or any(key not in preferences or preferences[key] != value
                    for key, value in payload["changes"].items())):
         raise HTTPException(502, "Settings revision mismatch")
+    return _no_store_response(response)
+
+
+@router.get("/api/pixel/settings/runtime")
+async def get_runtime(_key: str = Depends(verify_api_key)):
+    return _no_store_response(await _request("GET", "/v1/pixel/settings/runtime", validator=normalize_runtime, timeout=65))
+
+
+@router.post("/api/pixel/settings/runtime")
+async def change_runtime(request: Request, _key: str = Depends(verify_api_key)):
+    payload = await _body(request, normalize_runtime_change)
+    response = await _request("POST", "/v1/pixel/settings/runtime", payload, validator=normalize_runtime_outcome, timeout=340)
+    if response["outcome"] == "applied" and response["appliedRevision"] != payload["settingsRevision"]:
+        raise HTTPException(502, "Settings runtime revision mismatch")
     return _no_store_response(response)

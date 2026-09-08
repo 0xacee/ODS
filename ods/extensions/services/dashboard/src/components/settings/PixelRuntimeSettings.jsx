@@ -284,8 +284,8 @@ export default function PixelRuntimeSettings() {
   return (
     <section aria-labelledby="pixel-runtime-title" className="rounded-lg border border-theme-border bg-theme-card p-5 text-theme-text space-y-4 min-w-0">
       <h2 id="pixel-runtime-title" className="text-lg font-semibold">Pixel runtime settings</h2>
-      <p className="text-sm text-theme-text-muted">Saved preferences are not applied to Pixel yet.</p>
-      <p className="text-sm text-theme-text-muted">Model support and backend capacity have not been verified. Saving does not change the active runtime.</p>
+      <p className="text-sm text-theme-text-muted">Saving preferences does not apply them to Pixel.</p>
+      <p className="text-sm text-theme-text-muted">This form does not inspect the active runtime, model support, or backend capacity.</p>
       {stale && (
         <div className="text-sm text-amber-600">Connection stale. Reload before saving.</div>
       )}
