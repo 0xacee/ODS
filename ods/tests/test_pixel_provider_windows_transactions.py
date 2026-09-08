@@ -297,6 +297,22 @@ class Transactions(unittest.TestCase):
         self.assertEqual(context.exception.code, 'stale-revision')
         self.assertEqual(store.load(), saved)
 
+    def test_native_store_does_not_normalize_ambiguous_path_before_validation(self):
+        path = str(self.directory) + '\\.'
+        with self.assertRaises(StoreError):
+            WindowsProviderStore(path).load()
+        self.assertFalse((self.directory / T.LOCK_NAME).exists())
+
+    def test_native_store_does_not_turn_relative_input_into_absolute_authority(self):
+        previous = os.getcwd()
+        try:
+            os.chdir(self.directory)
+            with self.assertRaises(StoreError):
+                WindowsProviderStore('.').load()
+        finally:
+            os.chdir(previous)
+        self.assertFalse((self.directory / T.LOCK_NAME).exists())
+
 
 def peer_main():
     directory, mode, kind = sys.argv[2:]

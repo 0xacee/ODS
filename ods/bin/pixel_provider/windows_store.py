@@ -2,6 +2,7 @@
 import copy
 from contextlib import contextmanager
 import json
+import os
 
 from .store import LOCK_TIMEOUT, MAX_BYTES, ProviderStore, StoreError, decode_document
 from .windows_custody import WindowsCustodyError
@@ -9,6 +10,14 @@ from .windows_transactions import private_directory_transaction
 
 
 class WindowsProviderStore(ProviderStore):
+    def __init__(self, directory, *, validator=None, default_factory=None):
+        from .config import default_config, normalize_config
+        # Path(...).absolute() erases '.' and accepts relative spellings before
+        # the native custody validator can reject them. Snapshot raw fspath.
+        self.directory = os.fspath(directory)
+        self.validator = validator or normalize_config
+        self.default_factory = default_factory or default_config
+
     @contextmanager
     def _locked(self, exclusive):
         try:

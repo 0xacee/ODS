@@ -14,6 +14,7 @@ import re
 U32, U16, U8, PTR = C.c_uint32, C.c_uint16, C.c_ubyte, C.c_void_p
 BOOL, WCHAR = C.c_int, C.c_wchar_p
 READ_CONTROL, READ_ATTRIBUTES = 0x20000, 0x80
+LIST_DIRECTORY = 1
 DIRECTORY, REPARSE = 0x10, 0x400
 INVALID_HANDLE = PTR(-1).value
 
@@ -167,8 +168,13 @@ def _path(path):
         value = os.fspath(path)
     except TypeError:
         raise WindowsCustodyError('invalid-path') from None
-    if not isinstance(value, str) or not re.match(r'^[A-Za-z]:[\\/]', value) or len(value) > 240:
+    if not isinstance(value, str) or not re.match(r'^[A-Za-z]:[\\/]', value):
         raise WindowsCustodyError('invalid-path')
+    try:
+        if len(value.encode('utf-16-le')) // 2 > 240:
+            raise WindowsCustodyError('invalid-path')
+    except UnicodeError:
+        raise WindowsCustodyError('invalid-path') from None
     value = value.replace('/', '\\')
     root, tail = value[:3], value[3:]
     parts = tail.split('\\') if tail else []
@@ -199,7 +205,9 @@ def open_private(path, *, directory=False):
         ancestors = [root] + [root + '\\'.join(parts[:i]) for i in range(1, len(parts))]
         for number, ancestor in enumerate(ancestors):
             is_parent = not directory and number == len(ancestors) - 1
-            access = READ_ATTRIBUTES | (READ_CONTROL if is_parent else 0)
+            # Attribute-only opens do not enforce the intended share-delete
+            # exclusion. Request directory read access so this handle pins it.
+            access = READ_ATTRIBUTES | LIST_DIRECTORY | (READ_CONTROL if is_parent else 0)
             handle = api.CreateFileW(ancestor, access, 3, None, 3, 0x02200000, None)
             if handle in (None, INVALID_HANDLE):
                 raise WindowsCustodyError('open-failed')
@@ -209,7 +217,7 @@ def open_private(path, *, directory=False):
             if is_parent:
                 inspect_private(handle, directory=True)
                 private_parent = handle
-        access = READ_CONTROL | READ_ATTRIBUTES | (0 if directory else 0x80000000)
+        access = READ_CONTROL | READ_ATTRIBUTES | (LIST_DIRECTORY if directory else 0x80000000)
         handle = api.CreateFileW(value, access, 3 if directory else 1, None, 3, 0x02200000, None)
         if handle in (None, INVALID_HANDLE):
             raise WindowsCustodyError('open-failed')

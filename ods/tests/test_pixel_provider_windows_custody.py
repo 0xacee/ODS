@@ -209,6 +209,18 @@ class NativeCustody(unittest.TestCase):
         self.assertTrue(self.count_handles(self.api.GetCurrentProcess(), C.byref(after)))
         self.assertLessEqual(after.value - before.value, 2)
 
+    def test_empty_directory_handle_itself_denies_rename(self):
+        empty = self.create(self.directory / 'empty', directory=True)
+        with W.open_private(empty, directory=True):
+            with self.assertRaises(OSError):
+                os.rename(empty, self.directory / 'renamed-empty')
+
+    def test_path_budget_uses_utf16_units_and_rejects_unpaired_surrogates(self):
+        for path in ('C:\\' + '\U0001f331' * 120, 'C:\\invalid\ud800'):
+            with self.assertRaises(W.WindowsCustodyError) as context:
+                W._path(path)
+            self.assertEqual(context.exception.code, 'invalid-path')
+
 
 @unittest.skipIf(os.name == 'nt', 'Non-Windows import/fail-closed contract')
 class UnsupportedPlatform(unittest.TestCase):
