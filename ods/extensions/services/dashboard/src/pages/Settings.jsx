@@ -24,6 +24,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import EnvEditor from '../components/settings/EnvEditor'
 import PixelProviderSettings from '../components/settings/PixelProviderSettings.jsx'
+import PixelRuntimeSettings from '../components/settings/PixelRuntimeSettings.jsx'
 import PixelSharingSettings from '../components/settings/PixelSharingSettings.jsx'
 import PixelAccessCard from '../components/settings/PixelAccessCard'
 import { useTheme } from '../contexts/ThemeContext'
@@ -414,6 +415,7 @@ export default function Settings() {
           <RemoteSetupCard setupStatus={setupStatus} className="xl:col-span-5" />
         </div>
         <PixelProviderSettings />
+        <PixelRuntimeSettings />
         <PixelSharingSettings />
         <PixelAccessCard />
         <RoutingTableCard
