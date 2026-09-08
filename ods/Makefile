@@ -49,6 +49,8 @@ test: ## Run unit and contract tests
 	@bash tests/test-ods-doctor-rootless-subid.sh
 	@echo "=== phase 10 skips templated system units in the user scope ==="
 	@bash tests/test-phase10-skip-templated-user-units.sh
+	@echo "=== pre-download --tier is non-interactive ==="
+	@bash tests/test-pre-download-tier-noninteractive.sh
 	@echo "=== Docker rootless bind-mount ownership ==="
 	@bash tests/test-rootless-docker-ownership.sh
 	@echo ""
