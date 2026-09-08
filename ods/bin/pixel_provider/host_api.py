@@ -2,8 +2,13 @@
 
 from .config import default_config, public_config
 from .vault import validate_edit
-from .store_factory import (credential_store, existing_directory, prepare_directory,
-                            provider_directory, provider_store)
+from .store_factory import (
+    credential_store,
+    existing_directory,
+    prepare_directory,
+    provider_directory,
+    provider_store,
+)
 
 
 def get_configuration(data_dir):
