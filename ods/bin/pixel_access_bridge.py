@@ -7,7 +7,9 @@ No request can choose a path, command, UID, endpoint or service name.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -15,12 +17,14 @@ from pathlib import Path
 import platform
 import re
 import selectors
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-import urllib.request
+from urllib.parse import urlsplit
 import pixel_access_protocol as protocol
 
 UNIT = "openclaw-gateway.service"
@@ -30,6 +34,7 @@ HEX = re.compile(r"^[a-f0-9]{64}$")
 OWNER_TIMEOUT = 300
 OWNER_EXIT_TIMEOUT = 5
 OWNER_TERMINATE_TIMEOUT = 10
+_DEADLINE = contextvars.ContextVar("pixel_access_operation_deadline", default=None)
 
 
 class AccessError(Exception):
@@ -40,6 +45,29 @@ class AccessError(Exception):
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def remaining(timeout):
+    deadline = _DEADLINE.get()
+    value = min(timeout, deadline - time.monotonic()) if deadline is not None else timeout
+    if value <= 0: raise AccessError("operation-deadline-exceeded")
+    return value
+
+
+def _pipe_send(stream, value, deadline):
+    data = value.encode("utf-8")
+    fd = stream.fileno()
+    os.set_blocking(fd, False)
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_WRITE)
+        while data:
+            budget = min(deadline - time.monotonic(), remaining(OWNER_TIMEOUT))
+            if budget <= 0: raise AccessError("owner-worker-timeout")
+            if not selector.select(budget): raise AccessError("owner-worker-timeout")
+            try: count = os.write(fd, data)
+            except BlockingIOError: continue
+            if count <= 0: raise AccessError("owner-protocol-failed")
+            data = data[count:]
 
 
 def private_json(path, uid, maximum=1024 * 1024):
@@ -71,14 +99,57 @@ def atomic_json(path, value):
 
 
 class SystemdAccessBridge:
-    def __init__(self, install_dir, edge_key, *, state=STATE, dropin=DROPIN, installed_binary=None, gateway_owner=None):
+    def __init__(self, install_dir, edge_key, *, state=STATE, dropin=DROPIN, installed_binary=None, gateway_owner=None, settings_data_dir=None):
         self.install = Path(install_dir).resolve()
         self.edge_key = edge_key
         self.state = Path(state)
         self.dropin = Path(dropin)
         self.installed_binary, self.gateway_owner = installed_binary, gateway_owner
+        self.settings_data_dir = settings_data_dir
+
+    @contextlib.contextmanager
+    def bounded(self, seconds):
+        token = _DEADLINE.set(time.monotonic() + remaining(seconds))
+        try:
+            yield
+            remaining(seconds)  # A late normal return is not successful proof.
+        finally: _DEADLINE.reset(token)
+
+    def settings_status(self, *, data_dir_id):
+        from pixel_settings.coordinator import status
+        with self.bounded(45), self.locked():
+            self.discover()
+            if data_dir_id != self.settings_source(): raise AccessError("settings-data-directory-changed")
+            return status(self)
+
+    def settings_source(self):
+        from pixel_settings.runtime import settings_data_directory
+        env_file = self.install / ".env"
+        raw = b""
+        if os.path.lexists(env_file):
+            fd = os.open(env_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or info.st_uid not in (0, self.owner.pw_uid) or info.st_mode & 0o022 or info.st_size > 1024 * 1024):
+                    raise AccessError("unsafe-settings-environment")
+                with os.fdopen(fd, "rb", closefd=False) as handle: raw = handle.read(1024 * 1024 + 1)
+            finally: os.close(fd)
+        if len(raw) > 1024 * 1024: raise AccessError("unsafe-settings-environment")
+        directory = settings_data_directory(self.install, raw.decode("utf-8"))
+        if directory is None or directory != str(self.settings_data_dir):
+            raise AccessError("settings-data-directory-changed")
+        return hashlib.sha256(directory.encode("utf-8")).hexdigest()
+
+    def change_settings(self, request, *, data_dir_id):
+        from pixel_settings.coordinator import change
+        with self.bounded(250):
+            self.discover()
+            if data_dir_id != self.settings_source(): raise AccessError("settings-data-directory-changed")
+            return change(self, request)
 
     def command(self, args, timeout=20):
+        timeout = remaining(timeout)
         try:
             result = subprocess.run(args, check=True, stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, text=True, timeout=timeout)
@@ -141,18 +212,54 @@ class SystemdAccessBridge:
     def http(self, origin, path, key, payload=None, timeout=20):
         if any(ord(char) < 32 for char in key): raise AccessError("invalid-service-auth")
         body = json.dumps(payload).encode() if payload is not None else None
-        request = urllib.request.Request(origin + path, data=body,
-                                         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+        # Only the discovered loopback gateway or private edge IP. No proxies,
+        # redirects, or public request-selected origins are accepted here.
+        parts = urlsplit(origin)
+        try: address = ipaddress.ip_address(parts.hostname)
+        except ValueError: raise AccessError("invalid-service-origin") from None
+        if (parts.scheme != "http" or not (address.is_loopback or address.is_private)
+                or parts.username or parts.password or parts.query or parts.fragment or parts.path
+                or path not in ("/health", "/pixel-ods/access-runtime", "/v1/transition", "/v1/transition/acquire",
+                                "/v1/transition/recover", "/v1/transition/release")):
+            raise AccessError("invalid-service-origin")
+        budget = remaining(timeout)
+        deadline = time.monotonic() + budget
+        connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=budget)
+        timer = None
+        expired = threading.Event()
         try:
-            # The origin is derived from the fixed service, never request input.
-            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=timeout) as response:
+            connection.connect()
+            transport = connection.sock
+            budget = deadline - time.monotonic()
+            if budget <= 0: raise AccessError("runtime-operation-timeout")
+            def interrupt():
+                expired.set()
+                try: transport.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    # Completion can close this exact per-call socket first.
+                    return
+            timer = threading.Timer(budget, interrupt)
+            timer.daemon = True
+            timer.start()
+            connection.request("POST" if body is not None else "GET", path, body=body,
+                               headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+            with connection.getresponse() as response:
+                if response.status != 200: raise AccessError("runtime-unavailable-or-busy")
                 raw = response.read(65537)
+            if expired.is_set() or time.monotonic() >= deadline:
+                raise AccessError("runtime-operation-timeout")
             if len(raw) > 65536: raise ValueError()
-            value = json.loads(raw)
+            value = protocol.decode_frame(raw.decode("utf-8") + "\n", 65537)
             if not isinstance(value, dict): raise ValueError()
             return value
-        except Exception:
+        except (OSError, http.client.HTTPException, ValueError, UnicodeError):
+            if expired.is_set() or time.monotonic() >= deadline:
+                raise AccessError("runtime-operation-timeout") from None
             raise AccessError("runtime-unavailable-or-busy") from None
+        finally:
+            if timer is not None: timer.cancel()
+            connection.close()
+            if timer is not None: timer.join(timeout=1)
 
     def native(self, operation=None, token=None, *, timeout=60):
         payload = None
@@ -240,15 +347,14 @@ class SystemdAccessBridge:
                 raise ValueError()
         except (ValueError, TypeError, RecursionError):
             raise AccessError("owner-protocol-failed") from None
+        deadline = time.monotonic() + remaining(OWNER_TIMEOUT)
         process = subprocess.Popen([launcher, "-u", self.owner.pw_name, "--", sys.executable, "-I", "-u", str(script)],
                                    cwd="/", env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, text=True, bufsize=1)
         try:
-            process.stdin.write(encoded)
-            process.stdin.flush()
+            _pipe_send(process.stdin, encoded, deadline)
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
-                deadline = time.monotonic() + OWNER_TIMEOUT
                 buffered = b""
                 while time.monotonic() < deadline:
                     # TextIO.readline can block forever after a partial write,
@@ -271,9 +377,10 @@ class SystemdAccessBridge:
                     if set(value) == {"result"}:
                         try: result = protocol.result(operation, value["result"])
                         except protocol.ProtocolError: raise AccessError("owner-protocol-failed") from None
-                        try: process.wait(timeout=OWNER_EXIT_TIMEOUT)
+                        try: process.wait(timeout=remaining(min(OWNER_EXIT_TIMEOUT, deadline - time.monotonic())))
                         except subprocess.TimeoutExpired: raise AccessError("owner-worker-exit-unconfirmed") from None
                         if process.returncode != 0: raise AccessError("owner-worker-failed")
+                        remaining(deadline - time.monotonic())
                         return result
                     if set(value) == {"error"}:
                         if type(value["error"]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]{0,95}", value["error"]):
@@ -284,11 +391,12 @@ class SystemdAccessBridge:
                         raise AccessError("owner-protocol-failed")
                     callback = {"busy": busy, "restart": restart, "settings-activate": activate_settings}.get(value["hook"])
                     if callback is None: raise AccessError("owner-protocol-failed")
+                    remaining(deadline - time.monotonic())
                     answer = callback()
+                    remaining(deadline - time.monotonic())
                     try: protocol.hook_reply(operation, value["hook"], answer)
                     except protocol.ProtocolError: raise AccessError("host-hook-failed") from None
-                    process.stdin.write(json.dumps(answer) + "\n")
-                    process.stdin.flush()
+                    _pipe_send(process.stdin, json.dumps(answer) + "\n", deadline)
             raise AccessError("owner-worker-timeout")
         finally:
             try:

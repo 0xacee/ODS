@@ -12,7 +12,7 @@ import re
 import stat
 import time
 
-from pixel_access_bridge import AccessError, UNIT, atomic_json, digest
+from pixel_access_bridge import AccessError, UNIT, atomic_json, digest, remaining
 from pixel_access_protocol import decode_frame, HEX
 from .contract import SettingsError, preview_preferences
 from .runtime import compare_readback, declared_capabilities, saved_document
@@ -81,6 +81,7 @@ def _store(bridge, *, exclusive):
 
 
 def _inputs(bridge, directory):
+    bridge.settings_source()
     saved, saved_hash = _read(directory / "pixel-settings.json", bridge.owner.pw_uid, 256 * 1024)
     saved = saved_document(saved)
     config, config_hash = _read(bridge.home / ".openclaw/openclaw.json", bridge.owner.pw_uid)
@@ -146,6 +147,7 @@ def _inspection_revision(snapshot, source_hash, journal):
 
 
 def _write(bridge, journal):
+    _journal(journal)
     atomic_json(bridge.state / "transition.json", journal)
 
 
@@ -166,6 +168,7 @@ def _busy(bridge, journal):
 
 
 def _verify(bridge, journal):
+    bridge.settings_source()
     if _busy(bridge, journal): raise AccessError("runtime-busy")
     identity = _identity(bridge)
     current, config_hash = _read(bridge.home / ".openclaw/openclaw.json", bridge.owner.pw_uid)
@@ -185,6 +188,7 @@ def _verify(bridge, journal):
         raise AccessError("settings-runtime-proof-failed")
     atomic_json(bridge.state / "verified.json", {"pid": proof["pid"], "proof": proof["proof"],
         "config_sha256": config_hash, "boundary": journal["boundary"]})
+    bridge.settings_source()
     return dict(identity, configSha256=config_hash, observedAt=envelope["observedAt"])
 
 
@@ -217,9 +221,10 @@ def _activate(bridge, journal):
                     return "verified"
         except SettingsError as error:
             return "rejected" if str(error) == "settings-runtime-mismatch" else "unavailable"
-        except AccessError:
+        except AccessError as error:
+            if error.code == "operation-deadline-exceeded": raise
             pass  # Observe the same restarted unit until this fixed deadline.
-        time.sleep(1)
+        time.sleep(remaining(1))
     return "unavailable"
 
 

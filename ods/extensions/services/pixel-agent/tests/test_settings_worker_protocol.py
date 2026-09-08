@@ -94,6 +94,43 @@ def call_settings(adapter, **changes):
     return adapter.worker("settings-apply", **args)
 
 
+def test_callback_expired_after_running_cannot_send_verification(pipe_bridge):
+    adapter, launch = pipe_bridge
+    launch('import sys,time; sys.stdin.readline(); print(\'{"hook":"settings-activate"}\',flush=True); time.sleep(5)')
+    with pytest.raises(bridge.AccessError, match="operation-deadline-exceeded"):
+        with adapter.bounded(0.08):
+            call_settings(adapter, activate_settings=lambda: (time.sleep(0.10), "verified")[1])
+
+
+def test_owner_selector_uses_outer_deadline_and_still_cleans_up(pipe_bridge):
+    adapter, launch = pipe_bridge
+    launch('import sys,time; sys.stdin.readline(); time.sleep(5)')
+    start = time.monotonic()
+    with pytest.raises(bridge.AccessError, match="owner-worker-timeout"):
+        with adapter.bounded(0.08):
+            call_settings(adapter)
+    assert time.monotonic() - start < 1
+
+
+@pytest.mark.parametrize("value", [
+    {"operation": "status"}, {"operation": "change", "request": {}},
+    {"operation": "settings-status", "data_dir_id": "a" * 64},
+    {"operation": "settings-change", "data_dir_id": "a" * 64, "request": {}},
+])
+def test_fixed_root_socket_request_contract(value):
+    assert protocol.control_request(value) == value
+
+
+@pytest.mark.parametrize("value", [
+    [], {"operation": "shell"}, {"operation": "settings-status"},
+    {"operation": "settings-status", "data_dir_id": "relative"},
+    {"operation": "settings-status", "data_dir_id": "a" * 64, "path": "/tmp/other"},
+    {"operation": "settings-change", "data_dir_id": "a" * 64, "request": []},
+])
+def test_root_socket_refuses_paths_and_unqualified_requests(value):
+    with pytest.raises(protocol.ProtocolError): protocol.control_request(value)
+
+
 def test_real_pipe_settings_hooks_round_trip_without_restart(pipe_bridge):
     adapter, launch = pipe_bridge
     launch('''import json,sys

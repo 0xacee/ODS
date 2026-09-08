@@ -48,6 +48,23 @@ def read_frame(stream, maximum):
     return decode_frame(stream.readline(maximum + 1), maximum)
 
 
+def control_request(value):
+    """Fixed root socket operations; no paths or caller-supplied capabilities."""
+    if type(value) is not dict or type(value.get("operation")) is not str:
+        raise ProtocolError("invalid-request")
+    operation = value["operation"]
+    keys = {"status": {"operation"}, "change": {"operation", "request"},
+            "settings-status": {"operation", "data_dir_id"},
+            "settings-change": {"operation", "data_dir_id", "request"}}
+    if operation not in keys or set(value) != keys[operation]:
+        raise ProtocolError("invalid-request")
+    if operation.startswith("settings-") and (type(value["data_dir_id"]) is not str or not HEX.fullmatch(value["data_dir_id"])):
+        raise ProtocolError("invalid-request")
+    if "request" in value and type(value["request"]) is not dict:
+        raise ProtocolError("invalid-request")
+    return value
+
+
 def request(value):
     if type(value) is not dict or type(value.get("operation")) is not str:
         raise ProtocolError("owner-protocol-failed")

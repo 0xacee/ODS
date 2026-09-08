@@ -23,10 +23,12 @@ PROGRAM = Path(__file__).resolve().parent
 protected(PROGRAM)
 for name in ("access_mode_server.py", "pixel_access_bridge.py", "access_mode_worker.py", "pixel_access_mode.py", "access_mode_config.py",
              "settings_transaction.py", "pixel_access_protocol.py", "pixel_settings/__init__.py",
-             "pixel_settings/contract.py", "pixel_settings/projection.py"):
+             "pixel_settings/contract.py", "pixel_settings/projection.py", "pixel_settings/runtime.py", "pixel_settings/coordinator.py",
+             "pixel_provider/__init__.py", "pixel_provider/config.py"):
     protected(PROGRAM / name)
 sys.path.insert(0, str(PROGRAM))
 from pixel_access_bridge import AccessError, SystemdAccessBridge, private_json
+from pixel_access_protocol import control_request, decode_frame
 
 
 def main():
@@ -40,7 +42,11 @@ def main():
     for line in (install / ".env").read_text().splitlines():
         if line.startswith("DASHBOARD_API_KEY="):
             values["key"] = line.partition("=")[2].strip().strip("\"'")
-    adapter = SystemdAccessBridge(install, values.get("key", ""), installed_binary=settings["openclaw_bin"], gateway_owner=owner.pw_name)
+    def make_adapter():
+        # Discovery has request-local owner/gateway snapshots. Never let another
+        # handler replace the active transition's authentication or runtime data.
+        return SystemdAccessBridge(install, values.get("key", ""), installed_binary=settings["openclaw_bin"],
+                                   gateway_owner=owner.pw_name, settings_data_dir=settings.get("settings_data_dir"))
     address = "/run/ods-pixel-access/control.sock"
 
     class Handler(socketserver.StreamRequestHandler):
@@ -52,11 +58,17 @@ def main():
                 if uid not in (0, owner.pw_uid): raise PermissionError()
                 raw = self.rfile.readline(2049)
                 if len(raw) > 2048 or not raw.endswith(b"\n"): raise ValueError()
-                request = json.loads(raw)
+                request = control_request(decode_frame(raw.decode("utf-8"), 2048))
+                adapter = make_adapter()
                 if request == {"operation": "status"}:
                     status, body = 200, adapter.status()
                 elif set(request) == {"operation", "request"} and request["operation"] == "change":
                     status, body = 200, adapter.change(request["request"])
+                elif request["operation"].startswith("settings-"):
+                    status = 200
+                    body = (adapter.settings_status(data_dir_id=request["data_dir_id"])
+                            if request["operation"] == "settings-status"
+                            else adapter.change_settings(request["request"], data_dir_id=request["data_dir_id"]))
                 else: raise ValueError()
             except PermissionError: pass
             except AccessError as error: status, body = 409, {"error": error.code}

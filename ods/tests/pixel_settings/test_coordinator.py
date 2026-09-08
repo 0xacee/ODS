@@ -252,6 +252,25 @@ def test_stale_saved_revision_and_busy_apply_leave_no_root_journal(adapter):
     assert not adapter.pending() and "settings-apply" not in adapter.log
 
 
+def test_host_data_directory_identity_must_match_installer_pin(adapter):
+    fingerprint = adapter.settings_source()
+    assert adapter.settings_status(data_dir_id=fingerprint)["settingsRevision"] == 3
+    before = adapter.path.read_bytes()
+    with pytest.raises(AccessError, match="data-directory-changed"):
+        adapter.change_settings(request(adapter), data_dir_id="0" * 64)
+    assert adapter.path.read_bytes() == before and not adapter.pending()
+
+
+def test_env_retargeting_cannot_apply_old_store_with_coincidentally_same_revision(adapter):
+    stale = request(adapter)
+    fingerprint = adapter.settings_source()
+    (adapter.install / ".env").write_text("ODS_DATA_DIR=/other/private/data\n")
+    (adapter.install / ".env").chmod(0o600)
+    with pytest.raises(AccessError, match="data-directory-changed"):
+        adapter.change_settings(stale, data_dir_id=fingerprint)
+    assert not adapter.pending()
+
+
 def test_existing_store_lock_is_exclusive_and_never_created_as_root(adapter):
     with c._store(adapter, exclusive=True):
         with pytest.raises(AccessError, match="store-busy"):

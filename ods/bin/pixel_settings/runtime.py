@@ -1,10 +1,33 @@
 """Pure declared-capacity selection and current-process readback comparison."""
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 import re
+import shlex
 
 from pixel_provider.config import ConfigError, normalize_config
 from .contract import SettingsError, _capabilities, validate_preferences
 from .projection import LEAVES, _lookup, _agents, _object, canonical
+
+
+def settings_data_directory(install_dir, env_text):
+    """Match host-agent load_env semantics without expansion or execution.
+
+    Relative or empty custom values are unqualified for this new operation;
+    returning None lets an existing access-only installation remain functional.
+    """
+    value = str(PurePosixPath(str(install_dir)) / "data")
+    for line in env_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line: continue
+        key, _, raw = line.partition("=")
+        if key.strip() != "ODS_DATA_DIR": continue
+        raw = raw.strip()
+        try: parsed = shlex.split(raw, comments=False, posix=True)
+        except ValueError: parsed = []
+        value = parsed[0] if len(parsed) == 1 else raw.strip("'\"")
+    if not value or any(ord(char) < 32 for char in value): return None
+    path = PurePosixPath(value)
+    return str(path) if path.is_absolute() and ".." not in path.parts else None
 
 
 def _timestamp(value):

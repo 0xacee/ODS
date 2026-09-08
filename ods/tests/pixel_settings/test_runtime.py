@@ -104,3 +104,16 @@ def test_stale_or_unqualified_envelope_refused(change):
     response = copy.deepcopy(envelope(source))
     response.update(change)
     with pytest.raises(SettingsError): runtime.compare_readback(source, response, pid=123, revision="a" * 64)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("", "/opt/ods/data"), ("# ODS_DATA_DIR=/bad\nOTHER=1", "/opt/ods/data"),
+    (" ODS_DATA_DIR = '/mnt/my data' ", "/mnt/my data"),
+    ("ODS_DATA_DIR=/one\nODS_DATA_DIR=/two", "/two"),
+    ("ODS_DATA_DIR=/mnt/my\\ data", "/mnt/my data"),
+    ("ODS_DATA_DIR=relative", None), ("ODS_DATA_DIR=", None),
+    ("ODS_DATA_DIR=$HOME/data", None), ("ODS_DATA_DIR=${INSTALL_DIR}/data", None),
+    ("ODS_DATA_DIR=/safe/../other", None),
+])
+def test_data_directory_matches_plain_host_env_without_expansion(text, expected):
+    assert runtime.settings_data_directory("/opt/ods", text) == expected
