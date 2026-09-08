@@ -21,11 +21,15 @@ import sys
 import tempfile
 import time
 import urllib.request
+import pixel_access_protocol as protocol
 
 UNIT = "openclaw-gateway.service"
 STATE = Path("/var/lib/ods-pixel-access")
 DROPIN = Path("/etc/systemd/system/openclaw-gateway.service.d/90-ods-full-access.conf")
 HEX = re.compile(r"^[a-f0-9]{64}$")
+OWNER_TIMEOUT = 300
+OWNER_EXIT_TIMEOUT = 5
+OWNER_TERMINATE_TIMEOUT = 10
 
 
 class AccessError(Exception):
@@ -201,7 +205,8 @@ class SystemdAccessBridge:
         payload = dict(token=token, revision=revision) if operation else None
         return self.http("http://%s:9595" % address, "/v1/transition" + ("/" + operation if operation else ""), self.edge_key, payload)
 
-    def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None):
+    def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None,
+               transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None):
         script = Path(__file__).resolve().parent / "access_mode_worker.py"
         # This launcher still runs as root. Never search the owner's validator
         # PATH for it; that PATH is intended only for the unprivileged worker.
@@ -224,37 +229,80 @@ class SystemdAccessBridge:
         env = {"HOME": str(self.home), "USER": self.owner.pw_name, "LOGNAME": self.owner.pw_name,
                "PATH": str(Path(self.binary).parent) + ":/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
         request = dict(operation=operation, openclaw=self.binary, config_sha256=config_hash, confirmed=confirmed)
+        if operation in ("settings-apply", "settings-recover"):
+            request["transaction_id"] = transaction_id
+        if operation == "settings-apply":
+            request.update(settings_revision=settings_revision, preferences=preferences, capabilities=capabilities)
+        try:
+            protocol.request(request)
+            encoded = json.dumps(request, allow_nan=False) + "\n"
+            if len(encoded.encode("utf-8")) > protocol.MAX_REQUEST:
+                raise ValueError()
+        except (ValueError, TypeError, RecursionError):
+            raise AccessError("owner-protocol-failed") from None
         process = subprocess.Popen([launcher, "-u", self.owner.pw_name, "--", sys.executable, "-I", "-u", str(script)],
                                    cwd="/", env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, text=True, bufsize=1)
         try:
-            process.stdin.write(json.dumps(request) + "\n")
+            process.stdin.write(encoded)
             process.stdin.flush()
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
-                deadline = time.monotonic() + 300
+                deadline = time.monotonic() + OWNER_TIMEOUT
+                buffered = b""
                 while time.monotonic() < deadline:
-                    if not selector.select(1): continue
-                    line = process.stdout.readline(8193)
-                    if not line or len(line) > 8192: raise AccessError("owner-protocol-failed")
-                    value = json.loads(line)
+                    # TextIO.readline can block forever after a partial write,
+                    # even after select reports the first byte. Bound each read
+                    # and retain framing without losing the outer deadline.
+                    if b"\n" not in buffered:
+                        if not selector.select(min(1, max(0, deadline - time.monotonic()))): continue
+                        chunk = os.read(process.stdout.fileno(), protocol.MAX_REPLY + 1)
+                        if not chunk: raise AccessError("owner-protocol-failed")
+                        buffered += chunk
+                    raw, separator, rest = buffered.partition(b"\n")
+                    if len(raw) + 1 > protocol.MAX_REPLY: raise AccessError("owner-protocol-failed")
+                    if not separator: continue
+                    buffered = rest
+                    try:
+                        value = protocol.decode_frame(raw.decode("utf-8") + "\n", protocol.MAX_REPLY)
+                        if type(value) is not dict: raise ValueError()
+                    except ValueError:
+                        raise AccessError("owner-protocol-failed") from None
                     if set(value) == {"result"}:
-                        process.wait(timeout=5)
+                        try: result = protocol.result(operation, value["result"])
+                        except protocol.ProtocolError: raise AccessError("owner-protocol-failed") from None
+                        try: process.wait(timeout=OWNER_EXIT_TIMEOUT)
+                        except subprocess.TimeoutExpired: raise AccessError("owner-worker-exit-unconfirmed") from None
                         if process.returncode != 0: raise AccessError("owner-worker-failed")
-                        return value["result"]
-                    if set(value) == {"error"}: raise AccessError("controller-" + value["error"])
+                        return result
+                    if set(value) == {"error"}:
+                        if type(value["error"]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]{0,95}", value["error"]):
+                            raise AccessError("owner-protocol-failed")
+                        raise AccessError("controller-" + value["error"])
                     if set(value) != {"hook"}: raise AccessError("owner-protocol-failed")
-                    callback = {"busy": busy, "restart": restart}.get(value["hook"])
+                    if type(value["hook"]) is not str or value["hook"] not in protocol.HOOKS.get(operation, ()):
+                        raise AccessError("owner-protocol-failed")
+                    callback = {"busy": busy, "restart": restart, "settings-activate": activate_settings}.get(value["hook"])
                     if callback is None: raise AccessError("owner-protocol-failed")
                     answer = callback()
-                    if type(answer) is not bool: raise AccessError("host-hook-failed")
+                    try: protocol.hook_reply(operation, value["hook"], answer)
+                    except protocol.ProtocolError: raise AccessError("host-hook-failed") from None
                     process.stdin.write(json.dumps(answer) + "\n")
                     process.stdin.flush()
             raise AccessError("owner-worker-timeout")
         finally:
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=10)
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    try: process.wait(timeout=OWNER_TERMINATE_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        # Only the child launched above, never an installed
+                        # gateway/model/other operator process.
+                        process.kill()
+                        process.wait(timeout=OWNER_EXIT_TIMEOUT)
+            finally:
+                process.stdin.close()
+                process.stdout.close()
 
     def pending(self):
         file = self.state / "transition.json"
@@ -284,7 +332,7 @@ class SystemdAccessBridge:
         if native.get("pid") != pid or (pid <= 0 and not native.get("stopped")): raise AccessError("gateway-process-mismatch")
         pending = self.pending()
         revision = digest([config.get("config_sha256"), native.get("revision"), edge.get("revision"), pid,
-                           pending.get("phase") if pending else None])
+                           pending.get("phase") if pending else None, pending.get("kind", "access") if pending else None])
         proof = native.get("proof")
         verified = private_json(self.state / "verified.json", 0, 8192) if (self.state / "verified.json").exists() else {}
         effective = proof.get("mode") if (isinstance(proof, dict) and proof.get("executed") is True and proof.get("pid") == pid
@@ -362,9 +410,13 @@ class SystemdAccessBridge:
             if snapshot["revision"] != request["revision"]: raise AccessError("inspection-changed")
             if snapshot["busy"]: raise AccessError("runtime-busy")
             pending = self.pending()
+            # Missing kind is the legacy access journal. Never consume a
+            # settings (or unknown) journal through access-mode restoration.
+            if pending and pending.get("kind", "access") != "access":
+                raise AccessError("settings-recovery-required")
             if pending and request["mode"] != "sandboxed": raise AccessError("restore-required")
             if not pending:
-                pending = {"token": os.urandom(32).hex(), "phase": "acquiring", "edge_revision": snapshot["_edge"]["revision"]}
+                pending = {"kind": "access", "token": os.urandom(32).hex(), "phase": "acquiring", "edge_revision": snapshot["_edge"]["revision"]}
                 atomic_json(self.state / "transition.json", pending)
             token = pending["token"]
             try:

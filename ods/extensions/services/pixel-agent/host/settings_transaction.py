@@ -16,6 +16,7 @@ from pixel_settings.projection import plan_preferences, canonical, _validate_sta
 JOURNAL = "settings-journal.json"
 MANAGED = "settings-managed.json"
 BACKUP = "settings-before.json"
+COMPLETED = "settings-completed.json"
 MAX_BYTES = 1024 * 1024
 
 
@@ -125,11 +126,29 @@ def _activate(activate):
     return result == "verified"
 
 
-def _finish(sd, managed, journal):
+def _completion(value, path):
+    if value is None:
+        return None
+    _header(value, {"schemaVersion", "kind", "configPath", "transactionId", "settingsRevision", "outcome", "configSha256"}, path)
+    if (not _hash(value["transactionId"]) or not _hash(value["configSha256"])
+            or type(value["settingsRevision"]) is not int or not 0 <= value["settingsRevision"] <= 2**53 - 1
+            or value["outcome"] not in ("applied", "rolled-back")):
+        raise SettingsError("invalid-settings-state")
+    return value
+
+
+def _finish(sd, managed, journal, outcome):
     if managed is None:
         _remove(sd, MANAGED)
     else:
         _write(sd, MANAGED, managed)
+    # Root can lose the worker reply after this owner transaction completes.
+    # A bounded durable receipt disambiguates that case, but never attests the
+    # current runtime. A pending journal always takes precedence over it.
+    completed = {"schemaVersion": 1, "kind": "settings", "configPath": journal["configPath"],
+                 "transactionId": journal["transactionId"], "settingsRevision": journal["next"]["settingsRevision"],
+                 "outcome": outcome, "configSha256": journal["afterSha" if outcome == "applied" else "beforeSha"]}
+    _write(sd, COMPLETED, completed)
     # Keep the exact private before-image until a subsequent transaction has
     # safely captured its own baseline. Recovery never infers bytes from JSON.
     try:
@@ -175,11 +194,11 @@ def _rollback(path, sd, journal, validate, idle, activate):
         raise SettingsError("settings-rollback-unverified")
     controller._require_idle(idle)
     _check_result(path, journal["beforeSha"], journal["configMode"], "settings-rollback-conflict")
-    _finish(sd, journal["previous"], journal)
+    _finish(sd, journal["previous"], journal, "rolled-back")
     return {"status": "rolled-back", "configSha256": journal["beforeSha"]}
 
 
-def apply_settings(config_path, preferences, capabilities, *, state_dir, settings_revision,
+def apply_settings(config_path, preferences, capabilities, *, state_dir, settings_revision, transaction_id,
                    expected_config_sha256, validate_config, check_no_active_run, activate):
     """Persist and verify a plan using the existing owner transaction lock.
 
@@ -188,6 +207,8 @@ def apply_settings(config_path, preferences, capabilities, *, state_dir, setting
     The caller must qualify capabilities, settings revision and source custody.
     """
     _requirements(expected_config_sha256, validate_config, check_no_active_run, activate)
+    if not _hash(transaction_id):
+        raise SettingsError("invalid-settings-transaction-id")
     if type(settings_revision) is not int or not 0 <= settings_revision <= 2**53 - 1:
         raise SettingsError("invalid-settings-revision")
     sd = controller._prepare_state_dir(state_dir)
@@ -201,13 +222,16 @@ def apply_settings(config_path, preferences, capabilities, *, state_dir, setting
             raise SettingsError("settings-config-changed")
         # Reject duplicate/invalid JSON rather than silently dropping owner data.
         config = _decode(before)
+        completed = _completion(_record(sd, COMPLETED), path)
+        if completed is not None and completed["transactionId"] == transaction_id:
+            raise SettingsError("settings-transaction-already-completed")
         previous = _managed(_record(sd, MANAGED), path)
         plan = plan_preferences(config, preferences, capabilities,
                                 previous=previous["state"] if previous else None)
         after = _encoded(plan["document"])
         next_record = {"schemaVersion": 1, "kind": "settings", "configPath": path,
                        "settingsRevision": settings_revision, "state": plan["state"]}
-        journal = {"schemaVersion": 1, "kind": "settings", "configPath": path, "configMode": mode,
+        journal = {"schemaVersion": 1, "kind": "settings", "configPath": path, "configMode": mode, "transactionId": transaction_id,
                    "beforeSha": expected_config_sha256, "afterSha": controller._sha256_bytes(after),
                    "previous": previous, "next": next_record}
         _encoded(journal)  # Check bounds before writing any recovery material.
@@ -228,15 +252,17 @@ def apply_settings(config_path, preferences, capabilities, *, state_dir, setting
             return _rollback(path, sd, journal, validate, check_no_active_run, activate)
         controller._require_idle(check_no_active_run)
         _check_result(path, journal["afterSha"], mode, "settings-config-changed")
-        _finish(sd, next_record, journal)
+        _finish(sd, next_record, journal, "applied")
         return {"status": "runtime-verified", "settingsRevision": settings_revision,
                 "configSha256": journal["afterSha"]}
 
 
-def recover_settings(config_path, *, state_dir, expected_config_sha256, validate_config,
+def recover_settings(config_path, *, state_dir, transaction_id, expected_config_sha256, validate_config,
                      check_no_active_run, activate):
     """Explicitly roll back an interrupted transaction; never overwrite drift."""
     _requirements(expected_config_sha256, validate_config, check_no_active_run, activate)
+    if not _hash(transaction_id):
+        raise SettingsError("invalid-settings-transaction-id")
     sd = controller._prepare_state_dir(state_dir)
     with controller._Lock(sd):
         _no_pending_access(sd)
@@ -244,12 +270,31 @@ def recover_settings(config_path, *, state_dir, expected_config_sha256, validate
         if controller._sha256_bytes(data) != expected_config_sha256:
             raise SettingsError("settings-config-changed")
         journal = _record(sd, JOURNAL)
-        _header(journal, {"schemaVersion", "kind", "configPath", "configMode", "beforeSha", "afterSha", "previous", "next"}, path)
+        _header(journal, {"schemaVersion", "kind", "configPath", "configMode", "transactionId", "beforeSha", "afterSha", "previous", "next"}, path)
         if (not _hash(journal["beforeSha"]) or not _hash(journal["afterSha"])
                 or type(journal["configMode"]) is not int or journal["configMode"] != mode
+                or journal["transactionId"] != transaction_id
                 or journal["next"] is None):
             raise SettingsError("invalid-settings-state")
         _managed(journal["previous"], path)
         _managed(journal["next"], path)
         return _rollback(path, sd, journal, controller._normalize_validate(validate_config),
                          check_no_active_run, activate)
+
+
+def settings_status(config_path, *, state_dir):
+    """Private owner-pipe status; completion is NOT a live runtime claim."""
+    sd = controller._prepare_state_dir(state_dir)
+    with controller._Lock(sd, exclusive=False):
+        path, _mode, data, _config = controller._load_config(config_path)
+        managed = _managed(_record(sd, MANAGED), path)
+        completed = _completion(_record(sd, COMPLETED), path)
+        # Do not interpret an interrupted journal as a completed transaction,
+        # even if writing its completion receipt preceded the crash.
+        pending = os.path.lexists(os.path.join(sd, JOURNAL))
+        return {"configSha256": controller._sha256_bytes(data),
+                "managedRevision": managed["settingsRevision"] if managed else None,
+                "pending": pending,
+                "completion": ({key: completed[key] for key in ("transactionId", "settingsRevision", "outcome", "configSha256")}
+                               if completed is not None and not pending else None),
+                "runtimeVerified": False}

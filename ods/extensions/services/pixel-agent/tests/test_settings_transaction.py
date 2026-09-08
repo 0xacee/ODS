@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import uuid
 
 import pytest
 
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT / "bin"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "host"))
 import settings_transaction as tx
 from pixel_settings.contract import SettingsError
+TRANSACTIONS = {}
 
 
 def sha(data):
@@ -46,15 +48,19 @@ def owner(tmp_path):
 def apply(owner, preferences=None, **kwargs):
     path, state, caps, _ = owner
     options = dict(state_dir=str(state), settings_revision=3, expected_config_sha256=sha(path.read_bytes()),
+                   transaction_id=sha(uuid.uuid4().bytes),
                    validate_config=lambda staged: True, check_no_active_run=lambda: False,
                    activate=lambda: "verified")
     options.update(kwargs)
+    if not (state / tx.JOURNAL).exists():
+        TRANSACTIONS[str(path)] = options["transaction_id"]
     return tx.apply_settings(str(path), {"verbosity": "full"} if preferences is None else preferences, caps, **options)
 
 
 def recover(owner, **kwargs):
     path, state, _, _ = owner
     options = dict(state_dir=str(state), expected_config_sha256=sha(path.read_bytes()),
+                   transaction_id=TRANSACTIONS.get(str(path), "a" * 64),
                    validate_config=lambda staged: True, check_no_active_run=lambda: False,
                    activate=lambda: "verified")
     options.update(kwargs)
@@ -336,7 +342,7 @@ def test_journal_removal_durability_failure_keeps_explicit_recovery_possible(own
         nonlocal count
         if stat.S_ISDIR(os.fstat(fd).st_mode):
             count += 1
-            if count == 5:  # backup, pending journal, config, managed record, unlink
+            if count == 6:  # backup, journal, config, managed, completed, unlink
                 raise OSError("injected journal unlink durability failure")
         return original_fsync(fd)
     monkeypatch.setattr(os, "fsync", fault)
@@ -384,3 +390,50 @@ def test_lost_hold_after_activation_retains_recovery(owner):
     assert error.value.code == "active-run"
     assert (owner[1] / tx.JOURNAL).exists()
     assert recover(owner)["status"] == "rolled-back"
+
+
+def test_lost_success_reply_has_bounded_completion_receipt_and_cannot_reapply_id(owner):
+    identifier = "b" * 64
+    result = apply(owner, transaction_id=identifier)
+    state = tx.settings_status(str(owner[0]), state_dir=str(owner[1]))
+    assert state["runtimeVerified"] is False and state["pending"] is False
+    assert state["completion"] == {"transactionId": identifier, "settingsRevision": 3,
+                                   "configSha256": result["configSha256"], "outcome": "applied"}
+    assert state["managedRevision"] == 3
+    with pytest.raises(SettingsError, match="settings-transaction-already-completed"):
+        apply(owner, transaction_id=identifier)
+    assert "synthetic-secret" not in json.dumps(state)
+
+
+def test_pending_journal_hides_earlier_completion_and_recovery_is_id_bound(owner):
+    apply(owner, transaction_id="b" * 64)
+    pending(owner)
+    state = tx.settings_status(str(owner[0]), state_dir=str(owner[1]))
+    assert state["pending"] is True and state["completion"] is None
+    before = owner[0].read_bytes()
+    with pytest.raises(SettingsError, match="invalid-settings-state"):
+        recover(owner, transaction_id="b" * 64)
+    assert owner[0].read_bytes() == before
+    recover(owner)
+    state = tx.settings_status(str(owner[0]), state_dir=str(owner[1]))
+    assert state["completion"]["outcome"] == "rolled-back" and state["managedRevision"] == 3
+
+
+def test_completion_write_durability_failure_stays_pending_until_recovery(owner, monkeypatch):
+    original = os.fsync
+    count = 0
+    def fault(fd):
+        nonlocal count
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            count += 1
+            if count == 5:
+                raise OSError("injected completion durability failure")
+        return original(fd)
+    monkeypatch.setattr(os, "fsync", fault)
+    with pytest.raises(tx.controller.AccessModeRollback):
+        apply(owner)
+    monkeypatch.setattr(os, "fsync", original)
+    state = tx.settings_status(str(owner[0]), state_dir=str(owner[1]))
+    assert state["pending"] is True and state["completion"] is None
+    recover(owner)
+    assert tx.settings_status(str(owner[0]), state_dir=str(owner[1]))["completion"]["outcome"] == "rolled-back"

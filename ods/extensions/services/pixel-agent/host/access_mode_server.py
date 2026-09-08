@@ -21,7 +21,9 @@ def protected(path):
 
 PROGRAM = Path(__file__).resolve().parent
 protected(PROGRAM)
-for name in ("access_mode_server.py", "pixel_access_bridge.py", "access_mode_worker.py", "pixel_access_mode.py", "access_mode_config.py"):
+for name in ("access_mode_server.py", "pixel_access_bridge.py", "access_mode_worker.py", "pixel_access_mode.py", "access_mode_config.py",
+             "settings_transaction.py", "pixel_access_protocol.py", "pixel_settings/__init__.py",
+             "pixel_settings/contract.py", "pixel_settings/projection.py"):
     protected(PROGRAM / name)
 sys.path.insert(0, str(PROGRAM))
 from pixel_access_bridge import AccessError, SystemdAccessBridge, private_json
