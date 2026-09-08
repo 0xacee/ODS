@@ -199,6 +199,34 @@ test("prior website feedback does not require a preview for new scheduled file w
   assert.equal(userMessageRequestsWorkspacePreview([], "The last task succeeded. Improve the website and publish it."), true);
 });
 
+test("preview intent treats HTML paths as targets rather than task instructions", () => {
+  assert.equal(userMessageRequestsWorkspacePreview([], "Repair the server page at visualization/index.html and publish"), true);
+  for (const directory of ["expense-review/static", "history-chart", "backend/service"]) {
+    const prompt = `Continue from the saved ${directory}/index.html. ` +
+      "Diagnose and repair the page, preserve a backup outside static, " +
+      "and publish the repaired static folder through ODS.";
+    assert.equal(userMessageRequestsWorkspacePreview([], prompt), true, directory);
+    const guard = createToolLoopGuard();
+    const context = { agentId: "pixel", runId: "run-1", sessionId: "recovered-session" };
+    guard.observeRun(context, "pixel", { prompt });
+    const params = { relativeDirectory: directory };
+    assert.equal(call(guard, "pixel_ods_workspace_preview", { context, event: { params } })?.block, true);
+    const read = { path: `${directory}/index.html` };
+    afterCall(guard, "read", { context, event: {
+      params: read, result: { content: [{ type: "text", text: "<!doctype html><p>Report</p>" }] },
+    } });
+    assert.notEqual(call(guard, "pixel_ods_workspace_preview", { context, event: { params } })?.block, true);
+  }
+  for (const prompt of [
+    "Explain why we should publish build/index.html.",
+    "Review the implementation in create/index.html; do not publish it.",
+    "Do not publish expense-review/static/index.html.",
+    "Explain the parser in backend/service/index.html.",
+  ]) {
+    assert.equal(userMessageRequestsWorkspacePreview([], prompt), false, prompt);
+  }
+});
+
 for (const prompt of [
   "Inspect the actual event handlers/state update ordering, repair synchronous export filtering and visible validation, and publish the existing log-viewer-lab. Do not repeat a claimed fix without verifying the relevant code path.",
   "Publish the existing log-viewer-lab unchanged.",
@@ -1094,7 +1122,7 @@ test("parallel siblings do not spend multiple unrequested Operations correction 
   assert.equal(call(guard, "pixel_ops_run", {
     event: { params: { target: "ods-host", action: "host.identity" } },
   }).blockReason, OPERATIONS_NOT_REQUESTED_REASON);
-  assert.equal(call(guard, "tool_call", { event: { params: { id: "pixel_ods_host_observe", args: {} } } }).blockReason, OPERATIONS_NOT_REQUESTED_REASON);
+  assert.match(call(guard, "tool_call", { event: { params: { id: "pixel_ods_host_observe", args: {} } } }).blockReason, /could not validate this host observation/);
   assert.deepEqual(aborts, []);
   guard.observeModelCall({ runId: "run-1" }, context, "pixel");
   assert.equal(call(guard, "pixel_ops_run", {
@@ -3519,6 +3547,40 @@ test("filesystem pronouns do not authorize network-peer probes", () => {
   });
 });
 
+test("binds attributive endpoint names to their attached private address without widening scope", () => {
+  for (const [prompt, peer] of [
+    ["Diagnose whether the known fleet machine lab-alpha at 192.168.4.23 is reachable over LAN. TCP port 22 only. Do not scan other addresses or ports, authenticate, install anything, or change settings.", "192.168.4.23"],
+    ["Check whether server archive at fd12:3456::2 is reachable over the local network on port 22.", "fd12:3456::2"],
+    ["Verify that device 'desk-node' at '10.20.3.4' is reachable on the network port 22.", "10.20.3.4"],
+  ]) {
+    assert.deepEqual(userMessageNetworkPeerRequest([], prompt), { peer, ports: [22] });
+    const guard = createToolLoopGuard();
+    guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
+    const args = { actions: ["host.network-peer"], peer, ports: [22] };
+    assert.deepEqual(call(guard, "tool_call", { event: { params: { id: "pixel_ods_host_observe", args } } }),
+      { params: { id: "pixel_ods_host_observe", args } });
+    for (const invalid of [
+      { ...args, peer: { address: peer, ports: [22] } },
+      { ...args, ports: [443] },
+      { ...args, peer: "192.168.4.24" },
+    ]) {
+      const result = call(guard, "tool_call", { event: { params: { id: "pixel_ods_host_observe", args: invalid } } });
+      assert.equal(result.block, true);
+      assert.match(result.blockReason, /could not validate this host observation/);
+      assert.doesNotMatch(result.blockReason, /did not ask for host/);
+    }
+  }
+  for (const prompt of [
+    "Check whether machine lab-alpha at 8.8.8.8 is reachable over LAN port 22.",
+    "Check whether machine lab-alpha at 192.168.4.0/24 is reachable over LAN port 22.",
+    "Check whether machine lab-alpha at invalid-address is reachable over LAN port 22.",
+    "Check whether machine lab-alpha at 192.168.4.23 and server lab-beta at 192.168.4.24 are reachable over LAN port 22.",
+    "Check whether machine lab-alpha at 192.168.4.23 is reachable over LAN port 22. Do not contact lab-alpha.",
+    "Check whether machine lab-alpha at 192.168.4.23 is reachable over LAN port 22. Do not contact 192.168.4.23.",
+    "Do not inspect machine lab-alpha at 192.168.4.23 on the LAN port 22.",
+  ]) assert.equal(userMessageNetworkPeerRequest([], prompt), undefined, prompt);
+});
+
 test("binds one owner-named private peer to bounded read-only reachability evidence", () => {
   const prompt =
     "Strixy is a Windows computer that should be online on my current local network. " +
@@ -3533,7 +3595,7 @@ test("binds one owner-named private peer to bounded read-only reachability evide
   assert.deepEqual(userMessageNetworkPeerRequest([], prompt), networkPeer);
   assert.deepEqual(userMessageOperationsRequirements([], prompt), {
     required: true,
-    actions: ["host.tailscale", "host.network-peer"],
+    actions: ["host.network-peer"],
     networkPeer,
   });
   assert.deepEqual(
@@ -10659,6 +10721,92 @@ test("rejects ODS-authored creative bytes for every visual request", () => {
     assert.equal(attemptedStarter.block, true, prompt);
     assert.match(attemptedStarter.blockReason, /ODS-authored creative scaffold/);
   }
+});
+
+test("preview receipt recovery uses existing-file evidence and canonical sandbox aliases", () => {
+  for (const [readPath, previewArgs] of [
+    ["./study-cards-2571/index.html", { directory: "./study-cards-2571" }],
+    ["/workspace/./study-cards-2571/index.html", { relativeDirectory: "study-cards-2571" }],
+    ["study-cards-2571/index.html", { relativeDirectory: "./study-cards-2571" }],
+  ]) {
+    const guard = createToolLoopGuard();
+    guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", {
+      prompt: "In existing study-cards-2571, make one focused improvement: add a visible Paste JSON import control. It must validate a pasted deck before replacing any current cards, show readable errors, and preserve the deck on malformed input. Preserve the existing accurate storage warning and previous source backup. Read narrow source sections, make the edit, verify the saved file, and publish the website through the workspace preview capability. Do not redesign the app or claim browser tests you have not performed.",
+    });
+    for (const file of [readPath, "./study-cards-2571-backup/index.html"]) {
+      const params = { id: "read", args: { path: file, offset: 200, limit: 50 } };
+      assert.notEqual(call(guard, "tool_call", { event: { params } })?.block, true);
+      afterCall(guard, "tool_call", { event: { params, result: wrappedCoreResult("read", {
+        content: [{ type: "text", text: "<button>Import</button>\n[400 more lines in file.]" }],
+      }) } });
+    }
+    const edit = { id: "edit", args: { path: readPath, edits: [{ oldText: "Import", newText: "Paste JSON" }] } };
+    assert.notEqual(call(guard, "tool_call", { event: { params: edit } })?.block, true);
+    afterCall(guard, "tool_call", { event: { params: edit, result: wrappedCoreResult("edit", {
+      content: [{ type: "text", text: `Successfully replaced 1 block(s) in ${readPath}.` }],
+    }) } });
+    const publish = call(guard, "tool_call", { event: { params: { id: "pixel_ods_workspace_preview", args: previewArgs } } });
+    assert.notEqual(publish?.block, true, JSON.stringify(previewArgs));
+    assert.deepEqual(publish.params.args, { relativeDirectory: "study-cards-2571" });
+    const snapshot = workspacePreviewSnapshot("study-cards-2571", [{
+      path: "study-cards-2571/index.html", content: "<!doctype html><button>Paste JSON</button>",
+    }]);
+    const details = { schemaVersion: 1, kind: "ods-pixel-workspace-preview", status: "succeeded",
+      relativeDirectory: "study-cards-2571", ...snapshot, port: 9437,
+      url: `http://${snapshot.siteId}.localhost:9437/${snapshot.siteId}/`,
+      httpStatus: 200, readbackVerified: true, executable: false, overwritten: false };
+    afterCall(guard, "tool_call", { event: { params: publish.params,
+      result: wrappedPluginResult("pixel-ods", "pixel_ods_workspace_preview", { details }),
+    } });
+    const verified = guard.verificationForRun("run-1");
+    assert.equal(verified.status, "passed");
+    assert.equal(verified.preview.relativeDirectory, "study-cards-2571");
+    assert.doesNotMatch(verified.text, /Created by Pixel\./, "an existing-file edit is not full-snapshot authorship");
+    for (const args of [
+      { directory: "missing" }, { directory: "../escape" },
+      { relativeDirectory: "study-cards-2571", directory: "study-cards-2571-backup" },
+    ]) assert.equal(call(guard, "tool_call", { event: { params: { id: "pixel_ods_workspace_preview", args } } })?.block, true);
+  }
+});
+
+test("preview receipt recovery rejects failed or wrong-tool inspection receipts", () => {
+  for (const result of [
+    wrappedCoreResult("read", { isError: true, content: [{ type: "text", text: "ENOENT" }] }),
+    wrappedCoreResult("exec", { content: [{ type: "text", text: "<html>unrelated</html>" }] }),
+  ]) {
+    const guard = createToolLoopGuard();
+    guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", {
+      prompt: "Make a focused improvement in an existing project and publish the website preview.",
+    });
+    const params = { id: "read", args: { path: "./existing/index.html" } };
+    call(guard, "tool_call", { event: { params } });
+    afterCall(guard, "tool_call", { event: { params, result } });
+    assert.equal(call(guard, "pixel_ods_workspace_preview", {
+      event: { params: { relativeDirectory: "existing" } },
+    })?.block, true);
+  }
+});
+
+test("preview receipt recovery retains strict hashes for written files after readback", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", {
+    prompt: "Create a new website and publish its preview.",
+  });
+  const params = { path: "./new-site/index.html", content: "<!doctype html><title>Authored</title>" };
+  call(guard, "write", { event: { params } });
+  afterCall(guard, "write", { event: { params, result: { details: { status: "completed" } } } });
+  const read = { path: "/workspace/new-site/index.html" };
+  call(guard, "read", { event: { params: read } });
+  afterCall(guard, "read", { event: { params: read, result: { content: [{ type: "text", text: params.content }] } } });
+  const publish = call(guard, "pixel_ods_workspace_preview", { event: { params: { relativeDirectory: "new-site" } } });
+  assert.notEqual(publish?.block, true);
+  const wrong = workspacePreviewSnapshot("new-site", [{ path: "new-site/index.html", content: "<!doctype html><title>Other bytes</title>" }]);
+  afterCall(guard, "pixel_ods_workspace_preview", { event: { params: publish.params, result: { details: {
+    schemaVersion: 1, kind: "ods-pixel-workspace-preview", status: "succeeded", relativeDirectory: "new-site",
+    ...wrong, port: 9437, url: `http://${wrong.siteId}.localhost:9437/${wrong.siteId}/`,
+    httpStatus: 200, readbackVerified: true, executable: false, overwritten: false,
+  } } } });
+  assert.notEqual(guard.verificationForRun("run-1").status, "passed");
 });
 
 test("permits an explicitly requested preview after inspecting an existing site", () => {
