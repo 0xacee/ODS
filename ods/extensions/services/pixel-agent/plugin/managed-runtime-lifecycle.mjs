@@ -58,7 +58,8 @@ function requireHooks(raw) {
 
 export function createManagedRuntimeRegistry({environment = process.env,
   createRouting = createManagedProviderBootstrap,
-  createCommands = createManagedCommandAdmission} = {}) {
+  createCommands = createManagedCommandAdmission, controlTimeoutMs = 5000} = {}) {
+  if (!Number.isSafeInteger(controlTimeoutMs) || controlTimeoutMs < 1 || controlTimeoutMs > 60000) throw error();
   let current, poisoned = false;
   const registered = new WeakSet();
   function refuse() {
@@ -181,8 +182,43 @@ export function createManagedRuntimeRegistry({environment = process.env,
           const active = Math.max(base.active, command.active, selected.size + selecting.size);
           return {...base, active, phase: active && base.phase === 'idle' ? 'busy' : base.phase};
         }
+        function heldControlSnapshot() {
+          const base = accessRuntime.status(), command = commands.status();
+          if (base.available !== true || base.phase !== 'held' || base.active !== 0 ||
+              selected.size || selecting.size || cleanupFailed || command.active || command.unknown) throw error();
+          return base;
+        }
+        async function readControlStatus() {
+          const normal = status();
+          if (normal.available) return normal;
+          let timer;
+          try {
+            // Configuration replacement intentionally invalidates the old
+            // provider. Preserve ONLY an already-held management channel, and
+            // only after that same provider/command owner has fully drained.
+            // This never revives registration, inference, tools, or probes.
+            const before = heldControlSnapshot();
+            await Promise.race([shutdown(), new Promise((_, reject) => {
+              timer = setTimeout(() => reject(error()), controlTimeoutMs);
+            })]);
+            const after = heldControlSnapshot();
+            if (after.revision !== before.revision || after.pid !== before.pid) throw error();
+            return after;
+          } catch { return {...accessRuntime.status(), available: false, phase: 'unavailable', revision: null}; }
+          finally { clearTimeout(timer); }
+        }
+        async function acquireTransition(token, revision) {
+          if (valid()) {
+            assertTransition();
+          } else {
+            const held = await readControlStatus();
+            if (!held.available || held.phase !== 'held' || accessRuntime.owns(token) !== true) throw error();
+          }
+          return accessRuntime.acquire(token, revision);
+        }
         current = {accessRuntime, deploymentText: raw, binding: canonical(deployment.binding),
           routing, commands, valid, shutdown, admit, finish, select, assertTransition, status,
+          readControlStatus, acquireTransition,
           readRegistration() {
             assertTransition();
             // Report this successfully registered owner, not an editable config

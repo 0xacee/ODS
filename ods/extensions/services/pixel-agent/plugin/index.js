@@ -267,7 +267,7 @@ export default definePluginEntry({
     api.registerHttpRoute({path: "/pixel-ods/access-runtime", auth: "gateway", match: "exact",
       handler: async (req, res) => {
         if (req.url !== "/pixel-ods/access-runtime") { sendJson(res, 400, {error: "invalid request"}); return true; }
-        if (req.method === "GET") { sendJson(res, 200, managedRuntime ? managedRuntime.status() : accessRuntime.status()); return true; }
+        if (req.method === "GET") { sendJson(res, 200, managedRuntime ? await managedRuntime.readControlStatus() : accessRuntime.status()); return true; }
         if (req.method !== "POST") { sendJson(res, 405, {error: "method not allowed"}); return true; }
         try {
           let body = "";
@@ -277,8 +277,8 @@ export default definePluginEntry({
               !/^[a-f0-9]{64}$/.test(value.token) || !/^[a-f0-9]{64}$/.test(value.revision)) throw new Error();
           let result;
           if (value.operation === "acquire") {
-            managedRuntime?.assertTransition();
-            result = accessRuntime.acquire(value.token, value.revision);
+            result = managedRuntime ? await managedRuntime.acquireTransition(value.token, value.revision)
+              : accessRuntime.acquire(value.token, value.revision);
           }
           else if (value.operation === "release") result = accessRuntime.release(value.token);
           else if (value.operation === "probe") {

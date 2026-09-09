@@ -17,7 +17,7 @@ function setup(deny = false) {
   const calls = [], result = {source: 'current-runtime-config'};
   vm.runInNewContext(source.slice(start, end), {
     api: {registerHttpRoute(value) { route = value; }},
-    managedRuntime: {assertTransition() { calls.push('owner'); if (deny) throw new Error(); }, status: () => ({available: true})},
+    managedRuntime: {assertTransition() { calls.push('owner'); if (deny) throw new Error(); }, readControlStatus: () => ({available: true})},
     accessRuntime: {readSettings(token, revision) { calls.push(['read', token, revision]); return result; }},
     sendJson(res, status, body) { Object.assign(res, {status, body}); },
   });

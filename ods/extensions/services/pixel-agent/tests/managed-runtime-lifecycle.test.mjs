@@ -28,7 +28,9 @@ function fixture(options = {}) {
     active: runs.size, revision: 'synthetic-revision', proof: null}),
     isProbe: ctx => ctx?.runId === 'trusted-probe',
     admit(_event, ctx) {calls.push('access.admit'); if (held) return {outcome: 'block'}; runs.add(ctx.runId); return {outcome: 'pass'};},
-    finish(_event, ctx) {calls.push('access.finish'); runs.delete(ctx?.runId);}};
+    finish(_event, ctx) {calls.push('access.finish'); runs.delete(ctx?.runId);},
+    owns: token => held && token === 'a'.repeat(64),
+    acquire(token) {if (!held || token !== 'a'.repeat(64)) throw new Error('wrong hold'); return access.status();}};
   const makeApi = (mode = 'full') => ({registrationMode: mode,
     pluginConfig: config.plugins.entries['pixel-ods'].config,
     runtime: {config: {current: () => config}},
@@ -42,7 +44,7 @@ function fixture(options = {}) {
     async agentEnd(event, ctx) {calls.push('routing.end'); await options.end?.(event, ctx);},
     shutdown() {calls.push('routing.shutdown'); return options.shutdown?.();}};
   let constructions = 0;
-  const registry = createManagedRuntimeRegistry({environment,
+  const registry = createManagedRuntimeRegistry({environment, controlTimeoutMs: options.controlTimeoutMs ?? 50,
     createRouting: args => {constructions++; return options.real ? createManagedProviderBootstrap({...args,
       createLease: () => ({durableReplayGuard: true,
         async acquireLease() {calls.push('lease.acquire'); return {baseUrl: 'http://127.0.0.1:12345/v1', token: 'synthetic-key',
@@ -137,6 +139,75 @@ test('current runtime snapshot drift poisons the owner; restoration cannot reviv
   const changed = structuredClone(old); changed.agents.list[0].sandbox.mode = 'off'; f.replaceConfig(changed);
   assert.equal(owner.valid(), false); f.replaceConfig(old);
   assert.equal(owner.valid(), false); assert.throws(f.register); await owner.shutdown();
+});
+
+function changeBinding(f) {
+  const changed = structuredClone(f.config());
+  changed.plugins.entries['pixel-ods'].config.managedProvider.revision++;
+  f.replaceConfig(changed);
+}
+
+test('existing held management channel survives drained config invalidation, not provider admission', async () => {
+  const f = fixture(), owner = f.register(); f.hold(); changeBinding(f);
+  assert.equal(owner.status().available, false);
+  const status = await owner.readControlStatus();
+  assert.equal(status.available, true); assert.equal(status.phase, 'held'); assert.equal(status.active, 0);
+  assert.equal((await owner.acquireTransition('a'.repeat(64), status.revision)).phase, 'held');
+  await assert.rejects(owner.acquireTransition('b'.repeat(64), status.revision));
+  assert.throws(owner.assertTransition); assert.throws(() => owner.readRegistration());
+  assert.equal((await owner.select({}, context())).modelOverride, 'unavailable');
+  assert.equal((await owner.admit({}, context())).outcome, 'block');
+  assert.equal(owner.beforeCommandRun({commandId: 'after-drift'}, {}).action, 'block');
+});
+
+test('invalid idle owner cannot gain a new management hold', async () => {
+  const f = fixture(), owner = f.register(); changeBinding(f);
+  assert.equal((await owner.readControlStatus()).available, false);
+  await assert.rejects(owner.acquireTransition('a'.repeat(64), 'b'.repeat(64)));
+  assert.equal(f.access.status().phase, 'idle'); await owner.shutdown();
+});
+
+test('held management recovery waits for the same routing shutdown to settle', async () => {
+  const gate = deferred(), f = fixture({shutdown: () => gate.promise}), owner = f.register();
+  f.hold(); changeBinding(f); let done = false;
+  const pending = owner.readControlStatus().then(value => {done = true; return value;});
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(done, false);
+  gate.resolve(); assert.equal((await pending).phase, 'held');
+  assert.equal(f.calls.filter(call => call === 'routing.shutdown').length, 1);
+});
+
+test('rejected and bounded hanging cleanup never claim held recovery available', async () => {
+  for (const failure of ['reject', 'hang']) {
+    const gate = deferred(), f = fixture({shutdown: () => gate.promise, controlTimeoutMs: 5}), owner = f.register();
+    f.hold(); changeBinding(f);
+    const pending = owner.readControlStatus();
+    if (failure === 'reject') gate.reject(new Error('cleanup unknown'));
+    assert.equal((await pending).available, false);
+    if (failure === 'reject') await assert.rejects(owner.acquireTransition('a'.repeat(64), 'b'.repeat(64)));
+    else {gate.resolve(); await owner.shutdown();}
+  }
+});
+
+test('changed held revision during cleanup cannot be accepted as the original hold', async () => {
+  const gate = deferred(), f = fixture({shutdown: () => gate.promise}), owner = f.register();
+  f.hold(); changeBinding(f); const pending = owner.readControlStatus();
+  const previous = f.access.status;
+  f.access.status = () => ({...previous(), revision: 'another-revision'});
+  gate.resolve(); assert.equal((await pending).available, false);
+});
+
+test('active provider reservations cannot be hidden by an externally asserted hold', async () => {
+  const gate = deferred(), f = fixture({shutdown: () => gate.promise}), owner = f.register();
+  await owner.select({}, context()); f.hold(); changeBinding(f);
+  assert.equal((await owner.readControlStatus()).available, false);
+  gate.resolve(); await owner.shutdown();
+});
+
+test('held recovery status never revives the old provider when its config is restored', async () => {
+  const f = fixture(), owner = f.register(), before = structuredClone(f.config());
+  f.hold(); changeBinding(f); await owner.readControlStatus(); f.replaceConfig(before);
+  assert.equal(owner.valid(), false); assert.throws(() => owner.readRegistration());
+  assert.throws(f.register);
 });
 
 test('unrelated logging and other-agent configuration do not invalidate the policy', async () => {
