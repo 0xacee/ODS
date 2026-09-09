@@ -25,6 +25,16 @@ changes still take effect. Model reconciliation and its rollback snapshot retain
 additional extensions with unique IDs and bound paths/digests, so enabling native
 search does not prevent subsequent model changes.
 
+Public source downloads are available during ordinary research and development
+without classifying the owner's wording as an Operations task. The broker still
+enforces its public-network, redirect, size, and quarantine policy. Status,
+events, and cancellation apply only to downloads actually submitted by the run;
+the existing promoter independently verifies the broker receipt and rehashes a
+create-only workspace copy. Download completion does not end the research task
+or prevent subsequent sandbox work, and it grants no host-command or remote
+transfer authority. Explicit byte-for-byte requests retain their source and
+digest binding.
+
 The paired Pixel source candidate is tracked in
 [Pixel PR #240](https://github.com/Osmantic/Pixel/pull/240). Source and disposable
 runtime tests do not establish installed chat or fresh-install acceptance. Keep

@@ -341,6 +341,9 @@ const EXACT_DOWNLOAD_BROKER_TOOLS = new Set([
   "pixel_ops_job_wait",
   "pixel_ods_download_promote",
 ]);
+const DOWNLOAD_JOB_TOOLS = new Set([
+  "pixel_ops_job_get", "pixel_ops_job_wait", "pixel_ops_job_events", "pixel_ops_job_cancel",
+]);
 const OPERATIONS_TOOLS = new Set([
   "pixel_ods_extensions",
   "pixel_ods_host_observe",
@@ -1388,9 +1391,9 @@ function exactDownloadSubmission(event, requested) {
     typeof params.filename !== "string" ||
     params.filename !== requested?.filename ||
     !OPS_ARTIFACT_FILENAME.test(params.filename) ||
-    (params.expectedSha256 !== undefined &&
+    (params.expectedSha256 != null &&
       (typeof params.expectedSha256 !== "string" || !SHA256.test(params.expectedSha256))) ||
-    params.expectedSha256 !== requested?.expectedSha256 ||
+    (params.expectedSha256 ?? undefined) !== (requested?.expectedSha256 ?? undefined) ||
     !details ||
     typeof details !== "object" ||
     Array.isArray(details) ||
@@ -1421,7 +1424,7 @@ function exactDownloadSubmission(event, requested) {
     url: params.url,
     safeSource: params.url.split("?", 1)[0],
     filename: params.filename,
-    expectedSha256: params.expectedSha256,
+    expectedSha256: params.expectedSha256 ?? undefined,
     relativePath: requested.relativePath,
   };
 }
@@ -5911,6 +5914,7 @@ export function createToolLoopGuard({
         odsRoutingAborted: false,
         odsRoutingTerminalBlocks: 0,
         exactDownloadRequested: false,
+        researchDownloadSubmissions: new Map(),
         exactDownloadRequest: undefined,
         exactDownloadSubmissions: new Map(),
         exactDownloadBrokerObserved: false,
@@ -7192,6 +7196,15 @@ export function createToolLoopGuard({
       OPERATIONS_TOOLS.has(effectiveToolName) &&
       // Capability metadata is read-only and grants no action authority.
       effectiveToolName !== "pixel_ops_inventory" &&
+      // Public downloads are a normal research/development capability. The
+      // broker enforces network, size, redirect, and quarantine policy; the
+      // promoter independently verifies bytes and a create-only destination.
+      // A prompt-routing heuristic must not require an "Operations" task to
+      // reach those boundaries or stop later sandbox work.
+      effectiveToolName !== "pixel_ops_download_stage" &&
+      !(DOWNLOAD_JOB_TOOLS.has(effectiveToolName) &&
+        state.researchDownloadSubmissions.has((toolName === "tool_call"
+          ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId)) &&
       !(["pixel_ops_job_get", "pixel_ops_job_wait"].includes(effectiveToolName) &&
         state.operationsSubmittedJobs.has((toolName === "tool_call"
           ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId))
@@ -8549,10 +8562,21 @@ export function createToolLoopGuard({
       : toolName;
     const exactDownloadEvent = wrappedExactDownloadEvent ?? event;
     if (exactDownloadToolName === "pixel_ops_download_stage") {
-      const submission = exactDownloadSubmission(exactDownloadEvent, state.exactDownloadRequest);
+      // Explicit exact-byte requests retain their owner-bound URL/digest.
+      // General research may select a source archive or dependency URL. Only
+      // an actual matched broker submission creates permission to inspect or
+      // cancel its job; tool text and invented job IDs never do.
+      const submission = exactDownloadSubmission(exactDownloadEvent,
+        state.exactDownloadRequested ? state.exactDownloadRequest : exactDownloadEvent?.params);
       if (submission) {
-        state.exactDownloadSubmissions.set(submission.jobId, submission);
-        state.exactDownloadTerminalBlocks = 0;
+        if (state.exactDownloadRequested) {
+          state.exactDownloadSubmissions.set(submission.jobId, submission);
+          state.exactDownloadTerminalBlocks = 0;
+        } else {
+          // Status access does not turn a research task into the exclusive
+          // exact-byte delivery state machine or force its final response.
+          state.researchDownloadSubmissions.set(submission.jobId, submission);
+        }
       }
     }
     if (exactDownloadToolName === "pixel_ops_job_get" || exactDownloadToolName === "pixel_ops_job_wait") {
