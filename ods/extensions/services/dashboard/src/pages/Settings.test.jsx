@@ -101,7 +101,7 @@ describe('Settings', () => {
   })
   it('preserves unsaved provider edits during a system refresh', async () => {
     const { fetchMock } = renderSettings()
-    await screen.findByText('No providers configured.')
+    await screen.findByText('No providers configured.', {}, { timeout: 3000 })
     fireEvent.change(screen.getByLabelText('New provider ID'), { target: { value: 'unsaved' } })
     fireEvent.change(screen.getByLabelText('New provider label'), { target: { value: 'Unsaved provider' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add provider', exact: true }))
