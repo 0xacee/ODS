@@ -505,6 +505,8 @@ def _reject_pending_settings(sd):
     # retains this journal; an access restore must not consume its recovery.
     if os.path.lexists(os.path.join(sd, "settings-journal.json")):
         raise AccessModeRejected("settings-recovery-required", "settings recovery must complete before changing access mode")
+    if os.path.lexists(os.path.join(sd, "provider-journal.json")):
+        raise AccessModeRejected("provider-recovery-required", "provider recovery must complete before changing access mode")
 
 
 def _select_pixel(cfg):

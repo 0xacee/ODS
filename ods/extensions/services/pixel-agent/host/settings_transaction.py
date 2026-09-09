@@ -110,6 +110,8 @@ def _requirements(expected_hash, validate_config, check_no_active_run, activate)
 
 
 def _no_pending_access(sd):
+    if os.path.lexists(os.path.join(sd, "provider-journal.json")):
+        raise SettingsError("provider-recovery-required")
     access = controller._load_receipt(sd)
     if access is not None and access.get("status") == controller.STATUS_PENDING:
         raise SettingsError("access-recovery-required")
