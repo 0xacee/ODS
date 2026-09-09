@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -23,7 +24,14 @@ def owner(tmp_path):
     agent.DATA_DIR = tmp_path
     route = {'catalogId':'glm','runtimeModelId':'GLM','routeSeq':4,'contextLength':32768,
              'capabilities':{'chat':True,'tools':True,'vision':False,'agentViable':True}}
-    with patch.object(agent, '_pixel_share_active_route', return_value=route):
+    # This fixture qualifies actual HTTP/auth/private persistence, not the
+    # runner's Docker daemon. A live inspect can outlast the client deadline
+    # and accidentally probe an unrelated install. Lifecycle tests replace
+    # this stopped service with their explicit, independently controlled one.
+    stopped = SimpleNamespace(port=4005, status=lambda: {'status': 'stopped'})
+    with patch.object(agent, '_pixel_share_active_route', return_value=route), \
+         patch.object(agent, '_pixel_sharing_service', return_value=stopped), \
+         patch.object(agent, '_read_progress_status', return_value=None):
         yield agent, host_fixture.HostHTTP.server, route
     host_fixture.HostHTTP.tearDownClass()
 

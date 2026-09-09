@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-SOURCE = Path(__file__).parents[1] / "extensions/services/pixel-agent/runtime-source"
+SOURCE = Path(__file__).parents[2] / "extensions/services/pixel-agent/runtime-source"
 SPEC = importlib.util.spec_from_file_location(
     "managed_source_prepare", SOURCE / "prepare.py"
 )
