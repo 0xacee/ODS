@@ -86,7 +86,8 @@ def arm(value, **overrides):
 def test_forward_then_same_callback_rollback_restores_absence(participant):
     p, b = participant, participant.bridge
     record = arm(p)
-    assert bytes.fromhex(record['after']['dropin']['hex']) == ('[Service]\nEnvironmentFile=' + str(p.environment) + '\n').encode()
+    assert bytes.fromhex(record['after']['dropin']['hex']) == ('[Service]\nEnvironmentFile=' + str(p.environment)
+        + '\nBindPaths=/home/ods/providers\n').encode()
     assert p.snapshot() == {'environment': None, 'dropin': None}
     b.config.write_bytes(b.after)
     selected = p.apply(b.record)
@@ -99,6 +100,14 @@ def test_forward_then_same_callback_rollback_restores_absence(participant):
     assert p.verify(b.record, restored) == record['before']
     assert not p.environment.exists() and not p.dropin.exists()
     assert b.pending() == b.record and b.phase == 'held'
+
+
+@pytest.mark.parametrize('directory', ['/home/ods/with space', '/home/ods/%h', '/home/ods/a:b', '/home/ods/../elsewhere'])
+def test_provider_mount_cannot_expand_unit_syntax_or_escape_selected_path(participant, directory):
+    doc = deployment(BINDING, '/opt/ods/source', '/usr/bin/python3', '/home/ods/providers', True)
+    doc['providerDirectory'] = directory
+    with pytest.raises(ValueError): arm(participant, deployment_document=doc)
+    assert participant.snapshot() == {'environment': None, 'dropin': None}
 
 
 def test_second_prepare_cannot_overwrite_recovery_images(participant):

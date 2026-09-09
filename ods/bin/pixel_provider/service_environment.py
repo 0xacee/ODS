@@ -176,9 +176,18 @@ class ServiceEnvironment:
             path = str(self.environment)
             if not re.fullmatch(r'/[A-Za-z0-9_./-]+', path):
                 raise AccessError('unsafe-provider-service-path')
+            directory = deployment_document['providerDirectory']
+            if (not re.fullmatch(r'/[A-Za-z0-9_./-]+', directory)
+                    or str(Path(directory)) != directory or Path(directory).resolve() != Path(directory)):
+                raise AccessError('unsafe-provider-data-path')
             # EnvironmentFile= takes an absolute filename, not a shell-quoted
             # word. Actual systemd ignores a quoted path as non-absolute.
-            dropin = ('[Service]\nEnvironmentFile=' + path + '\n').encode()
+            # ProtectHome=tmpfs hides even owner-private files. Bind ONLY the
+            # root-selected provider store, not its parent or the whole home.
+            # This appends to existing mounts; deactivation removes our drop-in
+            # and restores the exact original namespace. Tools retain their
+            # independently verified sandbox/access policy.
+            dropin = ('[Service]\nEnvironmentFile=' + path + '\nBindPaths=' + directory + '\n').encode()
             after = {'environment': {'hex': raw.hex(), 'mode': 0o600},
                      'dropin': {'hex': dropin.hex(), 'mode': 0o644}}
         _pair(after)  # Refuse oversized/generated images before arming recovery.
