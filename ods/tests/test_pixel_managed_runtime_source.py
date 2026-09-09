@@ -48,6 +48,9 @@ def fixture(tmp_path):
     repo = tmp_path / "upstream"
     repo.mkdir()
     git(repo, "init", "--quiet")
+    (repo / ".gitattributes").write_text("* text=auto\n")
+    (repo / ".git/info/attributes").write_text("* -text -filter -ident\n")
+    (repo / "retained.bat").write_bytes(b"@echo off\r\n")
     (repo / "package.json").write_text(
         json.dumps({"version": "1.0.0", "packageManager": "pnpm@1.0.0"})
     )
@@ -98,6 +101,7 @@ def test_prepares_exact_tree_without_touching_dirty_upstream(fixture, tmp_path):
     assert result["sourceTree"] == lock["sourceTree"]
     assert result["built"] is False and result["installed"] is False
     assert (Path(result["source"]) / "entry.txt").read_text() == "after\n"
+    assert (Path(result["source"]) / "retained.bat").read_bytes() == b"@echo off\r\n"
     assert (repo / ".git/index").read_bytes() == index
     assert git(repo, "status", "--porcelain") == status
     again = prepare.prepare(repo, tmp_path, inputs=inputs)

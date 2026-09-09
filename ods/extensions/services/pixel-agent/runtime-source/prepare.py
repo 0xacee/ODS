@@ -175,6 +175,11 @@ def prepare(upstream, parent, *, inputs=HERE):
         )
 
     git("init", "--quiet")
+    # The upstream tree includes intentionally tracked CRLF files. A normal
+    # git add re-applies its text attributes and silently changes those blobs.
+    # These private index attributes preserve the archive's exact bytes only;
+    # the source .gitattributes and caller's repository are never modified.
+    (root / ".git/info/attributes").write_text("* -text -filter -ident\n")
     git("add", "--force", "--all")
     # Archive filters must not silently remove or rewrite committed inputs.
     expected_base = subprocess.check_output(
