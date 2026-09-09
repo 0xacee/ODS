@@ -64,7 +64,7 @@ def tree_manifest(root):
                     resolved = path.resolve(strict=True)
                 except (OSError, RuntimeError):
                     raise AccessError('provider-runtime-link-unqualified') from None
-                if root not in resolved.parents:
+                if resolved != root and root not in resolved.parents:
                     raise AccessError('provider-runtime-link-unqualified')
                 entries[relative] = ['link', os.readlink(path)]
             elif stat.S_ISDIR(info.st_mode):
