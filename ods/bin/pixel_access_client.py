@@ -6,11 +6,11 @@ import socket
 
 
 def request_access(operation, request=None, *, settings_data_dir=None):
-    if operation not in ("status", "change", "settings-status", "settings-change"):
+    if operation not in ("status", "change", "settings-status", "settings-change", "provider-status", "provider-change"):
         raise ValueError("invalid access operation")
     payload = {"operation": operation}
-    if operation in ("change", "settings-change"): payload["request"] = request
-    if operation.startswith("settings-"):
+    if operation in ("change", "settings-change", "provider-change"): payload["request"] = request
+    if operation.startswith(("settings-", "provider-")):
         # Supplied by the host agent's actual DATA_DIR, never the HTTP request.
         if settings_data_dir is None or not Path(settings_data_dir).is_absolute():
             raise ValueError("unqualified settings data directory")

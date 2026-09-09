@@ -1,10 +1,12 @@
 """Host-owned provider Settings. Saving is not runtime activation."""
 
 import os
+import platform
 
 from .config import default_config, public_config
 from .store import StoreError
 from .vault import validate_edit
+from .public import from_controller, normalize_change, normalize_outcome, safe_reason, unavailable
 from .store_factory import (
     credential_store,
     existing_directory,
@@ -41,3 +43,41 @@ def save_configuration(data_dir, body):
     # data directory must already exist. Store checks custody before any write.
     prepare_directory(directory)
     return credential_store(directory).save_public(body)
+
+
+def runtime_status(data_dir, *, request=None):
+    if platform.system() != "Linux":
+        return unavailable("macos-launchd-adapter-missing" if platform.system() == "Darwin" else "native-windows-adapter-missing")
+    if request is None:
+        from pixel_access_client import request_access
+        request = request_access
+    try:
+        status, value = request("provider-status", settings_data_dir=data_dir)
+        if status != 200:
+            return unavailable(safe_reason(value.get("error")))
+        return from_controller(value)
+    except (OSError, ValueError, TypeError, KeyError):
+        return unavailable("provider-controller-unavailable")
+
+
+def runtime_change(data_dir, body, *, request=None):
+    try:
+        body = normalize_change(body)
+    except ValueError:
+        raise StoreError("invalid-request") from None
+    if platform.system() != "Linux":
+        raise StoreError("provider-transition-unavailable")
+    if request is None:
+        from pixel_access_client import request_access
+        request = request_access
+    try:
+        status, value = request("provider-change", body, settings_data_dir=data_dir)
+    except (OSError, ValueError, TypeError, KeyError):
+        raise StoreError("provider-transition-uncertain") from None
+    if status != 200:
+        raise StoreError(safe_reason(value.get("error"), "provider-transition-unavailable"))
+    try:
+        return normalize_outcome(value, body)
+    except (ValueError, TypeError, KeyError):
+        # A bad/lost response is not evidence that the root operation failed.
+        raise StoreError("provider-transition-uncertain") from None

@@ -6402,6 +6402,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_pixel_ops_status(parse_qs(parsed.query, keep_blank_values=True))
         elif path == "/v1/pixel/providers":
             self._handle_pixel_providers(save=False)
+        elif path == "/v1/pixel/providers/runtime" and not parsed.query:
+            self._handle_pixel_providers_runtime(change=False)
         elif path == "/v1/pixel/settings" and not parsed.query:
             self._handle_pixel_settings(save=False)
         elif path == "/v1/pixel/settings/runtime" and not parsed.query:
@@ -6929,6 +6931,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_remote_provider_proof()
         elif self.path == "/v1/pixel/providers/save":
             self._handle_pixel_providers(save=True)
+        elif self.path == "/v1/pixel/providers/runtime":
+            self._handle_pixel_providers_runtime(change=True)
         elif self.path == "/v1/pixel/settings/save":
             self._handle_pixel_settings(save=True)
         elif self.path == "/v1/pixel/settings/runtime":
@@ -7166,6 +7170,55 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, status, {'error': 'Advisory request failed', 'code': exc.code}, no_store=True)
         except (ImportError, OSError, ValueError, TypeError, KeyError):
             json_response(self, 503, {'error': 'Advisory service unavailable'}, no_store=True)
+
+    def _handle_pixel_providers_runtime(self, *, change):
+        """Fixed owner-confirmed provider control; root alone selects targets."""
+        if not check_auth(self): return
+        try:
+            from pixel_provider.host_api import runtime_status, runtime_change
+            from pixel_provider.public import normalize_change
+            from pixel_provider.store import StoreError, decode_document
+        except ImportError:
+            json_response(self, 503, {"error": "Provider runtime is unavailable"}, no_store=True)
+            return
+        acquired = False
+        try:
+            if change:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,9}", lengths[0])
+                        or self.headers.get("Transfer-Encoding") is not None):
+                    raise StoreError("invalid-request")
+                length = int(lengths[0])
+                if length > 2048:
+                    json_response(self, 413, {"error": "Provider runtime request exceeds size limit"}, no_store=True)
+                    return
+                if length == 0: raise StoreError("invalid-request")
+                before = self.connection.gettimeout()
+                try:
+                    self.connection.settimeout(10)
+                    raw = self.rfile.read(length)
+                finally: self.connection.settimeout(before)
+                if len(raw) != length: raise StoreError("malformed-json")
+                try: body = normalize_change(decode_document(raw))
+                except ValueError: raise StoreError("invalid-request") from None
+                acquired, _active = _begin_model_lifecycle("pixel_providers")
+                if not acquired: raise StoreError("model-lifecycle-busy")
+                result = runtime_change(DATA_DIR, body)
+            else:
+                result = runtime_status(DATA_DIR)
+        except StoreError as error:
+            status = 400 if error.code in ("invalid-request", "malformed-json") else 409
+            if error.code in ("provider-transition-unavailable", "provider-transition-uncertain"):
+                status = 503
+            json_response(self, status, {"error": "Provider runtime request failed; inspect before retrying",
+                                        "code": error.code}, no_store=True)
+            return
+        except (OSError, ValueError, TypeError, KeyError):
+            json_response(self, 503, {"error": "Provider runtime result is unavailable; inspect before retrying"}, no_store=True)
+            return
+        finally:
+            if acquired: _end_model_lifecycle("pixel_providers")
+        json_response(self, 200, result, no_store=True)
 
     def _handle_pixel_settings_runtime(self, *, change):
         """Owner-only runtime inspection or fixed Apply/recovery; no paths in HTTP."""

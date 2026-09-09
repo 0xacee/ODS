@@ -6,12 +6,14 @@ import json
 import math
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from host_agent_client import (
     AgentHTTPError, AgentProtocolError, AgentUnavailable,
     async_request_json as request_agent_json,
 )
 from pixel_provider_public import normalize_public
+from pixel_provider_runtime_public import normalize_change, normalize_outcome, normalize_runtime
 from security import verify_api_key
 
 router = APIRouter(tags=["pixel-providers"])
@@ -63,10 +65,10 @@ def _check_depth(text):
                 raise ValueError("invalid-nesting")
 
 
-async def _body(request):
+async def _body(request, *, runtime=False):
     raw = bytearray()
     async for chunk in request.stream():
-        if len(raw) + len(chunk) > MAX_BYTES:
+        if len(raw) + len(chunk) > (2048 if runtime else MAX_BYTES):
             raise HTTPException(413, "Provider configuration exceeds size limit")
         raw.extend(chunk)
     try:
@@ -74,6 +76,8 @@ async def _body(request):
         _check_depth(text)
         value = json.loads(text, object_pairs_hook=_pairs,
                            parse_float=_float, parse_constant=_constant)
+        if runtime:
+            return normalize_change(value)
     except (ValueError, RecursionError):
         raise HTTPException(400, "Invalid provider configuration request") from None
     if (not isinstance(value, dict)
@@ -117,3 +121,32 @@ async def get_providers(_key: str = Depends(verify_api_key)):
 @router.post("/api/pixel/providers/save")
 async def save_providers(request: Request, _key: str = Depends(verify_api_key)):
     return await _request("POST", "/v1/pixel/providers/save", await _body(request))
+
+
+async def _runtime_request(method, payload=None):
+    headers = {"Cache-Control": "no-store"}
+    try:
+        raw = await request_agent_json(method, "/v1/pixel/providers/runtime", payload=payload,
+                                       timeout=340 if method == "POST" else 65)
+    except AgentHTTPError as error:
+        status = error.status_code if error.status_code in (400, 409, 413, 503) else 502
+        raise HTTPException(status, "Provider runtime request failed; inspect before retrying", headers=headers) from None
+    except AgentUnavailable:
+        raise HTTPException(503, "Provider runtime is unavailable; inspect before retrying", headers=headers) from None
+    except AgentProtocolError:
+        raise HTTPException(502, "Provider runtime result is unconfirmed; inspect before retrying", headers=headers) from None
+    try:
+        result = normalize_outcome(raw, payload) if method == "POST" else normalize_runtime(raw)
+    except (ValueError, TypeError, RecursionError):
+        raise HTTPException(502, "Invalid provider runtime response; inspect before retrying", headers=headers) from None
+    return JSONResponse(content=result, headers=headers)
+
+
+@router.get("/api/pixel/providers/runtime")
+async def get_provider_runtime(_key: str = Depends(verify_api_key)):
+    return await _runtime_request("GET")
+
+
+@router.post("/api/pixel/providers/runtime")
+async def change_provider_runtime(request: Request, _key: str = Depends(verify_api_key)):
+    return await _runtime_request("POST", await _body(request, runtime=True))
