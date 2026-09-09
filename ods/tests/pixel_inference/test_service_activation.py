@@ -169,7 +169,7 @@ def test_registration_is_exact_current_process_contract(mutation):
     identity = {'pid': 123}
     value = {'schemaVersion': 1, 'source': 'current-provider-registration', 'pid': 123,
              'runtimeVersion': '2026.6.33', 'revision': 'a' * 64,
-             'observedAt': datetime.now(timezone.utc).isoformat(), 'transportVerified': False,
+             'observedAt': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'), 'transportVerified': False,
              'registration': {'status': 'active', 'binding': BINDING}}
     assert service._registration(value, identity, 'a' * 64, BINDING)
     if mutation == 'pid': value['pid'] += 1

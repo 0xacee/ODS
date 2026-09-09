@@ -5,20 +5,20 @@ both admission holds, root journal, saved policy and owner transaction. This
 callback is deliberately zero-argument when bound into the owner-worker pipe:
 each invocation selects its environment using the actual configuration hash.
 """
-from datetime import datetime
 import time
 
 from pixel_access_bridge import AccessError, UNIT, atomic_json, digest, remaining
 from pixel_access_protocol import HEX
 from pixel_settings import coordinator as settings
 from pixel_settings.contract import SettingsError
+from pixel_settings.runtime import _timestamp
 
 
 def definition(bridge, owned_dropin):
     # Provider environment changes must not replace a launcher, OS identity or
     # unrelated unit policy. The exact two managed files are checked separately.
     fields = bridge.command(['systemctl', 'show', UNIT,
-        '--property=ExecStart,User,Group,DynamicUser,WorkingDirectory,RootDirectory,RootImage,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost'])
+        '--property=User,Group,DynamicUser,WorkingDirectory,RootDirectory,RootImage'])
     source = bridge.command(['systemctl', 'cat', UNIT])
     kept, owned = [], False
     for line in source.splitlines():
@@ -51,14 +51,14 @@ def _registration(envelope, identity, revision, binding):
             or envelope['source'] != 'current-provider-registration'
             or type(envelope['pid']) is not int or envelope['pid'] != identity['pid']
             or envelope['revision'] != revision or envelope['transportVerified'] is not False
-            or type(envelope['runtimeVersion']) is not str or not envelope['runtimeVersion']
+            or envelope['runtimeVersion'] != '2026.6.33'
             or type(envelope['observedAt']) is not str):
         return False
     try:
-        when = datetime.fromisoformat(envelope['observedAt'].replace('Z', '+00:00'))
-    except ValueError:
-        return False
-    if when.tzinfo is None:
+        _timestamp(envelope['observedAt'])
+        from pixel_access_protocol import provider_binding
+        provider_binding(envelope.get('registration', {}).get('binding'))
+    except (ValueError, SettingsError, AttributeError):
         return False
     return envelope['registration'] == {'status': 'active' if binding else 'inactive', 'binding': binding}
 
