@@ -1,8 +1,8 @@
 """Bounded host-agent client; no privileged code is loaded from the checkout."""
-import json
 import hashlib
-from pathlib import Path
+import json
 import socket
+from pathlib import Path
 
 
 def request_access(operation, request=None, *, settings_data_dir=None):

@@ -7,17 +7,25 @@ import math
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-
 from host_agent_client import (
-    AgentHTTPError, AgentProtocolError, AgentUnavailable,
+    AgentHTTPError,
+    AgentProtocolError,
+    AgentUnavailable,
+)
+from host_agent_client import (
     async_request_json as request_agent_json,
 )
 from pixel_provider_public import normalize_public
-from pixel_provider_runtime_public import normalize_change, normalize_outcome, normalize_runtime
+from pixel_provider_runtime_public import (
+    normalize_change,
+    normalize_outcome,
+    normalize_runtime,
+)
 from security import verify_api_key
 
 router = APIRouter(tags=["pixel-providers"])
 MAX_BYTES = 256 * 1024
+NO_STORE = {"Cache-Control": "no-store"}
 
 
 def _pairs(pairs):
@@ -69,7 +77,7 @@ async def _body(request, *, runtime=False):
     raw = bytearray()
     async for chunk in request.stream():
         if len(raw) + len(chunk) > (2048 if runtime else MAX_BYTES):
-            raise HTTPException(413, "Provider configuration exceeds size limit")
+            raise HTTPException(413, "Provider request exceeds size limit", headers=NO_STORE)
         raw.extend(chunk)
     try:
         text = bytes(raw).decode("utf-8")
@@ -79,7 +87,7 @@ async def _body(request, *, runtime=False):
         if runtime:
             return normalize_change(value)
     except (ValueError, RecursionError):
-        raise HTTPException(400, "Invalid provider configuration request") from None
+        raise HTTPException(400, "Invalid provider configuration request", headers=NO_STORE) from None
     if (not isinstance(value, dict)
             or not {"expectedRevision", "document"} <= set(value) <= {"expectedRevision", "document", "credentialChanges"}
             or type(value["expectedRevision"]) is not int
@@ -87,7 +95,7 @@ async def _body(request, *, runtime=False):
             or not isinstance(value["document"], dict)
             or not isinstance(value.get("credentialChanges", {}), dict)
             or len(value.get("credentialChanges", {})) > 32):
-        raise HTTPException(400, "Invalid provider configuration request")
+        raise HTTPException(400, "Invalid provider configuration request", headers=NO_STORE)
     return value
 
 
@@ -96,21 +104,21 @@ async def _request(method, path, payload=None):
         raw = await request_agent_json(method, path, payload=payload, timeout=10)
     except AgentHTTPError as exc:
         code = exc.status_code if exc.status_code in (400, 409, 413, 503) else 502
-        raise HTTPException(code, "Provider settings request failed") from None
+        raise HTTPException(code, "Provider settings request failed", headers=NO_STORE) from None
     except AgentUnavailable:
-        raise HTTPException(503, "Provider settings are unavailable") from None
+        raise HTTPException(503, "Provider settings are unavailable", headers=NO_STORE) from None
     except AgentProtocolError:
-        raise HTTPException(502, "Invalid provider settings response") from None
+        raise HTTPException(502, "Invalid provider settings response", headers=NO_STORE) from None
     try:
         configuration = normalize_public(raw)
     except (ValueError, TypeError, RecursionError):
-        raise HTTPException(502, "Invalid provider settings response") from None
-    return {
+        raise HTTPException(502, "Invalid provider settings response", headers=NO_STORE) from None
+    return JSONResponse(content={
         "configuration": configuration,
         # Deliberately distinct from desired configuration.enabled. Persistence
         # alone must never claim an effective inference route or grant access.
         "runtime": {"status": "not-applied", "reason": "provider-runtime-not-integrated"},
-    }
+    }, headers=NO_STORE)
 
 
 @router.get("/api/pixel/providers")
@@ -124,7 +132,7 @@ async def save_providers(request: Request, _key: str = Depends(verify_api_key)):
 
 
 async def _runtime_request(method, payload=None):
-    headers = {"Cache-Control": "no-store"}
+    headers = NO_STORE
     try:
         raw = await request_agent_json(method, "/v1/pixel/providers/runtime", payload=payload,
                                        timeout=340 if method == "POST" else 65)

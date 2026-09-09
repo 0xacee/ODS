@@ -1,7 +1,7 @@
 """Strict nonsecret provider-runtime envelopes; standalone host/dashboard parity."""
-from datetime import datetime
 import re
 import uuid
+from datetime import datetime
 
 STATES = {"not-applied", "applied", "saved-changes", "inactive", "pending", "unavailable"}
 KEYS = {"schemaVersion", "status", "revision", "providerRevision", "binding", "pending",

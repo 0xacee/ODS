@@ -4,9 +4,14 @@ import os
 import platform
 
 from .config import default_config, public_config
+from .public import (
+    from_controller,
+    normalize_change,
+    normalize_outcome,
+    safe_reason,
+    unavailable,
+)
 from .store import StoreError
-from .vault import validate_edit
-from .public import from_controller, normalize_change, normalize_outcome, safe_reason, unavailable
 from .store_factory import (
     credential_store,
     existing_directory,
@@ -14,6 +19,7 @@ from .store_factory import (
     provider_directory,
     provider_store,
 )
+from .vault import validate_edit
 
 
 def _directory(data_dir):
@@ -54,7 +60,7 @@ def runtime_status(data_dir, *, request=None):
     try:
         status, value = request("provider-status", settings_data_dir=data_dir)
         if status != 200:
-            return unavailable(safe_reason(value.get("error")))
+            return unavailable(safe_reason(value.get("error") if isinstance(value, dict) else None))
         return from_controller(value)
     except (OSError, ValueError, TypeError, KeyError):
         return unavailable("provider-controller-unavailable")
@@ -75,7 +81,8 @@ def runtime_change(data_dir, body, *, request=None):
     except (OSError, ValueError, TypeError, KeyError):
         raise StoreError("provider-transition-uncertain") from None
     if status != 200:
-        raise StoreError(safe_reason(value.get("error"), "provider-transition-unavailable"))
+        reason = value.get("error") if isinstance(value, dict) else None
+        raise StoreError(safe_reason(reason, "provider-transition-unavailable"))
     try:
         return normalize_outcome(value, body)
     except (ValueError, TypeError, KeyError):

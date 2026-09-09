@@ -2,9 +2,10 @@
 import copy
 
 import pytest
-
 from routers import pixel_providers
-from test_pixel_settings_host_integration import actual_stack  # noqa: F401 - shared pytest fixture
+from test_pixel_settings_host_integration import (
+    actual_stack,  # noqa: F401 - shared pytest fixture
+)
 
 BINDING = {'schemaVersion': 1, 'activationId': '123e4567-e89b-12d3-a456-426614174000',
            'revision': 3, 'allowCloud': False}
@@ -12,7 +13,7 @@ CHANGE = {'operation': 'apply', 'revision': 'a' * 64, 'providerRevision': 3}
 
 
 @pytest.fixture
-def provider_stack(actual_stack, monkeypatch):
+def provider_stack(actual_stack, monkeypatch):  # noqa: F811 - imported pytest fixture
     import pixel_access_client
     from pixel_provider import host_api
     client, agent, handler = actual_stack

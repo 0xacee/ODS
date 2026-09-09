@@ -3,8 +3,8 @@ import copy
 import importlib.util
 import io
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -114,11 +114,11 @@ def test_host_status_preserves_pending_and_fixed_codes(monkeypatch, tmp_path):
     assert host_api.runtime_status(tmp_path, request=lambda *a, **kw: (200, raw)) == value
     for error, expected in [('settings-store-not-initialized', 'settings-store-not-initialized'),
                             ('private-sentinel', 'provider-controller-unavailable')]:
-        result = host_api.runtime_status(tmp_path, request=lambda *a, **kw: (503, {'error': error}))
+        result = host_api.runtime_status(tmp_path, request=lambda *a, error=error, **kw: (503, {'error': error}))
         assert result == public.unavailable(expected)
 
 
-@pytest.mark.parametrize('failure', ['timeout', 'bad-outcome', 'private-error'])
+@pytest.mark.parametrize('failure', ['timeout', 'bad-outcome', 'private-error', 'nonobject-error'])
 def test_host_change_never_retries_unknown_outcome(monkeypatch, tmp_path, failure):
     monkeypatch.setattr(host_api.platform, 'system', lambda: 'Linux')
     calls = []
@@ -126,10 +126,17 @@ def test_host_change_never_retries_unknown_outcome(monkeypatch, tmp_path, failur
         calls.append((args, kwargs))
         if failure == 'timeout': raise TimeoutError('private-sentinel')
         if failure == 'bad-outcome': return 200, outcome(dict(BINDING, revision=99))
+        if failure == 'nonobject-error': return 503, None
         return 503, {'error': 'private-sentinel'}
     with pytest.raises(StoreError) as error: host_api.runtime_change(tmp_path, CHANGE, request=request)
     assert error.value.code in ('provider-transition-uncertain', 'provider-transition-unavailable')
     assert calls == [(('provider-change', CHANGE), {'settings_data_dir': tmp_path})]
+
+
+@pytest.mark.parametrize('body', [None, [], 'private-sentinel'])
+def test_host_status_maps_nonobject_controller_errors(monkeypatch, tmp_path, body):
+    monkeypatch.setattr(host_api.platform, 'system', lambda: 'Linux')
+    assert host_api.runtime_status(tmp_path, request=lambda *a, **kw: (503, body)) == public.unavailable()
 
 
 def test_native_platform_does_not_call_linux_controller(monkeypatch, tmp_path):
