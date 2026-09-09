@@ -5048,14 +5048,56 @@ function ownerForbidsWorkspacePreview(messages, prompt) {
   // Preserve explicit owner constraints without requiring a positive visual
   // vocabulary to use the local snapshot tool. These are delivery actions,
   // not filenames, quoted examples, or another clause's edit restriction.
-  return /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:(?:create|build|edit|write|run|execute)\s*(?:,\s*|and\s+|or\s+))*(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(text);
+  return portuguesePreviewForbidden(text) || /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:(?:create|build|edit|write|run|execute)\s*(?:,\s*|and\s+|or\s+))*(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(text);
+}
+
+function portuguesePreviewForbidden(text) {
+  const prose = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return /\b(?:nao|nunca|sem|evite)\s+(?:(?:criar|crie|fazer|faca|editar|edite)\s+(?:e|ou)\s+)?(?:(?:re)?publ(?:ic|iq)\w*|mostr\w*|abrir|abra|preview|pre-?visualiz\w*)\b/i.test(prose)
+    || /\b(?:so|somente|apenas)\s+(?:o\s+)?codigo\b/i.test(prose);
+}
+
+function portugueseWorkspaceBuildRequest(text) {
+  // Match an actual owner command, not quoted examples, tutorials or files
+  // merely named by a model. Delivery remains the existing bounded snapshot
+  // capability; this adds no network/server or arbitrary-directory authority.
+  const prose = text.replace(/(?:`{3}|~{3})[\s\S]*?(?:`{3}|~{3})/g, ' ')
+    .replace(/^\s*>[^\n]*/gm, ' ').replace(/"[^"\n]*"|`[^`\n]*`/g, ' ')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (portuguesePreviewForbidden(prose)) return false;
+  return prose.split(/[!?;\n]+|\.(?=\s|$)/).some(clause =>
+    /^\s*(?:por\s+favor[, ]+)?(?:(?:voce|vc)\s+)?(?:pode\s+)?(?:crie|criar|faca|fazer|construa|construir|desenvolva|desenvolver|implemente|implementar)\s+/i.test(clause)
+    && /\b(?:html|site|website|pagina\s+web|app\s+web|aplicativo\s+web)\b/i.test(clause)
+    && !/\b(?:nao|nunca|sem)\s+(?:criar|crie|fazer|faca|public\w*)\b/i.test(clause));
 }
 
 function withoutWorkspaceHtmlTargets(text) {
   return text.replace(/\b[A-Za-z0-9_-][A-Za-z0-9._/-]{0,511}\.html?\b/gi, " ");
 }
 
+function hasPortugueseWorkspacePreviewDirective(text) {
+  const portuguese = text.replace(/(?:`{3}|~{3})[\s\S]*?(?:`{3}|~{3})/g, ' ')
+    .replace(/^\s*>[^\n]*/gm, ' ').replace(/"[^"\n]*"|`[^`\n]*`/g, ' ')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (!portuguesePreviewForbidden(portuguese)) {
+    const directives = portuguese.matchAll(
+      /(?:^|[.!?;\n]|\be\s+)\s*(?:(?:depois|entao)\s+)?(?:por\s+favor[, ]+)?(?:(?:so|somente|apenas)\s+)?(?:publique|republique)\s+([^!?;\n]{1,512})/gi
+    );
+    for (const match of directives) {
+      const target = match[1];
+      if (hasWorkspaceHtmlTarget(target) || /\b(?:site|website|pagina|preview)\b/i.test(target)) return true;
+      // A conditional publication is still a requested delivery, not proof
+      // that tests passed. Existing execution/readback gates remain in force.
+      if (/^(?:apos|depois\s+de)\b/i.test(target)
+        && /\btestes?\b/i.test(target)
+        && /\b(?:site|website|pagina|preview)\b/i.test(portuguese.slice(0, match.index))) return true;
+    }
+  }
+  return false;
+}
+
 function hasExplicitWorkspacePreviewDirective(text) {
+  if (hasPortugueseWorkspacePreviewDirective(text)) return true;
   // A requested delivery action can follow a diagnosis or code repair. Do not
   // mistake a subordinate "why we should publish" for that owner command.
   const commands = text.matchAll(
@@ -5109,6 +5151,7 @@ function requestsNamedSessionPreview(text, preview) {
 export function userMessageRequestsWorkspacePreview(messages, prompt = undefined) {
   const text = currentOwnerIntentText(messages, prompt);
   if (!text) return false;
+  if (portuguesePreviewForbidden(text)) return false;
   // Classify visual targets and actions from the same positive request text.
   // A no-website constraint on a Python task is not a website request. Keep
   // independent actions after "but", "instead", "then", or a sentence boundary.
@@ -5190,7 +5233,8 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
   const nonVisualImplementation =
     /\b(?:backend|daemon|engine|file\s+format|library|parser|renderer|seriali[sz]er|server|service)\b/i.test(proseActionText) &&
     !/\b(?:browser|demo|interactive|visuali[sz]ation)\b/i.test(actionText);
-  const explicitDelivery = hasExplicitWorkspacePreviewDirective(actionText);
+  // Portuguese "no preview" means "in the preview", not English negation.
+  const explicitDelivery = hasPortugueseWorkspacePreviewDirective(text) || hasExplicitWorkspacePreviewDirective(actionText);
   // An edit constraint does not veto an independently requested display.
   // Keep negative compound requests closed ("never create and publish").
   // A filename's dot is not a sentence boundary.
@@ -5225,7 +5269,7 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
   return directPreview || unreachableLocalPreview || interactiveDelivery ||
     websiteAction ||
     ((application || browserInterface || htmlCreation) && (build || revise)) ||
-    (browserVisual && build);
+    (browserVisual && build) || portugueseWorkspaceBuildRequest(text);
 }
 
 function userMessageRequiresWorkspacePreviewAuthorship(
@@ -5256,7 +5300,7 @@ function userMessageRequiresWorkspacePreviewAuthorship(
     /\b(?:apps?|applications?|artwork|animation|chart|diagram|game|illustration|site|website)\b[^.!?;\n]{0,48}\bin\s+(?:(?:my|the|our)\s+)?workspace\b/i.test(text) ||
     /\b(?:show|open|view|preview)\s+(?:me\s+)?(?:the|that|this|our|my)\b[^.!?;\n]{0,64}\b(?:apps?|applications?|artwork|animation|chart|diagram|game|illustration|site|website)\b/i.test(text);
   if (reuseExisting && !explicitCreation) return false;
-  return create.test(text) && !rejectsCreation.test(text);
+  return (create.test(text) || portugueseWorkspaceBuildRequest(text)) && !rejectsCreation.test(text);
 }
 
 export function userMessageRequestsWorkspacePreviewInspection(
@@ -8954,7 +8998,10 @@ export function createToolLoopGuard({
     }
     state.workspacePreviewDirectory = directory;
     return {
-      stage: "workspace-preview",
+      // A publication followed by a write/check needs a new host receipt.
+      // Do not spend that recovery on the initial publication's retry key.
+      // Keep one fixed refresh key per run, not an unbounded mutation counter.
+      stage: state.workspacePreviewVerifiedDirectory ? "workspace-preview-refresh" : "workspace-preview",
       instruction:
         `Do not reply yet. Call tool_call now with id ${WORKSPACE_PREVIEW_TOOL} ` +
         `and args ${JSON.stringify({ relativeDirectory: directory })}. ` +
@@ -9021,6 +9068,15 @@ export function createToolLoopGuard({
       return undefined;
     })();
     const previewStageInstruction = (() => {
+      if (state?.workspacePreviewVerifiedDirectory && !state.workspacePreview &&
+          state.workspacePreviewRequired && !state.workspacePreviewForbidden &&
+          !state.operationsRequired && !state.exactDownloadRequested) {
+        return "[ODS Pixel next step] Files or checks changed after the earlier publication. " +
+          "Finish any remaining requested edits and checks, then call tool_call with id " +
+          WORKSPACE_PREVIEW_TOOL + " and args " +
+          JSON.stringify({ relativeDirectory: state.workspacePreviewVerifiedDirectory }) +
+          ". Publish last, after documentation too. Do not claim the earlier snapshot is current.";
+      }
       if (
         !state?.workspacePreview ||
         state.operationsRequired ||
