@@ -1682,15 +1682,9 @@ if existing_binds not in ([], [exec_control_bind]):
 # the host tree owner/mode, and exposes it read-only inside the sandbox.
 updated_sandbox_docker["binds"] = [exec_control_bind]
 updated_sandbox_docker["dangerouslyAllowExternalBindSources"] = True
-search = updated_web.get("search", {})
-searxng = updated.get("plugins", {}).get("entries", {}).get("searxng", {})
-search_url = searxng.get("config", {}).get("webSearch", {}).get("baseUrl")
-if (not isinstance(search, dict) or search.get("provider") != "searxng"
-        or searxng.get("enabled") is not True
-        or not isinstance(search_url, str)
-        or not re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]{0,4}", search_url)
-        or int(search_url.rsplit(":", 1)[1]) > 65535):
-    raise SystemExit("ODS Pixel private web search is not bound to local SearXNG")
+# Model budgets must preserve the owner's native web-search provider choice.
+# OpenClaw validates the complete candidate below; search provisioning and
+# readiness belong to bootstrap, not this context/sandbox budget overlay.
 updated_provider["timeoutSeconds"] = 1800
 updated_defaults["timeoutSeconds"] = 1800
 updated_defaults["bootstrapMaxChars"] = 32000
