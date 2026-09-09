@@ -29,25 +29,25 @@ for (const viewport of [{ width: 800, height: 600 }, { width: 480, height: 400 }
       });
     });
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "ODS", exact: true })).toBeInViewport();
+    await expect(page.getByRole("heading", { name: "ODS", exact: true })).toBeInViewport({ ratio: 1 });
     await page.getByRole("button", { name: "Get Started" }).click();
 
     for (const heading of ["System Check", "All Prerequisites Met", "GPU Detected"]) {
-      await expect(page.getByRole("heading", { name: heading, exact: true })).toBeInViewport();
+      await expect(page.getByRole("heading", { name: heading, exact: true })).toBeInViewport({ ratio: 1 });
       await page.getByRole("button", { name: "Continue", exact: true }).click();
     }
 
     const features = page.getByRole("heading", { name: "Choose Features" });
-    await expect(features).toBeInViewport();
+    await expect(features).toBeInViewport({ ratio: 1 });
     // Scroll to the last action and back: the heading must be reachable,
     // not positioned above the scroll container's zero position.
     await page.getByRole("button", { name: "Select All" }).scrollIntoViewIfNeeded();
     await features.scrollIntoViewIfNeeded();
-    await expect(features).toBeInViewport();
+    await expect(features).toBeInViewport({ ratio: 1 });
     await page.getByRole("button", { name: "Install", exact: true }).click();
     await page.getByRole("heading", { name: "Something Went Wrong" }).scrollIntoViewIfNeeded();
-    await expect(page.getByRole("heading", { name: "Something Went Wrong" })).toBeInViewport();
+    await expect(page.getByRole("heading", { name: "Something Went Wrong" })).toBeInViewport({ ratio: 1 });
     await page.getByRole("button", { name: "Try Again" }).scrollIntoViewIfNeeded();
-    await expect(page.getByRole("button", { name: "Try Again" })).toBeInViewport();
+    await expect(page.getByRole("button", { name: "Try Again" })).toBeInViewport({ ratio: 1 });
   });
 }
