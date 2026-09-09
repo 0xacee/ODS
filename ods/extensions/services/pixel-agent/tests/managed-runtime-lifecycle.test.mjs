@@ -188,12 +188,39 @@ test('rejected and bounded hanging cleanup never claim held recovery available',
   }
 });
 
-test('changed held revision during cleanup cannot be accepted as the original hold', async () => {
+for (const mutation of [{revision: 'another-revision'}, {pid: 98765}, {phase: 'idle'}, {available: false}, {active: 1}]) {
+  test('changed hold during cleanup cannot be accepted: ' + JSON.stringify(mutation), async () => {
+    const gate = deferred(), f = fixture({shutdown: () => gate.promise}), owner = f.register();
+    f.hold(); changeBinding(f); const pending = owner.readControlStatus();
+    const previous = f.access.status;
+    f.access.status = () => ({...previous(), ...mutation});
+    gate.resolve(); assert.equal((await pending).available, false);
+  });
+}
+
+test('valid managed acquire still delegates token validation to the existing access owner', async () => {
+  const f = fixture(), owner = f.register(); f.hold();
+  await assert.rejects(owner.acquireTransition('b'.repeat(64), 'b'.repeat(64)));
+  assert.equal((await owner.acquireTransition('a'.repeat(64), 'b'.repeat(64))).phase, 'held');
+  assert.equal(owner.valid(), true); await owner.shutdown();
+});
+
+test('token ownership lost during cleanup refuses reacquire despite an unchanged status projection', async () => {
   const gate = deferred(), f = fixture({shutdown: () => gate.promise}), owner = f.register();
-  f.hold(); changeBinding(f); const pending = owner.readControlStatus();
-  const previous = f.access.status;
-  f.access.status = () => ({...previous(), revision: 'another-revision'});
-  gate.resolve(); assert.equal((await pending).available, false);
+  f.hold(); changeBinding(f);
+  const pending = owner.acquireTransition('a'.repeat(64), 'b'.repeat(64));
+  f.access.owns = () => false;
+  gate.resolve(); await assert.rejects(pending);
+});
+
+test('unknown command cleanup remains unavailable even if external accounting drops its slot', async () => {
+  const f = fixture(), owner = f.register();
+  const command = owner.beforeCommandRun({commandId: 'unknown'}, {});
+  await assert.rejects(command.finish({commandId: 'unknown', inspectProcess: () => ({state: 'unknown'}), cancelProcess() {}}));
+  f.runs.clear(); f.hold(); changeBinding(f);
+  assert.equal((await owner.readControlStatus()).available, false);
+  await assert.rejects(owner.acquireTransition('a'.repeat(64), 'b'.repeat(64)));
+  await assert.rejects(owner.shutdown());
 });
 
 test('active provider reservations cannot be hidden by an externally asserted hold', async () => {
