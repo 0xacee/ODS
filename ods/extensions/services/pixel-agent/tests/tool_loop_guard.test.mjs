@@ -8044,6 +8044,61 @@ test("allows different public pages within the normal budget", () => {
   );
 });
 
+test("a larger page window can recover the official address after a truncated fetch", () => {
+  for (const wrapped of [false, true]) {
+    const guard = createToolLoopGuard();
+    const url = "https://docs.example.org/contact";
+    const context = {agentId: "pixel", runId: "run-1", sessionId: "session-1"};
+    const prompt = "Verify the address from the official website.";
+    guard.observeRun(context, "pixel", {prompt});
+    const invoke = (maxChars) => {
+      if (wrapped) {
+        const selected = call(guard, "tool_call", {event: {params: {
+          id: "openclaw:core:web_fetch", args: {url, maxChars},
+        }}});
+        if (selected?.block) return selected;
+      }
+      return call(guard, "web_fetch", {event: {params: {url, maxChars}}});
+    };
+    assert.equal(invoke(4000), undefined);
+    afterCall(guard, "web_fetch", {event: {params: {url, maxChars: 4000},
+      result: {details: {status: 200, truncated: true}}}});
+    assert.equal(invoke(8000), undefined);
+    guard.observeRun(context, "pixel", {prompt, messages: [
+      {role: "assistant", content: "The page read was expanded; verification is pending."},
+    ]});
+    assert.equal(invoke(8000).blockReason, WEB_FETCH_REPEAT_PIVOT_REASON);
+    assert.equal(invoke(4000).blockReason, WEB_FETCH_REPEAT_PIVOT_REASON);
+    assert.equal(invoke(16000), undefined);
+  }
+});
+
+test("unknown or invalid page limits do not establish a larger read", () => {
+  const url = "https://docs.example.org/contact";
+  for (const maxChars of [undefined, null, "8000", 0, -1, 8000.5, Infinity, NaN]) {
+    const guard = createToolLoopGuard();
+    assert.equal(call(guard, "web_fetch", {event: {params: {url, maxChars: 4000}}}), undefined);
+    assert.equal(call(guard, "web_fetch", {event: {params: {url, maxChars}}}).blockReason,
+      WEB_FETCH_REPEAT_PIVOT_REASON);
+  }
+  const guard = createToolLoopGuard();
+  assert.equal(call(guard, "web_fetch", {event: {params: {url}}}), undefined);
+  assert.equal(call(guard, "web_fetch", {event: {params: {url, maxChars: 8000}}}).blockReason,
+    WEB_FETCH_REPEAT_PIVOT_REASON);
+});
+
+test("larger reads still consume the fetch budget and preserve destination checks", () => {
+  const guard = createToolLoopGuard({limits: {search: 1, fetch: 2, total: 3}});
+  const url = "https://docs.example.org/contact";
+  for (const maxChars of [4000, 8000]) {
+    assert.equal(call(guard, "web_fetch", {event: {params: {url, maxChars}}}), undefined);
+  }
+  assert.equal(call(guard, "web_fetch", {event: {params: {url, maxChars: 16000}}}).blockReason,
+    WEB_BUDGET_EXHAUSTED_REASON);
+  assert.equal(call(guard, "web_fetch", {event: {params: {url: "http://127.0.0.1/", maxChars: 32000}}}).blockReason,
+    WEB_FETCH_PUBLIC_ONLY_REASON);
+});
+
 test("native truncated-page and 404 sequence can fetch corrected docs and save a report", () => {
   for (const wrapped of [false, true]) {
     const guard = createToolLoopGuard();
@@ -11219,6 +11274,14 @@ test("preview receipt recovery retains strict authorship hashes after readback",
   assert.match(verification.text, /Published from your workspace\./);
   assert.doesNotMatch(verification.text, /Created by Pixel\./);
   assert.equal(verification.preview.sha256, wrong.sha256);
+  const prose = "Click Export SVG to download the current scene.";
+  assert.equal(guard.deliveryVerificationForRun("run-1").deliveryMode, "append");
+  const reply = guard.replyPayloadSending({ runId: "run-1", kind: "final", payload: { text: prose } });
+  assert.ok(reply.payload.text.startsWith(prose));
+  assert.match(reply.payload.text, /Publication scope:/);
+  assert.ok(reply.payload.text.includes(verification.text));
+  assert.equal(guard.replyPayloadSending({ runId: "run-1", kind: "final", payload: reply.payload }).payload.text,
+    reply.payload.text);
 });
 
 test("permits an explicitly requested preview after inspecting an existing site", () => {

@@ -1055,6 +1055,59 @@ test("workspace preview metadata fails closed for an unverified URL or extra fie
   }
 });
 
+test("preview delivery preserves useful answers and retains stale snapshots without false success", async () => {
+  const sha256 = "a".repeat(64), siteId = `site-${sha256.slice(0, 24)}`;
+  const preview = { schemaVersion: 1, kind: "ods-pixel-workspace-preview", relativeDirectory: "orbit-garden",
+    siteId, port: 9437, url: `http://${siteId}.localhost:9437/${siteId}/`, files: 4, bytes: 4096,
+    sha256, entrySha256: "b".repeat(64) };
+  const prose = "Click Export SVG to save the current scene.";
+  const scope = "Publication scope: this receipt verifies the published snapshot, not functional behavior or completion of other requested work.";
+  for (const stream of [false, true]) {
+    for (const status of ["passed", "failed"]) {
+      const text = status === "passed" ? "Your preview is ready." : "Your last published preview is available; current files are unverified.";
+      for (const completionText of status === "passed" ? [prose, "", `${prose}\n\n${text}\n${scope}`] : ["All new changes were verified."]) {
+        const verification = { status, text, preview, ...(status === "passed" ? { deliveryMode: "append" } : {}) };
+        const gw = await fakeGateway({ verification, completionText });
+        const srv = await startIngress({ gatewayPort: gw.port });
+        try {
+          const response = await request(srv, "POST", "/v1/chat/completions", {
+            body: JSON.stringify({ stream, messages: [{ role: "user", content: "Open the app and explain export" }] }),
+            headers: { "Content-Type": "application/json" },
+          });
+          assert.equal(response.status, 200);
+          const frames = stream ? response.body.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6))) : [];
+          const delivered = stream ? frames.map(frame => frame.choices?.[0]?.delta?.content ?? "").join("") : JSON.parse(response.body).choices[0].message.content;
+          assert.equal(delivered, status === "passed" && completionText ? `${prose}\n\n${text}\n${scope}` : text);
+          if (stream) assert.deepEqual(frames.at(-1).pixel, { schemaVersion: 1, preview });
+        } finally {
+          await new Promise(resolve => srv.close(resolve));
+          await new Promise(resolve => gw.server.close(resolve));
+        }
+      }
+    }
+  }
+  for (const verification of [
+    { status: "failed", text: "Stale.", preview: { ...preview, url: "https://attacker.example/" } },
+    { status: "failed", text: "Stale.", preview, deliveryMode: "append" },
+    { status: "failed", text: "Stale.", preview, code: "operations-unavailable-zero-submissions" },
+    { status: "none", preview },
+    { status: "pending", text: "Pending.", preview },
+  ]) {
+    const gw = await fakeGateway({ verification });
+    const srv = await startIngress({ gatewayPort: gw.port });
+    try {
+      const response = await request(srv, "POST", "/v1/chat/completions", {
+        body: JSON.stringify({ messages: [{ role: "user", content: "show it" }] }),
+        headers: { "Content-Type": "application/json" },
+      });
+      assert.equal(response.status, 502);
+    } finally {
+      await new Promise(resolve => srv.close(resolve));
+      await new Promise(resolve => gw.server.close(resolve));
+    }
+  }
+});
+
 test("rejects recovery metadata outside the exact failed zero-submission contract", async () => {
   const invalid = [
     { status: "passed", code: "operations-unavailable-zero-submissions" },
