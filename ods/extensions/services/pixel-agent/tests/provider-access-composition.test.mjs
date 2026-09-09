@@ -146,7 +146,7 @@ test('other agents and detached tool activity remain accounted across Pixel clea
   await f.composition.finish(f.event, ctx); assert.equal(f.access.status().active, 2);
   await f.composition.finish(f.event, other); assert.equal(f.access.status().active, 1);
   assert.equal(f.access.status().phase, 'busy');
-  f.access.afterTool({toolCallId: 'poll', toolName: 'process', params: {sessionId: 'process-1'}, result: {details: {status: 'exited'}}}, ctx);
+  f.access.afterTool({toolCallId: 'poll', toolName: 'process', params: {sessionId: 'process-1'}, result: {details: {status: 'exited', exitCode: 0}}}, ctx);
   assert.equal(f.access.status().phase, 'idle'); await f.routing.shutdown();
 });
 

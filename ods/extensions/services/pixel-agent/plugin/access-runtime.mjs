@@ -126,6 +126,7 @@ export function executionHostForAgent(config, id = 'pixel') {
 
 export function createAccessRuntime({directory = path.join(os.homedir(), '.openclaw', '.ods-access-runtime'),
   config, settingsConfig, createTools, resolveSandbox, execControl, runtimeVersion = 'unknown', hooksAllowed = false,
+  readProcessSessions,
   probeDirectory = path.join('/var/lib/ods-pixel-access-probes', String(process.getuid?.() ?? 'unsupported'))} = {}) {
   if (typeof process.getuid !== 'function') {
     const unavailable = () => { throw new Error('POSIX admission unavailable'); };
@@ -138,9 +139,32 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
   // Other releases keep normal guard behavior, but cannot change access until
   // their hook coverage is qualified. Held state always continues to block.
   const qualified = runtimeVersion === '2026.6.33' && hooksAllowed === true;
-  const runs = new Set(), tools = new Set(), detached = new Set();
+  const runs = new Set(), tools = new Set(), detached = new Map(), internalRuns = new Set();
   const filename = path.join(directory, 'state.json');
   let state, failed = false, probeRun = null, proof = null, probeFailure = null;
+  let processTimer = null, processCheck = null;
+  const isInternal = context => (probeRun !== null && context?.runId === probeRun) || internalRuns.has(context?.runId);
+  // Construct only the SDK's scoped process-list reader. Never execute a shell,
+  // change the configured policy, or retain its command/output fields.
+  const inspectProcesses = readProcessSessions ?? (typeof config === 'function' && typeof createTools === 'function'
+    ? async context => {
+      const cfg = config(), runId = `ods-access-process-check-${crypto.randomUUID()}`;
+      const agent = cfg?.agents?.list?.find(item => item?.id === context.agentId);
+      if (!agent) throw new Error('process scope unavailable');
+      internalRuns.add(runId);
+      try {
+        const reader = createTools({config: cfg, agentId: context.agentId,
+          sessionKey: context.sessionKey, sessionId: context.sessionId, runId,
+          workspaceDir: agent.workspace, cwd: agent.workspace, oneShotCliRun: true})
+          .find(tool => tool.name === 'process');
+        if (!reader) throw new Error('process reader unavailable');
+        const result = await reader.execute(runId, {action: 'list'});
+        if (result?.isError || result?.details?.status !== 'completed' || !Array.isArray(result.details.sessions)) {
+          throw new Error('process status unavailable');
+        }
+        return result.details.sessions.map(({sessionId, startedAt, status}) => ({sessionId, startedAt, status}));
+      } finally { internalRuns.delete(runId); }
+    } : null);
   function privateEntry(target, directoryEntry = false) {
     const s = fs.lstatSync(target);
     if (s.isSymbolicLink() || s.uid !== process.getuid() || (s.mode & 0o077) ||
@@ -214,6 +238,40 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
   } catch { failed = true; }
   const busy = () => runs.size + tools.size + detached.size > 0;
   function changed() { state.revision = revision(); save(); }
+  function scheduleProcessCheck() {
+    if (processTimer !== null || processCheck !== null || failed || !qualified ||
+        typeof inspectProcesses !== 'function' || ![...detached.values()].some(record => record.context)) return;
+    processTimer = setTimeout(() => {
+      processTimer = null;
+      void reconcileDetached();
+    }, 5000);
+    processTimer.unref?.();
+  }
+  function reconcileDetached() {
+    if (processCheck !== null) return processCheck;
+    if (failed || !qualified || typeof inspectProcesses !== 'function') return Promise.resolve(status());
+    if (processTimer !== null) { clearTimeout(processTimer); processTimer = null; }
+    const pending = [...detached.entries()];
+    processCheck = (async () => {
+      for (const [sessionId, record] of pending) {
+        if (!record.context || !Number.isSafeInteger(record.startedAt) || record.startedAt <= 0) continue;
+        try {
+          const sessions = await inspectProcesses(record.context);
+          if (failed || detached.get(sessionId) !== record || !Array.isArray(sessions)) continue;
+          const matches = sessions.filter(item => item?.sessionId === sessionId);
+          // Absence, expiration, malformed results and a reused session ID do
+          // not prove this particular process finished. Keep admission held.
+          if (matches.length !== 1 || matches[0].startedAt !== record.startedAt ||
+              !['completed', 'failed', 'exited'].includes(matches[0].status)) continue;
+          detached.delete(sessionId);
+          if (!busy() && state.phase === 'busy') state.phase = 'idle';
+          changed();
+        } catch { /* Keep the exact outstanding record and retry later. */ }
+      }
+      return status();
+    })().finally(() => { processCheck = null; scheduleProcessCheck(); });
+    return processCheck;
+  }
   function status() {
     return {available: !failed && qualified, phase: failed ? 'unavailable' : state.phase,
       revision: failed ? null : state.revision, active: runs.size + tools.size + detached.size,
@@ -231,20 +289,35 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
     if (!failed && !busy() && state.phase === 'busy') { state.phase = 'idle'; changed(); }
   }
   function beforeTool(event, context) {
-    if (context?.runId === probeRun && probeRun !== null) return;
+    if (isInternal(context)) return;
     if (failed || ['held','interrupted'].includes(state.phase)) return {block: true, blockReason: blocked().message};
     // Missing identities cannot be paired safely; fail closed before execution.
     if (!event?.toolCallId) return {block: true, blockReason: 'Tool identity unavailable during access coordination.'};
     tools.add(event.toolCallId); state.phase = 'busy'; changed();
   }
   function afterTool(event, context) {
-    if (context?.runId === probeRun && probeRun !== null) return;
+    if (isInternal(context)) return;
     tools.delete(event?.toolCallId);
     const detail = event?.result?.details;
-    if (event?.toolName === 'exec' && detail?.status === 'running' && detail.sessionId) detached.add(detail.sessionId);
+    let detachedChanged = false;
+    if (event?.toolName === 'exec' && detail?.status === 'running' && detail.sessionId) {
+      const scope = typeof context?.agentId === 'string' && context.agentId &&
+        typeof context?.sessionKey === 'string' && context.sessionKey
+        ? {agentId: context.agentId, sessionKey: context.sessionKey,
+          ...(typeof context.sessionId === 'string' ? {sessionId: context.sessionId} : {})} : null;
+      detached.set(detail.sessionId, {startedAt: detail.startedAt, context: scope});
+      detachedChanged = true;
+      scheduleProcessCheck();
+    }
     if (event?.toolName === 'process' && event?.params?.sessionId &&
-        ['completed','failed','exited'].includes(detail?.status)) detached.delete(event.params.sessionId);
-    if (!failed && !busy() && state.phase === 'busy') { state.phase = 'idle'; changed(); }
+        ['completed','failed','exited'].includes(detail?.status) &&
+        (Number.isInteger(detail.exitCode) || (typeof detail.exitSignal === 'string' && detail.exitSignal))) {
+      detachedChanged = detached.delete(event.params.sessionId) || detachedChanged;
+    }
+    if (!failed) {
+      if (!busy() && state.phase === 'busy') { state.phase = 'idle'; detachedChanged = true; }
+      if (detachedChanged) changed();
+    }
   }
   function acquire(token, expected) {
     if (failed || !qualified || !hex(token) || !hex(expected)) throw new Error('runtime unavailable');
@@ -340,6 +413,6 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
       if (fs.existsSync(sentinel)) fs.unlinkSync(sentinel);
     }
   }
-  return {status, admit, finish, beforeTool, afterTool, acquire, release, probe, owns, readSettings,
-    isProbe: context => probeRun !== null && context?.runId === probeRun};
+  return {status, admit, finish, beforeTool, afterTool, acquire, release, probe, owns, readSettings, reconcileDetached,
+    isProbe: isInternal};
 }

@@ -5971,7 +5971,7 @@ export function createToolLoopGuard({
         privateNetworkExhausted: false,
         privateNetworkPrompt: false,
         clientCancelled: false,
-        fetchedUrls: new Set(),
+        fetchedUrls: new Map(),
         githubCanonicalUrl: undefined,
         githubCanonicalSatisfied: false,
         odsRoutingInitialized: false,
@@ -7921,13 +7921,19 @@ export function createToolLoopGuard({
     state.total += 1;
     if (toolName === "web_fetch") {
       const fetchUrl = canonicalFetchUrl(event);
+      const requestedChars = event?.params?.maxChars;
+      const fetchChars = Number.isSafeInteger(requestedChars) && requestedChars > 0
+        ? requestedChars : Infinity;
       // A repeated page consumes one bounded attempt, but does not revoke
       // access to other sources or extraction. Retain this state through
       // compaction so retries neither erase evidence nor reset the run budget.
-      if (fetchUrl && state.fetchedUrls.has(fetchUrl)) {
+      // An explicit larger read can recover content omitted by the first
+      // window. An omitted/invalid limit cannot establish a larger window.
+      if (fetchUrl && state.fetchedUrls.has(fetchUrl) &&
+          !(Number.isFinite(fetchChars) && fetchChars > state.fetchedUrls.get(fetchUrl))) {
         return { block: true, blockReason: WEB_FETCH_REPEAT_PIVOT_REASON };
       }
-      if (fetchUrl) state.fetchedUrls.add(fetchUrl);
+      if (fetchUrl) state.fetchedUrls.set(fetchUrl, fetchChars);
     }
     return normalizedParams ? { params: normalizedParams } : undefined;
   }

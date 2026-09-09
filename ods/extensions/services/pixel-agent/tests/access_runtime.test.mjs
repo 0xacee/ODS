@@ -432,7 +432,7 @@ test('direct tools and detached exec keep transition busy after agent end', () =
   runtime.finish({}, {runId: 'work'});
   assert.throws(() => runtime.acquire(token, runtime.status().revision));
   runtime.beforeTool({toolCallId: 'poll'});
-  runtime.afterTool({toolCallId: 'poll', toolName: 'process', params: {sessionId: 'child'}, result: {details: {status: 'completed'}}});
+  runtime.afterTool({toolCallId: 'poll', toolName: 'process', params: {sessionId: 'child'}, result: {details: {status: 'completed', exitCode: 0}}});
   assert.equal(runtime.status().phase, 'idle');
 });
 
