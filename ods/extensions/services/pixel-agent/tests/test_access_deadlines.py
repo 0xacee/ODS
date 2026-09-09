@@ -1,4 +1,9 @@
 """Actual loopback sockets/process/pipe deadlines; no installed services."""
+import sys
+import pytest
+if sys.platform == "win32":
+    pytest.skip("Pixel services require a POSIX environment", allow_module_level=True)
+
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import json

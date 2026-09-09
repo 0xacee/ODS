@@ -1,4 +1,9 @@
 """Actual disposable subprocess pipes; no root services or runtime acceptance."""
+import sys
+import pytest
+if sys.platform == "win32":
+    pytest.skip("Pixel services require a POSIX environment", allow_module_level=True)
+
 import io
 import json
 from pathlib import Path

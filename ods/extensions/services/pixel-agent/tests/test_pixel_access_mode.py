@@ -1,4 +1,9 @@
 """Focused tests for the pixel_access_mode persistent controller."""
+import sys
+import pytest
+if sys.platform == "win32":
+    pytest.skip("Pixel services require a POSIX environment", allow_module_level=True)
+
 import copy
 from pathlib import Path
 import fcntl
