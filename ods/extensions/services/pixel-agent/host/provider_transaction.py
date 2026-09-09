@@ -4,16 +4,22 @@ The root coordinator retains revision/source qualification, deployment environme
 admission and restart authority. The callback verifies registration, NOT inference.
 This module neither selects a service nor accepts arbitrary configuration documents.
 Private owner receipts are recovery data, not root authorization.
+Transaction IDs are root-generated, never public caller input. The bounded last
+completion resolves a lost reply; it is not an indefinite transaction-ID ledger.
 """
 import os
 
 import pixel_access_mode as controller
 import settings_transaction as storage
-from pixel_settings.contract import SettingsError
 from pixel_provider.activation_config import (
-    _binding, _validate_plan, plan_activation, restore_activation, update_activation,
+    _binding,
+    _validate_plan,
+    plan_activation,
+    restore_activation,
+    update_activation,
 )
 from pixel_provider.store import StoreError
+from pixel_settings.contract import SettingsError
 
 JOURNAL = 'provider-journal.json'
 MANAGED = 'provider-managed.json'
@@ -128,8 +134,8 @@ def _finish(sd, journal, outcome):
     else:
         _write(sd, MANAGED, state)
     checksum = journal['afterSha' if outcome == 'applied' else 'beforeSha']
-    receipt = dict(schemaVersion=1, kind='provider', configPath=journal['configPath'],
-        transactionId=journal['transactionId'], binding=_active(state), outcome=outcome, configSha256=checksum)
+    receipt = {'schemaVersion': 1, 'kind': 'provider', 'configPath': journal['configPath'],
+        'transactionId': journal['transactionId'], 'binding': _active(state), 'outcome': outcome, 'configSha256': checksum}
     _write(sd, COMPLETED, receipt)
     try:
         _io(storage._remove, sd, JOURNAL)
@@ -176,10 +182,10 @@ def _plan(config, previous, binding, path):
         if previous is None:
             raise StoreError('provider-not-managed')
         return restore_activation(config, previous['plan']), None
-    options = dict(revision=binding['revision'], allow_cloud=binding['allowCloud'], activation_id=binding['activationId'])
+    options = {'revision': binding['revision'], 'allow_cloud': binding['allowCloud'], 'activation_id': binding['activationId']}
     plan = (update_activation(config, previous['plan'], **options) if previous
             else plan_activation(config, **options))
-    return plan['document'], dict(schemaVersion=1, kind='provider', configPath=path, plan=plan)
+    return plan['document'], {'schemaVersion': 1, 'kind': 'provider', 'configPath': path, 'plan': plan}
 
 
 def change_provider(config_path, *, state_dir, binding, transaction_id, expected_config_sha256,
@@ -202,9 +208,9 @@ def change_provider(config_path, *, state_dir, binding, transaction_id, expected
         previous = _managed(_record(sd, MANAGED), path)
         document, next_state = _plan(config, previous, binding, path)
         after = _encoded(document)
-        journal = dict(schemaVersion=1, kind='provider', configPath=path, configMode=mode,
-            transactionId=transaction_id, beforeSha=expected_config_sha256,
-            afterSha=controller._sha256_bytes(after), previous=previous, next=next_state)
+        journal = {'schemaVersion': 1, 'kind': 'provider', 'configPath': path, 'configMode': mode,
+            'transactionId': transaction_id, 'beforeSha': expected_config_sha256,
+            'afterSha': controller._sha256_bytes(after), 'previous': previous, 'next': next_state}
         _journal(journal, path, mode)
         _encoded(journal)
         controller._require_idle(check_no_active_run)
@@ -229,6 +235,12 @@ def change_provider(config_path, *, state_dir, binding, transaction_id, expected
 
 def recover_provider(config_path, *, state_dir, transaction_id, expected_config_sha256,
                      validate_config, check_no_active_run, activate):
+    """Explicitly roll back an unacknowledged transaction, including late crashes.
+
+    A pending journal wins over a written completion. The root coordinator must
+    obtain rollback consent and preserve admission until the old registration is
+    verified. A completion is consumable as success only once no journal remains.
+    """
     _requirements(expected_config_sha256, transaction_id, validate_config, check_no_active_run, activate)
     sd = controller._prepare_state_dir(state_dir)
     with controller._Lock(sd):

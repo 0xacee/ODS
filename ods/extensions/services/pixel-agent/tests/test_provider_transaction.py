@@ -1,8 +1,8 @@
 """Real disposable filesystem transactions; callbacks are NOT runtime acceptance."""
 import json
-from pathlib import Path
 import sys
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -10,9 +10,9 @@ ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / 'bin'))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'host'))
 import provider_transaction as tx
-from pixel_provider.store import StoreError
 import test_settings_transaction as settings_tests
-from test_settings_transaction import sha, private_json
+from pixel_provider.store import StoreError
+from test_settings_transaction import private_json, sha
 
 owner = settings_tests.owner
 
@@ -33,18 +33,18 @@ def binding(revision=3):
 
 def change(owner, target, **overrides):
     path, state, _ = owner
-    options = dict(state_dir=str(state), binding=target, transaction_id=sha(uuid.uuid4().bytes),
-        expected_config_sha256=sha(path.read_bytes()), validate_config=lambda staged: True,
-        check_no_active_run=lambda: False, activate=lambda: 'verified')
+    options = {'state_dir': str(state), 'binding': target, 'transaction_id': sha(uuid.uuid4().bytes),
+        'expected_config_sha256': sha(path.read_bytes()), 'validate_config': lambda staged: True,
+        'check_no_active_run': lambda: False, 'activate': lambda: 'verified'}
     options.update(overrides)
     return tx.change_provider(str(path), **options)
 
 
 def recover(owner, transaction_id, **overrides):
     path, state, _ = owner
-    options = dict(state_dir=str(state), transaction_id=transaction_id,
-        expected_config_sha256=sha(path.read_bytes()), validate_config=lambda staged: True,
-        check_no_active_run=lambda: False, activate=lambda: 'verified')
+    options = {'state_dir': str(state), 'transaction_id': transaction_id,
+        'expected_config_sha256': sha(path.read_bytes()), 'validate_config': lambda staged: True,
+        'check_no_active_run': lambda: False, 'activate': lambda: 'verified'}
     options.update(overrides)
     return tx.recover_provider(str(path), **options)
 
@@ -167,9 +167,9 @@ def test_completed_transaction_id_cannot_be_reused(provider_owner):
 
 
 def test_pending_provider_blocks_settings_and_access(provider_owner):
-    from pixel_access_mode import _reject_pending_settings, AccessModeRejected
-    from pixel_settings.contract import SettingsError
     import settings_transaction
+    from pixel_access_mode import AccessModeRejected, _reject_pending_settings
+    from pixel_settings.contract import SettingsError
     private_json(provider_owner[1] / tx.JOURNAL, {'pending': True})
     with pytest.raises(SettingsError, match='provider-recovery-required'):
         settings_transaction._no_pending_access(str(provider_owner[1]))
@@ -189,3 +189,33 @@ def test_recovery_rejects_journal_plan_swapped_after_interruption(provider_owner
     with pytest.raises(StoreError, match='provider-journal-mismatch'):
         recover(provider_owner, 'a' * 64)
     assert path.read_bytes() == before
+
+
+def test_late_completion_does_not_override_pending_explicit_rollback(provider_owner, monkeypatch):
+    path, state, original = provider_owner
+    remove = tx.storage._remove
+    def fail_unlink(directory, name):
+        if name == tx.JOURNAL:
+            raise OSError('injected journal removal failure')
+        return remove(directory, name)
+    monkeypatch.setattr(tx.storage, '_remove', fail_unlink)
+    with pytest.raises(OSError):
+        change(provider_owner, binding(), transaction_id='a' * 64)
+    assert (state / tx.COMPLETED).exists() and (state / tx.JOURNAL).exists()
+    assert status(provider_owner)['pending'] is True
+    assert status(provider_owner)['completion'] is None
+    monkeypatch.setattr(tx.storage, '_remove', remove)
+    recover(provider_owner, 'a' * 64)
+    assert path.read_bytes() == original
+    assert status(provider_owner)['completion']['outcome'] == 'rolled-back'
+
+
+def test_replay_of_original_frame_remains_stale_after_later_transactions(provider_owner):
+    original_hash = sha(provider_owner[0].read_bytes())
+    original_binding = binding()
+    change(provider_owner, original_binding, transaction_id='a' * 64)
+    change(provider_owner, binding(4), transaction_id='b' * 64)
+    before = provider_owner[0].read_bytes()
+    with pytest.raises(StoreError, match='provider-config-changed'):
+        change(provider_owner, original_binding, transaction_id='a' * 64, expected_config_sha256=original_hash)
+    assert provider_owner[0].read_bytes() == before
