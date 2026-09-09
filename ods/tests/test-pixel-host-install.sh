@@ -1243,6 +1243,29 @@ check _ods_pixel_candidate_config_matches_live "$owner" "$runtime_home" "$runtim
 check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); required={"create_goal","get_goal","update_goal","update_plan"}; assert required.issubset(v["tools"]["alsoAllow"]) and required.issubset(v["tools"]["sandbox"]["tools"]["allow"])' "$runtime_config"
 check test -z "$(find "$runtime_home/.openclaw" -maxdepth 1 -name '.ods-pixel-runtime-budget.*' -print -quit)"
 
+for search_case in native-provider automatic-provider disabled-searxng; do
+    runtime_search_config="$runtime_home/.openclaw/$search_case.json"
+    python3 - "$runtime_config" "$runtime_search_config" "$search_case" <<'PY'
+import json, pathlib, sys
+
+source, destination = map(pathlib.Path, sys.argv[1:3])
+value = json.loads(source.read_text(encoding="utf-8"))
+entries = value["plugins"]["entries"]
+entries.pop("searxng", None)
+value["tools"]["web"]["search"] = {"enabled": True, "provider": "parallel-free"}
+entries["parallel"] = {"enabled": True}
+if sys.argv[3] == "automatic-provider":
+    value["tools"]["web"].pop("search")
+elif sys.argv[3] == "disabled-searxng":
+    entries["searxng"] = {"enabled": False}
+destination.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+destination.chmod(0o600)
+PY
+    runtime_search_sha256="$(sha256sum "$runtime_search_config" | awk '{print $1}')"
+    check test "$(_ods_pixel_apply_runtime_budget "$owner" "$runtime_home" "$runtime_search_config" "$runtime_validator")" = unchanged
+    check test "$(sha256sum "$runtime_search_config" | awk '{print $1}')" = "$runtime_search_sha256"
+done
+
 runtime_compact_config="$runtime_home/.openclaw/compact-context.json"
 python3 - "$runtime_config" "$runtime_compact_config" <<'PY'
 import json, pathlib, sys
