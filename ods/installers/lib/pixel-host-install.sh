@@ -1682,7 +1682,7 @@ if existing_binds not in ([], [exec_control_bind]):
 # the host tree owner/mode, and exposes it read-only inside the sandbox.
 updated_sandbox_docker["binds"] = [exec_control_bind]
 updated_sandbox_docker["dangerouslyAllowExternalBindSources"] = True
-# Model budgets must preserve the owner's native web-search provider choice.
+# Model budgets must preserve native web-search provider choices.
 # OpenClaw validates the complete candidate below; search provisioning and
 # readiness belong to bootstrap, not this context/sandbox budget overlay.
 updated_provider["timeoutSeconds"] = 1800
