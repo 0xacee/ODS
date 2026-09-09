@@ -102,11 +102,16 @@ def test_forward_then_same_callback_rollback_restores_absence(participant):
     assert b.pending() == b.record and b.phase == 'held'
 
 
-@pytest.mark.parametrize('directory', ['/home/ods/with space', '/home/ods/%h', '/home/ods/a:b', '/home/ods/../elsewhere'])
-def test_provider_mount_cannot_expand_unit_syntax_or_escape_selected_path(participant, directory):
+@pytest.mark.parametrize('directory,error', [
+    ('/home/ods/with space', AccessError),
+    ('/home/ods/%h', AccessError),
+    ('/home/ods/a:b', AccessError),
+    ('/home/ods/../elsewhere', ValueError),
+])
+def test_provider_mount_cannot_expand_unit_syntax_or_escape_selected_path(participant, directory, error):
     doc = deployment(BINDING, '/opt/ods/source', '/usr/bin/python3', '/home/ods/providers', True)
     doc['providerDirectory'] = directory
-    with pytest.raises(ValueError): arm(participant, deployment_document=doc)
+    with pytest.raises(error): arm(participant, deployment_document=doc)
     assert participant.snapshot() == {'environment': None, 'dropin': None}
 
 
