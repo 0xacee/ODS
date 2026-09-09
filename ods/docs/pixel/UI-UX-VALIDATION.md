@@ -74,7 +74,7 @@ From `ods/extensions/services/dashboard-api`, run `python -m pytest tests -q`.
 | Preview and edge Python tests on Linux/WSL | 95 passed, 17 subtests |
 | Pixel installer fixtures | 251 passed, 0 failed |
 | Extension audit | 30 services, 0 errors, 0 warnings |
-| Full clean-candidate API suite | In progress; see PR checks before approval |
+| Full clean-candidate API suite on Linux/WSL | 2,548 passed, 1 skipped, 2 warnings |
 
 The Dashboard CI matrix now repeats clean install, lint, test and build on
 Windows, Ubuntu and macOS. Passing those jobs is **not** a native GPU, browser,
