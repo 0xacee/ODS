@@ -92,7 +92,7 @@ it('prevents duplicate writes and edits while a POST is pending', async () => {
 
 it('marks an aborted timed-out POST as uncertain and refuses another save', async () => {
   const fetchMock = vi.fn((url, options) => options.method !== 'POST' ? Promise.resolve(response(doc()))
-    : new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('Timed out', 'AbortError')))))
+    : new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new window.DOMException('Timed out', 'AbortError')))))
   await mount(fetchMock)
   vi.useFakeTimers()
   change(); fireEvent.click(save())
