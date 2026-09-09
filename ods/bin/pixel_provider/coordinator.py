@@ -206,7 +206,8 @@ def _finish(bridge, journal, record, environment, runtime, outcome):
     _write(bridge, journal)
     atomic_json(bridge.state / MANAGED, next_state)
     atomic_json(bridge.state / PROOF, dict(proof, transactionId=journal['transactionId'], outcome=outcome,
-                                         runtimeCustody=journal['runtimeCustody'], boundary=journal['boundary']))
+                                         runtimeCustody=journal['runtimeCustody'], boundary=journal['boundary'],
+                                         serviceDefinition=journal['serviceDefinition']))
     bridge.edge('release', journal['token'], journal['edge_revision'])
     bridge.native('release', journal['token'])
     (bridge.state / 'transition.json').unlink()
@@ -306,6 +307,7 @@ def status(bridge):
         verified = (snapshot['runtime_verified'] is True and proof.get('configSha256') == checksum
                     and proof.get('binding') == _binding(managed) and proof.get('runtimeCustody') == custody
                     and proof.get('boundary') == bridge.unit_boundary()
+                    and proof.get('serviceDefinition') == definition(bridge, ServiceEnvironment(bridge).dropin)
                     and all(proof.get(k) == v for k, v in settings._identity(bridge).items()))
         if verified:
             runtime.verify_process()

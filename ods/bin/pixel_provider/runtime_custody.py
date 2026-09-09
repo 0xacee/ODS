@@ -7,10 +7,11 @@ does not install software, change services or confer root execution on Node.
 """
 import hashlib
 import os
+import re
 import stat
 from pathlib import Path
 
-from pixel_access_bridge import AccessError, digest
+from pixel_access_bridge import UNIT, AccessError, digest
 from pixel_access_protocol import HEX
 from pixel_settings.coordinator import _read
 
@@ -107,7 +108,6 @@ class RuntimeCustody:
         if Path(value['launcher']).read_bytes() != expected:
             raise AccessError('provider-runtime-launcher-unqualified')
         # Restrict paths used in this fixed launcher grammar; no shell expansion.
-        import re
         if any(not re.fullmatch(r'/[A-Za-z0-9_./-]+', value[key]) for key in ('node', 'runtimeRoot')):
             raise AccessError('provider-runtime-launcher-unqualified')
         if required_policy(value['policy']) != value['policy']:
@@ -122,9 +122,15 @@ class RuntimeCustody:
         identity = _identity(self.bridge)
         value, _ = self.inspect()
         process = Path('/proc') / str(identity['pid'])
-        args = (process / 'cmdline').read_bytes().split(b'\0')
-        expected = [os.fsencode(value['node']), os.fsencode(value['runtimeRoot'] + '/openclaw.mjs')]
-        if args[:2] != expected or (process / 'exe').resolve() != Path(value['node']):
+        # OpenClaw deliberately overwrites argv with its process title. The
+        # observed /proc/cmdline is not its original script path. Bind the
+        # systemd command to the protected launcher; MainPID/start/boot and the
+        # enclosing transaction's unit-file fingerprint bind the actual process.
+        # systemd can clear ExecStart's historical pid on daemon-reload.
+        command = self.bridge.command(['systemctl', 'show', UNIT, '--property=ExecStart', '--value'])
+        prefix = '{ path=' + value['launcher'] + ' ; argv[]=' + value['launcher'] + ' gateway '
+        if (not command.startswith(prefix) or command.count('{ path=') != 1
+                or (process / 'exe').resolve() != Path(value['node'])):
             raise AccessError('provider-runtime-process-unqualified')
         if _identity(self.bridge) != identity:
             raise AccessError('provider-process-changed')
