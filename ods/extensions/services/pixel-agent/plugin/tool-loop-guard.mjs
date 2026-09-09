@@ -4291,8 +4291,16 @@ export function userMessageOdsToolRequirements(messages, prompt = undefined) {
       asksOdsAppInventory ||
       /\bODS(?:\s+(?:app|application|service)s?)?\s+(?:links?|URLs?)\b/i.test(text) ||
       /\bconfigured\s+(?:app\s+)?(?:links?|URLs?)\b.{0,48}\bODS\b/i.test(text) ||
-      (/\b(?:n8n|Open\s*WebUI|Perplexica|SearXNG|LiteLLM|Hermes)\b/i.test(text) &&
-        /\b(?:configured|link|URL|where|address)\b/i.test(text)) ||
+      text.split(/[!?;\n]+|\.(?=\s|$)|,\s*(?=(?:and\s+then|but|however|instead|then)\b)/i).some(
+        (clause) => {
+          // A service excluded from research and an unrelated address or URL
+          // must not force application inventory before the owner's task.
+          const service = String.raw`(?:n8n|Open\s*WebUI|Perplexica|SearXNG|LiteLLM|Hermes)`;
+          return new RegExp(`\\b${service}\\b`, "i").test(clause) &&
+            /\b(?:configured|link|URL|where|address)\b/i.test(clause) &&
+            !explicitlyRejectsOdsTool(clause, service);
+        }
+      ) ||
       asksNamedServiceInventory);
   if (asksStatus) requirements.push("pixel_ods_status");
   if (asksApps) requirements.push("pixel_ods_apps_list");

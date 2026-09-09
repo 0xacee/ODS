@@ -3409,6 +3409,29 @@ test("live health plus reporting is scoped and cannot authorize artifact-only or
   assert.deepEqual(userMessageOperationsRequirements([], "Inspect this computer's CPU health and explain it."), { required: true, actions: ["host.cpu"] });
 });
 
+test("unrelated service mentions and source addresses do not force application inventory", () => {
+  for (const prompt of [
+    "Find three dumpling restaurants in Philadelphia with online delivery ordering. Use current web sources, open each restaurant's own site or its ordering page, and save a short comparison with source links to release-2641/philadelphia-dumplings.md. Distinguish an actual delivery option from pickup only and don't assume delivery reaches my address. Use your own search and web tools without delegating to Perplexica.",
+    "Research Python packaging and save source URLs. Do not use Hermes.",
+    "Find the official documentation without Perplexica; include a source link.",
+    "Do not query the Perplexica URL. Research the public documentation.",
+  ]) {
+    assert.deepEqual(userMessageOdsToolRequirements([], prompt), [], prompt);
+    const guard = createToolLoopGuard();
+    guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
+    assert.notEqual(call(guard, "tool_call", { event: { params: {
+      id: "openclaw:core:web_search", args: { query: "public source documentation" },
+    } } })?.block, true, prompt);
+  }
+  for (const prompt of [
+    "Where is Perplexica?",
+    "What's the configured n8n URL?",
+    "Show the SearXNG address.",
+    "List the ODS apps.",
+    "Research Python packaging. Then show the configured Open WebUI URL.",
+  ]) assert.deepEqual(userMessageOdsToolRequirements([], prompt), ["pixel_ods_apps_list"], prompt);
+});
+
 test("explicit negative ODS status intent never creates a compulsory projection", () => {
   const prompt = "For this request, do only a small workspace file conversion; do not inspect ODS status, host health or other machines. Create health-conversion-demo if it does not already exist, preserving any existing files. Create a five-row CSV with item,count columns and these synthetic rows: Desk lamp,2; Cable,5; Notebook,3; Coffee mug,1; Plant,4. Convert that CSV to JSON with integer count values, and actually run validation that there are five records and counts sum to 15. Show the output paths and the checks you executed. No installation or external services.";
   assert.deepEqual(userMessageOdsToolRequirements([], prompt), []);
