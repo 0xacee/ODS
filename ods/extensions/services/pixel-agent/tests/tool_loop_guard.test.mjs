@@ -12054,6 +12054,14 @@ test("allows requested verification after publication and invalidates potentiall
     result: { details: { status: "completed", exitCode: 0 } } } });
   assert.notEqual(guard.verificationForRun("run-1").status, "passed",
     "A shell tool may modify files; an earlier snapshot must not stand in for current publication");
+  const priorPublication = guard.verificationForRun("run-1");
+  assert.equal(priorPublication.status, "failed");
+  assert.equal(priorPublication.preview.url, details.url);
+  assert.equal(priorPublication.preview.sha256, details.sha256);
+  assert.equal(priorPublication.preview.entrySha256, details.entrySha256);
+  assert.match(priorPublication.text, /last published preview/i);
+  assert.match(priorPublication.text, /may not include subsequent changes/i);
+  assert.doesNotMatch(priorPublication.text, /no localhost URL is live/i);
   // A fresh host receipt can verify the unchanged bytes after a read-only check.
   assert.notEqual(call(guard, "pixel_ods_workspace_preview", { event: {
     params: { relativeDirectory: "signal-garden" },
@@ -12069,6 +12077,32 @@ test("allows requested verification after publication and invalidates potentiall
     result: { details: { status: "completed" } } } });
   assert.notEqual(guard.verificationForRun("run-1").status, "passed",
     "A successful edit requires a new verified snapshot");
+  assert.equal(guard.verificationForRun("run-1").preview.sha256, details.sha256,
+    "an edit cannot alter the retained immutable publication");
+  const changedWrite = { ...writeParams,
+    content: writeParams.content.replace("Model-authored Signal Garden", "Repaired Signal Garden") };
+  const changedSnapshot = workspacePreviewSnapshot("signal-garden", [changedWrite]);
+  const changedDetails = { ...details, ...changedSnapshot,
+    url: `http://${changedSnapshot.siteId}.localhost:9437/${changedSnapshot.siteId}/` };
+  afterCall(guard, "pixel_ods_workspace_preview", { event: {
+    params: { relativeDirectory: "signal-garden" }, result: { details: changedDetails },
+  } });
+  assert.equal(guard.verificationForRun("run-1").status, "passed");
+  afterCall(guard, "exec", { event: { params: { command: "wc -c signal-garden/index.html" },
+    result: { details: { status: "completed", exitCode: 0 } } } });
+  assert.equal(guard.verificationForRun("run-1").preview.sha256, changedDetails.sha256,
+    "the latest verified publication replaces the earlier fallback");
+  afterCall(guard, "pixel_ods_workspace_preview", { event: {
+    params: { relativeDirectory: "signal-garden" },
+    result: { details: { ...details, readbackVerified: false } },
+  } });
+  assert.equal(guard.verificationForRun("run-1").status, "failed");
+  assert.equal(guard.verificationForRun("run-1").preview.sha256, changedDetails.sha256,
+    "an unverified receipt cannot replace the genuine last publication");
+  guard.observeRun({ agentId: "pixel", runId: "unrelated-run", sessionId: "unrelated-session" },
+    "pixel", { prompt: "Build a new website in another directory." });
+  assert.equal(guard.verificationForRun("unrelated-run").preview, undefined,
+    "a retained publication must not leak into another run");
 });
 
 test("interleaves requested preview-file readback with other verification", () => {
