@@ -9424,7 +9424,8 @@ export function createToolLoopGuard({
         (state.operationsRequiredActions.size > 0 &&
           [...state.operationsRequiredActions].every((action) =>
             action.startsWith("host.") || action === "ods.extensions.list" || action === "ods.extensions.search")));
-    return verification.status === "passed" && verification.text && readOnlyOperations
+    return verification.status === "passed" && verification.text &&
+      (readOnlyOperations || verification.preview)
       ? { ...verification, deliveryMode: "append" }
       : verification;
   }
@@ -9448,9 +9449,14 @@ export function createToolLoopGuard({
     if (!authoritativeText) return undefined;
     if (verification.deliveryMode === "append" &&
         typeof event.payload?.text === "string" && event.payload.text.trim()) {
+      const scope = verification.preview
+        ? "Publication scope: this receipt verifies the published snapshot, not functional behavior or completion of other requested work."
+        : "Receipt scope: the Operations evidence above does not establish completion of other requested work.";
+      const evidence = `${authoritativeText}\n${scope}`;
       return {
-        payload: { ...(event.payload ?? {}), text: `${event.payload.text}\n\n${authoritativeText}\nReceipt scope: the Operations evidence above does not establish completion of other requested work.` },
-        reason: "Preserve the model's task reply alongside separately scoped Operations evidence.",
+        payload: { ...(event.payload ?? {}), text: event.payload.text.endsWith(evidence)
+          ? event.payload.text : `${event.payload.text}\n\n${evidence}` },
+        reason: "Preserve the model's task reply alongside separately scoped evidence.",
       };
     }
     return {

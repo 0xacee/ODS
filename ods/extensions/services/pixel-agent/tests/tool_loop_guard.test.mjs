@@ -11219,6 +11219,14 @@ test("preview receipt recovery retains strict authorship hashes after readback",
   assert.match(verification.text, /Published from your workspace\./);
   assert.doesNotMatch(verification.text, /Created by Pixel\./);
   assert.equal(verification.preview.sha256, wrong.sha256);
+  const prose = "Click Export SVG to download the current scene.";
+  assert.equal(guard.deliveryVerificationForRun("run-1").deliveryMode, "append");
+  const reply = guard.replyPayloadSending({ runId: "run-1", kind: "final", payload: { text: prose } });
+  assert.ok(reply.payload.text.startsWith(prose));
+  assert.match(reply.payload.text, /Publication scope:/);
+  assert.ok(reply.payload.text.includes(verification.text));
+  assert.equal(guard.replyPayloadSending({ runId: "run-1", kind: "final", payload: reply.payload }).payload.text,
+    reply.payload.text);
 });
 
 test("permits an explicitly requested preview after inspecting an existing site", () => {

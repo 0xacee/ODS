@@ -687,7 +687,7 @@ function parseVerificationResponse(value) {
     value.suppressStaleExecWarning === true &&
     (status === "none" || status === "passed");
   const hasPreview =
-    status === "passed" && Object.prototype.hasOwnProperty.call(value, "preview");
+    (status === "passed" || status === "failed") && Object.prototype.hasOwnProperty.call(value, "preview");
   const expectedKeys = carriesAuthoritativeText
     ? hasRecoveryCode
       ? ["status", "text", "code"]
@@ -741,6 +741,7 @@ function parseVerificationResponse(value) {
       /^[a-f0-9]{64}$/.test(preview.entrySha256));
   if (
     Object.keys(value).sort().join("\n") !== expectedKeys.sort().join("\n") ||
+    (hasRecoveryCode && hasPreview) ||
     (carriesAuthoritativeText &&
       (typeof value.text !== "string" ||
         value.text.length < 1 ||
@@ -796,7 +797,10 @@ function applyVerificationToCompletion(completion, verification) {
     if (typeof content === "string" && content.trim()) {
       // Both input components already have transport bounds. Preserve the
       // model's work summary; a verified observation is not the entire task.
-      const evidence = `${verification.text}\nReceipt scope: the Operations evidence above does not establish completion of other requested work.`;
+      const scope = verification.preview
+        ? "Publication scope: this receipt verifies the published snapshot, not functional behavior or completion of other requested work."
+        : "Receipt scope: the Operations evidence above does not establish completion of other requested work.";
+      const evidence = `${verification.text}\n${scope}`;
       const text = content.endsWith(evidence) ? content : `${content}\n\n${evidence}`;
       return {
         ...completion,
