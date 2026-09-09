@@ -98,6 +98,150 @@ def atomic_json(path, value):
         if os.path.exists(temporary): os.unlink(temporary)
 
 
+# This helper is embedded in the existing root-owned bridge so installation
+# custody continues to cover all code executed by the access controller.
+_EDGE_CONTAINER_SCRIPT = r'''
+import http.client, json, math, os, signal, sys
+try:
+    timeout = float(sys.argv[1])
+    if not math.isfinite(timeout) or not 0 < timeout <= 20:
+        os._exit(125)
+    signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
+    signal.setitimer(signal.ITIMER_REAL, timeout)
+    raw = sys.stdin.buffer.read(8193)
+    if len(raw) > 8192:
+        os._exit(125)
+    value = json.loads(raw)
+    body = json.dumps(value["payload"]).encode() if value["payload"] is not None else None
+    connection = http.client.HTTPConnection("127.0.0.1", 9595, timeout=timeout)
+    connection.request("POST" if body is not None else "GET", value["path"], body,
+                       {"Authorization": "Bearer " + value["key"],
+                        "Content-Type": "application/json", "Connection": "close"})
+    response = connection.getresponse()
+    if response.status != 200:
+        os._exit(125)
+    raw = response.read(65537)
+    if not raw or len(raw) > 65536 or response.length not in (None, 0):
+        os._exit(125)
+    sys.stdout.buffer.write(raw + b"\n")
+    sys.stdout.buffer.flush()
+    os._exit(0)
+except Exception:
+    os._exit(125)
+'''
+
+
+def _edge_json(raw):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate field")
+            result[key] = value
+        return result
+
+    def invalid_constant(_):
+        raise ValueError("invalid JSON constant")
+
+    value = json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
+    if not isinstance(value, dict):
+        raise ValueError("invalid edge response")
+    return value
+
+
+def _edge_container_request(container_id, path, key, payload, timeout=20):
+    """Bound one request to the exact running edge, including Docker Desktop.
+
+    Container IPs are not necessarily routable from the systemd host. Docker
+    exec reaches its loopback without a new listener or credentials in argv.
+    A failed POST has an unknown outcome: never retry it here. The caller must
+    retain admission holds until its normal recovery proves the resulting state.
+    """
+    if (not isinstance(container_id, str) or not HEX.fullmatch(container_id)
+            or path not in ("/v1/transition", "/v1/transition/acquire",
+                            "/v1/transition/recover", "/v1/transition/release")):
+        raise AccessError("edge-container-unavailable")
+    if (not isinstance(key, str) or not 32 <= len(key) <= 4096
+            or any(ord(char) < 33 or ord(char) > 126 for char in key)):
+        raise AccessError("edge-owner-auth-unavailable")
+    if path == "/v1/transition":
+        valid = payload is None
+    else:
+        valid = (isinstance(payload, dict) and set(payload) == {"token", "revision"}
+                 and all(isinstance(payload[name], str) and HEX.fullmatch(payload[name])
+                         for name in ("token", "revision")))
+    if not valid:
+        raise AccessError("invalid-edge-operation")
+    if not isinstance(timeout, (float, int)) or not 0 < timeout <= 20:
+        raise AccessError("operation-deadline-exceeded")
+    encoded = json.dumps({"path": path, "key": key, "payload": payload}).encode()
+    if len(encoded) > 8192:
+        raise AccessError("edge-owner-auth-unavailable")
+    deadline = time.monotonic() + timeout
+    process = None
+    try:
+        process = subprocess.Popen(
+            ["docker", "exec", "-i", container_id, "python3", "-I", "-c",
+             _EDGE_CONTAINER_SCRIPT, str(timeout)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            bufsize=0)
+        os.set_blocking(process.stdin.fileno(), False)
+        os.set_blocking(process.stdout.fileno(), False)
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdin, selectors.EVENT_WRITE)
+            offset = 0
+            while offset < len(encoded):
+                budget = deadline - time.monotonic()
+                if budget <= 0 or not selector.select(budget):
+                    raise AccessError("runtime-operation-timeout")
+                try:
+                    count = os.write(process.stdin.fileno(), encoded[offset:])
+                except BlockingIOError:
+                    continue
+                if count <= 0:
+                    raise AccessError("runtime-unavailable-or-busy")
+                offset += count
+            selector.unregister(process.stdin)
+            process.stdin.close()
+            selector.register(process.stdout, selectors.EVENT_READ)
+            frame = bytearray()
+            while True:
+                budget = deadline - time.monotonic()
+                if budget <= 0 or not selector.select(budget):
+                    raise AccessError("runtime-operation-timeout")
+                try:
+                    chunk = os.read(process.stdout.fileno(), min(8192, 65538 - len(frame)))
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    break
+                frame.extend(chunk)
+                if len(frame) > 65537:
+                    raise AccessError("runtime-unavailable-or-busy")
+        code = process.wait(timeout=max(0, deadline - time.monotonic()))
+        if code == 124:
+            raise AccessError("runtime-operation-timeout")
+        if code != 0:
+            raise AccessError("runtime-unavailable-or-busy")
+        return _edge_json(frame.decode("utf-8"))
+    except subprocess.TimeoutExpired:
+        raise AccessError("runtime-operation-timeout") from None
+    except (OSError, ValueError, UnicodeError):
+        raise AccessError("runtime-unavailable-or-busy") from None
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+                # The child inside Docker retains its independent alarm even
+                # if killing/reaping this CLI cannot terminate the exec child.
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+            for stream in (process.stdin, process.stdout):
+                if stream is not None:
+                    stream.close()
+
 class SystemdAccessBridge:
     def __init__(self, install_dir, edge_key, *, state=STATE, dropin=DROPIN, installed_binary=None, gateway_owner=None, settings_data_dir=None):
         self.install = Path(install_dir).resolve()
@@ -316,15 +460,19 @@ class SystemdAccessBridge:
                 "pid": 0, "proof": None, "stopped": True}
 
     def edge(self, operation=None, token=None, revision=None):
-        if not isinstance(self.edge_key, str) or len(self.edge_key) < 32: raise AccessError("edge-owner-auth-unavailable")
-        networks = json.loads(self.command(["docker", "inspect", "ods-pixel-edge", "--format", "{{json .NetworkSettings.Networks}} "]))
-        addresses = {value.get("IPAddress") for value in networks.values() if value.get("IPAddress")}
-        if len(addresses) != 1: raise AccessError("edge-network-ambiguous")
-        address = addresses.pop()
-        ip = ipaddress.ip_address(address)
-        if ip.version != 4 or not ip.is_private: raise AccessError("edge-network-invalid")
+        if operation not in (None, "acquire", "release", "recover"):
+            raise AccessError("invalid-edge-operation")
+        budget = remaining(20)
+        started = time.monotonic()
+        # Pin the inspected running instance, not a replaceable container name.
+        identity = self.command(["docker", "inspect", "ods-pixel-edge", "--format",
+                                 "{{.Id}} {{.State.Running}}"], timeout=budget).split()
+        if len(identity) != 2 or not HEX.fullmatch(identity[0]) or identity[1] != "true":
+            raise AccessError("edge-container-unavailable")
         payload = dict(token=token, revision=revision) if operation else None
-        return self.http("http://%s:9595" % address, "/v1/transition" + ("/" + operation if operation else ""), self.edge_key, payload)
+        return _edge_container_request(identity[0],
+            "/v1/transition" + ("/" + operation if operation else ""),
+            self.edge_key, payload, timeout=budget - (time.monotonic() - started))
 
     def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None,
                transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None,
