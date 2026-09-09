@@ -5035,7 +5035,9 @@ export function userMessageRequestsWorkspaceMutation(messages, prompt = undefine
 }
 
 function hasWorkspaceHtmlTarget(text) {
-  return /\b[A-Za-z0-9_-][A-Za-z0-9._/-]{0,511}\.html?\b/i.test(text);
+  // A public page URL is a navigation target, not a workspace filename.
+  const paths = text.replace(/\bhttps?:\/\/[^\s<>"'\x60]+/gi, " ");
+  return /\b[A-Za-z0-9_-][A-Za-z0-9._/-]{0,511}\.html?\b/i.test(paths);
 }
 
 function ownerForbidsWorkspacePreview(messages, prompt) {
@@ -5057,12 +5059,17 @@ function hasExplicitWorkspacePreviewDirective(text) {
   // A requested delivery action can follow a diagnosis or code repair. Do not
   // mistake a subordinate "why we should publish" for that owner command.
   const commands = text.matchAll(
-    /(?:^|[.!?;\n]|\b(?:and(?:\s+then)?|then)\s+)\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:display|preview|publish|republish|serve|open|show|view)\s+([^!?;\n]{1,512})/gi
+    /(?:^|[.!?;\n]|\b(?:and(?:\s+then)?|then)\s+)\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(display|preview|publish|republish|serve|open|show|view)\s+([^!?;\n]{1,512})/gi
   );
   return [...commands].some((match) => {
-    const target = match[1];
-    if (hasWorkspaceHtmlTarget(target) ||
-      /\b(?:website|site|web\s*page|frontend|dashboard|preview|animation|illustration|scene|game|chart|diagram|svg)\b/i.test(target)) return true;
+    const target = match[2].split(/\.(?=\s|$)|\b(?:and|then|but|however|instead)\b/i)[0];
+    if (hasWorkspaceHtmlTarget(target)) return true;
+    const visualTarget = /\b(?:website|site|web\s*page|frontend|dashboard|preview|animation|illustration|scene|game|chart|diagram|svg)\b/i.test(target);
+    // Open/show/view also describe ordinary navigation. Require a local
+    // artifact or preview binding before imposing workspace publication.
+    if (visualTarget && (!/^(?:open|show|view)$/i.test(match[1]) ||
+      /\b(?:workspace|preview)\b/i.test(target) ||
+      /\b(?:existing|current|saved|created|built|generated|updated|repaired)\s+(?:animated\s+)?(?:website|site|web\s*page|frontend|dashboard|animation|illustration|scene|game|chart|diagram|svg)\b/i.test(target))) return true;
     // "Edit demo/index.html and publish it" names its target before the
     // command. Bind that pronoun within this clause, not an earlier topic.
     const precedingClause = text.slice(0, match.index)
@@ -5089,10 +5096,14 @@ function requestsNamedSessionPreview(text, preview) {
   // Keep this an owner command, rather than a quoted command, explanation,
   // subordinate clause, or instruction found inside a code block.
   const commands = ownerText.matchAll(
-    /(?:^|[.!?;\n]|\b(?:and(?:\s+then)?|then)\s+)\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|I\s+(?:want|need)\s+you\s+to\s+)?(?:publish|republish|preview|display|show|open)\s+([^!?;\n]{1,512})/gi
+    /(?:^|[.!?;\n]|\b(?:and(?:\s+then)?|then)\s+)\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|I\s+(?:want|need)\s+you\s+to\s+)?(?:publish|republish|preview|display|show|open|view)\s+([^!?;\n]{1,512})/gi
   );
-  if (![...commands].some((match) => target.test(match[1]))) return false;
-  return !/\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:publish(?:ing)?|republish(?:ing)?|preview(?:ing)?|display(?:ing)?|show(?:ing)?|open(?:ing)?)\b/i.test(ownerText);
+  // A bare reference can reopen this session's actual verified artifact.
+  // Extra names or clauses (for example a public site's research request)
+  // must not inherit that artifact merely because the session has one.
+  const bareTarget = /^(?:me\s+)?(?:(?:the|this|that)\s+)(?:website|site|web\s*page|frontend|dashboard|preview|artwork|animation|illustration|scene|game|chart|diagram|svg)(?:\s+(?:again|here))?\s*[.!?]?\s*$/i;
+  if (![...commands].some((match) => target.test(match[1]) || bareTarget.test(match[1]))) return false;
+  return !/\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:publish(?:ing)?|republish(?:ing)?|preview(?:ing)?|display(?:ing)?|show(?:ing)?|open(?:ing)?|view(?:ing)?)\b/i.test(ownerText);
 }
 
 export function userMessageRequestsWorkspacePreview(messages, prompt = undefined) {
@@ -5136,7 +5147,7 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
   // Feedback about the previous website must not turn an independent file or
   // scheduled-work request into a mandatory website build.
   const websiteAction = actionText
-    .split(/[!?;\n]+|\.(?=\s|$)/)
+    .split(/[!?;\n]+|\.(?=\s|$)|\b(?:and|then|but|however|instead)\s+(?=(?:build|create|develop|design|generate|implement|make|write)\b)/i)
     .some((clause) => websitePattern.test(clause) &&
       (buildAction.test(clause) || reviseAction.test(clause)));
   // A timer or another named utility can be explicitly requested as HTML
@@ -5202,10 +5213,8 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
     // are constraints, even when another clause names an HTML file.
     (hasWorkspaceHtmlTarget(actionText) &&
       /\b(?:preview|publish|serve|open|show|view)\b/i.test(actionText)) ||
-    /\b(?:preview|publish|serve|open|show|view)\b[^.!?;\n]{0,96}\b(?:artworks?|illustrations?|charts?|diagrams?|animations?|games?)\b/i.test(actionText) ||
-    /\b(?:preview|publish|serve|open|show|view)\b[^.!?;\n]{0,96}\b(?:site|website|web\s*page|frontend)\b/i.test(actionText) ||
-    /\b(?:site|website|web\s*page|frontend)\b[^.!?;\n]{0,96}\b(?:preview|publish|serve|open|show|view)\b/i.test(actionText) ||
-    /\b(?:open|publish|refresh|republish|serve|show|view)\b[^.!?;\n]{0,96}\b(?:live\s+)?(?:preview|site|website|web\s*page|frontend)\b/i.test(actionText);
+    /\b(?:preview|publish|republish|serve)\b[^.!?;\n]{0,96}\b(?:artworks?|illustrations?|charts?|diagrams?|animations?|games?|sites?|websites?|web\s*pages?|frontends?)\b/i.test(actionText) ||
+    /\b(?:site|website|web\s*page|frontend)\b[^.!?;\n]{0,96}\b(?:preview|publish|republish|serve)\b/i.test(actionText);
   const unreachableLocalPreview =
     /\b(?:localhost|local\s+host)\b/i.test(text) &&
     /\b(?:not\s+(?:seeing|loading|opening|working)|can(?:not|'t)\s+(?:see|load|open|reach)|investigate|fix)\b/i.test(text);
