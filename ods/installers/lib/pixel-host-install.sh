@@ -2261,7 +2261,8 @@ info = provider_package.lstat()
 if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
     raise SystemExit("Pixel provider program directory is not root protected")
 for name in ('__init__.py', 'config.py', 'store.py', 'activation_config.py',
-             'managed_deployment.py', 'service_environment.py', 'service_activation.py'):
+             'managed_deployment.py', 'service_environment.py', 'service_activation.py',
+             'runtime_custody.py', 'coordinator.py'):
     write(provider_package / name, (source / 'bin/pixel_provider' / name).read_bytes(), 0o644)
 config_dir = pathlib.Path('/etc/ods')
 config_dir.mkdir(mode=0o755, exist_ok=True)

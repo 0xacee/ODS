@@ -148,6 +148,20 @@ class SystemdAccessBridge:
             if data_dir_id != self.settings_source(): raise AccessError("settings-data-directory-changed")
             return change(self, request)
 
+    def provider_status(self, *, data_dir_id):
+        from pixel_provider.coordinator import status
+        with self.bounded(120), self.locked():
+            self.discover()
+            if data_dir_id != self.settings_source(): raise AccessError("settings-data-directory-changed")
+            return status(self)
+
+    def change_providers(self, request, *, data_dir_id):
+        from pixel_provider.coordinator import change
+        with self.bounded(300):
+            self.discover()
+            if data_dir_id != self.settings_source(): raise AccessError("settings-data-directory-changed")
+            return change(self, request)
+
     def command(self, args, timeout=20):
         timeout = remaining(timeout)
         try:
@@ -314,7 +328,7 @@ class SystemdAccessBridge:
 
     def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None,
                transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None,
-               binding=None, activate_provider=None):
+               binding=None, activate_provider=None, expected_projection=None):
         script = Path(__file__).resolve().parent / "access_mode_worker.py"
         # This launcher still runs as root. Never search the owner's validator
         # PATH for it; that PATH is intended only for the unprivileged worker.
@@ -343,6 +357,8 @@ class SystemdAccessBridge:
             request.update(settings_revision=settings_revision, preferences=preferences, capabilities=capabilities)
         if operation == "provider-change":
             request["binding"] = binding
+            if expected_projection is not None:
+                request['expected_projection'] = expected_projection
         try:
             protocol.request(request)
             encoded = json.dumps(request, allow_nan=False) + "\n"

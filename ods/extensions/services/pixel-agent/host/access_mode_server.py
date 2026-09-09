@@ -26,7 +26,8 @@ for name in ("access_mode_server.py", "pixel_access_bridge.py", "access_mode_wor
              "pixel_settings/contract.py", "pixel_settings/projection.py", "pixel_settings/runtime.py", "pixel_settings/coordinator.py",
              "pixel_provider/__init__.py", "pixel_provider/config.py", "pixel_provider/store.py",
              "pixel_provider/activation_config.py", "pixel_provider/managed_deployment.py",
-             "pixel_provider/service_environment.py", "pixel_provider/service_activation.py", "provider_transaction.py"):
+             "pixel_provider/service_environment.py", "pixel_provider/service_activation.py",
+             "pixel_provider/runtime_custody.py", "pixel_provider/coordinator.py", "provider_transaction.py"):
     protected(PROGRAM / name)
 sys.path.insert(0, str(PROGRAM))
 from pixel_access_bridge import AccessError, SystemdAccessBridge, private_json
@@ -71,6 +72,11 @@ def main():
                     body = (adapter.settings_status(data_dir_id=request["data_dir_id"])
                             if request["operation"] == "settings-status"
                             else adapter.change_settings(request["request"], data_dir_id=request["data_dir_id"]))
+                elif request["operation"].startswith("provider-"):
+                    status = 200
+                    body = (adapter.provider_status(data_dir_id=request["data_dir_id"])
+                            if request["operation"] == "provider-status"
+                            else adapter.change_providers(request["request"], data_dir_id=request["data_dir_id"]))
                 else: raise ValueError()
             except PermissionError: pass
             except AccessError as error: status, body = 409, {"error": error.code}

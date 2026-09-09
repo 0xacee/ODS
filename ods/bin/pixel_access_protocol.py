@@ -59,10 +59,12 @@ def control_request(value):
     operation = value["operation"]
     keys = {"status": {"operation"}, "change": {"operation", "request"},
             "settings-status": {"operation", "data_dir_id"},
-            "settings-change": {"operation", "data_dir_id", "request"}}
+            "settings-change": {"operation", "data_dir_id", "request"},
+            "provider-status": {"operation", "data_dir_id"},
+            "provider-change": {"operation", "data_dir_id", "request"}}
     if operation not in keys or set(value) != keys[operation]:
         raise ProtocolError("invalid-request")
-    if operation.startswith("settings-") and (type(value["data_dir_id"]) is not str or not HEX.fullmatch(value["data_dir_id"])):
+    if operation.startswith(("settings-", "provider-")) and (type(value["data_dir_id"]) is not str or not HEX.fullmatch(value["data_dir_id"])):
         raise ProtocolError("invalid-request")
     if "request" in value and type(value["request"]) is not dict:
         raise ProtocolError("invalid-request")
@@ -73,7 +75,8 @@ def request(value):
     if type(value) is not dict or type(value.get("operation")) is not str:
         raise ProtocolError("owner-protocol-failed")
     operation = value["operation"]
-    if operation not in KEYS or set(value) != KEYS[operation]:
+    allowed = KEYS.get(operation)
+    if allowed is None or set(value) not in (allowed, allowed | {'expected_projection'} if operation == 'provider-change' else allowed):
         raise ProtocolError("owner-protocol-failed")
     if (type(value["openclaw"]) is not str or not PurePosixPath(value["openclaw"]).is_absolute()
             or "\x00" in value["openclaw"] or type(value["confirmed"]) is not bool):
@@ -92,6 +95,13 @@ def request(value):
         raise ProtocolError("owner-protocol-failed")
     if operation == "provider-change":
         provider_binding(value["binding"])
+        if 'expected_projection' in value:
+            projection = value['expected_projection']
+            if (type(projection) is not dict or set(projection) != {'afterSha', 'previousPlanSha'}
+                    or type(projection['afterSha']) is not str or not HEX.fullmatch(projection['afterSha'])
+                    or projection['previousPlanSha'] is not None and
+                    (type(projection['previousPlanSha']) is not str or not HEX.fullmatch(projection['previousPlanSha']))):
+                raise ProtocolError('owner-protocol-failed')
     return value
 
 

@@ -189,7 +189,7 @@ def _plan(config, previous, binding, path):
 
 
 def change_provider(config_path, *, state_dir, binding, transaction_id, expected_config_sha256,
-                    validate_config, check_no_active_run, activate):
+                    validate_config, check_no_active_run, activate, expected_projection=None):
     _requirements(expected_config_sha256, transaction_id, validate_config, check_no_active_run, activate)
     binding = _validate_binding(binding)
     sd = controller._prepare_state_dir(state_dir)
@@ -208,6 +208,14 @@ def change_provider(config_path, *, state_dir, binding, transaction_id, expected
         previous = _managed(_record(sd, MANAGED), path)
         document, next_state = _plan(config, previous, binding, path)
         after = _encoded(document)
+        if expected_projection is not None:
+            # The root coordinator independently owns the original baseline and
+            # projection. Compare UNDER apply.lock, before staging or writing.
+            expected = {'afterSha': controller._sha256_bytes(after),
+                        'previousPlanSha': controller._sha256_bytes(_encoded(previous['plan'])) if previous else None}
+            if (type(expected_projection) is not dict or set(expected_projection) != set(expected)
+                    or expected_projection != expected):
+                raise StoreError('provider-root-projection-mismatch')
         journal = {'schemaVersion': 1, 'kind': 'provider', 'configPath': path, 'configMode': mode,
             'transactionId': transaction_id, 'beforeSha': expected_config_sha256,
             'afterSha': controller._sha256_bytes(after), 'previous': previous, 'next': next_state}

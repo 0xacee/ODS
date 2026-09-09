@@ -72,7 +72,8 @@ def main():
                 kwargs = dict(state_dir=state_dir, validate_config=validate,
                     expected_config_sha256=request["config_sha256"], transaction_id=request["transaction_id"],
                     check_no_active_run=lambda: hook("busy"), activate=lambda: hook("provider-activate"))
-                result = (provider_transaction.change_provider(path, binding=request["binding"], **kwargs)
+                result = (provider_transaction.change_provider(path, binding=request["binding"],
+                              expected_projection=request.get('expected_projection'), **kwargs)
                           if request["operation"] == "provider-change"
                           else provider_transaction.recover_provider(path, **kwargs))
             emit({"result": result})
