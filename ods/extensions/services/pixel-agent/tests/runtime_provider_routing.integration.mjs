@@ -110,6 +110,7 @@ test('pinned gateway session/routing contract; private worker=' + workerMode + '
     copyFileSync(fileURLToPath(new URL('../plugin/handoff-owner-worker.mjs', import.meta.url)), join(plugin, 'handoff-owner-worker.mjs'));
     copyFileSync(fileURLToPath(new URL('../plugin/provider-bootstrap.mjs', import.meta.url)), join(plugin, 'provider-bootstrap.mjs'));
     copyFileSync(fileURLToPath(new URL('../plugin/access-runtime.mjs', import.meta.url)), join(plugin, 'access-runtime.mjs'));
+    copyFileSync(fileURLToPath(new URL('../plugin/settings-runtime-readback.mjs', import.meta.url)), join(plugin, 'settings-runtime-readback.mjs'));
     copyFileSync(fileURLToPath(new URL('./fixtures/managed-admission.mjs', import.meta.url)), join(plugin, 'managed-admission.mjs'));
     writeFileSync(join(plugin, 'package.json'), JSON.stringify({name: 'ods-routing-fixture', version: '1.0.0',
       type: 'module', openclaw: {extensions: ['./index.mjs']}}));
