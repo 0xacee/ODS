@@ -23,12 +23,13 @@ from .connection import normalize_connection
 from .connection_transport import probe_connection
 from .store import MAX_BYTES, StoreError, decode_document
 
-PIXEL_COMMIT = '9409d1ae894394a4848bf5b41a6323e64c577f06'
+PIXEL_COMMIT = 'bbd1d2d62c7260f822ba1e727728a0a02f78895f'
 # Preparation follows the current paired installer. Loading must not rewrite or
 # invalidate clients prepared with an earlier supported renderer. These exact
 # receipt identities do not certify custody of an owner's writable source tree.
 PREPARED_PIXEL_COMMITS = frozenset((
     PIXEL_COMMIT,
+    '9409d1ae894394a4848bf5b41a6323e64c577f06',
     '70f44c90ac40b8409ebc965becc5b085a053e270',
 ))
 OPENCLAW_VERSION = '2026.6.33'
