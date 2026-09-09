@@ -89,7 +89,8 @@ def test_get_success(client, mock_request):
     resp = client.get("/api/pixel/providers", headers={"Authorization": "Bearer test-key-12345"})
     assert resp.status_code == 200
     data = resp.json()
-    assert data["runtime"]["status"] == "not-applied"
+    assert data["runtime"] == {"status": "not-inspected", "reason": "runtime-status-separate"}
+    assert resp.headers['cache-control'] == 'no-store'
     assert data["configuration"] == DEFAULT_CONFIG
 
 def test_post_success(client, mock_request):

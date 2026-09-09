@@ -4,7 +4,9 @@ Status: development in PR #3818, stacked on ODS PR #3385. The Settings UI,
 POSIX credential vault, inference-only sharing perimeter and host owner controls
 are implemented, including guided host sharing and an isolated POSIX client CLI.
 Turn-scoped provider runtime activation is available for the isolated client.
-Default Pixel/UI activation, advisory/handoff escalation, Full Access and complete
+Default Pixel/UI provider activation now has a Linux host/dashboard API and
+confirmed Apply/Deactivate/Recover controls in source; the full installed UI
+journey remains unqualified. Advisory/handoff escalation, Full Access and complete
 cross-platform guided onboarding remain pending. Sharing is disabled by default.
 
 ## Independent settings
@@ -31,7 +33,7 @@ authority system. Inference route policy grants no tool or operating-system
 privilege. Credentials are represented only by opaque server-side references;
 public projections expose credential presence, not references or values.
 
-## Implemented Settings form and backend (not activation)
+## Independent provider configuration and runtime controls
 
 The owner-authenticated dashboard routes are `GET /api/pixel/providers` and
 `POST /api/pixel/providers/save`. Saves accept the exact envelope
@@ -56,10 +58,28 @@ submission, including on failure. Conflicts and ambiguous write outcomes require
 an explicit reload; writes are never automatically retried. System Refresh keeps
 unsaved provider edits mounted. No key is put in a URL or browser storage.
 
-Responses distinguish the desired configuration from effective runtime:
-`runtime.status` is currently `not-applied`, with reason
-`provider-runtime-not-integrated`. No save restarts a model or service, edits
+Configuration responses do not inspect runtime: `runtime.status` is
+`not-inspected`, with reason `runtime-status-separate`. Older configuration
+envelopes remain readable; the UI uses the separate strict runtime endpoint.
+No save restarts a model or service, edits
 `ODS_MODE`, updates the Pixel pin, or grants filesystem/administrative access.
+
+`GET /api/pixel/providers/runtime` inspects the fixed Linux controller; POST
+accepts exactly `{operation, revision, providerRevision}`, where operation is
+`apply`, `deactivate`, or `recover`. Host-selected paths, binding identity, and
+recovery journals are not supplied by the browser. Requests require owner auth,
+changes are bounded to 2048 bytes, and model lifecycle conflicts prevent changes.
+Runtime status distinguishes not-applied/applied/saved-changes/inactive/pending/
+unavailable. Native Windows/macOS adapters remain unavailable, not implicitly
+qualified by Linux tests. Registration verification is not inference health.
+
+The UI requires confirmation tied to the current inspection and saved revision.
+Cloud-enabled Apply additionally requires a fresh acknowledgement. Save/edit/
+reload are locked during a change. A successful POST must be corroborated by a
+fresh GET matching the entire activation binding; malformed/lost responses are
+never retried automatically. A timeout may mean the controller is still working.
+Recovery remains accessible when saved configuration cannot be read and can
+restore an older binding without deleting saved preferences or credentials.
 
 Host state lives below `ODS_DATA_DIR/pixel-providers/` in an owner-only 0700
 directory, with 0600 files. POSIX uses a permanent flock inode, revision checks,

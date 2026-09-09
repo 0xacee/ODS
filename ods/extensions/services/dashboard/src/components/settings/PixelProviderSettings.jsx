@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { copy, createProvider, eligible, prepareSave, readConfiguration } from './pixelProviderForm'
+import PixelProviderRuntime from './PixelProviderRuntime'
 
 const inputStyle = 'w-full rounded border border-theme-border bg-theme-bg px-3 py-2 text-theme-text focus:outline-none focus:ring-2 focus:ring-blue-500'
 const buttonStyle = 'rounded border border-theme-border px-3 py-2 text-sm hover:bg-white/5 disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-blue-500'
@@ -25,10 +26,18 @@ export default function PixelProviderSettings() {
   const [stale, setStale] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [runtimeBusy, setRuntimeBusy] = useState(false)
+  const runtimeBusyRef = useRef(false)
   const mounted = useRef(false)
   const sequence = useRef(0)
   const controller = useRef(null)
   const writePending = useRef(false)
+  const runtimeBusyChanged = useCallback(value => {
+    if (value && writePending.current) return false
+    runtimeBusyRef.current = value
+    if (mounted.current) setRuntimeBusy(value)
+    return true
+  }, [])
 
   const request = useCallback(async (method, payload) => {
     const seq = ++sequence.current
@@ -39,7 +48,7 @@ export default function PixelProviderSettings() {
     const current = () => mounted.current && sequence.current === seq
     try {
       const response = await fetch('/api/pixel/providers' + (method === 'POST' ? '/save' : ''), {
-        method, signal: abort.signal,
+        method, cache: 'no-store', signal: abort.signal,
         ...(payload ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : {}),
       })
       if (!current()) return
@@ -48,7 +57,7 @@ export default function PixelProviderSettings() {
           setStale(response.status === 409 || response.status >= 500)
           setError(response.status === 409 ? 'Settings changed elsewhere. Reload before saving.'
             : 'Settings could not be saved. Reload to check the stored state; re-enter any unsaved key.')
-        } else setError('Provider settings are unavailable. Reload to try again.')
+        } else { setStale(true); setError('Provider settings are unavailable. Reload to try again.') }
         return
       }
       const value = readConfiguration(await response.json(), payload ? payload.expectedRevision + 1 : undefined)
@@ -64,7 +73,7 @@ export default function PixelProviderSettings() {
       if (method === 'POST') setNotice('Settings saved. Pixel runtime has not been changed.')
     } catch {
       if (!current()) return
-      if (method === 'POST') setStale(true)
+      setStale(true)
       setError(method === 'POST'
         ? 'Save result is unknown. Reload before saving again; re-enter any unsaved key.'
         : 'Provider settings are unavailable. Reload to try again.')
@@ -79,6 +88,8 @@ export default function PixelProviderSettings() {
   }, [])
 
   const load = useCallback(() => {
+    if (writePending.current || runtimeBusyRef.current) return
+    writePending.current = true
     setLoading(true)
     setError('')
     setNotice('')
@@ -88,10 +99,11 @@ export default function PixelProviderSettings() {
   useEffect(() => {
     mounted.current = true
     load()
-    return () => { mounted.current = false; sequence.current++; controller.current?.abort() }
+    return () => { mounted.current = false; sequence.current++; writePending.current = false; controller.current?.abort() }
   }, [load])
 
   const edit = mutate => {
+    if (writePending.current || runtimeBusyRef.current) return
     setDraft(value => { const next = copy(value); mutate(next); return next })
     setDirty(true)
     setError('')
@@ -99,10 +111,10 @@ export default function PixelProviderSettings() {
   }
   const providerEdit = (id, key, value) => edit(next => { next.providers.find(p => p.id === id)[key] = value })
   const reload = () => {
-    if (!writePending.current && (!dirty || window.confirm('Discard unsaved Pixel provider edits and reload?'))) load()
+    if (!writePending.current && !runtimeBusyRef.current && (!dirty || window.confirm('Discard unsaved Pixel provider edits and reload?'))) load()
   }
   const save = () => {
-    if (writePending.current || saving || loading || stale || !dirty) return
+    if (writePending.current || runtimeBusyRef.current || saving || loading || stale || !dirty) return
     let payload
     try { payload = prepareSave(draft, snapshot, secrets, removals) }
     catch (problem) { setError(problem.message); return }
@@ -145,20 +157,23 @@ export default function PixelProviderSettings() {
       <div><h2 id="pixel-connections-title" className="text-lg font-semibold">Pixel connections</h2>
         <p className="text-sm text-theme-text-muted">Choose inference providers without changing other ODS apps.</p></div>
       <div className="flex flex-wrap gap-2">
-        <button className={buttonStyle} disabled={loading || saving} onClick={reload}>Reload providers</button>
-        <button className={buttonStyle} disabled={!dirty || loading || saving} onClick={() => {
+        <button className={buttonStyle} disabled={loading || saving || runtimeBusy} onClick={reload}>Reload providers</button>
+        <button className={buttonStyle} disabled={!dirty || loading || saving || runtimeBusy} onClick={() => {
+          if (writePending.current || runtimeBusyRef.current) return
           setDraft(copy(snapshot)); setSecrets({}); setRemovals({}); setDirty(false); setError(''); setNotice('')
         }}>Cancel provider edits</button>
-        <button className={buttonStyle + ' bg-blue-600 text-white'} disabled={!dirty || stale || saving || loading} onClick={save}>{saving ? 'Saving providers…' : 'Save providers'}</button>
+        <button className={buttonStyle + ' bg-blue-600 text-white'} disabled={!dirty || stale || saving || loading || runtimeBusy} onClick={save}>{saving ? 'Saving providers…' : 'Save providers'}</button>
       </div>
     </div>
-    <p className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm">Saved settings are not applied to Pixel yet.</p>
+    <p className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm">Saving providers does not apply them. Inspect the current runtime below before making a change.</p>
     <p className="text-sm text-theme-text-muted">Choosing Tower2 inference does not move this device’s tools there. Full Access is not available through these controls.</p>
     {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
     {notice && <p role="status" className="text-sm text-emerald-400">{notice}</p>}
     {stale && <p className="text-sm text-amber-400">Reload the stored configuration before another save.</p>}
     {loading && <p role="status">Loading provider settings…</p>}
-    {draft && <fieldset disabled={loading || saving} className="min-w-0 space-y-5">
+    <PixelProviderRuntime savedRevision={snapshot?.revision ?? null} saving={loading || saving} blocked={dirty || stale}
+      routingEnabled={snapshot?.enabled === true} allowCloud={snapshot?.policy.allowCloud === true} onBusyChange={runtimeBusyChanged} />
+    {draft && <fieldset disabled={loading || saving || runtimeBusy} className="min-w-0 space-y-5">
       <legend className="sr-only">Pixel provider configuration</legend>
       <div className="flex flex-wrap gap-5">
         <Toggle label="Enable desired Pixel routing" checked={draft.enabled} onChange={e => edit(next => { next.enabled = e.target.checked })} />

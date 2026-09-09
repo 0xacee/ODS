@@ -117,7 +117,7 @@ async def _request(method, path, payload=None):
         "configuration": configuration,
         # Deliberately distinct from desired configuration.enabled. Persistence
         # alone must never claim an effective inference route or grant access.
-        "runtime": {"status": "not-applied", "reason": "provider-runtime-not-integrated"},
+        "runtime": {"status": "not-inspected", "reason": "runtime-status-separate"},
     }, headers=NO_STORE)
 
 

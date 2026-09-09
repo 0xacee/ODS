@@ -127,3 +127,16 @@ def test_unavailable_control_does_not_claim_inactive(provider_stack, monkeypatch
     assert response.status_code == 200
     assert response.json()['status'] == 'unavailable' and response.json()['pending'] is None
     assert 'private-controller-path' not in response.text
+
+
+@pytest.mark.parametrize('path,body,status', [
+    ('/api/pixel/providers/runtime', {}, 400),
+    ('/api/pixel/providers/runtime', 'oversized', 413),
+    ('/api/pixel/providers/runtime', CHANGE, 200),
+    ('/api/pixel/providers/save', {}, 400),
+])
+def test_provider_responses_are_not_cacheable(provider_stack, path, body, status):
+    client, _agent, _handler, _calls, _state = provider_stack
+    response = client.post(path, content=b' ' * 2049) if body == 'oversized' else client.post(path, json=body)
+    assert response.status_code == status
+    assert response.headers['cache-control'] == 'no-store'
