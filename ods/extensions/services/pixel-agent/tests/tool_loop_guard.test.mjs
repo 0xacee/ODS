@@ -2626,6 +2626,9 @@ test("public research downloads and their own jobs do not require Operations phr
       : call(guard, name, { event: { params: args } });
     const jobId = "ops-1234567890123-abcdef123456";
     const args = { url: "https://github.com/pallets/click/archive/refs/heads/main.tar.gz", filename: "click-main.tar.gz" };
+    // Actual native Tool Search trace: the broker accepts null as an omitted
+    // optional digest, and returns a real submission. Tracking must agree.
+    if (wrapped) args.expectedSha256 = null;
     for (let round = 0; round < 3; round++) {
       guard.observeModelCall({ runId: "run-1" }, context, "pixel");
       assert.notEqual(select("pixel_ops_download_stage", args)?.block, true);

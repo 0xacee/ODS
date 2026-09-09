@@ -1391,9 +1391,9 @@ function exactDownloadSubmission(event, requested) {
     typeof params.filename !== "string" ||
     params.filename !== requested?.filename ||
     !OPS_ARTIFACT_FILENAME.test(params.filename) ||
-    (params.expectedSha256 !== undefined &&
+    (params.expectedSha256 != null &&
       (typeof params.expectedSha256 !== "string" || !SHA256.test(params.expectedSha256))) ||
-    params.expectedSha256 !== requested?.expectedSha256 ||
+    (params.expectedSha256 ?? undefined) !== (requested?.expectedSha256 ?? undefined) ||
     !details ||
     typeof details !== "object" ||
     Array.isArray(details) ||
@@ -1424,7 +1424,7 @@ function exactDownloadSubmission(event, requested) {
     url: params.url,
     safeSource: params.url.split("?", 1)[0],
     filename: params.filename,
-    expectedSha256: params.expectedSha256,
+    expectedSha256: params.expectedSha256 ?? undefined,
     relativePath: requested.relativePath,
   };
 }
