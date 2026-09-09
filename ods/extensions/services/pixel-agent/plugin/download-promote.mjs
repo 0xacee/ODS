@@ -194,6 +194,23 @@ function failedResult() {
   };
 }
 
+function invalidArgumentsResult() {
+  return {
+    content: [{
+      type: "text",
+      text:
+        "Invalid download promotion arguments. Supply exactly jobId, filename, " +
+        "relativePath, sha256, and sourceUrl. Use relativePath (not destination) " +
+        "for the workspace-relative file path ending in filename; use sourceUrl " +
+        "(not url) for the requested HTTPS source. Use the jobId, filename and " +
+        "SHA-256 from the successful staged-download receipt. No host request " +
+        "was made. Correct the arguments and retry the same verified job.",
+    }],
+    details: { status: "failed", errorCode: "invalid_arguments", boundary: BOUNDARY },
+    isError: true,
+  };
+}
+
 export function createDownloadPromoteTool({ request = requestPromotion } = {}) {
   return {
     name: "pixel_ods_download_promote",
@@ -212,8 +229,13 @@ export function createDownloadPromoteTool({ request = requestPromotion } = {}) {
       },
     },
     execute: async (_callId, params, signal) => {
+      let normalized;
       try {
-        const normalized = normalizePromotionParams(params);
+        normalized = normalizePromotionParams(params);
+      } catch {
+        return invalidArgumentsResult();
+      }
+      try {
         const response = validatedResponse(await request(normalized, { signal }), normalized);
         return {
           content: [

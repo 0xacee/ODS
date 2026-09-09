@@ -71,6 +71,56 @@ test("returns only a structurally matched host promotion receipt", async () => {
   assert.match(result.content[0].text, /"sha256":"a{64}"/);
 });
 
+test("explains the captured argument-name mistake before any host request and permits correction", async () => {
+  const requests = [];
+  const tool = createDownloadPromoteTool({
+    request: async (request) => {
+      requests.push(request);
+      return success(request);
+    },
+  });
+  const { relativePath, sourceUrl, ...rest } = params;
+  const failed = await tool.execute("bad-arguments", {
+    ...rest, destination: relativePath, url: sourceUrl,
+  });
+  assert.equal(requests.length, 0);
+  assert.equal(failed.isError, true);
+  assert.deepEqual(failed.details, {
+    status: "failed", errorCode: "invalid_arguments", boundary,
+  });
+  assert.match(failed.content[0].text, /relativePath \(not destination\)/);
+  assert.match(failed.content[0].text, /sourceUrl \(not url\)/);
+  assert.match(failed.content[0].text, /No host request was made/);
+  assert.match(failed.content[0].text, /retry the same verified job/);
+
+  const corrected = await tool.execute("corrected-arguments", params);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].jobId, params.jobId);
+  assert.equal(corrected.details.status, "succeeded");
+});
+
+test("validation guidance never echoes rejected values or contacts the host", async () => {
+  let contacted = false;
+  const tool = createDownloadPromoteTool({ request: async () => { contacted = true; } });
+  const privateValue = "PRIVATE_VALUE_NOT_FOR_MODEL_OUTPUT";
+  let guidance;
+  for (const rejected of [
+    null, [], {},
+    { ...params, relativePath: "../" + privateValue },
+    { ...params, sourceUrl: `https://user:${privateValue}@example.com/` },
+    { ...params, sha256: privateValue },
+    { ...params, [privateValue]: "extra field" },
+  ]) {
+    const result = await tool.execute("invalid", rejected);
+    assert.equal(result.isError, true);
+    assert.equal(result.details.errorCode, "invalid_arguments");
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(privateValue));
+    guidance ??= result.content[0].text;
+    assert.equal(result.content[0].text, guidance);
+  }
+  assert.equal(contacted, false);
+});
+
 test("fails closed on transport errors and mismatched service evidence", async () => {
   for (const request of [
     async () => {
