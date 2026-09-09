@@ -19,6 +19,12 @@ it does not grant host execution, change access mode, or enable browser navigati
 Perplexica remains available as an optional research application. The paid
 OpenClaw provider ID `parallel` is distinct from `parallel-free`.
 
+Reconfiguring the same model route and context preserves the owner's output-token
+budget, including when the gateway credential rotates. Explicit model-setting
+changes still take effect. Model reconciliation and its rollback snapshot retain
+additional extensions with unique IDs and bound paths/digests, so enabling native
+search does not prevent subsequent model changes.
+
 The paired Pixel source candidate is tracked in
 [Pixel PR #240](https://github.com/Osmantic/Pixel/pull/240). Source and disposable
 runtime tests do not establish installed chat or fresh-install acceptance. Keep
