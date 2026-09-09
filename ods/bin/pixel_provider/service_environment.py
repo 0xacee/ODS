@@ -6,14 +6,15 @@ Nothing here grants runtime custody or interprets an owner-supplied path. A
 prepared environment is not an activated provider or successful inference.
 """
 import os
-from pathlib import Path
 import re
 import stat
 import tempfile
+from pathlib import Path
 
 from pixel_access_bridge import AccessError, atomic_json, digest
 from pixel_access_protocol import HEX, provider_binding
 from pixel_settings.coordinator import _read
+
 from .managed_deployment import environment_bytes
 
 ENVIRONMENT = Path('/etc/ods/pixel-provider.env')

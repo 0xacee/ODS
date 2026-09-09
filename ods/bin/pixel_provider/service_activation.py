@@ -5,15 +5,16 @@ both admission holds, root journal, saved policy and owner transaction. This
 callback is deliberately zero-argument when bound into the owner-worker pipe:
 each invocation selects its environment using the actual configuration hash.
 """
+import re
 import time
 from pathlib import Path
-import re
 
-from pixel_access_bridge import AccessError, UNIT, atomic_json, digest, remaining
+from pixel_access_bridge import UNIT, AccessError, atomic_json, digest, remaining
 from pixel_access_protocol import HEX
 from pixel_settings import coordinator as settings
 from pixel_settings.contract import SettingsError
 from pixel_settings.runtime import _timestamp
+
 from .service_environment import _snapshot
 
 
