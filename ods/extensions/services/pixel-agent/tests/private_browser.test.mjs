@@ -58,6 +58,16 @@ test("untrusted private fetch targets do not gain a browser redirect from a publ
   assert.equal(guard.beforeToolCall(browser, context)?.block, true);
 });
 
+test("a denied private fetch can recover to a public browser destination", () => {
+  for (const key of ["url", "targetUrl"]) {
+    const guard = createToolLoopGuard();
+    guard.observeRun(context, "pixel", {prompt: "Read public documentation."}, {privateBrowserAccess: true});
+    assert.equal(guard.beforeToolCall({toolName: "web_fetch", params: {url: "http://127.0.0.1/"}}, context)?.block, true);
+    assert.equal(guard.beforeToolCall({toolName: "browser", params: {action: "open", [key]: "https://docs.python.org/3/"}}, context)?.block, undefined);
+    assert.equal(guard.beforeToolCall({toolName: "browser", params: {action: "open", [key]: "http://127.0.0.1/"}}, context)?.block, true);
+  }
+});
+
 test("browser navigation remains subject to configured browser policy rather than an extra text classifier", () => {
   for (const key of ["url", "targetUrl"]) {
     for (const wrapped of [false, true]) {

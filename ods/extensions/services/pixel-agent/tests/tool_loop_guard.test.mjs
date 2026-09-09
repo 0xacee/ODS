@@ -10107,7 +10107,7 @@ test("allows a normal public HTTP destination in an exec command", () => {
   );
 });
 
-test("aborts a run that asks for any second tool after a private-network denial", () => {
+test("allows authorized recovery but retains the repeated private-network denial fuse", () => {
   const aborts = [];
   const guard = createToolLoopGuard({
     abortRun: (sessionId) => {
@@ -10121,7 +10121,18 @@ test("aborts a run that asks for any second tool after a private-network denial"
     }).blockReason,
     EXEC_PRIVATE_NETWORK_REASON
   );
-  assert.deepEqual(call(guard, "web_search"), {
+  assert.equal(call(guard, "web_search"), undefined);
+  assert.equal(call(guard, "pixel_ods_status"), undefined);
+  assert.equal(call(guard, "pixel_ods_research", {
+    event: {params: {query: "Find public documentation for this extension"}},
+  }), undefined);
+  assert.equal(call(guard, "write", {
+    event: {params: {path: "diagnosis.md", content: "The direct private request was denied."}},
+  }), undefined);
+  assert.deepEqual(aborts, []);
+  assert.deepEqual(call(guard, "web_fetch", {
+    event: {params: {url: "http://127.0.0.1:18789/health"}},
+  }), {
     block: true,
     blockReason: PRIVATE_NETWORK_LOOP_ABORT_REASON,
   });
@@ -10498,6 +10509,38 @@ test("website navigation and research files do not require a workspace preview",
     guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
     assert.equal(guard.verificationForRun("run-1").status, "failed", prompt);
   }
+});
+
+test("wrapped private denial allows public extraction and workspace recovery", () => {
+  const aborts = [];
+  const guard = createToolLoopGuard({abortRun: id => {aborts.push(id); return true;}});
+  assert.equal(call(guard, "tool_call", {
+    event: {params: {id: "web_fetch", args: {url: "http://printer.local/status"}}},
+  }).blockReason, WEB_FETCH_PUBLIC_ONLY_REASON);
+  assert.equal(call(guard, "tool_call", {
+    event: {params: {id: "pixel_ods_web_extract", args: {
+      url: "https://docs.python.org/3/", query: "title",
+    }}},
+  }), undefined);
+  assert.equal(call(guard, "tool_call", {
+    event: {params: {id: "read", args: {path: "notes.md"}}},
+  }), undefined);
+  assert.deepEqual(aborts, []);
+  assert.equal(call(guard, "tool_call", {
+    event: {params: {id: "exec", args: {command: "curl http://printer.local/status"}}},
+  }).blockReason, PRIVATE_NETWORK_LOOP_ABORT_REASON);
+  assert.deepEqual(aborts, ["session-1"]);
+});
+
+test("explicit private URL request retains its no-substitution boundary", () => {
+  const aborts = [];
+  const guard = createToolLoopGuard({abortRun: id => {aborts.push(id); return true;}});
+  guard.observeRun({agentId: "pixel", runId: "run-1", sessionId: "session-1"}, "pixel", {
+    messages: [{role: "user", content: "Inspect http://127.0.0.1:3000 now"}],
+  });
+  assert.equal(call(guard, "pixel_ods_status").blockReason, PRIVATE_URL_REQUEST_REASON);
+  assert.equal(call(guard, "web_search").blockReason, PRIVATE_NETWORK_LOOP_ABORT_REASON);
+  assert.deepEqual(aborts, ["session-1"]);
 });
 
 test("bare reopening binds only a verified preview in the current session", () => {

@@ -44,7 +44,7 @@ export const WEB_FETCH_TRUNCATED_PIVOT_REASON =
   "The fetched public page was truncated. Only the returned content is evidence. Choose targeted extraction, another relevant source, or continue other authorized work; do not claim unread content was verified.";
 
 export const WEB_FETCH_PUBLIC_ONLY_REASON =
-  "Pixel blocked this fetch because web_fetch is restricted to public HTTP(S) hostnames and must not contact local, private, or raw-IP destinations. Do not call another tool in this turn; explain the boundary to the user.";
+  "Pixel blocked this fetch because web_fetch is restricted to public HTTP(S) hostnames and must not contact local, private, or raw-IP destinations. Do not retry that access through another tool. Other authorized work may continue, including approved ODS tools, public research, and saving verified findings.";
 
 export const GITHUB_CANONICAL_SOURCE_PREFIX =
   "Pixel already has the owner's identified canonical public GitHub source:";
@@ -56,7 +56,7 @@ export const GITHUB_SOURCE_UNVERIFIED_DELIVERY_PREFIX =
   "Pixel did not successfully read a source belonging to the requested GitHub repository in this response. Repository claims remain unverified; the workspace and other collected evidence are preserved.";
 
 export const EXEC_PRIVATE_NETWORK_REASON =
-  "Pixel blocked this command because shell execution cannot be used to contact local, private, or raw-IP HTTP(S) destinations. Do not call another tool in this turn; explain the boundary to the user.";
+  "Pixel blocked this command because shell execution cannot be used to contact local, private, or raw-IP HTTP(S) destinations. Do not retry that access through another tool. Other authorized work may continue, including approved ODS tools, public research, and saving verified findings.";
 
 export const PRIVATE_NETWORK_LOOP_ABORT_REASON =
   "Pixel stopped this response because it requested another tool after a private-network boundary was enforced. Start a fresh message with a safe public destination or an approved ODS status capability.";
@@ -5925,6 +5925,7 @@ export function createToolLoopGuard({
         successfulReadPaths: new Set(),
         repeatedWriteBlocks: new Map(),
         privateNetworkExhausted: false,
+        privateNetworkRequestDenied: false,
         privateNetworkPrompt: false,
         clientCancelled: false,
         fetchedUrls: new Map(),
@@ -7620,10 +7621,23 @@ export function createToolLoopGuard({
     if (state?.privateNetworkPrompt) {
       state.privateNetworkPrompt = false;
       state.privateNetworkExhausted = true;
+      state.privateNetworkRequestDenied = true;
       return { block: true, blockReason: PRIVATE_URL_REQUEST_REASON };
     }
 
-    if (state?.privateNetworkExhausted) {
+    // Denying one destination must not abort an unrelated, permitted tool.
+    // Keep the denial recorded across successful pivots so alternating calls
+    // cannot reset the repeated-private-access fuse. Explicit private-URL
+    // requests retain their separate no-substitution policy.
+    const repeatsDeniedPrivateAccess =
+      (selectedToolName === "exec" && execTargetsNonPublicAddress(selectedEvent)) ||
+      ((selectedToolName === "web_fetch" || selectedToolName === "pixel_ods_web_extract") &&
+        fetchTargetsNonPublicAddress(selectedEvent)) ||
+      (selectedToolName === "browser" &&
+        (urlTargetsNonPublicAddress(selectedParams?.url) ||
+          urlTargetsNonPublicAddress(selectedParams?.targetUrl)));
+    if (state?.privateNetworkExhausted &&
+        (state.privateNetworkRequestDenied || repeatsDeniedPrivateAccess)) {
       let aborted = false;
       try {
         aborted = typeof abortRun === "function" && Boolean(abortRun(sessionId));
