@@ -10,18 +10,18 @@ from pathlib import Path
 from types import MethodType
 
 import pytest
-
-from test_service_activation import lifecycle, owner  # noqa: F401
-from test_service_environment import participant  # noqa: F401
 from pixel_access_bridge import AccessError, atomic_json, digest
-from pixel_provider import coordinator as c, service_environment
+from pixel_provider import coordinator as c
+from pixel_provider import service_environment
 from pixel_provider.config import default_config
 from pixel_provider.managed_deployment import deployment, required_policy
 from pixel_provider.store import StoreError
+from test_service_activation import lifecycle, owner  # noqa: F401
+from test_service_environment import participant  # noqa: F401
 
 
 @pytest.fixture
-def integrated(lifecycle, monkeypatch):
+def integrated(lifecycle, monkeypatch):  # noqa: F811 - imported pytest fixture
     p, b = lifecycle, lifecycle.bridge
     (b.state / 'transition.json').unlink()
     b.phase = 'idle'
@@ -31,9 +31,9 @@ def integrated(lifecycle, monkeypatch):
     (directory / '.provider-config.lock').touch(mode=0o600)
     saved = default_config()
     saved.update(enabled=True, revision=1)
-    saved['providers'] = [dict(id='leader', label='Tower', kind='local', baseUrl='http://127.0.0.1:12001/v1',
-        model='qwen', contextTokens=32768, maxOutputTokens=4096, supportsTools=True,
-        supportsVision=False, reasoning=False, credentialRef=None, enabled=True)]
+    saved['providers'] = [{'id': 'leader', 'label': 'Tower', 'kind': 'local', 'baseUrl': 'http://127.0.0.1:12001/v1',
+        'model': 'qwen', 'contextTokens': 32768, 'maxOutputTokens': 4096, 'supportsTools': True,
+        'supportsVision': False, 'reasoning': False, 'credentialRef': None, 'enabled': True}]
     saved['roles']['leader'] = 'leader'
     atomic_json(directory / 'provider-config.json', saved)
     b.pending = lambda: json.loads((b.state / 'transition.json').read_text()) if (b.state / 'transition.json').exists() else None
@@ -71,7 +71,7 @@ def integrated(lifecycle, monkeypatch):
         return {'phase': self.phase, 'revision': self.nrev, 'streams': self.streams}
 
     def worker(self, operation, **kwargs):
-        common = dict(state_dir=str(b.home / '.openclaw/.ods-access-mode'))
+        common = {'state_dir': str(b.home / '.openclaw/.ods-access-mode')}
         if operation == 'provider-status': return owner.provider_status(str(b.config), **common)
         common.update(transaction_id=kwargs['transaction_id'], expected_config_sha256=kwargs['config_hash'],
             validate_config=lambda path: bool(json.loads(Path(path).read_bytes())),

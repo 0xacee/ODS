@@ -15,7 +15,12 @@ from pixel_access_bridge import AccessError, atomic_json, digest
 from pixel_access_protocol import HEX
 from pixel_settings import coordinator as settings
 
-from .activation_config import _validate_plan, plan_activation, restore_activation, update_activation
+from .activation_config import (
+    _validate_plan,
+    plan_activation,
+    restore_activation,
+    update_activation,
+)
 from .config import normalize_config
 from .runtime_custody import RuntimeCustody
 from .service_activation import activate, definition, stop_before_owner_change, verify
@@ -145,7 +150,7 @@ def _start(bridge, request, snapshot, directory, runtime, environment):
     else:
         if not saved['enabled']:
             raise AccessError('provider-policy-disabled')
-        options = dict(revision=saved['revision'], allow_cloud=saved['policy']['allowCloud'], activation_id=str(uuid.uuid4()))
+        options = {'revision': saved['revision'], 'allow_cloud': saved['policy']['allowCloud'], 'activation_id': str(uuid.uuid4())}
         next_plan = (update_activation(config, managed['plan'], **options) if managed else plan_activation(config, **options))
         after = next_plan['document']
         deployment_document, policy, check = runtime.deployment(next_plan['fields']['binding']['after'], directory)

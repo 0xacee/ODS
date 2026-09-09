@@ -4,11 +4,11 @@ These tests cannot establish root custody, actual SDK behavior or installation.
 The separate disposable native/systemd qualification supplies those observations.
 """
 import copy
-from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from types import MethodType
 
 import pytest
@@ -25,7 +25,7 @@ from test_service_environment import BINDING, arm, participant  # noqa: F401
 
 
 @pytest.fixture
-def lifecycle(participant):
+def lifecycle(participant):  # noqa: F811 - imported pytest fixture
     p, b = participant, participant.bridge
     config = {'agents': {'list': [{'id': 'pixel', 'model': 'local/model'}]},
               'plugins': {'entries': {'pixel-ods': {'enabled': True, 'hooks': {'allowConversationAccess': True}}}}}
