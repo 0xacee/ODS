@@ -3,9 +3,9 @@ import copy
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-import sys
 
 import pytest
 
@@ -75,10 +75,10 @@ def participant(tmp_path, monkeypatch):
 
 def arm(value, **overrides):
     b = value.bridge
-    options = dict(before_sha=hashlib.sha256(b.before).hexdigest(), after_sha=hashlib.sha256(b.after).hexdigest(),
-                   before_binding=None, after_binding=copy.deepcopy(BINDING),
-                   deployment_document=deployment(BINDING, '/opt/ods/source', '/usr/bin/python3', '/home/ods/providers', True),
-                   policy=required_policy())
+    options = {'before_sha': hashlib.sha256(b.before).hexdigest(), 'after_sha': hashlib.sha256(b.after).hexdigest(),
+               'before_binding': None, 'after_binding': copy.deepcopy(BINDING),
+               'deployment_document': deployment(BINDING, '/opt/ods/source', '/usr/bin/python3', '/home/ods/providers', True),
+               'policy': required_policy()}
     options.update(overrides)
     return value.prepare(b.record, **options)
 
