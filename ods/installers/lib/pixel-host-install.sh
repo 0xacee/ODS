@@ -846,9 +846,28 @@ models = provider_value.get("models", []) if isinstance(provider_value, dict) el
 agents = live.get("agents", {}).get("list", [])
 agent = [item for item in agents if isinstance(item, dict) and item.get("id") == agent_id]
 extensions = contract.get("gatewayExtensions")
+if not isinstance(extensions, list) or not 1 <= len(extensions) <= 32:
+    raise SystemExit("invalid ODS Pixel gateway extensions")
+extension_ids = set()
+for extension in extensions:
+    extension_id = extension.get("id") if isinstance(extension, dict) else None
+    if (not isinstance(extension_id, str)
+            or not re.fullmatch(r"[a-z][a-z0-9-]{1,62}", extension_id)
+            or extension_id in extension_ids):
+        raise SystemExit("invalid or duplicate ODS Pixel gateway extension")
+    extension_ids.add(extension_id)
+    # Additional extensions retain Pixel's path/digest binding. Configure and
+    # render verify the actual contents; model reconciliation preserves them.
+    if extension_id != "pixel-ods":
+        location, digest = extension.get("path"), extension.get("sha256")
+        if (not isinstance(location, str) or not pathlib.Path(location).is_absolute()
+                or pathlib.Path(location) == pathlib.Path("/")
+                or ".." in pathlib.Path(location).parts
+                or any(ord(c) < 32 or ord(c) == 127 for c in location)
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise SystemExit("unbound ODS Pixel gateway extension")
 if (contract.get("deploymentName") != "ods-default" or agent_id != "pixel"
-        or not isinstance(extensions, list) or len(extensions) != 1
-        or extensions[0].get("id") != "pixel-ods"
+        or "pixel-ods" not in extension_ids
         or len(models) != 1 or len(agent) != 1
         or not isinstance(models[0].get("id"), str) or not isinstance(models[0].get("name"), str)
         or provider_value.get("api") != "openai-completions"
@@ -924,14 +943,31 @@ if (not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode)
     raise SystemExit("unsafe ODS Pixel onboarding directory")
 value = json.loads(path.read_text(encoding="utf-8"))
 extensions = value.get("gatewayExtensions")
+if not isinstance(extensions, list) or not 1 <= len(extensions) <= 32:
+    raise SystemExit("invalid ODS Pixel gateway extensions")
+extension_ids = set()
+for extension in extensions:
+    extension_id = extension.get("id") if isinstance(extension, dict) else None
+    if (not isinstance(extension_id, str)
+            or not re.fullmatch(r"[a-z][a-z0-9-]{1,62}", extension_id)
+            or extension_id in extension_ids):
+        raise SystemExit("invalid or duplicate ODS Pixel gateway extension")
+    extension_ids.add(extension_id)
+    if extension_id != "pixel-ods":
+        location, digest = extension.get("path"), extension.get("sha256")
+        if (not isinstance(location, str) or not pathlib.Path(location).is_absolute()
+                or pathlib.Path(location) == pathlib.Path("/")
+                or ".." in pathlib.Path(location).parts
+                or any(ord(c) < 32 or ord(c) == 127 for c in location)
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise SystemExit("unbound ODS Pixel gateway extension")
 provider = value.get("modelProvider")
 model_id = value.get("modelId")
 model_name = value.get("modelName")
 base_url = value.get("modelBaseUrl")
 api_key = value.get("modelApiKey")
 if (value.get("deploymentName") != "ods-default" or value.get("agentId") != "pixel"
-        or not isinstance(extensions, list) or len(extensions) != 1
-        or extensions[0].get("id") != "pixel-ods"):
+        or "pixel-ods" not in extension_ids):
     raise SystemExit("onboarding contract is outside the ODS-managed Pixel boundary")
 if provider == "ods-local":
     if (api_key != "local-no-auth" or base_url != "http://127.0.0.1:11434/v1"
@@ -3444,6 +3480,41 @@ if (not gateway_port.isdigit() or not 1 <= int(gateway_port) <= 65535
     raise SystemExit("invalid ODS Pixel gateway route")
 home = pathlib.Path(home)
 path = pathlib.Path(out)
+# A source/plugin upgrade is not a request to reset the owner's output budget.
+# Preserve it for the same model route and context; explicit model settings are
+# still applied by _ods_pixel_update_onboarding_model.
+try:
+    previous_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    if path.is_symlink():
+        raise SystemExit("ODS Pixel onboarding contract cannot be a symlink")
+else:
+    with os.fdopen(previous_fd, "rb") as previous_file:
+        info = os.fstat(previous_file.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.getuid() or info.st_mode & 0o077
+                or info.st_size > 2 * 1024 * 1024):
+            raise SystemExit("unsafe existing ODS Pixel onboarding contract")
+        previous_bytes = previous_file.read(2 * 1024 * 1024 + 1)
+    if len(previous_bytes) > 2 * 1024 * 1024:
+        raise SystemExit("oversized existing ODS Pixel onboarding contract")
+    previous = json.loads(previous_bytes)
+    if (not isinstance(previous, dict)
+            or previous.get("deploymentName") != "ods-default" or previous.get("agentId") != "pixel"
+            or type(previous.get("modelContextWindow")) is not int
+            or type(previous.get("modelMaxTokens")) is not int
+            or type(previous.get("modelReasoning")) is not bool
+            or not 4096 <= previous["modelContextWindow"] <= 10_000_000
+            or not 1 <= previous["modelMaxTokens"] <= previous["modelContextWindow"]):
+        raise SystemExit("invalid existing ODS Pixel model contract")
+    same_model = {
+        "modelProvider": "ods-gateway", "modelId": gateway_alias,
+        "modelName": f"ODS {gateway_label} ({model})",
+        "modelBaseUrl": f"http://127.0.0.1:{gateway_port}/v1",
+        "modelContextWindow": int(context), "modelReasoning": reasoning == "true",
+    }
+    if all(previous.get(key) == value for key, value in same_model.items()):
+        max_tokens = str(previous["modelMaxTokens"])
 payload = {
     "deploymentProfile": "prepared",
     "capabilityProfile": "engineering-operator",
