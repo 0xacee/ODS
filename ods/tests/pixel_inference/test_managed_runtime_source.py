@@ -181,3 +181,19 @@ def test_checked_in_lock_binds_both_patches():
     lock, _, patches = prepare.load_lock(SOURCE)
     assert len(patches) == 2
     assert lock["sourceTree"] == "dfba3c7a7c74ec7e52774d7f4a8ef376b8536ca7"
+
+
+@pytest.mark.parametrize("target", ["../anchor/../escaped", "link"])
+def test_chained_escape_or_cycle_rejected_before_extraction(tmp_path, target):
+    archive = tmp_path / "source.tar"
+    with tarfile.open(archive, "w") as output:
+        for name, link_target in [("anchor", "."), ("dir/link", target)]:
+            link = tarfile.TarInfo(name)
+            link.type = tarfile.SYMTYPE
+            link.linkname = link_target
+            output.addfile(link)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    with pytest.raises(ValueError, match="source-link"):
+        prepare.extract_source(archive, destination)
+    assert list(destination.iterdir()) == []

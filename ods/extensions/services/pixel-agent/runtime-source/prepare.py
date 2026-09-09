@@ -63,12 +63,34 @@ def load_lock(directory):
     return lock, hashlib.sha256(raw).hexdigest(), patches
 
 
+def validate_link_chains(links):
+    for link in links:
+        pending = list(link.parts)
+        resolved = []
+        traversals = 0
+        while pending:
+            part = pending.pop(0)
+            if part == "..":
+                if not resolved:
+                    raise ValueError("escaping-source-link-chain")
+                resolved.pop()
+            else:
+                resolved.append(part)
+            key = PurePosixPath(*resolved)
+            if key in links:
+                traversals += 1
+                if traversals > 40:
+                    raise ValueError("cyclic-or-excessive-source-link-chain")
+                resolved.pop()
+                pending = list(links[key].parts) + pending
+
+
 def extract_source(archive_path, destination):
     """Reject special files and escaping links before extracting any content."""
     with tarfile.open(archive_path) as archive:
         members = archive.getmembers()
         names = set()
-        links = set()
+        links = {}
         for member in members:
             path = PurePosixPath(member.name)
             if (
@@ -91,7 +113,10 @@ def extract_source(archive_path, destination):
                     depth += -1 if part == ".." else 1
                     if depth < 0:
                         raise ValueError("escaping-source-link")
-                links.add(path)
+                links[path] = target
+        # Lexically internal links can still escape through another link and
+        # a later '..'. Resolve the archive's link graph before writing files.
+        validate_link_chains(links)
         for member in members:
             path = PurePosixPath(member.name)
             if any(parent in links for parent in path.parents):
