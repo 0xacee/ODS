@@ -10471,7 +10471,7 @@ test("classifies a requested website demo as a verified workspace preview", () =
     "Create a visual showcase of your capabilities.",
     "Build a high-quality responsive site for a fictional observatory with local CSS and JavaScript.",
     "Create an interactive voxel landscape I can explore.",
-    "Make an intricate animated SVG illustration.",
+    "Make an intricate animated SVG illustration and publish its browser preview.",
     "Create a small browser task app.",
     "I want a polished web dashboard.",
     "Create a beautiful signup-flow prototype with useful validation; do not submit anywhere.",
@@ -10693,6 +10693,35 @@ test("publishes an existing app without treating keep-unchanged instructions as 
   }), { params: previewParams }, "displaying an unchanged app must not require a fresh write");
 });
 
+test("SVG output alone does not require HTML publication or replace a verified file result", () => {
+  const prompt = "Write a tiny valid SVG of a yellow sun on a blue background to release-2654/sun.svg, read the file back to check it, and tell me the saved path.";
+  for (const request of [prompt, "Make an intricate animated SVG illustration.", "Make a detailed SVG illustration of a floating greenhouse.", "Save an animated SVG to artwork/orbit.svg."]) {
+    assert.equal(userMessageRequestsWorkspacePreview([], request), false, request);
+  }
+  for (const request of [
+    "Inspect the SVG at https://example.com/image.svg and open it in the browser.",
+    "Explain SVG animation and show its XML syntax.",
+    "Create an SVG. Open https://example.com in the browser.",
+    "Create an SVG and do not show it in the browser.",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], request), false, request);
+  for (const request of [
+    "Create an SVG and publish it in the preview.",
+    "Show me the saved SVG in the browser.",
+    "Build a website containing SVG at sun/index.html.",
+    "Build a browser game using SVG.",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], request), true, request);
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
+  const params = { path: "release-2654/sun.svg", content: "<svg xmlns='http://www.w3.org/2000/svg'/>" };
+  call(guard, "write", { event: { params } });
+  afterCall(guard, "write", { event: { params, result: { content: [{ type: "text", text: "Successfully wrote file" }] } } });
+  const readParams = { path: params.path };
+  call(guard, "read", { event: { params: readParams } });
+  afterCall(guard, "read", { event: { params: readParams, result: { content: [{ type: "text", text: params.content }] } } });
+  assert.equal(guard.beforeAgentFinalize({}, { agentId: "pixel", runId: "run-1" }), undefined);
+  assert.notEqual(guard.deliveryVerificationForRun("run-1")?.status, "failed");
+});
+
 test("keeps every visual category on the model-authored write path", () => {
   for (const prompt of [
     "Create an interactive SVG artwork called Tidal Atlas from scratch. Keep it self-contained, verify it, and publish it in the preview.",
@@ -10752,10 +10781,10 @@ test("new interactive objects do not require catalog nouns or a prior preview", 
   ]) assert.equal(userMessageRequestsWorkspacePreview([], prompt), false, prompt);
 });
 
-test("recognizes SVG artwork and explicit preview publication without widening nonvisual intent", () => {
+test("recognizes explicit SVG preview publication without widening nonvisual intent", () => {
   for (const prompt of [
     "Create a novel interactive SVG artwork called Orbital Garden from scratch and publish it in the preview.",
-    "Make a detailed SVG illustration of a floating greenhouse.",
+    "Make a detailed SVG illustration of a floating greenhouse and show it in the browser.",
     "Publish the existing preview.",
     "Serve this in the live preview.",
   ]) {

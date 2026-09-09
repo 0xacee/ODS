@@ -5106,7 +5106,8 @@ function hasExplicitWorkspacePreviewDirective(text) {
   return [...commands].some((match) => {
     const target = match[2].split(/\.(?=\s|$)|\b(?:and|then|but|however|instead)\b/i)[0];
     if (hasWorkspaceHtmlTarget(target)) return true;
-    const visualTarget = /\b(?:website|site|web\s*page|frontend|dashboard|preview|animation|illustration|scene|game|chart|diagram|svg)\b/i.test(target);
+    const visualTargetPattern = /\b(?:website|site|web\s*page|frontend|dashboard|preview|animation|illustration|scene|game|chart|diagram|svg)\b/i;
+    const visualTarget = visualTargetPattern.test(target);
     // Open/show/view also describe ordinary navigation. Require a local
     // artifact or preview binding before imposing workspace publication.
     if (visualTarget && (!/^(?:open|show|view)$/i.test(match[1]) ||
@@ -5117,7 +5118,10 @@ function hasExplicitWorkspacePreviewDirective(text) {
     const precedingClause = text.slice(0, match.index)
       .split(/[!?;\n]|\.(?=\s|$)/).at(-1);
     return /^(?:it|this|that)(?:\s|[.!?;]|$)/i.test(target.trim()) &&
-      hasWorkspaceHtmlTarget(precedingClause);
+      (hasWorkspaceHtmlTarget(precedingClause) ||
+        (/\b(?:browser|preview)\b/i.test(target) &&
+          visualTargetPattern.test(precedingClause) &&
+          /\b(?:build|create|design|generate|make|write)\b/i.test(precedingClause)));
   });
 }
 
@@ -5205,9 +5209,11 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
     .split(/[.!?;\n]+|\b(?:and|then|but|however|instead)\s+(?=(?:build|create|develop|design|generate|implement|make|write|add|change|continue|edit|improve|keep|modify|patch|refresh|remove|republish|tweak|update|work)\b)/i)
     .some((clause) => /\b(?:apps?|applications?)\b/i.test(clause) &&
       (buildAction.test(clause) || reviseAction.test(clause)));
+  // An output format alone does not require an HTML wrapper. SVG files may
+  // be delivered directly; explicit browser publication still requires proof.
   const browserVisual =
     /\b(?:artworks?|animated\s+(?:art|illustrations?|scenes?)|interactive\s+(?:art|charts?|diagrams?))\b/i.test(actionText) ||
-    /\b(?:svgs?|breakout|brick[- ]?breakers?|browser[- ]?games?|canvas\s+(?:demos?|games?)|interactive\s+(?:demos?|experiences?|visuali[sz]ations?)|task\s+boards?|to-?do\s+(?:apps?|boards?|lists?)|video\s*games?|videogames?|visual\s+(?:demos?|showcases?)|visuali[sz]ations?|voxel(?:[- ](?:based|styles?))?|webgl\s+(?:demos?|scenes?))\b/i.test(actionText) ||
+    /\b(?:breakout|brick[- ]?breakers?|browser[- ]?games?|canvas\s+(?:demos?|games?)|interactive\s+(?:demos?|experiences?|visuali[sz]ations?)|task\s+boards?|to-?do\s+(?:apps?|boards?|lists?)|video\s*games?|videogames?|visual\s+(?:demos?|showcases?)|visuali[sz]ations?|voxel(?:[- ](?:based|styles?))?|webgl\s+(?:demos?|scenes?))\b/i.test(actionText) ||
     /\b(?:arcade|board|card|puzzle|racing|rhythm|strategy|word)?\s*games?\b/i.test(actionText);
   const explicitBrowser =
     website || /\b(?:browser|canvas|html|svg|webgl)\b/i.test(actionText);
