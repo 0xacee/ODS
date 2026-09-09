@@ -16,7 +16,9 @@ import stat
 directory = Path(__file__).resolve().parent
 for path in (directory, *directory.parents, *(directory / name for name in (
         "pixel_access_mode.py", "access_mode_config.py", "settings_transaction.py", "pixel_access_protocol.py",
-        "pixel_settings", "pixel_settings/__init__.py", "pixel_settings/contract.py", "pixel_settings/projection.py"))):
+        "pixel_settings", "pixel_settings/__init__.py", "pixel_settings/contract.py", "pixel_settings/projection.py",
+        "provider_transaction.py", "pixel_provider", "pixel_provider/__init__.py", "pixel_provider/store.py",
+        "pixel_provider/activation_config.py"))):
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
         raise RuntimeError("controller program custody unavailable")
@@ -24,6 +26,8 @@ sys.path.insert(0, str(directory))
 import pixel_access_mode as controller
 import pixel_access_protocol as protocol
 import settings_transaction
+import provider_transaction
+from pixel_provider.store import StoreError
 from pixel_settings.contract import SettingsError
 
 
@@ -61,6 +65,18 @@ def main():
             return False
 
     try:
+        if request["operation"].startswith("provider-"):
+            if request["operation"] == "provider-status":
+                result = provider_transaction.provider_status(path, state_dir=state_dir)
+            else:
+                kwargs = dict(state_dir=state_dir, validate_config=validate,
+                    expected_config_sha256=request["config_sha256"], transaction_id=request["transaction_id"],
+                    check_no_active_run=lambda: hook("busy"), activate=lambda: hook("provider-activate"))
+                result = (provider_transaction.change_provider(path, binding=request["binding"], **kwargs)
+                          if request["operation"] == "provider-change"
+                          else provider_transaction.recover_provider(path, **kwargs))
+            emit({"result": result})
+            return
         if request["operation"].startswith("settings-"):
             if request["operation"] == "settings-status":
                 result = settings_transaction.settings_status(path, state_dir=state_dir)
@@ -88,7 +104,7 @@ def main():
         emit({"result": controller.get_status(path, state_dir=state_dir)})
     except controller.AccessModeError as error:
         emit({"error": error.code})
-    except (SettingsError, protocol.ProtocolError) as error:
+    except (SettingsError, StoreError, protocol.ProtocolError) as error:
         emit({"error": str(error)})
     except Exception:
         emit({"error": "owner-operation-failed"})

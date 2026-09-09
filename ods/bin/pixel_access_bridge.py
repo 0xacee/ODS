@@ -313,7 +313,8 @@ class SystemdAccessBridge:
         return self.http("http://%s:9595" % address, "/v1/transition" + ("/" + operation if operation else ""), self.edge_key, payload)
 
     def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None,
-               transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None):
+               transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None,
+               binding=None, activate_provider=None):
         script = Path(__file__).resolve().parent / "access_mode_worker.py"
         # This launcher still runs as root. Never search the owner's validator
         # PATH for it; that PATH is intended only for the unprivileged worker.
@@ -336,10 +337,12 @@ class SystemdAccessBridge:
         env = {"HOME": str(self.home), "USER": self.owner.pw_name, "LOGNAME": self.owner.pw_name,
                "PATH": str(Path(self.binary).parent) + ":/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
         request = dict(operation=operation, openclaw=self.binary, config_sha256=config_hash, confirmed=confirmed)
-        if operation in ("settings-apply", "settings-recover"):
+        if operation in ("settings-apply", "settings-recover", "provider-change", "provider-recover"):
             request["transaction_id"] = transaction_id
         if operation == "settings-apply":
             request.update(settings_revision=settings_revision, preferences=preferences, capabilities=capabilities)
+        if operation == "provider-change":
+            request["binding"] = binding
         try:
             protocol.request(request)
             encoded = json.dumps(request, allow_nan=False) + "\n"
@@ -389,7 +392,8 @@ class SystemdAccessBridge:
                     if set(value) != {"hook"}: raise AccessError("owner-protocol-failed")
                     if type(value["hook"]) is not str or value["hook"] not in protocol.HOOKS.get(operation, ()):
                         raise AccessError("owner-protocol-failed")
-                    callback = {"busy": busy, "restart": restart, "settings-activate": activate_settings}.get(value["hook"])
+                    callback = {"busy": busy, "restart": restart, "settings-activate": activate_settings,
+                                "provider-activate": activate_provider}.get(value["hook"])
                     if callback is None: raise AccessError("owner-protocol-failed")
                     remaining(deadline - time.monotonic())
                     answer = callback()

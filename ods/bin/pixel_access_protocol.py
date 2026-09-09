@@ -3,16 +3,20 @@ import json
 import math
 from pathlib import PurePosixPath
 import re
+import uuid
 
 MAX_REQUEST = 16384
 MAX_REPLY = 8192
 BASE = {"operation", "openclaw", "config_sha256", "confirmed"}
 KEYS = {"status": BASE, "full-access": BASE, "sandboxed": BASE, "settings-status": BASE,
         "settings-apply": BASE | {"transaction_id", "settings_revision", "preferences", "capabilities"},
-        "settings-recover": BASE | {"transaction_id"}}
+        "settings-recover": BASE | {"transaction_id"}, "provider-status": BASE,
+        "provider-change": BASE | {"transaction_id", "binding"},
+        "provider-recover": BASE | {"transaction_id"}}
 HOOKS = {"status": (), "full-access": ("busy", "restart"), "sandboxed": ("busy", "restart"),
          "settings-status": (), "settings-apply": ("busy", "settings-activate"),
-         "settings-recover": ("busy", "settings-activate")}
+         "settings-recover": ("busy", "settings-activate"), "provider-status": (),
+         "provider-change": ("busy", "provider-activate"), "provider-recover": ("busy", "provider-activate")}
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 
 
@@ -79,20 +83,37 @@ def request(value):
             raise ProtocolError("owner-protocol-failed")
     elif type(value["config_sha256"]) is not str or not HEX.fullmatch(value["config_sha256"]):
         raise ProtocolError("owner-protocol-failed")
-    if operation in ("settings-apply", "settings-recover"):
+    if operation in ("settings-apply", "settings-recover", "provider-change", "provider-recover"):
         if type(value["transaction_id"]) is not str or not HEX.fullmatch(value["transaction_id"]):
             raise ProtocolError("owner-protocol-failed")
     if operation == "settings-apply" and (
             type(value["settings_revision"]) is not int or not 0 <= value["settings_revision"] <= 2**53 - 1
             or type(value["preferences"]) is not dict or type(value["capabilities"]) is not dict):
         raise ProtocolError("owner-protocol-failed")
+    if operation == "provider-change":
+        provider_binding(value["binding"])
     return value
+
+
+def provider_binding(value):
+    if value is None:
+        return
+    if (type(value) is not dict or set(value) != {"schemaVersion", "activationId", "revision", "allowCloud"}
+            or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+            or type(value["revision"]) is not int or not 0 <= value["revision"] < 2**53
+            or type(value["allowCloud"]) is not bool or type(value["activationId"]) is not str):
+        raise ProtocolError("owner-protocol-failed")
+    try:
+        if str(uuid.UUID(value["activationId"])) != value["activationId"]:
+            raise ValueError()
+    except ValueError:
+        raise ProtocolError("owner-protocol-failed") from None
 
 
 def hook_reply(operation, name, value):
     if name not in HOOKS.get(operation, ()):
         raise ProtocolError("owner-protocol-failed")
-    if name == "settings-activate":
+    if name in ("settings-activate", "provider-activate"):
         valid = type(value) is str and value in ("verified", "rejected", "unavailable")
     else:
         valid = type(value) is bool
@@ -104,6 +125,8 @@ def hook_reply(operation, name, value):
 def result(operation, value):
     if type(value) is not dict:
         raise ProtocolError("owner-protocol-failed")
+    if operation.startswith("provider-"):
+        return provider_result(operation, value)
     if not operation.startswith("settings-"):
         return value  # Existing access status contract is interpreted by inspect.
     def revision(item):
@@ -128,6 +151,31 @@ def result(operation, value):
     else:
         valid = (valid and operation == "settings-apply" and value.get("status") == "runtime-verified"
                  and set(value) == {"status", "settingsRevision", "configSha256"} and revision(value["settingsRevision"]))
+    if not valid:
+        raise ProtocolError("owner-protocol-failed")
+    return value
+
+
+def provider_result(operation, value):
+    def checksum(item):
+        return type(item) is str and HEX.fullmatch(item) is not None
+    provider_binding(value.get("binding"))
+    valid = checksum(value.get("configSha256"))
+    if operation == "provider-status":
+        valid = (valid and set(value) == {"configSha256", "binding", "pending", "completion", "runtimeVerified"}
+                 and type(value["pending"]) is bool and value["runtimeVerified"] is False)
+        completed = value.get("completion")
+        if completed is not None:
+            valid = (valid and not value["pending"] and type(completed) is dict
+                     and set(completed) == {"transactionId", "binding", "outcome", "configSha256"}
+                     and checksum(completed["transactionId"]) and checksum(completed["configSha256"])
+                     and completed["outcome"] in ("applied", "rolled-back"))
+            if valid:
+                provider_binding(completed["binding"])
+    else:
+        valid = (valid and set(value) == {"status", "binding", "configSha256"}
+                 and (value.get("status") == "rolled-back" or
+                      operation == "provider-change" and value.get("status") == "registration-verified"))
     if not valid:
         raise ProtocolError("owner-protocol-failed")
     return value

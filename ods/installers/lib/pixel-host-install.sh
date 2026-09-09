@@ -2208,7 +2208,7 @@ def write(path, content, mode):
         if os.path.exists(temporary): os.unlink(temporary)
 
 host = source / 'extensions/services/pixel-agent/host'
-for name in ('access_mode_server.py', 'access_mode_worker.py', 'pixel_access_mode.py', 'access_mode_config.py', 'settings_transaction.py'):
+for name in ('access_mode_server.py', 'access_mode_worker.py', 'pixel_access_mode.py', 'access_mode_config.py', 'settings_transaction.py', 'provider_transaction.py'):
     write(target / name, (host / name).read_bytes(), 0o644)
 write(target / 'pixel_access_bridge.py', (source / 'bin/pixel_access_bridge.py').read_bytes(), 0o644)
 write(target / 'pixel_access_protocol.py', (source / 'bin/pixel_access_protocol.py').read_bytes(), 0o644)
@@ -2224,7 +2224,7 @@ provider_package.mkdir(mode=0o755, exist_ok=True)
 info = provider_package.lstat()
 if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
     raise SystemExit("Pixel provider program directory is not root protected")
-for name in ('__init__.py', 'config.py'):
+for name in ('__init__.py', 'config.py', 'store.py', 'activation_config.py'):
     write(provider_package / name, (source / 'bin/pixel_provider' / name).read_bytes(), 0o644)
 config_dir = pathlib.Path('/etc/ods')
 config_dir.mkdir(mode=0o755, exist_ok=True)

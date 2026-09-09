@@ -17,10 +17,12 @@ import pixel_access_protocol as protocol
 
 def request(operation="settings-apply", **changes):
     value = dict(operation=operation, openclaw="/usr/bin/openclaw", config_sha256="a" * 64, confirmed=False)
-    if operation in ("settings-apply", "settings-recover"):
+    if operation in ("settings-apply", "settings-recover", "provider-change", "provider-recover"):
         value["transaction_id"] = "b" * 64
     if operation == "settings-apply":
         value.update(settings_revision=3, preferences={}, capabilities={})
+    if operation == "provider-change":
+        value['binding'] = None
     if operation.endswith("status"):
         value["config_sha256"] = None
     value.update(changes)
@@ -219,7 +221,62 @@ def test_installer_and_runtime_custody_lists_include_every_new_dependency():
     installer = (ROOT / "installers/lib/pixel-host-install.sh").read_text()
     server = (ROOT / "extensions/services/pixel-agent/host/access_mode_server.py").read_text()
     worker = (ROOT / "extensions/services/pixel-agent/host/access_mode_worker.py").read_text()
-    for name in ("settings_transaction.py", "pixel_access_protocol.py", "contract.py", "projection.py"):
+    for name in ("settings_transaction.py", "pixel_access_protocol.py", "contract.py", "projection.py",
+                 "provider_transaction.py", "activation_config.py", "store.py"):
         assert name in installer and name in server and name in worker
     assert "import pixel_access_protocol as protocol" in worker
     assert "protocol.hook_reply" in worker and "settings_transaction.apply_settings" in worker
+
+
+PROVIDER_BINDING = {'schemaVersion': 1, 'activationId': '00000000-0000-4000-8000-000000000001',
+                    'revision': 3, 'allowCloud': False}
+
+
+@pytest.mark.parametrize('binding', [True, {}, {'path': '/private'},
+    dict(PROVIDER_BINDING, schemaVersion=True), dict(PROVIDER_BINDING, revision=True),
+    dict(PROVIDER_BINDING, revision=2**53), dict(PROVIDER_BINDING, allowCloud='false'),
+    dict(PROVIDER_BINDING, activationId='bad'), dict(PROVIDER_BINDING, extra='private')])
+def test_provider_binding_rejects_ambiguous_or_expansive_frames(binding):
+    with pytest.raises(protocol.ProtocolError):
+        protocol.request(request('provider-change', binding=binding))
+
+
+def test_actual_provider_pipe_preserves_binding_and_owned_callback(pipe_bridge):
+    adapter, launch = pipe_bridge
+    launch('''import json,sys
+request=json.loads(sys.stdin.readline())
+assert request['operation']=='provider-change'
+assert set(request)=={'operation','openclaw','config_sha256','confirmed','transaction_id','binding'}
+print(json.dumps({'hook':'provider-activate'}),flush=True)
+assert json.loads(sys.stdin.readline())=='verified'
+print(json.dumps({'result':{'status':'registration-verified','binding':request['binding'],'configSha256':'c'*64}}),flush=True)
+''')
+    called = []
+    def activate():
+        called.append('provider-activate')
+        return 'verified'
+    result = adapter.worker('provider-change', config_hash='a'*64, transaction_id='b'*64,
+        binding=PROVIDER_BINDING, activate_provider=activate)
+    assert result['binding'] == PROVIDER_BINDING and called == ['provider-activate']
+
+
+@pytest.mark.parametrize('frame', [
+    {'hook': 'settings-activate'}, {'hook': 'restart'},
+    {'result': {'status': 'registration-verified', 'binding': None, 'configSha256': 'c'*64, 'runtimeVerified': True}},
+    {'result': {'status': 'registration-verified', 'configSha256': 'c'*64}},
+])
+def test_provider_pipe_refuses_unowned_hooks_and_fabricated_runtime_proof(pipe_bridge, frame):
+    adapter, launch = pipe_bridge
+    launch('import sys; sys.stdin.readline(); print(' + repr(json.dumps(frame)) + ',flush=True)')
+    with pytest.raises(bridge.AccessError, match='owner-protocol-failed'):
+        adapter.worker('provider-change', config_hash='a'*64, transaction_id='b'*64,
+            binding=PROVIDER_BINDING, activate_settings=lambda: pytest.fail('wrong hook'))
+
+
+def test_provider_status_is_not_runtime_or_transport_verification():
+    value = dict(configSha256='c'*64, binding=PROVIDER_BINDING, pending=False, completion=None, runtimeVerified=False)
+    assert protocol.result('provider-status', value) == value
+    with pytest.raises(protocol.ProtocolError):
+        protocol.result('provider-status', dict(value, runtimeVerified=True))
+    with pytest.raises(protocol.ProtocolError):
+        protocol.result('provider-recover', dict(status='registration-verified', binding=None, configSha256='c'*64))
