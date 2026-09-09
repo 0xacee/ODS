@@ -1,10 +1,41 @@
+import { useEffect, useRef, useState } from 'react'
 import usePixelSettingsRuntime from './usePixelSettingsRuntime'
+
+function SettingsConfirmation({ confirmation, onCancel, onConfirm }) {
+  const cancel = useRef(null)
+  useEffect(() => {
+    cancel.current?.focus()
+    return () => {
+      if (confirmation.trigger.isConnected && !confirmation.trigger.disabled) confirmation.trigger.focus()
+    }
+  }, [confirmation])
+  const applying = confirmation.operation === 'apply'
+  return <div role="dialog" aria-labelledby="pixel-settings-confirm-title" aria-describedby="pixel-settings-confirm-description"
+    className="rounded-lg border border-theme-border p-4 space-y-3"
+    onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onCancel() } }}>
+    <h4 id="pixel-settings-confirm-title" className="font-medium">{applying ? 'Confirm saved preferences' : 'Confirm settings recovery'}</h4>
+    <p id="pixel-settings-confirm-description" className="text-sm">{applying
+      ? `Apply saved revision ${confirmation.savedRevision}? Pixel will restart only when idle. Existing access mode will be preserved.`
+      : 'Recover this interrupted change? The controller will finish a verified change or restore the previous configuration; Pixel may restart.'}</p>
+    <div className="flex flex-wrap gap-3">
+      <button type="button" ref={cancel} onClick={onCancel} className="rounded border border-theme-border px-3 py-2 text-sm">Cancel</button>
+      <button type="button" onClick={onConfirm} className="rounded border border-theme-border px-3 py-2 text-sm">{applying ? 'Confirm and apply' : 'Confirm and recover'}</button>
+    </div>
+  </div>
+}
 
 export default function PixelSettingsRuntime({ savedRevision, saving, blocked, onBusyChange }) {
   const { runtime, running, stale, error, notice, stage, inspect, change } = usePixelSettingsRuntime({ savedRevision, saving, blocked, onBusyChange })
+  const [confirmation, setConfirmation] = useState(null)
+  const consent = useRef(null)
   const canApply = !running && !saving && !blocked && !stale &&
     ['not-applied', 'saved-changes', 'restored'].includes(runtime?.status) && runtime.settingsRevision === savedRevision
   const canRecover = !running && !saving && !stale && runtime?.status === 'pending'
+  const confirmationValid = confirmation && confirmation.savedRevision === savedRevision &&
+    confirmation.runtime === runtime && (confirmation.operation === 'apply' ? canApply : canRecover)
+  useEffect(() => {
+    if (confirmation && !confirmationValid) { consent.current = null; setConfirmation(null) }
+  }, [confirmation, confirmationValid])
   const caps = !stale && runtime?.capabilities
   const mismatch = runtime && runtime.status !== 'unavailable' && runtime.status !== 'pending' &&
     savedRevision !== null && runtime.settingsRevision !== savedRevision
@@ -14,13 +45,21 @@ export default function PixelSettingsRuntime({ savedRevision, saving, blocked, o
     applied: `Saved revision ${runtime?.settingsRevision} is applied and verified.`,
     'saved-changes': `Runtime revision ${runtime?.appliedRevision} is verified; saved revision ${runtime?.settingsRevision} is not applied.`,
     pending: 'A settings change is incomplete. Inspect and recover it before applying another change.',
-    unavailable: 'Runtime control is unavailable on this installation. Saving preferences is still available.',
+    unavailable: runtime?.reason === 'settings-store-not-initialized'
+      ? 'Save Pixel preferences once to initialize runtime controls. Saving does not apply them.'
+      : 'Runtime control is unavailable on this installation. Saving preferences is still available.',
   }
-  const confirmChange = operation => {
-    const message = operation === 'apply'
-      ? `Apply saved revision ${savedRevision}? Pixel will restart only when idle. Existing access mode will be preserved.`
-      : 'Recover this interrupted change? The controller will finish a verified change or restore the previous configuration; Pixel may restart.'
-    if (window.confirm(message)) void change(operation)
+  const confirmChange = (operation, trigger) => {
+    if (consent.current || !(operation === 'apply' ? canApply : canRecover)) return
+    const next = { operation, savedRevision, runtime, trigger }
+    consent.current = next
+    setConfirmation(next)
+  }
+  const cancelConfirmation = () => { consent.current = null; setConfirmation(null) }
+  const submitConfirmation = () => {
+    if (!confirmationValid || consent.current !== confirmation) return
+    cancelConfirmation()
+    void change(confirmation.operation)
   }
   return (
     <section aria-labelledby="pixel-settings-runtime-status-title" className="space-y-3 min-w-0 rounded-lg border border-theme-border p-4">
@@ -48,9 +87,10 @@ export default function PixelSettingsRuntime({ savedRevision, saving, blocked, o
       )}
       <div className="flex flex-wrap gap-2">
         <button className="rounded border border-theme-border px-3 py-2 text-sm disabled:opacity-40" disabled={Boolean(running) || saving} onClick={inspect}>Refresh runtime status</button>
-        <button className="rounded border border-theme-border px-3 py-2 text-sm disabled:opacity-40" disabled={!canApply} onClick={() => confirmChange('apply')}>Apply saved Pixel preferences</button>
-        <button className="rounded border border-theme-border px-3 py-2 text-sm disabled:opacity-40" disabled={!canRecover} onClick={() => confirmChange('recover')}>Recover interrupted settings change</button>
+        <button className="rounded border border-theme-border px-3 py-2 text-sm disabled:opacity-40" disabled={!canApply} onClick={event => confirmChange('apply', event.currentTarget)}>Apply saved Pixel preferences</button>
+        <button className="rounded border border-theme-border px-3 py-2 text-sm disabled:opacity-40" disabled={!canRecover} onClick={event => confirmChange('recover', event.currentTarget)}>Recover interrupted settings change</button>
       </div>
+      {confirmationValid && <SettingsConfirmation confirmation={confirmation} onCancel={cancelConfirmation} onConfirm={submitConfirmation} />}
     </section>
   )
 }

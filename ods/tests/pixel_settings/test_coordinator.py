@@ -122,6 +122,15 @@ def test_apply_real_owner_transaction_and_preserves_mode(adapter):
     assert c.status(adapter)["appliedRevision"] == 3
 
 
+def test_fresh_store_status_is_actionable_and_never_creates_owner_files(adapter, tmp_path):
+    adapter.settings_data_dir = str(tmp_path / "not-initialized")
+    with pytest.raises(AccessError, match="settings-store-not-initialized"):
+        c.status(adapter)
+    assert not Path(adapter.settings_data_dir).exists()
+    assert not adapter.pending()
+    assert "restart" not in adapter.log
+
+
 def test_mismatch_rolls_back_exact_bytes_without_claiming_applied(adapter):
     before = adapter.path.read_bytes()
     adapter.failure = "mismatch"

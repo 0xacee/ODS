@@ -61,7 +61,12 @@ def _store(bridge, *, exclusive):
     directory = Path(bridge.settings_data_dir) / "pixel-providers"
     if not directory.is_absolute() or directory.resolve() != directory:
         raise AccessError("unsafe-settings-source")
-    _private(directory, bridge.owner.pw_uid, directory=True)
+    try:
+        _private(directory, bridge.owner.pw_uid, directory=True)
+    except FileNotFoundError:
+        # Inspect must not create owner storage as root on a fresh installation.
+        # The normal owner-facing Save operation initializes this private store.
+        raise AccessError("settings-store-not-initialized") from None
     lock = directory / ".provider-config.lock"
     info = _private(lock, bridge.owner.pw_uid)
     fd = os.open(lock, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)  # Never create as root.

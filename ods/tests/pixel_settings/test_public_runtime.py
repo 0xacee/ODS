@@ -106,6 +106,14 @@ def test_lost_controller_reply_is_unknown_not_false_success_or_retry(tmp_path):
     assert len(calls) == 2
 
 
+def test_fresh_store_code_survives_both_public_status_boundaries(tmp_path):
+    value = host_api.runtime_status(tmp_path, request=lambda *_args, **_kwargs:
+                                    (409, {"error": "settings-store-not-initialized"}))
+    expected = public.unavailable("settings-store-not-initialized")
+    assert value == dashboard_public().normalize_runtime(value) == expected
+    assert not (tmp_path / "pixel-providers").exists()
+
+
 def test_wrong_completed_revision_cannot_be_reported_as_success(tmp_path):
     body = {"operation": "apply", "revision": "b" * 64, "settingsRevision": 3}
     with pytest.raises(ValueError, match="revision-mismatch"):
