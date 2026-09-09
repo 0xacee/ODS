@@ -6,10 +6,16 @@ They are not installed-runtime or model-inference acceptance.
 import contextlib
 import json
 import os
+import sys
 from pathlib import Path
 from types import MethodType
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'bin'))
+sys.path.insert(0, str(ROOT / 'extensions/services/pixel-agent/host'))
+
 from pixel_access_bridge import AccessError, atomic_json, digest
 from pixel_provider import coordinator as c
 from pixel_provider import service_environment
