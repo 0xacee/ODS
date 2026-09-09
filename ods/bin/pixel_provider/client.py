@@ -23,7 +23,14 @@ from .connection import normalize_connection
 from .connection_transport import probe_connection
 from .store import MAX_BYTES, StoreError, decode_document
 
-PIXEL_COMMIT = '70f44c90ac40b8409ebc965becc5b085a053e270'
+PIXEL_COMMIT = '9409d1ae894394a4848bf5b41a6323e64c577f06'
+# Preparation follows the current paired installer. Loading must not rewrite or
+# invalidate clients prepared with an earlier supported renderer. These exact
+# receipt identities do not certify custody of an owner's writable source tree.
+PREPARED_PIXEL_COMMITS = frozenset((
+    PIXEL_COMMIT,
+    '70f44c90ac40b8409ebc965becc5b085a053e270',
+))
 OPENCLAW_VERSION = '2026.6.33'
 
 
@@ -218,7 +225,8 @@ def load_client(directory):
                 raise StoreError('unsafe-client-directory')
         record = decode_document(read_private(directory/'prepared.json'))
         if (type(record.get('schemaVersion')) is not int or record.get('schemaVersion') != 1
-                or record.get('pixelCommit') != PIXEL_COMMIT
+                or not isinstance(record.get('pixelCommit'),str)
+                or record['pixelCommit'] not in PREPARED_PIXEL_COMMITS
                 or record.get('openclawVersion') != OPENCLAW_VERSION
                 or record.get('status') != 'prepared-not-activated' or record.get('execution') != 'client-owned'
                 or not isinstance(record.get('agentId'),str)

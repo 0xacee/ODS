@@ -25,8 +25,8 @@ def test_client_pin_tracks_parent_installer():
     assert f'PIXEL_SOURCE_REF={mod.PIXEL_COMMIT}' in (root/'.env.example').read_text()
 
 
-@pytest.fixture
-def client_dir(tmp_path):
+@pytest.fixture(params=('70f44c90ac40b8409ebc965becc5b085a053e270',mod.PIXEL_COMMIT),ids=('legacy','current'))
+def client_dir(tmp_path,request):
     tmp_path.chmod(0o700)
     (tmp_path/'pixel-source').mkdir(mode=0o700)
     (tmp_path/'state').mkdir(mode=0o700)
@@ -37,11 +37,35 @@ def client_dir(tmp_path):
         'state/openclaw.json':b'{}'}
     for name,content in contents.items():
         mod._write_private(tmp_path/name,content)
-    record = dict(schemaVersion=1,pixelCommit=mod.PIXEL_COMMIT,openclawVersion=mod.OPENCLAW_VERSION,
+    record = dict(schemaVersion=1,pixelCommit=request.param,openclawVersion=mod.OPENCLAW_VERSION,
         status='prepared-not-activated',execution='client-owned',agentId='pixel-client-'+'a'*16,
         files={name:hashlib.sha256(content).hexdigest() for name,content in contents.items()})
     mod._write_private(tmp_path/'prepared.json',mod._json(record))
     return tmp_path
+
+
+def test_load_preserves_prepared_client(client_dir):
+    before = {path.relative_to(client_dir):path.read_bytes()
+              for path in client_dir.rglob('*') if path.is_file()}
+    directory,record = mod.load_client(client_dir)
+    assert directory == client_dir
+    assert record['pixelCommit'] in mod.PREPARED_PIXEL_COMMITS
+    assert {path.relative_to(client_dir):path.read_bytes()
+            for path in client_dir.rglob('*') if path.is_file()} == before
+
+
+@pytest.mark.parametrize('commit',[None,True,1,[],{},'main','0'*40,
+    '70f44c90ac40b8409ebc965becc5b085a053e271',mod.PIXEL_COMMIT.upper()])
+def test_unknown_prepared_source_rejected_without_changes(client_dir,commit):
+    path = client_dir/'prepared.json'
+    record = json.loads(path.read_bytes())
+    record['pixelCommit'] = commit
+    path.write_bytes(mod._json(record))
+    before = path.read_bytes()
+    with pytest.raises(mod.StoreError,match='invalid-client-record'):
+        mod.load_client(client_dir)
+    assert path.read_bytes() == before
+    assert not (client_dir/'runs').exists()
 
 
 def test_load_and_drift(client_dir):
