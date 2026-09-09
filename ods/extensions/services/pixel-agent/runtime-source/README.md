@@ -4,6 +4,42 @@ Not installed or enabled by ODS. This is a review/build input, not a runtime
 distribution, release, deployment recipe, or permission to activate Full Access.
 The feature remains dependent on parent PR #3385 and owner-managed installation.
 
+## Complete managed source preparation
+
+`source-lock.json` now binds the required-plugin patch followed by the generic
+command-lifecycle patch. The latter supplies `before_command_run`, which the
+current ODS managed plugin requires. Applying only the older patch is insufficient.
+The resulting complete Git tree is
+`dfba3c7a7c74ec7e52774d7f4a8ef376b8536ca7` (reviewed source commit
+`45f0f01b0ac47b5e52390b94cf090e58819fe475`). The upstream version remains unchanged.
+
+On a POSIX build host, prepare the source from a local upstream Git repository
+containing the exact base commit, without changing that repository or its index:
+
+```sh
+python3 prepare.py --upstream-checkout /absolute/path/openclaw \
+  --output-parent /absolute/path/private-builds
+```
+
+The tool creates a new private directory, verifies both patch hashes, rejects
+unsafe archive entries, and compares both the extracted upstream tree and the
+fully patched tree with their exact Git identities. It retains failed directories
+for diagnosis and never overwrites an earlier preparation. The successful
+`source-receipt.json` explicitly records `built: false` and `installed: false`.
+It is a build-input receipt, not a protected launcher or runtime attestation.
+
+Use the printed source directory for the pinned dependency installation/build
+commands below. Do not apply the patches again in that prepared directory.
+No dependency installation, network operation, service change, or activation is
+performed by preparation itself. Never point a build at an installed runtime.
+Preserve upstream LICENSE and THIRD_PARTY_NOTICES.md when packaging the result.
+
+The command patch separately passed 109 focused regressions, core/test type checks,
+lint, a complete build, and isolated real gateway command/startup qualification.
+That historical evidence does not qualify a newly prepared or installed build.
+Protected artifact delivery, launcher integration, upgrade/rollback, real provider
+traffic and cross-platform acceptance remain necessary before activation.
+
 ## Provenance and build boundary
 
 - Upstream: https://github.com/openclaw/openclaw
