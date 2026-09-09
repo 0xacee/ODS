@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from host_agent_client import AgentClientError, async_request_json as request_agent_json
+from host_agent_client import AgentClientError, AgentHTTPError, async_request_json as request_agent_json
 from pixel_runtime_state import begin_pixel_stream, end_pixel_stream
 from security import verify_api_key
 from config import read_live_env_value
@@ -224,6 +224,11 @@ async def _local_inference_issue(host_status: object) -> str | None:
                 and telemetry.get("schema_version") == "ods.host-llm-status.v1"
                 and isinstance(telemetry.get("health"), dict)
                 and telemetry["health"].get("status") == "ok"):
+            return None
+    except AgentHTTPError as error:
+        # Linux/WSL hosts do not implement Windows-native telemetry. Its
+        # absence cannot declare their otherwise discoverable agent offline.
+        if error.status_code == 501:
             return None
     except AgentClientError:
         pass

@@ -56,3 +56,20 @@ async def test_remote_model_does_not_depend_on_local_server(monkeypatch):
     monkeypatch.setattr(pixel, 'request_agent_json', host)
     runtime={'source':'remote-provider','model':'remote','contextLength':8192,'maxTokens':4096,'reasoning':False}
     assert await pixel._local_inference_issue({'activeRuntime':runtime}) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('code,available', [(501, True), (503, False)])
+async def test_unsupported_host_telemetry_does_not_disable_discoverable_agent(monkeypatch, code, available):
+    async def host(method, path, **kwargs):
+        if path == '/v1/llm/status':
+            raise pixel.AgentHTTPError(code, 'private-diagnostic')
+        return {'status': 'idle'}
+    monkeypatch.setattr(pixel, 'request_agent_json', host)
+    upstream = FakeResponse(chunks=[json.dumps({'data': [{'id': 'pixel/default'}]}).encode()])
+    with patch.object(pixel.httpx, 'AsyncClient', return_value=FakeClient(upstream)):
+        result = await pixel.pixel_status()
+    assert result['available'] is available
+    assert 'private-diagnostic' not in json.dumps(result)
+    if not available:
+        assert result['state'] == 'model_unavailable'
