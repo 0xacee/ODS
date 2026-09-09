@@ -136,7 +136,7 @@ def test_host_change_never_retries_unknown_outcome(monkeypatch, tmp_path, failur
 @pytest.mark.parametrize('body', [None, [], 'private-sentinel'])
 def test_host_status_maps_nonobject_controller_errors(monkeypatch, tmp_path, body):
     monkeypatch.setattr(host_api.platform, 'system', lambda: 'Linux')
-    assert host_api.runtime_status(tmp_path, request=lambda *a, **kw: (503, body)) == public.unavailable()
+    assert host_api.runtime_status(tmp_path, request=lambda *a, **kw: (503, body)) == public.unavailable('provider-controller-unavailable')
 
 
 def test_native_platform_does_not_call_linux_controller(monkeypatch, tmp_path):
