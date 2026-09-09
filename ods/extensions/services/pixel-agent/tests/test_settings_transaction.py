@@ -1,7 +1,7 @@
 """Disposable POSIX owner transactions, NOT installed runtime acceptance."""
 import sys
-import pytest
 if sys.platform == "win32":
+    import pytest
     pytest.skip("Pixel services require a POSIX environment", allow_module_level=True)
 
 import hashlib
