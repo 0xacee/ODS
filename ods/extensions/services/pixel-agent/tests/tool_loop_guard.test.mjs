@@ -88,6 +88,7 @@ import {
   WEB_FETCH_TRUNCATED_PIVOT_REASON,
   WEB_FETCH_PUBLIC_ONLY_REASON,
   WEB_LOOP_ABORT_REASON,
+  WEB_LOOP_DELIVERY_REASON,
   WORKSPACE_TOOL_SEARCH_COMPLETE_REASON,
   WORKSPACE_UNREQUESTED_PROJECTION_REASON,
   WORKSPACE_PREVIEW_REQUIRES_TOOL_REASON,
@@ -11948,6 +11949,38 @@ test("an abort failure is contained and remains a blocked tool result", () => {
   assert.equal(result.block, true);
   assert.equal(result.blockReason, WEB_LOOP_ABORT_REASON);
   assert.match(warnings[0], /abort failed/);
+  assert.deepEqual(guard.deliveryVerificationForRun("run-1"), { status: "none" });
+});
+
+test("acknowledged research aborts deliver their cause without replacing an unexhausted reply", () => {
+  for (const wrapped of [false, true]) {
+    for (const acknowledged of [false, true]) {
+      const guard = createToolLoopGuard({
+        abortRun: () => acknowledged,
+        limits: { search: 1, fetch: 1, total: 1 },
+      });
+      const search = () => {
+        if (wrapped) {
+          const outer = call(guard, "tool_call", {event: {params: {id: "web_search", args: {query: "public documentation"}}}});
+          if (outer?.block) return outer;
+        }
+        return call(guard, "web_search");
+      };
+      assert.equal(search(), undefined);
+      assert.equal(search().blockReason, WEB_BUDGET_EXHAUSTED_REASON);
+      assert.deepEqual(guard.deliveryVerificationForRun("run-1"), {status: "none"},
+        "reaching a limit does not erase a useful final answer");
+      assert.equal(search().blockReason, WEB_BUDGET_EXHAUSTED_REASON);
+      assert.equal(search().blockReason, WEB_LOOP_ABORT_REASON);
+      assert.deepEqual(guard.deliveryVerificationForRun("run-1"), acknowledged
+        ? {status: "failed", text: WEB_LOOP_DELIVERY_REASON}
+        : {status: "none"});
+      const rewritten = guard.replyPayloadSending({runId: "run-1", kind: "final", payload: {text: ""}});
+      assert.equal(rewritten?.payload?.text, acknowledged ? WEB_LOOP_DELIVERY_REASON : undefined);
+      assert.deepEqual(guard.deliveryVerificationForRun("another-run"), {status: "none"},
+        "the failure belongs only to the aborted run");
+    }
+  }
 });
 
 

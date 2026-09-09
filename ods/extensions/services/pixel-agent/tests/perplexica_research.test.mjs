@@ -103,3 +103,63 @@ test("result excerpts remain bounded without aborting successful longer research
 test("transport byte budget rejects unbounded upstream output", async () => {
   await assert.rejects(readResearchStream(stream([{ type: "response", data: "a".repeat(2000000) }, { type: "done" }], 64000), signal(), () => {}), /too large/);
 });
+
+function evidence(result) {
+  const text = result.content[0].text;
+  return JSON.parse(text.slice(text.indexOf(">\n") + 2, text.lastIndexOf("\n</perplexica_evidence_")));
+}
+
+test("keeps cited sources beyond the discovery prefix without increasing the source limit", async () => {
+  const sources = Array.from({length: 144}, (_, i) => ({metadata: {
+    title: `Source ${i + 1}`, url: `https://example.org/source-${i + 1}`,
+  }}));
+  const answer = "Supported statements [21][45][46][48][49][50][144]. Repeated citation [45].";
+  for (const sourcesFirst of [true, false]) {
+    let calls = 0;
+    const sourceEvent = {type: "sources", data: sources};
+    const responseEvent = {type: "response", data: answer};
+    const response = stream([...(sourcesFirst ? [sourceEvent, responseEvent] : [responseEvent, sourceEvent]), {type: "done"}], 8192);
+    const result = await createPerplexicaResearchTool({env: {}, fetch: async () => ++calls === 1 ? Response.json(config) : response})
+      .execute("call", {query: "Compare public sources"}, signal());
+    const output = evidence(result);
+    assert.equal(output.answer, answer);
+    assert.equal(output.sources.length, 40);
+    for (const index of [21, 45, 46, 48, 49, 50, 144]) {
+      assert.deepEqual(output.sources.find(source => source.index === index), {
+        index, title: `Source ${index}`, url: `https://example.org/source-${index}`,
+      });
+    }
+    assert.equal(result.details.sourceCount, 144);
+    assert.equal(result.details.retainedSourceCount, 40);
+    assert.equal(result.details.omittedCitationCount, 0);
+    assert.equal(result.details.truncated, true);
+  }
+});
+
+test("reports omitted citations and preserves unusable URL indexes without fabricating replacements", async () => {
+  let calls = 0;
+  const sources = Array.from({length: 50}, (_, i) => ({metadata: {
+    title: `Source ${i + 1}`, url: i === 0 ? "https://user:secret@example.org/private" : `https://example.org/${i + 1}`,
+  }}));
+  const answer = Array.from({length: 45}, (_, i) => `[${i + 1}]`).join(" ") + " [9999] [45]";
+  const result = await createPerplexicaResearchTool({env: {}, fetch: async () => ++calls === 1 ? Response.json(config) : stream([
+    {type: "sources", data: sources}, {type: "response", data: answer}, {type: "done"},
+  ], 8192)}).execute("call", {query: "Research"}, signal());
+  const output = evidence(result);
+  assert.equal(output.sources.length, 40);
+  assert.deepEqual(output.sources[0], {index: 1, title: "Source 1", urlUnavailable: true});
+  assert.equal(result.details.omittedCitationCount, 6);
+  assert.match(result.content[0].text, /6 cited source entries are not included/);
+  assert.doesNotMatch(result.content[0].text, /user:secret|example\.org\/9999/);
+});
+
+test("a completed request without sources is explicitly unverified", async () => {
+  let calls = 0;
+  const result = await createPerplexicaResearchTool({env: {}, fetch: async () => ++calls === 1 ? Response.json(config) : stream([
+    {type: "response", data: "No relevant sources found."}, {type: "sources", data: []}, {type: "done"},
+  ])}).execute("call", {query: "Research"}, signal());
+  assert.equal(result.details.status, "completed", "execution completed even though evidence is missing");
+  assert.equal(result.details.retainedSourceCount, 0);
+  assert.match(result.content[0].text, /returned no source citations.*unverified/);
+  assert.deepEqual(evidence(result).sources, []);
+});

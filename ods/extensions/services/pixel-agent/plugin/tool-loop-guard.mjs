@@ -34,6 +34,9 @@ export const WEB_BUDGET_EXHAUSTED_REASON =
 export const WEB_LOOP_ABORT_REASON =
   "Pixel stopped this response because it requested another web tool after the bounded research budget was exhausted. Start a fresh message to continue with a narrower research question.";
 
+export const WEB_LOOP_DELIVERY_REASON =
+  "Pixel stopped a repeated web-research loop after reaching this response's research limit. It did not finish your request. The conversation and any saved files are preserved. You can ask Pixel to continue from the evidence already collected.";
+
 export const WEB_FETCH_REPEAT_PIVOT_REASON =
   "Pixel already fetched this public page in this response. Avoid repeating that fetch. Use the returned evidence, target a missing detail with pixel_ods_web_extract, or choose another relevant source. Other authorized work may continue.";
 
@@ -5879,6 +5882,7 @@ export function createToolLoopGuard({
         fetch: 0,
         total: 0,
         webExhausted: false,
+        webLoopAborted: false,
         webTerminalBlocks: 0,
         webTerminalRound: 0,
         codingExhausted: false,
@@ -7694,6 +7698,7 @@ export function createToolLoopGuard({
       warn(
         `Pixel stopped a repeated web-tool loop for run ${runId}; active run aborted=${aborted}`
       );
+      state.webLoopAborted ||= aborted;
       return { block: true, blockReason: WEB_LOOP_ABORT_REASON };
     }
 
@@ -9335,6 +9340,12 @@ export function createToolLoopGuard({
   function deliveryVerificationForRun(runId) {
     const verification = verificationForRun(runId);
     const state = runs.get(runId);
+    // An acknowledged harness abort can end the model without a final token.
+    // Preserve existing artifact/evidence delivery; for an otherwise empty
+    // research result, give ingress the actual cause instead of a generic reply.
+    if (state?.webLoopAborted && verification.status === "none") {
+      return { status: "failed", text: WEB_LOOP_DELIVERY_REASON };
+    }
     const readOnlyOperations = state?.operationsRequired &&
       (extensionDiscoveryActive(state) || state.operationsInventoryOnly ||
         (state.operationsRequiredActions.size > 0 &&
