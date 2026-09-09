@@ -21,7 +21,7 @@ export function validateSnapshotChanges(value, preview, before) {
     for (const row of file.diff) {
       rows++
       if (rows > 5000 || !['context','add','remove'].includes(row?.type) || typeof row.text !== 'string'
-        || /[\r\n\u0000]/.test(row.text) || !line(row.oldLine) || !line(row.newLine)
+        || /[\r\n]/.test(row.text) || row.text.includes('\0') || !line(row.oldLine) || !line(row.newLine)
         || (row.type === 'add' ? row.oldLine !== null || row.newLine === null : row.type === 'remove' ? row.newLine !== null || row.oldLine === null : row.oldLine === null || row.newLine === null)) throw new Error('Invalid diff')
     }
   }

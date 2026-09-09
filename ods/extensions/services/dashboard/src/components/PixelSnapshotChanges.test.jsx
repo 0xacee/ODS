@@ -15,3 +15,11 @@ it('loads verified counts rather than parsing the reply',async()=>{
   expect(await screen.findByText('Edited index.html')).toBeVisible()
   expect(screen.getAllByLabelText('1 lines added, 1 lines removed')).toHaveLength(2)
 })
+
+it('rejects multiline and NUL-bearing diff rows without rejecting ordinary source',()=>{
+  for (const text of ['a\nb', 'a\rb', 'a\0b']) {
+    const changes = [{...value.changes[0], diff:[{type:'add',oldLine:null,newLine:1,text}]}]
+    expect(()=>validateSnapshotChanges({...value,changes},preview,before)).toThrow('Invalid diff')
+  }
+  expect(validateSnapshotChanges(value,preview,before)).toEqual(value.changes)
+})

@@ -68,7 +68,8 @@ From `ods/extensions/services/dashboard-api`, run `python -m pytest tests -q`.
 | Check | Evidence |
 | --- | --- |
 | Clean-lock frontend install, lint, build on Windows | Passed |
-| Frontend tests on Windows | 604 passed / 67 files |
+| Frontend tests on Windows | 605 passed / 67 files |
+| Native Windows Lemonade health boundary tests | 14 passed |
 | Production Docker build on Linux amd64 | Passed |
 | Pixel plugin tests on Linux/WSL | 955 passed, 1 skipped |
 | Preview and edge Python tests on Linux/WSL | 95 passed, 17 subtests |
@@ -79,6 +80,8 @@ From `ods/extensions/services/dashboard-api`, run `python -m pytest tests -q`.
 The Dashboard CI matrix now repeats clean install, lint, test and build on
 Windows, Ubuntu and macOS. Passing those jobs is **not** a native GPU, browser,
 fresh-install or runtime-activation qualification for those operating systems.
+Lint now explicitly includes production JSX as well as JavaScript and tests;
+the previous flat configuration did not select all production JSX files.
 
 ## Browser journeys
 
@@ -92,6 +95,8 @@ The separately built clean-candidate frontend was inspected against the local
 API/runtime: home, Extensions pagination and starter collections rendered without
 the experimental Hermes page. No extension installation or model switch was
 performed during these read-only library checks.
+Theme selection and a real model reply also passed through that clean frontend;
+the installed API/plugin were reused, not presented as a fresh installation.
 
 Before release, repeat these on the intended deployment:
 

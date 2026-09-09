@@ -3,6 +3,7 @@ import js from "@eslint/js";
 export default [
   js.configs.recommended,
   {
+    files: ["**/*.{js,jsx}"],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "module",
@@ -37,6 +38,12 @@ export default [
         HTMLCanvasElement: "readonly",
         HTMLDialogElement: "readonly",
         HTMLAnchorElement: "readonly",
+        Image: "readonly",
+        Node: "readonly",
+        Blob: "readonly",
+        Audio: "readonly",
+        FormData: "readonly",
+        MediaRecorder: "readonly",
         createImageBitmap: "readonly",
         crypto: "readonly",
         MutationObserver: "readonly",

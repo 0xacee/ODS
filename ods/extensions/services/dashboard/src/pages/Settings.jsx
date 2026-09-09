@@ -54,7 +54,7 @@ const buildErrorFromResponse = async (response) => {
   try {
     const payload = await response.json()
     detail = payload?.detail ?? payload
-  } catch {}
+  } catch { /* Non-JSON errors retain the HTTP status below. */ }
   const error = new Error(typeof detail === 'string' ? detail : (detail?.message || `Request failed (${response.status})`))
   error.details = typeof detail === 'object' && detail ? detail : null
   return error
