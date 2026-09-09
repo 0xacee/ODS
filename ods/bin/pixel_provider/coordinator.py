@@ -18,7 +18,7 @@ from pixel_settings import coordinator as settings
 from .activation_config import _validate_plan, plan_activation, restore_activation, update_activation
 from .config import normalize_config
 from .runtime_custody import RuntimeCustody
-from .service_activation import activate, definition, verify
+from .service_activation import activate, definition, stop_before_owner_change, verify
 from .service_environment import ServiceEnvironment, _pair, _parents, _sync
 
 PLAN = 'provider-root-plan.json'
@@ -254,6 +254,7 @@ def change(bridge, request):
                         raise AccessError('provider-source-changed')
                     journal['phase'] = 'invoking'
                     _write(bridge, journal)
+                    stop_before_owner_change(bridge, journal, environment, qualify_runtime=runtime.qualify)
                     binding = record['nextPlan']['fields']['binding']['after'] if record['nextPlan'] else None
                     projection = {'afterSha': record['afterSha'], 'previousPlanSha':
                                   hashlib.sha256(_encoded(record['previous']['plan'])).hexdigest() if record['previous'] else None}
@@ -273,6 +274,17 @@ def change(bridge, request):
                           and (journal['phase'] in ('acquiring', 'invoking') or journal.get('noOwnerWrite') is True)):
                         journal['noOwnerWrite'] = True
                         _write(bridge, journal)
+                        # A refused write can leave our deliberately stopped
+                        # gateway on the original config. Restore its service
+                        # before final verification, without restarting a live
+                        # original process or replaying a durable completion.
+                        try:
+                            settings._identity(bridge)
+                        except AccessError as error:
+                            if error.code != 'settings-process-not-active':
+                                raise
+                            if callback() != 'verified':
+                                raise AccessError('provider-original-runtime-unverified')
                         result = {'status': 'rolled-back', 'binding': _binding(record['previous']), 'configSha256': record['beforeSha']}
                     else:
                         raise AccessError('provider-recovery-conflict')

@@ -176,3 +176,55 @@ def test_process_identity_failure_is_not_reported_as_applied(integrated):
     b.failure = 'process'
     with pytest.raises(AccessError, match='process-unqualified'): c.change(b, request(p))
     assert c.status(b)['registrationVerified'] is False and b.pending()
+
+
+def test_owner_change_cannot_trigger_a_live_partial_configuration_reload(integrated):
+    p, b = integrated, integrated.bridge
+    worker = b.worker
+    def guarded_worker(operation, **kwargs):
+        if operation == 'provider-change':
+            assert b.stopped is True
+            assert b.pending()['restartIdentity']['pid'] == b.pid
+            assert b.config.read_bytes() == b.before
+        return worker(operation, **kwargs)
+    b.worker = guarded_worker
+    assert c.change(b, request(p))['outcome'] == 'applied'
+    assert b.stops == 1 and b.restarts == 1 and b.stopped is False
+
+
+@pytest.mark.parametrize('failure', ['stop', 'stopped-before-owner'])
+def test_interrupted_quiesce_restores_original_without_adopting_owner_state(integrated, failure):
+    p, b = integrated, integrated.bridge
+    worker = b.worker
+    def interrupted(operation, **kwargs):
+        if operation == 'provider-change': raise AccessError('simulated-owner-unavailable')
+        return worker(operation, **kwargs)
+    if failure == 'stop': b.failure = failure
+    else: b.worker = interrupted
+    with pytest.raises(AccessError): c.change(b, request(p))
+    assert b.config.read_bytes() == b.before and b.pending()['phase'] == 'invoking'
+    assert b.pending()['restartIdentity']['pid'] == b.pid
+    b.failure, b.worker = None, worker
+    assert c.change(b, request(p, 'recover'))['outcome'] == 'rolled-back'
+    assert b.config.read_bytes() == b.before and b.pending() is None and b.phase == 'idle'
+    assert b.stopped is False and b.restarts == (0 if failure == 'stop' else 1)
+
+
+def test_owner_write_without_callback_recovers_old_config_before_start(integrated):
+    p, b = integrated, integrated.bridge
+    worker = b.worker
+    def crash_before_callback():
+        assert b.stopped and b.config.read_bytes() != b.before
+        assert p.snapshot() == {'environment': None, 'dropin': None}
+        raise AccessError('simulated-callback-loss')
+    def interrupted(operation, **kwargs):
+        if operation == 'provider-change': kwargs['activate_provider'] = crash_before_callback
+        return worker(operation, **kwargs)
+    b.worker = interrupted
+    with pytest.raises(AccessError, match='callback-loss'): c.change(b, request(p))
+    assert b.stopped and b.pending()['phase'] == 'invoking' and b.restarts == 0
+    assert worker('provider-status')['pending'] is True
+    b.worker = worker
+    assert c.change(b, request(p, 'recover'))['outcome'] == 'rolled-back'
+    assert b.config.read_bytes() == b.before and b.live_binding is None
+    assert b.restarts == 1 and not b.stopped and b.phase == 'idle'

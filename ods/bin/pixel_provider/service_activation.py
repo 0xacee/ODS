@@ -101,6 +101,24 @@ def verify(bridge, journal, environment, selection, *, qualify_runtime):
                 registrationVerified=True, transportVerified=False)
 
 
+def stop_before_owner_change(bridge, journal, environment, *, qualify_runtime):
+    """Drain and stop before config replacement can trigger a partial hot reload.
+
+    Persist restart authority before stopping. No owner bytes have changed yet;
+    an interrupted stop or refused owner write remains explicitly recoverable.
+    """
+    _unchanged(bridge, journal, environment, qualify_runtime)
+    if settings._busy(bridge, journal):
+        raise AccessError('runtime-busy')
+    before = settings._identity(bridge)
+    journal.update(phase='invoking', restartIdentity=before)
+    atomic_json(bridge.state / 'transition.json', journal)
+    bridge.command(['systemctl', 'stop', UNIT], timeout=60)
+    if bridge.stopped_native(journal['token']).get('stopped') is not True:
+        raise AccessError('provider-stop-unconfirmed')
+    _unchanged(bridge, journal, environment, qualify_runtime)
+
+
 def activate(bridge, journal, environment, *, qualify_runtime):
     """Durably arm restart, replace environment, restart fixed unit and verify.
 
@@ -115,7 +133,7 @@ def activate(bridge, journal, environment, *, qualify_runtime):
     try:
         before = settings._identity(bridge)
     except AccessError:
-        if (journal.get('phase') != 'restarting' or not settings._valid_identity(journal.get('restartIdentity'))
+        if (journal.get('phase') not in ('invoking', 'restarting') or not settings._valid_identity(journal.get('restartIdentity'))
                 or bridge.stopped_native(journal['token']).get('stopped') is not True):
             return 'unavailable'
         before = journal['restartIdentity']

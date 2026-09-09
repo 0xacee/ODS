@@ -33,7 +33,7 @@ def lifecycle(participant):
     plan = plan_activation(config, revision=1, allow_cloud=False, activation_id=BINDING['activationId'])
     b.after = owner._encoded(plan['document'])
     b.config.write_bytes(b.before)
-    b.pid, b.started, b.stopped, b.restarts = 110, 1000, False, 0
+    b.pid, b.started, b.stopped, b.restarts, b.stops = 110, 1000, False, 0, 0
     b.boundary, b.definition = 'ProtectSystem=strict\nProtectHome=read-only', '/usr/bin/node pinned-entry'
     b.native_origin, b.native_key = 'http://127.0.0.1:18789', 'not-a-real-key'
     b.nrev, b.live_binding, b.failure = 'e' * 64, None, None
@@ -43,6 +43,11 @@ def lifecycle(participant):
     b.record.update(runtimeCustody='f' * 64, boundary=b.boundary, mode='sandboxed')
 
     def command(self, args, timeout=20):
+        if 'stop' in args:
+            self.stops += 1
+            if self.failure == 'stop': raise AccessError('host-command-failed')
+            self.stopped = True
+            return ''
         if 'restart' in args:
             self.restarts += 1
             if self.failure == 'restart':
