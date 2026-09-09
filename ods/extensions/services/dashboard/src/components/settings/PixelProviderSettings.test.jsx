@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { render } from '../../test/test-utils'
 import PixelProviderSettings from './PixelProviderSettings.jsx'
+import { runtimeDoc } from './pixelProviderRuntimeFixtures'
 
 const empty = () => ({ schemaVersion: 1, revision: 0, enabled: false, providers: [],
   roles: { leader: null, backups: [], advisor: null, handoff: null },
@@ -11,7 +12,9 @@ const tower = () => ({ ...empty(), providers: [{ id: 'tower', label: 'Tower', ki
 const response = (configuration, status = 200) => ({ ok: status === 200, status,
   json: async () => ({ configuration, runtime: { status: 'not-applied' } }) })
 function setup(doc, post = async () => response({ ...doc, revision: doc.revision + 1 })) {
-  const fetchMock = vi.fn(async (url, options) => url.endsWith('/save') ? post(options) : response(doc))
+  const fetchMock = vi.fn(async (url, options) => url.endsWith('/runtime')
+    ? { ok: true, status: 200, json: async () => runtimeDoc('unavailable') }
+    : url.endsWith('/save') ? post(options) : response(doc))
   vi.stubGlobal('fetch', fetchMock)
   render(<PixelProviderSettings />)
   return fetchMock
@@ -23,7 +26,7 @@ it('renders a pristine install without claiming runtime activation', async () =>
   setup(empty())
   expect(await screen.findByText('No providers configured.')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Save providers' })).toBeDisabled()
-  expect(screen.getByText('Saved settings are not applied to Pixel yet.')).toBeInTheDocument()
+  expect(screen.getByText('Saving providers does not apply them. Inspect the current runtime below before making a change.')).toBeInTheDocument()
 })
 
 it('shows unavailable for failed or malformed GET instead of fabricated defaults', async () => {
@@ -59,7 +62,7 @@ it('clears the key before POST completes, prevents duplicate saves and preserves
   expect(body.document).toEqual(doc)
   expect(JSON.stringify(body.document)).not.toContain('synthetic-only-key')
   resolve(response({ ...doc, revision: 1 }))
-  expect(await screen.findByRole('status')).toHaveTextContent('Pixel runtime has not been changed')
+  expect(await screen.findByText('Settings saved. Pixel runtime has not been changed.')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Save providers' })).toBeDisabled()
 })
 
