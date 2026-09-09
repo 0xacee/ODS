@@ -2079,7 +2079,7 @@ preflight = phase.index("_phase06_step \"preflight-pixel-source\"")
 checkout = phase.index("if ! _ods_pixel_source_checkout", preflight)
 assert phase.index(handoff) < preflight < checkout < phase.index("PIXEL_SOURCE_URL=$(dotenv_quote")
 assert "Pixel source is unavailable. Configure authorized Git access" in phase
-assert "PIXEL_SOURCE_REF \"9409d1ae894394a4848bf5b41a6323e64c577f06\"" in phase
+assert "PIXEL_SOURCE_REF \"bbd1d2d62c7260f822ba1e727728a0a02f78895f\"" in phase
 ' "$ROOT/installers/phases/06-directories.sh"
 check python3 -c '
 import pathlib,sys
