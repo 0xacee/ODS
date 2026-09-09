@@ -86,7 +86,7 @@ export function createPerplexicaResearchTool(deps = {}) {
     async execute(_id, params, signal) {
       const result = (text, details, isError = false) => ({ content: [{ type: "text", text }], details: { boundary: "installed-perplexica-research", ...details }, ...(isError ? { isError: true } : {}) });
       if (typeof params?.query !== "string" || !params.query.trim() || params.query.length > 16000 || (params.mode !== undefined && !["speed", "balanced"].includes(params.mode))) {
-        return result("Supply a research brief of 1–16,000 characters and speed or balanced mode.", { status: "invalid_request" }, true);
+        return result('Set query to a research brief of 1–16,000 characters, for example {"query":"Your research question"}. Optional mode is "speed" or "balanced".', { status: "invalid_request" }, true);
       }
       let timer, researchStarted = false;
       const controller = new AbortController();

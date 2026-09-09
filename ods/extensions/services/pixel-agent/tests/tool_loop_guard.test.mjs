@@ -11311,7 +11311,63 @@ test("publishes repaired multi-file websites without demanding whole-project rew
   }
 });
 
-test("new artwork requests still reject read-only reuse of existing creative bytes", () => {
+test("a renamed model-written page can publish after exact entry inspection", () => {
+  for (const wrapped of [false, true]) {
+    for (const inspection of ["matching", "different-directory", "failed"]) {
+      const guard = createToolLoopGuard();
+      guard.observeRun(
+        { agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel",
+        { prompt: "Research the official sources, build a new visit planner in trip/planner.html, and open a preview." }
+      );
+      const content = "<!doctype html><title>Visit planner</title><h1>Plan your visit</h1>";
+      const record = (name, params, result) => {
+        const tool = wrapped ? "tool_call" : name;
+        const request = wrapped ? { id: name, args: params } : params;
+        const before = call(guard, tool, { event: { toolCallId: name, params: request } });
+        assert.notEqual(before?.block, true);
+        afterCall(guard, tool, { event: { toolCallId: name, params: request,
+          result: wrapped ? wrappedCoreResult(name, result) : result } });
+      };
+      record("write", { path: "trip/planner.html", content }, {
+        content: [{ type: "text", text: "Successfully wrote page" }],
+      });
+      record("exec", { command: "mv trip/planner.html trip/index.html" }, {
+        content: [{ type: "text", text: "(no output)" }],
+        details: { status: "completed", exitCode: 0 },
+      });
+      record("read", { path: inspection === "different-directory" ? "other/index.html" : "trip/index.html" }, {
+        content: [{ type: "text", text: inspection === "failed" ? "File missing" : content }],
+        ...(inspection === "failed" ? { isError: true } : {}),
+      });
+      const tool = wrapped ? "tool_call" : "pixel_ods_workspace_preview";
+      const args = { relativeDirectory: "trip" };
+      const params = wrapped ? { id: "pixel_ods_workspace_preview", args } : args;
+      const before = call(guard, tool, { event: { toolCallId: "preview", params } });
+      if (inspection !== "matching") {
+        assert.equal(before?.block, true, `${wrapped}/${inspection}`);
+        continue;
+      }
+      assert.notEqual(before?.block, true, String(wrapped));
+      assert.notEqual(guard.verificationForRun("run-1").status, "passed");
+      const snapshot = workspacePreviewSnapshot("trip", [{ path: "trip/index.html", content }]);
+      const result = { details: {
+        ...snapshot, schemaVersion: 1, kind: "ods-pixel-workspace-preview",
+        status: "succeeded", relativeDirectory: "trip", port: 9437,
+        url: `http://${snapshot.siteId}.localhost:9437/${snapshot.siteId}/`,
+        httpStatus: 200, readbackVerified: true, executable: false, overwritten: false,
+      } };
+      afterCall(guard, tool, { event: { toolCallId: "preview", params,
+        result: wrapped ? wrappedPluginResult("pixel-ods", "pixel_ods_workspace_preview", result) : result } });
+      const verification = guard.verificationForRun("run-1");
+      assert.equal(verification.status, "passed");
+      assert.equal(verification.preview.sha256, snapshot.sha256);
+      assert.match(verification.text, /Published from your workspace\./);
+      assert.doesNotMatch(verification.text, /Created by Pixel\./);
+    }
+  }
+});
+
+test("new artwork requests may publish inspected files without claiming model authorship", () => {
   for (const prompt of [
     "Make a new interactive artwork using the existing design notes.",
     "Show me an original interactive artwork.",
@@ -11330,9 +11386,26 @@ test("new artwork requests still reject read-only reuse of existing creative byt
     afterCall(guard, "read", {
       event: { params, result: { details: { status: "completed" } } },
     });
-    assert.equal(call(guard, "pixel_ods_workspace_preview", {
-      event: { params: { relativeDirectory: "new-artwork" } },
+    const previewParams = { relativeDirectory: "new-artwork" };
+    assert.notEqual(call(guard, "pixel_ods_workspace_preview", {
+      event: { params: previewParams },
     }).block, true, prompt);
+    assert.notEqual(guard.verificationForRun("run-1").status, "passed");
+    const snapshot = workspacePreviewSnapshot("new-artwork", [
+      { path: params.path, content: "<!doctype html><title>Inspected artwork</title>" },
+    ]);
+    afterCall(guard, "pixel_ods_workspace_preview", {
+      event: { params: previewParams, result: { details: {
+        ...snapshot, schemaVersion: 1, kind: "ods-pixel-workspace-preview",
+        status: "succeeded", relativeDirectory: "new-artwork", port: 9437,
+        url: `http://${snapshot.siteId}.localhost:9437/${snapshot.siteId}/`,
+        httpStatus: 200, readbackVerified: true, executable: false, overwritten: false,
+      } } },
+    });
+    const verification = guard.verificationForRun("run-1");
+    assert.equal(verification.status, "passed");
+    assert.match(verification.text, /Published from your workspace\./);
+    assert.doesNotMatch(verification.text, /Created by Pixel\./);
   }
 });
 

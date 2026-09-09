@@ -6653,12 +6653,13 @@ export function createToolLoopGuard({
       const requiresAuthoredSnapshot = workspacePreviewRequiresAuthoredSnapshot(state, directory);
       const hasObservedIndex = validDirectory &&
         (state.successfulWritePaths.has(`${directory}/index.html`) ||
-          (!requiresAuthoredSnapshot && state.successfulReadPaths.has(`${directory}/index.html`)));
+          state.successfulReadPaths.has(`${directory}/index.html`));
       // The host reopens, validates and hashes an existing artifact at publish
       // time. An extra model read is not a file-integrity check and can trap
-      // a successful repair in a read/publish retry loop. Keep authored-byte
-      // evidence for fresh creations and workspace evidence when no current
-      // preview request is bound. Host receipts remain required for both.
+      // a successful repair in a read/publish retry loop. A read also covers
+      // entries created through a build or renamed by exec. Current-run write
+      // provenance controls authorship attribution, not permission to publish
+      // inspected files. Host receipts remain required for publication.
       const requestedExistingPreview = state.workspacePreviewRequired && !requiresAuthoredSnapshot;
       if (!validDirectory || (!hasObservedIndex && !requestedExistingPreview)) {
         if (validDirectory && !state.workspacePreviewAuthorshipRequired) {
