@@ -37,6 +37,9 @@ def lifecycle(participant):
     b.boundary, b.definition = 'ProtectSystem=strict\nProtectHome=read-only', '/usr/bin/node pinned-entry'
     b.native_origin, b.native_key = 'http://127.0.0.1:18789', 'not-a-real-key'
     b.nrev, b.live_binding, b.failure = 'e' * 64, None, None
+    b.fragment = p.dropin.parent / 'openclaw-gateway.service'
+    b.fragment.write_text('[Service]\nExecStart=/usr/bin/node pinned-entry\n')
+    b.fragment.chmod(0o644)
     b.record.update(runtimeCustody='f' * 64, boundary=b.boundary, mode='sandboxed')
 
     def command(self, args, timeout=20):
@@ -56,6 +59,8 @@ def lifecycle(participant):
             text = '# /etc/systemd/system/openclaw-gateway.service\n[Service]\nExecStart=' + self.definition + '\n'
             if p.dropin.exists(): text += '\n# ' + str(p.dropin) + '\n' + p.dropin.read_text()
             return text
+        if '--property=FragmentPath,DropInPaths' in args:
+            return f'FragmentPath={self.fragment}\nDropInPaths={p.dropin if p.dropin.exists() else ""}'
         if any('ExecMainStartTimestampMonotonic' in arg for arg in args):
             return f'MainPID={0 if self.stopped else self.pid}\nActiveState={"failed" if self.stopped else "active"}\nExecMainStartTimestampMonotonic={self.started}'
         return self.definition

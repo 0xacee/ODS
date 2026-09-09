@@ -6,12 +6,15 @@ callback is deliberately zero-argument when bound into the owner-worker pipe:
 each invocation selects its environment using the actual configuration hash.
 """
 import time
+from pathlib import Path
+import re
 
 from pixel_access_bridge import AccessError, UNIT, atomic_json, digest, remaining
 from pixel_access_protocol import HEX
 from pixel_settings import coordinator as settings
 from pixel_settings.contract import SettingsError
 from pixel_settings.runtime import _timestamp
+from .service_environment import _snapshot
 
 
 def definition(bridge, owned_dropin):
@@ -19,14 +22,24 @@ def definition(bridge, owned_dropin):
     # unrelated unit policy. The exact two managed files are checked separately.
     fields = bridge.command(['systemctl', 'show', UNIT,
         '--property=User,Group,DynamicUser,WorkingDirectory,RootDirectory,RootImage'])
-    source = bridge.command(['systemctl', 'cat', UNIT])
-    kept, owned = [], False
-    for line in source.splitlines():
-        if line.startswith('# /'):
-            owned = line == '# ' + str(owned_dropin)
-        if not owned:
-            kept.append(line)
-    return digest([fields, '\n'.join(kept).rstrip()])
+    sources = bridge.command(['systemctl', 'show', UNIT, '--property=FragmentPath,DropInPaths'])
+    values = dict(line.split('=', 1) for line in sources.splitlines() if '=' in line)
+    fragment, dropins = values.get('FragmentPath', ''), values.get('DropInPaths', '')
+    paths = [fragment, *dropins.split()]
+    if (not fragment or len(paths) != len(set(paths))
+            or any(not re.fullmatch(r'/[A-Za-z0-9_./-]+', path) for path in paths)):
+        raise AccessError('provider-unit-source-unqualified')
+    # Read the exact root-protected files, not presentation headers from `cat`.
+    # A comment inside a unit cannot hide another section from the fingerprint.
+    images = []
+    for path in paths:
+        if path == str(owned_dropin):
+            continue
+        image = _snapshot(Path(path))
+        if image is None:
+            raise AccessError('provider-unit-source-unavailable')
+        images.append([path, image])
+    return digest([fields, images])
 
 
 def _custody(journal, qualify_runtime):

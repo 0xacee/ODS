@@ -19,8 +19,8 @@ from .managed_deployment import environment_bytes
 ENVIRONMENT = Path('/etc/ods/pixel-provider.env')
 DROPIN = Path('/etc/systemd/system/openclaw-gateway.service.d/95-ods-provider.conf')
 RECORD = 'provider-service-environment.json'
-MAX_FILE = 16384
-MAX_RECORD = 160 * 1024
+MAX_FILE = 64 * 1024
+MAX_RECORD = 600 * 1024
 ROOT_UID = 0
 
 
@@ -180,6 +180,7 @@ class ServiceEnvironment:
             dropin = ('[Service]\nEnvironmentFile=' + path + '\n').encode()
             after = {'environment': {'hex': raw.hex(), 'mode': 0o600},
                      'dropin': {'hex': dropin.hex(), 'mode': 0o644}}
+        _pair(after)  # Refuse oversized/generated images before arming recovery.
         record = {'schemaVersion': 1, 'transactionId': journal['transactionId'],
                   'beforeSha': before_sha, 'afterSha': after_sha,
                   'beforeBinding': before_binding, 'afterBinding': after_binding,
