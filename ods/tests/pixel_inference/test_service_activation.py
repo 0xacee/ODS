@@ -69,7 +69,7 @@ def lifecycle(participant):
         if path == '/health': return {'ok': True}
         result = {'schemaVersion': 1, 'source': 'current-runtime-config', 'pid': self.pid,
                   'runtimeVersion': '2026.6.33', 'revision': self.nrev,
-                  'observedAt': datetime.now(timezone.utc).isoformat()}
+                  'observedAt': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}
         if payload['operation'] == 'settings-readback':
             return dict(result, **configured_fields(json.loads(self.config.read_bytes())))
         binding = None if self.failure == 'registration' and self.live_binding else self.live_binding
