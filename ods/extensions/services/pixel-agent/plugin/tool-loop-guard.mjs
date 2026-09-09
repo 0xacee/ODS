@@ -6008,6 +6008,7 @@ export function createToolLoopGuard({
         workspacePreviewDirectory: undefined,
         workspacePreviewAttempted: false,
         workspacePreview: undefined,
+        workspaceLastVerifiedPreview: undefined,
         workspacePreviewVerifiedDirectory: undefined,
         workspaceToolSearchRouted: false,
         workspaceToolSearchQueries: new Set(),
@@ -8377,6 +8378,7 @@ export function createToolLoopGuard({
         state.workspacePreviewDirectory = preview.relativeDirectory;
         state.workspacePreviewModelAuthored = workspacePreviewAuthorshipMatches(state, preview);
         state.workspacePreview = preview;
+        state.workspaceLastVerifiedPreview = Object.freeze({ ...preview });
         state.successfulWriteContentByPath.clear();
         rememberSessionPreview(state.currentSessionId, preview);
       }
@@ -9157,6 +9159,25 @@ export function createToolLoopGuard({
       !state.exactDownloadRequested
     ) {
       if (!state.workspacePreview) {
+        // A command may have changed the workspace, but it cannot change the
+        // immutable host publication. Retain its usable link without treating
+        // it as verification of the latest workspace or a completed request.
+        if (state.workspaceLastVerifiedPreview) {
+          const preview = state.workspaceLastVerifiedPreview;
+          return {
+            status: "failed",
+            text:
+              "Your last published preview is still available.\n\n" +
+              `[Open last published preview](${preview.url})\n\n` +
+              "The workspace has not been verified again since later tool activity. " +
+              "This snapshot may not include subsequent changes; publish again to verify the current files.",
+            preview: {
+              schemaVersion: 1,
+              kind: "ods-pixel-workspace-preview",
+              ...preview,
+            },
+          };
+        }
         const hasIndexEvidence = [
           ...state.successfulWritePaths,
           ...state.successfulReadPaths,
