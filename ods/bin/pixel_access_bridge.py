@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import ipaddress
 import json
 import os
 from pathlib import Path
