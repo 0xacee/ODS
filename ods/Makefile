@@ -170,6 +170,8 @@ test: ## Run unit and contract tests
 	@bash tests/test-macos-env-quote-strip.sh
 	@echo "=== macOS generated .env validates against the schema ==="
 	@bash tests/test-macos-env-schema.sh
+	@echo "=== macOS native llama port is relocatable ==="
+	@bash tests/test-macos-native-llama-port.sh
 	@echo ""
 	@echo "=== macOS uninstall LaunchAgent cleanup ==="
 	@bash tests/test-macos-uninstall-launchagents.sh
