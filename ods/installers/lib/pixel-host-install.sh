@@ -3363,6 +3363,7 @@ PY
 
 _ods_pixel_write_onboarding() {
     local owner="$1" home="$2" answers="$3" openclaw_bin="$4" plugin_path="$5" plugin_digest="$6"
+    local web_search_provider="${7:-searxng}" parallel_path="${8:-}" parallel_digest="${9:-}"
     local context="${MAX_CONTEXT:-16384}" max_tokens reasoning=false
     local gateway_alias gateway_label runtime_model gateway_port="${LITELLM_PORT:-4000}" gateway_key="${LITELLM_KEY:-}"
     local gateway_key_file write_status=0
@@ -3411,12 +3412,19 @@ _ods_pixel_write_onboarding() {
     ods_pixel_run_as_owner "$owner" "$home" python3 - "$answers" \
         "$openclaw_bin" "$home" "$runtime_model" "$context" "$max_tokens" "$reasoning" \
         "$gateway_alias" "$gateway_label" "$gateway_port" "$gateway_key_file" \
-        "${SEARXNG_PORT:-8888}" "$plugin_path" "$plugin_digest" <<'PY' || write_status=$?
+        "${SEARXNG_PORT:-8888}" "$plugin_path" "$plugin_digest" \
+        "$web_search_provider" "$parallel_path" "$parallel_digest" <<'PY' || write_status=$?
 import json, os, pathlib, re, stat, sys, tempfile
 
 (out, openclaw_bin, home, model, context, max_tokens, reasoning,
  gateway_alias, gateway_label, gateway_port, gateway_key_path,
- search_port, plugin_path, plugin_digest) = sys.argv[1:]
+ search_port, plugin_path, plugin_digest, web_search_provider, parallel_path, parallel_digest) = sys.argv[1:]
+if web_search_provider not in {"searxng", "parallel-free"}:
+    raise SystemExit("invalid native search provider")
+if web_search_provider == "parallel-free" and (
+        not pathlib.Path(parallel_path).is_absolute()
+        or not re.fullmatch(r"[0-9a-f]{64}", parallel_digest)):
+    raise SystemExit("native search requires a provisioned and verified parallel plugin")
 gateway_key_path = pathlib.Path(gateway_key_path)
 gateway_key_info = gateway_key_path.lstat()
 if (not stat.S_ISREG(gateway_key_info.st_mode) or stat.S_ISLNK(gateway_key_info.st_mode)
@@ -3458,6 +3466,7 @@ payload = {
     "modelContextWindow": int(context),
     "modelMaxTokens": int(max_tokens),
     "modelPrivateHosts": [],
+    "webSearchProvider": web_search_provider,
     "searxngBaseUrl": f"http://127.0.0.1:{search_port}",
     "embeddingModel": "embeddinggemma-300m-qat-Q8_0.gguf",
     "embeddingCache": str(home / ".cache" / "openclaw" / "embeddings"),
@@ -3489,6 +3498,8 @@ payload = {
     "frontierTaskPacks": [],
     "operationsActionPacks": [],
 }
+if web_search_provider == "parallel-free":
+    payload["gatewayExtensions"].append({"id": "parallel", "path": parallel_path, "sha256": parallel_digest})
 path.parent.mkdir(parents=True, exist_ok=True)
 if path.is_symlink():
     raise SystemExit("ODS Pixel onboarding contract cannot be a symlink")
@@ -3889,6 +3900,8 @@ ods_pixel_install_default_agent() {
     [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]] || return 0
     local owner home source_root pixel_root plugin_root answers operations_policy extension_catalog extension_manager_unit artifact_promoter_unit workspace_preview_unit openclaw_bin plugin_digest contract_sha256 runtime_budget_status gateway_alias pixel_log
     local candidate_runtime_status reuse_active=false same_verified_source=false same_source_resume=false
+    local web_search_provider parallel_path="" parallel_digest=""
+    local -a pixel_prerequisites=(litellm dashboard-api)
     owner="${PIXEL_SERVICE_USER:-$(ods_pixel_install_owner)}" || return 1
     home="$(ods_pixel_owner_home "$owner")" || return 1
     _ods_pixel_assert_managed_state "$owner" "$home" || return 1
@@ -3913,6 +3926,7 @@ ods_pixel_install_default_agent() {
         && -f "$plugin_root/host/pixel-workspace-preview.service" \
         && -f "$plugin_root/host/system_observe.py" \
         && -f "$plugin_root/host/openclaw_tool_recovery.py" \
+        && -f "$plugin_root/host/native_search.py" \
         && -f "$plugin_root/host/openclaw-tool-recovery.json" \
         && -f "$plugin_root/host/openclaw-completion-recovery.json" \
         && -f "$plugin_root/host/openclaw-compaction-export.json" \
@@ -3933,6 +3947,15 @@ ods_pixel_install_default_agent() {
         ai_bad "Pixel received an unsupported ODS model Switchboard mode."
         return 1
     }
+    answers="$INSTALL_DIR/data/pixel/onboarding.json"
+    web_search_provider="$(ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/native_search.py" --answers-file "$answers" \
+        --provider "${PIXEL_WEB_SEARCH_PROVIDER:-}")" || return 1
+    case "$web_search_provider" in
+        searxng) pixel_prerequisites+=(searxng) ;;
+        parallel-free) ;;
+        *) ai_bad "Pixel returned an invalid native search provider."; return 1 ;;
+    esac
     ai "Starting the ODS model gateway, control API, and search prerequisites for Pixel review..."
     # The scoped extension manager validates its contract against dashboard-api
     # while Pixel is installed below. Start the API from this exact Compose
@@ -3941,13 +3964,15 @@ ods_pixel_install_default_agent() {
     # port. Treat Compose startup failure as authoritative instead of allowing
     # later endpoint checks to accept unrelated containers.
     if ! $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" up -d --no-build --pull never \
-        litellm searxng dashboard-api >>"$LOG_FILE" 2>&1; then
+        "${pixel_prerequisites[@]}" >>"$LOG_FILE" 2>&1; then
         ai_bad "Could not start Pixel's exact ODS prerequisite services. See $LOG_FILE."
         return 1
     fi
     _ods_pixel_wait_model_gateway "ODS model gateway" "${LITELLM_PORT:-4000}" \
         "${LITELLM_KEY:-}" "$gateway_alias" 180
-    _ods_pixel_wait_http "ODS local search" "http://127.0.0.1:${SEARXNG_PORT:-8888}/search?q=pixel-preflight&format=json" 90 '.results | type == "array"'
+    if [[ "$web_search_provider" == searxng ]]; then
+        _ods_pixel_wait_http "ODS local search" "http://127.0.0.1:${SEARXNG_PORT:-8888}/search?q=pixel-preflight&format=json" 90 '.results | type == "array"'
+    fi
     _ods_pixel_wait_http "ODS control API" \
         "http://127.0.0.1:${DASHBOARD_API_PORT:-3002}/health" 90
 
@@ -3965,6 +3990,17 @@ ods_pixel_install_default_agent() {
     [[ "$openclaw_bin" == /* && -x "$openclaw_bin" ]] || return 1
     plugin_digest="$(ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" extension-hash "$plugin_root/plugin")"
     [[ "$plugin_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    if [[ "$web_search_provider" == parallel-free ]]; then
+        parallel_path="$INSTALL_DIR/data/pixel/native-search/parallel-2026.6.33"
+        if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+            "$plugin_root/host/native_search.py" \
+            --base-dir "$INSTALL_DIR/data/pixel/native-search" >>"$pixel_log" 2>&1; then
+            ai_bad "Pixel could not provision its pinned native search plugin. See $pixel_log."
+            return 1
+        fi
+        parallel_digest="$(ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" extension-hash "$parallel_path")" || return 1
+        [[ "$parallel_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+    fi
 
     answers="$INSTALL_DIR/data/pixel/onboarding.json"
     operations_policy="$INSTALL_DIR/data/pixel/operations-policy.json"
@@ -3993,7 +4029,8 @@ ods_pixel_install_default_agent() {
         ai_bad "Could not write the owner-private ODS Pixel workspace preview service."
         return 1
     fi
-    if ! _ods_pixel_write_onboarding "$owner" "$home" "$answers" "$openclaw_bin" "$plugin_root/plugin" "$plugin_digest"; then
+    if ! _ods_pixel_write_onboarding "$owner" "$home" "$answers" "$openclaw_bin" "$plugin_root/plugin" "$plugin_digest" \
+        "$web_search_provider" "$parallel_path" "$parallel_digest"; then
         ai_bad "Could not write the ODS-managed Pixel onboarding contract."
         return 1
     fi

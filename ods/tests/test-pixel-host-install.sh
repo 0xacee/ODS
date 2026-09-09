@@ -789,6 +789,25 @@ else
     pass "symlink Operations policy rejected"
 fi
 _ods_pixel_write_onboarding "$owner" "$home" "$answers" /usr/bin/openclaw /opt/ods/pixel-plugin "$digest"
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["webSearchProvider"] == "searxng"; assert not any(e["id"] == "parallel" for e in v["gatewayExtensions"])' "$answers"
+native_answers="$TEST_ROOT/native-search-onboarding.json"
+_ods_pixel_write_onboarding "$owner" "$home" "$native_answers" /usr/bin/openclaw \
+    /opt/ods/pixel-plugin "$digest" parallel-free /opt/ods/native-search/parallel-2026.6.33 "$digest"
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["webSearchProvider"] == "parallel-free"; assert {"id":"parallel","path":"/opt/ods/native-search/parallel-2026.6.33","sha256":sys.argv[2]} in v["gatewayExtensions"]' "$native_answers" "$digest"
+for invalid_search in parallel unknown; do
+    if _ods_pixel_write_onboarding "$owner" "$home" "$native_answers" /usr/bin/openclaw \
+        /opt/ods/pixel-plugin "$digest" "$invalid_search" >/dev/null 2>&1; then
+        fail "unsupported search provider rejected: $invalid_search"
+    else
+        pass "unsupported search provider rejected: $invalid_search"
+    fi
+done
+if _ods_pixel_write_onboarding "$owner" "$home" "$native_answers" /usr/bin/openclaw \
+    /opt/ods/pixel-plugin "$digest" parallel-free /opt/unverified '' >/dev/null 2>&1; then
+    fail "native search without verified extension rejected"
+else
+    pass "native search without verified extension rejected"
+fi
 observed_contract_sha256="$(_ods_pixel_contract_sha256 "$owner" "$home" "$answers")"
 check test "$observed_contract_sha256" = "$(_ods_pixel_contract_sha256 "$owner" "$home" "$answers")"
 check test "${#observed_contract_sha256}" = 64
@@ -2037,7 +2056,7 @@ assert "PIXEL_GATEWAY_TOKEN_FILE=$runtime_token_file" in text
 assert "PIXEL_ODS_VERSION=$ods_version" in text
 assert "PIXEL_ODS_N8N_PORT=${N8N_PORT:-5678}" in text
 assert "PIXEL_ODS_WHISPER_PORT=${WHISPER_PORT:-9000}" in text
-prerequisites = installer.index("litellm searxng dashboard-api")
+prerequisites = installer.index("\"${pixel_prerequisites[@]}\"")
 control_health = installer.index("_ods_pixel_wait_http \"ODS control API\"", prerequisites)
 bootstrap = installer.index("ai \"Bootstrapping the exact Pixel source", control_health)
 assert prerequisites < control_health < bootstrap
@@ -2056,7 +2075,7 @@ preflight = phase.index("_phase06_step \"preflight-pixel-source\"")
 checkout = phase.index("if ! _ods_pixel_source_checkout", preflight)
 assert phase.index(handoff) < preflight < checkout < phase.index("PIXEL_SOURCE_URL=$(dotenv_quote")
 assert "Pixel source is unavailable. Configure authorized Git access" in phase
-assert "PIXEL_SOURCE_REF \"70f44c90ac40b8409ebc965becc5b085a053e270\"" in phase
+assert "PIXEL_SOURCE_REF \"eb774606224800286d937dca8b53a6bd02ff0536\"" in phase
 ' "$ROOT/installers/phases/06-directories.sh"
 check python3 -c '
 import pathlib,sys

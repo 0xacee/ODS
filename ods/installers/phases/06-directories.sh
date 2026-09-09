@@ -678,7 +678,13 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
             error "Existing PIXEL_INGRESS_GID is invalid"
 
         PIXEL_SOURCE_URL_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_URL "https://github.com/Osmantic/Pixel.git")"
-        PIXEL_SOURCE_REF_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_REF "70f44c90ac40b8409ebc965becc5b085a053e270")"
+        PIXEL_SOURCE_REF_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_REF "eb774606224800286d937dca8b53a6bd02ff0536")"
+        PIXEL_WEB_SEARCH_PROVIDER_VALUE="$(_env_get_explicit_first PIXEL_WEB_SEARCH_PROVIDER "")"
+        case "$PIXEL_WEB_SEARCH_PROVIDER_VALUE" in
+            ""|parallel-free|searxng) ;;
+            *) ai_bad "PIXEL_WEB_SEARCH_PROVIDER must be parallel-free or searxng."; return 1 ;;
+        esac
+        export PIXEL_WEB_SEARCH_PROVIDER="$PIXEL_WEB_SEARCH_PROVIDER_VALUE"
         PIXEL_SOURCE_DIR_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_DIR "")"
         # Phase 11 installs Pixel in this same installer shell. Preserve the
         # resolved immutable source contract in that shell as well as in .env;
@@ -1241,6 +1247,7 @@ PIXEL_LICENSE_ACCEPTED=true
 PIXEL_SOURCE_URL=$(dotenv_quote "$PIXEL_SOURCE_URL_VALUE")
 PIXEL_SOURCE_REF=${PIXEL_SOURCE_REF_VALUE}
 PIXEL_SOURCE_DIR=$(dotenv_quote "$PIXEL_SOURCE_DIR_VALUE")
+$(if [[ -n "$PIXEL_WEB_SEARCH_PROVIDER_VALUE" ]]; then printf 'PIXEL_WEB_SEARCH_PROVIDER=%s\n' "$PIXEL_WEB_SEARCH_PROVIDER_VALUE"; fi)
 PIXEL_OPENWEBUI_KEY=${PIXEL_OPENWEBUI_KEY_VALUE}
 PIXEL_INGRESS_RUNTIME_DIR=/run/ods-pixel
 PIXEL_PREVIEW_RUNTIME_DIR=/run/ods-pixel-preview
