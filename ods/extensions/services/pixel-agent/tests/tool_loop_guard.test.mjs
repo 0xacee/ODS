@@ -3409,6 +3409,29 @@ test("live health plus reporting is scoped and cannot authorize artifact-only or
   assert.deepEqual(userMessageOperationsRequirements([], "Inspect this computer's CPU health and explain it."), { required: true, actions: ["host.cpu"] });
 });
 
+test("unrelated service mentions and source addresses do not force application inventory", () => {
+  for (const prompt of [
+    "Find three dumpling restaurants in Philadelphia with online delivery ordering. Use current web sources, open each restaurant's own site or its ordering page, and save a short comparison with source links to release-2641/philadelphia-dumplings.md. Distinguish an actual delivery option from pickup only and don't assume delivery reaches my address. Use your own search and web tools without delegating to Perplexica.",
+    "Research Python packaging and save source URLs. Do not use Hermes.",
+    "Find the official documentation without Perplexica; include a source link.",
+    "Do not query the Perplexica URL. Research the public documentation.",
+  ]) {
+    assert.deepEqual(userMessageOdsToolRequirements([], prompt), [], prompt);
+    const guard = createToolLoopGuard();
+    guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
+    assert.notEqual(call(guard, "tool_call", { event: { params: {
+      id: "openclaw:core:web_search", args: { query: "public source documentation" },
+    } } })?.block, true, prompt);
+  }
+  for (const prompt of [
+    "Where is Perplexica?",
+    "What's the configured n8n URL?",
+    "Show the SearXNG address.",
+    "List the ODS apps.",
+    "Research Python packaging. Then show the configured Open WebUI URL.",
+  ]) assert.deepEqual(userMessageOdsToolRequirements([], prompt), ["pixel_ods_apps_list"], prompt);
+});
+
 test("explicit negative ODS status intent never creates a compulsory projection", () => {
   const prompt = "For this request, do only a small workspace file conversion; do not inspect ODS status, host health or other machines. Create health-conversion-demo if it does not already exist, preserving any existing files. Create a five-row CSV with item,count columns and these synthetic rows: Desk lamp,2; Cable,5; Notebook,3; Coffee mug,1; Plant,4. Convert that CSV to JSON with integer count values, and actually run validation that there are five records and counts sum to 15. Show the output paths and the checks you executed. No installation or external services.";
   assert.deepEqual(userMessageOdsToolRequirements([], prompt), []);
@@ -10389,6 +10412,75 @@ test("classifies a requested website demo as a verified workspace preview", () =
     "Explain how mobile apps work.",
   ]) {
     assert.equal(userMessageRequestsWorkspacePreview([], request), false, request);
+  }
+});
+
+test("website navigation and research files do not require a workspace preview", () => {
+  for (const prompt of [
+    "Find three dumpling restaurants in Philadelphia with online delivery ordering. Use current web sources, open each restaurant's own site or its ordering page, and save a short comparison with source links to release-2641/philadelphia-dumplings.md. Distinguish an actual delivery option from pickup only and don't assume delivery reaches my address. Use your own search and web tools without delegating to Perplexica.",
+    "Open the official documentation website and write a summary to notes.md.",
+    "Open https://example.com/docs/index.html and save the findings to research.md.",
+    "View the museum website and report its opening hours.",
+    "Open the local news site and summarize today's headlines to notes.md.",
+    "Open the museum website and report the updated hours.",
+    "Open the museum website. Read the saved chart and summarize both to notes.md.",
+    "Use web search, open each source site, and save a cited comparison to comparison.md.",
+  ]) {
+    assert.equal(userMessageRequestsWorkspacePreview([], prompt), false, prompt);
+    const guard = createToolLoopGuard();
+    guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
+    assert.deepEqual(guard.verificationForRun("run-1"), { status: "none" }, prompt);
+  }
+  for (const prompt of [
+    "Search the web for examples, then build a website and publish it.",
+    "Open the saved website preview.",
+    "Show demo/index.html.",
+    "Publish the website.",
+    "Create a playable game and show it.",
+  ]) {
+    assert.equal(userMessageRequestsWorkspacePreview([], prompt), true, prompt);
+    const guard = createToolLoopGuard();
+    guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
+    assert.equal(guard.verificationForRun("run-1").status, "failed", prompt);
+  }
+});
+
+test("bare reopening binds only a verified preview in the current session", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel",
+    { prompt: "Build and publish a website." });
+  const write = { path: "signal-garden/index.html", content: "<!doctype html><title>Signal Garden</title>" };
+  call(guard, "write", { event: { params: write } });
+  afterCall(guard, "write", { event: { params: write, result: { details: { status: "completed" } } } });
+  const params = { relativeDirectory: "signal-garden" };
+  call(guard, "pixel_ods_workspace_preview", { event: { params } });
+  const snapshot = workspacePreviewSnapshot("signal-garden", [write]);
+  afterCall(guard, "pixel_ods_workspace_preview", { event: { params, result: { details: {
+    schemaVersion: 1, kind: "ods-pixel-workspace-preview", status: "succeeded",
+    relativeDirectory: "signal-garden", ...snapshot, port: 9437,
+    url: `http://${snapshot.siteId}.localhost:9437/${snapshot.siteId}/`,
+    httpStatus: 200, readbackVerified: true, executable: false, overwritten: false,
+  } } } });
+  assert.equal(guard.verificationForRun("run-1").status, "passed");
+  let next = 2;
+  for (const prompt of ["Show the website.", "Open the game.", "View the chart."]) {
+    const runId = `run-${next++}`;
+    guard.observeRun({ agentId: "pixel", runId, sessionId: "session-1" }, "pixel", { prompt });
+    assert.equal(guard.verificationForRun(runId).status, "failed", "reopening requires a fresh receipt");
+    const otherRun = `run-${next++}`;
+    guard.observeRun({ agentId: "pixel", runId: otherRun, sessionId: "other-session" }, "pixel", { prompt });
+    assert.deepEqual(guard.verificationForRun(otherRun), { status: "none" }, "another session cannot lend its artifact");
+  }
+  for (const prompt of [
+    "Open the local news site and summarize today's headlines to notes.md.",
+    "Open the museum website and report updated hours.",
+    "Open https://example.com/index.html and summarize it.",
+    "Explain why we should show the website.",
+    "Do not open the game.",
+  ]) {
+    const runId = `run-${next++}`;
+    guard.observeRun({ agentId: "pixel", runId, sessionId: "session-1" }, "pixel", { prompt });
+    assert.deepEqual(guard.verificationForRun(runId), { status: "none" }, prompt);
   }
 });
 
