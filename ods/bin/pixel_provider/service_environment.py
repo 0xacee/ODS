@@ -7,6 +7,7 @@ prepared environment is not an activated provider or successful inference.
 """
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 
@@ -172,9 +173,11 @@ class ServiceEnvironment:
             # The path is host-selected, never caller/model selected. systemd
             # specifiers are not permitted in the fixed EnvironmentFile path.
             path = str(self.environment)
-            if any(c in path for c in ('%', '\\', '"', '\n', '\r')):
+            if not re.fullmatch(r'/[A-Za-z0-9_./-]+', path):
                 raise AccessError('unsafe-provider-service-path')
-            dropin = ('[Service]\nEnvironmentFile="' + path + '"\n').encode()
+            # EnvironmentFile= takes an absolute filename, not a shell-quoted
+            # word. Actual systemd ignores a quoted path as non-absolute.
+            dropin = ('[Service]\nEnvironmentFile=' + path + '\n').encode()
             after = {'environment': {'hex': raw.hex(), 'mode': 0o600},
                      'dropin': {'hex': dropin.hex(), 'mode': 0o644}}
         record = {'schemaVersion': 1, 'transactionId': journal['transactionId'],

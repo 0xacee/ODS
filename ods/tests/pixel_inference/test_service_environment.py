@@ -86,6 +86,7 @@ def arm(value, **overrides):
 def test_forward_then_same_callback_rollback_restores_absence(participant):
     p, b = participant, participant.bridge
     record = arm(p)
+    assert bytes.fromhex(record['after']['dropin']['hex']) == ('[Service]\nEnvironmentFile=' + str(p.environment) + '\n').encode()
     assert p.snapshot() == {'environment': None, 'dropin': None}
     b.config.write_bytes(b.after)
     selected = p.apply(b.record)
