@@ -102,6 +102,36 @@ test('one owner per module generation; same registry API is registered once', ()
   assert.equal(f.hooks.get('before_command_run').settings.timeoutMs, 6000);
 });
 
+test('registration readback reports the registered binding without mutable aliases or private deployment', async () => {
+  const f = fixture(), owner = f.register(); f.hold();
+  const result = owner.readRegistration();
+  assert.deepEqual(result, {status: 'active', binding: f.deployment.binding});
+  assert.deepEqual(Object.keys(result).sort(), ['binding', 'status']);
+  result.binding.revision = 999;
+  assert.equal(owner.readRegistration().binding.revision, 1);
+  assert.equal(JSON.stringify(result).includes('/owner/'), false);
+  await owner.shutdown();
+  assert.throws(() => owner.readRegistration());
+});
+
+test('registration readback refuses current config drift rather than echoing a new binding', async () => {
+  const f = fixture(), owner = f.register();
+  const changed = structuredClone(f.config());
+  changed.plugins.entries['pixel-ods'].config.managedProvider.revision = 2;
+  f.replaceConfig(changed);
+  assert.throws(() => owner.readRegistration());
+  await owner.shutdown();
+});
+
+test('registration readback refuses active provider ownership', async () => {
+  const f = fixture(), owner = f.register(), ctx = context();
+  await owner.select({}, ctx);
+  assert.throws(() => owner.readRegistration());
+  await owner.finish({}, ctx);
+  assert.equal(owner.readRegistration().status, 'active');
+  await owner.shutdown();
+});
+
 test('current runtime snapshot drift poisons the owner; restoration cannot revive it', async () => {
   const f = fixture(), owner = f.register(), old = f.config();
   const changed = structuredClone(old); changed.agents.list[0].sandbox.mode = 'off'; f.replaceConfig(changed);

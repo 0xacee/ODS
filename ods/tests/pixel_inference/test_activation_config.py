@@ -8,7 +8,7 @@ import uuid
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bin'))
-from pixel_provider.activation_config import plan_activation, restore_activation
+from pixel_provider.activation_config import plan_activation, restore_activation, update_activation
 from pixel_provider.store import StoreError
 
 
@@ -223,3 +223,80 @@ def test_restore_rejects_structural_corruption_before_mutation(config, kind):
     with pytest.raises(StoreError) as error: restore_activation(current, plan)
     assert 'never-echo-secret' not in str(error.value)
     assert current == original
+
+
+def update(current, plan, **changes):
+    args = dict(revision=plan['fields']['binding']['after']['revision'] + 1,
+                allow_cloud=False, activation_id=str(uuid.uuid4()))
+    args.update(changes)
+    return update_activation(current, plan, **args)
+
+
+def test_update_retains_original_route_through_multiple_revisions(config):
+    original = copy.deepcopy(config)
+    plan = make(config)
+    for revision in range(5, 9):
+        previous = copy.deepcopy(plan)
+        current = copy.deepcopy(plan['document'])
+        next_plan = update(current, plan, revision=revision, allow_cloud=revision % 2 == 0)
+        assert current == previous['document'] and plan == previous
+        assert next_plan['fields']['model']['before'] == 'legacy/selected'
+        assert next_plan['fields']['binding']['after']['revision'] == revision
+        assert next_plan['fields']['binding']['after']['activationId'] != previous['fields']['binding']['after']['activationId']
+        assert restore_activation(next_plan['document'], next_plan) == original
+        plan = next_plan
+    assert config == original
+
+
+@pytest.mark.parametrize('missing', ['models', 'providers', 'plugin-config', 'pixel-model'])
+def test_update_preserves_original_absence_and_unrelated_owner_edits(config, missing):
+    if missing == 'models': del config['models']
+    elif missing == 'providers': del config['models']['providers']
+    elif missing == 'plugin-config': del config['plugins']['entries']['pixel-ods']['config']
+    else: del config['agents']['list'][0]['model']
+    plan = make(config)
+    current = copy.deepcopy(plan['document'])
+    current['agents']['list'].reverse()
+    current['agents']['list'][0]['name'] = 'Unrelated owner edit'
+    current['models']['providers']['added-by-owner'] = {'models': []}
+    expected = restore_activation(current, plan)
+    next_plan = update(current, plan)
+    assert restore_activation(next_plan['document'], next_plan) == expected
+    assert 'ods-policy' not in expected.get('models', {}).get('providers', {})
+
+
+@pytest.mark.parametrize('revision', [True, 5.0, -1, 3, 4, 2**53])
+def test_update_requires_a_strictly_newer_valid_revision(config, revision):
+    plan = make(config); before = copy.deepcopy(plan)
+    with pytest.raises(StoreError): update(plan['document'], plan, revision=revision)
+    assert plan == before
+
+
+def test_update_refuses_reusing_activation_identity(config):
+    plan = make(config)
+    with pytest.raises(StoreError, match='activation-id-reused'):
+        update(plan['document'], plan, activation_id=plan['fields']['binding']['after']['activationId'])
+
+
+@pytest.mark.parametrize('leaf', ['model', 'provider', 'binding'])
+def test_update_refuses_managed_drift_without_mutation(config, leaf):
+    plan = make(config); current = copy.deepcopy(plan['document'])
+    if leaf == 'model': current['agents']['list'][0]['model'] = 'never-echo-secret'
+    elif leaf == 'provider': current['models']['providers']['ods-policy']['apiKey'] = 'never-echo-secret'
+    else: current['plugins']['entries']['pixel-ods']['config']['managedProvider']['revision'] = 99
+    snapshot = copy.deepcopy(current)
+    with pytest.raises(StoreError) as error: update(current, plan)
+    assert current == snapshot and 'never-echo-secret' not in str(error.value)
+
+
+@pytest.mark.parametrize('kind', ['disabled', 'conversation-denied', 'global-tools', 'pixel-tools'])
+def test_update_rechecks_current_activation_eligibility(config, kind):
+    plan = make(config); current = copy.deepcopy(plan['document'])
+    if kind == 'disabled': current['plugins']['entries']['pixel-ods']['enabled'] = False
+    elif kind == 'conversation-denied': current['plugins']['entries']['pixel-ods']['hooks']['allowConversationAccess'] = False
+    else:
+        target = current if kind == 'global-tools' else current['agents']['list'][0]
+        target['tools'] = {'byProvider': {'legacy': {'deny': ['exec']}}}
+    snapshot = copy.deepcopy(current)
+    with pytest.raises(StoreError): update(current, plan)
+    assert current == snapshot

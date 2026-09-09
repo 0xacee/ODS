@@ -289,6 +289,17 @@ export default definePluginEntry({
             managedRuntime?.assertTransition();
             result = accessRuntime.readSettings(value.token, value.revision);
           }
+          else if (value.operation === "provider-readback") {
+            managedRuntime?.assertTransition();
+            // The same owned transition and current-process snapshot gate this
+            // diagnostic. Registration is distinct from successful inference.
+            const settings = accessRuntime.readSettings(value.token, value.revision);
+            result = {schemaVersion: 1, source: "current-provider-registration",
+              pid: settings.pid, runtimeVersion: settings.runtimeVersion,
+              revision: settings.revision, observedAt: settings.observedAt,
+              registration: managedRuntime ? managedRuntime.readRegistration()
+                : {status: "inactive", binding: null}, transportVerified: false};
+          }
           else throw new Error();
           sendJson(res, 200, result);
         } catch { sendJson(res, 409, {error: "access transition unavailable, busy, or proof failed"}); }

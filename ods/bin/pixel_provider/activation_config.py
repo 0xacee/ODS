@@ -177,3 +177,23 @@ def restore_activation(current, plan):
     if not parents["models"] and not models:
         restored.pop("models", None)
     return restored
+
+
+def update_activation(current, plan, *, revision, allow_cloud, activation_id):
+    """Plan a newer provider revision without adopting the managed route as baseline.
+
+    This is pure projection, not permission to update the running gateway. The
+    trusted coordinator must still validate the saved revision, acquire admission,
+    replace deployment/config together, and prove the new runtime before success.
+    A new binding identity invalidates old turn leases; retry/recovery belongs to
+    the existing transaction, not a second projection with the same identity.
+    """
+    baseline = restore_activation(current, plan)  # Validates plan and live leaves.
+    binding = _binding(revision, allow_cloud, activation_id)
+    previous = plan["fields"]["binding"]["after"]
+    if binding["revision"] <= previous["revision"]:
+        raise StoreError("activation-revision-not-newer")
+    if binding["activationId"] == previous["activationId"]:
+        raise StoreError("activation-id-reused")
+    return plan_activation(baseline, revision=revision, allow_cloud=allow_cloud,
+                           activation_id=activation_id)

@@ -183,6 +183,12 @@ export function createManagedRuntimeRegistry({environment = process.env,
         }
         current = {accessRuntime, deploymentText: raw, binding: canonical(deployment.binding),
           routing, commands, valid, shutdown, admit, finish, select, assertTransition, status,
+          readRegistration() {
+            assertTransition();
+            // Report this successfully registered owner, not an editable config
+            // echo. This does not attest any provider request or model response.
+            return {status: 'active', binding: JSON.parse(current.binding)};
+          },
           beforeCommandRun(event, context) {
             if (!valid()) return {action: 'block', reason: 'ods-command-admission-unavailable'};
             return commands.beforeCommandRun(event, context);
