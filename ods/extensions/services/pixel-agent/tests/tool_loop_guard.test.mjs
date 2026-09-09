@@ -190,6 +190,50 @@ function seedNamedPreview(guard) {
   return { write, params, details };
 }
 
+test("Portuguese HTML creation requests require a preview without overriding negative or quoted intent", () => {
+  for (const prompt of ["crie um jogo em html da cobrinha", "Faça um site de portfolio", "Por favor, pode criar um aplicativo web?"]) {
+    assert.equal(userMessageRequestsWorkspacePreview([], prompt), true, prompt);
+  }
+  for (const prompt of [
+    "explique como criar um jogo em html da cobrinha",
+    'Traduza: "crie um jogo em html da cobrinha"',
+    '> crie um jogo em html da cobrinha',
+    '```\ncrie um jogo em html da cobrinha\n```',
+    "Não crie um jogo em html da cobrinha",
+    "Crie um jogo em html, mas não publique",
+    "Crie um site sem preview",
+    "Crie um jogo em html, apenas o código",
+    "Crie um script Python para calcular fibonacci",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], prompt), false, prompt);
+});
+
+test("Portuguese publication commands require verified delivery, not a prose promise", () => {
+  for (const prompt of [
+    "Corrija o contador e publique essa pasta no preview.",
+    "Por favor, republique o site corrigido.",
+    "Teste o contador. Depois republique essa pasta no preview.",
+    "O teste real no preview falhou. Corrija apenas demo-counter. Só publique após esses três testes passarem.",
+  ]) {
+    assert.equal(userMessageRequestsWorkspacePreview([], prompt), true, prompt);
+    const guard = createToolLoopGuard();
+    const context = {agentId:'pixel',runId:'run-portuguese',sessionId:'session-portuguese'};
+    guard.observeRun(context, 'pixel', {prompt});
+    const recovery = guard.beforeAgentFinalize({lastAssistantMessage:'Agora publicando...'}, context);
+    assert.ok(recovery?.retry, 'A promise without a verified publication must not finish the turn');
+    assert.equal(recovery.retry.maxAttempts, 1, 'Publication recovery remains bounded');
+  }
+  for (const prompt of [
+    "Explique como publicar essa pasta no preview.",
+    'Traduza: "publique essa pasta no preview"',
+    '> publique essa pasta no preview',
+    '```\npublique essa pasta no preview\n```',
+    "Não publique essa pasta no preview.",
+    "Corrija o contador, mas nunca republique o site.",
+    "Explique por que devemos publicar o site.",
+    "Só publique após esses três testes passarem.",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], prompt), false, prompt);
+});
+
 test("prior website feedback does not require a preview for new scheduled file work", () => {
   const prompt = "The actual badge website now labels Play as motion off and explains the system reduced-motion preference. Preserve it. Test your real scheduled-work capability: create one one-time task for about two minutes from now to write /workspace/scheduled-check-lab/result.json containing a short greeting, the actual execution UTC time and the task ID if available. Use an actual scheduling tool if available; do not simulate scheduling with an exec sleep loop. Avoid duplicate jobs, do not modify other files, and do not configure an external notification channel. Return the real job ID and due time, or the exact missing capability. This is one bounded local task, not a recurring schedule.";
   assert.equal(userMessageRequestsWorkspacePreview([], prompt), false);
@@ -12039,6 +12083,27 @@ test("allows requested verification after publication and invalidates potentiall
   );
   assert.match(persisted.message.content.at(-1).text, /remaining owner-requested checks/i);
   assert.doesNotMatch(persisted.message.content.at(-1).text, /do not call another tool/i);
+  const documentation = { path: "README.md", content: "Documentation written after publishing." };
+  call(guard, "write", { event: { params: documentation, toolCallId: "readme-after-preview" },
+    context: { toolCallId: "readme-after-preview" } });
+  afterCall(guard, "write", { event: { params: documentation,
+    toolCallId: "readme-after-preview", result: { details: { status: "completed" } } },
+    context: { toolCallId: "readme-after-preview" } });
+  assert.equal(guard.verificationForRun("run-1").status, "failed",
+    "Documentation must not turn an invalidated receipt into a current preview");
+  const republishHint = persistToolResult(guard, "write", "readme-after-preview");
+  assert.match(republishHint.message.content.at(-1).text, /Publish last, after documentation too/);
+  assert.match(republishHint.message.content.at(-1).text, /"relativeDirectory":"signal-garden"/);
+  const recovery = guard.beforeAgentFinalize({}, { agentId: "pixel", runId: "run-1" });
+  assert.equal(recovery.retry.idempotencyKey, "pixel-ods-workspace-preview-refresh");
+  assert.equal(recovery.retry.maxAttempts, 1);
+  assert.equal(guard.beforeAgentFinalize({}, { agentId: "pixel", runId: "run-1" }).retry.idempotencyKey,
+    recovery.retry.idempotencyKey, "Repeated finalization must not grant unlimited retries");
+  call(guard, "pixel_ods_workspace_preview", { event: { params: { relativeDirectory: "signal-garden" } } });
+  afterCall(guard, "pixel_ods_workspace_preview", { event: {
+    params: { relativeDirectory: "signal-garden" }, result: { details },
+  } });
+  assert.equal(guard.verificationForRun("run-1").status, "passed");
   const verificationParams = { command: "node --check signal-garden/index.html" };
   const verification = call(guard, "tool_call", {
     event: {
