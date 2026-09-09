@@ -86,7 +86,7 @@ test("explains the captured argument-name mistake before any host request and pe
   assert.equal(requests.length, 0);
   assert.equal(failed.isError, true);
   assert.deepEqual(failed.details, {
-    status: "failed", errorCode: "invalid_arguments", boundary,
+    status: "failed", errorCode: "invalid_arguments", boundary, invalidField: "fields",
   });
   assert.match(failed.content[0].text, /relativePath \(not destination\)/);
   assert.match(failed.content[0].text, /sourceUrl \(not url\)/);
@@ -103,7 +103,6 @@ test("validation guidance never echoes rejected values or contacts the host", as
   let contacted = false;
   const tool = createDownloadPromoteTool({ request: async () => { contacted = true; } });
   const privateValue = "PRIVATE_VALUE_NOT_FOR_MODEL_OUTPUT";
-  let guidance;
   for (const rejected of [
     null, [], {},
     { ...params, relativePath: "../" + privateValue },
@@ -115,10 +114,35 @@ test("validation guidance never echoes rejected values or contacts the host", as
     assert.equal(result.isError, true);
     assert.equal(result.details.errorCode, "invalid_arguments");
     assert.doesNotMatch(JSON.stringify(result), new RegExp(privateValue));
-    guidance ??= result.content[0].text;
-    assert.equal(result.content[0].text, guidance);
+    assert.match(result.content[0].text, /No host request was made/);
   }
   assert.equal(contacted, false);
+});
+
+test("identifies a malformed receipt ID without blaming the valid destination", async () => {
+  let contacted = false;
+  const tool = createDownloadPromoteTool({ request: async () => { contacted = true; } });
+  const result = await tool.execute("lost-receipt", {
+    ...params, jobId: "ops-1757381036-9d9c71d9",
+  });
+  assert.equal(result.details.invalidField, "jobId");
+  assert.match(result.content[0].text, /Invalid field: jobId/);
+  assert.match(result.content[0].text, /Retrieve the actual receipt/);
+  assert.doesNotMatch(result.content[0].text, /Invalid field: relativePath/);
+  assert.doesNotMatch(result.content[0].text, /ops-1757381036-9d9c71d9/);
+  assert.equal(contacted, false);
+});
+
+test("never exposes an unexpected validation exception as a field hint", async () => {
+  const rejected = { ...params };
+  Object.defineProperty(rejected, "jobId", {
+    get() { throw new Error("PRIVATE_VALIDATION_EXCEPTION"); },
+  });
+  const result = await createDownloadPromoteTool().execute("unexpected", rejected);
+  assert.equal(result.isError, true);
+  assert.equal(result.details.errorCode, "invalid_arguments");
+  assert.equal(result.details.invalidField, undefined);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_VALIDATION_EXCEPTION/);
 });
 
 test("fails closed on transport errors and mismatched service evidence", async () => {
