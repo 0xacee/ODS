@@ -2612,6 +2612,96 @@ test("allows bounded web research then returns a terminal final-answer instructi
   assert.deepEqual(aborts, []);
 });
 
+test("public research downloads and their own jobs do not require Operations phrasing", () => {
+  for (const wrapped of [false, true]) {
+    const guard = createToolLoopGuard();
+    const context = { agentId: "pixel", runId: "run-1", sessionId: "session-1" };
+    guard.observeRun(context, "pixel", {
+      prompt: "Verify that guide using a disposable checkout and a project virtual environment. " +
+        "Install the development dependencies, run the tests, and update the guide with real results. " +
+        "If GitHub is blocked, investigate your available ODS download or repository tools.",
+    });
+    const select = (name, args) => wrapped
+      ? call(guard, "tool_call", { event: { params: { id: `openclaw:pixel-operations-broker:${name}`, args } } })
+      : call(guard, name, { event: { params: args } });
+    const jobId = "ops-1234567890123-abcdef123456";
+    const args = { url: "https://github.com/pallets/click/archive/refs/heads/main.tar.gz", filename: "click-main.tar.gz" };
+    for (let round = 0; round < 3; round++) {
+      guard.observeModelCall({ runId: "run-1" }, context, "pixel");
+      assert.notEqual(select("pixel_ops_download_stage", args)?.block, true);
+    }
+    const result = { details: { jobId, status: "submitted", kind: "download" } };
+    afterCall(guard, wrapped ? "tool_call" : "pixel_ops_download_stage", {
+      event: wrapped
+        ? { params: { id: "openclaw:pixel-operations-broker:pixel_ops_download_stage", args },
+            result: wrappedPluginResult("pixel-operations-broker", "pixel_ops_download_stage", result) }
+        : { params: args, result },
+    });
+    for (const name of ["pixel_ops_job_get", "pixel_ops_job_wait", "pixel_ops_job_events", "pixel_ops_job_cancel"]) {
+      assert.notEqual(select(name, { jobId })?.block, true, name);
+    }
+    const sha256 = "a".repeat(64);
+    const artifact = {
+      path: `/var/lib/pixel-ops-broker/artifacts/${jobId}/${args.filename}`,
+      filename: args.filename, bytes: 1024, sha256, source: args.url,
+      redirects: [], executable: false,
+    };
+    afterCall(guard, "pixel_ops_job_wait", { event: { params: { jobId }, result: { details: {
+      jobId, status: "succeeded", waitTimedOut: false,
+      steps: [{ action: "download.stage", target: "broker", exitCode: 0, artifact }],
+    } } } });
+    // The promoter independently reopens/re-hashes the broker receipt; routing
+    // must allow it and subsequent sandbox tools to reach their own checks.
+    assert.notEqual(call(guard, "pixel_ods_download_promote", { event: { params: {
+      jobId, filename: args.filename, relativePath: `sources/${args.filename}`,
+      sha256, sourceUrl: args.url,
+    } } })?.block, true);
+    afterCall(guard, "pixel_ods_download_promote", { event: {
+      params: { jobId, filename: args.filename, relativePath: `sources/${args.filename}`, sha256, sourceUrl: args.url },
+      result: { details: {
+        schemaVersion: 1, kind: "ods-pixel-download-promotion", status: "succeeded",
+        jobId, filename: args.filename, relativePath: `sources/${args.filename}`,
+        bytes: 1024, sha256, source: args.url, requestedSource: args.url,
+        executable: false, overwritten: false,
+        boundary: "Verified create-only promotion from Pixel Operations quarantine into the configured owner workspace; no arbitrary source, overwrite, execution, or path traversal authority.",
+      } },
+    } });
+    assert.notEqual(call(guard, "exec", { event: { params: { command: "python3 -m venv .venv" } } })?.block, true);
+    assert.notEqual(call(guard, "write", { event: { params: { path: "guide.md", content: "Tests remain unverified." } } })?.block, true);
+    assert.equal(select("pixel_ops_shell_propose", { command: "id" }).blockReason, OPERATIONS_NOT_REQUESTED_REASON);
+  }
+});
+
+test("download job continuation requires a successful broker submission in this run", () => {
+  for (const result of [
+    { content: [{ type: "text", text: '{"status":"submitted","kind":"download","jobId":"ops-1234567890123-abcdef123456"}' }] },
+    { details: { status: "submitted", kind: "shell", jobId: "ops-1234567890123-abcdef123456" } },
+    { isError: true, details: { status: "submitted", kind: "download", jobId: "ops-1234567890123-abcdef123456" } },
+  ]) {
+    const guard = createToolLoopGuard();
+    guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt: "Research the repository and update its guide." });
+    afterCall(guard, "pixel_ops_download_stage", { event: {
+      params: { url: "https://github.com/pallets/click/archive/refs/heads/main.tar.gz", filename: "click-main.tar.gz" }, result,
+    } });
+    assert.equal(call(guard, "pixel_ops_job_wait", { event: { params: { jobId: "ops-1234567890123-abcdef123456" } } }).blockReason, OPERATIONS_NOT_REQUESTED_REASON);
+  }
+});
+
+test("a research download does not grant access to another broker job or remote transfer", () => {
+  for (const [name, params] of [
+    ["pixel_ops_job_get", { jobId: "ops-1234567890124-abcdef123456" }],
+    ["pixel_ops_artifact_transfer", { jobId: "ops-1234567890123-abcdef123456", target: "another-host" }],
+  ]) {
+    const guard = createToolLoopGuard();
+    guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt: "Research this public repository and save a guide." });
+    afterCall(guard, "pixel_ops_download_stage", { event: {
+      params: { url: "https://github.com/pallets/click/archive/refs/heads/main.tar.gz", filename: "click-main.tar.gz" },
+      result: { details: { status: "submitted", kind: "download", jobId: "ops-1234567890123-abcdef123456" } },
+    } });
+    assert.equal(call(guard, name, { event: { params } }).blockReason, OPERATIONS_NOT_REQUESTED_REASON);
+  }
+});
+
 test("classifies exact-byte downloads without capturing ordinary page research", () => {
   assert.equal(
     userMessageRequestsExactByteDownload(
