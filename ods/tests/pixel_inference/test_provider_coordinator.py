@@ -4,8 +4,6 @@ These exercise production coordinator + owner projection + service participants.
 They are not installed-runtime or model-inference acceptance.
 """
 import contextlib
-import copy
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,7 +32,7 @@ def integrated(lifecycle, monkeypatch):
     saved = default_config()
     saved.update(enabled=True, revision=1)
     saved['providers'] = [dict(id='leader', label='Tower', kind='local', baseUrl='http://127.0.0.1:12001/v1',
-        model='qwen', contextWindow=32768, maxOutputTokens=4096, supportsTools=True,
+        model='qwen', contextTokens=32768, maxOutputTokens=4096, supportsTools=True,
         supportsVision=False, reasoning=False, credentialRef=None, enabled=True)]
     saved['roles']['leader'] = 'leader'
     atomic_json(directory / 'provider-config.json', saved)
@@ -169,6 +167,8 @@ def test_owner_projection_mismatch_refuses_before_any_config_write(integrated):
     b.worker = wrong_projection
     with pytest.raises(StoreError, match='root-projection-mismatch'): c.change(b, request(p))
     assert b.config.read_bytes() == b.before and b.restarts == 0 and b.pending()
+    b.worker = command
+    assert c.change(b, request(p, 'recover'))['outcome'] == 'rolled-back'
 
 
 def test_process_identity_failure_is_not_reported_as_applied(integrated):

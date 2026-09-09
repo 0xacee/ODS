@@ -268,7 +268,8 @@ def change(bridge, request):
                         done = state['completion']
                         result = {'status': 'registration-verified' if done['outcome'] == 'applied' else 'rolled-back',
                                   'binding': done['binding'], 'configSha256': done['configSha256']}
-                    elif state['configSha256'] == record['beforeSha'] and journal['phase'] == 'acquiring':
+                    elif (state['configSha256'] == record['beforeSha'] and state['binding'] == _binding(record['previous'])
+                          and (journal['phase'] in ('acquiring', 'invoking') or journal.get('noOwnerWrite') is True)):
                         journal['noOwnerWrite'] = True
                         result = {'status': 'rolled-back', 'binding': _binding(record['previous']), 'configSha256': record['beforeSha']}
                     else:
