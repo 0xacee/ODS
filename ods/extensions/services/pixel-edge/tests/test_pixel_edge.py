@@ -1,3 +1,7 @@
+import sys
+import pytest
+pytestmark = pytest.mark.skipif(sys.platform == 'win32', reason='Pixel Edge requires a POSIX environment')
+
 """Tests for pixel_edge — upstream Unix socket + edge proxy routes."""
 
 import asyncio
@@ -1590,3 +1594,4 @@ class TestChatActivity(BaseEdgeTest):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -1,3 +1,7 @@
+import sys
+import pytest
+pytestmark = pytest.mark.skipif(sys.platform == 'win32', reason='Pixel Edge requires a POSIX environment')
+
 """Gate qualification uses actual edge HTTP admission and held upstream streams."""
 
 import asyncio
@@ -314,3 +318,4 @@ os._exit(0)
         with self.assertRaises(OSError):
             initialize(self.directory.name)
         self.assertEqual(Path(self.directory.name, "transition.json").read_bytes(), before)
+
