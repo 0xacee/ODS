@@ -110,7 +110,7 @@ test("requires novel model-authored files for every requested browser visual", (
 
   for (const visual of [
     "Create an interactive voxel landscape with a dramatic day/night change.",
-    "Make an intricate animated SVG illustration with pause and color controls.",
+    "Make an intricate animated SVG illustration with pause and color controls and show it in the browser.",
     "Create a small task board where I can add, complete, filter, and remove items.",
   ]) {
     const result = promptContractForAgent(
@@ -129,7 +129,7 @@ test("requires novel model-authored files for every requested browser visual", (
 
   for (const prompt of [
     "Create a voxel city under the ocean.",
-    "Make an animated SVG of our dragon mascot.",
+    "Make an animated SVG of our dragon mascot and publish its preview.",
     "Build a task board with cloud sync.",
     "Make a playful puzzle game.",
     "Build a tiny habit-tracker app.",
@@ -156,6 +156,21 @@ test("requires novel model-authored files for every requested browser visual", (
     { configuredLeanPrompt: true }
   );
   assert.equal(explanation.appendSystemContext, ODS_COMPACT_CONVERSATION_CONTRACT);
+});
+
+test("standalone SVG requests keep ordinary file tools without an HTML publication contract", () => {
+  for (const prompt of [
+    "Make an intricate animated SVG illustration with pause and color controls.",
+    "Make an animated SVG of our dragon mascot.",
+    "Write a tiny valid SVG to release-2655/sun.svg, read it back, and tell me the saved path.",
+  ]) {
+    const result = promptContractForAgent(
+      { agentId: "pixel", contextTokenBudget: 65536 }, "pixel", { prompt },
+      { configuredLeanPrompt: true }
+    );
+    assert.equal(result.appendSystemContext, ODS_COMPACT_CONVERSATION_CONTRACT);
+    assert.doesNotMatch(result.appendSystemContext, /Only after its readback-verified receipt may you reply/);
+  }
 });
 
 test("routes natural visual follow-ups to a read-edit-republish contract", () => {
