@@ -93,6 +93,21 @@ class EdgeContainerTransportTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(json.loads(self.requests[0][3]), payload)
 
+    def test_native_gateway_status_and_mutation_reach_loopback(self):
+        value = {"available": True, "phase": "idle", "revision": "c" * 64, "active": 0}
+        self.response = json.dumps(value).encode()
+        adapter = bridge.SystemdAccessBridge("/unused", "k" * 64)
+        adapter.native_origin = "http://127.0.0.1:" + str(self.server.server_port)
+        adapter.native_key = "k" * 64
+        self.assertEqual(adapter.native(), value)
+        self.assertEqual(adapter.native("acquire", "b" * 64), value)
+        self.assertEqual([r[0] for r in self.requests], ["GET", "GET", "POST"])
+        self.assertTrue(all(r[1:3] == ("/pixel-ods/access-runtime", "Bearer " + "k" * 64)
+                            for r in self.requests))
+        self.assertEqual(json.loads(self.requests[-1][3]),
+                         {"operation": "acquire", "token": "b" * 64, "revision": "c" * 64})
+        self.assertEqual(self.children, [])
+
     def test_rejects_short_http_frame_even_if_body_is_valid_json(self):
         self.mode = "short"
         with self.assertRaises(bridge.AccessError): self.request()
