@@ -35,7 +35,9 @@ class EdgeContainerTransportTests(unittest.TestCase):
                 try:
                     if outer.mode == "drip":
                         for byte in outer.response:
-                            self.wfile.write(bytes([byte])); self.wfile.flush(); time.sleep(0.08)
+                            self.wfile.write(bytes([byte]))
+                            self.wfile.flush()
+                            time.sleep(0.08)
                     else:
                         self.wfile.write(outer.response)
                 except (BrokenPipeError, ConnectionResetError):
@@ -68,7 +70,9 @@ class EdgeContainerTransportTests(unittest.TestCase):
 
     def tearDown(self):
         self.launch.stop()
-        self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=1)
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=1)
         for child in self.children:
             self.assertIsNotNone(child.poll(), "CLI must be reaped or terminal")
 
