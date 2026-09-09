@@ -271,6 +271,7 @@ def change(bridge, request):
                     elif (state['configSha256'] == record['beforeSha'] and state['binding'] == _binding(record['previous'])
                           and (journal['phase'] in ('acquiring', 'invoking') or journal.get('noOwnerWrite') is True)):
                         journal['noOwnerWrite'] = True
+                        _write(bridge, journal)
                         result = {'status': 'rolled-back', 'binding': _binding(record['previous']), 'configSha256': record['beforeSha']}
                     else:
                         raise AccessError('provider-recovery-conflict')
