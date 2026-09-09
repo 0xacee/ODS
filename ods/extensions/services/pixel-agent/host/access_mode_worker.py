@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 import stat
 
+sys.dont_write_bytecode = True
+
 # The privileged installer places only these reviewed modules together. Isolated
 # Python excludes cwd, PYTHONPATH and user site packages; add this protected path.
 directory = Path(__file__).resolve().parent

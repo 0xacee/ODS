@@ -11,7 +11,7 @@ import re
 import stat
 from pathlib import Path
 
-from pixel_access_bridge import UNIT, AccessError, digest
+from pixel_access_bridge import UNIT, AccessError, digest, remaining
 from pixel_access_protocol import HEX
 from pixel_settings.coordinator import _read
 
@@ -20,13 +20,19 @@ from .service_environment import _parents
 
 DESCRIPTOR = Path('/etc/ods/pixel-provider-runtime.json')
 MAX_MANIFEST = 32 * 1024 * 1024
+ROOT_UID = 0
 
 
-def _regular(path):
+def _regular(path, cache=None):
     info = path.lstat()
-    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != ROOT_UID or info.st_nlink != 1
             or info.st_mode & 0o022):
         raise AccessError('provider-runtime-custody-unqualified')
+    signature = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                 info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    cached = cache.get(str(path)) if cache is not None else None
+    if cached is not None and cached[0] == signature:
+        return cached[1]
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         opened = os.fstat(fd)
@@ -35,6 +41,7 @@ def _regular(path):
         checksum = hashlib.sha256()
         with os.fdopen(fd, 'rb', closefd=False) as handle:
             for block in iter(lambda: handle.read(1024 * 1024), b''):
+                remaining(30)
                 checksum.update(block)
         after = os.fstat(fd)
         current = path.lstat()
@@ -42,22 +49,26 @@ def _regular(path):
                 (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
                 or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
             raise AccessError('provider-runtime-file-changed')
-        return ['file', stat.S_IMODE(opened.st_mode), opened.st_size, checksum.hexdigest()]
+        result = ['file', stat.S_IMODE(opened.st_mode), opened.st_size, checksum.hexdigest()]
+        if cache is not None:
+            cache[str(path)] = signature, result
+        return result
     finally:
         os.close(fd)
 
 
-def tree_manifest(root):
+def tree_manifest(root, cache=None):
     """All entries, including directories and resolved internal-only symlinks."""
     root = Path(root)
     _parents(root / 'entry')
     entries = {}
     for directory, folders, files in os.walk(root, followlinks=False):
+        remaining(30)
         for name in sorted(folders + files):
             path = Path(directory) / name
             relative = path.relative_to(root).as_posix()
             info = path.lstat()
-            if info.st_uid != 0 or (not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022):
+            if info.st_uid != ROOT_UID or (not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022):
                 raise AccessError('provider-runtime-custody-unqualified')
             if stat.S_ISLNK(info.st_mode):
                 try:
@@ -70,7 +81,7 @@ def tree_manifest(root):
             elif stat.S_ISDIR(info.st_mode):
                 entries[relative] = ['directory', stat.S_IMODE(info.st_mode)]
             else:
-                entries[relative] = _regular(path)
+                entries[relative] = _regular(path, cache)
             if len(entries) > 200000:
                 raise AccessError('provider-runtime-manifest-too-large')
     return entries
@@ -79,6 +90,10 @@ def tree_manifest(root):
 class RuntimeCustody:
     def __init__(self, bridge):
         self.bridge = bridge
+        # Per-operation only; never persist or share across request handlers.
+        # Every use still checks the complete entry set, links and file metadata.
+        # Only root-protected, unchanged files may reuse their verified hash.
+        self._cache = {}
 
     def inspect(self):
         _parents(DESCRIPTOR)
@@ -96,9 +111,9 @@ class RuntimeCustody:
         manifest, checksum = _read(Path(value['manifest']), 0, MAX_MANIFEST)
         if checksum != value['manifestSha256'] or type(manifest) is not dict:
             raise AccessError('provider-runtime-manifest-changed')
-        actual = {'runtime': tree_manifest(value['runtimeRoot']), 'source': tree_manifest(value['sourceRoot']),
-                  'node': _regular(Path(value['node'])), 'launcher': _regular(Path(value['launcher'])),
-                  'hostPython': _regular(Path(value['hostPython']))}
+        actual = {'runtime': tree_manifest(value['runtimeRoot'], self._cache), 'source': tree_manifest(value['sourceRoot'], self._cache),
+                  'node': _regular(Path(value['node']), self._cache), 'launcher': _regular(Path(value['launcher']), self._cache),
+                  'hostPython': _regular(Path(value['hostPython']), self._cache)}
         if actual != manifest or value['launcher'] != self.bridge.binary:
             raise AccessError('provider-runtime-custody-unqualified')
         # A root-selected launcher must select this exact protected Node/entry,

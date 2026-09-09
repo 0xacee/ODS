@@ -10,6 +10,8 @@ import stat
 import struct
 import sys
 
+sys.dont_write_bytecode = True
+
 
 def protected(path):
     path = Path(path)
