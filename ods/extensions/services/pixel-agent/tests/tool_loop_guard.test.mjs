@@ -2690,6 +2690,33 @@ test("download job continuation requires a successful broker submission in this 
   }
 });
 
+test("a submitted download can report invalid inputs without granting artifact success", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", {
+    prompt: "Get a disposable checkout of the public repository so we can work on its source.",
+  });
+  const jobId = "ops-1234567890123-abcdef123456";
+  // Native broker trace: missing filename still creates a job; its terminal
+  // failure is the actionable feedback needed to correct that request.
+  const args = { url: "https://github.com/pallets/click/archive/refs/heads/main.zip" };
+  afterCall(guard, "tool_call", { event: {
+    params: { id: "openclaw:pixel-operations-broker:pixel_ops_download_stage", args },
+    result: wrappedPluginResult("pixel-operations-broker", "pixel_ops_download_stage", {
+      details: { jobId, status: "submitted", kind: "download" },
+    }),
+  } });
+  assert.notEqual(call(guard, "pixel_ops_job_wait", { event: { params: { jobId } } })?.block, true);
+  afterCall(guard, "pixel_ops_job_wait", { event: { params: { jobId }, result: {
+    details: { jobId, status: "rejected", error: "filename is required", steps: [] },
+  } } });
+  assert.notEqual(call(guard, "pixel_ops_download_stage", { event: {
+    params: { ...args, filename: "click.zip" },
+  } })?.block, true);
+  assert.notEqual(call(guard, "write", { event: { params: {
+    path: "status.md", content: "Download request rejected; source not available yet.",
+  } } })?.block, true);
+});
+
 test("a research download does not grant access to another broker job or remote transfer", () => {
   for (const [name, params] of [
     ["pixel_ops_job_get", { jobId: "ops-1234567890124-abcdef123456" }],

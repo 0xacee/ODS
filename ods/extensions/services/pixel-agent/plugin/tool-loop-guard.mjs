@@ -1378,6 +1378,15 @@ function operationsInventoryEvidenceText(inventory) {
   ].join("\n");
 }
 
+function submittedDownloadJobId(event) {
+  if (toolCallFailed(event)) return undefined;
+  const details = event?.result?.details;
+  return details && typeof details === "object" && !Array.isArray(details) &&
+    details.status === "submitted" && details.kind === "download" &&
+    typeof details.jobId === "string" && OPS_JOB_ID.test(details.jobId)
+    ? details.jobId : undefined;
+}
+
 function exactDownloadSubmission(event, requested) {
   if (toolCallFailed(event)) return undefined;
   const params = event?.params;
@@ -8566,17 +8575,19 @@ export function createToolLoopGuard({
       // General research may select a source archive or dependency URL. Only
       // an actual matched broker submission creates permission to inspect or
       // cancel its job; tool text and invented job IDs never do.
-      const submission = exactDownloadSubmission(exactDownloadEvent,
-        state.exactDownloadRequested ? state.exactDownloadRequest : exactDownloadEvent?.params);
-      if (submission) {
-        if (state.exactDownloadRequested) {
+      if (state.exactDownloadRequested) {
+        const submission = exactDownloadSubmission(exactDownloadEvent, state.exactDownloadRequest);
+        if (submission) {
           state.exactDownloadSubmissions.set(submission.jobId, submission);
           state.exactDownloadTerminalBlocks = 0;
-        } else {
-          // Status access does not turn a research task into the exclusive
-          // exact-byte delivery state machine or force its final response.
-          state.researchDownloadSubmissions.set(submission.jobId, submission);
         }
+      } else {
+        // The broker may accept a request and subsequently reject its inputs.
+        // Let the model read that failure and repair the request. Tracking a
+        // real submission grants only job status/cancellation, not artifact
+        // validity, publication, or the exclusive exact-byte delivery flow.
+        const jobId = submittedDownloadJobId(exactDownloadEvent);
+        if (jobId) state.researchDownloadSubmissions.set(jobId, true);
       }
     }
     if (exactDownloadToolName === "pixel_ops_job_get" || exactDownloadToolName === "pixel_ops_job_wait") {
