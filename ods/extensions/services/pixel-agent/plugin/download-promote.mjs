@@ -13,6 +13,21 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_RESPONSE_BYTES = 8192;
 const BOUNDARY =
   "Verified create-only promotion from Pixel Operations quarantine into the configured owner workspace; no arbitrary source, overwrite, execution, or path traversal authority.";
+const ARGUMENT_HINTS = Object.freeze({
+  fields: "Supply one object with exactly the five required fields.",
+  jobId: "jobId must be the unchanged receipt ID: ops-, 13 decimal digits, a hyphen, then 12 lowercase hexadecimal characters. Retrieve the actual receipt if it is missing; do not invent an ID.",
+  filename: "filename must be a safe basename beginning with a letter or digit, with at most 200 letters, digits, dots, underscores or hyphens.",
+  sha256: "sha256 must be the receipt's 64 lowercase hexadecimal characters.",
+  sourceUrl: "sourceUrl must be the requested HTTPS URL, without credentials, a fragment or whitespace.",
+  relativePath: "relativePath must be a safe workspace-relative file path ending in filename, without dot components, backslashes or a leading slash.",
+});
+
+class InvalidPromotionArguments extends Error {
+  constructor(field) {
+    super("invalid exact-download promotion request");
+    this.field = field;
+  }
+}
 
 function validSourceUrl(value) {
   if (
@@ -65,17 +80,24 @@ export function normalizePromotionParams(value) {
     !["jobId", "filename", "relativePath", "sha256", "sourceUrl"].every((key) =>
       Object.hasOwn(value, key)
     ) ||
-    Object.keys(value).length !== 5 ||
-    typeof value.jobId !== "string" ||
-    !JOB_ID.test(value.jobId) ||
-    typeof value.filename !== "string" ||
-    !FILENAME.test(value.filename) ||
-    typeof value.sha256 !== "string" ||
-    !SHA256.test(value.sha256) ||
-    !validSourceUrl(value.sourceUrl) ||
-    !validRelativePath(value.relativePath, value.filename)
+    Object.keys(value).length !== 5
   ) {
-    throw new Error("invalid exact-download promotion request");
+    throw new InvalidPromotionArguments("fields");
+  }
+  if (typeof value.jobId !== "string" || !JOB_ID.test(value.jobId)) {
+    throw new InvalidPromotionArguments("jobId");
+  }
+  if (typeof value.filename !== "string" || !FILENAME.test(value.filename)) {
+    throw new InvalidPromotionArguments("filename");
+  }
+  if (typeof value.sha256 !== "string" || !SHA256.test(value.sha256)) {
+    throw new InvalidPromotionArguments("sha256");
+  }
+  if (!validSourceUrl(value.sourceUrl)) {
+    throw new InvalidPromotionArguments("sourceUrl");
+  }
+  if (!validRelativePath(value.relativePath, value.filename)) {
+    throw new InvalidPromotionArguments("relativePath");
   }
   return {
     schemaVersion: 1,
@@ -194,6 +216,30 @@ function failedResult() {
   };
 }
 
+function invalidArgumentsResult(error) {
+  const field = error instanceof InvalidPromotionArguments &&
+    Object.hasOwn(ARGUMENT_HINTS, error.field) ? error.field : undefined;
+  return {
+    content: [{
+      type: "text",
+      text:
+        "Invalid download promotion arguments. " +
+        (field ? `Invalid field: ${field}. ${ARGUMENT_HINTS[field]} ` : "") +
+        "Supply exactly jobId, filename, " +
+        "relativePath, sha256, and sourceUrl. Use relativePath (not destination) " +
+        "for the workspace-relative file path ending in filename; use sourceUrl " +
+        "(not url) for the requested HTTPS source. Use the jobId, filename and " +
+        "SHA-256 from the successful staged-download receipt. No host request " +
+        "was made. Correct the arguments and retry the same verified job.",
+    }],
+    details: {
+      status: "failed", errorCode: "invalid_arguments", boundary: BOUNDARY,
+      ...(field ? { invalidField: field } : {}),
+    },
+    isError: true,
+  };
+}
+
 export function createDownloadPromoteTool({ request = requestPromotion } = {}) {
   return {
     name: "pixel_ods_download_promote",
@@ -212,8 +258,13 @@ export function createDownloadPromoteTool({ request = requestPromotion } = {}) {
       },
     },
     execute: async (_callId, params, signal) => {
+      let normalized;
       try {
-        const normalized = normalizePromotionParams(params);
+        normalized = normalizePromotionParams(params);
+      } catch (error) {
+        return invalidArgumentsResult(error);
+      }
+      try {
         const response = validatedResponse(await request(normalized, { signal }), normalized);
         return {
           content: [
