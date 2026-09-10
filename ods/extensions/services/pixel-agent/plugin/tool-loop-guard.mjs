@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
+import { projectWebResult } from "./web-result-projection.mjs";
 
 export const DEFAULT_WEB_TOOL_LIMITS = Object.freeze({
   search: 8,
@@ -8246,7 +8247,7 @@ export function createToolLoopGuard({
     const pendingToolRun = pendingToolRuns.get(toolCallId);
     if (
       toolName === "tool_call" &&
-      ["read", "write", "edit", "apply_patch", "exec", "process"].includes(
+      ["read", "write", "edit", "apply_patch", "exec", "process", "web_search", "web_fetch"].includes(
         pendingToolRun?.selectedToolName
       )
     ) {
@@ -8255,7 +8256,9 @@ export function createToolLoopGuard({
         pendingToolRun.selectedToolName,
         "core"
       );
-      if (envelope) {
+      if (envelope && pendingToolRun.runId === runId &&
+          (!["web_search", "web_fetch"].includes(pendingToolRun.selectedToolName) ||
+            isDeepStrictEqual(envelope.params, pendingToolRun.selectedParams))) {
         // `tool_result_persist` runs with the same opaque call ID but may see
         // only the already-truncated model-visible content. Preserve this
         // bounded, structurally validated post-tool snapshot on that exact
@@ -9048,6 +9051,12 @@ export function createToolLoopGuard({
       return undefined;
     }
     const message = event?.message;
+    const compactWebResult = pending?.transport === "tool_call" &&
+      ["web_search", "web_fetch"].includes(pending.selectedToolName) &&
+      (!context?.runId || context.runId === pending.runId) &&
+      (!event?.runId || event.runId === pending.runId)
+      ? projectWebResult(message, pending.capturedToolSearchEnvelope)
+      : undefined;
     const compactVerification = compactCleanVerificationResult(message, pending);
     const compactCoreResult = compactVerification
       ? undefined
@@ -9157,11 +9166,12 @@ export function createToolLoopGuard({
       !hostEvidence &&
       !compactVerification &&
       !compactCoreResult &&
+      !compactWebResult &&
       !previewStageInstruction
     ) {
       return undefined;
     }
-    const compactMessage = compactVerification ?? compactCoreResult ?? message;
+    const compactMessage = compactVerification ?? compactCoreResult ?? compactWebResult ?? message;
     const content = hostEvidence
       ? [{
         type: "text",
