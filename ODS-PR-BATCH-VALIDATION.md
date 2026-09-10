@@ -1,6 +1,6 @@
 # ODS PR batch validation — 2026-09-10
 
-Twenty new pull requests were opened against Osmantic/ODS. All remain draft. The final GitHub audit found no conflicts with main and no attached check results. The results below are local validation, not hosted CI or live-installation evidence.
+Twenty new pull requests were opened against Osmantic/ODS. All twenty are now Ready for review following a fresh audit of their unchanged candidate heads. The final GitHub audit found no conflicts with main and no attached check results. The results below are local validation, not hosted CI or live-installation evidence.
 
 | PR | Change | Candidate head | Focused validation |
 | --- | --- | --- | --- |
@@ -54,6 +54,6 @@ Followup 31141545 (#3996) makes long GPU error messages scrollable. Followup 9ae
 
 **Remaining validation**
 
-No full Tauri/WebView package build, macOS execution, real GPU/Docker installation, or production deployment was performed. Native module tests exercise actual process boundaries with isolated fixture checkouts and state paths. Hosted GitHub checks have not reported results. Draft status remains appropriate for human review and the declared platform gates.
+No full Tauri/WebView package build, macOS execution, real GPU/Docker installation, or production deployment was performed. Native module tests exercise actual process boundaries with isolated fixture checkouts and state paths. Hosted GitHub checks have not reported results. Ready for review does not establish merge readiness. Native changes #4071 and #4072 are explicitly not merge-ready until their declared platform gates and independent human review are complete.
 
 The integration and compatibility branches are review artifacts on the fork. Nothing was merged into upstream main.
