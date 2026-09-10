@@ -10,6 +10,7 @@ import UserAvatar from '../components/UserAvatar'
 import {useLocalProfile} from '../lib/localProfile'
 import { pixelHeaderPose, pixelReplyPose } from '../lib/pixelMascotState'
 import PixelComposerTools from '../components/PixelComposerTools'
+import PixelTextFileInput from '../components/PixelTextFileInput'
 import PixelDictation from '../components/PixelDictation'
 import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelCommandSearch'
 import PixelSelectionActions from '../components/PixelSelectionActions'
@@ -1443,6 +1444,7 @@ export default function Pixel({ systemStatus = null }) {
           </div>
           </div>
           {stopError && <p role="alert" className="mt-1.5 px-1 text-xs text-amber-300">{stopError}</p>}
+          <PixelTextFileInput key={chatIdRef.current} input={input} disabled={isDisabled} limit={MAX_INPUT_LEN} onInsert={insertComposerText}/>
           <div className="pixel-composer-secondary">
             <PixelComposerTools input={input} disabled={isDisabled} onInsert={insertComposerText} />
             <div className="pixel-composer-limits">
