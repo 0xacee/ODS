@@ -61,6 +61,79 @@ def test_managed_capacity_uses_real_bound_leader_not_placeholder():
     assert caps["capacitySource"] == "owner-declared"
 
 
+@pytest.mark.parametrize("alias", ["maxTokens", "max_completion_tokens", "max_tokens"])
+@pytest.mark.parametrize("use_managed", [False, True])
+def test_output_capacity_inherits_runtime_default_params(alias, use_managed):
+    source, document = managed() if use_managed else (config(), None)
+    source["agents"]["list"][0].pop("params")
+    source["agents"]["defaults"] = {"params": {alias: 384}}
+    before = copy.deepcopy(source)
+    caps = runtime.declared_capabilities(source, document)
+    assert caps["activeMaxOutputTokens"] == 384
+    assert caps["samplingSupported"] is False
+    assert source == before
+
+
+@pytest.mark.parametrize("default_alias", ["maxTokens", "max_completion_tokens", "max_tokens"])
+@pytest.mark.parametrize("agent_alias", ["maxTokens", "max_completion_tokens", "max_tokens"])
+def test_agent_output_overrides_inherited_aliases(default_alias, agent_alias):
+    source = config()
+    source["agents"]["defaults"] = {"params": {default_alias: 384}}
+    source["agents"]["list"][0]["params"] = {agent_alias: 768}
+    assert runtime.declared_capabilities(source)["activeMaxOutputTokens"] == 768
+
+
+@pytest.mark.parametrize("value", [True, False, None, "384", 0, -1, 384.5])
+def test_unqualified_inherited_output_is_not_replaced_with_model_capacity(value):
+    source = config()
+    source["agents"]["list"][0].pop("params")
+    source["agents"]["defaults"] = {"params": {"maxTokens": value}}
+    with pytest.raises(SettingsError):
+        runtime.declared_capabilities(source)
+
+
+def test_output_reset_preview_and_projection_restore_inherited_budget():
+    from pixel_settings.projection import plan_preferences
+    source, document = managed()
+    source["agents"]["list"][0].pop("params")
+    source["agents"]["defaults"] = {"params": {"maxTokens": 384}}
+    caps = runtime.declared_capabilities(source, document)
+    first = plan_preferences(source, {"maxOutputTokens": 768}, caps)
+    reset = plan_preferences(first["document"], {"maxOutputTokens": None},
+        runtime.declared_capabilities(first["document"], document), previous=first["state"])
+    assert reset["document"] == source
+    assert reset["preview"]["proposed"]["maxOutputTokens"] == 384
+
+
+@pytest.mark.parametrize("alias", ["maxTokens", "max_completion_tokens", "max_tokens"])
+def test_selected_model_params_override_global_but_not_agent(alias):
+    source = config()
+    source["agents"]["list"][0].pop("params")
+    source["agents"]["defaults"] = {"params": {"maxTokens": 384}, "models": {
+        "local/pixel": {"params": {alias: 512}},
+        "local/unrelated": {"params": {"maxTokens": 8192}}}}
+    assert runtime.declared_capabilities(source)["activeMaxOutputTokens"] == 512
+    source["agents"]["list"][0]["params"] = {"max_tokens": 768}
+    assert runtime.declared_capabilities(source)["activeMaxOutputTokens"] == 768
+
+
+def test_managed_placeholder_model_params_are_not_dynamic_lease_params():
+    source, document = managed()
+    source["agents"]["list"][0].pop("params")
+    source["agents"]["defaults"] = {"params": {"maxTokens": 384}, "models": {
+        "ods-policy/managed": {"params": {"maxTokens": 8192}}}}
+    assert runtime.declared_capabilities(source, document)["activeMaxOutputTokens"] == 384
+
+
+def test_first_token_alias_in_layer_wins_without_mutating_owner_params():
+    source = config()
+    source["agents"]["list"][0]["params"] = {
+        "maxTokens": 256, "max_completion_tokens": 512, "max_tokens": 768}
+    before = copy.deepcopy(source)
+    assert runtime.declared_capabilities(source)["activeMaxOutputTokens"] == 256
+    assert source == before
+
+
 @pytest.mark.parametrize("mutation", ["revision", "policy", "disabled", "missing"])
 def test_managed_binding_drift_refused(mutation):
     source, document = managed()

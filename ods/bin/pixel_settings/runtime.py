@@ -79,6 +79,31 @@ def compare_readback(config, envelope, *, pid, revision):
     return all(canonical(envelope[name]) == canonical(value) for name, value in expected.items())
 
 
+def _declared_output(defaults, pixel, primary, output):
+    """Resolve configured output, not backend-observed generation capacity.
+
+    The pinned SDK resolves defaults, a selected model's params, then the agent.
+    Token aliases are resolved within each layer before later layers override it.
+    Managed turns use a per-lease model id, not the static managed placeholder.
+    """
+    layers = [_object(defaults.get("params", {}))]
+    if primary != "ods-policy/managed":
+        selected = _object(defaults.get("models", {})).get(primary, {})
+        layers.append(_object(_object(selected).get("params", {})))
+    layers.append(_object(pixel.get("params", {})))
+    for params in layers:
+        for key in ("maxTokens", "max_completion_tokens", "max_tokens"):
+            if key in params:
+                value = params[key]
+                # Invalid declarations are not evidence for a larger model
+                # default. Keep them unavailable, without rewriting owner data.
+                if type(value) is not int or not 1 <= value <= 10_000_000:
+                    raise SettingsError("settings-output-capacity-unavailable")
+                output = value
+                break
+    return output
+
+
 def declared_capabilities(config, provider_document=None, *, thinking_levels=None, sampling_supported=False):
     canonical(config)
     agents, entries, pixel = _agents(config)
@@ -126,6 +151,6 @@ def declared_capabilities(config, provider_document=None, *, thinking_levels=Non
     levels = thinking_levels if thinking_levels is not None else ([] if reasoning else ["off"])
     return _capabilities({"providerContextTokens": context, "providerMaxOutputTokens": output,
         "activeContextTokens": pixel.get("contextTokens", defaults.get("contextTokens", context)),
-        "activeMaxOutputTokens": _object(pixel.get("params", {})).get("maxTokens", output),
+        "activeMaxOutputTokens": _declared_output(defaults, pixel, primary, output),
         "backendContextTokens": None, "capacitySource": source, "supportedThinkingLevels": levels,
         "samplingSupported": sampling_supported, "pixelOnlyRuntime": len(entries) == 1})
