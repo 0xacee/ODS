@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { conversationLabels, saveConversationLabels } from '../lib/pixelConversationLabels'
+import './pixel-conversation-organizer.css'
 
 export default function PixelConversationOrganizer({chat, title, onSaved}) {
   const dialog = useRef(null)
@@ -15,7 +16,7 @@ export default function PixelConversationOrganizer({chat, title, onSaved}) {
     catch (failure) { setError(failure.message || 'Labels could not be saved. Your conversation is unchanged.') }
   }
   return <>
-    <button ref={trigger} type="button" className="conversation-delete" aria-label={`Organize chat: ${title}`} title="Rename, pin or archive" onClick={() => {setError(''); original.current = conversationLabels(chat.chatId); setEditing(original.current)}}>…</button>
+    <button ref={trigger} type="button" className="conversation-organize" aria-label={`Organize chat: ${title}`} title="Rename, pin or archive" onClick={() => {setError(''); original.current = conversationLabels(chat.chatId); setEditing(original.current)}}>…</button>
     {editing && <dialog ref={dialog} className="chat-delete-dialog" aria-label="Organize conversation" onCancel={event => {event.preventDefault(); close()}}>
       <form onSubmit={save}>
         <h3>Organize conversation</h3>
