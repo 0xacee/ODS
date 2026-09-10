@@ -415,6 +415,31 @@ function messageOutcome(message) {
     ? {status:message.status} : {}
 }
 
+function retainedResult(events) {
+  let content = ''
+  let preview = null
+  let task = null
+  let done = false
+  let failed = false
+  for (const line of events.split('\n')) {
+    if (!line.startsWith('data:')) continue
+    const payload = line.slice(5).trim()
+    if (payload === '[DONE]') { done = true; break }
+    try {
+      const frame = JSON.parse(payload)
+      if (frame?.error) { failed = true; continue }
+      if (failed) continue
+      const candidate = parseVerifiedPreviewFrame(frame)
+      if (candidate) preview = candidate
+      const candidateTask = parseTaskActivityFrame(frame)
+      if (candidateTask) task = candidateTask
+      const text = frame?.choices?.[0]?.delta?.content
+      if (typeof text === 'string') content += text
+    } catch { /* The same bounded SSE boundary applies to retained results. */ }
+  }
+  return { content, preview: done && !failed ? preview : null, task, done, failed }
+}
+
 function loadStoredChat(selected) {
   try {
     const stored = selected || JSON.parse(globalThis.localStorage?.getItem(CHAT_STORAGE_KEY) || 'null')
@@ -456,6 +481,7 @@ function loadStoredChat(selected) {
       contextStart: Number.isInteger(stored.contextStart) && stored.contextStart >= 0 && stored.contextStart <= messages.length ? stored.contextStart : 0,
       workspaceOpen: stored.workspaceOpen !== false && (stored.workspaceOpen === true || Boolean(preview)),
       draft: typeof stored.draft === 'string' ? stored.draft.slice(0, MAX_INPUT_LEN) : '',
+      requestId: SAFE_CHAT_ID.test(stored.requestId || '') ? stored.requestId : null,
       interrupted: stored.inFlight === true || stored.interrupted === true,
     }
   } catch {
@@ -514,6 +540,7 @@ export default function Pixel({ systemStatus = null }) {
   const restoredActivityRef = useRef(restoredActivity)
   const chatIdRef = useRef(initialChat?.chatId || makeChatId())
   const contextStartRef = useRef(initialChat?.contextStart || 0)
+  const requestIdRef = useRef(initialChat?.requestId || null)
   const inputRef = useRef(null)
   const scrollRef = useRef(null)
 
@@ -532,12 +559,51 @@ export default function Pixel({ systemStatus = null }) {
   useEffect(() => {
     if (!interrupted || sending) return undefined
     const chatId = chatIdRef.current
+    const requestId = requestIdRef.current
     const controller = new AbortController()
     let disposed = false
     let timer = null
     async function checkActivity() {
       let state = 'unknown'
       try {
+        if (requestId) {
+          const resultResponse = await fetch('/api/pixel/chat/result', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, request_id: requestId }), signal: controller.signal,
+          })
+          const result = await resultResponse.json()
+          if (disposed || chatIdRef.current !== chatId || requestIdRef.current !== requestId) return
+          if (resultResponse.ok && result && Object.keys(result).sort().join(',') === 'events,state'
+            && typeof result.events === 'string' && result.events.length <= 8 * 1024 * 1024) {
+            if (result.state === 'active') {
+              updateRestoredActivity('active')
+              timer = globalThis.setTimeout(checkActivity, 2000)
+              return
+            }
+            if (['complete', 'interrupted', 'cancelled'].includes(result.state)) {
+              const recovered = retainedResult(result.events)
+              const successful = result.state === 'complete' && recovered.done && !recovered.failed
+              setMessages(previous => {
+                const publication = successful ? recovered.preview : null
+                const before = [...previous].reverse().find(message => message.publication?.relativeDirectory === publication?.relativeDirectory)?.publication || null
+                return replaceLastAssistant(previous, {
+                content: result.state === 'cancelled' ? stoppedContent(recovered.content)
+                  : recovered.content || (successful ? 'Completed without a text response.' : 'Pixel could not complete the response. Check saved work before continuing.'),
+                status: result.state === 'cancelled' ? 'stopped' : successful ? 'done' : 'error',
+                ...(recovered.task ? {task:recovered.task} : {}),
+                ...(publication ? {publication,beforePublication:before} : {}),
+              })})
+              if (successful && recovered.preview) {
+                setPreview(recovered.preview); setPreviewRefresh(0)
+                setWorkspaceOpen(true); setPreviewCollapsed(false)
+              }
+              requestIdRef.current = null
+              setInterrupted(false)
+              updateRestoredActivity('terminal')
+              return
+            }
+          }
+        }
         const response = await fetch('/api/pixel/chat/activity', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ chat_id: chatId }), signal: controller.signal,
@@ -676,6 +742,7 @@ export default function Pixel({ systemStatus = null }) {
       saveConversation({
         schema: 1,
         chatId: chatIdRef.current,
+        requestId: requestIdRef.current,
         inFlight: sending,
         interrupted,
         draft: input,
@@ -731,14 +798,29 @@ export default function Pixel({ systemStatus = null }) {
       let taskActivity = null
 
       try {
+        const requestId = makeChatId()
+        requestIdRef.current = requestId
+        // Commit the attempt identity before the POST can start tool work.
+        // A page close before React's persistence effect must still recover it.
+        try {
+          saveConversation({
+            schema: 1, chatId, requestId, inFlight: true, interrupted: false,
+            messages: [...visibleConversation, { role: 'assistant', content: '' }], preview,
+            draft: '', contextStart: contextStartRef.current, workspaceOpen,
+          })
+        } catch {
+          requestIdRef.current = null
+          throw new Error('chat-recovery-storage-unavailable')
+        }
         const response = await fetch('/api/pixel/chat/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, messages: attemptConversation }),
+          body: JSON.stringify({ chat_id: chatId, request_id: requestId, messages: attemptConversation }),
           signal: controller.signal,
         })
         if (!isCurrentTurn()) return { kind: 'obsolete' }
         if (response.status === 409) {
+          requestIdRef.current = null
           let detail = MODEL_SWITCH_DETAIL
           if (typeof response.json === 'function') {
             try {
@@ -751,6 +833,7 @@ export default function Pixel({ systemStatus = null }) {
           return { kind: 'switching', detail }
         }
         if (response.status === 412) {
+          requestIdRef.current = null
           let detail = 'Pixel can use this model, but the current runtime still has an older model gate.'
           if (typeof response.json === 'function') {
             try {
@@ -841,7 +924,8 @@ export default function Pixel({ systemStatus = null }) {
       // An acknowledged Stop or page disposal can close a reader normally.
       // Its late close must not overwrite the explicit cancellation outcome.
       if (!isCurrentTurn()) return
-      if (attempt.receivedError) return
+      if (attempt.receivedError) { setInterrupted(true); return }
+      if (attempt.receivedDone) requestIdRef.current = null
       if (attempt.receivedDone) {
         const previousPublication = [...messages].reverse().find(message => message.publication?.relativeDirectory === attempt.verifiedPreview?.relativeDirectory)?.publication || preview
         if (attempt.verifiedPreview) {
@@ -931,9 +1015,11 @@ export default function Pixel({ systemStatus = null }) {
       finishAttempt(attempt)
     } catch (error) {
       if (isCurrentTurn() && error?.name !== 'AbortError') {
-        setInterrupted(true)
+        const storageFailed = error?.message === 'chat-recovery-storage-unavailable'
+        setInterrupted(!storageFailed)
+        if (storageFailed) setInput(trimmed)
         setMessages(previous => replaceLastAssistant(previous, {
-          content: latestAssistantText || 'Request failed',
+          content: storageFailed ? 'Could not save the request for recovery. No task was started. Check browser storage and try again.' : latestAssistantText || 'Request failed',
           status: 'error',
         }))
       }
@@ -945,11 +1031,12 @@ export default function Pixel({ systemStatus = null }) {
         abortRef.current = null
       }
     }
-  }, [input, messages, preview, sending, status, restoredActive, restoredChecking, updateRestoredActivity])
+  }, [input, messages, preview, workspaceOpen, sending, status, restoredActive, restoredChecking, updateRestoredActivity])
 
   const stopStreaming = useCallback(async () => {
     const controller = abortRef.current
     const chatId = chatIdRef.current
+    const requestId = requestIdRef.current
     const restored = !controller && interrupted
       && ['active', 'unknown'].includes(restoredActivityRef.current)
     if ((!controller && !restored) || stopping) return
@@ -960,7 +1047,7 @@ export default function Pixel({ systemStatus = null }) {
       const response = await fetch('/api/pixel/chat/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId }),
+        body: JSON.stringify({ chat_id: chatId, ...(requestId ? { request_id: requestId } : {}) }),
       })
       let payload = null
       if (typeof response?.json === 'function') {
@@ -976,10 +1063,11 @@ export default function Pixel({ systemStatus = null }) {
 
       // A normal terminal response may win the cancellation race. Do not
       // rewrite that completed answer as owner-stopped.
-      if (chatIdRef.current !== chatId || abortRef.current !== controller
+      if (chatIdRef.current !== chatId || requestIdRef.current !== requestId || abortRef.current !== controller
         || (restored && !['active', 'unknown'].includes(restoredActivityRef.current))) return
       controller?.abort()
       abortRef.current = null
+      requestIdRef.current = null
       setMessages(previous => replaceLastAssistant(previous, {
         content: stoppedContent(previous.at(-1)?.content),
         status: 'stopped',
@@ -1004,6 +1092,7 @@ export default function Pixel({ systemStatus = null }) {
   const startNewChat = useCallback(() => {
     if (sending || restoredActive || restoredChecking || stopping) return
     chatIdRef.current = makeChatId()
+    requestIdRef.current = null
     contextStartRef.current = 0
     setMessages([])
     setPreview(null)
@@ -1057,6 +1146,7 @@ export default function Pixel({ systemStatus = null }) {
       const chat = loadStoredChat(readConversations().find(item => item.chatId === event.detail))
       if (!chat || chat.chatId === chatIdRef.current) return
       chatIdRef.current = chat.chatId
+      requestIdRef.current = chat.requestId
       contextStartRef.current = chat.contextStart
       setMessages(chat.messages)
       setPreview(chat.preview)
