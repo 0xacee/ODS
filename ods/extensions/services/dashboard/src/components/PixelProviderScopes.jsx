@@ -23,6 +23,7 @@ export default function PixelProviderScopes({ chatId, sending = false }) {
   const [uncertain, setUncertain] = useState(false)
   const [error, setError] = useState('')
   const active = useRef(false)
+  const queuedInspection = useRef(null)
   const generation = useRef(0)
   const controllers = useRef(new Set())
   const trigger = useRef(null)
@@ -33,7 +34,7 @@ export default function PixelProviderScopes({ chatId, sending = false }) {
     const pending = controllers.current
     generation.current++; setState(null); setConfiguration(null); setOpen(false)
     setReviewed(false); setCloud(false); setCost(false)
-    return () => { generation.current++; for (const controller of pending) controller.abort() }
+    return () => { generation.current++; queuedInspection.current = null; for (const controller of pending) controller.abort() }
   }, [chatId])
 
   const request = async (url, body) => {
@@ -47,8 +48,16 @@ export default function PixelProviderScopes({ chatId, sending = false }) {
     } finally { clearTimeout(timer); controllers.current.delete(controller) }
   }
 
+  function finishOperation() {
+    active.current = false; setBusy(false)
+    const next = queuedInspection.current
+    queuedInspection.current = null
+    if (next) void next()
+  }
+
   const load = async () => {
-    if (active.current) return
+    // Preserve one explicit reopen/reload request while an older operation settles.
+    if (active.current) { queuedInspection.current = load; return }
     active.current = true; setBusy(true); resetConsent()
     const current = generation.current
     try {
@@ -60,7 +69,7 @@ export default function PixelProviderScopes({ chatId, sending = false }) {
       setState(result); setConfiguration(providers.configuration); setUncertain(false); setError('')
     } catch {
       if (current === generation.current) { setUncertain(true); setError('Provider preferences unavailable. Reload before making changes.') }
-    } finally { active.current = false; setBusy(false) }
+    } finally { finishOperation() }
   }
 
   const target = configuration?.providers.find(provider => provider.id === configuration.roles?.handoff)
@@ -84,10 +93,10 @@ export default function PixelProviderScopes({ chatId, sending = false }) {
       if (current === generation.current) {
         setUncertain(true); setError('Change outcome uncertain. Reload to inspect saved state; do not repeat the action.')
       }
-    } finally { active.current = false; setBusy(false); resetConsent() }
+    } finally { finishOperation(); resetConsent() }
   }
 
-  const close = () => { generation.current++; setOpen(false); resetConsent(); trigger.current?.focus() }
+  const close = () => { generation.current++; queuedInspection.current = null; setOpen(false); resetConsent(); trigger.current?.focus() }
   const keys = event => {
     if (event.key === 'Escape') { event.preventDefault(); close() }
     if (event.key !== 'Tab') return
