@@ -364,6 +364,7 @@ const EVIDENCE_REPORT_TOOL = "pixel_ods_evidence_report";
 const EVIDENCE_READBACK_TOOL = "pixel_ods_evidence_readback";
 const WORKSPACE_PREVIEW_TOOL = "pixel_ods_workspace_preview";
 const MAX_TRACKED_RUNS = 256;
+const MAX_SESSION_DOWNLOAD_JOBS = 32;
 const MAX_PENDING_EXEC_SESSIONS = 64;
 const ODS_OPENAI_USER = /^ods-[0-9a-f]{64}$/;
 const EXEC_CONTROL_WRAPPER = "/run/pixel-ods-control/cancellable-exec.sh";
@@ -5926,6 +5927,20 @@ export function createToolLoopGuard({
   const activeUsers = new Map();
   const pendingToolRuns = new Map();
   const sessionPreviews = new Map();
+  const sessionDownloadJobs = new Map();
+
+  function rememberSessionDownload(sessionId, jobId) {
+    if (typeof sessionId !== "string" || !sessionId || !OPS_JOB_ID.test(jobId)) return;
+    const jobs = sessionDownloadJobs.get(sessionId) ?? new Set();
+    jobs.delete(jobId);
+    while (jobs.size >= MAX_SESSION_DOWNLOAD_JOBS) jobs.delete(jobs.values().next().value);
+    jobs.add(jobId);
+    sessionDownloadJobs.delete(sessionId);
+    while (sessionDownloadJobs.size >= MAX_TRACKED_RUNS) {
+      sessionDownloadJobs.delete(sessionDownloadJobs.keys().next().value);
+    }
+    sessionDownloadJobs.set(sessionId, jobs);
+  }
 
   function pruneRuns() {
     while (runs.size >= MAX_TRACKED_RUNS) {
@@ -7274,8 +7289,10 @@ export function createToolLoopGuard({
       // reach those boundaries or stop later sandbox work.
       effectiveToolName !== "pixel_ops_download_stage" &&
       !(DOWNLOAD_JOB_TOOLS.has(effectiveToolName) &&
-        state.researchDownloadSubmissions.has((toolName === "tool_call"
-          ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId)) &&
+        (state.researchDownloadSubmissions.has((toolName === "tool_call"
+          ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId) ||
+          sessionDownloadJobs.get(state.currentSessionId)?.has((toolName === "tool_call"
+            ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId))) &&
       !(["pixel_ops_job_get", "pixel_ops_job_wait"].includes(effectiveToolName) &&
         state.operationsSubmittedJobs.has((toolName === "tool_call"
           ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId))
@@ -8636,6 +8653,14 @@ export function createToolLoopGuard({
       : toolName;
     const exactDownloadEvent = wrappedExactDownloadEvent ?? event;
     if (exactDownloadToolName === "pixel_ops_download_stage") {
+      // Approval may finish between user turns. Keep only actual broker
+      // handles in this process-local, session-bound cache. User/tool text
+      // cannot seed it; restart recovery still needs durable trusted receipts.
+      // This grants job inspection/cancellation, never approval or promotion.
+      const submittedJobId = submittedDownloadJobId(exactDownloadEvent);
+      if (submittedJobId) {
+        rememberSessionDownload(context?.sessionId ?? state.currentSessionId, submittedJobId);
+      }
       // Explicit exact-byte requests retain their owner-bound URL/digest.
       // General research may select a source archive or dependency URL. Only
       // an actual matched broker submission creates permission to inspect or
