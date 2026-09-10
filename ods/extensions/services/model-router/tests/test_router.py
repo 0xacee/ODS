@@ -93,7 +93,11 @@ def router(tmp_path, monkeypatch):
         doc["seq"] = route_seq if seq is None else seq
         if mutate:
             mutate(doc)
-        state_path.write_text(json.dumps(doc), encoding="utf-8")
+        # Match Switchboard's publication boundary so concurrent requests never
+        # observe the destination between truncation and a completed write.
+        staged = state_path.with_name(f".{state_path.name}.{uuid.uuid4().hex}.tmp")
+        staged.write_text(json.dumps(doc), encoding="utf-8")
+        staged.replace(state_path)
         mod._state_cache["mtime"] = None
 
     client = TestClient(mod.app)
