@@ -164,10 +164,15 @@ def test_safe_failure_code_retains_only_known_store_codes(code):
 @pytest.mark.parametrize('error', [
     RuntimeError('unsafe-sharing-compose'),
     StoreError('private-token-do-not-echo'),
-    StoreError('unsafe-sharing-compose', 'private-token-do-not-echo'),
     StoreError({'secret': 'private-token-do-not-echo'}),
 ])
 def test_safe_failure_code_never_echoes_arbitrary_exception_data(error):
+    assert service_module.safe_failure_code(error) == 'sharing-service-unavailable'
+
+
+def test_safe_failure_code_rejects_extra_exception_arguments():
+    error = StoreError('unsafe-sharing-compose')
+    error.args += ('private-token-do-not-echo',)
     assert service_module.safe_failure_code(error) == 'sharing-service-unavailable'
 
 
