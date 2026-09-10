@@ -12,6 +12,7 @@ import { pixelHeaderPose, pixelReplyPose } from '../lib/pixelMascotState'
 import PixelComposerTools from '../components/PixelComposerTools'
 import PixelDictation from '../components/PixelDictation'
 import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelCommandSearch'
+import PixelConversationImport from '../components/PixelConversationImport'
 import PixelSelectionActions from '../components/PixelSelectionActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
@@ -521,6 +522,7 @@ export default function Pixel({ systemStatus = null }) {
   const profile = useLocalProfile()
   const { displayName } = usePortalIdentity()
   const [initialChat] = useState(loadStoredChat)
+  const pendingImport = useRef(null)
   const [status, setStatus] = useState('loading')
   const [statusDetail, setStatusDetail] = useState('')
   const [messages, setMessages] = useState(() => initialChat?.messages || [])
@@ -1212,6 +1214,14 @@ export default function Pixel({ systemStatus = null }) {
         <div className="pixel-chat-header-actions">
           <button type="button" aria-label="Search Pixel" title="Search conversations · Ctrl+K" className="pixel-metal-control p-2" onClick={() => window.dispatchEvent(new Event(OPEN_PIXEL_SEARCH))}><Search size={16}/></button>
           <details className="pixel-chat-options"><summary aria-label="Chat options">•••</summary><div className="pixel-chat-options-menu">
+            <PixelConversationImport key={chatIdRef.current} disabled={sending || restoredActive || restoredChecking || stopping} onImport={record => {
+              if (sending || restoredActive || restoredChecking || stopping) throw new Error('Active task')
+              if (pendingImport.current?.record !== record) pendingImport.current = {record, chatId:makeChatId()}
+              const imported = {...record, chatId:pendingImport.current.chatId}
+              saveConversation(imported)
+              pendingImport.current = null
+              window.dispatchEvent(new CustomEvent(SELECT_EVENT, {detail:imported.chatId}))
+            }}/>
             <PixelAdvice canInsert={!sending} onInsert={text => setInput(current => current ? `${current}\n\n${text}` : text)} />
             <PixelHandoffApproval label="Approvals" />
             <PixelProviderScopes chatId={chatIdRef.current} sending={sending} />
