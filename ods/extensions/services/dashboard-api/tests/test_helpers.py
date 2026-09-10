@@ -12,6 +12,7 @@ import pytest
 from helpers import (
     string_extract_domain_names_safe,
     dict_key_path_setter_safe,
+    numeric_safe_geometric_mean,
     get_model_info, get_bootstrap_status, _update_lifetime_tokens,
     get_uptime, get_cpu_metrics, get_ram_metrics,
     check_service_health, get_all_services,
@@ -1634,3 +1635,13 @@ class TestDictKeyPathSetterSafe:
         assert dict_key_path_setter_safe(None, ["x", "y"], 10) == {"x": {"y": 10}}
         d = {"a": 1}
         assert dict_key_path_setter_safe(d, [], 5) == {"a": 1}
+
+
+class TestNumericSafeGeometricMean:
+    def test_valid_geometric_mean(self):
+        assert abs(numeric_safe_geometric_mean([4, 9]) - 6.0) < 1e-6
+
+    def test_invalid_types_negatives_none(self):
+        assert numeric_safe_geometric_mean(None) == 0.0
+        assert numeric_safe_geometric_mean([-1, -5, 0]) == 0.0
+        assert numeric_safe_geometric_mean(["a", None, float('nan')]) == 0.0
