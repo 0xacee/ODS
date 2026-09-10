@@ -439,6 +439,13 @@ PREVIEW_SCROLLBAR_STYLE = b'''<style data-ods-preview-scrollbars>
 </style>'''
 
 
+def _diff_row(kind: str, old_line: int | None, new_line: int | None, text: str) -> dict[str, Any]:
+    row = {"type": kind, "oldLine": old_line, "newLine": new_line, "text": text.rstrip("\r\n")}
+    if not text.endswith(("\r", "\n")):
+        row["noFinalNewline"] = True
+    return row
+
+
 def snapshot_changes(previews: pathlib.Path, site_id: str, before_id: str | None) -> bytes:
     """Compare verified publications, never infer edits from assistant prose.
 
@@ -468,19 +475,19 @@ def snapshot_changes(previews: pathlib.Path, site_id: str, before_id: str | None
         change = "published" if before_id is None else "deleted" if new is None else "created" if old is None else "modified"
         entry = {"path": path, "change": change, "additions": None, "deletions": None, "diff": [], "truncated": False}
         try:
-            a = [] if old is None else old.decode("utf-8").splitlines()
-            b = [] if new is None else new.decode("utf-8").splitlines()
-            if any(any(ord(c) < 32 and c != '\t' for c in line) for line in a + b) or len(a) + len(b) > 4000:
+            a = [] if old is None else old.decode("utf-8").splitlines(keepends=True)
+            b = [] if new is None else new.decode("utf-8").splitlines(keepends=True)
+            if any(any(ord(c) < 32 and c != '\t' for c in line.rstrip("\r\n")) for line in a + b) or len(a) + len(b) > 4000:
                 raise ValueError()
             additions = deletions = 0
             for kind, i, j, k, l in difflib.SequenceMatcher(None, a, b).get_opcodes():
                 if kind in {"replace", "delete"}: deletions += j - i
                 if kind in {"replace", "insert"}: additions += l - k
                 rows = []
-                if kind == "equal": rows = [{"type":"context", "oldLine":x+1, "newLine":k+x-i+1, "text":a[x]} for x in range(i,j)]
+                if kind == "equal": rows = [_diff_row("context", x+1, k+x-i+1, a[x]) for x in range(i,j)]
                 else:
-                    rows += [{"type":"remove", "oldLine":x+1, "newLine":None, "text":a[x]} for x in range(i,j)]
-                    rows += [{"type":"add", "oldLine":None, "newLine":x+1, "text":b[x]} for x in range(k,l)]
+                    rows += [_diff_row("remove", x+1, None, a[x]) for x in range(i,j)]
+                    rows += [_diff_row("add", None, x+1, b[x]) for x in range(k,l)]
                 for row in rows:
                     size = len(json.dumps(row, ensure_ascii=True).encode()) + 1
                     if size > remaining:
