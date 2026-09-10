@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 const modeName = mode => mode === 'full-access' ? 'Full Access' : mode === 'sandboxed' ? 'Safer mode' : 'Not verified'
 
@@ -8,17 +8,25 @@ export default function PixelAccessCard({ showHeading = true }) {
   const [changing, setChanging] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
-  const refresh = useCallback(async () => {
+  const [stale, setStale] = useState(true)
+  const inspection = useRef(0)
+  const mutation = useRef(false)
+  const refresh = useCallback(async ({forChange = false, preserveError = false} = {}) => {
+    if (mutation.current && !forChange) return
+    const version = ++inspection.current
+    setStale(true)
     try {
       const response = await fetch('/api/pixel/access-mode')
       if (!response.ok) throw new Error()
       const value = await response.json()
+      if (version !== inspection.current) return
       setStatus(value)
-      setError('')
+      setStale(false)
+      if (!preserveError) setError('')
       return value
-    } catch { setError('Pixel access status is unavailable. No effective mode has been verified.') }
+    } catch { if (version === inspection.current) setError('Pixel access status is unavailable. No effective mode has been verified.') }
   }, [])
-  useEffect(() => { void refresh() }, [refresh])
+  useEffect(() => { void refresh(); return () => { inspection.current++ } }, [refresh])
   useEffect(() => {
     if (!status?.pending && !status?.busy) return undefined
     const timer = setInterval(() => { void refresh() }, 5000)
@@ -26,12 +34,13 @@ export default function PixelAccessCard({ showHeading = true }) {
   }, [status?.pending, status?.busy, refresh])
 
   async function change(mode) {
-    if (!status?.revision || changing || (mode === 'full-access' && !confirmed)) return
+    if (!status?.revision || stale || mutation.current || (mode === 'full-access' && !confirmed)) return
+    mutation.current = true
     setChanging(true); setError('')
     try {
       // Runs can change the inspection revision while Settings remains open.
       // The host still checks this revision atomically before changing access.
-      const current = await refresh()
+      const current = await refresh({forChange: true})
       if (!current?.available || !current?.revision) {
         setError('Current access status could not be verified. No change was requested. Refresh the status before trying again.')
         return
@@ -46,11 +55,11 @@ export default function PixelAccessCard({ showHeading = true }) {
       setStatus(await response.json()); setConfirming(false); setConfirmed(false)
     } catch {
       setError('The change was not verified. Refresh the status and restore safer mode if recovery is required.')
-      await refresh()
-    } finally { setChanging(false) }
+      await refresh({forChange: true, preserveError: true})
+    } finally { mutation.current = false; setChanging(false) }
   }
 
-  const disabled = changing || !status?.available || status?.busy || !status?.revision
+  const disabled = changing || stale || !status?.available || status?.busy || !status?.revision
   return <section aria-labelledby="pixel-access-title" className="rounded-xl border border-white/10 bg-white/[0.03] p-5 space-y-3">
     <div className="flex items-center justify-between gap-4">
       <h2 id="pixel-access-title" className={showHeading ? 'font-semibold' : 'sr-only'}>Pixel access</h2>
@@ -60,7 +69,7 @@ export default function PixelAccessCard({ showHeading = true }) {
     <p className="text-sm text-gray-400">Full Access keeps the owner’s UID and existing group permissions, privilege restrictions, and protected program files. Existing owner permissions may include service administration. Current support: Linux or WSL with systemd.</p>
     {status ? <dl className="grid grid-cols-2 gap-2 text-sm">
       <dt>Configured</dt><dd>{modeName(status.configured_mode)}</dd>
-      <dt>Effective</dt><dd>{status.runtime_verified ? modeName(status.effective_mode) : 'Not verified'}</dd>
+      <dt>Effective</dt><dd>{!stale && status.runtime_verified ? modeName(status.effective_mode) : 'Not verified'}</dd>
       <dt>Platform</dt><dd>{status.surface}</dd>
     </dl> : !error ? <p role="status">Inspecting Pixel access…</p> : null}
     {!status?.available && status ? <p role="status">{status.pending

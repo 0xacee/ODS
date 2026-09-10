@@ -1,4 +1,4 @@
-import {fireEvent, render, screen, waitFor} from '@testing-library/react'
+import {act, fireEvent, render, screen, waitFor} from '@testing-library/react'
 import {afterEach, describe, expect, it, vi} from 'vitest'
 import PixelAccessCard from './PixelAccessCard'
 
@@ -7,6 +7,50 @@ const safe = {available: true, surface: 'linux-systemd', configured_mode: 'sandb
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Pixel access confirmation and effective status', () => {
+  it('withdraws effective-mode proof after a failed inspection and requires a fresh receipt', async () => {
+    const verified = {...safe, runtime_verified: true, effective_mode: 'sandboxed'}
+    const fetch = vi.fn().mockResolvedValueOnce({ok: true, json: async () => verified}).mockResolvedValue({ok: false})
+    vi.stubGlobal('fetch', fetch)
+    render(<PixelAccessCard />)
+    await waitFor(() => expect(screen.getByText('Effective').nextElementSibling).toHaveTextContent('Safer mode'))
+    fireEvent.click(screen.getByRole('button', {name: 'Refresh status'}))
+    await screen.findByRole('alert')
+    expect(screen.getByText('Effective').nextElementSibling).toHaveTextContent('Not verified')
+    expect(screen.getByRole('button', {name: 'Enable Full Access'})).toBeDisabled()
+    fetch.mockResolvedValue({ok: true, json: async () => verified})
+    fireEvent.click(screen.getByRole('button', {name: 'Refresh status'}))
+    await waitFor(() => expect(screen.getByRole('button', {name: 'Enable Full Access'})).toBeEnabled())
+    expect(screen.getByText('Effective').nextElementSibling).toHaveTextContent('Safer mode')
+  })
+
+  it('ignores an older failed read after a newer verified inspection', async () => {
+    let finishOld
+    const old = new Promise(resolve => {finishOld = resolve})
+    const fetch = vi.fn().mockResolvedValueOnce({ok: true, json: async () => safe})
+      .mockReturnValueOnce(old).mockResolvedValue({ok: true, json: async () => ({...safe, runtime_verified: true, effective_mode: 'sandboxed'})})
+    vi.stubGlobal('fetch', fetch)
+    render(<PixelAccessCard />)
+    await screen.findByText('Not verified')
+    fireEvent.click(screen.getByRole('button', {name: 'Refresh status'}))
+    fireEvent.click(screen.getByRole('button', {name: 'Refresh status'}))
+    await waitFor(() => expect(screen.getByText('Effective').nextElementSibling).toHaveTextContent('Safer mode'))
+    await act(async () => finishOld({ok: false}))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText('Effective').nextElementSibling).toHaveTextContent('Safer mode')
+  })
+
+  it('keeps a rejected change visible after the recovery inspection succeeds', async () => {
+    const fetch = vi.fn(async (_url, options) => options ? {ok: false, status: 409} : {ok: true, json: async () => safe})
+    vi.stubGlobal('fetch', fetch)
+    render(<PixelAccessCard />)
+    await screen.findByText('Not verified')
+    fireEvent.click(screen.getByRole('button', {name: 'Verify safer mode'}))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4))
+    await waitFor(() => expect(screen.queryByText(/Changing access and checking/)).toBeNull())
+    expect(screen.getByRole('alert')).toHaveTextContent('The change was not verified')
+    expect(fetch.mock.calls.filter(call => call[1]?.method === 'POST')).toHaveLength(1)
+  })
+
   it('ends the inspection message after failure and clears the error on retry', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ok: false}).mockResolvedValue({ok: true, json: async () => safe}))
     render(<PixelAccessCard />)
