@@ -16,7 +16,7 @@ function validReadiness(value) {
     && (value.status !== 'ready' || (hex.test(value.sourceSha256) && /^runtime-[a-f0-9]{32}$/.test(value.runtimeId)))
 }
 
-export default function PixelAdviceRuntime({ onReadyChange }) {
+export default function PixelAdviceRuntime({ onReadyChange, title = 'Advisory runtime', disabled = false }) {
   const [readiness, setReadiness] = useState(null)
   const [selected, setSelected] = useState('')
   const [consent, setConsent] = useState(false)
@@ -62,7 +62,7 @@ export default function PixelAdviceRuntime({ onReadyChange }) {
       if (!tracked.current && value.job && value.job.jobId !== dismissed.current) {
         tracked.current = value.job.jobId; setJobId(value.job.jobId); setJob(value.job)
       }
-    } catch { if (current === epoch.current) { setReadiness(null); setConsent(false); setError('Runtime readiness is unknown. Refresh before preparing or sending advice.') } }
+    } catch { if (current === epoch.current) { setReadiness(null); setConsent(false); setError('Runtime readiness is unknown. Refresh before preparing or using this runtime.') } }
   }, [request])
 
   useEffect(() => {
@@ -96,7 +96,7 @@ export default function PixelAdviceRuntime({ onReadyChange }) {
   const busy = submitting || (jobId && !done.has(job?.status))
 
   async function prepare() {
-    if (!available || !consent || busy || inflight.current) return
+    if (!available || !consent || busy || disabled || inflight.current) return
     inflight.current = true; setSubmitting(true); setError('')
     let id
     try {
@@ -129,8 +129,8 @@ export default function PixelAdviceRuntime({ onReadyChange }) {
     dismissed.current = tracked.current; tracked.current = null; setJobId(null); setJob(null); setConsent(false); setError('')
   }
 
-  return <section aria-label="Advisory runtime setup" className="space-y-2 rounded border border-theme-border p-3 text-sm">
-    <h3 className="font-semibold">Advisory runtime</h3>
+  return <section aria-label={`${title} setup`} className="space-y-2 rounded border border-theme-border p-3 text-sm">
+    <h3 className="font-semibold">{title}</h3>
     <p role="status">Runtime: {readiness?.status || 'unknown'}{readiness ? ` on ${readiness.host}` : ''}</p>
     <p className="text-xs">This is the ODS service host, not necessarily the device displaying this browser. Setup never changes your leader or execution permissions.</p>
     {error && <p role="alert" className="text-amber-400">{error}</p>}
@@ -144,7 +144,7 @@ export default function PixelAdviceRuntime({ onReadyChange }) {
       </select></label>
       {!readiness.candidates.some(c => c.canPrepare) && <p>An operator must install Python 3.11+ with venv/ensurepip on this host, then refresh. ODS will not install OS packages or request administrator privileges.</p>}
       <label className="flex gap-2"><input type="checkbox" checked={consent} disabled={!!busy} onChange={event => setConsent(event.target.checked)} />Allow a private runtime and dependency download from PyPI on this host. No model call, global Python upgrade, or service restart.</label>
-      <button type="button" className={button} disabled={!available || !consent || !!busy} onClick={prepare}>{readiness.status === 'drift' ? 'Repair private runtime' : 'Prepare private runtime'}</button>
+      <button type="button" className={button} disabled={!available || !consent || !!busy || disabled} onClick={prepare}>{readiness.status === 'drift' ? 'Repair private runtime' : 'Prepare private runtime'}</button>
     </>}
     {jobId && <div className="space-y-2">
       <p className="break-all text-xs">Tracked setup: {jobId}</p>

@@ -11,16 +11,22 @@ const tower = () => ({ ...empty(), providers: [{ id: 'tower', label: 'Tower', ki
   supportsTools: true, supportsVision: false, reasoning: false, hasCredential: true, enabled: true }] })
 const response = (configuration, status = 200) => ({ ok: status === 200, status,
   json: async () => ({ configuration, runtime: { status: 'not-applied' } }) })
+const adviceReadiness = () => ({ status: 'not-configured', revision: 0, host: 'canary',
+  sourceSha256: null, runtimeId: null, candidates: [], job: null })
 function setup(doc, post = async () => response({ ...doc, revision: doc.revision + 1 })) {
-  const fetchMock = vi.fn(async (url, options) => url.endsWith('/runtime')
-    ? { ok: true, status: 200, json: async () => runtimeDoc('unavailable') }
-    : url.endsWith('/save') ? post(options) : response(doc))
+  const fetchMock = vi.fn(async (url, options) => {
+    if (url === '/api/pixel/providers/runtime') return { ok: true, status: 200, json: async () => runtimeDoc('unavailable') }
+    if (url === '/api/pixel/providers/save') return post(options)
+    if (url === '/api/pixel/advice-runtime') return { ok: true, status: 200, json: async () => adviceReadiness() }
+    if (url === '/api/pixel/providers') return response(doc)
+    throw new Error(`Unexpected fetch: ${url}`)
+  })
   vi.stubGlobal('fetch', fetchMock)
   render(<PixelProviderSettings />)
   return fetchMock
 }
 const loaded = () => screen.findByLabelText('Model')
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear() })
 
 it('renders a pristine install without claiming runtime activation', async () => {
   setup(empty())

@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 
 import pytest
 
@@ -55,6 +56,27 @@ def test_explicit_optional_prepare_idempotence_and_separate_revision(provision):
     assert not (root/'provider-config.json').exists()
     assert (root/'advice-runtime.json').stat().st_mode & 0o777 == 0o600
     assert (root/'advice-runtimes'/result['runtimeId']).stat().st_mode & 0o777 == 0o700
+
+
+def test_actual_probe_rechecks_captured_receipt_without_retaking_store_lock(provision):
+    import fcntl
+    root, _ = provision
+    prepare(root)
+    receipt = runtime.RuntimeStore(root).load()
+    launcher = Path(__file__).resolve().parents[2] / 'bin/ods-pixel-route-lease'
+    def probe(value):
+        result = subprocess.run([sys.executable, '-I', '-S', '-B', str(launcher), '--check-runtime'],
+            input=json.dumps({'providerDirectory': str(root), 'receipt': value}),
+            capture_output=True, text=True, timeout=5, check=True)
+        assert not result.stderr
+        return json.loads(result.stdout)
+    with (root / '.provider-config.lock').open('r+') as locked:
+        fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert probe(receipt) == {'ready': True}
+        source = root / 'advice-runtimes' / receipt['runtime']['id'] / 'source/pixel_provider/advice.py'
+        source.write_bytes(source.read_bytes() + b'\n# real drift\n')
+        assert probe(receipt) == {'ready': False}
+        assert probe(dict(receipt, schemaVersion=2)) == {'ready': False}
 
 
 @pytest.mark.parametrize('changes,code',[

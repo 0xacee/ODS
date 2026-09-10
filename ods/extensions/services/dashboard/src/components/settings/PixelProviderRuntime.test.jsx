@@ -1,8 +1,15 @@
-import { StrictMode } from 'react'
+import { StrictMode, useEffect } from 'react'
 import { act, fireEvent, render, screen, waitFor } from '../../test/test-utils'
 import PixelProviderRuntime from './PixelProviderRuntime'
 import PixelProviderSettings from './PixelProviderSettings'
 import { binding, outcome, runtimeDoc } from './pixelProviderRuntimeFixtures'
+
+// These transaction tests assume a prepared worker; the real setup integration
+// is covered separately, including missing/drift/unknown and repair behavior.
+vi.mock('../PixelAdviceRuntime', () => ({ default: function ReadyWorker({ onReadyChange }) {
+  useEffect(() => { onReadyChange(true) }, [onReadyChange])
+  return <p>Prepared worker fixture</p>
+} }))
 
 const response = data => ({ ok: true, status: 200, json: async () => data })
 const button = name => screen.getByRole('button', { name })

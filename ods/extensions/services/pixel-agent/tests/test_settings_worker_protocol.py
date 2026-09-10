@@ -23,6 +23,10 @@ def request(operation="settings-apply", **changes):
         value.update(settings_revision=3, preferences={}, capabilities={})
     if operation == "provider-change":
         value['binding'] = None
+    if operation == 'provider-worker-status':
+        value['provider_probe'] = {'python': '/usr/bin/python3',
+            'launcher': '/opt/ods/bin/ods-pixel-route-lease', 'providerDirectory': '/home/owner/data/pixel-providers',
+            'receipt': {'schemaVersion': 1, 'revision': 0, 'runtime': None}}
     if operation.endswith("status"):
         value["config_sha256"] = None
     value.update(changes)
@@ -49,6 +53,28 @@ def test_bad_or_unterminated_frame_is_rejected(raw):
 def test_bad_request_shape_is_rejected(change):
     with pytest.raises(protocol.ProtocolError):
         protocol.request(request(**change))
+
+
+@pytest.mark.parametrize('change', [
+    {'launcher': '/opt/unrelated-command'}, {'python': 'python3'}, {'providerDirectory': 'relative'},
+    {'providerDirectory': '/tmp/\x00bad'}, {'receipt': None}, {'command': 'injected'},
+])
+def test_worker_readiness_rejects_invalid_internal_probe(change):
+    value = request('provider-worker-status')
+    value['provider_probe'].update(change)
+    with pytest.raises(protocol.ProtocolError):
+        protocol.request(value)
+
+
+@pytest.mark.parametrize('value', [{'ready': 1}, {'ready': 'true'}, {'ready': True, 'secret': 'value'}, {}])
+def test_worker_readiness_requires_exact_boolean_reply(value):
+    with pytest.raises(protocol.ProtocolError):
+        protocol.result('provider-worker-status', value)
+
+
+def test_worker_readiness_is_not_a_public_socket_operation():
+    with pytest.raises(protocol.ProtocolError):
+        protocol.control_request({'operation': 'provider-worker-status', 'data_dir_id': 'a' * 64})
 
 
 @pytest.mark.parametrize("operation,name,value,valid", [

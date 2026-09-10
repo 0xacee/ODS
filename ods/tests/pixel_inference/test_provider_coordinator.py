@@ -55,6 +55,11 @@ def integrated(lifecycle, monkeypatch):  # noqa: F811 - imported pytest fixture
     class Runtime:
         def __init__(self, bridge): pass
         def qualify(self): return 'f' * 64
+        def require_worker(self, directory, expected_custody):
+            assert directory == b.directory and expected_custody == self.qualify()
+            b.worker_checks += 1
+            if not b.worker_ready:
+                raise AccessError('provider-worker-runtime-not-ready')
         def verify_process(self):
             if b.failure == 'process': raise AccessError('provider-runtime-process-unqualified')
         def deployment(self, binding, directory):
@@ -90,6 +95,7 @@ def integrated(lifecycle, monkeypatch):  # noqa: F811 - imported pytest fixture
         return owner.recover_provider(str(b.config), **common)
     b.native, b.edge, b.worker = MethodType(native_lease, b), MethodType(edge, b), MethodType(worker, b)
     b.saved, b.directory = saved, directory
+    b.worker_ready, b.worker_checks = True, 0
     return p
 
 
@@ -114,6 +120,37 @@ def test_actual_owner_apply_update_deactivate_preserves_original_route(integrate
     assert result['binding'] is None and json.loads(b.config.read_bytes()) == original
     assert p.snapshot() == {'environment': None, 'dropin': None}
     assert c.status(b)['status'] == 'inactive' and b.restarts == 3
+
+
+def test_unready_worker_refuses_before_any_root_record_or_restart(integrated):
+    p, b = integrated, integrated.bridge
+    change = request(p)
+    before = {str(path): path.read_bytes() for path in b.state.iterdir() if path.is_file()}
+    b.worker_ready = False
+    with pytest.raises(AccessError, match='provider-worker-runtime-not-ready'):
+        c.change(b, change)
+    assert b.worker_checks == 1 and b.restarts == 0 and b.pending() is None
+    assert b.phase == 'idle' and b.config.read_bytes() == b.before
+    assert before == {str(path): path.read_bytes() for path in b.state.iterdir() if path.is_file()}
+
+
+def test_worker_drift_does_not_block_deactivation(integrated):
+    p, b = integrated, integrated.bridge
+    c.change(b, request(p))
+    b.worker_ready = False
+    assert c.change(b, request(p, 'deactivate'))['binding'] is None
+    assert b.worker_checks == 1 and json.loads(b.config.read_bytes()) == json.loads(b.before)
+
+
+def test_worker_drift_does_not_block_interrupted_recovery(integrated):
+    p, b = integrated, integrated.bridge
+    b.failure = 'reload'
+    with pytest.raises(AccessError):
+        c.change(b, request(p))
+    b.failure, b.worker_ready = None, False
+    assert c.change(b, request(p, 'recover'))['outcome'] == 'rolled-back'
+    assert b.worker_checks == 1 and b.pending() is None
+    assert b.config.read_bytes() == b.before
 
 
 @pytest.mark.parametrize('failure', ['reload', 'restart'])

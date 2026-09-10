@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import usePixelProviderRuntime from './usePixelProviderRuntime'
+import PixelAdviceRuntime from '../PixelAdviceRuntime'
 
 const button = 'rounded border border-theme-border px-3 py-2 text-sm disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-blue-500'
 const labels = { apply: 'Apply saved providers', deactivate: 'Deactivate managed providers', recover: 'Recover interrupted provider change' }
@@ -36,11 +37,12 @@ function ProviderConfirmation({ confirmation, onCancel, onConfirm }) {
 export default function PixelProviderRuntime({ savedRevision, saving, blocked, routingEnabled, allowCloud, onBusyChange }) {
   const { runtime, running, stale, error, notice, stage, inspect, change } = usePixelProviderRuntime({ savedRevision, saving, blocked, onBusyChange })
   const [confirmation, setConfirmation] = useState(null)
+  const [workerReady, setWorkerReady] = useState(false)
   const consent = useRef(null)
   const idle = !running && !saving && !stale
   const matched = runtime?.providerRevision === savedRevision && Number.isSafeInteger(savedRevision)
   const eligible = {
-    apply: idle && !blocked && routingEnabled && matched && ['not-applied', 'inactive', 'saved-changes'].includes(runtime?.status),
+    apply: idle && workerReady && !blocked && routingEnabled && matched && ['not-applied', 'inactive', 'saved-changes'].includes(runtime?.status),
     deactivate: idle && !blocked && matched && ['applied', 'saved-changes'].includes(runtime?.status),
     recover: idle && runtime?.status === 'pending',
   }
@@ -75,6 +77,8 @@ export default function PixelProviderRuntime({ savedRevision, saving, blocked, r
   return <section aria-labelledby="pixel-provider-runtime-title" className="space-y-3 min-w-0 rounded-lg border border-theme-border p-4">
     <h3 id="pixel-provider-runtime-title" className="font-medium">Provider runtime</h3>
     <p className="text-sm text-theme-text-muted">Save keeps your desired configuration. Apply changes the current agent’s inference routing, not its tool permissions.</p>
+    <PixelAdviceRuntime title="Provider worker runtime" onReadyChange={setWorkerReady} disabled={Boolean(running) || saving} />
+    {!workerReady && <p className="text-sm">Prepare or repair the private worker runtime before Apply. Deactivate and recovery do not require it.</p>}
     <div aria-live="polite" className="space-y-2 text-sm break-words">
       {stage && <p role="status">{stage}</p>}
       {!running && stale && <p>Provider runtime status is unknown or stale. Refresh before changing it.</p>}
