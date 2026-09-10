@@ -28,9 +28,15 @@ def artifact(tmp_path, monkeypatch):
     original = r._read
     monkeypatch.setattr(r, '_read', lambda path, uid, maximum: original(path, os.getuid(), maximum))
     runtime, source = tmp_path / 'runtime', tmp_path / 'source'
-    runtime.mkdir(); source.mkdir()
-    (runtime / 'openclaw.mjs').write_bytes(b'export const version="fixture";\n')
-    (source / 'helper.py').write_bytes(b'# fixture only\n')
+    tmp_path.chmod(0o700)
+    runtime.mkdir(mode=0o700)
+    source.mkdir(mode=0o700)
+    runtime_entry = runtime / 'openclaw.mjs'
+    runtime_entry.write_bytes(b'export const version="fixture";\n')
+    runtime_entry.chmod(0o600)
+    source_entry = source / 'helper.py'
+    source_entry.write_bytes(b'# fixture only\n')
+    source_entry.chmod(0o600)
     node, python, launcher = tmp_path / 'node', tmp_path / 'python', tmp_path / 'launcher'
     for path in (node, python): path.write_bytes(b'not executable fixture\n'); path.chmod(0o755)
     launcher.write_text('#!/bin/sh\nexec /usr/bin/env -u NODE_OPTIONS -u NODE_PATH '+str(node)+' '+str(runtime)+'/openclaw.mjs "$@"\n')
@@ -58,7 +64,9 @@ def test_second_qualification_reuses_hashes_but_checks_actual_file_set(artifact,
     monkeypatch.setattr(r.os, 'open', counted)
     first = a.custody.qualify()
     assert a.custody.qualify() == first and len(opened) == 1
-    (a.runtime / 'unexpected.mjs').write_text('new code')
+    unexpected = a.runtime / 'unexpected.mjs'
+    unexpected.write_text('new code')
+    unexpected.chmod(0o600)
     with pytest.raises(AccessError, match='custody-unqualified'): a.custody.qualify()
 
 
@@ -80,10 +88,12 @@ def test_metadata_or_entry_drift_is_never_accepted_from_cache(artifact, kind):
     if kind == 'mode': path.chmod(0o666)
     elif kind == 'hardlink': os.link(path, a.root / 'other-link')
     elif kind == 'external-link': (a.runtime / 'escape').symlink_to(a.root / 'node')
-    elif kind == 'fifo': os.mkfifo(a.runtime / 'pipe')
+    elif kind == 'fifo': os.mkfifo(a.runtime / 'pipe', mode=0o600)
     elif kind == 'deleted': path.unlink()
     elif kind == 'replaced':
-        path.unlink(); path.write_bytes(b'wrong replacement')
+        path.unlink()
+        path.write_bytes(b'wrong replacement')
+        path.chmod(0o600)
     with pytest.raises(AccessError): a.custody.qualify()
 
 
