@@ -15,6 +15,7 @@ export default function PixelSharingSettings() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [confirm, setConfirm] = useState(null)
+  const [clock, setClock] = useState(Date.now)
   const mounted = useRef(false)
   const pending = useRef(false)
   const controller = useRef(null)
@@ -81,10 +82,26 @@ export default function PixelSharingSettings() {
 
   const config = snapshot?.configuration
   const route = snapshot?.activeRoute
+  const now = Math.max(clock, Date.now())
+  useEffect(() => {
+    const future = config?.devices.filter(device => !device.revoked)
+      .map(device => device.expiresAt * 1000).filter(expires => expires > now) || []
+    if (!future.length) return undefined
+    // Browser timers cannot represent the entire maximum key lifetime.
+    const timer = setTimeout(() => setClock(Date.now()), Math.min(2147483647, Math.min(...future) - now + 1))
+    return () => clearTimeout(timer)
+  }, [config, now])
+  useEffect(() => {
+    const expiresAt = issued?.configuration.devices.find(device => device.id === issued.credential.id)?.expiresAt
+    if (issued && expiresAt * 1000 <= now) {
+      setIssued(null)
+      setNotice('The newly issued device key has expired. Create a new key to connect.')
+    }
+  }, [issued, now])
   const locked = busy || stale || !snapshot
   const validLabel = typeof label === 'string' && /^[\x20-\x7e]{1,256}$/.test(label) && label === label.trim()
   const validDays = Number.isInteger(days) && days >= 1 && days <= 365
-  const activeDevice = config?.devices.some(device => !device.revoked && device.expiresAt * 1000 > Date.now()
+  const activeDevice = config?.devices.some(device => !device.revoked && device.expiresAt * 1000 > now
     && device.catalogId === route?.catalogId && device.runtimeModelId === route?.runtimeModelId)
 
   function issue() {
@@ -153,7 +170,7 @@ export default function PixelSharingSettings() {
       </div>}
       <ul className="space-y-2" aria-label="Inference devices">
         {config.devices.map(device => <li key={device.id} className="flex flex-wrap items-center justify-between gap-3 rounded border border-theme-border p-3 text-sm">
-          <div><p className="font-medium">{device.label}</p><p className="text-theme-text-muted">{device.runtimeModelId} · {device.revoked ? 'Revoked' : device.expiresAt * 1000 <= Date.now() ? 'Expired' : `Expires ${new Date(device.expiresAt * 1000).toLocaleDateString()}`}</p></div>
+          <div><p className="font-medium">{device.label}</p><p className="text-theme-text-muted">{device.runtimeModelId} · {device.revoked ? 'Revoked' : device.expiresAt * 1000 <= now ? 'Expired' : `Expires ${new Date(device.expiresAt * 1000).toLocaleDateString()}`}</p></div>
           <button className={buttonStyle} disabled={locked || device.revoked} onClick={() => request('revoke', { expectedRevision: config.revision, deviceId: device.id })}>Revoke {device.label}</button>
         </li>)}
       </ul>
