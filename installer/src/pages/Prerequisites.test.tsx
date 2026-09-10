@@ -7,8 +7,10 @@ import { checkPrerequisites, installPrerequisite, type InstallPrereqResult } fro
 vi.mock("../hooks/useTauri", () => ({
   checkPrerequisites: vi.fn(), installPrerequisite: vi.fn(),
 }));
+const composeReady = { compose_installed: true, compose_version: "test" };
 const missing = {
   git_installed: true, docker_installed: false, docker_running: false,
+  compose_installed: false, compose_version: null,
   wsl2_needed: false, wsl2_installed: true, all_met: false,
 };
 beforeEach(() => {
@@ -21,7 +23,7 @@ it.each(["docker", "wsl2"] as const)(
   async (component) => {
     if (component === "wsl2") {
       vi.mocked(checkPrerequisites).mockResolvedValue({
-        ...missing, wsl2_needed: true, wsl2_installed: false,
+        ...missing, ...composeReady, wsl2_needed: true, wsl2_installed: false,
         docker_installed: true, docker_running: true,
       });
     }
@@ -50,7 +52,7 @@ it("surfaces re-check errors and permits a fresh readiness check", async () => {
   vi.mocked(checkPrerequisites)
     .mockResolvedValueOnce(missing)
     .mockRejectedValueOnce(new Error("IPC unavailable"))
-    .mockResolvedValueOnce({ ...missing, docker_installed: true, docker_running: true, all_met: true });
+    .mockResolvedValueOnce({ ...missing, ...composeReady, docker_installed: true, docker_running: true, all_met: true });
   const onError = vi.fn();
   render(<Prerequisites onNext={vi.fn()} onError={onError} />);
   fireEvent.click(await screen.findByRole("button", { name: "Re-check" }));
