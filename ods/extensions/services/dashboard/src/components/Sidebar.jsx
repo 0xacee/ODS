@@ -17,6 +17,9 @@ export default function Sidebar({ status, collapsed, onToggle }) {
   const pixelMode = pathname.startsWith('/pixel')
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
+  useEffect(() => {
+    if (collapsed) { setSearchOpen(false); setQuery('') }
+  }, [collapsed])
   const [apiLinks, setApiLinks] = useState([])
   const [serviceTokens, setServiceTokens] = useState({})
   useEffect(() => {
