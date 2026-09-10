@@ -2,7 +2,21 @@
 
 Portal (currently labelled Pixel in parts of ODS) is a core ODS feature under active qualification. This branch is the common baseline for supervised fleet and external user tests. It is not a declaration of general release readiness.
 
-## Current checkpoint — four installed beta machines, 10 September
+## Current checkpoint — independent research allowances, 10 September
+
+Runtime composition `476dc8a26ca598f833a60c9d1dae85ab51ab21a9` adds PR #3385 source `5cb98461f9bd2f9612d56dd6a632d7d2b1a13539` and PR #3818 source `974922caf37adc55697dea29739b86be59c7555a` to the previous beta. Both PRs remain open and unmerged. The new code changes the research guard and the sister PR's explicit-null runtime-status fallback; dashboard and API image code is unchanged.
+
+Search and page-reading allowances are now independent. Exhausting search no longer prevents fetching already identified public pages, and exhausting page reads does not consume the remaining search allowance. Total limits, repeated-denial protection, private-network policy and ordinary file-tool checks remain. No numeric context, output or research limits were raised. Denial state survives compaction and permitted work does not reset it.
+
+On physical Tower1, all four new direct/wrapped-tool regression cases failed against the preceding code and passed against the candidate. The candidate plugin suite passed 775 tests with one skip. The composed candidate, including the newer #3818 change, passed 1,017 tests with one skip. These source checks do not establish research completion or full provider acceptance.
+
+Installed scope: Tower1 activated only the new plugin, verified its canonical digest, preserved owner configuration/model settings/containers, passed the native sandbox probe and released admission. Its fresh research-to-file repeat is running. This is not a full installation of composition 476. Tower3, Strixy and the laptop retain full runtime 7d from the preceding checkpoint; Tower2's mixed tree remains unresolved.
+
+New native evidence: Tower3 continued the existing voxel project, published keyboard controls, then repaired a seeded-generator bug through another native turn. Root checked the actual preview: Play/Pause and keyboard regeneration work, and buildings now visibly vary. Strixy processed a preserved 12,000-row ZIP/CSV and independently reproduced 11,986 valid rows, 14 rejected rows and the exact USD total 44,834.04. Its follow-up fixed the short-row crash and archive-relative input, but independent checks found unbounded rejection samples, whole-member ZIP buffering and acceptance of extra fields. A further native repair is running. This was a workspace archive test, not an upload-interface pass.
+
+Browser provisioning/navigation, citation retention through compaction, truthful runtime/model switching, sharing/cloud/Full Access, upload/vision ingestion and lifecycle qualification remain open. Fresh live test results, source checks and installed revisions are reported separately.
+
+## Previous checkpoint — four installed beta machines, 10 September
 
 Runtime code `7dcb7d8ffb69743a5a0326d6d798dad468cc1b7c` combines PR #3385 through `ae60d3122d9cb3e95ed4002f38bcf00e5869927e`, PR #3818 through `5d68d42fc9458012fae5bbd3985096576cdaeebc`, and the public-beta workspace/UI. This checkpoint changes documentation only. Both PRs remain open and unmerged into the default branch.
 
