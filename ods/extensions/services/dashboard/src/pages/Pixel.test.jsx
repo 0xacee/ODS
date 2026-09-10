@@ -1391,6 +1391,21 @@ describe('Pixel', () => {
     expect(screen.getAllByText('Recovered final answer')).toHaveLength(1)
   })
 
+  it('does not call a retained zero-submission receipt completed or resubmit it on reload', async () => {
+    localStorage.setItem('ods.pixel.chat.v1', JSON.stringify({schema:1,chatId:'not-started-chat',requestId:'not-started-attempt',inFlight:true,
+      messages:[{role:'user',content:'Do my task'},{role:'assistant',content:''}]}))
+    const frame = {choices:[{delta:{},finish_reason:'stop'}],pixel:{schemaVersion:1,recovery:'clean-context',reason:'operations-unavailable-zero-submissions'}}
+    globalThis.fetch.mockImplementation(async url => {
+      if (url === '/api/pixel/status') return response({available:true})
+      if (url === '/api/pixel/chat/result') return response({state:'complete',events:'data: '+JSON.stringify(frame)+'\n\ndata: [DONE]\n\n'})
+      throw new Error(`Unexpected request ${url}`)
+    })
+    render(<Pixel />)
+    expect(await screen.findByText('Pixel did not start this attempt. Send your message again to continue.')).toBeVisible()
+    expect(screen.queryByText('Completed without a text response.')).toBeNull()
+    expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
+  })
+
   it('commits its recovery identity before starting a request', async () => {
     globalThis.fetch.mockImplementation(async (url, options) => {
       if (url === '/api/pixel/status') return response({available:true})
