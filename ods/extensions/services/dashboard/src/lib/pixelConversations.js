@@ -31,7 +31,11 @@ function loadConversations() {
 }
 
 export function readConversations() {
-  try { return loadConversations() } catch { return [] }
+  try {
+    // Isolate unreadable entries in the view; preserve their raw storage on save.
+    return loadConversations().filter(chat => (chat.draft == null || typeof chat.draft === 'string')
+      && chat.messages.every(message => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string'))
+  } catch { return [] }
 }
 
 export function saveConversation(chat) {
