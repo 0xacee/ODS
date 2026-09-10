@@ -581,10 +581,12 @@ export default function Pixel({ systemStatus = null }) {
     if (!interrupted || sending) return undefined
     const chatId = chatIdRef.current
     const requestId = requestIdRef.current
-    const controller = new AbortController()
+    let controller = null
     let disposed = false
     let timer = null
     async function checkActivity() {
+      controller = new AbortController()
+      const deadline = globalThis.setTimeout(() => controller.abort(), 15000)
       let state = 'unknown'
       try {
         if (requestId) {
@@ -634,7 +636,7 @@ export default function Pixel({ systemStatus = null }) {
           && ['active', 'terminal', 'unknown'].includes(data.state)) state = data.state
       } catch {
         // A failed lookup or edge restart is not evidence that work finished.
-      }
+      } finally { globalThis.clearTimeout(deadline) }
       if (disposed || chatIdRef.current !== chatId) return
       updateRestoredActivity(state)
       if (state !== 'terminal') timer = globalThis.setTimeout(checkActivity, 2000)
@@ -642,7 +644,7 @@ export default function Pixel({ systemStatus = null }) {
     checkActivity()
     return () => {
       disposed = true
-      controller.abort()
+      controller?.abort()
       if (timer !== null) globalThis.clearTimeout(timer)
     }
   }, [interrupted, sending, activityRefresh, updateRestoredActivity])
