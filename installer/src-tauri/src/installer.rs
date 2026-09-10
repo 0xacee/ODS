@@ -38,18 +38,18 @@ pub fn run_install(
     features: Vec<String>,
 ) -> Result<(), String> {
     // Phase 1: Clone the repo
-    update_progress(&state, "Downloading ODS", 5);
+    update_progress(&state, "download", "Downloading ODS", 5);
 
     ensure_checkout(&install_dir)?;
 
-    update_progress(&state, "Configuring installation", 15);
+    update_progress(&state, "configuration", "Configuring installation", 15);
 
     // Phase 2: Build installer arguments
     let ods_dir = install_dir.join("ods");
     let args = unix_installer_args(tier, &features);
 
     // Phase 3: Run the installer with progress parsing
-    update_progress(&state, "Running installer", 20);
+    update_progress(&state, "installing", "Running installer", 20);
 
     let install_script = ods_dir.join("install.sh");
     let install_ps1 = install_dir.join("install.ps1");
@@ -99,7 +99,7 @@ pub fn run_install(
         for line in output_lines(reader) {
             if let Ok(line) = line {
                 if let Some(progress) = parse_progress_line(&line) {
-                    update_progress(&state, &progress.message, progress.percent);
+                    update_progress(&state, &progress.phase, &progress.message, progress.percent);
                 }
             }
         }
@@ -113,7 +113,7 @@ pub fn run_install(
         .unwrap_or_default();
 
     if output.success() {
-        update_progress(&state, "Installation complete!", 100);
+        update_progress(&state, "complete", "Installation complete!", 100);
         let mut s = state.lock().unwrap();
         s.phase = InstallPhase::Complete;
         let _ = s.save();
@@ -335,12 +335,15 @@ fn repo_urls_identify_same_repository(candidate: &str, expected: &str) -> bool {
 }
 
 /// Parse a progress line from the installer.
-/// Expected format: ODS_PROGRESS:<percent>:<message>
+/// Expected format: ODS_PROGRESS:<percent>:<phase_id>:<message>
 fn parse_progress_line(line: &str) -> Option<ProgressEvent> {
     if let Some(rest) = line.strip_prefix("ODS_PROGRESS:") {
         let parts: Vec<&str> = rest.splitn(3, ':').collect();
         if parts.len() >= 2 {
-            let percent = parts[0].parse().unwrap_or(0);
+            let percent: u8 = parts[0].parse().ok()?;
+            if percent > 100 {
+                return None;
+            }
             let phase = if parts.len() >= 3 { parts[1] } else { "" };
             let message = if parts.len() >= 3 { parts[2] } else { parts[1] };
             return Some(ProgressEvent {
@@ -378,10 +381,11 @@ fn parse_progress_line(line: &str) -> Option<ProgressEvent> {
     })
 }
 
-fn update_progress(state: &Arc<Mutex<InstallState>>, message: &str, percent: u8) {
+fn update_progress(state: &Arc<Mutex<InstallState>>, phase: &str, message: &str, percent: u8) {
     if let Ok(mut s) = state.lock() {
         s.progress_pct = percent;
         s.progress_message = message.to_string();
+        s.progress_phase = phase.to_string();
         s.phase = InstallPhase::Installing;
         let _ = s.save();
     }
@@ -595,5 +599,20 @@ sys.exit(1)
 
         assert!(args.contains(&"-Cloud".to_string()));
         assert!(!args.contains(&"-Tier".to_string()));
+    }
+
+    #[test]
+    fn structured_progress_keeps_the_protocol_phase() {
+        let event =
+            parse_progress_line("ODS_PROGRESS:48:images:Downloading container images").unwrap();
+
+        assert_eq!(event.phase, "images");
+        assert_eq!(event.percent, 48);
+        assert_eq!(event.message, "Downloading container images");
+    }
+
+    #[test]
+    fn malformed_structured_progress_is_ignored() {
+        assert!(parse_progress_line("ODS_PROGRESS:not-a-number:images:Downloading").is_none());
     }
 }
