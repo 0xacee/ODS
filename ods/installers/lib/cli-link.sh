@@ -13,8 +13,8 @@ ods_cli_path_matches_install() {
     local candidate="$1" install_cli="$2" candidate_real install_real
     [[ -n "$candidate" && -n "$install_cli" ]] || return 1
     [[ ( -e "$candidate" || -L "$candidate" ) && -e "$install_cli" ]] || return 1
-    candidate_real="$(readlink -f -- "$candidate" 2>/dev/null)" || return 1
-    install_real="$(readlink -f -- "$install_cli" 2>/dev/null)" || return 1
+    candidate_real="$(realpath "$candidate" 2>/dev/null || readlink -f -- "$candidate" 2>/dev/null)" || return 1
+    install_real="$(realpath "$install_cli" 2>/dev/null || readlink -f -- "$install_cli" 2>/dev/null)" || return 1
     [[ -n "$candidate_real" && "$candidate_real" == "$install_real" ]]
 }
 
@@ -62,7 +62,9 @@ ods_bind_cli_command() {
     # attacker-controlled redirect cannot turn this into an arbitrary write.
     if [[ -e "$user_bin" || -L "$user_bin" ]]; then
         [[ -d "$user_bin" && ! -L "$user_bin" ]] || return 1
-        [[ "$(stat -c '%u' -- "$user_bin" 2>/dev/null)" == "$(id -u)" ]] || return 1
+        local bin_owner
+        bin_owner="$(stat -c '%u' -- "$user_bin" 2>/dev/null || stat -f '%u' "$user_bin" 2>/dev/null)"
+        [[ "$bin_owner" == "$(id -u)" ]] || return 1
     else
         install -d -m 0700 -- "$user_bin" || return 1
     fi
