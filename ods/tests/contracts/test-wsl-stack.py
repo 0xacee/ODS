@@ -5,7 +5,6 @@ import os
 import tempfile
 from pathlib import Path
 import subprocess
-import sys
 import unittest
 from unittest.mock import patch
 
@@ -35,7 +34,8 @@ class StackContract(unittest.TestCase):
                         patch.object(module.os, 'getuid', return_value=1000, create=True),
                         patch.object(Path, 'exists', return_value=True)]
         for item in self.patches:
-            item.start(); self.addCleanup(item.stop)
+            item.start()
+            self.addCleanup(item.stop)
 
     def test_only_exact_pixel_units(self):
         result = module.managed_units(self.root, self.home)
@@ -122,7 +122,8 @@ class RealFileCustody(unittest.TestCase):
         self.assertEqual(module.regular(self.path,os.getuid(),private=True), b'bounded original')
 
     def test_symlink_rejected(self):
-        link = self.path.with_name('link');link.symlink_to(self.path)
+        link = self.path.with_name('link')
+        link.symlink_to(self.path)
         with self.assertRaises(OSError):
             module.regular(link,os.getuid())
 
@@ -139,7 +140,8 @@ class RealFileCustody(unittest.TestCase):
             module.regular(self.path,os.getuid(),private=True)
 
     def test_fifo_does_not_block(self):
-        fifo=self.path.with_name('fifo');os.mkfifo(fifo)
+        fifo=self.path.with_name('fifo')
+        os.mkfifo(fifo)
         with self.assertRaises(RuntimeError):
             module.regular(fifo,os.getuid())
 
