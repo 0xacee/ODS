@@ -35,3 +35,16 @@ test('deletes after confirmation and shows refusal errors without hiding the cha
   expect(screen.queryByRole('button',{name:'Disposable test',exact:true})).not.toBeInTheDocument()
   window.removeEventListener(DELETE_EVENT,handle)
 })
+
+test.each([null, {role:'user', content:42}])('keeps the sidebar usable beside malformed retained messages: %j', message => {
+  const good = readConversations()[0]
+  const broken = {schema:1, chatId:'broken', messages:[message], updatedAt:1}
+  const original = JSON.stringify([broken,good])
+  localStorage.setItem('ods.pixel.conversations.v1',original)
+  render(<PixelConversationNavigation collapsed={false}/>)
+  expect(screen.getByRole('button',{name:'Disposable test',exact:true})).toBeVisible()
+  expect(localStorage.getItem('ods.pixel.conversations.v1')).toBe(original)
+  expect(() => saveConversation({...good,draft:'New draft'})).toThrow(/preserved/)
+  expect(() => deleteConversation(good.chatId)).toThrow(/preserved/)
+  expect(localStorage.getItem('ods.pixel.conversations.v1')).toBe(original)
+})

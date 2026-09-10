@@ -12,6 +12,8 @@ function storedArray(key) {
 const deletedIds = () => storedArray(DELETED_KEY)
 export const isConversationDeleted = chatId => deletedIds().includes(chatId)
 const valid = item => item?.schema === 1 && /^[A-Za-z0-9_-]{1,128}$/.test(item.chatId || '') && Array.isArray(item.messages)
+  && item.messages.every(message => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string')
+  && (item.draft === undefined || typeof item.draft === 'string')
 
 function currentConversation() {
   try {
@@ -22,8 +24,10 @@ function currentConversation() {
   }
 }
 
-function loadConversations() {
-  const entries = storedArray(LIBRARY_KEY).filter(valid)
+function loadConversations(strict = false) {
+  const stored = storedArray(LIBRARY_KEY)
+  if (strict && stored.some(item => !valid(item))) throw new Error('Saved chat history contains invalid records. Existing browser data has been preserved.')
+  const entries = stored.filter(valid)
   const current = currentConversation()
   if (valid(current) && current.messages.length && !entries.some(item => item.chatId === current.chatId)) entries.push(current)
   const deleted = deletedIds()
@@ -38,7 +42,7 @@ export function saveConversation(chat) {
   if (!valid(chat)) throw new Error('Invalid conversation')
   if (deletedIds().includes(chat.chatId)) throw new Error('This conversation was deleted in another tab. Start a new chat.')
   // A read error is not an empty library. Never overwrite unreadable history.
-  const entries = loadConversations()
+  const entries = loadConversations(true)
   const previous = entries.find(item => item.chatId === chat.chatId)
   const value = { ...previous, ...chat, updatedAt: Date.now() }
   if (value.messages.length || value.draft?.trim()) {
@@ -55,7 +59,7 @@ export function conversationTitle(chat) {
 }
 
 export function deleteConversation(chatId) {
-  const entries = loadConversations()
+  const entries = loadConversations(true)
   const chat = entries.find(item => item.chatId === chatId)
   if (!chat) return
   if (chat.inFlight || chat.interrupted) throw new Error('Stop or resume this task before deleting its conversation.')
