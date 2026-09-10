@@ -13,6 +13,7 @@ from helpers import (
     string_extract_domain_names_safe,
     dict_key_path_setter_safe,
     numeric_safe_geometric_mean,
+    list_deduplicate_by_key_safe,
     get_model_info, get_bootstrap_status, _update_lifetime_tokens,
     get_uptime, get_cpu_metrics, get_ram_metrics,
     check_service_health, get_all_services,
@@ -1645,3 +1646,14 @@ class TestNumericSafeGeometricMean:
         assert numeric_safe_geometric_mean(None) == 0.0
         assert numeric_safe_geometric_mean([-1, -5, 0]) == 0.0
         assert numeric_safe_geometric_mean(["a", None, float('nan')]) == 0.0
+
+
+class TestListDeduplicateByKeySafe:
+    def test_dedup_dicts_by_key(self):
+        items = [{"id": 1, "v": "a"}, {"id": 2, "v": "b"}, {"id": 1, "v": "c"}]
+        res = list_deduplicate_by_key_safe(items, "id")
+        assert res == [{"id": 1, "v": "a"}, {"id": 2, "v": "b"}]
+
+    def test_invalid_inputs(self):
+        assert list_deduplicate_by_key_safe(None, "id") == []
+        assert list_deduplicate_by_key_safe([{"a": [1, 2]}, {"a": [1, 2]}], "a") == [{"a": [1, 2]}]
