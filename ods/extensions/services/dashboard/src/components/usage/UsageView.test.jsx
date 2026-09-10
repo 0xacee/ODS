@@ -43,3 +43,19 @@ test('exports all token fields, escapes quotes and prevents spreadsheet formulas
 test('includes both cache read and cache write in totals',()=>{
   expect(tokens({input_tokens:1,output_tokens:2,cache_read_tokens:3,cache_write_tokens:4})).toBe(10)
 })
+
+test.each([
+  ['All Providers','provider','Tower A'],
+  ['All Services','service','pixel'],
+  ['All Sources','cost_source','actual_billed'],
+])('keeps the selected %s visible when refreshed rows omit it', (label, field, selected) => {
+  const view = show({models:[{model:'Earlier model',[field]:selected,input_tokens:10}]})
+  fireEvent.click(screen.getByRole('button',{name:'Models',exact:true}))
+  fireEvent.click(screen.getByText('Filters'))
+  fireEvent.change(screen.getByLabelText(label),{target:{value:selected}})
+  view.rerender(<UsageView report={{source:{status:'ok'},summary:{},models:[{model:'Another model',[field]:'other',input_tokens:20}]}} readiness={{status:'ready'}} range={{start:'2026-06-01'}} />)
+  expect(screen.getByLabelText(label)).toHaveValue(selected)
+  expect(screen.getByText('No models match these filters.')).toBeVisible()
+  fireEvent.change(screen.getByLabelText(label),{target:{value:'all'}})
+  expect(screen.getByText('Another model')).toBeVisible()
+})
