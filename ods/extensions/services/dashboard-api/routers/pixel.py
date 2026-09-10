@@ -1,5 +1,11 @@
 """Bounded dashboard bridge to the internal Pixel edge service."""
 
+import sys
+import asyncio
+if sys.version_info >= (3, 11):
+    from asyncio import timeout as async_timeout
+else:
+    from async_timeout import timeout as async_timeout
 from __future__ import annotations
 
 import asyncio
@@ -416,7 +422,7 @@ async def pixel_status() -> dict[str, object]:
         if available and model_support is not None:
             result["modelSupport"] = model_support
         return result
-    except (httpx.HTTPError, async_timeoutError) as exc:
+    except (httpx.HTTPError, asyncio.TimeoutError) as exc:
         # Exception text and request objects can contain upstream credentials.
         # Retain the failure phase/type without logging those sensitive values.
         logger.warning("Pixel edge status request failed (%s)", type(exc).__name__)
@@ -504,7 +510,7 @@ async def _cancel_edge_run(edge_url: str, key: str, chat_id: str) -> bool:
         )
     except (
         httpx.HTTPError,
-        async_timeoutError,
+        asyncio.TimeoutError,
         json.JSONDecodeError,
         UnicodeDecodeError,
         ValueError,
@@ -577,7 +583,7 @@ async def pixel_chat_activity(body: ChatCancelRequest) -> dict[str, str]:
         if (isinstance(parsed, dict) and set(parsed) == {"state"}
                 and isinstance(parsed["state"], str) and parsed["state"] in {"active", "terminal", "unknown"}):
             return {"state": parsed["state"]}
-    except (httpx.HTTPError, async_timeoutError, ValueError, TypeError):
+    except (httpx.HTTPError, asyncio.TimeoutError, ValueError, TypeError):
         pass
     return {"state": "unknown"}
 
@@ -684,7 +690,7 @@ async def _produce_retained_result(store, identity, body, config):
         if not done_seen and not cancelled:
             try:
                 stopped = await asyncio.wait_for(_cancel_edge_run(edge_url, key, body.chat_id), _CLIENT_CANCEL_TIMEOUT_SECONDS)
-            except (async_timeoutError, asyncio.CancelledError):
+            except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
         try:
             if not done_seen:
@@ -768,7 +774,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
     )
     try:
         upstream = await upstream_context.__aenter__()
-    except (httpx.HTTPError, async_timeoutError) as exc:
+    except (httpx.HTTPError, asyncio.TimeoutError) as exc:
         await client.aclose()
         logger.warning("Pixel edge stream connection failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Pixel stream is unavailable") from exc
@@ -813,7 +819,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             return
         except (GeneratorExit, asyncio.CancelledError):
             raise
-        except (httpx.HTTPError, async_timeoutError):
+        except (httpx.HTTPError, asyncio.TimeoutError):
             yield _error_event("Pixel stream is unavailable")
         except Exception:
             yield _error_event("Pixel stream failed")
@@ -825,7 +831,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
                         asyncio.shield(cancel_task),
                         timeout=_CLIENT_CANCEL_TIMEOUT_SECONDS,
                     )
-                except (asyncio.CancelledError, async_timeoutError):
+                except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
             await upstream_context.__aexit__(None, None, None)
             await client.aclose()
@@ -842,4 +848,5 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             "X-Accel-Buffering": "no",
         },
     )
+
 

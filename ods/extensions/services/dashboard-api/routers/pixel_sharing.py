@@ -1,4 +1,10 @@
 """Owner-only inference sharing controls, separate from incoming device keys."""
+import sys
+import asyncio
+if sys.version_info >= (3, 11):
+    from asyncio import timeout as async_timeout
+else:
+    from async_timeout import timeout as async_timeout
 import asyncio
 import json
 
@@ -70,4 +76,5 @@ async def change_sharing(action: str, request: Request, _key: str = Depends(veri
     if action not in ('issue','enable','revoke','start','stop'):
         raise HTTPException(404, 'Sharing action not found')
     return await _request(action, await _body(request, action))
+
 

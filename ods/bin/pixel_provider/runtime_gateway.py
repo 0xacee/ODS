@@ -4,6 +4,12 @@ Instances use an immutable owner-approved configuration and credentials. They
 are never a public agent or administration endpoint. Terminal failure closes
 the lease so client-library retries cannot multiply the provider attempt budget.
 """
+import sys
+import asyncio
+if sys.version_info >= (3, 11):
+    from asyncio import timeout as async_timeout
+else:
+    from async_timeout import timeout as async_timeout
 import asyncio
 import copy
 import hmac
