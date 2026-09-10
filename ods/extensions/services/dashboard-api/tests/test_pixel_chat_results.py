@@ -149,3 +149,18 @@ def test_result_and_cancel_require_owner_authentication(store):
             payload = {"chat_id":"chat-test", "request_id":"attempt-one"}
             assert client.post('/api/pixel/chat/'+endpoint, json=payload).status_code == 401
             assert client.post('/api/pixel/chat/'+endpoint, json=payload, headers={"Authorization":"Bearer wrong"}).status_code == 403
+
+
+@pytest.mark.parametrize("ack", [True, False])
+def test_truncated_upstream_retains_error_and_does_not_release_unknown_native_work(store, monkeypatch, ack):
+    async def run():
+        monkeypatch.setattr(pixel.httpx, "AsyncClient", lambda **kw: FakeClient(FakeResponse(content_type="text/event-stream", chunks=[b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'])))
+        async def cancel(*args): return ack
+        monkeypatch.setattr(pixel, "_cancel_edge_run", cancel)
+        await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
+        await asyncio.gather(*list(pixel._result_tasks.values()))
+        assert store.get(IDENTITY)["state"] == ("interrupted" if ack else "unresolved")
+        assert store.has_pending(IDENTITY[:2]) is not ack
+        data = b''.join(row['data'] for row in store.chunks(IDENTITY))
+        assert b'partial' in data and b'pixel_dashboard_error' in data and b'[DONE]' in data
+    asyncio.run(run())
