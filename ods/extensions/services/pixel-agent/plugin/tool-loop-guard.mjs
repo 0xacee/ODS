@@ -5047,7 +5047,7 @@ function ownerForbidsWorkspacePreview(messages, prompt) {
   // Preserve explicit owner constraints without requiring a positive visual
   // vocabulary to use the local snapshot tool. These are delivery actions,
   // not filenames, quoted examples, or another clause's edit restriction.
-  return portuguesePreviewForbidden(text) || /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:(?:create|build|edit|write|run|execute)\s*(?:,\s*|and\s+|or\s+))*(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(text);
+  return portuguesePreviewForbidden(text) || /\b(?:only|just)\s+(?:the\s+)?(?:code|source(?:\s+code)?)\b/i.test(text) || /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:(?:create|build|edit|write|run|execute)\s*(?:,\s*|and\s+|or\s+))*(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(text);
 }
 
 function portuguesePreviewForbidden(text) {
@@ -5064,10 +5064,21 @@ function portugueseWorkspaceBuildRequest(text) {
     .replace(/^\s*>[^\n]*/gm, ' ').replace(/"[^"\n]*"|`[^`\n]*`/g, ' ')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   if (portuguesePreviewForbidden(prose)) return false;
-  return prose.split(/[!?;\n]+|\.(?=\s|$)/).some(clause =>
-    /^\s*(?:por\s+favor[, ]+)?(?:(?:voce|vc)\s+)?(?:pode\s+)?(?:crie|criar|faca|fazer|construa|construir|desenvolva|desenvolver|implemente|implementar)\s+/i.test(clause)
-    && /\b(?:html|site|website|pagina\s+web|app\s+web|aplicativo\s+web)\b/i.test(clause)
-    && !/\b(?:nao|nunca|sem)\s+(?:criar|crie|fazer|faca|public\w*)\b/i.test(clause));
+  return prose.split(/[!?;\n]+|\.(?=\s|$)/).some(clause => {
+    const request = clause.trim().replace(/^(?:(?:ok|ta|agora|entao)[,\s]+)+/i, '')
+      .replace(/^por\s+favor[,\s]+/i, '');
+    const command = /^(?:(?:voce|vc)\s+)?(?:pode\s+)?(?:crie|cria|criar|faca|faz|fazer|construa|construir|desenvolva|desenvolver|implemente|implementar)\s+/i.test(request);
+    const desired = /^(?:eu\s+)?(?:quero|queria|gostaria\s+de)\s+(?:(?:que\s+(?:voce|vc)\s+)?(?:crie|faca|faz|criar|fazer)\s+)?(?:um|uma|outro|outra)\b/i.test(request);
+    // Conversational task requests often omit "create": "agora um site em
+    // html ...". Require a task prefix and a new visual object, not any mention
+    // of HTML in a question, diagnosis, quotation, or already-existing page.
+    const elliptical = /^\s*(?:(?:ok|ta)[,\s]+)*(?:agora|entao)[,\s]+/i.test(clause)
+      && /^(?:mais\s+)?(?:um|uma|outro|outra)\s+(?:novo\s+|nova\s+)?(?:site|website|pagina\s+web|app\s+web|aplicativo\s+web|jogo|calculadora)\b/i.test(request)
+      && !/\b(?:explique|explica|como|por\s+que|porque|significa|existe|existente|esta|ficou|parou|falhou|mostra|abre|carrega|funciona)\b/i.test(request);
+    return (command || desired || elliptical)
+      && /\b(?:html|site|website|pagina\s+web|app\s+web|aplicativo\s+web|interface|dashboard|landing\s+page|visualizacao|svg)\b/i.test(request)
+      && !/\b(?:nao|nunca|sem)\s+(?:criar|crie|fazer|faca|faz|public\w*)\b/i.test(request);
+  });
 }
 
 function withoutWorkspaceHtmlTargets(text) {
@@ -8029,7 +8040,7 @@ export function createToolLoopGuard({
         // With no verified previous preview, ordinary tools must remain usable
         // to locate the requested files. Only a real preview binds its scope.
         state.workspacePreviewRequired = !state.workspacePreviewForbidden && (
-          Boolean(trustedSessionPreview) ||
+          Boolean(trustedSessionPreview) || state.workspaceVisualArtifactProduced ||
           ((!visualContinuationRequested || explicitDelivery) && previewRequested)
         );
         state.workspacePreviewAuthorshipRequired = Boolean(
@@ -8368,6 +8379,21 @@ export function createToolLoopGuard({
       : [];
     if (completedEditPath) state.successfulEditPaths.add(completedEditPath);
     const completedVisualMutationPath = completedEditPath ?? completedWritePath;
+    const previousVisualDirectory = sessionPreviews.get(state.currentSessionId)?.relativeDirectory;
+    const updatesPublishedProject = previousVisualDirectory && completedVisualMutationPath?.startsWith(`${previousVisualDirectory}/`);
+    if (state.ownerIntentObserved && !state.workspacePreviewForbidden &&
+        !state.operationsRequired && !state.exactDownloadRequested &&
+        completedVisualMutationPath && (updatesPublishedProject || /\.(?:html?|svg|jsx|tsx|vue|svelte)$/i.test(completedVisualMutationPath)) &&
+        !/(?:^|\/)(?:node_modules|vendor|__tests__|tests?|fixtures?)(?:\/|$)/i.test(completedVisualMutationPath)) {
+      // Actual successful workspace mutations are a stronger delivery signal
+      // than a fixed vocabulary of request verbs or languages. Reads, failed
+      // tools, quoted model claims and text-only files never activate this.
+      state.workspaceVisualArtifactProduced = true;
+      state.workspacePreviewRequired = true;
+      state.workspaceTaskRequested = true;
+      state.workspaceMutationRequested = true;
+      if (updatesPublishedProject) state.workspacePreviewDirectory = previousVisualDirectory;
+    }
     if (
       completedVisualMutationPath &&
       state.workspaceVisualContinuationRequested &&
@@ -9042,7 +9068,7 @@ export function createToolLoopGuard({
       return {
         stage: "workspace-preview-files",
         instruction:
-          "Do not reply yet. Create or inspect the requested static website in one workspace-relative directory with index.html and any local CSS or JavaScript assets. Do not start a server. After index.html has been written or read in this response, call pixel_ods_workspace_preview with that relative directory.",
+          "Do not reply yet. Deliver the visual project in Workbench: prepare a browser-ready version in one workspace-relative directory with index.html and its local CSS, JavaScript, SVG and image assets. Preserve the project source files. Raw JSX/TSX/Vue/Svelte source is not a browser preview: prepare the runnable output first and inspect its entry point. For a standalone visual asset, create an index.html that displays it. Do not start a server or claim an unverified preview. After index.html has been written or read in this response, call pixel_ods_workspace_preview with that relative directory.",
       };
     }
     state.workspacePreviewDirectory = directory;
@@ -9123,6 +9149,15 @@ export function createToolLoopGuard({
       return undefined;
     })();
     const previewStageInstruction = (() => {
+      if (state?.workspacePreviewRequired && !state.workspacePreview && !state.workspacePreviewVerifiedDirectory &&
+          !state.workspacePreviewForbidden && !state.operationsRequired && !state.exactDownloadRequested) {
+        const directory = workspacePreviewDirectoryFromState(state);
+        return "[ODS Pixel next step] This visual project must be delivered in Workbench. " +
+          "Finish all requested files, edits and checks first, then publish BEFORE your final answer. " +
+          (directory ? `Call tool_call with id ${WORKSPACE_PREVIEW_TOOL} and args ${JSON.stringify({relativeDirectory:directory})}. ` :
+            "Prepare a browser-ready directory with index.html and local assets, preserve the source files, then call pixel_ods_workspace_preview with that relativeDirectory. ") +
+          "Do not start a server. A saved file or a previous snapshot is not a verified current preview.";
+      }
       if (state?.workspacePreviewVerifiedDirectory && !state.workspacePreview &&
           state.workspacePreviewRequired && !state.workspacePreviewForbidden &&
           !state.operationsRequired && !state.exactDownloadRequested) {
