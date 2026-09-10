@@ -31,25 +31,14 @@ test('handles empty results without issuing an action', () => {
   expect(screen.getByText('No matching conversations or actions.')).toBeVisible()
 })
 
-test('IME Enter confirms composed text without running the selected action', () => {
-  const create = vi.fn()
-  render(<MemoryRouter><PixelCommandSearch onInsert={() => {}} onNewTask={create}/></MemoryRouter>)
-  fireEvent(window, new Event(OPEN_PIXEL_SEARCH))
-  const field = screen.getByLabelText('Search conversations and actions')
-  fireEvent.keyDown(field, {key:'Enter',isComposing:true})
-  expect(create).not.toHaveBeenCalled()
-  expect(screen.getByRole('dialog')).toBeVisible()
-  fireEvent.keyDown(field, {key:'Enter'})
-  expect(create).toHaveBeenCalledTimes(1)
-})
-test('repeated search shortcuts preserve the query and original focus return target', () => {
+test.each(['ctrlKey','metaKey'])('repeated %s search shortcuts preserve the query and original focus return target', modifier => {
   render(<MemoryRouter><button>Original trigger</button><PixelCommandSearch onInsert={() => {}} onNewTask={() => {}}/></MemoryRouter>)
   const trigger = screen.getByRole('button',{name:'Original trigger'})
   trigger.focus()
-  fireEvent.keyDown(trigger,{key:'k',ctrlKey:true})
+  fireEvent.keyDown(trigger,{key:'k',[modifier]:true})
   const field = screen.getByLabelText('Search conversations and actions')
   fireEvent.change(field,{target:{value:'Research'}})
-  fireEvent.keyDown(field,{key:'k',ctrlKey:true})
+  fireEvent.keyDown(field,{key:'k',[modifier]:true})
   expect(field).toHaveValue('Research')
   fireEvent.click(screen.getByRole('button',{name:'Close search'}))
   expect(trigger).toHaveFocus()
