@@ -1429,7 +1429,7 @@ describe('Pixel', () => {
   it('does not start orphaned work when the attempt identity cannot be saved', async () => {
     globalThis.fetch.mockResolvedValue(response({available:true}))
     render(<Pixel />); await screen.findByText('Available')
-    vi.spyOn(Storage.prototype,'setItem').mockImplementation(() => { throw new Error('quota') })
+    vi.spyOn(window.Storage.prototype,'setItem').mockImplementation(() => { throw new Error('quota') })
     fireEvent.change(screen.getByPlaceholderText('Message Pixel...'),{target:{value:'Keep my draft'}})
     fireEvent.click(screen.getByTitle('Send'))
     expect(await screen.findByText(/No task was started/)).toBeVisible()
