@@ -4,6 +4,7 @@ import StatusIcon from "../components/StatusIcon";
 import { detectGpu, type GpuResult } from "../hooks/useTauri";
 
 interface Props {
+  initialTier?: number;
   onNext: (tier: number) => void;
 }
 
@@ -15,7 +16,7 @@ const VENDOR_LABELS: Record<string, string> = {
   none: "No dedicated GPU",
 };
 
-export default function GpuDetected({ onNext }: Props) {
+export default function GpuDetected({ onNext, initialTier }: Props) {
   const [loading, setLoading] = useState(true);
   const [result, setResult] = useState<GpuResult | null>(null);
   const [selectedTier, setSelectedTier] = useState<number>(1);
@@ -31,7 +32,7 @@ export default function GpuDetected({ onNext }: Props) {
       (detected) => {
         if (!active) return;
         setResult(detected);
-        setSelectedTier(detected.recommended_tier);
+        setSelectedTier(initialTier ?? detected.recommended_tier);
         setLoading(false);
       },
       (reason: unknown) => {
@@ -41,7 +42,7 @@ export default function GpuDetected({ onNext }: Props) {
       },
     );
     return () => { active = false; };
-  }, [attempt]);
+  }, [attempt, initialTier]);
 
   if (error) {
     return (
