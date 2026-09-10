@@ -10152,8 +10152,19 @@ test("client cancellation signals the exact run and blocks any later tool", {tim
     runId: "run-live",
   });
   assert.equal(await guard.abortUserRun(user), true);
-  // Cleanup is a timer; setImmediate is not ordered after it on every Node/OS.
-  await cleaned;
+  // Production cleanup is deliberately unref'd. Keep this test alive until
+  // its callback runs, with a bounded deadline rather than timer ordering.
+  let cleanupDeadline;
+  try {
+    await Promise.race([
+      cleaned,
+      new Promise((_, reject) => {
+        cleanupDeadline = setTimeout(() => reject(new Error('Cancellation marker cleanup did not run')), 2000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(cleanupDeadline);
+  }
   assert.deepEqual(signals, ["run-live"]);
   assert.deepEqual(clears, ["run-live"]);
   assert.deepEqual(
