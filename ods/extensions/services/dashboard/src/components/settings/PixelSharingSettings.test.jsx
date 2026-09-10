@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { createElement } from 'react'
 import { render } from '../../test/test-utils'
 import PixelSharingSettings from './PixelSharingSettings'
@@ -129,4 +129,28 @@ it.each(['http://tower/v1', 'https://user:secret@tower/v1', 'https://tower/v1?ke
 })
 it.each(['https://tower.example/v1', 'http://localhost:5000/v1', 'http://127.0.0.1:4005/v1', 'http://[::1]:4005/v1'])('accepts explicit secure/tunneled URL %s', value => {
   expect(connectionBaseUrl(value)).toBe(value)
+})
+
+it('expires the retained key and device admission at their deadlines without another request', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(now*1000)
+  try {
+    const first={...device(),expiresAt:now+2}
+    const second={...device(),id:'device-'+'c'.repeat(16),label:'Second laptop',expiresAt:now+4}
+    let view
+    await act(async () => {view=setup(snapshot(),() => response({...issued(),configuration:{...issued().configuration,devices:[first,second]}}))})
+    fireEvent.change(screen.getByLabelText('Device label'),{target:{value:'Laptop'}})
+    await act(async () => fireEvent.click(screen.getByRole('button',{name:'Create device key'})))
+    expect(screen.getByLabelText('Device API key')).toBeVisible()
+    await act(async () => vi.advanceTimersByTime(2001))
+    expect(screen.queryByLabelText('Device API key')).toBeNull()
+    expect(screen.getByRole('button',{name:'Start sharing'})).toBeEnabled()
+    expect(screen.getAllByText(/GLM · Expired/)).toHaveLength(1)
+    await act(async () => vi.advanceTimersByTime(2000))
+    expect(screen.getByRole('button',{name:'Start sharing'})).toBeDisabled()
+    expect(screen.getAllByText(/GLM · Expired/)).toHaveLength(2)
+    expect(view.fetchMock).toHaveBeenCalledTimes(2)
+    view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {vi.useRealTimers()}
 })
