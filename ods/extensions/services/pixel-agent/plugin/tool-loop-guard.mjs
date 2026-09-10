@@ -32,6 +32,12 @@ const MAX_TRACKED_WORKSPACE_FILE_BYTES = 4 * 1024 * 1024;
 export const WEB_BUDGET_EXHAUSTED_REASON =
   "Pixel's web-research budget is exhausted for this response. Do not call web tools again. Finish using the evidence already collected and any otherwise-authorized tools, including saving the requested report. Preserve existing evidence and clearly state any missing external information.";
 
+export const WEB_SEARCH_BUDGET_EXHAUSTED_REASON =
+  "Pixel's search-call allowance is exhausted for this response. Do not repeat web_search. Use web_fetch or targeted extraction for already identified public sources within the remaining page-reading and total allowances, or finish using collected evidence and otherwise-authorized tools, including saving the requested report.";
+
+export const WEB_FETCH_BUDGET_EXHAUSTED_REASON =
+  "Pixel's page-reading allowance is exhausted for this response. Do not repeat web_fetch, pixel_ods_web_extract or pixel_ods_research. Search may continue within its remaining search and total allowances. Finish using collected evidence and otherwise-authorized tools, including saving the requested report; do not claim unread pages were verified.";
+
 export const WEB_LOOP_ABORT_REASON =
   "Pixel stopped this response because it requested another web tool after the bounded research budget was exhausted. Start a fresh message to continue with a narrower research question.";
 
@@ -5942,6 +5948,19 @@ export function createToolLoopGuard({
     });
   }
 
+  function exhaustedWebBudget(state, toolName) {
+    if (!WEB_TOOLS.has(toolName)) return null;
+    if (state.total >= effective.total) return "total";
+    const kind = toolName === "web_search" ? "search" : "fetch";
+    return state[kind] >= effective[kind] ? kind : null;
+  }
+
+  function webBudgetReason(budget) {
+    if (budget === "search") return WEB_SEARCH_BUDGET_EXHAUSTED_REASON;
+    if (budget === "fetch") return WEB_FETCH_BUDGET_EXHAUSTED_REASON;
+    return WEB_BUDGET_EXHAUSTED_REASON;
+  }
+
   function stateFor(runId) {
     let state = runs.get(runId);
     if (!state) {
@@ -5950,10 +5969,8 @@ export function createToolLoopGuard({
         search: 0,
         fetch: 0,
         total: 0,
-        webExhausted: false,
         webLoopAborted: false,
-        webTerminalBlocks: 0,
-        webTerminalRound: 0,
+        webTerminals: new Map(),
         codingExhausted: false,
         codingTerminalBlocks: 0,
         invalidEditCreateBlocks: 0,
@@ -7725,23 +7742,31 @@ export function createToolLoopGuard({
         : undefined;
     }
 
-    // A research limit governs web calls, not the rest of the owner's task.
-    // Match resolved Tool Search names too, and fall through to each non-web
-    // tool's ordinary policy, path, cancellation and coding-loop checks.
-    // Non-web progress does not replenish ignored-web-call attempts.
-    if (state.webExhausted && WEB_TOOLS.has(effectiveToolName)) {
+    // Search and page-reading allowances are independent. Their denial and
+    // retry state survive compaction; progress through another permitted tool
+    // neither consumes that denial allowance nor resets it. Total exhaustion
+    // still applies to every web tool, including resolved Tool Search calls.
+    const exhaustedBudget = exhaustedWebBudget(state, effectiveToolName);
+    if (exhaustedBudget) {
+      const reason = webBudgetReason(exhaustedBudget);
+      let terminal = state.webTerminals.get(exhaustedBudget);
+      if (!terminal) {
+        terminal = { blocks: 0, round: state.operationsPromptRound };
+        state.webTerminals.set(exhaustedBudget, terminal);
+        return { block: true, blockReason: reason };
+      }
       // Sibling calls were already emitted before the model could receive the
       // warning. Escalate only after another observed model decision, as the
       // Operations guards do. Runtimes without model hooks retain the bounded
       // call-count fallback rather than acquiring an unlimited retry allowance.
       if (state.operationsPromptRound > 0 &&
-          state.operationsPromptRound === state.webTerminalRound) {
-        return { block: true, blockReason: WEB_BUDGET_EXHAUSTED_REASON };
+          state.operationsPromptRound === terminal.round) {
+        return { block: true, blockReason: reason };
       }
-      if (state.webTerminalBlocks === 0) {
-        state.webTerminalBlocks = 1;
-        state.webTerminalRound = state.operationsPromptRound;
-        return { block: true, blockReason: WEB_BUDGET_EXHAUSTED_REASON };
+      if (terminal.blocks === 0) {
+        terminal.blocks = 1;
+        terminal.round = state.operationsPromptRound;
+        return { block: true, blockReason: reason };
       }
       let aborted = false;
       try {
@@ -7881,12 +7906,6 @@ export function createToolLoopGuard({
     }
 
     const kind = toolName === "web_search" ? "search" : "fetch";
-    if (state[kind] >= effective[kind] || state.total >= effective.total) {
-      state.webExhausted = true;
-      state.webTerminalRound = state.operationsPromptRound;
-      return { block: true, blockReason: WEB_BUDGET_EXHAUSTED_REASON };
-    }
-
     state[kind] += 1;
     state.total += 1;
     if (toolName === "web_fetch") {

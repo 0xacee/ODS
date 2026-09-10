@@ -82,6 +82,8 @@ import {
   VERIFICATION_COMMAND_NOT_AUDITABLE_REASON,
   VERIFICATION_PENDING_DELIVERY_PREFIX,
   WEB_BUDGET_EXHAUSTED_REASON,
+  WEB_SEARCH_BUDGET_EXHAUSTED_REASON,
+  WEB_FETCH_BUDGET_EXHAUSTED_REASON,
   WEB_FETCH_REPEAT_PIVOT_REASON,
   WEB_FETCH_TRUNCATED_PIVOT_REASON,
   WEB_FETCH_PUBLIC_ONLY_REASON,
@@ -7794,7 +7796,7 @@ test("pending ODS projections retain ordinary research budgets and workspace con
   for (let i = 0; i < 8; i++) {
     assert.notEqual(call(guard, "web_search", { event: { params: { query: `model documentation ${i}` } } })?.block, true);
   }
-  assert.equal(call(guard, "web_search").blockReason, WEB_BUDGET_EXHAUSTED_REASON);
+  assert.equal(call(guard, "web_search").blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
   assert.notEqual(call(guard, "write", { event: { params: { path: "report.md", content: "Only observed evidence" } } })?.block, true);
 });
 
@@ -8065,16 +8067,18 @@ test("research exhaustion preserves report delivery without inferred workspace i
         limits: { search: 1, fetch: exhaustion === "repeat" ? 2 : 4, total: exhaustion === "total" ? 1 : 5 },
         abortRun: (id) => { aborts.push(id); return true; },
       });
+      const reason = exhaustion === "search" ? WEB_SEARCH_BUDGET_EXHAUSTED_REASON
+        : exhaustion === "repeat" ? WEB_FETCH_BUDGET_EXHAUSTED_REASON : WEB_BUDGET_EXHAUSTED_REASON;
       // No workspace-task inference: a research workflow may still save its
       // requested deliverable. Its access policy is independent of this cap.
       if (exhaustion === "repeat") {
         const event = { params: { url: "https://docs.python.org/3/library/csv.html" } };
         assert.equal(call(guard, "web_fetch", { event }), undefined);
         assert.equal(call(guard, "web_fetch", { event }).blockReason, WEB_FETCH_REPEAT_PIVOT_REASON);
-        assert.equal(call(guard, "web_fetch", { event }).blockReason, WEB_BUDGET_EXHAUSTED_REASON);
+        assert.equal(call(guard, "web_fetch", { event }).blockReason, reason);
       } else {
         assert.equal(call(guard, "web_search"), undefined);
-        assert.equal(call(guard, "web_search").blockReason, WEB_BUDGET_EXHAUSTED_REASON);
+        assert.equal(call(guard, "web_search").blockReason, reason);
       }
       const invoke = (name, args) => wrapped
         ? call(guard, "tool_call", { event: { params: { id: `openclaw:core:${name}`, args } } })
@@ -8090,14 +8094,18 @@ test("research exhaustion preserves report delivery without inferred workspace i
       assert.deepEqual(aborts, []);
       assert.match(WEB_BUDGET_EXHAUSTED_REASON, /Do not call web tools again/);
       assert.doesNotMatch(WEB_BUDGET_EXHAUSTED_REASON, /Do not call any tool again/);
-      // Discovery must not open a second route around the same web budget.
-      assert.equal(invoke("pixel_ods_web_extract", {
+      // A different, still-funded web bucket remains usable. Discovery does
+      // not provide an alternate route around the exhausted bucket itself.
+      if (exhaustion === "search") assert.notEqual(invoke("pixel_ods_web_extract", {
         url: "https://docs.python.org/3/library/csv.html", query: "reader",
-      }).blockReason, WEB_BUDGET_EXHAUSTED_REASON);
+      })?.block, true);
+      if (exhaustion === "repeat") assert.notEqual(invoke("web_search", {query: "CSV documentation"})?.block, true);
+      const blockedName = exhaustion === "search" ? "web_search" : "pixel_ods_web_extract";
+      const blockedArgs = exhaustion === "search" ? {query: "repeated search"}
+        : {url: "https://docs.python.org/3/library/csv.html", query: "reader"};
+      assert.equal(invoke(blockedName, blockedArgs).blockReason, reason);
       assert.notEqual(invoke("read", { path: "research/report.md" })?.block, true);
-      assert.equal(invoke("web_fetch", {
-        url: "https://docs.python.org/3/library/json.html",
-      }).blockReason, WEB_LOOP_ABORT_REASON);
+      assert.equal(invoke(blockedName, blockedArgs).blockReason, WEB_LOOP_ABORT_REASON);
       assert.deepEqual(aborts, ["session-1"]);
       // A fresh run gets a fresh web budget.
       assert.equal(call(guard, "web_search", {
@@ -8184,7 +8192,7 @@ test("larger reads still consume the fetch budget and preserve destination check
     assert.equal(call(guard, "web_fetch", {event: {params: {url, maxChars}}}), undefined);
   }
   assert.equal(call(guard, "web_fetch", {event: {params: {url, maxChars: 16000}}}).blockReason,
-    WEB_BUDGET_EXHAUSTED_REASON);
+    WEB_FETCH_BUDGET_EXHAUSTED_REASON);
   assert.equal(call(guard, "web_fetch", {event: {params: {url: "http://127.0.0.1/", maxChars: 32000}}}).blockReason,
     WEB_FETCH_PUBLIC_ONLY_REASON);
 });
