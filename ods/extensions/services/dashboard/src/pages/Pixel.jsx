@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom'
 import PixelAdvice from '../components/PixelAdvice.jsx'
 import PixelHandoffApproval from '../components/PixelHandoffApproval.jsx'
 import PixelProviderScopes from '../components/PixelProviderScopes.jsx'
+import { usePortalIdentity } from '../contexts/PortalIdentityContext'
 import {
   AlertCircle,
   Bot,
@@ -347,9 +348,9 @@ export function OperationsApprovalCard({ content }) {
   )
 }
 
-function workingDetail(elapsedSeconds) {
+function workingDetail(elapsedSeconds, displayName) {
   if (elapsedSeconds < 15) return 'Starting the owner-agent turn'
-  if (elapsedSeconds < 60) return 'Pixel is working with the active model'
+  if (elapsedSeconds < 60) return `${displayName} is working with the active model`
   return 'Still working — local model and tool turns can take several minutes'
 }
 
@@ -440,6 +441,7 @@ function boundedHistory(messages, nextUserContent) {
 }
 
 export default function Pixel({ systemStatus = null }) {
+  const { displayName } = usePortalIdentity()
   const [initialChat] = useState(loadStoredChat)
   const [status, setStatus] = useState('loading')
   const [statusDetail, setStatusDetail] = useState('')
@@ -967,7 +969,7 @@ export default function Pixel({ systemStatus = null }) {
           <Bot className="h-5 w-5" />
         </div>
         <div className="min-w-0">
-          <h1 className="text-base font-semibold leading-tight">Pixel</h1>
+          <h1 className="text-base font-semibold leading-tight truncate max-w-[40vw]" title={displayName}>{displayName}</h1>
           <p className="text-[11px] text-theme-text-muted">Your local ODS owner agent</p>
         </div>
 
@@ -1053,7 +1055,7 @@ export default function Pixel({ systemStatus = null }) {
         {status === 'loading' && messages.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center text-theme-text-muted">
             <Loader2 className="mb-3 h-8 w-8 animate-spin" />
-            <p>Connecting to Pixel...</p>
+            <p>Connecting to {displayName}...</p>
           </div>
         )}
         {status === 'unavailable' && messages.length === 0 && (
@@ -1061,7 +1063,7 @@ export default function Pixel({ systemStatus = null }) {
             <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-500/25 bg-amber-500/10 text-amber-300">
               <AlertCircle className="h-7 w-7" />
             </div>
-            <p className="font-medium text-theme-text">Pixel is currently unavailable</p>
+            <p className="font-medium text-theme-text">{displayName} is currently unavailable</p>
             {statusDetail && <p className="mt-1 text-sm">{statusDetail}</p>}
             <p className="mt-4 text-xs">Your other ODS applications remain available while the agent reconnects.</p>
           </div>
@@ -1069,8 +1071,8 @@ export default function Pixel({ systemStatus = null }) {
         {status === 'switching' && messages.length === 0 && (
           <div className="mx-auto flex h-full max-w-lg flex-col items-center justify-center text-center text-theme-text-muted">
             <Loader2 className="mb-4 h-9 w-9 animate-spin text-theme-accent-light" />
-            <p className="font-medium text-theme-text">Pixel is switching models</p>
-            <p className="mt-1 text-sm">Your draft is safe. Pixel will reconnect automatically when activation completes.</p>
+            <p className="font-medium text-theme-text">{displayName} is switching models</p>
+            <p className="mt-1 text-sm">Your draft is safe. {displayName} will reconnect automatically when activation completes.</p>
           </div>
         )}
         {status === 'available' && messages.length === 0 && (
@@ -1081,7 +1083,7 @@ export default function Pixel({ systemStatus = null }) {
               </div>
               <h2 className="text-2xl font-semibold tracking-tight">What should we accomplish?</h2>
               <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-theme-text-muted">
-                Pixel uses every ODS chat model. Stronger models handle complex tools and long tasks more reliably; the same broker-enforced safety boundaries apply to all of them.
+                {displayName} uses every ODS chat model. Stronger models handle complex tools and long tasks more reliably; the same broker-enforced safety boundaries apply to all of them.
               </p>
             </div>
 
@@ -1147,7 +1149,7 @@ export default function Pixel({ systemStatus = null }) {
                 <span role="status" className="inline-flex items-start gap-2 text-theme-text-muted">
                   <Loader2 className="h-4 w-4 animate-spin text-theme-accent-light" />
                   <span>
-                    <span className="block">{workingDetail(workingElapsedSeconds)}</span>
+                    <span className="block">{workingDetail(workingElapsedSeconds, displayName)}</span>
                     <span className="mt-0.5 block text-xs text-theme-text-muted/80">
                       {workingElapsed} elapsed · You can stop safely at any time.
                     </span>
@@ -1175,10 +1177,10 @@ export default function Pixel({ systemStatus = null }) {
               }
             }}
             placeholder={status === 'available'
-              ? 'Message Pixel...'
+              ? `Message ${displayName}...`
               : status === 'switching'
                 ? 'Waiting for model switch...'
-                : 'Pixel is unavailable'}
+                : `${displayName} is unavailable`}
             disabled={isDisabled}
             rows={1}
             className={`min-h-11 flex-1 resize-none rounded-xl border bg-theme-card px-4 py-2.5 text-sm text-theme-text outline-none transition placeholder:text-theme-text-muted/70 focus:ring-2 focus:ring-theme-accent/30 disabled:opacity-50 ${
@@ -1207,7 +1209,7 @@ export default function Pixel({ systemStatus = null }) {
           </div>
           {stopError && <p role="alert" className="mt-1.5 px-1 text-xs text-amber-300">{stopError}</p>}
           <div className="mt-1.5 flex items-center justify-between gap-3 px-1 text-[10px] text-theme-text-muted/70">
-            <span>{stopping ? 'Waiting for exact cancellation acknowledgement' : restoredActive ? 'Earlier work is active in this chat; Stop targets only this chat.' : sending ? `Pixel is using the active ODS model and tools · ${workingElapsed} elapsed` : 'Enter to send • Shift+Enter for a new line'}</span>
+            <span>{stopping ? 'Waiting for exact cancellation acknowledgement' : restoredActive ? 'Earlier work is active in this chat; Stop targets only this chat.' : sending ? `${displayName} is using the active ODS model and tools · ${workingElapsed} elapsed` : 'Enter to send • Shift+Enter for a new line'}</span>
             <span className={inputOver ? 'text-red-400' : ''}>{input.length.toLocaleString()} / {MAX_INPUT_LEN.toLocaleString()}</span>
           </div>
         </div>
@@ -1260,7 +1262,7 @@ export default function Pixel({ systemStatus = null }) {
             <iframe
               key={`${preview.siteId}-${previewRefresh}`}
               src={previewAccess.url}
-              title="Interactive Pixel preview"
+              title={`Interactive ${displayName} preview`}
               sandbox={previewAccess.sandbox}
               data-preview-route={previewAccess.route}
               referrerPolicy="no-referrer"

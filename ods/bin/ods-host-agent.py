@@ -6406,6 +6406,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_pixel_providers_runtime(change=False)
         elif path == "/v1/pixel/settings" and not parsed.query:
             self._handle_pixel_settings(save=False)
+        elif path == "/v1/pixel/identity" and not parsed.query:
+            self._handle_portal_identity(save=False)
         elif path == "/v1/pixel/settings/runtime" and not parsed.query:
             self._handle_pixel_settings_runtime(change=False)
         elif path == "/v1/pixel/advice-runtime":
@@ -6938,6 +6940,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_pixel_providers_runtime(change=True)
         elif self.path == "/v1/pixel/settings/save":
             self._handle_pixel_settings(save=True)
+        elif self.path == "/v1/pixel/identity/save":
+            self._handle_portal_identity(save=True)
         elif self.path == "/v1/pixel/settings/runtime":
             self._handle_pixel_settings_runtime(change=True)
         elif self.path in {"/v1/pixel/advice/start", "/v1/pixel/advice/status", "/v1/pixel/advice/cancel"}:
@@ -7312,6 +7316,54 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         except (OSError, ValueError, TypeError, RecursionError):
             json_response(self, 503, {"error": "Pixel settings are unavailable"}, no_store=True)
+            return
+        json_response(self, 200, result, no_store=True)
+
+    def _handle_portal_identity(self, *, save):
+        """Owner display name only; never changes model or system identity."""
+        if not check_auth(self):
+            return
+        try:
+            from portal_identity import get_identity, save_identity
+            from pixel_provider.store import StoreError, decode_document
+        except ImportError:
+            json_response(self, 503, {"error": "Assistant identity is unavailable"}, no_store=True)
+            return
+        try:
+            if save:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,9}", lengths[0])
+                        or self.headers.get("Transfer-Encoding") is not None):
+                    raise StoreError("invalid-request")
+                length = int(lengths[0])
+                if length > 2048:
+                    json_response(self, 413, {"error": "Assistant identity request is too large"}, no_store=True)
+                    return
+                if length == 0:
+                    raise StoreError("invalid-request")
+                old_timeout = self.connection.gettimeout()
+                try:
+                    self.connection.settimeout(10)
+                    raw = self.rfile.read(length)
+                finally:
+                    self.connection.settimeout(old_timeout)
+                if len(raw) != length:
+                    raise StoreError("invalid-request")
+                try:
+                    body = decode_document(raw)
+                except StoreError:
+                    raise StoreError("invalid-request") from None
+                result = save_identity(DATA_DIR, body)
+            else:
+                result = get_identity(DATA_DIR)
+        except StoreError as error:
+            status = 409 if error.code == "stale-revision" else 503
+            if save and error.code == "invalid-request":
+                status = 400
+            json_response(self, status, {"error": "Assistant identity request failed"}, no_store=True)
+            return
+        except (OSError, ValueError, TypeError, RecursionError):
+            json_response(self, 503, {"error": "Assistant identity is unavailable"}, no_store=True)
             return
         json_response(self, 200, result, no_store=True)
 

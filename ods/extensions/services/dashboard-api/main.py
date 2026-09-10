@@ -77,6 +77,7 @@ from routers import (
     pixel,
     pixel_providers,
     pixel_settings,
+    portal_identity,
     pixel_advice,
     pixel_handoff,
     pixel_scopes,
@@ -1195,6 +1196,7 @@ app.include_router(node.router)
 app.include_router(pixel.router)
 app.include_router(pixel_providers.router)
 app.include_router(pixel_settings.router)
+app.include_router(portal_identity.router)
 app.include_router(pixel_advice.router)
 app.include_router(pixel_handoff.router)
 app.include_router(pixel_scopes.router)

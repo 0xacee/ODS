@@ -27,6 +27,7 @@ import PixelProviderSettings from '../components/settings/PixelProviderSettings.
 import PixelRuntimeSettings from '../components/settings/PixelRuntimeSettings.jsx'
 import PixelSharingSettings from '../components/settings/PixelSharingSettings.jsx'
 import PixelAccessCard from '../components/settings/PixelAccessCard'
+import AssistantIdentitySettings from '../components/settings/AssistantIdentitySettings'
 import { useTheme } from '../contexts/ThemeContext'
 import { dashboardHost, serviceUrl } from '../lib/serviceUrls'
 import {
@@ -51,7 +52,9 @@ const buildErrorFromResponse = async (response) => {
   try {
     const payload = await response.json()
     detail = payload?.detail ?? payload
-  } catch {}
+  } catch {
+    // Keep the HTTP status fallback when the server did not return JSON.
+  }
   const error = new Error(typeof detail === 'string' ? detail : (detail?.message || `Request failed (${response.status})`))
   error.details = typeof detail === 'object' && detail ? detail : null
   return error
@@ -359,7 +362,7 @@ export default function Settings() {
         services: data.services?.map(s => ({ name: s.name, port: s.port, status: s.status })),
         model: data.model,
       }
-      const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
+      const blob = new globalThis.Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -414,6 +417,7 @@ export default function Settings() {
           <AccountUsageCard usageReport={usageReport} className="xl:col-span-7" />
           <RemoteSetupCard setupStatus={setupStatus} className="xl:col-span-5" />
         </div>
+        <AssistantIdentitySettings />
         <PixelProviderSettings />
         <PixelRuntimeSettings />
         <PixelSharingSettings />
