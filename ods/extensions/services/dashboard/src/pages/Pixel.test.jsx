@@ -1823,6 +1823,10 @@ describe('Pixel', () => {
     fireEvent.click(screen.getByTitle('Reload preview'))
     await waitFor(()=>expect(requests()).toBe(before+1))
     expect(screen.getByRole('button',{name:tab,exact:true})).toHaveAttribute('aria-pressed','true')
+    expect(screen.getAllByTitle('Interactive Pixel preview')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button',{name:'Preview',exact:true}))
+    expect(screen.getAllByTitle('Interactive Pixel preview')).toHaveLength(1)
+    expect(screen.queryByRole('region',{name:'Task files'})).not.toBeInTheDocument()
   })
 
   it('renders assistant HTML as inert text', async () => {
