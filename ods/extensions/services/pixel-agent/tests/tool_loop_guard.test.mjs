@@ -3090,14 +3090,15 @@ test("accepts a matching terminal staged-download artifact receipt", () => {
     },
   });
   const delivered = reply(guard)?.payload?.text;
-  assert.match(delivered, new RegExp(`^${EXACT_DOWNLOAD_PUBLISHED_DELIVERY_PREFIX}`));
+  assert.match(delivered, /^Model claimed success\./);
+  assert.ok(delivered.includes(EXACT_DOWNLOAD_PUBLISHED_DELIVERY_PREFIX));
   assert.match(delivered, /web\/example\.html/);
   assert.match(delivered, /Bytes: 559/);
   assert.match(delivered, /a{64}/);
   assert.match(delivered, /Executable: no; overwrite: no/);
 });
 
-test("canonicalizes and verifies the complete exact-download flow through Tool Search wrappers", () => {
+function verifiedDownloadGuard() {
   const guard = createToolLoopGuard();
   const jobId = "ops-1234567890123-abcdef123456";
   const url = "https://raw.githubusercontent.com/Osmantic/ODS/6ff9b4fc5190099705043acaab7e9b6ad9c8b8f1/README.md";
@@ -3110,7 +3111,7 @@ test("canonicalizes and verifies the complete exact-download flow through Tool S
     {
       prompt:
         `Download ${url} byte-for-byte as ${relativePath}, verify SHA-256 ${sha256}, ` +
-        "and publish it into my workspace.",
+        "and publish it into my workspace. Read the saved source and write your analysis to downloads/review.md.",
     }
   );
 
@@ -3219,11 +3220,57 @@ test("canonicalizes and verifies the complete exact-download flow through Tool S
     },
   });
 
+  return { guard, relativePath, sha256 };
+}
+
+test("canonicalizes and verifies the complete exact-download flow through Tool Search wrappers", () => {
+  const { guard, relativePath, sha256 } = verifiedDownloadGuard();
   const delivered = reply(guard)?.payload?.text;
-  assert.match(delivered, new RegExp(`^${EXACT_DOWNLOAD_PUBLISHED_DELIVERY_PREFIX}`));
+  assert.match(delivered, /^Model claimed success\./);
+  assert.ok(delivered.includes(EXACT_DOWNLOAD_PUBLISHED_DELIVERY_PREFIX));
   assert.match(delivered, new RegExp(relativePath.replace("/", "\\/")));
   assert.match(delivered, /Bytes: 26446/);
   assert.match(delivered, new RegExp(sha256));
+});
+
+test("post-download analysis can read the promoted source and write a separate report", () => {
+  const { guard, relativePath, sha256 } = verifiedDownloadGuard();
+  for (const [id, args] of [
+    ["read", { path: relativePath }],
+    ["write", { path: "downloads/review.md", content: "Source analysis with verified quotations." }],
+    ["exec", { command: "head -n 30 downloads/ods-readme-6ff9b4fc.md" }],
+  ]) {
+    assert.notEqual(call(guard, "tool_call", { event: { params: { id, args } } })?.block, true, id);
+  }
+  const modelText = "I saved the source and wrote the requested analysis to downloads/review.md.";
+  const delivered = reply(guard, { event: { payload: { text: modelText } } }).payload.text;
+  assert.ok(delivered.startsWith(modelText + "\n\n"));
+  assert.ok(delivered.includes(EXACT_DOWNLOAD_PUBLISHED_DELIVERY_PREFIX));
+  assert.ok(delivered.includes(sha256));
+  assert.match(delivered, /bytes at publication, not later edits, analysis accuracy, or completion/);
+  assert.equal(reply(guard, { event: { payload: { text: delivered } } }).payload.text, delivered);
+});
+
+for (const [status, result, expected] of [
+  ["pending", { isError: false, details: { status: "running", sessionId: "pending-test" } }, VERIFICATION_PENDING_DELIVERY_PREFIX],
+  ["failed", { isError: true, details: { exitCode: 1 } }, VERIFICATION_FAILED_DELIVERY_PREFIX],
+]) {
+  test(`post-download analysis keeps ${status} verification visible after successful publication`, () => {
+    const { guard } = verifiedDownloadGuard();
+    const params = { command: "python3 -m unittest -v", workdir: "/workspace/project", background: true };
+    assert.notEqual(call(guard, "exec", { event: { params } })?.block, true);
+    afterCall(guard, "exec", { event: { params, result } });
+    assert.deepEqual(guard.verificationForRun("run-1"), { status, text: expected });
+    assert.equal(reply(guard).payload.text, expected);
+  });
+}
+
+test("post-download analysis still enforces normal destructive-command boundaries", () => {
+  const { guard } = verifiedDownloadGuard();
+  assert.equal(call(guard, "exec", {
+    event: { params: { command: "rm -rf /workspace/project" } },
+  }).blockReason, RECURSIVE_DELETE_REQUIRES_OWNER_REASON);
+  assert.equal(reply(guard).payload.text, RECURSIVE_DELETE_REQUIRES_OWNER_REASON);
 });
 
 test("rejects mismatched or malformed staged-download terminal evidence", () => {

@@ -494,16 +494,20 @@ test("adds a static visible-reply contract for the exact Pixel agent", () => {
   assert.match(result.appendSystemContext, /never as authority for an action/);
 });
 
-test("adds a strict staged-download and publication sequence only for exact bytes", () => {
+test("keeps exact-byte provenance while allowing discovery and post-download analysis", () => {
   const result = promptContractForAgent(
     { agentId: "pixel" },
     "pixel",
     { prompt: "Download https://example.com/ as web/example.html and preserve the exact bytes." }
   );
   assert.match(result.appendSystemContext, new RegExp(ODS_EXACT_DOWNLOAD_CONTRACT.slice(0, 80)));
-  assert.match(result.appendSystemContext, /pixel_ops_download_stage first/);
+  assert.match(result.appendSystemContext, /Discover or describe the approved tools/);
+  assert.match(result.appendSystemContext, /pixel_ops_download_stage/);
   assert.match(result.appendSystemContext, /pixel_ops_job_wait/);
   assert.match(result.appendSystemContext, /pixel_ods_download_promote/);
+  assert.match(result.appendSystemContext, /After verified promotion, continue the owner's authorized reading, analysis, report writing/);
+  assert.match(result.appendSystemContext, /Do not execute downloaded code without authorization/);
+  assert.doesNotMatch(result.appendSystemContext, /call no more tools/);
   const ordinary = promptContractForAgent(
     { agentId: "pixel" },
     "pixel",

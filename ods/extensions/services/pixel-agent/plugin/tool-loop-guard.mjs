@@ -194,9 +194,6 @@ export const EXACT_DOWNLOAD_REQUIRES_WAIT_REASON =
 export const EXACT_DOWNLOAD_REQUIRES_PROMOTION_REASON =
   "Pixel verified the staged artifact in quarantine. Call pixel_ods_download_promote now; ODS will bind the job, source URL, digest, filename, and workspace-relative destination. Do not read the root-only quarantine path or create a substitute file.";
 
-export const EXACT_DOWNLOAD_COMPLETE_REASON =
-  "Pixel has already published and reverified the requested exact-byte artifact. Do not call another tool; give the owner the final path, byte count, SHA-256, source, and non-executable status.";
-
 export const EXACT_DOWNLOAD_REQUEST_UNBOUND_REASON =
   "Pixel could not bind this exact-byte request to one unambiguous HTTPS source URL and one safe workspace-relative destination. Do not call another tool or create a substitute; ask the owner for one exact HTTPS URL and destination path.";
 
@@ -7331,10 +7328,6 @@ export function createToolLoopGuard({
       };
     }
 
-    if (state?.exactDownloadRequested && state.exactDownloadPromotion) {
-      return { block: true, blockReason: EXACT_DOWNLOAD_COMPLETE_REASON };
-    }
-
     // Publication verifies a snapshot, not completion of the owner's task.
     // Let verification and repairs reach normal tool/loop checks; a blanket
     // early return here can itself repeat forever before those checks run.
@@ -7342,7 +7335,8 @@ export function createToolLoopGuard({
     // Finding and describing the approved broker is not an attempt to replace
     // its verified bytes. Keep discovery subject to the normal loop checks.
     const exactDownloadDiscovery = effectiveToolName === "tool_search" || effectiveToolName === "tool_describe";
-    if (state?.exactDownloadRequested && !exactDownloadDiscovery && !EXACT_DOWNLOAD_BROKER_TOOLS.has(effectiveToolName)) {
+    if (state?.exactDownloadRequested && !state.exactDownloadPromotion &&
+        !exactDownloadDiscovery && !EXACT_DOWNLOAD_BROKER_TOOLS.has(effectiveToolName)) {
       if (state.exactDownloadTerminalBlocks === 0) {
         state.exactDownloadTerminalBlocks = 1;
         return {
@@ -9257,12 +9251,12 @@ export function createToolLoopGuard({
     if (state.unrequestedOperationsAborted) {
       return { status: "failed", text: UNREQUESTED_OPERATIONS_LOOP_ABORT_REASON };
     }
-    // Successful host facts cannot hide a failed or still-running workspace
-    // verification in the same request. The broker receipts stay recorded.
-    if (state.operationsRequired && state.latestVerificationStatus === "failed") {
+    // Successful host facts or a published download cannot hide a failed or
+    // still-running workspace verification. The broker receipts stay recorded.
+    if ((state.operationsRequired || state.exactDownloadPromotion) && state.latestVerificationStatus === "failed") {
       return { status: "failed", text: VERIFICATION_FAILED_DELIVERY_PREFIX };
     }
-    if (state.operationsRequired && state.latestVerificationStatus === "pending") {
+    if ((state.operationsRequired || state.exactDownloadPromotion) && state.latestVerificationStatus === "pending") {
       return { status: "pending", text: VERIFICATION_PENDING_DELIVERY_PREFIX };
     }
     if (
@@ -9537,7 +9531,7 @@ export function createToolLoopGuard({
           [...state.operationsRequiredActions].every((action) =>
             action.startsWith("host.") || action === "ods.extensions.list" || action === "ods.extensions.search")));
     return verification.status === "passed" && verification.text &&
-      (readOnlyOperations || verification.preview)
+      (readOnlyOperations || verification.preview || state?.exactDownloadPromotion)
       ? { ...verification, deliveryMode: "append" }
       : verification;
   }
@@ -9563,7 +9557,9 @@ export function createToolLoopGuard({
         typeof event.payload?.text === "string" && event.payload.text.trim()) {
       const scope = verification.preview
         ? "Publication scope: this receipt verifies the published snapshot, not functional behavior or completion of other requested work."
-        : "Receipt scope: the Operations evidence above does not establish completion of other requested work.";
+        : state.exactDownloadPromotion
+          ? "Download scope: this receipt verifies bytes at publication, not later edits, analysis accuracy, or completion of other requested work."
+          : "Receipt scope: the Operations evidence above does not establish completion of other requested work.";
       const evidence = `${authoritativeText}\n${scope}`;
       return {
         payload: { ...(event.payload ?? {}), text: event.payload.text.endsWith(evidence)
