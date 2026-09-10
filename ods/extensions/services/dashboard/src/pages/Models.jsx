@@ -411,7 +411,7 @@ export default function Models({ compact = false }) {
 
         {compact ? <>
           <div className="models-results"><span>{libraryScope === 'installed' ? 'On this device' : 'ODS recommended'}</span><span>{filteredModels.length} {filteredModels.length === 1 ? 'model' : 'models'}</span></div>
-          {filteredModels.length ? <FittedLibraryPage key={`${libraryScope}:${query}:${categoryFilter}:${compatibilityFilter}:${speedFilter}:${contextFloor}`} items={filteredModels} label="Model library">{items => <div className="models-list">{items.map(renderModel)}</div>}</FittedLibraryPage> : <p className="models-empty">No models match the current filters.</p>}
+          {filteredModels.length ? <FittedLibraryPage key={`${libraryScope}:${query}:${categoryFilter}:${compatibilityFilter}:${speedFilter}:${contextFloor}`} items={filteredModels} label="Model library" minimumItems={6}>{items => <div className="models-list">{items.map(renderModel)}</div>}</FittedLibraryPage> : <p className="models-empty">No models match the current filters.</p>}
         </> : <section
           ref={libraryRef}
           className="overflow-hidden rounded-xl border"

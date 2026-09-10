@@ -1,7 +1,6 @@
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import {
   Activity,
-  ArrowUpRight,
   Calendar,
   ChevronDown,
   ChevronRight,
@@ -17,7 +16,6 @@ import {
   RefreshCw,
   Route,
   Server,
-  Settings as SettingsIcon,
   UserPlus,
   WalletCards,
 } from 'lucide-react'
@@ -31,6 +29,7 @@ import PixelAccessCard from '../components/settings/PixelAccessCard'
 import AssistantIdentitySettings from '../components/settings/AssistantIdentitySettings'
 import { useTheme } from '../contexts/ThemeContext'
 import { WALLPAPERS } from '../lib/wallpapers'
+import CustomWallpaperPicker from '../components/CustomWallpaperPicker'
 import '../wallpaper-themes.css'
 import { dashboardHost, serviceUrl } from '../lib/serviceUrls'
 import {
@@ -392,7 +391,7 @@ export default function Settings({ activeSection = 'all' }) {
   if (loading && !initialized) return <SettingsSkeleton />
 
   return (
-    <div className="settings-refined min-h-full px-3 py-6 sm:px-4 lg:px-5 xl:px-6">
+    <div className={`settings-refined min-h-full ${activeSection === 'all' ? 'px-3 py-6 sm:px-4 lg:px-5 xl:px-6' : 'settings-single-section'}`}>
       <div hidden={activeSection !== 'all'}><SettingsPageHeader
         onRefresh={() => fetchSettings({ preserveEnvChanges: envDirty })}
         onCheckUpdates={() => {
@@ -412,9 +411,9 @@ export default function Settings({ activeSection = 'all' }) {
           <div hidden={!visible('usage')}><AccountUsageCard usageReport={usageReport} /></div>
           <div hidden={!visible('owner')}><RemoteSetupCard setupStatus={setupStatus} /></div>
         </div>
-        <div hidden={!visible('profile')}><AssistantIdentitySettings /></div>
+        {activeSection === 'all' && <AssistantIdentitySettings />}
         <div hidden={!visible('connections')}><PixelProviderSettings showHeading={activeSection === 'all'} /></div>
-        <div hidden={!visible('connections')}><PixelRuntimeSettings /></div>
+        <div hidden={!visible('connections')}><details className="settings-agent-behavior"><summary>Agent behavior</summary><PixelRuntimeSettings /></details></div>
         <div hidden={!visible('sharing')}><PixelSharingSettings /></div>
         <div hidden={!visible('access')}><PixelAccessCard showHeading={activeSection === 'all'} /></div>
         <div hidden={!visible('services')}><RoutingTableCard
@@ -426,16 +425,16 @@ export default function Settings({ activeSection = 'all' }) {
           onToggleExpanded={() => setRoutesExpanded(current => !current)}
         /></div>
 
-        <div hidden={!['all','storage','updates','advanced'].includes(activeSection)} className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1.65fr)_minmax(22rem,0.85fr)]">
+        <div hidden={!['all','storage','updates'].includes(activeSection) && !(activeSection === 'advanced' && !envOpen)} className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1.65fr)_minmax(22rem,0.85fr)]">
           <div hidden={!visible('storage')}><StorageCard storage={storage} showHeading={activeSection === 'all'} /></div>
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
+          <div hidden={!['all','updates','advanced'].includes(activeSection)} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
             <div hidden={!visible('updates')}><UpdatesCard version={version} showHeading={activeSection === 'all'} onCheckUpdates={() => fetchVersionInfo({ announce: true })} /></div>
-            <div hidden={!visible('advanced')}><CommandsCard onExportConfig={handleExportConfig} /><button className="mt-4 rounded border border-theme-border px-3 py-2" onClick={handleOpenEnvironmentEditor}>Environment editor</button></div>
+            <div hidden={!visible('advanced')} className="settings-advanced-tools"><CommandsCard onExportConfig={handleExportConfig} />{!envOpen && <button className="settings-open-editor" onClick={handleOpenEnvironmentEditor}>Open environment editor</button>}</div>
           </div>
         </div>
 
         {envOpen && envEditor ? (
-          <div hidden={!visible('advanced')} ref={envEditorRef} className="pt-4">
+          <div hidden={!visible('advanced')} ref={envEditorRef}>
             <EnvEditor
               editor={envEditor}
               search={envSearch}
@@ -459,6 +458,7 @@ export default function Settings({ activeSection = 'all' }) {
               onReload={() => fetchEnvEditor({ announce: true })}
               onSave={handleSaveEnv}
               onApply={handleApplyEnv}
+              onExport={handleExportConfig}
               dirty={envDirty}
               saving={envSaving}
               applyPlan={envApplyPlan}
@@ -515,6 +515,7 @@ function SystemIdentityCard({ version, className = '' }) {
 }
 
 function AppearanceCard({ theme, themes, labels, onThemeChange, className = '', showHeading = true }) {
+  const {wallpapers = WALLPAPERS} = useTheme()
   return (
     <PremiumCard className={`p-5 lg:p-6 ${className}`}>
       {showHeading && <CardIntro icon={Palette} title="Appearance" description="Pixel’s minimal interface is shared across ODS." />}
@@ -530,7 +531,7 @@ function AppearanceCard({ theme, themes, labels, onThemeChange, className = '', 
             className="wallpaper-choice"
           >
             <span className="wallpaper-thumbnail">
-              {WALLPAPERS.find(item => item.id === themeId)?.image && <img src={WALLPAPERS.find(item => item.id === themeId).image} alt="" loading="lazy"/>}
+              {wallpapers.find(item => item.id === themeId)?.image && <img src={wallpapers.find(item => item.id === themeId).image} alt="" loading="lazy"/>}
               <span className="wallpaper-mini-sidebar"><i/><i/><i/></span><span className="wallpaper-mini-chat"><i/><i/></span>
               {theme === themeId && <span className="wallpaper-check" aria-hidden="true">✓</span>}
             </span>
@@ -539,6 +540,7 @@ function AppearanceCard({ theme, themes, labels, onThemeChange, className = '', 
         ))}
       </div>
       <p className="wallpaper-note">Applied instantly · saved in this browser. Wallpapers add frosted glass without changing your layout.</p>
+      <CustomWallpaperPicker />
     </PremiumCard>
   )
 }
@@ -780,19 +782,9 @@ function UpdatesCard({ version, onCheckUpdates, showHeading = true }) {
 
 function CommandsCard({ onExportConfig }) {
   return (
-    <PremiumCard className="flex min-h-0 flex-col justify-between p-4">
-      <div className="flex items-start gap-3">
-        <SettingsIcon size={19} strokeWidth={1.8} className="mt-0.5 shrink-0 text-theme-accent-light" />
-        <div>
-          <h2 className="text-base font-semibold text-theme-text">Commands</h2>
-          <p className="mt-0.5 text-xs text-theme-text-muted">Portable operational metadata.</p>
-        </div>
-      </div>
-      <button type="button" onClick={onExportConfig} className="mt-4 flex w-full items-center justify-between border-t border-theme-border pt-3 text-left text-sm font-medium text-theme-text hover:text-theme-accent-light">
+      <button type="button" onClick={onExportConfig} className="settings-export-config">
         <span className="flex items-center gap-2"><Download size={16} />Export configuration</span>
-        <ArrowUpRight size={15} className="text-theme-text-muted" />
       </button>
-    </PremiumCard>
   )
 }
 

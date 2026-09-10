@@ -24,6 +24,10 @@ export function parseTaskActivity(value, runId) {
 }
 
 export function parseTaskActivityFrame(frame) {
+  if (frame?.object === 'ods.task.activity' && Object.keys(frame).sort().join(',') === 'id,object,pixel_task') {
+    const task = parseTaskActivity(frame.pixel_task, frame.id);
+    return task?.state === 'running' ? task : null;
+  }
   if (frame?.choices?.[0]?.finish_reason !== 'stop') return null;
   return parseTaskActivity(frame.pixel_task, frame.id);
 }

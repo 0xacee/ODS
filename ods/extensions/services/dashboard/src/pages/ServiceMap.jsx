@@ -195,31 +195,33 @@ function edgePath(source, target) {
   return `M ${sx} ${sy} L ${sx} ${midY} L ${tx} ${midY} L ${tx} ${ty}`
 }
 
-function ServiceNode({ node, pos, selected, onSelect }) {
+function ServiceNode({ node, pos, selected, onSelect, compact = false }) {
   const meta = statusMeta(node.status)
+  const label = compact ? node.name.replace(/\s*\(.*\)$/, '') : node.name
   return (
     <g role="button" tabIndex={0} aria-label={`${node.name}: ${node.status}`} onClick={() => onSelect(node)} onKeyDown={event => {
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(node) }
     }} className="cursor-pointer">
+      <title>{node.name}: {node.status}</title>
       {selected && (
         <rect x={pos.x - 4} y={pos.y - 4} width={NODE_W + 8} height={NODE_H + 8} rx={14} fill="none" stroke={meta.color} strokeWidth="2" />
       )}
       <rect x={pos.x} y={pos.y} width={NODE_W} height={NODE_H} rx={12} className="fill-zinc-900 stroke-zinc-700" />
       <circle cx={pos.x + 15} cy={pos.y + 25} r="4" fill={meta.color} />
-      <text x={pos.x + 27} y={pos.y + 29} className="fill-zinc-100" style={{ fontSize: 12, fontWeight: 700 }}>
-        {node.name.length > 18 ? `${node.name.slice(0, 17)}…` : node.name}
+      <text x={pos.x + 27} y={pos.y + 29} className="fill-zinc-100" style={{ fontSize: 12, fontWeight: compact ? 500 : 700 }}>
+        {label.length > 18 ? `${label.slice(0, 17)}…` : label}
       </text>
       <text x={pos.x + 15} y={pos.y + 47} className="fill-zinc-400" style={{ fontSize: 11 }}>
-        :{node.port}
+        {node.port ? `:${node.port}` : 'No port'}
       </text>
       <text x={pos.x + NODE_W - 10} y={pos.y + 47} textAnchor="end" style={{ fontSize: 9, fill: meta.color }}>
-        {node.status}
+        {node.status.replaceAll('_', ' ')}
       </text>
     </g>
   )
 }
 
-function DetailPanel({ node, edges, onClose }) {
+function DetailPanel({ node, edges, onClose, inline = false }) {
   if (!node) return null
   const meta = statusMeta(node.status)
   const upstream = edges.filter(edge => edge.target === node.id)
@@ -227,7 +229,7 @@ function DetailPanel({ node, edges, onClose }) {
   const url = serviceUrl(node)
 
   return (
-    <div className="absolute top-4 right-4 z-10 w-72 overflow-hidden rounded-xl border border-theme-border bg-theme-card shadow-2xl">
+    <div className={inline ? 'integration-detail' : 'absolute top-4 right-4 z-10 w-72 overflow-hidden rounded-xl border border-theme-border bg-theme-card shadow-2xl'}>
       <div className="flex items-center justify-between border-b border-theme-border px-4 py-3">
         <div className="flex items-center gap-2">
           <span className={`h-2.5 w-2.5 rounded-full ${meta.dot}`} />
@@ -264,8 +266,58 @@ function DependencyList({ label, edges, field }) {
   )
 }
 
+function CompactIntegrations({ nodes, edges, refresh, error }) {
+  const [view, setView] = useState('list')
+  const [search, setSearch] = useState('')
+  const [filter, setFilter] = useState('all')
+  const [selectedId, setSelectedId] = useState(null)
+  const detailRef = useRef(null)
+  useEffect(() => { if (selectedId) detailRef.current?.scrollIntoView?.({ block: 'nearest' }) }, [selectedId])
+  const selected = nodes.find(node => node.id === selectedId)
+  const visible = nodes.filter(node => `${node.name} ${node.id}`.toLowerCase().includes(search.toLowerCase()) && (filter === 'all' || (filter === 'healthy' ? node.status === 'healthy' : node.status !== 'healthy')))
+  const positions = {}
+  const labels = []
+  let height = 35
+  for (const layer of LAYERS) {
+    const members = visible.filter(node => node.category === layer).sort((a, b) => a.name.localeCompare(b.name))
+    if (!members.length) continue
+    labels.push({ layer, y: height })
+    height += 20
+    members.forEach((node, index) => { positions[node.id] = { x: 18 + (index % 2) * 212, y: height + Math.floor(index / 2) * 100 } })
+    height += Math.ceil(members.length / 2) * 100 + 25
+  }
+  return <section className="portal-integrations">
+    <header className="integrations-header"><div><h2>Integrations</h2><p>{nodes.length} services · {nodes.filter(node => node.status === 'healthy').length} healthy</p></div><button type="button" aria-label="Refresh integrations" onClick={refresh}><RefreshCw size={15} /></button></header>
+    <nav className="settings-view-tabs" aria-label="Integration views"><button type="button" aria-pressed={view === 'list'} onClick={() => setView('list')}>Service list</button><button type="button" aria-pressed={view === 'map'} onClick={() => setView('map')}>View map</button></nav>
+    {error && <p role="alert" className="text-red-400">Status could not be refreshed. {error}</p>}
+    <div className="integrations-filters"><input type="search" aria-label="Search integrations" placeholder="Search services…" value={search} onChange={event => setSearch(event.target.value)} /><select aria-label="Service status" value={filter} onChange={event => setFilter(event.target.value)}><option value="all">All statuses</option><option value="healthy">Healthy</option><option value="attention">Not healthy</option></select></div>
+    <div ref={detailRef}><DetailPanel inline node={selected} edges={edges} onClose={() => setSelectedId(null)} /></div>
+    {!visible.length ? <p className="integrations-empty">{nodes.length ? 'No matching services.' : 'No services reported.'}</p> : view === 'list' ? <div className="integrations-list">
+      {LAYERS.map(layer => {
+        const members = visible.filter(node => node.category === layer).sort((a, b) => a.name.localeCompare(b.name))
+        return members.length > 0 && <section key={layer}><h3>{LAYER_LABELS[layer].toLowerCase().replace('-', ' ')}</h3>{members.map(node => <button type="button" key={node.id} onClick={() => setSelectedId(node.id)} aria-pressed={selectedId === node.id}><span className="integration-name"><span className={`integration-dot ${statusMeta(node.status).dot}`} /><span>{node.name}</span></span><span className="integration-status">{node.status.replaceAll('_', ' ')}{node.port && <small>:{node.port}</small>}</span></button>)}</section>
+      })}
+    </div> : <div className="integrations-map" role="region" aria-label="Service topology" tabIndex={0}>
+      <p>Known dependencies · select a service to highlight its connections</p>
+      <svg width="100%" viewBox={`0 0 418 ${height}`} style={{ fontFamily: 'inherit' }}>
+        {labels.map(({ layer, y }) => <text key={layer} x="18" y={y} fill="currentColor" opacity=".55" fontSize="10">{LAYER_LABELS[layer]}</text>)}
+        {edges.map((edge, index) => {
+          const source = positions[edge.source], target = positions[edge.target]
+          if (!source || !target) return null
+          const highlighted = selectedId === edge.source || selectedId === edge.target
+          const sx = source.x < 200 ? source.x + NODE_W : source.x
+          const tx = target.x < 200 ? target.x + NODE_W : target.x
+          const gutter = 202 + (index % 5) * 3
+          const path = `M ${sx} ${source.y + NODE_H / 2} H ${gutter} V ${target.y + NODE_H / 2} H ${tx}`
+          return <path key={`${edge.source}-${edge.target}`} d={path} fill="none" stroke="currentColor" strokeWidth={highlighted ? 2 : 1} opacity={highlighted ? .85 : .13} />
+        })}
+        {visible.map(node => <ServiceNode compact key={node.id} node={node} pos={positions[node.id]} selected={selectedId === node.id} onSelect={value => setSelectedId(value.id)} />)}
+      </svg>
+    </div>}
+  </section>
+}
+
 export default function ServiceMap({ compact = false }) {
-  const [showMap, setShowMap] = useState(false)
   const [topology, setTopology] = useState({ nodes: [], edges: [] })
   const [selectedNode, setSelectedNode] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -311,23 +363,17 @@ export default function ServiceMap({ compact = false }) {
   const edgeLabels = [...new Set(edges.map(edge => edge.label))]
 
   if (loading) {
-    return <div className="p-8 animate-pulse"><div className="mb-6 h-8 w-1/3 rounded bg-theme-card" /><div className="h-96 rounded-xl bg-theme-card" /></div>
+    return <p role="status" className="text-sm text-theme-text-muted">Loading integrations…</p>
   }
 
-  if (error) {
-    return <div className="p-8 text-sm text-red-400">Topology data unavailable: {error}</div>
+  if (error && !nodes.length) {
+    return <div role="alert" className="text-sm text-red-400">Topology data unavailable: {error}<button className="ml-3" onClick={fetchTopology}>Retry</button></div>
   }
 
-  if (compact && !showMap) return <section className="portal-integrations p-5">
-    <div className="mb-4 flex justify-between items-center gap-3"><p className="text-theme-text-muted">{nodes.length} services · {counts.healthy} healthy</p><button className="rounded border border-theme-border px-3 py-2" onClick={() => setShowMap(true)}>View map</button></div>
-    <p className="mb-4 text-xs text-theme-text-muted">Select a service to inspect its connections.</p>
-    {nodes.map(node => <button key={node.id} onClick={() => setSelectedNode(node)} aria-pressed={selectedNode?.id === node.id} className="flex w-full items-center justify-between gap-3 border-b border-theme-border py-3 text-left"><span>{node.name}</span><small className={node.status === 'healthy' ? 'text-emerald-300' : 'text-theme-text-muted'}>{node.status}</small></button>)}
-    <DetailPanel node={selectedNode} edges={edges} onClose={() => setSelectedNode(null)} />
-  </section>
+  if (compact) return <CompactIntegrations nodes={nodes} edges={edges} refresh={fetchTopology} error={error} />
 
   return (
     <div className="p-8">
-      {compact && <button className="mb-4 text-sm text-theme-text-muted" onClick={() => setShowMap(false)}>← Service list</button>}
       <div className="mb-6 flex items-start justify-between">
         <div>
           {!compact && <h1 className="flex items-center gap-2 text-2xl font-bold text-theme-text"><GitBranch size={22} className="text-theme-accent" />Integrations</h1>}

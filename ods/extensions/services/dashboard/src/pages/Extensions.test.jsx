@@ -36,16 +36,44 @@ const baseSummary = (overrides = {}) => ({
 
 const baseFeature = { category: 'tools', icon: 'Box' }
 
-const installFetchMock = (catalogFixture) => {
+const installFetchMock = (catalogFixture, templates = []) => {
   const fetchMock = vi.fn(async (url) => {
     const u = String(url)
     if (u.includes('/api/extensions/catalog')) return makeJsonResponse(catalogFixture)
-    if (u.includes('/api/templates')) return makeJsonResponse({ templates: [] })
+    if (u.includes('/api/templates')) return makeJsonResponse({ templates })
     throw new Error(`Unmocked fetch: ${u}`)
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
+
+it('hides unsupported extensions from results, categories and counts without hiding unhealthy services',async()=>{
+  installFetchMock({agent_available:true,extensions:[
+    {id:'supported',name:'Supported',status:'unhealthy',source:'user',features:[baseFeature]},
+    {id:'unsupported',name:'Unsupported device',status:'incompatible',features:[{category:'hidden-category'}]},
+    {id:'unsupported-flag',name:'Unsupported flag',status:'not_installed',compatible:false,features:[]},
+  ],summary:baseSummary({total:3})})
+  render(<Extensions compact/> )
+  expect(await screen.findByText('Supported')).toBeVisible()
+  expect(screen.queryByText('Unsupported device')).toBeNull()
+  expect(screen.queryByText('Unsupported flag')).toBeNull()
+  expect(screen.queryByRole('option',{name:'hidden-category'})).toBeNull()
+  expect(screen.getByRole('button',{name:'All 1'})).toBeVisible()
+})
+
+it('hides collections that require unsupported services while retaining usable collections', async () => {
+  installFetchMock({agent_available:true,extensions:[
+    {id:'unsupported',name:'GPU unavailable',status:'incompatible',features:[]},
+    {id:'supported',name:'Ready to install',status:'not_installed',features:[]},
+  ]}, [
+    {id:'blocked',name:'Blocked collection',services:['unsupported']},
+    {id:'available',name:'Available collection',services:['supported']},
+  ])
+  render(<Extensions compact/>)
+  fireEvent.click(await screen.findByRole('button',{name:'Starter collections 1'}))
+  expect(screen.getByText('Available collection')).toBeVisible()
+  expect(screen.queryByText('Blocked collection')).toBeNull()
+})
 
 // Find the per-extension toggle <button> by its uniquely-shaped width class.
 // L680 uses Tailwind arbitrary values: `inline-flex h-[18px] w-[32px] ...`

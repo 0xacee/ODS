@@ -16,7 +16,6 @@ import PixelDictation from '../components/PixelDictation'
 import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelCommandSearch'
 import PixelConversationImport from '../components/PixelConversationImport'
 import PixelSelectionActions from '../components/PixelSelectionActions'
-import PixelMessageActions from '../components/PixelMessageActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
 import PixelTurnNavigation from '../components/PixelTurnNavigation'
@@ -36,7 +35,6 @@ import {
   CheckCircle2,
   Code2,
   Copy,
-  Globe2,
   ExternalLink,
   Loader2,
   Plus,
@@ -49,7 +47,6 @@ import {
   Sparkles,
   Square,
   Terminal,
-  Wrench,
   X,
 } from 'lucide-react'
 
@@ -103,33 +100,6 @@ const OPS_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'reje
 const OPS_APPROVAL_RECEIPT = /^Pixel prepared the exact (ods\.extensions\.(?:install|enable|disable|remove)) plan for extension ([a-z0-9](?:[a-z0-9_-]|\.(?=[a-z0-9])){0,63}), but external approval is required\. No lifecycle change was executed\. Job: (ops-[0-9]{13}-[a-f0-9]{12})\. Plan SHA-256: ([a-f0-9]{64})\.$/
 const OPS_HOST_COMMAND_APPROVAL_RECEIPT = /^Pixel prepared a protected ODS host command plan, but external approval is required\. No command was executed\. Job: (ops-[0-9]{13}-[a-f0-9]{12})\. Plan SHA-256: ([a-f0-9]{64})\.$/
 let fallbackChatSequence = 0
-
-const SUGGESTED_TASKS = [
-  {
-    icon: ShieldCheck,
-    label: 'Check ODS health',
-    description: 'Inspect the live stack and explain anything that needs attention.',
-    prompt: 'Check the current ODS status. Summarize what is healthy, identify anything degraded or stopped, and suggest the safest next action.',
-  },
-  {
-    icon: Code2,
-    label: 'Build in my workspace',
-    description: 'Create, edit, run, and verify code instead of only suggesting it.',
-    prompt: 'Help me build and verify something useful in your writable workspace. Start by asking what outcome I want if it is not clear.',
-  },
-  {
-    icon: Globe2,
-    label: 'Research with sources',
-    description: 'Use public web evidence and keep citations exact.',
-    prompt: 'Research a public topic for me using current sources. Ask what topic and decision I need to make, then return a concise evidence-backed answer with exact source URLs.',
-  },
-  {
-    icon: Wrench,
-    label: 'Plan a multi-step task',
-    description: 'Break down a larger job, use tools, and report verified progress.',
-    prompt: 'Help me complete a multi-step task safely. Ask for the objective, then make a short plan and carry out the steps you can verify.',
-  },
-]
 
 function formatContext(value) {
   const context = Number(value || 0)
@@ -924,7 +894,10 @@ export default function Pixel({ systemStatus = null }) {
               const candidatePreview = parseVerifiedPreviewFrame(frame)
               if (candidatePreview) verifiedPreview = candidatePreview
               const candidateTask = parseTaskActivityFrame(frame)
-              if (candidateTask) taskActivity = candidateTask
+              if (candidateTask) {
+                taskActivity = candidateTask
+                setMessages(previous => replaceLastAssistant(previous, {task:candidateTask}))
+              }
               const content = frame?.choices?.[0]?.delta?.content
               if (typeof content === 'string' && content.length > 0) {
                 assistantText += content
@@ -1138,11 +1111,6 @@ export default function Pixel({ systemStatus = null }) {
     inputRef.current?.focus?.()
   }, [sending, restoredActive, restoredChecking, stopping, updateRestoredActivity])
 
-  const selectSuggestion = useCallback((prompt) => {
-    setInput(prompt)
-    inputRef.current?.focus?.()
-  }, [])
-
   useEffect(() => {
     const remove = event => {
       const {chatId, complete} = event.detail
@@ -1228,7 +1196,7 @@ export default function Pixel({ systemStatus = null }) {
       <header className="pixel-chat-header">
         <div className="pixel-chat-identity">
         <div className="flex h-9 w-9 items-center justify-center text-theme-accent-light">
-          <PixelMascot state={pixelHeaderPose({sending, stopping, restoredActive, restoredChecking, interrupted, restoredActivity, status})} />
+          <PixelMascot interactive name={displayName} state={pixelHeaderPose({sending, stopping, restoredActive, restoredChecking, interrupted, restoredActivity, status, task:messages.at(-1)?.task})} />
         </div>
         <div className="min-w-0">
           <h1 className="text-base font-semibold leading-tight truncate max-w-[40vw]" title={displayName}>{displayName}</h1>
@@ -1361,29 +1329,11 @@ export default function Pixel({ systemStatus = null }) {
         {status === 'available' && messages.length === 0 && (
           <div className="pixel-welcome mx-auto text-theme-text-muted">
             <div>
-              <PixelMascot className="pixel-welcome-character" />
+              <PixelMascot interactive name={displayName} className="pixel-welcome-character" />
               <h2>What do you want to work on?</h2>
               <p className="pixel-welcome-description">Start a private task, explore an idea, or create something new.</p>
             </div>
 
-            <div className="pixel-suggestions">
-              {SUGGESTED_TASKS.map(({ icon: Icon, label, description, prompt }) => (
-                <button
-                  key={label}
-                  type="button"
-                  onClick={() => selectSuggestion(prompt)}
-                  className="pixel-suggestion"
-                >
-                  <span className="pixel-suggestion-icon">
-                    <Icon className="h-4 w-4" />
-                  </span>
-                  <span>
-                    <span className="block text-sm font-medium text-theme-text">{label}</span>
-                    <span className="mt-1 block text-xs leading-5 text-theme-text-muted">{description}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
 
           </div>
         )}
@@ -1420,7 +1370,6 @@ export default function Pixel({ systemStatus = null }) {
               ) : (
                 <span className="break-words whitespace-pre-wrap">{message.content}</span>
               )}
-              {message.content && message.status !== 'streaming' && <PixelMessageActions key={`${chatIdRef.current}-${index}-${message.role}`} content={message.content} role={message.role} canReuse={!isDisabled && input.length + message.content.length + 1 <= MAX_INPUT_LEN} onReuse={insertComposerText}/>}
               {message.status === 'streaming' && !message.content && (
                 <span role="status" className="inline-flex items-start gap-2 text-theme-text-muted">
                   <span>
@@ -1486,10 +1435,11 @@ export default function Pixel({ systemStatus = null }) {
           </div>
           </div>
           {stopError && <p role="alert" className="mt-1.5 px-1 text-xs text-amber-300">{stopError}</p>}
-          <PixelTextFileInput key={`file-input-${chatIdRef.current}`} input={input} disabled={isDisabled} limit={MAX_INPUT_LEN} onInsert={insertComposerText}/>
-          <PixelDraftPreview key={`draft-preview-${chatIdRef.current}`} input={input}/>
           <div className="pixel-composer-secondary">
-            <PixelComposerTools input={input} disabled={isDisabled} onInsert={insertComposerText} />
+            <PixelComposerTools input={input} disabled={isDisabled} onInsert={insertComposerText}>
+              <PixelTextFileInput key={`file-input-${chatIdRef.current}`} input={input} disabled={isDisabled} limit={MAX_INPUT_LEN} onInsert={insertComposerText}/>
+              <PixelDraftPreview key={`draft-preview-${chatIdRef.current}`} input={input}/>
+            </PixelComposerTools>
             <div className="pixel-composer-limits">
               {activeContext && <span title="Model context window shared by instructions, conversation, tools, and reply">{activeContext}</span>}
               <span className={inputOver ? 'text-red-400' : ''} title="Characters in this message, not tokens or context usage">{input.length.toLocaleString()} / {MAX_INPUT_LEN.toLocaleString()} chars</span>

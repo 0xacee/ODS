@@ -72,6 +72,22 @@ describe('Pixel', () => {
     expect(formatElapsed(3671)).toBe('1:01:11')
   })
 
+  it('keeps prompts clean without copy/reuse controls or inline tool-call summaries',async()=>{
+    localStorage.setItem('ods.pixel.chat.v1',JSON.stringify({schema:1,chatId:'clean-chat',messages:[
+      {role:'user',content:'A clean prompt'},
+      {role:'assistant',content:'A clean response',task:{schemaVersion:1,runId:'chatcmpl_12345678-1234-1234-1234-123456789012',startedAt:'2026-09-10T12:00:00.000Z',finishedAt:'2026-09-10T12:00:01.000Z',state:'completed',calls:2,failures:0,blocked:0,truncated:false,activities:[{kind:'read',calls:2,failures:0,blocked:0}]}},
+    ]}))
+    fetch.mockResolvedValue(response({available:true,model:'pixel/default'}))
+    render(<Pixel/>)
+    await waitFor(()=>expect(screen.getByText('Available')).toBeInTheDocument())
+    expect(screen.getByText('A clean prompt')).toBeVisible()
+    expect(screen.getByText('A clean response')).toBeVisible()
+    expect(screen.queryByRole('button',{name:'Copy message'})).toBeNull()
+    expect(screen.queryByRole('button',{name:'Reuse prompt'})).toBeNull()
+    expect(screen.queryByText(/(?:Live|Recorded) activity ·/)).toBeNull()
+    expect(screen.queryByRole('button',{name:'Copy Markdown'})).toBeNull()
+  })
+
   it('accepts only the fixed approval receipt grammar', () => {
     const jobId = 'ops-1788127319657-f3262c99a419'
     const planHash = 'e'.repeat(64)
@@ -861,7 +877,7 @@ describe('Pixel', () => {
     ])
   })
 
-  it('orients the owner with live runtime identity and editable starter tasks', async () => {
+  it('keeps new chats clear of sample tasks while preserving runtime identity', async () => {
     globalThis.fetch.mockResolvedValue(
       response({ available: true, model: 'pixel/default', detail: 'Owner agent ready' })
     )
@@ -878,10 +894,8 @@ describe('Pixel', () => {
     expect(screen.getByText('Qwen3.5-9B-Q4_K_M.gguf')).toBeInTheDocument()
     expect(screen.getByText('32K context')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: /Check ODS health/ }))
-    expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue(
-      'Check the current ODS status. Summarize what is healthy, identify anything degraded or stopped, and suggest the safest next action.'
-    )
+    for (const name of ['Check ODS health','Build in my workspace','Research with sources','Plan a multi-step task']) expect(screen.queryByRole('button',{name:new RegExp(name)})).toBeNull()
+    expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue('')
     expect(globalThis.fetch).toHaveBeenCalledTimes(1)
   })
 

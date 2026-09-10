@@ -48,7 +48,7 @@ export function createTaskActivity({now = () => new Date().toISOString(), maximu
       if (!settled) return;
       runs.delete(settled[0]);
     }
-    runs.set(id, {runId:id, startedAt:now(), finishedAt:null, state:'running', calls:new Map(), truncated:false});
+    runs.set(id, {runId:id, sessionKey:context?.sessionKey, startedAt:now(), finishedAt:null, state:'running', calls:new Map(), truncated:false});
   }
   function record(event, context, outcome) {
     const run = runs.get(identify(event, context));
@@ -76,6 +76,12 @@ export function createTaskActivity({now = () => new Date().toISOString(), maximu
   }
   return {
     begin,
+    activeForUser(user) {
+      if (typeof user !== 'string' || !/^ods-[a-f0-9]{64}$/.test(user)) return null;
+      const matches = [...runs.values()].filter(run => run.state === 'running' && run.sessionKey === `agent:pixel:openai-user:${user}`);
+      // Ambiguity is not evidence: never guess which run belongs to this turn.
+      return matches.length === 1 ? this.projection(matches[0].runId) : null;
+    },
     before(event, context, blocked = false) { record(event, context, blocked ? 'blocked' : 'running'); },
     after(event, context) { record(event, context, failedResult(event) ? 'failed' : 'completed'); },
     finish(event, context) {

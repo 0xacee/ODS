@@ -779,6 +779,12 @@ export default function Dashboard({ status, loading, compact = false }) {
 
   systemMetrics.push(
     {
+      icon: Zap,
+      label: 'Tokens / second',
+      value: Number.isFinite(status?.inference?.tokensPerSecond) ? `${status.inference.tokensPerSecond.toFixed(1)} tok/s` : '—',
+      subvalue: Number.isFinite(status?.inference?.tokensPerSecond) ? 'runtime reading' : 'telemetry unavailable',
+    },
+    {
       icon: Brackets,
       label: 'Context',
       value: status?.inference?.contextSize ? `${(status.inference.contextSize / 1024).toFixed(0)}k` : '—',

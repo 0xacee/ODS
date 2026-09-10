@@ -890,6 +890,41 @@ function completionSse(completion, verification) {
   );
 }
 
+// Side-channel observations only. Answer bytes still wait for final verification.
+export function streamTaskActivity(res, user, token, gatewayPort, signal, deps = defaultDeps) {
+  const since = new Date().toISOString();
+  let stopped = false, timer, inFlight, last = '', runId;
+  async function poll() {
+    if (stopped || signal.aborted || res.destroyed || res.writableEnded) return;
+    const controller = new AbortController();
+    inFlight = controller;
+    const abort = () => controller.abort();
+    signal.addEventListener('abort', abort, {once:true});
+    const deadline = deps.setTimeout(abort, 1800);
+    try {
+      const response = await deps.fetch(`http://127.0.0.1:${gatewayPort}/pixel-ods/activity`, {
+        method:'POST', headers:upstreamHeaders(false, token), body:JSON.stringify({user}), redirect:'error', signal:controller.signal,
+      });
+      if (response.status !== 200 || !String(response.headers.get('content-type')).startsWith('application/json')) { await drain(response.body); return; }
+      const value = JSON.parse((await readBounded(response.body, 4096)).toString('utf8'));
+      if (!value || Object.keys(value).join() !== 'task') return;
+      const task = parseTaskActivity(value.task, value.task?.runId);
+      if (!task || task.state !== 'running' || task.startedAt < since || (runId && task.runId !== runId)) return;
+      runId = task.runId;
+      const packet = JSON.stringify({object:'ods.task.activity', id:runId, pixel_task:task});
+      if (!stopped && !signal.aborted && !res.destroyed && !res.writableEnded && !res.writableNeedDrain && packet !== last) {
+        res.write(`data: ${packet}\n\n`); last = packet;
+      }
+    } catch { /* Optional telemetry must not fail or repeat the actual task. */ }
+    finally {
+      deps.clearTimeout(deadline); signal.removeEventListener('abort', abort); inFlight = null;
+      if (!stopped && !signal.aborted && !res.destroyed && !res.writableEnded) timer = deps.setTimeout(poll, 1500);
+    }
+  }
+  timer = deps.setTimeout(poll, 250);
+  return () => { stopped = true; deps.clearTimeout(timer); inFlight?.abort(); };
+}
+
 async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps) {
   const controller = new AbortController();
   const totalTimer = deps.setTimeout(() => controller.abort(), TOTAL_TIMEOUT_MS);
@@ -901,6 +936,7 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
   // proxy can consume a close before it reaches this response object.
   res.once("close", abortOnDownstreamClose);
   const wantsStream = outgoing.stream === true;
+  let stopActivity;
   // OpenClaw's OpenAI-compatible streaming route concatenates assistant block
   // replies from every tool continuation. Its non-stream route returns only
   // the terminal assistant reply. This ingress already withholds response
@@ -919,6 +955,7 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
       "X-Accel-Buffering": "no",
     });
     res.flushHeaders?.();
+    stopActivity = streamTaskActivity(res, outgoing.user, token, gatewayPort, controller.signal, deps);
   }
   try {
     const upstream = await deps.fetch(
@@ -1018,6 +1055,7 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
       res.destroy();
     }
   } finally {
+    stopActivity?.();
     res.off("close", abortOnDownstreamClose);
     deps.clearTimeout(totalTimer);
   }

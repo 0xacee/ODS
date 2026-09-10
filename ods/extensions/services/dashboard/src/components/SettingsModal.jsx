@@ -4,13 +4,17 @@ import { Search, Settings as Gear, Palette, Activity, Network, HardDrive, Refres
 import Settings from '../pages/Settings'
 import MetalMetricIcon from './MetalMetricIcon'
 import ProfileSettings from './settings/ProfileSettings'
+import AssistantIdentitySettings from './settings/AssistantIdentitySettings'
+import PortalMascotSettings from './settings/PortalMascotSettings'
 import '../settings-refinement.css'
+import '../settings-workspace.css'
 const Integrations = lazy(() => import('../pages/ServiceMap'))
 const RemoteGPU = lazy(() => import('../pages/RemoteProvider'))
 const PixelDiagnostics = lazy(() => import('./settings/PixelDiagnostics'))
 
 const sections = [
   ['general', 'General', Gear], ['profile', 'Profile', UserRound], ['appearance', 'Appearance', Palette],
+  ['portal-mascot', 'Portal mascot', Bot],
   ['usage', 'Usage', Activity], ['owner', 'Setup / Owner', UserRound],
   ['connections', 'Pixel connections', Bot], ['access', 'Pixel access', ShieldCheck],
   ['sharing', 'Model sharing', Share2], ['services', 'Services', Network],
@@ -41,8 +45,9 @@ export default function SettingsModal() {
         {!sections.some(([,label]) => label.toLowerCase().includes(query.toLowerCase())) && <p>No settings found.</p>}
       </nav>
     </aside>
-    <div ref={content} className="ods-settings-content" aria-label={sections.find(([id]) => id === section)[1]}><div hidden={section === 'profile'}><Settings activeSection={section} /></div>
-      {visited.has('profile') && <div hidden={section !== 'profile'}><ProfileSettings/></div>}
+    <div ref={content} className="ods-settings-content" aria-label={sections.find(([id]) => id === section)[1]}><div hidden={['profile','portal-mascot','pixel-diagnostics','integrations','remote'].includes(section)}><Settings activeSection={section} /></div>
+      {visited.has('profile') && <div hidden={section !== 'profile'} className="space-y-6"><ProfileSettings/><AssistantIdentitySettings/></div>}
+      {section === 'portal-mascot' && <PortalMascotSettings/>}
       <Suspense fallback={<p>Loading settings…</p>}>
         {section === 'pixel-diagnostics' && <PixelDiagnostics />}
         {visited.has('integrations') && <div hidden={section !== 'integrations'}><Integrations compact /></div>}

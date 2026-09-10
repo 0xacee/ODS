@@ -1,5 +1,6 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
 import { WALLPAPERS } from '../lib/wallpapers'
+import { readCustomWallpapers, addCustomWallpaper, deleteCustomWallpaper, isCustomWallpaper, CUSTOM_WALLPAPER_EVENT } from '../lib/customWallpapers'
 
 const STORAGE_KEY = 'ods-theme'
 const THEMES = WALLPAPERS.map(item => item.id)
@@ -9,16 +10,43 @@ const DEFAULT_THEME = 'ods'
 const ThemeContext = createContext(null)
 
 export function ThemeProvider({ children }) {
+  const [custom, setCustom] = useState([])
+  const [wallpaperError, setWallpaperError] = useState('')
+  const galleryRevision = useRef(0)
+  const wallpapers = [...WALLPAPERS, ...custom]
   const [theme, setThemeState] = useState(() => {
     let stored
     try { stored = localStorage.getItem(STORAGE_KEY) } catch { /* Use Pixel when storage is unavailable. */ }
-    return THEMES.includes(stored) ? stored : DEFAULT_THEME
+    return THEMES.includes(stored) || isCustomWallpaper(stored) ? stored : DEFAULT_THEME
   })
+
+  useEffect(() => {
+    let active = true
+    const refresh = () => {
+      const revision = ++galleryRevision.current
+      return readCustomWallpapers().then(rows => {
+        if (!active || revision !== galleryRevision.current) return
+        setCustom(rows)
+        setWallpaperError('')
+        setThemeState(previous => isCustomWallpaper(previous) && !rows.some(row => row.id === previous) ? DEFAULT_THEME : previous)
+      }).catch(error => { if (active && revision === galleryRevision.current) setWallpaperError(error.message) })
+    }
+    const sync = event => {
+      if (event.key !== STORAGE_KEY) return
+      setThemeState(THEMES.includes(event.newValue) || isCustomWallpaper(event.newValue) ? event.newValue : DEFAULT_THEME)
+      void refresh()
+    }
+    void refresh()
+    window.addEventListener(CUSTOM_WALLPAPER_EVENT, refresh)
+    window.addEventListener('focus', refresh)
+    window.addEventListener('storage', sync)
+    return () => { active = false; window.removeEventListener(CUSTOM_WALLPAPER_EVENT, refresh); window.removeEventListener('focus', refresh); window.removeEventListener('storage', sync) }
+  }, [])
 
   useEffect(() => {
     const root = document.documentElement
     root.setAttribute('data-theme', 'ods')
-    const wallpaper = WALLPAPERS.find(item => item.id === theme)
+    const wallpaper = [...WALLPAPERS, ...custom].find(item => item.id === theme)
     if (wallpaper?.image) {
       root.setAttribute('data-wallpaper', theme)
       root.style.setProperty('--workspace-wallpaper', `url("${wallpaper.image}")`)
@@ -27,17 +55,24 @@ export function ThemeProvider({ children }) {
       root.style.removeProperty('--workspace-wallpaper')
     }
     try { localStorage.setItem(STORAGE_KEY, theme) } catch { /* Session-only theme. */ }
-  }, [theme])
-
-  useEffect(() => {
-    const sync = event => { if (event.key === STORAGE_KEY) setThemeState(THEMES.includes(event.newValue) ? event.newValue : DEFAULT_THEME) }
-    window.addEventListener('storage', sync)
-    return () => window.removeEventListener('storage', sync)
-  }, [])
+  }, [theme, custom])
 
   const setTheme = useCallback((t) => {
-    if (THEMES.includes(t)) setThemeState(t)
+    if (THEMES.includes(t) || isCustomWallpaper(t)) setThemeState(t)
   }, [])
+
+  const addWallpaper = async file => {
+    const row = await addCustomWallpaper(file)
+    galleryRevision.current++
+    setCustom(previous => [...previous.filter(item => item.id !== row.id), row])
+    setThemeState(row.id)
+  }
+  const removeWallpaper = async id => {
+    await deleteCustomWallpaper(id)
+    galleryRevision.current++
+    setCustom(previous => previous.filter(item => item.id !== id))
+    setThemeState(previous => previous === id ? DEFAULT_THEME : previous)
+  }
 
   const cycleTheme = useCallback(() => {
     setThemeState(prev => {
@@ -47,7 +82,7 @@ export function ThemeProvider({ children }) {
   }, [])
 
   return (
-    <ThemeContext.Provider value={{ theme, setTheme, cycleTheme, themes: THEMES, labels: THEME_LABELS }}>
+    <ThemeContext.Provider value={{ theme, setTheme, cycleTheme, themes: wallpapers.map(item => item.id), labels: {...THEME_LABELS, ...Object.fromEntries(custom.map(item => [item.id, item.name]))}, wallpapers, addWallpaper, removeWallpaper, wallpaperError }}>
       {children}
     </ThemeContext.Provider>
   )

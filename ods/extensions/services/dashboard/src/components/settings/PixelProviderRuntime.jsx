@@ -34,7 +34,7 @@ function ProviderConfirmation({ confirmation, onCancel, onConfirm }) {
   </div>
 }
 
-export default function PixelProviderRuntime({ savedRevision, saving, blocked, routingEnabled, allowCloud, onBusyChange }) {
+export default function PixelProviderRuntime({ savedRevision, saving, blocked, routingEnabled, allowCloud, onBusyChange, compact = false }) {
   const { runtime, running, stale, error, notice, stage, inspect, change } = usePixelProviderRuntime({ savedRevision, saving, blocked, onBusyChange })
   const [confirmation, setConfirmation] = useState(null)
   const [workerReady, setWorkerReady] = useState(false)
@@ -76,9 +76,7 @@ export default function PixelProviderRuntime({ savedRevision, saving, blocked, r
   }
   return <section aria-labelledby="pixel-provider-runtime-title" className="space-y-3 min-w-0 rounded-lg border border-theme-border p-4">
     <h3 id="pixel-provider-runtime-title" className="font-medium">Provider runtime</h3>
-    <p className="text-sm text-theme-text-muted">Save keeps your desired configuration. Apply changes the current agent’s inference routing, not its tool permissions.</p>
-    <PixelAdviceRuntime title="Provider worker runtime" onReadyChange={setWorkerReady} disabled={Boolean(running) || saving} />
-    {!workerReady && <p className="text-sm">Prepare or repair the private worker runtime before Apply. Deactivate and recovery do not require it.</p>}
+    <p className="text-sm text-theme-text-muted">Inference routing only. Tool permissions stay unchanged.</p>
     <div aria-live="polite" className="space-y-2 text-sm break-words">
       {stage && <p role="status">{stage}</p>}
       {!running && stale && <p>Provider runtime status is unknown or stale. Refresh before changing it.</p>}
@@ -90,7 +88,7 @@ export default function PixelProviderRuntime({ savedRevision, saving, blocked, r
       {!stale && runtime && !['unavailable', 'pending'].includes(runtime.status) && savedRevision !== null && !matched &&
         <p>Saved providers and runtime inspection differ. Reload providers and refresh runtime status.</p>}
       {blocked && <p>Save or cancel edits and reload stale settings before Apply or Deactivate. Recovery does not discard your edits.</p>}
-      {!routingEnabled && <p>Enable desired routing and save before Apply. Deactivate restores the original inference configuration.</p>}
+      {!routingEnabled && runtime?.status !== 'unavailable' && <p>Enable desired routing and save before Apply. Deactivate restores the original inference configuration.</p>}
       {error && <p role="alert" className="text-red-600">{error}</p>}
       {notice && <p role="status">{notice}</p>}
     </div>
@@ -99,6 +97,11 @@ export default function PixelProviderRuntime({ savedRevision, saving, blocked, r
       {Object.entries(labels).map(([operation, label]) => <button type="button" key={operation} className={button}
         disabled={!eligible[operation]} onClick={event => open(operation, event.currentTarget)}>{label}</button>)}
     </div>
+    <details className="settings-worker-setup" open={!compact || undefined}>
+      <summary>Worker setup · {workerReady ? 'Ready' : 'Not ready'}</summary>
+      <PixelAdviceRuntime title="Provider worker runtime" onReadyChange={setWorkerReady} disabled={Boolean(running) || saving} />
+      {!workerReady && <p className="text-xs text-theme-text-muted">Required for Apply, not for deactivation or recovery.</p>}
+    </details>
     {valid && <ProviderConfirmation confirmation={confirmation} onCancel={close} onConfirm={submit} />}
   </section>
 }

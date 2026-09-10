@@ -29,7 +29,7 @@ it('starts with readable service rows in a panel and keeps the full map accessib
   expect(screen.getByRole('button',{name:'Close service details'})).toBeVisible()
   fireEvent.click(screen.getByRole('button',{name:'View map'}))
   expect(screen.getByRole('region',{name:'Service topology'})).toBeVisible()
-  fireEvent.click(screen.getByRole('button',{name:'← Service list'}))
+  fireEvent.click(screen.getByRole('button',{name:'Service list'}))
   expect(screen.getByRole('button',{name:'View map'})).toBeVisible()
 })
 
@@ -56,6 +56,20 @@ const statusPayload = {
     { id: 'whisper', name: 'Whisper (STT)', status: 'healthy', port: 9000, uptime: 120 },
   ],
 }
+
+it('filters the compact list and renders a panel-sized map with inline details', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok:true,json:async () => statusPayload}))
+  render(<ServiceMap compact />)
+  await screen.findByRole('searchbox', { name: 'Search integrations' })
+  fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'llama' } })
+  expect(screen.queryByRole('button', { name: /APE/ })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: /llama-server/ }))
+  expect(screen.getByRole('button', { name: 'Close service details' }).closest('.integration-detail')).not.toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'View map' }))
+  expect(screen.getByRole('region', { name: 'Service topology' }).querySelector('svg').getAttribute('viewBox').split(' ')[2]).toBe('418')
+  fireEvent.change(screen.getByRole('combobox', { name: 'Service status' }), { target: { value: 'attention' } })
+  expect(screen.getByText('No matching services.')).toBeVisible()
+})
 
 const expectedIds = [
   'ape',

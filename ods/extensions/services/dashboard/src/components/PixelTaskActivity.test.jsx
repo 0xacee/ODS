@@ -30,3 +30,14 @@ it('shares strict schema behavior with the host and rejects nonterminal/cross-ru
   expect(parseTaskActivityFrame({id:'other',pixel_task:task,choices:[{finish_reason:'stop'}]})).toBeNull()
   expect(parseTaskActivityFrame({id:task.runId,pixel_task:task,choices:[{finish_reason:null}]})).toBeNull()
 })
+
+it('accepts only explicit live observation packets and renders tools during the turn',()=>{
+  const live={...task,state:'running',finishedAt:null}
+  const packet={object:'ods.task.activity',id:task.runId,pixel_task:live}
+  expect(parseTaskActivityFrame(packet)).toEqual(live)
+  expect(parseTaskActivityFrame({...packet,prompt:'secret'})).toBeNull()
+  expect(parseTaskActivityFrame({...packet,pixel_task:task})).toBeNull()
+  render(<PixelTaskActivity sending elapsed="0:05" messages={[{role:'assistant',task:live}]}/> )
+  expect(screen.getByText('Read')).toBeVisible()
+  expect(screen.getByRole('status')).toHaveTextContent('Working · 0:05')
+})

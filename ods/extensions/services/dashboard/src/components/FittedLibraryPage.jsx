@@ -15,7 +15,7 @@ export function fittedPageNumbers(current, pages) {
 
 // Pagination uses the utility panel's remaining height, not the whole window.
 // Expanded errors/progress can grow naturally; content is never clipped.
-export default function FittedLibraryPage({items, label, children}) {
+export default function FittedLibraryPage({items, label, children, minimumItems = 1}) {
   const root = useRef(null)
   const measured = useRef({width: 0, row: 0})
   const [capacity, setCapacity] = useState(4)
@@ -41,7 +41,7 @@ export default function FittedLibraryPage({items, label, children}) {
         : window.innerHeight - bounds.top - 24
       if (height <= 0) return
       setAvailableHeight(height)
-      setCapacity(fittedPageSize(height, measured.current.row))
+      setCapacity(Math.max(minimumItems, fittedPageSize(height, measured.current.row)))
     }
     measure()
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
@@ -49,7 +49,7 @@ export default function FittedLibraryPage({items, label, children}) {
     if (panel) observer?.observe(panel)
     window.addEventListener('resize', measure)
     return () => {observer?.disconnect(); window.removeEventListener('resize', measure)}
-  }, [items.length])
+  }, [items.length, minimumItems])
   return <section ref={root} className="fitted-library-page" style={{minHeight: availableHeight || undefined}} aria-label={label}>
     {children(items.slice((current - 1) * capacity, current * capacity))}
     {items.length > 0 && <footer className="extensions-page-footer">

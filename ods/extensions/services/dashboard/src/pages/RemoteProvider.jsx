@@ -193,9 +193,9 @@ function StatusPill({ status }) {
   )
 }
 
-function Panel({ icon: Icon, title, children, actions = null, className = '' }) {
+function Panel({ icon: Icon, title, children, actions = null, className = '', hidden = false }) {
   return (
-    <section className={`rounded-lg border border-theme-border bg-theme-card p-4 shadow-sm ${className}`}>
+    <section hidden={hidden} className={`remote-provider-panel rounded-lg border border-theme-border bg-theme-card p-4 shadow-sm ${className}`}>
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Icon size={18} className="text-theme-accent" />
@@ -245,7 +245,7 @@ function TextInput({ label, value, onChange, type = 'text', autoComplete = 'off'
 
 function Field({ label, value, tone = 'text-theme-text' }) {
   return (
-    <div className="flex items-center justify-between gap-4 text-sm">
+    <div className="remote-field-row flex items-center justify-between gap-4 text-sm">
       <span className="text-theme-text-muted">{label}</span>
       <span className={`text-right font-medium ${tone}`}>{valueOrDash(value)}</span>
     </div>
@@ -312,6 +312,7 @@ function LoadingState() {
 }
 
 export default function RemoteProvider({ compact = false }) {
+  const [view, setView] = useState('connection')
   const [statusData, setStatusData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -536,7 +537,7 @@ export default function RemoteProvider({ compact = false }) {
         <div>
           {!compact && <h1 className="text-2xl font-bold text-theme-text">Remote GPU</h1>}
           <p className="mt-1 text-sm text-theme-text-muted">
-            Switchboard route, egress health, and SSH tunnel proof.
+            {provider.model ? `Current model: ${provider.model}` : 'Remote inference connection'}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -565,6 +566,9 @@ export default function RemoteProvider({ compact = false }) {
           </button>
         </div>
       </header>
+      {compact && <nav className="settings-view-tabs" aria-label="Remote GPU views">
+        {[['connection', 'Connection'], ['models', 'Peer models'], ['diagnostics', 'Diagnostics']].map(([id, label]) => <button key={id} type="button" aria-pressed={view === id} onClick={() => setView(id)}>{label}</button>)}
+      </nav>}
 
       {error && (
         <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
@@ -605,7 +609,7 @@ export default function RemoteProvider({ compact = false }) {
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Panel icon={Route} title="Route">
+        <Panel hidden={compact && view !== 'diagnostics'} icon={Route} title="Route">
           <Field label="State" value={routeState.enabled ? 'Enabled' : 'Disabled'} tone={routeState.enabled ? 'text-emerald-300' : 'text-zinc-400'} />
           <Field label="Mode" value={routeState.mode} />
           <Field label="Transport" value={provider.transport} />
@@ -624,7 +628,7 @@ export default function RemoteProvider({ compact = false }) {
           )}
         </Panel>
 
-        <Panel icon={Cloud} title="Egress">
+        <Panel hidden={compact && view !== 'diagnostics'} icon={Cloud} title="Egress">
           <Field label="Status" value={titleize(egress.status)} tone={egress.ready ? 'text-emerald-300' : 'text-amber-300'} />
           <Field label="Ready" value={boolLabel(egress.ready)} />
           <Field label="Reachable" value={boolLabel(egress.reachable)} />
@@ -633,7 +637,7 @@ export default function RemoteProvider({ compact = false }) {
           <Field label="Reason" value={titleize(egress.reason)} />
         </Panel>
 
-        <Panel icon={Server} title="SSH Tunnel">
+        <Panel hidden={compact && view !== 'diagnostics'} icon={Server} title="SSH Tunnel">
           <Field label="Status" value={titleize(sshSupervisor.status)} tone={sshSupervisor.ready ? 'text-emerald-300' : 'text-amber-300'} />
           <Field label="Ready" value={boolLabel(sshSupervisor.ready)} />
           <Field label="Ready to start" value={boolLabel(sshSupervisor.readyToStart)} />
@@ -642,7 +646,7 @@ export default function RemoteProvider({ compact = false }) {
           <Field label="Missing secrets" value={(sshSupervisor.missingSecrets || []).length} />
         </Panel>
 
-        <Panel icon={ShieldCheck} title="Capabilities">
+        <Panel hidden={compact && view !== 'diagnostics'} icon={ShieldCheck} title="Capabilities">
           <Field label="Inference" value={boolLabel(statusData?.capabilities?.inference)} tone={statusData?.capabilities?.inference ? 'text-emerald-300' : 'text-zinc-400'} />
           <Field label="ODS peer lifecycle" value={boolLabel(statusData?.capabilities?.odsPeerLifecycle)} />
           <Field label="Available test" value={boolLabel(testEnabled)} />
@@ -656,6 +660,7 @@ export default function RemoteProvider({ compact = false }) {
         <Panel
           icon={Cloud}
           title="ODS Peer Models"
+          hidden={compact && view !== 'models'}
           className="lg:col-span-2"
           actions={(
             <ActionButton icon={RefreshCw} onClick={() => loadPeerModels()} disabled={!peerReady || peerBusy}>
@@ -773,7 +778,7 @@ export default function RemoteProvider({ compact = false }) {
           )}
         </Panel>
 
-        <Panel icon={KeyRound} title="Configure" className="lg:col-span-2">
+        <Panel hidden={compact && view !== 'connection'} icon={KeyRound} title="Configure" className="lg:col-span-2">
           <div className="grid gap-3 md:grid-cols-[1.2fr_1fr_1fr]">
             <TextInput
               label="Base URL"

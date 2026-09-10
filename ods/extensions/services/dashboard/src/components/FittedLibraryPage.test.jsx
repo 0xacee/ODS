@@ -13,6 +13,16 @@ it('reserves the footer and keeps at least one item in a short panel', () => {
   expect(fittedPageSize(624, 144)).toBe(4)
   expect(fittedPageSize(50, 144)).toBe(1)
 })
+
+it('keeps a browsable group of models even when the panel is short',()=>{
+  vi.stubGlobal('ResizeObserver',class {observe(){} disconnect(){}})
+  vi.spyOn(HTMLElement.prototype,'getBoundingClientRect').mockReturnValue({top:0,width:440,height:200})
+  vi.spyOn(HTMLElement.prototype,'clientHeight','get').mockReturnValue(200)
+  render(<div className="portal-panel-content"><FittedLibraryPage minimumItems={6} label="Models" items={Array.from({length:12},(_,i)=>i)}>{items=>items.map(i=><article className="model-entry" key={i}>Model {i}</article>)}</FittedLibraryPage></div>)
+  expect(screen.getAllByRole('article')).toHaveLength(6)
+  fireEvent.click(screen.getByRole('button',{name:'Page 2'}))
+  expect(screen.getByText('Model 11')).toBeVisible()
+})
 it('fits the actual utility panel and paginates without dropping entries', () => {
   vi.stubGlobal('ResizeObserver', class {observe(){} disconnect(){}})
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
