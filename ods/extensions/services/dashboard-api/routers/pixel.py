@@ -496,6 +496,8 @@ async def pixel_chat_cancel(body: ChatCancelRequest, owner: str = Depends(verify
         try:
             aborted = await _cancel_edge_run(edge_url, key, body.chat_id)
             if aborted:
+                if store.get(identity)["state"] == "complete":
+                    return {"aborted": False}
                 task = _result_tasks.get(identity)
                 if task is not None and not task.done():
                     task.cancel()

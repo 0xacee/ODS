@@ -90,6 +90,7 @@ class ChatResultStore:
     def reserve(self, key, fingerprint):
         """Commit identity before upstream submission; duplicate POSTs never run twice."""
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
             self.db.execute("DELETE FROM attempts WHERE state NOT IN ('active','unresolved') AND created < ?", (time.time() - RETENTION_SECONDS,))
             previous = self.get(key)
             if previous is not None:
