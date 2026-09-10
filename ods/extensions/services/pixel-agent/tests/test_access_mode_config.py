@@ -88,6 +88,9 @@ class TestMigration(unittest.TestCase):
         with self.assertRaises(MigrationError):
             enable(config)
         self.assertEqual(config, snapshot)
+        with self.assertRaises(MigrationError):
+            restore(config, {"sandbox.mode": {"present": True, "value": "all"}})
+        self.assertEqual(config, snapshot)
 
     def test_root_agents_list_non_dict_items_rejected(self):
         config = load_sample()

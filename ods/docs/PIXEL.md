@@ -752,5 +752,8 @@ a snapshot of what this browser has observed so far. Workspace files, published
 asset bytes, Docker volumes, and server configuration are not included.
 
 Keep the file private if the conversation contains sensitive content. This is a
-portable JSON archive for inspection and backup; automatic import is not
-implemented, and it does not replace an installation or volume backup.
+portable JSON archive for inspection and backup. Chat options → **Import
+conversation** can import its messages and draft as a new local conversation
+after confirmation. Import deliberately discards task IDs, permissions and
+publication receipts; it never resumes exported work. Neither operation replaces
+an installation or volume backup.

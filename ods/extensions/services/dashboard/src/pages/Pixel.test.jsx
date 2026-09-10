@@ -1472,7 +1472,7 @@ describe('Pixel', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button',{name:'Check activity again'})) })
     expect(signals).toHaveLength(2)
     expect(signals[1]).not.toBe(signals[0])
-    expect(screen.getByPlaceholderText('Message Pixel...')).toBeEnabled()
+    expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
     expect(screen.getByText(retained ? 'Recovered after timeout' : 'Saved partial result')).toBeVisible()
     expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
   })

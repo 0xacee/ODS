@@ -1486,8 +1486,8 @@ export default function Pixel({ systemStatus = null }) {
           </div>
           </div>
           {stopError && <p role="alert" className="mt-1.5 px-1 text-xs text-amber-300">{stopError}</p>}
-          <PixelTextFileInput key={chatIdRef.current} input={input} disabled={isDisabled} limit={MAX_INPUT_LEN} onInsert={insertComposerText}/>
-          <PixelDraftPreview key={chatIdRef.current} input={input}/>
+          <PixelTextFileInput key={`file-input-${chatIdRef.current}`} input={input} disabled={isDisabled} limit={MAX_INPUT_LEN} onInsert={insertComposerText}/>
+          <PixelDraftPreview key={`draft-preview-${chatIdRef.current}`} input={input}/>
           <div className="pixel-composer-secondary">
             <PixelComposerTools input={input} disabled={isDisabled} onInsert={insertComposerText} />
             <div className="pixel-composer-limits">
