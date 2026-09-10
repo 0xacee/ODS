@@ -10107,7 +10107,7 @@ test("allows a normal public HTTP destination in an exec command", () => {
   );
 });
 
-test("aborts a run that asks for any second tool after a private-network denial", () => {
+test("allows authorized recovery but retains the repeated private-network denial fuse", () => {
   const aborts = [];
   const guard = createToolLoopGuard({
     abortRun: (sessionId) => {
@@ -10121,7 +10121,18 @@ test("aborts a run that asks for any second tool after a private-network denial"
     }).blockReason,
     EXEC_PRIVATE_NETWORK_REASON
   );
-  assert.deepEqual(call(guard, "web_search"), {
+  assert.equal(call(guard, "web_search"), undefined);
+  assert.equal(call(guard, "pixel_ods_status"), undefined);
+  assert.equal(call(guard, "pixel_ods_research", {
+    event: {params: {query: "Find public documentation for this extension"}},
+  }), undefined);
+  assert.equal(call(guard, "write", {
+    event: {params: {path: "diagnosis.md", content: "The direct private request was denied."}},
+  }), undefined);
+  assert.deepEqual(aborts, []);
+  assert.deepEqual(call(guard, "web_fetch", {
+    event: {params: {url: "http://127.0.0.1:18789/health"}},
+  }), {
     block: true,
     blockReason: PRIVATE_NETWORK_LOOP_ABORT_REASON,
   });
@@ -10416,7 +10427,7 @@ test("classifies a requested website demo as a verified workspace preview", () =
     "Create a visual showcase of your capabilities.",
     "Build a high-quality responsive site for a fictional observatory with local CSS and JavaScript.",
     "Create an interactive voxel landscape I can explore.",
-    "Make an intricate animated SVG illustration.",
+    "Make an intricate animated SVG illustration and publish its browser preview.",
     "Create a small browser task app.",
     "I want a polished web dashboard.",
     "Create a beautiful signup-flow prototype with useful validation; do not submit anywhere.",
@@ -10498,6 +10509,62 @@ test("website navigation and research files do not require a workspace preview",
     guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
     assert.equal(guard.verificationForRun("run-1").status, "failed", prompt);
   }
+});
+
+test("literal file contents and quoted examples do not require a website preview", () => {
+  const captured = "Create provider-repair-canary-20260909.txt in the current workspace containing exactly: Portal repaired provider routing works. Read the file back using a tool, then report its path and exact contents. This is a plain text file, not a website; no browser preview is requested. Do not use web search or change any settings.";
+  for (const request of [
+    captured,
+    captured.replace("Portal repaired provider routing works.", '"Portal repaired provider routing works."'),
+    "Create note.txt containing: Portal routing works. Read it back.",
+    "Create note.txt with the contents exactly: `Build a website.` Read it back.",
+    'Write report.md describing the example "Create a beautiful website".',
+    "Write report.md describing the example 'Create a beautiful website'.",
+    "Write notes.md about this example:\n```text\nBuild a website and publish it.\n```",
+    "Write notes.md about this example:\n  > Build a website and publish it.",
+    "Save a standalone diagram.svg file with an accessible title and description.",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], request), false, request);
+  for (const request of [
+    'Create note.txt containing exactly: "Build a website." Then create and publish demo/index.html.',
+    'Build a website with the text: "Hello Portal". Publish it.',
+    "Create note.txt containing exactly: Hello; then build a website.",
+    'Publish "demo/index.html".',
+    "Publish `demo/index.html`.",
+    "Publish 'demo/index.html'.",
+    "Create an animated SVG and publish its browser preview.",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], request), true, request);
+});
+
+test("wrapped private denial allows public extraction and workspace recovery", () => {
+  const aborts = [];
+  const guard = createToolLoopGuard({abortRun: id => {aborts.push(id); return true;}});
+  assert.equal(call(guard, "tool_call", {
+    event: {params: {id: "web_fetch", args: {url: "http://printer.local/status"}}},
+  }).blockReason, WEB_FETCH_PUBLIC_ONLY_REASON);
+  assert.equal(call(guard, "tool_call", {
+    event: {params: {id: "pixel_ods_web_extract", args: {
+      url: "https://docs.python.org/3/", query: "title",
+    }}},
+  }), undefined);
+  assert.equal(call(guard, "tool_call", {
+    event: {params: {id: "read", args: {path: "notes.md"}}},
+  }), undefined);
+  assert.deepEqual(aborts, []);
+  assert.equal(call(guard, "tool_call", {
+    event: {params: {id: "exec", args: {command: "curl http://printer.local/status"}}},
+  }).blockReason, PRIVATE_NETWORK_LOOP_ABORT_REASON);
+  assert.deepEqual(aborts, ["session-1"]);
+});
+
+test("explicit private URL request retains its no-substitution boundary", () => {
+  const aborts = [];
+  const guard = createToolLoopGuard({abortRun: id => {aborts.push(id); return true;}});
+  guard.observeRun({agentId: "pixel", runId: "run-1", sessionId: "session-1"}, "pixel", {
+    messages: [{role: "user", content: "Inspect http://127.0.0.1:3000 now"}],
+  });
+  assert.equal(call(guard, "pixel_ods_status").blockReason, PRIVATE_URL_REQUEST_REASON);
+  assert.equal(call(guard, "web_search").blockReason, PRIVATE_NETWORK_LOOP_ABORT_REASON);
+  assert.deepEqual(aborts, ["session-1"]);
 });
 
 test("bare reopening binds only a verified preview in the current session", () => {
@@ -10606,6 +10673,35 @@ test("publishes an existing app without treating keep-unchanged instructions as 
   }), { params: previewParams }, "displaying an unchanged app must not require a fresh write");
 });
 
+test("SVG output alone does not require HTML publication or replace a verified file result", () => {
+  const prompt = "Write a tiny valid SVG of a yellow sun on a blue background to release-2654/sun.svg, read the file back to check it, and tell me the saved path.";
+  for (const request of [prompt, "Make an intricate animated SVG illustration.", "Make a detailed SVG illustration of a floating greenhouse.", "Save an animated SVG to artwork/orbit.svg."]) {
+    assert.equal(userMessageRequestsWorkspacePreview([], request), false, request);
+  }
+  for (const request of [
+    "Inspect the SVG at https://example.com/image.svg and open it in the browser.",
+    "Explain SVG animation and show its XML syntax.",
+    "Create an SVG. Open https://example.com in the browser.",
+    "Create an SVG and do not show it in the browser.",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], request), false, request);
+  for (const request of [
+    "Create an SVG and publish it in the preview.",
+    "Show me the saved SVG in the browser.",
+    "Build a website containing SVG at sun/index.html.",
+    "Build a browser game using SVG.",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], request), true, request);
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt });
+  const params = { path: "release-2654/sun.svg", content: "<svg xmlns='http://www.w3.org/2000/svg'/>" };
+  call(guard, "write", { event: { params } });
+  afterCall(guard, "write", { event: { params, result: { content: [{ type: "text", text: "Successfully wrote file" }] } } });
+  const readParams = { path: params.path };
+  call(guard, "read", { event: { params: readParams } });
+  afterCall(guard, "read", { event: { params: readParams, result: { content: [{ type: "text", text: params.content }] } } });
+  assert.equal(guard.beforeAgentFinalize({}, { agentId: "pixel", runId: "run-1" }), undefined);
+  assert.notEqual(guard.deliveryVerificationForRun("run-1")?.status, "failed");
+});
+
 test("keeps every visual category on the model-authored write path", () => {
   for (const prompt of [
     "Create an interactive SVG artwork called Tidal Atlas from scratch. Keep it self-contained, verify it, and publish it in the preview.",
@@ -10665,10 +10761,10 @@ test("new interactive objects do not require catalog nouns or a prior preview", 
   ]) assert.equal(userMessageRequestsWorkspacePreview([], prompt), false, prompt);
 });
 
-test("recognizes SVG artwork and explicit preview publication without widening nonvisual intent", () => {
+test("recognizes explicit SVG preview publication without widening nonvisual intent", () => {
   for (const prompt of [
     "Create a novel interactive SVG artwork called Orbital Garden from scratch and publish it in the preview.",
-    "Make a detailed SVG illustration of a floating greenhouse.",
+    "Make a detailed SVG illustration of a floating greenhouse and show it in the browser.",
     "Publish the existing preview.",
     "Serve this in the live preview.",
   ]) {

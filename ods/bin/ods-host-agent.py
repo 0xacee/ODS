@@ -6871,7 +6871,10 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         status = _windows_llm_status()
         if status is None:
-            json_response(self, 503, {"error": "Host inference telemetry is unavailable"})
+            if platform.system() != "Windows":
+                json_response(self, 501, {"error": "Host inference telemetry is unsupported on this platform"})
+            else:
+                json_response(self, 503, {"error": "Host inference telemetry is unavailable"})
             return
         json_response(self, 200, status)
 

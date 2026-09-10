@@ -1073,14 +1073,17 @@ async def handle_preview(request: web.Request):
     try:
         async with ClientSession(connector=connector, timeout=timeout) as session:
             async with session.request(
-                request.method,
+                "GET",
                 f"http://pixel-preview.internal{upstream_path}",
                 headers={"Host": "pixel-preview.internal"},
             ) as upstream:
                 if upstream.status not in {200, 404}:
                     return web.json_response({"error": "preview unavailable"}, status=502)
-                body = await upstream.content.read(_MAX_PREVIEW_RESPONSE_BYTES + 1)
-                if len(body) > _MAX_PREVIEW_RESPONSE_BYTES:
+                # read(n) may return only the first available transport chunk.
+                # Verify the complete bounded snapshot, including for client HEAD.
+                try:
+                    body = await _read_bounded(upstream.content, _MAX_PREVIEW_RESPONSE_BYTES)
+                except ValueError:
                     return web.json_response({"error": "preview too large"}, status=502)
                 if upstream.status == 404:
                     return web.json_response({"error": "not found"}, status=404)

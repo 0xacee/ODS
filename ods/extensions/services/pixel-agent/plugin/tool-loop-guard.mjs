@@ -44,7 +44,7 @@ export const WEB_FETCH_TRUNCATED_PIVOT_REASON =
   "The fetched public page was truncated. Only the returned content is evidence. Choose targeted extraction, another relevant source, or continue other authorized work; do not claim unread content was verified.";
 
 export const WEB_FETCH_PUBLIC_ONLY_REASON =
-  "Pixel blocked this fetch because web_fetch is restricted to public HTTP(S) hostnames and must not contact local, private, or raw-IP destinations. Do not call another tool in this turn; explain the boundary to the user.";
+  "Pixel blocked this fetch because web_fetch is restricted to public HTTP(S) hostnames and must not contact local, private, or raw-IP destinations. Do not retry that access through another tool. Other authorized work may continue, including approved ODS tools, public research, and saving verified findings.";
 
 export const GITHUB_CANONICAL_SOURCE_PREFIX =
   "Pixel already has the owner's identified canonical public GitHub source:";
@@ -56,7 +56,7 @@ export const GITHUB_SOURCE_UNVERIFIED_DELIVERY_PREFIX =
   "Pixel did not successfully read a source belonging to the requested GitHub repository in this response. Repository claims remain unverified; the workspace and other collected evidence are preserved.";
 
 export const EXEC_PRIVATE_NETWORK_REASON =
-  "Pixel blocked this command because shell execution cannot be used to contact local, private, or raw-IP HTTP(S) destinations. Do not call another tool in this turn; explain the boundary to the user.";
+  "Pixel blocked this command because shell execution cannot be used to contact local, private, or raw-IP HTTP(S) destinations. Do not retry that access through another tool. Other authorized work may continue, including approved ODS tools, public research, and saving verified findings.";
 
 export const PRIVATE_NETWORK_LOOP_ABORT_REASON =
   "Pixel stopped this response because it requested another tool after a private-network boundary was enforced. Start a fresh message with a safe public destination or an approved ODS status capability.";
@@ -5055,6 +5055,33 @@ function withoutWorkspaceHtmlTargets(text) {
   return text.replace(/\b[A-Za-z0-9_-][A-Za-z0-9._/-]{0,511}\.html?\b/gi, " ");
 }
 
+function workspacePreviewInstructionText(text) {
+  // This is an intent projection only. Keep the owner's original message and
+  // tool contents intact; quoted examples must not become delivery commands.
+  let projected = text
+    .replace(/(`{3,}|~{3,})[\s\S]*?\1/g, " ")
+    .replace(/^[ \t]*>[^\n]*/gm, " ");
+  // An explicit payload can be delimited or one unquoted sentence. Preserve
+  // independent instructions after its closing quote or sentence boundary.
+  // Undelimited multi-sentence prose remains ambiguous; this is not a parser
+  // for every way an owner can express a task.
+  projected = projected.replace(
+    /\b(?:containing|with\s+(?:the\s+)?(?:contents?|text))\s*(?:exactly\s*)?:\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[^\n]*?(?=[!?;\n]|\.(?=\s|$)|$))/gi,
+    " "
+  );
+  const quotedTarget = (value) =>
+    /^(?:\.\.?\/)?[A-Za-z0-9_/-][A-Za-z0-9._/-]*\.html?$/i.test(value.trim())
+      ? value
+      : " ";
+  // Preserve a quoted HTML filename as an action target, but not arbitrary
+  // quoted prose that happens to contain "portal", "website", or commands.
+  return projected
+    .replace(/"((?:\\.|[^"\\])*)"|`((?:\\.|[^`\\])*)`/g,
+      (_match, quoted, inline) => quotedTarget(quoted ?? inline))
+    .replace(/(^|[\s(=,:])'((?:\\.|[^'\\])*)'(?=$|[\s).,;:!?])/g,
+      (_match, prefix, quoted) => prefix + quotedTarget(quoted));
+}
+
 function hasExplicitWorkspacePreviewDirective(text) {
   // A requested delivery action can follow a diagnosis or code repair. Do not
   // mistake a subordinate "why we should publish" for that owner command.
@@ -5064,7 +5091,8 @@ function hasExplicitWorkspacePreviewDirective(text) {
   return [...commands].some((match) => {
     const target = match[2].split(/\.(?=\s|$)|\b(?:and|then|but|however|instead)\b/i)[0];
     if (hasWorkspaceHtmlTarget(target)) return true;
-    const visualTarget = /\b(?:website|site|web\s*page|frontend|dashboard|preview|animation|illustration|scene|game|chart|diagram|svg)\b/i.test(target);
+    const visualTargetPattern = /\b(?:website|site|web\s*page|frontend|dashboard|preview|animation|illustration|scene|game|chart|diagram|svg)\b/i;
+    const visualTarget = visualTargetPattern.test(target);
     // Open/show/view also describe ordinary navigation. Require a local
     // artifact or preview binding before imposing workspace publication.
     if (visualTarget && (!/^(?:open|show|view)$/i.test(match[1]) ||
@@ -5075,7 +5103,10 @@ function hasExplicitWorkspacePreviewDirective(text) {
     const precedingClause = text.slice(0, match.index)
       .split(/[!?;\n]|\.(?=\s|$)/).at(-1);
     return /^(?:it|this|that)(?:\s|[.!?;]|$)/i.test(target.trim()) &&
-      hasWorkspaceHtmlTarget(precedingClause);
+      (hasWorkspaceHtmlTarget(precedingClause) ||
+        (/\b(?:browser|preview)\b/i.test(target) &&
+          visualTargetPattern.test(precedingClause) &&
+          /\b(?:build|create|design|generate|make|write)\b/i.test(precedingClause)));
   });
 }
 
@@ -5107,7 +5138,7 @@ function requestsNamedSessionPreview(text, preview) {
 }
 
 export function userMessageRequestsWorkspacePreview(messages, prompt = undefined) {
-  const text = currentOwnerIntentText(messages, prompt);
+  const text = workspacePreviewInstructionText(currentOwnerIntentText(messages, prompt));
   if (!text) return false;
   // Classify visual targets and actions from the same positive request text.
   // A no-website constraint on a Python task is not a website request. Keep
@@ -5162,9 +5193,11 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
     .split(/[.!?;\n]+|\b(?:and|then|but|however|instead)\s+(?=(?:build|create|develop|design|generate|implement|make|write|add|change|continue|edit|improve|keep|modify|patch|refresh|remove|republish|tweak|update|work)\b)/i)
     .some((clause) => /\b(?:apps?|applications?)\b/i.test(clause) &&
       (buildAction.test(clause) || reviseAction.test(clause)));
+  // An output format alone does not require an HTML wrapper. SVG files may
+  // be delivered directly; explicit browser publication still requires proof.
   const browserVisual =
     /\b(?:artworks?|animated\s+(?:art|illustrations?|scenes?)|interactive\s+(?:art|charts?|diagrams?))\b/i.test(actionText) ||
-    /\b(?:svgs?|breakout|brick[- ]?breakers?|browser[- ]?games?|canvas\s+(?:demos?|games?)|interactive\s+(?:demos?|experiences?|visuali[sz]ations?)|task\s+boards?|to-?do\s+(?:apps?|boards?|lists?)|video\s*games?|videogames?|visual\s+(?:demos?|showcases?)|visuali[sz]ations?|voxel(?:[- ](?:based|styles?))?|webgl\s+(?:demos?|scenes?))\b/i.test(actionText) ||
+    /\b(?:breakout|brick[- ]?breakers?|browser[- ]?games?|canvas\s+(?:demos?|games?)|interactive\s+(?:demos?|experiences?|visuali[sz]ations?)|task\s+boards?|to-?do\s+(?:apps?|boards?|lists?)|video\s*games?|videogames?|visual\s+(?:demos?|showcases?)|visuali[sz]ations?|voxel(?:[- ](?:based|styles?))?|webgl\s+(?:demos?|scenes?))\b/i.test(actionText) ||
     /\b(?:arcade|board|card|puzzle|racing|rhythm|strategy|word)?\s*games?\b/i.test(actionText);
   const explicitBrowser =
     website || /\b(?:browser|canvas|html|svg|webgl)\b/i.test(actionText);
@@ -5925,6 +5958,7 @@ export function createToolLoopGuard({
         successfulReadPaths: new Set(),
         repeatedWriteBlocks: new Map(),
         privateNetworkExhausted: false,
+        privateNetworkRequestDenied: false,
         privateNetworkPrompt: false,
         clientCancelled: false,
         fetchedUrls: new Map(),
@@ -7620,10 +7654,23 @@ export function createToolLoopGuard({
     if (state?.privateNetworkPrompt) {
       state.privateNetworkPrompt = false;
       state.privateNetworkExhausted = true;
+      state.privateNetworkRequestDenied = true;
       return { block: true, blockReason: PRIVATE_URL_REQUEST_REASON };
     }
 
-    if (state?.privateNetworkExhausted) {
+    // Denying one destination must not abort an unrelated, permitted tool.
+    // Keep the denial recorded across successful pivots so alternating calls
+    // cannot reset the repeated-private-access fuse. Explicit private-URL
+    // requests retain their separate no-substitution policy.
+    const repeatsDeniedPrivateAccess =
+      (selectedToolName === "exec" && execTargetsNonPublicAddress(selectedEvent)) ||
+      ((selectedToolName === "web_fetch" || selectedToolName === "pixel_ods_web_extract") &&
+        fetchTargetsNonPublicAddress(selectedEvent)) ||
+      (selectedToolName === "browser" &&
+        (urlTargetsNonPublicAddress(selectedParams?.url) ||
+          urlTargetsNonPublicAddress(selectedParams?.targetUrl)));
+    if (state?.privateNetworkExhausted &&
+        (state.privateNetworkRequestDenied || repeatsDeniedPrivateAccess)) {
       let aborted = false;
       try {
         aborted = typeof abortRun === "function" && Boolean(abortRun(sessionId));
