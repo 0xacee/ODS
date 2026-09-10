@@ -1,6 +1,5 @@
 """Exercise real durable receipts plus asynchronous upstream/disconnect races."""
 import asyncio
-import json
 import os
 import sqlite3
 from pathlib import Path
@@ -27,6 +26,7 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(pixel, "_result_store", result)
     monkeypatch.setattr(pixel, "_result_tasks", {})
     monkeypatch.setattr(pixel, "_result_stops", set())
+    monkeypatch.setattr(pixel, "_result_abort_ack", set())
     monkeypatch.setenv("PIXEL_OPENWEBUI_KEY", "e" * 64)
     async def ready(): return None
     monkeypatch.setattr(pixel, "_model_readiness_issue", ready)
@@ -202,3 +202,19 @@ def test_orphaned_receipts_do_not_reserve_future_output_capacity(tmp_path, monke
         assert second.reserve((IDENTITY[0],'different-chat','next'),'hash')
         assert second.get(IDENTITY)['state'] == 'unresolved'
     finally: second.close()
+
+
+def test_api_task_shutdown_is_not_reported_as_owner_stop(store, monkeypatch):
+    async def run():
+        started = asyncio.Event()
+        class Upstream(FakeResponse):
+            async def aiter_bytes(self):
+                started.set(); await asyncio.Future(); yield b''
+        monkeypatch.setattr(pixel.httpx, 'AsyncClient', lambda **kw: FakeClient(Upstream(content_type='text/event-stream')))
+        async def cancel(*args): return True
+        monkeypatch.setattr(pixel, '_cancel_edge_run', cancel)
+        await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER); await started.wait()
+        task = pixel._result_tasks[IDENTITY]; task.cancel(); await task
+        assert store.get(IDENTITY)['state'] == 'interrupted'
+        assert b'Pixel was stopped' not in b''.join(row['data'] for row in store.chunks(IDENTITY))
+    asyncio.run(run())
