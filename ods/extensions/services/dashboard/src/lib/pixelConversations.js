@@ -13,7 +13,8 @@ function storedArray(key) {
 }
 const deletedIds = () => storedArray(DELETED_KEY)
 export const isConversationDeleted = chatId => deletedIds().includes(chatId)
-const valid = item => item?.schema === 1 && /^[A-Za-z0-9_-]{1,128}$/.test(item.chatId || '') && Array.isArray(item.messages)
+const valid = item => item?.schema === 1 && typeof item.chatId === 'string'
+  && /^[A-Za-z0-9_-]{1,128}$/.test(item.chatId) && Array.isArray(item.messages)
   && item.messages.every(message => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string')
   && (item.draft === undefined || typeof item.draft === 'string')
 
@@ -26,21 +27,20 @@ function currentConversation() {
   }
 }
 
-function loadConversations(strict = false) {
+function loadConversations(preserveInvalid = false) {
   const stored = storedArray(LIBRARY_KEY)
-  if (strict && stored.some(item => !valid(item))) throw new Error('Saved chat history contains invalid records. Existing browser data has been preserved.')
-  const entries = stored.filter(valid)
+  const entries = preserveInvalid ? stored : stored.filter(valid)
   const current = currentConversation()
-  if (valid(current) && current.messages.length && !entries.some(item => item.chatId === current.chatId)) entries.push(current)
+  if (valid(current) && current.messages.length && !entries.some(item => valid(item) && item.chatId === current.chatId)) entries.push(current)
   const deleted = deletedIds()
-  return entries.filter(item => !deleted.includes(item.chatId)).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+  return entries.filter(item => !valid(item) || !deleted.includes(item.chatId))
+    .sort((a, b) => (Number.isFinite(b?.updatedAt) ? b.updatedAt : 0) - (Number.isFinite(a?.updatedAt) ? a.updatedAt : 0))
 }
 
 export function readConversations() {
   try {
     // Isolate unreadable entries in the view; preserve their raw storage on save.
-    return loadConversations().filter(chat => (chat.draft == null || typeof chat.draft === 'string')
-      && chat.messages.every(message => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string'))
+    return loadConversations()
   } catch { return [] }
 }
 
@@ -49,9 +49,9 @@ export function saveConversation(chat) {
   if (deletedIds().includes(chat.chatId)) throw new Error('This conversation was deleted in another tab. Start a new chat.')
   // A read error is not an empty library. Never overwrite unreadable history.
   const entries = loadConversations(true)
-  const previous = entries.find(item => item.chatId === chat.chatId)
+  const previous = entries.find(item => valid(item) && item.chatId === chat.chatId)
   const value = { ...previous, ...chat, updatedAt: Date.now() }
-  const remaining = entries.filter(item => item.chatId !== value.chatId)
+  const remaining = entries.filter(item => !valid(item) || item.chatId !== value.chatId)
   if (value.messages.length || value.draft?.trim()) {
     const next = [value, ...remaining]
     // Never silently evict an older conversation when browser storage fills up.
@@ -70,12 +70,12 @@ export function conversationTitle(chat) {
 
 export function deleteConversation(chatId) {
   const entries = loadConversations(true)
-  const chat = entries.find(item => item.chatId === chatId)
+  const chat = entries.find(item => valid(item) && item.chatId === chatId)
   if (!chat) return
   if (chat.inFlight || chat.interrupted) throw new Error('Stop or resume this task before deleting its conversation.')
   // Write the deletion marker first: stale open tabs must never resurrect a deleted chat.
   localStorage.setItem(DELETED_KEY, JSON.stringify([...new Set([...deletedIds(), chatId])]))
-  localStorage.setItem(LIBRARY_KEY, JSON.stringify(entries.filter(item => item.chatId !== chatId)))
+  localStorage.setItem(LIBRARY_KEY, JSON.stringify(entries.filter(item => !valid(item) || item.chatId !== chatId)))
   const current = currentConversation()
   if (current?.chatId === chatId) localStorage.removeItem(CHAT_KEY)
   window.dispatchEvent(new Event(LIBRARY_EVENT))

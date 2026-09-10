@@ -6458,6 +6458,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_pixel_providers(save=False)
         elif path == "/v1/pixel/providers/runtime" and not parsed.query:
             self._handle_pixel_providers_runtime(change=False)
+        elif path == "/v1/pixel/providers/health" and not parsed.query:
+            self._handle_pixel_provider_health()
         elif path == "/v1/pixel/settings" and not parsed.query:
             self._handle_pixel_settings(save=False)
         elif path == "/v1/pixel/identity" and not parsed.query:
@@ -7233,6 +7235,16 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, status, {'error': 'Advisory request failed', 'code': exc.code}, no_store=True)
         except (ImportError, OSError, ValueError, TypeError, KeyError):
             json_response(self, 503, {'error': 'Advisory service unavailable'}, no_store=True)
+
+    def _handle_pixel_provider_health(self):
+        if not check_auth(self):
+            return
+        try:
+            from pixel_provider.health import health_status
+            result = health_status(DATA_DIR)
+        except (ImportError, OSError, ValueError):
+            result = {"status": "unavailable"}
+        json_response(self, 200, result, no_store=True)
 
     def _handle_pixel_providers_runtime(self, *, change):
         """Fixed owner-confirmed provider control; root alone selects targets."""

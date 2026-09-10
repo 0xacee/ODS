@@ -1236,10 +1236,14 @@ def numeric_safe_geometric_mean(numbers: list) -> float:
         return 0.0
     try:
         scale = max(valid_nums)
-        offset = math.log(scale)
-        mean_log = math.fsum((math.log(x) - offset) / len(valid_nums) for x in valid_nums)
-        return scale * math.exp(min(0.0, mean_log))
-    except (OverflowError, ValueError):
+        smallest = min(valid_nums)
+        if smallest == scale:
+            return scale
+        mean_log = math.fsum(math.log(x) / len(valid_nums) for x in valid_nums)
+        return min(scale, max(smallest, math.exp(mean_log)))
+    except OverflowError:
+        return scale  # Rounding at the largest representable finite float.
+    except ValueError:
         return 0.0
 
 

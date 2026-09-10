@@ -317,6 +317,35 @@ def test_export_workspace_snapshot(client, mock_request_agent):
     data = resp.json()
     assert data["schemaVersion"] == 1
     assert data["type"] == "ods-workspace-snapshot"
+    assert data["scope"] == "pixel-configuration"
+    assert data["excludes"] == ["credentials", "conversations", "workspace-files"]
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["x-content-type-options"] == "nosniff"
     assert "settings" in data
     assert "providers" in data
     assert data["providers"]["providers"][0]["id"] == "my-local-ai"
+
+
+def test_export_requires_owner_auth(client, mock_request_agent):
+    assert client.get("/api/pixel/settings/export").status_code == 401
+    mock_request_agent.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", [
+    {"credentialRef": "private-sentinel"},
+    {"schemaVersion": 1, "apiKey": "private-sentinel"},
+    None,
+])
+def test_export_rejects_unvalidated_provider_documents(client, mock_request_agent, provider):
+    mock_request_agent.side_effect = [copy.deepcopy(VALID_GET), provider]
+    response = client.get("/api/pixel/settings/export", headers={"Authorization": "Bearer test-key-12345"})
+    assert response.status_code == 502
+    assert "private-sentinel" not in response.text
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_export_does_not_publish_partial_snapshot_when_host_fails(client, mock_request_agent):
+    mock_request_agent.side_effect = [copy.deepcopy(VALID_GET), AgentUnavailable()]
+    response = client.get("/api/pixel/settings/export", headers={"Authorization": "Bearer test-key-12345"})
+    assert response.status_code == 503
+    assert "settings" not in response.json()

@@ -1703,6 +1703,7 @@ def test_numeric_helpers_bound_nonfinite_and_huge_integers():
     huge = 10 ** 1000
     assert numeric_safe_geometric_mean([huge, 4, 9, True, float("inf")]) == pytest.approx(6)
     assert numeric_safe_geometric_mean([sys.float_info.max] * 4) == sys.float_info.max
+    assert numeric_safe_geometric_mean([sys.float_info.max] + [5e-324] * 1000) > 0
     result = numeric_exponential_moving_average_safe(
         [huge, sys.float_info.max, -sys.float_info.max, float("nan")], alpha=0.5)
     assert result == [sys.float_info.max, 0.0]

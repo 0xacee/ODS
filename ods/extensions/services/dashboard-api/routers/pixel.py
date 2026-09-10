@@ -1,14 +1,12 @@
 """Bounded dashboard bridge to the internal Pixel edge service."""
 
 from __future__ import annotations
-import sys
 import asyncio
-if sys.version_info >= (3, 11):
-    from asyncio import timeout as async_timeout
-else:
-    from async_timeout import timeout as async_timeout
 
-import asyncio
+try:
+    from asyncio import timeout as async_timeout
+except ImportError:  # Python 3.10; installed by this runtime's requirements.
+    from async_timeout import timeout as async_timeout
 import hashlib
 import json
 import logging

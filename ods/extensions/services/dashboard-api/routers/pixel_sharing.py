@@ -1,11 +1,10 @@
 """Owner-only inference sharing controls, separate from incoming device keys."""
-import sys
 import asyncio
-if sys.version_info >= (3, 11):
+
+try:
     from asyncio import timeout as async_timeout
-else:
+except ImportError:  # Python 3.10; installed by this runtime's requirements.
     from async_timeout import timeout as async_timeout
-import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -44,7 +43,7 @@ async def _body(request, action):
         if action == 'revoke' and not isinstance(payload['deviceId'], str):
             raise ValueError('invalid-request')
         return payload
-    except (ValueError, RecursionError, TimeoutError):
+    except (ValueError, RecursionError, asyncio.TimeoutError, TimeoutError):
         raise HTTPException(400, 'Invalid sharing request') from None
 
 

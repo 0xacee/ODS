@@ -1,10 +1,4 @@
 """Owner-selected SSH forwarding to a peer's loopback inference port only."""
-import sys
-import asyncio
-if sys.version_info >= (3, 11):
-    from asyncio import timeout as async_timeout
-else:
-    from async_timeout import timeout as async_timeout
 import asyncio
 import contextlib
 import json
@@ -60,7 +54,7 @@ async def serve_tunnel(*, ssh_bin, target, remote_port, listen_port, stop=None, 
                 child = await spawn
                 raise
             pumps = [asyncio.create_task(pump(reader,child.stdin)),asyncio.create_task(pump(child.stdout,writer))]
-            async with async_timeout(3600):
+            async def transfer():
                 done,_ = await asyncio.wait(pumps,return_when=asyncio.FIRST_COMPLETED)
                 # A client may half-close its request and still await the reply.
                 # EOF from SSH, however, ends the remote response direction.
@@ -68,7 +62,10 @@ async def serve_tunnel(*, ssh_bin, target, remote_port, listen_port, stop=None, 
                     item.result()
                 if pumps[1] not in done:
                     await pumps[1]
-        except (OSError,TimeoutError,ConnectionError):
+            # This tunnel runs under the stdlib host interpreter, not the
+            # optional provider venv. wait_for works on Python 3.10 too.
+            await asyncio.wait_for(transfer(), 3600)
+        except (OSError,asyncio.TimeoutError,TimeoutError,ConnectionError):
             pass  # Remote authentication/readiness is proven by `probe`, not bind.
         finally:
             for item in pumps:
@@ -79,12 +76,12 @@ async def serve_tunnel(*, ssh_bin, target, remote_port, listen_port, stop=None, 
                 child.stdin.close()
                 try:
                     await asyncio.wait_for(child.wait(),5)
-                except TimeoutError:
+                except (asyncio.TimeoutError, TimeoutError):
                     with contextlib.suppress(ProcessLookupError):
                         child.terminate()
                     try:
                         await asyncio.wait_for(child.wait(),2)
-                    except TimeoutError:
+                    except (asyncio.TimeoutError, TimeoutError):
                         with contextlib.suppress(ProcessLookupError):
                             child.kill()
                         await child.wait()

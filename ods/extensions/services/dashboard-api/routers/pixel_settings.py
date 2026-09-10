@@ -112,6 +112,8 @@ async def export_workspace_snapshot(_key: str = Depends(verify_api_key)):
         content = {
             "schemaVersion": 1,
             "type": "ods-workspace-snapshot",
+            "scope": "pixel-configuration",
+            "excludes": ["credentials", "conversations", "workspace-files"],
             "settings": settings["configuration"],
             "providers": providers
         }
@@ -119,15 +121,16 @@ async def export_workspace_snapshot(_key: str = Depends(verify_api_key)):
             content=content,
             headers={
                 "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
                 "Content-Disposition": 'attachment; filename="ods-workspace-snapshot.json"'
             }
         )
     except AgentHTTPError as exc:
         code = exc.status_code if exc.status_code in (400, 409, 413, 503) else 502
-        raise HTTPException(code, "Snapshot export failed") from None
+        raise HTTPException(code, "Snapshot export failed", headers={"Cache-Control": "no-store"}) from None
     except AgentUnavailable:
-        raise HTTPException(503, "Settings are unavailable for export") from None
+        raise HTTPException(503, "Settings are unavailable for export", headers={"Cache-Control": "no-store"}) from None
     except (AgentProtocolError, ValueError, TypeError, RecursionError):
-        raise HTTPException(502, "Invalid response during export") from None
+        raise HTTPException(502, "Invalid response during export", headers={"Cache-Control": "no-store"}) from None
 
 

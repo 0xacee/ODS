@@ -4,13 +4,12 @@ Instances use an immutable owner-approved configuration and credentials. They
 are never a public agent or administration endpoint. Terminal failure closes
 the lease so client-library retries cannot multiply the provider attempt budget.
 """
-import sys
 import asyncio
-if sys.version_info >= (3, 11):
+
+try:
     from asyncio import timeout as async_timeout
-else:
+except ImportError:  # Python 3.10; installed by this runtime's requirements.
     from async_timeout import timeout as async_timeout
-import asyncio
 import copy
 import hmac
 import ipaddress
@@ -319,7 +318,7 @@ def create_app(config,credentials,token,*,events=None,client_factory=None):
         except (RuntimeErrorCode,StoreError) as error:
             terminal = True
             return failure(str(error))
-        except (TimeoutError,httpx.HTTPError,OSError,ValueError):
+        except (asyncio.TimeoutError,TimeoutError,httpx.HTTPError,OSError,ValueError):
             terminal = True
             return failure('provider-transport-failed')
         finally:

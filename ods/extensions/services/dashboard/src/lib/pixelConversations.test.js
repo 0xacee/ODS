@@ -75,3 +75,14 @@ test('clears the current chat and refuses active or interrupted tasks',()=>{
   expect(localStorage.getItem(CHAT_KEY)).toBeNull()
   expect(readConversations()).toEqual([])
 })
+test('preserves unknown records, including null, while updating and deleting valid chats', () => {
+  const damaged = [null, 42, {schema:1, chatId:'broken', messages:[null]},
+    {schema:1, chatId:123, messages:[]}]
+  const retained = {...chat('valid','Keep working'), updatedAt:{toString:1,valueOf:2}}
+  localStorage.setItem('ods.pixel.conversations.v1', JSON.stringify([...damaged,retained]))
+  expect(readConversations().map(item => item.chatId)).toEqual(['valid'])
+  saveConversation({...retained,draft:'Still works'})
+  expect(readConversations()[0].draft).toBe('Still works')
+  deleteConversation('valid')
+  expect(JSON.parse(localStorage.getItem('ods.pixel.conversations.v1'))).toEqual(damaged)
+})

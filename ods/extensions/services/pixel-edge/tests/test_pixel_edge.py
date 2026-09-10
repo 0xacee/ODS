@@ -5,13 +5,12 @@ if sys.platform == "win32":
 
 """Tests for pixel_edge — upstream Unix socket + edge proxy routes."""
 
-import sys
 import asyncio
-if sys.version_info >= (3, 11):
+
+try:
     from asyncio import timeout as async_timeout
-else:
+except ImportError:  # Python 3.10; installed by this runtime's requirements.
     from async_timeout import timeout as async_timeout
-import asyncio
 import hashlib
 import io
 import json

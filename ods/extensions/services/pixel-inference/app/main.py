@@ -4,13 +4,12 @@ One process: per-device rate/concurrency limits are local admission controls,
 not durable billing quotas. No arbitrary forwarding, agent or management API.
 """
 
-import sys
 import asyncio
-if sys.version_info >= (3, 11):
+
+try:
     from asyncio import timeout as async_timeout
-else:
+except ImportError:  # Python 3.10; installed by this runtime's requirements.
     from async_timeout import timeout as async_timeout
-import asyncio
 import ipaddress
 import json
 import os
@@ -318,7 +317,7 @@ def create_app(store=None, router_url=None, client=None):
             return _failure(error.status, error.code)
         except StoreError:
             return _failure(400, 'invalid_request')
-        except (TimeoutError, httpx.TimeoutException):
+        except (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException):
             return _failure(504, 'inference_deadline')
         except (httpx.HTTPError, ValueError, OSError):
             return _failure(502, 'inference_unavailable')

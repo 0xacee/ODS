@@ -233,11 +233,16 @@ async def change_provider_runtime(request: Request, _key: str = Depends(verify_a
 async def get_active_provider_health(_key: str = Depends(verify_api_key)):
     """Background or on-demand probe of the active provider's health."""
     try:
-        raw = await request_agent_json("GET", "/v1/models", timeout=10)
-        return JSONResponse(
-            content={"status": "online", "models": len(raw.get("data", [])) if isinstance(raw, dict) else 0},
-            headers=NO_STORE
-        )
-    except (AgentHTTPError, AgentUnavailable, AgentProtocolError):
-        return JSONResponse(content={"status": "offline"}, headers=NO_STORE)
+        raw = await request_agent_json("GET", "/v1/pixel/providers/health", timeout=12)
+        if type(raw) is not dict:
+            raise ValueError()
+        if raw.get("status") == "online":
+            if (set(raw) != {"status", "models"} or type(raw["models"]) is not int
+                    or not 1 <= raw["models"] <= 4096):
+                raise ValueError()
+        elif set(raw) != {"status"} or raw["status"] not in ("offline", "unavailable", "inactive"):
+            raise ValueError()
+        return JSONResponse(content=raw, headers=NO_STORE)
+    except (AgentHTTPError, AgentUnavailable, AgentProtocolError, ValueError, TypeError):
+        return JSONResponse(content={"status": "unavailable"}, headers=NO_STORE)
 

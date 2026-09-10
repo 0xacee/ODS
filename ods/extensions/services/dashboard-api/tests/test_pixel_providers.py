@@ -257,15 +257,40 @@ def test_host_credential_url_never_reflected(client, mock_request):
 
 
 def test_active_provider_health_online(client, mock_request):
-    mock_request.return_value = {"data": [{"id": "model-1"}, {"id": "model-2"}]}
+    mock_request.return_value = {"status": "online", "models": 2}
     resp = client.get("/api/pixel/providers/health", headers={"Authorization": "Bearer test-key-12345"})
     assert resp.status_code == 200
     assert resp.json() == {"status": "online", "models": 2}
-    mock_request.assert_called_once_with("GET", "/v1/models", timeout=10)
+    mock_request.assert_called_once_with("GET", "/v1/pixel/providers/health", timeout=12)
 
 def test_active_provider_health_offline(client, mock_request):
     mock_request.side_effect = AgentUnavailable()
     resp = client.get("/api/pixel/providers/health", headers={"Authorization": "Bearer test-key-12345"})
     assert resp.status_code == 200
-    assert resp.json() == {"status": "offline"}
+    assert resp.json() == {"status": "unavailable"}
+
+
+@pytest.mark.parametrize("value", [
+    {}, None, {"status": "online", "models": True}, {"status": "online", "models": -1},
+    {"status": "online", "models": 2, "credential": "private-sentinel"},
+    {"status": "online", "models": 0}, {"status": "offline", "error": "private-sentinel"},
+])
+def test_health_never_trusts_malformed_or_secret_host_payload(client, mock_request, value):
+    mock_request.return_value = value
+    response = client.get("/api/pixel/providers/health", headers={"Authorization": "Bearer test-key-12345"})
+    assert response.json() == {"status": "unavailable"}
+    assert response.headers["cache-control"] == "no-store"
+    assert "private-sentinel" not in response.text
+
+
+def test_health_requires_owner_auth_before_probe(client, mock_request):
+    assert client.get("/api/pixel/providers/health").status_code == 401
+    mock_request.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["offline", "inactive", "unavailable"])
+def test_health_preserves_truthful_host_status(client, mock_request, status):
+    mock_request.return_value = {"status": status}
+    response = client.get("/api/pixel/providers/health", headers={"Authorization": "Bearer test-key-12345"})
+    assert response.json() == {"status": status}
 
