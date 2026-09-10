@@ -6,12 +6,13 @@ export default function PixelDictation({ disabled, conversationId, onInsert }) {
   const insert = useRef(onInsert)
   insert.current = onInsert
   const [listening, setListening] = useState(false)
+  const [finishing, setFinishing] = useState(false)
   const [notice, setNotice] = useState('')
   const stop = () => {
     const active = recognition.current
     recognition.current = null
     active?.abort()
-    setListening(false)
+    setListening(false); setFinishing(false)
   }
   useEffect(() => () => {
     const active = recognition.current
@@ -20,7 +21,13 @@ export default function PixelDictation({ disabled, conversationId, onInsert }) {
   }, [])
   useEffect(() => { stop() }, [disabled, conversationId])
   function start() {
-    if (listening) { stop(); return }
+    if (finishing) return
+    if (listening) {
+      setFinishing(true)
+      try { recognition.current?.stop() }
+      catch { stop(); setNotice('Dictation could not finish. Please try again.') }
+      return
+    }
     if (disabled) return
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognition) { setNotice('Dictation is not supported by this browser. You can still type your message.'); return }
@@ -32,20 +39,20 @@ export default function PixelDictation({ disabled, conversationId, onInsert }) {
     active.continuous = false
     active.onresult = event => {
       if (recognition.current !== active) return
-      const text = Array.from(event.results).filter(result => result.isFinal !== false).map(result => result[0]?.transcript || '').join(' ').trim()
+      const text = Array.from(event.results).slice(event.resultIndex ?? 0).filter(result => result.isFinal !== false).map(result => result[0]?.transcript || '').join(' ').trim()
       if (text) insert.current(`${text} `)
     }
-    active.onend = () => { if (recognition.current === active) { recognition.current = null; setListening(false) } }
+    active.onend = () => { if (recognition.current === active) { recognition.current = null; setListening(false); setFinishing(false); setFinishing(false) } }
     active.onerror = event => {
       if (recognition.current !== active) return
       setNotice(event.error === 'not-allowed' ? 'Microphone access was not granted. Nothing was added to your message.' : 'Dictation could not finish. Your existing draft is unchanged.')
-      recognition.current = null; setListening(false)
+      recognition.current = null; setListening(false); setFinishing(false)
     }
     try { active.start(); setListening(true) } catch { recognition.current = null; setNotice('Dictation could not start in this browser.') }
   }
   return <div className="pixel-dictation">
-    <button type="button" disabled={disabled} aria-label={listening ? 'Stop dictation' : 'Dictate message'} aria-pressed={listening} title="Browser dictation may use your browser provider’s online speech service. Audio is not sent to the ODS model." onClick={start}>{listening ? <Square size={15}/> : <Mic size={16}/>}</button>
-    {listening && <span role="status">Listening…</span>}
+    <button type="button" disabled={disabled || finishing} aria-label={finishing ? 'Finishing dictation' : listening ? 'Stop dictation' : 'Dictate message'} aria-pressed={listening} title="Browser dictation may use your browser provider’s online speech service. Audio is not sent to the ODS model." onClick={start}>{listening ? <Square size={15}/> : <Mic size={16}/>}</button>
+    {listening && <span role="status">{finishing ? 'Finishing dictation…' : 'Listening…'}</span>}
     {notice && <span role="status" className="pixel-dictation-notice">{notice}</span>}
   </div>
 }
