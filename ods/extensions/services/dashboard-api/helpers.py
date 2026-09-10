@@ -1285,3 +1285,32 @@ def string_snake_to_pascal_case_safe(text: str) -> str:
     if not parts:
         return ""
     return "".join(p.capitalize() for p in parts)
+
+
+def dict_flatten_nested_safe(d: dict, separator: str = '.', max_depth: int = 10) -> dict:
+    """
+    Safely flatten a nested dictionary into a flat dictionary with delimiter-separated keys.
+    Guards against None, non-dict, maximum recursion depth limit, circular references, and non-string separators.
+    """
+    if not isinstance(d, dict):
+        return {}
+    if not isinstance(separator, str):
+        separator = '.'
+    if not isinstance(max_depth, int) or max_depth < 1:
+        max_depth = 10
+    
+    result = {}
+    
+    def _flatten(current, prefix='', depth=0):
+        if depth >= max_depth or not isinstance(current, dict):
+            return
+        for k, v in current.items():
+            str_key = str(k)
+            new_key = f"{prefix}{separator}{str_key}" if prefix else str_key
+            if isinstance(v, dict) and depth + 1 < max_depth:
+                _flatten(v, new_key, depth + 1)
+            else:
+                result[new_key] = v
+    
+    _flatten(d)
+    return result

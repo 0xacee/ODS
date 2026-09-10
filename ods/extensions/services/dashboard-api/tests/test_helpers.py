@@ -15,6 +15,7 @@ from helpers import (
     numeric_safe_geometric_mean,
     list_deduplicate_by_key_safe,
     string_snake_to_pascal_case_safe,
+    dict_flatten_nested_safe,
     get_model_info, get_bootstrap_status, _update_lifetime_tokens,
     get_uptime, get_cpu_metrics, get_ram_metrics,
     check_service_health, get_all_services,
@@ -1669,3 +1670,16 @@ class TestStringSnakeToPascalCaseSafe:
         assert string_snake_to_pascal_case_safe(None) == ""
         assert string_snake_to_pascal_case_safe(123) == ""
         assert string_snake_to_pascal_case_safe("__double___underscores__") == "DoubleUnderscores"
+
+
+class TestDictFlattenNestedSafe:
+    def test_flatten_success(self):
+        d = {"a": {"b": {"c": 1}}}
+        res = dict_flatten_nested_safe(d)
+        assert res == {"a.b.c": 1}
+
+    def test_max_depth_and_none(self):
+        assert dict_flatten_nested_safe(None) == {}
+        d = {"a": {"b": {"c": 1}}}
+        res = dict_flatten_nested_safe(d, max_depth=1)
+        assert res == {"a": {"b": {"c": 1}}}
