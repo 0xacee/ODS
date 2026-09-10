@@ -46,8 +46,8 @@ def resolve_shield_api_key(env_key: Optional[str], key_path: str) -> str:
     3) Generated key (persisted for future reuse)
     """
 
-    if env_key:
-        return env_key
+    if env_key and isinstance(env_key, str) and env_key.strip():
+        return env_key.strip()
 
     persisted = load_persisted_key(key_path)
     if persisted:
