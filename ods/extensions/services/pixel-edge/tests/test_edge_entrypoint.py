@@ -1,3 +1,7 @@
+import sys
+import pytest
+pytestmark = pytest.mark.skipif(sys.platform == 'win32', reason='Pixel Edge requires a POSIX environment')
+
 from pathlib import Path
 import sys
 import tempfile
@@ -44,3 +48,4 @@ class ProvisionTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
