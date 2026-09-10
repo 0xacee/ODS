@@ -23,7 +23,7 @@ const PixelSettings = lazy(() => import('./pages/PixelSettings'))
 
 function getStorageValue(storage, key) {
   try {
-    return storage?.getItem(key)
+    return globalThis[storage]?.getItem(key)
   } catch {
     return null
   }
@@ -31,7 +31,7 @@ function getStorageValue(storage, key) {
 
 function setStorageValue(storage, key, value) {
   try {
-    storage?.setItem(key, value)
+    globalThis[storage]?.setItem(key, value)
   } catch {
     // Ignore storage failures in private windows or restricted environments.
   }
@@ -67,11 +67,11 @@ function App() {
   // API call fails, so the normal app shell is the safe default.
   const { firstRun, refresh: refreshFirstRun } = useFirstRun()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    return getStorageValue(globalThis.localStorage, 'ods-sidebar-collapsed') === 'true'
+    return getStorageValue('localStorage', 'ods-sidebar-collapsed') === 'true'
   })
 
   useEffect(() => {
-    setStorageValue(globalThis.localStorage, 'ods-sidebar-collapsed', String(sidebarCollapsed))
+    setStorageValue('localStorage', 'ods-sidebar-collapsed', String(sidebarCollapsed))
   }, [sidebarCollapsed])
 
   const dismissFirstRun = useCallback(() => {
@@ -106,7 +106,7 @@ function App() {
     return (
       <div className="min-h-screen bg-theme-bg text-theme-text">
         {!splashDone && <SplashScreen onComplete={() => {
-          setStorageValue(globalThis.sessionStorage, 'ods-splash-shown', '1')
+          setStorageValue('sessionStorage', 'ods-splash-shown', '1')
           setSplashDone(true)
         }} />}
         <Suspense fallback={
@@ -123,7 +123,7 @@ function App() {
   return (
     <div className={`pixel-app flex min-h-screen bg-theme-bg text-theme-text relative ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       {!splashDone && <SplashScreen onComplete={() => {
-        setStorageValue(globalThis.sessionStorage, 'ods-splash-shown', '1')
+        setStorageValue('sessionStorage', 'ods-splash-shown', '1')
         setSplashDone(true)
       }} />}
       <Sidebar
