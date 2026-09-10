@@ -288,7 +288,7 @@ describe('Pixel', () => {
     expect(column).toContainElement(screen.getByRole('button',{name:'Workspace',exact:true}))
     expect(column).toContainElement(screen.getByRole('link',{name:'Change model'}))
     expect(column).toContainElement(screen.getByRole('button',{name:'Search Pixel'}))
-    expect(panel).not.toContainElement(screen.getByRole('heading',{name:'Pixel',exact:true}))
+    expect(panel).not.toContainElement(screen.getByRole('heading',{name:'Portal',exact:true}))
     fireEvent.click(screen.getByTitle('Collapse preview'))
     expect(panel).toHaveClass('is-collapsed')
     fireEvent.click(screen.getByTitle('Expand preview'))
