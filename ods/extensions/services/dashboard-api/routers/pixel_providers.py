@@ -20,6 +20,7 @@ from pixel_provider_runtime_public import (
     normalize_change,
     normalize_outcome,
     normalize_runtime,
+    safe_reason,
 )
 from security import verify_api_key
 
@@ -131,6 +132,25 @@ async def save_providers(request: Request, _key: str = Depends(verify_api_key)):
     return await _request("POST", "/v1/pixel/providers/save", await _body(request))
 
 
+def _runtime_failure_reason(error):
+    """Bound the host envelope and retain only an exact public reason code."""
+    text = error.response_text
+    if type(text) is not str or len(text) > 2048:
+        return None
+    try:
+        if len(text.encode("utf-8")) > 2048:
+            return None
+        _check_depth(text)
+        value = json.loads(text, object_pairs_hook=_pairs,
+                           parse_float=_float, parse_constant=_constant)
+    except (ValueError, RecursionError):
+        return None
+    if (type(value) is not dict or set(value) != {"error", "code"}
+            or type(value["error"]) is not str):
+        return None
+    return safe_reason(value["code"], fallback=None)
+
+
 async def _runtime_request(method, payload=None):
     headers = NO_STORE
     try:
@@ -138,6 +158,12 @@ async def _runtime_request(method, payload=None):
                                        timeout=340 if method == "POST" else 65)
     except AgentHTTPError as error:
         status = error.status_code if error.status_code in (400, 409, 413, 503) else 502
+        reason = _runtime_failure_reason(error) if method == "POST" else None
+        if reason is not None:
+            raise HTTPException(status, {
+                "reason": reason,
+                "message": "Provider controller reported a problem; refresh runtime status before any further change.",
+            }, headers=headers) from None
         raise HTTPException(status, "Provider runtime request failed; inspect before retrying", headers=headers) from None
     except AgentUnavailable:
         raise HTTPException(503, "Provider runtime is unavailable; inspect before retrying", headers=headers) from None

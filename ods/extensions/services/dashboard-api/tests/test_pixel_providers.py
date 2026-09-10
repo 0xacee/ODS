@@ -1,10 +1,12 @@
-import pytest
 import copy
+import json
 from unittest.mock import AsyncMock, patch
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from routers import pixel_providers as api
 from pixel_provider_public import normalize_public
+from routers import pixel_providers as api
 
 DEFAULT_CONFIG = {
     "schemaVersion": 1,
@@ -14,6 +16,40 @@ DEFAULT_CONFIG = {
     "roles": {"leader": None, "backups": [], "advisor": None, "handoff": None},
     "policy": {"allowCloud": False, "maxAttempts": 3, "deadlineSeconds": 120}
 }
+
+@pytest.mark.parametrize("reason", ["provider-inspection-changed", "model-lifecycle-busy", "provider-recovery-conflict"])
+def test_runtime_conflict_preserves_only_allowlisted_host_code(client, mock_request, reason):
+    from host_agent_client import AgentHTTPError
+    mock_request.side_effect = AgentHTTPError(409, "private-sentinel", json.dumps({
+        "error": "private-sentinel", "code": reason,
+    }))
+    response = client.post("/api/pixel/providers/runtime", json={
+        "operation": "deactivate", "revision": "a" * 64, "providerRevision": 3,
+    }, headers={"Authorization": "Bearer test-key-12345"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason"] == reason
+    assert "private-sentinel" not in response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert mock_request.call_count == 1
+
+
+@pytest.mark.parametrize("raw", [
+    '{"code":"private-sentinel"}', '{"code":"provider-inspection-changed","code":"private-sentinel"}',
+    '{"code":"provider-inspection-changed","extra":"private-sentinel"}',
+    '{"code":"provider-inspection-changed","error":"' + 'x' * 2048 + '"}',
+    '{', '["provider-inspection-changed"]',
+])
+def test_runtime_conflict_unknown_or_malformed_body_stays_generic(client, mock_request, raw):
+    from host_agent_client import AgentHTTPError
+    mock_request.side_effect = AgentHTTPError(409, "private-sentinel", raw)
+    response = client.post("/api/pixel/providers/runtime", json={
+        "operation": "deactivate", "revision": "a" * 64, "providerRevision": 3,
+    }, headers={"Authorization": "Bearer test-key-12345"})
+    assert response.status_code == 409
+    assert isinstance(response.json()["detail"], str)
+    assert "private-sentinel" not in response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert mock_request.call_count == 1
 
 @pytest.mark.parametrize("field,value", [
     ("schemaVersion", True), ("revision", "0"),
