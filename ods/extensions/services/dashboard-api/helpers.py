@@ -1163,3 +1163,36 @@ def get_ram_metrics() -> dict:
     elif _system == "Darwin":
         return _get_ram_metrics_sysctl()
     return {"used_gb": 0, "total_gb": 0, "percent": 0}
+
+
+def list_deduplicate_by_key_safe(items: list, key_or_attr: any) -> list:
+    """
+    Safely deduplicate a list of dictionaries or objects by a specified key or attribute,
+    preserving original order and guarding against None, unhashable keys, type errors, or missing keys.
+    """
+    if not isinstance(items, (list, tuple)):
+        return []
+    if key_or_attr is None:
+        return list(items)
+    
+    seen = set()
+    result = []
+    for item in items:
+        val = None
+        if isinstance(item, dict):
+            val = item.get(key_or_attr)
+        elif hasattr(item, str(key_or_attr)):
+            val = getattr(item, str(key_or_attr), None)
+        else:
+            val = item
+        
+        try:
+            hash(val)
+            key_val = val
+        except TypeError:
+            key_val = str(val)
+        
+        if key_val not in seen:
+            seen.add(key_val)
+            result.append(item)
+    return result
