@@ -19,6 +19,7 @@ import PixelSelectionActions from '../components/PixelSelectionActions'
 import PixelMessageActions from '../components/PixelMessageActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
+import PixelTurnNavigation from '../components/PixelTurnNavigation'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
 import PixelPreviewViewport from '../components/PixelPreviewViewport'
 import PixelPreviewHistory from '../components/PixelPreviewHistory'
@@ -1249,6 +1250,11 @@ export default function Pixel({ systemStatus = null }) {
             <label className="block p-2 text-xs">Send shortcut<select className="mt-1 block w-full rounded border border-theme-border bg-theme-bg p-2" aria-label="Send shortcut" value={sendKey.mode} onChange={event => sendKey.change(event.target.value)}><option value="enter">Enter to send</option><option value="mod-enter">Ctrl/⌘+Enter to send</option></select></label>
             {sendKey.error && <p role="alert" className="p-2 text-xs">{sendKey.error}</p>}
 
+            <PixelTurnNavigation messages={messages} onNavigate={index => {
+              const row = scrollRef.current?.parentElement?.querySelector(`[data-pixel-message-index="${index}"]`)
+              row?.scrollIntoView?.({block:'start', behavior:'auto'})
+              row?.focus?.({preventScroll:true})
+            }}/>
             <PixelAdvice canInsert={!sending} onInsert={text => setInput(current => current ? `${current}\n\n${text}` : text)} />
             <PixelHandoffApproval label="Approvals" />
             <PixelProviderScopes chatId={chatIdRef.current} sending={sending} />
@@ -1382,7 +1388,7 @@ export default function Pixel({ systemStatus = null }) {
           </div>
         )}
         {messages.map((message, index) => (
-          <div key={index} data-pixel-response={message.role === 'assistant' ? '' : undefined} className={`mx-auto flex min-w-0 w-full max-w-5xl ${message.role === 'user' ? 'justify-end gap-2' : 'justify-start'}`}>
+          <div key={index} data-pixel-message-index={index} tabIndex={-1} data-pixel-response={message.role === 'assistant' ? '' : undefined} className={`mx-auto flex min-w-0 w-full max-w-5xl ${message.role === 'user' ? 'justify-end gap-2' : 'justify-start'}`}>
             {message.role === 'assistant' && <PixelMascot state={pixelReplyPose(message, sending && index === messages.length - 1)} settled={message.status !== 'streaming'} className="pixel-reply-character" />}
             <div className={`min-w-0 max-w-[min(85%,48rem)] rounded-2xl px-4 py-3 text-sm leading-6 [overflow-wrap:anywhere] ${
               message.role === 'user'
