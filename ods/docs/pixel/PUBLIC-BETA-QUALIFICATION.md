@@ -1,8 +1,10 @@
 # Portal public beta — 10 September 2026
 
-Portal (currently labelled Pixel in parts of ODS) is a core ODS feature under active qualification. This branch is the common baseline for supervised fleet and external user tests. It is not a declaration of general release readiness.
+Portal (currently labelled Pixel in parts of ODS) is a core ODS feature in public beta. On 10 September the owner ended the continuous supervised fleet campaign and handed further testing and improvements to the community. Both main PRs remain open and unmerged. This is not a declaration of general release readiness.
 
-## Current checkpoint — native search rollout and connection settings, 10 September
+**Start with [COMMUNITY-HANDOFF.md](COMMUNITY-HANDOFF.md)** for the final published/installed state, completed evidence, staged-but-uninstalled images, related PRs, and remaining work. Both task goals are cleared and the recurring fleet-test automation is paused. The checkpoints below are historical; references to running repairs or next actions do not authorize or describe ongoing automatic work.
+
+## Historical checkpoint — native search rollout and connection settings, 10 September
 
 Runtime composition `bef2245ad05ca4d4ea457b841f7773a994258d9b` combines the preceding beta `59acd787` with PR #3818 source `c379453a`. PR #3385 remains open at `5cb98461`; neither PR is merged. The new composition adds guided connection import and corrects declared output limits inherited from defaults or selected-model parameters. It does not raise context/output limits or enable unqualified sampling, thinking, cloud or access capabilities.
 
