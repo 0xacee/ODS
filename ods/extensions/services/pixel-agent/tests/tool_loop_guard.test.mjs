@@ -2877,6 +2877,44 @@ test("blocks exact-download tools when source or destination is ambiguous", () =
   });
 });
 
+test("download tool discovery does not consume the exact-byte violation fuse", () => {
+  const aborts = [];
+  const guard = createToolLoopGuard({ abortRun: (id) => { aborts.push(id); return true; } });
+  const url = "https://raw.githubusercontent.com/psf/requests/dae7ef63b4df6eded86637f251fc4e3a06c3b479/src/requests/api.py";
+  guard.observeRun(
+    { agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel",
+    { prompt: `Download the public source file ${url} into release-2663/requests-source/api.py without changing its bytes. Use the local file to report the exact get() and request() signatures and their starting line numbers in release-2663/requests-source/review.md. Verify quotations from the saved source. Do not execute repository code or install dependencies. Keep existing projects untouched; if exact-byte download is unavailable, say so rather than manufacturing a substitute.` }
+  );
+  for (const query of ["pixel_ops_download_stage pixel_ods_download_promote", "download stage promote exact byte"]) {
+    assert.equal(call(guard, "tool_search", { event: { params: { query, limit: 5 } } }), undefined);
+  }
+  assert.equal(call(guard, "tool_describe", { event: { params: { id: "pixel_ops_download_stage" } } }), undefined);
+  assert.deepEqual(call(guard, "tool_call", { event: { params: { id: "pixel_ops_download_stage", args: { url: "https://wrong.example/", filename: "wrong" } } } }), {
+    params: { id: "pixel_ops_download_stage", args: { url, filename: "api.py" } },
+  });
+  assert.deepEqual(call(guard, "tool_call", { event: { params: { id: "web_fetch", args: { url } } } }), {
+    block: true, blockReason: EXACT_DOWNLOAD_REQUIRES_BROKER_REASON,
+  });
+  assert.deepEqual(aborts, []);
+  assert.deepEqual(call(guard, "tool_call", { event: { params: { id: "write", args: { path: "release-2663/requests-source/api.py", content: "substitute" } } } }), {
+    block: true, blockReason: EXACT_DOWNLOAD_LOOP_ABORT_REASON,
+  });
+  assert.deepEqual(aborts, ["session-1"]);
+});
+
+test("download tool discovery is allowed before resolving an ambiguous request", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun(
+    { agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel",
+    { prompt: "Download https://example.com/a and https://example.com/b as exact bytes." }
+  );
+  assert.equal(call(guard, "tool_search", { event: { params: { query: "pixel_ops_download_stage", limit: 5 } } }), undefined);
+  assert.equal(call(guard, "tool_describe", { event: { params: { id: "pixel_ops_download_stage" } } }), undefined);
+  assert.deepEqual(call(guard, "pixel_ops_download_stage"), {
+    block: true, blockReason: EXACT_DOWNLOAD_REQUEST_UNBOUND_REASON,
+  });
+});
+
 test("fails closed when transformed web evidence is requested as an exact download", () => {
   const aborts = [];
   const guard = createToolLoopGuard({
