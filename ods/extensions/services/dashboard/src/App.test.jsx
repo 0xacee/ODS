@@ -177,3 +177,15 @@ describe('App', () => {
     expect(globalThis.fetch).not.toHaveBeenCalledWith('/api/auth/admin-session', expect.anything())
   })
 })
+
+test.each(['localStorage', 'sessionStorage'])('opens the beta workspace when %s access is denied', async storage => {
+  const getter = vi.spyOn(window, storage, 'get').mockImplementation(() => {
+    throw new window.DOMException('Storage denied', 'SecurityError')
+  })
+  try {
+    render(<App />)
+    expect(await screen.findByLabelText('Portal draft')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', {name:'Collapse sidebar'}))
+    expect(screen.getByRole('button', {name:'Expand sidebar'})).toBeVisible()
+  } finally { getter.mockRestore() }
+})
