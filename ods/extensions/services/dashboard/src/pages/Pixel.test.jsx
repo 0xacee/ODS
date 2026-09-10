@@ -1381,7 +1381,7 @@ describe('Pixel', () => {
     })
     const first = render(<StrictMode><Pixel /></StrictMode>)
     expect(await screen.findByText('Recovered final answer')).toBeVisible()
-    expect(await screen.findByTitle('Interactive Pixel preview')).toHaveAttribute('src',`/pixel-preview/${siteId}/`)
+    expect(await screen.findByTitle('Interactive Pixel preview')).toHaveAttribute('src',`/pixel-preview/${siteId}/__ods_view__.html`)
     expect(screen.queryByText('Partial answer')).toBeNull()
     expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
     await waitFor(() => expect(JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).inFlight).toBe(false))
