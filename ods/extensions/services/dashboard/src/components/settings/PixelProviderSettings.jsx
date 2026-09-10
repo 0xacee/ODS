@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { copy, createProvider, eligible, prepareSave, readConfiguration } from './pixelProviderForm'
 import PixelProviderRuntime from './PixelProviderRuntime'
+import PixelConnectionImport from './PixelConnectionImport'
 
 const inputStyle = 'w-full rounded border border-theme-border bg-theme-bg px-3 py-2 text-theme-text focus:outline-none focus:ring-2 focus:ring-blue-500'
 const buttonStyle = 'rounded border border-theme-border px-3 py-2 text-sm hover:bg-white/5 disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-blue-500'
@@ -27,15 +28,24 @@ export default function PixelProviderSettings() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [runtimeBusy, setRuntimeBusy] = useState(false)
+  const [connectionBusy, setConnectionBusy] = useState(false)
+  const [importReset, setImportReset] = useState(0)
+  const connectionBusyRef = useRef(false)
   const runtimeBusyRef = useRef(false)
   const mounted = useRef(false)
   const sequence = useRef(0)
   const controller = useRef(null)
   const writePending = useRef(false)
   const runtimeBusyChanged = useCallback(value => {
-    if (value && writePending.current) return false
+    if (value && (writePending.current || connectionBusyRef.current)) return false
     runtimeBusyRef.current = value
     if (mounted.current) setRuntimeBusy(value)
+    return true
+  }, [])
+  const connectionBusyChanged = useCallback(value => {
+    if (value && (writePending.current || runtimeBusyRef.current)) return false
+    connectionBusyRef.current = value
+    if (mounted.current) setConnectionBusy(value)
     return true
   }, [])
 
@@ -88,8 +98,9 @@ export default function PixelProviderSettings() {
   }, [])
 
   const load = useCallback(() => {
-    if (writePending.current || runtimeBusyRef.current) return
+    if (writePending.current || runtimeBusyRef.current || connectionBusyRef.current) return
     writePending.current = true
+    setImportReset(value => value + 1)
     setLoading(true)
     setError('')
     setNotice('')
@@ -103,7 +114,7 @@ export default function PixelProviderSettings() {
   }, [load])
 
   const edit = mutate => {
-    if (writePending.current || runtimeBusyRef.current) return
+    if (writePending.current || runtimeBusyRef.current || connectionBusyRef.current) return
     setDraft(value => { const next = copy(value); mutate(next); return next })
     setDirty(true)
     setError('')
@@ -111,10 +122,10 @@ export default function PixelProviderSettings() {
   }
   const providerEdit = (id, key, value) => edit(next => { next.providers.find(p => p.id === id)[key] = value })
   const reload = () => {
-    if (!writePending.current && !runtimeBusyRef.current && (!dirty || window.confirm('Discard unsaved Pixel provider edits and reload?'))) load()
+    if (!writePending.current && !runtimeBusyRef.current && !connectionBusyRef.current && (!dirty || window.confirm('Discard unsaved Pixel provider edits and reload?'))) load()
   }
   const save = () => {
-    if (writePending.current || runtimeBusyRef.current || saving || loading || stale || !dirty) return
+    if (writePending.current || runtimeBusyRef.current || connectionBusyRef.current || saving || loading || stale || !dirty) return
     let payload
     try { payload = prepareSave(draft, snapshot, secrets, removals) }
     catch (problem) { setError(problem.message); return }
@@ -133,6 +144,14 @@ export default function PixelProviderSettings() {
       setNewId('')
       setNewLabel('')
     } catch (problem) { setError(problem.message) }
+  }
+  const importConnection = (provider, apiKey) => {
+    if (writePending.current || runtimeBusyRef.current || connectionBusyRef.current || stale || !draft
+      || draft.providers.length >= 32 || draft.providers.some(p => p.id === provider.id)) return false
+    edit(next => { next.providers.push(copy(provider)) })
+    setSecrets(values => ({ ...values, [provider.id]: apiKey }))
+    setNotice('Connection added as a disabled provider draft. Review roles, Save, and separately Apply when ready.')
+    return true
   }
   const remove = id => {
     edit(next => {
@@ -157,12 +176,13 @@ export default function PixelProviderSettings() {
       <div><h2 id="pixel-connections-title" className="text-lg font-semibold">Pixel connections</h2>
         <p className="text-sm text-theme-text-muted">Choose inference providers without changing other ODS apps.</p></div>
       <div className="flex flex-wrap gap-2">
-        <button className={buttonStyle} disabled={loading || saving || runtimeBusy} onClick={reload}>Reload providers</button>
-        <button className={buttonStyle} disabled={!dirty || loading || saving || runtimeBusy} onClick={() => {
-          if (writePending.current || runtimeBusyRef.current) return
+        <button className={buttonStyle} disabled={loading || saving || runtimeBusy || connectionBusy} onClick={reload}>Reload providers</button>
+        <button className={buttonStyle} disabled={!dirty || loading || saving || runtimeBusy || connectionBusy} onClick={() => {
+          if (writePending.current || runtimeBusyRef.current || connectionBusyRef.current) return
+          setImportReset(value => value + 1)
           setDraft(copy(snapshot)); setSecrets({}); setRemovals({}); setDirty(false); setError(''); setNotice('')
         }}>Cancel provider edits</button>
-        <button className={buttonStyle + ' bg-blue-600 text-white'} disabled={!dirty || stale || saving || loading || runtimeBusy} onClick={save}>{saving ? 'Saving providers…' : 'Save providers'}</button>
+        <button className={buttonStyle + ' bg-blue-600 text-white'} disabled={!dirty || stale || saving || loading || runtimeBusy || connectionBusy} onClick={save}>{saving ? 'Saving providers…' : 'Save providers'}</button>
       </div>
     </div>
     <p className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm">Saving providers does not apply them. Inspect the current runtime below before making a change.</p>
@@ -171,9 +191,11 @@ export default function PixelProviderSettings() {
     {notice && <p role="status" className="text-sm text-emerald-400">{notice}</p>}
     {stale && <p className="text-sm text-amber-400">Reload the stored configuration before another save.</p>}
     {loading && <p role="status">Loading provider settings…</p>}
-    <PixelProviderRuntime savedRevision={snapshot?.revision ?? null} saving={loading || saving} blocked={dirty || stale}
+    <PixelProviderRuntime savedRevision={snapshot?.revision ?? null} saving={loading || saving || connectionBusy} blocked={dirty || stale || connectionBusy}
       routingEnabled={snapshot?.enabled === true} allowCloud={snapshot?.policy.allowCloud === true} onBusyChange={runtimeBusyChanged} />
-    {draft && <fieldset disabled={loading || saving || runtimeBusy} className="min-w-0 space-y-5">
+    {draft && <PixelConnectionImport key={`${snapshot?.revision}:${importReset}`} providers={draft.providers}
+      disabled={loading || saving || runtimeBusy || stale} onBusyChange={connectionBusyChanged} onImport={importConnection} />}
+    {draft && <fieldset disabled={loading || saving || runtimeBusy || connectionBusy} className="min-w-0 space-y-5">
       <legend className="sr-only">Pixel provider configuration</legend>
       <div className="flex flex-wrap gap-5">
         <Toggle label="Enable desired Pixel routing" checked={draft.enabled} onChange={e => edit(next => { next.enabled = e.target.checked })} />

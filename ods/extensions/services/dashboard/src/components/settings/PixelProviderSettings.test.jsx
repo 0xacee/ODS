@@ -13,10 +13,11 @@ const response = (configuration, status = 200) => ({ ok: status === 200, status,
   json: async () => ({ configuration, runtime: { status: 'not-applied' } }) })
 const adviceReadiness = () => ({ status: 'not-configured', revision: 0, host: 'canary',
   sourceSha256: null, runtimeId: null, candidates: [], job: null })
-function setup(doc, post = async () => response({ ...doc, revision: doc.revision + 1 })) {
+function setup(doc, post = async () => response({ ...doc, revision: doc.revision + 1 }), probe = null) {
   const fetchMock = vi.fn(async (url, options) => {
     if (url === '/api/pixel/providers/runtime') return { ok: true, status: 200, json: async () => runtimeDoc('unavailable') }
     if (url === '/api/pixel/providers/save') return post(options)
+    if (url === '/api/pixel/providers/connection-probe' && probe) return probe(options)
     if (url === '/api/pixel/advice-runtime') return { ok: true, status: 200, json: async () => adviceReadiness() }
     if (url === '/api/pixel/providers') return response(doc)
     throw new Error(`Unexpected fetch: ${url}`)
@@ -26,6 +27,51 @@ function setup(doc, post = async () => response({ ...doc, revision: doc.revision
   return fetchMock
 }
 const loaded = () => screen.findByLabelText('Model')
+
+it('imports a disabled peer without changing old keys or roles and requires a separate Save', async () => {
+  const doc = tower(); doc.roles.leader = 'tower'
+  const secret = 'ods_infer_' + 'c'.repeat(64)
+  const bundle = { schemaVersion: 1, kind: 'ods-inference-connection', label: 'New peer',
+    baseUrl: 'http://127.0.0.1:40345/v1', model: 'ods/shared', deviceId: 'device-' + 'b'.repeat(16),
+    expiresAt: Math.floor(Date.now() / 1000) + 3600, expected: { catalogId: 'glm', runtimeModelId: 'GLM' },
+    credential: { apiKey: secret }, execution: 'client-owned' }
+  let finish
+  const pending = new Promise(resolve => { finish = resolve })
+  const fetchMock = setup(doc, async options => {
+    const value = JSON.parse(options.body).document
+    return response({ ...value, revision: 1, providers: value.providers.map(p => ({ ...p, hasCredential: true })) })
+  }, () => pending)
+  await loaded()
+  const storageBeforeImport = Object.entries(localStorage)
+  fireEvent.change(screen.getByLabelText('Connection bundle (private)'), { target: { value: JSON.stringify(bundle) } })
+  fireEvent.click(screen.getByText('Review endpoint'))
+  fireEvent.click(screen.getByRole('checkbox', { name: /Send this connection key only/ }))
+  fireEvent.click(screen.getByText('Check connection metadata'))
+  expect(screen.getByText('Reload providers')).toBeDisabled()
+  expect(screen.getByLabelText('New provider ID')).toBeDisabled()
+  expect(screen.getByLabelText('Model')).toBeDisabled()
+  finish({ ok: true, json: async () => ({ schemaVersion: 1, endpoint: bundle.baseUrl, deviceId: bundle.deviceId,
+    expiresAt: bundle.expiresAt, expected: bundle.expected, metadata: { catalogId: 'glm', routedModel: 'GLM',
+      identitySource: 'ods-verified-route', routeSeq: 23, contextLength: 65536, maxOutputTokens: 4096,
+      expiresAt: bundle.expiresAt, execution: 'client-owned',
+      capabilities: { chat: true, tools: false, vision: false, agentViable: true } } }) })
+  await screen.findByText('Add to provider draft')
+  fireEvent.click(screen.getByText('Add to provider draft'))
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/save'))).toHaveLength(0)
+  expect(screen.getByRole('combobox', { name: 'Leader', exact: true })).toHaveValue('tower')
+  expect(Object.entries(localStorage)).toEqual(storageBeforeImport)
+  expect(JSON.stringify(Object.entries(localStorage))).not.toContain(secret)
+  fireEvent.click(screen.getByText('Save providers'))
+  await screen.findByText('Settings saved. Pixel runtime has not been changed.')
+  const saves = fetchMock.mock.calls.filter(([url]) => url.endsWith('/save'))
+  expect(saves).toHaveLength(1)
+  const payload = JSON.parse(saves[0][1].body)
+  expect(payload.document.roles).toEqual(doc.roles)
+  expect(payload.document.providers[0]).toEqual(doc.providers[0])
+  expect(payload.document.providers[1]).toMatchObject({ id: 'new-peer', enabled: false, supportsTools: false, hasCredential: false })
+  expect(payload.credentialChanges).toEqual({ 'new-peer': { action: 'set', value: secret } })
+  expect(fetchMock.mock.calls.some(([url, options]) => url.endsWith('/runtime') && options?.method === 'POST')).toBe(false)
+})
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear() })
 
 it('renders a pristine install without claiming runtime activation', async () => {

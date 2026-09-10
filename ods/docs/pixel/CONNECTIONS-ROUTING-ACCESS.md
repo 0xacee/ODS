@@ -99,8 +99,10 @@ Detaching a local key does not revoke it at its provider.
 
 `hasCredential` means a reference is configured, not that its key is valid or
 passed a provider handshake. Host-only credential resolution checks the exact
-revision, custody, size and key contents. Connection verification remains
-pending. Do not provision real cloud keys into this draft for runtime use yet.
+revision, custody, size and key contents. Guided scoped-connection metadata
+verification is now implemented in source as described below; actual installed
+onboarding/inference acceptance remains pending. Do not provision real cloud keys
+into this draft for runtime use yet.
 
 Activity proof distinguishes busy, idle and unknown and binds observations to
 a runtime epoch and freshness interval. Every chat, API, cron and background
@@ -157,7 +159,36 @@ confirmed start/stop, actual service state, and one-time connection-bundle
 copying. The copied `/v1` URL must be HTTPS or local loopback through an
 operator-created SSH tunnel; ODS does not automatically create network access.
 Keys are not persisted in browser storage, and ambiguous writes require a fresh
-read before another attempt. Client-side import/probing/activation is pending.
+read before another attempt. The source now supports guided client import and
+metadata inspection; installed onboarding and inference acceptance remain pending.
+
+### Guided connection import (source-only qualification)
+
+On the client ODS host, Settings > Connections accepts the private connection
+bundle copied from the sharing host. Review is local and does not send its key.
+The user must explicitly confirm the displayed endpoint before checking metadata.
+Loopback refers to the ODS host, not the browser; an already-trusted SSH tunnel or
+verified HTTPS transport must exist. This UI does not open ports or create tunnels.
+
+The owner-authenticated `POST /api/pixel/providers/connection-probe` accepts only
+`{bundle: <original JSON string>, confirmedEndpoint: <reviewed URL>}`. Its fixed
+host-agent counterpart `/v1/pixel/providers/connection-probe` validates the exact
+existing connection schema, including duplicate keys, expiry and expected model
+identity, before starting a disposable 20-second child. Only one such child is
+allowed per host-agent process. The scoped key travels on stdin, not argv, logs,
+environment or disk. The existing single-hop transport makes only a metadata
+`GET /v1/models`: no redirects, proxy environment, inference or tool execution.
+Timeout kills and reaps the exact child. The strict response contains no key.
+
+A successful check offers an explicit Add to provider draft. It creates a new,
+disabled ODS-peer provider using the verified endpoint and declared context/output/
+tool/vision metadata, with reasoning off until separately configured. A declaration
+of `tools:false` stays false. Metadata matching is not proof of successful inference
+or tool behavior. Existing providers, credentials, roles and runtime stay unchanged.
+The user must separately review roles/capabilities, Save and Apply. Pasted keys are
+cleared on submission/failure/discard; a verified key is held only in memory until
+added to the existing write-only provider form. Cancel/unmount rejects late results.
+No automatic save, apply, retry, cloud opt-in or grant revocation occurs.
 
 Activation validates the resolved Compose security settings and requires an
 already healthy, installation-owned model-router. The port defaults to 4005
