@@ -40,6 +40,28 @@ it('requires explicit consent and submits only the server candidate ID once', as
   expect(localStorage.getItem(storage)).toBe(id)
 })
 
+it('defers status reads and stop until the prepare receipt arrives', async () => {
+  let resolvePrepare
+  const pendingPrepare = new Promise(resolve => { resolvePrepare = resolve })
+  const { fetchMock } = await setup(async url => {
+    if (url.endsWith('/prepare')) return pendingPrepare
+    return response(url.endsWith('advice-runtime') ? state() : job())
+  })
+  fireEvent.click(screen.getByLabelText(consent))
+  fireEvent.click(screen.getByRole('button', { name: 'Prepare private runtime' }))
+  await screen.findByText('Tracked setup: ' + id)
+  fireEvent.click(screen.getByRole('button', { name: 'Check setup' }))
+  const stop = screen.getByRole('button', { name: 'Stop setup' })
+  expect(stop).toBeDisabled()
+  fireEvent.click(stop)
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/status') || url.endsWith('/cancel'))).toHaveLength(0)
+  await act(async () => resolvePrepare(response(job())))
+  await screen.findByText('Setup: running')
+  expect(screen.getByRole('button', { name: 'Stop setup' })).toBeEnabled()
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/status'))).toHaveLength(1))
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/prepare'))).toHaveLength(1)
+})
+
 it('reload adopts durable setup without automatically preparing again', async () => {
   const { fetchMock } = await setup(async url => response(url.endsWith('advice-runtime') ? { ...state(), job: job() } : job()))
   await screen.findByText('Setup: running')
