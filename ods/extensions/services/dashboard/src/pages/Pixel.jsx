@@ -390,6 +390,11 @@ function retainedResult(events) {
       const frame = JSON.parse(payload)
       if (frame?.error) { failed = true; continue }
       if (failed) continue
+      if (isCleanContextRecoveryFrame(frame)) {
+        content = 'Pixel did not start this attempt. Send your message again to continue.'
+        failed = true
+        continue
+      }
       const candidate = parseVerifiedPreviewFrame(frame)
       if (candidate) preview = candidate
       const text = frame?.choices?.[0]?.delta?.content
