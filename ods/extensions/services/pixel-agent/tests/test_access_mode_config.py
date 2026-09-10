@@ -1,4 +1,9 @@
 """Roundtrip, isolation and malformed-baseline tests for access-mode changes."""
+import sys
+if sys.platform == "win32":
+    import pytest
+    pytest.skip("Pixel services require a POSIX environment", allow_module_level=True)
+
 import copy
 import json
 import os

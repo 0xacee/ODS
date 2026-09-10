@@ -8,6 +8,11 @@ nosniff.  .env and arbitrary hidden files remain blocked.  Source tree is
 never mutated.
 """
 
+import sys
+if sys.platform == "win32":
+    import pytest
+    pytest.skip("Pixel services require a POSIX environment", allow_module_level=True)
+
 import http.client
 import importlib.util
 import os
@@ -807,3 +812,4 @@ def test_metadata_is_never_opened_or_traversed_and_alias_is_rejected():
         (site / "assets").symlink_to(site / ".git", target_is_directory=True)
         with pytest.raises(MODULE.PreviewError, match="unsafe"):
             MODULE.publish_snapshot(workspace, previews, site.name, os.getuid())
+

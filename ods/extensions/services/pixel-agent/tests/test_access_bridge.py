@@ -1,3 +1,8 @@
+import sys
+if sys.platform == "win32":
+    import pytest
+    pytest.skip("Pixel services require a POSIX environment", allow_module_level=True)
+
 import contextlib
 import os
 from pathlib import Path
