@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Pencil } from 'lucide-react'
 import { fileLanguage, PixelCodeLines, PixelLanguageBadge } from './PixelCodeBlock'
 import './pixel-file-changes.css'
@@ -45,8 +45,9 @@ function DiffLines({rows, path}) {
   }}/>
 }
 
-function FileChange({file, onPreview}) {
+function FileChange({file, onPreview, expansion}) {
   const [open, setOpen] = useState(false)
+  useEffect(() => {if (expansion) setOpen(expansion.open)}, [expansion])
   const [copyState, setCopyState] = useState('Copy')
   const rows = Array.isArray(file.diff) ? file.diff : []
   const hasCounts = count(file.additions) && count(file.deletions)
@@ -75,6 +76,21 @@ function FileChange({file, onPreview}) {
 
 /** Receives verified changes only. Does not derive counts from truncated rows. */
 export default function PixelFileChanges({changes = [], onPreview}) {
+  const [query, setQuery] = useState('')
+  const [kind, setKind] = useState('')
+  const [expansion, setExpansion] = useState(null)
   if (!changes.length) return null
-  return <div className="pixel-file-changes" aria-label="File changes">{changes.map(file => <FileChange key={file.path} file={file} onPreview={onPreview}/>)}</div>
+  const shown = changes.filter(file => file.path.toLowerCase().includes(query.toLowerCase()) && (!kind || file.change === kind))
+  return <div className="pixel-file-changes" aria-label="File changes">
+    {(changes.length > 1 || query || kind) && <div className="my-2 flex flex-wrap items-center gap-2 text-xs">
+      <input type="search" aria-label="Filter changed files" placeholder="Find a changed file…" className="min-w-0 rounded border border-theme-border bg-theme-bg p-2" value={query} onChange={event => setQuery(event.target.value)}/>
+      <select aria-label="Change kind" className="rounded border border-theme-border bg-theme-bg p-2" value={kind} onChange={event => setKind(event.target.value)}><option value="">All changes</option>{Object.entries(LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>
+      <button type="button" onClick={() => setExpansion({open:true})}>Expand all changes</button>
+      <button type="button" onClick={() => setExpansion({open:false})}>Collapse all changes</button>
+      {(query || kind) && <button type="button" onClick={() => {setQuery(''); setKind('')}}>Clear change filters</button>}
+      <span role="status">Showing {shown.length} of {changes.length} changed files</span>
+    </div>}
+    {!shown.length && <p role="status">No changed files match these filters.</p>}
+    {shown.map(file => <FileChange key={file.path} file={file} onPreview={onPreview} expansion={expansion}/>)}
+  </div>
 }
