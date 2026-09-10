@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Search, X, MessageSquare, Plus, Settings, ListChecks, Globe2 } from 'lucide-react'
-import { readConversations, conversationTitle, SELECT_EVENT } from '../lib/pixelConversations'
+import { readConversations, conversationTitle, SELECT_EVENT, LIBRARY_EVENT } from '../lib/pixelConversations'
 
 export const OPEN_PIXEL_SEARCH = 'ods:pixel-search'
 export default function PixelCommandSearch({ onInsert, onNewTask }) {
@@ -23,9 +23,18 @@ export default function PixelCommandSearch({ onInsert, onNewTask }) {
     const key = event => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); open() }
     }
+    const refresh = () => {
+      if (!dialog.current?.open) return
+      setChats(readConversations()); setIndex(0)
+    }
     window.addEventListener(OPEN_PIXEL_SEARCH, open)
     window.addEventListener('keydown', key)
-    return () => { window.removeEventListener(OPEN_PIXEL_SEARCH, open); window.removeEventListener('keydown', key) }
+    window.addEventListener(LIBRARY_EVENT, refresh)
+    window.addEventListener('storage', refresh)
+    return () => {
+      window.removeEventListener(OPEN_PIXEL_SEARCH, open); window.removeEventListener('keydown', key)
+      window.removeEventListener(LIBRARY_EVENT, refresh); window.removeEventListener('storage', refresh)
+    }
   }, [])
   const entries = [
     { title: 'New task', detail: 'Start a fresh conversation', icon: Plus, run: onNewTask },
