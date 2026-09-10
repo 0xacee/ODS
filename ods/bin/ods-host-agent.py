@@ -6990,6 +6990,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_remote_provider_proof()
         elif self.path == "/v1/pixel/providers/save":
             self._handle_pixel_providers(save=True)
+        elif self.path == "/v1/pixel/providers/connection-probe":
+            self._handle_pixel_connection_probe()
         elif self.path == "/v1/pixel/providers/runtime":
             self._handle_pixel_providers_runtime(change=True)
         elif self.path == "/v1/pixel/settings/save":
@@ -7418,6 +7420,48 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         except (OSError, ValueError, TypeError, RecursionError):
             json_response(self, 503, {"error": "Assistant identity is unavailable"}, no_store=True)
+            return
+        json_response(self, 200, result, no_store=True)
+
+    def _handle_pixel_connection_probe(self):
+        """Owner-confirmed metadata GET only; credentials never enter logs/state."""
+        if not check_auth(self):
+            return
+        try:
+            from pixel_provider.connection_import import MAX_REQUEST, ERRORS, inspect_connection
+            from pixel_provider.store import StoreError, decode_document
+        except ImportError:
+            json_response(self, 503, {"error": "Connection inspection unavailable"}, no_store=True)
+            return
+        try:
+            lengths = self.headers.get_all("Content-Length", [])
+            if (len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,9}", lengths[0])
+                    or self.headers.get("Transfer-Encoding") is not None):
+                json_response(self, 400, {"error": "Invalid request framing"}, no_store=True)
+                return
+            length = int(lengths[0])
+            if not 0 < length <= MAX_REQUEST:
+                json_response(self, 413 if length > MAX_REQUEST else 400,
+                              {"error": "Invalid request size"}, no_store=True)
+                return
+            old_timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(10)
+                raw = self.rfile.read(length)
+            finally:
+                self.connection.settimeout(old_timeout)
+            if len(raw) != length:
+                raise StoreError('invalid-request')
+            result = inspect_connection(decode_document(raw))
+        except StoreError as error:
+            reason = error.code if error.code in ERRORS else 'invalid-request'
+            code = 409 if reason == 'connection-probe-busy' else 400 if reason in {
+                'invalid-request', 'invalid-connection', 'connection-endpoint-not-confirmed',
+                'unsafe-connection-address'} else 503
+            json_response(self, code, {"error": "Connection inspection failed", "code": reason}, no_store=True)
+            return
+        except (OSError, ValueError, TypeError, RecursionError):
+            json_response(self, 503, {"error": "Connection inspection unavailable"}, no_store=True)
             return
         json_response(self, 200, result, no_store=True)
 

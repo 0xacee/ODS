@@ -1,6 +1,7 @@
 """Pure declared-capacity selection and current-process readback comparison."""
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
+import math
 import re
 import shlex
 
@@ -79,6 +80,37 @@ def compare_readback(config, envelope, *, pid, revision):
     return all(canonical(envelope[name]) == canonical(value) for name, value in expected.items())
 
 
+def _declared_output(defaults, pixel, primary, output):
+    """Resolve configured output, not backend-observed generation capacity.
+
+    The pinned SDK resolves defaults, a selected model's params, then the agent.
+    Token aliases are resolved within each layer before later layers override it.
+    Managed turns use a per-lease model id, not the static managed placeholder.
+    """
+    layers = [_object(defaults.get("params", {}))]
+    if primary != "ods-policy/managed":
+        selected = _object(defaults.get("models", {})).get(primary, {})
+        layers.append(_object(_object(selected).get("params", {})))
+    layers.append(_object(pixel.get("params", {})))
+    declared = resolved = False
+    for params in layers:
+        for key in ("maxTokens", "max_completion_tokens", "max_tokens"):
+            if key in params:
+                declared = True
+                value = params[key]
+                # Match SDK alias selection and layer precedence. Validate the
+                # final winner below, not a default shadowed by the agent.
+                if (type(value) is int or type(value) is float and math.isfinite(value)) and value >= 0:
+                    output = value
+                    resolved = True
+                    break
+    # Invalid declarations are not evidence for a larger model default.
+    if (declared and not resolved or type(output) is not int
+            or not 1 <= output <= 10_000_000):
+        raise SettingsError("settings-output-capacity-unavailable")
+    return output
+
+
 def declared_capabilities(config, provider_document=None, *, thinking_levels=None, sampling_supported=False):
     canonical(config)
     agents, entries, pixel = _agents(config)
@@ -126,6 +158,6 @@ def declared_capabilities(config, provider_document=None, *, thinking_levels=Non
     levels = thinking_levels if thinking_levels is not None else ([] if reasoning else ["off"])
     return _capabilities({"providerContextTokens": context, "providerMaxOutputTokens": output,
         "activeContextTokens": pixel.get("contextTokens", defaults.get("contextTokens", context)),
-        "activeMaxOutputTokens": _object(pixel.get("params", {})).get("maxTokens", output),
+        "activeMaxOutputTokens": _declared_output(defaults, pixel, primary, output),
         "backendContextTokens": None, "capacitySource": source, "supportedThinkingLevels": levels,
         "samplingSupported": sampling_supported, "pixelOnlyRuntime": len(entries) == 1})

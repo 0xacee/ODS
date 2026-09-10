@@ -15,6 +15,7 @@ from host_agent_client import (
 from host_agent_client import (
     async_request_json as request_agent_json,
 )
+from pixel_connection_public import normalize_connection_result
 from pixel_provider_public import normalize_public
 from pixel_provider_runtime_public import (
     normalize_change,
@@ -130,6 +131,49 @@ async def get_providers(_key: str = Depends(verify_api_key)):
 @router.post("/api/pixel/providers/save")
 async def save_providers(request: Request, _key: str = Depends(verify_api_key)):
     return await _request("POST", "/v1/pixel/providers/save", await _body(request))
+
+
+@router.post("/api/pixel/providers/connection-probe")
+async def probe_connection(request: Request, _key: str = Depends(verify_api_key)):
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 65536:
+            raise HTTPException(413, "Connection request exceeds size limit", headers=NO_STORE)
+        raw.extend(chunk)
+    try:
+        text = bytes(raw).decode('utf-8')
+        _check_depth(text)
+        value = json.loads(text, object_pairs_hook=_pairs, parse_float=_float, parse_constant=_constant)
+        if (type(value) is not dict or set(value) != {'bundle', 'confirmedEndpoint'}
+                or type(value['bundle']) is not str or len(value['bundle'].encode('utf-8')) > 32768
+                or type(value['confirmedEndpoint']) is not str
+                or not 1 <= len(value['confirmedEndpoint']) <= 2048):
+            raise ValueError('invalid-request')
+        # Preserve original bundle text so the host also rejects duplicate keys.
+        _check_depth(value['bundle'])
+        bundle = json.loads(value['bundle'], object_pairs_hook=_pairs,
+                            parse_float=_float, parse_constant=_constant)
+        if type(bundle) is not dict:
+            raise ValueError('invalid-request')
+    except (ValueError, RecursionError):
+        raise HTTPException(400, "Invalid connection request", headers=NO_STORE) from None
+    try:
+        result = await request_agent_json('POST', '/v1/pixel/providers/connection-probe',
+                                          payload=value, timeout=25)
+        result = normalize_connection_result(result)
+        if (result['endpoint'] != value['confirmedEndpoint']
+                or result['deviceId'] != bundle.get('deviceId')
+                or result['expiresAt'] != bundle.get('expiresAt')
+                or result['expected'] != bundle.get('expected')):
+            raise ValueError('connection-identity-mismatch')
+    except AgentHTTPError as error:
+        status = error.status_code if error.status_code in (400, 409, 413, 503) else 502
+        raise HTTPException(status, "Connection metadata could not be verified", headers=NO_STORE) from None
+    except AgentUnavailable:
+        raise HTTPException(503, "Connection inspection unavailable", headers=NO_STORE) from None
+    except (AgentProtocolError, ValueError, TypeError, RecursionError):
+        raise HTTPException(502, "Invalid connection inspection response", headers=NO_STORE) from None
+    return JSONResponse(content=result, headers=NO_STORE)
 
 
 def _runtime_failure_reason(error):
