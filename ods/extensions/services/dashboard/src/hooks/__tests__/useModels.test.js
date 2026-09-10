@@ -85,6 +85,18 @@ describe('useModels', () => {
     expect(result.current.error).toBeNull()
   })
 
+  test('keeps observed runtime identity separate from catalog activation identity and clears it on unload', async () => {
+    fetch.mockResolvedValue(modelsResponse([], { loadedModel: 'owner-native-35b' }))
+    const { result } = renderHook(() => useModels())
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.loadedModel).toBe('owner-native-35b')
+    expect(result.current.currentModel).toBeNull()
+    expect(result.current.activationReadyModel).toBeNull()
+    fetch.mockResolvedValue(modelsResponse([]))
+    await act(async () => { await result.current.refresh() })
+    expect(result.current.loadedModel).toBeNull()
+  })
+
   test('surfaces backend-owned activation as a pending model action', async () => {
     const target = 'slow-model'
     fetch.mockResolvedValue(modelsResponse(

@@ -137,6 +137,18 @@ test('compact catalog uses fitted pages and preserves filter reset behavior', ()
   expect(screen.queryByRole('button',{name:'Page 2'})).toBeNull()
 })
 
+test.each([false, true])('displays an observed runtime outside the catalog without marking a catalog model loaded (compact=%s)', (compact) => {
+  useModelsMock.mockReturnValue(baseState({
+    loadedModel: 'Qwen3.6-35B-A3B-GGUF',
+    configuredModel: 'qwen3.5-9b-q4',
+    models: [model({ status: 'downloaded' })],
+  }))
+  render(createElement(MemoryRouter, null, createElement(Models, { compact })))
+  expect(screen.getByText(/Qwen3\.6-35B-A3B-GGUF/)).toBeInTheDocument()
+  expect(screen.queryByText(/Selected during install:/)).not.toBeInTheDocument()
+  expect(screen.getAllByTitle('Run Qwen 3.5 9B')[0]).not.toBeDisabled()
+})
+
 test('renders the model library layout from catalog fields only', () => {
   useModelsMock.mockReturnValue(baseState({
     currentModel: 'qwen3.5-9b-q4',

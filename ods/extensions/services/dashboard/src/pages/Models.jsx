@@ -63,6 +63,7 @@ export default function Models({ compact = false }) {
     models,
     gpu,
     currentModel,
+    loadedModel,
     configuredModel,
     odsMode,
     configuredMode,
@@ -341,11 +342,11 @@ export default function Models({ compact = false }) {
       <CurrentModelPanel
         compact={compact}
         model={activeModel}
-        currentModel={currentModel}
+        currentModel={currentModel || loadedModel}
         gpu={gpu}
       />
 
-      {!currentModel && configuredModel && (
+      {!currentModel && !loadedModel && configuredModel && (
         <section className="mb-4 rounded-xl border border-amber-400/25 bg-amber-500/10 p-4">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm text-amber-200">
