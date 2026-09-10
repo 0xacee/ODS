@@ -15,10 +15,12 @@ beforeEach(() => {
     requirements: [], docker: { installed: true, running: true, version: "test",
       compose_installed: true, compose_version: "test" },
   });
-  vi.mocked(checkPrerequisites).mockResolvedValue({
+  const prerequisites = {
     git_installed: true, docker_installed: true, docker_running: true,
+    compose_installed: true, compose_version: "test",
     wsl2_needed: false, wsl2_installed: true, all_met: true,
-  });
+  };
+  vi.mocked(checkPrerequisites).mockResolvedValue(prerequisites);
   vi.mocked(detectGpu).mockResolvedValue({
     gpu: { vendor: "nvidia", name: "Test GPU", vram_mb: 24576, driver_version: null },
     recommended_tier: 3, tier_description: "Tier 3",
