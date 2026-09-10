@@ -3,7 +3,6 @@
 import importlib.util
 from pathlib import Path
 from uuid import uuid4
-import pytest
 
 TOKEN_SPY_DIR = Path(__file__).resolve().parent.parent
 
