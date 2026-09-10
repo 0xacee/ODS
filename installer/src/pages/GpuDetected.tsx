@@ -46,7 +46,7 @@ export default function GpuDetected({ onNext, initialTier }: Props) {
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center h-full px-8">
+      <div className="flex flex-col items-center justify-center min-h-full py-8 px-8">
         <h2 className="text-2xl font-bold mb-4">GPU check failed</h2>
         <p role="alert" className="text-gray-400 mb-6 text-center max-w-md">{error}</p>
         <Button onClick={() => setAttempt((previous) => previous + 1)}>
