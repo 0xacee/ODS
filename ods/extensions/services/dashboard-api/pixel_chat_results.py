@@ -100,8 +100,9 @@ class ChatResultStore:
             if self.has_pending(key[:2]):
                 raise ResultConflict("This conversation has an unresolved attempt; recover or stop it first")
             count, active, allocation = self.db.execute(
-                "SELECT COUNT(*), COALESCE(SUM(state IN ('active','unresolved')),0), "
-                "COALESCE(SUM(CASE WHEN state IN ('active','unresolved') THEN ? ELSE size END),0) FROM attempts", (MAX_RESULT_BYTES,)
+                "SELECT COUNT(*), COALESCE(SUM(state='active' AND instance=?),0), "
+                "COALESCE(SUM(CASE WHEN state='active' AND instance=? THEN ? ELSE size END),0) FROM attempts",
+                (self.instance, self.instance, MAX_RESULT_BYTES)
             ).fetchone()
             if count >= MAX_RECORDS or active >= MAX_ACTIVE or allocation + MAX_RESULT_BYTES > MAX_STORE_BYTES:
                 raise ResultCapacity("Chat result storage is full; existing results were preserved")
