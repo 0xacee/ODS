@@ -23,11 +23,13 @@ export function summarizeCheck(id, data) {
     }
   }
   if (id === 'model') {
-    const name = text(data.inference?.loadedModel) || text(data.model?.name)
     if (!('inference' in data) && !('model' in data)) throw new Error('Invalid status')
+    // Modern status separates loaded runtime telemetry from configured metadata.
+    const runtime = 'inference' in data
+    const name = text(runtime ? data.inference?.loadedModel : data.model?.name)
     return { state: name ? 'Reported by ODS' : 'Not loaded', ok: Boolean(name),
       detail: 'Local model telemetry. A remote Pixel route may use a different model.',
-      rows: [['Local model', name || 'Not reported'], ['Context window', context(data.inference?.contextSize ?? data.model?.contextLength)]],
+      rows: [['Local model', name || 'Not reported'], ['Context window', context(runtime ? data.inference?.contextSize : data.model?.contextLength)]],
     }
   }
   if (typeof data.available !== 'boolean') throw new Error('Invalid status')
