@@ -100,7 +100,7 @@ export default function PixelAdviceRuntime({ onReadyChange, title = 'Advisory ru
     inflight.current = true; setSubmitting(true); setError('')
     let id
     try {
-      id = crypto.randomUUID(); localStorage.setItem(key, id)
+      id = globalThis.crypto.randomUUID(); localStorage.setItem(key, id)
       tracked.current = id; setJobId(id); setJob(null)
       const result = await request('/prepare', { requestId: id, expectedRevision: readiness.revision,
         sourceSha256: readiness.sourceSha256, candidateId: selected, confirmed: true })
