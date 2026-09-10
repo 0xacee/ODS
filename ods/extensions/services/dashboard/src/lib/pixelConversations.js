@@ -1,3 +1,5 @@
+import { conversationLabels } from './pixelConversationLabels'
+
 export const CHAT_KEY = 'ods.pixel.chat.v1'
 const LIBRARY_KEY = 'ods.pixel.conversations.v1'
 export const LIBRARY_EVENT = 'ods:pixel-conversations-changed'
@@ -59,7 +61,7 @@ export function saveConversation(chat) {
 }
 
 export function conversationTitle(chat) {
-  return chat.messages.find(message => message.role === 'user' && typeof message.content === 'string')?.content.trim().slice(0, 80) || chat.draft?.trim().slice(0, 80) || 'Untitled conversation'
+  return conversationLabels(chat.chatId).title || chat.messages.find(message => message.role === 'user' && typeof message.content === 'string')?.content.trim().slice(0, 80) || chat.draft?.trim().slice(0, 80) || 'Untitled conversation'
 }
 
 export function deleteConversation(chatId) {
