@@ -14,6 +14,7 @@ export default function PixelCommandSearch({ onInsert, onNewTask }) {
   const [index, setIndex] = useState(0)
   useEffect(() => {
     const open = () => {
+      if (dialog.current.open) return
       trigger.current = document.activeElement
       setQuery(''); setIndex(0); setChats(readConversations())
       if (!dialog.current.open) dialog.current.showModal()
@@ -37,6 +38,7 @@ export default function PixelCommandSearch({ onInsert, onNewTask }) {
   function choose(entry) { if (entry) { close(); entry.run() } }
   return <dialog ref={dialog} className="pixel-command-dialog" aria-label="Search Pixel" onClick={event => { if (event.target === event.currentTarget) close() }} onCancel={() => trigger.current?.focus?.()}>
     <div className="pixel-command-input"><Search size={17}/><input ref={field} aria-label="Search conversations and actions" placeholder="Search conversations and actions…" value={query} onChange={event => { setQuery(event.target.value); setIndex(0) }} onKeyDown={event => {
+      if (event.nativeEvent.isComposing || event.keyCode === 229) return
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setIndex(value => entries.length ? (value + (event.key === 'ArrowDown' ? 1 : -1) + entries.length) % entries.length : 0) }
       if (event.key === 'Enter') { event.preventDefault(); choose(entries[index]) }
     }}/><button aria-label="Close search" onClick={close}><X size={16}/></button></div>
