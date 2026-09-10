@@ -19,6 +19,27 @@ it('reports each real check independently and only performs reads', async () => 
   for (const [,options] of fetch.mock.calls) expect(options.method).toBeUndefined()
   expect(screen.getByRole('link', {name:'Access settings'})).toHaveAttribute('href','/settings?section=access')
 })
+it.each([null, ''])('does not substitute configured metadata for an unloaded runtime (%s)', async loadedModel => {
+  vi.stubGlobal('fetch', vi.fn(async path => path === '/api/status'
+    ? ok({ inference: { loadedModel, contextSize: null }, model: { name: 'Configured-only.gguf', contextLength: 65536 } })
+    : ok({ available: true })))
+  show()
+  const region = screen.getByRole('region', { name: 'ODS model' })
+  expect(await within(region).findByText('Not loaded')).toBeVisible()
+  expect(within(region).queryByText('Configured-only.gguf')).toBeNull()
+  expect(within(region).queryByText(`${(65536).toLocaleString()} tokens`)).toBeNull()
+  expect(within(region).getAllByText('Not reported')).toHaveLength(2)
+})
+
+it('retains legacy model telemetry when the response has no inference section', async () => {
+  vi.stubGlobal('fetch', vi.fn(async path => path === '/api/status'
+    ? ok({ model: { name: 'Legacy.gguf', contextLength: 32768 } }) : ok({ available: true })))
+  show()
+  const region = screen.getByRole('region', { name: 'ODS model' })
+  expect(await within(region).findByText('Legacy.gguf')).toBeVisible()
+  expect(within(region).getByText(`${(32768).toLocaleString()} tokens`)).toBeVisible()
+})
+
 it('clears stale success on refresh and allows retry after errors', async () => {
   const fetch = vi.fn(async path => path === '/api/status' ? ok({model:null}) : ok({available:true}))
   vi.stubGlobal('fetch', fetch)
