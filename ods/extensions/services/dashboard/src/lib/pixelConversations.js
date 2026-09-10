@@ -41,10 +41,14 @@ export function saveConversation(chat) {
   const entries = loadConversations()
   const previous = entries.find(item => item.chatId === chat.chatId)
   const value = { ...previous, ...chat, updatedAt: Date.now() }
+  const remaining = entries.filter(item => item.chatId !== value.chatId)
   if (value.messages.length || value.draft?.trim()) {
-    const next = [value, ...entries.filter(item => item.chatId !== value.chatId)]
+    const next = [value, ...remaining]
     // Never silently evict an older conversation when browser storage fills up.
     localStorage.setItem(LIBRARY_KEY, JSON.stringify(next))
+  } else if (previous) {
+    // An erased unsent draft must not survive in the sidebar's saved library.
+    localStorage.setItem(LIBRARY_KEY, JSON.stringify(remaining))
   }
   localStorage.setItem(CHAT_KEY, JSON.stringify(value))
   window.dispatchEvent(new Event(LIBRARY_EVENT))
