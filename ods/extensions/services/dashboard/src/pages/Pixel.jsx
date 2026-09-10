@@ -238,7 +238,7 @@ export function resolvePreviewAccess(preview) {
 
 function ApprovalCommand({command}) {
   const [state, setState] = useState('idle')
-  const active = useRef(false)
+  const active = useRef(true)
   const pending = useRef(false)
   useEffect(() => { active.current = true; return () => { active.current = false } }, [])
   async function copy() {
