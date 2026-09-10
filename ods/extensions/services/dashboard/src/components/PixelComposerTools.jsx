@@ -16,7 +16,10 @@ export default function PixelComposerTools({ disabled, input, onInsert }) {
   const [menu, setMenu] = useState(null)
   const root = useRef(null)
   const lastTrigger = useRef(null)
-  useEffect(() => { if (input === '/' && !disabled) setMenu('commands') }, [input, disabled])
+  useEffect(() => {
+    if (input === '/' && !disabled) { lastTrigger.current = document.activeElement; setMenu('commands') }
+  }, [input, disabled])
+  useEffect(() => { if (menu) root.current?.querySelector('.pixel-composer-popover button')?.focus() }, [menu])
   useEffect(() => { if (disabled) setMenu(null) }, [disabled])
   useEffect(() => {
     const outside = event => { if (!root.current?.contains(event.target)) setMenu(null) }
@@ -26,7 +29,16 @@ export default function PixelComposerTools({ disabled, input, onInsert }) {
   }, [menu])
   function toggle(kind, event) { lastTrigger.current = event.currentTarget; setMenu(value => value === kind ? null : kind) }
   return <div ref={root} className="pixel-composer-tools">
-    {menu && <div className="pixel-composer-popover" role="group" aria-label={menu === 'sources' ? 'Mention a source' : 'Prompt commands'}>
+    {menu && <div className="pixel-composer-popover" role="group" onKeyDown={event => {
+      const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End']
+      if (!keys.includes(event.key)) return
+      event.preventDefault()
+      const choices = [...event.currentTarget.querySelectorAll('button')]
+      const current = choices.indexOf(document.activeElement)
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1
+        : (current + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length
+      choices[next]?.focus()
+    }} aria-label={menu === 'sources' ? 'Mention a source' : 'Prompt commands'}>
       {(menu === 'sources' ? sources : commands).map(item => <button type="button" key={item.title} aria-label={`${item.title} ${item.detail}`} onClick={() => { setMenu(null); onInsert(item.text) }}><item.icon size={17}/><span><strong>{item.title}</strong><small>{item.detail}</small></span></button>)}
     </div>}
     <button type="button" disabled={disabled} aria-label="Mention source" aria-expanded={menu === 'sources'} onClick={event => toggle('sources', event)}><AtSign size={16}/></button>
