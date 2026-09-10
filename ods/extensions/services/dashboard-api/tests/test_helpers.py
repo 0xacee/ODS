@@ -14,6 +14,7 @@ from helpers import (
     dict_key_path_setter_safe,
     numeric_safe_geometric_mean,
     list_deduplicate_by_key_safe,
+    string_snake_to_pascal_case_safe,
     get_model_info, get_bootstrap_status, _update_lifetime_tokens,
     get_uptime, get_cpu_metrics, get_ram_metrics,
     check_service_health, get_all_services,
@@ -1657,3 +1658,14 @@ class TestListDeduplicateByKeySafe:
     def test_invalid_inputs(self):
         assert list_deduplicate_by_key_safe(None, "id") == []
         assert list_deduplicate_by_key_safe([{"a": [1, 2]}, {"a": [1, 2]}], "a") == [{"a": [1, 2]}]
+
+
+class TestStringSnakeToPascalCaseSafe:
+    def test_valid_snake_and_kebab(self):
+        assert string_snake_to_pascal_case_safe("dashboard_api_service") == "DashboardApiService"
+        assert string_snake_to_pascal_case_safe("kebab-case-string") == "KebabCaseString"
+
+    def test_invalid_types_and_empty(self):
+        assert string_snake_to_pascal_case_safe(None) == ""
+        assert string_snake_to_pascal_case_safe(123) == ""
+        assert string_snake_to_pascal_case_safe("__double___underscores__") == "DoubleUnderscores"

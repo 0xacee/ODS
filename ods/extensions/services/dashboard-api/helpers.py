@@ -1270,3 +1270,18 @@ def list_deduplicate_by_key_safe(items: list, key_or_attr: any) -> list:
             seen.add(key_val)
             result.append(item)
     return result
+
+
+def string_snake_to_pascal_case_safe(text: str) -> str:
+    """
+    Safely convert snake_case or kebab-case string to PascalCase.
+    Guards against None, non-string, whitespace, numbers, and multiple delimiters.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    import re
+    clean = text.strip().replace("-", "_")
+    parts = [p for p in re.split(r'_+', clean) if p]
+    if not parts:
+        return ""
+    return "".join(p.capitalize() for p in parts)
