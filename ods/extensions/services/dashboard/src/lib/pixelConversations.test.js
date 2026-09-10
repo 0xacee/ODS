@@ -23,6 +23,19 @@ test('updates a conversation without creating duplicate entries', () => {
   expect(conversationTitle(readConversations()[0])).toBe('Keep me')
 })
 
+test('clearing an unsent draft removes its saved text without deleting other chats', () => {
+  saveConversation(chat('sent', 'Keep this conversation'))
+  saveConversation({ schema: 1, chatId: 'draft', messages: [], draft: 'Discard this text' })
+  saveConversation({ schema: 1, chatId: 'draft', messages: [], draft: '' })
+  expect(readConversations().map(item => item.chatId)).toEqual(['sent'])
+  expect(JSON.parse(localStorage.getItem(CHAT_KEY)).draft).toBe('')
+  saveConversation({ schema: 1, chatId: 'next', messages: [], draft: '' })
+  expect(readConversations().map(item => item.chatId)).toEqual(['sent'])
+  // Erasing a draft is not deletion: the same active chat can be edited again.
+  saveConversation({ schema: 1, chatId: 'draft', messages: [], draft: 'Replacement' })
+  expect(conversationTitle(readConversations().find(item => item.chatId === 'draft'))).toBe('Replacement')
+})
+
 test('rejects invalid identities', () => {
   expect(() => saveConversation(chat('../bad', 'test'))).toThrow()
 })
