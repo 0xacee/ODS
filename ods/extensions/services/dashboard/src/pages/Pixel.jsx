@@ -236,11 +236,42 @@ export function resolvePreviewAccess(preview) {
   }
 }
 
+
+function ApprovalCommand({command}) {
+  const [state, setState] = useState('idle')
+  const active = useRef(true)
+  const pending = useRef(false)
+  useEffect(() => { active.current = true; return () => { active.current = false } }, [])
+  async function copy() {
+    if (pending.current) return
+    pending.current = true
+    setState('pending')
+    try {
+      if (!globalThis.navigator?.clipboard?.writeText) throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(command)
+      if (active.current) setState('copied')
+    } catch {
+      if (active.current) setState('error')
+    } finally { pending.current = false }
+  }
+  return <>
+    <button type="button" onClick={copy} disabled={state === 'pending'}
+      className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-1.5 text-xs font-medium text-amber-200 transition hover:bg-amber-400/15">
+      {state === 'copied' ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+      {state === 'copied' ? 'Copied' : state === 'pending' ? 'Copying…' : 'Copy secure approval command'}
+    </button>
+    {state === 'error' && <div>
+      <p role="alert" className="mt-2 text-xs">Clipboard access failed. Select and copy the verified command manually.</p>
+      <textarea aria-label="Secure approval command" readOnly value={command}
+        className="mt-2 w-full rounded border border-theme-border bg-theme-bg p-2 font-mono text-xs" />
+    </div>}
+  </>
+}
+
 export function OperationsApprovalCard({ content }) {
   const receipt = parseApprovalReceipt(content)
   const [projection, setProjection] = useState(null)
   const [verification, setVerification] = useState(receipt ? 'loading' : 'absent')
-  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     if (!receipt) return undefined
@@ -294,16 +325,6 @@ export function OperationsApprovalCard({ content }) {
 
   if (!receipt) return null
 
-  const copyCommand = async () => {
-    if (!projection?.approvalCommand) return
-    try {
-      await globalThis.navigator?.clipboard?.writeText(projection.approvalCommand)
-      setCopied(true)
-      globalThis.setTimeout(() => setCopied(false), 2000)
-    } catch {
-      setCopied(false)
-    }
-  }
 
   if (verification === 'loading' || verification === 'absent') {
     return (
@@ -350,14 +371,7 @@ export function OperationsApprovalCard({ content }) {
           </dl>
           {awaiting && projection.approvalCommand && (
             <>
-              <button
-                type="button"
-                onClick={copyCommand}
-                className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-1.5 text-xs font-medium text-amber-200 transition hover:bg-amber-400/15"
-              >
-                {copied ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                {copied ? 'Copied' : 'Copy secure approval command'}
-              </button>
+              <ApprovalCommand key={projection.approvalCommand} command={projection.approvalCommand} />
               <p className="mt-2 flex items-start gap-1.5 text-[10px] leading-4 text-theme-text-muted">
                 <Terminal className="mt-0.5 h-3 w-3 shrink-0" />
                 Run it in a real terminal. Pixel will require fresh password-backed administrator authentication, show the complete protected plan, and ask for a one-time challenge.
