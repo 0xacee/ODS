@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from helpers import (
+    string_snake_to_pascal_case_safe,
     get_model_info, get_bootstrap_status, _update_lifetime_tokens,
     get_uptime, get_cpu_metrics, get_ram_metrics,
     check_service_health, get_all_services,
@@ -1607,3 +1608,15 @@ class TestDirSizeGb:
         # Verify older items were evicted
         first_path = tmp_path / "test_dir_0"
         assert _dir_size_cache.get(first_path) is None
+
+
+
+class TestStringSnakeToPascalCaseSafe:
+    def test_valid_snake_and_kebab(self):
+        assert string_snake_to_pascal_case_safe("dashboard_api_service") == "DashboardApiService"
+        assert string_snake_to_pascal_case_safe("kebab-case-string") == "KebabCaseString"
+
+    def test_invalid_types_and_empty(self):
+        assert string_snake_to_pascal_case_safe(None) == ""
+        assert string_snake_to_pascal_case_safe(123) == ""
+        assert string_snake_to_pascal_case_safe("__double___underscores__") == "DoubleUnderscores"
