@@ -1,6 +1,7 @@
 """Pure declared-capacity selection and current-process readback comparison."""
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
+import math
 import re
 import shlex
 
@@ -91,16 +92,22 @@ def _declared_output(defaults, pixel, primary, output):
         selected = _object(defaults.get("models", {})).get(primary, {})
         layers.append(_object(_object(selected).get("params", {})))
     layers.append(_object(pixel.get("params", {})))
+    declared = resolved = False
     for params in layers:
         for key in ("maxTokens", "max_completion_tokens", "max_tokens"):
             if key in params:
+                declared = True
                 value = params[key]
-                # Invalid declarations are not evidence for a larger model
-                # default. Keep them unavailable, without rewriting owner data.
-                if type(value) is not int or not 1 <= value <= 10_000_000:
-                    raise SettingsError("settings-output-capacity-unavailable")
-                output = value
-                break
+                # Match SDK alias selection and layer precedence. Validate the
+                # final winner below, not a default shadowed by the agent.
+                if (type(value) is int or type(value) is float and math.isfinite(value)) and value >= 0:
+                    output = value
+                    resolved = True
+                    break
+    # Invalid declarations are not evidence for a larger model default.
+    if (declared and not resolved or type(output) is not int
+            or not 1 <= output <= 10_000_000):
+        raise SettingsError("settings-output-capacity-unavailable")
     return output
 
 

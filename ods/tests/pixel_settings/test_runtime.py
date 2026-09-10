@@ -83,7 +83,7 @@ def test_agent_output_overrides_inherited_aliases(default_alias, agent_alias):
     assert runtime.declared_capabilities(source)["activeMaxOutputTokens"] == 768
 
 
-@pytest.mark.parametrize("value", [True, False, None, "384", 0, -1, 384.5])
+@pytest.mark.parametrize("value", [True, False, None, "384", 0, -1, 384.5, 10**400])
 def test_unqualified_inherited_output_is_not_replaced_with_model_capacity(value):
     source = config()
     source["agents"]["list"][0].pop("params")
@@ -132,6 +132,22 @@ def test_first_token_alias_in_layer_wins_without_mutating_owner_params():
     before = copy.deepcopy(source)
     assert runtime.declared_capabilities(source)["activeMaxOutputTokens"] == 256
     assert source == before
+
+
+@pytest.mark.parametrize("value", [True, None, "384", 0, -1, 384.5, 10**400])
+def test_shadowed_default_does_not_override_valid_agent_output(value):
+    source = config()
+    source["agents"]["defaults"] = {"params": {"maxTokens": value}}
+    assert runtime.declared_capabilities(source)["activeMaxOutputTokens"] == 4096
+
+
+def test_invalid_alias_is_skipped_like_sdk_without_losing_valid_inheritance():
+    source = config()
+    source["agents"]["defaults"] = {"params": {"max_tokens": 384}}
+    source["agents"]["list"][0]["params"] = {"maxTokens": "ignored", "max_tokens": 768}
+    assert runtime.declared_capabilities(source)["activeMaxOutputTokens"] == 768
+    source["agents"]["list"][0]["params"].pop("max_tokens")
+    assert runtime.declared_capabilities(source)["activeMaxOutputTokens"] == 384
 
 
 @pytest.mark.parametrize("mutation", ["revision", "policy", "disabled", "missing"])
