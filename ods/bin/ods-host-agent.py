@@ -2048,6 +2048,7 @@ def _pixel_sharing_runtime():
 def _start_pixel_sharing_change(action, body, route):
     from pixel_provider.sharing import SharingStore
     from pixel_provider.sharing_host_api import change_sharing, get_sharing
+    from pixel_provider.sharing_service import safe_failure_code
     from pixel_provider.store import StoreError
     if (not isinstance(body, dict) or set(body) != {'expectedRevision'}
             or type(body['expectedRevision']) is not int or not 0 <= body['expectedRevision'] < 2**53 - 1):
@@ -2071,7 +2072,7 @@ def _start_pixel_sharing_change(action, body, route):
             try:
                 service.start() if action == 'start' else service.stop()
                 _write_progress('pixel-inference', 'complete', 'Inference sharing ready' if action == 'start' else 'Inference sharing stopped')
-            except Exception:
+            except Exception as error:
                 # Grant revocations may advance revision during the build;
                 # preserve them while closing this failed activation.
                 if action == 'start':
@@ -2079,8 +2080,10 @@ def _start_pixel_sharing_change(action, body, route):
                         SharingStore(DATA_DIR / 'pixel-inference').disable_after_failed_start()
                     except (StoreError, OSError):
                         pass
-                _write_progress('pixel-inference', 'error', 'Inference sharing operation failed',
-                                error='Sharing operation failed; reload state before retrying.')
+                code = safe_failure_code(error)
+                logger.warning('Inference sharing %s failed: %s', action, code)
+                _write_progress('pixel-inference', 'error', f'Inference sharing operation failed ({code})',
+                                error=f'Sharing operation failed ({code}); reload state before retrying.')
             finally:
                 lock.release()
         threading.Thread(target=work, daemon=True, name='ods-pixel-sharing-lifecycle').start()
