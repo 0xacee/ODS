@@ -30,3 +30,20 @@ it('rejects arbitrary source destinations before fetching', async () => {
   expect(await screen.findByRole('alert')).toBeVisible()
   expect(fetch).not.toHaveBeenCalled()
 })
+
+it.each(['oversized', 'failed'])('cancels an unread %s response when source verification rejects it', async reason => {
+  const cancel = vi.fn().mockResolvedValue(undefined)
+  const getReader = vi.fn()
+  const arrayBuffer = vi.fn()
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: reason !== 'failed',
+    headers: new globalThis.Headers({'Content-Length': String(reason === 'oversized' ? 4 * 1024 * 1024 + 1 : 512)}),
+    body: {cancel, getReader}, arrayBuffer,
+  })))
+  render(<PixelPreviewSource preview={preview}/>)
+  expect(await screen.findByRole('alert')).toHaveTextContent('could not be verified')
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(getReader).not.toHaveBeenCalled()
+  expect(arrayBuffer).not.toHaveBeenCalled()
+  expect(screen.getByRole('button',{name:'Copy code'})).toBeDisabled()
+})

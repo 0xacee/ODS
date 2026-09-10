@@ -5,7 +5,11 @@ export const isArtifactPath = value => typeof value === 'string' && value.length
   && value.split('/').every(part => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(part))
 
 export async function readBoundedBytes(response, maximum) {
-  if (!response.ok || Number(response.headers?.get('Content-Length')) > maximum) throw new Error('Unavailable artifact')
+  if (!response.ok || Number(response.headers?.get('Content-Length')) > maximum) {
+    // Rejecting headers must also release the unread network response.
+    await response.body?.cancel()
+    throw new Error('Unavailable artifact')
+  }
   if (!response.body?.getReader) {
     const data = await response.arrayBuffer()
     if (data.byteLength > maximum) throw new Error('Oversized artifact')
