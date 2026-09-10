@@ -16,6 +16,7 @@ import PixelSelectionActions from '../components/PixelSelectionActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
+import PixelPreviewViewport from '../components/PixelPreviewViewport'
 import { parseTaskActivity, parseTaskActivityFrame } from '../lib/pixelTaskActivity'
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import PanelResizeHandle from '../components/PanelResizeHandle.jsx'
@@ -1506,15 +1507,11 @@ export default function Pixel({ systemStatus = null }) {
               </button>
               </div>
             </div>
-            {preview && <iframe
+            {preview && <PixelPreviewViewport
               key={`preview-${preview.siteId}-${previewRefresh}`}
-              src={previewAccess.frameUrl}
+              access={previewAccess}
               title={`Interactive ${displayName} preview`}
               hidden={previewCollapsed || previewTab !== 'preview'}
-              sandbox={previewAccess.sandbox}
-              data-preview-route={previewAccess.route}
-              referrerPolicy="no-referrer"
-              className="min-h-0 flex-1 border-0 bg-white"
             />}
             {!previewCollapsed && preview && previewTab === 'files' && <PixelTaskFiles key={`files-${preview.siteId}-${previewRefresh}`} preview={preview}/>}
             {!previewCollapsed && preview && previewTab === 'changes' && <div className="pixel-workspace-changes"><PixelSnapshotChanges key={`${preview.siteId}-${previewRefresh}`} preview={preview} before={[...messages].reverse().find(message=>message.publication?.siteId === preview.siteId)?.beforePublication || null} onPreview={()=>setPreviewTab('preview')}/></div>}
