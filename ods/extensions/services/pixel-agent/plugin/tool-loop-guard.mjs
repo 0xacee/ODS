@@ -5096,6 +5096,33 @@ function hasPortugueseWorkspacePreviewDirective(text) {
   return false;
 }
 
+function workspacePreviewInstructionText(text) {
+  // This is an intent projection only. Keep the owner's original message and
+  // tool contents intact; quoted examples must not become delivery commands.
+  let projected = text
+    .replace(/(`{3,}|~{3,})[\s\S]*?\1/g, " ")
+    .replace(/^[ \t]*>[^\n]*/gm, " ");
+  // An explicit payload can be delimited or one unquoted sentence. Preserve
+  // independent instructions after its closing quote or sentence boundary.
+  // Undelimited multi-sentence prose remains ambiguous; this is not a parser
+  // for every way an owner can express a task.
+  projected = projected.replace(
+    /\b(?:containing|with\s+(?:the\s+)?(?:contents?|text))\s*(?:exactly\s*)?:\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[^\n]*?(?=[!?;\n]|\.(?=\s|$)|$))/gi,
+    " "
+  );
+  const quotedTarget = (value) =>
+    /^(?:\.\.?\/)?[A-Za-z0-9_/-][A-Za-z0-9._/-]*\.html?$/i.test(value.trim())
+      ? value
+      : " ";
+  // Preserve a quoted HTML filename as an action target, but not arbitrary
+  // quoted prose that happens to contain "portal", "website", or commands.
+  return projected
+    .replace(/"((?:\\.|[^"\\])*)"|`((?:\\.|[^`\\])*)`/g,
+      (_match, quoted, inline) => quotedTarget(quoted ?? inline))
+    .replace(/(^|[\s(=,:])'((?:\\.|[^'\\])*)'(?=$|[\s).,;:!?])/g,
+      (_match, prefix, quoted) => prefix + quotedTarget(quoted));
+}
+
 function hasExplicitWorkspacePreviewDirective(text) {
   if (hasPortugueseWorkspacePreviewDirective(text)) return true;
   // A requested delivery action can follow a diagnosis or code repair. Do not
@@ -5153,7 +5180,7 @@ function requestsNamedSessionPreview(text, preview) {
 }
 
 export function userMessageRequestsWorkspacePreview(messages, prompt = undefined) {
-  const text = currentOwnerIntentText(messages, prompt);
+  const text = workspacePreviewInstructionText(currentOwnerIntentText(messages, prompt));
   if (!text) return false;
   if (portuguesePreviewForbidden(text)) return false;
   // Classify visual targets and actions from the same positive request text.
