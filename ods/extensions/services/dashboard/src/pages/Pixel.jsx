@@ -15,6 +15,7 @@ import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelComman
 import PixelSelectionActions from '../components/PixelSelectionActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
+import PixelTurnNavigation from '../components/PixelTurnNavigation'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
 import { parseTaskActivity, parseTaskActivityFrame } from '../lib/pixelTaskActivity'
 import MetalMetricIcon from '../components/MetalMetricIcon'
@@ -1212,6 +1213,11 @@ export default function Pixel({ systemStatus = null }) {
         <div className="pixel-chat-header-actions">
           <button type="button" aria-label="Search Pixel" title="Search conversations · Ctrl+K" className="pixel-metal-control p-2" onClick={() => window.dispatchEvent(new Event(OPEN_PIXEL_SEARCH))}><Search size={16}/></button>
           <details className="pixel-chat-options"><summary aria-label="Chat options">•••</summary><div className="pixel-chat-options-menu">
+            <PixelTurnNavigation messages={messages} onNavigate={index => {
+              const row = scrollRef.current?.parentElement?.querySelector(`[data-pixel-message-index="${index}"]`)
+              row?.scrollIntoView?.({block:'start', behavior:'auto'})
+              row?.focus?.({preventScroll:true})
+            }}/>
             <PixelAdvice canInsert={!sending} onInsert={text => setInput(current => current ? `${current}\n\n${text}` : text)} />
             <PixelHandoffApproval label="Approvals" />
             <PixelProviderScopes chatId={chatIdRef.current} sending={sending} />
@@ -1345,7 +1351,7 @@ export default function Pixel({ systemStatus = null }) {
           </div>
         )}
         {messages.map((message, index) => (
-          <div key={index} data-pixel-response={message.role === 'assistant' ? '' : undefined} className={`mx-auto flex min-w-0 w-full max-w-5xl ${message.role === 'user' ? 'justify-end gap-2' : 'justify-start'}`}>
+          <div key={index} data-pixel-message-index={index} tabIndex={-1} data-pixel-response={message.role === 'assistant' ? '' : undefined} className={`mx-auto flex min-w-0 w-full max-w-5xl ${message.role === 'user' ? 'justify-end gap-2' : 'justify-start'}`}>
             {message.role === 'assistant' && <PixelMascot state={pixelReplyPose(message, sending && index === messages.length - 1)} settled={message.status !== 'streaming'} className="pixel-reply-character" />}
             <div className={`min-w-0 max-w-[min(85%,48rem)] rounded-2xl px-4 py-3 text-sm leading-6 [overflow-wrap:anywhere] ${
               message.role === 'user'
