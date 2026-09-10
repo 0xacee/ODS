@@ -19,6 +19,9 @@ export default function Sidebar({ status, collapsed, onToggle }) {
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const { displayName } = usePortalIdentity()
+  useEffect(() => {
+    if (collapsed) { setSearchOpen(false); setQuery('') }
+  }, [collapsed])
   const [apiLinks, setApiLinks] = useState([])
   const [serviceTokens, setServiceTokens] = useState({})
   useEffect(() => {
