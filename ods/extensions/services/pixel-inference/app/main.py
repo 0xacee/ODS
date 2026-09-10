@@ -237,7 +237,7 @@ def create_app(store=None, router_url=None, client=None):
             payload = None
             if request.method == 'POST':
                 raw = bytearray()
-                async with asyncio.timeout(min(10, grant['deadlineSeconds'])):
+                async with async_timeout(min(10, grant['deadlineSeconds'])):
                     async for chunk in request.stream():
                         if len(raw) + len(chunk) > MAX_BYTES:
                             raise ShareError(413, 'request_too_large')
@@ -324,3 +324,4 @@ def create_app(store=None, router_url=None, client=None):
 
 
 app = create_app()
+

@@ -1623,7 +1623,7 @@ class TestChatActivity(BaseEdgeTest):
         await asyncio.wait_for(stream.content.readany(), 2)
         self.assertEqual(await self.activity(user), {"state": "active"})
         stream.close()
-        async with asyncio.timeout(2):
+        async with async_timeout(2):
             while self.edge_app[self.pe._CANCEL_EVENTS_KEY].get(user):
                 await asyncio.sleep(0.02)
         native = self.up_runner.app["native_runs"][user][1]
@@ -1644,3 +1644,4 @@ class TestChatActivity(BaseEdgeTest):
 
 if __name__ == "__main__":
     unittest.main()
+

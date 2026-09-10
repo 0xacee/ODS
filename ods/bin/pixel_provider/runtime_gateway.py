@@ -193,7 +193,7 @@ def create_app(config,credentials,token,*,events=None,client_factory=None):
 
         try:
             body = bytearray()
-            async with asyncio.timeout(min(10,config['policy']['deadlineSeconds'])):
+            async with async_timeout(min(10,config['policy']['deadlineSeconds'])):
                 async for chunk in request.stream():
                     if len(body)+len(chunk)>MAX_BYTES:
                         raise RuntimeErrorCode('request-too-large')
@@ -321,3 +321,4 @@ def create_app(config,credentials,token,*,events=None,client_factory=None):
                 await cleanup()
 
     return app
+

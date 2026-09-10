@@ -54,7 +54,7 @@ async def serve_tunnel(*, ssh_bin, target, remote_port, listen_port, stop=None, 
                 child = await spawn
                 raise
             pumps = [asyncio.create_task(pump(reader,child.stdin)),asyncio.create_task(pump(child.stdout,writer))]
-            async with asyncio.timeout(3600):
+            async with async_timeout(3600):
                 done,_ = await asyncio.wait(pumps,return_when=asyncio.FIRST_COMPLETED)
                 # A client may half-close its request and still await the reply.
                 # EOF from SSH, however, ends the remote response direction.
@@ -113,3 +113,4 @@ def run_tunnel(**options):
                 'target':options['target'],'remotePort':options['remote_port']}),flush=True)
         await serve_tunnel(**options,stop=stop,ready=ready)
     asyncio.run(run())
+
