@@ -1,4 +1,9 @@
 """Actual temporary files, simulated root/admission; not installed acceptance."""
+import sys
+if sys.platform == 'win32':
+    import pytest
+    pytest.skip('POSIX only', allow_module_level=True)
+
 import copy
 import hashlib
 import json

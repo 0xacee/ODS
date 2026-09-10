@@ -3,6 +3,11 @@
 These exercise production coordinator + owner projection + service participants.
 They are not installed-runtime or model-inference acceptance.
 """
+import sys
+if sys.platform == 'win32':
+    import pytest
+    pytest.skip('POSIX only', allow_module_level=True)
+
 import contextlib
 import json
 import os

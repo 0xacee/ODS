@@ -1,4 +1,9 @@
 """Cancellation must close real upstream TCP, not merely an in-memory mock."""
+import sys
+if sys.platform == 'win32':
+    import pytest
+    pytest.skip('POSIX only', allow_module_level=True)
+
 import asyncio
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import select

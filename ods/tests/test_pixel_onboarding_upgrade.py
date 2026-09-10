@@ -1,5 +1,10 @@
 """Run real installer helpers against private, disposable onboarding records."""
 
+import sys
+if sys.platform == 'win32':
+    import pytest
+    pytest.skip('POSIX only', allow_module_level=True)
+
 import copy
 import json
 import os

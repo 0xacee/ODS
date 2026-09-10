@@ -1,4 +1,9 @@
 """Actual file/mode/link/hash checks with explicit non-root custody simulation."""
+import sys
+if sys.platform == 'win32':
+    import pytest
+    pytest.skip('POSIX only', allow_module_level=True)
+
 import hashlib
 import json
 import os
