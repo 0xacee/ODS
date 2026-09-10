@@ -3,6 +3,11 @@
 These tests cannot establish root custody, actual SDK behavior or installation.
 The separate disposable native/systemd qualification supplies those observations.
 """
+import sys
+if sys.platform == 'win32':
+    import pytest
+    pytest.skip('POSIX only', allow_module_level=True)
+
 import copy
 import hashlib
 import json

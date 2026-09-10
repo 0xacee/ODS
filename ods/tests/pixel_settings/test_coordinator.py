@@ -1,4 +1,9 @@
 """Real temporary file transactions with simulated services; NOT installed proof."""
+import sys
+if sys.platform == 'win32':
+    import pytest
+    pytest.skip('POSIX only', allow_module_level=True)
+
 import hashlib
 import json
 import os

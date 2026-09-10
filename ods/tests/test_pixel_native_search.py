@@ -1,5 +1,10 @@
 """Exercise provider selection and immutable provisioning without contacting npm."""
 
+import sys
+if sys.platform == 'win32':
+    import pytest
+    pytest.skip('POSIX only', allow_module_level=True)
+
 import base64
 import hashlib
 import importlib.util
