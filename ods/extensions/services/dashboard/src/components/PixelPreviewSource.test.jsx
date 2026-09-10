@@ -47,3 +47,17 @@ it.each(['oversized', 'failed'])('cancels an unread %s response when source veri
   expect(arrayBuffer).not.toHaveBeenCalled()
   expect(screen.getByRole('button',{name:'Copy code'})).toBeDisabled()
 })
+
+it.each([
+  ['index.html','<p>First</p>\n\n'],
+  ['index.html','<p>First</p>\r\n<p>Second</p>\r\n'],
+  ['notes.txt','First\n\nLast\n'],
+  ['notes.txt','\n'],
+])('preserves verified whitespace when manually selecting %s source',async (path,text) => {
+  const bytes=new TextEncoder().encode(text)
+  const digest=createHash('sha256').update(bytes).digest('hex')
+  vi.stubGlobal('fetch',vi.fn(async () => ({ok:true,arrayBuffer:async () => bytes.buffer})))
+  const {container}=render(<PixelPreviewSource preview={{...preview,entrySha256:digest}} file={{path,sha256:digest,bytes:bytes.byteLength}}/>)
+  await waitFor(() => expect(screen.getByRole('button',{name:'Copy code'})).toBeEnabled())
+  expect(container.querySelector('pre code').textContent).toBe(text)
+})
