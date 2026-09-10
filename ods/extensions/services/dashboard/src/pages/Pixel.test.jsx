@@ -1147,8 +1147,8 @@ describe('Pixel', () => {
   })
 
   it('recovers a completed answer after closing the original stream without resubmitting in StrictMode', async () => {
-    const siteId = 'site-' + 'd'.repeat(24)
-    const preview = {relativeDirectory:'recovery-demo',siteId,port:9437,
+    const siteId = 'site-' + 'a'.repeat(24)
+    const preview = {schemaVersion:1,kind:'ods-pixel-workspace-preview',relativeDirectory:'recovery-demo',siteId,port:9437,
       url:`http://${siteId}.localhost:9437/${siteId}/`,files:2,bytes:4096,
       sha256:'a'.repeat(64),entrySha256:'b'.repeat(64)}
     globalThis.localStorage.setItem('ods.pixel.chat.v1', JSON.stringify({
