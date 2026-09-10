@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import AsyncIterator, Literal
 from urllib.parse import urlparse
 
@@ -17,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from host_agent_client import AgentClientError, async_request_json as request_agent_json
 from pixel_runtime_state import begin_pixel_stream, end_pixel_stream
+from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, owner_namespace
 from security import verify_api_key
 
 
@@ -112,6 +115,7 @@ class ChatStreamRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     chat_id: str
+    request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
     messages: list[_Message] = Field(min_length=1, max_length=50)
 
     @field_validator("chat_id")
@@ -134,6 +138,7 @@ class ChatCancelRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     chat_id: str
+    request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
 
     @field_validator("chat_id")
     @classmethod
@@ -144,6 +149,49 @@ class ChatCancelRequest(BaseModel):
 
 
 router = APIRouter(prefix="/api/pixel", tags=["pixel"])
+
+_result_store: ChatResultStore | None = None
+_result_tasks: dict[tuple[str, str, str], asyncio.Task] = {}
+_result_stops: set[tuple[str, str]] = set()
+_result_abort_ack: set[tuple[str, str, str]] = set()
+
+
+def _chat_results() -> ChatResultStore:
+    global _result_store
+    if _result_store is None:
+        _result_store = ChatResultStore(Path(os.environ.get("ODS_DATA_DIR", "/data")) / "pixel-chat-results")
+    return _result_store
+
+
+def _result_state(store, identity):
+    row = store.get(identity)
+    task = _result_tasks.get(identity)
+    if row is not None and row["state"] == "active" and (task is None or task.done()):
+        # A producer may fail while committing its last bytes. The API process
+        # being alive does not prove that this particular task is still running.
+        row["state"] = "unresolved"
+    return row
+
+
+class ChatResultRequest(ChatCancelRequest):
+    request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+
+@router.post("/chat/result")
+async def pixel_chat_result(body: ChatResultRequest, owner: str = Depends(verify_api_key)):
+    """Read an owner's attempt without resubmitting any model request."""
+    store = _chat_results()
+    key = (owner_namespace(owner), body.chat_id, body.request_id)
+    row = _result_state(store, key)
+    if row is None:
+        return {"state": "unknown", "events": ""}
+    if row["state"] == "unresolved":
+        activity = await pixel_chat_activity(ChatCancelRequest(chat_id=body.chat_id))
+        if activity["state"] == "terminal":
+            store.finish(key, "interrupted")
+            row = store.get(key)
+    events = b"" if row["state"] == "active" else b"".join(chunk["data"] for chunk in store.chunks(key))
+    return {"state": row["state"], "events": events.decode("utf-8", errors="replace")}
 
 
 class PixelAccessChange(BaseModel):
@@ -434,8 +482,8 @@ async def _cancel_edge_run(edge_url: str, key: str, chat_id: str) -> bool:
         return False
 
 
-@router.post("/chat/cancel", dependencies=[Depends(verify_api_key)])
-async def pixel_chat_cancel(body: ChatCancelRequest) -> dict[str, bool]:
+@router.post("/chat/cancel")
+async def pixel_chat_cancel(body: ChatCancelRequest, owner: str = Depends(verify_api_key)) -> dict[str, bool]:
     """Cancel only the active run for this validated dashboard conversation.
 
     The explicit endpoint makes the owner's Stop action independent of HTTP
@@ -446,6 +494,35 @@ async def pixel_chat_cancel(body: ChatCancelRequest) -> dict[str, bool]:
     if config is None:
         raise HTTPException(status_code=503, detail="Pixel is not enabled")
     edge_url, key = config
+    if body.request_id is not None:
+        store = _chat_results()
+        identity = (owner_namespace(owner), body.chat_id, body.request_id)
+        row = _result_state(store, identity)
+        # A late Stop for a completed/unknown attempt must not stop a newer run.
+        if row is None or row["state"] not in {"active", "unresolved"}:
+            return {"aborted": False}
+        if identity[:2] in _result_stops:
+            return {"aborted": False}
+        _result_stops.add(identity[:2])
+        try:
+            aborted = await _cancel_edge_run(edge_url, key, body.chat_id)
+            if aborted:
+                if store.get(identity)["state"] == "complete":
+                    return {"aborted": False}
+                _result_abort_ack.add(identity)
+                task = _result_tasks.get(identity)
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                if store.get(identity)["state"] == "complete":
+                    return {"aborted": False}
+                store.finish(identity, "cancelled")
+            return {"aborted": aborted}
+        finally:
+            _result_abort_ack.discard(identity)
+            _result_stops.discard(identity[:2])
+    if isinstance(owner, str) and _result_store is not None and _result_store.has_pending((owner_namespace(owner), body.chat_id)):
+        return {"aborted": False}
     return {"aborted": await _cancel_edge_run(edge_url, key, body.chat_id)}
 
 
@@ -476,6 +553,115 @@ async def pixel_chat_activity(body: ChatCancelRequest) -> dict[str, str]:
 
 class _ClientDisconnected(Exception):
     """The dashboard consumer left while Pixel was still producing a turn."""
+
+
+async def _retained_chat_stream(request, body, owner):
+    store = _chat_results()
+    identity = (owner_namespace(owner), body.chat_id, body.request_id)
+    fingerprint = hashlib.sha256(json.dumps([m.model_dump() for m in body.messages],
+                                           sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+    existing = store.get(identity)
+    if existing is None:
+        config = _pixel_config()
+        if config is None:
+            raise HTTPException(status_code=503, detail="Pixel is not enabled")
+        issue = await _model_readiness_issue()
+        if issue is not None:
+            raise HTTPException(status_code=409, detail=issue[1])
+    try:
+        if identity[:2] in _result_stops:
+            raise ResultConflict("Stop is still being confirmed")
+        created = store.reserve(identity, fingerprint)
+    except ResultConflict as exc:
+        raise HTTPException(status_code=423, detail=str(exc)) from None
+    except ResultCapacity as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from None
+    if created:
+        begin_pixel_stream()
+        task = asyncio.create_task(_produce_retained_result(store, identity, body, config))
+        _result_tasks[identity] = task
+        def release(finished):
+            _result_tasks.pop(identity, None)
+            end_pixel_stream()
+            if not finished.cancelled() and finished.exception() is not None:
+                logger.error("Pixel result persistence failed (%s)", type(finished.exception()).__name__)
+        task.add_done_callback(release)
+
+    async def subscribe():
+        after = -1
+        while True:
+            for chunk in store.chunks(identity, after):
+                after = chunk["sequence"]
+                yield chunk["data"]
+            row = _result_state(store, identity)
+            if row is None or row["state"] != "active":
+                return
+            if await request.is_disconnected():
+                return
+            # Subscriber disposal never cancels the independent bounded producer.
+            await asyncio.sleep(_CLIENT_DISCONNECT_POLL_SECONDS)
+
+    return StreamingResponse(subscribe(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no",
+    })
+
+
+async def _produce_retained_result(store, identity, body, config):
+    edge_url, key = config
+    done_seen = False
+    cancelled = False
+    failed = False
+    stopped = False
+    try:
+        timeout = httpx.Timeout(connect=5.0, read=_CHAT_STREAM_TIMEOUT_SECONDS, write=30.0, pool=5.0)
+        async with asyncio.timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
+                async with client.stream("POST", f"{edge_url}/v1/chat/completions",
+                        json={"model": _MODEL, "stream": True, "user": body.chat_id,
+                              "messages": [m.model_dump() for m in body.messages]},
+                        headers=_edge_headers(key, accept="text/event-stream")) as upstream:
+                    if upstream.status_code != 200 or not upstream.headers.get("content-type", "").lower().startswith("text/event-stream"):
+                        raise ValueError("Invalid upstream stream")
+                    buffered = bytearray()
+                    async for chunk in upstream.aiter_bytes():
+                        buffered.extend(chunk)
+                        while b"\n" in buffered:
+                            newline = buffered.index(b"\n")
+                            line = bytes(buffered[:newline + 1])
+                            del buffered[:newline + 1]
+                            if len(line.rstrip(b"\r\n")) > _MAX_SSE_LINE_BYTES:
+                                raise ResultCapacity("SSE line limit")
+                            store.append(identity, line)
+                            if line.rstrip(b"\r\n") == b"data: [DONE]":
+                                done_seen = True
+                                break
+                        if done_seen:
+                            break
+                        if len(buffered) > _MAX_SSE_LINE_BYTES:
+                            raise ResultCapacity("SSE line limit")
+                    if not done_seen:
+                        failed = True
+    except asyncio.CancelledError:
+        cancelled = identity in _result_abort_ack
+        failed = not cancelled
+    except Exception as exc:
+        failed = True
+        logger.warning("Pixel retained stream failed (%s)", type(exc).__name__)
+    finally:
+        # Keep this conversation reserved until cancellation has finished. A late
+        # native cancellation must never target the next attempt in this chat.
+        if not done_seen and not cancelled:
+            try:
+                stopped = await asyncio.wait_for(_cancel_edge_run(edge_url, key, body.chat_id), _CLIENT_CANCEL_TIMEOUT_SECONDS)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+        try:
+            if not done_seen:
+                text = "Pixel was stopped." if cancelled else "Pixel could not complete the response. Check saved work before continuing."
+                store.append(identity, _error_event(text) + b"data: [DONE]\n\n", terminal=True)
+        finally:
+            state = "complete" if done_seen else "cancelled" if cancelled else "interrupted" if failed and stopped else "unresolved" if failed else "complete"
+            store.finish(identity, state)
 
 
 async def _iter_upstream_chunks(
@@ -512,9 +698,13 @@ async def _iter_upstream_chunks(
             await close()
 
 
-@router.post("/chat/stream", dependencies=[Depends(verify_api_key)])
-async def pixel_chat_stream(request: Request, body: ChatStreamRequest) -> StreamingResponse:
+@router.post("/chat/stream")
+async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: str = Depends(verify_api_key)) -> StreamingResponse:
     """Forward one bounded chat over authenticated, unbuffered SSE."""
+    if body.request_id is not None:
+        return await _retained_chat_stream(request, body, owner)
+    if isinstance(owner, str) and _result_store is not None and _result_store.has_pending((owner_namespace(owner), body.chat_id)):
+        raise HTTPException(status_code=423, detail="Recover or stop the retained attempt before starting another turn")
     config = _pixel_config()
     if config is None:
         raise HTTPException(status_code=503, detail="Pixel is not enabled")

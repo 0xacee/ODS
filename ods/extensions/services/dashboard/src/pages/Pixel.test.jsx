@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { render } from '../test/test-utils'
 import { act } from '@testing-library/react'
+import { StrictMode } from 'react'
 
 // The repository's base ESLint profile does not mark JSX identifiers as uses.
 // eslint-disable-next-line no-unused-vars
@@ -823,6 +824,7 @@ describe('Pixel', () => {
     expect(body.messages[0].role).toBe('user')
     expect(body.messages[0].content).toBe('hi there')
     expect(body.chat_id).toBeDefined()
+    expect(body.request_id).toEqual(expect.any(String))
     expect(call[1].headers).toEqual({ 'Content-Type': 'application/json' })
     expect(call[1].headers.Authorization).toBeUndefined()
   })
@@ -924,6 +926,7 @@ describe('Pixel', () => {
     expect(chatCalls).toHaveLength(3)
     expect(JSON.parse(chatCalls[2][1].body)).toEqual({
       chat_id: retryBody.chat_id,
+      request_id: expect.any(String),
       messages: [
         { role: 'user', content: 'Inspect the installed extension.' },
         { role: 'assistant', content: 'Verified recovery result' },
@@ -1141,6 +1144,85 @@ describe('Pixel', () => {
       expect(globalThis.fetch.mock.calls.filter(([url]) => url === '/api/pixel/chat/stream')).toHaveLength(1)
       restored.unmount()
     }
+  })
+
+  it('recovers a completed answer after closing the original stream without resubmitting in StrictMode', async () => {
+    const siteId = 'site-' + 'a'.repeat(24)
+    const preview = {schemaVersion:1,kind:'ods-pixel-workspace-preview',relativeDirectory:'recovery-demo',siteId,port:9437,
+      url:`http://${siteId}.localhost:9437/${siteId}/`,files:2,bytes:4096,
+      sha256:'a'.repeat(64),entrySha256:'b'.repeat(64)}
+    globalThis.localStorage.setItem('ods.pixel.chat.v1', JSON.stringify({
+      schema:1, chatId:'durable-chat', requestId:'durable-attempt', inFlight:true,
+      messages:[{role:'user',content:'Make my preview'},{role:'assistant',content:'Partial answer'}],
+    }))
+    globalThis.fetch.mockImplementation(async (url, options) => {
+      if (url === '/api/pixel/status') return response({available:true})
+      if (url === '/api/pixel/chat/result') {
+        expect(JSON.parse(options.body)).toEqual({chat_id:'durable-chat',request_id:'durable-attempt'})
+        return response({state:'complete',events:[
+          'data: '+JSON.stringify({choices:[{delta:{content:'Recovered final answer'}}]}),
+          'data: '+JSON.stringify({choices:[{finish_reason:'stop'}],pixel:{schemaVersion:1,preview}}),
+          'data: [DONE]', '',
+        ].join('\n')})
+      }
+      throw new Error(`Unexpected request ${url}`)
+    })
+    const first = render(<StrictMode><Pixel /></StrictMode>)
+    expect(await screen.findByText('Recovered final answer')).toBeVisible()
+    expect(await screen.findByTitle('Interactive Pixel preview')).toHaveAttribute('src',`/pixel-preview/${siteId}/`)
+    expect(screen.queryByText('Partial answer')).toBeNull()
+    expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).inFlight).toBe(false))
+    first.unmount()
+    render(<Pixel />)
+    expect(await screen.findByText('Recovered final answer')).toBeVisible()
+    expect(screen.getAllByText('Recovered final answer')).toHaveLength(1)
+  })
+
+  it('does not call a retained zero-submission receipt completed or resubmit it on reload', async () => {
+    localStorage.setItem('ods.pixel.chat.v1', JSON.stringify({schema:1,chatId:'not-started-chat',requestId:'not-started-attempt',inFlight:true,
+      messages:[{role:'user',content:'Do my task'},{role:'assistant',content:''}]}))
+    const frame = {choices:[{delta:{},finish_reason:'stop'}],pixel:{schemaVersion:1,recovery:'clean-context',reason:'operations-unavailable-zero-submissions'}}
+    globalThis.fetch.mockImplementation(async url => {
+      if (url === '/api/pixel/status') return response({available:true})
+      if (url === '/api/pixel/chat/result') return response({state:'complete',events:'data: '+JSON.stringify(frame)+'\n\ndata: [DONE]\n\n'})
+      throw new Error(`Unexpected request ${url}`)
+    })
+    render(<Pixel />)
+    expect(await screen.findByText('Pixel did not start this attempt. Send your message again to continue.')).toBeVisible()
+    expect(screen.queryByText('Completed without a text response.')).toBeNull()
+    expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
+  })
+
+  it('commits its recovery identity before starting a request', async () => {
+    globalThis.fetch.mockImplementation(async (url, options) => {
+      if (url === '/api/pixel/status') return response({available:true})
+      if (url === '/api/pixel/chat/stream') {
+        const sent = JSON.parse(options.body)
+        const saved = JSON.parse(localStorage.getItem('ods.pixel.chat.v1'))
+        expect(saved.requestId).toBe(sent.request_id)
+        expect(saved.chatId).toBe(sent.chat_id)
+        expect(saved.inFlight).toBe(true)
+        expect(saved.messages).toEqual([{role:'user',content:'Retain this task'},{role:'assistant',content:''}])
+        return sseResponse([JSON.stringify({choices:[{delta:{content:'Stored'}}]}),'[DONE]'])
+      }
+      throw new Error(`Unexpected request ${url}`)
+    })
+    render(<Pixel />); await screen.findByText('Available')
+    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'),{target:{value:'Retain this task'}})
+    fireEvent.click(screen.getByTitle('Send'))
+    expect(await screen.findByText('Stored')).toBeVisible()
+  })
+
+  it('does not start orphaned work when the attempt identity cannot be saved', async () => {
+    globalThis.fetch.mockResolvedValue(response({available:true}))
+    render(<Pixel />); await screen.findByText('Available')
+    vi.spyOn(Storage.prototype,'setItem').mockImplementation(() => { throw new Error('quota') })
+    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'),{target:{value:'Keep my draft'}})
+    fireEvent.click(screen.getByTitle('Send'))
+    expect(await screen.findByText(/No task was started/)).toBeVisible()
+    expect(screen.getByPlaceholderText('Message Pixel...')).toHaveValue('Keep my draft')
+    expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
   })
 
   function saveInterruptedChat() {
