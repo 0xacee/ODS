@@ -9,7 +9,8 @@ export default function PixelSharingSettings() {
   const [label, setLabel] = useState('')
   const [days, setDays] = useState(30)
   const [issued, setIssued] = useState(null)
-  const [baseUrl, setBaseUrl] = useState('http://127.0.0.1:4005/v1')
+  const [baseUrl, setBaseUrl] = useState('')
+  const baseUrlEdited = useRef(false)
   const [busy, setBusy] = useState(false)
   const [stale, setStale] = useState(false)
   const [error, setError] = useState('')
@@ -39,10 +40,12 @@ export default function PixelSharingSettings() {
       if (!response.ok) throw new Error('Sharing request failed')
       const result = await response.json()
       const next = readSharing(result)
+      const defaultUrl = `http://127.0.0.1:${next.transport.port}/v1`
       if (action && next.configuration.revision !== payload.expectedRevision + 1) throw new Error('Unknown revision')
-      if (action === 'issue') connectionBundle(result, 'http://127.0.0.1:4005/v1')
+      if (action === 'issue') connectionBundle(result, defaultUrl)
       if (!current()) return
       setSnapshot(next)
+      if (!baseUrlEdited.current) setBaseUrl(defaultUrl)
       setStale(false)
       if (action === 'issue') {
         setIssued(result)
@@ -145,7 +148,7 @@ export default function PixelSharingSettings() {
       {issued && <div className="rounded-lg border border-theme-border p-4 space-y-3">
         <h3 className="font-medium">One-time connection settings</h3>
         <p className="text-sm text-theme-text-muted">On your laptop, forward this host’s 127.0.0.1:{snapshot.transport.port} through authenticated SSH, or use your explicitly configured HTTPS ingress. The key grants inference only, not SSH or computer access.</p>
-        <label className="block text-sm">Laptop connection URL<input className={inputStyle} value={baseUrl} onChange={event => setBaseUrl(event.target.value)} spellCheck={false} /></label>
+        <label className="block text-sm">Laptop connection URL<input className={inputStyle} value={baseUrl} onChange={event => { baseUrlEdited.current = true; setBaseUrl(event.target.value) }} spellCheck={false} /></label>
         <label className="block text-sm">Device API key<input className={inputStyle} type="password" value={issued.credential.key} readOnly autoComplete="off" /></label>
         <p className="text-sm">OpenAI-compatible model: <code>ods/shared</code>. Test the connection on the client before choosing it as Pixel’s leader.</p>
         <button className={buttonStyle} onClick={copyConnection}>Copy connection settings</button>{' '}

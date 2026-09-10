@@ -119,6 +119,23 @@ def test_changed_route_fails_closed(connect):
         assert client.post('/v1/chat/completions', json=body(), headers=auth).status_code == 409
 
 
+@pytest.mark.parametrize('method,path', [('GET', '/v1/models'), ('POST', '/v1/chat/completions')])
+def test_legacy_router_metadata_cannot_substitute_for_catalog_attestation(connect, method, path):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert request.method == 'GET'
+        # Real stale laptop-router shape: model and sequence exist, catalog identity does not.
+        return httpx.Response(200, json={'ods': {'routedModel': 'GLM', 'backend': 'llama-server', 'routeSeq': 4}})
+
+    with connect(handler) as (client, auth):
+        response = client.request(method, path, headers=auth, **({'json': body()} if method == 'POST' else {}))
+        assert response.status_code == 409
+        assert response.json()['error']['type'] == 'shared_model_not_active'
+        assert len(requests) == 1 and requests[0].url.path == '/v1/models'
+
+
 def test_revocation_rechecked_after_route_lookup(connect, state):
     store, _ = state
     def handler(request):

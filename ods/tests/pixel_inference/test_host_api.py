@@ -110,10 +110,13 @@ def lifecycle(owner):
     class Service:
         port = 4015
         fail = False
+        failure = None
         state = 'stopped'
         def start(self):
             started.set()
             assert release.wait(3), 'test did not release lifecycle'
+            if self.failure is not None:
+                raise self.failure
             if self.fail:
                 raise RuntimeError('private-lifecycle-sentinel')
             self.state = 'ready'
@@ -170,6 +173,24 @@ def test_failed_start_disables_admission_and_does_not_expose_error(owner, lifecy
     assert status == 200 and value['runtime']['status'] == 'error'
     assert not value['configuration']['enabled'] and value['configuration']['revision'] == 3
     assert 'private-lifecycle-sentinel' not in json.dumps(progress)
+
+
+def test_failed_start_reports_safe_template_reason_without_changing_response_schema(owner, lifecycle, caplog):
+    from pixel_provider.store import StoreError
+    service, started, release, progress = lifecycle
+    service.failure = StoreError('unsafe-sharing-compose')
+    request(owner, 'issue', {'expectedRevision': 0, 'settings': settings()})
+    assert request(owner, 'start', {'expectedRevision': 1})[0] == 202
+    assert started.wait(1)
+    release.set()
+    deadline = time.monotonic() + 2
+    while owner[0]._service_locks['pixel-inference'].locked() and time.monotonic() < deadline:
+        time.sleep(.01)
+    status, value, _ = request(owner)
+    assert status == 200 and value['runtime'] == {'status': 'error'}
+    assert not value['configuration']['enabled'] and value['configuration']['revision'] == 3
+    assert 'unsafe-sharing-compose' in progress[-1][1]['error']
+    assert 'Inference sharing start failed: unsafe-sharing-compose' in caplog.text
 
 
 @pytest.mark.parametrize('action', ['start','stop'])

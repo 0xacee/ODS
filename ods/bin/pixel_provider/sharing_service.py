@@ -15,6 +15,19 @@ from .store import StoreError
 SERVICE = 'pixel-inference'
 CONTAINER = 'ods-pixel-inference'
 ACTIVATION_LABEL = 'ods.pixel-inference.activation'
+FAILURE_CODES = frozenset({
+    'invalid-sharing-port', 'model-router-not-ready', 'sharing-activation-changed',
+    'sharing-build-failed', 'sharing-compose-conflict', 'sharing-compose-invalid',
+    'sharing-container-identity-mismatch', 'sharing-health-unverified',
+    'sharing-service-unavailable', 'sharing-start-failed', 'sharing-stop-failed',
+    'sharing-stop-unverified', 'unsafe-sharing-compose', 'unsupported-platform',
+})
+
+
+def safe_failure_code(error):
+    """Expose only known lifecycle codes, never subprocess output or credentials."""
+    code = error.args[0] if isinstance(error, StoreError) and len(error.args) == 1 else None
+    return code if type(code) is str and code in FAILURE_CODES else 'sharing-service-unavailable'
 
 
 def validate_compose(document, *, directory, port, uid, gid):

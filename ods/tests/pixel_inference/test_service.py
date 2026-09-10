@@ -1,6 +1,5 @@
 import copy
 import json
-import os
 from pathlib import Path
 import sys
 import subprocess
@@ -140,6 +139,40 @@ def test_effective_compose_rejects_unsafe_changes(setup,change):
 def test_private_read_only_compose_contract(setup):
     _,spec,_,_,_,private = setup
     validate_compose(copy.deepcopy(spec),directory=private,port=4005,uid=1000,gid=1000)
+
+
+def test_group_writable_installed_template_refuses_before_rename_or_build(setup):
+    service, _, calls, _, extension, _ = setup
+    template = extension / 'compose.yaml.disabled'
+    before = template.read_bytes()
+    template.chmod(0o664)  # Reproduces the real laptop beta-copy failure.
+    with pytest.raises(StoreError, match='unsafe-sharing-compose'):
+        service.start()
+    assert template.read_bytes() == before
+    assert template.stat().st_mode & 0o777 == 0o664
+    assert not (extension / 'compose.yaml').exists()
+    assert not list(service.install_dir.glob('.ods-sharing-activation-*.json'))
+    assert all(command[:3] == ['docker', 'container', 'inspect'] for command in calls)
+
+
+@pytest.mark.parametrize('code', sorted(service_module.FAILURE_CODES))
+def test_safe_failure_code_retains_only_known_store_codes(code):
+    assert service_module.safe_failure_code(StoreError(code)) == code
+
+
+@pytest.mark.parametrize('error', [
+    RuntimeError('unsafe-sharing-compose'),
+    StoreError('private-token-do-not-echo'),
+    StoreError({'secret': 'private-token-do-not-echo'}),
+])
+def test_safe_failure_code_never_echoes_arbitrary_exception_data(error):
+    assert service_module.safe_failure_code(error) == 'sharing-service-unavailable'
+
+
+def test_safe_failure_code_rejects_extra_exception_arguments():
+    error = StoreError('unsafe-sharing-compose')
+    error.args += ('private-token-do-not-echo',)
+    assert service_module.safe_failure_code(error) == 'sharing-service-unavailable'
 
 
 @pytest.mark.parametrize('failure', ['fail_up','timeout_up'])

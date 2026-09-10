@@ -189,12 +189,12 @@ describe('Pixel', () => {
 
     const original = render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), {
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {
       target: { value: 'Build and show me a demo website.' },
     })
     fireEvent.click(screen.getByTitle('Send'))
 
-    const frame = await screen.findByTitle('Interactive Pixel preview')
+    const frame = await screen.findByTitle('Interactive Portal preview')
     expect(frame).toHaveAttribute('src', `/pixel-preview/${siteId}/__ods_view__.html`)
     expect(frame).toHaveAttribute('sandbox', 'allow-scripts allow-forms allow-downloads')
     expect(screen.queryByLabelText('Snapshot details')).not.toBeInTheDocument()
@@ -211,11 +211,11 @@ describe('Pixel', () => {
     original.unmount()
     globalThis.fetch.mockResolvedValue(response({ available: true }))
     const restored = render(<Pixel />)
-    expect(await screen.findByTitle('Interactive Pixel preview')).toHaveAttribute('src', `/pixel-preview/${siteId}/__ods_view__.html`)
+    expect(await screen.findByTitle('Interactive Portal preview')).toHaveAttribute('src', `/pixel-preview/${siteId}/__ods_view__.html`)
     expect(globalThis.fetch.mock.calls.filter(([url]) => url === '/api/pixel/chat/stream')).toHaveLength(1)
 
     fireEvent.click(screen.getByTitle('Close preview'))
-    expect(screen.queryByTitle('Interactive Pixel preview')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Interactive Portal preview')).not.toBeInTheDocument()
     await waitFor(() => expect(
       JSON.parse(globalThis.localStorage.getItem('ods.pixel.chat.v1')).workspaceOpen
     ).toBe(false))
@@ -223,10 +223,10 @@ describe('Pixel', () => {
     restored.unmount()
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    expect(screen.queryByTitle('Interactive Pixel preview')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Interactive Portal preview')).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Open the verified preview' })).toHaveAttribute('href', `/pixel-preview/${siteId}/`)
     fireEvent.click(screen.getByRole('button',{name:'Workspace',exact:true}))
-    expect(screen.getByTitle('Interactive Pixel preview')).toHaveAttribute('src', `/pixel-preview/${siteId}/__ods_view__.html`)
+    expect(screen.getByTitle('Interactive Portal preview')).toHaveAttribute('src', `/pixel-preview/${siteId}/__ods_view__.html`)
   })
 
   it('opens the workspace without a preview and only drafts a publication request', async () => {
@@ -235,7 +235,7 @@ describe('Pixel', () => {
     await screen.findByText('Available')
     fireEvent.click(screen.getByRole('button',{name:'Workspace',exact:true}))
     expect(screen.getByText('No preview published yet')).toBeVisible()
-    expect(screen.queryByTitle('Interactive Pixel preview')).toBeNull()
+    expect(screen.queryByTitle('Interactive Portal preview')).toBeNull()
     fireEvent.click(screen.getByRole('button',{name:'Ask Pixel to publish'}))
     expect(screen.getByPlaceholderText('Message Pixel...').value).toContain('pixel_ods_workspace_preview')
     expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
@@ -383,7 +383,7 @@ describe('Pixel', () => {
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('Keep my work visible')).toBeInTheDocument()
-    expect(screen.queryByTitle('Interactive Pixel preview')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Interactive Portal preview')).not.toBeInTheDocument()
   })
 
   it('clears the stored preview when starting a new conversation', async () => {
@@ -400,14 +400,14 @@ describe('Pixel', () => {
     }))
     globalThis.fetch.mockResolvedValue(response({ available: true }))
     const restored = render(<Pixel />)
-    const frame = await screen.findByTitle('Interactive Pixel preview')
+    const frame = await screen.findByTitle('Interactive Portal preview')
     expect(frame).toBeInTheDocument()
     fireEvent.click(screen.getByTitle('Collapse preview'))
     expect(frame).not.toBeVisible()
-    expect(screen.getByTitle('Interactive Pixel preview')).toBe(frame)
+    expect(screen.getByTitle('Interactive Portal preview')).toBe(frame)
     fireEvent.click(screen.getByTitle('Expand preview'))
     expect(frame).toBeVisible()
-    expect(screen.getByTitle('Interactive Pixel preview')).toBe(frame)
+    expect(screen.getByTitle('Interactive Portal preview')).toBe(frame)
     fireEvent.click(screen.getByTitle('Start a new chat'))
     await waitFor(() => {
       const stored = JSON.parse(globalThis.localStorage.getItem('ods.pixel.chat.v1'))
@@ -418,7 +418,7 @@ describe('Pixel', () => {
     restored.unmount()
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    expect(screen.queryByTitle('Interactive Pixel preview')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Interactive Portal preview')).not.toBeInTheDocument()
   })
 
   it('uses the authenticated relay for LAN and forwarded loopback dashboards', () => {
@@ -456,12 +456,12 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), {
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {
       target: { value: 'Show my site.' },
     })
     fireEvent.click(screen.getByTitle('Send'))
     expect(await screen.findByText(/Live at/)).toBeInTheDocument()
-    expect(screen.queryByTitle('Interactive Pixel preview')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('Interactive Portal preview')).not.toBeInTheDocument()
   })
 
   it('keeps dictation beside send and distinguishes characters from model context', async () => {
@@ -542,7 +542,7 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), {
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {
       target: { value: 'Install the ODS extension crewai.' },
     })
     fireEvent.click(screen.getByTitle('Send'))
@@ -649,7 +649,7 @@ describe('Pixel', () => {
     render(<Pixel />)
 
     await waitFor(() => expect(screen.getByText('Switching model...')).toBeInTheDocument())
-    expect(screen.getByText('Pixel is switching models')).toBeInTheDocument()
+    expect(screen.getByText('Portal is switching models')).toBeInTheDocument()
     expect(screen.getByPlaceholderText('Waiting for model switch...')).toBeDisabled()
   })
 
@@ -674,7 +674,7 @@ describe('Pixel', () => {
     )
     expect(screen.getAllByRole('link', { name: 'Change model' })).toHaveLength(1)
     expect(screen.getAllByRole('link', { name: 'Change model' })[0]).toHaveAttribute('href', '/models')
-    expect(screen.getByPlaceholderText('Message Pixel...')).toBeEnabled()
+    expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   })
 
   it('preserves a draft when model viability changes before stream acceptance', async () => {
@@ -686,13 +686,13 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    const composer = screen.getByPlaceholderText('Message Pixel...')
+    const composer = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(composer, { target: { value: 'keep this owner request' } })
     fireEvent.click(screen.getByTitle('Send'))
 
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    expect(screen.getByPlaceholderText('Message Pixel...')).toBeEnabled()
-    expect(screen.getByPlaceholderText('Message Pixel...')).toHaveValue(
+    expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
+    expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue(
       'keep this owner request'
     )
   })
@@ -723,7 +723,7 @@ describe('Pixel', () => {
     )
     expect(screen.getAllByRole('link', { name: 'Change model' })).toHaveLength(1)
     expect(screen.getAllByRole('link', { name: 'Change model' })[0]).toHaveAttribute('href', '/models')
-    expect(screen.getByPlaceholderText('Message Pixel...')).toBeEnabled()
+    expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   })
 
   it('restores an unsent draft when model activation wins the chat race', async () => {
@@ -737,7 +737,7 @@ describe('Pixel', () => {
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(textarea, { target: { value: 'keep this exact draft' } })
     fireEvent.click(screen.getByTitle('Send'))
 
@@ -755,7 +755,7 @@ describe('Pixel', () => {
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     const send = screen.getByTitle('Send')
     expect(send).toBeDisabled()
     fireEvent.change(textarea, { target: { value: '   ' } })
@@ -845,7 +845,7 @@ describe('Pixel', () => {
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('remembered')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), {
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {
       target: { value: 'what did I say?' },
     })
     fireEvent.click(screen.getByTitle('Send'))
@@ -879,7 +879,7 @@ describe('Pixel', () => {
     expect(screen.getByText('32K context')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Check ODS health/ }))
-    expect(screen.getByPlaceholderText('Message Pixel...')).toHaveValue(
+    expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue(
       'Check the current ODS status. Summarize what is healthy, identify anything degraded or stopped, and suggest the safest next action.'
     )
     expect(globalThis.fetch).toHaveBeenCalledTimes(1)
@@ -946,7 +946,7 @@ describe('Pixel', () => {
     expect(screen.getByText('8K context')).toBeInTheDocument()
     expect(screen.queryByText('Qwen3.5-9B-Q4_K_M.gguf')).not.toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.getByPlaceholderText('Message Pixel...')).toBeEnabled()
+    expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   })
 
   it('shows the verified local runtime instead of stale installer model metadata', async () => {
@@ -960,7 +960,7 @@ describe('Pixel', () => {
     expect(screen.getByText('Qwen3.6-35B-A3B-GGUF')).toBeInTheDocument()
     expect(screen.getByText('64K context')).toBeInTheDocument()
     expect(screen.queryByText('qwen3.5-9b')).not.toBeInTheDocument()
-    expect(screen.getByPlaceholderText('Message Pixel...')).toBeEnabled()
+    expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   })
 
   it('ignores an unknown runtime source and keeps the fallback local identity', async () => {
@@ -1010,7 +1010,7 @@ describe('Pixel', () => {
     ]
     globalThis.fetch.mockResolvedValueOnce(sseResponse(streamFrames))
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(textarea, { target: { value: 'hi there' } })
     fireEvent.click(screen.getByTitle('Send'))
 
@@ -1053,7 +1053,7 @@ describe('Pixel', () => {
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(textarea, { target: { value: 'first turn' } })
     fireEvent.click(screen.getByTitle('Send'))
     await waitFor(() => expect(screen.getByText('First answer')).toBeInTheDocument())
@@ -1111,7 +1111,7 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(textarea, { target: { value: 'Inspect the installed extension.' } })
     fireEvent.click(screen.getByTitle('Send'))
 
@@ -1164,7 +1164,7 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), {
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {
       target: { value: 'Inspect ODS through Operations.' },
     })
     fireEvent.click(screen.getByTitle('Send'))
@@ -1186,7 +1186,7 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), {
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {
       target: { value: 'Discuss the fallback wording.' },
     })
     fireEvent.click(screen.getByTitle('Send'))
@@ -1211,7 +1211,7 @@ describe('Pixel', () => {
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(textarea, { target: { value: 'first turn' } })
     fireEvent.click(screen.getByTitle('Send'))
     await waitFor(() => expect(screen.getByText('First answer')).toBeInTheDocument())
@@ -1222,7 +1222,7 @@ describe('Pixel', () => {
     expect(screen.queryByText('First answer')).not.toBeInTheDocument()
     expect(screen.getByText('What do you want to work on?')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), { target: { value: 'second turn' } })
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), { target: { value: 'second turn' } })
     fireEvent.click(screen.getByTitle('Send'))
     await waitFor(() => expect(screen.getByText('Second answer')).toBeInTheDocument())
 
@@ -1249,7 +1249,7 @@ describe('Pixel', () => {
     ]
     globalThis.fetch.mockResolvedValueOnce(sseResponse(frames))
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(textarea, { target: { value: 'hello' } })
     fireEvent.click(screen.getByTitle('Send'))
 
@@ -1299,7 +1299,7 @@ describe('Pixel', () => {
       headers: new Map([['content-type', 'text/event-stream']]),
     })
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(textarea, { target: { value: 'boundaries' } })
     fireEvent.click(screen.getByTitle('Send'))
 
@@ -1330,7 +1330,7 @@ describe('Pixel', () => {
     })
     const first = render(<Pixel />)
     await screen.findByText('Available')
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), { target: { value: 'Create a report, then verify it.' } })
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), { target: { value: 'Create a report, then verify it.' } })
     fireEvent.click(screen.getByTitle('Send'))
     await screen.findByText('Created report.md; checking its contents.')
     const request = JSON.parse(globalThis.fetch.mock.calls.find(([url]) => url === '/api/pixel/chat/stream')[1].body)
@@ -1381,7 +1381,7 @@ describe('Pixel', () => {
     })
     const first = render(<StrictMode><Pixel /></StrictMode>)
     expect(await screen.findByText('Recovered final answer')).toBeVisible()
-    expect(await screen.findByTitle('Interactive Pixel preview')).toHaveAttribute('src',`/pixel-preview/${siteId}/__ods_view__.html`)
+    expect(await screen.findByTitle('Interactive Portal preview')).toHaveAttribute('src',`/pixel-preview/${siteId}/__ods_view__.html`)
     expect(screen.queryByText('Partial answer')).toBeNull()
     expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
     await waitFor(() => expect(JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).inFlight).toBe(false))
@@ -1421,7 +1421,7 @@ describe('Pixel', () => {
       throw new Error(`Unexpected request ${url}`)
     })
     render(<Pixel />); await screen.findByText('Available')
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'),{target:{value:'Retain this task'}})
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'),{target:{value:'Retain this task'}})
     fireEvent.click(screen.getByTitle('Send'))
     expect(await screen.findByText('Stored')).toBeVisible()
   })
@@ -1430,10 +1430,10 @@ describe('Pixel', () => {
     globalThis.fetch.mockResolvedValue(response({available:true}))
     render(<Pixel />); await screen.findByText('Available')
     vi.spyOn(window.Storage.prototype,'setItem').mockImplementation(() => { throw new Error('quota') })
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'),{target:{value:'Keep my draft'}})
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'),{target:{value:'Keep my draft'}})
     fireEvent.click(screen.getByTitle('Send'))
     expect(await screen.findByText(/No task was started/)).toBeVisible()
-    expect(screen.getByPlaceholderText('Message Pixel...')).toHaveValue('Keep my draft')
+    expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue('Keep my draft')
     expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
   })
 
@@ -1456,7 +1456,7 @@ describe('Pixel', () => {
     render(<Pixel />)
     await screen.findByText('Working in this chat')
     expect(screen.getByTitle('Stop')).toBeEnabled()
-    expect(screen.getByPlaceholderText('Message Pixel...')).toBeDisabled()
+    expect(screen.getByPlaceholderText('Message Portal...')).toBeDisabled()
     expect(screen.getByTitle('Start a new chat')).toBeDisabled()
     expect(screen.getByText('Saved partial result')).toBeInTheDocument()
     state = 'terminal'
@@ -1603,7 +1603,7 @@ describe('Pixel', () => {
       expect(screen.getByText('Available')).toBeInTheDocument()
     })
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(textarea, { target: { value: 'test' } })
     fireEvent.click(screen.getByTitle('Send'))
 
@@ -1611,7 +1611,7 @@ describe('Pixel', () => {
     // the textarea itself is disabled.
     await waitFor(() => {
       expect(screen.queryByTitle('Send')).not.toBeInTheDocument()
-      const ta = screen.getByPlaceholderText('Message Pixel...')
+      const ta = screen.getByPlaceholderText('Message Portal...')
       expect(ta).toBeDisabled()
       expect(screen.getByText('Working')).toBeInTheDocument()
       expect(screen.getAllByText(/0:00 elapsed/).length).toBeGreaterThan(0)
@@ -1642,7 +1642,7 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), {
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {
       target: { value: 'long task' },
     })
     fireEvent.click(screen.getByTitle('Send'))
@@ -1691,7 +1691,7 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), {
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {
       target: { value: 'long task with partial output' },
     })
     fireEvent.click(screen.getByTitle('Send'))
@@ -1772,7 +1772,7 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), {
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {
       target: { value: 'long task' },
     })
     fireEvent.click(screen.getByTitle('Send'))
@@ -1798,7 +1798,7 @@ describe('Pixel', () => {
       expect(screen.getByText('Available')).toBeInTheDocument()
     })
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     const longText = 'a'.repeat(16 * 1024 + 1)
     fireEvent.change(textarea, { target: { value: longText } })
 
@@ -1821,7 +1821,7 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), { target: { value: 'test' } })
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), { target: { value: 'test' } })
     fireEvent.click(screen.getByTitle('Send'))
 
     await waitFor(() => {
@@ -1840,7 +1840,7 @@ describe('Pixel', () => {
 
     render(<Pixel />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    fireEvent.change(screen.getByPlaceholderText('Message Pixel...'), { target: { value: 'test' } })
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), { target: { value: 'test' } })
     fireEvent.click(screen.getByTitle('Send'))
 
     await waitFor(() => expect(screen.getByText('Response interrupted.')).toBeInTheDocument())
@@ -1905,9 +1905,9 @@ describe('Pixel', () => {
     fireEvent.click(screen.getByTitle('Reload preview'))
     await waitFor(()=>expect(requests()).toBe(before+1))
     expect(screen.getByRole('button',{name:tab,exact:true})).toHaveAttribute('aria-pressed','true')
-    expect(screen.getAllByTitle('Interactive Pixel preview')).toHaveLength(1)
+    expect(screen.getAllByTitle('Interactive Portal preview')).toHaveLength(1)
     fireEvent.click(screen.getByRole('button',{name:'Preview',exact:true}))
-    expect(screen.getAllByTitle('Interactive Pixel preview')).toHaveLength(1)
+    expect(screen.getAllByTitle('Interactive Portal preview')).toHaveLength(1)
     expect(screen.queryByRole('region',{name:'Task files'})).not.toBeInTheDocument()
   })
 
@@ -1928,7 +1928,7 @@ describe('Pixel', () => {
       expect(screen.getByText('Available')).toBeInTheDocument()
     })
 
-    const textarea = screen.getByPlaceholderText('Message Pixel...')
+    const textarea = screen.getByPlaceholderText('Message Portal...')
     fireEvent.change(textarea, { target: { value: 'test' } })
     fireEvent.click(screen.getByTitle('Send'))
 

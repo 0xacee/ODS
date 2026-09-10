@@ -2,6 +2,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { ArrowLeft, ChevronLeft, ChevronRight, Plus, Search, Sparkles, Settings } from 'lucide-react'
 import { getSidebarExternalLinks, getSidebarNavItems } from '../plugins/registry'
+import { usePortalIdentity } from '../contexts/PortalIdentityContext'
 import { fallbackServiceUrl } from '../lib/serviceUrls'
 import PixelHandoffApproval from './PixelHandoffApproval'
 import PixelMascot from './PixelMascot'
@@ -17,6 +18,7 @@ export default function Sidebar({ status, collapsed, onToggle }) {
   const pixelMode = pathname.startsWith('/pixel')
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
+  const { displayName } = usePortalIdentity()
   const [apiLinks, setApiLinks] = useState([])
   const [serviceTokens, setServiceTokens] = useState({})
   useEffect(() => {
@@ -32,20 +34,20 @@ export default function Sidebar({ status, collapsed, onToggle }) {
   const applications = getSidebarExternalLinks({ status, getExternalUrl: fallbackServiceUrl, apiLinks })
     .filter(link => link.healthy || link.alwaysVisible)
   const links = pixelMode ? [
-    { path: '/pixel', label: 'Agent', icon: Sparkles },
+    { path: '/pixel', label: displayName, icon: Sparkles },
     { path: '/pixel/settings', label: 'Settings', icon: Settings },
-  ] : getSidebarNavItems({ status })
+  ] : getSidebarNavItems({ status }).map(item => item.id === 'pixel' ? { ...item, label: displayName } : item)
   function closeSearch() { setSearchOpen(false); setQuery('') }
   function toggleSearch() {
     if (searchOpen) { closeSearch(); return }
     if (collapsed) onToggle()
     setSearchOpen(true)
   }
-  return <aside className={`pixel-sidebar ${collapsed ? 'is-collapsed' : ''} ${searchOpen ? 'has-search' : ''}`} aria-label={pixelMode ? 'Pixel navigation' : 'ODS navigation'}>
+  return <aside className={`pixel-sidebar ${collapsed ? 'is-collapsed' : ''} ${searchOpen ? 'has-search' : ''}`} aria-label={pixelMode ? `${displayName} navigation` : 'ODS navigation'}>
     <div className={`pixel-brand ${pixelMode ? '' : 'ods-brand'}`}>
-      <NavLink to={pixelMode ? '/pixel' : '/'} aria-label={pixelMode ? 'Pixel home' : 'ODS home'}>
+      <NavLink to={pixelMode ? '/pixel' : '/'} aria-label={pixelMode ? `${displayName} home` : 'ODS home'}>
         <div hidden={pixelMode}><ODSLogo active={!pixelMode} /></div>
-        {pixelMode && <><PixelMascot brand /><span>Pixel</span></>}
+        {pixelMode && <><PixelMascot brand /><span>{displayName}</span></>}
       </NavLink>
       <button className="pixel-metal-control" onClick={onToggle} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}><MetalMetricIcon icon={collapsed ? ChevronRight : ChevronLeft} size={16}/></button>
     </div>

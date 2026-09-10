@@ -106,7 +106,7 @@ export const coreRoutes = [
   {
     id: 'pixel',
     path: '/pixel',
-    label: 'Pixel',
+    label: 'Portal',
     icon: Bot,
     component: Pixel,
     getProps: ({ status }) => ({ systemStatus: status }),

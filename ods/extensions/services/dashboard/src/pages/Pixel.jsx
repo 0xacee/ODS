@@ -21,6 +21,7 @@ import MetalMetricIcon from '../components/MetalMetricIcon'
 import PanelResizeHandle from '../components/PanelResizeHandle.jsx'
 import PixelHandoffApproval from '../components/PixelHandoffApproval.jsx'
 import PixelProviderScopes from '../components/PixelProviderScopes.jsx'
+import { usePortalIdentity } from '../contexts/PortalIdentityContext'
 import {
   AlertCircle,
   Bot,
@@ -369,9 +370,9 @@ export function OperationsApprovalCard({ content }) {
   )
 }
 
-function workingDetail(elapsedSeconds) {
+function workingDetail(elapsedSeconds, displayName) {
   if (elapsedSeconds < 15) return 'Starting the owner-agent turn'
-  if (elapsedSeconds < 60) return 'Pixel is working with the active model'
+  if (elapsedSeconds < 60) return `${displayName} is working with the active model`
   return 'Still working — local model and tool turns can take several minutes'
 }
 
@@ -518,6 +519,7 @@ function boundedHistory(messages, nextUserContent) {
 
 export default function Pixel({ systemStatus = null }) {
   const profile = useLocalProfile()
+  const { displayName } = usePortalIdentity()
   const [initialChat] = useState(loadStoredChat)
   const [status, setStatus] = useState('loading')
   const [statusDetail, setStatusDetail] = useState('')
@@ -1202,7 +1204,7 @@ export default function Pixel({ systemStatus = null }) {
           <PixelMascot state={pixelHeaderPose({sending, stopping, restoredActive, restoredChecking, interrupted, restoredActivity, status})} />
         </div>
         <div className="min-w-0">
-          <h1 className="text-base font-semibold leading-tight">Pixel</h1>
+          <h1 className="text-base font-semibold leading-tight truncate max-w-[40vw]" title={displayName}>{displayName}</h1>
           <p className="text-[11px] text-theme-text-muted">Your local ODS owner agent</p>
         </div>
         </div>
@@ -1291,7 +1293,7 @@ export default function Pixel({ systemStatus = null }) {
         {status === 'loading' && messages.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center text-theme-text-muted">
             <Loader2 className="mb-3 h-8 w-8 animate-spin" />
-            <p>Connecting to Pixel...</p>
+            <p>Connecting to {displayName}...</p>
           </div>
         )}
         {status === 'unavailable' && messages.length === 0 && (
@@ -1300,7 +1302,7 @@ export default function Pixel({ systemStatus = null }) {
             <h2>What do you want to work on?</h2>
             <p className="pixel-welcome-description">Start a private task, explore an idea, or create something new.</p>
             <div className="pixel-offline-notice" role="status">
-            <p className="font-medium text-theme-text">Pixel is currently unavailable</p>
+            <p className="font-medium text-theme-text">{displayName} is currently unavailable</p>
             {statusDetail && <p className="mt-1 text-sm">{statusDetail}</p>}
             <p className="mt-4 text-xs">Your other ODS applications remain available while the agent reconnects.</p>
             </div>
@@ -1309,8 +1311,8 @@ export default function Pixel({ systemStatus = null }) {
         {status === 'switching' && messages.length === 0 && (
           <div className="mx-auto flex h-full max-w-lg flex-col items-center justify-center text-center text-theme-text-muted">
             <Loader2 className="mb-4 h-9 w-9 animate-spin text-theme-accent-light" />
-            <p className="font-medium text-theme-text">Pixel is switching models</p>
-            <p className="mt-1 text-sm">Your draft is safe. Pixel will reconnect automatically when activation completes.</p>
+            <p className="font-medium text-theme-text">{displayName} is switching models</p>
+            <p className="mt-1 text-sm">Your draft is safe. {displayName} will reconnect automatically when activation completes.</p>
           </div>
         )}
         {status === 'available' && messages.length === 0 && (
@@ -1378,7 +1380,7 @@ export default function Pixel({ systemStatus = null }) {
               {message.status === 'streaming' && !message.content && (
                 <span role="status" className="inline-flex items-start gap-2 text-theme-text-muted">
                   <span>
-                    <span className="pixel-working-label block">{workingDetail(workingElapsedSeconds)}</span>
+                    <span className="pixel-working-label block">{workingDetail(workingElapsedSeconds, displayName)}</span>
                     <span className="mt-0.5 block text-xs text-theme-text-muted/80">
                       {workingElapsed} elapsed · You can stop safely at any time.
                     </span>
@@ -1407,10 +1409,10 @@ export default function Pixel({ systemStatus = null }) {
               }
             }}
             placeholder={status === 'available'
-              ? 'Message Pixel...'
+              ? `Message ${displayName}...`
               : status === 'switching'
                 ? 'Waiting for model switch...'
-                : 'Pixel is unavailable'}
+                : `${displayName} is unavailable`}
             disabled={isDisabled}
             rows={1}
             className={`pixel-composer-input min-h-11 flex-1 resize-none rounded-xl border bg-theme-card px-4 py-2.5 text-sm text-theme-text outline-none transition placeholder:text-theme-text-muted/70 disabled:opacity-50 ${
@@ -1449,7 +1451,7 @@ export default function Pixel({ systemStatus = null }) {
             </div>
           </div>
           <div className="mt-1.5 flex items-center justify-between gap-3 px-1 text-[10px] text-theme-text-muted/70">
-            <span>{stopping ? 'Waiting for exact cancellation acknowledgement' : restoredActive ? 'Earlier work is active in this chat; Stop targets only this chat.' : sending ? `Pixel is using the active ODS model and tools · ${workingElapsed} elapsed` : 'Enter to send • Shift+Enter for a new line'}</span>
+            <span>{stopping ? 'Waiting for exact cancellation acknowledgement' : restoredActive ? 'Earlier work is active in this chat; Stop targets only this chat.' : sending ? `${displayName} is using the active ODS model and tools · ${workingElapsed} elapsed` : 'Enter to send • Shift+Enter for a new line'}</span>
           </div>
         </div>
         {inputOver && (
@@ -1507,7 +1509,7 @@ export default function Pixel({ systemStatus = null }) {
             {preview && <iframe
               key={`preview-${preview.siteId}-${previewRefresh}`}
               src={previewAccess.frameUrl}
-              title="Interactive Pixel preview"
+              title={`Interactive ${displayName} preview`}
               hidden={previewCollapsed || previewTab !== 'preview'}
               sandbox={previewAccess.sandbox}
               data-preview-route={previewAccess.route}

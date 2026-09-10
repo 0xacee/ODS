@@ -73,6 +73,27 @@ it('rejects a plaintext remote URL without sending a key to the clipboard', asyn
   expect(navigator.clipboard.writeText).not.toHaveBeenCalled()
 })
 
+it('uses the advertised sharing port and preserves an edited client URL on reload', async () => {
+  const withPort = value => ({...value,transport:{...value.transport,port:4405}})
+  setup(withPort(snapshot()), () => response(withPort(issued())))
+  await createKey()
+  expect(screen.getByLabelText('Laptop connection URL')).toHaveValue('http://127.0.0.1:4405/v1')
+  fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+  await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledOnce())
+  expect(JSON.parse(navigator.clipboard.writeText.mock.calls[0][0]).baseUrl).toBe('http://127.0.0.1:4405/v1')
+  fireEvent.change(screen.getByLabelText('Laptop connection URL'),{target:{value:'https://my-ingress.example/v1'}})
+  fireEvent.click(screen.getByRole('button',{name:'Reload sharing'}))
+  await waitFor(() => expect(screen.getByRole('button',{name:'Reload sharing'})).toBeEnabled())
+  // Issue again after reloading a snapshot without the retained one-time key.
+  await createKey()
+  expect(screen.getByLabelText('Laptop connection URL')).toHaveValue('https://my-ingress.example/v1')
+  fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+  await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(2))
+  expect(JSON.parse(navigator.clipboard.writeText.mock.calls[1][0])).toEqual(
+    connectionBundle(withPort(issued()), 'https://my-ingress.example/v1'),
+  )
+})
+
 it('revocation removes the retained one-time key', async () => {
   setup(snapshot(), url => response(url.endsWith('/issue') ? issued() : snapshot(2, [{ ...device(), revoked: true }])))
   await createKey()

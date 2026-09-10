@@ -28,6 +28,7 @@ import PixelProviderSettings from '../components/settings/PixelProviderSettings.
 import PixelRuntimeSettings from '../components/settings/PixelRuntimeSettings.jsx'
 import PixelSharingSettings from '../components/settings/PixelSharingSettings.jsx'
 import PixelAccessCard from '../components/settings/PixelAccessCard'
+import AssistantIdentitySettings from '../components/settings/AssistantIdentitySettings'
 import { useTheme } from '../contexts/ThemeContext'
 import { WALLPAPERS } from '../lib/wallpapers'
 import '../wallpaper-themes.css'
@@ -356,7 +357,7 @@ export default function Settings({ activeSection = 'all' }) {
         services: data.services?.map(s => ({ name: s.name, port: s.port, status: s.status })),
         model: data.model,
       }
-      const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
+      const blob = new globalThis.Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -411,6 +412,7 @@ export default function Settings({ activeSection = 'all' }) {
           <div hidden={!visible('usage')}><AccountUsageCard usageReport={usageReport} /></div>
           <div hidden={!visible('owner')}><RemoteSetupCard setupStatus={setupStatus} /></div>
         </div>
+        <div hidden={!visible('profile')}><AssistantIdentitySettings /></div>
         <div hidden={!visible('connections')}><PixelProviderSettings showHeading={activeSection === 'all'} /></div>
         <div hidden={!visible('connections')}><PixelRuntimeSettings /></div>
         <div hidden={!visible('sharing')}><PixelSharingSettings /></div>

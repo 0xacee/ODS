@@ -2048,6 +2048,7 @@ def _pixel_sharing_runtime():
 def _start_pixel_sharing_change(action, body, route):
     from pixel_provider.sharing import SharingStore
     from pixel_provider.sharing_host_api import change_sharing, get_sharing
+    from pixel_provider.sharing_service import safe_failure_code
     from pixel_provider.store import StoreError
     if (not isinstance(body, dict) or set(body) != {'expectedRevision'}
             or type(body['expectedRevision']) is not int or not 0 <= body['expectedRevision'] < 2**53 - 1):
@@ -2071,7 +2072,7 @@ def _start_pixel_sharing_change(action, body, route):
             try:
                 service.start() if action == 'start' else service.stop()
                 _write_progress('pixel-inference', 'complete', 'Inference sharing ready' if action == 'start' else 'Inference sharing stopped')
-            except Exception:
+            except Exception as error:
                 # Grant revocations may advance revision during the build;
                 # preserve them while closing this failed activation.
                 if action == 'start':
@@ -2079,8 +2080,10 @@ def _start_pixel_sharing_change(action, body, route):
                         SharingStore(DATA_DIR / 'pixel-inference').disable_after_failed_start()
                     except (StoreError, OSError):
                         pass
-                _write_progress('pixel-inference', 'error', 'Inference sharing operation failed',
-                                error='Sharing operation failed; reload state before retrying.')
+                code = safe_failure_code(error)
+                logger.warning('Inference sharing %s failed: %s', action, code)
+                _write_progress('pixel-inference', 'error', f'Inference sharing operation failed ({code})',
+                                error=f'Sharing operation failed ({code}); reload state before retrying.')
             finally:
                 lock.release()
         threading.Thread(target=work, daemon=True, name='ods-pixel-sharing-lifecycle').start()
@@ -6457,6 +6460,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_pixel_providers_runtime(change=False)
         elif path == "/v1/pixel/settings" and not parsed.query:
             self._handle_pixel_settings(save=False)
+        elif path == "/v1/pixel/identity" and not parsed.query:
+            self._handle_portal_identity(save=False)
         elif path == "/v1/pixel/settings/runtime" and not parsed.query:
             self._handle_pixel_settings_runtime(change=False)
         elif path == "/v1/pixel/advice-runtime":
@@ -6989,6 +6994,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_pixel_providers_runtime(change=True)
         elif self.path == "/v1/pixel/settings/save":
             self._handle_pixel_settings(save=True)
+        elif self.path == "/v1/pixel/identity/save":
+            self._handle_portal_identity(save=True)
         elif self.path == "/v1/pixel/settings/runtime":
             self._handle_pixel_settings_runtime(change=True)
         elif self.path in {"/v1/pixel/advice/start", "/v1/pixel/advice/status", "/v1/pixel/advice/cancel"}:
@@ -7363,6 +7370,54 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         except (OSError, ValueError, TypeError, RecursionError):
             json_response(self, 503, {"error": "Pixel settings are unavailable"}, no_store=True)
+            return
+        json_response(self, 200, result, no_store=True)
+
+    def _handle_portal_identity(self, *, save):
+        """Owner display name only; never changes model or system identity."""
+        if not check_auth(self):
+            return
+        try:
+            from portal_identity import get_identity, save_identity
+            from pixel_provider.store import StoreError, decode_document
+        except ImportError:
+            json_response(self, 503, {"error": "Assistant identity is unavailable"}, no_store=True)
+            return
+        try:
+            if save:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,9}", lengths[0])
+                        or self.headers.get("Transfer-Encoding") is not None):
+                    raise StoreError("invalid-request")
+                length = int(lengths[0])
+                if length > 2048:
+                    json_response(self, 413, {"error": "Assistant identity request is too large"}, no_store=True)
+                    return
+                if length == 0:
+                    raise StoreError("invalid-request")
+                old_timeout = self.connection.gettimeout()
+                try:
+                    self.connection.settimeout(10)
+                    raw = self.rfile.read(length)
+                finally:
+                    self.connection.settimeout(old_timeout)
+                if len(raw) != length:
+                    raise StoreError("invalid-request")
+                try:
+                    body = decode_document(raw)
+                except StoreError:
+                    raise StoreError("invalid-request") from None
+                result = save_identity(DATA_DIR, body)
+            else:
+                result = get_identity(DATA_DIR)
+        except StoreError as error:
+            status = 409 if error.code == "stale-revision" else 503
+            if save and error.code == "invalid-request":
+                status = 400
+            json_response(self, status, {"error": "Assistant identity request failed"}, no_store=True)
+            return
+        except (OSError, ValueError, TypeError, RecursionError):
+            json_response(self, 503, {"error": "Assistant identity is unavailable"}, no_store=True)
             return
         json_response(self, 200, result, no_store=True)
 
