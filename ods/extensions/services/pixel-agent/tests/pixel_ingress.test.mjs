@@ -40,7 +40,7 @@ import {
   gatewayFetch,
 } from "../host/pixel_ingress.mjs";
 
-const DIR = path.join(os.tmpdir(), `pixel-ingress-test-${process.pid}-${Date.now()}`);
+const DIR = path.join(os.tmpdir(), `px-ing-${process.pid}-${Date.now()}`);
 fs.mkdirSync(DIR, { recursive: true });
 const SOCKET = path.join(DIR, "pixel-ingress.sock");
 const TOKEN = "test-gateway-token-0123456789abcdef";
