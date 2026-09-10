@@ -162,6 +162,16 @@ def _chat_results() -> ChatResultStore:
     return _result_store
 
 
+def _result_state(store, identity):
+    row = store.get(identity)
+    task = _result_tasks.get(identity)
+    if row is not None and row["state"] == "active" and (task is None or task.done()):
+        # A producer may fail while committing its last bytes. The API process
+        # being alive does not prove that this particular task is still running.
+        row["state"] = "unresolved"
+    return row
+
+
 class ChatResultRequest(ChatCancelRequest):
     request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -171,7 +181,7 @@ async def pixel_chat_result(body: ChatResultRequest, owner: str = Depends(verify
     """Read an owner's attempt without resubmitting any model request."""
     store = _chat_results()
     key = (owner_namespace(owner), body.chat_id, body.request_id)
-    row = store.get(key)
+    row = _result_state(store, key)
     if row is None:
         return {"state": "unknown", "events": ""}
     if row["state"] == "unresolved":
@@ -486,7 +496,7 @@ async def pixel_chat_cancel(body: ChatCancelRequest, owner: str = Depends(verify
     if body.request_id is not None:
         store = _chat_results()
         identity = (owner_namespace(owner), body.chat_id, body.request_id)
-        row = store.get(identity)
+        row = _result_state(store, identity)
         # A late Stop for a completed/unknown attempt must not stop a newer run.
         if row is None or row["state"] not in {"active", "unresolved"}:
             return {"aborted": False}
@@ -578,7 +588,7 @@ async def _retained_chat_stream(request, body, owner):
             for chunk in store.chunks(identity, after):
                 after = chunk["sequence"]
                 yield chunk["data"]
-            row = store.get(identity)
+            row = _result_state(store, identity)
             if row is None or row["state"] != "active":
                 return
             if await request.is_disconnected():
@@ -639,11 +649,13 @@ async def _produce_retained_result(store, identity, body, config):
                 stopped = await asyncio.wait_for(_cancel_edge_run(edge_url, key, body.chat_id), _CLIENT_CANCEL_TIMEOUT_SECONDS)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
-        if not done_seen:
-            text = "Pixel was stopped." if cancelled else "Pixel could not complete the response. Check saved work before continuing."
-            store.append(identity, _error_event(text) + b"data: [DONE]\n\n", terminal=True)
-        state = "cancelled" if cancelled else "interrupted" if failed and stopped else "unresolved" if failed else "complete"
-        store.finish(identity, state)
+        try:
+            if not done_seen:
+                text = "Pixel was stopped." if cancelled else "Pixel could not complete the response. Check saved work before continuing."
+                store.append(identity, _error_event(text) + b"data: [DONE]\n\n", terminal=True)
+        finally:
+            state = "cancelled" if cancelled else "interrupted" if failed and stopped else "unresolved" if failed else "complete"
+            store.finish(identity, state)
 
 
 async def _iter_upstream_chunks(

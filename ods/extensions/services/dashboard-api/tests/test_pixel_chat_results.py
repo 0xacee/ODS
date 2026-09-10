@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import sqlite3
 from pathlib import Path
 import sys
 
@@ -164,3 +165,40 @@ def test_truncated_upstream_retains_error_and_does_not_release_unknown_native_wo
         data = b''.join(row['data'] for row in store.chunks(IDENTITY))
         assert b'partial' in data and b'pixel_dashboard_error' in data and b'[DONE]' in data
     asyncio.run(run())
+
+
+def test_terminal_write_failure_still_releases_known_stopped_attempt(store, monkeypatch):
+    async def run():
+        append = store.append
+        def failing_append(key, data, **kwargs):
+            if kwargs.get('terminal'): raise sqlite3.OperationalError('disk full')
+            return append(key, data, **kwargs)
+        monkeypatch.setattr(store, 'append', failing_append)
+        monkeypatch.setattr(pixel.httpx, 'AsyncClient', lambda **kw: FakeClient(FakeResponse(content_type='text/event-stream')))
+        async def cancel(*args): return True
+        monkeypatch.setattr(pixel, '_cancel_edge_run', cancel)
+        await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
+        await asyncio.gather(*list(pixel._result_tasks.values()), return_exceptions=True)
+        assert store.get(IDENTITY)['state'] == 'interrupted'
+        assert not store.has_pending(IDENTITY[:2])
+    asyncio.run(run())
+
+
+def test_finished_task_with_failed_state_commit_is_not_reported_as_running(store, monkeypatch):
+    store.reserve(IDENTITY, 'hash')
+    async def terminal(*args): return {'state':'terminal'}
+    monkeypatch.setattr(pixel, 'pixel_chat_activity', terminal)
+    result = asyncio.run(pixel.pixel_chat_result(pixel.ChatResultRequest(chat_id='chat-test',request_id='attempt-one'), OWNER))
+    assert result == {'state':'interrupted','events':''}
+    assert not store.has_pending(IDENTITY[:2])
+
+
+def test_orphaned_receipts_do_not_reserve_future_output_capacity(tmp_path, monkeypatch):
+    monkeypatch.setattr(receipts,'MAX_ACTIVE',1)
+    first = receipts.ChatResultStore(tmp_path/'private')
+    first.reserve(IDENTITY,'hash'); first.close()
+    second = receipts.ChatResultStore(tmp_path/'private')
+    try:
+        assert second.reserve((IDENTITY[0],'different-chat','next'),'hash')
+        assert second.get(IDENTITY)['state'] == 'unresolved'
+    finally: second.close()
