@@ -1,12 +1,12 @@
 """Bounded dashboard bridge to the internal Pixel edge service."""
 
+from __future__ import annotations
 import sys
 import asyncio
 if sys.version_info >= (3, 11):
     from asyncio import timeout as async_timeout
 else:
     from async_timeout import timeout as async_timeout
-from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -848,5 +848,6 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             "X-Accel-Buffering": "no",
         },
     )
+
 
 
