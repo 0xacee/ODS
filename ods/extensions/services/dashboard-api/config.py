@@ -124,9 +124,10 @@ def _apply_host_native_llm_service_override(
     gpu_backend: str,
     environment: Mapping[str, str] | None = None,
 ) -> None:
-    """Route Windows AMD dashboard probes to the host-native LLM endpoint."""
+    """Route host-inference probes independently of WSL's GPU exposure."""
     env = environment if environment is not None else os.environ
-    if str(gpu_backend).lower() != "amd":
+    lemonade = str(env.get("LLM_BACKEND", "")).strip().lower() == "lemonade"
+    if str(gpu_backend).lower() != "amd" and not lemonade:
         return
     if str(env.get("AMD_INFERENCE_LOCATION", "")).lower() != "host":
         return
@@ -134,8 +135,14 @@ def _apply_host_native_llm_service_override(
     if not service:
         return
 
+    # The generic LLM URL can be LiteLLM. Its model aliases do not identify
+    # the model loaded by Lemonade; use the configured inference endpoint.
+    lemonade_url = (
+        env.get("LEMONADE_CONTAINER_BASE_URL") or env.get("LEMONADE_BASE_URL")
+    ) if lemonade else None
     configured_url = (
-        env.get("OLLAMA_URL")
+        lemonade_url
+        or env.get("OLLAMA_URL")
         or env.get("LLM_URL")
         or env.get("LLM_API_URL")
         or f"http://host.docker.internal:{env.get('AMD_INFERENCE_PORT', '8080')}"
