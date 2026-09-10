@@ -50,7 +50,7 @@ def test_actual_owner_and_metadata_chain_without_saved_settings(owner):
     ('invalid', 'wrong', 403), ('{}', 'synthetic-provider-test-key', 400),
     ('{"bundle":"{}","bundle":"{}","confirmedEndpoint":"https://example.org/v1"}', 'synthetic-provider-test-key', 400),
     ('x' * 65537, 'synthetic-provider-test-key', 413),
-])
+], ids=['invalid-token', 'empty-dict', 'duplicate-keys', 'payload-too-large'])
 def test_denial_and_bad_input_never_spawn_probe(owner, body, token, status, monkeypatch):
     from pixel_provider import connection_import
     def forbidden(*args, **kwargs):
@@ -58,3 +58,4 @@ def test_denial_and_bad_input_never_spawn_probe(owner, body, token, status, monk
     monkeypatch.setattr(connection_import.subprocess, 'run', forbidden)
     assert request(owner, body, token)[0] == status
     assert list(owner[1].iterdir()) == []
+
