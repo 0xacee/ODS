@@ -21,6 +21,7 @@ if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
 
 TOKEN = "test-token-abc123-0123456789abcdef"
+FRAGMENTED_CSV = b"id,amount\n" + b"123,45.67\n" * 64000
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +128,26 @@ async def _upstream_preview(request):
     site_id = "site-" + "a" * 24
     if request.match_info.get("site_id") != site_id:
         return web.Response(status=404)
+    if request.match_info.get("tail") == "fragmented.csv":
+        headers = {
+            "Content-Type": "text/csv",
+            "Content-Length": str(len(FRAGMENTED_CSV)),
+            "X-Preview-SHA256": hashlib.sha256(FRAGMENTED_CSV).hexdigest(),
+        }
+        response = web.StreamResponse(headers=headers)
+        await response.prepare(request)
+        # HEAD has no upstream body: the edge must request GET to verify bytes.
+        if request.method != "HEAD":
+            try:
+                await response.write(FRAGMENTED_CSV[:128])
+                await asyncio.sleep(0.02)
+                for offset in range(128, len(FRAGMENTED_CSV), 8192):
+                    await response.write(FRAGMENTED_CSV[offset:offset + 8192])
+                await response.write_eof()
+            except ConnectionResetError:
+                # Oversize rejection closes the upstream before it finishes.
+                pass
+        return response
     body = b"<button id=launch>Remote preview</button>"
     digest = (
         "b" * 64
@@ -389,6 +410,39 @@ class TestAuth(BaseEdgeTest):
 
 
 class TestPreviewRelay(BaseEdgeTest):
+    async def test_fragmented_csv_get_relays_all_verified_bytes(self):
+        site_id = "site-" + "a" * 24
+        async with self.client.get(
+            f"http://localhost/preview/{site_id}/fragmented.csv", headers=self.auth()
+        ) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.read(), FRAGMENTED_CSV)
+            self.assertEqual(int(response.headers["Content-Length"]), len(FRAGMENTED_CSV))
+            self.assertEqual(response.headers["X-Preview-SHA256"], hashlib.sha256(FRAGMENTED_CSV).hexdigest())
+
+    async def test_fragmented_csv_head_verifies_full_body_without_relaying_it(self):
+        site_id = "site-" + "a" * 24
+        async with self.client.head(
+            f"http://localhost/preview/{site_id}/fragmented.csv", headers=self.auth()
+        ) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.read(), b"")
+            self.assertEqual(int(response.headers["Content-Length"]), len(FRAGMENTED_CSV))
+            self.assertEqual(response.headers["X-Preview-SHA256"], hashlib.sha256(FRAGMENTED_CSV).hexdigest())
+
+    async def test_fragmented_csv_still_rejects_oversized_body(self):
+        site_id = "site-" + "a" * 24
+        original = self.pe._MAX_PREVIEW_RESPONSE_BYTES
+        self.pe._MAX_PREVIEW_RESPONSE_BYTES = 256
+        try:
+            async with self.client.get(
+                f"http://localhost/preview/{site_id}/fragmented.csv", headers=self.auth()
+            ) as response:
+                self.assertEqual(response.status, 502)
+                self.assertEqual(await response.json(), {"error": "preview too large"})
+        finally:
+            self.pe._MAX_PREVIEW_RESPONSE_BYTES = original
+
     async def test_preview_requires_the_dashboard_proxy_token(self):
         site_id = "site-" + "a" * 24
         async with self.client.get(f"http://localhost/preview/{site_id}/") as resp:
