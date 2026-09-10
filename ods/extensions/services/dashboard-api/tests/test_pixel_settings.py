@@ -267,3 +267,56 @@ def test_invalid_host_envelope_is_never_exposed(client, mock_request_agent, muta
     response = client.get("/api/pixel/settings", headers={"Authorization": "Bearer test-key-12345"})
     assert response.status_code == 502
     assert "do-not-echo" not in response.text
+
+def test_export_workspace_snapshot(client, mock_request_agent):
+    def mock_agent_response(method, path, **kwargs):
+        if path == "/v1/pixel/settings":
+            return copy.deepcopy(VALID_GET)
+        if path == "/v1/pixel/providers":
+            return {
+                "schemaVersion": 1,
+                "revision": 2,
+                "enabled": True,
+                "providers": [
+                    {
+                        "id": "my-local-ai",
+                        "label": "Local AI",
+                        "kind": "local",
+                        "baseUrl": "http://127.0.0.1:8080/v1",
+                        "model": "llama3",
+                        "contextTokens": 4096,
+                        "maxOutputTokens": 2048,
+                        "supportsTools": False,
+                        "supportsVision": False,
+                        "reasoning": False,
+                        "enabled": True,
+                        "hasCredential": False
+                    }
+                ],
+                "roles": {
+                    "leader": "my-local-ai",
+                    "backups": [],
+                    "advisor": None,
+                    "handoff": None
+                },
+                "policy": {
+                    "deadlineSeconds": 60,
+                    "allowCloud": True,
+                    "maxAttempts": 3
+                }
+            }
+        return {}
+    mock_request_agent.side_effect = mock_agent_response
+
+    resp = client.get(
+        "/api/pixel/settings/export",
+        headers={"Authorization": "Bearer test-key-12345"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("Content-Disposition") == 'attachment; filename="ods-workspace-snapshot.json"'
+    data = resp.json()
+    assert data["schemaVersion"] == 1
+    assert data["type"] == "ods-workspace-snapshot"
+    assert "settings" in data
+    assert "providers" in data
+    assert data["providers"]["providers"][0]["id"] == "my-local-ai"

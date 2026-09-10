@@ -97,3 +97,37 @@ async def change_runtime(request: Request, _key: str = Depends(verify_api_key)):
     if response["outcome"] == "applied" and response["appliedRevision"] != payload["settingsRevision"]:
         raise HTTPException(502, "Settings runtime revision mismatch")
     return _no_store_response(response)
+
+
+@router.get("/api/pixel/settings/export")
+async def export_workspace_snapshot(_key: str = Depends(verify_api_key)):
+    try:
+        settings_raw = await request_agent_json("GET", "/v1/pixel/settings", timeout=10)
+        settings = normalize_response(settings_raw)
+        
+        providers_raw = await request_agent_json("GET", "/v1/pixel/providers", timeout=10)
+        from pixel_provider_public import normalize_public
+        providers = normalize_public(providers_raw)
+        
+        content = {
+            "schemaVersion": 1,
+            "type": "ods-workspace-snapshot",
+            "settings": settings["configuration"],
+            "providers": providers
+        }
+        return JSONResponse(
+            content=content,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": 'attachment; filename="ods-workspace-snapshot.json"'
+            }
+        )
+    except AgentHTTPError as exc:
+        code = exc.status_code if exc.status_code in (400, 409, 413, 503) else 502
+        raise HTTPException(code, "Snapshot export failed") from None
+    except AgentUnavailable:
+        raise HTTPException(503, "Settings are unavailable for export") from None
+    except (AgentProtocolError, ValueError, TypeError, RecursionError):
+        raise HTTPException(502, "Invalid response during export") from None
+
+
