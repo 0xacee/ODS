@@ -1,10 +1,12 @@
 import { StrictMode } from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { render } from '../test/test-utils'
 import { PortalIdentityProvider, usePortalIdentity } from './PortalIdentityContext'
 import AssistantIdentitySettings from '../components/settings/AssistantIdentitySettings'
 import Sidebar from '../components/Sidebar'
 import Pixel from '../pages/Pixel'
+import { ThemeProvider } from './ThemeContext'
 
 const identity = (displayName = 'Portal', revision = 0) => ({ schemaVersion: 1, displayName, revision })
 const response = value => new globalThis.Response(JSON.stringify(value), { status: 200 })
@@ -120,7 +122,9 @@ it('renders custom names as inert text in navigation and chat without changing r
     if (url === '/api/external-links') return response([])
     return response({})
   })
-  render(<PortalIdentityProvider><Sidebar status={{}}/><Pixel/></PortalIdentityProvider>)
+  render(<PortalIdentityProvider><Sidebar status={{}}/><Pixel/></PortalIdentityProvider>, {
+    wrapper: ({ children }) => <MemoryRouter initialEntries={['/pixel']}><ThemeProvider>{children}</ThemeProvider></MemoryRouter>,
+  })
   expect(await screen.findByRole('heading', { name, exact: true })).toBeInTheDocument()
   expect(screen.getByRole('link', { name, exact: true })).toHaveAttribute('href', '/pixel')
   expect(await screen.findByPlaceholderText(`Message ${name}...`)).toBeEnabled()
