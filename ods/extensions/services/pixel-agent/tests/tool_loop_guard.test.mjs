@@ -207,6 +207,113 @@ test("Portuguese HTML creation requests require a preview without overriding neg
   ]) assert.equal(userMessageRequestsWorkspacePreview([], prompt), false, prompt);
 });
 
+test("conversational Portuguese HTML requests cannot finish with an unverified prose claim", () => {
+  for (const prompt of [
+    "agora um site em html de uma calculadora minimalista em preto e branco e bonita.",
+    "ok, agora uma calculadora em HTML preta e branca",
+    "Então, outro site em html para um portfolio",
+    "quero uma calculadora em html",
+    "agora faça um site de portfolio",
+    "faz um jogo em html",
+  ]) {
+    assert.equal(userMessageRequestsWorkspacePreview([], prompt), true, prompt);
+    const guard = createToolLoopGuard();
+    const context = { agentId: 'pixel', runId: 'run-1', sessionId: 'session-1' };
+    guard.observeRun(context, 'pixel', { prompt });
+    const retry = guard.beforeAgentFinalize({lastAssistantMessage: 'Criei a calculadora e salvei index.html.'}, context);
+    assert.ok(retry?.retry, prompt);
+    assert.notEqual(guard.verificationForRun('run-1').status, 'passed');
+  }
+  for (const prompt of [
+    'explique agora um site em html de calculadora',
+    'agora um site em html ficou indisponível, explique por quê',
+    'agora um site em html não carrega',
+    'Traduza: agora um site em html de calculadora',
+    'Traduza: "agora um site em html de calculadora"',
+    '> agora um site em html de calculadora',
+    '```\nagora um site em html de calculadora\n```',
+    'agora um site em html, mas não publique',
+    'agora um site em html, apenas o código',
+    'agora não crie um site em html',
+    'agora um script python para uma calculadora',
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], prompt), false, prompt);
+});
+
+test("conversational calculator delivery emits the verified snapshot consumed by Workbench", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({agentId:'pixel',runId:'run-1',sessionId:'session-1'}, 'pixel', {
+    prompt: 'agora um site em html de uma calculadora minimalista em preto e branco e bonita.',
+  });
+  const writes = [
+    {path:'calculator/index.html',content:'<!doctype html><title>Calculator</title><link rel="stylesheet" href="styles.css"><button>1</button><script src="app.js"></script>'},
+    {path:'calculator/styles.css',content:'body{background:#111;color:#eee}'},
+    {path:'calculator/app.js',content:'document.querySelector("button").onclick=()=>{}'},
+  ];
+  for (const write of writes) {
+    call(guard, 'write', {event:{params:write}});
+    afterCall(guard, 'write', {event:{params:write,result:{details:{status:'completed'}}}});
+    const persisted = persistToolResult(guard, 'write', `write-${write.path}`);
+    assert.match(JSON.stringify(persisted), /publish BEFORE your final answer/);
+  }
+  const params = {relativeDirectory:'calculator'};
+  const snapshot = workspacePreviewSnapshot('calculator',writes);
+  const details = {schemaVersion:1,kind:'ods-pixel-workspace-preview',status:'succeeded',relativeDirectory:'calculator',...snapshot,port:9437,
+    url:`http://${snapshot.siteId}.localhost:9437/${snapshot.siteId}/`,httpStatus:200,readbackVerified:true,executable:false,overwritten:false};
+  assert.notEqual(call(guard, 'pixel_ods_workspace_preview', {event:{params}})?.block, true);
+  // A written file alone is not a delivered preview.
+  assert.notEqual(guard.verificationForRun('run-1').status, 'passed');
+  afterCall(guard, 'pixel_ods_workspace_preview', {event:{params,result:{details}}});
+  const verification = guard.verificationForRun('run-1');
+  assert.equal(verification.status, 'passed');
+  assert.equal(verification.preview.sha256, snapshot.sha256);
+  assert.equal(verification.preview.files, 3);
+  assert.match(verification.text, /Open preview/);
+});
+
+test("actual visual files request Workbench delivery independent of prompt wording", () => {
+  for (const path of ['project/index.html','project/chart.svg','project/src/App.tsx','project/src/App.vue','project/src/App.svelte']) {
+    const guard = createToolLoopGuard();
+    const context = {agentId:'pixel',runId:'run-1',sessionId:'session-1'};
+    guard.observeRun(context,'pixel',{prompt:'Um projeto bonito para mim.'});
+    const params = {path,content:'visual project source'};
+    call(guard,'write',{event:{params}});
+    afterCall(guard,'write',{event:{params,result:{details:{status:'completed'}}}});
+    // Subsequent run observations must not lose the production signal.
+    guard.observeRun(context,'pixel',{prompt:'Um projeto bonito para mim.'});
+    assert.ok(guard.beforeAgentFinalize({},context)?.retry, path);
+  }
+  for (const scenario of [
+    {path:'project/notes.txt'}, {path:'project/tests/fixture.html'},
+    {path:'project/index.html',failed:true}, {path:'project/index.html',read:true},
+    {path:'project/index.html',prompt:'Crie o site, mas não publique'},
+    {path:'project/index.html',prompt:'Create the source code only. Do not show a preview.'},
+    {path:'project/index.html',prompt:'Only the code for a site'},
+  ]) {
+    const guard = createToolLoopGuard();
+    const context = {agentId:'pixel',runId:'run-1',sessionId:'session-1'};
+    guard.observeRun(context,'pixel',{prompt:scenario.prompt || 'Um projeto bonito para mim.'});
+    const params = {path:scenario.path,content:'source'};
+    const tool = scenario.read ? 'read' : 'write';
+    call(guard,tool,{event:{params}});
+    afterCall(guard,tool,{event:{params,result:scenario.failed ? {isError:true} : {details:{status:'completed'}}}});
+    assert.equal(guard.beforeAgentFinalize({},context)?.retry, undefined, JSON.stringify(scenario));
+  }
+});
+
+test("asset-only edits refresh a previously verified project in the same session", () => {
+  const guard = createToolLoopGuard();
+  seedNamedPreview(guard);
+  const context = {agentId:'pixel',runId:'run-2',sessionId:'session-1'};
+  guard.observeRun(context,'pixel',{prompt:'mude a cor do botão para azul'});
+  const params = {path:'log-viewer-lab/styles.css',content:'button{color:blue}'};
+  call(guard,'write',{event:{params},context});
+  afterCall(guard,'write',{event:{params,result:{details:{status:'completed'}}},context});
+  const continuation = guard.beforeAgentFinalize({},context);
+  assert.ok(continuation?.retry);
+  assert.match(continuation.retry.instruction, /log-viewer-lab/);
+  assert.notEqual(guard.verificationForRun('run-2').status,'passed');
+});
+
 test("Portuguese publication commands require verified delivery, not a prose promise", () => {
   for (const prompt of [
     "Corrija o contador e publique essa pasta no preview.",
@@ -10020,9 +10127,11 @@ test("tracks and drains only the active hashed ODS OpenAI user", async () => {
   assert.equal(guard.trackedUserCount(), 0);
 });
 
-test("client cancellation signals the exact run and blocks any later tool", async () => {
+test("client cancellation signals the exact run and blocks any later tool", {timeout:5000}, async () => {
   const signals = [];
   const clears = [];
+  let cleanupDone;
+  const cleaned = new Promise(resolve => { cleanupDone = resolve; });
   const guard = createToolLoopGuard({
     abortRunAndDrain: async () => ({ aborted: true, drained: true }),
     execMarkerCleanupDelayMs: 0,
@@ -10032,7 +10141,7 @@ test("client cancellation signals the exact run and blocks any later tool", asyn
         signals.push(runId);
         return true;
       },
-      clear: (runId) => clears.push(runId),
+      clear: (runId) => { clears.push(runId); cleanupDone(); },
     },
   });
   const user = `ods-${"e".repeat(64)}`;
@@ -10043,7 +10152,19 @@ test("client cancellation signals the exact run and blocks any later tool", asyn
     runId: "run-live",
   });
   assert.equal(await guard.abortUserRun(user), true);
-  await new Promise((resolve) => setImmediate(resolve));
+  // Production cleanup is deliberately unref'd. Keep this test alive until
+  // its callback runs, with a bounded deadline rather than timer ordering.
+  let cleanupDeadline;
+  try {
+    await Promise.race([
+      cleaned,
+      new Promise((_, reject) => {
+        cleanupDeadline = setTimeout(() => reject(new Error('Cancellation marker cleanup did not run')), 2000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(cleanupDeadline);
+  }
   assert.deepEqual(signals, ["run-live"]);
   assert.deepEqual(clears, ["run-live"]);
   assert.deepEqual(
@@ -10815,7 +10936,7 @@ test("publishes an existing app without treating keep-unchanged instructions as 
   }), { params: previewParams }, "displaying an unchanged app must not require a fresh write");
 });
 
-test("SVG output alone does not require HTML publication or replace a verified file result", () => {
+test("an authored SVG requests visual delivery while preserving the original file", () => {
   const prompt = "Write a tiny valid SVG of a yellow sun on a blue background to release-2654/sun.svg, read the file back to check it, and tell me the saved path.";
   for (const request of [prompt, "Make an intricate animated SVG illustration.", "Make a detailed SVG illustration of a floating greenhouse.", "Save an animated SVG to artwork/orbit.svg."]) {
     assert.equal(userMessageRequestsWorkspacePreview([], request), false, request);
@@ -10840,8 +10961,10 @@ test("SVG output alone does not require HTML publication or replace a verified f
   const readParams = { path: params.path };
   call(guard, "read", { event: { params: readParams } });
   afterCall(guard, "read", { event: { params: readParams, result: { content: [{ type: "text", text: params.content }] } } });
-  assert.equal(guard.beforeAgentFinalize({}, { agentId: "pixel", runId: "run-1" }), undefined);
-  assert.notEqual(guard.deliveryVerificationForRun("run-1")?.status, "failed");
+  const continuation = guard.beforeAgentFinalize({}, { agentId: "pixel", runId: "run-1" });
+  assert.match(continuation.retry.instruction, /Preserve the project source files/);
+  assert.match(continuation.retry.instruction, /standalone visual asset/);
+  assert.notEqual(guard.deliveryVerificationForRun("run-1")?.status, "passed");
 });
 
 test("keeps every visual category on the model-authored write path", () => {

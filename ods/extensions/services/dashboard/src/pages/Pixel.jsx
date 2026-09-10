@@ -1346,12 +1346,12 @@ export default function Pixel({ systemStatus = null }) {
                 : message.status === 'error'
                   ? 'border border-red-500/25 bg-red-500/10 text-red-200'
                   : message.status === 'stopped'
-                    ? 'border border-amber-500/30 bg-amber-500/10 text-theme-text-secondary'
+                    ? 'pixel-stopped-response bg-transparent text-theme-text-secondary'
                   : 'bg-transparent text-theme-text-secondary'
             }`}>
               {message.status === 'stopped' && (
-                <div role="status" className="mb-2 inline-flex items-center gap-1.5 text-xs font-medium text-amber-300">
-                  <Square className="h-3 w-3 fill-current" />
+                <div role="status" className="mb-2 inline-flex items-center gap-2 text-xs font-medium text-theme-text-muted">
+                  <Square className="h-3 w-3" />
                   Response stopped
                 </div>
               )}

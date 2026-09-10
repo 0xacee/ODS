@@ -1700,7 +1700,8 @@ describe('Pixel', () => {
     expect(globalThis.fetch).toHaveBeenCalledWith('/api/pixel/chat/cancel', expect.objectContaining({
       method: 'POST',
     }))
-    expect(stopped.parentElement).toHaveClass('bg-amber-500/10')
+    expect(stopped.parentElement).toHaveClass('pixel-stopped-response', 'bg-transparent')
+    expect(stopped.parentElement).not.toHaveClass('bg-amber-500/10', 'border-amber-500/30')
     expect(stopped.parentElement).not.toHaveClass('bg-red-500/10')
     expect(screen.getByText('Stopped by you. Workspace changes completed before cancellation were preserved.')).toBeInTheDocument()
     expect(screen.getByText('Available')).toBeInTheDocument()
