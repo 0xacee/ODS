@@ -545,6 +545,8 @@ async def pixel_chat_cancel(body: ChatCancelRequest, owner: str = Depends(verify
                 if task is not None and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
+                if store.get(identity)["state"] == "complete":
+                    return {"aborted": False}
                 store.finish(identity, "cancelled")
             return {"aborted": aborted}
         finally:
@@ -689,7 +691,7 @@ async def _produce_retained_result(store, identity, body, config):
                 text = "Pixel was stopped." if cancelled else "Pixel could not complete the response. Check saved work before continuing."
                 store.append(identity, _error_event(text) + b"data: [DONE]\n\n", terminal=True)
         finally:
-            state = "cancelled" if cancelled else "interrupted" if failed and stopped else "unresolved" if failed else "complete"
+            state = "complete" if done_seen else "cancelled" if cancelled else "interrupted" if failed and stopped else "unresolved" if failed else "complete"
             store.finish(identity, state)
 
 
