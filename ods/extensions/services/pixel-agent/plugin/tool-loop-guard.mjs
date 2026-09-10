@@ -7295,7 +7295,10 @@ export function createToolLoopGuard({
     // Let verification and repairs reach normal tool/loop checks; a blanket
     // early return here can itself repeat forever before those checks run.
 
-    if (state?.exactDownloadRequested && !EXACT_DOWNLOAD_BROKER_TOOLS.has(effectiveToolName)) {
+    // Finding and describing the approved broker is not an attempt to replace
+    // its verified bytes. Keep discovery subject to the normal loop checks.
+    const exactDownloadDiscovery = effectiveToolName === "tool_search" || effectiveToolName === "tool_describe";
+    if (state?.exactDownloadRequested && !exactDownloadDiscovery && !EXACT_DOWNLOAD_BROKER_TOOLS.has(effectiveToolName)) {
       if (state.exactDownloadTerminalBlocks === 0) {
         state.exactDownloadTerminalBlocks = 1;
         return {
@@ -7319,7 +7322,7 @@ export function createToolLoopGuard({
       return { block: true, blockReason: EXACT_DOWNLOAD_LOOP_ABORT_REASON };
     }
 
-    if (state?.exactDownloadRequested) {
+    if (state?.exactDownloadRequested && EXACT_DOWNLOAD_BROKER_TOOLS.has(effectiveToolName)) {
       const request = state.exactDownloadRequest;
       const exactDownloadParams = (selectedToolName, params) =>
         toolName === "tool_call"
