@@ -154,6 +154,7 @@ router = APIRouter(prefix="/api/pixel", tags=["pixel"])
 _result_store: ChatResultStore | None = None
 _result_tasks: dict[tuple[str, str, str], asyncio.Task] = {}
 _result_stops: set[tuple[str, str]] = set()
+_result_abort_ack: set[tuple[str, str, str]] = set()
 
 
 def _chat_results() -> ChatResultStore:
@@ -539,6 +540,7 @@ async def pixel_chat_cancel(body: ChatCancelRequest, owner: str = Depends(verify
             if aborted:
                 if store.get(identity)["state"] == "complete":
                     return {"aborted": False}
+                _result_abort_ack.add(identity)
                 task = _result_tasks.get(identity)
                 if task is not None and not task.done():
                     task.cancel()
@@ -546,6 +548,7 @@ async def pixel_chat_cancel(body: ChatCancelRequest, owner: str = Depends(verify
                 store.finish(identity, "cancelled")
             return {"aborted": aborted}
         finally:
+            _result_abort_ack.discard(identity)
             _result_stops.discard(identity[:2])
     if isinstance(owner, str) and _result_store is not None and _result_store.has_pending((owner_namespace(owner), body.chat_id)):
         return {"aborted": False}
@@ -668,7 +671,8 @@ async def _produce_retained_result(store, identity, body, config):
                     if not done_seen:
                         failed = True
     except asyncio.CancelledError:
-        cancelled = True
+        cancelled = identity in _result_abort_ack
+        failed = not cancelled
     except Exception as exc:
         failed = True
         logger.warning("Pixel retained stream failed (%s)", type(exc).__name__)
