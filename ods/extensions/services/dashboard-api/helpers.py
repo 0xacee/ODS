@@ -1163,3 +1163,27 @@ def get_ram_metrics() -> dict:
     elif _system == "Darwin":
         return _get_ram_metrics_sysctl()
     return {"used_gb": 0, "total_gb": 0, "percent": 0}
+
+
+def numeric_safe_geometric_mean(numbers: list) -> float:
+    """
+    Safely compute the geometric mean of a list of positive numbers.
+    Guards against None, empty list, non-sequence types, negative/zero numbers,
+    NaN/Inf values, and float overflow/underflow using log-sum.
+    """
+    if not isinstance(numbers, (list, tuple)) or not numbers:
+        return 0.0
+    import math
+    valid_nums = []
+    for x in numbers:
+        if isinstance(x, (int, float)) and not isinstance(x, bool):
+            if not math.isnan(x) and not math.isinf(x) and x > 0:
+                valid_nums.append(float(x))
+    if not valid_nums:
+        return 0.0
+    try:
+        log_sum = sum(math.log(x) for x in valid_nums)
+        mean_log = log_sum / len(valid_nums)
+        return math.exp(mean_log)
+    except (OverflowError, ValueError):
+        return 0.0
