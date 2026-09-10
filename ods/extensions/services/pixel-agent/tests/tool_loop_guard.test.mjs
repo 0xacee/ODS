@@ -10511,6 +10511,30 @@ test("website navigation and research files do not require a workspace preview",
   }
 });
 
+test("literal file contents and quoted examples do not require a website preview", () => {
+  const captured = "Create provider-repair-canary-20260909.txt in the current workspace containing exactly: Portal repaired provider routing works. Read the file back using a tool, then report its path and exact contents. This is a plain text file, not a website; no browser preview is requested. Do not use web search or change any settings.";
+  for (const request of [
+    captured,
+    captured.replace("Portal repaired provider routing works.", '"Portal repaired provider routing works."'),
+    "Create note.txt containing: Portal routing works. Read it back.",
+    "Create note.txt with the contents exactly: `Build a website.` Read it back.",
+    'Write report.md describing the example "Create a beautiful website".',
+    "Write report.md describing the example 'Create a beautiful website'.",
+    "Write notes.md about this example:\n```text\nBuild a website and publish it.\n```",
+    "Write notes.md about this example:\n  > Build a website and publish it.",
+    "Save a standalone diagram.svg file with an accessible title and description.",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], request), false, request);
+  for (const request of [
+    'Create note.txt containing exactly: "Build a website." Then create and publish demo/index.html.',
+    'Build a website with the text: "Hello Portal". Publish it.',
+    "Create note.txt containing exactly: Hello; then build a website.",
+    'Publish "demo/index.html".',
+    "Publish `demo/index.html`.",
+    "Publish 'demo/index.html'.",
+    "Create an animated SVG and publish its browser preview.",
+  ]) assert.equal(userMessageRequestsWorkspacePreview([], request), true, request);
+});
+
 test("wrapped private denial allows public extraction and workspace recovery", () => {
   const aborts = [];
   const guard = createToolLoopGuard({abortRun: id => {aborts.push(id); return true;}});
