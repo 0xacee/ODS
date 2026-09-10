@@ -54,8 +54,11 @@ def _validate_root(config):
     agents = config.get("agents")
     if not isinstance(agents, dict):
         raise MigrationError("malformed config: root.agents must be an object")
-    if not isinstance(agents.get("list"), list):
+    agents_list = agents.get("list")
+    if not isinstance(agents_list, list):
         raise MigrationError("malformed config: root.agents.list must be an array")
+    if any(not isinstance(entry, dict) for entry in agents_list):
+        raise MigrationError("malformed config: items in root.agents.list must be objects")
 
 
 def _select_agent(config):
