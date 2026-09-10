@@ -64,3 +64,16 @@ describe('Pixel workspace navigation', () => {
     window.removeEventListener('ods:pixel-new-task', handler)
   })
 })
+
+it('clears a navigation filter when the sidebar is collapsed externally', () => {
+  const view=show('/')
+  fireEvent.click(screen.getByRole('button',{name:'Search'}))
+  fireEvent.change(screen.getByLabelText('Search navigation'),{target:{value:'Models'}})
+  expect(screen.queryByRole('link',{name:'Extensions'})).toBeNull()
+  view.rerender(<MemoryRouter initialEntries={['/']}><Sidebar status={{}} collapsed onToggle={() => {}}/></MemoryRouter>)
+  expect(screen.queryByLabelText('Search navigation')).toBeNull()
+  expect(screen.getByRole('link',{name:'Extensions'})).toBeVisible()
+  view.rerender(<MemoryRouter initialEntries={['/']}><Sidebar status={{}} collapsed={false} onToggle={() => {}}/></MemoryRouter>)
+  expect(screen.getByRole('button',{name:'Search'})).toHaveAttribute('aria-expanded','false')
+  expect(screen.getByRole('link',{name:'Dashboard'})).toBeVisible()
+})
