@@ -1163,3 +1163,26 @@ def get_ram_metrics() -> dict:
     elif _system == "Darwin":
         return _get_ram_metrics_sysctl()
     return {"used_gb": 0, "total_gb": 0, "percent": 0}
+
+
+def dict_key_path_setter_safe(d: dict, path_keys: list, value: any) -> dict:
+    """
+    Safely set a nested key value in a dictionary given a list of path keys.
+    Guards against None dictionary, non-list path_keys, empty path, or non-dict intermediate values.
+    Returns the modified dictionary (or a new dict if d is None/invalid).
+    """
+    if d is None or not isinstance(d, dict):
+        d = {}
+    if not isinstance(path_keys, (list, tuple)) or not path_keys:
+        return d
+    
+    current = d
+    for key in path_keys[:-1]:
+        k_str = str(key) if not isinstance(key, (str, int)) else key
+        if k_str not in current or not isinstance(current[k_str], dict):
+            current[k_str] = {}
+        current = current[k_str]
+    
+    final_key = str(path_keys[-1]) if not isinstance(path_keys[-1], (str, int)) else path_keys[-1]
+    current[final_key] = value
+    return d

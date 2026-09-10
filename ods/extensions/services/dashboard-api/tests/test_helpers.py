@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from helpers import (
+    dict_key_path_setter_safe,
     get_model_info, get_bootstrap_status, _update_lifetime_tokens,
     get_uptime, get_cpu_metrics, get_ram_metrics,
     check_service_health, get_all_services,
@@ -1607,3 +1608,16 @@ class TestDirSizeGb:
         # Verify older items were evicted
         first_path = tmp_path / "test_dir_0"
         assert _dir_size_cache.get(first_path) is None
+
+
+
+class TestDictKeyPathSetterSafe:
+    def test_set_nested_key_success(self):
+        d = {"a": {"b": 1}}
+        res = dict_key_path_setter_safe(d, ["a", "c"], 2)
+        assert res == {"a": {"b": 1, "c": 2}}
+
+    def test_none_dict_and_invalid_path(self):
+        assert dict_key_path_setter_safe(None, ["x", "y"], 10) == {"x": {"y": 10}}
+        d = {"a": 1}
+        assert dict_key_path_setter_safe(d, [], 5) == {"a": 1}
