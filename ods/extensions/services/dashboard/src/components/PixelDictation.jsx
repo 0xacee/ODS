@@ -42,7 +42,7 @@ export default function PixelDictation({ disabled, conversationId, onInsert }) {
       const text = Array.from(event.results).slice(event.resultIndex ?? 0).filter(result => result.isFinal !== false).map(result => result[0]?.transcript || '').join(' ').trim()
       if (text) insert.current(`${text} `)
     }
-    active.onend = () => { if (recognition.current === active) { recognition.current = null; setListening(false); setFinishing(false); setFinishing(false) } }
+    active.onend = () => { if (recognition.current === active) { recognition.current = null; setListening(false); setFinishing(false) } }
     active.onerror = event => {
       if (recognition.current !== active) return
       setNotice(event.error === 'not-allowed' ? 'Microphone access was not granted. Nothing was added to your message.' : 'Dictation could not finish. Your existing draft is unchanged.')
