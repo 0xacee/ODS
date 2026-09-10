@@ -1,7 +1,7 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from './PixelCommandSearch'
-import { saveConversation, SELECT_EVENT } from '../lib/pixelConversations'
+import { saveConversation, deleteConversation, SELECT_EVENT } from '../lib/pixelConversations'
 
 beforeEach(() => {
   localStorage.clear()
@@ -29,4 +29,31 @@ test('handles empty results without issuing an action', () => {
   fireEvent.keyDown(screen.getByLabelText('Search conversations and actions'), {key:'Enter'})
   expect(create).not.toHaveBeenCalled()
   expect(screen.getByText('No matching conversations or actions.')).toBeVisible()
+})
+
+test('removes deleted conversations from an open search and never selects a stale result', () => {
+  saveConversation({schema:1,chatId:'removed',messages:[{role:'user',content:'Find this task'}]})
+  const selected = vi.fn()
+  window.addEventListener(SELECT_EVENT, selected)
+  render(<MemoryRouter><PixelCommandSearch onInsert={() => {}} onNewTask={() => {}}/></MemoryRouter>)
+  fireEvent(window, new Event(OPEN_PIXEL_SEARCH))
+  const input = screen.getByLabelText('Search conversations and actions')
+  fireEvent.change(input,{target:{value:'Find this task'}})
+  act(() => deleteConversation('removed'))
+  expect(screen.queryByRole('button',{name:/Find this task/})).toBeNull()
+  fireEvent.keyDown(input,{key:'Enter'})
+  expect(selected).not.toHaveBeenCalled()
+  expect(input).toHaveValue('Find this task')
+  window.removeEventListener(SELECT_EVENT, selected)
+})
+
+test('refreshes new saved results without clearing the open search query', () => {
+  render(<MemoryRouter><PixelCommandSearch onInsert={() => {}} onNewTask={() => {}}/></MemoryRouter>)
+  fireEvent(window, new Event(OPEN_PIXEL_SEARCH))
+  const input = screen.getByLabelText('Search conversations and actions')
+  fireEvent.change(input,{target:{value:'Newly saved'}})
+  localStorage.setItem('ods.pixel.conversations.v1',JSON.stringify([{schema:1,chatId:'newly-saved',messages:[{role:'user',content:'Newly saved task'}]}]))
+  fireEvent(window,new StorageEvent('storage',{key:'ods.pixel.conversations.v1'}))
+  expect(screen.getByRole('button',{name:/Newly saved task/})).toBeVisible()
+  expect(input).toHaveValue('Newly saved')
 })
