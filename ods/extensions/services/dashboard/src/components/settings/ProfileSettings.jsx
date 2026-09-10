@@ -12,7 +12,16 @@ export default function ProfileSettings() {
   const [notice,setNotice] = useState('')
   const input = useRef(null)
   const selection = useRef(0)
-  useEffect(() => {setDraft(saved)},[saved])
+  const previousSaved = useRef(saved)
+  useEffect(() => {
+    const previous = previousSaved.current
+    previousSaved.current = saved
+    // Sync untouched fields without replacing edits made in this form.
+    setDraft(current => ({
+      name: current.name === previous.name ? saved.name : current.name,
+      photo: current.photo === previous.photo ? saved.photo : current.photo,
+    }))
+  },[saved])
   useEffect(() => () => {selection.current++},[])
   async function upload(event) {
     const file = event.target.files?.[0]
