@@ -327,6 +327,45 @@ def test_published_changes_use_actual_verified_source_versions_and_keep_unknown_
         assert json.loads(MODULE.snapshot_changes(previews, new["siteId"], new["siteId"]))["changes"] == []
 
 
+def test_changes_http_preserves_final_newline_edits():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        workspace, previews = root / "workspace", root / "previews"
+        workspace.mkdir(mode=0o700)
+        previews.mkdir(mode=0o700)
+        site = workspace / "demo"
+        site.mkdir(mode=0o700)
+        entry = site / "index.html"
+        for old_text, new_text in [("<h1>Hi</h1>", "<h1>Hi</h1>\n"),
+                                   ("<h1>Hi</h1>\n", "<h1>Hi</h1>")]:
+            entry.write_text(old_text, encoding="utf-8")
+            entry.chmod(0o600)
+            old = MODULE.publish_snapshot(workspace, previews, "demo", os.getuid())
+            entry.write_text(new_text, encoding="utf-8")
+            new = MODULE.publish_snapshot(workspace, previews, "demo", os.getuid())
+            with MODULE.PreviewHTTPServer(("127.0.0.1", 0), previews) as server:
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                    connection.request("GET", f"/{new['siteId']}/__ods_changes__/{old['siteId']}.json",
+                                       headers={"Host": f"{new['siteId']}.localhost:{server.server_port}"})
+                    response = connection.getresponse()
+                    payload = json.loads(response.read())
+                    connection.close()
+                    assert response.status == 200
+                    assert payload["sha256"] == new["sha256"]
+                    file = payload["changes"][0]
+                    assert (file["additions"], file["deletions"]) == (1, 1)
+                    assert [row["type"] for row in file["diff"]] == ["remove", "add"]
+                    assert [row["text"] for row in file["diff"]] == ["<h1>Hi</h1>"] * 2
+                    assert [row.get("noFinalNewline", False) for row in file["diff"]] == [
+                        not old_text.endswith("\n"), not new_text.endswith("\n")]
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)
+
+
 def test_unix_http_preview_accepts_only_the_internal_relay_authority():
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
