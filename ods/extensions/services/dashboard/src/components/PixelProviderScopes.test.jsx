@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { createElement } from 'react'
 import { render } from '../test/test-utils'
 import PixelProviderScopes from './PixelProviderScopes.jsx'
@@ -80,4 +80,43 @@ it('prevents UI changes while a run is active and closes on chat identity change
   expect(screen.getByRole('button', { name: 'End task' })).toBeDisabled()
   rerender(createElement(PixelProviderScopes, { chatId: 'Chat_B', sending: false }))
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+})
+
+it.each(['inspection', 'mutation'])('honors a reopen inspection after an older %s settles', async operation => {
+  let finishOld
+  const pending = new Promise(resolve => { finishOld = resolve })
+  const {fetchMock} = await setup({mutate: async () => pending})
+  const handler = fetchMock.getMockImplementation()
+  let reads = 0
+  fetchMock.mockImplementation((url, options) => {
+    if (url.endsWith('/status')) {
+      reads++
+      if (operation === 'inspection' && reads === 1) return pending
+      return Promise.resolve(response({...initial(), taskId:null, revision:5}))
+    }
+    return handler(url, options)
+  })
+  fireEvent.click(screen.getByRole('button', {name:operation === 'inspection' ? 'Reload preferences' : 'Return from selected scope'}))
+  fireEvent.click(screen.getByRole('button', {name:'Close scope controls'}))
+  fireEvent.click(screen.getByRole('button', {name:'Handoff scope'}))
+  await act(async () => finishOld(response({...initial(), revision:2})))
+  await waitFor(() => expect(screen.getByRole('button', {name:'Begin task'})).toBeEnabled())
+  expect(screen.getByRole('button', {name:'End task'})).toBeDisabled()
+  expect(reads).toBe(operation === 'inspection' ? 2 : 1)
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/return'))).toHaveLength(operation === 'mutation' ? 1 : 0)
+  expect(screen.getByLabelText('I reviewed this recipient, duration and return behavior')).not.toBeChecked()
+})
+
+it('drops a queued inspection when the reopened panel is closed again', async () => {
+  let finishOld
+  const pending = new Promise(resolve => { finishOld = resolve })
+  const {fetchMock} = await setup({mutate: async () => pending})
+  fireEvent.click(screen.getByRole('button', {name:'Return from selected scope'}))
+  fireEvent.click(screen.getByRole('button', {name:'Close scope controls'}))
+  fireEvent.click(screen.getByRole('button', {name:'Handoff scope'}))
+  fireEvent.click(screen.getByRole('button', {name:'Close scope controls'}))
+  await act(async () => finishOld(response({...initial(), revision:2})))
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/status'))).toHaveLength(1)
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/return'))).toHaveLength(1)
 })
