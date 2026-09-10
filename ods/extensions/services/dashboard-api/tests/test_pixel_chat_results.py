@@ -223,11 +223,11 @@ def test_api_task_shutdown_is_not_reported_as_owner_stop(store, monkeypatch):
 def test_completed_stream_wins_stop_during_upstream_context_teardown(store, monkeypatch):
     async def run():
         closing = asyncio.Event()
-        class Upstream(FakeResponse):
+        class Client(FakeClient):
             async def __aexit__(self, *args):
                 closing.set()
                 await asyncio.Future()
-        monkeypatch.setattr(pixel.httpx, 'AsyncClient', lambda **kw: FakeClient(Upstream(content_type='text/event-stream', chunks=[FINAL])))
+        monkeypatch.setattr(pixel.httpx, 'AsyncClient', lambda **kw: Client(FakeResponse(content_type='text/event-stream', chunks=[FINAL])))
         async def cancel(*args): return True
         monkeypatch.setattr(pixel, '_cancel_edge_run', cancel)
         await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
