@@ -1,10 +1,15 @@
 """Actual disposable subprocess/socket boundary; not fleet inference acceptance."""
 import json
 import subprocess
+import sys
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bin'))
+
 from pixel_provider import connection_import as mod
 from test_connection import BASE_CONN, PROBE_ROOT
 from test_connection_transport import server
