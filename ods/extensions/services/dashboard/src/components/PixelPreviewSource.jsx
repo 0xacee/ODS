@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { loadArtifactBytes } from '../lib/pixelArtifacts'
 import { PixelCodeLines, PixelLanguageBadge } from './PixelCodeBlock'
+import PixelArtifactDownload from './PixelArtifactDownload'
 
 const TEXT_LANGUAGES = {html:'html',htm:'html',css:'css',scss:'scss',js:'javascript',mjs:'javascript',cjs:'javascript',jsx:'javascript',ts:'typescript',tsx:'typescript',py:'python',sh:'bash',yml:'yaml',yaml:'yaml',toml:'ini',json:'json',svg:'xml',xml:'xml',md:'markdown',markdown:'markdown',txt:'text',map:'json',csv:'text',tsv:'text'}
 
@@ -41,7 +42,7 @@ export default function PixelPreviewSource({ preview, file }) {
     {binarySize !== null && <p role="status">Binary asset. Its bytes are verified; no text source is available.</p>}
     {error && <div role="alert"><p>{error}</p><button type="button" onClick={() => setAttempt(value => value + 1)}>Retry source</button></div>}
     <div className="pixel-code-block">
-      <header className="code-block-header"><PixelLanguageBadge path={path}/><span title={path}>{path}</span>{language && <button type="button" aria-label="Copy code" onClick={copy} disabled={source === null}>{copied ? 'Copied' : 'Copy'}</button>}</header>
+      <header className="code-block-header"><PixelLanguageBadge path={path}/><span title={path}>{path}</span><PixelArtifactDownload key={`${preview.siteId}/${path}/${expectedDigest}`} preview={preview} file={{path, sha256:expectedDigest, bytes:file?.bytes}}/>{language && <button type="button" aria-label="Copy code" onClick={copy} disabled={source === null}>{copied ? 'Copied' : 'Copy'}</button>}</header>
       {source !== null && <pre tabIndex={0} aria-label={`Code for ${path}`}><PixelCodeLines source={source} language={language}/></pre>}
     </div>
     {(source !== null || binarySize !== null) && <p className="pixel-source-verification">Published snapshot · SHA-256 verified{binarySize !== null ? ` · ${binarySize.toLocaleString()} bytes` : ''}</p>}
