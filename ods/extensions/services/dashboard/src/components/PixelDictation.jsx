@@ -34,7 +34,7 @@ export default function PixelDictation({ disabled, conversationId, onInsert }) {
     active.continuous = false
     active.onresult = event => {
       if (recognition.current !== active) return
-      const text = Array.from(event.results).filter(result => result.isFinal !== false).map(result => result[0]?.transcript || '').join(' ').trim()
+      const text = Array.from(event.results).slice(event.resultIndex ?? 0).filter(result => result.isFinal !== false).map(result => result[0]?.transcript || '').join(' ').trim()
       if (text) insert.current(`${text} `)
     }
     active.onend = () => { if (recognition.current === active) { recognition.current = null; setListening(false); setFinishing(false) } }

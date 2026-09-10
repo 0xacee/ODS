@@ -70,3 +70,14 @@ test('reports denied permission and aborts recognition on unmount', () => {
   view.unmount()
   expect(instance.abort).toHaveBeenCalledOnce()
 })
+
+test('appends only newly finalized results', () => {
+  const instance=speech(),insert=vi.fn()
+  render(<PixelDictation onInsert={insert}/>)
+  fireEvent.click(screen.getByRole('button',{name:'Dictate message'}))
+  const first=Object.assign([{transcript:'First'}],{isFinal:true})
+  const second=Object.assign([{transcript:'Second'}],{isFinal:true})
+  act(() => instance.onresult({resultIndex:0,results:[first]}))
+  act(() => instance.onresult({resultIndex:1,results:[first,second]}))
+  expect(insert.mock.calls).toEqual([['First '],['Second ']])
+})
