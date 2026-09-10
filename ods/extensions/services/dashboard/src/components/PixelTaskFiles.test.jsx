@@ -20,7 +20,7 @@ it('filters all published files, opens verified nested source and returns to the
   fireEvent.click(screen.getByRole('button',{name:/assets\/app.js/}))
   await waitFor(() => expect(screen.getByRole('button',{name:'Copy code'})).toBeEnabled())
   expect(container.querySelector('pre').textContent).toContain(js)
-  expect(screen.getByRole('button',{name:/assets\/app.js/})).toHaveAttribute('aria-current','true')
+  expect(screen.getByRole('button',{name:/^assets\/app.js/})).toHaveAttribute('aria-current','true')
   expect(screen.getByRole('searchbox')).toHaveValue('app.js')
   expect(fetch).toHaveBeenLastCalledWith(`/pixel-preview/${preview.siteId}/assets/app.js`,expect.objectContaining({cache:'no-store'}))
   fireEvent.click(screen.getByRole('button',{name:'All files'}))
