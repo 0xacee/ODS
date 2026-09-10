@@ -1410,7 +1410,7 @@ export default function Pixel({ systemStatus = null }) {
               </div>
             </div>
             {preview && <iframe
-              key={`${preview.siteId}-${previewRefresh}`}
+              key={`preview-${preview.siteId}-${previewRefresh}`}
               src={previewAccess.frameUrl}
               title="Interactive Pixel preview"
               hidden={previewCollapsed || previewTab !== 'preview'}
@@ -1419,7 +1419,7 @@ export default function Pixel({ systemStatus = null }) {
               referrerPolicy="no-referrer"
               className="min-h-0 flex-1 border-0 bg-white"
             />}
-            {!previewCollapsed && preview && previewTab === 'files' && <PixelTaskFiles key={`${preview.siteId}-${previewRefresh}`} preview={preview}/>}
+            {!previewCollapsed && preview && previewTab === 'files' && <PixelTaskFiles key={`files-${preview.siteId}-${previewRefresh}`} preview={preview}/>}
             {!previewCollapsed && preview && previewTab === 'changes' && <div className="pixel-workspace-changes"><PixelSnapshotChanges key={`${preview.siteId}-${previewRefresh}`} preview={preview} before={[...messages].reverse().find(message=>message.publication?.siteId === preview.siteId)?.beforePublication || null} onPreview={()=>setPreviewTab('preview')}/></div>}
             {!previewCollapsed && previewTab === 'activity' && <PixelTaskActivity key={chatIdRef.current} messages={messages} sending={sending} elapsed={workingElapsed}/>}
             {!previewCollapsed && !preview && previewTab !== 'activity' && <section className="pixel-workspace-empty">
