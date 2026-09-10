@@ -162,7 +162,7 @@ def load_verified_active_state(path: Path | None) -> dict[str, Any] | None:
             not stat.S_ISREG(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
             or info.st_nlink != 1
-            or info.st_uid != os.getuid()
+            or (hasattr(os, "getuid") and info.st_uid != os.getuid())
             or info.st_mode & 0o022
             or info.st_size <= 0
             or info.st_size > 2 * 1024 * 1024
