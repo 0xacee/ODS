@@ -166,6 +166,7 @@ export function useModels() {
   const [models, setModels] = useState(USE_MOCK_DATA ? getMockModels() : [])
   const [gpu, setGpu] = useState(USE_MOCK_DATA ? MOCK_GPU : null)
   const [currentModel, setCurrentModel] = useState(USE_MOCK_DATA ? MOCK_CURRENT_MODEL : null)
+  const [loadedModel, setLoadedModel] = useState(USE_MOCK_DATA ? MOCK_CURRENT_MODEL : null)
   const [activationReadyModel, setActivationReadyModel] = useState(USE_MOCK_DATA ? MOCK_CURRENT_MODEL : null)
   const [configuredModel, setConfiguredModel] = useState(USE_MOCK_DATA ? MOCK_CURRENT_MODEL : null)
   const [modelLifecycle, setModelLifecycle] = useState(null)
@@ -245,6 +246,7 @@ export function useModels() {
       setModels(data.models)
       setGpu(data.gpu)
       setCurrentModel(data.currentModel)
+      setLoadedModel(data.loadedModel ?? null)
       setActivationReadyModel(data.activationReadyModel ?? null)
       setConfiguredModel(data.configuredModel ?? null)
       setModelLifecycle(normalizeModelLifecycle(data.modelLifecycle))
@@ -497,6 +499,7 @@ export function useModels() {
     models,
     gpu,
     currentModel,
+    loadedModel,
     activationReadyModel,
     configuredModel,
     modelLifecycle,

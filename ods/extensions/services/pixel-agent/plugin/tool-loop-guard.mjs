@@ -179,12 +179,6 @@ export const WORKSPACE_PREVIEW_PUBLISHED_DELIVERY_PREFIX =
 export const CLIENT_CANCELLED_REASON =
   "The owner cancelled this Pixel response. Do not call another tool or continue the task in this turn.";
 
-export const ODS_TOOL_ROUTING_ABORT_REASON =
-  "Pixel stopped this response because the required dedicated ODS projection tool was not used after one correction. Do not call another tool in this turn. State that the requested ODS facts were not verified and ask the owner to retry.";
-
-export const ODS_TOOL_ROUTING_LOOP_ABORT_REASON =
-  "Pixel stopped this response because it requested another tool after the ODS projection route was enforced. Start a fresh message to continue.";
-
 export const EXACT_DOWNLOAD_REQUIRES_BROKER_REASON =
   "Pixel cannot turn web_fetch or another transformed page view into an exact-byte download. Call pixel_ops_download_stage now; ODS will bind it to the owner's exact HTTPS URL, destination basename, and expected digest. Wait for that exact job with pixel_ops_job_wait, then publish only its verified receipt with pixel_ods_download_promote. Do not create a substitute file.";
 
@@ -193,9 +187,6 @@ export const EXACT_DOWNLOAD_REQUIRES_WAIT_REASON =
 
 export const EXACT_DOWNLOAD_REQUIRES_PROMOTION_REASON =
   "Pixel verified the staged artifact in quarantine. Call pixel_ods_download_promote now; ODS will bind the job, source URL, digest, filename, and workspace-relative destination. Do not read the root-only quarantine path or create a substitute file.";
-
-export const EXACT_DOWNLOAD_COMPLETE_REASON =
-  "Pixel has already published and reverified the requested exact-byte artifact. Do not call another tool; give the owner the final path, byte count, SHA-256, source, and non-executable status.";
 
 export const EXACT_DOWNLOAD_REQUEST_UNBOUND_REASON =
   "Pixel could not bind this exact-byte request to one unambiguous HTTPS source URL and one safe workspace-relative destination. Do not call another tool or create a substitute; ask the owner for one exact HTTPS URL and destination path.";
@@ -373,6 +364,7 @@ const EVIDENCE_REPORT_TOOL = "pixel_ods_evidence_report";
 const EVIDENCE_READBACK_TOOL = "pixel_ods_evidence_readback";
 const WORKSPACE_PREVIEW_TOOL = "pixel_ods_workspace_preview";
 const MAX_TRACKED_RUNS = 256;
+const MAX_SESSION_DOWNLOAD_JOBS = 32;
 const MAX_PENDING_EXEC_SESSIONS = 64;
 const ODS_OPENAI_USER = /^ods-[0-9a-f]{64}$/;
 const EXEC_CONTROL_WRAPPER = "/run/pixel-ods-control/cancellable-exec.sh";
@@ -5891,6 +5883,20 @@ export function createToolLoopGuard({
   const activeUsers = new Map();
   const pendingToolRuns = new Map();
   const sessionPreviews = new Map();
+  const sessionDownloadJobs = new Map();
+
+  function rememberSessionDownload(sessionId, jobId) {
+    if (typeof sessionId !== "string" || !sessionId || !OPS_JOB_ID.test(jobId)) return;
+    const jobs = sessionDownloadJobs.get(sessionId) ?? new Set();
+    jobs.delete(jobId);
+    while (jobs.size >= MAX_SESSION_DOWNLOAD_JOBS) jobs.delete(jobs.values().next().value);
+    jobs.add(jobId);
+    sessionDownloadJobs.delete(sessionId);
+    while (sessionDownloadJobs.size >= MAX_TRACKED_RUNS) {
+      sessionDownloadJobs.delete(sessionDownloadJobs.keys().next().value);
+    }
+    sessionDownloadJobs.set(sessionId, jobs);
+  }
 
   function pruneRuns() {
     while (runs.size >= MAX_TRACKED_RUNS) {
@@ -5967,12 +5973,6 @@ export function createToolLoopGuard({
         odsRoutingInitialized: false,
         odsRequestedTools: new Set(),
         odsRequiredTools: new Set(),
-        odsRoutingBlocks: 0,
-        odsRoutingCorrectionRound: undefined,
-        odsRoutingExhausted: false,
-        odsRoutingTerminalRound: undefined,
-        odsRoutingAborted: false,
-        odsRoutingTerminalBlocks: 0,
         exactDownloadRequested: false,
         researchDownloadSubmissions: new Map(),
         exactDownloadRequest: undefined,
@@ -6171,25 +6171,6 @@ export function createToolLoopGuard({
         }
       }
       return { block: true, blockReason: RECURSIVE_DELETE_REQUIRES_OWNER_REASON };
-    }
-    // A model must see a correction before it can ignore it. Terminal-round
-    // siblings stay blocked without aborting; the next model round is the
-    // actual abort boundary, before Tool Search and every other early return.
-    if (state?.odsRoutingExhausted) {
-      if ((state.operationsPromptRound > 0 &&
-           state.operationsPromptRound === state.odsRoutingTerminalRound) ||
-          (state.operationsPromptRound === 0 && state.odsRoutingTerminalBlocks++ === 0)) {
-        return { block: true, blockReason: ODS_TOOL_ROUTING_ABORT_REASON };
-      }
-      const activeSession = sessionId ?? state.currentSessionId;
-      if (!state.odsRoutingAborted && typeof activeSession === "string" && activeSession) {
-        try {
-          state.odsRoutingAborted = typeof abortRun === "function" && Boolean(abortRun(activeSession));
-        } catch (error) {
-          warn(`Pixel ODS-routing abort failed for run ${runId}: ${String(error)}`);
-        }
-      }
-      return { block: true, blockReason: ODS_TOOL_ROUTING_LOOP_ABORT_REASON };
     }
     // Put this terminal fuse before every tool-specific return, including
     // Tool Search, reply controls, and workspace recovery adaptations. The
@@ -7264,8 +7245,10 @@ export function createToolLoopGuard({
       // reach those boundaries or stop later sandbox work.
       effectiveToolName !== "pixel_ops_download_stage" &&
       !(DOWNLOAD_JOB_TOOLS.has(effectiveToolName) &&
-        state.researchDownloadSubmissions.has((toolName === "tool_call"
-          ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId)) &&
+        (state.researchDownloadSubmissions.has((toolName === "tool_call"
+          ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId) ||
+          sessionDownloadJobs.get(state.currentSessionId)?.has((toolName === "tool_call"
+            ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId))) &&
       !(["pixel_ops_job_get", "pixel_ops_job_wait"].includes(effectiveToolName) &&
         state.operationsSubmittedJobs.has((toolName === "tool_call"
           ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId))
@@ -7287,15 +7270,15 @@ export function createToolLoopGuard({
       };
     }
 
-    if (state?.exactDownloadRequested && state.exactDownloadPromotion) {
-      return { block: true, blockReason: EXACT_DOWNLOAD_COMPLETE_REASON };
-    }
-
     // Publication verifies a snapshot, not completion of the owner's task.
     // Let verification and repairs reach normal tool/loop checks; a blanket
     // early return here can itself repeat forever before those checks run.
 
-    if (state?.exactDownloadRequested && !EXACT_DOWNLOAD_BROKER_TOOLS.has(effectiveToolName)) {
+    // Finding and describing the approved broker is not an attempt to replace
+    // its verified bytes. Keep discovery subject to the normal loop checks.
+    const exactDownloadDiscovery = effectiveToolName === "tool_search" || effectiveToolName === "tool_describe";
+    if (state?.exactDownloadRequested && !state.exactDownloadPromotion &&
+        !exactDownloadDiscovery && !EXACT_DOWNLOAD_BROKER_TOOLS.has(effectiveToolName)) {
       if (state.exactDownloadTerminalBlocks === 0) {
         state.exactDownloadTerminalBlocks = 1;
         return {
@@ -7319,7 +7302,7 @@ export function createToolLoopGuard({
       return { block: true, blockReason: EXACT_DOWNLOAD_LOOP_ABORT_REASON };
     }
 
-    if (state?.exactDownloadRequested) {
+    if (state?.exactDownloadRequested && EXACT_DOWNLOAD_BROKER_TOOLS.has(effectiveToolName)) {
       const request = state.exactDownloadRequest;
       const exactDownloadParams = (selectedToolName, params) =>
         toolName === "tool_call"
@@ -7683,28 +7666,11 @@ export function createToolLoopGuard({
       return { block: true, blockReason: PRIVATE_NETWORK_LOOP_ABORT_REASON };
     }
 
-    if (state?.odsRequiredTools.size > 0) {
-      if (state.odsRequiredTools.has(effectiveToolName)) {
-        state.odsRequiredTools.delete(effectiveToolName);
-        state.odsRoutingBlocks = 0;
-        state.odsRoutingCorrectionRound = undefined;
-      } else if (state.odsRoutingBlocks === 0 ||
-          (state.operationsPromptRound > 0 &&
-           state.odsRoutingCorrectionRound === state.operationsPromptRound)) {
-        state.odsRoutingBlocks = 1;
-        state.odsRoutingCorrectionRound = state.operationsPromptRound;
-        const required = [...state.odsRequiredTools].join(" and ");
-        return {
-          block: true,
-          blockReason:
-            `This request asks for ODS facts exposed by dedicated read-only tools. ` +
-            `Before any other tool, call ${required} exactly once. Then continue the owner's remaining work normally.`,
-        };
-      } else {
-        state.odsRoutingExhausted = true;
-        state.odsRoutingTerminalRound = state.operationsPromptRound;
-        return { block: true, blockReason: ODS_TOOL_ROUTING_ABORT_REASON };
-      }
+    // Requested read-only projections are useful facts, not prerequisites for
+    // discovery, argument recovery, or workspace work. Their execution and
+    // results still pass through ordinary tool validation and receipt handling.
+    if (state?.odsRequiredTools.has(effectiveToolName)) {
+      state.odsRequiredTools.delete(effectiveToolName);
     }
 
     if (
@@ -8643,6 +8609,14 @@ export function createToolLoopGuard({
       : toolName;
     const exactDownloadEvent = wrappedExactDownloadEvent ?? event;
     if (exactDownloadToolName === "pixel_ops_download_stage") {
+      // Approval may finish between user turns. Keep only actual broker
+      // handles in this process-local, session-bound cache. User/tool text
+      // cannot seed it; restart recovery still needs durable trusted receipts.
+      // This grants job inspection/cancellation, never approval or promotion.
+      const submittedJobId = submittedDownloadJobId(exactDownloadEvent);
+      if (submittedJobId) {
+        rememberSessionDownload(context?.sessionId ?? state.currentSessionId, submittedJobId);
+      }
       // Explicit exact-byte requests retain their owner-bound URL/digest.
       // General research may select a source archive or dependency URL. Only
       // an actual matched broker submission creates permission to inspect or
@@ -9191,19 +9165,15 @@ export function createToolLoopGuard({
     if (state.recursiveDeleteDenied) {
       return { status: "failed", text: RECURSIVE_DELETE_REQUIRES_OWNER_REASON };
     }
-    if (state.odsRoutingExhausted) {
-      return { status: "failed", text: state.odsRoutingAborted
-        ? ODS_TOOL_ROUTING_LOOP_ABORT_REASON : ODS_TOOL_ROUTING_ABORT_REASON };
-    }
     if (state.unrequestedOperationsAborted) {
       return { status: "failed", text: UNREQUESTED_OPERATIONS_LOOP_ABORT_REASON };
     }
-    // Successful host facts cannot hide a failed or still-running workspace
-    // verification in the same request. The broker receipts stay recorded.
-    if (state.operationsRequired && state.latestVerificationStatus === "failed") {
+    // Successful host facts or a published download cannot hide a failed or
+    // still-running workspace verification. The broker receipts stay recorded.
+    if ((state.operationsRequired || state.exactDownloadPromotion) && state.latestVerificationStatus === "failed") {
       return { status: "failed", text: VERIFICATION_FAILED_DELIVERY_PREFIX };
     }
-    if (state.operationsRequired && state.latestVerificationStatus === "pending") {
+    if ((state.operationsRequired || state.exactDownloadPromotion) && state.latestVerificationStatus === "pending") {
       return { status: "pending", text: VERIFICATION_PENDING_DELIVERY_PREFIX };
     }
     if (
@@ -9478,7 +9448,7 @@ export function createToolLoopGuard({
           [...state.operationsRequiredActions].every((action) =>
             action.startsWith("host.") || action === "ods.extensions.list" || action === "ods.extensions.search")));
     return verification.status === "passed" && verification.text &&
-      (readOnlyOperations || verification.preview)
+      (readOnlyOperations || verification.preview || state?.exactDownloadPromotion)
       ? { ...verification, deliveryMode: "append" }
       : verification;
   }
@@ -9504,7 +9474,9 @@ export function createToolLoopGuard({
         typeof event.payload?.text === "string" && event.payload.text.trim()) {
       const scope = verification.preview
         ? "Publication scope: this receipt verifies the published snapshot, not functional behavior or completion of other requested work."
-        : "Receipt scope: the Operations evidence above does not establish completion of other requested work.";
+        : state.exactDownloadPromotion
+          ? "Download scope: this receipt verifies bytes at publication, not later edits, analysis accuracy, or completion of other requested work."
+          : "Receipt scope: the Operations evidence above does not establish completion of other requested work.";
       const evidence = `${authoritativeText}\n${scope}`;
       return {
         payload: { ...(event.payload ?? {}), text: event.payload.text.endsWith(evidence)
