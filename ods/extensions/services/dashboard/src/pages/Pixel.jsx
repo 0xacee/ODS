@@ -22,6 +22,7 @@ import PanelResizeHandle from '../components/PanelResizeHandle.jsx'
 import PixelHandoffApproval from '../components/PixelHandoffApproval.jsx'
 import PixelProviderScopes from '../components/PixelProviderScopes.jsx'
 import { usePortalIdentity } from '../contexts/PortalIdentityContext'
+import {usePixelSendKey, shouldSendMessage} from '../lib/usePixelSendKey'
 import {
   AlertCircle,
   Bot,
@@ -521,6 +522,7 @@ export default function Pixel({ systemStatus = null }) {
   const profile = useLocalProfile()
   const { displayName } = usePortalIdentity()
   const [initialChat] = useState(loadStoredChat)
+  const sendKey = usePixelSendKey()
   const [status, setStatus] = useState('loading')
   const [statusDetail, setStatusDetail] = useState('')
   const [messages, setMessages] = useState(() => initialChat?.messages || [])
@@ -1212,6 +1214,8 @@ export default function Pixel({ systemStatus = null }) {
         <div className="pixel-chat-header-actions">
           <button type="button" aria-label="Search Pixel" title="Search conversations · Ctrl+K" className="pixel-metal-control p-2" onClick={() => window.dispatchEvent(new Event(OPEN_PIXEL_SEARCH))}><Search size={16}/></button>
           <details className="pixel-chat-options"><summary aria-label="Chat options">•••</summary><div className="pixel-chat-options-menu">
+            <label className="block p-2 text-xs">Send shortcut<select className="mt-1 block w-full rounded border border-theme-border bg-theme-bg p-2" aria-label="Send shortcut" value={sendKey.mode} onChange={event => sendKey.change(event.target.value)}><option value="enter">Enter to send</option><option value="mod-enter">Ctrl/⌘+Enter to send</option></select></label>
+            {sendKey.error && <p role="alert" className="p-2 text-xs">{sendKey.error}</p>}
             <PixelAdvice canInsert={!sending} onInsert={text => setInput(current => current ? `${current}\n\n${text}` : text)} />
             <PixelHandoffApproval label="Approvals" />
             <PixelProviderScopes chatId={chatIdRef.current} sending={sending} />
@@ -1402,8 +1406,7 @@ export default function Pixel({ systemStatus = null }) {
             value={input}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                if (event.nativeEvent?.isComposing) return
+              if (shouldSendMessage(event, sendKey.mode)) {
                 event.preventDefault()
                 sendMessage()
               }
@@ -1451,7 +1454,7 @@ export default function Pixel({ systemStatus = null }) {
             </div>
           </div>
           <div className="mt-1.5 flex items-center justify-between gap-3 px-1 text-[10px] text-theme-text-muted/70">
-            <span>{stopping ? 'Waiting for exact cancellation acknowledgement' : restoredActive ? 'Earlier work is active in this chat; Stop targets only this chat.' : sending ? `${displayName} is using the active ODS model and tools · ${workingElapsed} elapsed` : 'Enter to send • Shift+Enter for a new line'}</span>
+            <span>{stopping ? 'Waiting for exact cancellation acknowledgement' : restoredActive ? 'Earlier work is active in this chat; Stop targets only this chat.' : sending ? `${displayName} is using the active ODS model and tools · ${workingElapsed} elapsed` : sendKey.mode === 'mod-enter' ? 'Ctrl/⌘+Enter to send • Enter for a new line' : 'Enter to send • Shift+Enter for a new line'}</span>
           </div>
         </div>
         {inputOver && (
