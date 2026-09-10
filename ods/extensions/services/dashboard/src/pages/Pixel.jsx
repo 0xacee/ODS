@@ -11,6 +11,7 @@ import {useLocalProfile} from '../lib/localProfile'
 import { pixelHeaderPose, pixelReplyPose } from '../lib/pixelMascotState'
 import PixelComposerTools from '../components/PixelComposerTools'
 import PixelTextFileInput from '../components/PixelTextFileInput'
+import PixelDraftPreview from '../components/PixelDraftPreview'
 import PixelDictation from '../components/PixelDictation'
 import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelCommandSearch'
 import PixelConversationImport from '../components/PixelConversationImport'
@@ -1474,6 +1475,7 @@ export default function Pixel({ systemStatus = null }) {
           </div>
           {stopError && <p role="alert" className="mt-1.5 px-1 text-xs text-amber-300">{stopError}</p>}
           <PixelTextFileInput key={chatIdRef.current} input={input} disabled={isDisabled} limit={MAX_INPUT_LEN} onInsert={insertComposerText}/>
+          <PixelDraftPreview key={chatIdRef.current} input={input}/>
           <div className="pixel-composer-secondary">
             <PixelComposerTools input={input} disabled={isDisabled} onInsert={insertComposerText} />
             <div className="pixel-composer-limits">
