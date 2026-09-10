@@ -29,6 +29,7 @@ export default function PixelAdviceRuntime({ onReadyChange, title = 'Advisory ru
   const fingerprint = useRef('')
   const inflight = useRef(false)
   const polling = useRef(false)
+  const jobVersion = useRef(0)
   const controllers = useRef(new Set())
   const epoch = useRef(0)
   const notify = useRef(onReadyChange)
@@ -72,15 +73,16 @@ export default function PixelAdviceRuntime({ onReadyChange, title = 'Advisory ru
   }, [refresh])
 
   const inspect = useCallback(async () => {
-    if (!jobId || polling.current) return
+    if (!jobId || polling.current || inflight.current) return
     polling.current = true
+    const version = jobVersion.current
     try {
       const result = await request('/status', { jobId })
       if (!validJob(result) || result.jobId !== jobId) throw new Error('Invalid setup job')
-      if (tracked.current !== jobId) return
+      if (tracked.current !== jobId || version !== jobVersion.current) return
       setJob(result); setError('')
       if (done.has(result.status)) await refresh()
-    } catch { if (tracked.current === jobId) setError('Setup status is unknown. Check the tracked setup; closing this panel does not stop it.') }
+    } catch { if (tracked.current === jobId && version === jobVersion.current) setError('Setup status is unknown. Check the tracked setup; closing this panel does not stop it.') }
     finally { polling.current = false }
   }, [jobId, request, refresh])
 
@@ -98,6 +100,7 @@ export default function PixelAdviceRuntime({ onReadyChange, title = 'Advisory ru
   async function prepare() {
     if (!available || !consent || busy || disabled || inflight.current) return
     inflight.current = true; setSubmitting(true); setError('')
+    jobVersion.current++
     let id
     try {
       id = globalThis.crypto.randomUUID(); localStorage.setItem(key, id)
@@ -113,7 +116,8 @@ export default function PixelAdviceRuntime({ onReadyChange, title = 'Advisory ru
   }
 
   async function stop() {
-    if (!jobId) return
+    if (!jobId || inflight.current) return
+    inflight.current = true; setSubmitting(true); jobVersion.current++
     try {
       const result = await request('/cancel', { jobId })
       if (!validJob(result) || result.jobId !== jobId) throw new Error('Invalid setup job')
@@ -121,6 +125,7 @@ export default function PixelAdviceRuntime({ onReadyChange, title = 'Advisory ru
       setJob(result); setError('')
       if (done.has(result.status)) await refresh()
     } catch { if (tracked.current === jobId) setError('Stop setup is unconfirmed. Check the tracked setup again.') }
+    finally { inflight.current = false; setSubmitting(false) }
   }
 
   function forget() {
@@ -151,7 +156,7 @@ export default function PixelAdviceRuntime({ onReadyChange, title = 'Advisory ru
       <p role="status">Setup: {job?.status || 'unknown'}</p>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={button} onClick={inspect}>Check setup</button>
-        {!done.has(job?.status) && <button type="button" className={button} onClick={stop}>Stop setup</button>}
+        {!done.has(job?.status) && <button type="button" className={button} disabled={submitting} onClick={stop}>Stop setup</button>}
         {(done.has(job?.status) || error) && <button type="button" className={button} disabled={submitting} onClick={forget}>Forget tracking (does not stop setup)</button>}
       </div>
       {job?.status === 'failed' && <p>Setup failed or runtime custody changed. Refresh readiness and check host Python/venv availability. Old runtime files and job evidence are retained.</p>}
