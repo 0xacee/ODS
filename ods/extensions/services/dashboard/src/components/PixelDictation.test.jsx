@@ -3,7 +3,7 @@ import PixelDictation from './PixelDictation'
 
 afterEach(() => { delete window.SpeechRecognition; delete window.webkitSpeechRecognition })
 function speech() {
-  const instance = {start:vi.fn(),abort:vi.fn()}
+  const instance = {start:vi.fn(),stop:vi.fn(),abort:vi.fn()}
   window.SpeechRecognition = function () { return instance }
   return instance
 }
@@ -33,6 +33,32 @@ test('reports unsupported browsers without changing the draft', () => {
   fireEvent.click(screen.getByRole('button',{name:'Dictate message'}))
   expect(screen.getByRole('status')).toHaveTextContent('not supported')
   expect(insert).not.toHaveBeenCalled()
+})
+
+test('Stop finishes captured speech and accepts its final transcript', () => {
+  const instance = speech(), insert = vi.fn()
+  render(<PixelDictation onInsert={insert} conversationId="one"/>)
+  fireEvent.click(screen.getByRole('button',{name:'Dictate message'}))
+  fireEvent.click(screen.getByRole('button',{name:'Stop dictation'}))
+  expect(instance.stop).toHaveBeenCalledOnce()
+  expect(instance.abort).not.toHaveBeenCalled()
+  expect(screen.getByRole('status')).toHaveTextContent('Finishing dictation')
+  act(() => instance.onresult({results:[Object.assign([{transcript:'Keep my last words'}],{isFinal:true})]}))
+  expect(insert).toHaveBeenCalledWith('Keep my last words ')
+  act(() => instance.onend())
+  expect(screen.getByRole('button',{name:'Dictate message'})).toBeEnabled()
+})
+
+test('switching conversation after Stop still discards the pending transcript', () => {
+  const instance = speech(), insert = vi.fn()
+  const view = render(<PixelDictation onInsert={insert} conversationId="one"/>)
+  fireEvent.click(screen.getByRole('button',{name:'Dictate message'}))
+  fireEvent.click(screen.getByRole('button',{name:'Stop dictation'}))
+  view.rerender(<PixelDictation onInsert={insert} conversationId="two"/>)
+  act(() => instance.onresult({results:[Object.assign([{transcript:'Old conversation'}],{isFinal:true})]}))
+  expect(insert).not.toHaveBeenCalled()
+  expect(instance.abort).toHaveBeenCalledOnce()
+  expect(screen.getByRole('button',{name:'Dictate message'})).toBeEnabled()
 })
 test('reports denied permission and aborts recognition on unmount', () => {
   const instance = speech()
