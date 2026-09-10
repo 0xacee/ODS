@@ -179,12 +179,6 @@ export const WORKSPACE_PREVIEW_PUBLISHED_DELIVERY_PREFIX =
 export const CLIENT_CANCELLED_REASON =
   "The owner cancelled this Pixel response. Do not call another tool or continue the task in this turn.";
 
-export const ODS_TOOL_ROUTING_ABORT_REASON =
-  "Pixel stopped this response because the required dedicated ODS projection tool was not used after one correction. Do not call another tool in this turn. State that the requested ODS facts were not verified and ask the owner to retry.";
-
-export const ODS_TOOL_ROUTING_LOOP_ABORT_REASON =
-  "Pixel stopped this response because it requested another tool after the ODS projection route was enforced. Start a fresh message to continue.";
-
 export const EXACT_DOWNLOAD_REQUIRES_BROKER_REASON =
   "Pixel cannot turn web_fetch or another transformed page view into an exact-byte download. Call pixel_ops_download_stage now; ODS will bind it to the owner's exact HTTPS URL, destination basename, and expected digest. Wait for that exact job with pixel_ops_job_wait, then publish only its verified receipt with pixel_ods_download_promote. Do not create a substitute file.";
 
@@ -6008,12 +6002,6 @@ export function createToolLoopGuard({
         odsRoutingInitialized: false,
         odsRequestedTools: new Set(),
         odsRequiredTools: new Set(),
-        odsRoutingBlocks: 0,
-        odsRoutingCorrectionRound: undefined,
-        odsRoutingExhausted: false,
-        odsRoutingTerminalRound: undefined,
-        odsRoutingAborted: false,
-        odsRoutingTerminalBlocks: 0,
         exactDownloadRequested: false,
         researchDownloadSubmissions: new Map(),
         exactDownloadRequest: undefined,
@@ -6212,25 +6200,6 @@ export function createToolLoopGuard({
         }
       }
       return { block: true, blockReason: RECURSIVE_DELETE_REQUIRES_OWNER_REASON };
-    }
-    // A model must see a correction before it can ignore it. Terminal-round
-    // siblings stay blocked without aborting; the next model round is the
-    // actual abort boundary, before Tool Search and every other early return.
-    if (state?.odsRoutingExhausted) {
-      if ((state.operationsPromptRound > 0 &&
-           state.operationsPromptRound === state.odsRoutingTerminalRound) ||
-          (state.operationsPromptRound === 0 && state.odsRoutingTerminalBlocks++ === 0)) {
-        return { block: true, blockReason: ODS_TOOL_ROUTING_ABORT_REASON };
-      }
-      const activeSession = sessionId ?? state.currentSessionId;
-      if (!state.odsRoutingAborted && typeof activeSession === "string" && activeSession) {
-        try {
-          state.odsRoutingAborted = typeof abortRun === "function" && Boolean(abortRun(activeSession));
-        } catch (error) {
-          warn(`Pixel ODS-routing abort failed for run ${runId}: ${String(error)}`);
-        }
-      }
-      return { block: true, blockReason: ODS_TOOL_ROUTING_LOOP_ABORT_REASON };
     }
     // Put this terminal fuse before every tool-specific return, including
     // Tool Search, reply controls, and workspace recovery adaptations. The
@@ -7724,28 +7693,11 @@ export function createToolLoopGuard({
       return { block: true, blockReason: PRIVATE_NETWORK_LOOP_ABORT_REASON };
     }
 
-    if (state?.odsRequiredTools.size > 0) {
-      if (state.odsRequiredTools.has(effectiveToolName)) {
-        state.odsRequiredTools.delete(effectiveToolName);
-        state.odsRoutingBlocks = 0;
-        state.odsRoutingCorrectionRound = undefined;
-      } else if (state.odsRoutingBlocks === 0 ||
-          (state.operationsPromptRound > 0 &&
-           state.odsRoutingCorrectionRound === state.operationsPromptRound)) {
-        state.odsRoutingBlocks = 1;
-        state.odsRoutingCorrectionRound = state.operationsPromptRound;
-        const required = [...state.odsRequiredTools].join(" and ");
-        return {
-          block: true,
-          blockReason:
-            `This request asks for ODS facts exposed by dedicated read-only tools. ` +
-            `Before any other tool, call ${required} exactly once. Then continue the owner's remaining work normally.`,
-        };
-      } else {
-        state.odsRoutingExhausted = true;
-        state.odsRoutingTerminalRound = state.operationsPromptRound;
-        return { block: true, blockReason: ODS_TOOL_ROUTING_ABORT_REASON };
-      }
+    // Requested read-only projections are useful facts, not prerequisites for
+    // discovery, argument recovery, or workspace work. Their execution and
+    // results still pass through ordinary tool validation and receipt handling.
+    if (state?.odsRequiredTools.has(effectiveToolName)) {
+      state.odsRequiredTools.delete(effectiveToolName);
     }
 
     if (
@@ -9243,10 +9195,6 @@ export function createToolLoopGuard({
     if (!state) return { status: "none" };
     if (state.recursiveDeleteDenied) {
       return { status: "failed", text: RECURSIVE_DELETE_REQUIRES_OWNER_REASON };
-    }
-    if (state.odsRoutingExhausted) {
-      return { status: "failed", text: state.odsRoutingAborted
-        ? ODS_TOOL_ROUTING_LOOP_ABORT_REASON : ODS_TOOL_ROUTING_ABORT_REASON };
     }
     if (state.unrequestedOperationsAborted) {
       return { status: "failed", text: UNREQUESTED_OPERATIONS_LOOP_ABORT_REASON };
