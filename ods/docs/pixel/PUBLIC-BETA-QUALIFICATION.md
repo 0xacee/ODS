@@ -1,6 +1,30 @@
-# Portal public beta — 9 September 2026
+# Portal public beta — 10 September 2026
 
 Portal (currently labelled Pixel in parts of ODS) is a core ODS feature under active qualification. This branch is the common baseline for supervised fleet and external user tests. It is not a declaration of general release readiness.
+
+## Current checkpoint — 10 September
+
+Code qualified at `7b74eda7ca1d` combines PR #3385 through `5a8b84d136bd10a363fa0e3d1393fde45a97bf56`, PR #3818 through `5d68d42fc9458012fae5bbd3985096576cdaeebc`, and the existing public-beta workspace/dashboard work. Both PRs remain open and unmerged into the default branch.
+
+The composition includes durable chat-result recovery, Stop ordering, native-search provisioning, provider/runtime/access controls, sharing diagnostics and advertised-port handling, and a customizable assistant display name with Portal as the default. Internal routes remain stable. The beta workspace layout and preview isolation are preserved.
+
+The exact composition passed 116 focused API tests, all 703 frontend tests across 73 files, frontend lint, and the production build on physical Tower2. The API scope covers chat recovery and identity. PR #3385 at `5a8b84d1` separately passed 32 hosted checks, with three skipped. The wider beta retained Python lint debt outside the recovery files; this composition is not declared globally lint-clean.
+
+Current native evidence and gaps:
+
+- Tower3 recovered a real answer and preview after closing the browser tab; the completed result survived an API replacement. Explicit Stop and stale Stop were independently checked. This does not qualify OS-shutdown recovery or every long-running job.
+- Tower1 runs a separate native-search canary with the official pinned `parallel-free` plugin and a required read-only service mount. Actual ODS chat receipts show relevant restaurant pages. The full research-to-file task still failed after context-overflow checks, compaction/retry, and research-budget exhaustion. No report was saved; standalone research is not accepted.
+- Laptop sharing exposed incorrect installed Compose permissions, then an older router image missing required model metadata. The file mode was repaired without changing bytes. No inference capability probe ran. Test grants are revoked and sharing is stopped; existing model configuration and llama/router containers were preserved.
+- Real app tests still expose functional failures: a voxel repair failed at shell portability/output completion, and a laptop time-zone planner initially displayed identical times in different cities. Publication alone is not functional acceptance.
+- Strixy's UI displayed its 35B model while the agent's status projection reported old 9B configuration. The agent could not establish the actual underlying model. Runtime/projection parity remains an upgrade requirement.
+
+Installed state at this checkpoint: Tower1, Strixy, and the laptop retain the earlier `8c` dashboard beta; Tower3 runs recovery canary `a86bca33`; Tower2 remains a coordinated mixed-source exception protecting its runtime. This new composition is not yet installed consistently. Qualification must include router image bytes, gateway/plugin configuration and file permissions as well as source and dashboard/API images.
+
+Next acceptance work: reliable research-to-file and bounded ingestion across compaction; model switching and truthful runtime status; interruption/resume; files, PDFs, codebases, GitHub and images; browser/network and Full Access; cloud providers and two-host sharing; fresh-install, upgrade, reboot and rollback. Record actual installed versions and artifacts, and distinguish partial results from accepted behavior.
+
+## Historical checkpoint — 9 September
+
+The following evidence describes the earlier composition and installations, not the current fleet state above.
 
 ## Included changes
 
