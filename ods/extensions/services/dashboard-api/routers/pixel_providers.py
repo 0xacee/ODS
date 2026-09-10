@@ -228,3 +228,16 @@ async def get_provider_runtime(_key: str = Depends(verify_api_key)):
 @router.post("/api/pixel/providers/runtime")
 async def change_provider_runtime(request: Request, _key: str = Depends(verify_api_key)):
     return await _runtime_request("POST", await _body(request, runtime=True))
+
+@router.get("/api/pixel/providers/health")
+async def get_active_provider_health(_key: str = Depends(verify_api_key)):
+    """Background or on-demand probe of the active provider's health."""
+    try:
+        raw = await request_agent_json("GET", "/v1/models", timeout=10)
+        return JSONResponse(
+            content={"status": "online", "models": len(raw.get("data", [])) if isinstance(raw, dict) else 0},
+            headers=NO_STORE
+        )
+    except (AgentHTTPError, AgentUnavailable, AgentProtocolError):
+        return JSONResponse(content={"status": "offline"}, headers=NO_STORE)
+

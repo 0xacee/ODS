@@ -1,3 +1,4 @@
+from host_agent_client import AgentUnavailable, AgentHTTPError, AgentProtocolError
 import copy
 import json
 from unittest.mock import AsyncMock, patch
@@ -253,3 +254,18 @@ def test_host_credential_url_never_reflected(client, mock_request):
     response = client.get("/api/pixel/providers", headers={"Authorization": "Bearer test-key-12345"})
     assert response.status_code == 502
     assert "private-sentinel" not in response.text
+
+
+def test_active_provider_health_online(client, mock_request):
+    mock_request.return_value = {"data": [{"id": "model-1"}, {"id": "model-2"}]}
+    resp = client.get("/api/pixel/providers/health", headers={"Authorization": "Bearer test-key-12345"})
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "online", "models": 2}
+    mock_request.assert_called_once_with("GET", "/v1/models", timeout=10)
+
+def test_active_provider_health_offline(client, mock_request):
+    mock_request.side_effect = AgentUnavailable()
+    resp = client.get("/api/pixel/providers/health", headers={"Authorization": "Bearer test-key-12345"})
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "offline"}
+
