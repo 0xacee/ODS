@@ -39,8 +39,6 @@ import {
   GITHUB_CANONICAL_FETCH_FAILED_REASON,
   GITHUB_CANONICAL_SOURCE_PREFIX,
   GITHUB_SOURCE_UNVERIFIED_DELIVERY_PREFIX,
-  ODS_TOOL_ROUTING_ABORT_REASON,
-  ODS_TOOL_ROUTING_LOOP_ABORT_REASON,
   OPERATIONS_HOST_EVIDENCE_PREFIX,
   OPERATIONS_HOST_COMMAND_COMPLETE_REASON,
   OPERATIONS_HOST_COMMAND_EVIDENCE_PREFIX,
@@ -3418,7 +3416,7 @@ test("rejects malformed staged-download approval evidence", () => {
   assert.equal(reply(guard)?.payload?.text, EXACT_DOWNLOAD_UNVERIFIED_DELIVERY_PREFIX);
 });
 
-test("routes explicit ODS facts through projections before mixed workspace work", () => {
+test("allows mixed workspace work before requested ODS projections", () => {
   const guard = createToolLoopGuard();
   const context = { agentId: "pixel", runId: "run-1", sessionId: "session-1" };
   const prompt =
@@ -3429,9 +3427,8 @@ test("routes explicit ODS facts through projections before mixed workspace work"
   ]);
   guard.observeRun(context, "pixel", { prompt });
 
-  const redirected = call(guard, "exec", { event: { params: { command: "find ." } } });
-  assert.equal(redirected.block, true);
-  assert.match(redirected.blockReason, /call pixel_ods_status and pixel_ods_apps_list exactly once/);
+  assert.notEqual(call(guard, "exec", { event: { params: { command: "find ." } } })?.block, true);
+  assert.notEqual(guard.verificationForRun("run-1").status, "verified");
   assert.equal(
     call(guard, "tool_call", {
       event: { params: { id: "pixel_ods_status", args: {} } },
@@ -3532,110 +3529,76 @@ test("explicit negative ODS status intent never creates a compulsory projection"
   }
 });
 
-test("ODS projection correction belongs to a model round, not parallel sibling calls", () => {
+test("ODS projection discovery survives malformed wrappers and later model rounds", () => {
   const aborts = [];
   const guard = createToolLoopGuard({ abortRun(id) { aborts.push(id); return true; } });
   const context = { agentId: "pixel", runId: "run-1", sessionId: "session-1" };
-  guard.observeRun(context, "pixel", { prompt: "Create result.txt in the workspace and verify it. What ODS model is active?" });
-  guard.observeModelCall({ runId: "run-1" }, context, "pixel");
-  for (let index = 0; index < 10; index += 1) {
-    const blocked = call(guard, "tool_call", { event: { params: { id: "write", args: { path: `file-${index}.txt`, text: "fixture" } } } });
-    assert.match(blocked.blockReason, /call pixel_ods_status exactly once/);
+  guard.observeRun(context, "pixel", { prompt: "Inspect this ODS installation and explain which model is actually serving Pixel, which inference backend it uses, and whether the important services are healthy. Save a concise diagnostic report in release-2664/strixy-health.md with observed evidence and any unknowns. Do not change settings, restart services, install anything, or expose credentials." });
+  for (let round = 0; round < 2; round += 1) {
+    guard.observeModelCall({ runId: "run-1" }, context);
+    // Reproduce the model's bad Tool Search envelope. The normal dispatcher
+    // owns its validation error; it must not poison later discovery.
+    const result = call(guard, "tool_call", { event: { params: {
+      id: "tool_call", args: { action: "pixel_ods_status" },
+    } } });
+    assert.doesNotMatch(result?.blockReason ?? "", /projection|exactly once/);
   }
-  assert.deepEqual(aborts, []);
-  guard.observeModelCall({ runId: "run-1" }, context, "pixel");
+  guard.observeModelCall({ runId: "run-1" }, context);
+  assert.notEqual(call(guard, "tool_describe", { event: { params: { id: "pixel_ods_status" } } })?.block, true);
   assert.notEqual(call(guard, "tool_call", { event: { params: { id: "pixel_ods_status", args: {} } } })?.block, true);
-  assert.notEqual(call(guard, "write", { event: { params: { path: "result.txt", content: "fixture" } } })?.block, true);
+  assert.notEqual(call(guard, "tool_call", { event: { params: { id: "pixel_ods_apps_list", args: {} } } })?.block, true);
+  assert.notEqual(call(guard, "write", { event: { params: { path: "release-2664/strixy-health.md", content: "Observed facts and unknowns" } } })?.block, true);
   assert.deepEqual(aborts, []);
+  assert.notEqual(guard.verificationForRun("run-1").status, "failed");
 });
 
-test("SDK model-call contexts without agentId preserve parallel correction and later progress", () => {
+test("ODS projection requests do not order parallel independent workspace calls", () => {
+  const guard = createToolLoopGuard();
+  const context = { agentId: "pixel", runId: "run-1", sessionId: "session-1" };
+  guard.observeRun(context, "pixel", { prompt: "Create result.txt in the workspace and verify it. What ODS model is active?" });
+  guard.observeModelCall({ runId: "run-1" }, context);
+  for (let index = 0; index < 10; index += 1) {
+    assert.notEqual(call(guard, "tool_call", { event: { params: { id: "write", args: { path: `file-${index}.txt`, text: "fixture" } } } })?.block, true);
+  }
+  assert.notEqual(call(guard, "pixel_ods_status")?.block, true);
+  assert.notEqual(call(guard, "read", { event: { params: { path: "result.txt" } } })?.block, true);
+});
+
+test("SDK model-call contexts without agentId permit projection discovery and recovery", () => {
   for (const identity of [{ sessionId: "session-1" }, { sessionKey: "agent:pixel:main" }]) {
     const guard = createToolLoopGuard();
     guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1", sessionKey: "agent:pixel:main" }, "pixel", { prompt: "What ODS model is active?" });
-    const sdkContext = Object.freeze({ runId: "run-1", ...identity, modelProviderId: "local", modelId: "test" });
-    guard.observeModelCall({ runId: "run-1", callId: "model-1", provider: "local", model: "test" }, sdkContext);
-    assert.match(call(guard, "tool_search").blockReason, /call pixel_ods_status exactly once/);
-    assert.match(call(guard, "tool_search").blockReason, /call pixel_ods_status exactly once/);
-    guard.observeModelCall({ runId: "run-1", callId: "model-2", provider: "local", model: "test" }, sdkContext);
+    const context = Object.freeze({ runId: "run-1", ...identity, modelProviderId: "local", modelId: "test" });
+    for (let round = 0; round < 3; round += 1) {
+      guard.observeModelCall({ runId: "run-1", callId: `model-${round}` }, context);
+      assert.notEqual(call(guard, "tool_search", { event: { params: { query: `ODS model details ${round}` } } })?.block, true);
+    }
     assert.notEqual(call(guard, "pixel_ods_status")?.block, true);
   }
 });
 
-test("SDK model-call contexts without agentId still stop a later ignored correction", () => {
+test("unattributed model calls cannot create extra projection runs", () => {
   const guard = createToolLoopGuard();
   guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt: "What ODS model is active?" });
-  const sdkContext = { runId: "run-1", sessionId: "session-1" };
-  guard.observeModelCall({ runId: "run-1", callId: "model-1" }, sdkContext);
-  assert.match(call(guard, "tool_search").blockReason, /call pixel_ods_status exactly once/);
-  guard.observeModelCall({ runId: "run-1", callId: "model-2" }, sdkContext);
-  assert.equal(call(guard, "tool_search").blockReason, ODS_TOOL_ROUTING_ABORT_REASON);
-});
-
-test("unattributed SDK model calls require an existing matching Pixel session", () => {
-  for (const identity of [
-    {}, { sessionId: "other" }, { sessionKey: "agent:other:main" },
-    { sessionId: "other", sessionKey: "agent:pixel:main" },
-    { sessionId: "session-1", sessionKey: "agent:other:main" },
-    { agentId: "other", sessionId: "session-1" },
-  ]) {
-    const guard = createToolLoopGuard();
-    const context = { agentId: "pixel", runId: "run-1", sessionId: "session-1", sessionKey: "agent:pixel:main" };
-    guard.observeRun(context, "pixel", { prompt: "What ODS model is active?" });
-    guard.observeModelCall({ runId: "run-1" }, context);
-    assert.match(call(guard, "tool_search").blockReason, /call pixel_ods_status exactly once/);
-    guard.observeModelCall({ runId: "run-1" }, { runId: "run-1", ...identity });
-    assert.match(call(guard, "tool_search").blockReason, /call pixel_ods_status exactly once/);
-    const count = guard.trackedRunCount();
-    guard.observeModelCall({ runId: "unknown" }, { runId: "unknown", sessionId: "session-1" });
+  const count = guard.trackedRunCount();
+  for (const identity of [{}, { sessionId: "other" }, { agentId: "other", sessionId: "session-1" }]) {
+    guard.observeModelCall({ runId: "unknown" }, { runId: "unknown", ...identity });
     assert.equal(guard.trackedRunCount(), count);
   }
 });
 
-test("ODS routing terminal cause survives verification fallback and aborts early-return tools next round", () => {
-  for (const [toolName, params] of [["tool_search", { query: "write" }], ["tool_call", { id: "reply_to_current", args: { text: "still working" } }], ["pixel_ods_status", {}]]) {
-    const aborts = [];
-    const guard = createToolLoopGuard({ abortRun(id) { aborts.push(id); return true; } });
-    const context = { agentId: "pixel", runId: "run-1", sessionId: "session-1" };
-    guard.observeRun(context, "pixel", { prompt: "Create result.txt in the workspace and verify it. What ODS model is active?" });
-    guard.observeModelCall({ runId: "run-1" }, context, "pixel");
-    assert.match(call(guard, "read", { event: { params: { path: "result.txt" } } }).blockReason, /call pixel_ods_status exactly once/);
-    guard.observeModelCall({ runId: "run-1" }, context, "pixel");
-    assert.equal(call(guard, "read", { event: { params: { path: "result.txt" } } }).blockReason, ODS_TOOL_ROUTING_ABORT_REASON);
-    assert.equal(call(guard, "tool_call", { event: { params: { id: "write", args: { path: "result.txt", content: "fixture" } } } }).blockReason, ODS_TOOL_ROUTING_ABORT_REASON);
-    assert.deepEqual(guard.verificationForRun("run-1"), { status: "failed", text: ODS_TOOL_ROUTING_ABORT_REASON });
-    assert.deepEqual(aborts, []);
-    guard.observeModelCall({ runId: "run-1" }, context, "pixel");
-    assert.equal(call(guard, toolName, { event: { params }, context: { sessionId: undefined } }).blockReason, ODS_TOOL_ROUTING_LOOP_ABORT_REASON);
-    assert.deepEqual(aborts, ["session-1"]);
-    assert.deepEqual(guard.verificationForRun("run-1"), { status: "failed", text: ODS_TOOL_ROUTING_LOOP_ABORT_REASON });
-  }
+test("pending ODS projection does not bypass public-network restrictions", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt: "What ODS model is active?" });
+  assert.equal(call(guard, "web_fetch", { event: { params: { url: "http://127.0.0.1/private" } } }).block, true);
 });
 
-test("ODS projection terminal state is run-isolated and retries only a failed active abort", () => {
-  const aborts = [];
-  const guard = createToolLoopGuard({ abortRun(id) {
-    aborts.push(id);
-    if (aborts.length === 1) throw new Error("temporary abort failure");
-    return true;
-  } });
-  const context = { agentId: "pixel", runId: "run-1", sessionId: "session-1" };
-  guard.observeRun(context, "pixel", { prompt: "What ODS model is active?" });
-  guard.observeModelCall({ runId: "run-1" }, context);
-  call(guard, "read");
-  guard.observeModelCall({ runId: "run-1" }, context);
-  call(guard, "read");
-  guard.observeModelCall({ runId: "run-1" }, context);
-  for (let index = 0; index < 3; index += 1) {
-    assert.equal(call(guard, "tool_search").blockReason, ODS_TOOL_ROUTING_LOOP_ABORT_REASON);
-  }
-  assert.deepEqual(aborts, ["session-1", "session-1"], "successful abort is not repeated");
-  const other = { agentId: "pixel", runId: "run-other", sessionId: "session-other" };
-  guard.observeRun(other, "pixel", { prompt: "Create a CSV in the workspace." });
-  assert.notEqual(call(guard, "write", { context: other, event: {
-    runId: "run-other", params: { path: "other.csv", content: "item,count\nLamp,2\n" },
-  } })?.block, true);
-  assert.deepEqual(aborts, ["session-1", "session-1"]);
+test("ODS projection intent alone cannot claim verified work", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt: "What ODS model is active?" });
+  assert.deepEqual(guard.verificationForRun("run-1"), { status: "none" });
+  assert.notEqual(call(guard, "tool_describe", { event: { params: { id: "pixel_ods_status" } } })?.block, true);
+  assert.deepEqual(guard.verificationForRun("run-1"), { status: "none" });
 });
 
 test("does not route unrelated model, app, or n8n implementation work", () => {
@@ -7764,33 +7727,14 @@ User: Write goodbye.txt.`;
   assert.equal(userMessageAuthorizesRecursiveDelete([], ambiguousDelimiter), true);
 });
 
-test("terminates an ignored ODS projection correction instead of looping", () => {
-  const aborts = [];
-  const guard = createToolLoopGuard({
-    abortRun: (sessionId) => {
-      aborts.push(sessionId);
-      return true;
-    },
-  });
-  guard.observeRun(
-    { agentId: "pixel", runId: "run-1", sessionId: "session-1" },
-    "pixel",
-    { prompt: "What ODS model is active?" }
-  );
-  assert.match(call(guard, "read").blockReason, /call pixel_ods_status exactly once/);
-  assert.deepEqual(call(guard, "exec"), {
-    block: true,
-    blockReason: ODS_TOOL_ROUTING_ABORT_REASON,
-  });
-  assert.deepEqual(call(guard, "web_search"), {
-    block: true,
-    blockReason: ODS_TOOL_ROUTING_ABORT_REASON,
-  });
-  assert.deepEqual(call(guard, "read"), {
-    block: true,
-    blockReason: ODS_TOOL_ROUTING_LOOP_ABORT_REASON,
-  });
-  assert.deepEqual(aborts, ["session-1"]);
+test("pending ODS projections retain ordinary research budgets and workspace continuation", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt: "What ODS model is active?" });
+  for (let i = 0; i < 8; i++) {
+    assert.notEqual(call(guard, "web_search", { event: { params: { query: `model documentation ${i}` } } })?.block, true);
+  }
+  assert.equal(call(guard, "web_search").blockReason, WEB_BUDGET_EXHAUSTED_REASON);
+  assert.notEqual(call(guard, "write", { event: { params: { path: "report.md", content: "Only observed evidence" } } })?.block, true);
 });
 
 test("default research admits multiple sources and still enforces a finite budget", () => {
@@ -12689,9 +12633,8 @@ test('native delivery suffix does not invent projection work during sandbox tool
     assert.ok(userMessageOdsToolRequirements([], prompt).includes(tool));
     const guard = createToolLoopGuard();
     guard.observeRun({ agentId: 'pixel', runId: 'run-1', sessionId: 'session-1' }, 'pixel', { prompt });
-    const blocked = call(guard, 'read', { event: { params: { path: 'example.txt' } } });
-    assert.equal(blocked?.block, true);
-    assert.match(JSON.stringify(blocked), new RegExp(`call ${tool}`));
+    assert.notEqual(call(guard, 'read', { event: { params: { path: 'example.txt' } } })?.block, true);
+    assert.notEqual(call(guard, tool)?.block, true);
   }
 });
 
