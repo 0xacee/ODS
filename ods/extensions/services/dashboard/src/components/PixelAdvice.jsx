@@ -29,6 +29,7 @@ export default function PixelAdvice({ onInsert, canInsert = true }) {
   const [submitting, setSubmitting] = useState(false)
   const inFlight = useRef(false)
   const polling = useRef(false)
+  const jobVersion = useRef(0)
   const controllers = useRef(new Set())
   const panel = useRef(null)
   const trigger = useRef(null)
@@ -83,14 +84,15 @@ export default function PixelAdvice({ onInsert, canInsert = true }) {
   }
 
   const inspect = useCallback(async () => {
-    if (!jobId || polling.current) return
+    if (!jobId || polling.current || inFlight.current) return
     polling.current = true
+    const version = jobVersion.current
     try {
       const value = await request('/api/pixel/advice/status', { jobId })
       if (value.jobId !== jobId || !['running', 'cancelling', ...terminal].includes(value.status)) throw new Error('Invalid job')
-      if (trackedId.current !== jobId) return
+      if (trackedId.current !== jobId || version !== jobVersion.current) return
       setJob(value); setError('')
-    } catch { if (trackedId.current === jobId) setError('Job status is unknown. Check this job before starting another; a call may have occurred.') }
+    } catch { if (trackedId.current === jobId && version === jobVersion.current) setError('Job status is unknown. Check this job before starting another; a call may have occurred.') }
     finally { polling.current = false }
   }, [jobId, request])
 
@@ -106,6 +108,7 @@ export default function PixelAdvice({ onInsert, canInsert = true }) {
       || new TextEncoder().encode(capsule).length > 16384 || capsule.includes('\0')
       || (advisor.kind === 'cloud' && (!cloud || !cost))) return
     inFlight.current = true; setSubmitting(true); setError('')
+    jobVersion.current++
     let id
     try {
       id = crypto.randomUUID()
@@ -131,13 +134,15 @@ export default function PixelAdvice({ onInsert, canInsert = true }) {
   }
 
   async function stop() {
-    if (!jobId) return
+    if (!jobId || inFlight.current) return
+    inFlight.current = true; setSubmitting(true); jobVersion.current++
     try {
       const value = await request('/api/pixel/advice/cancel', { jobId })
       if (value.jobId !== jobId) throw new Error('Invalid job')
       if (trackedId.current !== jobId) return
       setJob(value); setError('')
     } catch { if (trackedId.current === jobId) setError('Stop is not confirmed. Keep this job ID and check again.') }
+    finally { inFlight.current = false; setSubmitting(false) }
   }
 
   function forget() {
@@ -161,7 +166,7 @@ export default function PixelAdvice({ onInsert, canInsert = true }) {
           {job && <p className="text-sm">Configured advisor: {job.providerLabel} · {job.model} · revision {job.revision}. Cost: unknown.</p>}
           <div className="flex flex-wrap gap-2">
             <button className={button} onClick={inspect}>Check job</button>
-            {!terminal.has(job?.status) && <button className={button} onClick={stop}>Stop advice</button>}
+            {!terminal.has(job?.status) && <button className={button} disabled={submitting} onClick={stop}>Stop advice</button>}
             {(terminal.has(job?.status) || error) && <button className={button} disabled={submitting} onClick={forget}>Forget tracking (does not stop the request)</button>}
           </div>
           <p className="text-xs">Closing this panel does not cancel the request. Stop is separate. An interrupted job is never replayed automatically; a new request may incur another charge.</p>

@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { createElement } from 'react'
 import { render } from '../test/test-utils'
 import PixelAdvice from './PixelAdvice.jsx'
@@ -89,6 +89,41 @@ it('reload recovers only opaque ID, checks status and can stop an active job', a
   fireEvent.click(screen.getByRole('button', { name: 'Stop advice' }))
   await screen.findByText('Advice: cancelled')
   expect(fetchMock.mock.calls.find(([url]) => url.endsWith('/cancel'))[1].body).toBe(JSON.stringify({ jobId: id }))
+})
+
+it.each(['running', 'error'])('preserves completed advice when a stale %s poll settles after Stop', async late => {
+  localStorage.setItem(key, id)
+  let resolvePoll, rejectPoll
+  const poll = new Promise((resolve, reject) => { resolvePoll = resolve; rejectPoll = reject })
+  const { fetchMock } = await setup({ post: async url => url.endsWith('/status') ? poll : response(job()) })
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/status'))).toBe(true))
+  fireEvent.click(screen.getByRole('button', { name: 'Stop advice' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Stop advice' }))
+  await screen.findByText('Advice: completed')
+  await act(async () => {
+    if (late === 'error') rejectPoll(new Error('Old status failed'))
+    else resolvePoll(response(job('running')))
+  })
+  expect(screen.getByText('Advice: completed')).toBeVisible()
+  expect(screen.getByText('<img src=x onerror=alert(1)> Advice')).toBeVisible()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Stop advice' })).toBeNull()
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/cancel'))).toHaveLength(1)
+})
+
+it('does not poll or stop a request before its start receipt arrives', async () => {
+  let resolveStart
+  const pending = new Promise(resolve => { resolveStart = resolve })
+  const { fetchMock } = await setup({ post: async url => url.endsWith('/start') ? pending : response(job('running')) })
+  fireEvent.change(screen.getByLabelText('Capsule to send'), { target: { value: 'Review this' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send reviewed capsule' }))
+  await screen.findByRole('button', { name: 'Check job' })
+  fireEvent.click(screen.getByRole('button', { name: 'Check job' }))
+  expect(screen.getByRole('button', { name: 'Stop advice' })).toBeDisabled()
+  expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/status'))).toHaveLength(0)
+  await act(async () => resolveStart(response(job('running'))))
+  await screen.findByText('Advice: running')
+  expect(screen.getByRole('button', { name: 'Stop advice' })).toBeEnabled()
 })
 
 it('closing panel does not start, stop, or change the chat', async () => {
