@@ -33,8 +33,8 @@ export default function PixelPreviewSource({ preview, file }) {
     return () => { current = false; controller.abort(); clearTimeout(timeout) }
   }, [preview.siteId, path, expectedDigest, file?.bytes, language, attempt])
   async function copy() {
-    try { await navigator.clipboard.writeText(source); setCopied(true) }
-    catch { setError('Clipboard access failed. You can select and copy the code manually.') }
+    try { await navigator.clipboard.writeText(source); setCopied(true); setError('') }
+    catch { setCopied(false); setError('Clipboard access failed. You can select and copy the code manually.') }
   }
   return <section className="pixel-preview-source pixel-original-source" aria-label={path === 'index.html' ? 'Published HTML source' : `Source: ${path}`}>
     {source === null && binarySize === null && !error && <p role="status">Verifying source…</p>}
