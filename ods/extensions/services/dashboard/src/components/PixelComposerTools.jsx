@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AtSign, Slash, ShieldCheck, ListChecks, Globe2, CheckCheck } from 'lucide-react'
 import PixelMascot from './PixelMascot'
+import PixelPromptLibrary from './PixelPromptLibrary'
 
 const commands = [
   { title: 'Plan', detail: 'Milestones and completion checks', icon: ListChecks, text: 'Plan this outcome with milestones and exact completion criteria: ' },
@@ -42,6 +43,7 @@ export default function PixelComposerTools({ disabled, input, onInsert }) {
       {(menu === 'sources' ? sources : commands).map(item => <button type="button" key={item.title} aria-label={`${item.title} ${item.detail}`} onClick={() => { setMenu(null); onInsert(item.text) }}><item.icon size={17}/><span><strong>{item.title}</strong><small>{item.detail}</small></span></button>)}
     </div>}
     <button type="button" disabled={disabled} aria-label="Mention source" aria-expanded={menu === 'sources'} onClick={event => toggle('sources', event)}><AtSign size={16}/></button>
+    <PixelPromptLibrary input={input} disabled={disabled} onInsert={onInsert}/>
     <button type="button" disabled={disabled} aria-label="Open prompt commands" aria-expanded={menu === 'commands'} onClick={event => toggle('commands', event)}><Slash size={16}/></button>
     <Link to="/models" className="pixel-composer-agent"><PixelMascot/><span>Pixel agent</span></Link>
     <Link to="/pixel/settings?section=access" title="Pixel access settings"><ShieldCheck size={15}/><span>Permissions</span></Link>
