@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from helpers import (
+    numeric_exponential_moving_average_safe,
     get_model_info, get_bootstrap_status, _update_lifetime_tokens,
     get_uptime, get_cpu_metrics, get_ram_metrics,
     check_service_health, get_all_services,
@@ -1607,3 +1608,17 @@ class TestDirSizeGb:
         # Verify older items were evicted
         first_path = tmp_path / "test_dir_0"
         assert _dir_size_cache.get(first_path) is None
+
+
+
+class TestNumericExponentialMovingAverageSafe:
+    def test_ema_computation(self):
+        vals = [10.0, 20.0, 30.0]
+        res = numeric_exponential_moving_average_safe(vals, alpha=0.5)
+        assert len(res) == 3
+        assert res[0] == 10.0
+        assert res[1] == 15.0
+
+    def test_invalid_types_and_alpha(self):
+        assert numeric_exponential_moving_average_safe(None) == []
+        assert numeric_exponential_moving_average_safe([1, 2, 3], alpha=-1) != []

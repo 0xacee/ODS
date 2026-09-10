@@ -1163,3 +1163,33 @@ def get_ram_metrics() -> dict:
     elif _system == "Darwin":
         return _get_ram_metrics_sysctl()
     return {"used_gb": 0, "total_gb": 0, "percent": 0}
+
+
+def numeric_exponential_moving_average_safe(values: list, alpha: float = 0.2) -> list:
+    """
+    Safely compute Exponential Moving Average (EMA) over a numeric sequence.
+    Guards against None, non-sequence types, empty lists, NaN/Inf floats, and invalid alpha range (0 < alpha <= 1).
+    """
+    if not isinstance(values, (list, tuple)) or not values:
+        return []
+    import math
+    if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or math.isnan(alpha) or math.isinf(alpha):
+        alpha = 0.2
+    if alpha <= 0 or alpha > 1:
+        alpha = 0.2
+    
+    valid_vals = []
+    for v in values:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            if not math.isnan(v) and not math.isinf(v):
+                valid_vals.append(float(v))
+    if not valid_vals:
+        return []
+    
+    ema = []
+    current = valid_vals[0]
+    ema.append(current)
+    for v in valid_vals[1:]:
+        current = alpha * v + (1 - alpha) * current
+        ema.append(current)
+    return ema
