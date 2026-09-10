@@ -5,6 +5,12 @@ if sys.platform == "win32":
 
 """Tests for pixel_edge — upstream Unix socket + edge proxy routes."""
 
+import sys
+import asyncio
+if sys.version_info >= (3, 11):
+    from asyncio import timeout as async_timeout
+else:
+    from async_timeout import timeout as async_timeout
 import asyncio
 import hashlib
 import io
@@ -1628,7 +1634,7 @@ class TestChatActivity(BaseEdgeTest):
         await asyncio.wait_for(stream.content.readany(), 2)
         self.assertEqual(await self.activity(user), {"state": "active"})
         stream.close()
-        async with asyncio.timeout(2):
+        async with async_timeout(2):
             while self.edge_app[self.pe._CANCEL_EVENTS_KEY].get(user):
                 await asyncio.sleep(0.02)
         native = self.up_runner.app["native_runs"][user][1]

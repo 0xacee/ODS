@@ -4,6 +4,12 @@ One process: per-device rate/concurrency limits are local admission controls,
 not durable billing quotas. No arbitrary forwarding, agent or management API.
 """
 
+import sys
+import asyncio
+if sys.version_info >= (3, 11):
+    from asyncio import timeout as async_timeout
+else:
+    from async_timeout import timeout as async_timeout
 import asyncio
 import ipaddress
 import json
@@ -237,7 +243,7 @@ def create_app(store=None, router_url=None, client=None):
             payload = None
             if request.method == 'POST':
                 raw = bytearray()
-                async with asyncio.timeout(min(10, grant['deadlineSeconds'])):
+                async with async_timeout(min(10, grant['deadlineSeconds'])):
                     async for chunk in request.stream():
                         if len(raw) + len(chunk) > MAX_BYTES:
                             raise ShareError(413, 'request_too_large')
@@ -324,3 +330,4 @@ def create_app(store=None, router_url=None, client=None):
 
 
 app = create_app()
+

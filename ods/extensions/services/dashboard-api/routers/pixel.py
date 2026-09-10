@@ -1,6 +1,12 @@
 """Bounded dashboard bridge to the internal Pixel edge service."""
 
 from __future__ import annotations
+import sys
+import asyncio
+if sys.version_info >= (3, 11):
+    from asyncio import timeout as async_timeout
+else:
+    from async_timeout import timeout as async_timeout
 
 import asyncio
 import hashlib
@@ -645,7 +651,7 @@ async def _produce_retained_result(store, identity, body, config):
     stopped = False
     try:
         timeout = httpx.Timeout(connect=5.0, read=_CHAT_STREAM_TIMEOUT_SECONDS, write=30.0, pool=5.0)
-        async with asyncio.timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
+        async with async_timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
             async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
                 async with client.stream("POST", f"{edge_url}/v1/chat/completions",
                         json={"model": _MODEL, "stream": True, "user": body.chat_id,
@@ -786,7 +792,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
     async def stream() -> AsyncIterator[bytes]:
         done_seen = False
         try:
-            async with asyncio.timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
+            async with async_timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
                 buffered = bytearray()
                 async for chunk in _iter_upstream_chunks(upstream, request):
                     buffered.extend(chunk)
@@ -842,3 +848,6 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             "X-Accel-Buffering": "no",
         },
     )
+
+
+
