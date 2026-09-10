@@ -1444,6 +1444,39 @@ describe('Pixel', () => {
     }))
   }
 
+  it.each([false, true])('bounds a stalled recovery lookup and permits a fresh inspection (receipt=%s)', async retained => {
+    saveInterruptedChat()
+    if (retained) {
+      const saved = JSON.parse(localStorage.getItem('ods.pixel.chat.v1'))
+      localStorage.setItem('ods.pixel.chat.v1', JSON.stringify({...saved, requestId:'retained-attempt'}))
+    }
+    const signals = []
+    const endpoint = retained ? '/api/pixel/chat/result' : '/api/pixel/chat/activity'
+    globalThis.fetch.mockImplementation(async (url, options) => {
+      if (url === '/api/pixel/status') return response({available:true})
+      expect(url).toBe(endpoint)
+      expect(options.signal.aborted).toBe(false)
+      signals.push(options.signal)
+      if (signals.length === 1) return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new globalThis.DOMException('aborted','AbortError')), {once:true})
+      })
+      return response(retained ? {state:'complete',events:'data: {"choices":[{"delta":{"content":"Recovered after timeout"}}]}\n\ndata: [DONE]\n\n'} : {state:'terminal'})
+    })
+    vi.useFakeTimers()
+    await act(async () => { render(<Pixel />) })
+    expect(signals).toHaveLength(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(15000) })
+    expect(signals[0].aborted).toBe(true)
+    expect(screen.getByRole('button',{name:'Check activity again'})).toBeEnabled()
+    expect(screen.getByText('Saved partial result')).toBeVisible()
+    await act(async () => { fireEvent.click(screen.getByRole('button',{name:'Check activity again'})) })
+    expect(signals).toHaveLength(2)
+    expect(signals[1]).not.toBe(signals[0])
+    expect(screen.getByPlaceholderText('Message Pixel...')).toBeEnabled()
+    expect(screen.getByText(retained ? 'Recovered after timeout' : 'Saved partial result')).toBeVisible()
+    expect(globalThis.fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
+  })
+
   it('restored activity tracks this chat from active to terminal without replay or stopped claims', async () => {
     saveInterruptedChat()
     let state = 'active'
