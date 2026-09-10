@@ -13,6 +13,7 @@ import PixelComposerTools from '../components/PixelComposerTools'
 import PixelDictation from '../components/PixelDictation'
 import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelCommandSearch'
 import PixelSelectionActions from '../components/PixelSelectionActions'
+import PixelMessageActions from '../components/PixelMessageActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
@@ -1377,6 +1378,7 @@ export default function Pixel({ systemStatus = null }) {
               ) : (
                 <span className="break-words whitespace-pre-wrap">{message.content}</span>
               )}
+              {message.content && message.status !== 'streaming' && <PixelMessageActions key={`${chatIdRef.current}-${index}-${message.role}`} content={message.content} role={message.role} canReuse={!isDisabled && input.length + message.content.length + 1 <= MAX_INPUT_LEN} onReuse={insertComposerText}/>}
               {message.status === 'streaming' && !message.content && (
                 <span role="status" className="inline-flex items-start gap-2 text-theme-text-muted">
                   <span>
