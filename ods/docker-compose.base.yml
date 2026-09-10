@@ -214,6 +214,13 @@ services:
       - LLAMA_ARG_SPLIT_MODE=${LLAMA_ARG_SPLIT_MODE:-}
       - LLAMA_ARG_TENSOR_SPLIT=${LLAMA_ARG_TENSOR_SPLIT:-}
       - HOST_RAM_GB=${HOST_RAM_GB:-0}
+      # WSL may use the CPU compose surface while inference runs on the
+      # Windows GPU. Pass the selected runtime independently of GPU exposure.
+      - LLM_BACKEND=${LLM_BACKEND:-}
+      - AMD_INFERENCE_LOCATION=${AMD_INFERENCE_LOCATION:-}
+      - AMD_INFERENCE_PORT=${AMD_INFERENCE_PORT:-8080}
+      - LEMONADE_CONTAINER_BASE_URL=${LEMONADE_CONTAINER_BASE_URL:-}
+      - LEMONADE_BASE_URL=${LEMONADE_BASE_URL:-}
       - OLLAMA_URL=${LLM_API_URL:-http://llama-server:8080}
       - LLM_MODEL=${LLM_MODEL:-qwen3:30b-a3b}
       - GGUF_FILE=${GGUF_FILE:-}

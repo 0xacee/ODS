@@ -177,6 +177,26 @@ class TestHostAgentResolution:
 
 class TestHostNativeLlmResolution:
 
+    @pytest.mark.parametrize("url_key", ["LEMONADE_CONTAINER_BASE_URL", "LEMONADE_BASE_URL"])
+    def test_wsl_cpu_surface_probes_selected_windows_lemonade(self, url_key):
+        services = {"llama-server": {"host": "llama-server", "port": 8080}}
+        _apply_host_native_llm_service_override(services, "cpu", {
+            "LLM_BACKEND": "lemonade",
+            "AMD_INFERENCE_LOCATION": "host",
+            url_key: "http://192.168.50.1:8181",
+            "OLLAMA_URL": "http://litellm:4000",
+        })
+        assert services["llama-server"] == {"host": "192.168.50.1", "port": 8181}
+
+    def test_container_lemonade_does_not_use_host_endpoint(self):
+        services = {"llama-server": {"host": "llama-server", "port": 8080}}
+        _apply_host_native_llm_service_override(services, "cpu", {
+            "LLM_BACKEND": "lemonade",
+            "AMD_INFERENCE_LOCATION": "container",
+            "LEMONADE_CONTAINER_BASE_URL": "http://192.168.50.1:8181",
+        })
+        assert services["llama-server"] == {"host": "llama-server", "port": 8080}
+
     def test_routes_windows_amd_host_runtime_to_ollama_url(self):
         services = {"llama-server": {"host": "llama-server", "port": 8080}}
         env = {
