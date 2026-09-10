@@ -49,10 +49,11 @@ export default function PixelAccessCard({ showHeading = true }) {
         setError('Pixel is working or recovering an access transition. No change was requested. Wait for it to finish, or restore safer mode when available.')
         return
       }
+      setStale(true)
       const response = await fetch('/api/pixel/access-mode', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({mode, revision: current.revision, confirmed: mode === 'full-access' && confirmed})})
       if (!response.ok) throw new Error()
-      setStatus(await response.json()); setConfirming(false); setConfirmed(false)
+      setStatus(await response.json()); setStale(false); setConfirming(false); setConfirmed(false)
     } catch {
       setError('The change was not verified. Refresh the status and restore safer mode if recovery is required.')
       await refresh({forChange: true, preserveError: true})

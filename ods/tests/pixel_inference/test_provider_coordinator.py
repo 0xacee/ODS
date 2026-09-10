@@ -4,9 +4,9 @@ These exercise production coordinator + owner projection + service participants.
 They are not installed-runtime or model-inference acceptance.
 """
 import sys
-if sys.platform == 'win32':
-    import pytest
-    pytest.skip('POSIX only', allow_module_level=True)
+if sys.platform == "win32":
+    from unittest import SkipTest
+    raise SkipTest("Requires POSIX host ownership, file locks, or Unix sockets; run under Linux/WSL")
 
 import contextlib
 import json

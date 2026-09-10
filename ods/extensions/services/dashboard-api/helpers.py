@@ -1173,44 +1173,43 @@ def string_extract_domain_names_safe(text: str) -> list:
     """
     if not isinstance(text, str) or not text.strip():
         return []
-    import re
-    pattern = r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}'
-    try:
-        matches = re.findall(pattern, text)
-        domains = set()
-        for m in matches:
-            clean = m.lower()
-            if clean.startswith("http://"):
-                clean = clean[7:]
-            elif clean.startswith("https://"):
-                clean = clean[8:]
-            clean = clean.split('/')[0].split(':')[0].strip('.')
-            if clean and '.' in clean:
-                domains.add(clean)
-        return sorted(list(domains))
-    except Exception:
+    if len(text) > 65536:
         return []
+    # Tokenize first so an invalid long label cannot match a valid suffix.
+    # This extracts text candidates; it is not an SSRF/URL authorization check.
+    domains = set()
+    for candidate in re.findall(r"[A-Za-z0-9.-]+", text):
+        candidate = candidate.lower().strip(".")
+        labels = candidate.split(".")
+        if (len(candidate) <= 253 and len(labels) >= 2
+                and 2 <= len(labels[-1]) <= 63 and labels[-1].isalpha()
+                and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                        for label in labels)):
+            domains.add(candidate)
+    return sorted(domains)
 
 
 def dict_key_path_setter_safe(d: dict, path_keys: list, value: any) -> dict:
     """
     Safely set a nested key value in a dictionary given a list of path keys.
-    Guards against None dictionary, non-list path_keys, empty path, or non-dict intermediate values.
+    Guards against invalid dictionaries, paths over 128 keys, and unsupported keys.
+    Invalid paths leave the dictionary untouched; valid paths replace scalar parents.
     Returns the modified dictionary (or a new dict if d is None/invalid).
     """
     if d is None or not isinstance(d, dict):
         d = {}
-    if not isinstance(path_keys, (list, tuple)) or not path_keys:
+    if (not isinstance(path_keys, (list, tuple)) or not 1 <= len(path_keys) <= 128
+            or any(type(key) not in (str, int) for key in path_keys)):
         return d
     
     current = d
     for key in path_keys[:-1]:
-        k_str = str(key) if not isinstance(key, (str, int)) else key
+        k_str = key
         if k_str not in current or not isinstance(current[k_str], dict):
             current[k_str] = {}
         current = current[k_str]
     
-    final_key = str(path_keys[-1]) if not isinstance(path_keys[-1], (str, int)) else path_keys[-1]
+    final_key = path_keys[-1]
     current[final_key] = value
     return d
 
@@ -1227,14 +1226,19 @@ def numeric_safe_geometric_mean(numbers: list) -> float:
     valid_nums = []
     for x in numbers:
         if isinstance(x, (int, float)) and not isinstance(x, bool):
-            if not math.isnan(x) and not math.isinf(x) and x > 0:
-                valid_nums.append(float(x))
+            try:
+                number = float(x)
+            except (OverflowError, ValueError):
+                continue
+            if math.isfinite(number) and number > 0:
+                valid_nums.append(number)
     if not valid_nums:
         return 0.0
     try:
-        log_sum = sum(math.log(x) for x in valid_nums)
-        mean_log = log_sum / len(valid_nums)
-        return math.exp(mean_log)
+        scale = max(valid_nums)
+        offset = math.log(scale)
+        mean_log = math.fsum((math.log(x) - offset) / len(valid_nums) for x in valid_nums)
+        return scale * math.exp(min(0.0, mean_log))
     except (OverflowError, ValueError):
         return 0.0
 
@@ -1246,25 +1250,39 @@ def list_deduplicate_by_key_safe(items: list, key_or_attr: any) -> list:
     """
     if not isinstance(items, (list, tuple)):
         return []
-    if key_or_attr is None:
+    if key_or_attr is None or not isinstance(key_or_attr, (str, int)):
         return list(items)
     
     seen = set()
+    structured = []
+    missing = object()
     result = []
     for item in items:
-        val = None
+        val = missing
         if isinstance(item, dict):
-            val = item.get(key_or_attr)
-        elif hasattr(item, str(key_or_attr)):
-            val = getattr(item, str(key_or_attr), None)
+            val = item.get(key_or_attr, missing)
         else:
-            val = item
-        
+            try:
+                val = getattr(item, str(key_or_attr), missing)
+            except (AttributeError, TypeError, ValueError):
+                val = missing
+        if val is missing:
+            result.append(item)
+            continue
         try:
-            hash(val)
-            key_val = val
+            key_val = (type(val), val)
+            hash(key_val)
         except TypeError:
-            key_val = str(val)
+            # Do not equate a list with its string representation or discard
+            # unrelated records that have no key.
+            try:
+                duplicate = any(type(val) is type(previous) and val == previous for previous in structured)
+            except (TypeError, ValueError, RecursionError):
+                duplicate = False
+            if not duplicate:
+                structured.append(val)
+                result.append(item)
+            continue
         
         if key_val not in seen:
             seen.add(key_val)
@@ -1296,23 +1314,25 @@ def dict_flatten_nested_safe(d: dict, separator: str = '.', max_depth: int = 10)
         return {}
     if not isinstance(separator, str):
         separator = '.'
-    if not isinstance(max_depth, int) or max_depth < 1:
+    if type(max_depth) is not int or max_depth < 1:
         max_depth = 10
+    max_depth = min(max_depth, 128)
     
     result = {}
     
-    def _flatten(current, prefix='', depth=0):
-        if depth >= max_depth or not isinstance(current, dict):
-            return
+    # Iterative traversal avoids Python recursion limits. Cycles and depth
+    # boundaries remain leaf values, just like other unflattened dictionaries.
+    pending = [(d, '', 0, frozenset({id(d)}))]
+    while pending:
+        current, prefix, depth, ancestors = pending.pop()
         for k, v in current.items():
             str_key = str(k)
             new_key = f"{prefix}{separator}{str_key}" if prefix else str_key
-            if isinstance(v, dict) and depth + 1 < max_depth:
-                _flatten(v, new_key, depth + 1)
+            if isinstance(v, dict) and v and depth + 1 < max_depth and id(v) not in ancestors:
+                pending.append((v, new_key, depth + 1, ancestors | {id(v)}))
             else:
                 result[new_key] = v
     
-    _flatten(d)
     return result
 
 
@@ -1324,7 +1344,7 @@ def numeric_exponential_moving_average_safe(values: list, alpha: float = 0.2) ->
     if not isinstance(values, (list, tuple)) or not values:
         return []
     import math
-    if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or math.isnan(alpha) or math.isinf(alpha):
+    if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or not 0 < alpha <= 1:
         alpha = 0.2
     if alpha <= 0 or alpha > 1:
         alpha = 0.2
@@ -1332,8 +1352,12 @@ def numeric_exponential_moving_average_safe(values: list, alpha: float = 0.2) ->
     valid_vals = []
     for v in values:
         if isinstance(v, (int, float)) and not isinstance(v, bool):
-            if not math.isnan(v) and not math.isinf(v):
-                valid_vals.append(float(v))
+            try:
+                number = float(v)
+            except (OverflowError, ValueError):
+                continue
+            if math.isfinite(number):
+                valid_vals.append(number)
     if not valid_vals:
         return []
     

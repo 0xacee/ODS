@@ -76,7 +76,7 @@ class PIIDetector:
         Returns scrubbed text.
         """
         if not isinstance(text, str):
-            return ""
+            raise TypeError("PII scrub requires text")
         scrubbed = text
 
         for pii_type, pattern in self.PATTERNS.items():
@@ -112,7 +112,7 @@ class PIIDetector:
         Returns restored text.
         """
         if not isinstance(text, str):
-            return ""
+            raise TypeError("PII restore requires text")
         restored = text
         for token, original in self.pii_map.items():
             restored = restored.replace(token, original)

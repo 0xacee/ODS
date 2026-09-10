@@ -1,9 +1,9 @@
 """Exercise manifest discovery through the catalog Pixel actually reads."""
 
 import sys
-if sys.platform == 'win32':
-    import pytest
-    pytest.skip('POSIX only', allow_module_level=True)
+if sys.platform == "win32":
+    from unittest import SkipTest
+    raise SkipTest("Requires POSIX host ownership, file locks, or Unix sockets; run under Linux/WSL")
 
 import importlib.util
 import json

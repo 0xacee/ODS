@@ -1,6 +1,7 @@
 import sys
-import pytest
-pytestmark = pytest.mark.skipif(sys.platform == 'win32', reason='Pixel Edge requires a POSIX environment')
+if sys.platform == "win32":
+    from unittest import SkipTest
+    raise SkipTest("Requires POSIX host ownership, file locks, or Unix sockets; run under Linux/WSL")
 
 """Gate qualification uses actual edge HTTP admission and held upstream streams."""
 

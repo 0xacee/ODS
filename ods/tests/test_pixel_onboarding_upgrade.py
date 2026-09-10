@@ -1,9 +1,9 @@
 """Run real installer helpers against private, disposable onboarding records."""
 
 import sys
-if sys.platform == 'win32':
-    import pytest
-    pytest.skip('POSIX only', allow_module_level=True)
+if sys.platform == "win32":
+    from unittest import SkipTest
+    raise SkipTest("Requires POSIX host ownership, file locks, or Unix sockets; run under Linux/WSL")
 
 import copy
 import json

@@ -1,8 +1,8 @@
 """Cancellation must close real upstream TCP, not merely an in-memory mock."""
 import sys
-if sys.platform == 'win32':
-    import pytest
-    pytest.skip('POSIX only', allow_module_level=True)
+if sys.platform == "win32":
+    from unittest import SkipTest
+    raise SkipTest("Requires POSIX host ownership, file locks, or Unix sockets; run under Linux/WSL")
 
 import asyncio
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer

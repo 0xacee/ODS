@@ -1697,3 +1697,45 @@ class TestNumericExponentialMovingAverageSafe:
     def test_invalid_types_and_alpha(self):
         assert numeric_exponential_moving_average_safe(None) == []
         assert numeric_exponential_moving_average_safe([1, 2, 3], alpha=-1) != []
+def test_numeric_helpers_bound_nonfinite_and_huge_integers():
+    import math
+    import sys
+    huge = 10 ** 1000
+    assert numeric_safe_geometric_mean([huge, 4, 9, True, float("inf")]) == pytest.approx(6)
+    assert numeric_safe_geometric_mean([sys.float_info.max] * 4) == sys.float_info.max
+    result = numeric_exponential_moving_average_safe(
+        [huge, sys.float_info.max, -sys.float_info.max, float("nan")], alpha=0.5)
+    assert result == [sys.float_info.max, 0.0]
+    assert all(math.isfinite(item) for item in result)
+    assert numeric_exponential_moving_average_safe([1, 2], alpha=huge) == pytest.approx([1, 1.2])
+
+
+def test_domain_extractor_does_not_accept_partial_invalid_labels():
+    assert string_extract_domain_names_safe("a" * 64 + ".com -bad.org good.example.com.") == ["good.example.com"]
+    assert string_extract_domain_names_safe("x" * 65537) == []
+
+
+def test_invalid_dictionary_path_is_atomic():
+    value = {"existing": 1}
+    assert dict_key_path_setter_safe(value, ["new", []], 2) == {"existing": 1}
+    assert dict_key_path_setter_safe(value, ["x"] * 129, 2) == {"existing": 1}
+
+
+def test_deduplication_preserves_missing_and_different_value_types():
+    records = [{"id": [1]}, {"id": "[1]"}, {"id": [1]}, {"a": 1}, {"b": 2}]
+    assert list_deduplicate_by_key_safe(records, "id") == [records[0], records[1], records[3], records[4]]
+    assert list_deduplicate_by_key_safe(records, []) == records
+
+
+def test_flatten_bounds_cycles_and_large_depth_without_losing_empty_leaves():
+    cycle = {}
+    cycle["self"] = cycle
+    result = dict_flatten_nested_safe(cycle, max_depth=100000)
+    assert list(result) == ["self"]
+    assert result["self"] is cycle
+    assert dict_flatten_nested_safe({"empty": {}}) == {"empty": {}}
+    nested = {"leaf": 1}
+    for _ in range(1500):
+        nested = {"child": nested}
+    result = dict_flatten_nested_safe(nested, max_depth=100000)
+    assert len(next(iter(result)).split(".")) == 128

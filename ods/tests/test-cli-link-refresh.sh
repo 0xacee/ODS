@@ -74,4 +74,29 @@ fi
     || fail "unsafe regular user command changed"
 pass "unmanaged regular command paths fail closed"
 
+# Exercise the BSD fallback contract without claiming macOS installation QA.
+(
+    stat() {
+        [[ "$1" == "-f" ]] || return 1
+        command stat -c "$2" "$3"
+    }
+    install() {
+        for argument in "$@"; do [[ "$argument" != "--" ]] || return 1; done
+        command install "$@"
+    }
+    ln() {
+        for argument in "$@"; do [[ "$argument" != "--" ]] || return 1; done
+        command ln "$@"
+    }
+    bsd_owner="$TMP_ROOT/bsd home"
+    mkdir -p "$bsd_owner"
+    result="$(TEST_SUDO_AVAILABLE=false ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$bsd_owner")"
+    [[ "$result" == "user:$bsd_owner/.local/bin/ods" ]] || fail "BSD rootless creation failed"
+    result="$(TEST_SUDO_AVAILABLE=false ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$bsd_owner")"
+    [[ "$result" == "user:$bsd_owner/.local/bin/ods" ]] || fail "BSD ownership fallback failed"
+    realpath() { return 1; }
+    ods_cli_path_matches_install "$bsd_owner/.local/bin/ods" "$INSTALL_DIR/ods-cli" || fail "readlink fallback failed"
+)
+pass "BSD-style options and ownership fallback retain exact CLI binding"
+
 printf 'CLI link refresh tests passed.\n'

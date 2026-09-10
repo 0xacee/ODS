@@ -1,7 +1,7 @@
 import sys
 if sys.platform == "win32":
-    import pytest
-    pytest.skip("Pixel services require a POSIX environment", allow_module_level=True)
+    from unittest import SkipTest
+    raise SkipTest("Requires POSIX host ownership, file locks, or Unix sockets; run under Linux/WSL")
 
 import contextlib
 import os

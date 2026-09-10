@@ -30,9 +30,9 @@ _ods_cli_replace_link() {
 
     if [[ "$privileged" == "true" ]]; then
         ods_sudo_available || return 1
-        ods_sudo ln -sfn -- "$target" "$link" || return 1
+        ods_sudo ln -sfn "$target" "$link" || return 1
     else
-        ln -sfn -- "$target" "$link" || return 1
+        ln -sfn "$target" "$link" || return 1
     fi
     ods_cli_path_matches_install "$link" "$target"
 }
@@ -66,7 +66,7 @@ ods_bind_cli_command() {
         bin_owner="$(stat -c '%u' -- "$user_bin" 2>/dev/null || stat -f '%u' "$user_bin" 2>/dev/null)"
         [[ "$bin_owner" == "$(id -u)" ]] || return 1
     else
-        install -d -m 0700 -- "$user_bin" || return 1
+        install -d -m 0700 "$user_bin" || return 1
     fi
     if _ods_cli_replace_link "$install_cli" "$user_link" false; then
         printf 'user:%s\n' "$user_link"
