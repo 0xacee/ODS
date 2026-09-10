@@ -13,6 +13,7 @@ REASONS = {
     "provider-owner-state-changed", "provider-runtime-custody-unqualified",
     "provider-runtime-descriptor-unqualified", "provider-runtime-custody-changed",
     "provider-source-changed", "provider-service-baseline-conflict",
+    "provider-worker-runtime-not-ready",
     "settings-store-not-initialized", "settings-store-busy", "settings-data-directory-unqualified",
     "transition-recovery-required", "runtime-busy", "runtime-busy-or-unqualified",
     "model-lifecycle-busy", "macos-launchd-adapter-missing", "native-windows-adapter-missing",

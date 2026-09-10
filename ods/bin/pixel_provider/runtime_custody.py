@@ -132,6 +132,22 @@ class RuntimeCustody:
     def qualify(self):
         return self.inspect()[1]
 
+    def require_worker(self, directory, expected_custody):
+        """Owner-only source/runtime verification while root holds store lock."""
+        value, checksum = self.inspect()
+        if checksum != expected_custody:
+            raise AccessError('provider-runtime-custody-changed')
+        try:
+            receipt, _ = _read(Path(directory) / 'advice-runtime.json', self.bridge.owner.pw_uid, 8192)
+        except FileNotFoundError:
+            raise AccessError('provider-worker-runtime-not-ready') from None
+        result = self.bridge.worker('provider-worker-status', provider_probe={
+            'python': value['hostPython'],
+            'launcher': str(Path(value['sourceRoot']) / 'bin/ods-pixel-route-lease'),
+            'providerDirectory': str(directory), 'receipt': receipt})
+        if result != {'ready': True}:
+            raise AccessError('provider-worker-runtime-not-ready')
+
     def verify_process(self):
         from pixel_settings.coordinator import _identity
         identity = _identity(self.bridge)

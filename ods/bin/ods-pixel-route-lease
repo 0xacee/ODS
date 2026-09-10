@@ -8,9 +8,38 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 
 from pixel_provider.advice_process import worker_environment
 from pixel_provider.advice_runtime import resolve_runtime
+from pixel_provider.store import decode_document
+
+
+def check_runtime():
+    """Check a root-captured receipt as the owner without retaking its lock.
+
+    Apply holds the provider store lock while invoking this fixed probe. The
+    receipt is not proof: resolve_runtime still verifies every source/runtime
+    hash. This path neither starts a lease nor imports third-party packages.
+    """
+    import json
+    try:
+        raw = sys.stdin.buffer.read(8193)
+        if len(raw) > 8192:
+            raise ValueError('oversized-runtime-check')
+        request = decode_document(raw)
+        if (set(request) != {'providerDirectory', 'receipt'}
+                or type(request['providerDirectory']) is not str
+                or not os.path.isabs(request['providerDirectory'])
+                or type(request['receipt']) is not dict):
+            raise ValueError('invalid-runtime-check')
+        resolve_runtime(request['providerDirectory'], receipt=request['receipt'])
+        ready = True
+    except (OSError, ValueError, TypeError, KeyError):
+        ready = False
+    print(json.dumps({'ready': ready}), flush=True)
+    return 0
 
 
 def main():
+    if sys.argv[1:] == ['--check-runtime']:
+        return check_runtime()
     if len(sys.argv)!=3 or sys.argv[1]!='--provider-directory' or not os.path.isabs(sys.argv[2]):
         return 2
     try:

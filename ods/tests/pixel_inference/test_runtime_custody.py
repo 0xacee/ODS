@@ -111,3 +111,32 @@ def test_another_operation_has_an_independent_hash_cache(artifact):
     other = r.RuntimeCustody(SimpleNamespace(binary=str(a.launcher)))
     assert not other._cache
     assert other.qualify() == a.custody.qualify()
+
+
+def test_worker_probe_uses_qualified_source_and_private_receipt(artifact):
+    a = artifact
+    a.custody.bridge.owner = SimpleNamespace(pw_uid=os.getuid())
+    directory = a.root / 'providers'
+    directory.mkdir(mode=0o700)
+    receipt = {'schemaVersion': 1, 'revision': 0, 'runtime': None}
+    atomic_json(directory / 'advice-runtime.json', receipt)
+    calls = []
+    def worker(operation, **kwargs):
+        calls.append((operation, kwargs))
+        return {'ready': True}
+    a.custody.bridge.worker = worker
+    a.custody.require_worker(directory, a.custody.qualify())
+    assert calls == [('provider-worker-status', {'provider_probe': {
+        'python': a.document['hostPython'], 'launcher': str(a.source / 'bin/ods-pixel-route-lease'),
+        'providerDirectory': str(directory), 'receipt': receipt}})]
+    a.custody.bridge.worker = lambda *args, **kwargs: {'ready': False}
+    with pytest.raises(AccessError, match='worker-runtime-not-ready'):
+        a.custody.require_worker(directory, a.custody.qualify())
+
+
+def test_missing_worker_receipt_does_not_start_owner_probe(artifact):
+    a = artifact
+    a.custody.bridge.owner = SimpleNamespace(pw_uid=os.getuid())
+    a.custody.bridge.worker = lambda *args, **kwargs: pytest.fail('missing receipt executed probe')
+    with pytest.raises(AccessError, match='worker-runtime-not-ready'):
+        a.custody.require_worker(a.root, a.custody.qualify())

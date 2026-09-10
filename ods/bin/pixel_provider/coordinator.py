@@ -150,6 +150,9 @@ def _start(bridge, request, snapshot, directory, runtime, environment):
     else:
         if not saved['enabled']:
             raise AccessError('provider-policy-disabled')
+        # Bootstrap registration does not exercise the owner-derived route
+        # worker. Refuse stale/missing artifacts before any journal or restart.
+        runtime.require_worker(directory, custody)
         options = {'revision': saved['revision'], 'allow_cloud': saved['policy']['allowCloud'], 'activation_id': str(uuid.uuid4())}
         next_plan = (update_activation(config, managed['plan'], **options) if managed else plan_activation(config, **options))
         after = next_plan['document']

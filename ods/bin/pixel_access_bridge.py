@@ -476,7 +476,7 @@ class SystemdAccessBridge:
 
     def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None,
                transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None,
-               binding=None, activate_provider=None, expected_projection=None):
+               binding=None, activate_provider=None, expected_projection=None, provider_probe=None):
         script = Path(__file__).resolve().parent / "access_mode_worker.py"
         # This launcher still runs as root. Never search the owner's validator
         # PATH for it; that PATH is intended only for the unprivileged worker.
@@ -499,6 +499,8 @@ class SystemdAccessBridge:
         env = {"HOME": str(self.home), "USER": self.owner.pw_name, "LOGNAME": self.owner.pw_name,
                "PATH": str(Path(self.binary).parent) + ":/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
         request = dict(operation=operation, openclaw=self.binary, config_sha256=config_hash, confirmed=confirmed)
+        if operation == 'provider-worker-status':
+            request['provider_probe'] = provider_probe
         if operation in ("settings-apply", "settings-recover", "provider-change", "provider-recover"):
             request["transaction_id"] = transaction_id
         if operation == "settings-apply":

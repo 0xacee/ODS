@@ -92,3 +92,18 @@ it('unavailable venv shows operator remediation and cannot prepare', async () =>
   fireEvent.click(screen.getByLabelText(consent))
   expect(screen.getByRole('button', { name: 'Prepare private runtime' })).toBeDisabled()
 })
+
+it('blocks preparation while disabled without losing unchanged consent or status access', async () => {
+  const { rerender, fetchMock, onReadyChange } = await setup()
+  fireEvent.click(screen.getByLabelText(consent))
+  const prepare = screen.getByRole('button', { name: 'Prepare private runtime' })
+  expect(prepare).toBeEnabled()
+  rerender(createElement(PixelAdviceRuntime, { onReadyChange, disabled: true }))
+  expect(prepare).toBeDisabled()
+  expect(screen.getByLabelText(consent)).toBeChecked()
+  expect(screen.getByRole('button', { name: 'Refresh runtime readiness' })).toBeEnabled()
+  fireEvent.click(prepare)
+  expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/prepare'))).toBe(false)
+  rerender(createElement(PixelAdviceRuntime, { onReadyChange, disabled: false }))
+  expect(prepare).toBeEnabled()
+})

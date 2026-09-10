@@ -11,11 +11,12 @@ BASE = {"operation", "openclaw", "config_sha256", "confirmed"}
 KEYS = {"status": BASE, "full-access": BASE, "sandboxed": BASE, "settings-status": BASE,
         "settings-apply": BASE | {"transaction_id", "settings_revision", "preferences", "capabilities"},
         "settings-recover": BASE | {"transaction_id"}, "provider-status": BASE,
+        "provider-worker-status": BASE | {"provider_probe"},
         "provider-change": BASE | {"transaction_id", "binding"},
         "provider-recover": BASE | {"transaction_id"}}
 HOOKS = {"status": (), "full-access": ("busy", "restart"), "sandboxed": ("busy", "restart"),
          "settings-status": (), "settings-apply": ("busy", "settings-activate"),
-         "settings-recover": ("busy", "settings-activate"), "provider-status": (),
+         "settings-recover": ("busy", "settings-activate"), "provider-status": (), "provider-worker-status": (),
          "provider-change": ("busy", "provider-activate"), "provider-recover": ("busy", "provider-activate")}
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 
@@ -86,6 +87,15 @@ def request(value):
             raise ProtocolError("owner-protocol-failed")
     elif type(value["config_sha256"]) is not str or not HEX.fullmatch(value["config_sha256"]):
         raise ProtocolError("owner-protocol-failed")
+    if operation == 'provider-worker-status':
+        probe = value['provider_probe']
+        if (type(probe) is not dict or set(probe) != {'python', 'launcher', 'providerDirectory', 'receipt'}
+                or type(probe['receipt']) is not dict
+                or any(type(probe[key]) is not str or '\x00' in probe[key]
+                       or not PurePosixPath(probe[key]).is_absolute()
+                       for key in ('python', 'launcher', 'providerDirectory'))
+                or PurePosixPath(probe['launcher']).name != 'ods-pixel-route-lease'):
+            raise ProtocolError('owner-protocol-failed')
     if operation in ("settings-apply", "settings-recover", "provider-change", "provider-recover"):
         if type(value["transaction_id"]) is not str or not HEX.fullmatch(value["transaction_id"]):
             raise ProtocolError("owner-protocol-failed")
@@ -135,6 +145,10 @@ def hook_reply(operation, name, value):
 def result(operation, value):
     if type(value) is not dict:
         raise ProtocolError("owner-protocol-failed")
+    if operation == 'provider-worker-status':
+        if set(value) != {'ready'} or type(value['ready']) is not bool:
+            raise ProtocolError('owner-protocol-failed')
+        return value
     if operation.startswith("provider-"):
         return provider_result(operation, value)
     if not operation.startswith("settings-"):

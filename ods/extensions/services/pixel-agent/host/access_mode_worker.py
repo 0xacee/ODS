@@ -68,7 +68,24 @@ def main():
 
     try:
         if request["operation"].startswith("provider-"):
-            if request["operation"] == "provider-status":
+            if request['operation'] == 'provider-worker-status':
+                # Root selected and qualified both executable paths; this
+                # subprocess runs only after dropping to the existing owner.
+                # Do not load RuntimeStore here: root holds its exclusive lock.
+                probe = request['provider_probe']
+                payload = {key: probe[key] for key in ('providerDirectory', 'receipt')}
+                try:
+                    checked = subprocess.run(
+                        [probe['python'], '-I', '-S', '-B', probe['launcher'], '--check-runtime'],
+                        input=json.dumps(payload) + '\n', text=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL, timeout=30, check=False)
+                    if checked.returncode != 0:
+                        raise ValueError('runtime-check-failed')
+                    result = protocol.result(request['operation'],
+                        protocol.decode_frame(checked.stdout, 128))
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    result = {'ready': False}
+            elif request["operation"] == "provider-status":
                 result = provider_transaction.provider_status(path, state_dir=state_dir)
             else:
                 kwargs = dict(state_dir=state_dir, validate_config=validate,
