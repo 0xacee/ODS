@@ -329,8 +329,13 @@ export default function Extensions({ compact = false }) {
     )
   }
 
-  const extensions = catalog?.extensions || []
-  const summary = catalog?.summary || {}
+  const allExtensions = catalog?.extensions || []
+  const extensions = allExtensions.filter(ext => !['incompatible', 'unsupported'].includes(ext.status) && ext.compatible !== false)
+  const unsupportedIds = new Set(allExtensions.filter(ext => !extensions.includes(ext)).map(ext => ext.id))
+  const summary = {
+    not_installed: extensions.filter(ext => ext.status === 'not_installed').length,
+    updates_available: extensions.filter(ext => ext.update_available).length,
+  }
 
   // Derive unique categories from features
   const categories = ['all', ...new Set(
@@ -339,7 +344,7 @@ export default function Extensions({ compact = false }) {
       .filter(Boolean)
   )]
 
-  const STATUS_FILTERS = ['all', 'enabled', 'cli_installed', 'stopped', 'unhealthy', 'disabled', 'installing', 'setting_up', 'error', 'not_installed', 'incompatible']
+  const STATUS_FILTERS = ['all', 'enabled', 'cli_installed', 'stopped', 'unhealthy', 'disabled', 'installing', 'setting_up', 'error', 'not_installed']
   const STATUS_LABELS = { all: 'All', enabled: 'Enabled', cli_installed: 'CLI Installed', stopped: 'Stopped', unhealthy: 'Unhealthy', disabled: 'Disabled', installing: 'Installing', setting_up: 'Setting Up', error: 'Error', not_installed: 'Not Installed', incompatible: 'Incompatible' }
 
   // Filter extensions
@@ -353,7 +358,10 @@ export default function Extensions({ compact = false }) {
     if (query && !ext.name.toLowerCase().includes(query) && !ext.description?.toLowerCase().includes(query)) return false
     return true
   })
-  const collections = templates.map(template => ({...template, _status: getTemplateStatus(template, extensions)})).filter(template => template._status !== 'applied')
+  const collections = templates
+    .filter(template => !(template.services || []).some(id => unsupportedIds.has(id)))
+    .map(template => ({...template, _status: getTemplateStatus(template, extensions)}))
+    .filter(template => template._status !== 'applied')
   const filteredCollections = collections.filter(template => !query || `${template.name} ${template.description || ''}`.toLowerCase().includes(query))
   const showingCollections = libraryView === 'collections'
 

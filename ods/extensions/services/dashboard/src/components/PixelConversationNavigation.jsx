@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Download, Plus, X } from 'lucide-react'
+import { Plus } from 'lucide-react'
 import { CHAT_KEY, LIBRARY_EVENT, SELECT_EVENT, DELETE_EVENT, readConversations, conversationTitle } from '../lib/pixelConversations'
 import { conversationLabels } from '../lib/pixelConversationLabels'
-import PixelConversationOrganizer from './PixelConversationOrganizer'
+import PixelConversationRow, {ConversationTitle} from './PixelConversationRow'
 
 import { exportConversation } from '../lib/pixelConversationExport'
 
@@ -42,10 +42,10 @@ export default function PixelConversationNavigation({ collapsed }) {
   const regular = visible.filter(item => !item.labels.pinned).map(item => item.chat)
   const chevron = <svg className="rail-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3 3 3-3"/></svg>
   function rows(items, empty) {
-    return <div className="rail-conversations">{items.length ? items.map(chat => <div className="conversation-row" key={chat.chatId}><button className={`conversation-link ${chat.chatId === active ? 'active' : ''}`} title={`${conversationTitle(chat)} · ${chat.messages.filter(item => item.role === 'user').length} turns`} aria-current={chat.chatId === active ? 'page' : undefined} onClick={() => window.dispatchEvent(new CustomEvent(SELECT_EVENT, { detail: chat.chatId }))}><strong>{conversationTitle(chat)}</strong>{chat.inFlight && <span className="rail-task-running" role="status" aria-label="Working"/>}</button><PixelConversationOrganizer chat={chat} title={conversationTitle(chat)} onSaved={() => archiveToggle.current?.focus()}/><button className="conversation-delete" aria-label={`Delete chat: ${conversationTitle(chat)}`} title="Delete chat" onClick={event => { trigger.current = event.currentTarget; setDeleteError(''); setPending(chat) }}><X size={13}/></button><button type="button" className="conversation-export" aria-label={'Export chat: ' + conversationTitle(chat)} title="Export this conversation as JSON" onClick={() => {
+    return <div className="rail-conversations">{items.length ? items.map(chat => <PixelConversationRow key={chat.chatId} chat={chat} title={conversationTitle(chat)} onSaved={() => archiveToggle.current?.focus()} onDelete={event => {trigger.current=event.currentTarget;setDeleteError('');setPending(chat)}} onExport={() => {
       try { exportConversation(chat.chatId); setExportError('') }
       catch { setExportError('This conversation could not be exported. Your saved history is unchanged.') }
-    }}><Download size={13}/></button></div>) : <span className="rail-empty">{empty}</span>}</div>
+    }}><button className={`conversation-link ${chat.chatId === active ? 'active' : ''}`} title={conversationTitle(chat)} aria-current={chat.chatId === active ? 'page' : undefined} onClick={() => window.dispatchEvent(new CustomEvent(SELECT_EVENT, { detail: chat.chatId }))}><ConversationTitle title={conversationTitle(chat)}/>{chat.inFlight && <span className="rail-task-running" role="status" aria-label="Working"/>}</button></PixelConversationRow>) : <span className="rail-empty">{empty}</span>}</div>
 
   }
   return <div className="pixel-conversation-navigation">

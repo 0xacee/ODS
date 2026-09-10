@@ -13,7 +13,7 @@ const response = (configuration, status = 200) => ({ ok: status === 200, status,
   json: async () => ({ configuration, runtime: { status: 'not-applied' } }) })
 const adviceReadiness = () => ({ status: 'not-configured', revision: 0, host: 'canary',
   sourceSha256: null, runtimeId: null, candidates: [], job: null })
-function setup(doc, post = async () => response({ ...doc, revision: doc.revision + 1 }), probe = null) {
+function setup(doc, post = async () => response({ ...doc, revision: doc.revision + 1 }), probe = null, props = {}) {
   const fetchMock = vi.fn(async (url, options) => {
     if (url === '/api/pixel/providers/runtime') return { ok: true, status: 200, json: async () => runtimeDoc('unavailable') }
     if (url === '/api/pixel/providers/save') return post(options)
@@ -23,10 +23,25 @@ function setup(doc, post = async () => response({ ...doc, revision: doc.revision
     throw new Error(`Unexpected fetch: ${url}`)
   })
   vi.stubGlobal('fetch', fetchMock)
-  render(<PixelProviderSettings />)
+  render(<PixelProviderSettings {...props} />)
   return fetchMock
 }
 const loaded = () => screen.findByLabelText('Model')
+
+it('organizes embedded connections without losing drafts or applying runtime changes', async () => {
+  const fetchMock = setup(tower(), undefined, null, { showHeading: false })
+  await loaded()
+  expect(screen.queryByRole('button', { name: 'Refresh provider runtime' })).toBeNull()
+  fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'unsaved-model' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Runtime', exact: true }))
+  expect(screen.queryByRole('textbox', { name: 'Model', exact: true })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Import connection', exact: true }))
+  expect(screen.getByLabelText('Connection bundle (private)')).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: 'Providers', exact: true }))
+  expect(screen.getByLabelText('Model')).toHaveValue('unsaved-model')
+  expect(screen.getByRole('button', { name: 'Save providers' })).toBeEnabled()
+  expect(fetchMock.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false)
+})
 
 it('imports a disabled peer without changing old keys or roles and requires a separate Save', async () => {
   const doc = tower(); doc.roles.leader = 'tower'
@@ -78,7 +93,7 @@ it('renders a pristine install without claiming runtime activation', async () =>
   setup(empty())
   expect(await screen.findByText('No providers configured.')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Save providers' })).toBeDisabled()
-  expect(screen.getByText('Saving providers does not apply them. Inspect the current runtime below before making a change.')).toBeInTheDocument()
+  expect(screen.getByText('Save stores your configuration. Apply it separately from Runtime.')).toBeInTheDocument()
 })
 
 it('shows unavailable for failed or malformed GET instead of fabricated defaults', async () => {

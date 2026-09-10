@@ -3,17 +3,21 @@ import { LiquidMetal } from '@paper-design/shaders-react'
 
 const source = '/osmantic-isolated-os.png'
 
-export default function ODSLogo({ active = true }) {
+export default function ODSLogo() {
   const [mask, setMask] = useState(null)
-  const [still, setStill] = useState(false)
+  const [hovered, setHovered] = useState(false)
+  const [reduced, setReduced] = useState(false)
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-reduced-motion: reduce)')
+    const update = () => setReduced(Boolean(media?.matches))
+    update()
+    media?.addEventListener?.('change', update)
+    return () => media?.removeEventListener?.('change', update)
+  }, [])
   useEffect(() => {
     // Keep the original image in embedded/limited renderers without browser APIs.
     if (typeof window.matchMedia !== 'function') return
     let disposed = false
-    const preference = window.matchMedia('(prefers-reduced-motion: reduce)')
-    const update = () => setStill(preference.matches)
-    update()
-    preference.addEventListener('change', update)
     const canvas = document.createElement('canvas')
     let supported = null
     try {
@@ -47,9 +51,9 @@ export default function ODSLogo({ active = true }) {
       }
       img.src = source
     }
-    return () => { disposed = true; preference.removeEventListener('change', update) }
+    return () => { disposed = true }
   }, [])
-  return <div className="ods-metal-logo" aria-hidden="true">
-    {mask ? <LiquidMetal image={mask} width="100%" height="100%" colorBack="#00000000" colorTint="#ffffff" repetition={2} softness={0.1} shiftRed={0.3} shiftBlue={0.3} distortion={0.07} contour={0.4} angle={70} speed={still || !active ? 0 : 1} scale={0.9} fit="contain" /> : <img src={source} alt="" style={{filter:'grayscale(1)',mixBlendMode:'screen'}} />}
+  return <div className="ods-metal-logo" aria-hidden="true" onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
+    {mask ? <LiquidMetal image={mask} width="100%" height="100%" colorBack="#00000000" colorTint="#ffffff" repetition={2} softness={0.1} shiftRed={0.3} shiftBlue={0.3} distortion={0.07} contour={0.4} angle={70} speed={hovered && !reduced ? 0.35 : 0} scale={0.9} fit="contain" /> : <img src={source} alt="" style={{filter:'grayscale(1)',mixBlendMode:'screen'}} />}
   </div>
 }

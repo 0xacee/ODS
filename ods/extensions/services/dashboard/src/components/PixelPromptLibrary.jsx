@@ -1,4 +1,5 @@
 import {useEffect, useRef, useState} from 'react'
+import { Bookmark } from 'lucide-react'
 import {readSavedPrompts, writeSavedPrompt} from '../lib/pixelSavedPrompts'
 
 export default function PixelPromptLibrary({input, disabled, onInsert}) {
@@ -30,7 +31,7 @@ export default function PixelPromptLibrary({input, disabled, onInsert}) {
   const fieldClass = 'my-2 block w-full rounded border border-theme-border bg-theme-bg p-2 text-theme-text'
   const buttonClass = 'rounded border border-theme-border px-3 py-2 text-xs hover:bg-theme-surface-hover disabled:opacity-40'
   return <>
-    <button ref={trigger} type="button" disabled={disabled} aria-label="Saved prompts" onClick={() => {refresh(); dialog.current.showModal()}}>Saved prompts</button>
+    <button ref={trigger} type="button" disabled={disabled} aria-label="Saved prompts" title="Saved prompts" onClick={() => {refresh(); dialog.current.showModal()}}><Bookmark size={16}/></button>
     <dialog ref={dialog} className="chat-delete-dialog" style={{maxHeight:'calc(100dvh - 32px)', overflowY:'auto'}} aria-label="Saved prompts" onCancel={event => {event.preventDefault(); close()}}>
       <h3>Saved prompts</h3><p>Reusable text stored in this browser. Insert a prompt into your draft, then review it before sending.</p>
       {error && <p role="alert">{error}</p>}

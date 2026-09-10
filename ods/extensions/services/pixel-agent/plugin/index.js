@@ -341,6 +341,15 @@ export default definePluginEntry({
         return true;
       },
     });
+    api.registerHttpRoute({
+      path: '/pixel-ods/activity', auth: 'gateway', match: 'exact',
+      handler: async (req, res) => {
+        const parsed = await readAbortUser(req);
+        if (parsed.status !== 200) { sendJson(res, parsed.status, {error:'invalid activity request'}); return true; }
+        sendJson(res, 200, {task:taskActivity.activeForUser(parsed.user)});
+        return true;
+      },
+    });
     // The OpenAI-compatible gateway route does not dispatch channel delivery
     // hooks. Give the private host ingress a narrow, authenticated way to ask
     // for host-observed verification and source-evidence truth before it

@@ -354,6 +354,22 @@ test('renders remote provider status and proof receipt', async () => {
   expect(screen.getByRole('button', { name: /test route/i })).toBeEnabled()
 })
 
+test('compact views keep the connection draft and never apply changes on navigation', async () => {
+  globalThis.fetch.mockResolvedValue(response(statusPayload))
+  render(createElement(RemoteProvider, { compact: true }))
+  await screen.findByRole('button', { name: 'Connection', exact: true })
+  expect(screen.queryByRole('heading', { name: 'Egress' })).toBeNull()
+  fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'https://draft.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Diagnostics', exact: true }))
+  expect(screen.getByRole('heading', { name: 'Egress' })).toBeVisible()
+  expect(screen.queryByRole('textbox', { name: 'Base URL' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Peer models', exact: true }))
+  expect(screen.getByRole('heading', { name: 'ODS Peer Models' })).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: 'Connection', exact: true }))
+  expect(screen.getByLabelText('Base URL')).toHaveValue('https://draft.example/v1')
+  expect(globalThis.fetch.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false)
+})
+
 test('runs configured route probe and shows proof recording result', async () => {
   globalThis.fetch
     .mockResolvedValueOnce(response(statusPayload))

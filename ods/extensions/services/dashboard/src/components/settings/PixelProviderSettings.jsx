@@ -15,6 +15,7 @@ function Toggle({ label, ...props }) {
 }
 
 export default function PixelProviderSettings({ showHeading = true }) {
+  const [view, setView] = useState('providers')
   const [snapshot, setSnapshot] = useState(null)
   const [draft, setDraft] = useState(null)
   const [secrets, setSecrets] = useState({})
@@ -149,6 +150,7 @@ export default function PixelProviderSettings({ showHeading = true }) {
     if (writePending.current || runtimeBusyRef.current || connectionBusyRef.current || stale || !draft
       || draft.providers.length >= 32 || draft.providers.some(p => p.id === provider.id)) return false
     edit(next => { next.providers.push(copy(provider)) })
+    setView('providers')
     setSecrets(values => ({ ...values, [provider.id]: apiKey }))
     setNotice('Connection added as a disabled provider draft. Review roles, Save, and separately Apply when ready.')
     return true
@@ -171,10 +173,10 @@ export default function PixelProviderSettings({ showHeading = true }) {
     if (removed) setNotice('The new leader was removed from the backup list.')
   }
 
-  return <section aria-labelledby="pixel-connections-title" className="settings-premium-card rounded-lg border border-theme-border p-5 space-y-5 text-theme-text">
+  return <section aria-labelledby="pixel-connections-title" className="settings-premium-card pixel-connections-settings rounded-lg border border-theme-border p-5 space-y-5 text-theme-text">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><h2 id="pixel-connections-title" className={showHeading ? 'text-lg font-semibold' : 'sr-only'}>Pixel connections</h2>
-        <p className="text-sm text-theme-text-muted">Choose inference providers without changing other ODS apps.</p></div>
+        <p className="text-sm text-theme-text-muted">{dirty ? 'Unsaved provider changes' : 'Inference providers and routing'}</p></div>
       <div className="flex flex-wrap gap-2">
         <button className={buttonStyle} disabled={loading || saving || runtimeBusy || connectionBusy} onClick={reload}>Reload providers</button>
         <button className={buttonStyle} disabled={!dirty || loading || saving || runtimeBusy || connectionBusy} onClick={() => {
@@ -185,18 +187,22 @@ export default function PixelProviderSettings({ showHeading = true }) {
         <button className={buttonStyle + ' bg-blue-600 text-white'} disabled={!dirty || stale || saving || loading || runtimeBusy || connectionBusy} onClick={save}>{saving ? 'Saving providers…' : 'Save providers'}</button>
       </div>
     </div>
-    <p className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm">Saving providers does not apply them. Inspect the current runtime below before making a change.</p>
-    <p className="text-sm text-theme-text-muted">Choosing Tower2 inference does not move this device’s tools there. Full Access is not available through these controls.</p>
+    {!showHeading && <nav className="settings-view-tabs" aria-label="Connection views">
+      {[['providers', 'Providers'], ['runtime', 'Runtime'], ['import', 'Import connection']].map(([id, label]) => <button key={id} type="button" aria-pressed={view === id} onClick={() => setView(id)}>{label}</button>)}
+    </nav>}
+    <p className="text-xs text-theme-text-muted">Save stores your configuration. Apply it separately from Runtime.</p>
     {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
     {notice && <p role="status" className="text-sm text-emerald-400">{notice}</p>}
     {stale && <p className="text-sm text-amber-400">Reload the stored configuration before another save.</p>}
     {loading && <p role="status">Loading provider settings…</p>}
-    <PixelProviderRuntime savedRevision={snapshot?.revision ?? null} saving={loading || saving || connectionBusy} blocked={dirty || stale || connectionBusy}
-      routingEnabled={snapshot?.enabled === true} allowCloud={snapshot?.policy.allowCloud === true} onBusyChange={runtimeBusyChanged} />
-    {draft && <PixelConnectionImport key={`${snapshot?.revision}:${importReset}`} providers={draft.providers}
-      disabled={loading || saving || runtimeBusy || stale} onBusyChange={connectionBusyChanged} onImport={importConnection} />}
-    {draft && <fieldset disabled={loading || saving || runtimeBusy || connectionBusy} className="min-w-0 space-y-5">
+    <div hidden={!showHeading && view !== 'runtime'}><PixelProviderRuntime compact={!showHeading} savedRevision={snapshot?.revision ?? null} saving={loading || saving || connectionBusy} blocked={dirty || stale || connectionBusy}
+      routingEnabled={snapshot?.enabled === true} allowCloud={snapshot?.policy.allowCloud === true} onBusyChange={runtimeBusyChanged} /></div>
+    <div hidden={!showHeading && view !== 'import'}>{draft && <PixelConnectionImport key={`${snapshot?.revision}:${importReset}`} providers={draft.providers}
+      disabled={loading || saving || runtimeBusy || stale} onBusyChange={connectionBusyChanged} onImport={importConnection} />}</div>
+    {draft && <fieldset hidden={!showHeading && view !== 'providers'} disabled={loading || saving || runtimeBusy || connectionBusy} className="min-w-0 space-y-5">
       <legend className="sr-only">Pixel provider configuration</legend>
+      <details className="settings-routing-options" open={showHeading || undefined}>
+      <summary>Routing &amp; fallback rules</summary>
       <div className="flex flex-wrap gap-5">
         <Toggle label="Enable desired Pixel routing" checked={draft.enabled} onChange={e => edit(next => { next.enabled = e.target.checked })} />
         <Toggle label="Allow cloud inference" checked={draft.policy.allowCloud} onChange={e => edit(next => { next.policy.allowCloud = e.target.checked })} />
@@ -228,13 +234,14 @@ export default function PixelProviderSettings({ showHeading = true }) {
         {!draft.roles.backups.length && <p className="text-sm text-theme-text-muted">No backups selected.</p>}
         <div className="flex flex-wrap gap-3">{draft.providers.filter(p => eligible(p, draft.policy) && p.id !== draft.roles.leader && !draft.roles.backups.includes(p.id)).map(p => <button key={p.id} className={buttonStyle} disabled={draft.roles.backups.length >= 8} onClick={() => edit(next => { next.roles.backups.push(p.id) })}>Add backup {p.label}</button>)}</div>
       </fieldset>
+      </details>
       <div className="grid items-end gap-3 sm:grid-cols-[1fr_1fr_auto]">
         <Field label="New provider ID"><input className={inputStyle} value={newId} maxLength={64} onChange={e => setNewId(e.target.value)} /></Field>
         <Field label="New provider label"><input className={inputStyle} value={newLabel} maxLength={256} onChange={e => setNewLabel(e.target.value)} /></Field>
         <button className={buttonStyle} disabled={draft.providers.length >= 32} onClick={add}>Add provider</button>
       </div>
       {!draft.providers.length && <p className="text-sm text-theme-text-muted">No providers configured.</p>}
-      {draft.providers.map(p => <fieldset key={p.id} className="min-w-0 rounded border border-theme-border p-4 space-y-4">
+      {draft.providers.map(p => <fieldset key={p.id} className="provider-editor min-w-0 space-y-4">
         <legend className="px-2 font-medium">{p.label} ({p.id})</legend>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Toggle label="Provider enabled" checked={p.enabled} onChange={e => providerEdit(p.id, 'enabled', e.target.checked)} />

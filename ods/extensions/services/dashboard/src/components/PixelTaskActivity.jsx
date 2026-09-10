@@ -37,7 +37,7 @@ export default function PixelTaskActivity({messages, sending, elapsed}) {
       <h2>{turn?.prompt || 'Ready for your next task'}</h2>
       <p role="status">{active ? `Working · ${elapsed} elapsed` : task ? `${task.state === 'failed' ? 'Turn ended with an error' : task.state === 'running' ? 'Completion not observed' : 'Turn ended'}${duration !== null ? ` · ${duration}s` : ''}` : 'No recorded tool activity for this turn'}</p>
     </header>
-    {active ? <p className="pixel-activity-note">The tool summary will appear when the runtime finishes this turn.</p> : task ? <>
+    {task ? <>
       <div className="pixel-activity-heading"><h3>Tools</h3><span>{task.calls} calls</span></div>
       <ul>
         {task.activities.map(item => {
@@ -51,9 +51,9 @@ export default function PixelTaskActivity({messages, sending, elapsed}) {
           </li>
         })}
       </ul>
-      {task.calls === 0 && <p className="pixel-activity-note">No tool calls were observed. This turn used the model only.</p>}
+      {task.calls === 0 && <p className="pixel-activity-note">{active ? 'The runtime started this turn. No tool calls observed yet.' : 'No tool calls were observed. This turn used the model only.'}</p>}
       {task.truncated && <p className="pixel-activity-warning">Only the first 512 calls are included.</p>}
       <p className="pixel-activity-note">Recorded by the Pixel runtime. Tool calls show attempts, not proof that the requested result works. Saved with this conversation in this browser.</p>
-    </> : <p className="pixel-activity-note">Older replies do not contain runtime observations. They are not reconstructed from the assistant’s claims.</p>}
+    </> : <p className="pixel-activity-note">{active ? 'Waiting for runtime observations. This runtime may not provide live activity.' : 'Older replies do not contain runtime observations. They are not reconstructed from the assistant’s claims.'}</p>}
   </section>
 }

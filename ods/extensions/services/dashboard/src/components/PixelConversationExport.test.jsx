@@ -20,7 +20,8 @@ test('exports complete retained history and metadata without selecting or trunca
   window.addEventListener(SELECT_EVENT,select)
   try {
     render(<PixelConversationNavigation collapsed={false}/>)
-    fireEvent.click(screen.getByRole('button',{name:'Export chat: Turn 0'}))
+    fireEvent.contextMenu(screen.getByRole('button',{name:/^Turn 0/}))
+    fireEvent.click(screen.getByRole('menuitem',{name:'Export conversation'}))
     expect(URL.createObjectURL).toHaveBeenCalledOnce()
     const blob=URL.createObjectURL.mock.calls[0][0]
     expect(blob.type).toBe('application/json')
@@ -43,7 +44,8 @@ test('reports download failure while preserving the conversation', () => {
   saveConversation({schema:1,chatId:'export-test',messages:[{role:'user',content:'Keep me'}]})
   URL.createObjectURL.mockImplementation(() => {throw new Error('Unavailable')})
   render(<PixelConversationNavigation collapsed={false}/>)
-  fireEvent.click(screen.getByRole('button',{name:'Export chat: Keep me'}))
+  fireEvent.contextMenu(screen.getByRole('button',{name:'Keep me',exact:true}))
+  fireEvent.click(screen.getByRole('menuitem',{name:'Export conversation'}))
   expect(screen.getByRole('alert')).toHaveTextContent('could not be exported')
   expect(readConversations()).toHaveLength(1)
   expect(window.HTMLAnchorElement.prototype.click).not.toHaveBeenCalled()

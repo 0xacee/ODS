@@ -34,7 +34,7 @@
 .models-refined .model-filter-disclosure input[type=range] { accent-color:#aeb8c0; }
 .models-results { display:flex; justify-content:space-between; gap:12px; padding:15px 0 4px; color:#828d96; font-size:10px; }
 .models-results > :first-child { color:#a8b1b8; }
-.model-entry { border-bottom:1px solid #292c2e; padding:17px 0; min-height:216px; }
+.model-entry { border-bottom:1px solid #292c2e; padding:12px 0; min-height:0; }
 .model-entry > header { display:flex; gap:11px; align-items:flex-start; }
 .model-entry > header > div { flex:1; min-width:0; }
 .model-entry h3 { font-size:13px; font-weight:550; line-height:1.6; overflow-wrap:anywhere; }
@@ -43,11 +43,11 @@
 .model-entry-symbol > div { width:22px; height:22px; min-width:0; padding:0; border:0; background:transparent; box-shadow:none; }
 .model-entry-symbol img { width:21px; height:21px; object-fit:contain; filter:grayscale(1); }
 .model-state { padding-top:5px; white-space:nowrap; color:#929ba3; font-size:9px; }
-.model-entry-metrics { display:grid; grid-template-columns:1fr 1fr; gap:9px 16px; margin:13px 0 10px 34px; }
+.model-entry-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:10px 0 8px 34px; }
 .model-entry-metrics > div { min-width:0; }
 .model-entry-metrics dt { font-size:9px; color:#7f8b94; margin-bottom:4px; }
 .model-entry-metrics dd { color:#bdc6cd; font-size:11px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
-.model-speed-reading { grid-column:1/-1; }
+.model-speed-reading { grid-column:auto; }
 .model-fit { display:flex; flex-wrap:wrap; gap:5px 10px; margin-left:34px; font-size:9px; color:#8d99a3; }
 .model-fit > :first-child { color:#bbc4cb; }
 .model-entry > footer { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; margin:13px 0 0 34px; }
@@ -75,7 +75,7 @@
 .models-hub .hf-repository-row img { filter:grayscale(1); }
 .models-hub :is(input,select) { background:#181a1b; border-color:#303437; font-size:11px; }
 @container (min-width:600px) {
-  .model-entry { min-height:176px; }
+  .model-entry { min-height:0; }
   .model-entry-metrics { grid-template-columns:minmax(0,.8fr) minmax(0,1fr) minmax(0,1.4fr); }
   .model-speed-reading { grid-column:auto; }
   .models-active dl { flex-direction:row; }

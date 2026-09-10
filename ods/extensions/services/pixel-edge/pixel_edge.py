@@ -19,10 +19,47 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from urllib.parse import quote
 
 from aiohttp import web, ClientSession, UnixConnector, ClientTimeout
 from transition_gate import TransitionGate, GateError, strict_json, valid_binding
+
+
+def valid_live_task_event(event):
+    """Only bounded content-free observations may bypass the answer buffer."""
+    if not isinstance(event, dict) or set(event) != {"object", "id", "pixel_task"} or event["object"] != "ods.task.activity":
+        return False
+    task = event["pixel_task"]
+    if not isinstance(task, dict) or set(task) != {"schemaVersion", "runId", "startedAt", "finishedAt", "state", "calls", "failures", "blocked", "truncated", "activities"}:
+        return False
+    if type(task["schemaVersion"]) is not int or task["schemaVersion"] != 1 or task["state"] != "running" or task["finishedAt"] is not None or type(task["truncated"]) is not bool:
+        return False
+    if not isinstance(event["id"], str) or not re.fullmatch(r"chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", event["id"], re.I) or task["runId"] != event["id"]:
+        return False
+    stamp = task["startedAt"]
+    if not isinstance(stamp, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", stamp):
+        return False
+    try:
+        datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    count_keys = ("calls", "failures", "blocked")
+    if any(type(task[key]) is not int or not 0 <= task[key] <= 512 for key in count_keys):
+        return False
+    rows = task["activities"]
+    if not isinstance(rows, list) or len(rows) > 8:
+        return False
+    seen, sums = set(), dict.fromkeys(count_keys, 0)
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"kind", *count_keys} or not isinstance(row["kind"], str) or row["kind"] not in {"read", "agent", "run", "edit", "browser", "preview", "action", "unknown"} or row["kind"] in seen:
+            return False
+        if any(type(row[key]) is not int for key in count_keys) or not 0 <= row["blocked"] <= row["failures"] <= row["calls"] <= 512 or row["calls"] == 0:
+            return False
+        seen.add(row["kind"])
+        for key in count_keys:
+            sums[key] += row[key]
+    return all(sums[key] == task[key] for key in count_keys)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -967,6 +1004,10 @@ async def _stream_upstream(
                     continue
 
                 event, content, finish_reason = _sse_event(line)
+                if isinstance(event, dict) and event.get('object') == 'ods.task.activity':
+                    if valid_live_task_event(event):
+                        await response.write(line + b"\n\n")
+                    continue
                 if isinstance(event, dict) and "error" in event:
                     await flush_pending()
                     await response.write(line + b"\n")

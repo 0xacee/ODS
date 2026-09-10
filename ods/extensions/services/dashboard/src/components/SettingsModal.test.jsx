@@ -36,11 +36,21 @@ it('leaves closing and collapsing to the workspace panel header', () => {
   expect(close).not.toHaveBeenCalled()
 })
 
+it('provides mascot controls in their own settings section',()=>{
+  render(<SettingsModal/>)
+  fireEvent.click(screen.getByRole('button',{name:'Portal mascot',exact:true}))
+  expect(screen.getByRole('heading',{name:'Portal mascot'})).toBeVisible()
+  expect(screen.getByLabelText('Sleep after inactivity')).toBeVisible()
+  expect(screen.getByRole('button',{name:'Thinking',exact:true})).toHaveAttribute('aria-pressed','true')
+})
+
 it('opens the editable profile section without losing another settings draft',()=>{
   render(<SettingsModal/>)
   fireEvent.change(screen.getByLabelText('Draft'),{target:{value:'Unsaved'}})
   fireEvent.click(screen.getByRole('button',{name:'Profile',exact:true}))
   expect(screen.getByRole('textbox',{name:'Display name'})).toBeVisible()
+  expect(screen.getByRole('textbox',{name:'Assistant display name'})).toBeVisible()
+  expect(screen.getByRole('button',{name:'Save name'})).toBeVisible()
   fireEvent.click(screen.getByRole('button',{name:'General',exact:true}))
   expect(screen.getByLabelText('Draft')).toHaveValue('Unsaved')
 })

@@ -1,4 +1,5 @@
 import {useState} from 'react'
+import { ScanEye } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './pixel-draft-preview.css'
@@ -11,7 +12,7 @@ const components = {
 export default function PixelDraftPreview({input}) {
   const [open,setOpen]=useState(false)
   return <div className="pixel-draft-preview">
-    <button type="button" disabled={!input.trim() && !open} aria-expanded={open} onClick={()=>setOpen(value=>!value)}>{open?'Hide draft preview':'Preview draft'}</button>
+    <button type="button" title={open?'Hide draft preview':'Preview draft'} aria-label={open?'Hide draft preview':'Preview draft'} disabled={!input.trim() && !open} aria-expanded={open} onClick={()=>setOpen(value=>!value)}><ScanEye size={16}/></button>
     {open && <section aria-label="Draft Markdown preview">
       <p className="pixel-draft-note">Preview only. Links and external images stay inactive.</p>
       {input.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{input}</ReactMarkdown> : <p>Your draft is empty.</p>}

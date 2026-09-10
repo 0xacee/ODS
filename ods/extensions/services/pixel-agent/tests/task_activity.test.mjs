@@ -6,6 +6,22 @@ const runId = 'chatcmpl_11111111-2222-4333-8444-555555555555';
 const ctx = {agentId:'pixel',runId};
 const now = () => '2026-09-08T20:00:00.000Z';
 
+test('live observations bind exactly one active run to its opaque user and exclude other sessions', () => {
+  const recorder=createTaskActivity({now});
+  const user='ods-'+ 'a'.repeat(64);
+  const context={...ctx,sessionKey:`agent:pixel:openai-user:${user}`};
+  recorder.begin({},context);
+  assert.equal(recorder.activeForUser(user).runId,runId);
+  assert.equal(recorder.activeForUser('ods-'+ 'b'.repeat(64)),null);
+  const second={...context,runId:runId.replace('11111111','aaaaaaaa')};
+  recorder.begin({},second);
+  assert.equal(recorder.activeForUser(user),null);
+  recorder.finish({success:true},second);
+  assert.equal(recorder.activeForUser(user).runId,runId);
+  recorder.finish({success:true},context);
+  assert.equal(recorder.activeForUser(user),null);
+});
+
 test('projects real attempts without arguments, outputs or unknown tool names', () => {
   const recorder = createTaskActivity({now});
   recorder.begin({prompt:'private prompt'},ctx);

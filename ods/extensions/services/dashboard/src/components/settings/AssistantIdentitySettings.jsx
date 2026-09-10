@@ -5,16 +5,15 @@ export default function AssistantIdentitySettings() {
   const { document, ready, busy, error, notice, reload, save } = usePortalIdentity()
   const [draft, setDraft] = useState('')
   useEffect(() => { if (document) setDraft(document.displayName) }, [document])
-  return <section className="rounded border border-theme-border p-4 space-y-3" aria-labelledby="assistant-identity-title">
-    <h2 id="assistant-identity-title" className="font-medium">Assistant identity</h2>
-    <p className="text-sm text-theme-text-muted">Applies to this ODS installation across browsers. Changes display text only; no model restart or permission changes. Your own profile is separate.</p>
+  return <section className="profile-settings assistant-identity-settings" aria-labelledby="assistant-identity-title">
+    <h2 id="assistant-identity-title">Assistant identity</h2>
+    <p>The assistant’s name across this ODS installation.</p>
     <form onSubmit={event => { event.preventDefault(); void save(draft) }} className="space-y-3">
-      <label className="block">Assistant display name
-        <input className="block w-full rounded border border-theme-border bg-theme-bg p-2" autoComplete="off" maxLength={240}
-          placeholder="Portal" value={draft} onChange={event => setDraft(event.target.value)} disabled={busy || !ready}/>
+      <label className="profile-name-label">Assistant display name
+        <input autoComplete="off" maxLength={60}
+          placeholder="Assistant name" value={draft} onChange={event => setDraft(event.target.value)} disabled={busy || !ready}/>
       </label>
-      <p className="text-xs text-theme-text-muted">Up to 60 characters. An empty name resets to Portal.</p>
-      <div className="flex flex-wrap gap-3">
+      <div className="profile-settings-actions assistant-identity-actions">
         <button type="submit" disabled={busy || !ready}>Save name</button>
         <button type="button" disabled={busy || !ready} onClick={() => setDraft('Portal')}>Reset to Portal</button>
         <button type="button" disabled={busy} onClick={() => { void reload() }}>Refresh saved name</button>

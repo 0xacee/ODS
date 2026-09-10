@@ -1,4 +1,4 @@
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import { ArrowLeft, ChevronLeft, ChevronRight, Plus, Search, Sparkles, Settings } from 'lucide-react'
 import { getSidebarExternalLinks, getSidebarNavItems } from '../plugins/registry'
@@ -15,6 +15,7 @@ import UserAvatar from './UserAvatar'
 export default function Sidebar({ status, collapsed, onToggle }) {
   const profile = useLocalProfile()
   const { pathname } = useLocation()
+  const navigate = useNavigate()
   const pixelMode = pathname.startsWith('/pixel')
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
@@ -41,6 +42,14 @@ export default function Sidebar({ status, collapsed, onToggle }) {
     { path: '/pixel/settings', label: 'Settings', icon: Settings },
   ] : getSidebarNavItems({ status }).map(item => item.id === 'pixel' ? { ...item, label: displayName } : item)
   function closeSearch() { setSearchOpen(false); setQuery('') }
+  function navigatePanel(event, path) {
+    closeSearch()
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    if (path !== '/' && path !== '/pixel' && pathname === path) {
+      event.preventDefault()
+      navigate('/')
+    }
+  }
   function toggleSearch() {
     if (searchOpen) { closeSearch(); return }
     if (collapsed) onToggle()
@@ -60,7 +69,7 @@ export default function Sidebar({ status, collapsed, onToggle }) {
       </>}
       <button className="pixel-nav-item" title="Search navigation" aria-label="Search" onClick={toggleSearch} aria-expanded={searchOpen}><Search size={16} /><span>Search</span></button>
       {searchOpen && !collapsed && <input autoFocus aria-label="Search navigation" placeholder="Find a page…" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { closeSearch(); event.currentTarget.previousElementSibling?.focus() } }} className="pixel-nav-search" />}
-      {links.filter(item => item.label.toLowerCase().includes(query.toLowerCase())).map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end title={label} aria-label={label} onClick={closeSearch} className={({ isActive }) => `pixel-nav-item ${isActive ? 'is-active' : ''}`}><Icon size={16} /><span>{label}</span></NavLink>)}
+      {links.filter(item => item.label.toLowerCase().includes(query.toLowerCase())).map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end title={label} aria-label={label} onClick={event => navigatePanel(event, path)} className={({ isActive }) => `pixel-nav-item ${isActive ? 'is-active' : ''}`}><Icon size={16} /><span>{label}</span></NavLink>)}
       {!pixelMode && applications.length > 0 && <details className="pixel-applications" open={query ? true : undefined}>
         <summary aria-label="Applications"><span>{collapsed ? '•••' : 'Applications'}</span><svg className="rail-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3 3 3-3"/></svg></summary>
         {applications.filter(link => link.label.toLowerCase().includes(query.toLowerCase())).map(({ key, label, icon: Icon, healthy, url }) => {

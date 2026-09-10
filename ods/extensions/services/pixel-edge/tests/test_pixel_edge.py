@@ -43,6 +43,17 @@ async def _upstream_chat(request):
     request.app["chat_requests"].append(data)
     stream = data.get("stream", False)
 
+    if data.get('trigger_live'):
+        task = {"schemaVersion":1,"runId":"chatcmpl_11111111-2222-4333-8444-555555555555","startedAt":"2026-09-10T20:00:00.000Z","finishedAt":None,"state":"running","calls":1,"failures":0,"blocked":0,"truncated":False,"activities":[{"kind":"read","calls":1,"failures":0,"blocked":0}]}
+        packet = {"object":"ods.task.activity","id":task['runId'],"pixel_task":task}
+        resp = web.StreamResponse(headers={'Content-Type':'text/event-stream'})
+        await resp.prepare(request)
+        await resp.write(('data: ' + json.dumps({**packet,'prompt':'must-not-leak'}) + '\n\n').encode())
+        await resp.write(('data: ' + json.dumps(packet) + '\n\n').encode())
+        await request.app['release_stream'].wait()
+        await resp.write(b'data: {"choices":[{"delta":{"content":"Verified reply"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+        return resp
+
     if data.get("trigger_error"):
         return web.json_response({"error": "upstream-secret-path-/private/token"}, status=500)
 
@@ -1236,6 +1247,20 @@ class TestSyntheticModels(BaseEdgeTest):
 # ---------------------------------------------------------------------------
 
 class TestResponseRewrite(BaseEdgeTest):
+    async def test_live_activity_arrives_before_terminal_answer_without_leaking_extra_fields(self):
+        async with self.client.post('http://localhost/v1/chat/completions',headers=self.auth(),json={'model':'pixel/default','stream':True,'trigger_live':True,'messages':[{'role':'user','content':'observe'}]}) as resp:
+            try:
+                async with async_timeout(2):
+                    line = await resp.content.readline()
+                self.assertIn(b'ods.task.activity',line)
+                self.assertNotIn(b'must-not-leak',line)
+                self.assertFalse(self.up_runner.app['release_stream'].is_set())
+            finally:
+                self.up_runner.app['release_stream'].set()
+            remainder = await resp.text()
+            self.assertIn('Verified reply',remainder)
+            self.assertNotIn('must-not-leak',remainder)
+
     async def test_non_stream_model_rewritten(self):
         async with self.client.post(
             "http://localhost/v1/chat/completions",

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Paperclip } from 'lucide-react'
 
 const EXTENSIONS = /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|toml|xml|html|css|js|jsx|ts|tsx|py|sh|log)$/i
 const MAX_BYTES = 16 * 1024
@@ -41,7 +42,7 @@ export default function PixelTextFileInput({ input, disabled, limit, onInsert })
   const fits = file && input.length + file.text.length + 1 <= limit
   return <div className="pixel-text-file-input text-xs text-theme-text-secondary">
     <input ref={field} type="file" aria-label="Choose text file" accept=".txt,.md,.csv,.tsv,.json,.jsonl,.yaml,.yml,.toml,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.sh,.log" hidden disabled={disabled} onChange={choose}/>
-    <button type="button" className="pixel-metal-control rounded px-2 py-1" disabled={disabled || reading} onClick={() => field.current?.click()}>Add text file</button>
+    <button type="button" aria-label="Add text file" title="Add text file" disabled={disabled || reading} onClick={() => field.current?.click()}><Paperclip size={16}/></button>
     {reading && <span role="status">Reading local file…</span>}
     {error && <p role="alert">{error}</p>}
     {file && <div role="group" aria-label="Review text file">
