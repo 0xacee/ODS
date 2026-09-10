@@ -14,6 +14,7 @@ export default function PixelCommandSearch({ onInsert, onNewTask }) {
   const [index, setIndex] = useState(0)
   useEffect(() => {
     const open = () => {
+      if (dialog.current.open) return
       trigger.current = document.activeElement
       setQuery(''); setIndex(0); setChats(readConversations())
       if (!dialog.current.open) dialog.current.showModal()

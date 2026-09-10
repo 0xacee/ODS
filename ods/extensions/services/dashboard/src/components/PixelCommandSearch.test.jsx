@@ -57,3 +57,16 @@ test('refreshes new saved results without clearing the open search query', () =>
   expect(screen.getByRole('button',{name:/Newly saved task/})).toBeVisible()
   expect(input).toHaveValue('Newly saved')
 })
+
+test.each(['ctrlKey','metaKey'])('repeated %s search shortcuts preserve the query and original focus return target', modifier => {
+  render(<MemoryRouter><button>Original trigger</button><PixelCommandSearch onInsert={() => {}} onNewTask={() => {}}/></MemoryRouter>)
+  const trigger = screen.getByRole('button',{name:'Original trigger'})
+  trigger.focus()
+  fireEvent.keyDown(trigger,{key:'k',[modifier]:true})
+  const field = screen.getByLabelText('Search conversations and actions')
+  fireEvent.change(field,{target:{value:'Research'}})
+  fireEvent.keyDown(field,{key:'k',[modifier]:true})
+  expect(field).toHaveValue('Research')
+  fireEvent.click(screen.getByRole('button',{name:'Close search'}))
+  expect(trigger).toHaveFocus()
+})
