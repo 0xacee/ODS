@@ -497,6 +497,20 @@ def snapshot_changes(previews: pathlib.Path, site_id: str, before_id: str | None
                        "changes":changes}, separators=(",", ":")).encode()
 
 
+def _preview_content_type(target: pathlib.Path, body: bytes) -> str:
+    content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    if target.suffix.lower() in {".md", ".markdown"}:
+        content_type = "text/plain"
+    if content_type.startswith("text/") or content_type == "application/javascript":
+        try:
+            body.decode("utf-8")
+        except UnicodeDecodeError:
+            # Preserve browser encoding detection for non-UTF-8 publications.
+            return content_type
+        return content_type + "; charset=utf-8"
+    return content_type
+
+
 class PreviewHandler(http.server.BaseHTTPRequestHandler):
     server_version = "ODSPreview"
     sys_version = ""
@@ -571,12 +585,7 @@ class PreviewHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         target, body = result
-        content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        # Markdown is documentation, not executable content.  Force
-        # text/plain so browsers never attempt HTML rendering of .md files.
-        suffix = pathlib.PurePosixPath(target.name).suffix.lower()
-        if suffix in {".md", ".markdown"}:
-            content_type = "text/plain; charset=utf-8"
+        content_type = _preview_content_type(target, body)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
