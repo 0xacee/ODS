@@ -34,8 +34,13 @@ export function PixelCodeLines({source, language = 'text', renderLine}) {
   const text = String(source).replace(/\n$/u, '')
   const rows = text.split('\n')
   const render = tokens => rows.map((row, index) => {
-    const content = tokens?.[index]?.map((token, part) => <span className={token.className || undefined} key={part}>{token.text}</span>) || row || ' '
-    return renderLine ? renderLine(content, index) : <span className="code-line" data-line={index + 1} key={index}><span className="code-line-content">{content}{index < rows.length - 1 ? '\n' : ''}</span></span>
+    // Markdown highlighting can normalize CRLF and other source text.
+    // Use tokens only when they reproduce this verified source line exactly.
+    const lineTokens = tokens?.[index]
+    const content = lineTokens?.map(token => token.text).join('') === row
+      ? lineTokens.map((token, part) => <span className={token.className || undefined} key={part}>{token.text}</span>)
+      : row
+    return renderLine ? renderLine(content, index) : <span className="code-line" data-line={index + 1} key={index}><span className="code-line-content">{content}{index < rows.length - 1 || String(source).endsWith('\n') ? '\n' : ''}</span></span>
   })
   if (text.length > 128 * 1024 || language === 'text') return <code>{render()}</code>
   const fence = '`'.repeat([...text.matchAll(/`+/g)].reduce((max,match) => Math.max(max,match[0].length),2) + 1)
