@@ -1,4 +1,4 @@
-.pixel-conversation-navigation .conversation-row .conversation-link { padding-left:64px; }
+.pixel-conversation-navigation .pixel-original-sections .conversation-row .conversation-link { padding-left:64px; }
 .conversation-organize { position:absolute; left:32px; top:50%; transform:translateY(-50%); width:26px; height:26px; display:grid; place-items:center; opacity:0; color:#aeb5be; border:0; border-radius:5px; background:transparent; pointer-events:none; }
 .conversation-row:hover .conversation-organize,.conversation-row:focus-within .conversation-organize { opacity:1; pointer-events:auto; }
 .conversation-organize:hover { color:#fff; background:#ffffff12; }
