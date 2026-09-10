@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { confirmOutcome, readOutcome, readRuntime, runtimeChangeRequest } from './pixelProviderRuntimeStatus'
+import { providerRuntimeErrorMessage, readProviderRuntimeError } from './pixelProviderRuntimeError'
 
 const PATH = '/api/pixel/providers/runtime'
 
@@ -8,7 +9,11 @@ async function request(flight, method, payload) {
   try {
     const response = await fetch(PATH, { method, cache: 'no-store', signal: flight.controller.signal,
       ...(payload ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : {}) })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}`)
+      if (method === 'POST') error.providerReason = await readProviderRuntimeError(response)
+      throw error
+    }
     return await response.json()
   } finally { clearTimeout(flight.timer) }
 }
@@ -78,14 +83,15 @@ export default function usePixelProviderRuntime({ savedRevision, saving, blocked
         setNotice(message)
       }
       setStale(false)
-    } catch {
+    } catch (failure) {
       if (current()) {
         setStale(true)
-        setError(operation === 'inspect'
+        const reported = operation !== 'inspect' && providerRuntimeErrorMessage(failure?.providerReason)
+        setError(reported || (operation === 'inspect'
           ? 'Runtime inspection failed. Saved providers remain separate; refresh runtime status to try again.'
           : controllerReplied
             ? 'The controller replied, but current runtime verification failed. Refresh runtime status before any further change.'
-            : 'The provider change could not be confirmed. It may still be running; refresh runtime status before any further change.')
+            : 'The provider change could not be confirmed. It may still be running; refresh runtime status before any further change.'))
       }
     } finally {
       if (current()) {

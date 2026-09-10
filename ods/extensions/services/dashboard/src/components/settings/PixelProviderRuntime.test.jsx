@@ -29,6 +29,39 @@ const doc = () => ({ configuration: { schemaVersion: 1, revision: 3, enabled: tr
   policy: { allowCloud: false, maxAttempts: 3, deadlineSeconds: 120 } } })
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
+it('shows a bounded controller reason without retrying or declaring the runtime unchanged', async () => {
+  const mock = vi.fn(async (_url, options) => options.method === 'POST'
+    ? new globalThis.Response(JSON.stringify({ detail: { reason: 'provider-inspection-changed', message: 'private-sentinel' } }), { status: 409 })
+    : response(runtimeDoc('applied')))
+  vi.stubGlobal('fetch', mock)
+  render(<PixelProviderRuntime {...props()} />)
+  await waitFor(() => expect(off()).toBeEnabled())
+  confirm('deactivate')
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('provider-inspection-changed'))
+  expect(screen.getByRole('alert')).toHaveTextContent('Refresh runtime status before any further change')
+  expect(screen.getByRole('alert')).not.toHaveTextContent('private-sentinel')
+  expect(posts(mock)).toHaveLength(1)
+  expect(off()).toBeDisabled()
+  expect(gets(mock)).toHaveLength(1)
+})
+
+it.each([
+  '{"detail":{"reason":"private-sentinel","message":"private-sentinel"}}',
+  '{"detail":{"reason":"provider-inspection-changed","message":"' + 'x'.repeat(2048) + '"}}',
+  '{',
+])('keeps unknown, oversized or malformed controller failures uncertain: %s', async raw => {
+  const mock = vi.fn(async (_url, options) => options.method === 'POST'
+    ? new globalThis.Response(raw, { status: 409 }) : response(runtimeDoc('applied')))
+  vi.stubGlobal('fetch', mock)
+  render(<PixelProviderRuntime {...props()} />)
+  await waitFor(() => expect(off()).toBeEnabled())
+  confirm('deactivate')
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('could not be confirmed'))
+  expect(screen.getByRole('alert')).not.toHaveTextContent('private-sentinel')
+  expect(posts(mock)).toHaveLength(1)
+  expect(off()).toBeDisabled()
+})
+
 it('requires explicit confirmation, focuses cancel, and restores focus on Escape', async () => {
   const mock = vi.fn(async () => response(runtimeDoc()))
   vi.stubGlobal('fetch', mock)

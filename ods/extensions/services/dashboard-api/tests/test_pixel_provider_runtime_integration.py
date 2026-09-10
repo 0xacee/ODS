@@ -92,10 +92,27 @@ def test_lifecycle_busy_prevents_controller_change(provider_stack):
     acquired, _ = agent._begin_model_lifecycle('model_switch')
     assert acquired
     try:
-        assert client.post('/api/pixel/providers/runtime', json=CHANGE).status_code == 409
+        response = client.post('/api/pixel/providers/runtime', json=CHANGE)
+        assert response.status_code == 409
+        assert response.json()['detail']['reason'] == 'model-lifecycle-busy'
         assert calls == []
     finally:
         agent._end_model_lifecycle('model_switch')
+
+
+def test_actual_host_preserves_controller_conflict_reason_without_replay(provider_stack, monkeypatch):
+    import pixel_access_client
+    client, _agent, handler, _calls, _state = provider_stack
+    calls = []
+    def conflict(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 409, {'error': 'provider-inspection-changed'}
+    monkeypatch.setattr(pixel_access_client, 'request_access', conflict)
+    response = client.post('/api/pixel/providers/runtime', json=dict(CHANGE, operation='deactivate'))
+    assert response.status_code == 409
+    assert response.json()['detail']['reason'] == 'provider-inspection-changed'
+    assert len(calls) == 1 and handler.posts == 1
+    assert response.headers['cache-control'] == 'no-store'
 
 
 @pytest.mark.parametrize('failure', ['timeout', 'malformed', 'private-error'])
