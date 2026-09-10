@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, X } from 'lucide-react'
+import { Download, Plus, X } from 'lucide-react'
 import { CHAT_KEY, LIBRARY_EVENT, SELECT_EVENT, DELETE_EVENT, readConversations, conversationTitle } from '../lib/pixelConversations'
+
+import { exportConversation } from '../lib/pixelConversationExport'
 
 export default function PixelConversationNavigation({ collapsed }) {
   const [chats, setChats] = useState(readConversations)
   const [active, setActive] = useState('')
   const [pending, setPending] = useState(null)
   const [deleteError, setDeleteError] = useState('')
+  const [exportError, setExportError] = useState('')
   const dialog = useRef(null)
   const trigger = useRef(null)
   useEffect(() => { if (pending) dialog.current?.showModal() }, [pending])
@@ -30,9 +33,13 @@ export default function PixelConversationNavigation({ collapsed }) {
   if (collapsed) return <button className="pixel-nav-item" aria-label="New task" title="New task" onClick={() => window.dispatchEvent(new Event('ods:pixel-new-task'))}><Plus size={16}/></button>
   const chevron = <svg className="rail-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3 3 3-3"/></svg>
   function rows(items, empty) {
-    return <div className="rail-conversations">{items.length ? items.map(chat => <div className="conversation-row" key={chat.chatId}><button className={`conversation-link ${chat.chatId === active ? 'active' : ''}`} title={`${conversationTitle(chat)} · ${chat.messages.filter(item => item.role === 'user').length} turns`} aria-current={chat.chatId === active ? 'page' : undefined} onClick={() => window.dispatchEvent(new CustomEvent(SELECT_EVENT, { detail: chat.chatId }))}><strong>{conversationTitle(chat)}</strong>{chat.inFlight && <span className="rail-task-running" role="status" aria-label="Working"/>}</button><button className="conversation-delete" aria-label={`Delete chat: ${conversationTitle(chat)}`} title="Delete chat" onClick={event => { trigger.current = event.currentTarget; setDeleteError(''); setPending(chat) }}><X size={13}/></button></div>) : <span className="rail-empty">{empty}</span>}</div>
+    return <div className="rail-conversations">{items.length ? items.map(chat => <div className="conversation-row" key={chat.chatId}><button className={`conversation-link ${chat.chatId === active ? 'active' : ''}`} title={`${conversationTitle(chat)} · ${chat.messages.filter(item => item.role === 'user').length} turns`} aria-current={chat.chatId === active ? 'page' : undefined} onClick={() => window.dispatchEvent(new CustomEvent(SELECT_EVENT, { detail: chat.chatId }))}><strong>{conversationTitle(chat)}</strong>{chat.inFlight && <span className="rail-task-running" role="status" aria-label="Working"/>}</button><button className="conversation-delete" aria-label={`Delete chat: ${conversationTitle(chat)}`} title="Delete chat" onClick={event => { trigger.current = event.currentTarget; setDeleteError(''); setPending(chat) }}><X size={13}/></button><button type="button" className="conversation-export" aria-label={'Export chat: ' + conversationTitle(chat)} title="Export this conversation as JSON" onClick={() => {
+      try { exportConversation(chat.chatId); setExportError('') }
+      catch { setExportError('This conversation could not be exported. Your saved history is unchanged.') }
+    }}><Download size={13}/></button></div>) : <span className="rail-empty">{empty}</span>}</div>
   }
   return <div className="pixel-conversation-navigation">
+    {exportError && <p role="alert">{exportError}</p>}
     <dialog ref={dialog} className="chat-delete-dialog" aria-labelledby="delete-chat-title" onCancel={event => { event.preventDefault(); closeDelete() }}>
       <h3 id="delete-chat-title">Delete this chat?</h3>
       <p>{pending && conversationTitle(pending)}</p>

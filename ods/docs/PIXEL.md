@@ -738,3 +738,19 @@ alone is not proof of live usability.
 | Generated secrets and pinned source | `installers/phases/06-directories.sh` |
 | Health and operator handoff | `installers/phases/12-health.sh`, `installers/phases/13-summary.sh` |
 | Focused integration tests | `tests/test-pixel-*.sh` and each service's `tests/` directory |
+
+## Export a browser-local conversation
+
+In the expanded conversation sidebar, use the **Export chat** download control
+on a conversation row. It downloads an ods-pixel-<chat-id>.json file with the
+complete retained messages, unsent draft, and saved task/publication metadata.
+The model's per-request context limit does not truncate this export.
+
+Export reads the latest browser-local record without sending a request to Pixel,
+switching chats, or stopping a running task. Treat an export made during a run as
+a snapshot of what this browser has observed so far. Workspace files, published
+asset bytes, Docker volumes, and server configuration are not included.
+
+Keep the file private if the conversation contains sensitive content. This is a
+portable JSON archive for inspection and backup; automatic import is not
+implemented, and it does not replace an installation or volume backup.

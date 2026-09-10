@@ -94,3 +94,10 @@
   :root[data-wallpaper] .portal-chat { background:#111820ed; }
 }
 @media(prefers-reduced-motion:reduce) { .wallpaper-thumbnail { transition:none; } }
+
+/* Keep export separate from conversation selection and deletion. */
+.pixel-original-sections .conversation-row .conversation-link { padding-right:35px; }
+.conversation-export { position:absolute; right:4px; top:50%; transform:translateY(-50%); width:26px; height:26px; display:grid; place-items:center; opacity:0; color:#aeb5be; border:0; border-radius:5px; background:transparent; pointer-events:none; }
+.conversation-row:hover .conversation-export,.conversation-row:focus-within .conversation-export { opacity:1; pointer-events:auto; }
+.conversation-export:hover { color:#fff; background:#ffffff12; }
+@media(hover:none) { .conversation-export { opacity:1; pointer-events:auto; } }
