@@ -21,6 +21,7 @@ import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
 import PixelPreviewViewport from '../components/PixelPreviewViewport'
+import PixelPreviewHistory from '../components/PixelPreviewHistory'
 import { parseTaskActivity, parseTaskActivityFrame } from '../lib/pixelTaskActivity'
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import PanelResizeHandle from '../components/PanelResizeHandle.jsx'
@@ -1544,6 +1545,7 @@ export default function Pixel({ systemStatus = null }) {
               </button>
               </div>
             </div>
+            {!previewCollapsed && preview && <PixelPreviewHistory previews={messages.map(message => messagePublication(message).publication).filter(Boolean)} selected={preview} onSelect={publication => {setPreview(publication); setPreviewRefresh(0)}}/>}
             {preview && <PixelPreviewViewport
               key={`preview-${preview.siteId}-${previewRefresh}`}
               access={previewAccess}
