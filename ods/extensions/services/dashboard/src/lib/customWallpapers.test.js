@@ -1,4 +1,5 @@
 import {prepareWallpaper, isCustomWallpaper, isStoredWallpaper, MAX_WALLPAPER_VIDEO_BYTES} from './customWallpapers'
+const {HTMLMediaElement, HTMLVideoElement} = window
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals()})
 it('accepts only opaque custom IDs, not URLs or CSS',()=>{
   expect(isCustomWallpaper('custom-11111111-2222-4333-8444-555555555555')).toBe(true)
@@ -9,7 +10,7 @@ function mockVideo({error = false, width = 1920, duration = 3} = {}) {
   const createObjectURL = vi.fn(() => 'blob:qa-video'), revokeObjectURL = vi.fn()
   vi.stubGlobal('URL', Object.assign(class extends URL {}, {createObjectURL, revokeObjectURL}))
   vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(function () {
-    if (this.getAttribute('src')) queueMicrotask(() => error ? this.onerror?.() : this.onloadeddata?.())
+    if (this.getAttribute('src')) window.queueMicrotask(() => error ? this.onerror?.() : this.onloadeddata?.())
   })
   const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
   vi.spyOn(HTMLVideoElement.prototype, 'videoWidth', 'get').mockReturnValue(width)

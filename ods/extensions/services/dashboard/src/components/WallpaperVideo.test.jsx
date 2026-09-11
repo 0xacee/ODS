@@ -1,6 +1,7 @@
 import {render, act, fireEvent} from '@testing-library/react'
 import WallpaperVideo from './WallpaperVideo'
 import {useTheme} from '../contexts/ThemeContext'
+const {HTMLMediaElement} = window
 vi.mock('../contexts/ThemeContext', () => ({useTheme:vi.fn()}))
 let media, theme
 beforeEach(() => {
