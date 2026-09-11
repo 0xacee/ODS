@@ -14,6 +14,8 @@ afterEach(() => {cleanup(); vi.useRealTimers(); vi.unstubAllGlobals()})
 it.each([
   ['2026-08-31T23:30:00Z', '2026-08-01', '2026-08-31', 'August 2026'],
   ['2026-09-01T00:30:00Z', '2026-09-01', '2026-09-30', 'September 2026'],
+  ['2026-12-31T23:30:00Z', '2026-12-01', '2026-12-31', 'December 2026'],
+  ['2027-01-01T00:30:00Z', '2027-01-01', '2027-01-31', 'January 2027'],
 ])('requests and labels the current UTC month at %s', async (instant, start, end, label) => {
   vi.setSystemTime(new Date(instant))
   await act(async () => {render(<Usage/>)})
