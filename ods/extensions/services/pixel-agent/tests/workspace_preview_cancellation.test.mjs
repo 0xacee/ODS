@@ -53,3 +53,26 @@ test('cancellation settles a stalled publication socket without claiming host ca
     fs.rmSync(root, {recursive:true, force:true});
   }
 });
+
+test('a late valid receipt cannot revive a cancelled publication wait', async () => {
+  const controller = new AbortController();
+  const sha256 = 'a'.repeat(64);
+  const siteId = 'site-' + sha256.slice(0, 24);
+  const receipt = {
+    schemaVersion:1, kind:'ods-pixel-workspace-preview', status:'succeeded',
+    relativeDirectory:'site', siteId, port:9437,
+    url:`http://${siteId}.localhost:9437/${siteId}/`,
+    files:1, bytes:40, sha256, entryFile:'index.html', entrySha256:'b'.repeat(64),
+    httpStatus:200, readbackVerified:true, executable:false, overwritten:false,
+    boundary:testing.BOUNDARY,
+  };
+  const tool = createWorkspacePreviewTool({request:async () => {
+    controller.abort();
+    return receipt;
+  }});
+  const result = await tool.execute('late-receipt', {relativeDirectory:'site'}, controller.signal);
+  assert.equal(result.isError, true);
+  assert.equal(result.details.errorCode, 'cancelled');
+  assert.equal(result.details.siteId, undefined);
+  assert.match(result.content[0].text, /may still complete/);
+});
