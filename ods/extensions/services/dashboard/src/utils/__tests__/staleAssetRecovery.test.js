@@ -82,7 +82,7 @@ describe('browser-denied sessionStorage access', () => {
   beforeEach(() => {
     descriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
     Object.defineProperty(globalThis, 'sessionStorage', {configurable:true, get() {
-      throw new DOMException('Storage access denied', 'SecurityError')
+      throw new globalThis.DOMException('Storage access denied', 'SecurityError')
     }})
   })
   afterEach(() => {Object.defineProperty(globalThis, 'sessionStorage', descriptor)})
