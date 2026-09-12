@@ -769,12 +769,13 @@ async def handle_chat_completions(request: web.Request):
         return web.json_response({"error": "request too large"}, status=413)
 
     try:
-        body = await request.read()
+        # Enforce this route's cap for both Content-Length and chunked bodies.
+        # Request.read() otherwise applies aiohttp's default 1 MiB cap first.
+        body = await _read_bounded(request.content, _MAX_BODY)
+    except ValueError:
+        return web.json_response({"error": "request too large"}, status=413)
     except Exception:
         return web.json_response({"error": "bad request"}, status=400)
-
-    if len(body) > _MAX_BODY:
-        return web.json_response({"error": "request too large"}, status=413)
 
     try:
         data = json.loads(body)

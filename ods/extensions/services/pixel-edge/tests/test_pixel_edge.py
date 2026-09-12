@@ -186,7 +186,7 @@ async def _start_upstream():
     fd, path = tempfile.mkstemp(suffix=".sock")
     os.close(fd)
     os.unlink(path)
-    app = web.Application()
+    app = web.Application(client_max_size=2 * 1024 * 1024 + 1)
     app["chat_requests"] = []
     app["cancel_users"] = []
     app["native_runs"] = {}
@@ -1207,6 +1207,50 @@ class TestHeaderStripping(BaseEdgeTest):
 # ---------------------------------------------------------------------------
 
 class TestSizeLimit(BaseEdgeTest):
+
+    async def test_large_valid_body_reaches_upstream(self):
+        for size in (1024 * 1024 + 17, 2 * 1024 * 1024):
+            for chunked in (False, True):
+                with self.subTest(size=size, chunked=chunked):
+                    payload = {"model": "pixel/default", "messages": [
+                        {"role": "user", "content": "x"}]}
+                    raw = json.dumps(payload).encode()
+                    payload["messages"][0]["content"] += "x" * (1024 * 1024 - len(raw))
+                    raw = json.dumps(payload).encode()
+                    raw += b" " * (size - len(raw))
+                    self.assertEqual(len(raw), size)
+
+                    async def chunks():
+                        for offset in range(0, len(raw), 65536):
+                            yield raw[offset:offset + 65536]
+
+                    async with self.client.post(
+                        "http://localhost/v1/chat/completions",
+                        headers={**self.auth(), "Content-Type": "application/json"},
+                        data=chunks() if chunked else raw,
+                    ) as response:
+                        self.assertEqual(response.status, 200, await response.text())
+                    received = self.up_runner.app["chat_requests"][-1]
+                    self.assertTrue(received["messages"][0]["content"].startswith(
+                        payload["messages"][0]["content"]))
+                    self.assertEqual(received["model"], "openclaw/default")
+
+    async def test_chunked_over_limit_returns_413_without_upstream(self):
+        raw = b"x" * (2 * 1024 * 1024 + 1)
+
+        async def chunks():
+            for offset in range(0, len(raw), 65536):
+                yield raw[offset:offset + 65536]
+
+        async with self.client.post(
+            "http://localhost/v1/chat/completions",
+            headers={**self.auth(), "Content-Type": "application/json"},
+            data=chunks(),
+        ) as response:
+            self.assertEqual(response.status, 413)
+            self.assertEqual(await response.json(), {"error": "request too large"})
+        self.assertEqual(self.up_runner.app["chat_requests"], [])
+
     async def test_oversized_body_rejected(self):
         big = json.dumps({"model": "pixel/default",
                           "messages": [{"role": "user", "content": "x" * (2 * 1024 * 1024 + 1)}]})
