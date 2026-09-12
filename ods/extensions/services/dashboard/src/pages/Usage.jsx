@@ -166,7 +166,7 @@ function useUsageReport(range, reloadToken = 0) {
       let timeoutId
       const deadline = new Promise((_, reject) => {
         cancelLoad = () => {
-          reject(new DOMException('Usage poll cancelled', 'AbortError'))
+          reject(new globalThis.DOMException('Usage poll cancelled', 'AbortError'))
           controller.abort()
         }
         timeoutId = window.setTimeout(() => {
