@@ -16,6 +16,7 @@ import re
 import secrets
 import shlex
 import tempfile
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -1164,7 +1165,16 @@ def _get_local_session_status(agent: str) -> dict:
     }
 
 
+_accumulated_turns_lock = threading.Lock()
+
+
 def _get_local_accumulated_turns(agent: str) -> int:
+    # Summary handlers run in worker threads; serialize checkpoint updates.
+    with _accumulated_turns_lock:
+        return _read_local_accumulated_turns(agent)
+
+
+def _read_local_accumulated_turns(agent: str) -> int:
     """Count total turns across ALL session files for a local-model agent,
     with a persistent accumulator to survive session file cleanup/purge.
     Unlike _get_local_session_status (current session only), this gives the
@@ -1179,9 +1189,11 @@ def _get_local_accumulated_turns(agent: str) -> int:
     # whose OpenClaw gateway doesn't log user messages in the JSONL.
     import glob
     files = glob.glob(os.path.join(sessions_dir, "*.jsonl"))
-    user_turns = 0
-    assistant_turns = 0
+    file_counts = {}
+    scan_failed = False
     for fpath in files:
+        user_turns = 0
+        assistant_turns = 0
         try:
             with open(fpath) as f:
                 for line in f:
@@ -1198,9 +1210,17 @@ def _get_local_accumulated_turns(agent: str) -> int:
                                 assistant_turns += 1
                     except (json.JSONDecodeError, KeyError, TypeError):
                         pass  # skip malformed JSONL lines
-        except Exception:
+        except (OSError, UnicodeError):
             log.warning(f"[SESSION] Failed to read session file: {fpath}")
-    current_file_turns = user_turns if user_turns > 0 else assistant_turns
+            scan_failed = True
+        file_counts[os.path.basename(fpath)] = (user_turns, assistant_turns)
+    use_user_turns = any(counts[0] > 0 for counts in file_counts.values())
+    count_role = "user" if use_user_turns else "assistant"
+    current_counts = {
+        name: counts[0 if use_user_turns else 1]
+        for name, counts in file_counts.items()
+    }
+    current_file_turns = sum(current_counts.values())
 
     # Persistent accumulator — survives session purge (250KB/24h cleanup)
     acc_path = os.path.join(os.path.dirname(__file__), "data", f"{agent}-accumulated-turns.json")
@@ -1213,14 +1233,30 @@ def _get_local_accumulated_turns(agent: str) -> int:
     last_file_turns = acc.get("last_file_turns", 0)
     total = acc.get("total", 0)
 
-    if current_file_turns >= last_file_turns:
-        # Normal growth or no change — add the delta
-        total += (current_file_turns - last_file_turns)
-    else:
-        # Session files were purged (current < last) — add what's on disk now
-        total += current_file_turns
+    if scan_failed:
+        # A temporarily unreadable file is not evidence of cleanup. Keep the
+        # last complete snapshot so its recovery cannot count old turns again.
+        return total
 
-    acc = {"total": total, "last_file_turns": current_file_turns}
+    if "file_turns" in acc:
+        previous_counts = acc["file_turns"]
+        # Keep the existing user/assistant fallback rule. If its source changes,
+        # establish a fresh baseline instead of comparing unlike counters.
+        delta = (
+            sum(max(count - previous_counts.get(name, 0), 0)
+                for name, count in current_counts.items())
+            if not previous_counts or acc["count_role"] == count_role else 0
+        )
+    else:
+        # Migrate the scalar accumulator without recounting surviving history.
+        # Growth can be credited; a smaller snapshot cannot identify new work.
+        delta = max(current_file_turns - last_file_turns, 0)
+    total += delta
+
+    acc = {
+        "total": total, "last_file_turns": current_file_turns,
+        "count_role": count_role, "file_turns": current_counts,
+    }
     try:
         os.makedirs(os.path.dirname(acc_path), exist_ok=True)
         with open(acc_path, "w") as f:
