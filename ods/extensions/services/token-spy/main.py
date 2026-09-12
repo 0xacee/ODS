@@ -1100,38 +1100,39 @@ def _get_local_session_status(agent: str) -> dict:
         return None
 
     largest = files[0]
-    try:
-        with open(largest) as f:
-            lines = f.readlines()
-    except Exception:
-        log.warning(f"[SESSION] Failed to read session file: {largest}")
-        return None
-
     user_turns = 0
     assistant_turns = 0
     history_chars = 0
     tool_results = 0
-    for line in lines:
-        try:
-            d = json.loads(line)
-            if d.get("type") == "message":
-                msg = d.get("message", {})
-                if isinstance(msg, str):
-                    msg = json.loads(msg)
-                role = msg.get("role", "")
-                if role == "user":
-                    user_turns += 1
-                elif role == "assistant":
-                    assistant_turns += 1
-                if role in ("toolResult", "tool") or msg.get("tool_call_id"):
-                    tool_results += 1
-                c = msg.get("content", "")
-                if isinstance(c, list):
-                    history_chars += sum(len(str(x)) for x in c)
-                elif isinstance(c, str):
-                    history_chars += len(c)
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass  # skip malformed JSONL lines
+    total_lines = 0
+    try:
+        with open(largest) as session_file:
+            for line in session_file:
+                total_lines += 1
+                try:
+                    d = json.loads(line)
+                    if d.get("type") == "message":
+                        msg = d.get("message", {})
+                        if isinstance(msg, str):
+                            msg = json.loads(msg)
+                        role = msg.get("role", "")
+                        if role == "user":
+                            user_turns += 1
+                        elif role == "assistant":
+                            assistant_turns += 1
+                        if role in ("toolResult", "tool") or msg.get("tool_call_id"):
+                            tool_results += 1
+                        c = msg.get("content", "")
+                        if isinstance(c, list):
+                            history_chars += sum(len(str(x)) for x in c)
+                        elif isinstance(c, str):
+                            history_chars += len(c)
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass  # skip malformed JSONL lines
+
+    except (OSError, UnicodeError):
+        log.warning(f"[SESSION] Failed to read session file: {largest}")
+        return None
 
     limit = get_agent_setting(agent, "session_char_limit") or AUTO_RESET_HISTORY_CHARS
     if tool_results >= 480:
@@ -1162,7 +1163,7 @@ def _get_local_session_status(agent: str) -> dict:
         "is_local_model": agent in LOCAL_MODEL_AGENTS,
         "tool_results": tool_results,
         "file_bytes": os.path.getsize(largest),
-        "total_lines": len(lines),
+        "total_lines": total_lines,
         "session_files": len(files),
     }
 
