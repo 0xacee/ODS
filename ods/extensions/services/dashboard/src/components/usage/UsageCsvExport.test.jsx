@@ -13,7 +13,7 @@ async function exportRow(row) {
   fireEvent.click(screen.getByRole('button', {name:'Export CSV'}))
   const blob = createObjectURL.mock.calls[0][0]
   return new Promise((resolve, reject) => {
-    const reader = new FileReader()
+    const reader = new globalThis.FileReader()
     reader.onload = () => resolve(reader.result)
     reader.onerror = () => reject(reader.error)
     reader.readAsText(blob)
