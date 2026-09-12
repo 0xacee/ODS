@@ -4,6 +4,7 @@ M3: API Privacy Shield - HTTP Proxy (ODS Integration)
 FastAPI-based proxy with connection pooling and PII caching.
 """
 
+import codecs
 import logging
 import os
 import re
@@ -356,7 +357,7 @@ async def proxy(request: Request, path: str):
             "X-Privacy-Shield": "active",
             "X-PII-Scrubbed": str(metadata.get("pii_count", 0)),
             "X-Processing-Time-Ms": f"{overhead_ms:.2f}",
-            "Content-Type": content_type,
+            "content-type": content_type,
         }
     )
 
@@ -391,6 +392,8 @@ async def proxy(request: Request, path: str):
                 # do_restore is only true when the body is uncompressed text,
                 # so raw bytes == decoded bytes here and stay byte-exact.
                 restorer = StreamRestorer(shield.detector, charset)
+                encoder = codecs.getincrementalencoder(charset)(errors="replace")
+                emitted = False
                 seen = 0
                 async for chunk in chunks:
                     seen += len(chunk)
@@ -400,18 +403,19 @@ async def proxy(request: Request, path: str):
                         # Continue draining the SAME iterator — do NOT
                         # re-iterate the upstream response.
                         tail = restorer.finalize()
-                        if tail:
-                            yield tail.encode(charset, "replace")
+                        if tail or emitted:
+                            yield encoder.encode(tail, final=True)
                         yield chunk
                         async for rest in chunks:
                             yield rest
                         return
                     out = restorer.feed(chunk)
                     if out:
-                        yield out.encode(charset, "replace")
+                        yield encoder.encode(out)
+                        emitted = True
                 tail = restorer.finalize()
-                if tail:
-                    yield tail.encode(charset, "replace")
+                if tail or emitted:
+                    yield encoder.encode(tail, final=True)
             else:
                 # Transparent byte-for-byte passthrough (compressed/binary):
                 # raw bytes preserve the original transport encoding.
