@@ -274,6 +274,32 @@ describe('Usage page', () => {
     expect(screen.getAllByText('No verified data for this period')).toHaveLength(2)
     tab('Models');expect(screen.getByText('No tracked usage for this period')).toBeVisible()
   })
+  it('keeps the current report when comparison and readiness requests fail', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      const text = String(url)
+      if (text.includes('/api/usage/readiness')) {
+        throw new TypeError('readiness connection failed')
+      }
+      if (text.includes('start=2026-04-01')) {
+        throw new TypeError('comparison connection failed')
+      }
+      return {
+        ok: true,
+        json: async () => currentReport,
+      }
+    }))
+
+    render(<Usage status={{}} />)
+
+    await ready()
+    tab('Models')
+    expect(screen.getByText('gpt-4o')).toBeInTheDocument()
+    tab('Costs')
+    expect(screen.getByText('$3.75')).toBeInTheDocument()
+    expect(screen.getByText('Usage readiness API is unavailable.')).toBeInTheDocument()
+    expect(screen.queryByText('comparison connection failed')).not.toBeInTheDocument()
+  })
+
   it('filters by query, provider, service and source',async()=>{
     installFetchMock();render(<Usage/>);await ready();tab('Models')
     fireEvent.change(screen.getByPlaceholderText('Search models...'),{target:{value:'qwen'}})

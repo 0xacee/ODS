@@ -177,21 +177,38 @@ function useUsageReport(range, reloadToken = 0) {
       if (!silent) setLoading(true)
       if (!silent) setError(null)
       try {
-        // Include response bodies in the deadline; only the winning poll
-        // may publish state or append history.
         const pending = (async () => {
-          const [currentRes, previousRes, readinessRes] = await Promise.all([
+          const [currentResult, previousResult, readinessResult] = await Promise.allSettled([
             fetch(`/api/usage/report?start=${range.start}&end=${range.end}`, {signal:controller.signal}),
             fetch(`/api/usage/report?start=${prevRange.start}&end=${prevRange.end}`, {signal:controller.signal}),
             fetch('/api/usage/readiness', {signal:controller.signal}),
           ])
+          if (currentResult.status === 'rejected') throw currentResult.reason
+          const currentRes = currentResult.value
           if (!currentRes.ok) throw new Error(`Usage API returned HTTP ${currentRes.status}`)
           const current = await currentRes.json()
-          const previous = previousRes.ok ? await previousRes.json() : null
-          const usageReadiness = readinessRes.ok ? await readinessRes.json() : {
-            ...EMPTY_READINESS,
-            status: 'unavailable',
-            detail: `Usage readiness API returned HTTP ${readinessRes.status}`,
+          const previous = previousResult.status === 'fulfilled' && previousResult.value.ok
+            ? await previousResult.value.json().catch(() => null)
+            : null
+          let usageReadiness
+          if (readinessResult.status === 'rejected') {
+            usageReadiness = {
+              ...EMPTY_READINESS,
+              status: 'unavailable',
+              detail: 'Usage readiness API is unavailable.',
+            }
+          } else if (readinessResult.value.ok) {
+            usageReadiness = await readinessResult.value.json().catch(() => ({
+              ...EMPTY_READINESS,
+              status: 'unavailable',
+              detail: 'Usage readiness API returned an invalid response.',
+            }))
+          } else {
+            usageReadiness = {
+              ...EMPTY_READINESS,
+              status: 'unavailable',
+              detail: `Usage readiness API returned HTTP ${readinessResult.value.status}`,
+            }
           }
           return {current, previous, usageReadiness}
         })()
