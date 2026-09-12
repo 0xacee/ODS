@@ -441,7 +441,7 @@ async def _poll_remote_agents():
                 if needs_reset:
                     reason = f"tool loop ({tool_results} calls)" if tool_results >= 480 else f"history {chars:,} >= {limit:,}"
                     log.warning(f"[REMOTE-POLL] {agent}: auto-reset — {reason}")
-                    _kill_session(agent, reason=f"auto-reset ({reason})")
+                    await asyncio.to_thread(_kill_session, agent, reason=f"auto-reset ({reason})")
                     _last_auto_reset[agent] = time.time()
                 elif chars > 0:
                     log.info(f"[REMOTE-POLL] {agent}: {chars:,} / {limit:,} chars ({chars*100//limit}%)")
@@ -449,7 +449,9 @@ async def _poll_remote_agents():
             for agent in AGENT_SESSION_DIRS:
                 if agent == AGENT_NAME or agent in REMOTE_AGENTS:
                     continue  # skip agents that go through this proxy instance
-                status = _get_local_session_status(agent, include_session_id=True)
+                status = await asyncio.to_thread(
+                    _get_local_session_status, agent, include_session_id=True,
+                )
                 if not status:
                     continue
                 chars = status.get("current_history_chars", 0)
@@ -462,8 +464,8 @@ async def _poll_remote_agents():
                 if needs_reset:
                     reason = f"tool loop ({tool_results} calls)" if tool_results >= 480 else f"history {chars:,} >= {limit:,}"
                     log.warning(f"[LOCAL-POLL] {agent}: auto-reset — {reason}")
-                    result = _kill_session(
-                        agent, reason=f"auto-reset ({reason})",
+                    result = await asyncio.to_thread(
+                        _kill_session, agent, reason=f"auto-reset ({reason})",
                         session_id=status["_reset_session_id"],
                     )
                     if result.get("action") == "killed":
