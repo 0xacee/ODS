@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from filters import apply_filters
 from providers import ProviderRegistry
+from providers.anthropic import cumulative_usage_update
 from routed_telemetry import (
     TelemetryValidationError,
     routed_event_to_usage,
@@ -745,8 +746,10 @@ async def _handle_streaming(client, raw_body, headers, model, sys_analysis,
 
                         elif current_event == "message_delta":
                             delta_usage = data.get("usage", {})
-                            if delta_usage.get("output_tokens") is not None:
-                                usage["output_tokens"] = delta_usage["output_tokens"]
+                            # Anthropic deltas carry cumulative counters, including
+                            # revised input/cache usage. Omitted fields retain
+                            # the last observation; explicit zero is authoritative.
+                            usage.update(cumulative_usage_update(delta_usage))
                             stop = data.get("delta", {}).get("stop_reason")
                             if stop:
                                 usage["stop_reason"] = stop
