@@ -7,7 +7,7 @@ afterEach(() => {cleanup();vi.unstubAllGlobals()})
 it('drives both mascots from validated live task activity counters', async () => {
   localStorage.clear()
   let stream
-  const body = new ReadableStream({start(controller) {stream = controller}})
+  const body = new globalThis.ReadableStream({start(controller) {stream = controller}})
   vi.stubGlobal('fetch', vi.fn(async url => String(url).endsWith('/chat/stream')
     ? {ok:true,headers:new Map([['content-type','text/event-stream']]),body}
     : {ok:true,json:async () => ({available:true})}))
