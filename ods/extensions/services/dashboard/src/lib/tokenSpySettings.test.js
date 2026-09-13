@@ -60,3 +60,17 @@ test('display headings are not parsed back into agent identifiers', async () => 
     agents: { [agent]: { session_char_limit: null, poll_interval_minutes: null } },
   })
 })
+
+test('agent names remain literal text and special object keys survive saving', async () => {
+  const names = ['<em>Daily</em> & helper', '__proto__', 'constructor']
+  const agents = Object.fromEntries(names.map(name => [name, {
+    session_char_limit: 30000, poll_interval_minutes: 2,
+  }]))
+  const { window, fetch, groups } = await settingsPage(agents)
+  expect(groups.map(group => group.querySelector('h4').textContent))
+    .toEqual(names.map(name => `${name} Override`))
+  expect(groups[0].querySelector('em')).toBeNull()
+  await window.saveSettings()
+  const [, request] = fetch.mock.calls.find(([, options]) => options?.method === 'POST')
+  expect(JSON.parse(request.body).agents).toEqual(agents)
+})
