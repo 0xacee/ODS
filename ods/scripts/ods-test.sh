@@ -243,7 +243,11 @@ test_docker() {
     print_test "Docker Daemon" "pass"
     
     local running_count
-    running_count=$(timeout 10 docker ps --format '{{.Names}}' 2>/dev/null | wc -l)
+    if ! running_count=$(timeout 10 docker ps --format '{{.Names}}' 2>/dev/null | wc -l); then
+        record_result "Running Containers" "fail" "container listing failed"
+        print_test "Running Containers" "fail" "container listing failed"
+        return 0
+    fi
     record_result "Running Containers" "pass" "$running_count containers"
     print_test "Running Containers" "pass" "$running_count containers"
     return 0  # results are tallied by record_result; never surface a status to set -e
@@ -259,7 +263,7 @@ test_gpu() {
     fi
     
     local gpu_info
-    gpu_info=$(timeout 10 nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null | head -1)
+    gpu_info=$(timeout 10 nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null | head -1) || gpu_info=""
     
     if [[ -n "$gpu_info" ]]; then
         local name mem_used mem_total util mem_pct
@@ -267,6 +271,11 @@ test_gpu() {
         mem_used=$(echo "$gpu_info" | cut -d',' -f2 | xargs | cut -d' ' -f1)
         mem_total=$(echo "$gpu_info" | cut -d',' -f3 | xargs | cut -d' ' -f1)
         
+        if [[ ! "$mem_used" =~ ^[0-9]+$ || ! "$mem_total" =~ ^[0-9]+$ ]] || [[ "$mem_total" -eq 0 ]]; then
+            record_result "GPU Memory" "fail" "invalid memory telemetry"
+            print_test "GPU Memory" "fail" "invalid memory telemetry"
+            return 0
+        fi
         mem_pct=$(( mem_used * 100 / mem_total ))
         
         record_result "GPU Available" "pass" "$name"
@@ -302,7 +311,7 @@ test_llm() {
     fi
 
     local model_id
-    model_id=$(curl -s --max-time 10 "$LLM_URL/v1/models" 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    model_id=$(curl -s --max-time 10 "$LLM_URL/v1/models" 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4) || model_id=""
     model_id="${model_id:-local}"
 
     local payload="{\"model\": \"$model_id\", \"messages\": [{\"role\": \"user\", \"content\": \"Say hello\"}], \"max_tokens\": 10}"
@@ -311,11 +320,11 @@ test_llm() {
     response=$(curl -s --max-time 30 \
         -X POST "$LLM_URL/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d "$payload" 2>/dev/null)
+        -d "$payload" 2>/dev/null) || response=""
 
     if echo "$response" | grep -q '"content"'; then
         local tokens_used
-        tokens_used=$(echo "$response" | grep -o '"total_tokens":[0-9]*' | cut -d: -f2)
+        tokens_used=$(echo "$response" | grep -o '"total_tokens":[0-9]*' | cut -d: -f2) || tokens_used="unknown"
         record_result "LLM Inference" "pass" "${tokens_used} tokens"
         print_test "LLM Inference" "pass" "${tokens_used} tokens"
     else
@@ -342,7 +351,7 @@ test_tool_calling() {
     response=$(curl -s --max-time 30 \
         -X POST "$LLM_URL/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d "$payload" 2>/dev/null)
+        -d "$payload" 2>/dev/null) || response=""
     
     if echo "$response" | grep -q '"tool_calls"'; then
         record_result "Tool Calling" "pass" "function called"
@@ -390,7 +399,7 @@ test_tts() {
     
     if echo "$response" | grep -q '"voices"'; then
         local voice_count
-        voice_count=$(echo "$response" | grep -o '"voice_id"' | wc -l)
+        voice_count=$(echo "$response" | grep -o '"voice_id"' | wc -l) || voice_count=0
         record_result "TTS Voices" "pass" "$voice_count voices"
         print_test "TTS Voices" "pass" "$voice_count voices"
     else
@@ -469,7 +478,7 @@ test_voice_roundtrip() {
     llm_response=$(curl -s --max-time 15 \
         -X POST "$LLM_URL/v1/chat/completions" \
         -H "Content-Type: application/json" \
-        -d "$llm_payload" 2>/dev/null)
+        -d "$llm_payload" 2>/dev/null) || llm_response=""
     
     if ! echo "$llm_response" | grep -q '"content"'; then
         record_result "Voice Round-Trip" "fail" "LLM step failed"
@@ -483,7 +492,7 @@ test_voice_roundtrip() {
     tts_response=$(curl -s --max-time 15 \
         -X POST "http://${TTS_HOST}:${TTS_PORT}/v1/audio/speech" \
         -H "Content-Type: application/json" \
-        -d "$tts_payload" 2>/dev/null)
+        -d "$tts_payload" 2>/dev/null) || tts_response=""
     
     end_time=$(_now_ms)
     duration_ms=$(( end_time - start_time ))

@@ -91,3 +91,37 @@ run_target >"$TMP_DIR/out.txt" 2>&1 || rc=$?
 grep -q '> Privacy Shield M3' "$TMP_DIR/out.txt" || fail "text mode stopped before the Privacy Shield section"
 grep -qE 'Passed:.*Failed:' "$TMP_DIR/out.txt" || fail "text mode printed no summary line"
 pass "text mode runs every section and prints the summary"
+
+# Non-quick execution must also finish when inference curl exits nonzero.
+run_full() {
+    (
+        cd "$INSTALL" || exit 1
+        ODS_DIR="$INSTALL" ENV_FILE="$INSTALL/.env" PATH="$INSTALL/bin:$PATH" \
+            "$BASH" scripts/ods-test.sh --json
+    )
+}
+assert_full_report() {
+    local label="$1" expected="$2" rc=0
+    run_full >"$TMP_DIR/full.json" 2>"$TMP_DIR/full.err" || rc=$?
+    [[ "$rc" -eq 1 ]] || fail "$label should exit 1, got $rc"
+    python3 - "$TMP_DIR/full.json" "$expected" <<'PY' || fail "$label lost its failure report"
+import json, sys
+with open(sys.argv[1]) as stream:
+    doc = json.load(stream)
+results = {r['name']: r for r in doc['results']}
+assert results[sys.argv[2]]['status'] == 'fail', results
+assert 'LiveKit Health' in results, results
+assert doc['summary']['failed'] > 0, doc
+PY
+    pass "$label records failure and reaches the last section"
+}
+assert_full_report "non-quick inference transport failure" "Tool Calling"
+
+# A daemon can answer info then fail ps; an installed GPU driver may be broken.
+printf '#!/bin/sh\n[ "$1" = info ] && exit 0\nexit 1\n' > "$INSTALL/bin/docker"
+assert_full_report "Docker listing failure" "Running Containers"
+printf '#!/bin/sh\nexit 9\n' > "$INSTALL/bin/nvidia-smi"
+chmod +x "$INSTALL/bin/nvidia-smi"
+assert_full_report "GPU command failure" "NVIDIA GPU"
+printf '#!/bin/sh\necho "Test GPU, 0 MiB, 0 MiB, 0"\n' > "$INSTALL/bin/nvidia-smi"
+assert_full_report "invalid GPU memory capacity" "GPU Memory"
