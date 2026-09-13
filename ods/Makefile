@@ -47,6 +47,8 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== ods-doctor rootless subordinate IDs ==="
 	@bash tests/test-ods-doctor-rootless-subid.sh
+	@echo "=== ods-test.sh reports HTTP 000 for a failed probe ==="
+	@bash tests/test-ods-test-http-code.sh
 	@echo "=== ods-test.sh completes and reports when checks fail ==="
 	@bash tests/test-ods-test-complete-run.sh
 	@echo "=== phase 10 skips templated system units in the user scope ==="
