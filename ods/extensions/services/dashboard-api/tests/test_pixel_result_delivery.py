@@ -5,7 +5,10 @@ import pytest
 
 from routers import pixel
 from test_pixel import ConnectedRequest, FakeClient, FakeResponse, stream_body
-from test_pixel_chat_results import IDENTITY, OWNER, body, store  # noqa: F401
+import test_pixel_chat_results
+from test_pixel_chat_results import IDENTITY, OWNER, body
+
+store = test_pixel_chat_results.store
 
 
 @pytest.mark.parametrize("terminal", [True, False])
