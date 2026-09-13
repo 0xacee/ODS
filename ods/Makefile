@@ -47,6 +47,8 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== ods-doctor rootless subordinate IDs ==="
 	@bash tests/test-ods-doctor-rootless-subid.sh
+	@echo "=== ods-test.sh completes and reports when checks fail ==="
+	@bash tests/test-ods-test-complete-run.sh
 	@echo "=== phase 10 skips templated system units in the user scope ==="
 	@bash tests/test-phase10-skip-templated-user-units.sh
 	@echo "=== Docker rootless bind-mount ownership ==="
