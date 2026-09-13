@@ -2383,17 +2383,20 @@ async function loadSettingsUI() {
       const cfg = s.agents[agent];
       const div = document.createElement('div');
       div.className = 'setting-group';
-      const safeId = agent.replace(/[^a-zA-Z0-9]/g, '-');
+      // Different names can normalize to the same id (e.g. a-b and a_b).
+      const safeId = 'agent-' + idx;
+      div.dataset.agent = agent;
       div.innerHTML =
-        '<h4>' + agent + ' Override</h4>' +
+        '<h4></h4>' +
         '<div class="setting-row">' +
           '<label>Session char limit</label>' +
-          '<div><input type="number" id="set-' + safeId + '-limit" step="10000" min="10000" placeholder="inherit" > <span class="unit">chars</span> <span id="set-' + safeId + '-limit-tok" class="unit" style="color:#58a6ff"></span></div>' +
+          '<div><input type="number" data-setting="limit" id="set-' + safeId + '-limit" step="10000" min="10000" placeholder="inherit" > <span class="unit">chars</span> <span id="set-' + safeId + '-limit-tok" class="unit" style="color:#58a6ff"></span></div>' +
         '</div>' +
         '<div class="setting-row">' +
           '<label>Poll frequency</label>' +
-          '<div><input type="number" id="set-' + safeId + '-poll" step="1" min="1" max="60" placeholder="inherit"> <span class="unit">min</span></div>' +
+          '<div><input type="number" data-setting="poll" id="set-' + safeId + '-poll" step="1" min="1" max="60" placeholder="inherit"> <span class="unit">min</span></div>' +
         '</div>';
+      div.querySelector('h4').textContent = agent + ' Override';
       grid.appendChild(div);
       // Set values
       document.getElementById('set-' + safeId + '-limit').value = cfg.session_char_limit != null ? cfg.session_char_limit : '';
@@ -2415,24 +2418,21 @@ async function saveSettings() {
   btn.disabled = true;
   btn.textContent = 'Saving...';
 
-  const getVal = (id) => {
-    const el = document.getElementById(id);
+  const inputValue = (el) => {
     if (!el) return null;
     const v = el.value;
     return v === '' ? null : parseInt(v, 10);
   };
+  const getVal = id => inputValue(document.getElementById(id));
 
   // Build agents object from current UI
-  const agents = {};
-  const groups = document.querySelectorAll('.setting-group');
+  const agents = Object.create(null);
+  const groups = document.querySelectorAll('.setting-group[data-agent]');
   groups.forEach(g => {
-    const h4 = g.querySelector('h4');
-    if (!h4 || h4.textContent === 'Global Defaults') return;
-    const agent = h4.textContent.replace(' Override', '');
-    const safeId = agent.replace(/[^a-zA-Z0-9]/g, '-');
+    const agent = g.dataset.agent;
     agents[agent] = {
-      session_char_limit: getVal('set-' + safeId + '-limit'),
-      poll_interval_minutes: getVal('set-' + safeId + '-poll'),
+      session_char_limit: inputValue(g.querySelector('[data-setting="limit"]')),
+      poll_interval_minutes: inputValue(g.querySelector('[data-setting="poll"]')),
     };
   });
 
