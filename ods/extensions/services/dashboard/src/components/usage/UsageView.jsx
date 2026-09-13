@@ -1,6 +1,7 @@
 import {useEffect, useMemo, useState} from 'react'
 import {ChevronLeft, ChevronRight, RefreshCw, Search, Download, Activity, Cpu, Layers, Wallet} from 'lucide-react'
 import MetalMetricIcon from '../MetalMetricIcon'
+import DailyUsageExport from './DailyUsageExport'
 import './usage-refined.css'
 
 export const integer = value => Number(value || 0).toLocaleString('en-US')
@@ -28,7 +29,7 @@ const seriesInfo = {input:{field:'input_tokens',label:'Input',color:'#dce1e5'},o
 
 export function csvForRows(rows) {
   const fields=['model','provider','service','input_tokens','output_tokens','cache_read_tokens','cache_write_tokens','requests','cost_usd','cost_source']
-  const cell=value=>`"${String(value ?? '').replace(/^[=+@\-\t\r]/,"'$&").replaceAll('"','""')}"`
+  const cell=value=>`"${String(value ?? '').replace(/^[=+@\-\t\r\n＝＋－＠]/,"'$&").replaceAll('"','""')}"`
   return [fields.join(','),...rows.map(row=>fields.map(key=>cell(row[key])).join(','))].join('\r\n')
 }
 
@@ -76,7 +77,7 @@ function ActivityView({report,available}) {
   const data=daily.map(day=>({date:day.date,input:Number(day.input_tokens || 0),output:Number(day.output_tokens || 0),cache:Number(day.cache_read_tokens || 0)+Number(day.cache_write_tokens || 0),requests:day.requests}))
   const keys=series==='all' ? ['input','output','cache'] : [series]
   return <>
-    <header className="usage-section-title"><div><h2>Token activity</h2><p>Daily volume · UTC</p></div></header>
+    <header className="usage-section-title"><div><h2>Token activity</h2><p>Daily volume · UTC</p></div><DailyUsageExport daily={daily} available={available} source={report.source}/></header>
     <div className="usage-series" role="group" aria-label="Token series">{['all','input','output','cache'].map(key=><button key={key} aria-pressed={series===key} onClick={()=>setSeries(key)}>{key==='all' ? 'All' : seriesInfo[key].label}</button>)}</div>
     <div className="usage-charts">
       <Trend label="Tokens per day" data={data} keys={keys} available={available}/>
