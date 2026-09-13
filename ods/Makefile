@@ -35,6 +35,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-external-services.sh
 	@bash tests/test-resolve-compose-resilient.sh
 	@bash tests/test-phase03-multigpu-tty.sh
+	@bash tests/test-phase03-no-gpu-assignment-message.sh
 	@bash tests/contracts/test-preflight-fixtures.sh
 	@bash tests/test-preflight-resolver-bug.sh
 	@bash tests/test-linux-cloud-mode.sh
@@ -46,6 +47,12 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== ods-doctor rootless subordinate IDs ==="
 	@bash tests/test-ods-doctor-rootless-subid.sh
+	@echo "=== ods-test.sh completes and reports when checks fail ==="
+	@bash tests/test-ods-test-complete-run.sh
+	@echo "=== phase 10 skips templated system units in the user scope ==="
+	@bash tests/test-phase10-skip-templated-user-units.sh
+	@echo "=== pre-download --tier is non-interactive ==="
+	@bash tests/test-pre-download-tier-noninteractive.sh
 	@echo "=== Docker rootless bind-mount ownership ==="
 	@bash tests/test-rootless-docker-ownership.sh
 	@echo ""
@@ -68,6 +75,9 @@ test: ## Run unit and contract tests
 	@bash tests/test-safe-env.sh
 	@bash tests/test-phase06-secret-generation.sh
 	@echo ""
+	@echo "=== health-check.sh --json output contract ==="
+	@bash tests/test-health-check-json-output.sh
+	@echo ""
 	@echo "=== QR code helper LAN detection ==="
 	@bash tests/test-qrcode-helper.sh
 	@echo ""
@@ -80,9 +90,12 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== config migration (version check under set -e) ==="
 	@bash tests/test-migrate-config.sh
+	@echo "=== installer simulation harness records real exit codes ==="
+	@bash tests/test-simulate-installers-exit-codes.sh
 	@echo ""
 	@echo "=== restore refuses empty backup config ==="
 	@bash tests/test-restore-empty-config.sh
+	@bash tests/test-lifecycle-prompts-noninteractive.sh
 	@echo ""
 	@echo "=== atomic .env writes ==="
 	@bash tests/test-atomic-env-writes.sh
@@ -92,6 +105,8 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== ods-cli pipefail tolerance ==="
 	@bash tests/test-ods-cli-pipefail-tolerance.sh
+	@bash tests/test-cli-prompts-noninteractive.sh
+	@bash tests/test-agent-restart-nonfatal.sh
 	@bash tests/test-unix-restart-recreate-env.sh
 	@echo ""
 	@echo "=== ods-cli install directory resolution ==="
@@ -111,6 +126,8 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== Manifest schema source of truth ==="
 	@bash tests/test-validate-manifest-schema.sh
+	@echo "=== ComfyUI user directory is persisted ==="
+	@bash tests/test-comfyui-user-dir-persisted.sh
 	@echo ""
 	@echo "=== macOS ods config show secret-mask ==="
 	@bash tests/test-macos-config-show-secret-mask.sh
@@ -123,6 +140,7 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== ods-update.sh backup command ==="
 	@bash tests/test-update-script-backup.sh
+	@bash tests/test-update-backup-retention-spaces.sh
 	@bash tests/test-backup-data-coverage.sh
 	@echo ""
 	@echo "=== backup integrity and restore round-trip ==="
