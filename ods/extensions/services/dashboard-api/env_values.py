@@ -18,14 +18,14 @@ def strip_matching_quotes(value: str) -> str:
 
 def quote_env_value(value: str) -> str:
     """Serialize one value for the single-line ``.env`` grammar shared by
-    Docker Compose and ODS's own readers (``lib/safe-env.sh``,
-    ``strip_matching_quotes``).
+    Docker Compose and ODS's own literal readers (``lib/safe-env.sh``,
+    ``parse_env_value``).
 
     Bare values are left alone whenever every reader agrees on them. Compose
     interpolates ``$NAME`` in unquoted and double-quoted values, cuts an
     unquoted value at the first `` #``, trims surrounding whitespace, and
-    treats a leading quote as the start of a quoted value; ODS readers do
-    none of that. Such values are single-quoted, which is literal for every
+    treats a leading quote as the start of a quoted value. ODS readers do
+    not interpolate environment variables. Such values are single-quoted, literal for every
     reader. A value that already contains a single quote or a backslash uses
     the double-quoted escape set from ``lib/dotenv-quote.sh`` instead.
     """
@@ -53,7 +53,7 @@ _SINGLE_QUOTED_RE = re.compile(r"^'([^']*)'(?:\s+#.*)?$")
 
 
 def parse_env_value(raw: str) -> str:
-    """Read one ``.env`` value the way Docker Compose does.
+    """Read ODS's literal single-line subset of Compose dotenv syntax.
 
     Compose trims surrounding whitespace, ends an unquoted value at the first
     `` #`` (a ``#`` at the start of the trimmed value is not a comment), lets a
@@ -62,6 +62,7 @@ def parse_env_value(raw: str) -> str:
     ``quote_env_value`` emits and ``lib/safe-env.sh`` decodes. Values that
     start with a quote but do not parse as a quoted value fall back to
     ``strip_matching_quotes`` so mismatched quotes stay data.
+    Environment interpolation and multiline values are intentionally not evaluated.
     """
     value = raw.strip()
     match = _DOUBLE_QUOTED_RE.match(value)

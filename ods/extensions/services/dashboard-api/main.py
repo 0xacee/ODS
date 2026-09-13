@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 # --- Local modules ---
-from env_values import quote_env_value, strip_matching_quotes
+from env_values import parse_env_value, quote_env_value
 from config import (
     SERVICES, DATA_DIR, INSTALL_DIR, SIDEBAR_ICONS, MANIFEST_ERRORS, ALWAYS_ON_SERVICES,
     AGENT_HOST, AGENT_PORT, AGENT_URL, ODS_AGENT_KEY,
@@ -161,7 +161,7 @@ def _read_installed_version() -> str:
         try:
             for line in env_file.read_text().splitlines():
                 if line.startswith("ODS_VERSION="):
-                    env_version = strip_matching_quotes(line.split("=", 1)[1])
+                    env_version = parse_env_value(line.split("=", 1)[1])
                     if env_version:
                         return env_version
         except OSError:
