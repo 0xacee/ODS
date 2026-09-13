@@ -50,6 +50,7 @@ class ClusterStatus:
     async def refresh(self):
         """Query cluster status from smart proxy"""
         logger.debug("Refreshing cluster status from proxy")
+        nodes = []
         try:
             proc = await asyncio.create_subprocess_exec(
                 "curl", "-s", "--max-time", "4", f"http://localhost:{os.environ.get('CLUSTER_PROXY_PORT', '9199')}/status",
@@ -62,18 +63,8 @@ class ClusterStatus:
                 data = json.loads(stdout.decode())
                 if isinstance(data, dict):
                     nodes_data = data.get("nodes")
-                    self.nodes = nodes_data if isinstance(nodes_data, list) else []
-                    self.total_gpus = len(self.nodes)
-                    self.active_gpus = sum(
-                        1 for n in self.nodes if isinstance(n, dict) and n.get("healthy", False)
-                    )
-                    self.failover_ready = self.active_gpus > 1
-                    logger.debug(
-                        "Cluster status: %d/%d GPUs active, failover_ready=%s",
-                        self.active_gpus,
-                        self.total_gpus,
-                        self.failover_ready,
-                    )
+                    if isinstance(nodes_data, list):
+                        nodes = [node for node in nodes_data if isinstance(node, dict)]
         except FileNotFoundError:
             logger.debug("Cluster proxy not available: curl command not found")
         except asyncio.TimeoutError:
@@ -82,8 +73,17 @@ class ClusterStatus:
             logger.debug("Cluster proxy health check timed out after 5s")
         except OSError as e:
             logger.debug("Cluster proxy connection failed: %s", e)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning("Cluster proxy returned invalid JSON: %s", e)
+
+        # Only the latest successful response can establish readiness. A failed
+        # poll must not leave a previously healthy cluster reported as ready.
+        self.nodes = nodes
+        self.total_gpus = len(nodes)
+        self.active_gpus = sum(1 for node in nodes if node.get("healthy") is True)
+        self.failover_ready = self.active_gpus > 1
+        logger.debug("Cluster status: %d/%d GPUs active, failover_ready=%s",
+                     self.active_gpus, self.total_gpus, self.failover_ready)
 
     def to_dict(self) -> dict:
         return {
