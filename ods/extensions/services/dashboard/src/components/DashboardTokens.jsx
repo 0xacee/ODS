@@ -108,7 +108,14 @@ export default function DashboardTokens() {
     ]).then(([report,readiness,timeline]) => {
       if (report.source?.status && report.source.status !== 'ok') throw new Error('Token telemetry unavailable.')
       if (!controller.signal.aborted) setState({report,readiness,timeline,days})
-    }).catch(error => {if (!controller.signal.aborted) setState({days,error:error.message})}).finally(() => {
+    }).catch(error => {
+      if (!controller.signal.aborted) {
+        setState({days,error:error.message})
+        // Promise.all rejects as soon as one endpoint fails. Release any
+        // sibling body reads even when the tab is hidden and polling pauses.
+        controller.abort()
+      }
+    }).finally(() => {
       clearTimeout(timeout)
       if (pending.current === controller) pending.current = null
     })

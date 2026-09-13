@@ -172,3 +172,20 @@ it('expires a stalled JSON body and restores an explicit refresh without accepti
   await act(async () => {resolveBody({summary:{total_tokens:9999}})})
   expect(screen.queryByTitle((9999).toLocaleString())).toBeNull()
 })
+
+it('aborts unfinished sibling telemetry reads when one endpoint fails early', async () => {
+  const signals = []
+  vi.stubGlobal('fetch', vi.fn(async (url, {signal}) => {
+    signals.push(signal)
+    if (url.includes('/report?')) return {ok:false}
+    return {ok:true,json:() => new Promise((resolve,reject) => {
+      if (signal.aborted) reject(new globalThis.DOMException('Aborted','AbortError'))
+      else signal.addEventListener('abort',() => reject(new globalThis.DOMException('Aborted','AbortError')),{once:true})
+    })}
+  }))
+  render(<DashboardTokens/>)
+  expect(await screen.findByRole('alert')).toHaveTextContent('Token telemetry unavailable')
+  expect(signals).toHaveLength(3)
+  expect(signals.every(signal => signal.aborted)).toBe(true)
+  expect(screen.getByRole('button',{name:'Refresh token usage'})).toBeEnabled()
+})
