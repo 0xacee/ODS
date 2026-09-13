@@ -55,6 +55,8 @@ test: ## Run unit and contract tests
 	@bash tests/test-phase10-skip-templated-user-units.sh
 	@echo "=== pre-download --tier is non-interactive ==="
 	@bash tests/test-pre-download-tier-noninteractive.sh
+	@echo "=== ods-doctor reads .env through lib/safe-env.sh ==="
+	@bash tests/test-ods-doctor-env-reader.sh
 	@echo "=== Docker rootless bind-mount ownership ==="
 	@bash tests/test-rootless-docker-ownership.sh
 	@bash tests/test-cli-status-docker-error.sh
@@ -76,6 +78,7 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== safe .env loading (quote/CRLF handling) ==="
 	@bash tests/test-safe-env.sh
+	@bash tests/test-env-example-inline-comments.sh
 	@bash tests/test-phase06-secret-generation.sh
 	@echo ""
 	@echo "=== health-check.sh --json output contract ==="

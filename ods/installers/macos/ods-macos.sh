@@ -210,6 +210,22 @@ read_ods_env() {
         if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
             local key="${BASH_REMATCH[1]}"
             local val="${BASH_REMATCH[2]}"
+            # Apply Docker Compose's value grammar, mirrored from
+            # lib/safe-env.sh, before stripping quotes: trim surrounding
+            # whitespace (Compose trims leading space, so "KEY=  # x" becomes
+            # the literal "# x"), then for an unquoted value cut at the first
+            # " #", and for a quoted value drop a " #..." after the closing
+            # quote. "#" without a leading space and "#" inside quotes stay.
+            val="${val#"${val%%[![:space:]]*}"}"
+            val="${val%"${val##*[![:space:]]}"}"
+            case "$val" in
+                \"*) [[ "$val" =~ ^(\"(\\.|[^\"\\])*\")[[:space:]]+# ]] && val="${BASH_REMATCH[1]}" ;;
+                \'*) [[ "$val" =~ ^(\'[^\']*\')[[:space:]]+# ]] && val="${BASH_REMATCH[1]}" ;;
+                *)
+                    val="${val%% #*}"
+                    val="${val%"${val##*[![:space:]]}"}"
+                    ;;
+            esac
             # Strip exactly one matching pair of surrounding quotes. The old
             # sed removed a leading and a trailing quote independently (either
             # type), so KEY=abc" lost its trailing quote and "abc' was cut on
@@ -218,6 +234,11 @@ read_ods_env() {
             if [[ "$val" == '"'*'"' ]]; then
                 val="${val#\"}"
                 val="${val%\"}"
+                # Decode writer escapes without evaluating shell expansions.
+                # Single-quoted values below remain literal.
+                val="${val//\\\"/\"}"
+                val="${val//\\\$/\$}"
+                val="${val//\\\\/\\}"
             elif [[ "$val" == "'"*"'" ]]; then
                 val="${val#\'}"
                 val="${val%\'}"
