@@ -208,3 +208,15 @@ it('clears a previous copy success before a failed copy of edited connection set
   expect(await screen.findByRole('alert')).toHaveTextContent('Could not copy')
   expect(screen.queryByText(/Connection settings copied/)).toBeNull()
 })
+
+it('discards a prior receipt when the connection is edited, even if its URL is later restored', async () => {
+  setup()
+  await createKey()
+  fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+  await screen.findByText(/Connection settings copied/)
+  const url = screen.getByLabelText('Laptop connection URL')
+  fireEvent.change(url,{target:{value:'https://edited.example/v1'}})
+  fireEvent.change(url,{target:{value:'http://127.0.0.1:4005/v1'}})
+  expect(screen.queryByText(/Connection settings copied/)).toBeNull()
+  expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1)
+})

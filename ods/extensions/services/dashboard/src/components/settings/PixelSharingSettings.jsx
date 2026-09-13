@@ -28,6 +28,9 @@ export default function PixelSharingSettings() {
   const controller = useRef(null)
   const sequence = useRef(0)
 
+  // Release the receipt's credential reference when its connection is dismissed or edited.
+  useEffect(() => setCopyResult(null), [issued, baseUrl])
+
   const request = useCallback(async (action = null, payload = null) => {
     if (pending.current) return
     pending.current = true
