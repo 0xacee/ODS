@@ -40,6 +40,7 @@ _HISTORY_POLL_INTERVAL = 5.0
 
 # Simple per-endpoint TTL caches
 _detailed_cache: dict = {"expires": 0.0, "value": None}
+_detailed_lock = asyncio.Lock()
 _topology_cache: dict = {"expires": 0.0, "value": None}
 _GPU_DETAILED_TTL = 3.0
 _GPU_TOPOLOGY_TTL = 300.0
@@ -329,10 +330,19 @@ async def _probe_external_lemonade(api_base: str, api_path: str) -> tuple[str, s
 @router.get("/api/gpu/detailed", response_model=MultiGPUStatus, dependencies=[Depends(verify_api_key)])
 async def gpu_detailed():
     """Per-GPU metrics with service assignment info (cached 3 s)."""
-    now = time.monotonic()
-    if now < _detailed_cache["expires"] and _detailed_cache["value"] is not None:
-        return _detailed_cache["value"]
+    # Multiple dashboard clients can miss the same cache entry. Recheck under
+    # the lock so only one successful probe populates each new snapshot.
+    async with _detailed_lock:
+        if time.monotonic() < _detailed_cache["expires"] and _detailed_cache["value"] is not None:
+            return _detailed_cache["value"]
+        result = await _read_detailed_gpu_status()
+        _detailed_cache["value"] = result
+        _detailed_cache["expires"] = time.monotonic() + _GPU_DETAILED_TTL
+        return result
 
+
+async def _read_detailed_gpu_status() -> MultiGPUStatus:
+    """Discover one complete GPU snapshot without publishing partial results."""
     gpu_backend = os.environ.get("GPU_BACKEND", "").lower() or "nvidia"
     gpus = await asyncio.to_thread(_get_raw_gpus, gpu_backend)
     if not gpus:
@@ -343,7 +353,7 @@ async def gpu_detailed():
     assignment_full = decode_gpu_assignment()
     assignment_data = assignment_full.get("gpu_assignment") if assignment_full else None
 
-    result = MultiGPUStatus(
+    return MultiGPUStatus(
         gpu_count=len(gpus),
         backend=gpu_backend,
         gpus=gpus,
@@ -353,9 +363,6 @@ async def gpu_detailed():
         tensor_split=_live_env_value("LLAMA_ARG_TENSOR_SPLIT") or None,
         aggregate=aggregate,
     )
-    _detailed_cache["expires"] = now + _GPU_DETAILED_TTL
-    _detailed_cache["value"] = result
-    return result
 
 
 @router.get("/api/gpu/topology", dependencies=[Depends(verify_api_key)])
