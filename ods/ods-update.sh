@@ -627,18 +627,21 @@ cmd_backup() {
     log_ok "Backup created: ${backup_path}"
     log_info "Files backed up: ${files_backed_up}"
     
-    # Cleanup old backups. Read NUL-delimited paths: `for dir in $backup_dirs`
-    # word-split every path, so a BACKUP_DIR containing a space (a HOME like
-    # /mnt/c/Users/First Last) produced fragments — retention silently pruned
-    # nothing, and `rm -rf` ran against a partial path.
-    local count=0
-    while IFS= read -r -d '' dir; do
+    # Bash's sorted glob preserves whole paths, including spaces/newlines,
+    # without requiring GNU sort -z on macOS. Never follow backup symlinks.
+    local backup_dirs=() dir index count=0
+    for dir in "$BACKUP_DIR"/backup-*; do
+        [[ -d "$dir" && ! -L "$dir" ]] || continue
+        backup_dirs+=("$dir")
+    done
+    for ((index=${#backup_dirs[@]}-1; index>=0; index--)); do
+        dir="${backup_dirs[$index]}"
         count=$((count + 1))
         if ((count > MAX_BACKUPS)); then
             log_info "Removing old backup: $(basename "$dir")"
             rm -rf "$dir"
         fi
-    done < <(find "$BACKUP_DIR" -maxdepth 1 -type d -name "backup-*" -print0 | sort -zr)
+    done
 }
 
 #==============================================================================

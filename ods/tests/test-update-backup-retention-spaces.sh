@@ -41,6 +41,17 @@ before=$(find "$BACKUPS" -maxdepth 1 -type d -name 'backup-*' | wc -l | tr -d ' 
 # word-split `rm -rf` fragment would target this; it must survive untouched.
 mkdir -p "$TMP_DIR/My"
 printf 'do-not-delete\n' > "$TMP_DIR/My/canary.txt"
+ln -s "$TMP_DIR/My" "$BACKUPS/backup-00000000-external"
+
+# Stock macOS sort has no GNU -z option. Retention must not depend on it.
+sort() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in -*z*) echo 'sort: illegal option -- z' >&2; return 2 ;; esac
+    done
+    command sort "$@"
+}
+export -f sort
 
 set +e
 out="$(cd "$INSTALL" && HOME="$FAKE_HOME" MAX_BACKUPS=2 "$BASH" ./ods-update.sh backup 2>&1)"
