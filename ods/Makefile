@@ -49,8 +49,12 @@ test: ## Run unit and contract tests
 	@bash tests/test-ods-doctor-rootless-subid.sh
 	@echo "=== ods-test.sh reports HTTP 000 for a failed probe ==="
 	@bash tests/test-ods-test-http-code.sh
+	@echo "=== ods-test.sh completes and reports when checks fail ==="
+	@bash tests/test-ods-test-complete-run.sh
 	@echo "=== phase 10 skips templated system units in the user scope ==="
 	@bash tests/test-phase10-skip-templated-user-units.sh
+	@echo "=== pre-download --tier is non-interactive ==="
+	@bash tests/test-pre-download-tier-noninteractive.sh
 	@echo "=== Docker rootless bind-mount ownership ==="
 	@bash tests/test-rootless-docker-ownership.sh
 	@echo ""
@@ -72,6 +76,9 @@ test: ## Run unit and contract tests
 	@echo "=== safe .env loading (quote/CRLF handling) ==="
 	@bash tests/test-safe-env.sh
 	@bash tests/test-phase06-secret-generation.sh
+	@echo ""
+	@echo "=== health-check.sh --json output contract ==="
+	@bash tests/test-health-check-json-output.sh
 	@echo ""
 	@echo "=== QR code helper LAN detection ==="
 	@bash tests/test-qrcode-helper.sh
@@ -98,6 +105,7 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== ods-cli pipefail tolerance ==="
 	@bash tests/test-ods-cli-pipefail-tolerance.sh
+	@bash tests/test-cli-prompts-noninteractive.sh
 	@bash tests/test-agent-restart-nonfatal.sh
 	@bash tests/test-unix-restart-recreate-env.sh
 	@echo ""
