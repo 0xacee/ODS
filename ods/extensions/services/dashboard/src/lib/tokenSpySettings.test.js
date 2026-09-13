@@ -7,9 +7,9 @@ import { JSDOM } from 'jsdom'
 import { afterEach, expect, test, vi } from 'vitest'
 
 const source = resolve('../token-spy/main.py')
-const html = execFileSync(process.platform === 'win32' ? 'python' : 'python3', ['-c', [
+const html = execFileSync(process.platform === 'win32' ? 'python' : 'python3', ['-X', 'utf8', '-c', [
   'import ast, pathlib, sys',
-  'module = ast.parse(pathlib.Path(sys.argv[1]).read_text())',
+  'module = ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))',
   'value = next(n.value for n in module.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "DASHBOARD_HTML" for t in n.targets))',
   'sys.stdout.write(ast.literal_eval(value))',
 ].join('\n'), source], { encoding: 'utf8' })
