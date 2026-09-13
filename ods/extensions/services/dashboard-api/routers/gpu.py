@@ -526,23 +526,26 @@ async def gpu_history():
 async def poll_gpu_history() -> None:
     """Background task: append a per-GPU sample to _GPU_HISTORY every 5 s."""
     while True:
+        readings = {}
         try:
             gpu_backend = os.environ.get("GPU_BACKEND", "").lower() or "nvidia"
             gpus = await asyncio.to_thread(_get_raw_gpus, gpu_backend)
             if gpus:
-                sample = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "gpus": {
-                        str(g.index): {
-                            "utilization": g.utilization_percent if g.utilization_available else None,
-                            "memory_percent": g.memory_percent if g.memory_usage_available else None,
-                            "temperature": g.temperature_c if g.temperature_available else None,
-                            "power_w": g.power_w,
-                        }
-                        for g in gpus
-                    },
+                readings = {
+                    str(g.index): {
+                        "utilization": g.utilization_percent if g.utilization_available else None,
+                        "memory_percent": g.memory_percent if g.memory_usage_available else None,
+                        "temperature": g.temperature_c if g.temperature_available else None,
+                        "power_w": g.power_w,
+                    }
+                    for g in gpus
                 }
-                _GPU_HISTORY.append(sample)
         except Exception:  # Broad catch: background task must survive transient failures
             logger.exception("GPU history poll failed")
+        # Advance the bounded window even when discovery is unavailable. The
+        # history endpoint represents absent readings as null, never as zero.
+        _GPU_HISTORY.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "gpus": readings,
+        })
         await asyncio.sleep(_HISTORY_POLL_INTERVAL)
