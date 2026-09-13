@@ -59,6 +59,36 @@ def test_partial_purge_never_recounts_surviving_turns(summary, role):
     assert read() == 10
 
 
+@pytest.mark.parametrize("failure", ["write", "replace"])
+def test_interrupted_checkpoint_preserves_previous_total(summary, monkeypatch, failure):
+    read, directory, state = summary
+    append_turns(directory / "old.jsonl", 2)
+    append_turns(directory / "current.jsonl", 3)
+    assert read() == 5
+    previous = state.read_bytes()
+    (directory / "old.jsonl").unlink()
+    append_turns(directory / "current.jsonl", 1)
+
+    def fail_write(value, stream, *args, **kwargs):
+        stream.write('{"total":')
+        raise OSError("fixture interrupted write")
+
+    def fail_replace(*args, **kwargs):
+        raise OSError("fixture replacement unavailable")
+
+    with monkeypatch.context() as patch:
+        if failure == "write":
+            patch.setattr(json, "dump", fail_write)
+        else:
+            import os
+            patch.setattr(os, "replace", fail_replace)
+        assert read() == 6
+    assert state.read_bytes() == previous
+    assert list(state.parent.iterdir()) == [state]
+    assert read() == 6
+    assert json.loads(state.read_text())["total"] == 6
+
+
 @pytest.mark.parametrize("new_turns", [1, 2])
 def test_new_file_is_counted_even_when_cleanup_offsets_its_growth(summary, new_turns):
     read, directory, _ = summary

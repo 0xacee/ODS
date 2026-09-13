@@ -1266,12 +1266,29 @@ def _read_local_accumulated_turns(agent: str) -> int:
         "total": total, "last_file_turns": current_file_turns,
         "count_role": count_role, "file_turns": current_counts,
     }
+    temporary_path = None
     try:
-        os.makedirs(os.path.dirname(acc_path), exist_ok=True)
-        with open(acc_path, "w") as f:
+        directory = os.path.dirname(acc_path)
+        os.makedirs(directory, exist_ok=True)
+        # Never truncate the last valid checkpoint before the new one is ready.
+        # A sibling temporary file also keeps replacement on the same filesystem.
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=directory, prefix=".turns-", delete=False,
+        ) as f:
+            temporary_path = f.name
             json.dump(acc, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, acc_path)
+        temporary_path = None
     except Exception:
         log.warning(f"[SESSION] Failed to save accumulated turns for {agent}")
+    finally:
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                log.warning(f"[SESSION] Failed to clean temporary checkpoint for {agent}")
 
     return total
 
