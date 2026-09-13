@@ -25,6 +25,8 @@ export default function PixelSharingSettings() {
   const request = useCallback(async (action = null, payload = null) => {
     if (pending.current) return
     pending.current = true
+    // A reload or device mutation ends the review of the previous snapshot.
+    setConfirm(null)
     setBusy(true)
     setError('')
     const seq = ++sequence.current
@@ -126,9 +128,10 @@ export default function PixelSharingSettings() {
 
   function confirmAction() {
     if (!confirm || locked) return
-    const action = confirm
+    if (confirm.revision !== config.revision) { setConfirm(null); return }
+    const {action, revision} = confirm
     setConfirm(null)
-    request(action, { expectedRevision: config.revision })
+    request(action, { expectedRevision: revision })
   }
 
   return <section className="rounded-xl border border-theme-border bg-theme-card p-5 space-y-4" aria-labelledby="pixel-sharing-title">
@@ -147,14 +150,14 @@ export default function PixelSharingSettings() {
       </div>
       <p className="text-sm text-theme-text-muted">Keys are limited to this active model. To share another model, select it in ODS Models first. A model change pauses incompatible device requests.</p>
       <div className="flex flex-wrap gap-2">
-        <button className={buttonStyle} disabled={locked || !route || !activeDevice || snapshot.runtime.status === 'starting'} onClick={() => setConfirm('start')}>Start sharing</button>
-        <button className={buttonStyle} disabled={locked || snapshot.runtime.status === 'starting'} onClick={() => setConfirm('stop')}>Stop sharing</button>
+        <button className={buttonStyle} disabled={locked || !route || !activeDevice || snapshot.runtime.status === 'starting'} onClick={() => setConfirm({action:'start',revision:config.revision})}>Start sharing</button>
+        <button className={buttonStyle} disabled={locked || snapshot.runtime.status === 'starting'} onClick={() => setConfirm({action:'stop',revision:config.revision})}>Stop sharing</button>
       </div>
       {confirm && <div role="dialog" aria-label="Confirm inference sharing" className="rounded border border-amber-500/40 p-4 space-y-3">
-        <p className="text-sm">{confirm === 'start'
+        <p className="text-sm">{confirm.action === 'start'
           ? `Enable issued device keys and build/start only the sharing service on 127.0.0.1:${snapshot.transport.port}? The model router and global ODS provider mode will not be changed.`
           : 'Disable device requests and stop only the sharing service? Active inference will be cancelled. This does not undo completed output.'}</p>
-        <button className={buttonStyle} disabled={locked} onClick={confirmAction}>Confirm {confirm === 'start' ? 'start' : 'stop'}</button>{' '}
+        <button className={buttonStyle} disabled={locked} onClick={confirmAction}>Confirm {confirm.action === 'start' ? 'start' : 'stop'}</button>{' '}
         <button className={buttonStyle} onClick={() => setConfirm(null)}>Cancel</button>
       </div>}
       <div className="grid gap-3 md:grid-cols-[1fr_10rem_auto] items-end">
