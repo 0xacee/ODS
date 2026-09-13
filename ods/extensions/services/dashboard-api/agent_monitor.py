@@ -95,12 +95,15 @@ class ThroughputMetrics:
         self.data_points: List[dict] = []
 
     def add_sample(self, tokens_per_sec: float):
-        """Add a new throughput sample"""
+        """Record finite nonnegative measurements; invalid data is not zero usage."""
+        if isinstance(tokens_per_sec, bool):
+            return
         try:
             val = float(tokens_per_sec)
-            val = val if math.isfinite(val) and val >= 0 else 0.0
-        except (TypeError, ValueError):
-            val = 0.0
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(val) or val < 0:
+            return
 
         self.data_points.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -122,7 +125,7 @@ class ThroughputMetrics:
         values = [p["tokens_per_sec"] for p in self.data_points]
         return {
             "current": values[-1] if values else 0,
-            "average": sum(values) / len(values),
+            "average": sum(value / len(values) for value in values),
             "peak": max(values) if values else 0,
             "history": self.data_points[-30:]  # Last 30 points
         }

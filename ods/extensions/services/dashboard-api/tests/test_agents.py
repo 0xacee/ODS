@@ -98,4 +98,5 @@ class TestGetThroughput:
         tm.add_sample(25.0)
         stats = tm.get_stats()
         assert stats["current"] == 25.0
-        assert stats["average"] == (0.0 + 0.0 + 25.0) / 3.0
+        assert stats["average"] == 25.0
+        assert len(stats["history"]) == 1
