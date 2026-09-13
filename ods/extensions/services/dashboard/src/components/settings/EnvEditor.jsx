@@ -74,6 +74,7 @@ export default function EnvEditor({
 
   return (
     <section className="settings-premium-card settings-environment p-5 lg:p-7">
+      <fieldset disabled={saving} className="m-0 min-w-0 border-0 p-0" aria-busy={saving}>
       <EnvironmentEditorHeader
         onRefresh={onRefresh || onReload}
         onReload={onReload}
@@ -192,6 +193,7 @@ export default function EnvEditor({
           </div>
         </div>
       </div>
+      </fieldset>
     </section>
   )
 }
