@@ -71,8 +71,18 @@ if [ -d "$USER_MOUNT" ]; then
         # First start after this mount was introduced: carry over whatever the
         # container already holds rather than discarding it. -n keeps anything
         # already on the host authoritative.
-        cp -a -n "$user_target/." "$USER_MOUNT/" 2>/dev/null || true
-        rm -rf "$user_target"
+        user_backup="${COMFYUI_DIR}/user.migration-backup"
+        if [ -e "$user_backup" ] || [ -L "$user_backup" ]; then
+            echo "[startup] User migration backup already exists: $user_backup. Resolve it before retrying." >&2
+            exit 1
+        fi
+        if ! cp -a -n "$user_target/." "$USER_MOUNT/"; then
+            echo "[startup] User persistence copy failed; original files were kept at $user_target." >&2
+            exit 1
+        fi
+        # Retain the original even after a successful copy, including files
+        # skipped because the host already has an authoritative copy.
+        mv "$user_target" "$user_backup"
     fi
     ln -s "$USER_MOUNT" "$user_target"
 fi

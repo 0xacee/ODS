@@ -66,6 +66,8 @@ pass "startup.sh points the ComfyUI user directory at the persisted mount"
 [[ -f "$USER_MOUNT/default/comfy.settings.json" ]] \
     || fail "UI settings were not migrated to the host"
 pass "existing container-side workflows and settings are migrated, not discarded"
+[[ -f "$COMFYUI_DIR/user.migration-backup/default/workflows/my-workflow.json" ]] \
+    || fail "migration did not retain its original files for recovery"
 
 # 5. Re-running must be idempotent and must not clobber host state.
 printf 'host-wins\n' > "$USER_MOUNT/default/workflows/my-workflow.json"
@@ -74,3 +76,19 @@ bash -c "set -euo pipefail; $block"
     || fail "a restart overwrote host-side workflow state"
 [[ -L "$COMFYUI_DIR/user" ]] || fail "the symlink did not survive a restart"
 pass "restarting keeps the host copy authoritative"
+
+# A failed copy must stop startup with the original directory still intact.
+COMFYUI_DIR="$TMP_DIR/failed-comfyui"; USER_MOUNT="$TMP_DIR/failed-user-mount"
+mkdir -p "$COMFYUI_DIR/user/default/workflows" "$USER_MOUNT"
+printf 'irreplaceable\n' > "$COMFYUI_DIR/user/default/workflows/keep.json"
+cp() { return 1; }
+export -f cp
+if bash -c "set -euo pipefail; $block" 2>"$TMP_DIR/copy-error"; then
+    fail "startup continued after the persistence copy failed"
+fi
+unset -f cp
+[[ -d "$COMFYUI_DIR/user" && ! -L "$COMFYUI_DIR/user" ]] \
+    || fail "failed migration removed or redirected the original user directory"
+[[ "$(cat "$COMFYUI_DIR/user/default/workflows/keep.json")" == "irreplaceable" ]] \
+    || fail "failed migration lost the original workflow"
+pass "copy failure stops startup and preserves the original user directory"
