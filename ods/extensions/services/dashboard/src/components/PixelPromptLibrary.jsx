@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState} from 'react'
 import { Bookmark } from 'lucide-react'
 import {readSavedPrompts, writeSavedPrompt} from '../lib/pixelSavedPrompts'
+import PixelPromptBackup from './PixelPromptBackup'
 
 export default function PixelPromptLibrary({input, disabled, onInsert}) {
   const dialog = useRef(null), trigger = useRef(null), previous = useRef(null)
@@ -8,6 +9,7 @@ export default function PixelPromptLibrary({input, disabled, onInsert}) {
   const [editing, setEditing] = useState(null)
   const [removing, setRemoving] = useState(null)
   const [error, setError] = useState('')
+  const [backupSession, setBackupSession] = useState(0)
   function refresh() {
     try {setItems(readSavedPrompts()); setError('')}
     catch {setError('Saved prompts could not be read. Existing browser data has been preserved.')}
@@ -17,7 +19,7 @@ export default function PixelPromptLibrary({input, disabled, onInsert}) {
     window.addEventListener('storage', update)
     return () => window.removeEventListener('storage', update)
   }, [])
-  function close() {dialog.current?.close(); setEditing(null); setRemoving(null); trigger.current?.focus()}
+  function close() {dialog.current?.close(); setEditing(null); setRemoving(null); setBackupSession(value => value + 1); trigger.current?.focus()}
   function edit(item) {previous.current = item; setEditing(item || {id:'prompt-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2, 10), title:'', text:input}); setError('')}
   function save(event) {
     event.preventDefault()
@@ -43,6 +45,7 @@ export default function PixelPromptLibrary({input, disabled, onInsert}) {
         <p>Delete saved prompt “{removing.title}”? Existing conversations are kept.</p>
         <footer><button type="button" autoFocus onClick={() => setRemoving(null)}>Keep prompt</button><button type="button" onClick={remove}>Delete prompt</button></footer>
       </div> : <>
+        <PixelPromptBackup key={backupSession} onRestored={setItems}/>
         <button className={buttonClass} type="button" onClick={() => edit(null)}>Save a new prompt</button>
         {!items.length && <p>No saved prompts yet. Start with your current draft or write a new one.</p>}
         <ul>{items.map(item => {
