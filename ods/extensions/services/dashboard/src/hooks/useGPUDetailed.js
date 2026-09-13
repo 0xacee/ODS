@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 
 // Auth: nginx injects Authorization header for all /api/ requests (see nginx.conf).
 
@@ -10,15 +10,16 @@ export function useGPUDetailed() {
   const [topology, setTopology] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const fetchInFlight = useRef(false)
 
   useEffect(() => {
+    // Each effect lifetime owns its poll; StrictMode cleanup must not block
+    // the replacement lifetime or release its in-flight guard.
+    let fetchInFlight = false
     let disposed = false
     let activeController = null
     const fetchAll = async () => {
-      if (document.hidden) return
-      if (fetchInFlight.current) return
-      fetchInFlight.current = true
+      if (disposed || document.hidden || fetchInFlight) return
+      fetchInFlight = true
       const controller = new AbortController()
       activeController = controller
       let rejectAbort
@@ -43,8 +44,11 @@ export function useGPUDetailed() {
       } finally {
         clearTimeout(timer)
         controller.signal.removeEventListener('abort', rejectAbort)
+        // Promise.all rejects as soon as one endpoint fails. Release its
+        // still-pending siblings too, rather than dropping their deadline.
+        controller.abort()
         if (activeController === controller) activeController = null
-        fetchInFlight.current = false
+        fetchInFlight = false
         if (!disposed) setLoading(false)
       }
     }
