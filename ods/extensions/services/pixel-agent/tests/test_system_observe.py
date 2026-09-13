@@ -252,10 +252,39 @@ class SystemObserveTests(unittest.TestCase):
         self.assertEqual([row["address"] for row in value["addresses"]], ["fe80::1234%3", "fe80::1234%4"])
         self.assertEqual([row["tcp"] for row in value["addresses"]],
                          [[{"port": 443, "open": True}], [{"port": 443, "open": False}]])
-        self.assertEqual(connection.connect_ex.call_args_list,
-                         [mock.call(("fe80::1234", 443, 0, 3)), mock.call(("fe80::1234", 443, 0, 4))])
-        self.assertEqual(icmp.call_args_list,
-                         [mock.call(socket.AF_INET6, "fe80::1234%3"), mock.call(socket.AF_INET6, "fe80::1234%4")])
+        # Probe completion order is intentionally concurrent; only the final
+        # receipt order and exact scoped endpoint set are deterministic.
+        self.assertEqual(connection.connect_ex.call_count, 2)
+        connection.connect_ex.assert_has_calls(
+            [mock.call(("fe80::1234", 443, 0, 3)), mock.call(("fe80::1234", 443, 0, 4))], any_order=True)
+        self.assertEqual(icmp.call_count, 2)
+        icmp.assert_has_calls(
+            [mock.call(socket.AF_INET6, "fe80::1234%3"), mock.call(socket.AF_INET6, "fe80::1234%4")], any_order=True)
+
+    def test_receipts_stay_in_resolver_order_when_the_second_peer_finishes_first(self):
+        second_finished = threading.Event()
+        completed = []
+        addresses = ["192.168.1.10", "192.168.1.11"]
+
+        def icmp(_family, address):
+            if address == addresses[0]:
+                self.assertTrue(second_finished.wait(2), "second probe never started")
+                completed.append(address)
+                return False
+            completed.append(address)
+            second_finished.set()
+            return True
+
+        tailscale = {"available": False, "found": False, "online": None, "addresses": []}
+        with mock.patch.object(system_observe, "_resolve_peer",
+                               return_value=[(socket.AF_INET, address, "lan") for address in addresses]), \
+             mock.patch.object(system_observe, "_tailscale_peer_status", return_value=tailscale), \
+             mock.patch.object(system_observe, "_probe_icmp", side_effect=icmp), \
+             mock.patch.object(system_observe, "_probe_tcp", return_value=False):
+            value = system_observe.observe_network_peer("peer", "443")
+        self.assertEqual(completed, list(reversed(addresses)))
+        self.assertEqual([row["address"] for row in value["addresses"]], addresses)
+        self.assertEqual([row["icmpReachable"] for row in value["addresses"]], [False, True])
 
     def test_network_peer_rejects_public_resolution_and_unbounded_ports(self):
         records = [
