@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import uuid
 
 import httpx
@@ -19,7 +20,7 @@ SERVICE = ROOT / 'extensions/library/services/ntfy'
 
 def test_ntfy_is_discoverable_with_consistent_manifest_and_compose(tmp_path):
     output = tmp_path / 'catalog.json'
-    subprocess.run(['python3', str(ROOT / 'scripts/generate-extensions-catalog.py'), '--output', str(output)], check=True)
+    subprocess.run([sys.executable, str(ROOT / 'scripts/generate-extensions-catalog.py'), '--output', str(output)], check=True)
     generated = json.loads(output.read_text())
     entry = next(item for item in generated['extensions'] if item['id'] == 'ntfy')
     checked_in = json.loads((ROOT / 'config/extensions-catalog.json').read_text())
