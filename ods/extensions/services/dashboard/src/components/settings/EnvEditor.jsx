@@ -1,4 +1,5 @@
 import PanelSelect from '../PanelSelect'
+import { useBeforeUnload } from '../../hooks/useBeforeUnload'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -68,6 +69,7 @@ export default function EnvEditor({
   onCompleteFollowUp = () => {},
   applying = false,
 }) {
+  useBeforeUnload(dirty || saving)
   const activeKeys = activeSection?.keys || []
   const canApply = Boolean(applyPlan?.supported && applyPlan?.services?.length > 0 && editor?.agentAvailable !== false)
   const issueSectionCount = countIssueSections(sections, issues)
