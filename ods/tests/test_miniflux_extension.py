@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import uuid
 
 import httpx
@@ -19,7 +20,7 @@ SERVICE = ROOT / 'extensions/library/services/miniflux'
 
 def test_miniflux_catalog_preserves_required_credentials(tmp_path):
     output = tmp_path / 'catalog.json'
-    subprocess.run(['python3', str(ROOT / 'scripts/generate-extensions-catalog.py'), '--output', str(output)], check=True)
+    subprocess.run([sys.executable, str(ROOT / 'scripts/generate-extensions-catalog.py'), '--output', str(output)], check=True)
     generated = json.loads(output.read_text())
     entry = next(item for item in generated['extensions'] if item['id'] == 'miniflux')
     checked_in = json.loads((ROOT / 'config/extensions-catalog.json').read_text())
