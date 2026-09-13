@@ -123,9 +123,12 @@ class ThroughputMetrics:
             return {"current": 0, "average": 0, "peak": 0, "history": []}
 
         values = [p["tokens_per_sec"] for p in self.data_points]
+        total = sum(values)
+        average = (total / len(values) if math.isfinite(total)
+                   else sum(value / len(values) for value in values))
         return {
             "current": values[-1] if values else 0,
-            "average": sum(value / len(values) for value in values),
+            "average": average,
             "peak": max(values) if values else 0,
             "history": self.data_points[-30:]  # Last 30 points
         }
