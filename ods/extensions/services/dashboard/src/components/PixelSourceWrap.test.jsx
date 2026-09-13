@@ -1,6 +1,11 @@
 import {webcrypto, createHash} from 'node:crypto'
 import {render, screen, fireEvent, waitFor} from '@testing-library/react'
 import PixelPreviewSource from './PixelPreviewSource'
+import {readFileSync} from 'node:fs'
+
+// Vitest stubs CSS imports; read the actual stylesheet for cascade assertions.
+const sourceStyles=readFileSync('src/components/pixel-file-changes.css','utf8')
+const findStyles=readFileSync('src/components/pixel-source-find.css','utf8')
 
 const source = '<div>'+ 'long-unbroken-content'.repeat(80) + '</div>\r\nsecond line\r\n'
 const digest = createHash('sha256').update(source).digest('hex')
@@ -11,6 +16,16 @@ beforeEach(()=>{
   Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:vi.fn().mockResolvedValue(undefined)}})
 })
 afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();delete navigator.clipboard})
+
+it('applies wrapping to plain code as well as highlighted line spans', () => {
+  const {container,rerender}=render(<section className="pixel-preview-source" data-wrap-lines="true"><style>{sourceStyles + findStyles}</style><div className="pixel-code-block"><pre><code>unbroken-plain-source</code></pre></div></section>)
+  const code=container.querySelector('code')
+  expect(getComputedStyle(code).whiteSpace).toBe('pre-wrap')
+  expect(getComputedStyle(code).overflowWrap).toBe('anywhere')
+  expect(getComputedStyle(code).minWidth).toBe('0px')
+  rerender(<section className="pixel-preview-source" data-wrap-lines="false"><style>{sourceStyles + findStyles}</style><div className="pixel-code-block"><pre><code>unbroken-plain-source</code></pre></div></section>)
+  expect(getComputedStyle(code).whiteSpace).not.toBe('pre-wrap')
+})
 
 it('wraps verified source for reading without changing logical lines, copying or refetching',async()=>{
   const {container}=render(<PixelPreviewSource preview={preview}/>)
