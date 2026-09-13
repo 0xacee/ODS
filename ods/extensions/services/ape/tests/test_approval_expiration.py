@@ -53,3 +53,26 @@ def test_unused_grant_expires_without_renewal(make_client, monkeypatch, age, all
     assert result.json()["allowed"] is allowed
     if allowed:
         assert client.post("/verify", json=ACTION).json()["decision"] == "require_approval"
+
+
+@pytest.mark.parametrize('bad_time', [None, True, '2000000000', float('nan'),
+                                    float('inf'), 10 ** 400, 2_000_000_001.0],
+                         ids=['missing', 'bool', 'text', 'nan', 'inf', 'overflow', 'future'])
+@pytest.mark.parametrize('restart', [False, True])
+@pytest.mark.parametrize('granted', [False, True])
+def test_invalid_approval_time_cannot_grant_or_reset_limits(make_client, monkeypatch, bad_time, restart, granted):
+    client, app = make_client(policy_yaml=POLICY)
+    monkeypatch.setattr(app.time, 'time', lambda: 2_000_000_000.0)
+    token = escalate(client)
+    if granted:
+        assert client.post('/approve', json={'approval_token': token}).json()['granted'] is True
+        next(iter(app._state['grants'].values()))['granted_at'] = bad_time
+    else:
+        app._state['approvals'][token]['issued_at'] = bad_time
+    app.save_state()
+    if restart:
+        client, app = make_client()
+    result = client.post('/approve', json={'approval_token': token})
+    assert result.status_code == 200
+    assert result.json()['granted'] is False
+    assert client.post('/verify', json=ACTION).json()['decision'] == 'require_approval'

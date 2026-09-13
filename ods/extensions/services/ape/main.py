@@ -267,7 +267,9 @@ APPROVAL_TTL_SECONDS = 15 * 60
 
 def _approval_fresh(record: dict, field: str, now: float) -> bool:
     timestamp = record.get(field)
-    return type(timestamp) in (int, float) and 0 <= now - timestamp < APPROVAL_TTL_SECONDS
+    # Compare bounds without coercing an untrusted JSON integer to float.
+    # Subtraction can overflow and reset persisted governance state on reload.
+    return type(timestamp) in (int, float) and now - APPROVAL_TTL_SECONDS < timestamp <= now
 
 
 def _empty_state() -> dict[str, Any]:
