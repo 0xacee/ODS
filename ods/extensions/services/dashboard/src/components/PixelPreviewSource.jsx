@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { loadArtifactBytes } from '../lib/pixelArtifacts'
-import { PixelCodeLines, PixelLanguageBadge } from './PixelCodeBlock'
+import { PixelCodeLines, PixelLanguageBadge, needsPlainSource } from './PixelCodeBlock'
 import PixelArtifactDownload from './PixelArtifactDownload'
 import PixelSourceFind from './PixelSourceFind'
 import PixelSourceExcerpt from './PixelSourceExcerpt'
@@ -19,6 +19,7 @@ export default function PixelPreviewSource({ preview, file }) {
   const [copied, setCopied] = useState(false)
   const [attempt, setAttempt] = useState(0)
   const codeRef = useRef(null)
+  const plain = source !== null && needsPlainSource(source)
   const copyRevision = useRef(0)
   useEffect(() => {
     copyRevision.current++
@@ -57,7 +58,7 @@ export default function PixelPreviewSource({ preview, file }) {
     {error && <div role="alert"><p>{error}</p><button type="button" onClick={() => setAttempt(value => value + 1)}>Retry source</button></div>}
     <div className="pixel-code-block">
       <header className="code-block-header"><PixelLanguageBadge path={path}/><span title={path}>{path}</span><PixelArtifactDownload key={`${preview.siteId}/${path}/${expectedDigest}`} preview={preview} file={{path, sha256:expectedDigest, bytes:file?.bytes}}/>{language && <button type="button" aria-label="Copy code" onClick={copy} disabled={source === null}>{copied ? 'Copied' : 'Copy'}</button>}</header>
-      {source !== null && <><PixelSourceExcerpt key={`${preview.siteId}/${path}/${expectedDigest}`} source={source}/><PixelSourceFind key={`${preview.siteId}/${path}/${expectedDigest}`} source={source} codeRef={codeRef}/><pre ref={codeRef} tabIndex={0} aria-label={`Code for ${path}`}><PixelCodeLines source={source} language={language}/></pre></>}
+      {source !== null && <><PixelSourceExcerpt key={`${preview.siteId}/${path}/${expectedDigest}`} source={source}/>{plain ? <p role="status">Large source is shown as plain text. Use browser find or download the file; line search and highlighting are disabled.</p> : <PixelSourceFind key={`${preview.siteId}/${path}/${expectedDigest}`} source={source} codeRef={codeRef}/>}<pre ref={codeRef} tabIndex={0} aria-label={`Code for ${path}`}><PixelCodeLines source={source} language={language}/></pre></>}
 
     </div>
     {(source !== null || binarySize !== null) && <p className="pixel-source-verification">Published snapshot · SHA-256 verified{binarySize !== null ? ` · ${binarySize.toLocaleString()} bytes` : ''}</p>}
