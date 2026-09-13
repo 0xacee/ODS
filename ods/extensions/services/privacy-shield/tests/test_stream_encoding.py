@@ -40,3 +40,34 @@ def test_restored_json_retains_one_encoding_stream(monkeypatch, encoding, chunk_
     finally:
         client.close()
         asyncio.run(upstream.aclose())
+
+
+@pytest.mark.parametrize('encoding', ['utf-8', 'utf-8-sig', 'utf-16', 'utf-32'])
+@pytest.mark.parametrize('limit', [5, 31])
+def test_restore_budget_cutover_preserves_partial_characters(monkeypatch, encoding, limit):
+    expected = []
+    monkeypatch.setattr(proxy, 'RESTORE_MAX_BYTES', limit)
+
+    def upstream_response(request):
+        token = json.loads(request.content)['messages'][0]['content']
+        text = '日本語 — before ' * 20 + token + ' — after'
+        expected.append(text)
+        raw = text.encode(encoding)
+        return _resp(200, {'content-type': f'text/plain; charset={encoding}'},
+                     [raw[offset:offset + 7] for offset in range(0, len(raw), 7)])
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(upstream_response))
+    monkeypatch.setattr(proxy, 'http_client', upstream)
+    monkeypatch.setattr(proxy, 'sessions', {})
+    client = TestClient(proxy.app)
+    try:
+        response = client.post('/echo', headers=AUTH,
+                               json={'messages': [{'content': 'cutover@example.com'}]})
+        assert response.status_code == 200
+        assert response.content.decode(encoding) == expected[0]
+        # Past the budget, tokens must remain untouched, not silently restored.
+        assert 'cutover@example.com' not in response.text
+        assert '<PII_email_' in response.content.decode(encoding)
+    finally:
+        client.close()
+        asyncio.run(upstream.aclose())

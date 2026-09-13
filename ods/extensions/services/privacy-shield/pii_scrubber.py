@@ -202,9 +202,14 @@ class StreamRestorer:
                 return n
         return 0
 
-    def feed(self, chunk: bytes) -> str:
+    def feed(self, chunk: bytes, *, restore: bool = True) -> str:
         """Decode + restore a chunk; return text safe to emit now."""
         text = self._carry + self._decoder.decode(chunk)
+        if not restore:
+            # Retain decoder state across the restoration budget boundary.
+            # Decoding still needs bytes held from the previous transport chunk.
+            self._carry = ""
+            return text
         hold = self._holdback_len(text)
         if hold:
             releasable, self._carry = text[:-hold], text[-hold:]
@@ -214,14 +219,14 @@ class StreamRestorer:
             return ""
         return self._detector.restore(releasable)
 
-    def finalize(self) -> str:
+    def finalize(self, *, restore: bool = True) -> str:
         """Flush the decoder and carry buffer at end of stream."""
         tail = self._decoder.decode(b"", True)
         remaining = self._carry + tail
         self._carry = ""
         if not remaining:
             return ""
-        return self._detector.restore(remaining)
+        return self._detector.restore(remaining) if restore else remaining
 
 
 class PrivacyShield:
