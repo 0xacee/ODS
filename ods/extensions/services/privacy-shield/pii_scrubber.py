@@ -80,29 +80,24 @@ class PIIDetector:
         scrubbed = text
 
         for pii_type, pattern in self.PATTERNS.items():
-            matches = pattern.findall(scrubbed)
-            for match in matches:
-                if isinstance(match, tuple):
-                    match = match[0]  # Handle groups
+            def replace_match(found):
+                match = found.group(0)
 
-                # Credit card: validate with Luhn to reduce false positives
+                # Credit card: validate with Luhn to reduce false positives.
                 if pii_type == 'credit_card' and not self._luhn_check(match):
-                    continue
+                    return match
 
-                # Check if we've seen this PII before
-                existing_token = None
                 for token, original in self.pii_map.items():
                     if original == match:
-                        existing_token = token
-                        break
+                        return token
 
-                if existing_token:
-                    scrubbed = scrubbed.replace(match, existing_token, 1)
-                else:
-                    # New PII - create token
-                    token = self._generate_token(pii_type, match)
-                    self.pii_map[token] = match
-                    scrubbed = scrubbed.replace(match, token, 1)
+                token = self._generate_token(pii_type, match)
+                self.pii_map[token] = match
+                return token
+
+            # Replace exactly the regex match. A same-valued substring earlier
+            # in the text may not satisfy the pattern's boundary conditions.
+            scrubbed = pattern.sub(replace_match, scrubbed)
 
         return scrubbed
 
