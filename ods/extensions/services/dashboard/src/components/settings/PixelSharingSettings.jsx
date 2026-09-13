@@ -15,12 +15,21 @@ export default function PixelSharingSettings() {
   const [stale, setStale] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [copying, setCopying] = useState(false)
+  const [copyResult, setCopyResult] = useState(null)
+  const copyPending = useRef(false)
+  const connection = useRef(null)
+  connection.current = {issued,baseUrl}
+  const currentCopy = copyResult?.issued === issued && copyResult?.baseUrl === baseUrl ? copyResult : null
   const [confirm, setConfirm] = useState(null)
   const [clock, setClock] = useState(Date.now)
   const mounted = useRef(false)
   const pending = useRef(false)
   const controller = useRef(null)
   const sequence = useRef(0)
+
+  // Release the receipt's credential reference when its connection is dismissed or edited.
+  useEffect(() => setCopyResult(null), [issued, baseUrl])
 
   const request = useCallback(async (action = null, payload = null) => {
     if (pending.current) return
@@ -120,10 +129,19 @@ export default function PixelSharingSettings() {
   }
 
   async function copyConnection() {
+    if (copyPending.current) return
+    copyPending.current = true
+    setCopying(true); setCopyResult(null); setNotice(''); setError('')
+    const current = () => mounted.current && connection.current.issued === issued && connection.current.baseUrl === baseUrl
     try {
       await navigator.clipboard.writeText(JSON.stringify(connectionBundle(issued, baseUrl), null, 2))
-      setNotice('Connection settings copied. They contain a secret device key; share only with the intended device.')
-    } catch { setError('Could not copy. Check the /v1 URL and clipboard permission.') }
+      if (current()) setCopyResult({issued,baseUrl,notice:'Connection settings copied. They contain a secret device key; share only with the intended device.'})
+    } catch {
+      if (current()) setCopyResult({issued,baseUrl,error:'Could not copy. Check the /v1 URL and clipboard permission.'})
+    } finally {
+      copyPending.current = false
+      if (mounted.current) setCopying(false)
+    }
   }
 
   function confirmAction() {
@@ -140,8 +158,8 @@ export default function PixelSharingSettings() {
         <p className="text-sm text-theme-text-muted">Use this ODS model from Pixel on another device. Tools and permissions stay on that device.</p></div>
       <button className={buttonStyle} disabled={busy} onClick={() => request()}>Reload sharing</button>
     </div>
-    {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
-    {notice && <p role="status" className="text-sm text-theme-text-muted">{notice}</p>}
+    {(currentCopy?.error || error) && <p role="alert" className="text-sm text-red-400">{currentCopy?.error || error}</p>}
+    {(currentCopy?.notice || notice) && <p role="status" className="text-sm text-theme-text-muted">{currentCopy?.notice || notice}</p>}
     {!snapshot ? <p className="text-sm text-theme-text-muted">{busy ? 'Loading sharing settings…' : 'Sharing settings could not be loaded.'}</p> : <>
       <div className="grid gap-3 text-sm md:grid-cols-3">
         <div><span className="text-theme-text-muted">Active model</span><p>{route?.runtimeModelId || 'No verified local model'}</p></div>
@@ -171,7 +189,7 @@ export default function PixelSharingSettings() {
         <label className="block text-sm">Laptop connection URL<input className={inputStyle} value={baseUrl} onChange={event => { baseUrlEdited.current = true; setBaseUrl(event.target.value) }} spellCheck={false} /></label>
         <label className="block text-sm">Device API key<input className={inputStyle} type="password" value={issued.credential.key} readOnly autoComplete="off" /></label>
         <p className="text-sm">OpenAI-compatible model: <code>ods/shared</code>. Test the connection on the client before choosing it as Pixel’s leader.</p>
-        <button className={buttonStyle} onClick={copyConnection}>Copy connection settings</button>{' '}
+        <button className={buttonStyle} onClick={copyConnection} disabled={copying}>Copy connection settings</button>{' '}
         <button className={buttonStyle} onClick={() => setIssued(null)}>Dismiss key</button>
       </div>}
       <ul className="space-y-2" aria-label="Inference devices">
