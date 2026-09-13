@@ -1382,6 +1382,26 @@ def _assignment_lines(rendered: str, key: str) -> list[str]:
     return [line for line in rendered.splitlines() if line.startswith(f"{key}=")]
 
 
+@pytest.mark.parametrize("template", [
+    "# VIDEO_GID=44\nVIDEO_GID=44\n",
+    "VIDEO_GID=44\nVIDEO_GID=992\n",
+])
+def test_render_env_mixed_and_active_repetitions_assign_once(repeated_key_template, template):
+    from main import _render_env_from_values
+
+    repeated_key_template.write_text(template, encoding="utf-8")
+    assert _assignment_lines(_render_env_from_values({"VIDEO_GID": "7"}), "VIDEO_GID") == ["VIDEO_GID=7"]
+
+
+def test_render_env_unset_comment_does_not_suppress_later_active_key(repeated_key_template):
+    from main import _render_env_from_values
+
+    repeated_key_template.write_text("# VIDEO_GID=44\nVIDEO_GID=992\n", encoding="utf-8")
+    rendered = _render_env_from_values({})
+    assert _assignment_lines(rendered, "VIDEO_GID") == ["VIDEO_GID="]
+    assert "# VIDEO_GID=44" in rendered.splitlines()
+
+
 def test_render_env_assigns_repeated_template_key_once(repeated_key_template):
     """Every commented occurrence of a key used to be rewritten into an
     assignment, so a value for VIDEO_GID came out twice and validate-env.sh

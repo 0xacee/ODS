@@ -811,6 +811,7 @@ def _build_env_sections(schema_keys: list[str]) -> list[dict[str, Any]]:
 def _render_env_from_values(values: dict[str, str]) -> str:
     example_path = _resolve_template_path(".env.example")
     seen: set[str] = set()
+    assigned: set[str] = set()
     output_lines: list[str] = []
 
     if example_path.exists():
@@ -827,8 +828,12 @@ def _render_env_from_values(values: dict[str, str]) -> str:
 
         if assignment:
             key = assignment.group(1)
-            output_lines.append(f"{key}={values.get(key, '')}")
             seen.add(key)
+            if key in assigned:
+                output_lines.append(f"# {line}")
+                continue
+            output_lines.append(f"{key}={values.get(key, '')}")
+            assigned.add(key)
             continue
 
         if commented_assignment:
@@ -838,12 +843,13 @@ def _render_env_from_values(values: dict[str, str]) -> str:
             # LLAMA_CPU_LIMIT, WHISPER_ACCELERATION, ...) and a prose comment
             # can look like "# ODS_MODE=cloud and ..."; rewriting every match
             # produced duplicate assignments that validate-env.sh rejects.
-            if key in seen:
+            if key in assigned:
                 output_lines.append(line)
                 continue
             seen.add(key)
             if key in values:
                 output_lines.append(f"{key}={values[key]}")
+                assigned.add(key)
             else:
                 output_lines.append(line)
             continue
