@@ -176,6 +176,51 @@ it('expires the retained key and device admission at their deadlines without ano
   } finally {vi.useRealTimers()}
 })
 
+it.each(['url','dismiss'])('does not acknowledge an obsolete clipboard write after %s changes', async change => {
+  setup()
+  await createKey()
+  let complete
+  navigator.clipboard.writeText.mockImplementation(() => new Promise(resolve => {complete = resolve}))
+  const button = screen.getByRole('button',{name:'Copy connection settings'})
+  fireEvent.click(button)
+  fireEvent.click(button)
+  expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1)
+  if (change === 'url') fireEvent.change(screen.getByLabelText('Laptop connection URL'),{target:{value:'https://new.example/v1'}})
+  else fireEvent.click(screen.getByRole('button',{name:'Dismiss key'}))
+  await act(async () => complete())
+  expect(screen.queryByText(/Connection settings copied/)).toBeNull()
+  if (change === 'url') {
+    navigator.clipboard.writeText.mockResolvedValueOnce(undefined)
+    fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+    expect(await screen.findByText(/Connection settings copied/)).toBeVisible()
+    expect(JSON.parse(navigator.clipboard.writeText.mock.calls.at(-1)[0]).baseUrl).toBe('https://new.example/v1')
+  }
+})
+
+it('clears a previous copy success before a failed copy of edited connection settings', async () => {
+  setup()
+  await createKey()
+  fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+  await screen.findByText(/Connection settings copied/)
+  fireEvent.change(screen.getByLabelText('Laptop connection URL'),{target:{value:'https://changed.example/v1'}})
+  navigator.clipboard.writeText.mockRejectedValueOnce(new Error('denied'))
+  fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Could not copy')
+  expect(screen.queryByText(/Connection settings copied/)).toBeNull()
+})
+
+it('discards a prior receipt when the connection is edited, even if its URL is later restored', async () => {
+  setup()
+  await createKey()
+  fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+  await screen.findByText(/Connection settings copied/)
+  const url = screen.getByLabelText('Laptop connection URL')
+  fireEvent.change(url,{target:{value:'https://edited.example/v1'}})
+  fireEvent.change(url,{target:{value:'http://127.0.0.1:4005/v1'}})
+  expect(screen.queryByText(/Connection settings copied/)).toBeNull()
+  expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1)
+})
+
 it('invalidates a pending sharing confirmation before a reload can replace its reviewed state', async () => {
   const {fetchMock} = setup(snapshot(1,[device()]))
   await screen.findByText('stopped')
