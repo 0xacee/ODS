@@ -6,6 +6,7 @@ import {readFileSync} from 'node:fs'
 // Vitest stubs CSS imports; read the actual stylesheet for cascade assertions.
 const sourceStyles=readFileSync('src/components/pixel-file-changes.css','utf8')
 const findStyles=readFileSync('src/components/pixel-source-find.css','utf8')
+const getComputedStyle=element=>window.getComputedStyle(element)
 
 const source = '<div>'+ 'long-unbroken-content'.repeat(80) + '</div>\r\nsecond line\r\n'
 const digest = createHash('sha256').update(source).digest('hex')
