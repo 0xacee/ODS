@@ -175,3 +175,36 @@ it('expires the retained key and device admission at their deadlines without ano
     expect(vi.getTimerCount()).toBe(0)
   } finally {vi.useRealTimers()}
 })
+
+it.each(['url','dismiss'])('does not acknowledge an obsolete clipboard write after %s changes', async change => {
+  setup()
+  await createKey()
+  let complete
+  navigator.clipboard.writeText.mockImplementation(() => new Promise(resolve => {complete = resolve}))
+  const button = screen.getByRole('button',{name:'Copy connection settings'})
+  fireEvent.click(button)
+  fireEvent.click(button)
+  expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1)
+  if (change === 'url') fireEvent.change(screen.getByLabelText('Laptop connection URL'),{target:{value:'https://new.example/v1'}})
+  else fireEvent.click(screen.getByRole('button',{name:'Dismiss key'}))
+  await act(async () => complete())
+  expect(screen.queryByText(/Connection settings copied/)).toBeNull()
+  if (change === 'url') {
+    navigator.clipboard.writeText.mockResolvedValueOnce(undefined)
+    fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+    expect(await screen.findByText(/Connection settings copied/)).toBeVisible()
+    expect(JSON.parse(navigator.clipboard.writeText.mock.calls.at(-1)[0]).baseUrl).toBe('https://new.example/v1')
+  }
+})
+
+it('clears a previous copy success before a failed copy of edited connection settings', async () => {
+  setup()
+  await createKey()
+  fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+  await screen.findByText(/Connection settings copied/)
+  fireEvent.change(screen.getByLabelText('Laptop connection URL'),{target:{value:'https://changed.example/v1'}})
+  navigator.clipboard.writeText.mockRejectedValueOnce(new Error('denied'))
+  fireEvent.click(screen.getByRole('button',{name:'Copy connection settings'}))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Could not copy')
+  expect(screen.queryByText(/Connection settings copied/)).toBeNull()
+})
