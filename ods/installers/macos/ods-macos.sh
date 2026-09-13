@@ -234,6 +234,11 @@ read_ods_env() {
             if [[ "$val" == '"'*'"' ]]; then
                 val="${val#\"}"
                 val="${val%\"}"
+                # Decode writer escapes without evaluating shell expansions.
+                # Single-quoted values below remain literal.
+                val="${val//\\\"/\"}"
+                val="${val//\\\$/\$}"
+                val="${val//\\\\/\\}"
             elif [[ "$val" == "'"*"'" ]]; then
                 val="${val#\'}"
                 val="${val%\'}"

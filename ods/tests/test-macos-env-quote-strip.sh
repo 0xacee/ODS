@@ -55,6 +55,8 @@ IC_SQ='single value'   # trailing note
 IC_DQ_INNER="keep # this"
 IC_EMPTY_COMMENT=  # auto-generated during install
 IC_LEADING_HASH= #x
+IC_DQ_ESCAPED="it's \$5 \"quoted\" back\\slash" # note
+IC_SQ_LITERAL='keep \$5 \n literal'
 EOF
 
 INSTALL_DIR="$TMP_DIR"
@@ -89,6 +91,8 @@ assert_env "IC_DQ_INNER" 'keep # this'
 # config); read_ods_env matches so ods exports what Compose would read.
 assert_env "IC_EMPTY_COMMENT" '# auto-generated during install'
 assert_env "IC_LEADING_HASH" '#x'
+assert_env "IC_DQ_ESCAPED" 'it'"'"'s $5 "quoted" back\slash'
+assert_env "IC_SQ_LITERAL" 'keep \$5 \n literal'
 
 echo ""
 echo "Result: $PASSED passed, $FAILED failed"
