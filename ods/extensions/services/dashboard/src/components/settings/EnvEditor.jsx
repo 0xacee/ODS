@@ -25,6 +25,14 @@ const GROUPS = [
 
 const fieldKeyLabel = (key = '') => key.toLowerCase()
 
+// Match the Settings API's accepted form aliases without rewriting stored text.
+const booleanSelection = value => {
+  const text = String(value).trim().toLowerCase()
+  if (['true', '1', 'yes', 'on'].includes(text)) return 'true'
+  if (['false', '0', 'no', 'off'].includes(text)) return 'false'
+  return value === '' ? '' : null
+}
+
 const countIssueSections = (sections, issues) => {
   const issueKeys = new Set((issues || []).map(issue => issue.key).filter(Boolean))
   return (sections || []).filter(section => section.keys?.some(key => issueKeys.has(key))).length
@@ -255,6 +263,7 @@ function EnvironmentFieldCard({ field, value, issues, revealed, cleared, onToggl
   const isEnum = Array.isArray(field?.enum) && field.enum.length > 0
   const isBoolean = field?.type === 'boolean'
   const isInteger = field?.type === 'integer'
+  const selectedBoolean = isBoolean ? booleanSelection(value) : null
   const isReadOnly = Boolean(field?.readOnly)
   const secretPlaceholder = field?.secret ? (field?.hasValue ? 'Stored locally' : 'Not set') : (field?.default !== undefined && field?.default !== null ? String(field.default) : '')
 
@@ -285,10 +294,10 @@ function EnvironmentFieldCard({ field, value, issues, revealed, cleared, onToggl
                 key={option.label}
                 type="button"
                 disabled={isReadOnly}
-                aria-pressed={String(value).toLowerCase() === option.id}
+                aria-pressed={selectedBoolean === option.id}
                 onClick={() => onChange(option.id)}
                 className={`rounded-lg px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition-colors disabled:cursor-default disabled:opacity-60 ${
-                  String(value).toLowerCase() === option.id ? 'bg-theme-accent text-white' : 'text-theme-text-muted hover:text-theme-text'
+                  selectedBoolean === option.id ? 'bg-theme-accent text-white' : 'text-theme-text-muted hover:text-theme-text'
                 }`}
               >
                 {option.label}
