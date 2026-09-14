@@ -202,10 +202,12 @@ reset_remote_agent() {
 
     # Fetch current memory from remote
     local tmpfile="/tmp/memory-shepherd-${agent}-current.md"
-    if ! scp -q "${remote_user}@${remote_host}:${remote_memory}" "$tmpfile" 2>/dev/null; then
-        log "WARN: No memory file for $agent on $remote_host — pushing baseline"
-        scp -q "$baseline" "${remote_user}@${remote_host}:${remote_memory}"
-        return 0
+    if ! scp -q "${remote_user}@${remote_host}:${remote_memory}" "$tmpfile"; then
+        # SCP failure does not establish that the remote file is missing.
+        # A failed or partial read must never authorize overwriting memory
+        # whose current notes have not been archived.
+        log "ERROR: Could not read memory for $agent on $remote_host — no reset requested" >&2
+        return 1
     fi
 
     local memory_size
