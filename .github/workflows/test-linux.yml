@@ -63,6 +63,9 @@ jobs:
             extensions/services/pixel-agent/tests/test_pixel_access_mode.py \
             extensions/services/pixel-agent/tests/test_access_mode_config.py
 
+      - name: Test preview publication directory failures
+        run: python -m pytest -q extensions/services/pixel-agent/tests/test_preview_directory_errors.py
+
   token-spy-postgres:
     runs-on: ubuntu-latest
     services:
