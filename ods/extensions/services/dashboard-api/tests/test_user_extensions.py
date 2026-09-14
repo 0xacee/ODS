@@ -139,6 +139,17 @@ class TestScanUserExtensions:
         result = scan_user_extension_services(user_dir)
         assert result["my-ext"]["name"] == "my-ext"
 
+    def test_scan_out_of_range_port_skipped(self, tmp_path):
+        """Manifests with ports <= 0 or > 65535 are skipped."""
+        user_dir = tmp_path / "user"
+        ext_dir = user_dir / "bad-port"
+        _write_manifest(ext_dir, _make_manifest("bad-port", port=-1))
+        (ext_dir / "compose.yaml").write_text("services: {}\n")
+        assert scan_user_extension_services(user_dir) == {}
+
+        _write_manifest(ext_dir, _make_manifest("bad-port", port=70000))
+        assert scan_user_extension_services(user_dir) == {}
+
     def test_scan_symlink_skipped(self, tmp_path):
         """Symlinked directories in user-extensions are skipped."""
         user_dir = tmp_path / "user"

@@ -77,20 +77,25 @@ def scan_user_extension_services(
                     continue
 
             port = svc.get("port", 0)
-            name = svc.get("name", service_id)
+            port_int = int(port)
+            if not 1 <= port_int <= 65535:
+                logger.warning("Skipping extension %s: port %r out of valid range", service_id, port)
+                continue
+            ext_port = int(svc.get("external_port_default", port_int))
+            name = str(svc.get("name") or service_id)
 
             # Host = service_id (Docker DNS). Never trust manifest host_env/default_host.
             services[service_id] = {
                 "host": service_id,
-                "port": int(port),
-                "external_port": int(svc.get("external_port_default", port)),
+                "port": port_int,
+                "external_port": ext_port,
                 "health": health,
                 "name": name,
                 # Optional: extensions whose health endpoint lives on a
                 # secondary port (e.g. milvus 9091) need an explicit
                 # health_port; check_service_health() falls back to "port"
                 # when absent.
-                **({"health_port": int(svc["health_port"])} if "health_port" in svc else {}),
+                **({"health_port": int(svc["health_port"])} if "health_port" in svc and 1 <= int(svc["health_port"]) <= 65535 else {}),
             }
         except (TypeError, ValueError) as exc:
             logger.warning("Skipping extension %s: invalid manifest value: %s", service_id, exc)
