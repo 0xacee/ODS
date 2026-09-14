@@ -148,7 +148,12 @@ when host inference health is unavailable.
 ### `GET /v1/service/health`
 
 Return a read-only Docker lifecycle and declared healthcheck snapshot for ODS
-containers. Compose service labels are preferred over container-name parsing.
+containers. Both this endpoint and `GET /v1/service/stats` include explicitly
+declared Docker container names from installed extension manifests, even when
+the name does not start with `ods-`. User extension definitions take precedence
+over built-ins. Declared names map to their extension service ID; other `ods-`
+containers retain Compose-label or name-based identification. Unrelated names
+and custom names from non-Docker definitions are excluded.
 
 **Authentication:** Required
 
