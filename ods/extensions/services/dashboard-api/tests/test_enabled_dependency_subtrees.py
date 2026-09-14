@@ -8,15 +8,15 @@ import pytest
 from routers import extensions
 
 
-@pytest.fixture
-def installation(monkeypatch, tmp_path):
+@pytest.fixture(params=[False, True], ids=["disabled-target", "enabled-target"])
+def installation(monkeypatch, tmp_path, request):
     bundled = tmp_path / "bundled"
     source = Path(__file__).resolve().parents[2]
     for name in ("hermes-proxy", "hermes", "searxng"):
         directory = bundled / name
         directory.mkdir(parents=True)
         (directory / "manifest.yaml").write_bytes((source / name / "manifest.yaml").read_bytes())
-        filename = "compose.yaml.disabled" if name == "hermes-proxy" else "compose.yaml"
+        filename = "compose.yaml.disabled" if name == "hermes-proxy" and not request.param else "compose.yaml"
         (directory / filename).write_text(f"services:\n  {name}:\n    image: alpine:3.22\n")
 
     def rename(action, name):
@@ -47,6 +47,7 @@ def disable_search(client, start):
 
 def test_enable_requires_confirmation_for_disabled_transitive_service(test_client, installation):
     bundled, start = installation
+    target_enabled = (bundled / "hermes-proxy" / "compose.yaml").exists()
     disable_search(test_client, start)
 
     response = test_client.post("/api/extensions/hermes-proxy/enable",
@@ -54,7 +55,8 @@ def test_enable_requires_confirmation_for_disabled_transitive_service(test_clien
 
     assert response.status_code == 400
     assert response.json()["detail"]["missing_dependencies"] == ["searxng"]
-    assert (bundled / "hermes-proxy" / "compose.yaml.disabled").exists()
+    assert (bundled / "hermes-proxy" / "compose.yaml").exists() is target_enabled
+    assert (bundled / "hermes-proxy" / "compose.yaml.disabled").exists() is not target_enabled
     start.assert_not_called()
 
 
