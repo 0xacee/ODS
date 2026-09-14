@@ -2199,6 +2199,22 @@ def _activate_service(service_id: str) -> dict:
     return {"id": service_id, "action": "enabled"}
 
 
+def _failed_dependency_starts(service_id: str, failed: set[str], seen=None) -> list[str]:
+    """Find failed prerequisites, including through already-enabled services."""
+    if seen is None:
+        seen = set()
+    if service_id in seen:
+        return []
+    seen.add(service_id)
+    blockers = []
+    for dep in _read_direct_deps(service_id):
+        if dep in failed:
+            blockers.append(dep)
+        else:
+            blockers.extend(_failed_dependency_starts(dep, failed, seen))
+    return list(dict.fromkeys(blockers))
+
+
 @router.post("/api/extensions/{service_id}/enable")
 @_serialize_extension_operation
 def enable_extension(
@@ -2295,10 +2311,20 @@ def enable_extension(
     # Start all enabled services via agent (outside lock)
     agent_ok = True
     warnings: list[str] = []
+    failed_services: list[str] = []
     for svc_id in enabled_services:
+        blocked_deps = _failed_dependency_starts(svc_id, set(failed_services))
+        if blocked_deps:
+            agent_ok = False
+            failed_services.append(svc_id)
+            message = f"Not started because dependencies failed: {', '.join(blocked_deps)}"
+            _write_error_progress(svc_id, message)
+            warnings.append(f"{svc_id}: {message}")
+            continue
         # pre_start failure is terminal for this service — do not start it
         if not _call_agent_hook(svc_id, "pre_start"):
             agent_ok = False
+            failed_services.append(svc_id)
             _write_error_progress(
                 svc_id,
                 "pre_start hook failed — extension not started.",
@@ -2306,6 +2332,9 @@ def enable_extension(
             continue
         if not _call_agent("start", svc_id):
             agent_ok = False
+            failed_services.append(svc_id)
+            _write_error_progress(svc_id, "Host agent failed to start extension.")
+            continue
         # post_start is non-terminal — log failure but don't fail the enable
         if not _call_agent_hook(svc_id, "post_start"):
             logger.warning("post_start hook failed for %s (non-fatal)", svc_id)
@@ -2319,6 +2348,7 @@ def enable_extension(
         "id": service_id,
         "action": "enabled",
         "enabled_services": enabled_services,
+        "failed_services": failed_services,
         "restart_required": not agent_ok,
         "warnings": warnings,
         "message": (
