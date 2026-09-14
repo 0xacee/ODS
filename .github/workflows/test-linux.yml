@@ -8,6 +8,30 @@ on:
       - master
 
 jobs:
+  backup-space:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    defaults:
+      run:
+        working-directory: ods
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Install backup test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync jq mawk
+      - name: Backup and restore disk-space boundaries
+        env:
+          ODS_TEST_AWK: mawk
+        run: python3 tests/test-backup-space-arithmetic.py -v
+      - name: Backup integrity and restore round trip
+        run: |
+          bash tests/test-backup-integrity.sh
+          bash tests/test-backup-restore-roundtrip.sh
+
   pixel-advice-host-stdlib:
     runs-on: ubuntu-latest
     strategy:
