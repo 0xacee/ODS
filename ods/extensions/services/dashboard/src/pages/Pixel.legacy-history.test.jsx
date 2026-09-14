@@ -59,7 +59,8 @@ test('restores the library-first request receipt before checking interrupted wor
     body: JSON.stringify({chat_id: 'retained-chat', request_id: 'latest-request'}),
   })))
   expect(screen.getByText('Latest saved request')).toBeInTheDocument()
-  expect(screen.getByPlaceholderText(/is unavailable$/)).toBeDisabled()
+  await screen.findByText('Working in this chat')
+  expect(screen.getByRole('textbox')).toBeDisabled()
   resolveHealth({ok: true, json: async () => ({available: true})})
   expect(await screen.findByPlaceholderText(/^Message .+\.\.\.$/)).toBeDisabled()
   expect(JSON.parse(localStorage.getItem(CHAT_KEY))).toMatchObject({requestId: 'latest-request', interrupted: true})
