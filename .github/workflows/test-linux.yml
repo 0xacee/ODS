@@ -318,6 +318,12 @@ jobs:
       - name: Backup Data Coverage Contract
         run: bash tests/test-backup-data-coverage.sh
 
+      - name: Backup retention and integrity
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync jq
+          bash tests/test-backup-integrity.sh
+
       - name: Bootstrap Upgrade Compose Flags Recovery Tests
         run: bash tests/test-bootstrap-upgrade-compose-flags-recovery.sh
 
