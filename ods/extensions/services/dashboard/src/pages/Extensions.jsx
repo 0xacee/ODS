@@ -18,6 +18,11 @@ export { getTemplateStatus }
 
 // API/backend services with no user-facing web UI — show badge instead of port link.
 const HEADLESS_EXTENSIONS = new Set(['embeddings', 'tts', 'whisper', 'privacy-shield'])
+const UPDATE_CONFIRMATION_STATES = {
+  update_state_unknown: 'unknown',
+  locally_modified: 'modified',
+  untracked_install: 'untracked',
+}
 
 // Auth: nginx injects "Authorization: Bearer ${DASHBOARD_API_KEY}" via
 // proxy_set_header for all /api/ requests (see nginx.conf).  All fetches
@@ -271,6 +276,20 @@ export default function Extensions({ compact = false }) {
           setDepConfirm({ ext, missingDeps: detail.missing_dependencies })
           return
         }
+        if (action === 'update' && !force && res.status === 409 && detail?.force_available === true
+          && Object.hasOwn(UPDATE_CONFIRMATION_STATES, detail.code)) {
+          const ext = extensions.find(e => e.id === serviceId)
+          if (ext) {
+            // The server inspected newer state than the catalog. Reopen
+            // review with that reason; never automatically resend with force.
+            requestAction({
+              ...ext,
+              update_status: UPDATE_CONFIRMATION_STATES[detail.code],
+              locally_modified: detail.code === 'locally_modified',
+            }, 'update')
+            return
+          }
+        }
         throw new Error((typeof detail === 'string' ? detail : detail?.message) || `Failed to ${action}`)
       }
       const data = await res.json()
@@ -311,7 +330,9 @@ export default function Extensions({ compact = false }) {
       disable: `Disable ${ext.name}? The service will be stopped.`,
       uninstall: `Remove ${ext.name}? You can reinstall it from the library.`,
       purge: `Permanently delete all data for ${ext.name}? This cannot be undone.`,
-      update: ext.locally_modified
+      update: ext.update_status === 'unknown'
+        ? `ODS could not inspect the installed files for ${ext.name}. Refresh from the ODS library? This replaces the installed definition, including any local changes, and retains the current files as a rollback backup.`
+        : ext.locally_modified
         ? `Update ${ext.name} from the ODS library? Local definition changes will be replaced, but retained as a rollback backup.`
         : ext.update_status === 'untracked'
         ? `Refresh this legacy ${ext.name} install from the ODS library and begin tracking future updates? The current definition will be retained as a rollback backup.`
@@ -526,7 +547,7 @@ export default function Extensions({ compact = false }) {
               <button
                 onClick={() => handleMutation(confirm.ext.id, confirm.action, {
                   force: confirm.action === 'update' && (
-                    confirm.ext.locally_modified || confirm.ext.update_status === 'untracked'
+                    confirm.ext.locally_modified || ['untracked', 'unknown'].includes(confirm.ext.update_status)
                   ),
                 })}
                 className={`px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.08em] rounded-lg transition-colors ${
@@ -646,7 +667,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
   const showRemove = isUserExt && (status === 'disabled' || isError)
   const showInstall = status === 'not_installed' && ext.installable
   const showUpdate = isUserExt && ext.installable && (
-    ext.update_available || ext.update_status === 'untracked'
+    ext.update_available || ext.locally_modified || ['untracked', 'unknown'].includes(ext.update_status)
   )
   const showRollback = isUserExt && ext.rollback_available
 
@@ -761,7 +782,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
               onClick={() => onAction(ext, 'update')}
               className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] rounded-lg bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 transition-colors disabled:opacity-50"
             >
-              {isMutating ? <Loader2 size={12} className="animate-spin" /> : <><RefreshCw size={12} /> {ext.update_status === 'untracked' ? 'Refresh' : 'Update'}</>}
+              {isMutating ? <Loader2 size={12} className="animate-spin" /> : <><RefreshCw size={12} /> {ext.update_available ? 'Update' : 'Refresh'}</>}
             </button>
           )}
           {showRollback && (
