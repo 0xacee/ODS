@@ -170,6 +170,12 @@ def _safe_root(path: pathlib.Path, owner_uid: int) -> None:
         raise PreviewError("unsafe preview root")
 
 
+def _directory_walk_failed(error: OSError) -> None:
+    # os.walk otherwise silently skips unreadable/disappeared directories and
+    # can publish an index whose referenced assets were never captured.
+    raise PreviewError("unsafe preview directory") from error
+
+
 def _source_files(
     workspace: pathlib.Path, relative_directory: str, owner_uid: int
 ) -> list[tuple[str, pathlib.Path, os.stat_result]]:
@@ -189,7 +195,7 @@ def _source_files(
         raise PreviewError("unsafe preview directory")
 
     files: list[tuple[str, pathlib.Path, os.stat_result]] = []
-    for root, directories, names in os.walk(current, topdown=True, followlinks=False):
+    for root, directories, names in os.walk(current, topdown=True, followlinks=False, onerror=_directory_walk_failed):
         root_path = pathlib.Path(root)
         root_info = root_path.lstat()
         if (
@@ -338,7 +344,7 @@ def publish_snapshot(
         raise PreviewError("unsafe preview snapshot")
     expected = {relative: data for relative, data in captured}
     observed: set[str] = set()
-    for root, directories, names in os.walk(destination, topdown=True, followlinks=False):
+    for root, directories, names in os.walk(destination, topdown=True, followlinks=False, onerror=_directory_walk_failed):
         root_path = pathlib.Path(root)
         root_info = root_path.lstat()
         if (
