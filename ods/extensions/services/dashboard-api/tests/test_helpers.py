@@ -485,6 +485,25 @@ class TestCheckServiceHealth:
         assert result.status == "down"
 
     @pytest.mark.asyncio
+    async def test_normalizes_health_endpoint_without_leading_slash(self, mock_aiohttp_session, monkeypatch):
+        session = mock_aiohttp_session(status=200)
+        monkeypatch.setattr("helpers._get_aio_session", AsyncMock(return_value=session))
+        cfg = dict(self._CONFIG, health="api/health")
+        result = await check_service_health("test-svc", cfg)
+        assert result.status == "healthy"
+        session.get.assert_called_once()
+        url = session.get.call_args[0][0]
+        assert url == "http://localhost:8080/api/health"
+
+    @pytest.mark.asyncio
+    async def test_down_on_value_error(self, monkeypatch):
+        session = MagicMock()
+        session.get = MagicMock(side_effect=ValueError("Invalid URL"))
+        monkeypatch.setattr("helpers._get_aio_session", AsyncMock(return_value=session))
+        result = await check_service_health("test-svc", self._CONFIG)
+        assert result.status == "down"
+
+    @pytest.mark.asyncio
     async def test_host_network_portless_service_is_not_deployed(self):
         config = {
             "name": "Portless",

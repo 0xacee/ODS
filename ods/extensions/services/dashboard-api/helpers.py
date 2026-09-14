@@ -668,8 +668,15 @@ async def check_service_health(
         return _service_status_from_config(service_id, config, "not_deployed")
 
     host = config.get('host', 'localhost')
-    health_port = config.get('health_port', config['port'])
-    url = f"http://{host}:{health_port}{config['health']}"
+    health_path = config.get('health', '/health') or '/health'
+    if not health_path.startswith('/'):
+        health_path = f"/{health_path}"
+    raw_port = config.get('health_port', config.get('port', 80))
+    try:
+        health_port = int(raw_port)
+    except (ValueError, TypeError):
+        health_port = 80
+    url = f"http://{host}:{health_port}{health_path}"
     status = "unknown"
     response_time = None
 
@@ -694,7 +701,7 @@ async def check_service_health(
             status = "not_deployed"
         else:
             status = "down"
-    except (aiohttp.ClientError, OSError) as e:
+    except (aiohttp.ClientError, OSError, ValueError) as e:
         logger.debug(f"Health check failed for {service_id} at {url}: {e}")
         status = "down"
 
