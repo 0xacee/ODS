@@ -1923,12 +1923,18 @@ def update_extension(
                     prefix=f".{service_id}-retired-backup-", dir=retire_parent,
                 )) / service_id
                 os.replace(backup, retired)
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(dest, backup)
+            live_parked = False
             try:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(dest, backup)
+                live_parked = True
                 os.replace(staged, dest)
             except OSError:
-                os.replace(backup, dest)
+                # Even a failure to park the live tree must restore the
+                # retired rollback point. The live tree has not moved yet
+                # in that case, so never replace it with the older backup.
+                if live_parked:
+                    os.replace(backup, dest)
                 if retired is not None:
                     try:
                         os.replace(retired, backup)
