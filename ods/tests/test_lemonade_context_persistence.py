@@ -26,6 +26,10 @@ def runtime(tmp_path):
     config = root / ".cache/lemonade/config.json"
     config.parent.mkdir(parents=True)
     (opt / "lemonade").mkdir(parents=True)
+    # sudo CI maps namespace root to host root, which cannot traverse a
+    # runner-owned private home after dropping host-namespace capabilities.
+    # Copy the exact entrypoint into the fixture before entering isolation.
+    shutil.copyfile(ENTRYPOINT, opt / "lemonade-entrypoint.sh")
     server = opt / "lemonade/lemonade-server"
     server.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$LEMONADE_TEST_RECEIPT"\n', encoding="utf-8")
     server.chmod(0o755)
@@ -38,7 +42,7 @@ def runtime(tmp_path):
         return subprocess.run([
             "unshare", "--user", "--map-root-user", "--mount", "--fork", "--propagation", "private",
             "sh", "-ec", 'mount --bind "$1" /root\nmount --bind "$2" /opt\nshift 2\nexec sh "$@"',
-            "lemonade-fixture", str(root), str(opt), str(ENTRYPOINT), "serve", "--port", "8080",
+            "lemonade-fixture", str(root), str(opt), "/opt/lemonade-entrypoint.sh", "serve", "--port", "8080",
         ], env=env, capture_output=True, text=True, timeout=20, preexec_fn=file_limit if limit else None)
 
     return config, receipt, start
@@ -63,6 +67,7 @@ def test_failed_write_keeps_the_complete_previous_config_and_does_not_boot(runti
     config.chmod(0o640)
     result = start(limit=True)
     assert result.returncode != 0
+    assert "File too large" in result.stderr
     assert not receipt.exists(), "Lemonade must not boot after failed context synchronization"
     assert config.read_bytes() == original
     assert config.stat().st_mode & 0o777 == 0o640
@@ -96,6 +101,7 @@ def test_malformed_existing_config_is_retained_and_stops_startup(runtime):
     config.write_bytes(original)
     result = start()
     assert result.returncode != 0
+    assert "JSONDecodeError" in result.stderr
     assert config.read_bytes() == original
     assert not receipt.exists()
 
