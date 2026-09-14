@@ -475,8 +475,10 @@ def snapshot_changes(previews: pathlib.Path, site_id: str, before_id: str | None
         change = "published" if before_id is None else "deleted" if new is None else "created" if old is None else "modified"
         entry = {"path": path, "change": change, "additions": None, "deletions": None, "diff": [], "truncated": False}
         try:
-            a = [] if old is None else old.decode("utf-8").splitlines(keepends=True)
-            b = [] if new is None else new.decode("utf-8").splitlines(keepends=True)
+            # Match the source viewer/excerpt's LF boundaries. str.splitlines
+            # also splits Unicode separators that are retained inside a source line.
+            a = [] if old is None else re.findall(r"[^\n]*\n|[^\n]+$", old.decode("utf-8"))
+            b = [] if new is None else re.findall(r"[^\n]*\n|[^\n]+$", new.decode("utf-8"))
             if any(any(ord(c) < 32 and c != '\t' for c in line.rstrip("\r\n")) for line in a + b) or len(a) + len(b) > 4000:
                 raise ValueError()
             additions = deletions = 0
