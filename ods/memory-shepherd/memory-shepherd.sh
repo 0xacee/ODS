@@ -65,7 +65,7 @@ find_config() {
 parse_config() {
     local conf_file="$1"
     local section=""
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
         # Strip comments and whitespace
         line="${line%%#*}"
         line="${line#"${line%%[![:space:]]*}"}"
