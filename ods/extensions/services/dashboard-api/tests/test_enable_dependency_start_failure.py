@@ -95,3 +95,24 @@ def test_failure_is_found_through_an_already_enabled_intermediate(test_client, i
     assert response.json()["failed_services"] == ["searxng", "hermes-proxy"]
     start.assert_called_once_with("start", "searxng")
     assert not (root / "extension-progress" / "hermes.json").exists()
+
+
+@pytest.mark.parametrize("start_ok", [False, True])
+def test_enabled_target_reports_its_start_outcome(test_client, installation, start_ok):
+    root, start, _ = installation
+    for service in ("hermes-proxy", "hermes", "searxng"):
+        directory = root / "bundled" / service
+        (directory / "compose.yaml.disabled").rename(directory / "compose.yaml")
+    start.return_value = start_ok
+
+    response = test_client.post("/api/extensions/hermes-proxy/enable",
+                                headers=test_client.auth_headers)
+
+    assert response.status_code == 200
+    assert response.json()["failed_services"] == ([] if start_ok else ["hermes-proxy"])
+    assert response.json()["restart_required"] is not start_ok
+    start.assert_called_once_with("start", "hermes-proxy")
+    if not start_ok:
+        progress = json.loads((root / "extension-progress/hermes-proxy.json").read_text())
+        assert progress["status"] == "error"
+        assert "ods restart" in progress["error"]

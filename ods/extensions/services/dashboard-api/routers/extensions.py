@@ -2264,6 +2264,7 @@ def enable_extension(
         return {
             "id": service_id,
             "action": "enabled",
+            "failed_services": [] if agent_ok else [service_id],
             "restart_required": not agent_ok,
             "message": (
                 "Extension started." if agent_ok
