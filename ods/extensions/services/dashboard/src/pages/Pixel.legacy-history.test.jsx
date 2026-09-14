@@ -40,6 +40,13 @@ test.each([
 })
 
 test('restores the library-first request receipt before checking interrupted work', async () => {
+  // Result recovery and service health run independently. Make the receipt
+  // arrive first, as it can in CI, then verify the active-task lock after health.
+  let resolveHealth
+  const health = new Promise(resolve => { resolveHealth = resolve })
+  const immediateFetch = fetch.getMockImplementation()
+  fetch.mockImplementation((url, ...args) => url === '/api/pixel/status'
+    ? health : immediateFetch(url, ...args))
   localStorage.setItem(CHAT_KEY, JSON.stringify(record('Old pointer text')))
   localStorage.setItem(LIBRARY_KEY, JSON.stringify([{
     ...record('Latest saved request'), messages: [
@@ -52,7 +59,9 @@ test('restores the library-first request receipt before checking interrupted wor
     body: JSON.stringify({chat_id: 'retained-chat', request_id: 'latest-request'}),
   })))
   expect(screen.getByText('Latest saved request')).toBeInTheDocument()
-  expect(screen.getByPlaceholderText(/^Message .+\.\.\.$/)).toBeDisabled()
+  expect(screen.getByPlaceholderText(/is unavailable$/)).toBeDisabled()
+  resolveHealth({ok: true, json: async () => ({available: true})})
+  expect(await screen.findByPlaceholderText(/^Message .+\.\.\.$/)).toBeDisabled()
   expect(JSON.parse(localStorage.getItem(CHAT_KEY))).toMatchObject({requestId: 'latest-request', interrupted: true})
   expect(fetch.mock.calls.some(([url]) => url === '/api/pixel/chat/stream')).toBe(false)
 })
