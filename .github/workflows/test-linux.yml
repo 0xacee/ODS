@@ -241,6 +241,9 @@ jobs:
       - name: CLI Install Directory Resolution Tests
         run: bash tests/test-cli-install-dir-resolution.sh
 
+      - name: Legacy Update Fallback Backup Round Trip
+        run: python3 tests/test-cli-legacy-update-backup.py
+
       - name: Validate Simulation Summary Tests
         run: bash tests/test-validate-sim-summary.sh
 
