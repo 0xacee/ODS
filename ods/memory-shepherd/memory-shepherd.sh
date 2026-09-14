@@ -152,19 +152,15 @@ reset_agent() {
     separator_line=$(grep -n "^${SEPARATOR}$" "$memory_file" | tail -1 | cut -d: -f1 || echo "")
 
     if [ -n "$separator_line" ]; then
-        local total_lines
-        total_lines=$(wc -l < "$memory_file")
-        if [ "$separator_line" -lt "$total_lines" ]; then
-            local scratch
-            scratch=$(tail -n +"$(($separator_line + 1))" "$memory_file" | sed '/^## Scratch Notes/d' | sed '/^[[:space:]]*$/d')
-            if [ -n "$scratch" ]; then
-                mkdir -p "$archive_dir"
-                local archive_file="$archive_dir/${TIMESTAMP}.md"
-                printf "# %s scratch notes — archived %s\n\n%s\n" "$agent" "$TIMESTAMP" "$scratch" > "$archive_file"
-                log "Archived scratch notes for $agent ($(echo "$scratch" | wc -l) lines)"
-            else
-                log "No scratch notes for $agent"
-            fi
+        # wc -l counts newline bytes, not the final unterminated line. Read
+        # the suffix itself before deciding it is safe to discard the memory.
+        local scratch
+        scratch=$(tail -n +"$((separator_line + 1))" "$memory_file" | sed '/^## Scratch Notes/d' | sed '/^[[:space:]]*$/d')
+        if [ -n "$scratch" ]; then
+            mkdir -p "$archive_dir"
+            local archive_file="$archive_dir/${TIMESTAMP}.md"
+            printf "# %s scratch notes — archived %s\n\n%s\n" "$agent" "$TIMESTAMP" "$scratch" > "$archive_file"
+            log "Archived scratch notes for $agent ($(echo "$scratch" | wc -l) lines)"
         else
             log "No scratch notes for $agent"
         fi
@@ -219,19 +215,15 @@ reset_remote_agent() {
     separator_line=$(grep -n "^${SEPARATOR}$" "$tmpfile" | tail -1 | cut -d: -f1 || echo "")
 
     if [ -n "$separator_line" ]; then
-        local total_lines
-        total_lines=$(wc -l < "$tmpfile")
-        if [ "$separator_line" -lt "$total_lines" ]; then
-            local scratch
-            scratch=$(tail -n +"$(($separator_line + 1))" "$tmpfile" | sed '/^## Scratch Notes/d' | sed '/^[[:space:]]*$/d')
-            if [ -n "$scratch" ]; then
-                mkdir -p "$archive_dir"
-                local archive_file="$archive_dir/${TIMESTAMP}.md"
-                printf "# %s scratch notes — archived %s\n\n%s\n" "$agent" "$TIMESTAMP" "$scratch" > "$archive_file"
-                log "Archived scratch notes for $agent ($(echo "$scratch" | wc -l) lines)"
-            else
-                log "No scratch notes for $agent"
-            fi
+        # Keep the same suffix-based decision as local resets: SCP does not
+        # guarantee that a text file ends with a newline.
+        local scratch
+        scratch=$(tail -n +"$((separator_line + 1))" "$tmpfile" | sed '/^## Scratch Notes/d' | sed '/^[[:space:]]*$/d')
+        if [ -n "$scratch" ]; then
+            mkdir -p "$archive_dir"
+            local archive_file="$archive_dir/${TIMESTAMP}.md"
+            printf "# %s scratch notes — archived %s\n\n%s\n" "$agent" "$TIMESTAMP" "$scratch" > "$archive_file"
+            log "Archived scratch notes for $agent ($(echo "$scratch" | wc -l) lines)"
         else
             log "No scratch notes for $agent"
         fi
