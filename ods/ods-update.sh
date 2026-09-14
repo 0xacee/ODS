@@ -347,23 +347,46 @@ _restore_snapshot() {
 
     log_info "Restoring from rollback snapshot: $(basename "${snap_dir}")"
 
+    # Callers invoke this as `if ! _restore_snapshot ...`, which disables set -e
+    # for everything below, so every copy has to be checked by hand. Without the
+    # checks a failed copy fell through to the "Restored" line and the function
+    # still returned 0, so rollback reported success it had not achieved.
+
     # Flat files: .env*, .version, docker-compose*.yml
     shopt -s dotglob
     for f in "${snap_dir}"/*; do
         local base
         base="$(basename "$f")"
         [[ -f "$f" && "$base" != "snapshot.json" && "$base" != "metadata.json" ]] || continue
-        cp "$f" "${INSTALL_DIR}/"
+        if ! cp "$f" "${INSTALL_DIR}/"; then
+            shopt -u dotglob
+            log_error "  Failed to restore ${base} from the snapshot."
+            return 1
+        fi
         log_info "  Restored: ${base}"
     done
     shopt -u dotglob
 
-    # Per-extension config directories
+    # Per-extension config directories. Stage the copy first: the old code
+    # removed the live directory and only then copied, so a copy that failed
+    # left the user with no config at all — during the command they ran to
+    # recover. Nothing is destroyed until the replacement is complete.
     for ext_dir in litellm n8n openclaw searxng; do
         local src="${snap_dir}/config-${ext_dir}"
         if [[ -d "$src" ]]; then
-            rm -rf "${INSTALL_DIR}/config/${ext_dir}"
-            cp -r "$src" "${INSTALL_DIR}/config/${ext_dir}"
+            local dest="${INSTALL_DIR}/config/${ext_dir}"
+            local staged="${dest}.restore-$$"
+            rm -rf "$staged"
+            if ! cp -r "$src" "$staged"; then
+                rm -rf "$staged"
+                log_error "  Failed to restore config/${ext_dir}/ — the existing directory was left untouched."
+                return 1
+            fi
+            rm -rf "$dest"
+            if ! mv "$staged" "$dest"; then
+                log_error "  Restored copy is staged at ${staged} but could not be moved into place."
+                return 1
+            fi
             log_info "  Restored: config/${ext_dir}/"
         fi
     done
