@@ -16,6 +16,7 @@ import PixelDraftPreview from '../components/PixelDraftPreview'
 import PixelDictation from '../components/PixelDictation'
 import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelCommandSearch'
 import PixelConversationImport from '../components/PixelConversationImport'
+import { appendComposerText } from '../lib/pixelComposerText'
 import PixelSelectionActions from '../components/PixelSelectionActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
@@ -1148,7 +1149,7 @@ export default function Pixel({ systemStatus = null }) {
 
   const insertComposerText = useCallback(text => {
     if (sending || restoredActive || restoredChecking || stopping) return
-    setInput(value => value === '/' ? text : `${value}${value && !value.endsWith(' ') && !value.endsWith('\n') ? ' ' : ''}${text}`)
+    setInput(value => appendComposerText(value, text))
     inputRef.current?.focus?.()
   }, [sending, restoredActive, restoredChecking, stopping])
 
