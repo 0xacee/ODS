@@ -43,6 +43,13 @@ jobs:
         run: python -m pytest extensions/services/pixel-inference/tests -q
       - name: Model router compatibility and route pins
         run: python -m pytest extensions/services/model-router/tests -q
+      - name: Test verified preview source and diff contracts
+        run: |
+          python -m pytest -q extensions/services/pixel-agent/tests/test_workspace_preview.py \
+            extensions/services/pixel-agent/tests/test_workspace_preview_charset.py \
+            extensions/services/pixel-agent/tests/test_workspace_preview_git.py \
+            extensions/services/pixel-agent/tests/test_preview_empty_assets.py
+
       - name: Settings transaction and access preservation contracts
         run: |
           python -m pytest -q tests/pixel_settings/test_contract.py tests/pixel_settings/test_projection.py \
