@@ -255,6 +255,11 @@ Stop an extension container. Runs `docker compose stop <service_id>`.
 
 Fetch recent container logs. Uses `docker logs --tail N ods-<service_id>` directly (bypasses compose for speed).
 
+Both this endpoint and `POST /v1/service/logs` capture stdout and stderr through
+one pipe in the order emitted by `docker logs`. The response retains the latest
+50,000 characters of that combined output, so stderr diagnostics remain visible
+when the container also writes normal output to stdout.
+
 **Authentication:** Required
 
 **Request body:**
