@@ -43,9 +43,6 @@ jobs:
         run: python -m pytest extensions/services/pixel-inference/tests -q
       - name: Model router compatibility and route pins
         run: python -m pytest extensions/services/model-router/tests -q
-      - name: Test preview publication directory failures
-        run: python -m pytest -q extensions/services/pixel-agent/tests/test_preview_directory_errors.py
-
       - name: Settings transaction and access preservation contracts
         run: |
           python -m pytest -q tests/pixel_settings/test_contract.py tests/pixel_settings/test_projection.py \
@@ -58,6 +55,9 @@ jobs:
             extensions/services/pixel-agent/tests/test_settings_control_transport.py \
             extensions/services/pixel-agent/tests/test_pixel_access_mode.py \
             extensions/services/pixel-agent/tests/test_access_mode_config.py
+
+      - name: Test preview publication directory failures
+        run: python -m pytest -q extensions/services/pixel-agent/tests/test_preview_directory_errors.py
 
   token-spy-postgres:
     runs-on: ubuntu-latest
