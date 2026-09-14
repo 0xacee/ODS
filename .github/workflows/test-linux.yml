@@ -113,6 +113,9 @@ jobs:
       - name: Install manifest validator dependencies
         run: python3 -m pip install "PyYAML>=6.0,<7.0" "jsonschema>=4.21,<5.0"
 
+      - name: Branch cleanup release exclusions
+        run: python3 tests/test-stale-branch-release-refs.py
+
       - name: Docs Link Checks
         run: bash tests/test-doc-links.sh
 
