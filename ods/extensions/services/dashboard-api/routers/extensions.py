@@ -2128,12 +2128,14 @@ def _get_missing_deps_transitive(
     _visiting.add(service_id)
 
     for dep in _read_direct_deps(service_id):
-        if _is_dep_satisfied(dep):
-            continue
         if dep in _order:
             continue  # already queued from another branch
+        # An enabled service can still have a disabled dependency: disable
+        # warns about dependents but permits the operation. Walk its subtree
+        # before deciding whether this service itself needs activation.
         _get_missing_deps_transitive(dep, _visiting=_visiting, _order=_order)
-        _order.append(dep)
+        if not _is_dep_satisfied(dep):
+            _order.append(dep)
 
     _visiting.discard(service_id)
     return _order
