@@ -1,8 +1,7 @@
 export default function PixelPreviewHistory({previews, selected, onSelect}) {
   const retained = new Map()
   for (const preview of previews) {
-    // Content-addressed IDs recur when a user restores an earlier snapshot.
-    // Order each distinct snapshot by its latest retained publication.
+    // Identical content reuses its site ID; order by its latest publication.
     retained.delete(preview.siteId)
     retained.set(preview.siteId, preview)
   }
