@@ -54,8 +54,11 @@ async function prepareVideoWallpaper(file) {
       video.src = url
       video.load()
     })
+    // Chunked MediaRecorder WebM files can decode successfully while reporting
+    // Infinity until playback discovers their end. The input is already a
+    // bounded local Blob, so unknown duration does not mean an unbounded stream.
     if (!video.videoWidth || !video.videoHeight || video.videoWidth * video.videoHeight > 3840 * 2160 ||
-        !Number.isFinite(video.duration) || video.duration <= 0) throw new Error('Choose a valid video up to 4K. Short 1080p clips work best.')
+        !(video.duration > 0)) throw new Error('Choose a valid video up to 4K. Short 1080p clips work best.')
     const scale = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight))
     const canvas = document.createElement('canvas')
     canvas.width = Math.max(1, Math.round(video.videoWidth * scale))
