@@ -6029,6 +6029,11 @@ def _split_nmcli_terse(line: str) -> list[str]:
     return parts
 
 
+def _nmcli_env() -> dict[str, str]:
+    """Use English status text and UTF-8 network names in child processes only."""
+    return {**os.environ, "LC_ALL": "C.UTF-8", "LANGUAGE": "C"}
+
+
 def _network_supported(handler) -> bool:
     """Linux + nmcli precondition for Wi-Fi endpoints. Sends a 501 on failure
     so the caller doesn't need to repeat the check; returns True only when
@@ -7894,7 +7899,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             subprocess.run(
                 ["nmcli", "device", "wifi", "rescan"],
-                capture_output=True, timeout=10,
+                capture_output=True, timeout=10, env=_nmcli_env(),
             )
         except (subprocess.TimeoutExpired, OSError):
             pass
@@ -7910,7 +7915,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             result = subprocess.run(
                 ["nmcli", "-t", "-f",
                  "SSID,SIGNAL,SECURITY,IN-USE", "device", "wifi", "list"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=15, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "nmcli wifi list timed out"})
@@ -7990,7 +7995,7 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         try:
             result = subprocess.run(
-                args, capture_output=True, text=True, timeout=45,
+                args, capture_output=True, text=True, timeout=45, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "Connection attempt timed out"})
@@ -8051,7 +8056,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             check = subprocess.run(
                 ["nmcli", "-t", "-f", "connection.type", "connection", "show", connection],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "nmcli show timed out"})
@@ -8089,7 +8094,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 ["nmcli", "connection", "delete", connection],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=15, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "nmcli delete timed out"})
@@ -8125,7 +8130,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "nmcli timed out"})
@@ -8160,7 +8165,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 ip_result = subprocess.run(
                     ["nmcli", "-t", "-f", "IP4.ADDRESS,IP4.GATEWAY",
                      "device", "show", device],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, timeout=5, env=_nmcli_env(),
                 )
                 for ip_line in ip_result.stdout.splitlines():
                     if ip_line.startswith("IP4.ADDRESS"):

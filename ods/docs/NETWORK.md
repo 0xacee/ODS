@@ -32,6 +32,14 @@ ods-host-agent (HTTP server on host, root)
 
 The container can't run `nmcli` directly — it needs root and access to the host's NetworkManager D-Bus. Routing through the host-agent is the same pattern we already use for `.env` writes and Docker recreates.
 
+The host agent runs these `nmcli` commands with child-only `LC_ALL=C.UTF-8` and
+`LANGUAGE=C` overrides
+so parsed state names and error classifications do not depend on the host's
+language. Other environment values, including the D-Bus address, are preserved;
+the host locale and user-provided network names are unchanged. The UTF-8 C locale
+retains non-ASCII names while fixing message language. This follows
+[NetworkManager's scripting guidance](https://networkmanager.dev/docs/api/latest/nmcli.html).
+
 ## API surface
 
 All endpoints require the standard dashboard-api Bearer token (auth handled at the dashboard-api edge; the host-agent has its own API key for the inner hop).
