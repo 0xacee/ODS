@@ -49,7 +49,7 @@ Returns nearby Wi-Fi networks, strongest signal first.
 }
 ```
 
-The endpoint triggers a fresh rescan (best-effort) then returns nmcli's cached list. Duplicate SSIDs (multiple BSSIDs of the same network) are collapsed.
+The endpoint triggers a fresh rescan (best-effort) then returns nmcli's cached list. Duplicate SSIDs (multiple BSSIDs of the same network) are collapsed. Signal and security describe the strongest observed BSSID; `in_use` is true if any BSSID for that SSID is connected, even when it has a weaker signal.
 
 ### `POST /api/setup/wifi-connect`
 
