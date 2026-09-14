@@ -166,23 +166,39 @@ def local_llm_required(root: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def check_gguf_set(candidate: Path) -> tuple[bool, str]:
+    """Require every finalized shard of a conventionally named split GGUF."""
+    if not _usable_file(candidate):
+        return False, f"Not found or empty: data/models/{candidate.name}"
+    split = re.fullmatch(r"(.+)-(\d{5})-of-(\d{5})(\.gguf)", candidate.name, re.IGNORECASE)
+    if split:
+        prefix, index, total, suffix = split.groups()
+        if int(index) != 1 or int(total) < 1:
+            return False, f"Expected the first split GGUF shard: {prefix}-00001-of-{total}{suffix}"
+        for part in range(1, int(total) + 1):
+            required = candidate.with_name(f"{prefix}-{part:05d}-of-{total}{suffix}")
+            if not _usable_file(required):
+                return False, f"Split GGUF incomplete; not found or empty: data/models/{required.name}"
+        return True, f"OK: data/models/{candidate.name} ({int(total)} parts)"
+    return True, f"OK: data/models/{candidate.name}"
+
+
 def check_llm(root: Path) -> tuple[bool, str]:
     models_dir = root / "data" / "models"
     configured = env_value(root, "GGUF_FILE")
     if configured:
         if Path(configured).name != configured:
             return False, f"Invalid GGUF_FILE (expected a filename): {configured}"
-        candidate = models_dir / configured
-        if _usable_file(candidate):
-            return True, f"OK: data/models/{configured}"
-        return False, f"Not found or empty: data/models/{configured}"
+        return check_gguf_set(models_dir / configured)
 
     if models_dir.is_dir():
-        candidates = sorted(
-            path for path in models_dir.glob("*.gguf") if _usable_file(path)
-        )
+        candidates = sorted(models_dir.glob("*.gguf"))
+        for candidate in candidates:
+            result = check_gguf_set(candidate)
+            if result[0]:
+                return result
         if candidates:
-            return True, f"OK: data/models/{candidates[0].name}"
+            return check_gguf_set(candidates[0])
     return False, "Not found: data/models/*.gguf"
 
 
