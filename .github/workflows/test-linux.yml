@@ -316,7 +316,13 @@ jobs:
         run: bash tests/test-update-rollback-contract.sh
 
       - name: Backup Data Coverage Contract
-        run: bash tests/test-backup-data-coverage.sh
+        run: |
+          command -v rsync
+          command -v jq
+          bash tests/test-backup-data-coverage.sh
+          bash tests/test-backup-integrity.sh
+          bash tests/test-backup-restore-roundtrip.sh
+          python3 tests/test-rsync-transfer-failures.py
 
       - name: Bootstrap Upgrade Compose Flags Recovery Tests
         run: bash tests/test-bootstrap-upgrade-compose-flags-recovery.sh
