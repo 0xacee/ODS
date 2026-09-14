@@ -150,18 +150,20 @@ async def service_resources(api_key: str = Depends(verify_api_key)):
         }
         services.append(entry)
 
-    # Add services with disk data but not in SERVICES dict (orphaned data)
+    # A manifest can own multiple containers (for example LibreChat's MongoDB
+    # and Meilisearch). Keep their measured usage visible even though they do
+    # not have separate service manifests or restart authority.
     known_ids = set(SERVICES.keys())
-    for sid, disk in disk_usage.items():
+    for sid in dict.fromkeys([*stats_by_id, *disk_usage]):
         if sid not in known_ids:
             services.append({
                 "id": sid,
                 "name": sid,
-                "type": "unknown",
+                "type": "docker" if sid in stats_by_id else "unknown",
                 "restartable": False,
                 "restart_unavailable_reason": "Service is not declared in the active manifest set",
-                "container": None,
-                "disk": disk,
+                "container": stats_by_id.get(sid),
+                "disk": disk_usage.get(sid),
             })
 
     total_cpu = sum(s.get("cpu_percent", 0) for s in container_stats)
