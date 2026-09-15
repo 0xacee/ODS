@@ -8161,34 +8161,46 @@ class AgentHandler(BaseHTTPRequestHandler):
             device, typ, state, connection = parts[0], parts[1], parts[2], parts[3]
             if state != "connected":
                 continue
-            ip_addr = ""
-            gateway = ""
-            try:
-                ip_result = subprocess.run(
-                    ["nmcli", "-t", "-f", "IP4.ADDRESS,IP4.GATEWAY",
-                     "device", "show", device],
-                    capture_output=True, text=True, timeout=5, env=_nmcli_env(),
-                )
-                for ip_line in ip_result.stdout.splitlines():
-                    if ip_line.startswith("IP4.ADDRESS"):
-                        _, _, val = ip_line.partition(":")
-                        ip_addr = val.split("/")[0]
-                    elif ip_line.startswith("IP4.GATEWAY"):
-                        _, _, val = ip_line.partition(":")
-                        gateway = val
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-
             devices.append({
                 "device": device,
                 "type": typ,
                 "state": state,
                 "connection": connection,
-                "ip": ip_addr,
-                "gateway": gateway,
+                "ip": "",
+                "gateway": "",
             })
             if typ == "wifi":
                 wifi_connected = True
+
+        # One query for all interfaces bounds the entire operation to two
+        # subprocess timeouts, regardless of the number of connected devices.
+        if devices:
+            by_device = {item["device"]: item for item in devices}
+            try:
+                ip_result = subprocess.run(
+                    ["nmcli", "-t", "-f", "GENERAL.DEVICE,IP4.ADDRESS,IP4.GATEWAY",
+                     "device", "show"],
+                    capture_output=True, text=True, timeout=5, env=_nmcli_env(),
+                )
+                if ip_result.returncode != 0:
+                    logger.warning("Network address query failed with exit %s", ip_result.returncode)
+                else:
+                    current = None
+                    for ip_line in ip_result.stdout.splitlines():
+                        parts = _split_nmcli_terse(ip_line)
+                        if len(parts) != 2:
+                            continue
+                        key, value = parts
+                        if key == "GENERAL.DEVICE":
+                            current = by_device.get(value)
+                        elif current is not None and key.startswith("IP4.ADDRESS"):
+                            current["ip"] = value.split("/")[0]
+                        elif current is not None and key == "IP4.GATEWAY":
+                            current["gateway"] = value
+            except subprocess.TimeoutExpired:
+                logger.warning("Network address query timed out; returning connection state without addresses")
+            except OSError as exc:
+                logger.warning("Network address query unavailable: %s", exc)
 
         json_response(self, 200, {
             "platform_supported": True,

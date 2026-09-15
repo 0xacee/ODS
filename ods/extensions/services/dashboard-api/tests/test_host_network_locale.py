@@ -49,8 +49,8 @@ def test_network_status_reports_connected_device_on_localized_host(
             state = "connected" if english else "connecté"
             output = f"wlan0:wifi:{state}:Café\\:réseau\n"
         else:
-            assert command[-3:] == ["device", "show", "wlan0"]
-            output = "IP4.ADDRESS[1]:192.0.2.5/24\nIP4.GATEWAY:192.0.2.1\n"
+            assert command[-2:] == ["device", "show"]
+            output = "GENERAL.DEVICE:wlan0\nIP4.ADDRESS[1]:192.0.2.5/24\nIP4.GATEWAY:192.0.2.1\n"
         return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
 
     calls = record_nmcli(monkeypatch, respond)

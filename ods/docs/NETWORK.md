@@ -113,6 +113,14 @@ Deletes a saved NetworkManager connection profile.
 { "connection": "OldNetwork" }
 ```
 
+## Operation deadlines
+
+The dashboard's host-agent read budget includes every sequential NetworkManager step plus response overhead. Network status uses one 5-second status query and one 5-second address query for all interfaces, with a 15-second API budget. Adding interfaces does not add subprocess waits. If address collection fails, connection state is still returned with empty addresses and the host logs the reason.
+
+Forgetting Wi-Fi allows a 10-second profile-type check followed by a 15-second delete, within a 30-second API budget. This keeps a valid deletion from completing after the dashboard has already reported an unreachable host. The existing Wi-Fi-only guard and host timeout/error responses remain in effect; the API does not retry a mutation. These are bounded I/O waits, not a guarantee during arbitrary host scheduling stalls or a lost network connection.
+
+The batch address query uses NetworkManager's documented [`nmcli device show` behavior](https://networkmanager.dev/docs/api/latest/nmcli.html): omitting an interface examines all devices.
+
 ## Security notes
 
 - **Password lifetime in process memory.** The password lives in the host-agent's memory while the subprocess runs, then in nmcli's argv until the process exits. On modern Linux with `kernel.yama.ptrace_scope >= 1` (default on Ubuntu/Fedora), unprivileged processes can't read the cmdline of another user's process — and the host-agent runs as root anyway. The exposure window is acceptable for v1.
