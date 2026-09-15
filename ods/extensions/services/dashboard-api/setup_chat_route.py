@@ -9,6 +9,7 @@ KEYS = (
     "OPEN_WEBUI_LLM_BASE_URL", "OPEN_WEBUI_LLM_API_KEY", "OPEN_WEBUI_TASK_MODEL",
     "LEMONADE_CONTAINER_BASE_URL", "LEMONADE_BASE_URL", "LEMONADE_API_BASE_PATH",
     "LEMONADE_API_KEY", "LITELLM_LEMONADE_API_KEY", "LEMONADE_MODEL",
+    "AMD_INFERENCE_RUNTIME", "AMD_INFERENCE_PORT", "ODS_MODE",
 )
 
 
@@ -39,8 +40,9 @@ def same_endpoint(left: str, right: str) -> bool:
 
 def resolve_chat_route(default_url: str) -> tuple[str, str, dict[str, str]]:
     env = {key: value.strip() for key, value in read_live_env_values(KEYS).items()}
+    lemonade_runtime = "lemonade" in {env["LLM_BACKEND"].lower(), env["AMD_INFERENCE_RUNTIME"].lower(), env["ODS_MODE"].lower()}
     base = api_base(env["LLM_API_URL"] or env["OLLAMA_URL"] or default_url,
-                    env["LLM_API_BASE_PATH"] or "/v1")
+                    env["LLM_API_BASE_PATH"] or ("/api/v1" if lemonade_runtime else "/v1"))
     target = urlsplit(base)
     local_gateway = target.scheme == "http" and target.hostname in ("litellm", "ods-litellm") and target.port == 4000
     if local_gateway:
@@ -52,8 +54,15 @@ def resolve_chat_route(default_url: str) -> tuple[str, str, dict[str, str]]:
     lemonade_base = env["LEMONADE_CONTAINER_BASE_URL"] or env["LEMONADE_BASE_URL"]
     paired_lemonade = bool(lemonade_base) and same_endpoint(
         base, api_base(lemonade_base, env["LEMONADE_API_BASE_PATH"] or "/api/v1"))
+    managed_lemonade = (
+        lemonade_runtime and target.scheme == "http"
+        and target.hostname in ("host.docker.internal", "llama-server", "ods-llama-server")
+        and str(target.port) == (env["AMD_INFERENCE_PORT"] or "8080")
+    )
     key = ""
     model = env["LLM_MODEL"] or "qwen3-coder-next"
+    if paired_lemonade or managed_lemonade:
+        model = env["LEMONADE_MODEL"] or ("extra."+env["GGUF_FILE"] if env["GGUF_FILE"] else model)
     if local_gateway:
         key = env["LITELLM_KEY"] or env["LITELLM_MASTER_KEY"]
         model = (env["OPEN_WEBUI_TASK_MODEL"] if paired_webui else "") or (
@@ -61,9 +70,8 @@ def resolve_chat_route(default_url: str) -> tuple[str, str, dict[str, str]]:
     elif paired_webui:
         key = env["OPEN_WEBUI_LLM_API_KEY"]
         model = env["OPEN_WEBUI_TASK_MODEL"] or model
-    elif paired_lemonade:
+    elif paired_lemonade or managed_lemonade:
         key = env["LEMONADE_API_KEY"] or env["LITELLM_LEMONADE_API_KEY"]
-        model = env["LEMONADE_MODEL"] or model
     elif target.hostname in ("llama-server", "ods-llama-server", "host.docker.internal") and env["LLM_BACKEND"] != "external":
         model = env["GGUF_FILE"] or model
     headers = {"Content-Type": "application/json"}

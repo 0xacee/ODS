@@ -79,6 +79,17 @@ def test_chat_uses_live_url_path_and_model(test_client, monkeypatch, tmp_path, b
       "LEMONADE_API_KEY":"must-not-send"}, "http://other:13305/api/v1", "configured-model", ""),
     ({"LLM_API_URL":"http://llama-server:8080", "GGUF_FILE":"actual-model.gguf"},
      "http://llama-server:8080/v1", "actual-model.gguf", ""),
+    ({"LLM_API_URL":"http://host.docker.internal:13305", "LLM_BACKEND":"lemonade",
+      "AMD_INFERENCE_PORT":"13305", "LEMONADE_BASE_URL":"", "LEMONADE_CONTAINER_BASE_URL":"",
+      "LEMONADE_MODEL":"extra.imported-model.gguf", "GGUF_FILE":"imported-model.gguf", "LEMONADE_API_KEY":"native-key"},
+     "http://host.docker.internal:13305/api/v1", "extra.imported-model.gguf", "native-key"),
+    ({"LLM_API_URL":"http://llama-server:8080", "AMD_INFERENCE_RUNTIME":"lemonade", "GGUF_FILE":"imported.gguf"},
+     "http://llama-server:8080/api/v1", "extra.imported.gguf", ""),
+    ({"LLM_API_URL":"http://other-host:13305", "LLM_BACKEND":"lemonade", "AMD_INFERENCE_PORT":"13305",
+      "LEMONADE_API_KEY":"must-not-send", "LEMONADE_MODEL":"must-not-assume"},
+     "http://other-host:13305/api/v1", "configured-model", ""),
+    ({"LLM_API_URL":"http://host.docker.internal:9999", "LLM_BACKEND":"lemonade", "AMD_INFERENCE_PORT":"13305",
+      "LEMONADE_API_KEY":"must-not-send"}, "http://host.docker.internal:9999/api/v1", "configured-model", ""),
 ])
 def test_credentials_and_model_are_bound_to_the_selected_backend(monkeypatch, tmp_path, values, url, model, key):
     monkeypatch.setattr(config, "INSTALL_DIR", str(tmp_path))
