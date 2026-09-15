@@ -493,6 +493,9 @@ def _patch_mutation_config(monkeypatch, tmp_path, lib_dir=None, user_dir=None):
                         tmp_path / "builtin")
     monkeypatch.setattr("routers.extensions.CORE_SERVICE_IDS",
                         frozenset({"dashboard-api", "open-webui", "hermes", "hermes-proxy"}))
+    # Mutation tests should model a reachable host agent unless a test is
+    # specifically exercising the stop-failure path.
+    monkeypatch.setattr("routers.extensions._call_agent", lambda action, sid: True)
 
 
 # --- Install endpoint ---
@@ -1191,6 +1194,24 @@ class TestEnableExtensionHookReturnHandling:
 
 class TestDisableExtension:
 
+    def test_disable_stop_failure_preserves_enabled_definition(
+        self, test_client, monkeypatch, tmp_path,
+    ):
+        """A failed stop must not make a running extension uninstallable."""
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        monkeypatch.setattr("routers.extensions._call_agent", lambda action, sid: False)
+
+        resp = test_client.post(
+            "/api/extensions/my-ext/disable",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 502
+        assert "failed to stop" in resp.json()["detail"]
+        assert (user_dir / "my-ext" / "compose.yaml").exists()
+        assert not (user_dir / "my-ext" / "compose.yaml.disabled").exists()
+
     def test_disable_renames_to_disabled(self, test_client, monkeypatch, tmp_path):
         """Disable renames compose.yaml → compose.yaml.disabled."""
         user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
@@ -1204,7 +1225,7 @@ class TestDisableExtension:
         assert resp.status_code == 200
         data = resp.json()
         assert data["action"] == "disabled"
-        assert data["restart_required"] is True
+        assert data["restart_required"] is False
         assert (user_dir / "my-ext" / "compose.yaml.disabled").exists()
         assert not (user_dir / "my-ext" / "compose.yaml").exists()
 
