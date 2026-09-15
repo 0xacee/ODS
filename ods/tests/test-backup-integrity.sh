@@ -123,6 +123,20 @@ ODS_DIR="$FAKE_ODS" RETENTION_COUNT=5 "$ODS_BACKUP" --output "$LIFECYCLE_DIR" --
 [[ -d "$LIFECYCLE_DIR/my-notes" ]] || fail "retention deleted an unrelated directory"
 pass "retention prunes oldest own-format backups and leaves other directories"
 
+info "Creating concurrent backups in the same second"
+CONCURRENT_DIR="$TMP_ROOT/concurrent-backups"
+mkdir -p "$CONCURRENT_DIR"
+ODS_DIR="$FAKE_ODS" "$ODS_BACKUP" --output "$CONCURRENT_DIR" --type config >/dev/null &
+backup_one=$!
+ODS_DIR="$FAKE_ODS" "$ODS_BACKUP" --output "$CONCURRENT_DIR" --type config >/dev/null &
+backup_two=$!
+wait "$backup_one"
+wait "$backup_two"
+
+concurrent_count=$(find "$CONCURRENT_DIR" -mindepth 1 -maxdepth 1 -type d -name 'backup-*' | wc -l | tr -d ' ')
+[[ "$concurrent_count" == "2" ]] || fail "concurrent backups collided (found $concurrent_count directories)"
+pass "concurrent same-second backups receive distinct IDs"
+
 info "Deleting a compressed backup by bare ID"
 (cd "$LIFECYCLE_DIR" && mkdir -p 20260601-120000 && echo x > 20260601-120000/f \
   && tar czf 20260601-120000.tar.gz 20260601-120000 && rm -rf 20260601-120000)

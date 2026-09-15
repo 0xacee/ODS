@@ -484,7 +484,10 @@ do_backup() {
 
     # Generate backup ID
     local backup_id
-    backup_id=$(date +%Y%m%d-%H%M%S)
+    # Include the process ID so concurrent invocations cannot share one
+    # second-granularity directory. A merged directory would make either
+    # snapshot incomplete and could make a later restore select mixed data.
+    backup_id="backup-$$-$(date +%Y%m%d-%H%M%S)"
     local backup_dir="$BACKUP_ROOT/$backup_id"
 
     log_info "Starting $backup_type backup: $backup_id"
