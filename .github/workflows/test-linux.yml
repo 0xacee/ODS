@@ -148,6 +148,11 @@ jobs:
       - name: Extension Runtime Check Tests
         run: bash tests/test-extension-runtime-check.sh
 
+      - name: AP network identity preflight
+        run: |
+          bash tests/test-ap-mode.sh
+          python3 tests/test-ap-identity-preflight.py
+
       - name: Phase C P1 Static Checks
         run: bash tests/test-phase-c-p1.sh
 
