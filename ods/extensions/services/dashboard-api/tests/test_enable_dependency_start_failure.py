@@ -39,8 +39,12 @@ def installation(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("failure", ["pre_start", "start"])
-def test_failed_dependency_blocks_transitive_start(test_client, installation, failure):
+@pytest.mark.parametrize("enabled_target", [False, True])
+def test_failed_dependency_blocks_transitive_start(test_client, installation, failure, enabled_target):
     root, start, hook = installation
+    if enabled_target:
+        target = root / "bundled/hermes-proxy"
+        (target / "compose.yaml.disabled").rename(target / "compose.yaml")
     if failure == "pre_start":
         hook.side_effect = lambda service, phase: (service, phase) != ("searxng", "pre_start")
     else:
