@@ -50,7 +50,7 @@ def send_event(monkeypatch, response):
     ({}, 17, 17),
     ({'cache_creation_tokens': -1}, 0, 0),
     ({'cache_creation_tokens': True}, 0, 0),
-    ({'cache_creation_tokens': 3_000_000_000}, 0, 2_000_000_000),
+    ({'cache_creation_tokens': 3_000_000_000}, 0, 4872),
 ])
 def test_outgoing_ingest_uses_cache_creation_detail_without_changing_totals(monkeypatch, details, legacy, expected):
     event = send_event(monkeypatch, {
@@ -61,7 +61,8 @@ def test_outgoing_ingest_uses_cache_creation_detail_without_changing_totals(monk
     })
     assert event['cache_write_tokens'] == expected
     assert event['cache_read_tokens'] == 128
-    assert event['input_tokens'] == 5000
+    assert event['input_tokens'] == 5000 - 128 - expected
+    assert sum(event[key] for key in ('input_tokens', 'cache_read_tokens', 'cache_write_tokens')) == 5000
     assert event['output_tokens'] == 42
 
 
