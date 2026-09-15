@@ -395,6 +395,9 @@ jobs:
       - name: Rollback Picks the Newest Backup
         run: bash tests/test-update-rollback-latest-backup.sh
 
+      - name: Rollback Preserves Originals on I/O Failure
+        run: bash tests/test-update-rollback-restore-failure.sh
+
       - name: Update Rollback Contract
         run: bash tests/test-update-rollback-contract.sh
 
