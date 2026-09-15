@@ -290,15 +290,29 @@ write_state() {
   local status="$1"
   # SSIDs are literal text; shell interpolation is not JSON serialization.
   python3 - "$status" "$ODS_AP_SSID" "$ODS_AP_INTERFACE" "$ODS_AP_GATEWAY_IP" \
-    "$(date -Iseconds)" > "${STATE_FILE}" <<'PY'
+    "$(date -Iseconds)" "${STATE_FILE}" <<'PY'
 import json
+import os
 import sys
+import tempfile
 
 keys = ("status", "ssid", "interface", "gateway_ip", "since")
-json.dump(dict(zip(keys, sys.argv[1:])), sys.stdout, indent=2)
-sys.stdout.write("\n")
+target = sys.argv[6]
+fd, temporary = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=os.path.dirname(target))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(dict(zip(keys, sys.argv[1:6])), stream, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fchmod(stream.fileno(), 0o644)
+        os.fsync(stream.fileno())
+    os.replace(temporary, target)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
 PY
-  chmod 0644 "${STATE_FILE}"
 }
 
 cmd_up() {
@@ -331,7 +345,11 @@ cmd_up() {
       || { err "dnsmasq failed to start — check ${RUN_DIR}/dnsmasq.log"; cmd_down; return 1; }
   fi
 
-  write_state "active"
+  if ! write_state "active"; then
+    err "could not publish AP state; tearing down the incomplete startup"
+    cmd_down
+    return 1
+  fi
   log "AP up: SSID=${ODS_AP_SSID} gateway=${ODS_AP_GATEWAY_IP}"
   log "  any hostname resolves to ${ODS_AP_GATEWAY_IP} (captive portal)"
   log "  HTTP/HTTPS on ${ODS_AP_INTERFACE} redirected to the gateway"

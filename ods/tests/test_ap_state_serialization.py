@@ -14,7 +14,7 @@ def environment(tmp_path):
     bins = tmp_path / "bin"
     bins.mkdir()
     # No network or process-management commands reach the host.
-    for name in ["hostapd", "dnsmasq", "iptables", "ip", "nmcli", "pgrep", "iw", "id"]:
+    for name in ["hostapd", "dnsmasq", "iptables", "ip", "nmcli", "pgrep", "pkill", "iw", "id"]:
         body = "exit 0"
         if name == "id":
             body = "echo 0"
@@ -65,3 +65,50 @@ def test_missing_serializer_fails_before_creating_runtime_state(tmp_path):
     assert started.returncode != 0
     assert "missing required binaries: python3" in started.stderr
     assert not Path(env["ODS_AP_RUN_DIR"]).exists()
+
+
+def inject_failure(tmp_path, env, operation):
+    hook = tmp_path / "python-hook"
+    hook.mkdir()
+    (hook / "sitecustomize.py").write_text('''
+import os, json, tempfile
+def fail(*args, **kwargs):
+    if os.environ["AP_FAULT"] == "write":
+        args[1].write("partial state")
+    raise OSError("injected state publication failure")
+operation = os.environ["AP_FAULT"]
+if operation == "write": json.dump = fail
+elif operation == "create": tempfile.mkstemp = fail
+else: setattr(os, operation, fail)
+''', encoding="utf-8")
+    return {**env, "PYTHONPATH": str(hook), "AP_FAULT": operation}
+
+
+@pytest.mark.parametrize("operation", ["create", "write", "fchmod", "fsync", "replace"])
+def test_failed_publication_preserves_previous_complete_snapshot(tmp_path, operation):
+    env = environment(tmp_path)
+    run_dir = Path(env["ODS_AP_RUN_DIR"])
+    run_dir.mkdir()
+    old = b'{"status":"active","ssid":"previous"}\n'
+    state = run_dir / "state.json"
+    state.write_bytes(old)
+    env = inject_failure(tmp_path, env, operation)
+    result = subprocess.run(["bash", "-c", 'source "$1"; write_state active', "bash", str(SCRIPT)],
+                            env=env, text=True, capture_output=True, timeout=10)
+    assert result.returncode != 0
+    assert state.read_bytes() == old
+    assert not list(run_dir.glob(".state-*.tmp"))
+
+
+def test_up_failure_tears_down_and_never_announces_success(tmp_path):
+    env = inject_failure(tmp_path, environment(tmp_path), "replace")
+    result = subprocess.run(["bash", str(SCRIPT), "up"], env=env,
+                            text=True, capture_output=True, timeout=10)
+    assert result.returncode != 0
+    assert "AP up:" not in result.stderr
+    assert "AP down;" in result.stderr
+    run_dir = Path(env["ODS_AP_RUN_DIR"])
+    assert not (run_dir / "state.json").exists()
+    assert not (run_dir / "hostapd.conf").exists()
+    assert not (run_dir / "dnsmasq.conf").exists()
+    assert not list(run_dir.glob(".state-*.tmp"))
