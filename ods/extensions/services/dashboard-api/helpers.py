@@ -1036,27 +1036,33 @@ def _get_cpu_metrics_linux() -> dict:
             d_idle, d_total = idle - prev_idle, total - prev_total
             get_cpu_metrics._prev = (idle, total)
             if d_total > 0:
-                result["percent"] = round((1 - d_idle / d_total) * 100, 1)
+                result["percent"] = max(0.0, min(100.0, round((1 - d_idle / d_total) * 100, 1)))
     except OSError as e:
         logger.debug("Failed to read /proc/stat: %s", e)
 
     try:
         import glob
         for tz in sorted(glob.glob("/sys/class/thermal/thermal_zone*/type")):
-            with open(tz) as f:
-                zone_type = f.read().strip()
-            if any(k in zone_type.lower() for k in ("k10temp", "coretemp", "cpu", "soc", "tctl")):
-                with open(tz.replace("/type", "/temp")) as f:
-                    result["temp_c"] = int(f.read().strip()) // 1000
-                break
-        if result["temp_c"] is None:
-            for hwmon in sorted(glob.glob("/sys/class/hwmon/hwmon*/name")):
-                with open(hwmon) as f:
-                    name = f.read().strip()
-                if name in ("k10temp", "coretemp", "zenpower"):
-                    with open(hwmon.replace("/name", "/temp1_input")) as f:
+            try:
+                with open(tz) as f:
+                    zone_type = f.read().strip()
+                if any(k in zone_type.lower() for k in ("k10temp", "coretemp", "cpu", "soc", "tctl")):
+                    with open(tz.replace("/type", "/temp")) as f:
                         result["temp_c"] = int(f.read().strip()) // 1000
                     break
+            except (OSError, ValueError):
+                continue
+        if result["temp_c"] is None:
+            for hwmon in sorted(glob.glob("/sys/class/hwmon/hwmon*/name")):
+                try:
+                    with open(hwmon) as f:
+                        name = f.read().strip()
+                    if name in ("k10temp", "coretemp", "zenpower"):
+                        with open(hwmon.replace("/name", "/temp1_input")) as f:
+                            result["temp_c"] = int(f.read().strip()) // 1000
+                        break
+                except (OSError, ValueError):
+                    continue
     except OSError as e:
         logger.debug("Failed to read CPU temperature: %s", e)
     return result
@@ -1103,11 +1109,11 @@ def _get_ram_metrics_linux() -> dict:
                     meminfo[parts[0].rstrip(":")] = int(parts[1])
         total = meminfo.get("MemTotal", 0)
         available = meminfo.get("MemAvailable", 0)
-        used = total - available
+        used = max(0, total - available)
         result["total_gb"] = round(total / (1024 * 1024), 1)
         result["used_gb"] = round(used / (1024 * 1024), 1)
         if total > 0:
-            result["percent"] = round(used / total * 100, 1)
+            result["percent"] = max(0.0, min(100.0, round(used / total * 100, 1)))
         # On Apple Silicon, override total_gb with the host's actual RAM
         host_ram_gb_str = os.environ.get("HOST_RAM_GB", "")
         gpu_backend = os.environ.get("GPU_BACKEND", "").lower()
@@ -1116,7 +1122,7 @@ def _get_ram_metrics_linux() -> dict:
                 host_ram_gb = float(host_ram_gb_str)
                 if host_ram_gb > 0:
                     result["total_gb"] = round(host_ram_gb, 1)
-                    result["percent"] = round(used / (host_ram_gb * 1024 * 1024) * 100, 1)
+                    result["percent"] = max(0.0, min(100.0, round(used / (host_ram_gb * 1024 * 1024) * 100, 1)))
             except ValueError:
                 pass
     except OSError as e:
