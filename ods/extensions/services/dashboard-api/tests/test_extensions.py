@@ -611,6 +611,31 @@ class TestInstallExtension:
         assert (user_dir / "my-ext" / "compose.yaml").exists()
         assert resp.json()["action"] == "installed"
 
+    def test_install_rejects_symlinked_retry_directory(
+        self, test_client, monkeypatch, tmp_path,
+    ):
+        """A failed retry must not follow or remove a symlinked extension path."""
+        lib_dir = _setup_library_ext(tmp_path, "my-ext")
+        user_dir = tmp_path / "user"
+        user_dir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("must survive", encoding="utf-8")
+        _patch_mutation_config(monkeypatch, tmp_path, lib_dir=lib_dir,
+                               user_dir=user_dir)
+        # Model a symlink at the Path API boundary so this safety test runs on
+        # Windows hosts without Developer Mode or administrator privileges.
+        monkeypatch.setattr(Path, "is_symlink", lambda path: path.name == "my-ext")
+
+        resp = test_client.post(
+            "/api/extensions/my-ext/install",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 400
+        assert "symlinked" in resp.json()["detail"]
+        assert (outside / "keep.txt").read_text(encoding="utf-8") == "must survive"
+
     def test_install_unknown_extension_404(self, test_client, monkeypatch, tmp_path):
         """404 when extension is not in the library."""
         _patch_mutation_config(monkeypatch, tmp_path)
