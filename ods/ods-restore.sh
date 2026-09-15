@@ -402,7 +402,7 @@ stop_containers() {
 _restore_selected_paths() (
     local backup_dir="$1" restore_data="$2" restore_configuration="$3"
     local -a sources=() destinations=() workspaces=() publishing=() merge_data=()
-    local dir file parent workspace i changes completed=false recovery_failed=false
+    local dir file parent workspace i changes transfer_status completed=false recovery_failed=false
     shopt -s nullglob
     if [[ "$restore_data" == true ]]; then
         for dir in "${ODS_USER_DATA_PATHS[@]}"; do
@@ -463,7 +463,9 @@ _restore_selected_paths() (
         if [[ "$recovery_failed" == true ]]; then
             log_error "Rollback could not restore every original. Manual recovery required from the retained paths above."
         fi
-        [[ "$completed" == true && "$status" == 0 ]] || status=1
+        if [[ "$completed" != true && "$status" == 0 ]]; then
+            status=1
+        fi
         exit "$status"
     }
     trap restore_cleanup EXIT
@@ -488,9 +490,12 @@ _restore_selected_paths() (
             else
                 mkdir -- "$workspace/new" || return 1
             fi
-            if ! rsync_with_progress "${sources[i]}/" "$workspace/new/" "Staging ${sources[i]}"; then
+            if rsync_with_progress "${sources[i]}/" "$workspace/new/" "Staging ${sources[i]}"; then
+                :
+            else
+                transfer_status=$?
                 log_error "Failed to stage user data; live paths are unchanged."
-                return 1
+                return "$transfer_status"
             fi
         elif ! cp -a -- "${sources[i]}" "$workspace/new"; then
             log_error "Failed to stage configuration; live paths are unchanged."
@@ -619,9 +624,13 @@ do_restore() {
         stop_containers || return 1
     fi
 
-    if ! _restore_selected_paths "$backup_dir" "$restore_data" "$restore_config"; then
+    local restore_status
+    if _restore_selected_paths "$backup_dir" "$restore_data" "$restore_config"; then
+        :
+    else
+        restore_status=$?
         log_error "Restore failed; inspect recovery diagnostics above."
-        return 1
+        return "$restore_status"
     fi
 
     log_success "Restore complete!"
