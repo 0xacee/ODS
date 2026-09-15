@@ -188,6 +188,30 @@ else
     fail "Pixel uninstall fallback logging is unavailable"
 fi
 
+# Contract regression for the root-owned access coordinator. This service is
+# outside the checkout and uses Restart=on-failure, so uninstall must retire it.
+if python3 - "$ROOT_DIR/lib/pixel-uninstall.sh" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+required = (
+    'access_unit="$systemd_dir/ods-pixel-access.service"',
+    'systemctl disable --now ods-pixel-access.service',
+    'systemctl is-active --quiet ods-pixel-access.service',
+    '"$system_observer_program" "$access_unit" "$access_config"',
+    '"$access_program" "$access_state"',
+)
+missing = [item for item in required if item not in text]
+if missing:
+    raise SystemExit("missing access-service uninstall contract: " + ", ".join(missing))
+PY
+then
+    pass "uninstall contract retires the root-owned Pixel access service"
+else
+    fail "uninstall contract omits the root-owned Pixel access service"
+fi
+
 write_fixture() {
     rm -rf "$SYSTEMD_DIR" "$ETC_DIR" "$LIBEXEC_DIR" "$HOME_DIR" "$INSTALL_DIR" \
         "$OPS_POLICY_DIR" "$OPS_INSTALL" "$OPS_STATE" "$PREVIEW_STATE"

@@ -44,6 +44,13 @@ ods_pixel_uninstall_managed() {
     local workspace_preview_state="${ODS_PIXEL_UNINSTALL_PREVIEW_STATE_DIR:-/var/lib/ods-pixel-preview}"
     local system_observer_program="$libexec_dir/ods-pixel-system-observe.py"
     local system_observer_source="$install_dir/extensions/services/pixel-agent/host/system_observe.py"
+    # This root-owned coordinator must be retired with the other Pixel units;
+    # otherwise systemd can restart it after the ODS installation is gone.
+    local access_unit="$systemd_dir/ods-pixel-access.service"
+    local access_source="$install_dir/extensions/services/pixel-agent/host/ods-pixel-access.service"
+    local access_program="$libexec_dir/ods-pixel-access"
+    local access_state="${ODS_PIXEL_UNINSTALL_ACCESS_STATE_DIR:-/var/lib/ods-pixel-access}"
+    local access_config="$etc_dir/pixel-access.json"
     local ops_user="pixel-ops-broker"
     local ops_group="pixel-ops"
     local ops_unit="$systemd_dir/pixel-ops-broker.service"
@@ -95,7 +102,8 @@ ods_pixel_uninstall_managed() {
         "$extension_manager_unit" "$extension_manager_program" \
         "$artifact_promoter_unit" "$artifact_promoter_program" \
         "$workspace_preview_unit" "$workspace_preview_program" "$workspace_preview_state" \
-        "$system_observer_program"; do
+        "$system_observer_program" "$access_unit" "$access_program" \
+        "$access_source" "$access_state" "$access_config"; do
         [[ "$path" == /* && "$path" != / ]] || {
             log_error "Refusing Pixel Operations cleanup for an invalid absolute target"
             return 1
@@ -1309,6 +1317,10 @@ PY
         || -e "$workspace_preview_program" || -L "$workspace_preview_program" \
         || -e "$system_observer_program" || -L "$system_observer_program" \
         || -e "$workspace_preview_state" || -L "$workspace_preview_state" \
+        || -e "$access_unit" || -L "$access_unit" \
+        || -e "$access_program" || -L "$access_program" \
+        || -e "$access_state" || -L "$access_state" \
+        || -e "$access_config" || -L "$access_config" \
         || "$ops_artifacts_present" == true ]]; then
         root_artifacts_present=true
         command -v sudo >/dev/null 2>&1 || {
@@ -1317,9 +1329,15 @@ PY
         }
     fi
 
+    # Do not delete an operator-modified root service under the ODS marker.
+    if [[ -e "$access_unit" ]] && ! cmp -s "$access_unit" "$access_source"; then
+        log_error "ODS-managed Pixel access service was modified; refusing removal"
+        return 1
+    fi
+
     if [[ -e "$gateway_unit" || -e "$ingress_unit" || -e "$extension_manager_unit" \
         || -e "$artifact_promoter_unit" || -e "$workspace_preview_unit" \
-        || -e "$ops_unit" ]]; then
+        || -e "$access_unit" || -e "$ops_unit" ]]; then
         # Stop the ingress before the gateway it proxies to. Keep these as
         # separate calls so the shutdown order is an enforced contract rather
         # than an argument-order hint to systemctl. An interrupted first install
@@ -1355,12 +1373,18 @@ PY
             log_error "Could not stop ODS-managed Pixel system services; no Pixel files were removed"
             return 1
         fi
+        if [[ -e "$access_unit" ]] \
+            && ! timeout 30s sudo systemctl disable --now ods-pixel-access.service; then
+            log_error "Could not stop ODS-managed Pixel system services; no Pixel files were removed"
+            return 1
+        fi
         if systemctl is-active --quiet openclaw-gateway.service \
             || systemctl is-active --quiet pixel-ingress.service \
             || systemctl is-active --quiet pixel-extension-manager.service \
             || systemctl is-active --quiet pixel-artifact-promoter.service \
             || systemctl is-active --quiet pixel-workspace-preview.service \
-            || systemctl is-active --quiet pixel-ops-broker.service; then
+            || systemctl is-active --quiet pixel-ops-broker.service \
+            || systemctl is-active --quiet ods-pixel-access.service; then
             log_error "ODS-managed Pixel system services are still active; no Pixel files were removed"
             return 1
         fi
@@ -1663,7 +1687,8 @@ PY
             "$extension_manager_unit" "$extension_manager_program" \
             "$artifact_promoter_unit" "$artifact_promoter_program" \
             "$workspace_preview_unit" "$workspace_preview_program" \
-            "$system_observer_program" \
+            "$system_observer_program" "$access_unit" "$access_config" \
+            || ! sudo rm -rf -- "$access_program" "$access_state" \
             || ! sudo systemctl daemon-reload; then
             log_error "Could not remove ODS-managed Pixel system artifacts"
             return 1
@@ -1673,7 +1698,8 @@ PY
             || -e "$extension_manager_program" || -e "$artifact_promoter_unit" \
             || -e "$artifact_promoter_program" || -e "$workspace_preview_unit" \
             || -e "$workspace_preview_program" || -e "$system_observer_program" \
-            || -e "$workspace_preview_state" ]]; then
+            || -e "$workspace_preview_state" || -e "$access_unit" \
+            || -e "$access_program" || -e "$access_state" || -e "$access_config" ]]; then
             log_error "ODS-managed Pixel system artifact cleanup was incomplete"
             return 1
         fi
