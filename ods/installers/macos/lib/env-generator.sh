@@ -78,6 +78,11 @@ upsert_env_value() {
     if grep -qE "^${key}=" "$env_path" 2>/dev/null; then
         sed -i '' "s|^${key}=.*|${key}=${value}|" "$env_path"
     else
+        # Appending after a last line that has no newline would join the new
+        # assignment onto that line and corrupt both keys.
+        if [[ -s "$env_path" && -n "$(tail -c 1 "$env_path")" ]]; then
+            printf '\n' >> "$env_path"
+        fi
         printf '%s=%s\n' "$key" "$value" >> "$env_path"
     fi
 }
@@ -534,7 +539,6 @@ ODS_MODE=local
 ODS_MODEL_SWITCHBOARD=${switchboard_mode}
 LLM_BACKEND=llama-server
 LLM_API_URL=${llm_api_url}
-LLM_BACKEND=llama-server
 
 #=== Cloud API Keys ===
 ANTHROPIC_API_KEY=
