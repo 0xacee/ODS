@@ -139,7 +139,11 @@ def build_event(
                 "cached_tokens", usage.get("cache_read_tokens", 0)
             )
         ),
-        "cache_write_tokens": _count(usage.get("cache_write_tokens", 0)),
+        "cache_write_tokens": _count(
+            prompt_details.get(
+                "cache_creation_tokens", usage.get("cache_write_tokens", 0)
+            )
+        ),
         "duration_ms": _duration_ms(start_time, end_time),
         "stop_reason": str(
             first_choice.get("finish_reason")
