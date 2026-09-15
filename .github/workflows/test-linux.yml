@@ -275,6 +275,8 @@ jobs:
 
       - name: Uninstall Compose Flags Tests
         run: bash tests/test-uninstall-compose-flags.sh
+      - name: System service ownership and shutdown recovery
+        run: bash tests/test-uninstall-mdns-unit.sh
 
       - name: Windows Compose Failure Report Tests
         run: bash tests/test-windows-compose-failure-report.sh

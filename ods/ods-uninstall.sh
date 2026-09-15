@@ -157,6 +157,20 @@ if [[ "$FORCE" != "true" ]]; then
     echo ""
 fi
 
+# Retire verified host services before deleting their installation or data.
+if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ -f "$SCRIPT_DIR/lib/system-uninstall.sh" ]]; then
+        . "$SCRIPT_DIR/lib/system-uninstall.sh"
+        if ! ods_uninstall_system_units "$INSTALL_DIR" "$HOME"; then
+            log_error "System service cleanup failed; installation retained"
+            exit 1
+        fi
+    elif [[ -e /etc/systemd/system/ods-host-agent.service || -e /etc/systemd/system/ods-mdns.service ]]; then
+        log_error "System service uninstall helper is missing; installation retained"
+        exit 1
+    fi
+fi
+
 # Validate and remove Pixel before any broader uninstall mutation. The helper
 # is marker-bound to this exact install and fails closed on ambient or drifted
 # Pixel state.
@@ -333,30 +347,6 @@ if (( ${#_ods_uninstall_orphan_pids[@]} > 0 )); then
     done
 fi
 unset _ods_uninstall_orphan_pids _pid
-
-# Remove the system-mode units phase 07 installs under /etc/systemd/system:
-# ods-host-agent (migrated from --user mode) and ods-mdns (the LAN announcer,
-# enabled with `systemctl enable --now` on Linux). Both units run a script
-# from $INSTALL_DIR, so a unit left behind keeps restarting against the
-# deleted directory (or keeps publishing <device>.local for a stack that no
-# longer exists). Idempotent — no-op for units that were never installed.
-for _ods_system_unit in ods-host-agent.service ods-mdns.service; do
-    if systemctl is-enabled "$_ods_system_unit" >/dev/null 2>&1; then
-        if ! prepare_sudo_credential; then
-            log_warn "sudo is unavailable; $_ods_system_unit was not removed"
-        elif ! timeout 20s sudo -n -- systemctl disable --now "$_ods_system_unit" 2>/dev/null; then
-            log_warn "${_ods_system_unit%.service} did not stop cleanly; forcing service shutdown"
-            run_sudo systemctl kill -s SIGKILL "$_ods_system_unit" 2>/dev/null || true
-            timeout 10s sudo -n -- systemctl disable "$_ods_system_unit" 2>/dev/null || true
-        fi
-    fi
-    if [[ -e "/etc/systemd/system/$_ods_system_unit" ]]; then
-        run_sudo rm -f "/etc/systemd/system/$_ods_system_unit" 2>/dev/null || true
-        run_sudo systemctl daemon-reload 2>/dev/null || true
-    fi
-done
-unset _ods_system_unit
-log_ok "Systemd services removed"
 
 # 3. Remove CLI symlinks
 _removed_cli_symlink=false
