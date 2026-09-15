@@ -105,7 +105,7 @@ def _provider_uses_local_runtime(provider_name: str) -> bool:
         return True
     if provider == "anthropic":
         return _is_local_upstream_url(ANTHROPIC_UPSTREAM)
-    return _is_local_upstream_url(OPENAI_UPSTREAM) or _is_local_upstream_url(UPSTREAM_BASE_URL)
+    return _is_local_upstream_url(OPENAI_UPSTREAM)
 
 # Cost per million tokens by model prefix (longer prefixes matched first)
 # USD per 1M tokens — input, output, cache_read, cache_write
@@ -777,7 +777,9 @@ async def _handle_streaming(client, raw_body, headers, model, sys_analysis,
         finally:
             # Guarantee billing metrics are logged even on CancelledError
             # (which is a BaseException and bypasses 'except Exception')
-            if not logged and usage["input_tokens"] > 0:
+            if not logged and any((usage[key] or 0) > 0 for key in (
+                "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+            )):
                 _log_entry(
                     model, sys_analysis, msg_analysis, tools,
                     raw_body, usage, start_time,
@@ -1004,7 +1006,9 @@ async def _handle_openai_streaming(client, raw_body, headers, model, sys_analysi
             log.error(f"Proxy stream error: {e}")
         finally:
             # Guarantee billing metrics are logged even on CancelledError
-            if not logged and usage["input_tokens"] > 0:
+            if not logged and any((usage[key] or 0) > 0 for key in (
+                "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+            )):
                 _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_time, provider_name="openai", filter_result=filter_result)
 
     return StreamingResponse(
@@ -1544,6 +1548,11 @@ def _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_
         else:
             provider_name = "anthropic"  # default
 
+    # Local endpoints may expose familiar cloud model aliases. Resolve the
+    # actual protocol upstream before looking up any model-name price.
+    if _provider_uses_local_runtime(provider_name):
+        provider_name = "local"
+
     cost = estimate_cost(
         model,
         usage["input_tokens"],
@@ -1552,9 +1561,6 @@ def _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_
         usage["cache_write_tokens"],
         provider_name=provider_name,
     )
-    if cost == 0 and _provider_uses_local_runtime(provider_name):
-        provider_name = "local"
-
     entry = {
         "agent": AGENT_NAME,
         "model": model,
