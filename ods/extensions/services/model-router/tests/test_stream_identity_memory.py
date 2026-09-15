@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 from test_router import _set_stream_upstream, _signed_marker
-from test_router import router  # noqa: F401
+from test_router import router as router  # noqa: PLC0414
 
 
 def chunk(model, *, tail=False):
