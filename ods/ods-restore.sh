@@ -222,8 +222,8 @@ extract_backup() {
 
     if [[ -f "$compressed" ]]; then
         # Validate: reject archives with absolute paths or path traversal
-        if tar -tzf "$compressed" 2>/dev/null | grep -qE '(^/|\.\./)'; then
-            log_error "Backup archive contains unsafe paths (absolute or ../) — refusing to extract" >&2
+        if tar -tzf "$compressed" 2>/dev/null | grep -qE '(^/|^\.\.(/|$)|/\.\.(/|$))'; then
+            log_error "Backup archive contains unsafe paths (absolute or traversal segments) — refusing to extract" >&2
             return 1
         fi
         log_info "Extracting compressed backup..." >&2
