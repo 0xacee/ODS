@@ -44,6 +44,9 @@ echo "model-cache-file" > "$SRC/models/model.gguf"
 echo "gguf-weights" > "$SRC/data/models/weights.gguf"
 echo "whisper-hub-cache" > "$SRC/data/whisper/models--Systran--faster-whisper-small/model.bin"
 echo "tei-cache" > "$SRC/data/embeddings/embeddings.bin"
+mkdir -p "$SRC/data/whisper/hub/blobs" "$SRC/data/whisper/hub/snapshots/revision"
+echo "linked-model-cache" > "$SRC/data/whisper/hub/blobs/model"
+ln -s ../../blobs/model "$SRC/data/whisper/hub/snapshots/revision/model.bin"
 
 # Both scripts source lib/rsync.sh relative to ODS_DIR
 mkdir -p "$SRC/lib"
@@ -209,7 +212,7 @@ pass "Legacy rsync fallback remains additive"
 # log line leaking to stdout garbles the path and fails every .tar.gz restore.
 
 info "Creating compressed backup from source"
-ODS_DIR="$SRC" bash "$ODS_BACKUP" --type config --compress >/dev/null 2>&1 || fail "Compressed backup failed"
+ODS_DIR="$SRC" bash "$ODS_BACKUP" --type full --compress >/dev/null 2>&1 || fail "Compressed backup failed"
 
 TARBALL=$(ls -1 "$SRC/.backups"/*.tar.gz 2>/dev/null | head -n 1)
 [[ -n "$TARBALL" ]] || fail "No compressed backup created"
@@ -226,6 +229,9 @@ info "Restoring from compressed backup"
 ODS_DIR="$DST2" bash "$ODS_RESTORE" -f "$CBACKUP_ID" >/dev/null 2>&1 || fail "Compressed restore failed"
 [[ -f "$DST2/.env" ]] || fail "Missing .env after compressed restore"
 [[ "$(cat "$DST2/.env")" == "test-env-value" ]] || fail ".env content mismatch after compressed restore"
+[[ "$(cat "$DST2/data/models/weights.gguf")" == "gguf-weights" ]] || fail "Compressed backup lost model weights"
+[[ -L "$DST2/data/whisper/hub/snapshots/revision/model.bin" ]] || fail "Compressed backup lost the cache symlink"
+[[ "$(cat "$DST2/data/whisper/hub/snapshots/revision/model.bin")" == "linked-model-cache" ]] || fail "Compressed backup broke cache links"
 pass "Compressed backup restores correctly"
 
 # ── Interactive selection ─────────────────────────────────────────────
