@@ -38,8 +38,17 @@ build_fixture() {
     printf '{"version":"1.9.0","timestamp":"2026-01-01T00:00:00Z"}\n' > "$snap/snapshot.json"
 
     # Rollback stops the stack first; no daemon here.
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$install/bin/docker"
+    cat > "$install/bin/docker" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+    *'ps --services'*) echo fixture ;;
+    *'ps --format json'*) echo '{"State":"running"}' ;;
+esac
+exit 0
+SH
     chmod +x "$install/bin/docker"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$install/bin/curl"
+    chmod +x "$install/bin/curl"
 
     if [[ "$mode" == "break-cp" ]]; then
         # Fail only the snapshot config copy — a full disk mid-restore.
@@ -84,7 +93,7 @@ grep -qi "manual recovery required" <<<"$out" \
 pass "restore failure propagates so rollback reports it"
 
 # No staging directory may be left behind.
-if compgen -G "$BROKEN/config/*.restore-*" >/dev/null; then
+if [[ -n "$(find "$BROKEN" -type d -name '.ods-restore.*' -print -quit)" ]]; then
     fail "a staging directory was left behind after a failed restore"
 fi
 pass "a failed restore leaves no staging directory behind"
@@ -102,9 +111,10 @@ grep -q "^ODS_VERSION=1.9.0$" "$OK_DIR/.env" \
     || fail "a healthy rollback did not restore the snapshot .env"
 grep -q "Restored: config/litellm/" <<<"$out_ok" \
     || fail "a healthy rollback did not report the restored config"
-if compgen -G "$OK_DIR/config/*.restore-*" >/dev/null; then
+if [[ -n "$(find "$OK_DIR" -type d -name '.ods-restore.*' -print -quit)" ]]; then
     fail "a successful restore left a staging directory behind"
 fi
 pass "a healthy rollback still restores the snapshot and cleans up staging"
 
 echo "Rollback restore-failure tests passed."
+python3 "$ROOT_DIR/tests/test_update_rollback_atomicity.py"
