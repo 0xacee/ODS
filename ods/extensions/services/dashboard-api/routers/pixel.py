@@ -22,7 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from host_agent_client import AgentClientError, AgentHTTPError, async_request_json as request_agent_json
-from pixel_runtime_state import begin_pixel_stream, end_pixel_stream
+from pixel_runtime_state import begin_pixel_stream, end_pixel_stream, try_begin_pixel_stream
 from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, owner_namespace
 from security import verify_api_key
 from config import read_live_env_value
@@ -750,6 +750,8 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
     if readiness_issue is not None:
         _state, detail = readiness_issue
         raise HTTPException(status_code=409, detail=detail)
+    if not try_begin_pixel_stream():
+        raise HTTPException(status_code=429, detail="Pixel stream capacity is busy; retry shortly")
     edge_url, key = config
     edge_body = {
         "model": _MODEL,
@@ -777,18 +779,19 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         upstream = await upstream_context.__aenter__()
     except (httpx.HTTPError, asyncio.TimeoutError) as exc:
         await client.aclose()
+        end_pixel_stream()
         logger.warning("Pixel edge stream connection failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Pixel stream is unavailable") from exc
     if upstream.status_code != 200:
         await upstream_context.__aexit__(None, None, None)
         await client.aclose()
+        end_pixel_stream()
         raise HTTPException(status_code=502, detail="Pixel request was rejected")
     if not upstream.headers.get("content-type", "").lower().startswith("text/event-stream"):
         await upstream_context.__aexit__(None, None, None)
         await client.aclose()
+        end_pixel_stream()
         raise HTTPException(status_code=502, detail="Pixel returned an invalid stream")
-
-    begin_pixel_stream()
 
     async def stream() -> AsyncIterator[bytes]:
         done_seen = False
@@ -849,5 +852,4 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             "X-Accel-Buffering": "no",
         },
     )
-
 
