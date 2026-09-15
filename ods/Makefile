@@ -80,6 +80,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-safe-env.sh
 	@bash tests/test-env-example-inline-comments.sh
 	@bash tests/test-phase06-secret-generation.sh
+	@bash tests/test-phase06-env-rerun-quoting.sh
 	@echo ""
 	@echo "=== health-check.sh --json output contract ==="
 	@bash tests/test-health-check-json-output.sh
