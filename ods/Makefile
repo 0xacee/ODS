@@ -153,6 +153,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-update-backup-retention-labels.sh
 	@bash tests/test-update-script-backup.sh
 	@bash tests/test-update-backup-retention-spaces.sh
+	@bash tests/test-update-rollback-restore-failure.sh
 	@bash tests/test-backup-data-coverage.sh
 	@echo ""
 	@echo "=== backup integrity and restore round-trip ==="

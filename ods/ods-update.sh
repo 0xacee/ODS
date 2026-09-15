@@ -321,7 +321,7 @@ snapshot_pre_update() {
 # _restore_snapshot <snap_dir>
 #   Validates snapshot integrity, then restores .env files, compose overlays,
 #   and per-extension config dirs.  Does NOT restart services.
-_restore_snapshot() {
+_restore_snapshot() (
     local snap_dir="$1"
     if [[ ! -d "$snap_dir" ]]; then
         log_error "Rollback snapshot not found: ${snap_dir}"
@@ -347,29 +347,104 @@ _restore_snapshot() {
 
     log_info "Restoring from rollback snapshot: $(basename "${snap_dir}")"
 
-    # Flat files: .env*, .version, docker-compose*.yml
-    shopt -s dotglob
+    # A subshell owns shell options and traps even when callers use `if !`.
+    # Stage every item before touching live files; keep displaced originals
+    # beside their destination so all publication/rollback renames stay local.
+    local -a sources=() destinations=() workspaces=() publishing=()
+    local f base ext_dir parent workspace i completed=false recovery_failed=false
+    shopt -s dotglob nullglob
     for f in "${snap_dir}"/*; do
-        local base
         base="$(basename "$f")"
-        [[ -f "$f" && "$base" != "snapshot.json" && "$base" != "metadata.json" ]] || continue
-        cp "$f" "${INSTALL_DIR}/"
-        log_info "  Restored: ${base}"
+        [[ -f "$f" && "$base" != snapshot.json && "$base" != metadata.json ]] || continue
+        sources+=("$f")
+        destinations+=("${INSTALL_DIR}/${base}")
     done
-    shopt -u dotglob
-
-    # Per-extension config directories
     for ext_dir in litellm n8n openclaw searxng; do
-        local src="${snap_dir}/config-${ext_dir}"
-        if [[ -d "$src" ]]; then
-            rm -rf "${INSTALL_DIR}/config/${ext_dir}"
-            cp -r "$src" "${INSTALL_DIR}/config/${ext_dir}"
-            log_info "  Restored: config/${ext_dir}/"
+        f="${snap_dir}/config-${ext_dir}"
+        [[ -d "$f" ]] || continue
+        sources+=("$f")
+        destinations+=("${INSTALL_DIR}/config/${ext_dir}")
+    done
+
+    restore_cleanup() {
+        local status=$? index target work
+        trap - EXIT INT TERM
+        if [[ "$completed" != true ]]; then
+            for ((index=${#workspaces[@]}-1; index>=0; index--)); do
+                target="${destinations[index]}"
+                work="${workspaces[index]}"
+                if [[ "${publishing[index]:-false}" == true && ! -e "$work/new" && ! -L "$work/new"
+                    && ( -e "$target" || -L "$target" ) ]]; then
+                    if ! mv -- "$target" "$work/new"; then
+                        recovery_failed=true
+                        log_error "Cannot withdraw restored item ${target}; recovery files retained at ${work}"
+                        continue
+                    fi
+                fi
+                if [[ -e "$work/old" || -L "$work/old" ]]; then
+                    if ! mv -- "$work/old" "$target"; then
+                        recovery_failed=true
+                        log_error "Cannot restore original ${target}; original retained at ${work}/old"
+                        continue
+                    fi
+                fi
+            done
+        fi
+        for ((index=0; index<${#workspaces[@]}; index++)); do
+            # If recovery failed, never remove a workspace containing originals.
+            if [[ "$completed" == true || ( ! -e "${workspaces[index]}/old" && ! -L "${workspaces[index]}/old" ) ]]; then
+                rm -rf -- "${workspaces[index]}" || log_warn "Could not remove staging ${workspaces[index]}"
+            fi
+        done
+        if [[ "$recovery_failed" == true ]]; then
+            log_error "Rollback could not restore every original. Manual recovery required from the retained paths above."
+        fi
+        [[ "$completed" == true && "$status" == 0 ]] || status=1
+        exit "$status"
+    }
+    trap restore_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    for ((i=0; i<${#sources[@]}; i++)); do
+        parent="$(dirname "${destinations[i]}")"
+        if ! mkdir -p -- "$parent"; then
+            log_error "Cannot prepare restore destination ${parent}"
+            return 1
+        fi
+        workspace="$(mktemp -d "${parent}/.ods-restore.XXXXXX")" || return 1
+        workspaces+=("$workspace")
+        # cp -a preserves private .env modes, links and directory attributes.
+        if ! cp -a -- "${sources[i]}" "$workspace/new"; then
+            log_error "Failed to stage ${sources[i]}; live configuration is unchanged."
+            return 1
         fi
     done
-
+    for ((i=0; i<${#destinations[@]}; i++)); do
+        f="${destinations[i]}"
+        workspace="${workspaces[i]}"
+        publishing[i]=true
+        if [[ -e "$f" || -L "$f" ]]; then
+            if ! mv -- "$f" "$workspace/old"; then
+                log_error "Cannot preserve original ${f}; undoing restore."
+                return 1
+            fi
+        fi
+        if ! mv -- "$workspace/new" "$f"; then
+            log_error "Cannot activate restored ${f}; undoing restore."
+            return 1
+        fi
+    done
+    completed=true
+    for f in "${destinations[@]}"; do
+        if [[ -d "$f" ]]; then
+            log_info "  Restored: ${f#"${INSTALL_DIR}/"}/"
+        else
+            log_info "  Restored: ${f#"${INSTALL_DIR}/"}"
+        fi
+    done
     log_ok "Snapshot restored."
-}
+)
 
 # wait_for_healthy
 #   Polls cmd_health every 10 s until it passes or HEALTH_TIMEOUT expires.
