@@ -662,14 +662,44 @@ async def check_service_health(
     if config.get("type") == "host-systemd":
         return await _check_host_systemd_health(service_id, config)
 
-    if config.get("host_network") and int(config.get("port") or 0) <= 0:
+    def port_number(value):
+        if type(value) is not int and not (
+            isinstance(value, str) and re.fullmatch(r"[0-9]{1,5}", value.strip())
+        ):
+            raise ValueError("port must be an integer")
+        port = int(value)
+        if not 0 <= port <= 65535:
+            raise ValueError("port outside valid range")
+        return port
+
+    # Keep the service visible as down on malformed configuration, without
+    # probing an unrelated default port. Zero represents an invalid/absent port.
+    safe = {**config, "name": str(config.get("name") or service_id), "port": 0, "external_port": 0}
+    try:
+        safe["port"] = port_number(config.get("port"))
+        safe["external_port"] = port_number(config.get("external_port", safe["port"]))
+    except (ValueError, TypeError):
+        return _service_status_from_config(service_id, safe, "down")
+    config = safe
+
+    if config.get("host_network") and config["port"] == 0:
         if service_id == "tailscale":
             return await _check_tailscale_health(service_id, config)
         return _service_status_from_config(service_id, config, "not_deployed")
 
     host = config.get('host', 'localhost')
-    health_port = config.get('health_port', config['port'])
-    url = f"http://{host}:{health_port}{config['health']}"
+    try:
+        health_path = config.get('health', '/')
+        if not isinstance(health_path, str):
+            raise ValueError("health path must be a string")
+        if not health_path.startswith('/'):
+            health_path = f"/{health_path}"
+        health_port = port_number(config.get('health_port', config['port']))
+        if health_port == 0:
+            raise ValueError("HTTP health port must be positive")
+    except (ValueError, TypeError):
+        return _service_status_from_config(service_id, config, "down")
+    url = f"http://{host}:{health_port}{health_path}"
     status = "unknown"
     response_time = None
 
@@ -694,7 +724,7 @@ async def check_service_health(
             status = "not_deployed"
         else:
             status = "down"
-    except (aiohttp.ClientError, OSError) as e:
+    except (aiohttp.ClientError, OSError, ValueError) as e:
         logger.debug(f"Health check failed for {service_id} at {url}: {e}")
         status = "down"
 

@@ -432,6 +432,29 @@ class TestCheckServiceHealth:
     }
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("field,value", [
+        ("port", "invalid"), ("port", True), ("port", 8080.5),
+        ("port", -1), ("port", 65536), ("external_port", "invalid"),
+        ("health_port", "invalid"), ("health_port", 0),
+        ("health_port", 65536), ("health_port", float("inf")),
+        ("health", 42), ("health", None), ("health", []),
+    ])
+    async def test_bad_config_returns_down_without_guessing_an_endpoint(self, monkeypatch, field, value):
+        get_session = AsyncMock()
+        monkeypatch.setattr("helpers._get_aio_session", get_session)
+        result = await check_service_health("test-svc", {**self._CONFIG, field: value})
+        assert result.status == "down"
+        get_session.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_health_path_preserves_root_probe(self, mock_aiohttp_session, monkeypatch):
+        session = mock_aiohttp_session(status=200)
+        monkeypatch.setattr("helpers._get_aio_session", AsyncMock(return_value=session))
+        result = await check_service_health("test-svc", {**self._CONFIG, "health": "", "health_port": "9091"})
+        assert result.status == "healthy"
+        assert session.get.call_args[0][0] == "http://localhost:9091/"
+
+    @pytest.mark.asyncio
     async def test_healthy_on_200(self, mock_aiohttp_session, monkeypatch):
         session = mock_aiohttp_session(status=200)
         monkeypatch.setattr("helpers._get_aio_session", AsyncMock(return_value=session))
@@ -500,6 +523,25 @@ class TestCheckServiceHealth:
         session.get = MagicMock(side_effect=OSError("connection refused"))
         monkeypatch.setattr("helpers._get_aio_session", AsyncMock(return_value=session))
 
+        result = await check_service_health("test-svc", self._CONFIG)
+        assert result.status == "down"
+
+    @pytest.mark.asyncio
+    async def test_normalizes_health_endpoint_without_leading_slash(self, mock_aiohttp_session, monkeypatch):
+        session = mock_aiohttp_session(status=200)
+        monkeypatch.setattr("helpers._get_aio_session", AsyncMock(return_value=session))
+        cfg = dict(self._CONFIG, health="api/health")
+        result = await check_service_health("test-svc", cfg)
+        assert result.status == "healthy"
+        session.get.assert_called_once()
+        url = session.get.call_args[0][0]
+        assert url == "http://localhost:8080/api/health"
+
+    @pytest.mark.asyncio
+    async def test_down_on_value_error(self, monkeypatch):
+        session = MagicMock()
+        session.get = MagicMock(side_effect=ValueError("Invalid URL"))
+        monkeypatch.setattr("helpers._get_aio_session", AsyncMock(return_value=session))
         result = await check_service_health("test-svc", self._CONFIG)
         assert result.status == "down"
 
