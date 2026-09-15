@@ -288,6 +288,31 @@ def _resolve_public_service_url(
 
 # --- Manifest Loading ---
 
+MAX_MANIFEST_DEPTH = 32
+
+
+def _validate_manifest_depth(value: Any, *, depth: int = 0, active: set[int] | None = None) -> None:
+    """Reject pathological nested or cyclic YAML/JSON structures early."""
+    if depth > MAX_MANIFEST_DEPTH:
+        raise ValueError(f"Manifest nesting exceeds {MAX_MANIFEST_DEPTH} levels")
+    if not isinstance(value, (dict, list)):
+        return
+    active = active if active is not None else set()
+    marker = id(value)
+    if marker in active:
+        raise ValueError("Manifest contains a cyclic structure")
+    active.add(marker)
+    try:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                _validate_manifest_depth(key, depth=depth + 1, active=active)
+                _validate_manifest_depth(item, depth=depth + 1, active=active)
+        else:
+            for item in value:
+                _validate_manifest_depth(item, depth=depth + 1, active=active)
+    finally:
+        active.remove(marker)
+
 
 def _read_manifest_file(path: Path) -> dict[str, Any]:
     """Load a JSON or YAML extension manifest file."""
@@ -296,6 +321,7 @@ def _read_manifest_file(path: Path) -> dict[str, Any]:
         data = json.loads(text)
     else:
         data = yaml.safe_load(text)
+    _validate_manifest_depth(data)
     if not isinstance(data, dict):
         raise ValueError("Manifest root must be an object")
     return data
