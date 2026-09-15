@@ -44,6 +44,13 @@ ods_pixel_uninstall_managed() {
     local workspace_preview_state="${ODS_PIXEL_UNINSTALL_PREVIEW_STATE_DIR:-/var/lib/ods-pixel-preview}"
     local system_observer_program="$libexec_dir/ods-pixel-system-observe.py"
     local system_observer_source="$install_dir/extensions/services/pixel-agent/host/system_observe.py"
+    # This root-owned coordinator must be retired with the other Pixel units;
+    # otherwise systemd can restart it after the ODS installation is gone.
+    local access_unit="$systemd_dir/ods-pixel-access.service"
+    local access_source="$install_dir/extensions/services/pixel-agent/host/ods-pixel-access.service"
+    local access_program="$libexec_dir/ods-pixel-access"
+    local access_state="${ODS_PIXEL_UNINSTALL_ACCESS_STATE_DIR:-/var/lib/ods-pixel-access}"
+    local access_config="$etc_dir/pixel-access.json"
     local ops_user="pixel-ops-broker"
     local ops_group="pixel-ops"
     local ops_unit="$systemd_dir/pixel-ops-broker.service"
@@ -95,7 +102,8 @@ ods_pixel_uninstall_managed() {
         "$extension_manager_unit" "$extension_manager_program" \
         "$artifact_promoter_unit" "$artifact_promoter_program" \
         "$workspace_preview_unit" "$workspace_preview_program" "$workspace_preview_state" \
-        "$system_observer_program"; do
+        "$system_observer_program" "$access_unit" "$access_program" \
+        "$access_source" "$access_state" "$access_config"; do
         [[ "$path" == /* && "$path" != / ]] || {
             log_error "Refusing Pixel Operations cleanup for an invalid absolute target"
             return 1
@@ -1309,6 +1317,10 @@ PY
         || -e "$workspace_preview_program" || -L "$workspace_preview_program" \
         || -e "$system_observer_program" || -L "$system_observer_program" \
         || -e "$workspace_preview_state" || -L "$workspace_preview_state" \
+        || -e "$access_unit" || -L "$access_unit" \
+        || -e "$access_program" || -L "$access_program" \
+        || -e "$access_state" || -L "$access_state" \
+        || -e "$access_config" || -L "$access_config" \
         || "$ops_artifacts_present" == true ]]; then
         root_artifacts_present=true
         command -v sudo >/dev/null 2>&1 || {
@@ -1317,9 +1329,86 @@ PY
         }
     fi
 
+    # A shared service name alone does not bind these privileged artifacts to
+    # this installation. Validate their custody and configuration before stop.
+    validate_access_cleanup() {
+        [[ -e "$access_unit" || -L "$access_unit" || -e "$access_program" || -L "$access_program"
+            || -e "$access_state" || -L "$access_state" || -e "$access_config" || -L "$access_config" ]] || return 0
+        sudo python3 - "$install_dir" "$owner_uid" "$root_uid" "$access_unit" \
+            "$access_source" "$access_program" "$access_state" "$access_config" <<'PY'
+import fcntl, json, os, pathlib, pwd, stat, sys
+install, owner_uid, root_uid, unit, source, program, state, config = sys.argv[1:]
+install = pathlib.Path(install).resolve()
+unit, source, program, state, config = map(pathlib.Path, (unit, source, program, state, config))
+
+def check(path, directory=False, private=False):
+    info = path.lstat()
+    expected = stat.S_ISDIR if directory else stat.S_ISREG
+    if (not expected(info.st_mode) or info.st_uid != int(root_uid)
+            or info.st_mode & (0o077 if private else 0o022)
+            or (not directory and info.st_nlink != 1)):
+        raise ValueError('unsafe access coordinator artifact: '+str(path))
+    for parent in path.parents:
+        if parent.is_symlink():
+            raise ValueError('symlinked access coordinator parent: '+str(parent))
+
+try:
+    if program.name != 'ods-pixel-access' or state.name != 'ods-pixel-access':
+        raise ValueError('unexpected access coordinator directory')
+    check(config, private=True)
+    binding = json.loads(config.read_text())
+    if (binding.get('install_dir') != str(install)
+            or pwd.getpwnam(binding.get('owner', '')).pw_uid != int(owner_uid)):
+        raise ValueError('access coordinator belongs to another installation')
+    if os.path.lexists(unit):
+        check(unit)
+        if unit.read_bytes() != source.read_bytes():
+            raise ValueError('access coordinator service was modified')
+    for root in (program, state):
+        if not os.path.lexists(root):
+            continue
+        check(root, directory=True, private=root == state)
+        for parent, dirs, files in os.walk(root, followlinks=False):
+            for name in dirs:
+                check(pathlib.Path(parent)/name, directory=True)
+            for name in files:
+                path = pathlib.Path(parent)/name
+                check(path)
+                relative = path.relative_to(root)
+                if root == program and '__pycache__' not in relative.parts:
+                    candidates = (install/'extensions/services/pixel-agent/host'/relative, install/'bin'/relative)
+                    if not any(p.is_file() and p.read_bytes() == path.read_bytes() for p in candidates):
+                        raise ValueError('access coordinator program was modified: '+str(relative))
+    if os.path.lexists(state/'transition.json'):
+        raise ValueError('recover the pending Pixel access/settings/provider transition before uninstall')
+    if (state/'lock').exists():
+        with (state/'lock').open('rb') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (OSError, ValueError, KeyError, TypeError) as error:
+    print('Refusing Pixel access cleanup: '+str(error), file=sys.stderr)
+    raise SystemExit(1)
+PY
+    }
+    validate_access_cleanup || return 1
+
+    # Stop the coordinator before its dependencies so it cannot begin another
+    # transition while the gateway is being retired. Recheck recovery after stop.
+    if [[ -e "$access_unit" ]] \
+        && ! timeout 30s sudo systemctl disable --now ods-pixel-access.service; then
+        log_error "Could not stop Pixel access coordinator; no Pixel files were removed"
+        return 1
+    fi
+    if [[ -e "$access_config" ]]; then
+        if systemctl is-active --quiet ods-pixel-access.service; then
+            log_error "Pixel access coordinator is still active; no Pixel files were removed"
+            return 1
+        fi
+        validate_access_cleanup || return 1
+    fi
+
     if [[ -e "$gateway_unit" || -e "$ingress_unit" || -e "$extension_manager_unit" \
         || -e "$artifact_promoter_unit" || -e "$workspace_preview_unit" \
-        || -e "$ops_unit" ]]; then
+        || -e "$access_unit" || -e "$ops_unit" ]]; then
         # Stop the ingress before the gateway it proxies to. Keep these as
         # separate calls so the shutdown order is an enforced contract rather
         # than an argument-order hint to systemctl. An interrupted first install
@@ -1360,7 +1449,8 @@ PY
             || systemctl is-active --quiet pixel-extension-manager.service \
             || systemctl is-active --quiet pixel-artifact-promoter.service \
             || systemctl is-active --quiet pixel-workspace-preview.service \
-            || systemctl is-active --quiet pixel-ops-broker.service; then
+            || systemctl is-active --quiet pixel-ops-broker.service \
+            || systemctl is-active --quiet ods-pixel-access.service; then
             log_error "ODS-managed Pixel system services are still active; no Pixel files were removed"
             return 1
         fi
@@ -1664,6 +1754,8 @@ PY
             "$artifact_promoter_unit" "$artifact_promoter_program" \
             "$workspace_preview_unit" "$workspace_preview_program" \
             "$system_observer_program" \
+            || ! sudo rm -rf -- "$access_program" "$access_state" \
+            || ! sudo rm -f -- "$access_unit" "$access_config" \
             || ! sudo systemctl daemon-reload; then
             log_error "Could not remove ODS-managed Pixel system artifacts"
             return 1
@@ -1673,7 +1765,8 @@ PY
             || -e "$extension_manager_program" || -e "$artifact_promoter_unit" \
             || -e "$artifact_promoter_program" || -e "$workspace_preview_unit" \
             || -e "$workspace_preview_program" || -e "$system_observer_program" \
-            || -e "$workspace_preview_state" ]]; then
+            || -e "$workspace_preview_state" || -e "$access_unit" \
+            || -e "$access_program" || -e "$access_state" || -e "$access_config" ]]; then
             log_error "ODS-managed Pixel system artifact cleanup was incomplete"
             return 1
         fi
