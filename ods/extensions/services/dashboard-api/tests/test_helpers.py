@@ -384,6 +384,16 @@ class TestGetCpuMetrics:
         result = get_cpu_metrics()
         assert result == {"percent": 0, "temp_c": None}
 
+    def test_linux_cpu_metrics_handles_corrupt_sensor(self, monkeypatch):
+        from unittest.mock import mock_open
+        fake_stat = "cpu  100 200 300 400 500 600 700 800\n"
+        monkeypatch.setattr("builtins.open", mock_open(read_data="corrupted_not_a_number\n"))
+        monkeypatch.setattr("glob.glob", lambda pat: ["/sys/class/thermal/thermal_zone0/type"])
+        from helpers import _get_cpu_metrics_linux
+        res = _get_cpu_metrics_linux()
+        assert res["temp_c"] is None
+        assert 0.0 <= res["percent"] <= 100.0
+
 
 class TestGetRamMetrics:
 
@@ -397,6 +407,15 @@ class TestGetRamMetrics:
         monkeypatch.setattr("helpers.platform.system", lambda: "UnknownOS")
         result = get_ram_metrics()
         assert result == {"used_gb": 0, "total_gb": 0, "percent": 0}
+
+    def test_linux_ram_metrics_clamps_bounds(self, monkeypatch):
+        from unittest.mock import mock_open
+        fake_mem = "MemTotal:        16000000 kB\nMemAvailable:    18000000 kB\n"
+        monkeypatch.setattr("builtins.open", mock_open(read_data=fake_mem))
+        from helpers import _get_ram_metrics_linux
+        res = _get_ram_metrics_linux()
+        assert res["used_gb"] == 0
+        assert res["percent"] == 0.0
 
 
 # --- check_service_health ---

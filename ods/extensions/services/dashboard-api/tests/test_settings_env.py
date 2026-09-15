@@ -134,6 +134,70 @@ def settings_env_fixture(tmp_path, monkeypatch):
     }
 
 
+@pytest.fixture()
+def constrained_settings(settings_env_fixture):
+    """Use the shipped constraints, through the real Settings save boundary."""
+    schema_path = settings_env_fixture["schema_path"]
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    shipped = json.loads((Path(__file__).resolve().parents[4] / ".env.schema.json").read_text())
+    for key in ("REMOTE_LLM_SSH_PORT", "LLAMA_ARG_N_CPU_MOE", "N8N_PASS",
+                "PIXEL_OPENWEBUI_KEY", "TS_HOSTNAME"):
+        schema["properties"][key] = shipped["properties"][key]
+    schema_path.write_text(json.dumps(schema), encoding="utf-8")
+    return settings_env_fixture
+
+
+@pytest.mark.parametrize("key,value", [
+    ("REMOTE_LLM_SSH_PORT", "0"),
+    ("REMOTE_LLM_SSH_PORT", "65536"),
+    ("LLAMA_ARG_N_CPU_MOE", "-1"),
+    ("N8N_PASS", "tiny-pass"),
+    ("PIXEL_OPENWEBUI_KEY", "a" * 65),
+    ("PIXEL_OPENWEBUI_KEY", "g" * 64),
+    ("TS_HOSTNAME", "invalid/hostname"),
+])
+def test_settings_rejects_shipped_schema_violations_before_host_write(
+    test_client, constrained_settings, monkeypatch, key, value,
+):
+    from unittest.mock import Mock
+
+    import main
+    write = Mock(wraps=main._call_agent_env_update)
+    monkeypatch.setattr("main._call_agent_env_update", write)
+    env_path = constrained_settings["env_path"]
+    original = env_path.read_bytes()
+    response = test_client.put("/api/settings/env", headers=test_client.auth_headers,
+                               json={"mode": "form", "values": {key: value}})
+
+    assert response.status_code == 400, response.text
+    assert any(issue["key"] == key for issue in response.json()["detail"]["issues"])
+    if key in {"N8N_PASS", "PIXEL_OPENWEBUI_KEY"}:
+        assert value not in response.text
+    write.assert_not_called()
+    assert env_path.read_bytes() == original
+    assert not (constrained_settings["data_root"] / "config-backups").exists()
+
+
+@pytest.mark.parametrize("port", ["1", "65535"])
+def test_settings_saves_valid_schema_boundaries_and_keeps_blank_secret(
+    test_client, constrained_settings, port,
+):
+    values = {"REMOTE_LLM_SSH_PORT": port, "LLAMA_ARG_N_CPU_MOE": "0",
+              "N8N_PASS": "a" * 10, "PIXEL_OPENWEBUI_KEY": "a" * 64,
+              "TS_HOSTNAME": "ods-local"}
+    response = test_client.put("/api/settings/env", headers=test_client.auth_headers,
+                               json={"mode": "form", "values": values})
+    assert response.status_code == 200, response.text
+    response = test_client.put("/api/settings/env", headers=test_client.auth_headers,
+                               json={"mode": "form", "values": {"N8N_PASS": ""}})
+    assert response.status_code == 200, response.text
+    from settings import _parse_env_text
+    persisted, issues = _parse_env_text(constrained_settings["env_path"].read_text())
+    assert issues == []
+    assert {key: persisted[key] for key in values} == values
+    assert (constrained_settings["data_root"] / "config-backups/.env.backup.test").exists()
+
+
 def test_api_settings_env_masks_secret_values(test_client, settings_env_fixture):
     response = test_client.get("/api/settings/env", headers=test_client.auth_headers)
 
@@ -149,6 +213,27 @@ def test_api_settings_env_masks_secret_values(test_client, settings_env_fixture)
     assert payload["values"]["LLM_BACKEND"] == "local"
     assert payload["fields"]["LLM_BACKEND"]["value"] == "local"
     assert payload["agentAvailable"] is True
+
+
+def test_api_settings_env_recognizes_library_ports_and_keeps_library_secrets_masked(
+    test_client, settings_env_fixture,
+):
+    schema = Path(__file__).resolve().parents[4] / ".env.schema.json"
+    settings_env_fixture["schema_path"].write_bytes(schema.read_bytes())
+    settings_env_fixture["env_path"].write_text(
+        "DIFY_PORT=18002\nFLOWISE_PASSWORD=library-secret-fixture\nMINIFLUX_ADMIN_PASSWORD=miniflux-secret-fixture\n", encoding="utf-8",
+    )
+    response = test_client.get("/api/settings/env", headers=test_client.auth_headers)
+    assert response.status_code == 200
+    fields = response.json()["fields"]
+    assert fields["DIFY_PORT"]["type"] == "integer"
+    assert fields["DIFY_PORT"]["value"] == "18002"
+    assert fields["FLOWISE_PASSWORD"]["secret"] is True
+    assert fields["FLOWISE_PASSWORD"]["hasValue"] is True
+    assert "library-secret-fixture" not in response.text
+    assert fields["MINIFLUX_ADMIN_PASSWORD"]["secret"] is True
+    assert fields["MINIFLUX_ADMIN_PASSWORD"]["hasValue"] is True
+    assert "miniflux-secret-fixture" not in response.text
 
 
 def test_api_settings_env_does_not_treat_plural_tokens_as_a_secret(
@@ -1557,6 +1642,139 @@ def test_env_example_keys_are_present_in_schema():
     schema_keys = set(schema.get("properties", {}))
 
     assert documented_keys - schema_keys == set()
+
+
+# --- Render quoting: values Compose would interpolate or truncate ---
+
+
+def test_render_env_quotes_values_compose_would_rewrite(commented_example_template):
+    """Values the dashboard writes back must read the same for Compose and ODS.
+
+    Docker Compose interpolates ``$NAME`` in unquoted values and cuts them at
+    the first `` #``; a password saved as ``hunter$two`` used to reach the
+    container as ``hunter``. Such values are written single-quoted (literal
+    for Compose, ``lib/safe-env.sh`` and ``strip_matching_quotes``); plain
+    values keep their bare form so existing files stay byte-identical.
+    """
+    from main import _render_env_from_values
+    from settings import _parse_env_text
+
+    values = {
+        "LLM_BACKEND": "local",
+        "N8N_PASS": "hunter$two",
+        "OPENCLAW_TOKEN": "token #1",
+        "LLM_MODEL": "it's $5",
+    }
+    rendered = _render_env_from_values(values)
+    lines = rendered.splitlines()
+    assert "LLM_BACKEND=local" in lines
+    assert "N8N_PASS='hunter$two'" in lines
+    assert "OPENCLAW_TOKEN='token #1'" in lines
+    assert 'LLM_MODEL="it\'s \\$5"' in lines
+
+    reparsed, issues = _parse_env_text(rendered)
+    assert issues == []
+    assert reparsed["N8N_PASS"] == "hunter$two"
+    assert reparsed["OPENCLAW_TOKEN"] == "token #1"
+
+
+def test_api_settings_env_save_quotes_interpolation_sensitive_secret(test_client, settings_env_fixture):
+    env_path = settings_env_fixture["env_path"]
+
+    response = test_client.put(
+        "/api/settings/env",
+        headers=test_client.auth_headers,
+        json={
+            "mode": "form",
+            "values": {"OPENAI_API_KEY": "sk-live $ecret #1"},
+        },
+    )
+
+    assert response.status_code == 200
+    updated_env = env_path.read_text(encoding="utf-8")
+    assert "OPENAI_API_KEY='sk-live $ecret #1'" in updated_env.splitlines()
+
+    from settings import _parse_env_text
+
+    saved_values, _ = _parse_env_text(updated_env)
+    assert saved_values["OPENAI_API_KEY"] == "sk-live $ecret #1"
+    assert response.json()["fields"]["OPENAI_API_KEY"]["hasValue"] is True
+
+
+def test_rendered_env_values_match_bash_reader(tmp_path):
+    """``lib/safe-env.sh`` (ods-cli) must decode what the dashboard writes."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    safe_env = Path(__file__).resolve().parents[4] / "lib" / "safe-env.sh"
+    if not safe_env.is_file() or shutil.which("bash") is None:
+        pytest.skip("lib/safe-env.sh or bash not available in this checkout")
+
+    from main import _render_env_from_values
+
+    values = {
+        "PLAIN": "value",
+        "DOLLAR": "hunter$two",
+        "HASH": "token #1",
+        "PADDED": "  padded  ",
+        "MIXED": "it's $5 \"q\" back\\slash",
+    }
+    env_file = tmp_path / ".env"
+    env_file.write_text(_render_env_from_values(values), encoding="utf-8")
+
+    script = (
+        f". '{safe_env}'; load_env_file '{env_file}'; "
+        + " ".join(f"printf '%s\\0' \"${key}\";" for key in values)
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, check=True)
+    decoded = out.stdout.decode("utf-8").split("\0")[: len(values)]
+    assert decoded == list(values.values())
+
+
+def test_api_settings_env_save_keeps_compose_comment_semantics(test_client, settings_env_fixture):
+    """A hand-written inline comment must not be frozen into the value on save.
+
+    Compose reads ``OPENAI_API_KEY=sk-live-secret   # rotate me`` as
+    ``sk-live-secret``; the Settings page must read and write back the same.
+    """
+    env_path = settings_env_fixture["env_path"]
+    env_path.write_text(
+        "OPENAI_API_KEY=sk-live-secret   # rotate me\n"
+        "RAG_OPENAI_API_KEY=\"rag-live-secret\" # trailing note\n"
+        "LLM_BACKEND=local\n"
+        "WEBUI_AUTH=true\n",
+        encoding="utf-8",
+    )
+
+    response = test_client.put(
+        "/api/settings/env",
+        headers=test_client.auth_headers,
+        json={"mode": "form", "values": {"LLM_BACKEND": "cloud"}},
+    )
+
+    assert response.status_code == 200
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    assert "OPENAI_API_KEY=sk-live-secret" in lines
+    assert "RAG_OPENAI_API_KEY=rag-live-secret" in lines
+    assert "LLM_BACKEND=cloud" in lines
+
+
+def test_api_settings_env_second_save_does_not_double_escape(test_client, settings_env_fixture):
+    """Saving twice must be idempotent for values that use the escape set."""
+    env_path = settings_env_fixture["env_path"]
+    from settings import _parse_env_text
+
+    for _ in range(2):
+        response = test_client.put(
+            "/api/settings/env",
+            headers=test_client.auth_headers,
+            json={"mode": "form", "values": {"OPENAI_API_KEY": "it's $5 \"q\""}},
+        )
+        assert response.status_code == 200
+        saved, _issues = _parse_env_text(env_path.read_text(encoding="utf-8"))
+        assert saved["OPENAI_API_KEY"] == "it's $5 \"q\""
+    assert 'OPENAI_API_KEY="it\'s \\$5 \\"q\\""' in env_path.read_text(encoding="utf-8").splitlines()
 
 
 def test_api_settings_env_masks_extension_keys_outside_the_schema(test_client, settings_env_fixture):

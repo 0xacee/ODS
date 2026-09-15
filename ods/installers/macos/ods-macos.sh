@@ -202,14 +202,30 @@ read_ods_env() {
     if [[ ! -f "$env_file" ]]; then
         return
     fi
-    # Parse .env safely (no eval)
-    while IFS= read -r line; do
+    # Parse .env safely (no eval). Keep a last line that has no newline.
+    while IFS= read -r line || [[ -n "$line" ]]; do
         line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [[ "$line" =~ ^# ]] && continue
         [[ -z "$line" ]] && continue
         if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
             local key="${BASH_REMATCH[1]}"
             local val="${BASH_REMATCH[2]}"
+            # Apply Docker Compose's value grammar, mirrored from
+            # lib/safe-env.sh, before stripping quotes: trim surrounding
+            # whitespace (Compose trims leading space, so "KEY=  # x" becomes
+            # the literal "# x"), then for an unquoted value cut at the first
+            # " #", and for a quoted value drop a " #..." after the closing
+            # quote. "#" without a leading space and "#" inside quotes stay.
+            val="${val#"${val%%[![:space:]]*}"}"
+            val="${val%"${val##*[![:space:]]}"}"
+            case "$val" in
+                \"*) [[ "$val" =~ ^(\"(\\.|[^\"\\])*\")[[:space:]]+# ]] && val="${BASH_REMATCH[1]}" ;;
+                \'*) [[ "$val" =~ ^(\'[^\']*\')[[:space:]]+# ]] && val="${BASH_REMATCH[1]}" ;;
+                *)
+                    val="${val%% #*}"
+                    val="${val%"${val##*[![:space:]]}"}"
+                    ;;
+            esac
             # Strip exactly one matching pair of surrounding quotes. The old
             # sed removed a leading and a trailing quote independently (either
             # type), so KEY=abc" lost its trailing quote and "abc' was cut on
@@ -218,6 +234,11 @@ read_ods_env() {
             if [[ "$val" == '"'*'"' ]]; then
                 val="${val#\"}"
                 val="${val%\"}"
+                # Decode writer escapes without evaluating shell expansions.
+                # Single-quoted values below remain literal.
+                val="${val//\\\"/\"}"
+                val="${val//\\\$/\$}"
+                val="${val//\\\\/\\}"
             elif [[ "$val" == "'"*"'" ]]; then
                 val="${val#\'}"
                 val="${val%\'}"
@@ -407,6 +428,11 @@ upsert_env_value() {
     if grep -qE "^${key}=" "$env_file" 2>/dev/null; then
         sed -i '' "s|^${key}=.*|${key}=${value}|" "$env_file"
     else
+        # Appending after a last line that has no newline would join the new
+        # assignment onto that line and corrupt both keys.
+        if [[ -s "$env_file" && -n "$(tail -c 1 "$env_file")" ]]; then
+            printf '\n' >> "$env_file"
+        fi
         printf '%s=%s\n' "$key" "$value" >> "$env_file"
     fi
 }
@@ -801,12 +827,18 @@ cmd_start() {
     elif [[ -n "$service" ]]; then
         ai "Starting ${service}..."
         # shellcheck disable=SC2086
-        docker compose $flags up -d "$service"
+        if ! docker compose $flags up -d "$service"; then
+            ai_err "Failed to start ${service}."
+            return 1
+        fi
         ai_ok "${service} started"
     else
         ai "Starting all services..."
         # shellcheck disable=SC2086
-        docker compose $flags up -d
+        if ! docker compose $flags up -d; then
+            ai_err "Failed to start ODS services."
+            return 1
+        fi
         ai_ok "All services started"
     fi
 
@@ -866,7 +898,10 @@ cmd_restart() {
     elif [[ -n "$service" ]]; then
         ai "Restarting ${service}..."
         # shellcheck disable=SC2086
-        docker compose $flags up -d --force-recreate --no-build --pull never "$service"
+        if ! docker compose $flags up -d --force-recreate --no-build --pull never "$service"; then
+            ai_err "Failed to restart ${service}."
+            return 1
+        fi
         ai_ok "${service} restarted"
     else
         # Restart native llama-server
@@ -878,7 +913,10 @@ cmd_restart() {
 
         ai "Restarting all services..."
         # shellcheck disable=SC2086
-        docker compose $flags up -d --force-recreate --no-build --pull never
+        if ! docker compose $flags up -d --force-recreate --no-build --pull never; then
+            ai_err "Failed to restart ODS services."
+            return 1
+        fi
         ai_ok "All services restarted"
     fi
 

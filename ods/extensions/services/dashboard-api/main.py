@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 # --- Local modules ---
-from env_values import strip_matching_quotes
+from env_values import parse_env_value, quote_env_value
 from config import (
     SERVICES, DATA_DIR, INSTALL_DIR, SIDEBAR_ICONS, MANIFEST_ERRORS, ALWAYS_ON_SERVICES,
     AGENT_HOST, AGENT_PORT, AGENT_URL, ODS_AGENT_KEY,
@@ -161,7 +161,7 @@ def _read_installed_version() -> str:
         try:
             for line in env_file.read_text().splitlines():
                 if line.startswith("ODS_VERSION="):
-                    env_version = strip_matching_quotes(line.split("=", 1)[1])
+                    env_version = parse_env_value(line.split("=", 1)[1])
                     if env_version:
                         return env_version
         except OSError:
@@ -832,7 +832,7 @@ def _render_env_from_values(values: dict[str, str]) -> str:
             if key in assigned:
                 output_lines.append(f"# {line}")
                 continue
-            output_lines.append(f"{key}={values.get(key, '')}")
+            output_lines.append(f"{key}={quote_env_value(values.get(key, ''))}")
             assigned.add(key)
             continue
 
@@ -848,7 +848,7 @@ def _render_env_from_values(values: dict[str, str]) -> str:
                 continue
             seen.add(key)
             if key in values:
-                output_lines.append(f"{key}={values[key]}")
+                output_lines.append(f"{key}={quote_env_value(values[key])}")
                 assigned.add(key)
             else:
                 output_lines.append(line)
@@ -865,7 +865,7 @@ def _render_env_from_values(values: dict[str, str]) -> str:
             "# Values below were preserved because they are not part of .env.example.",
         ])
         for key, value in extras:
-            output_lines.append(f"{key}={value}")
+            output_lines.append(f"{key}={quote_env_value(value)}")
 
     return "\n".join(output_lines).rstrip() + "\n"
 
