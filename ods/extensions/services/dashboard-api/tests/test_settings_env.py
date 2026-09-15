@@ -157,7 +157,7 @@ def test_api_settings_env_recognizes_library_ports_and_keeps_library_secrets_mas
     schema = Path(__file__).resolve().parents[4] / ".env.schema.json"
     settings_env_fixture["schema_path"].write_bytes(schema.read_bytes())
     settings_env_fixture["env_path"].write_text(
-        "DIFY_PORT=18002\nFLOWISE_PASSWORD=library-secret-fixture\n", encoding="utf-8",
+        "DIFY_PORT=18002\nFLOWISE_PASSWORD=library-secret-fixture\nMINIFLUX_ADMIN_PASSWORD=miniflux-secret-fixture\n", encoding="utf-8",
     )
     response = test_client.get("/api/settings/env", headers=test_client.auth_headers)
     assert response.status_code == 200
@@ -167,6 +167,9 @@ def test_api_settings_env_recognizes_library_ports_and_keeps_library_secrets_mas
     assert fields["FLOWISE_PASSWORD"]["secret"] is True
     assert fields["FLOWISE_PASSWORD"]["hasValue"] is True
     assert "library-secret-fixture" not in response.text
+    assert fields["MINIFLUX_ADMIN_PASSWORD"]["secret"] is True
+    assert fields["MINIFLUX_ADMIN_PASSWORD"]["hasValue"] is True
+    assert "miniflux-secret-fixture" not in response.text
 
 
 def test_api_settings_env_does_not_treat_plural_tokens_as_a_secret(

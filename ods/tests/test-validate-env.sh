@@ -573,6 +573,12 @@ fi
 echo ""
 # Library port overrides are optional, but must be valid when operators set them.
 cp "$TMP_DIR/valid.env" "$TMP_DIR/library-ports.env"
+cat >> "$TMP_DIR/library-ports.env" <<'EOF'
+MINIFLUX_BASE_URL=http://localhost:8098
+NTFY_BASE_URL=http://localhost:8097
+MINIFLUX_DB_PASSWORD=fixture-database-password
+MINIFLUX_ADMIN_PASSWORD=fixture-admin-password
+EOF
 port=31000
 while read -r key; do
     printf '%s=%s\n' "$key" "$port" >> "$TMP_DIR/library-ports.env"
