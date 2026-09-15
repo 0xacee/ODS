@@ -250,6 +250,9 @@ jobs:
       - name: Safe Env Loading Tests
         run: bash tests/test-safe-env.sh
 
+      - name: Installer Rerun .env Quoting Tests
+        run: bash tests/test-phase06-env-rerun-quoting.sh
+
       - name: Dotenv Serializer Tests
         run: bash tests/test-dotenv-serializer.sh
 
