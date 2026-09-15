@@ -749,6 +749,26 @@ cmd_update() {
 # COMMAND: ROLLBACK
 #==============================================================================
 
+# _latest_backup_dir <root> <prefix>
+#   Prints the newest <root>/<prefix>* directory, judged by the
+#   YYYYMMDD-HHMMSS stamp its name ends with, or nothing when there is none.
+#   The root may not exist: `ods update` writes only general backups, so
+#   data/backups is often absent. General backup names put an optional label
+#   before that stamp (backup-<label>-<stamp>), so whole names do not sort by age.
+_latest_backup_dir() {
+    local root="$1" prefix="$2" dir stamp latest="" latest_stamp=0
+    local stamp_re='-([0-9]{8})-([0-9]{6})$'
+    for dir in "$root"/"$prefix"*; do
+        [[ -d "$dir" && ! -L "$dir" && "$dir" =~ $stamp_re ]] || continue
+        stamp="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+        if [[ -z "$latest" ]] || ((10#$stamp > 10#$latest_stamp)); then
+            latest="$dir"
+            latest_stamp="$stamp"
+        fi
+    done
+    printf '%s' "$latest"
+}
+
 cmd_rollback() {
     local target="${1:-}"
     local backup_path=""
@@ -768,11 +788,9 @@ cmd_rollback() {
     else
         # No target: prefer the most recent pre-update rollback snapshot,
         # fall back to the most recent general backup.
-        backup_path=$(find "${ROLLBACK_DIR}" -maxdepth 1 -type d -name "pre-update-*" \
-            2>/dev/null | sort -r | head -1)
+        backup_path="$(_latest_backup_dir "$ROLLBACK_DIR" pre-update-)"
         if [[ -z "$backup_path" ]]; then
-            backup_path=$(find "${BACKUP_DIR}" -maxdepth 1 -type d -name "backup-*" \
-                2>/dev/null | sort -r | head -1)
+            backup_path="$(_latest_backup_dir "$BACKUP_DIR" backup-)"
         fi
     fi
 

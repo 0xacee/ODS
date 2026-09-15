@@ -155,6 +155,9 @@ test: ## Run unit and contract tests
 	@bash tests/test-backup-restore-roundtrip.sh
 	@python3 tests/test-rsync-transfer-failures.py
 	@echo ""
+	@echo "=== ods-update.sh rollback picks the newest backup ==="
+	@bash tests/test-update-rollback-latest-backup.sh
+	@echo ""
 	@echo "=== bootstrap-upgrade spawn closes inherited FDs ==="
 	@bash tests/test-bootstrap-upgrade-close-inherited-fds.sh
 	@echo ""
