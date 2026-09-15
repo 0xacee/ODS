@@ -71,6 +71,8 @@ jobs:
         run: python -m pytest extensions/services/pixel-inference/tests -q
       - name: Model router compatibility and route pins
         run: python -m pytest extensions/services/model-router/tests -q
+      - name: LiteLLM metadata-only telemetry contracts
+        run: python -m pytest extensions/services/litellm/tests -q
       - name: Test verified preview source and diff contracts
         run: |
           python -m pytest -q extensions/services/pixel-agent/tests/test_workspace_preview.py \
