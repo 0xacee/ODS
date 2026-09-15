@@ -215,6 +215,10 @@ extract_backup() {
     local compressed="$BACKUP_ROOT/$backup_id.tar.gz"
     local uncompressed="$BACKUP_ROOT/$backup_id"
 
+    if [[ -L "$uncompressed" ]]; then
+        log_error "Refusing a symlinked backup directory" >&2
+        return 1
+    fi
     if [[ -d "$uncompressed" ]]; then
         # Already extracted
         echo "$uncompressed"
@@ -222,16 +226,13 @@ extract_backup() {
     fi
 
     if [[ -f "$compressed" ]]; then
-        # Validate: reject archives with absolute paths or path traversal
-        if tar -tzf "$compressed" 2>/dev/null | grep -qE '(^/|^\.\.(/|$)|/\.\.(/|$))'; then
-            log_error "Backup archive contains unsafe paths (absolute or traversal segments) — refusing to extract" >&2
+        if ! command -v python3 >/dev/null 2>&1; then
+            log_error "python3 is required to validate and extract compressed backups" >&2
             return 1
         fi
         log_info "Extracting compressed backup..." >&2
-        mkdir -p "$uncompressed"
-        if ! tar xzf "$compressed" --no-same-owner -C "$BACKUP_ROOT"; then
+        if ! python3 "$SCRIPT_DIR/lib/backup-archive.py" "$compressed" "$BACKUP_ROOT" "$backup_id"; then
             log_error "Failed to extract backup archive" >&2
-            rm -rf "$uncompressed"
             return 1
         fi
         echo "$uncompressed"
@@ -575,6 +576,12 @@ do_restore() {
     local restore_data="$5"
     local restore_config="$6"
     local skip_verify="$7"
+
+    if [[ -z "$backup_id" || "$backup_id" == . || "$backup_id" == ..
+        || "$backup_id" == */* || "$backup_id" == *\\* ]]; then
+        log_error "Invalid backup ID"
+        return 1
+    fi
 
     log_info "Starting restore from backup: $backup_id"
 
