@@ -129,6 +129,12 @@ require_binaries() {
 }
 
 require_password() {
+  # hostapd counts bytes, not locale-dependent Unicode characters.
+  local LC_ALL=C
+  if [[ "$ODS_AP_PASSWORD" == *$'\n'* || "$ODS_AP_PASSWORD" == *$'\r'* ]]; then
+    err "ODS_AP_PASSWORD must not contain line breaks"
+    return 1
+  fi
   # Open APs are tolerated but called out — for first-boot AP we
   # *strongly* recommend setting a per-device password so the unit
   # doesn't accept random clients during the wizard window.
@@ -139,8 +145,17 @@ require_password() {
     err "ODS_AP_PASSWORD still has the example placeholder value"
     err "set a unique per-device AP password in ${CONF_DIR}/ap-mode.conf"
     return 1
-  elif [[ ${#ODS_AP_PASSWORD} -lt 8 ]]; then
-    err "ODS_AP_PASSWORD must be at least 8 characters (WPA2 minimum)"
+  elif [[ ${#ODS_AP_PASSWORD} -lt 8 || ${#ODS_AP_PASSWORD} -gt 63 ]]; then
+    err "ODS_AP_PASSWORD must be 8–63 bytes (hostapd passphrase limit)"
+    return 1
+  fi
+}
+
+require_ssid() {
+  local LC_ALL=C
+  if [[ ${#ODS_AP_SSID} -lt 1 || ${#ODS_AP_SSID} -gt 32 ||
+        "$ODS_AP_SSID" == *$'\n'* || "$ODS_AP_SSID" == *$'\r'* ]]; then
+    err "ODS_AP_SSID must be 1–32 bytes without line breaks"
     return 1
   fi
 }
@@ -290,6 +305,7 @@ cmd_up() {
   require_linux
   require_root
   require_binaries
+  require_ssid
   require_password
   interface_supports_ap
 
