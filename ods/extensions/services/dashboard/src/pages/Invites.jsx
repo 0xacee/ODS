@@ -377,6 +377,7 @@ function CreateOwnerModal({ ownerCardStatus, onClose, onCreated }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (submitting) return
     setFormError(null)
     if (ownerCardUnavailable) {
       setFormError(ownerCardStatus.reason || 'Enable ODS proxy before generating owner cards.')
@@ -409,7 +410,7 @@ function CreateOwnerModal({ ownerCardStatus, onClose, onCreated }) {
   }
 
   return (
-    <Modal title="Create owner card" label="Create owner card" onClose={onClose}>
+    <Modal title="Create owner card" label="Create owner card" onClose={onClose} busy={submitting}>
       <form onSubmit={handleSubmit}>
         <UsernameInput value={username} onChange={setUsername} autoFocus />
         <label className="block mb-4">
@@ -454,6 +455,7 @@ function CreateGuestModal({ onClose, onCreated }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (submitting) return
     setFormError(null)
     const trimmed = username.trim()
     if (!/^[A-Za-z0-9._-]+$/.test(trimmed)) {
@@ -483,7 +485,7 @@ function CreateGuestModal({ onClose, onCreated }) {
   }
 
   return (
-    <Modal title="Create guest invite" label="Create guest invite" onClose={onClose}>
+    <Modal title="Create guest invite" label="Create guest invite" onClose={onClose} busy={submitting}>
       <form onSubmit={handleSubmit}>
         <UsernameInput value={username} onChange={setUsername} autoFocus />
         <label className="block mb-3">
@@ -532,28 +534,31 @@ function CreateGuestModal({ onClose, onCreated }) {
   )
 }
 
-function Modal({ title, label, onClose, children }) {
+function Modal({ title, label, onClose, children, busy = false }) {
+  const requestClose = () => { if (!busy) onClose() }
   useEffect(() => {
-    const handleKey = (e) => { if (e.key === 'Escape') onClose() }
+    const handleKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
     document.addEventListener('keydown', handleKey)
     return () => document.removeEventListener('keydown', handleKey)
-  }, [onClose])
+  }, [onClose, busy])
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={requestClose}>
       <div
         className="bg-theme-card border border-theme-border rounded-xl p-6 w-full max-w-md"
         onClick={e => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
+        aria-busy={busy}
         aria-label={label}
       >
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-theme-text">{title}</h2>
-          <button type="button" onClick={onClose} className="text-theme-text-muted hover:text-theme-text" aria-label="Close">
+          <button type="button" disabled={busy} onClick={requestClose} className="text-theme-text-muted hover:text-theme-text" aria-label="Close">
             <X size={20} />
           </button>
         </div>
+        {busy && <p role="status" className="mb-3 text-sm text-theme-text-muted">Creating your access link… Keep this dialog open until the result arrives.</p>}
         {children}
       </div>
     </div>
@@ -592,7 +597,7 @@ function FormError({ message }) {
 function ModalActions({ onCancel, submitting, submitLabel, disabled }) {
   return (
     <div className="flex justify-end gap-2">
-      <button type="button" onClick={onCancel} className="px-4 py-2 text-theme-text-muted hover:text-theme-text">
+      <button type="button" disabled={submitting} onClick={onCancel} className="px-4 py-2 text-theme-text-muted hover:text-theme-text">
         Cancel
       </button>
       <button
