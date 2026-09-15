@@ -80,5 +80,58 @@ else
     fail "the exported archive no longer imports the same preset"
 fi
 
+# Observe permissions while tar writes, and inject failures before publication.
+mkdir -p "$TMP_DIR/bin"
+export PRESET_REAL_TAR="$(command -v tar)"
+export PRESET_REAL_CHMOD="$(command -v chmod)"
+export PRESET_REAL_MV="$(command -v mv)"
+export PRESET_OUTPUT="$TMP_DIR/out/transaction.tar.gz"
+cat > "$TMP_DIR/bin/tar" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+if [[ "$1" == czf ]]; then
+    [[ "$(cat "$PRESET_OUTPUT")" == original ]] || exit 71
+    [[ "$2" != "$PRESET_OUTPUT" ]] || exit 72
+    mode="$(stat -c '%a' "$2" 2>/dev/null || stat -f '%Lp' "$2")"
+    [[ "$mode" == 600 ]] || exit 73
+    if [[ "${PRESET_FAIL:-}" == tar ]]; then
+        printf 'partial private archive' > "$2"
+        exit 74
+    fi
+fi
+exec "$PRESET_REAL_TAR" "$@"
+EOF
+cat > "$TMP_DIR/bin/chmod" <<'EOF'
+#!/usr/bin/env bash
+[[ "${PRESET_FAIL:-}" != chmod ]] || exit 75
+exec "$PRESET_REAL_CHMOD" "$@"
+EOF
+cat > "$TMP_DIR/bin/mv" <<'EOF'
+#!/usr/bin/env bash
+[[ "${PRESET_FAIL:-}" != mv ]] || exit 76
+exec "$PRESET_REAL_MV" "$@"
+EOF
+chmod +x "$TMP_DIR/bin/"*
+for failure in tar chmod mv; do
+    printf original > "$PRESET_OUTPUT"
+    chmod 644 "$PRESET_OUTPUT"
+    if PATH="$TMP_DIR/bin:$PATH" PRESET_FAIL="$failure" run_cli "$SOURCE" preset export shared-setup "$PRESET_OUTPUT" > "$TMP_DIR/failure.out" 2>&1; then
+        fail "$failure failure reported success"
+    elif [[ "$(cat "$PRESET_OUTPUT")" == original && "$(file_mode "$PRESET_OUTPUT")" == 644 ]] \
+        && ! compgen -G "$PRESET_OUTPUT.*" >/dev/null; then
+        pass "$failure failure preserves original and removes private staging"
+    else
+        fail "$failure failure altered original or leaked staging"
+    fi
+done
+if PATH="$TMP_DIR/bin:$PATH" run_cli "$SOURCE" preset export shared-setup "$PRESET_OUTPUT" > "$TMP_DIR/private.out" 2>&1 \
+    && [[ "$(file_mode "$PRESET_OUTPUT")" == 600 ]] \
+    && tar tzf "$PRESET_OUTPUT" >/dev/null; then
+    pass "archive remains private during creation and publishes atomically"
+else
+    cat "$TMP_DIR/private.out"
+    fail "private archive creation/publication failed"
+fi
+
 printf 'Results: %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
