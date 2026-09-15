@@ -295,6 +295,9 @@ jobs:
       - name: CLI Install Directory Resolution Tests
         run: bash tests/test-cli-install-dir-resolution.sh
 
+      - name: Preset Export Archive Permissions
+        run: bash tests/test-preset-export-permissions.sh
+
       - name: Legacy Update Fallback Backup Round Trip
         run: python3 tests/test-cli-legacy-update-backup.py
 
