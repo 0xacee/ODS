@@ -22,6 +22,9 @@ class RelativeArchiveLinks(unittest.TestCase):
                 model = cache / name
                 model.mkdir(parents=True)
                 (model / "weights.bin").write_bytes(b"fixture weights")
+                # Also use a genuinely old access time, so the fixture remains
+                # valid with backlog changes that remove the bc dependency.
+                os.utime(model / "weights.bin", (1_000_000_000, 1_000_000_000))
                 cold = (work / relative).resolve()
                 self.assertTrue(cold.is_relative_to(root))
                 cold.mkdir()
