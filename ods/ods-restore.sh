@@ -396,24 +396,60 @@ restore_user_data() {
     log_step "Restoring user data..."
 
     local data_dirs=("${ODS_USER_DATA_PATHS[@]}")
-
+    local staging_dir="$ODS_DIR/.data.restore.$$"
+    local displaced_dir="$ODS_DIR/.data.previous.$$"
+    local -a restored_dirs=()
     local restored_any=false
+
+    # Restore into a sibling staging tree first. A later transfer must not leave
+    # earlier live directories changed, because data paths are one recovery unit.
+    rm -rf "$staging_dir" "$displaced_dir"
     for dir in "${data_dirs[@]}"; do
         if [[ -d "$backup_dir/$dir" ]]; then
             restored_any=true
-            mkdir -p "$ODS_DIR/$(dirname "$dir")"
-            # Note: Using -a without --delete to preserve any new files created after backup
-            # Use --force flag or manually delete target if you need exact restoration
-            rsync_with_progress "$backup_dir/$dir" "$ODS_DIR/$(dirname "$dir")/" "Restoring $dir"
-            log_success "Restored: $dir"
+            mkdir -p "$staging_dir/$(dirname "$dir")"
+            if ! rsync_with_progress "$backup_dir/$dir" "$staging_dir/$(dirname "$dir")/" "Staging $dir"; then
+                rm -rf "$staging_dir" "$displaced_dir"
+                log_error "Failed to stage $dir; live user data was left unchanged."
+                return 1
+            fi
         else
             log_warn "Skipped (not in backup): $dir"
         fi
     done
 
     if [[ "$restored_any" == "false" ]]; then
+        rm -rf "$staging_dir" "$displaced_dir"
         log_warn "No user data directories were found in this backup."
+        return 0
     fi
+
+    for dir in "${data_dirs[@]}"; do
+        [[ -d "$staging_dir/$dir" ]] || continue
+        mkdir -p "$displaced_dir/$(dirname "$dir")" "$ODS_DIR/$(dirname "$dir")"
+        if [[ -d "$ODS_DIR/$dir" ]] && ! mv "$ODS_DIR/$dir" "$displaced_dir/$dir"; then
+            log_error "Failed to prepare $dir; rolling back restored user data."
+            for rollback_dir in "${restored_dirs[@]}"; do
+                rm -rf "$ODS_DIR/$rollback_dir"
+                [[ -d "$displaced_dir/$rollback_dir" ]] && mv "$displaced_dir/$rollback_dir" "$ODS_DIR/$rollback_dir"
+            done
+            rm -rf "$staging_dir" "$displaced_dir"
+            return 1
+        fi
+        if ! mv "$staging_dir/$dir" "$ODS_DIR/$dir"; then
+            [[ -d "$displaced_dir/$dir" ]] && mv "$displaced_dir/$dir" "$ODS_DIR/$dir"
+            for rollback_dir in "${restored_dirs[@]}"; do
+                rm -rf "$ODS_DIR/$rollback_dir"
+                [[ -d "$displaced_dir/$rollback_dir" ]] && mv "$displaced_dir/$rollback_dir" "$ODS_DIR/$rollback_dir"
+            done
+            rm -rf "$staging_dir" "$displaced_dir"
+            log_error "Failed to activate $dir; rolling back restored user data."
+            return 1
+        fi
+        restored_dirs+=("$dir")
+        log_success "Restored: $dir"
+    done
+    rm -rf "$staging_dir" "$displaced_dir"
 }
 
 validate_restore_config_source() {
