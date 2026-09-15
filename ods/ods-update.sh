@@ -678,8 +678,15 @@ cmd_update() {
     # ── Step 2: pull latest changes ───────────────────────────────────────────
     log_info "Pulling latest changes..."
     cd "$INSTALL_DIR"
+    local update_branch
+    update_branch=$(git branch --show-current 2>/dev/null || true)
+    if [[ -z "$update_branch" ]]; then
+        _update_rollback "Cannot update a detached checkout safely. Check out a branch first." \
+            "$snap_dir" "$compose_flags"
+        return 1
+    fi
     git fetch origin
-    if ! git pull origin main && ! git pull origin master; then
+    if ! git pull --ff-only origin "$update_branch"; then
         _update_rollback "Git pull failed." "$snap_dir" "$compose_flags"
         return 1
     fi
