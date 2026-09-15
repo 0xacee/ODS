@@ -75,7 +75,7 @@ If either is missing, the captive portal redirect lands the phone on a dead port
 
 ```bash
 # 1. Install hostapd, dnsmasq, iptables (NetworkManager is already required for PR-8).
-sudo apt install hostapd dnsmasq iptables
+sudo apt install hostapd dnsmasq iptables network-manager python3
 
 # 2. Drop the operator config in place. Edit SSID + password per device.
 sudo install -d -m 0755 /etc/ods

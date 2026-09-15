@@ -116,14 +116,14 @@ require_linux() {
 
 require_binaries() {
   local missing=()
-  for bin in hostapd dnsmasq iptables ip nmcli; do
+  for bin in hostapd dnsmasq iptables ip nmcli python3; do
     if ! command -v "$bin" >/dev/null 2>&1; then
       missing+=("$bin")
     fi
   done
   if (( ${#missing[@]} > 0 )); then
     err "missing required binaries: ${missing[*]}"
-    err "install with: apt install hostapd dnsmasq iptables network-manager"
+    err "install with: apt install hostapd dnsmasq iptables network-manager python3"
     return 1
   fi
 }
@@ -288,16 +288,31 @@ bring_up_interface() {
 
 write_state() {
   local status="$1"
-  cat > "${STATE_FILE}" <<HEREDOC
-{
-  "status": "${status}",
-  "ssid": "${ODS_AP_SSID}",
-  "interface": "${ODS_AP_INTERFACE}",
-  "gateway_ip": "${ODS_AP_GATEWAY_IP}",
-  "since": "$(date -Iseconds)"
-}
-HEREDOC
-  chmod 0644 "${STATE_FILE}"
+  # SSIDs are literal text; shell interpolation is not JSON serialization.
+  python3 - "$status" "$ODS_AP_SSID" "$ODS_AP_INTERFACE" "$ODS_AP_GATEWAY_IP" \
+    "$(date -Iseconds)" "${STATE_FILE}" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+keys = ("status", "ssid", "interface", "gateway_ip", "since")
+target = sys.argv[6]
+fd, temporary = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=os.path.dirname(target))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(dict(zip(keys, sys.argv[1:6])), stream, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fchmod(stream.fileno(), 0o644)
+        os.fsync(stream.fileno())
+    os.replace(temporary, target)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
 }
 
 cmd_up() {
@@ -330,7 +345,11 @@ cmd_up() {
       || { err "dnsmasq failed to start — check ${RUN_DIR}/dnsmasq.log"; cmd_down; return 1; }
   fi
 
-  write_state "active"
+  if ! write_state "active"; then
+    err "could not publish AP state; tearing down the incomplete startup"
+    cmd_down
+    return 1
+  fi
   log "AP up: SSID=${ODS_AP_SSID} gateway=${ODS_AP_GATEWAY_IP}"
   log "  any hostname resolves to ${ODS_AP_GATEWAY_IP} (captive portal)"
   log "  HTTP/HTTPS on ${ODS_AP_INTERFACE} redirected to the gateway"
