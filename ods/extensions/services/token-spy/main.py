@@ -777,7 +777,9 @@ async def _handle_streaming(client, raw_body, headers, model, sys_analysis,
         finally:
             # Guarantee billing metrics are logged even on CancelledError
             # (which is a BaseException and bypasses 'except Exception')
-            if not logged and usage["input_tokens"] > 0:
+            if not logged and any((usage[key] or 0) > 0 for key in (
+                "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+            )):
                 _log_entry(
                     model, sys_analysis, msg_analysis, tools,
                     raw_body, usage, start_time,
@@ -1004,7 +1006,9 @@ async def _handle_openai_streaming(client, raw_body, headers, model, sys_analysi
             log.error(f"Proxy stream error: {e}")
         finally:
             # Guarantee billing metrics are logged even on CancelledError
-            if not logged and usage["input_tokens"] > 0:
+            if not logged and any((usage[key] or 0) > 0 for key in (
+                "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+            )):
                 _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_time, provider_name="openai", filter_result=filter_result)
 
     return StreamingResponse(
