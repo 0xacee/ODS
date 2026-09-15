@@ -345,6 +345,9 @@ jobs:
       - name: Update Rollback Contract
         run: bash tests/test-update-rollback-contract.sh
 
+      - name: Update Backup Retention By Creation Time
+        run: bash tests/test-update-backup-retention-labels.sh
+
       - name: Backup Data Coverage Contract
         run: |
           command -v rsync
