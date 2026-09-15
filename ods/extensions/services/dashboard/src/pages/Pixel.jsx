@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import PixelConversationRecovery from '../components/PixelConversationRecovery'
-import { readConversations, saveConversation, SELECT_EVENT, DELETE_EVENT, deleteConversation, isConversationDeleted } from '../lib/pixelConversations'
+import { readConversations, saveConversation, createConversationWriter, SELECT_EVENT, DELETE_EVENT, deleteConversation, isConversationDeleted } from '../lib/pixelConversations'
 import ReactMarkdown from 'react-markdown'
 import {usePixelAutoScroll} from '../lib/usePixelAutoScroll'
 import remarkGfm from 'remark-gfm'
@@ -483,6 +483,7 @@ function loadStoredChat(selected) {
       // A damaged preview must not discard an otherwise valid conversation.
     }
     return {
+      persistenceSnapshot: stored,
       chatId: stored.chatId, messages, preview,
       contextStart: Number.isInteger(stored.contextStart) && stored.contextStart >= 0 && stored.contextStart <= messages.length ? stored.contextStart : 0,
       workspaceOpen: stored.workspaceOpen !== false && (stored.workspaceOpen === true || Boolean(preview)),
@@ -523,6 +524,8 @@ export default function Pixel({ systemStatus = null }) {
   const profile = useLocalProfile()
   const { displayName } = usePortalIdentity()
   const [initialChat] = useState(loadStoredChat)
+  const conversationWriter = useRef(null)
+  if (!conversationWriter.current) conversationWriter.current = createConversationWriter(initialChat?.persistenceSnapshot)
   const pendingImport = useRef(null)
   const sendKey = usePixelSendKey()
 
@@ -755,7 +758,7 @@ export default function Pixel({ systemStatus = null }) {
       })
       // Report storage limits without silently trimming previous turns.
       if (storedMessages.length > MAX_STORED_MESSAGES || storedMessages.reduce((total, message) => total + new TextEncoder().encode(message.content).byteLength, 0) > MAX_STORED_MESSAGE_BYTES) throw new Error('stored Pixel chat is too large')
-      saveConversation({
+      conversationWriter.current({
         schema: 1,
         chatId: chatIdRef.current,
         requestId: requestIdRef.current,
@@ -768,10 +771,11 @@ export default function Pixel({ systemStatus = null }) {
         workspaceOpen,
       })
       setPersistenceError('')
-    } catch {
+    } catch (error) {
       // Conversation persistence is a convenience; chat remains usable when
       // storage is unavailable, full, or blocked by the browser.
-      setPersistenceError('Your browser could not save this conversation. Keep this page open to avoid losing it.')
+      setPersistenceError(error?.code === 'conversation-changed' ? error.message
+        : 'Your browser could not save this conversation. Keep this page open to avoid losing it.')
     }
   }, [messages, preview, workspaceOpen, sending, interrupted, input])
 
@@ -819,7 +823,7 @@ export default function Pixel({ systemStatus = null }) {
         // Commit the attempt identity before the POST can start tool work.
         // A page close before React's persistence effect must still recover it.
         try {
-          saveConversation({
+          conversationWriter.current({
             schema: 1, chatId, requestId, inFlight: true, interrupted: false,
             messages: [...visibleConversation, { role: 'assistant', content: '' }], preview,
             draft: '', contextStart: contextStartRef.current, workspaceOpen,
@@ -1169,6 +1173,7 @@ export default function Pixel({ systemStatus = null }) {
       }
       const chat = loadStoredChat(readConversations().find(item => item.chatId === event.detail))
       if (!chat || chat.chatId === chatIdRef.current) return
+      conversationWriter.current = createConversationWriter(chat.persistenceSnapshot)
       chatIdRef.current = chat.chatId
       requestIdRef.current = chat.requestId
       contextStartRef.current = chat.contextStart
