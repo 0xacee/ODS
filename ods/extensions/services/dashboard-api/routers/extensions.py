@@ -1511,6 +1511,11 @@ def _install_from_library(service_id: str) -> None:
     dest = USER_EXTENSIONS_DIR / service_id
 
     # Re-check under lock to prevent double-install race.
+    if dest.is_symlink():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Refusing to install over symlinked extension directory: {service_id}",
+        )
     if dest.exists():
         has_compose = (dest / "compose.yaml").exists()
         has_disabled = (dest / "compose.yaml.disabled").exists()
@@ -1630,6 +1635,11 @@ def install_extension(service_id: str, api_key: str = Depends(verify_api_key)):
     dest = USER_EXTENSIONS_DIR / service_id
 
     # Early check (non-authoritative, rechecked under lock in _install_from_library)
+    if dest.is_symlink():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Refusing to install over symlinked extension directory: {service_id}",
+        )
     if dest.exists():
         has_compose = (dest / "compose.yaml").exists()
         has_disabled = (dest / "compose.yaml.disabled").exists()
@@ -2371,7 +2381,14 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
     # Call agent to stop BEFORE renaming (prevents zombie containers)
     agent_ok = _call_agent("stop", service_id)
     if not agent_ok:
-        logger.warning("Could not stop %s via agent — container may still be running", service_id)
+        # Do not rename an extension after a failed stop: uninstall only
+        # accepts disabled definitions, so continuing would make it possible
+        # to delete the definition while its container still serves traffic.
+        logger.error("Could not stop %s via agent; refusing to disable", service_id)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Host agent failed to stop extension: {service_id}; extension was not disabled",
+        )
 
     with _extensions_lock():
         # lstat check inside lock (TOCTOU prevention)

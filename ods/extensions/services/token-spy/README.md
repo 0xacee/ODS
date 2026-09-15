@@ -61,6 +61,10 @@ Use `UPSTREAM_API_KEY` for external Anthropic/OpenAI/Moonshot providers. For loc
 
 See [TOKEN-SPY-GUIDE.md](TOKEN-SPY-GUIDE.md) for all available settings.
 
+For SQLite, set DB_PATH to override the default data/usage.db beside the
+service source. Relative paths (including a filename such as usage.db) are
+resolved from the process working directory; missing parent directories are created.
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
