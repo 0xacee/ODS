@@ -43,20 +43,21 @@ fmt_bytes() {
 # Available bytes on filesystem containing a path
 free_bytes_for_path() {
     local path="$1"
-    df -Pk "$path" 2>/dev/null | awk 'NR==2 { print $4 * 1024 }'
+    # Bash arithmetic requires decimal integers, including above 2 GiB.
+    df -Pk "$path" 2>/dev/null | awk 'NR==2 { printf "%.0f\n", $4 * 1024 }'
 }
 
 # Estimate the backup size on disk (uncompressed)
 estimate_restore_bytes_dir() {
     local backup_dir="$1"
-    du -sk "$backup_dir" 2>/dev/null | awk '{print $1 * 1024}'
+    du -sk "$backup_dir" 2>/dev/null | awk '{printf "%.0f\n", $1 * 1024}'
 }
 
 # Estimate restore size for a tar.gz (uncompressed file sizes)
 estimate_restore_bytes_tar() {
     local tar_path="$1"
     # tar -tv lists size in column 3
-    tar -tvzf "$tar_path" 2>/dev/null | awk '{sum += $3} END {print sum+0}'
+    tar -tvzf "$tar_path" 2>/dev/null | awk '{sum += $3} END {printf "%.0f\n", sum+0}'
 }
 
 ensure_restore_space() {
@@ -78,7 +79,7 @@ ensure_restore_space() {
     local free
     free=$(free_bytes_for_path "$ODS_DIR")
 
-    if [[ -n "$free" && "$free" -gt 0 && "$free" -lt "$need" ]]; then
+    if [[ -n "$free" && "$free" -lt "$need" ]]; then
         log_error "Not enough disk space to restore into: $ODS_DIR"
         log_error "Need ~$(fmt_bytes "$need"), have ~$(fmt_bytes "$free")."
         log_error "Free up space or restore to a different location (set ODS_DIR)."
@@ -188,7 +189,7 @@ select_backup() {
     fi
 
     echo "Select a backup to restore (enter number):" >&2
-    read -r selection
+    read -r selection || selection=""
 
     local backups=()
     while IFS= read -r -d '' backup; do
@@ -197,7 +198,8 @@ select_backup() {
 
     local index=$((selection - 1))
     if [[ $index -lt 0 || $index -ge ${#backups[@]} ]]; then
-        log_error "Invalid selection: $selection"
+        # stdout is the captured backup ID; the error must reach the user.
+        log_error "Invalid selection: $selection" >&2
         return 1
     fi
 
@@ -536,7 +538,7 @@ do_restore() {
         log_warn "This will copy backup data into: $ODS_DIR"
         log_warn "Existing files may be overwritten."
         echo ""
-        read -rp "Type the backup ID ('$backup_id') to continue, or press Enter to cancel: " confirm
+        read -rp "Type the backup ID ('$backup_id') to continue, or press Enter to cancel: " confirm || confirm=""
         if [[ "$confirm" != "$backup_id" ]]; then
             log_info "Restore cancelled"
             return 0
@@ -650,7 +652,7 @@ main() {
     if [[ "$has_compose" == "false" && ! -d "$ODS_DIR/data" ]]; then
         log_warn "This doesn't appear to be a ODS directory"
         log_warn "Expected: docker-compose.yml or data/ directory"
-        read -rp "Continue anyway? [y/N] " confirm
+        read -rp "Continue anyway? [y/N] " confirm || confirm=""
         if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
             exit 1
         fi
