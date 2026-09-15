@@ -26,6 +26,7 @@ from pixel_runtime_state import begin_pixel_stream, end_pixel_stream, try_begin_
 from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, owner_namespace
 from security import verify_api_key
 from config import read_live_env_value
+from pixel_chat_identity import messages_with_identity
 
 
 logger = logging.getLogger(__name__)
@@ -603,6 +604,7 @@ async def _retained_chat_stream(request, body, owner):
         issue = await _model_readiness_issue()
         if issue is not None:
             raise HTTPException(status_code=409, detail=issue[1])
+        messages = await messages_with_identity(body.messages)
     try:
         if identity[:2] in _result_stops:
             raise ResultConflict("Stop is still being confirmed")
@@ -613,7 +615,7 @@ async def _retained_chat_stream(request, body, owner):
         raise HTTPException(status_code=507, detail=str(exc)) from None
     if created:
         begin_pixel_stream()
-        task = asyncio.create_task(_produce_retained_result(store, identity, body, config))
+        task = asyncio.create_task(_produce_retained_result(store, identity, body, config, messages))
         _result_tasks[identity] = task
         def release(finished):
             _result_tasks.pop(identity, None)
@@ -644,7 +646,7 @@ async def _retained_chat_stream(request, body, owner):
     })
 
 
-async def _produce_retained_result(store, identity, body, config):
+async def _produce_retained_result(store, identity, body, config, messages):
     edge_url, key = config
     done_seen = False
     cancelled = False
@@ -656,7 +658,7 @@ async def _produce_retained_result(store, identity, body, config):
             async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
                 async with client.stream("POST", f"{edge_url}/v1/chat/completions",
                         json={"model": _MODEL, "stream": True, "user": body.chat_id,
-                              "messages": [m.model_dump() for m in body.messages]},
+                              "messages": messages},
                         headers=_edge_headers(key, accept="text/event-stream")) as upstream:
                     if upstream.status_code != 200 or not upstream.headers.get("content-type", "").lower().startswith("text/event-stream"):
                         raise ValueError("Invalid upstream stream")
@@ -755,7 +757,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         "model": _MODEL,
         "stream": True,
         "user": body.chat_id,
-        "messages": [message.model_dump() for message in body.messages],
+        "messages": await messages_with_identity(body.messages),
     }
 
     # Pixel Edge is capped at 33 minutes; retain one bounded minute of outer

@@ -27,6 +27,7 @@ sys.path.insert(0, DASHBOARD_API_DIR)
 
 from routers import pixel  # noqa: E402
 import pixel_runtime_state  # noqa: E402
+import pixel_chat_identity  # noqa: E402
 from pixel_runtime_state import pixel_stream_active  # noqa: E402
 
 
@@ -121,6 +122,9 @@ async def stream_body(response):
 
 @pytest.fixture(autouse=True)
 def pixel_env(monkeypatch):
+    async def saved_identity(*_args, **_kwargs):
+        return {"schemaVersion": 1, "revision": 1, "displayName": "Portal"}
+    monkeypatch.setattr(pixel_chat_identity, "async_request_json", saved_identity)
     monkeypatch.setenv("PIXEL_OPENWEBUI_KEY", EDGE_KEY)
     monkeypatch.setenv("PIXEL_EDGE_URL", "http://pixel-edge:9595")
 
@@ -539,11 +543,13 @@ async def test_chat_forwards_exact_body_and_narrow_edge_key_only():
     assert streamed.count(b"data: [DONE]") == 1
     assert capture["method"] == "POST"
     assert capture["url"] == "http://pixel-edge:9595/v1/chat/completions"
-    assert capture["json"] == {
+    assert capture["json"]["messages"][0]["role"] == "system"
+    assert '"Portal"' in capture["json"]["messages"][0]["content"]
+    assert capture["json"]["messages"][1:] == [{"role": "user", "content": "hello"}]
+    assert {key: value for key, value in capture["json"].items() if key != "messages"} == {
         "model": "pixel/default",
         "stream": True,
         "user": "conversation_1",
-        "messages": [{"role": "user", "content": "hello"}],
     }
     assert capture["headers"]["Authorization"] == f"Bearer {EDGE_KEY}"
     assert "dashboard-test-key" not in json.dumps(capture)

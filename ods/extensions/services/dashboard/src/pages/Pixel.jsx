@@ -1256,7 +1256,7 @@ export default function Pixel({ systemStatus = null }) {
           </div></details>
           {activeModel && (
             <div
-              className="pixel-chat-model hidden min-w-0 items-center rounded-md border border-theme-border px-2 py-1.5 font-mono text-[10px] text-theme-text-muted sm:flex"
+              className="pixel-chat-model hidden min-w-0 items-center px-2 py-1.5 font-mono text-[10px] text-theme-text-muted sm:flex"
               title={activeModel}
             >
               <span className="truncate text-theme-text-secondary">{activeModel}</span>
@@ -1367,9 +1367,9 @@ export default function Pixel({ systemStatus = null }) {
         {messages.map((message, index) => (
           <div key={index} data-pixel-message-index={index} tabIndex={-1} data-pixel-response={message.role === 'assistant' ? '' : undefined} className={`mx-auto flex min-w-0 w-full max-w-5xl ${message.role === 'user' ? 'justify-end gap-2' : 'justify-start'}`}>
             {message.role === 'assistant' && <PixelMascot state={pixelReplyPose(message, sending && index === messages.length - 1)} settled={message.status !== 'streaming'} className="pixel-reply-character" />}
-            <div className={`min-w-0 max-w-[min(85%,48rem)] rounded-2xl px-4 py-3 text-sm leading-6 [overflow-wrap:anywhere] ${
+            <div className={`min-w-0 max-w-[min(85%,48rem)] text-sm leading-6 [overflow-wrap:anywhere] ${message.role === 'user' ? 'rounded-[14px] px-3.5 py-2' : 'rounded-2xl px-4 py-3'} ${
               message.role === 'user'
-                ? 'border border-theme-border bg-theme-card text-theme-text'
+                ? 'bg-theme-card text-theme-text'
                 : message.status === 'error'
                   ? 'border border-red-500/25 bg-red-500/10 text-red-200'
                   : message.status === 'stopped'
