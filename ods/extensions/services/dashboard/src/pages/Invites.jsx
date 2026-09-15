@@ -58,9 +58,9 @@ function isOwnerToken(token) {
   return token.token_type === 'owner'
 }
 
-function tokenStatus(token) {
+function tokenStatus(token, now = Date.now()) {
   if (token.revoked_at) return { label: 'revoked', tone: 'bg-theme-border text-theme-text-muted' }
-  if (!isOwnerToken(token) && token.expires_at && new Date(token.expires_at).getTime() < Date.now()) {
+  if (!isOwnerToken(token) && token.expires_at && new Date(token.expires_at).getTime() <= now) {
     return { label: 'expired', tone: 'bg-theme-border text-theme-text-muted' }
   }
   if (!isOwnerToken(token) && token.redemption_count > 0 && !token.reusable) {
@@ -72,13 +72,14 @@ function tokenStatus(token) {
   return { label: 'active', tone: 'bg-green-500/20 text-green-400' }
 }
 
-function tokenCanRevoke(token) {
-  const status = tokenStatus(token).label
+function tokenCanRevoke(token, now = Date.now()) {
+  const status = tokenStatus(token, now).label
   return status === 'active' || status.startsWith('used')
 }
 
 export default function Invites() {
   const [tokens, setTokens] = useState([])
+  const [now, setNow] = useState(Date.now)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [showOwnerCreate, setShowOwnerCreate] = useState(false)
@@ -86,6 +87,26 @@ export default function Invites() {
   const [generated, setGenerated] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
   const [ownerCardStatus, setOwnerCardStatus] = useState(null)
+
+  useEffect(() => {
+    const tick = () => setNow(Date.now())
+    const visible = () => { if (document.visibilityState === 'visible') tick() }
+    // Refresh relative labels regularly and expiry verdicts at their boundary.
+    // This updates existing metadata without polling the access-link API.
+    const current = Date.now()
+    let delay = 30_000
+    for (const token of tokens) {
+      if (isOwnerToken(token) || !token.expires_at) continue
+      const remaining = new Date(token.expires_at).getTime() - current
+      if (remaining > 0) delay = Math.min(delay, remaining)
+    }
+    const timer = setTimeout(tick, delay)
+    document.addEventListener('visibilitychange', visible)
+    return () => {
+      clearTimeout(timer)
+      document.removeEventListener('visibilitychange', visible)
+    }
+  }, [tokens, now])
 
   const refresh = useCallback(async () => {
     setRefreshing(true)
@@ -177,8 +198,8 @@ export default function Invites() {
       )}
 
       <dl className="owner-access-summary" aria-label="Access summary">
-        <div><dt>Owner cards</dt><dd>{ownerTokens.filter(tokenCanRevoke).length}<span> active</span></dd></div>
-        <div><dt>Guest links</dt><dd>{guestTokens.filter(t => tokenStatus(t).label === 'active' || (t.reusable && tokenCanRevoke(t))).length}<span> available</span></dd></div>
+        <div><dt>Owner cards</dt><dd>{ownerTokens.filter(token => tokenCanRevoke(token, now)).length}<span> active</span></dd></div>
+        <div><dt>Guest links</dt><dd>{guestTokens.filter(t => tokenStatus(t, now).label === 'active' || (t.reusable && tokenCanRevoke(t, now))).length}<span> available</span></dd></div>
       </dl>
       <section className="owner-access-section" aria-labelledby="owner-cards-heading">
         <div className="owner-access-section-heading">
@@ -213,7 +234,7 @@ export default function Invites() {
         ) : (
           <div className="mt-5 space-y-3">
             {ownerTokens.map(t => (
-              <TokenRow key={t.token_hash_prefix} token={t} onRevoke={() => handleRevoke(t.token_hash_prefix)} />
+              <TokenRow key={t.token_hash_prefix} token={t} now={now} onRevoke={() => handleRevoke(t.token_hash_prefix)} />
             ))}
           </div>
         )}
@@ -244,7 +265,7 @@ export default function Invites() {
         ) : (
           <div className="mt-5 space-y-3">
             {guestTokens.map(t => (
-              <TokenRow key={t.token_hash_prefix} token={t} onRevoke={() => handleRevoke(t.token_hash_prefix)} />
+              <TokenRow key={t.token_hash_prefix} token={t} now={now} onRevoke={() => handleRevoke(t.token_hash_prefix)} />
             ))}
           </div>
         )}
@@ -323,11 +344,11 @@ function EmptyGuestState() {
   )
 }
 
-function TokenRow({ token, onRevoke }) {
-  const status = tokenStatus(token)
+function TokenRow({ token, onRevoke, now }) {
+  const status = tokenStatus(token, now)
   const expires = isOwnerToken(token) ? null : formatRelative(token.expires_at)
   const lastRedeemed = formatRelative(token.last_redeemed_at)
-  const canRevoke = tokenCanRevoke(token)
+  const canRevoke = tokenCanRevoke(token, now)
 
   return (
     <div className="owner-access-token flex items-center justify-between gap-4">
