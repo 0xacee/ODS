@@ -162,6 +162,19 @@ function modelActivationModeError(effectiveMode, configuredMode, llmBackend) {
   return null
 }
 
+function waitForActivationPoll(delay, signal) {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise(resolve => {
+    const finish = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, delay)
+    signal.addEventListener('abort', finish, { once: true })
+  })
+}
+
 export function useModels() {
   const [models, setModels] = useState(USE_MOCK_DATA ? getMockModels() : [])
   const [gpu, setGpu] = useState(USE_MOCK_DATA ? MOCK_GPU : null)
@@ -186,6 +199,13 @@ export function useModels() {
   const latestSettledModelsRequestRef = useRef(0)
   const pollInFlightRef = useRef(false)
   const loadActiveRef = useRef(false)
+  const activationControllerRef = useRef(null)
+
+  useEffect(() => () => {
+    // Navigation ends this page's observation. The host still owns any
+    // accepted activation, and a new page reads its lifecycle on mount.
+    activationControllerRef.current?.abort()
+  }, [])
 
   const updatePendingActions = useCallback((update) => {
     const nextActions = typeof update === 'function'
@@ -224,7 +244,8 @@ export function useModels() {
     })
   }, [updatePendingActions])
 
-  const fetchModels = useCallback(async () => {
+  const fetchModels = useCallback(async ({ signal } = {}) => {
+    if (signal?.aborted) return null
     // If using mock data, don't attempt API call
     if (USE_MOCK_DATA) {
       setLoading(false)
@@ -233,11 +254,14 @@ export function useModels() {
 
     const requestId = ++modelsRequestRef.current
     const controller = new AbortController()
+    const cancel = () => controller.abort()
+    signal?.addEventListener('abort', cancel, { once: true })
     const timeout = setTimeout(() => controller.abort(), MODELS_FETCH_TIMEOUT_MS)
     try {
       const response = await fetch('/api/models', { signal: controller.signal })
       if (!response.ok) throw new Error('Failed to fetch models')
       const data = await response.json()
+      if (signal?.aborted) return null
 
       // A slower, older request must not overwrite a newer snapshot.
       if (requestId < latestSettledModelsRequestRef.current) return null
@@ -261,6 +285,7 @@ export function useModels() {
       reconcilePendingActions(data.models)
       return data
     } catch (err) {
+      if (signal?.aborted) return null
       if (requestId >= latestSettledModelsRequestRef.current) {
         latestSettledModelsRequestRef.current = requestId
         setFetchError(err.message)
@@ -268,7 +293,8 @@ export function useModels() {
       // No silent fallback - let error propagate to UI
     } finally {
       clearTimeout(timeout)
-      setLoading(false)
+      signal?.removeEventListener('abort', cancel)
+      if (!signal?.aborted) setLoading(false)
     }
   }, [reconcilePendingActions])
 
@@ -363,6 +389,7 @@ export function useModels() {
     // status remains authoritative and the POST runs alongside polling.
     const controller = new AbortController()
     const startedAt = Date.now()
+    activationControllerRef.current = controller
     let activationError = null
     let targetLoaded = false
     const requestedContextLength = Number(options.contextLength || 0) || null
@@ -417,12 +444,14 @@ export function useModels() {
       .catch(() => {})
 
     try {
-      while (Date.now() - startedAt < MODEL_ACTIVATION_TIMEOUT_MS) {
+      while (!controller.signal.aborted && Date.now() - startedAt < MODEL_ACTIVATION_TIMEOUT_MS) {
         const remainingMs = MODEL_ACTIVATION_TIMEOUT_MS - (Date.now() - startedAt)
-        await new Promise(resolve => setTimeout(resolve, Math.min(MODEL_ACTIVATION_POLL_MS, remainingMs)))
+        await waitForActivationPoll(Math.min(MODEL_ACTIVATION_POLL_MS, remainingMs), controller.signal)
+        if (controller.signal.aborted) return
 
         if (activationError) break
-        const data = await fetchModels()
+        const data = await fetchModels({ signal: controller.signal })
+        if (controller.signal.aborted) return
         if (activationMatches(data)) {
           targetLoaded = true
           break
@@ -431,7 +460,9 @@ export function useModels() {
 
       // Take one final authoritative snapshot at the deadline or after a POST
       // failure. This cannot turn an unverified 409 into same-target success.
-      const finalData = await fetchModels()
+      if (controller.signal.aborted) return
+      const finalData = await fetchModels({ signal: controller.signal })
+      if (controller.signal.aborted) return
       const confirmed = !activationError && activationMatches(finalData)
 
       if (!confirmed) {
@@ -440,9 +471,10 @@ export function useModels() {
           : `Timed out after 10 minutes waiting for ${modelId} to activate. The server may still be finishing; refresh before retrying.`))
       }
     } finally {
+      if (!controller.signal.aborted) finishAction(action.token)
       controller.abort()
+      activationControllerRef.current = null
       void activationRequest
-      finishAction(action.token)
       loadActiveRef.current = false
     }
   }
