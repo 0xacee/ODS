@@ -717,7 +717,11 @@ cmd_update() {
         fi
         if ! docker compose ${compose_flags} up -d; then
             log_warn "docker compose v2 up failed, trying v1..."
-            docker-compose ${compose_flags} up -d
+            if ! docker-compose ${compose_flags} up -d; then
+                _update_rollback "Both Docker Compose v2 and v1 failed to restart services." \
+                    "$snap_dir" "$compose_flags"
+                return 1
+            fi
         fi
     elif [[ -f "${INSTALL_DIR}/docker-compose.yml" ]]; then
         if ! docker compose down --remove-orphans; then
@@ -726,7 +730,11 @@ cmd_update() {
         fi
         if ! docker compose up -d; then
             log_warn "docker compose v2 up failed, trying v1..."
-            docker-compose up -d
+            if ! docker-compose up -d; then
+                _update_rollback "Both Docker Compose v2 and v1 failed to restart services." \
+                    "$snap_dir" "$compose_flags"
+                return 1
+            fi
         fi
     else
         log_warn "No compose files found. Skipping container restart."
