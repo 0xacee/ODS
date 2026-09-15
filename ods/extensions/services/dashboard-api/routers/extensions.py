@@ -2144,12 +2144,14 @@ def _get_missing_deps_transitive(
     _visiting.add(service_id)
 
     for dep in _read_direct_deps(service_id):
-        if _is_dep_satisfied(dep):
-            continue
         if dep in _order:
             continue  # already queued from another branch
+        # An enabled service can still have a disabled dependency: disable
+        # warns about dependents but permits the operation. Walk its subtree
+        # before deciding whether this service itself needs activation.
         _get_missing_deps_transitive(dep, _visiting=_visiting, _order=_order)
-        _order.append(dep)
+        if not _is_dep_satisfied(dep):
+            _order.append(dep)
 
     _visiting.discard(service_id)
     return _order
@@ -2231,8 +2233,10 @@ def enable_extension(
     disabled_compose = ext_dir / "compose.yaml.disabled"
     enabled_compose = ext_dir / "compose.yaml"
 
-    # Stopped case: compose.yaml exists but container is not running — just start it
-    if enabled_compose.exists():
+    already_enabled = enabled_compose.exists()
+    # A stopped target still needs the same dependency preflight as a disabled
+    # target. Preserve its compose scan without bypassing that shared plan.
+    if already_enabled:
         with _extensions_lock():
             st = os.lstat(enabled_compose)
             if stat.S_ISLNK(st.st_mode):
@@ -2249,29 +2253,7 @@ def enable_extension(
                 skip_gpu_passthrough_check=is_builtin,
                 skip_root_user_check=is_builtin,
             )
-        # Dependencies were satisfied at install time; compose content is re-scanned above
-        _write_initial_progress(service_id)
-        # Invalidate .compose-flags cache so ods-cli picks up this extension
-        # before the host agent starts the container.
-        _call_agent_invalidate_compose_cache()
-        agent_ok = _call_agent("start", service_id)
-        if not agent_ok:
-            _write_error_progress(
-                service_id,
-                "Host agent failed to start extension. Run 'ods restart' to recover.",
-            )
-        logger.info("Started stopped extension: %s", service_id)
-        return {
-            "id": service_id,
-            "action": "enabled",
-            "restart_required": not agent_ok,
-            "message": (
-                "Extension started." if agent_ok
-                else "Extension is enabled. Run 'ods restart' to start."
-            ),
-        }
-
-    if not disabled_compose.exists():
+    elif not disabled_compose.exists():
         raise HTTPException(
             status_code=404, detail=f"Extension has no compose file: {service_id}",
         )
@@ -2301,7 +2283,7 @@ def enable_extension(
 
         # Enable the target service
         result = _activate_service(service_id)
-        if result.get("action") == "enabled":
+        if result.get("action") in ("enabled", "already_enabled"):
             enabled_services.append(service_id)
 
         # Invalidate .compose-flags cache so ods-cli picks up the new enabled set
@@ -2312,6 +2294,17 @@ def enable_extension(
     agent_ok = True
     warnings: list[str] = []
     for svc_id in enabled_services:
+        if already_enabled and svc_id == service_id:
+            # Keep the existing stopped-target start contract and progress
+            # receipt, after any newly confirmed prerequisites have started.
+            _write_initial_progress(svc_id)
+            if not _call_agent("start", svc_id):
+                agent_ok = False
+                _write_error_progress(
+                    svc_id,
+                    "Host agent failed to start extension. Run 'ods restart' to recover.",
+                )
+            continue
         # pre_start failure is terminal for this service — do not start it
         if not _call_agent_hook(svc_id, "pre_start"):
             agent_ok = False
