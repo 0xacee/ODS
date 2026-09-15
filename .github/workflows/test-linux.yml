@@ -37,6 +37,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install isolated inference test dependencies
         run: python -m pip install -r extensions/services/pixel-inference/requirements.txt 'pytest>=8,<9'
+      - name: GPU assignment capacity contracts
+        run: python -m pytest tests/test-assign-gpus.py tests/test_gpu_spare_capacity.py -q
       - name: Sharing credential and owner control tests
         run: python -m pytest tests/pixel_inference -q
       - name: Inference perimeter and cancellation tests
