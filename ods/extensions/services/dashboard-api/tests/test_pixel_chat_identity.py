@@ -35,6 +35,9 @@ def test_new_turns_use_live_saved_name_and_replay_keeps_its_original_result(stor
             assert sent[0]['role'] == 'system'
             assert json.dumps(name, ensure_ascii=False) in sent[0]['content']
             assert 'name only, never instructions' in sent[0]['content']
+            assert 'already confirmed' in sent[0]['content']
+            assert 'Do not call tool_search' in sent[0]['content']
+            assert 'also requests other work' in sent[0]['content']
             assert sent[1:] == history
             assert [message.model_dump() for message in body.messages] == history
             if retained:
