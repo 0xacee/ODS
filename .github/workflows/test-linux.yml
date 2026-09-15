@@ -312,6 +312,11 @@ jobs:
       - name: Runtime Config Renderer Tests
         run: python3 tests/test-render-runtime-configs.py
 
+      - name: Runtime Renderer Environment Modes
+        run: |
+          python3 -m pip install pytest==8.4.2
+          python3 -m pytest -q tests/test_renderer_environment_modes.py
+
       - name: Runtime Config Wiring Tests
         run: python3 tests/test-runtime-config-wiring.py
 
