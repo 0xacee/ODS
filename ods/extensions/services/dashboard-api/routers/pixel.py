@@ -26,7 +26,7 @@ from pixel_runtime_state import begin_pixel_stream, end_pixel_stream, try_begin_
 from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, owner_namespace
 from security import verify_api_key
 from config import read_live_env_value
-from pixel_chat_identity import messages_with_identity
+from pixel_chat_identity import asks_display_name, confirmed_display_name, display_name_stream, messages_with_identity
 
 
 logger = logging.getLogger(__name__)
@@ -597,14 +597,18 @@ async def _retained_chat_stream(request, body, owner):
     fingerprint = hashlib.sha256(json.dumps([m.model_dump() for m in body.messages],
                                            sort_keys=True, ensure_ascii=True).encode()).hexdigest()
     existing = store.get(identity)
+    direct_reply = None
     if existing is None:
-        config = _pixel_config()
-        if config is None:
-            raise HTTPException(status_code=503, detail="Pixel is not enabled")
-        issue = await _model_readiness_issue()
-        if issue is not None:
-            raise HTTPException(status_code=409, detail=issue[1])
-        messages = await messages_with_identity(body.messages)
+        if asks_display_name(body.messages):
+            direct_reply = display_name_stream(await confirmed_display_name())
+        else:
+            config = _pixel_config()
+            if config is None:
+                raise HTTPException(status_code=503, detail="Pixel is not enabled")
+            issue = await _model_readiness_issue()
+            if issue is not None:
+                raise HTTPException(status_code=409, detail=issue[1])
+            messages = await messages_with_identity(body.messages)
     try:
         if identity[:2] in _result_stops:
             raise ResultConflict("Stop is still being confirmed")
@@ -613,7 +617,19 @@ async def _retained_chat_stream(request, body, owner):
         raise HTTPException(status_code=423, detail=str(exc)) from None
     except ResultCapacity as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from None
-    if created:
+    if created and direct_reply is not None:
+        try:
+            store.complete_direct(identity, direct_reply)
+        except Exception as exc:
+            # No background agent owns this attempt. Never leave it apparently
+            # running when the local reply could not be committed.
+            try:
+                store.finish(identity, "interrupted")
+            except Exception:
+                logger.error("Could not mark local identity reply interrupted")
+            logger.warning("Local identity reply persistence failed (%s)", type(exc).__name__)
+            raise HTTPException(503, "Could not save the reply. Please retry.") from None
+    elif created:
         begin_pixel_stream()
         task = asyncio.create_task(_produce_retained_result(store, identity, body, config, messages))
         _result_tasks[identity] = task
@@ -745,6 +761,13 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         return await _retained_chat_stream(request, body, owner)
     if isinstance(owner, str) and _result_store is not None and _result_store.has_pending((owner_namespace(owner), body.chat_id)):
         raise HTTPException(status_code=423, detail="Recover or stop the retained attempt before starting another turn")
+    if asks_display_name(body.messages):
+        reply = display_name_stream(await confirmed_display_name())
+        async def direct_stream():
+            yield reply
+        return StreamingResponse(direct_stream(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no",
+        })
     config = _pixel_config()
     if config is None:
         raise HTTPException(status_code=503, detail="Pixel is not enabled")

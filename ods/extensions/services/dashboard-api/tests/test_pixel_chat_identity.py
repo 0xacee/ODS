@@ -11,6 +11,84 @@ from test_pixel import ConnectedRequest, FakeClient, FakeResponse, stream_body
 from test_pixel_chat_results import store, OWNER
 
 
+@pytest.mark.parametrize('text', ['Qual o seu nome?', 'Qual é o seu nome?', 'QUAL É SEU NOME ATUAL?',
+    'Como você se chama?', 'Como vc se chama?', 'Como se chama?', 'Como devo te chamar?',
+    'Diga seu nome', 'Olá, qual o seu nome?', 'Qual é o seu nome, por favor?',
+    'What is your name?', "What's your name?", 'Tell me your name', '¿Cómo te llamas?'])
+def test_complete_name_questions(text):
+    messages = pixel.ChatStreamRequest(chat_id='n', messages=[{'role':'user','content':text}]).messages
+    assert pixel_chat_identity.asks_display_name(messages)
+
+
+@pytest.mark.parametrize('text', ['Qual o seu nome? Crie um site.', 'Qual o seu nome e o modelo carregado?',
+    'Explique a frase "qual o seu nome"', 'Qual o nome do meu arquivo?', 'Qual meu nome?',
+    'Mude seu nome para Aurora', 'Meu nome é Gabriel', 'Who are you and what can you do?',
+    'What is your name? Read README.md.', 'What is your model name?'])
+def test_compound_work_and_other_names_stay_with_agent(text):
+    messages = pixel.ChatStreamRequest(chat_id='n', messages=[{'role':'user','content':text}]).messages
+    assert not pixel_chat_identity.asks_display_name(messages)
+
+
+@pytest.mark.parametrize('retained', [False, True])
+def test_profile_answer_never_starts_model_or_tools_even_without_inference(store, monkeypatch, retained):
+    async def run():
+        def forbidden(*args, **kwargs):
+            raise AssertionError('A profile-name question must not depend on inference or tools')
+        monkeypatch.setattr(pixel, '_model_readiness_issue', forbidden)
+        monkeypatch.setattr(pixel, '_pixel_config', forbidden)
+        monkeypatch.setattr(pixel.httpx, 'AsyncClient', forbidden)
+        monkeypatch.delenv('PIXEL_OPENWEBUI_KEY')
+        for revision, name in enumerate(['Portal', 'Aurora 🌙'], 1):
+            async def identity(*args, **kwargs):
+                return {'schemaVersion':1,'revision':revision,'displayName':name}
+            monkeypatch.setattr(pixel_chat_identity, 'async_request_json', identity)
+            body = pixel.ChatStreamRequest(chat_id='profile-only', request_id=f'name-{revision}' if retained else None,
+                messages=[{'role':'assistant','content':'Meu nome é Pixel.'}, {'role':'user','content':'Qual o seu nome?'}])
+            answer = await stream_body(await pixel.pixel_chat_stream(ConnectedRequest(), body, OWNER))
+            events = [json.loads(line[6:]) for line in answer.decode().splitlines() if line.startswith('data: {')]
+            assert events[0]['choices'][0]['delta']['content'] == name
+            assert events[0]['ods_source'] == 'saved-profile'
+            assert b'[DONE]' in answer and not pixel._result_tasks
+            if retained:
+                monkeypatch.setattr(pixel_chat_identity, 'async_request_json', forbidden)
+                assert await stream_body(await pixel.pixel_chat_stream(ConnectedRequest(), body, OWNER)) == answer
+                assert store.get((pixel.owner_namespace(OWNER),body.chat_id,body.request_id))['state'] == 'complete'
+    asyncio.run(run())
+
+
+def test_direct_identity_is_literal_display_data():
+    data = pixel_chat_identity.display_name_stream('[Nova](https://example.com) <b>')
+    event = json.loads(data.decode().splitlines()[0][6:])
+    assert event['choices'][0]['delta']['content'] == r'\[Nova\]\(https://example\.com\) \<b\>'
+
+
+def test_direct_receipt_rolls_back_bytes_if_completion_cannot_commit(store):
+    key=(pixel.owner_namespace(OWNER),'atomic-name','attempt')
+    store.reserve(key,'fingerprint')
+    store.db.execute("CREATE TRIGGER fail_direct BEFORE UPDATE OF state ON attempts BEGIN SELECT RAISE(ABORT,'fixture'); END")
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError):
+        store.complete_direct(key,b'data: test\n\n')
+    assert store.chunks(key) == []
+    assert store.get(key)['size'] == 0
+
+
+def test_failed_local_commit_does_not_leave_an_invisible_active_attempt(store, monkeypatch):
+    async def run():
+        def failed(*args):
+            raise OSError('private storage path')
+        monkeypatch.setattr(store, 'complete_direct', failed)
+        body = pixel.ChatStreamRequest(chat_id='failed-name',request_id='attempt',
+                                       messages=[{'role':'user','content':'Qual o seu nome?'}])
+        with pytest.raises(HTTPException) as caught:
+            await pixel.pixel_chat_stream(ConnectedRequest(),body,OWNER)
+        assert caught.value.status_code == 503
+        assert 'private storage path' not in caught.value.detail
+        assert store.get((pixel.owner_namespace(OWNER),body.chat_id,body.request_id))['state'] == 'interrupted'
+        assert not store.has_pending((pixel.owner_namespace(OWNER),body.chat_id))
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('retained', [False, True])
 def test_new_turns_use_live_saved_name_and_replay_keeps_its_original_result(store, monkeypatch, retained):
     async def run():
