@@ -7,12 +7,11 @@ import importlib.util
 import json
 import sys
 import types
-
-import pytest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 
 CALLBACK_PATH = Path(__file__).resolve().parent.parent / "ods_token_spy_callback.py"
 
