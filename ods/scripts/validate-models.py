@@ -159,6 +159,8 @@ def local_llm_required(root: Path) -> tuple[bool, str]:
     """Describe whether ODS owns a GGUF file for the configured LLM backend."""
     mode = env_value(root, "ODS_MODE", "local").lower()
     backend = env_value(root, "LLM_BACKEND", "llama-server").lower()
+    if backend == "external":
+        return False, "model storage belongs to the external backend"
     if mode == "cloud" or backend in {"cloud", "litellm", "remote"}:
         return False, "cloud/remote backend"
     if mode == "lemonade" or backend == "lemonade":
