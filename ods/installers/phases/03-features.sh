@@ -218,9 +218,17 @@ if ! $DRY_RUN; then
     _switchboard_mode=""
     if [[ -f "${INSTALL_DIR:-}/.env" ]]; then
         _switchboard_mode="$(awk -F= '$1 == "ODS_MODEL_SWITCHBOARD" { print substr($0, index($0, "=") + 1); exit }' \
-            "$INSTALL_DIR/.env" 2>/dev/null | tr -d "\r\"'" || true)"
+            "$INSTALL_DIR/.env" 2>/dev/null | tr -d '\r' || true)"
         _switchboard_mode="${_switchboard_mode%% #*}"
-        _switchboard_mode="${_switchboard_mode//[[:space:]]/}"
+        _switchboard_mode="${_switchboard_mode#"${_switchboard_mode%%[![:space:]]*}"}"
+        _switchboard_mode="${_switchboard_mode%"${_switchboard_mode##*[![:space:]]}"}"
+        # Only exact modes can disable the gateway. Do not turn invalid
+        # quoted values such as 'legacy # literal' or ' legacy ' into legacy.
+        case "$_switchboard_mode" in
+            \"legacy\"|\'legacy\') _switchboard_mode=legacy ;;
+            \"observe\"|\'observe\') _switchboard_mode=observe ;;
+            \"\"|\'\') _switchboard_mode="" ;;
+        esac
     fi
     [[ -n "$_switchboard_mode" ]] || _switchboard_mode="${ODS_MODEL_SWITCHBOARD:-enabled}"
     [[ "$_switchboard_mode" == "legacy" || "$_switchboard_mode" == "observe" ]] || _pixel_support_services=true

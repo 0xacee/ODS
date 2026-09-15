@@ -97,4 +97,23 @@ for switchboard_case in "${switchboard_cases[@]}"; do
     done
     checked=$((checked + 1))
 done
-echo "PASS: all 64 Pixel/external/shared-service consumer combinations under ${checked} switchboard configurations"
+# Literal whitespace and hashes inside quotes are not valid routing modes.
+# These fixed expectations deliberately do not reuse expected_mode's parser.
+for literal in "'legacy # literal'" '"observe # literal"' "' legacy '" '"ob serve"'; do
+    (
+        INSTALL_DIR="$tmp_dir/literal"
+        mkdir -p "$INSTALL_DIR"
+        printf 'ODS_MODEL_SWITCHBOARD=%s\n' "$literal" > "$INSTALL_DIR/.env"
+        ODS_MODEL_SWITCHBOARD=legacy
+        EXTERNAL_LLM_URL=""
+        for flag in "${flags[@]}"; do printf -v "$flag" '%s' false; done
+        declare -A selected=()
+        _sync_extension_compose() { selected["$2"]="$1"; }
+        source /dev/stdin <<< "$block"
+        [[ "${selected[litellm]:-missing}" == true ]] || {
+            echo "FAIL: invalid literal $literal must keep the enabled gateway"; exit 1;
+        }
+    )
+done
+
+echo "PASS: all 64 Pixel/external/shared-service consumer combinations under ${checked} switchboard configurations and quoted literal regressions"
