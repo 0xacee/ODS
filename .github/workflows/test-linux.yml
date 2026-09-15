@@ -332,6 +332,11 @@ jobs:
       - name: Perplexica Entrypoint Contract Tests
         run: python3 tests/test-perplexica-entrypoint.py
 
+      - name: Perplexica Repair Interpreter Tests
+        run: |
+          python3 -m pip install pytest==8.4.2
+          python3 -m pytest -q tests/test_perplexica_repair_python.py
+
       - name: CPU-Only Path Tests
         run: bash tests/test-cpu-only-path.sh
 
