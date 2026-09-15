@@ -1047,15 +1047,12 @@ function DetailModal({ ext, gpuBackend, onClose }) {
           {/* Login / Credentials */}
           {envVars.some(v => /password|secret|token|key/i.test(v.key || '')) && (
             <div>
-              <h4 className="text-xs font-medium text-theme-text-muted uppercase tracking-wider mb-2">Login Credentials</h4>
-              <p className="text-xs text-theme-text-muted mb-2">Run this in your terminal to see login info:</p>
+              <h4 className="text-xs font-medium text-theme-text-muted uppercase tracking-wider mb-2">Configured Credentials</h4>
+              <p className="text-xs text-theme-text-muted mb-2">Run this from your ODS installation directory to view the configured values:</p>
               <CopyableCommand command={
-                `docker exec ods-${ext.id} env | grep -iE "${envVars.filter(v => /username|password|secret|token|key|user|email/i.test(v.key || '')).map(v => v.key).join('|')}"`
+                `grep -E '^[[:space:]]*(export[[:space:]]+)?(${envVars.filter(v => /username|password|secret|token|key|user|email/i.test(v.key || '')).map(v => v.key).join('|')})[[:space:]]*=' .env`
               } />
-              <p className="text-xs text-theme-text-muted mt-1.5">Or check your .env file directly:</p>
-              <CopyableCommand command={
-                `grep -E "${envVars.filter(v => /username|password|secret|token|key|user|email/i.test(v.key || '')).map(v => v.key).join('|')}" .env`
-              } />
+              <p className="text-xs text-theme-text-muted mt-1.5">A password changed inside an application may differ from its initial value in .env.</p>
             </div>
           )}
 
