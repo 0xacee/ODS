@@ -360,6 +360,11 @@ jobs:
           python3 -m pip install pytest==8.4.2
           python3 -m pytest -q tests/test_support_bundle_timeouts.py tests/test_support_bundle_log_scope.py
 
+      - name: Linux Node runtime path tests
+        run: |
+          bash tests/test-node-runtime.sh
+          python3 -m pytest -q tests/test_node_runtime_paths.py
+
       - name: Config Migration Tests
         run: bash tests/test-migrate-config.sh
 
