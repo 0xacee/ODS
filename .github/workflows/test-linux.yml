@@ -283,6 +283,9 @@ jobs:
       - name: Mode Switch Tests
         run: bash tests/test-mode-switch-status.sh
 
+      - name: .env Upserts After an Unterminated Last Line
+        run: bash tests/test-env-append-final-newline.sh
+
       - name: CLI Install Directory Resolution Tests
         run: bash tests/test-cli-install-dir-resolution.sh
 
