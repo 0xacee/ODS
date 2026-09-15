@@ -265,7 +265,10 @@ delete_backup() {
 
     read -rp "Are you sure you want to delete backup $(basename "$target")? [y/N] " confirm || confirm=""
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        rm -rf "$target"
+        if ! rm -rf -- "$target"; then
+            log_error "Failed to delete backup: $(basename "$target")"
+            return 1
+        fi
         log_success "Deleted backup: $(basename "$target")"
     else
         log_info "Deletion cancelled"
@@ -677,7 +680,7 @@ main() {
     # Delete mode
     if [[ -n "$delete_id" ]]; then
         delete_backup "$delete_id"
-        exit 0
+        exit $?
     fi
 
     # Verify mode
@@ -710,4 +713,6 @@ main() {
     do_backup "$backup_type" "$compress" "$description"
 }
 
-main "$@"
+if [[ "${ODS_BACKUP_SOURCE_ONLY:-false}" != "true" ]]; then
+    main "$@"
+fi
