@@ -18,9 +18,11 @@ import shlex
 import tempfile
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlparse
 
+import anyio
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -763,12 +765,12 @@ async def _handle_streaming(client, raw_body, headers, model, sys_analysis,
 
                         elif current_event == "message_stop":
                             # Stream complete — log metrics
-                            _log_entry(
+                            logged = True
+                            await _log_entry_async(
                                 model, sys_analysis, msg_analysis, tools,
                                 raw_body, usage, start_time,
                                 provider_name="anthropic",
                             )
-                            logged = True
         except httpx.HTTPStatusError as e:
             log.error(f"Upstream HTTP error: {e.response.status_code}")
             yield f"data: {json.dumps({'type': 'error', 'error': {'type': 'proxy_error', 'message': 'Upstream request failed'}})}\n\n"
@@ -780,7 +782,7 @@ async def _handle_streaming(client, raw_body, headers, model, sys_analysis,
             if not logged and any((usage[key] or 0) > 0 for key in (
                 "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
             )):
-                _log_entry(
+                await _log_entry_async(
                     model, sys_analysis, msg_analysis, tools,
                     raw_body, usage, start_time,
                     provider_name="anthropic",
@@ -828,7 +830,7 @@ async def _handle_non_streaming(client, raw_body, headers, model, sys_analysis,
         "stop_reason": data.get("stop_reason"),
     }
 
-    _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_time, provider_name="anthropic")
+    await _log_entry_async(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_time, provider_name="anthropic")
 
     return Response(
         content=resp.content,
@@ -973,13 +975,13 @@ async def _handle_openai_streaming(client, raw_body, headers, model, sys_analysi
                         continue
                     data_str = stripped[5:].strip()
                     if data_str == "[DONE]":
-                        _log_entry(
+                        logged = True
+                        await _log_entry_async(
                             model, sys_analysis, msg_analysis, tools,
                             raw_body, usage, start_time,
                             provider_name="openai",
                             filter_result=filter_result,
                         )
-                        logged = True
                         continue
                     try:
                         data = json.loads(data_str)
@@ -1009,7 +1011,7 @@ async def _handle_openai_streaming(client, raw_body, headers, model, sys_analysi
             if not logged and any((usage[key] or 0) > 0 for key in (
                 "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
             )):
-                _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_time, provider_name="openai", filter_result=filter_result)
+                await _log_entry_async(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_time, provider_name="openai", filter_result=filter_result)
 
     return StreamingResponse(
         stream_and_capture(),
@@ -1053,7 +1055,7 @@ async def _handle_openai_non_streaming(client, raw_body, headers, model, sys_ana
         "stop_reason": (data.get("choices", [{}])[0].get("finish_reason") if data.get("choices") else None),
     }
 
-    _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_time, provider_name="openai", filter_result=filter_result)
+    await _log_entry_async(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_time, provider_name="openai", filter_result=filter_result)
 
     return Response(
         content=resp.content,
@@ -1524,6 +1526,21 @@ def _auto_reset_check(agent: str, history_chars: int):
     if result.get("action") == "killed":
         _last_auto_reset[agent] = now
         log.warning(f"[AUTO-RESET] {agent} session killed: {result.get('session_id')}")
+
+
+_usage_log_limiter = None
+
+
+async def _log_entry_async(*args, **kwargs):
+    global _usage_log_limiter
+    if _usage_log_limiter is None:
+        _usage_log_limiter = anyio.CapacityLimiter(1)
+    # SQLite busy waits (and session-reset I/O) must not stall all HTTP traffic.
+    # Keep these side effects serial as before, and finish billing on disconnect.
+    with anyio.CancelScope(shield=True):
+        await anyio.to_thread.run_sync(
+            partial(_log_entry, *args, **kwargs), limiter=_usage_log_limiter,
+        )
 
 
 def _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_time,

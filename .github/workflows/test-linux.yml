@@ -84,6 +84,8 @@ jobs:
             extensions/services/pixel-agent/tests/test_workspace_preview_git.py \
             extensions/services/pixel-agent/tests/test_preview_empty_assets.py
 
+      - name: Token Spy proxy persistence and disconnect contracts
+        run: python -m pytest extensions/services/token-spy/tests/test_proxy_persistence_io.py extensions/services/token-spy/tests/test_anthropic_cumulative_usage.py -q
       - name: Lemonade context cache persistence
         run: sudo env LEMONADE_REQUIRE_NAMESPACE=1 "$(command -v python)" -m pytest tests/test_lemonade_context_persistence.py -q
 
