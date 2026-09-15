@@ -1511,6 +1511,11 @@ def _install_from_library(service_id: str) -> None:
     dest = USER_EXTENSIONS_DIR / service_id
 
     # Re-check under lock to prevent double-install race.
+    if dest.is_symlink():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Refusing to install over symlinked extension directory: {service_id}",
+        )
     if dest.exists():
         has_compose = (dest / "compose.yaml").exists()
         has_disabled = (dest / "compose.yaml.disabled").exists()
@@ -1630,6 +1635,11 @@ def install_extension(service_id: str, api_key: str = Depends(verify_api_key)):
     dest = USER_EXTENSIONS_DIR / service_id
 
     # Early check (non-authoritative, rechecked under lock in _install_from_library)
+    if dest.is_symlink():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Refusing to install over symlinked extension directory: {service_id}",
+        )
     if dest.exists():
         has_compose = (dest / "compose.yaml").exists()
         has_disabled = (dest / "compose.yaml.disabled").exists()
