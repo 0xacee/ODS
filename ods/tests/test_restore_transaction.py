@@ -26,9 +26,14 @@ if tool=='cp' and mode=='partial_copy' and source.endswith('/config'):
     (pathlib.Path(dest)/'settings').write_text('truncated')
     sys.exit(23)
 if tool=='rsync' and '--help' not in args and '--dry-run' not in args:
+    if mode=='cache_transfer_failure' and source.endswith('/data/models/'):
+        (pathlib.Path(dest)/'weights.gguf').write_text('partial cache')
+        sys.exit(23)
     if mode=='rsync_failure': sys.exit(23)
     if mode=='rsync_noop': sys.exit(0)
 if tool=='mv':
+    if source.endswith('/new') and dest==root+'/data/embeddings' and mode=='cache_publish_failure':
+        sys.exit(23)
     if source.endswith('/new') and dest==root+'/config' and mode in ('publish_failure','recovery_failure'):
         sys.exit(23)
     if source.endswith('/old') and dest==root+'/.env' and mode=='recovery_failure': sys.exit(23)
@@ -108,6 +113,33 @@ class RestoreTransaction(unittest.TestCase):
         self.write(self.backup, '.env', 'restored')
         self.assertEqual(self.restore('', '--config-only'), 0, self.output)
         self.assertEqual((self.root/'.env').read_text(), 'restored')
+
+    def cache_fixture(self):
+        self.fixture()
+        for name in ('models/legacy.gguf', 'data/models/weights.gguf',
+                     'data/whisper/model.bin', 'data/embeddings/model.bin'):
+            self.write(self.root, name, 'current-'+name)
+            self.write(self.backup, name, 'backup-'+name)
+        self.write(self.root, 'data/models/newer.gguf', 'keep model')
+        self.before = self.contents()
+
+    def test_cache_transfer_and_publication_failures_rollback_all_selected_paths(self):
+        for fault in ('cache_transfer_failure', 'cache_publish_failure', 'publish_failure'):
+            with self.subTest(fault=fault):
+                self.cache_fixture()
+                self.assertNotEqual(self.restore(fault), 0, self.output)
+                self.assertEqual(self.contents(), self.before, self.output)
+                self.assertEqual(list(self.root.rglob('.ods-restore.*')), [])
+
+    def test_cache_restore_is_additive_and_config_only_skips_cache(self):
+        self.cache_fixture()
+        self.assertEqual(self.restore('', '--config-only'), 0, self.output)
+        self.assertEqual((self.root/'data/models/weights.gguf').read_text(), 'current-data/models/weights.gguf')
+        self.assertEqual(self.restore('', '--data-only'), 0, self.output)
+        for name in ('models/legacy.gguf', 'data/models/weights.gguf',
+                     'data/whisper/model.bin', 'data/embeddings/model.bin'):
+            self.assertEqual((self.root/name).read_text(), 'backup-'+name)
+        self.assertEqual((self.root/'data/models/newer.gguf').read_text(), 'keep model')
 
     def test_new_data_destination(self):
         self.write(self.backup, 'data/persona/SOUL.md', 'restored')

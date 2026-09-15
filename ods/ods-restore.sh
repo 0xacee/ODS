@@ -355,6 +355,25 @@ dry_run_preview() {
             fi
         done
         echo ""
+
+        # Cache tier (full backups only): models and model caches.
+        local -a cache_dirs=("models" "${ODS_BACKUP_CACHE_PATHS[@]}")
+        local cache_listed=false
+        for dir in "${cache_dirs[@]}"; do
+            if [[ -d "$backup_dir/$dir" ]]; then
+                if [[ "$cache_listed" == "false" ]]; then
+                    echo "Cache to Restore (models):"
+                    echo "───────────────────────────────────────────────────────────────────"
+                    cache_listed=true
+                fi
+                local size
+                size=$(du -sh "$backup_dir/$dir" 2>/dev/null | cut -f1)
+                echo "  ✓ $dir ($size)"
+            fi
+        done
+        if [[ "$cache_listed" == "true" ]]; then
+            echo ""
+        fi
     fi
 
     if [[ "$restore_config" == "true" ]]; then
@@ -406,7 +425,7 @@ _restore_selected_paths() (
     local dir file parent workspace i changes transfer_status completed=false recovery_failed=false
     shopt -s nullglob
     if [[ "$restore_data" == true ]]; then
-        for dir in "${ODS_USER_DATA_PATHS[@]}"; do
+        for dir in "${ODS_USER_DATA_PATHS[@]}" "models" "${ODS_BACKUP_CACHE_PATHS[@]}"; do
             [[ -d "$backup_dir/$dir" ]] || continue
             sources+=("$backup_dir/$dir")
             destinations+=("$ODS_DIR/$dir")
