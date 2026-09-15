@@ -349,12 +349,15 @@ def _windows_whisper_cuda_supported(env: dict) -> bool:
 
 
 def _find_usable_bash() -> str | None:
-    """Return a Bash executable compatible with this host's path contract."""
+    """Return a Bash executable compatible with this host's path contract.
+
+    A successfully validated executable is stable enough to cache.  Failed
+    probes are deliberately retried: on Windows Git Bash can be temporarily
+    unavailable while the installer or endpoint protection is still settling.
+    """
     global _usable_bash
     if isinstance(_usable_bash, str):
         return _usable_bash
-    if _usable_bash is False:
-        return None
 
     candidates: list[str] = []
     if platform.system() == "Windows":
@@ -441,7 +444,7 @@ def _find_usable_bash() -> str | None:
             _usable_bash = bash
             return bash
 
-    _usable_bash = False
+    _usable_bash = None
     return None
 
 # Model download state — only one download at a time
@@ -6029,6 +6032,11 @@ def _split_nmcli_terse(line: str) -> list[str]:
     return parts
 
 
+def _nmcli_env() -> dict[str, str]:
+    """Use English status text and UTF-8 network names in child processes only."""
+    return {**os.environ, "LC_ALL": "C.UTF-8", "LANGUAGE": "C"}
+
+
 def _network_supported(handler) -> bool:
     """Linux + nmcli precondition for Wi-Fi endpoints. Sends a 501 on failure
     so the caller doesn't need to repeat the check; returns True only when
@@ -6401,11 +6409,9 @@ def _find_update_bash() -> str | None:
     global _update_usable_bash
     if isinstance(_update_usable_bash, str):
         return _update_usable_bash
-    if _update_usable_bash is False:
-        return None
 
     bash = _find_usable_bash()
-    _update_usable_bash = bash if bash else False
+    _update_usable_bash = bash
     return bash
 
 
@@ -7894,7 +7900,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             subprocess.run(
                 ["nmcli", "device", "wifi", "rescan"],
-                capture_output=True, timeout=10,
+                capture_output=True, timeout=10, env=_nmcli_env(),
             )
         except (subprocess.TimeoutExpired, OSError):
             pass
@@ -7910,7 +7916,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             result = subprocess.run(
                 ["nmcli", "-t", "-f",
                  "SSID,SIGNAL,SECURITY,IN-USE", "device", "wifi", "list"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=15, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "nmcli wifi list timed out"})
@@ -7938,15 +7944,17 @@ class AgentHandler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 signal_pct = 0
             existing = networks_by_ssid.get(ssid)
+            in_use = in_use_str == "*" or bool(existing and existing["in_use"])
             if existing and existing["signal"] >= signal_pct:
+                existing["in_use"] = in_use
                 continue
             # nmcli sometimes returns multiple rows per SSID (one per BSSID).
-            # Collapse on SSID and keep the strongest signal observed.
+            # Keep the strongest signal and connection state from any BSSID.
             networks_by_ssid[ssid] = {
                 "ssid": ssid,
                 "signal": signal_pct,
                 "security": security or "open",
-                "in_use": in_use_str == "*",
+                "in_use": in_use,
             }
 
         # Strongest signal first — that's the order the wizard wants to display.
@@ -7990,7 +7998,7 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         try:
             result = subprocess.run(
-                args, capture_output=True, text=True, timeout=45,
+                args, capture_output=True, text=True, timeout=45, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "Connection attempt timed out"})
@@ -8051,7 +8059,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             check = subprocess.run(
                 ["nmcli", "-t", "-f", "connection.type", "connection", "show", connection],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "nmcli show timed out"})
@@ -8089,7 +8097,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 ["nmcli", "connection", "delete", connection],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=15, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "nmcli delete timed out"})
@@ -8125,7 +8133,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, env=_nmcli_env(),
             )
         except subprocess.TimeoutExpired:
             json_response(self, 504, {"error": "nmcli timed out"})
@@ -8154,34 +8162,46 @@ class AgentHandler(BaseHTTPRequestHandler):
             device, typ, state, connection = parts[0], parts[1], parts[2], parts[3]
             if state != "connected":
                 continue
-            ip_addr = ""
-            gateway = ""
-            try:
-                ip_result = subprocess.run(
-                    ["nmcli", "-t", "-f", "IP4.ADDRESS,IP4.GATEWAY",
-                     "device", "show", device],
-                    capture_output=True, text=True, timeout=5,
-                )
-                for ip_line in ip_result.stdout.splitlines():
-                    if ip_line.startswith("IP4.ADDRESS"):
-                        _, _, val = ip_line.partition(":")
-                        ip_addr = val.split("/")[0]
-                    elif ip_line.startswith("IP4.GATEWAY"):
-                        _, _, val = ip_line.partition(":")
-                        gateway = val
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-
             devices.append({
                 "device": device,
                 "type": typ,
                 "state": state,
                 "connection": connection,
-                "ip": ip_addr,
-                "gateway": gateway,
+                "ip": "",
+                "gateway": "",
             })
             if typ == "wifi":
                 wifi_connected = True
+
+        # One query for all interfaces bounds the entire operation to two
+        # subprocess timeouts, regardless of the number of connected devices.
+        if devices:
+            by_device = {item["device"]: item for item in devices}
+            try:
+                ip_result = subprocess.run(
+                    ["nmcli", "-t", "-f", "GENERAL.DEVICE,IP4.ADDRESS,IP4.GATEWAY",
+                     "device", "show"],
+                    capture_output=True, text=True, timeout=5, env=_nmcli_env(),
+                )
+                if ip_result.returncode != 0:
+                    logger.warning("Network address query failed with exit %s", ip_result.returncode)
+                else:
+                    current = None
+                    for ip_line in ip_result.stdout.splitlines():
+                        parts = _split_nmcli_terse(ip_line)
+                        if len(parts) != 2:
+                            continue
+                        key, value = parts
+                        if key == "GENERAL.DEVICE":
+                            current = by_device.get(value)
+                        elif current is not None and key.startswith("IP4.ADDRESS"):
+                            current["ip"] = value.split("/")[0]
+                        elif current is not None and key == "IP4.GATEWAY":
+                            current["gateway"] = value
+            except subprocess.TimeoutExpired:
+                logger.warning("Network address query timed out; returning connection state without addresses")
+            except OSError as exc:
+                logger.warning("Network address query unavailable: %s", exc)
 
         json_response(self, 200, {
             "platform_supported": True,
@@ -8674,18 +8694,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             container_name = f"ods-{service_id}"
             cmd = ["docker", "logs", "--tail", str(tail), container_name]
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=5,
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5,
             )
+            output = result.stdout or ""
             # Handle container not yet created (e.g. during image pull)
-            if result.returncode != 0 and "no such container" in (result.stderr or "").lower():
+            if result.returncode != 0 and "no such container" in output.lower():
                 json_response(self, 200, {
                     "service_id": service_id,
                     "logs": "Container is starting up — logs will appear once it is running.",
                     "lines": 0,
                 })
                 return
-            # docker logs writes to stderr for some containers
-            output = result.stdout or result.stderr or ""
+            # Both container streams share one pipe, preserving their emitted order.
             json_response(self, 200, {
                 "service_id": service_id,
                 "logs": output[-50000:],
@@ -8724,9 +8744,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 ["docker", "logs", "--tail", str(tail), container_name],
-                capture_output=True, text=True, timeout=5,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5,
             )
-            if result.returncode != 0 and "no such container" in (result.stderr or "").lower():
+            output = result.stdout or ""
+            if result.returncode != 0 and "no such container" in output.lower():
                 json_response(self, 200, {
                     "service_id": sid,
                     "container_name": container_name,
@@ -8735,9 +8756,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                 })
                 return
             if result.returncode != 0:
-                json_response(self, 500, {"error": f"docker logs failed: {(result.stderr or '')[:500]}"})
+                json_response(self, 500, {"error": f"docker logs failed: {output[:500]}"})
                 return
-            output = result.stdout or result.stderr or ""
             json_response(self, 200, {
                 "service_id": sid,
                 "container_name": container_name,

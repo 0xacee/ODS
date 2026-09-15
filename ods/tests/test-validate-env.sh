@@ -568,6 +568,27 @@ else
     fail "BACKEND=nvidia#x should fail the enum check (Compose passes 'nvidia#x' to the container), got exit $r"
 fi
 
+# 24. Keys phase 09 appends to .env for an air-gapped install
+# (installers/phases/09-offline.sh, `--offline`) must be declared, or every
+# offline install ends up with a .env that `ods config validate` rejects.
+cp "$TMP_DIR/valid.env" "$TMP_DIR/offline.env"
+cat >> "$TMP_DIR/offline.env" <<'EOF'
+OFFLINE_MODE=true
+DISABLE_TELEMETRY=true
+DISABLE_UPDATE_CHECK=true
+WEB_SEARCH_ENABLED=false
+LOCAL_RAG_ENABLED=true
+EOF
+set +e
+out=$("$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" "$TMP_DIR/offline.env" "$ROOT_DIR/.env.schema.json" 2>&1)
+r=$?
+set -e
+if [[ $r -eq 0 ]]; then
+    pass "Installer-written offline-mode keys validate cleanly"
+else
+    fail "Offline-mode keys should validate, got exit $r: $(echo "$out" | grep -iE 'OFFLINE_MODE|TELEMETRY|UPDATE_CHECK|WEB_SEARCH|LOCAL_RAG' | tr '\n' ' ')"
+fi
+
 echo ""
 echo "Result: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]
