@@ -3303,7 +3303,12 @@ META
 
             # Create archive (relative to presets dir to avoid absolute paths)
             cd "$PRESETS_DIR"
-            if tar czf "$output" "$name" 2>/dev/null; then
+            if (umask 077 && tar czf "$output" "$name" 2>/dev/null); then
+                # The archive bundles the preset's copy of .env (DASHBOARD_API_KEY,
+                # service passwords, provider API keys). Keep it owner-only like
+                # the compressed backup archive; umask alone does not cover an
+                # existing file, whose mode tar keeps when it overwrites it.
+                chmod 600 "$output" || warn "Could not restrict $output to its owner; it contains .env secrets."
                 local size
                 size=$(du -h "$output" 2>/dev/null | cut -f1 || true)
                 success "Preset exported to: $output ($size)"
