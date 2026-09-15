@@ -38,6 +38,146 @@ BOOTSTRAP_GGUF_FILE="${7:-Qwen3.5-2B-Q4_K_M.gguf}"
 LOG_TAG="[BOOTSTRAP-UPGRADE]"
 
 log()  { echo "$LOG_TAG $(date '+%H:%M:%S') $*"; }
+MODEL_ROUTER_SWAP_GATE_TOKEN=""
+MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID=""
+
+model_router_swap_gate_call() {
+    local action="$1" token="$2" lease_seconds="${3:-30}"
+    [[ -n "${DOCKER_CMD:-}" ]] || return 1
+    $DOCKER_CMD exec \
+        -e ODS_SWAP_GATE_ACTION="$action" \
+        -e ODS_SWAP_GATE_TOKEN="$token" \
+        -e ODS_SWAP_GATE_LEASE_SECONDS="$lease_seconds" \
+        ods-model-router python -c '
+import json, os, urllib.error, urllib.request
+key = os.environ.get("ODS_ROUTER_INTERNAL_KEY") or os.environ.get("DASHBOARD_API_KEY") or ""
+if not key:
+    raise SystemExit(2)
+payload = {
+    "action": os.environ["ODS_SWAP_GATE_ACTION"],
+    "token": os.environ["ODS_SWAP_GATE_TOKEN"],
+}
+if payload["action"] == "begin":
+    payload["leaseSeconds"] = int(os.environ["ODS_SWAP_GATE_LEASE_SECONDS"])
+request = urllib.request.Request(
+    "http://127.0.0.1:9099/internal/model-swap/admission",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=5) as response:
+        body = json.load(response)
+except (OSError, ValueError, urllib.error.HTTPError):
+    raise SystemExit(3)
+expected = "closed" if payload["action"] == "begin" else "open"
+raise SystemExit(0 if body.get("status") == expected else 4)
+' >/dev/null 2>&1
+}
+
+model_router_swap_gate_health() {
+    [[ -n "${DOCKER_CMD:-}" ]] || return 1
+    $DOCKER_CMD exec ods-model-router python -c '
+import json, urllib.request
+with urllib.request.urlopen("http://127.0.0.1:9099/health", timeout=5) as response:
+    body = json.load(response)
+active = body.get("activeRequests")
+queued = body.get("queuedRequests")
+gate = body.get("modelSwapGateActive")
+if isinstance(active, bool) or not isinstance(active, int) or active < 0:
+    raise SystemExit(2)
+if isinstance(queued, bool) or not isinstance(queued, int) or queued < 0:
+    raise SystemExit(2)
+if not isinstance(gate, bool):
+    raise SystemExit(2)
+print(f"{active} {queued} {1 if gate else 0}")
+' 2>/dev/null
+}
+
+release_model_router_swap_gate() {
+    local token="${MODEL_ROUTER_SWAP_GATE_TOKEN:-}"
+    local heartbeat_pid="${MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID:-}"
+    [[ -n "$token" ]] || return 0
+    MODEL_ROUTER_SWAP_GATE_TOKEN=""
+    MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID=""
+    if [[ -n "$heartbeat_pid" ]]; then
+        kill "$heartbeat_pid" >/dev/null 2>&1 || true
+        wait "$heartbeat_pid" >/dev/null 2>&1 || true
+    fi
+    if model_router_swap_gate_call end "$token" 30; then
+        log "Reopened model-router request admission."
+    else
+        log "WARNING: could not explicitly reopen model-router admission; its short lease will expire automatically."
+    fi
+}
+
+acquire_model_router_swap_gate() {
+    local switchboard_mode token drain_attempts state active queued gate consecutive_idle=0
+    switchboard_mode="$(read_env_value ODS_MODEL_SWITCHBOARD | tr '[:upper:]' '[:lower:]')"
+    [[ "$switchboard_mode" == "enabled" ]] || {
+        log "Model switchboard is ${switchboard_mode:-unset}; no router admission gate is active for this explicit legacy/observe route."
+        return 0
+    }
+    if ! $DOCKER_CMD ps --filter name=ods-model-router --format '{{.Names}}' 2>/dev/null \
+        | grep -qx 'ods-model-router'; then
+        log "ERROR: model switchboard is enabled but ods-model-router is not running."
+        return 1
+    fi
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        token="$(tr -d '-' </proc/sys/kernel/random/uuid)"
+    elif command -v uuidgen >/dev/null 2>&1; then
+        token="$(uuidgen | tr -d '-')"
+    else
+        token="ods-swap-$$-$(date +%s)-${RANDOM}${RANDOM}"
+    fi
+    if ! model_router_swap_gate_call begin "$token" 30; then
+        log "ERROR: model-router refused the request-admission gate."
+        return 1
+    fi
+    MODEL_ROUTER_SWAP_GATE_TOKEN="$token"
+    (
+        while sleep 10; do
+            model_router_swap_gate_call begin "$token" 30 || exit 1
+        done
+    ) >/dev/null 2>&1 &
+    MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID=$!
+
+    drain_attempts="${ODS_BOOTSTRAP_ROUTER_DRAIN_ATTEMPTS:-600}"
+    if ! [[ "$drain_attempts" =~ ^[0-9]+$ ]] || (( drain_attempts < 1 )); then
+        drain_attempts=600
+    fi
+    log "Closed model-router admission; draining active model requests before promotion..."
+    for _drain_i in $(seq 1 "$drain_attempts"); do
+        state="$(model_router_swap_gate_health)" || {
+            log "ERROR: model-router drain health could not be verified."
+            release_model_router_swap_gate
+            return 1
+        }
+        read -r active queued gate <<<"$state"
+        if [[ "$gate" != "1" ]]; then
+            log "ERROR: model-router admission gate was lost while draining."
+            release_model_router_swap_gate
+            return 1
+        fi
+        if [[ "$active" == "0" ]]; then
+            consecutive_idle=$(( consecutive_idle + 1 ))
+            if (( consecutive_idle >= 2 )); then
+                log "Model-router drained (active=0, queued=${queued}); promotion may mutate runtime state."
+                return 0
+            fi
+        else
+            consecutive_idle=0
+            if (( _drain_i == 1 || _drain_i % 15 == 0 )); then
+                log "Waiting for ${active} active model request(s) to finish (${queued} queued)."
+            fi
+        fi
+        sleep 1
+    done
+    log "ERROR: active model requests did not drain within ${drain_attempts} seconds."
+    release_model_router_swap_gate
+    return 1
+}
+
 release_model_lifecycle_lock() {
     if declare -F ods_model_lifecycle_lock_release >/dev/null 2>&1; then
         ods_model_lifecycle_lock_release
@@ -68,7 +208,7 @@ acquire_model_lifecycle_lock() {
     [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]] || return 0
     ods_model_lifecycle_lock_acquire "$INSTALL_DIR" "background full-model activation"
 }
-fail() { log "ERROR: $*"; release_model_lifecycle_lock; release_upgrade_lock; exit 1; }
+fail() { log "ERROR: $*"; release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock; exit 1; }
 
 if [[ -z "$INSTALL_DIR" || ! -d "$INSTALL_DIR" ]]; then
     log "ERROR: install directory does not exist: ${INSTALL_DIR:-<empty>}"
@@ -88,6 +228,68 @@ ENV_FILE="$INSTALL_DIR/.env"
 MODELS_INI="$INSTALL_DIR/config/llama-server/models.ini"
 STATUS_FILE="$INSTALL_DIR/data/bootstrap-status.json"
 UPGRADE_LOCK_DIR=""
+
+reconcile_ods_managed_pixel_model() {
+    local target_model="${1:-$FULL_LLM_MODEL}"
+    [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]] || return 0
+
+    local owner home marker sudo_helper pixel_helper target_context target_max_tokens target_reasoning reasoning_mode
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        owner="${SUDO_USER:-}"
+    else
+        owner="$(id -un)"
+    fi
+    [[ -n "$owner" && "$owner" != root ]] || return 0
+    home="$(getent passwd "$owner" 2>/dev/null | awk -F: 'NR == 1 { print $6 }')"
+    [[ "$home" == /* && "$home" != / && -d "$home" && ! -L "$home" ]] || return 1
+    marker="$home/.config/ods/pixel-managed.json"
+    [[ -e "$marker" || -L "$marker" ]] || return 0
+
+    sudo_helper="$INSTALL_DIR/installers/lib/sudo.sh"
+    pixel_helper="$INSTALL_DIR/installers/lib/pixel-host-install.sh"
+    [[ -f "$sudo_helper" && ! -L "$sudo_helper" && -f "$pixel_helper" && ! -L "$pixel_helper" ]] || {
+        log "ERROR: ODS-managed Pixel exists, but its reconciliation helpers are unavailable."
+        return 1
+    }
+    INTERACTIVE=false
+    if [[ ${EUID:-$(id -u)} -eq 0 ]] \
+        || { command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }; then
+        ODS_SUDO_AVAILABLE=true
+    else
+        ODS_SUDO_AVAILABLE=false
+    fi
+    export INTERACTIVE ODS_SUDO_AVAILABLE
+    # shellcheck source=installers/lib/sudo.sh
+    . "$sudo_helper"
+    # shellcheck source=installers/lib/pixel-host-install.sh
+    . "$pixel_helper"
+
+    target_context="$(read_env_value MAX_CONTEXT)"
+    [[ "$target_context" =~ ^[0-9]+$ ]] || target_context="$(read_env_value CTX_SIZE)"
+    if ! [[ "$target_context" =~ ^[0-9]+$ && "$target_context" -ge 4096 ]]; then
+        log "ERROR: ODS-managed Pixel requires a promoted model context of at least 4096 tokens."
+        return 1
+    fi
+    target_max_tokens="$(_ods_pixel_default_output_tokens "$target_context")" || {
+        log "ERROR: ODS-managed Pixel received an invalid promoted context budget."
+        return 1
+    }
+    target_reasoning=false
+    reasoning_mode="$(read_env_value LLAMA_REASONING | tr '[:upper:]' '[:lower:]')"
+    [[ -n "$reasoning_mode" ]] || reasoning_mode=off
+    if [[ ! "$reasoning_mode" =~ ^(off|none|false|0)$ ]]; then
+        target_reasoning=true
+    fi
+
+    log "Reconciling the ODS-managed Pixel route to ${target_model} at ${target_context} tokens..."
+    if ods_pixel_reconcile_promoted_model "$owner" "$home" "$target_model" ready \
+        "$target_context" "$target_max_tokens" "$target_reasoning"; then
+        log "ODS-managed Pixel now targets ${target_model}."
+        return 0
+    fi
+    log "ERROR: ODS-managed Pixel model reconciliation failed."
+    return 1
+}
 
 # Cross-platform file size (GNU stat on Linux/WSL2, BSD stat on macOS)
 # IMPORTANT: Try GNU stat -c %s FIRST (Linux). stat -f on Linux returns filesystem
@@ -200,6 +402,34 @@ compose_recreate_llama_server_with_retry() {
     done
 }
 
+compose_recreate_hermes() {
+    local -a compose_args=()
+
+    if declare -p COMPOSE_ARGS >/dev/null 2>&1 && [[ ${#COMPOSE_ARGS[@]} -gt 0 ]]; then
+        compose_args=("${COMPOSE_ARGS[@]}")
+    elif declare -p WINDOWS_LEMONADE_COMPOSE_ARGS >/dev/null 2>&1 \
+      && [[ ${#WINDOWS_LEMONADE_COMPOSE_ARGS[@]} -gt 0 ]]; then
+        compose_args=("${WINDOWS_LEMONADE_COMPOSE_ARGS[@]}")
+    elif [[ -s "$INSTALL_DIR/.compose-flags" ]]; then
+        read -ra compose_args <<< "$(cat "$INSTALL_DIR/.compose-flags")"
+    fi
+
+    if [[ ${#compose_args[@]} -eq 0 || -z "${DOCKER_COMPOSE_CMD:-}" ]]; then
+        log "WARNING: cannot recreate Hermes because the active compose stack is unavailable."
+        return 1
+    fi
+
+    # Atomic installer updates replace bind-mounted files by inode. Docker
+    # Desktop cannot reliably restart a container whose old mount source was
+    # replaced, so recreate Hermes through the exact active Compose stack.
+    (
+        cd "$INSTALL_DIR"
+        env -u GGUF_FILE -u LLM_MODEL -u LEMONADE_MODEL -u MAX_CONTEXT -u CTX_SIZE \
+            $DOCKER_COMPOSE_CMD "${compose_args[@]}" \
+            up -d --force-recreate --no-deps hermes
+    )
+}
+
 release_upgrade_lock() {
     if [[ -n "${UPGRADE_LOCK_DIR:-}" && -d "$UPGRADE_LOCK_DIR" ]]; then
         rm -rf "$UPGRADE_LOCK_DIR"
@@ -236,7 +466,7 @@ acquire_upgrade_lock() {
 
     UPGRADE_LOCK_DIR="$lock_dir"
     printf '%s\n' "$$" > "$pid_file"
-    trap 'release_model_lifecycle_lock; release_upgrade_lock' EXIT
+    trap 'release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock' EXIT
 }
 
 model_sha256() {
@@ -385,12 +615,14 @@ discard_active_model_config_snapshot() {
 
 restore_docker_llama_server_after_swap_failure() {
     local health_url="${1:-}"
+    local reconcile_pixel="${2:-false}"
     local compose_arg_count=0
-    local previous_gguf previous_gpu_backend previous_model_id
+    local previous_gguf previous_gpu_backend previous_llm_model previous_model_id
     local rollback_healthy=false
 
     previous_gguf="$(snapshot_env_value GGUF_FILE)"
     previous_gpu_backend="$(snapshot_env_value GPU_BACKEND | tr '[:upper:]' '[:lower:]')"
+    previous_llm_model="$(snapshot_env_value LLM_MODEL)"
     previous_model_id="$(snapshot_env_value LEMONADE_MODEL)"
     if [[ -z "$previous_model_id" && -n "$previous_gguf" ]]; then
         previous_model_id="extra.${previous_gguf}"
@@ -442,6 +674,11 @@ restore_docker_llama_server_after_swap_failure() {
                 log "WARNING: previous runtime is healthy, but its restored LiteLLM route could not be proved."
                 return 1
             fi
+        fi
+        if [[ "$reconcile_pixel" == "true" && -n "$previous_llm_model" ]] \
+            && ! reconcile_ods_managed_pixel_model "$previous_llm_model"; then
+            log "WARNING: previous inference runtime is healthy, but the managed Pixel route could not be reconciled to ${previous_llm_model}."
+            return 1
         fi
         log "Rollback complete: llama-server is healthy with the previous active model config."
         return 0
@@ -532,20 +769,126 @@ read_env_value() {
     grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"\047\r'
 }
 
+resolve_env_file() {
+    local path="$1" link dir hops=0
+
+    # Preserve former in-place write behavior: a .env symlink must keep
+    # pointing at its target rather than being replaced by the temp file.
+    while [[ -L "$path" ]]; do
+        hops=$((hops + 1))
+        [[ "$hops" -le 40 ]] || return 1
+        dir="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+        link="$(readlink "$path")" || return 1
+        case "$link" in
+            /*) path="$link" ;;
+            [A-Za-z]:/*|[A-Za-z]:\\*)
+                command -v cygpath >/dev/null 2>&1 || return 1
+                path="$(cygpath -u "$link")" || return 1
+                ;;
+            *) path="$dir/$link" ;;
+        esac
+    done
+
+    dir="$(cd -P "$(dirname "$path")" && pwd)" || return 1
+    printf '%s/%s\n' "$dir" "$(basename "$path")"
+}
+
+copy_env_permissions() {
+    local source="$1" target="$2" source_windows target_windows
+
+    # Git Bash replacement uses the source file ACL. Copy the protected NTFS
+    # DACL to the still-empty temp file before it receives .env contents.
+    case "$(uname -s 2>/dev/null || true)" in
+        MINGW*|MSYS*|CYGWIN*)
+            command -v cygpath >/dev/null 2>&1 || return 1
+            command -v powershell.exe >/dev/null 2>&1 || return 1
+            source_windows="$(cygpath -aw "$source")" || return 1
+            target_windows="$(cygpath -aw "$target")" || return 1
+            if ! ODS_ENV_ACL_SOURCE="$source_windows" ODS_ENV_ACL_TARGET="$target_windows" \
+                powershell.exe -NoLogo -NoProfile -NonInteractive -Command '
+$ErrorActionPreference = [System.Management.Automation.ActionPreference]::Stop
+$sourceAcl = [System.IO.File]::GetAccessControl($env:ODS_ENV_ACL_SOURCE, [System.Security.AccessControl.AccessControlSections]::Access)
+$sddl = $sourceAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+$targetAcl = [System.IO.File]::GetAccessControl($env:ODS_ENV_ACL_TARGET, [System.Security.AccessControl.AccessControlSections]::Access)
+$targetAcl.SetSecurityDescriptorSddlForm($sddl, [System.Security.AccessControl.AccessControlSections]::Access)
+[System.IO.File]::SetAccessControl($env:ODS_ENV_ACL_TARGET, $targetAcl)
+' >/dev/null; then
+                return 1
+            fi
+            return 0
+    esac
+
+    cp -p "$source" "$target"
+}
+
+replace_env_file() {
+    local source="$1" target="$2" backup source_windows target_windows backup_windows
+
+    case "$(uname -s 2>/dev/null || true)" in
+        MINGW*|MSYS*|CYGWIN*)
+            command -v cygpath >/dev/null 2>&1 || return 1
+            command -v powershell.exe >/dev/null 2>&1 || return 1
+            backup="$(umask 077; mktemp "${target}.bak.XXXXXX")" || return 1
+            if ! copy_env_permissions "$target" "$backup"; then
+                rm -f "$backup" 2>/dev/null || true
+                return 1
+            fi
+            if ! source_windows="$(cygpath -aw "$source")"; then
+                rm -f "$backup" 2>/dev/null || true
+                return 1
+            fi
+            if ! target_windows="$(cygpath -aw "$target")"; then
+                rm -f "$backup" 2>/dev/null || true
+                return 1
+            fi
+            if ! backup_windows="$(cygpath -aw "$backup")"; then
+                rm -f "$backup" 2>/dev/null || true
+                return 1
+            fi
+            if ! ODS_ENV_REPLACE_SOURCE="$source_windows" ODS_ENV_REPLACE_TARGET="$target_windows" \
+                ODS_ENV_REPLACE_BACKUP="$backup_windows" \
+                powershell.exe -NoLogo -NoProfile -NonInteractive -Command '
+$ErrorActionPreference = [System.Management.Automation.ActionPreference]::Stop
+[System.IO.File]::Replace($env:ODS_ENV_REPLACE_SOURCE, $env:ODS_ENV_REPLACE_TARGET, $env:ODS_ENV_REPLACE_BACKUP)
+' >/dev/null; then
+                rm -f "$backup" 2>/dev/null || true
+                return 1
+            fi
+            rm -f "$backup" || return 1
+            return 0
+    esac
+
+    mv -f "$source" "$target"
+}
+
 write_env_value() {
-    local key="$1" value="$2" tmp
-    [[ -f "$ENV_FILE" ]] || return 1
-    tmp="${ENV_FILE}.tmp.$$"
+    local key="$1" value="$2" tmp env_file
+    env_file="$(resolve_env_file "$ENV_FILE")" || return 1
+    [[ -f "$env_file" ]] || return 1
+    tmp="$(umask 077; mktemp "${env_file}.tmp.XXXXXX")" || return 1
+
+    # Keep the replacement in the same directory so mv is an atomic rename.
+    # Copy metadata before writing: .env can hold service keys and is
+    # deliberately owner-only on normal installs.
+    if ! copy_env_permissions "$env_file" "$tmp"; then
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    fi
+
     if ! awk -v k="$key" -v v="$value" '
         BEGIN { found = 0 }
         index($0, k "=") == 1 { print k "=" v; found = 1; next }
         { print }
         END { if (!found) print k "=" v }
-    ' "$ENV_FILE" > "$tmp"; then
-        rm -f "$tmp"
+    ' "$env_file" > "$tmp"; then
+        rm -f "$tmp" 2>/dev/null || true
         return 1
     fi
-    cat "$tmp" > "$ENV_FILE" && rm -f "$tmp"
+
+    if ! replace_env_file "$tmp" "$env_file"; then
+        rm -f "$tmp" 2>/dev/null || true
+        return 1
+    fi
 }
 
 full_model_env_matches() {
@@ -811,7 +1154,7 @@ restart_windows_lemonade_with_full_model() {
 
     log "Restarting native Windows Lemonade with ${target_label}: ${target_gguf}"
     local ps_output model_id ps_rc restart_timeout ps_output_file
-    local -a ps_env_cmd ps_timeout_prefix
+    local -a ps_env_cmd
     restart_timeout="${ODS_LEMONADE_RESTART_PS_TIMEOUT:-180}"
     case "$restart_timeout" in ''|*[!0-9]*|0) restart_timeout=180 ;; esac
     mkdir -p "$INSTALL_DIR/logs" 2>/dev/null || true
@@ -829,11 +1172,10 @@ restart_windows_lemonade_with_full_model() {
         "ODS_WIN_LEMONADE_TASK=ODSLemonadeRuntime"
         "ODS_WIN_GGUF_FILE=$target_gguf"
     )
-    ps_timeout_prefix=()
     if command -v timeout >/dev/null 2>&1; then
-        ps_timeout_prefix=(timeout --foreground --kill-after=5s "${restart_timeout}s")
+        ps_env_cmd+=(timeout --foreground --kill-after=5s "${restart_timeout}s")
     fi
-    if "${ps_env_cmd[@]}" "${ps_timeout_prefix[@]}" \
+    if "${ps_env_cmd[@]}" \
         "$ps_cmd" -NoProfile -ExecutionPolicy Bypass -Command '
         $ErrorActionPreference = "Stop"
 
@@ -1138,6 +1480,7 @@ restart_windows_native_llama_server_with_full_model() {
     ODS_WIN_BIND_ADDR="$bind_addr" \
     ODS_WIN_LLAMA_PORT="$llama_port" \
     ODS_WIN_CTX_SIZE="$ctx_size" \
+    ODS_WIN_GPU_LAYERS="$(read_env_value N_GPU_LAYERS)" \
     ODS_WIN_REASONING_FORMAT="$reasoning_fmt" \
     ODS_WIN_FLASH_ATTN="$(read_env_value LLAMA_ARG_FLASH_ATTN)" \
     ODS_WIN_CACHE_TYPE_K="$(read_env_value LLAMA_ARG_CACHE_TYPE_K)" \
@@ -1196,11 +1539,13 @@ restart_windows_native_llama_server_with_full_model() {
         function Start-ODSLlama {
             param([string]$ModelPath)
 
+            $gpuLayers = $env:ODS_WIN_GPU_LAYERS
+            if (-not $gpuLayers) { $gpuLayers = "auto" }
             $args = @(
                 "--model", $ModelPath,
                 "--host", $env:ODS_WIN_BIND_ADDR,
                 "--port", $env:ODS_WIN_LLAMA_PORT,
-                "--n-gpu-layers", "999",
+                "--n-gpu-layers", $gpuLayers,
                 "--ctx-size", $env:ODS_WIN_CTX_SIZE,
                 "--reasoning-format", $env:ODS_WIN_REASONING_FORMAT,
                 "--metrics"
@@ -1267,24 +1612,40 @@ restart_windows_native_llama_server_with_full_model() {
     return 0
 }
 
+yaml_double_quoted_scalar_content() {
+    local value="$1"
+    case "$value" in
+        *$'\n'*|*$'\r'*) return 1 ;;
+    esac
+    printf '%s' "$value" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+sed_replacement_escape() {
+    printf '%s' "$1" | sed 's/[\\&|]/\\&/g'
+}
+
 patch_hermes_yaml_with_sed() {
     local path="$1" model="$2" context_length="$3" base_url="${4:-}" request_timeout_seconds="${5:-180}"
     [[ -f "$path" ]] || return 1
+    [[ "$context_length" =~ ^[0-9]+$ ]] || return 1
+    [[ "$request_timeout_seconds" =~ ^[0-9]+$ ]] || return 1
 
-    local model_sed base_url_sed
-    model_sed="$(printf '%s' "$model" | sed 's/[\\&|]/\\&/g')"
-    base_url_sed="$(printf '%s' "$base_url" | sed 's/[\\&|]/\\&/g')"
+    local model_yaml base_url_yaml model_sed base_url_sed
+    model_yaml="$(yaml_double_quoted_scalar_content "$model")" || return 1
+    base_url_yaml="$(yaml_double_quoted_scalar_content "$base_url")" || return 1
+    model_sed="$(sed_replacement_escape "$model_yaml")" || return 1
+    base_url_sed="$(sed_replacement_escape "$base_url_yaml")" || return 1
 
     local sed_args=(
-        -e "s|^  default: \".*\"[[:space:]]*$|  default: \"${model_sed}\"|"
+        -e "s|^  default: .*[[:space:]]*$|  default: \"${model_sed}\"|"
         -e "s|^  context_length: .*|  context_length: ${context_length}|"
         -e "s|^    context_length: .*|    context_length: ${context_length}|"
     )
-    if [[ "$request_timeout_seconds" =~ ^[0-9]+$ && "$request_timeout_seconds" != "180" ]]; then
+    if [[ "$request_timeout_seconds" != "180" ]]; then
         sed_args+=(-e "s|^    request_timeout_seconds: 180[[:space:]]*$|    request_timeout_seconds: ${request_timeout_seconds}|")
     fi
     if [[ -n "$base_url" ]]; then
-        sed_args+=(-e "s|^  base_url: \".*\"[[:space:]]*$|  base_url: \"${base_url_sed}\"|")
+        sed_args+=(-e "s|^  base_url: .*[[:space:]]*$|  base_url: \"${base_url_sed}\"|")
     fi
 
     if sed -i.bak \
@@ -1296,9 +1657,48 @@ patch_hermes_yaml_with_sed() {
         return 1
     fi
 
-    grep -Fq "  default: \"${model}\"" "$path" \
+    grep -Fq "  default: \"${model_yaml}\"" "$path" \
         && grep -Fq "  context_length: ${context_length}" "$path" \
-        && { [[ -z "$base_url" ]] || grep -Fq "  base_url: \"${base_url}\"" "$path"; }
+        && { [[ -z "$base_url" ]] || grep -Fq "  base_url: \"${base_url_yaml}\"" "$path"; }
+}
+
+patch_hermes_yaml_in_container() {
+    local model="$1" context_length="$2" base_url="${3:-}" request_timeout_seconds="${4:-180}"
+    local normalize_compression="${5:-false}"
+
+    [[ -n "${DOCKER_CMD:-}" ]] || return 1
+    [[ "$context_length" =~ ^[0-9]+$ ]] || return 1
+    [[ "$request_timeout_seconds" =~ ^[0-9]+$ ]] || return 1
+    [[ "$normalize_compression" == "true" || "$normalize_compression" == "false" ]] || return 1
+    local model_yaml base_url_yaml model_sed base_url_sed
+    model_yaml="$(yaml_double_quoted_scalar_content "$model")" || return 1
+    base_url_yaml="$(yaml_double_quoted_scalar_content "$base_url")" || return 1
+    model_sed="$(sed_replacement_escape "$model_yaml")" || return 1
+    base_url_sed="$(sed_replacement_escape "$base_url_yaml")" || return 1
+
+    local sed_args=(
+        -e "s|^  default: .*[[:space:]]*$|  default: \"${model_sed}\"|"
+        -e "s|^  context_length: .*|  context_length: ${context_length}|"
+        -e "s|^    context_length: .*|    context_length: ${context_length}|"
+    )
+    if [[ -n "$base_url" ]]; then
+        sed_args+=(-e "s|^  base_url: .*[[:space:]]*$|  base_url: \"${base_url_sed}\"|")
+    fi
+    if [[ "$request_timeout_seconds" != "180" ]]; then
+        sed_args+=(-e "s|^    request_timeout_seconds: 180[[:space:]]*$|    request_timeout_seconds: ${request_timeout_seconds}|")
+    fi
+    if [[ "$normalize_compression" == "true" ]]; then
+        sed_args+=(
+            -e 's|^  enabled: .*|  enabled: true|'
+            -e 's|^  threshold: .*|  threshold: 0.75|'
+            -e 's|^  target_ratio: .*|  target_ratio: 0.50|'
+            -e 's|^  protect_last_n: .*|  protect_last_n: 40|'
+        )
+    fi
+
+    $DOCKER_CMD exec ods-hermes sed -i \
+        "${sed_args[@]}" \
+        /opt/data/config.yaml
 }
 
 patch_hermes_model_after_swap() {
@@ -1343,24 +1743,14 @@ patch_hermes_model_after_swap() {
     fi
 
     if [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-hermes --format '{{.Names}}' 2>/dev/null | grep -q ods-hermes; then
-        local live_patch new_model_sed hermes_base_url_sed
-        new_model_sed="$(printf '%s' "$new_model" | sed 's/[\\&|]/\\&/g')"
-        hermes_base_url_sed="$(printf '%s' "$hermes_base_url" | sed 's/[\\&|]/\\&/g')"
-        live_patch="sed -i -e 's|^  default: \".*\"[[:space:]]*$|  default: \"${new_model_sed}\"|' -e 's|^  context_length: .*|  context_length: ${FULL_MAX_CONTEXT}|' -e 's|^    context_length: .*|    context_length: ${FULL_MAX_CONTEXT}|'"
-        if [[ -n "$hermes_base_url" ]]; then
-            live_patch="${live_patch} -e 's|^  base_url: \".*\"|  base_url: \"${hermes_base_url_sed}\"|'"
-        fi
-        if [[ "$hermes_request_timeout" != "180" ]]; then
-            live_patch="${live_patch} -e 's|^    request_timeout_seconds: 180[[:space:]]*$|    request_timeout_seconds: ${hermes_request_timeout}|'"
-        fi
-        live_patch="${live_patch} /opt/data/config.yaml"
-        $DOCKER_CMD exec ods-hermes sh -c \
-            "$live_patch" 2>&1 || {
+        patch_hermes_yaml_in_container \
+            "$new_model" "$FULL_MAX_CONTEXT" "$hermes_base_url" "$hermes_request_timeout" false \
+            2>&1 || {
                 log "ERROR: Could not patch Hermes live config after full-model swap."
                 return 1
             }
-        $DOCKER_CMD restart ods-hermes 2>&1 || {
-            log "ERROR: Could not restart Hermes after full-model swap."
+        compose_recreate_hermes 2>&1 || {
+            log "ERROR: Could not recreate Hermes after full-model swap."
             return 1
         }
     elif [[ "$live_host_patch_failed" == "true" ]]; then
@@ -1442,14 +1832,14 @@ refresh_windows_lemonade_litellm_after_swap() {
         log "ERROR: runtime config renderer is unavailable for Windows Lemonade"
         return 1
     fi
-    if ! "$renderer_py" "$renderer_script" \
+    if ! ODS_RENDER_LITELLM_KEY="$lemonade_api_key" \
+        "$renderer_py" "$renderer_script" \
         --surface litellm-lemonade \
         --ods-mode lemonade \
         --gpu-backend amd \
         --gguf-file "$FULL_GGUF_FILE" \
         --lemonade-model-id "$model_id" \
         --lemonade-api-base "$lemonade_api_base" \
-        --litellm-key "$lemonade_api_key" \
         --output-root "$INSTALL_DIR" \
         --write >/dev/null 2>&1; then
         log "ERROR: runtime config renderer failed for Windows Lemonade"
@@ -1652,8 +2042,8 @@ restart_windows_lemonade_dependents_after_rollback() {
         $DOCKER_CMD restart ods-litellm 2>&1 || dependents_ok=false
     fi
     if [[ "$WINDOWS_LEMONADE_HERMES_PRESENT" == "true" ]]; then
-        log "Restarting Hermes with its restored config..."
-        $DOCKER_CMD restart ods-hermes 2>&1 || dependents_ok=false
+        log "Recreating Hermes with its restored config..."
+        compose_recreate_hermes 2>&1 || dependents_ok=false
     fi
     if [[ "$WINDOWS_LEMONADE_OPENCLAW_PRESENT" == "true" ]]; then
         log "Recreating OpenClaw with the restored model environment..."
@@ -1669,8 +2059,10 @@ snapshot_env_value() {
 }
 
 rollback_windows_lemonade_swap() {
-    local previous_gguf previous_model_id rollback_ok=true inference_restored=false route_verified=false
+    local reconcile_pixel="${1:-false}"
+    local previous_gguf previous_llm_model previous_model_id rollback_ok=true inference_restored=false route_verified=false
     previous_gguf="$(snapshot_env_value GGUF_FILE)"
+    previous_llm_model="$(snapshot_env_value LLM_MODEL)"
     previous_model_id="$(snapshot_env_value LEMONADE_MODEL)"
     [[ -n "$previous_gguf" ]] || previous_gguf="$BOOTSTRAP_GGUF_FILE"
 
@@ -1695,6 +2087,10 @@ rollback_windows_lemonade_swap() {
     else
         rollback_ok=false
     fi
+    if [[ "$reconcile_pixel" == "true" && -n "$previous_llm_model" ]] \
+        && ! reconcile_ods_managed_pixel_model "$previous_llm_model"; then
+        rollback_ok=false
+    fi
 
     if [[ "$rollback_ok" == "true" && "$route_verified" == "true" ]]; then
         log "Rollback verified: the previous model completed through the restored downstream route."
@@ -1707,10 +2103,11 @@ rollback_windows_lemonade_swap() {
 
 windows_lemonade_swap_failed() {
     WINDOWS_LEMONADE_SWAP_FAILURE="$1"
+    local reconcile_pixel="${2:-false}"
     WINDOWS_LEMONADE_ROLLBACK_VERIFIED=false
     log "Windows Lemonade full-model activation failed: ${WINDOWS_LEMONADE_SWAP_FAILURE}"
     log "Restoring previous active model config after Windows Lemonade swap timeout or post-swap failure..."
-    if rollback_windows_lemonade_swap; then
+    if rollback_windows_lemonade_swap "$reconcile_pixel"; then
         WINDOWS_LEMONADE_ROLLBACK_VERIFIED=true
     fi
     return 1
@@ -2211,6 +2608,11 @@ elif [[ -n "$DOCKER_CMD" ]]; then
 fi
 
 if [[ "$_windows_lemonade_swap_applies" == "true" || "$_windows_native_llama_swap_applies" == "true" || "$_docker_llama_swap_applies" == "true" ]]; then
+    acquire_model_router_swap_gate \
+        || fail "Could not safely drain model traffic before full-model activation."
+fi
+
+if [[ "$_windows_lemonade_swap_applies" == "true" || "$_windows_native_llama_swap_applies" == "true" || "$_docker_llama_swap_applies" == "true" ]]; then
     log "Snapshotting active model config before full-model swap..."
     _include_windows_lemonade_snapshot=false
     if [[ "$_windows_lemonade_swap_applies" == "true" ]]; then
@@ -2284,6 +2686,20 @@ if [[ "$_windows_lemonade_swap_applies" == "true" ]]; then
 
     if activate_windows_lemonade_full_model; then
         HOT_SWAP_VERIFIED=true
+        # Pixel is a host-side OpenClaw deployment rather than the legacy
+        # ods-openclaw container. Reconcile its reviewed configuration while
+        # the bootstrap model and the active-config snapshot are still intact,
+        # so a failure can restore both the agent route and inference runtime.
+        if ! reconcile_ods_managed_pixel_model; then
+            _rollback_status="Previous active model config restore was attempted; inspect the logs before retrying."
+            windows_lemonade_swap_failed "the managed Pixel route could not be reconciled" true
+            if [[ "$WINDOWS_LEMONADE_ROLLBACK_VERIFIED" == "true" ]]; then
+                _rollback_status="Previous active model config and Pixel route restored; re-run to retry the full-model swap."
+            fi
+            write_status "failed" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 \
+                "Full model served, but ODS could not reconcile the managed Pixel route. ${_rollback_status}"
+            exit 1
+        fi
         discard_active_model_config_snapshot
         discard_bootstrap_model_backup_after_windows_swap
     else
@@ -2658,14 +3074,14 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
             fi
             if [[ ! -f "$_renderer_script" ]] \
                 || ! command -v "$_renderer_py" >/dev/null 2>&1 \
-                || ! "$_renderer_py" "$_renderer_script" \
+                || ! ODS_RENDER_LITELLM_KEY="$LITELLM_LEMONADE_API_KEY" \
+                    "$_renderer_py" "$_renderer_script" \
                     --surface litellm-lemonade \
                     --ods-mode lemonade \
                     --gpu-backend amd \
                     --gguf-file "$FULL_GGUF_FILE" \
                     --lemonade-model-id "$_lemonade_model_id" \
                     --lemonade-api-base "$_lemonade_api_base" \
-                    --litellm-key "$LITELLM_LEMONADE_API_KEY" \
                     --output-root "$INSTALL_DIR" \
                     --write >/dev/null 2>&1; then
                 log "ERROR: runtime config renderer failed for the Lemonade route"
@@ -2719,6 +3135,19 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
             unset _direct_model _direct_port
         fi
         HOT_SWAP_VERIFIED=true
+        # Pixel is host-side OpenClaw, so it does not inherit the promoted
+        # model from a container recreate. Reconcile it before discarding the
+        # bootstrap snapshot or deleting the bootstrap GGUF; otherwise Pixel
+        # keeps requesting a model that no longer exists.
+        if ! reconcile_ods_managed_pixel_model; then
+            _rollback_status="Previous active model config restore was attempted; inspect the logs before retrying."
+            if restore_docker_llama_server_after_swap_failure "$_health_url" true; then
+                _rollback_status="Previous active model config and Pixel route restored; re-run to retry the full-model swap."
+            fi
+            write_status "failed" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 \
+                "Full model served, but ODS could not reconcile the managed Pixel route. ${_rollback_status}"
+            exit 1
+        fi
         discard_active_model_config_snapshot
         # Recreate OpenClaw so inject-token.js picks up the new GGUF_FILE/LLM_MODEL
         # from .env. A restart alone won't work — env vars are baked in at container
@@ -2812,27 +3241,18 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
 
         if $DOCKER_CMD ps --filter name=ods-hermes --format '{{.Names}}' 2>/dev/null | grep -q ods-hermes; then
             # Live config inside the running container (owned by container UID).
-            _hermes_new_model_sed="$(printf '%s' "$_hermes_new_model" | sed 's/[\\&|]/\\&/g')"
-            _hermes_base_url_sed="$(printf '%s' "$_hermes_base_url" | sed 's/[\\&|]/\\&/g')"
-            _hermes_live_patch="sed -i -e 's|^  default: \".*\"[[:space:]]*$|  default: \"${_hermes_new_model_sed}\"|' -e 's|^  context_length: .*|  context_length: ${FULL_MAX_CONTEXT}|' -e 's|^    context_length: .*|    context_length: ${FULL_MAX_CONTEXT}|'"
-            if [[ -n "$_hermes_base_url" ]]; then
-                _hermes_live_patch="${_hermes_live_patch} -e 's|^  base_url: \".*\"|  base_url: \"${_hermes_base_url_sed}\"|'"
-            fi
-            if [[ "$_hermes_request_timeout" != "180" ]]; then
-                _hermes_live_patch="${_hermes_live_patch} -e 's|^    request_timeout_seconds: 180[[:space:]]*$|    request_timeout_seconds: ${_hermes_request_timeout}|'"
-            fi
-            _hermes_live_patch="${_hermes_live_patch} -e 's|^  enabled: .*|  enabled: true|' -e 's|^  threshold: .*|  threshold: 0.75|' -e 's|^  target_ratio: .*|  target_ratio: 0.50|' -e 's|^  protect_last_n: .*|  protect_last_n: 40|' /opt/data/config.yaml"
-            $DOCKER_CMD exec ods-hermes sh -c \
-                "$_hermes_live_patch" 2>&1 || \
+            patch_hermes_yaml_in_container \
+                "$_hermes_new_model" "$FULL_MAX_CONTEXT" "$_hermes_base_url" "$_hermes_request_timeout" true \
+                2>&1 || \
                 log "WARNING: Could not patch Hermes /opt/data/config.yaml (non-fatal — operator can hand-edit and 'docker restart ods-hermes')"
-            log "Restarting Hermes to pick up model change..."
-            $DOCKER_CMD restart ods-hermes 2>&1 || log "WARNING: Hermes restart failed (non-fatal — hand-restart with 'docker restart ods-hermes')"
+            log "Recreating Hermes to pick up model change..."
+            compose_recreate_hermes 2>&1 || log "WARNING: Hermes recreate failed (non-fatal — hand-recreate with 'docker compose up -d --force-recreate --no-deps hermes')"
 
             # Pre-warm the freshly-swapped LLM + Hermes's 14K-token system prompt.
             #
             # Two latency hits if we skip this:
             #   1. llama-server / Lemonade loads the full model into VRAM on first
-            #      request (`--n-gpu-layers 999` is lazy). PR #1192 already warms
+            #      request. PR #1192 already warms
             #      this at install time, but that warm-up was against the
             #      bootstrap model — after the swap, the slot is cold again.
             #   2. Hermes's runtime config bakes a 14K-token system prompt
@@ -2969,13 +3389,15 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
             _cache_type_k=$(grep '^LLAMA_ARG_CACHE_TYPE_K=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
             _cache_type_v=$(grep '^LLAMA_ARG_CACHE_TYPE_V=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
             _n_cpu_moe=$(grep '^LLAMA_ARG_N_CPU_MOE=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
+            _gpu_layers=$(grep '^N_GPU_LAYERS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
+            [[ -z "$_gpu_layers" ]] && _gpu_layers="auto"
             _spec_type=$(grep '^LLAMA_ARG_SPEC_TYPE=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
             _spec_draft_n_max=$(grep '^LLAMA_ARG_SPEC_DRAFT_N_MAX=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
             _llama_args=(
                 --host "$_bind" --port "$_native_port"
                 --model "$_model_path"
                 --ctx-size "$_ctx_size"
-                --n-gpu-layers 999
+                --n-gpu-layers "$_gpu_layers"
                 --reasoning-format "$_reasoning_fmt"
                 --metrics
             )
@@ -3023,7 +3445,7 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
                             --host "$_bind" --port "$_native_port" \
                             --model "$_old_model_path" \
                             --ctx-size "$_ctx_size" \
-                            --n-gpu-layers 999 \
+                            --n-gpu-layers "$_gpu_layers" \
                             --reasoning-format "${_reasoning_fmt:-none}" \
                             --metrics
                     ) > "$LLAMA_SERVER_LOG" 2>&1 &

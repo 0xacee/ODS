@@ -108,6 +108,27 @@ else
     fail "Valid .env should yield exit 0, got $r"
 fi
 
+# N_GPU_LAYERS accepts llama.cpp's symbolic policies and explicit non-negative
+# counts, but rejects malformed values before they reach any launcher.
+for gpu_layers in auto all 0 17 999; do
+    cp "$TMP_DIR/valid.env" "$TMP_DIR/gpu-layers-valid.env"
+    printf 'N_GPU_LAYERS=%s\n' "$gpu_layers" >> "$TMP_DIR/gpu-layers-valid.env"
+    "$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" \
+        "$TMP_DIR/gpu-layers-valid.env" "$ROOT_DIR/.env.schema.json" >/dev/null 2>&1 \
+        || fail "N_GPU_LAYERS=$gpu_layers should validate"
+done
+pass "N_GPU_LAYERS accepts auto, all, and non-negative layer counts"
+
+for gpu_layers in -1 1.5 AUTO automatic '999;exit'; do
+    cp "$TMP_DIR/valid.env" "$TMP_DIR/gpu-layers-invalid.env"
+    printf 'N_GPU_LAYERS=%s\n' "$gpu_layers" >> "$TMP_DIR/gpu-layers-invalid.env"
+    if "$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" \
+        "$TMP_DIR/gpu-layers-invalid.env" "$ROOT_DIR/.env.schema.json" >/dev/null 2>&1; then
+        fail "N_GPU_LAYERS=$gpu_layers should be rejected"
+    fi
+done
+pass "N_GPU_LAYERS rejects malformed and negative values"
+
 # 5. .env missing one required key → exit 2
 REAL_JQ="$(command -v jq)"
 CRLF_JQ_DIR="$TMP_DIR/crlf-jq"
@@ -480,6 +501,92 @@ if [[ $r -eq 0 ]]; then
 else
     fail "Brave Search keys should validate, got exit $r: $(echo "$out" | grep -i brave | tr '
 ' ' ')"
+fi
+
+# 22. Keys the Linux installer itself writes for Intel Arc (GPU_BACKEND=sycl,
+# installers/phases/06-directories.sh INTEL_ENV block) must be declared, or
+# `ods config validate` reports them as unknown on every Arc install.
+cp "$TMP_DIR/valid.env" "$TMP_DIR/arc.env"
+cat >> "$TMP_DIR/arc.env" <<'EOF'
+ONEAPI_DEVICE_SELECTOR=level_zero:gpu
+SYCL_CACHE_PERSISTENT=1
+ZES_ENABLE_SYSMAN=1
+EOF
+set +e
+out=$("$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" "$TMP_DIR/arc.env" "$ROOT_DIR/.env.schema.json" 2>&1)
+r=$?
+set -e
+if [[ $r -eq 0 ]]; then
+    pass "Installer-written Intel Arc keys validate cleanly"
+else
+    fail "Intel Arc keys should validate, got exit $r: $(echo "$out" | grep -iE 'ONEAPI|SYCL|ZES' | tr '\n' ' ')"
+fi
+
+# 23. Inline-comment rule must match Docker Compose (checked with `docker compose
+# config`): a '#' without a leading space is part of the value, a " #..." note
+# after a closing quote is not. Uses a small schema so both directions show:
+# a valid value must not be truncated into a false error, and an invalid value
+# must not be truncated into a false pass.
+cat > "$TMP_DIR/comment-schema.json" <<'EOF'
+{
+  "type": "object",
+  "required": [],
+  "properties": {
+    "SECRET_WITH_HASH": {"type": "string", "minLength": 10},
+    "QUOTED_THEN_NOTE": {"type": "string", "minLength": 10},
+    "PLAIN_THEN_NOTE":  {"type": "string", "enum": ["value"]},
+    "BACKEND":          {"type": "string", "enum": ["nvidia", "amd"]}
+  }
+}
+EOF
+cat > "$TMP_DIR/comment-ok.env" <<'EOF'
+SECRET_WITH_HASH=abcdefgh#ijklmnop
+QUOTED_THEN_NOTE="sk-abcdefghij-valid" # rotate me
+PLAIN_THEN_NOTE=value # a note
+BACKEND=nvidia   # picked by installer
+EOF
+set +e
+out=$("$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" "$TMP_DIR/comment-ok.env" "$TMP_DIR/comment-schema.json" 2>&1)
+r=$?
+set -e
+if [[ $r -eq 0 ]]; then
+    pass "Inline-comment rule matches Compose (no false errors on '#' inside values or notes after quotes)"
+else
+    fail "Compose-valid values were rejected (exit $r): $(echo "$out" | grep -E 'SECRET_WITH_HASH|QUOTED_THEN_NOTE|PLAIN_THEN_NOTE|BACKEND' | head -3 | tr '\n' ' ')"
+fi
+
+cat > "$TMP_DIR/comment-bad.env" <<'EOF'
+BACKEND=nvidia#x
+EOF
+set +e
+out=$("$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" "$TMP_DIR/comment-bad.env" "$TMP_DIR/comment-schema.json" 2>&1)
+r=$?
+set -e
+if [[ $r -ne 0 ]] && echo "$out" | grep -q "BACKEND"; then
+    pass "A '#' glued to a value is validated as data (BACKEND=nvidia#x fails the enum, as it would in Compose)"
+else
+    fail "BACKEND=nvidia#x should fail the enum check (Compose passes 'nvidia#x' to the container), got exit $r"
+fi
+
+# 24. Keys phase 09 appends to .env for an air-gapped install
+# (installers/phases/09-offline.sh, `--offline`) must be declared, or every
+# offline install ends up with a .env that `ods config validate` rejects.
+cp "$TMP_DIR/valid.env" "$TMP_DIR/offline.env"
+cat >> "$TMP_DIR/offline.env" <<'EOF'
+OFFLINE_MODE=true
+DISABLE_TELEMETRY=true
+DISABLE_UPDATE_CHECK=true
+WEB_SEARCH_ENABLED=false
+LOCAL_RAG_ENABLED=true
+EOF
+set +e
+out=$("$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" "$TMP_DIR/offline.env" "$ROOT_DIR/.env.schema.json" 2>&1)
+r=$?
+set -e
+if [[ $r -eq 0 ]]; then
+    pass "Installer-written offline-mode keys validate cleanly"
+else
+    fail "Offline-mode keys should validate, got exit $r: $(echo "$out" | grep -iE 'OFFLINE_MODE|TELEMETRY|UPDATE_CHECK|WEB_SEARCH|LOCAL_RAG' | tr '\n' ' ')"
 fi
 
 echo ""

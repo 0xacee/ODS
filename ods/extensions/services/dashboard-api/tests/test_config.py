@@ -33,6 +33,25 @@ features:
 """
 
 
+def test_bundled_llama_server_is_discoverable_on_cpu_fallback():
+    manifest_path = Path(__file__).resolve().parents[2] / "llama-server" / "manifest.yaml"
+    manifest = config.yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+
+    assert "cpu" in manifest["service"]["gpu_backends"]
+    assert all("cpu" in feature["gpu_backends"] for feature in manifest["features"])
+
+
+def test_manifest_loader_rejects_pathological_nesting(tmp_path):
+    nested = "value: leaf\n"
+    for _ in range(config.MAX_MANIFEST_DEPTH + 2):
+        nested = "value:\n  " + nested.replace("\n", "\n  ")
+    manifest = tmp_path / "deep.yaml"
+    manifest.write_text(nested, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="nesting exceeds"):
+        _read_manifest_file(manifest)
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -66,6 +85,20 @@ def test_live_env_value_preserves_explicit_empty_value(monkeypatch, tmp_path):
     monkeypatch.setenv("LEMONADE_MODEL", "stale-process-model")
 
     assert config.read_live_env_value("LEMONADE_MODEL", "fallback") == ""
+
+
+def test_live_env_value_strips_one_pair_and_preserves_unmatched_quotes(monkeypatch, tmp_path):
+    (tmp_path / ".env").write_text(
+        "PAIRED='model-v2'\n"
+        "UNMATCHED=model-v2'\n"
+        "REPEATED=''model-v2''\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "INSTALL_DIR", str(tmp_path))
+
+    assert config.read_live_env_value("PAIRED") == "model-v2"
+    assert config.read_live_env_value("UNMATCHED") == "model-v2'"
+    assert config.read_live_env_value("REPEATED") == "'model-v2'"
 
 
 class TestReadManifestFile:
@@ -126,9 +159,24 @@ class TestHostAgentResolution:
     def test_resolve_agent_host_uses_gateway_inside_container(self, monkeypatch):
         monkeypatch.delenv("ODS_AGENT_HOST", raising=False)
         monkeypatch.setattr(config, "_running_inside_container", lambda: True)
+        monkeypatch.setattr(config, "_running_under_wsl", lambda: False)
         monkeypatch.setattr(config, "_detect_container_default_gateway", lambda: "172.18.0.1")
 
         assert config._resolve_agent_host() == "172.18.0.1"
+
+    def test_resolve_agent_host_uses_desktop_route_under_wsl(self, monkeypatch):
+        monkeypatch.delenv("ODS_AGENT_HOST", raising=False)
+        monkeypatch.setattr(config, "_running_inside_container", lambda: True)
+        monkeypatch.setattr(config, "_running_under_wsl", lambda: True)
+        monkeypatch.setattr(
+            config,
+            "_detect_container_default_gateway",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("WSL must not select Docker Desktop's compose gateway")
+            ),
+        )
+
+        assert config._resolve_agent_host() == "host.docker.internal"
 
     def test_resolve_agent_host_falls_back_outside_container(self, monkeypatch):
         monkeypatch.delenv("ODS_AGENT_HOST", raising=False)
@@ -139,6 +187,26 @@ class TestHostAgentResolution:
 
 
 class TestHostNativeLlmResolution:
+
+    @pytest.mark.parametrize("url_key", ["LEMONADE_CONTAINER_BASE_URL", "LEMONADE_BASE_URL"])
+    def test_wsl_cpu_surface_probes_selected_windows_lemonade(self, url_key):
+        services = {"llama-server": {"host": "llama-server", "port": 8080}}
+        _apply_host_native_llm_service_override(services, "cpu", {
+            "LLM_BACKEND": "lemonade",
+            "AMD_INFERENCE_LOCATION": "host",
+            url_key: "http://192.168.50.1:8181",
+            "OLLAMA_URL": "http://litellm:4000",
+        })
+        assert services["llama-server"] == {"host": "192.168.50.1", "port": 8181}
+
+    def test_container_lemonade_does_not_use_host_endpoint(self):
+        services = {"llama-server": {"host": "llama-server", "port": 8080}}
+        _apply_host_native_llm_service_override(services, "cpu", {
+            "LLM_BACKEND": "lemonade",
+            "AMD_INFERENCE_LOCATION": "container",
+            "LEMONADE_CONTAINER_BASE_URL": "http://192.168.50.1:8181",
+        })
+        assert services["llama-server"] == {"host": "llama-server", "port": 8080}
 
     def test_routes_windows_amd_host_runtime_to_ollama_url(self):
         services = {"llama-server": {"host": "llama-server", "port": 8080}}

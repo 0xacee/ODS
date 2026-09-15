@@ -18,8 +18,9 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from env_values import parse_env_value, strip_matching_quotes
 from gguf_inspector import inspect_gguf
-from context_policy import HERMES_MIN_CONTEXT, HERMES_TARGET_CONTEXT
+from context_policy import HERMES_MIN_CONTEXT, HERMES_TARGET_CONTEXT, PIXEL_MIN_CONTEXT
 from helpers import (
     get_model_performance_samples,
     get_recorded_model_performance,
@@ -133,7 +134,7 @@ def _system_ram_gb() -> int:
 def read_env_value(key: str, install_dir: str | Path) -> str:
     value = os.environ.get(key, "")
     if value:
-        return value.strip().strip("\"'")
+        return strip_matching_quotes(value)
     return read_env_file_value(key, install_dir)
 
 
@@ -142,7 +143,7 @@ def read_env_file_value(key: str, install_dir: str | Path) -> str:
     try:
         for line in env_path.read_text(encoding="utf-8").splitlines():
             if line.startswith(f"{key}="):
-                return line.split("=", 1)[1].strip().strip("\"'")
+                return parse_env_value(line.split("=", 1)[1])
     except OSError:
         pass
     return ""
@@ -154,7 +155,7 @@ def read_persisted_env_value(key: str, install_dir: str | Path) -> str:
     file_value = read_env_file_value(key, install_dir)
     if file_value or env_path.exists():
         return file_value
-    return os.environ.get(key, "").strip().strip("\"'")
+    return strip_matching_quotes(os.environ.get(key, ""))
 
 
 def read_context_length(install_dir: str | Path, default: int = 32768) -> int:
@@ -403,20 +404,21 @@ def _app_compatibility_payload_key(key: Any) -> str:
     if not raw:
         return ""
     aliases = {
-        "agent_viability": "agentViability",
-        "hermes_talk": "hermesTalk",
-        "openai_chat": "openaiChat",
+        "agent-viability": "agentViability",
+        "hermes-talk": "hermesTalk",
+        "openai-chat": "openaiChat",
+        "pixel-agent": "pixelAgent",
     }
     if raw in aliases:
         return aliases[raw]
-    parts = [part for part in raw.split("_") if part]
+    parts = [part for part in raw.split("-") if part]
     if not parts:
         return ""
     return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
 
 
 def _app_compatibility_default_label(key: Any) -> str:
-    parts = [part for part in normalize_key(str(key or "")).split("_") if part]
+    parts = [part for part in normalize_key(str(key or "")).split("-") if part]
     if not parts:
         return "App compatibility untested"
     acronyms = {"api": "API", "llm": "LLM", "ui": "UI"}
@@ -457,6 +459,7 @@ def model_app_compatibility(
         "openaiChat": _app_compatibility_entry(raw.get("openai_chat"), "Direct chat untested", runtime_context),
         "hermesTalk": hermes_talk,
         "agentViability": _agent_viability_entry(raw.get("agent_viability"), hermes_talk, runtime_context),
+        "pixelAgent": _app_compatibility_entry(raw.get("pixel_agent"), "Pixel agent untested", runtime_context),
     }
     for raw_key, raw_value in raw.items():
         payload_key = _app_compatibility_payload_key(raw_key)
@@ -477,6 +480,11 @@ def model_app_compatibility(
         compatibility["agentViability"] = {
             "status": "not_agent_viable",
             "label": "Too slow for agents",
+            "reason": exact_speed_block["reason"],
+        }
+        compatibility["pixelAgent"] = {
+            "status": "not_agent_viable",
+            "label": "Too slow for Pixel",
             "reason": exact_speed_block["reason"],
         }
     return compatibility
@@ -1361,13 +1369,16 @@ def build_models_payload(gpu_info: Optional[GPUInfo], loaded_model: Optional[str
                 else 0
             )
         )
+        memory_model = {**model, **metadata}
         context_model = {
-            **model,
+            **memory_model,
             "max_context_length": max_context_length,
             "context_limit_known": context_limit_known,
         }
         vram_required = float(model["vram_required_gb"])
-        selector_required = _effective_required_memory_gb({**model, "context_length": actual_context}, runtime_profile)
+        selector_required = _effective_required_memory_gb(
+            {**memory_model, "context_length": actual_context}, runtime_profile
+        )
         if gpu_info:
             capacity_gb = _usable_model_memory_gb(gpu_info)
             fits_total = bool(_fits_declared_vram(selector_required, capacity_gb) or is_loaded)
@@ -1494,6 +1505,7 @@ def build_models_payload(gpu_info: Optional[GPUInfo], loaded_model: Optional[str
         "configuredModel": configured_model_id,
         "hermesMinimumContext": HERMES_MIN_CONTEXT,
         "hermesTargetContext": HERMES_TARGET_CONTEXT,
+        "pixelMinimumContext": PIXEL_MIN_CONTEXT,
         "recommendationPolicy": recommendation.get("selectionPolicy") or _DEFAULT_RECOMMENDATION_POLICY,
         "recommendationAlternatives": [
             _recommendation_alternative(model, gpu_info)

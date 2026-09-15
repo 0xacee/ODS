@@ -94,7 +94,10 @@ test_docker_running() {
     return 0
 }
 
-test_install() {
+# Install-directory checks only. Commands that read or edit local files
+# (config show / config edit) use this so they keep working while the Docker
+# runtime is down -- which is exactly when a user needs to look at .env.
+test_install_dir() {
     if [[ ! -d "$INSTALL_DIR" ]]; then
         ai_err "ODS not found at ${INSTALL_DIR}."
         ai "Invoke from inside the install dir (bash <install>/ods-macos.sh status), export ODS_HOME=<install>, or run the installer."
@@ -106,10 +109,18 @@ test_install() {
         ai_err "docker-compose.base.yml not found in ${INSTALL_DIR}"
         exit 1
     fi
+}
+
+# Install directory plus a reachable Docker runtime, for commands that talk
+# to compose.
+test_install() {
+    test_install_dir
     test_docker_running || exit 1
 }
 
 get_compose_flags() {
+    ensure_hermes_dashboard_session_token
+
     local flags_file="${INSTALL_DIR}/.compose-flags"
     if [[ -f "$flags_file" ]]; then
         cat "$flags_file"
@@ -191,14 +202,30 @@ read_ods_env() {
     if [[ ! -f "$env_file" ]]; then
         return
     fi
-    # Parse .env safely (no eval)
-    while IFS= read -r line; do
+    # Parse .env safely (no eval). Keep a last line that has no newline.
+    while IFS= read -r line || [[ -n "$line" ]]; do
         line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [[ "$line" =~ ^# ]] && continue
         [[ -z "$line" ]] && continue
         if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
             local key="${BASH_REMATCH[1]}"
             local val="${BASH_REMATCH[2]}"
+            # Apply Docker Compose's value grammar, mirrored from
+            # lib/safe-env.sh, before stripping quotes: trim surrounding
+            # whitespace (Compose trims leading space, so "KEY=  # x" becomes
+            # the literal "# x"), then for an unquoted value cut at the first
+            # " #", and for a quoted value drop a " #..." after the closing
+            # quote. "#" without a leading space and "#" inside quotes stay.
+            val="${val#"${val%%[![:space:]]*}"}"
+            val="${val%"${val##*[![:space:]]}"}"
+            case "$val" in
+                \"*) [[ "$val" =~ ^(\"(\\.|[^\"\\])*\")[[:space:]]+# ]] && val="${BASH_REMATCH[1]}" ;;
+                \'*) [[ "$val" =~ ^(\'[^\']*\')[[:space:]]+# ]] && val="${BASH_REMATCH[1]}" ;;
+                *)
+                    val="${val%% #*}"
+                    val="${val%"${val##*[![:space:]]}"}"
+                    ;;
+            esac
             # Strip exactly one matching pair of surrounding quotes. The old
             # sed removed a leading and a trailing quote independently (either
             # type), so KEY=abc" lost its trailing quote and "abc' was cut on
@@ -207,6 +234,11 @@ read_ods_env() {
             if [[ "$val" == '"'*'"' ]]; then
                 val="${val#\"}"
                 val="${val%\"}"
+                # Decode writer escapes without evaluating shell expansions.
+                # Single-quoted values below remain literal.
+                val="${val//\\\"/\"}"
+                val="${val//\\\$/\$}"
+                val="${val//\\\\/\\}"
             elif [[ "$val" == "'"*"'" ]]; then
                 val="${val#\'}"
                 val="${val%\'}"
@@ -396,8 +428,31 @@ upsert_env_value() {
     if grep -qE "^${key}=" "$env_file" 2>/dev/null; then
         sed -i '' "s|^${key}=.*|${key}=${value}|" "$env_file"
     else
+        # Appending after a last line that has no newline would join the new
+        # assignment onto that line and corrupt both keys.
+        if [[ -s "$env_file" && -n "$(tail -c 1 "$env_file")" ]]; then
+            printf '\n' >> "$env_file"
+        fi
         printf '%s=%s\n' "$key" "$value" >> "$env_file"
     fi
+}
+
+ensure_hermes_dashboard_session_token() {
+    local env_file="${INSTALL_DIR}/.env"
+    [[ -f "$env_file" ]] || return 0
+    [[ -n "$(read_env_value "$env_file" "HERMES_DASHBOARD_SESSION_TOKEN")" ]] && return 0
+
+    local token
+    if command -v openssl >/dev/null 2>&1; then
+        token="$(openssl rand -hex 32)"
+    else
+        token="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+    [[ "$token" =~ ^[0-9a-f]{64}$ ]] || {
+        ai_err "Could not generate HERMES_DASHBOARD_SESSION_TOKEN"
+        return 1
+    }
+    upsert_env_value "$env_file" "HERMES_DASHBOARD_SESSION_TOKEN" "$token"
 }
 
 proxy_is_enabled() {
@@ -588,6 +643,9 @@ start_native_llama() {
 
     local gguf_file="${ENV_GGUF_FILE:-Qwen3.5-9B-Q4_K_M.gguf}"
     local ctx_size="${ENV_CTX_SIZE:-65536}"
+    local gpu_layers="${ENV_N_GPU_LAYERS:-auto}"
+    gpu_layers="$(printf '%s' "$gpu_layers" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    gpu_layers="${gpu_layers:-auto}"
     local native_port="${ENV_ODS_NATIVE_LLAMA_PORT:-8080}"
     local bind_address="${ENV_BIND_ADDRESS:-127.0.0.1}"
     local probe_host
@@ -615,7 +673,7 @@ start_native_llama() {
         --host "$bind_address" --port "$native_port"
         --model "$model_path"
         --ctx-size "$ctx_size"
-        --n-gpu-layers 999
+        --n-gpu-layers "$gpu_layers"
         --reasoning-format "$reasoning_fmt"
         --metrics
     )
@@ -769,12 +827,18 @@ cmd_start() {
     elif [[ -n "$service" ]]; then
         ai "Starting ${service}..."
         # shellcheck disable=SC2086
-        docker compose $flags up -d "$service"
+        if ! docker compose $flags up -d "$service"; then
+            ai_err "Failed to start ${service}."
+            return 1
+        fi
         ai_ok "${service} started"
     else
         ai "Starting all services..."
         # shellcheck disable=SC2086
-        docker compose $flags up -d
+        if ! docker compose $flags up -d; then
+            ai_err "Failed to start ODS services."
+            return 1
+        fi
         ai_ok "All services started"
     fi
 
@@ -834,7 +898,10 @@ cmd_restart() {
     elif [[ -n "$service" ]]; then
         ai "Restarting ${service}..."
         # shellcheck disable=SC2086
-        docker compose $flags up -d "$service"
+        if ! docker compose $flags up -d --force-recreate --no-build --pull never "$service"; then
+            ai_err "Failed to restart ${service}."
+            return 1
+        fi
         ai_ok "${service} restarted"
     else
         # Restart native llama-server
@@ -846,7 +913,10 @@ cmd_restart() {
 
         ai "Restarting all services..."
         # shellcheck disable=SC2086
-        docker compose $flags up -d
+        if ! docker compose $flags up -d --force-recreate --no-build --pull never; then
+            ai_err "Failed to restart ODS services."
+            return 1
+        fi
         ai_ok "All services restarted"
     fi
 
@@ -889,7 +959,7 @@ cmd_logs() {
 }
 
 cmd_config_show() {
-    test_install
+    test_install_dir
 
     echo ""
     echo -e "  ${GRN}Configuration${NC}"
@@ -1047,7 +1117,7 @@ case "$COMMAND" in
         ACTION="${1:-show}"
         case "$ACTION" in
             edit)
-                test_install
+                test_install_dir
                 ${EDITOR:-nano} "${INSTALL_DIR}/.env"
                 ;;
             *)

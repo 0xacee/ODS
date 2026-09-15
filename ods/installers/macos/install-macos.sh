@@ -108,6 +108,8 @@ ENABLE_PERPLEXICA=false
 ENABLE_PRIVACY_SHIELD=false
 ENABLE_ODS_PROXY=false
 ENABLE_TAILSCALE=false
+ENABLE_SEARXNG=false
+ENABLE_WEB_SEARCH=false
 # Langfuse defaults OFF because its clickhouse + postgres + minio stack adds
 # ~500MB baseline memory. Enable via --langfuse, --all, or post-install
 # `ods enable langfuse`. --no-langfuse honored as explicit override so a
@@ -272,7 +274,7 @@ _macos_set_builtin_compose_state() {
 
 _macos_sync_builtin_compose_states() {
     _macos_set_builtin_compose_state litellm "$ENABLE_RECOMMENDED"
-    _macos_set_builtin_compose_state searxng "$ENABLE_RECOMMENDED"
+    _macos_set_builtin_compose_state searxng "$ENABLE_SEARXNG"
     _macos_set_builtin_compose_state token-spy "$ENABLE_RECOMMENDED"
     _macos_set_builtin_compose_state whisper "$ENABLE_VOICE"
     _macos_set_builtin_compose_state tts "$ENABLE_VOICE"
@@ -308,7 +310,7 @@ _macos_patch_hermes_persisted_config() {
         project_image="$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]')-dashboard-api:latest"
         hermes_image="$(docker inspect --format '{{.Config.Image}}' ods-hermes 2>/dev/null || true)"
         [[ -n "$hermes_image" ]] || hermes_image="$(read_env_value "${INSTALL_DIR}/.env" "HERMES_AGENT_IMAGE")"
-        [[ -n "$hermes_image" ]] || hermes_image="nousresearch/hermes-agent:v2026.5.16"
+        [[ -n "$hermes_image" ]] || hermes_image="nousresearch/hermes-agent:v2026.6.5"
 
         # The Hermes runtime image is not guaranteed to include PyYAML. Probe
         # candidates instead of treating a cached image as a usable migrator.
@@ -1520,6 +1522,14 @@ if ! $ENABLE_HERMES && ! $ENABLE_OPENCLAW; then
     ENABLE_APE=false
 fi
 
+# SearXNG backs Open WebUI web search, Perplexica, and agent web tools.
+if $ENABLE_RECOMMENDED || $ENABLE_PERPLEXICA || $ENABLE_HERMES || $ENABLE_OPENCLAW; then
+    ENABLE_SEARXNG=true
+else
+    ENABLE_SEARXNG=false
+fi
+ENABLE_WEB_SEARCH=$ENABLE_SEARXNG
+
 if $ENABLE_HERMES && ! $CLOUD_MODE; then
     if [[ "${MAX_CONTEXT:-0}" =~ ^[0-9]+$ ]] && (( MAX_CONTEXT < HERMES_CONTEXT_SIZE )); then
         ai_warn "Hermes enabled: increasing macOS llama context from ${MAX_CONTEXT} to ${HERMES_CONTEXT_SIZE} (64K floor)."
@@ -1587,6 +1597,7 @@ else
     mkdir -p "${INSTALL_DIR}/data/langfuse/clickhouse"
     mkdir -p "${INSTALL_DIR}/data/langfuse/redis"
     mkdir -p "${INSTALL_DIR}/data/langfuse/minio"
+    mkdir -p "${INSTALL_DIR}/data/remote-provider/secrets"
     mkdir -p "${INSTALL_DIR}/bin"
     ai_ok "Created directory structure"
 
@@ -1721,9 +1732,9 @@ else
     _previous_macos_gateway="$(read_env_value "${INSTALL_DIR}/.env" "ODS_MACOS_HOST_GATEWAY")"
     generate_ods_env "$INSTALL_DIR" "$SELECTED_TIER" "$FORCE"
     _macos_switchboard_mode="$(read_env_value "${INSTALL_DIR}/.env" "ODS_MODEL_SWITCHBOARD")"
-    case "${_macos_switchboard_mode:-observe}" in
+    case "${_macos_switchboard_mode:-enabled}" in
         legacy|observe|enabled) ;;
-        *) _macos_switchboard_mode="observe" ;;
+        *) _macos_switchboard_mode="enabled" ;;
     esac
     upsert_env_value "${INSTALL_DIR}/.env" "ODS_MODEL_SWITCHBOARD" "$_macos_switchboard_mode"
     _macos_agent_bind_raw="$(read_env_value "${INSTALL_DIR}/.env" "ODS_AGENT_BIND")"
@@ -1829,6 +1840,7 @@ else
     CONTAINER_LLM_URL="$(read_env_value "${INSTALL_DIR}/.env" "LLM_API_URL")"
     [[ -n "$CONTAINER_LLM_URL" ]] || CONTAINER_LLM_URL="http://host.docker.internal:8080"
     _macos_runtime_renderer="${ODS_PYTHON_CMD:-python3}"
+    _macos_renderer_key="$(read_env_value "${INSTALL_DIR}/.env" "LITELLM_KEY")"
     if [[ ! -f "${INSTALL_DIR}/scripts/render-runtime-configs.py" ]] \
         || ! command -v "$_macos_runtime_renderer" >/dev/null 2>&1; then
         ai_err "Model router config renderer is unavailable"
@@ -1841,13 +1853,13 @@ else
         --model "${LLM_MODEL:-}"
         --gguf-file "${GGUF_FILE:-}"
         --llm-base-url "${CONTAINER_LLM_URL}"
-        --litellm-key "$(read_env_value "${INSTALL_DIR}/.env" "LITELLM_KEY")"
         --context-length "${MAX_CONTEXT:-65536}"
         --output-root "$INSTALL_DIR"
         --write
     )
     for _macos_router_surface in model-router-endpoints; do
-        if ! "$_macos_runtime_renderer" "${INSTALL_DIR}/scripts/render-runtime-configs.py" \
+        if ! ODS_RENDER_LITELLM_KEY="$_macos_renderer_key" \
+            "$_macos_runtime_renderer" "${INSTALL_DIR}/scripts/render-runtime-configs.py" \
             --surface "$_macos_router_surface" "${_macos_router_args[@]}" >> "$ODS_LOG_FILE" 2>&1; then
             ai_err "Failed to render required ${_macos_router_surface} config"
             exit 1
@@ -1855,12 +1867,13 @@ else
     done
     if [[ "$_macos_switchboard_mode" == "enabled" ]] \
        && [[ "$(read_env_value "${INSTALL_DIR}/.env" "ODS_MODE")" != "cloud" ]] \
-       && ! "$_macos_runtime_renderer" "${INSTALL_DIR}/scripts/render-runtime-configs.py" \
+       && ! ODS_RENDER_LITELLM_KEY="$_macos_renderer_key" \
+            "$_macos_runtime_renderer" "${INSTALL_DIR}/scripts/render-runtime-configs.py" \
             --surface litellm-switchboard "${_macos_router_args[@]}" >> "$ODS_LOG_FILE" 2>&1; then
         ai_err "Failed to render required litellm-switchboard config"
         exit 1
     fi
-    unset _macos_runtime_renderer _macos_router_args _macos_router_surface
+    unset _macos_runtime_renderer _macos_renderer_key _macos_router_args _macos_router_surface
     if $env_existed && ! $FORCE; then
         ai_ok "Preserved existing .env (use --force to regenerate secrets)"
     else
@@ -2182,13 +2195,15 @@ else
         _cache_type_k=$(grep '^LLAMA_ARG_CACHE_TYPE_K=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
         _cache_type_v=$(grep '^LLAMA_ARG_CACHE_TYPE_V=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
         _n_cpu_moe=$(grep '^LLAMA_ARG_N_CPU_MOE=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
+        _gpu_layers=$(grep '^N_GPU_LAYERS=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
+        [[ -z "$_gpu_layers" ]] && _gpu_layers="auto"
         _spec_type=$(grep '^LLAMA_ARG_SPEC_TYPE=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
         _spec_draft_n_max=$(grep '^LLAMA_ARG_SPEC_DRAFT_N_MAX=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
         _llama_args=(
             --host "$_bind" --port "$_native_llama_port"
             --model "$MODEL_FULL_PATH"
             --ctx-size "$MAX_CONTEXT"
-            --n-gpu-layers 999
+            --n-gpu-layers "$_gpu_layers"
             --reasoning-format "$_reasoning_fmt"
             --metrics
         )
@@ -2313,7 +2328,8 @@ else
             # Check feature flags
             SKIP=false
             case "$SVC_NAME" in
-                litellm|searxng|token-spy) $ENABLE_RECOMMENDED || SKIP=true ;;
+                litellm|token-spy) $ENABLE_RECOMMENDED || SKIP=true ;;
+                searxng)       $ENABLE_SEARXNG || SKIP=true ;;
                 whisper|tts)   $ENABLE_VOICE || SKIP=true ;;
                 n8n)           $ENABLE_WORKFLOWS || SKIP=true ;;
                 qdrant|embeddings) $ENABLE_RAG || SKIP=true ;;
@@ -2575,7 +2591,7 @@ for service in (data.get("services") or {}).values():
     # surface unrelated Dockerfile failures and make a healthy selected stack
     # look broken.
     ai "Rebuilding local-built images..."
-    _macos_candidate_build_services=(dashboard dashboard-api model-router remote-provider-egress remote-provider-ssh-tunnel ape token-spy privacy-shield brave-search)
+    _macos_candidate_build_services=(dashboard dashboard-api model-router remote-provider-egress remote-provider-ssh-tunnel ape token-spy privacy-shield brave-search pixel-inference)
     if ! _macos_enabled_services="$(docker compose "${COMPOSE_FLAGS[@]}" config --services 2>>"$ODS_LOG_FILE")"; then
         ai_err "Could not resolve macOS compose services for local image rebuilds."
         ai "Inspect compose config with: cd '$INSTALL_DIR' && docker compose ${COMPOSE_FLAGS[*]} config --services"
@@ -2818,7 +2834,7 @@ for service in (data.get("services") or {}).values():
     if [[ -n "$OPENCODE_BIN" && -x "$OPENCODE_BIN" ]]; then
         mkdir -p "$OPENCODE_CONFIG_DIR"
         _opencode_switchboard_mode="$(read_env_value "$INSTALL_DIR/.env" "ODS_MODEL_SWITCHBOARD")"
-        if [[ "${_opencode_switchboard_mode:-observe}" == "enabled" ]]; then
+        if [[ "${_opencode_switchboard_mode:-enabled}" == "enabled" ]]; then
             _opencode_model="ods/current"
             _opencode_port="$(read_env_value "$INSTALL_DIR/.env" "LITELLM_PORT")"
             [[ "$_opencode_port" =~ ^[0-9]+$ ]] || _opencode_port="4000"
@@ -3250,7 +3266,7 @@ if $ENABLE_PERPLEXICA; then
     PERPLEXICA_API_KEY="no-key"
     PERPLEXICA_BASE_URL="${CONTAINER_LLM_URL:-http://host.docker.internal:8080}"
     _perplexica_switchboard_mode="$(read_env_value "$INSTALL_DIR/.env" "ODS_MODEL_SWITCHBOARD")"
-    if [[ "${_perplexica_switchboard_mode:-observe}" == "enabled" ]]; then
+    if [[ "${_perplexica_switchboard_mode:-enabled}" == "enabled" ]]; then
         PERPLEXICA_MODEL="ods/current"
         PERPLEXICA_API_KEY="$(read_env_value "$INSTALL_DIR/.env" "LITELLM_KEY")"
         PERPLEXICA_BASE_URL="http://litellm:4000"
