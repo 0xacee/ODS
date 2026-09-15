@@ -37,6 +37,24 @@ _split_nmcli_terse = _mod._split_nmcli_terse
 _request_server_shutdown = _mod._request_server_shutdown
 
 
+@pytest.mark.parametrize("value", [
+    "it's $5 \"q\" back\\slash", "  model #1  ", r"C:\models\file.gguf", "ordinary",
+])
+def test_load_env_reads_dashboard_writer(tmp_path, value):
+    from env_values import quote_env_value
+
+    path = tmp_path / ".env"
+    path.write_text("VALUE=" + quote_env_value(value) + "\n", encoding="utf-8")
+    assert _mod.load_env(path)["VALUE"] == value
+
+
+def test_load_env_retains_legacy_shell_quoted_values(tmp_path):
+    path = tmp_path / ".env"
+    value = "it's $5"
+    path.write_text(_mod._env_assignment("VALUE", value) + "\n", encoding="utf-8")
+    assert _mod.load_env(path)["VALUE"] == value
+
+
 @pytest.fixture(autouse=True)
 def _isolate_opencode_config(monkeypatch, tmp_path):
     """Keep host-agent integration tests out of the user's OpenCode config."""
@@ -1008,7 +1026,39 @@ class TestFindUsableBash:
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
 
         assert _mod._find_usable_bash() is None
-        assert _mod._usable_bash is False
+        assert _mod._usable_bash is None
+
+    def test_bash_discovery_retries_after_a_transient_probe_failure(self, monkeypatch):
+        git = r"C:\Test\Git\cmd\git.exe"
+        bash = r"C:\Test\Git\bin\bash.exe"
+        outcomes = iter([1, 0])
+
+        monkeypatch.setattr(_mod, "_usable_bash", None)
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(_mod.shutil, "which", lambda name: git if name == "git" else None)
+        monkeypatch.setattr(_mod.Path, "exists", lambda path: str(path) == bash)
+
+        def fake_run(cmd, *args, **kwargs):
+            return subprocess.CompletedProcess(cmd, next(outcomes), "ok", "")
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+        assert _mod._find_usable_bash() is None
+        assert _mod._usable_bash is None
+        assert _mod._find_usable_bash() == bash
+        assert _mod._usable_bash == bash
+
+    def test_update_bash_retries_after_a_transient_discovery_failure(self, monkeypatch):
+        bash = "/test/bin/bash"
+        outcomes = iter([None, bash])
+
+        monkeypatch.setattr(_mod, "_update_usable_bash", None)
+        monkeypatch.setattr(_mod, "_find_usable_bash", lambda: next(outcomes))
+
+        assert _mod._find_update_bash() is None
+        assert _mod._update_usable_bash is None
+        assert _mod._find_update_bash() == bash
+        assert _mod._update_usable_bash == bash
 
 
 class TestValidateCoreRecreateIds:
