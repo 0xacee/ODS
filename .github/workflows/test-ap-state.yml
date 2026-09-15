@@ -1,0 +1,21 @@
+name: AP state serialization
+on:
+  pull_request:
+    paths:
+      - 'ods/scripts/ap-mode.sh'
+      - 'ods/tests/test_ap_state_serialization.py'
+      - 'ods/tests/test-ap-mode.sh'
+      - '.github/workflows/test-ap-state.yml'
+permissions:
+  contents: read
+jobs:
+  state:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pytest
+      - run: python -m pytest -q ods/tests/test_ap_state_serialization.py
+      - run: bash ods/tests/test-ap-mode.sh

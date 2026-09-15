@@ -116,14 +116,14 @@ require_linux() {
 
 require_binaries() {
   local missing=()
-  for bin in hostapd dnsmasq iptables ip nmcli; do
+  for bin in hostapd dnsmasq iptables ip nmcli python3; do
     if ! command -v "$bin" >/dev/null 2>&1; then
       missing+=("$bin")
     fi
   done
   if (( ${#missing[@]} > 0 )); then
     err "missing required binaries: ${missing[*]}"
-    err "install with: apt install hostapd dnsmasq iptables network-manager"
+    err "install with: apt install hostapd dnsmasq iptables network-manager python3"
     return 1
   fi
 }
@@ -273,15 +273,16 @@ bring_up_interface() {
 
 write_state() {
   local status="$1"
-  cat > "${STATE_FILE}" <<HEREDOC
-{
-  "status": "${status}",
-  "ssid": "${ODS_AP_SSID}",
-  "interface": "${ODS_AP_INTERFACE}",
-  "gateway_ip": "${ODS_AP_GATEWAY_IP}",
-  "since": "$(date -Iseconds)"
-}
-HEREDOC
+  # SSIDs are literal text; shell interpolation is not JSON serialization.
+  python3 - "$status" "$ODS_AP_SSID" "$ODS_AP_INTERFACE" "$ODS_AP_GATEWAY_IP" \
+    "$(date -Iseconds)" > "${STATE_FILE}" <<'PY'
+import json
+import sys
+
+keys = ("status", "ssid", "interface", "gateway_ip", "since")
+json.dump(dict(zip(keys, sys.argv[1:])), sys.stdout, indent=2)
+sys.stdout.write("\n")
+PY
   chmod 0644 "${STATE_FILE}"
 }
 
