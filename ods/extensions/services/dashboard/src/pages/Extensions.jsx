@@ -649,6 +649,8 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
     ext.update_available || ext.update_status === 'untracked'
   )
   const showRollback = isUserExt && ext.rollback_available
+  const launchUrl = serviceUrl(ext)
+  const launchPort = ext.external_port ?? ext.external_port_default ?? ext.port
 
   return (
     <article className="extension-entry">
@@ -838,22 +840,22 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
         </div>
         <div className="flex items-center gap-2">
           <DependencyBadges dependsOn={ext.depends_on} dependencyStatus={ext.dependency_status} />
-          {status === 'enabled' && (ext.external_port_default || ext.port) && (ext.external_port_default || ext.port) !== 0 ? (
+          {status === 'enabled' && launchUrl ? (
             HEADLESS_EXTENSIONS.has(ext.id) ? (
               <span className="px-2 py-1 text-[9px] font-mono uppercase tracking-[0.12em] text-theme-text-muted/45">
                 API service
               </span>
             ) : (
               <a
-                href={serviceUrl({ ...ext, port: ext.external_port_default || ext.port })}
+                href={launchUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={e => e.stopPropagation()}
                 className="flex items-center gap-1 px-2 py-1.5 text-[10px] font-mono text-theme-text-secondary hover:text-theme-text hover:bg-theme-surface-hover/40 rounded-lg transition-colors"
-                title={`Open on port ${ext.external_port_default || ext.port}`}
+                title={launchPort ? "Open on port " + launchPort : "Open service"}
               >
                 <ExternalLink size={11} />
-                :{ext.external_port_default || ext.port}
+                {launchPort ? ":" + launchPort : "Open service"}
               </a>
             )
           ) : null}
