@@ -78,9 +78,12 @@ const PENDING_MODEL_ACTION_POLL_MS = 2000
 const MODELS_FETCH_TIMEOUT_MS = 30000
 const MODEL_DOWNLOAD_START_TIMEOUT_MS = 15000
 const MODEL_ACTIVATION_POLL_MS = 5000
-// The dashboard API permits the host activation request to run for 600s.
-// Keep the UI lock slightly longer so that deadline can settle before we fail.
-const MODEL_ACTIVATION_TIMEOUT_MS = 610000
+// Delete allows 30s at the host; the 128-token benchmark allows 384s.
+const MODEL_DELETE_TIMEOUT_MS = 35000
+const MODEL_BENCHMARK_TIMEOUT_MS = 400000
+// Activation allows 2700s plus 120s of download-busy retry grace.
+// Keep the UI lock until that budget and a small response margin have elapsed.
+const MODEL_ACTIVATION_TIMEOUT_MS = 2825000
 const ODS_MODES = new Set(['local', 'cloud', 'hybrid', 'lemonade'])
 const LOCAL_MODEL_MODES = new Set(['local', 'hybrid', 'lemonade'])
 
@@ -109,6 +112,29 @@ function errorMessageFromPayload(data, fallback) {
 
 async function errorMessageFromResponse(response, fallback) {
   return errorMessageFromPayload(await responseJson(response), fallback)
+}
+
+async function modelActionRequest(url, options, budget, timeoutMessage, failureMessage) {
+  const controller = new AbortController()
+  let timer
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(timeoutMessage))
+      controller.abort()
+    }, budget)
+  })
+  try {
+    await Promise.race([
+      (async () => {
+        const response = await fetch(url, { ...options, signal: controller.signal })
+        if (!response.ok) throw new Error(await errorMessageFromResponse(response, failureMessage))
+      })(),
+      deadline,
+    ])
+  } finally {
+    clearTimeout(timer)
+    controller.abort()
+  }
 }
 
 function conflictActiveModelId(data) {
@@ -311,30 +337,15 @@ export function useModels() {
 
   const downloadModel = async (modelId) => {
     const action = startAction(modelId, 'download')
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), MODEL_DOWNLOAD_START_TIMEOUT_MS)
     try {
-      let response
-      try {
-        response = await fetch(`/api/models/${encodeURIComponent(modelId)}/download`, {
-          method: 'POST',
-          signal: controller.signal,
-        })
-      } catch (err) {
-        if (err?.name === 'AbortError') {
-          throw new Error(`Download for ${modelId} did not start within 15 seconds. Check the service and retry.`)
-        }
-        throw err
-      } finally {
-        clearTimeout(timeout)
-      }
-
-      if (!response.ok) {
-        throw new Error(await errorMessageFromResponse(response, `Failed to start download for ${modelId}`))
-      }
+      await modelActionRequest(
+        '/api/models/' + encodeURIComponent(modelId) + '/download',
+        { method: 'POST' }, MODEL_DOWNLOAD_START_TIMEOUT_MS,
+        'Download for ' + modelId + ' did not start within 15 seconds. The server may still be working; refresh before retrying.',
+        'Failed to start download for ' + modelId,
+      )
       await fetchModels() // Refresh
     } finally {
-      clearTimeout(timeout)
       finishAction(action.token)
     }
   }
@@ -358,7 +369,7 @@ export function useModels() {
     const action = startAction(modelId, 'load')
     setMutationError(null)
 
-    // Model activation can consume the API's full 600-second budget. The
+    // Model activation can consume the host's 45-minute budget plus retry grace. The
     // browser connection may still disappear while the server completes, so
     // status remains authoritative and the POST runs alongside polling.
     const controller = new AbortController()
@@ -437,7 +448,7 @@ export function useModels() {
       if (!confirmed) {
         setMutationError(activationError || (targetLoaded
           ? `Could not confirm activation of ${modelId} against the latest model status. Refresh before retrying.`
-          : `Timed out after 10 minutes waiting for ${modelId} to activate. The server may still be finishing; refresh before retrying.`))
+          : `Timed out after 47 minutes waiting for ${modelId} to activate. The server may still be finishing; refresh before retrying.`))
       }
     } finally {
       controller.abort()
@@ -451,12 +462,12 @@ export function useModels() {
     setMutationError(null)
     const action = startAction(modelId, 'delete')
     try {
-      const response = await fetch(`/api/models/${encodeURIComponent(modelId)}`, {
-        method: 'DELETE'
-      })
-      if (!response.ok) {
-        throw new Error(await errorMessageFromResponse(response, `Failed to delete ${modelId}`))
-      }
+      await modelActionRequest(
+        '/api/models/' + encodeURIComponent(modelId),
+        { method: 'DELETE' }, MODEL_DELETE_TIMEOUT_MS,
+        'Delete for ' + modelId + ' timed out. The server may still be working; refresh before retrying.',
+        'Failed to delete ' + modelId,
+      )
       await fetchModels() // Refresh
     } catch (err) {
       setMutationError(err.message)
@@ -469,12 +480,16 @@ export function useModels() {
     setMutationError(null)
     const action = startAction(modelId, 'benchmark')
     try {
-      const response = await fetch(`/api/models/${encodeURIComponent(modelId)}/benchmark`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ max_tokens: 128 })
-      })
-      if (!response.ok) throw new Error(await errorMessageFromResponse(response, 'Failed to benchmark model'))
+      await modelActionRequest(
+        '/api/models/' + encodeURIComponent(modelId) + '/benchmark',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ max_tokens: 128 }),
+        }, MODEL_BENCHMARK_TIMEOUT_MS,
+        'Benchmark for ' + modelId + ' timed out. The server may still be working; refresh before retrying.',
+        'Failed to benchmark model',
+      )
       await fetchModels()
     } catch (err) {
       setMutationError(err.message)
