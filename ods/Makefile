@@ -146,6 +146,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-bootstrap-openclaw-compose-guard.sh
 	@echo ""
 	@echo "=== ods-update.sh backup command ==="
+	@bash tests/test-update-backup-retention-labels.sh
 	@bash tests/test-update-script-backup.sh
 	@bash tests/test-update-backup-retention-spaces.sh
 	@bash tests/test-backup-data-coverage.sh

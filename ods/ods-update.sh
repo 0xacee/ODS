@@ -627,21 +627,28 @@ cmd_backup() {
     log_ok "Backup created: ${backup_path}"
     log_info "Files backed up: ${files_backed_up}"
     
-    # Bash's sorted glob preserves whole paths, including spaces/newlines,
-    # without requiring GNU sort -z on macOS. Never follow backup symlinks.
-    local backup_dirs=() dir index count=0
+    # Bash's glob preserves whole paths, including spaces/newlines, without
+    # requiring GNU sort -z on macOS. Never follow backup symlinks.
+    # Order by the creation timestamp this function appends to every name, not
+    # by the whole name: a labelled "backup-dashboard-<ts>" sorts after every
+    # unlabelled "backup-<ts>", which would prune the backup just created.
+    # Only the fixed-width timestamps and array indexes are sorted.
+    local backup_dirs=() dir index stamp count=0 order=""
+    local stamp_re='-([0-9]{8}-[0-9]{6})$'
     for dir in "$BACKUP_DIR"/backup-*; do
         [[ -d "$dir" && ! -L "$dir" ]] || continue
+        [[ "$dir" =~ $stamp_re ]] || continue
+        order+="${BASH_REMATCH[1]} ${#backup_dirs[@]}"$'\n'
         backup_dirs+=("$dir")
     done
-    for ((index=${#backup_dirs[@]}-1; index>=0; index--)); do
+    while read -r stamp index; do
         dir="${backup_dirs[$index]}"
         count=$((count + 1))
         if ((count > MAX_BACKUPS)); then
             log_info "Removing old backup: $(basename "$dir")"
             rm -rf "$dir"
         fi
-    done
+    done < <(printf '%s' "$order" | LC_ALL=C sort -r)
 }
 
 #==============================================================================
