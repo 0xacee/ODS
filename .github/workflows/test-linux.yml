@@ -27,6 +27,8 @@ jobs:
         env:
           ODS_TEST_AWK: mawk
         run: python3 tests/test-backup-space-arithmetic.py -v
+      - name: Restore transaction failure recovery
+        run: python3 tests/test_restore_transaction.py -v
       - name: Backup integrity and restore round trip
         run: |
           bash tests/test-backup-integrity.sh

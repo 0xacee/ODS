@@ -349,12 +349,15 @@ def _windows_whisper_cuda_supported(env: dict) -> bool:
 
 
 def _find_usable_bash() -> str | None:
-    """Return a Bash executable compatible with this host's path contract."""
+    """Return a Bash executable compatible with this host's path contract.
+
+    A successfully validated executable is stable enough to cache.  Failed
+    probes are deliberately retried: on Windows Git Bash can be temporarily
+    unavailable while the installer or endpoint protection is still settling.
+    """
     global _usable_bash
     if isinstance(_usable_bash, str):
         return _usable_bash
-    if _usable_bash is False:
-        return None
 
     candidates: list[str] = []
     if platform.system() == "Windows":
@@ -441,7 +444,7 @@ def _find_usable_bash() -> str | None:
             _usable_bash = bash
             return bash
 
-    _usable_bash = False
+    _usable_bash = None
     return None
 
 # Model download state — only one download at a time
@@ -6406,11 +6409,9 @@ def _find_update_bash() -> str | None:
     global _update_usable_bash
     if isinstance(_update_usable_bash, str):
         return _update_usable_bash
-    if _update_usable_bash is False:
-        return None
 
     bash = _find_usable_bash()
-    _update_usable_bash = bash if bash else False
+    _update_usable_bash = bash
     return bash
 
 
@@ -8693,18 +8694,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             container_name = f"ods-{service_id}"
             cmd = ["docker", "logs", "--tail", str(tail), container_name]
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=5,
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5,
             )
+            output = result.stdout or ""
             # Handle container not yet created (e.g. during image pull)
-            if result.returncode != 0 and "no such container" in (result.stderr or "").lower():
+            if result.returncode != 0 and "no such container" in output.lower():
                 json_response(self, 200, {
                     "service_id": service_id,
                     "logs": "Container is starting up — logs will appear once it is running.",
                     "lines": 0,
                 })
                 return
-            # docker logs writes to stderr for some containers
-            output = result.stdout or result.stderr or ""
+            # Both container streams share one pipe, preserving their emitted order.
             json_response(self, 200, {
                 "service_id": service_id,
                 "logs": output[-50000:],
@@ -8743,9 +8744,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 ["docker", "logs", "--tail", str(tail), container_name],
-                capture_output=True, text=True, timeout=5,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5,
             )
-            if result.returncode != 0 and "no such container" in (result.stderr or "").lower():
+            output = result.stdout or ""
+            if result.returncode != 0 and "no such container" in output.lower():
                 json_response(self, 200, {
                     "service_id": sid,
                     "container_name": container_name,
@@ -8754,9 +8756,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                 })
                 return
             if result.returncode != 0:
-                json_response(self, 500, {"error": f"docker logs failed: {(result.stderr or '')[:500]}"})
+                json_response(self, 500, {"error": f"docker logs failed: {output[:500]}"})
                 return
-            output = result.stdout or result.stderr or ""
             json_response(self, 200, {
                 "service_id": sid,
                 "container_name": container_name,
