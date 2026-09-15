@@ -149,6 +149,11 @@ def generate_catalog(library_dir: Path, services_dir: Path | None = None) -> lis
             if manifest is None:
                 invalid_manifests.append(str(manifest_path))
                 continue
+            service = manifest.get("service")
+            if (isinstance(service, dict) and service.get("id") == service_dir.name
+                    and service_dir.name in EXCLUDED_IDS):
+                # Intentional catalog exclusions are not broken manifests.
+                continue
             entry = extract_entry(manifest)
             if entry is None or entry["id"] != service_dir.name:
                 invalid_manifests.append(str(manifest_path))
