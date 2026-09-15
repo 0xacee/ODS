@@ -22,6 +22,14 @@ def environment(tmp_path):
             body = "exit 1"
         elif name == "iw":
             body = "printf 'Supported interface modes\\n * AP\\n'"
+        elif name == "iptables":
+            body = '''case "$*" in *"--dport 443"*) port=443;; *) port=80;; esac
+rule="$ODS_AP_RUN_DIR/rule-$port"
+case "$3" in
+  -C) test -f "$rule";;
+  -A) touch "$rule";;
+  -D) rm -f "$rule";;
+esac'''
         command = bins / name
         command.write_text("#!/bin/sh\n" + body + "\n")
         command.chmod(0o755)
@@ -111,4 +119,5 @@ def test_up_failure_tears_down_and_never_announces_success(tmp_path):
     assert not (run_dir / "state.json").exists()
     assert not (run_dir / "hostapd.conf").exists()
     assert not (run_dir / "dnsmasq.conf").exists()
+    assert not list(run_dir.glob("rule-*"))
     assert not list(run_dir.glob(".state-*.tmp"))
