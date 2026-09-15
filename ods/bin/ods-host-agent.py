@@ -8694,18 +8694,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             container_name = f"ods-{service_id}"
             cmd = ["docker", "logs", "--tail", str(tail), container_name]
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=5,
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5,
             )
+            output = result.stdout or ""
             # Handle container not yet created (e.g. during image pull)
-            if result.returncode != 0 and "no such container" in (result.stderr or "").lower():
+            if result.returncode != 0 and "no such container" in output.lower():
                 json_response(self, 200, {
                     "service_id": service_id,
                     "logs": "Container is starting up — logs will appear once it is running.",
                     "lines": 0,
                 })
                 return
-            # docker logs writes to stderr for some containers
-            output = result.stdout or result.stderr or ""
+            # Both container streams share one pipe, preserving their emitted order.
             json_response(self, 200, {
                 "service_id": service_id,
                 "logs": output[-50000:],
@@ -8744,9 +8744,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 ["docker", "logs", "--tail", str(tail), container_name],
-                capture_output=True, text=True, timeout=5,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=5,
             )
-            if result.returncode != 0 and "no such container" in (result.stderr or "").lower():
+            output = result.stdout or ""
+            if result.returncode != 0 and "no such container" in output.lower():
                 json_response(self, 200, {
                     "service_id": sid,
                     "container_name": container_name,
@@ -8755,9 +8756,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                 })
                 return
             if result.returncode != 0:
-                json_response(self, 500, {"error": f"docker logs failed: {(result.stderr or '')[:500]}"})
+                json_response(self, 500, {"error": f"docker logs failed: {output[:500]}"})
                 return
-            output = result.stdout or result.stderr or ""
             json_response(self, 200, {
                 "service_id": sid,
                 "container_name": container_name,
