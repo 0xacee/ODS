@@ -7938,15 +7938,17 @@ class AgentHandler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 signal_pct = 0
             existing = networks_by_ssid.get(ssid)
+            in_use = in_use_str == "*" or bool(existing and existing["in_use"])
             if existing and existing["signal"] >= signal_pct:
+                existing["in_use"] = in_use
                 continue
             # nmcli sometimes returns multiple rows per SSID (one per BSSID).
-            # Collapse on SSID and keep the strongest signal observed.
+            # Keep the strongest signal and connection state from any BSSID.
             networks_by_ssid[ssid] = {
                 "ssid": ssid,
                 "signal": signal_pct,
                 "security": security or "open",
-                "in_use": in_use_str == "*",
+                "in_use": in_use,
             }
 
         # Strongest signal first — that's the order the wizard wants to display.
