@@ -29,7 +29,11 @@ describe('daily usage download at the activity view boundary', () => {
     show()
     fireEvent.click(screen.getByRole('button', {name: 'Export daily CSV'}))
     const blob = URL.createObjectURL.mock.calls[0][0]
-    const csv = await new Promise(resolve => { const reader = new window.FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(blob) })
+    // FileReader dispatches its completion event through browser timers. With
+    // fake timers enabled for the deferred Blob-URL cleanup, that event can
+    // never fire unless the test advances an unrelated clock. Blob.text()
+    // observes the same payload without coupling the assertion to timers.
+    const csv = await blob.text()
     expect(csv).toBe('date,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,requests\r\n2026-01-01,0,12,3,4,\r\n2026-01-02,24,,,,2')
     expect(click.mock.instances[0].download).toBe('ods-daily-usage-2026-01-01-to-2026-01-02.csv')
     expect(click.mock.instances[0].isConnected).toBe(false)
