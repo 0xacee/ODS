@@ -57,6 +57,22 @@ it('rejects video that exceeds the resolution limit', async () => {
   expect(mocks.revokeObjectURL).toHaveBeenCalledOnce()
 })
 
+it('accepts a decoded finite WebM blob whose header has no duration', async () => {
+  const mocks=mockVideo({duration:Infinity})
+  const file=new File(['recorded clip'],'Recording.webm',{type:'video/webm'})
+  const row=await prepareWallpaper(file)
+  expect(row.video).toBe(file)
+  expect(isStoredWallpaper(row)).toBe(true)
+  expect(mocks.revokeObjectURL).toHaveBeenCalledOnce()
+})
+
+it.each([NaN,0,-1,-Infinity])('rejects unusable video duration %s and releases its resources', async duration => {
+  const mocks=mockVideo({duration})
+  await expect(prepareWallpaper(new File(['v'],'bad.webm',{type:'video/webm'}))).rejects.toThrow('valid video')
+  expect(mocks.revokeObjectURL).toHaveBeenCalledOnce()
+  expect(mocks.pause).toHaveBeenCalledOnce()
+})
+
 it('rejects remote media and malformed stored records, retaining old image records', () => {
   const row={id:'custom-11111111-2222-4333-8444-555555555555',name:'Saved',image:'data:image/webp;base64,YQ=='}
   expect(isStoredWallpaper(row)).toBe(true)
