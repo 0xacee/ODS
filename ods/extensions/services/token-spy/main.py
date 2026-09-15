@@ -105,7 +105,7 @@ def _provider_uses_local_runtime(provider_name: str) -> bool:
         return True
     if provider == "anthropic":
         return _is_local_upstream_url(ANTHROPIC_UPSTREAM)
-    return _is_local_upstream_url(OPENAI_UPSTREAM) or _is_local_upstream_url(UPSTREAM_BASE_URL)
+    return _is_local_upstream_url(OPENAI_UPSTREAM)
 
 # Cost per million tokens by model prefix (longer prefixes matched first)
 # USD per 1M tokens — input, output, cache_read, cache_write
@@ -1548,6 +1548,11 @@ def _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_
         else:
             provider_name = "anthropic"  # default
 
+    # Local endpoints may expose familiar cloud model aliases. Resolve the
+    # actual protocol upstream before looking up any model-name price.
+    if _provider_uses_local_runtime(provider_name):
+        provider_name = "local"
+
     cost = estimate_cost(
         model,
         usage["input_tokens"],
@@ -1556,9 +1561,6 @@ def _log_entry(model, sys_analysis, msg_analysis, tools, raw_body, usage, start_
         usage["cache_write_tokens"],
         provider_name=provider_name,
     )
-    if cost == 0 and _provider_uses_local_runtime(provider_name):
-        provider_name = "local"
-
     entry = {
         "agent": AGENT_NAME,
         "model": model,

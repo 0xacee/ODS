@@ -101,6 +101,21 @@ jobs:
       - name: Test preview publication directory failures
         run: python -m pytest -q extensions/services/pixel-agent/tests/test_preview_directory_errors.py
 
+  token-spy-pricing:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ods/extensions/services/token-spy
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt "pytest>=8,<9"
+      - name: Test proxy pricing receipts
+        run: python -m pytest -q tests/test_local_upstream_pricing.py tests/test_anthropic_cumulative_usage.py tests/test_usage_report.py
+
   token-spy-postgres:
     runs-on: ubuntu-latest
     services:
