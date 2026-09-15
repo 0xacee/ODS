@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import PixelConversationRecovery from '../components/PixelConversationRecovery'
 import { readConversations, saveConversation, SELECT_EVENT, DELETE_EVENT, deleteConversation, isConversationDeleted } from '../lib/pixelConversations'
 import ReactMarkdown from 'react-markdown'
+import {usePixelAutoScroll} from '../lib/usePixelAutoScroll'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import { Link } from 'react-router-dom'
@@ -16,6 +17,7 @@ import PixelDraftPreview from '../components/PixelDraftPreview'
 import PixelDictation from '../components/PixelDictation'
 import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelCommandSearch'
 import PixelConversationImport from '../components/PixelConversationImport'
+import { appendComposerText } from '../lib/pixelComposerText'
 import PixelSelectionActions from '../components/PixelSelectionActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
@@ -554,6 +556,7 @@ export default function Pixel({ systemStatus = null }) {
   const requestIdRef = useRef(initialChat?.requestId || null)
   const inputRef = useRef(null)
   const scrollRef = useRef(null)
+  const chatScroll = usePixelAutoScroll(messages, chatIdRef.current, scrollRef)
 
   const activeModel = agentRuntime?.model || systemStatus?.inference?.loadedModel || systemStatus?.model?.name || ''
   const activeContext = formatContext(
@@ -736,10 +739,6 @@ export default function Pixel({ systemStatus = null }) {
     const timer = globalThis.setInterval(updateElapsed, 1000)
     return () => globalThis.clearInterval(timer)
   }, [sending])
-
-  useEffect(() => {
-    scrollRef.current?.scrollIntoView?.({ behavior: 'smooth' })
-  }, [messages])
 
   useEffect(() => {
     const field = inputRef.current
@@ -1153,7 +1152,7 @@ export default function Pixel({ systemStatus = null }) {
 
   const insertComposerText = useCallback(text => {
     if (sending || restoredActive || restoredChecking || stopping) return
-    setInput(value => value === '/' ? text : `${value}${value && !value.endsWith(' ') && !value.endsWith('\n') ? ' ' : ''}${text}`)
+    setInput(value => appendComposerText(value, text))
     inputRef.current?.focus?.()
   }, [sending, restoredActive, restoredChecking, stopping])
 
@@ -1302,7 +1301,7 @@ export default function Pixel({ systemStatus = null }) {
           </span>
         </div>
       </header>
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6">
+      <div role="region" aria-label="Conversation messages" tabIndex={-1} onScroll={chatScroll.onScroll} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6">
         {interrupted && !sending && (
           <div role="status" className="mx-auto w-full max-w-5xl rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
             {restoredActivity === 'active'
@@ -1411,6 +1410,7 @@ export default function Pixel({ systemStatus = null }) {
       </div>
 
       <div className="pixel-composer px-4 py-3 sm:px-6">
+        {chatScroll.showLatest && <div className="mb-2 text-center"><button type="button" onClick={chatScroll.jumpToLatest} className="rounded border border-theme-border px-3 py-1 text-xs">Jump to latest</button></div>}
         <div className="mx-auto max-w-5xl">
           <div className="pixel-composer-row">
           <textarea

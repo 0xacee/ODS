@@ -81,6 +81,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-safe-env.sh
 	@bash tests/test-env-example-inline-comments.sh
 	@bash tests/test-phase06-secret-generation.sh
+	@bash tests/test-phase06-env-rerun-quoting.sh
 	@echo ""
 	@echo "=== health-check.sh --json output contract ==="
 	@bash tests/test-health-check-json-output.sh
@@ -147,6 +148,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-bootstrap-openclaw-compose-guard.sh
 	@echo ""
 	@echo "=== ods-update.sh backup command ==="
+	@bash tests/test-update-backup-retention-labels.sh
 	@bash tests/test-update-script-backup.sh
 	@bash tests/test-update-backup-retention-spaces.sh
 	@bash tests/test-backup-data-coverage.sh
@@ -155,6 +157,9 @@ test: ## Run unit and contract tests
 	@bash tests/test-backup-integrity.sh
 	@bash tests/test-backup-restore-roundtrip.sh
 	@python3 tests/test-rsync-transfer-failures.py
+	@echo ""
+	@echo "=== ods-update.sh rollback picks the newest backup ==="
+	@bash tests/test-update-rollback-latest-backup.sh
 	@echo ""
 	@echo "=== bootstrap-upgrade spawn closes inherited FDs ==="
 	@bash tests/test-bootstrap-upgrade-close-inherited-fds.sh
