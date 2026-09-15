@@ -123,6 +123,11 @@ _env_set() {
             if (index($0, k "=") == 1) print k "=" v; else print
         }' "$file" > "${file}.tmp" && cat "${file}.tmp" > "$file" && rm -f "${file}.tmp"
     else
+        # Appending after a last line that has no newline would join the new
+        # assignment onto that line and corrupt both keys.
+        if [[ -s "$file" && -n "$(tail -c 1 "$file")" ]]; then
+            printf '\n' >> "$file"
+        fi
         echo "${key}=${val}" >> "$file"
     fi
 }
@@ -3303,7 +3308,18 @@ META
 
             # Create archive (relative to presets dir to avoid absolute paths)
             cd "$PRESETS_DIR"
-            if tar czf "$output" "$name" 2>/dev/null; then
+            if (
+                umask 077
+                staged_archive="$(mktemp "${output}.XXXXXX")" || exit 1
+                trap 'rm -f -- "$staged_archive"' EXIT
+                trap 'exit 130' INT
+                trap 'exit 143' TERM
+                # Finish privately before replacing an existing public file.
+                chmod 600 "$staged_archive" || exit 1
+                tar czf "$staged_archive" "$name" 2>/dev/null || exit 1
+                [[ ! -d "$output" ]] || exit 1
+                mv -f -- "$staged_archive" "$output"
+            ); then
                 local size
                 size=$(du -h "$output" 2>/dev/null | cut -f1 || true)
                 success "Preset exported to: $output ($size)"
@@ -4749,10 +4765,14 @@ cmd_stt() {
 
     # Resolve model and port from .env (with fallback for older installs).
     local model port model_encoded url
-    model=$(_env_get_raw AUDIO_STT_MODEL)
-    [[ -z "$model" ]] && model="Systran/faster-whisper-base"
-    port=$(_env_get_raw WHISPER_PORT)
-    [[ -z "$port" ]] && port="9000"
+    # These settings are dotenv values, including quotes and inline comments.
+    # Keep missing-file/key defaults independent of the caller's environment.
+    local AUDIO_STT_MODEL="" WHISPER_PORT=""
+    if [[ -f "$INSTALL_DIR/.env" ]]; then
+        load_env
+    fi
+    model="${AUDIO_STT_MODEL:-Systran/faster-whisper-base}"
+    port="${WHISPER_PORT:-9000}"
     model_encoded="${model//\//%2F}"
     url="http://127.0.0.1:${port}"
 
