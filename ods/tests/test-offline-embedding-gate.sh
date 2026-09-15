@@ -39,6 +39,14 @@ fi
 [[ ! -e "$tmp/install/.offline-mode" ]]
 [[ ! -e "$tmp/install/models/embeddings/nomic-embed-text-v1.5.Q4_K_M.gguf" ]]
 
+# A failed rerun must invalidate a stale readiness marker as well.
+touch "$tmp/install/.offline-mode"
+if PATH="$tmp/bin:/usr/bin:/bin" "$tmp/run-phase.sh" >/dev/null 2>&1; then
+    echo "FAIL: failed rerun was accepted" >&2
+    exit 1
+fi
+[[ ! -e "$tmp/install/.offline-mode" ]]
+
 # A valid GGUF response is installed atomically and enables the marker.
 cat > "$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash

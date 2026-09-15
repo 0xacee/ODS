@@ -22,6 +22,10 @@ if [[ "$OFFLINE_MODE" == "true" ]] && $DRY_RUN; then
 elif [[ "$OFFLINE_MODE" == "true" ]] && ! $DRY_RUN; then
     chapter "CONFIGURING OFFLINE MODE (M1)"
 
+    # A previous successful install must not make a failed rerun look ready.
+    # Recreate the marker only after the required asset is validated below.
+    rm -f -- "$INSTALL_DIR/.offline-mode"
+
     # Disable any cloud-dependent features in .env
     _sed_i 's/^BRAVE_API_KEY=.*/BRAVE_API_KEY=/' "$INSTALL_DIR/.env" 2>/dev/null || true
     _sed_i 's/^ANTHROPIC_API_KEY=.*/ANTHROPIC_API_KEY=/' "$INSTALL_DIR/.env" 2>/dev/null || true
