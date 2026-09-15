@@ -332,6 +332,8 @@ jobs:
       - name: Perplexica Entrypoint Contract Tests
         run: python3 tests/test-perplexica-entrypoint.py
 
+      - name: ComfyUI Template Seeding Tests
+        run: sudo env COMFYUI_REQUIRE_NAMESPACE=1 "$(command -v python3)" tests/test_comfyui_template_seeding.py -v
       - name: Perplexica Repair Interpreter Tests
         run: |
           python3 -m pip install pytest==8.4.2
