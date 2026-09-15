@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState} from 'react'
 import { Bookmark } from 'lucide-react'
 import {readSavedPrompts, writeSavedPrompt} from '../lib/pixelSavedPrompts'
+import {appendComposerText} from '../lib/pixelComposerText'
 
 export default function PixelPromptLibrary({input, disabled, onInsert}) {
   const dialog = useRef(null), trigger = useRef(null), previous = useRef(null)
@@ -55,7 +56,7 @@ export default function PixelPromptLibrary({input, disabled, onInsert}) {
           {!shown.length && <p>No prompts match your search.</p>}
         </div>}
         <ul>{shown.map(item => {
-          const fits = input.length + item.text.length + 1 <= 16384
+          const fits = appendComposerText(input, item.text).length <= 16384
           return <li key={item.id} className="my-3 rounded border border-theme-border p-2">
             <strong>{item.title}</strong><p className="whitespace-pre-wrap break-words">{item.text.slice(0, 160)}{item.text.length > 160 ? '…' : ''}</p>
             <div className="mt-2 flex flex-wrap gap-2">
