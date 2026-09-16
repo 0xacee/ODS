@@ -1440,7 +1440,7 @@ export default function Pixel({ systemStatus = null }) {
             }`}
           />
           <div className="pixel-composer-actions">
-          <PixelDictation disabled={isDisabled} conversationId={chatIdRef.current} onInsert={insertComposerText}/>
+          <PixelDictation disabled={isDisabled} conversationId={chatIdRef.current} input={input} limit={MAX_INPUT_LEN} onInsert={insertComposerText}/>
           {sending || restoredActive ? (
             <button
               onClick={stopStreaming}
