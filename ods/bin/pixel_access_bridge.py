@@ -695,11 +695,27 @@ class SystemdAccessBridge:
             "/v1/transition" + ("/" + operation if operation else ""),
             self.edge_key, payload, timeout=budget - (time.monotonic() - started))
 
-    def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None,
-               transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None,
-               binding=None, activate_provider=None, expected_projection=None, provider_probe=None,
-               model_target=None, model_outcome=None):
+    def _launch_owner_worker(self, env):
         script = Path(__file__).resolve().parent / "access_mode_worker.py"
+        command = [sys.executable, "-I", "-u", str(script)]
+        identity = {}
+        if platform.system() == "Darwin":
+            import pwd
+            owner = pwd.getpwnam(self.owner.pw_name)
+            if (os.geteuid() != 0 or owner.pw_uid <= 0 or owner.pw_gid < 0
+                    or owner.pw_uid != self.owner.pw_uid or owner.pw_gid != self.owner.pw_gid):
+                raise AccessError("unsafe-owner-identity")
+            # Popen drops groups/GID/UID in the child before exec, without a
+            # shell, user-controlled launcher, or thread-unsafe preexec_fn.
+            identity = {"user": owner.pw_uid, "group": owner.pw_gid,
+                        "extra_groups": os.getgrouplist(owner.pw_name, owner.pw_gid)}
+        else:
+            command = [self._linux_owner_launcher(), "-u", self.owner.pw_name, "--", *command]
+        return subprocess.Popen(command, cwd="/", env=env, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, bufsize=1, **identity)
+
+    def _linux_owner_launcher(self):
         # This launcher still runs as root. Never search the owner's validator
         # PATH for it; that PATH is intended only for the unprivileged worker.
         launcher = None
@@ -718,6 +734,12 @@ class SystemdAccessBridge:
                 continue
         if launcher is None:
             raise AccessError("owner-launcher-unavailable")
+        return launcher
+
+    def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None,
+               transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None,
+               binding=None, activate_provider=None, expected_projection=None, provider_probe=None,
+               model_target=None, model_outcome=None):
         env = {"HOME": str(self.home), "USER": self.owner.pw_name, "LOGNAME": self.owner.pw_name,
                "PATH": str(Path(self.binary).parent) + ":/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
         request = dict(operation=operation, openclaw=self.binary, config_sha256=config_hash, confirmed=confirmed)
@@ -743,9 +765,7 @@ class SystemdAccessBridge:
         except (ValueError, TypeError, RecursionError):
             raise AccessError("owner-protocol-failed") from None
         deadline = time.monotonic() + remaining(OWNER_TIMEOUT)
-        process = subprocess.Popen([launcher, "-u", self.owner.pw_name, "--", sys.executable, "-I", "-u", str(script)],
-                                   cwd="/", env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        process = self._launch_owner_worker(env)
         try:
             _pipe_send(process.stdin, encoded, deadline)
             with selectors.DefaultSelector() as selector:

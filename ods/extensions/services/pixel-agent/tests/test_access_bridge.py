@@ -88,10 +88,66 @@ class OwnerLauncherTests(unittest.TestCase):
             adapter.home = root
             adapter.owner = types.SimpleNamespace(pw_name="fixture")
             adapter.binary = str(root / "openclaw")
-            with patch.object(bridge.Path, "resolve", return_value=unsafe), patch.object(bridge.subprocess, "Popen") as launch:
+            with patch.object(bridge.platform, "system", return_value="Linux"), patch.object(bridge.Path, "resolve", return_value=unsafe), patch.object(bridge.subprocess, "Popen") as launch:
                 with self.assertRaisesRegex(bridge.AccessError, "unsafe-owner-launcher"):
                     adapter.worker()
             launch.assert_not_called()
+
+    def test_macos_worker_drops_all_identity_fields_before_exec(self):
+        import pwd
+        owner = types.SimpleNamespace(pw_name="fixture", pw_uid=501, pw_gid=20)
+        adapter = bridge.SystemdAccessBridge(Path("/tmp/ods"), "k" * 64)
+        adapter.owner = owner
+        with patch.object(bridge.platform, "system", return_value="Darwin"), \
+                patch.object(bridge.os, "geteuid", return_value=0), \
+                patch.object(pwd, "getpwnam", return_value=owner), \
+                patch.object(bridge.os, "getgrouplist", return_value=[20, 80]), \
+                patch.object(bridge.subprocess, "Popen") as launch:
+            adapter._launch_owner_worker({"HOME": "/private/tmp/fixture"})
+        args, options = launch.call_args.args[0], launch.call_args.kwargs
+        self.assertEqual(args[:3], [sys.executable, "-I", "-u"])
+        self.assertEqual(options["user"], 501)
+        self.assertEqual(options["group"], 20)
+        self.assertEqual(options["extra_groups"], [20, 80])
+        self.assertNotIn("preexec_fn", options)
+        self.assertNotIn("shell", options)
+
+    def test_macos_worker_refuses_root_or_changed_identity(self):
+        import pwd
+        adapter = bridge.SystemdAccessBridge(Path("/tmp/ods"), "k" * 64)
+        adapter.owner = types.SimpleNamespace(pw_name="fixture", pw_uid=501, pw_gid=20)
+        for uid, gid, euid in ((0, 0, 0), (502, 20, 0), (501, 21, 0), (501, 20, 501)):
+            with self.subTest(uid=uid, gid=gid, euid=euid), \
+                    patch.object(bridge.platform, "system", return_value="Darwin"), \
+                    patch.object(bridge.os, "geteuid", return_value=euid), \
+                    patch.object(pwd, "getpwnam", return_value=types.SimpleNamespace(pw_uid=uid, pw_gid=gid)), \
+                    patch.object(bridge.subprocess, "Popen") as launch:
+                with self.assertRaisesRegex(bridge.AccessError, "unsafe-owner-identity"):
+                    adapter._launch_owner_worker({})
+                launch.assert_not_called()
+
+    @unittest.skipUnless(os.geteuid() == 0, "real credential drop requires root")
+    def test_posix_child_really_has_target_credentials(self):
+        import pwd
+        owner = pwd.getpwnam("nobody")
+        if owner.pw_uid <= 0:
+            self.skipTest("positive unprivileged fixture identity required")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o755)
+            script = root / "access_mode_worker.py"
+            script.write_text("import json,os; print(json.dumps([os.getuid(),os.geteuid(),os.getgid(),os.getgroups()]))\n")
+            script.chmod(0o644)
+            adapter = bridge.SystemdAccessBridge(root, "k" * 64)
+            adapter.owner = owner
+            with patch.object(bridge.platform, "system", return_value="Darwin"), \
+                    patch.object(bridge, "__file__", str(root / "pixel_access_bridge.py")):
+                with adapter._launch_owner_worker({"HOME": directory, "PATH": "/usr/bin:/bin"}) as process:
+                    output, _ = process.communicate(timeout=10)
+                    self.assertEqual(process.returncode, 0)
+            uid, euid, gid, groups = json.loads(output)
+            self.assertEqual((uid, euid, gid), (owner.pw_uid, owner.pw_uid, owner.pw_gid))
+            self.assertEqual(sorted(groups), sorted(os.getgrouplist(owner.pw_name, owner.pw_gid)))
 
 
 class HostAgentDiscoveryTests(unittest.TestCase):
