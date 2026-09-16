@@ -363,7 +363,7 @@ if not isinstance(policy_value, str) or pathlib.Path(policy_value) != expected_p
 policy_payload = read_private_regular(expected_policy, "Operations policy")
 catalog_payload = read_private_regular(catalog_path, "extension catalog")
 helper_payloads = []
-for helper in (helper_path, manager_path, manager_unit_path, approval_path, promoter_path, promoter_unit_path, operations_service_dropin_path, preview_path, preview_unit_path, system_observer_path):
+for helper in (helper_path, manager_path, manager_unit_path, approval_path, promoter_path, promoter_unit_path, operations_service_dropin_path, preview_path, preview_unit_path, system_observer_path, preview_path.with_name("unix_peer.py")):
     helper_info = helper.lstat()
     if (not stat.S_ISREG(helper_info.st_mode) or stat.S_ISLNK(helper_info.st_mode)
             or helper_info.st_nlink != 1 or helper_info.st_uid != os.getuid()
@@ -371,7 +371,7 @@ for helper in (helper_path, manager_path, manager_unit_path, approval_path, prom
         raise SystemExit("invalid ODS Pixel extension helper")
     helper_payloads.append(helper.read_bytes())
 digest = hashlib.sha256()
-digest.update(b"ods-pixel-contract-v9\0")
+digest.update(b"ods-pixel-contract-v10\0")
 for payload in (answers_payload, policy_payload, catalog_payload, *helper_payloads):
     digest.update(len(payload).to_bytes(8, "big"))
     digest.update(payload)
@@ -3852,6 +3852,7 @@ _ods_pixel_install_ingress() {
     local system_artifact_promoter="/usr/local/libexec/ods-pixel-artifact-promoter.py"
     local workspace_preview="$plugin_root/host/workspace_preview.py"
     local system_workspace_preview="/usr/local/libexec/ods-pixel-workspace-preview.py"
+    local unix_peer="$plugin_root/host/unix_peer.py"
     local system_observer="$plugin_root/host/system_observe.py"
     local installed_system_observer="/usr/local/libexec/ods-pixel-system-observe.py"
     local operations_service_dropin="$plugin_root/host/pixel-ops-broker-ods.conf"
@@ -3867,7 +3868,7 @@ _ods_pixel_install_ingress() {
         "$extension_manager" "$rendered_extension_manager_unit" \
         "$artifact_promoter" "$rendered_artifact_promoter_unit" \
         "$workspace_preview" "$rendered_workspace_preview_unit" \
-        "$system_observer" \
+        "$system_observer" "$unix_peer" \
         "$operations_service_dropin"; do
         [[ -f "$projection_source" && ! -L "$projection_source" ]] || return 1
         IFS='|' read -r kind uid mode size < <(stat -c '%F|%u|%a|%s' -- "$projection_source")
@@ -3945,6 +3946,8 @@ EOF
     ods_sudo install -o root -g root -m 0755 "$artifact_promoter" "$system_artifact_promoter"
     ods_sudo install -o root -g root -m 0755 "$workspace_preview" "$system_workspace_preview"
     ods_sudo install -o root -g root -m 0755 "$system_observer" "$installed_system_observer"
+    ods_sudo install -o root -g root -m 0644 "$unix_peer" /usr/local/libexec/unix_peer.py
+    ods_sudo install -o root -g root -m 0644 "$unix_peer" /opt/pixel-ops-broker/unix_peer.py
     if ods_sudo test -e "$operations_service_dropin_dir" \
         || ods_sudo test -L "$operations_service_dropin_dir"; then
         ods_sudo test -d "$operations_service_dropin_dir" || return 1
@@ -3963,6 +3966,8 @@ EOF
     ods_sudo cmp -s -- "$artifact_promoter" "$system_artifact_promoter"
     ods_sudo cmp -s -- "$workspace_preview" "$system_workspace_preview"
     ods_sudo cmp -s -- "$system_observer" "$installed_system_observer"
+    ods_sudo cmp -s -- "$unix_peer" /usr/local/libexec/unix_peer.py
+    ods_sudo cmp -s -- "$unix_peer" /opt/pixel-ops-broker/unix_peer.py
     ods_sudo cmp -s -- "$operations_service_dropin" "$installed_operations_service_dropin" \
         || return 1
     extension_probe="$(ods_sudo -u pixel-ops-broker /usr/bin/python3 \
@@ -4172,6 +4177,7 @@ ods_pixel_install_default_agent() {
         && -f "$plugin_root/host/artifact_promoter.py" \
         && -f "$plugin_root/host/pixel-artifact-promoter.service" \
         && -f "$plugin_root/host/workspace_preview.py" \
+        && -f "$plugin_root/host/unix_peer.py" \
         && -f "$plugin_root/host/pixel-workspace-preview.service" \
         && -f "$plugin_root/host/system_observe.py" \
         && -f "$plugin_root/host/openclaw_tool_recovery.py" \

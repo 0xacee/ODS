@@ -10,6 +10,7 @@ create-only.  Remote bytes remain untrusted and non-executable.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -19,11 +20,14 @@ import secrets
 import select
 import socket
 import stat
-import struct
 import sys
 import urllib.parse
 from typing import Any, Callable
 
+_peer_spec = importlib.util.spec_from_file_location("ods_unix_peer", pathlib.Path(__file__).with_name("unix_peer.py"))
+_peer_module = importlib.util.module_from_spec(_peer_spec)
+_peer_spec.loader.exec_module(_peer_module)
+peer_ids = _peer_module.peer_ids
 
 SCHEMA_VERSION = 1
 KIND = "ods-pixel-download-promotion"
@@ -591,8 +595,7 @@ def _serve_connection(
 
     response: dict[str, Any]
     try:
-        peer = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        _pid, uid, _gid = struct.unpack("3i", peer)
+        uid, _gid = peer_ids(connection)
         if uid != owner_uid:
             raise PromotionError("unauthorized promotion peer")
         connection.settimeout(10)

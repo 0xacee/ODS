@@ -10,6 +10,7 @@ serves only those immutable snapshots with browser-hardening headers.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import difflib
 import http.client
 import http.server
@@ -23,13 +24,16 @@ import shutil
 import socket
 import socketserver
 import stat
-import struct
 import sys
 import tempfile
 import threading
 import urllib.parse
 from typing import Any
 
+_peer_spec = importlib.util.spec_from_file_location("ods_unix_peer", pathlib.Path(__file__).with_name("unix_peer.py"))
+_peer_module = importlib.util.module_from_spec(_peer_spec)
+_peer_spec.loader.exec_module(_peer_module)
+peer_ids = _peer_module.peer_ids
 
 SCHEMA_VERSION = 1
 KIND = "ods-pixel-workspace-preview"
@@ -704,8 +708,7 @@ def _serve_connection(
 ) -> None:
     response: dict[str, Any]
     try:
-        peer = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        _pid, uid, _gid = struct.unpack("3i", peer)
+        uid, _gid = peer_ids(connection)
         if uid != owner_uid:
             raise PreviewError("unauthorized preview peer")
         connection.settimeout(10)

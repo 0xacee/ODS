@@ -9,6 +9,7 @@ credential, Docker access, an arbitrary HTTP client, or a generic host shell.
 from __future__ import annotations
 
 import http.client
+import importlib.util
 import json
 import os
 import pathlib
@@ -16,12 +17,15 @@ import pwd
 import re
 import socket
 import stat
-import struct
 import sys
 import time
 import urllib.parse
 from typing import Any
 
+_peer_spec = importlib.util.spec_from_file_location("ods_unix_peer", pathlib.Path(__file__).with_name("unix_peer.py"))
+_peer_module = importlib.util.module_from_spec(_peer_spec)
+_peer_spec.loader.exec_module(_peer_module)
+peer_ids = _peer_module.peer_ids
 
 SCHEMA_VERSION = 1
 KIND = "ods-pixel-extension-lifecycle"
@@ -810,8 +814,7 @@ def _serve_connection(
     action = "inspect"
     extension_id = "invalid"
     try:
-        peer = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        _pid, uid, _gid = struct.unpack("3i", peer)
+        uid, _gid = peer_ids(connection)
         connection.settimeout(15)
         chunks = bytearray()
         while len(chunks) <= MAX_REQUEST_BYTES:

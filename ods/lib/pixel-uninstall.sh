@@ -39,6 +39,7 @@ ods_pixel_uninstall_managed() {
     local artifact_promoter_owner_unit="$install_dir/data/pixel/artifact-promoter.service"
     local workspace_preview_unit="$systemd_dir/pixel-workspace-preview.service"
     local workspace_preview_program="$libexec_dir/ods-pixel-workspace-preview.py"
+    local unix_peer_program="$libexec_dir/unix_peer.py"
     local workspace_preview_source="$install_dir/extensions/services/pixel-agent/host/workspace_preview.py"
     local workspace_preview_owner_unit="$install_dir/data/pixel/workspace-preview.service"
     local workspace_preview_state="${ODS_PIXEL_UNINSTALL_PREVIEW_STATE_DIR:-/var/lib/ods-pixel-preview}"
@@ -66,6 +67,7 @@ ods_pixel_uninstall_managed() {
     local ops_extension_program="$ops_install/ods-extension-search.py"
     local ops_extension_catalog="$ops_install/ods-extension-catalog.json"
     local ops_extension_manager="$ops_install/ods-extension-manager.py"
+    local ops_unix_peer="$ops_install/unix_peer.py"
     local ops_state="${ODS_PIXEL_UNINSTALL_OPS_STATE_DIR:-/var/lib/pixel-ops-broker}"
     local ops_owner_policy="$install_dir/data/pixel/operations-policy.json"
     local ops_owner_extension_catalog="$install_dir/data/pixel/extension-catalog.json"
@@ -102,7 +104,7 @@ ods_pixel_uninstall_managed() {
         "$ops_extension_program" "$ops_extension_catalog" "$ops_extension_manager" "$ops_state" \
         "$extension_manager_unit" "$extension_manager_program" \
         "$artifact_promoter_unit" "$artifact_promoter_program" \
-        "$workspace_preview_unit" "$workspace_preview_program" "$workspace_preview_state" \
+        "$workspace_preview_unit" "$workspace_preview_program" "$workspace_preview_state" "$unix_peer_program" "$ops_unix_peer" \
         "$system_observer_program" "$access_unit" "$access_program" \
         "$access_source" "$access_state" "$access_config"; do
         [[ "$path" == /* && "$path" != / ]] || {
@@ -665,7 +667,7 @@ if onboarding.exists():
                                     if system_observer_source_present:
                                         v9 = hashlib.sha256()
                                         v9.update(b"ods-pixel-contract-v9\0")
-                                        for payload in (
+                                        v9_payloads = (
                                             onboarding_payload,
                                             policy_payload,
                                             ops_owner_extension_catalog.read_bytes(),
@@ -679,12 +681,22 @@ if onboarding.exists():
                                             workspace_preview_source.read_bytes(),
                                             workspace_preview_owner_unit.read_bytes(),
                                             system_observer_source.read_bytes(),
-                                        ):
+                                        )
+                                        for payload in v9_payloads:
                                             v9.update(len(payload).to_bytes(8, "big"))
                                             v9.update(payload)
                                         v9_digest = v9.hexdigest()
                                         accepted_contracts.add(v9_digest)
                                         system_observer_contract_present = value.get("contract_sha256") == v9_digest
+                                        peer_source = workspace_preview_source.with_name("unix_peer.py")
+                                        if peer_source.exists() or peer_source.is_symlink():
+                                            regular(peer_source, owner_uid, 2 * 1024 * 1024)
+                                            v10 = hashlib.sha256(b"ods-pixel-contract-v10\0")
+                                            for payload in (*v9_payloads, peer_source.read_bytes()):
+                                                v10.update(len(payload).to_bytes(8, "big"))
+                                                v10.update(payload)
+                                            accepted_contracts.add(v10.hexdigest())
+                                            system_observer_contract_present |= value.get("contract_sha256") == v10.hexdigest()
         if value.get("contract_sha256") not in accepted_contracts:
             raise SystemExit("Pixel onboarding drifted from its ODS marker")
 elif cleanup[0] != "none" and state != "deactivating":
@@ -701,6 +713,8 @@ artifact_promoter_unit = pathlib.Path(artifact_promoter_unit_raw)
 artifact_promoter_program = pathlib.Path(artifact_promoter_program_raw)
 workspace_preview_unit = pathlib.Path(workspace_preview_unit_raw)
 workspace_preview_program = pathlib.Path(workspace_preview_program_raw)
+unix_peer_program = workspace_preview_program.with_name("unix_peer.py")
+unix_peer_source = pathlib.Path(workspace_preview_source_raw).with_name("unix_peer.py")
 workspace_preview_state = pathlib.Path(workspace_preview_state_raw)
 system_observer_program = pathlib.Path(system_observer_program_raw)
 for path, maximum in (
@@ -714,6 +728,7 @@ for path, maximum in (
     (artifact_promoter_program, 2 * 1024 * 1024),
     (workspace_preview_unit, 256 * 1024),
     (workspace_preview_program, 2 * 1024 * 1024),
+    (unix_peer_program, 2 * 1024 * 1024),
     (system_observer_program, 2 * 1024 * 1024),
 ):
     if path.exists() or path.is_symlink():
@@ -816,6 +831,11 @@ if workspace_preview_unit.exists():
 if workspace_preview_program.exists():
     if workspace_preview_program.read_bytes() != workspace_preview_source.read_bytes():
         raise SystemExit("installed Pixel workspace preview program drifted from this ODS install")
+
+if unix_peer_program.exists():
+    regular(unix_peer_source, owner_uid, 2 * 1024 * 1024)
+    if unix_peer_program.read_bytes() != unix_peer_source.read_bytes():
+        raise SystemExit("installed Pixel peer identity helper drifted from this ODS install")
 
 if system_observer_program.exists():
     if system_observer_program.read_bytes() != system_observer_source.read_bytes():
@@ -1101,6 +1121,14 @@ if exists(install_dir):
         expected_contents.update({"ods-extension-search.py", "ods-extension-catalog.json"})
     if lifecycle_source_present:
         expected_contents.add("ods-extension-manager.py")
+    peer_program = install_dir / "unix_peer.py"
+    if exists(peer_program):
+        expected_contents.add("unix_peer.py")
+        exact_file(peer_program, root_uid, root_gid, 0o644, 2 * 1024 * 1024)
+        peer_source = expected_extension_manager.with_name("unix_peer.py")
+        owner_source(peer_source, 2 * 1024 * 1024)
+        if peer_program.read_bytes() != peer_source.read_bytes():
+            raise SystemExit("Pixel peer identity helper drifted from the exact ODS source")
     contents_valid = (
         contents.issubset(expected_contents)
         if marker_state in {"installing", "deactivating"}
@@ -1316,6 +1344,7 @@ PY
         || -e "$artifact_promoter_program" || -L "$artifact_promoter_program" \
         || -e "$workspace_preview_unit" || -L "$workspace_preview_unit" \
         || -e "$workspace_preview_program" || -L "$workspace_preview_program" \
+        || -e "$unix_peer_program" || -L "$unix_peer_program" \
         || -e "$system_observer_program" || -L "$system_observer_program" \
         || -e "$workspace_preview_state" || -L "$workspace_preview_state" \
         || -e "$access_unit" || -L "$access_unit" \
@@ -1691,7 +1720,7 @@ PY
             return 1
         fi
         if ! sudo rm -f -- "$ops_unit" "$ops_dropin" "$ops_env" "$ops_policy" "$ops_program" \
-            "$ops_extension_program" "$ops_extension_catalog" "$ops_extension_manager" \
+            "$ops_extension_program" "$ops_extension_catalog" "$ops_extension_manager" "$ops_unix_peer" \
             || ! { [[ ! -e "$ops_dropin_dir" && ! -L "$ops_dropin_dir" ]] || sudo rmdir -- "$ops_dropin_dir"; } \
             || ! { [[ ! -e "$ops_install" && ! -L "$ops_install" ]] || sudo rmdir -- "$ops_install"; } \
             || ! { [[ ! -e "$ops_policy_dir" && ! -L "$ops_policy_dir" ]] || sudo rmdir -- "$ops_policy_dir"; }; then
@@ -1760,7 +1789,7 @@ PY
         if ! sudo rm -f -- "$gateway_unit" "$ingress_unit" "$ingress_env" "$ingress_program" \
             "$extension_manager_unit" "$extension_manager_program" \
             "$artifact_promoter_unit" "$artifact_promoter_program" \
-            "$workspace_preview_unit" "$workspace_preview_program" \
+            "$workspace_preview_unit" "$workspace_preview_program" "$unix_peer_program" \
             "$system_observer_program" \
             || ! sudo rm -rf -- "$access_program" "$access_state" \
             || ! sudo rm -f -- "$access_unit" "$access_config" "$access_relay_key" \
@@ -1772,7 +1801,7 @@ PY
             || -e "$ingress_program" || -e "$extension_manager_unit" \
             || -e "$extension_manager_program" || -e "$artifact_promoter_unit" \
             || -e "$artifact_promoter_program" || -e "$workspace_preview_unit" \
-            || -e "$workspace_preview_program" || -e "$system_observer_program" \
+            || -e "$workspace_preview_program" || -e "$unix_peer_program" || -e "$system_observer_program" \
             || -e "$workspace_preview_state" || -e "$access_unit" \
             || -e "$access_program" || -e "$access_state" || -e "$access_config" ]]; then
             log_error "ODS-managed Pixel system artifact cleanup was incomplete"
