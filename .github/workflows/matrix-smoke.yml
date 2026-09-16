@@ -236,6 +236,9 @@ jobs:
       - name: Native Model Store Restart Tests
         run: /bin/bash tests/test-macos-native-model-store.sh
 
+      - name: Unix Peer Identity Tests
+        run: python3 extensions/services/pixel-agent/tests/test_unix_peer.py
+
       - name: Atomic Environment Write Tests
         run: /bin/bash tests/test-atomic-env-writes.sh
 
