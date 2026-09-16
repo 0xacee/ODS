@@ -332,7 +332,7 @@ test('non-Linux POSIX keeps conservative legacy behavior and rejects Linux ident
   const child = spawnSync(process.execPath, ['-e', ''], {encoding: 'utf8'});
   assert.equal(child.status, 0, child.stderr);
   const previous = identity();
-  Object.defineProperty(process, 'platform', {...descriptor, value: 'darwin'});
+  Object.defineProperty(process, 'platform', {...descriptor, value: 'freebsd'});
   try {
     const fresh = fixture(), runtime = createAccessRuntime(fresh);
     assert.equal(runtime.status().available, true);
@@ -366,6 +366,53 @@ test('kernel claim survives helper exit, excludes recovery, and releases after o
   assert.equal(fs.statSync(claim).isFile(), true);
 });
 
+test('Darwin descriptor lock excludes stale recovery and releases on process death', {skip:process.platform !== 'darwin'}, async t => {
+  const dead = spawnSync(process.execPath, ['-e', '']);
+  assert.equal(dead.status, 0);
+  const options = fixture(); seed(options, {pid:dead.pid}, 'held');
+  const claim = path.join(options.directory, '.process-claim');
+  const {child} = await childProcess(t, `
+    import fs from 'node:fs';
+    const fd = fs.openSync(${JSON.stringify(claim)}, fs.constants.O_CREAT | fs.constants.O_RDWR |
+      fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK | 0x20, 0o600);
+    process.send({locked:true}); setInterval(() => {}, 1000);`);
+  const before = fs.readFileSync(path.join(options.directory, 'process.json'), 'utf8');
+  assert.equal(createAccessRuntime(options).status().available, false);
+  assert.equal(fs.readFileSync(path.join(options.directory, 'process.json'), 'utf8'), before);
+  const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited;
+  const recovered = createAccessRuntime(options).status();
+  assert.equal(recovered.available, true);
+  assert.equal(recovered.phase, 'held');
+  t.after(() => fs.rmSync(path.dirname(options.directory), {recursive:true}));
+});
+
+test('Darwin concurrent stale claims elect exactly one owner and preserve its hold', {skip:process.platform !== 'darwin'}, async t => {
+  const dead = spawnSync(process.execPath, ['-e', '']);
+  assert.equal(dead.status, 0);
+  const options = fixture(); seed(options, {pid:dead.pid});
+  const contenders = [];
+  for (let index = 0; index < 6; index++) {
+    contenders.push(await childProcess(t, `
+      import {createAccessRuntime} from ${JSON.stringify(runtimeUrl)};
+      process.once('message', () => {
+        const runtime = createAccessRuntime(${JSON.stringify(options)});
+        if (runtime.status().available) runtime.acquire('${token}', runtime.status().revision);
+        process.send(runtime.status());
+      }); process.send({ready:true}); setInterval(() => {}, 1000);`));
+  }
+  const responses = contenders.map(({child}) => once(child, 'message', {signal:AbortSignal.timeout(10000)}));
+  contenders.forEach(({child}) => child.send('start'));
+  const states = [];
+  for (const response of responses) states.push((await response)[0]);
+  const winners = states.filter(state => state.available);
+  assert.equal(winners.length, 1);
+  assert.equal(winners[0].phase, 'held');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(options.directory, 'process.json'))), {pid:winners[0].pid});
+  assert.equal(createAccessRuntime(options).status().available, false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(options.directory, 'state.json'))).phase, 'held');
+  t.after(() => fs.rmSync(path.dirname(options.directory), {recursive:true}));
+});
+
 test('simultaneous stale registrations elect one live owner without replacing it', linux, async t => {
   const options = fixture(), previous = identity(); previous.startTicks = String(BigInt(previous.startTicks) + 1n);
   seed(options, previous);
@@ -389,7 +436,8 @@ test('simultaneous stale registrations elect one live owner without replacing it
   assert.equal(JSON.parse(fs.readFileSync(path.join(options.directory, 'state.json'))).phase, 'held');
 });
 
-test('process and kernel claim files require private owned regular single-link entries', linux, () => {
+test('process and kernel claim files require private owned regular single-link entries',
+  {skip: !['linux', 'darwin'].includes(process.platform)}, () => {
   for (const name of ['process.json', '.process-claim']) {
     for (const kind of ['symlink', 'hardlink', 'public', 'directory', 'foreign-owner']) {
       const options = fixture(); seed(options, {pid: process.pid});
