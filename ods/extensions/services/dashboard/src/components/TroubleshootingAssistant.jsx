@@ -51,8 +51,7 @@ const commonIssues = [
     solutions: [
       {
         title: 'Check model download progress',
-        command: 'ls -lh ~/ods/data/models/',
-        description: 'Verify model files exist and have size > 1GB'
+        description: 'Open Models to check the download status and any reported error. A nonempty file alone does not prove that the download is complete.'
       },
       {
         title: 'Check VRAM usage',
@@ -60,9 +59,9 @@ const commonIssues = [
         description: 'Look for processes using GPU memory'
       },
       {
-        title: 'Use smaller model tier',
-        command: '# Edit .env\nGPU_TIER=minimal  # Uses Qwen 1.5B instead of 32B',
-        description: 'For GPUs with <16GB VRAM'
+        title: 'Select a smaller model',
+        command: 'ods model current\nods model list',
+        description: 'Review the current model and available tiers, then use Models to download and activate a smaller model at a suitable context length. For an already downloaded tier, use ods model swap with its listed tier name. Editing a tier value in .env does not download or activate a model.'
       }
     ]
   },
