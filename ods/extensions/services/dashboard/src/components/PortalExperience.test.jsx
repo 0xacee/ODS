@@ -10,7 +10,7 @@ const task={schemaVersion:2,runId:'chatcmpl_11111111-2222-4333-8444-555555555555
 it('shows measured occupancy on focus and touch, never a pretend zero',()=>{
   const {rerender}=render(<PortalContextRing context={task.context}/>)
   const button=screen.getByRole('button',{name:/81% full/})
-  fireEvent.focus(button);expect(screen.getByRole('tooltip')).toHaveTextContent('810 / 1,000')
+  fireEvent.focus(button);expect(screen.getByRole('tooltip')).toHaveTextContent('81% used (19% remaining)');expect(screen.getByRole('tooltip')).toHaveTextContent('810 / 1k tokens used')
   fireEvent.keyDown(button,{key:'Escape'});expect(screen.queryByRole('tooltip')).toBeNull()
   rerender(<PortalContextRing capacity={32768}/>);fireEvent.click(screen.getByRole('button'))
   expect(screen.getByRole('tooltip')).toHaveTextContent('Token usage unavailable')
