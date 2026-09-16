@@ -195,7 +195,10 @@ it('sends the complete retained transcript beside bounded legacy messages withou
   fetch.mockImplementation(async url=>url==='/api/pixel/chat/stream'?stream():response(url==='/api/pixel/chat/context'?snapshot():{available:true,runtime}))
   render(<Pixel/>);await screen.findByText('Available')
   fireEvent.change(screen.getByPlaceholderText('Message Portal...'),{target:{value:'Continue with Cedar'}})
-  fireEvent.click(screen.getByTitle('Send'));await screen.findByText('Continued successfully')
+  fireEvent.click(screen.getByTitle('Send'))
+  // Rendering this deliberately large retained transcript competes with the
+  // response reveal frames on slower Windows CI runners.
+  await screen.findByText('Continued successfully',{}, {timeout:5000})
   const body=JSON.parse(calls('/api/pixel/chat/stream')[0][1].body)
   expect(body.messages.length).toBeLessThanOrEqual(50)
   expect(body.history_snapshot).toEqual({schemaVersion:1,messages:[...messages.map(({role,content})=>({role,content})),{role:'user',content:'Continue with Cedar'}]})
