@@ -132,3 +132,24 @@ model-facing evidence remains unchanged. The first unconstrained file test
 still exposed hallucinated tool names; the guard stopped that run and kept its
 actual failed/completed steps. These checks establish the activity integration,
 not universal model reliability.
+
+
+## Tabbed workspace and published-file review
+
+Publication cards in the conversation now open Preview, Review or the selected
+changed file in a compact workspace. Review displays one verified diff with a
+searchable folder tree on the right. Opening its source creates a closable,
+deduplicated file tab. Verified Markdown is rendered as a document with a source
+toggle; relative file links resolve within that same publication.
+
+The preview iframe stays mounted across tab switches and panel collapse, so
+reading a file does not reset an interactive preview. Publication and viewport
+selectors remain available under compact options. Small panels use a file drawer;
+keyboard tab navigation, focus restoration and transparent, theme-aware scrollbars
+cover the chat and workspace. No external editor, undo or live repository state is
+implied: this view reads the existing verified publication snapshots.
+
+Focused regressions cover opening a workspace before publication, publication
+switches during manifest loading, failed-manifest retries, obsolete pending file
+requests, exact file selection and draft-only publication requests. Existing
+snapshot integrity, clipboard, source and conversation recovery tests are retained.

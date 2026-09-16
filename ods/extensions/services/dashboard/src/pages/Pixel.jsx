@@ -18,8 +18,6 @@ import PixelCommandSearch, { OPEN_PIXEL_SEARCH } from '../components/PixelComman
 import PixelConversationImport from '../components/PixelConversationImport'
 import { appendComposerText } from '../lib/pixelComposerText'
 import PixelSelectionActions from '../components/PixelSelectionActions'
-import PixelTaskFiles from '../components/PixelTaskFiles'
-import PixelTaskActivity from '../components/PixelTaskActivity'
 import PixelQuestions from '../components/PixelQuestions'
 import PortalGoalPlan from '../components/PortalGoalPlan'
 import {goalCommand,continueGoal} from '../lib/portalGoal'
@@ -29,8 +27,7 @@ import PortalStreamingText from '../components/PortalStreamingText'
 import {parseQuestionsFrame, questionMetadata} from '../lib/pixelQuestions'
 import PixelTurnNavigation from '../components/PixelTurnNavigation'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
-import PixelPreviewViewport from '../components/PixelPreviewViewport'
-import PixelPreviewHistory from '../components/PixelPreviewHistory'
+import PortalWorkspace from '../components/PortalWorkspace'
 import { parseTaskActivity, parseTaskActivityFrame } from '../lib/pixelTaskActivity'
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import PanelResizeHandle from '../components/PanelResizeHandle.jsx'
@@ -44,12 +41,9 @@ import {
   CheckCircle2,
   Code2,
   Copy,
-  ExternalLink,
   Loader2,
   Plus,
-  PanelRightClose,
   PanelRightOpen,
-  RefreshCw,
   Send,
   Search,
   ShieldCheck,
@@ -549,15 +543,20 @@ export default function Pixel({ systemStatus = null }) {
   const [preview, setPreview] = useState(() => initialChat?.preview || null)
   const [previewRefresh, setPreviewRefresh] = useState(0)
   const [previewCollapsed, setPreviewCollapsed] = useState(false)
-  const [previewWidth, setPreviewWidth] = useState(440)
-  const [previewTab, setPreviewTab] = useState('preview')
+  const [previewWidth, setPreviewWidth] = useState(640)
+  const [workspaceRequest, setWorkspaceRequest] = useState(null)
+  const [workspaceExpanded, setWorkspaceExpanded] = useState(false)
   const [workspaceOpen, setWorkspaceOpen] = useState(() => initialChat?.workspaceOpen || false)
-  useEffect(() => { setPreviewTab('preview') }, [preview?.siteId])
+  function openPublication(publication, kind, path=null) {
+    setPreview(publication);setWorkspaceOpen(true);setPreviewCollapsed(false)
+    setWorkspaceRequest({siteId:publication.siteId,kind,path})
+  }
 
   const abortRef = useRef(null)
   const stopRequestRef = useRef(null)
   const restoredActivityRef = useRef(restoredActivity)
   const chatIdRef = useRef(initialChat?.chatId || makeChatId())
+  useEffect(() => { setWorkspaceRequest(null); setWorkspaceExpanded(false) }, [chatIdRef.current])
   const contextStartRef = useRef(initialChat?.contextStart || 0)
   const requestIdRef = useRef(initialChat?.requestId || null)
   const inputRef = useRef(null)
@@ -1287,7 +1286,7 @@ export default function Pixel({ systemStatus = null }) {
 
   return (
     <div className="pixel-chat flex flex-col overflow-hidden text-theme-text">
-      <div className="pixel-chat-preview-layout flex min-h-0 flex-1 flex-col lg:flex-row">
+      <div className={`pixel-chat-preview-layout flex min-h-0 flex-1 flex-col lg:flex-row ${workspaceExpanded && workspaceOpen && !previewCollapsed ? 'is-workspace-expanded' : ''}`}>
         <div className="pixel-chat-column flex min-h-0 min-w-0 flex-1 flex-col">
       {persistenceError && <PixelConversationRecovery error={persistenceError} chatId={chatIdRef.current} messages={messages} draft={input}/>}
       <header className="pixel-chat-header">
@@ -1463,7 +1462,7 @@ export default function Pixel({ systemStatus = null }) {
               {message.role === 'assistant' && <PortalAgentActivity task={message.task} active={message.status === 'streaming'} status={message.status}/> }
               {message.role === 'assistant' && message.content ? (
                 <>
-                  {message.publication && <PixelSnapshotChanges preview={message.publication} before={message.beforePublication} onPreview={() => {setPreview(message.publication);setWorkspaceOpen(true);setPreviewCollapsed(false);setPreviewTab('preview')}}/>}
+                  {message.publication && <PixelSnapshotChanges preview={message.publication} before={message.beforePublication} variant="summary" onPreview={()=>openPublication(message.publication,'preview')} onReview={path=>openPublication(message.publication,'review',path)}/>}
                   {!message.questions && <PortalStreamingText active={message.status==='streaming'} components={MARKDOWN_COMPONENTS}>{message.content}</PortalStreamingText>}
                   <OperationsApprovalCard content={message.content} />
                 </>
@@ -1561,61 +1560,17 @@ export default function Pixel({ systemStatus = null }) {
         {workspaceOpen && (
           <aside aria-label="Preview panel" style={{'--preview-width':`${previewWidth}px`}} className={`pixel-preview-panel ${previewCollapsed ? 'is-collapsed' : ''} flex shrink-0 flex-col border-theme-border bg-theme-bg`}>
             {!previewCollapsed && <PanelResizeHandle width={previewWidth} onResize={setPreviewWidth} label="Resize preview panel" container=".pixel-chat-preview-layout" minimum={240} />}
-            <div className="pixel-workspace-toolbar flex items-center gap-2 border-b border-theme-border px-3 py-2.5">
-              <nav className="pixel-preview-tabs" aria-label="Preview views">
-                <button type="button" aria-pressed={previewTab === 'activity'} onClick={() => setPreviewTab('activity')}>Activity</button>
-                <button type="button" aria-pressed={previewTab === 'files'} onClick={() => setPreviewTab('files')}>Files</button>
-                <button type="button" aria-pressed={previewTab === 'preview'} onClick={() => setPreviewTab('preview')}>Preview</button>
-                <button type="button" aria-pressed={previewTab === 'changes'} onClick={() => setPreviewTab('changes')}>Changes</button>
-              </nav>
-              <div className="pixel-workspace-actions">
-              <button type="button" onClick={() => setPreviewCollapsed(value => !value)} title={previewCollapsed ? 'Expand preview' : 'Collapse preview'} className="rounded-lg p-2 text-theme-text-muted">
-                <MetalMetricIcon icon={previewCollapsed ? PanelRightOpen : PanelRightClose} size={16}/>
-              </button>
-              <button
-                type="button"
-                onClick={() => setPreviewRefresh(value => value + 1)}
-                className="rounded-lg p-2 text-theme-text-muted transition hover:bg-theme-surface-hover hover:text-theme-text"
-                title="Reload preview"
-                disabled={!preview}
-              >
-                <MetalMetricIcon icon={RefreshCw} size={16} />
-              </button>
-              {preview && <a
-                href={previewAccess.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="rounded-lg p-2 text-theme-text-muted transition hover:bg-theme-surface-hover hover:text-theme-text"
-                title="Open preview in a new tab"
-              >
-                <MetalMetricIcon icon={ExternalLink} size={16} />
-              </a>}
-              <button
-                type="button"
-                onClick={() => setWorkspaceOpen(false)}
-                className="rounded-lg p-2 text-theme-text-muted transition hover:bg-theme-surface-hover hover:text-theme-text"
-                title="Close preview"
-              >
-                <MetalMetricIcon icon={X} size={16} />
-              </button>
-              </div>
-            </div>
-            {!previewCollapsed && preview && <PixelPreviewHistory previews={messages.map(message => messagePublication(message).publication).filter(Boolean)} selected={preview} onSelect={publication => {setPreview(publication); setPreviewRefresh(0)}}/>}
-            {preview && <PixelPreviewViewport
-              key={`preview-${preview.siteId}-${previewRefresh}`}
-              access={previewAccess}
-              title={`Interactive ${displayName} preview`}
-              hidden={previewCollapsed || previewTab !== 'preview'}
-            />}
-            {!previewCollapsed && preview && previewTab === 'files' && <PixelTaskFiles key={`files-${preview.siteId}-${previewRefresh}`} preview={preview}/>}
-            {!previewCollapsed && preview && previewTab === 'changes' && <div className="pixel-workspace-changes"><PixelSnapshotChanges key={`${preview.siteId}-${previewRefresh}`} preview={preview} before={[...messages].reverse().find(message=>message.publication?.siteId === preview.siteId)?.beforePublication || null} onPreview={()=>setPreviewTab('preview')}/></div>}
-            {!previewCollapsed && previewTab === 'activity' && <PixelTaskActivity key={chatIdRef.current} messages={messages} sending={sending} elapsed={workingElapsed}/>}
-            {!previewCollapsed && !preview && previewTab !== 'activity' && <section className="pixel-workspace-empty">
-              <Code2 size={24}/><h2>{previewTab === 'files' ? 'No published files yet' : 'No preview published yet'}</h2>
-              <p>Saving HTML in the agent workspace does not publish it here. Pixel must publish the site and ODS must verify the result.</p>
-              <button type="button" disabled={isDisabled} onClick={() => insertComposerText('Publique o site que voce criou nesta conversa no preview do ODS. Inspecione os arquivos existentes, preserve o projeto e use pixel_ods_workspace_preview para a pasta que contem index.html. Nao apenas descreva o arquivo.')}>Ask Pixel to publish</button>
-              <small>Adds a request to your message. Review it before sending.</small>
-            </section>}
+            <PortalWorkspace key={chatIdRef.current} preview={preview} access={previewAccess}
+              before={[...messages].reverse().find(message=>message.publication?.siteId===preview?.siteId)?.beforePublication || null}
+              previews={messages.map(message=>messagePublication(message).publication).filter(Boolean)}
+              title={`Interactive ${displayName} preview`} request={workspaceRequest} refresh={previewRefresh}
+              onRefresh={()=>setPreviewRefresh(value=>value+1)}
+              onSelectPreview={publication=>{setPreview(publication);setPreviewRefresh(0)}}
+              collapsed={previewCollapsed} onCollapse={()=>setPreviewCollapsed(value=>!value)}
+              expanded={workspaceExpanded} onExpand={()=>setWorkspaceExpanded(value=>!value)}
+              onClose={()=>{setWorkspaceOpen(false);setWorkspaceExpanded(false)}}
+              onPublish={isDisabled?undefined:()=>{setWorkspaceExpanded(false);insertComposerText('Publique o site que voce criou nesta conversa no preview do ODS. Inspecione os arquivos existentes, preserve o projeto e use pixel_ods_workspace_preview para a pasta que contem index.html.')}}/>
+
           </aside>
         )}
       </div>
