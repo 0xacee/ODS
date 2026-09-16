@@ -2773,7 +2773,9 @@ for service in (data.get("services") or {}).values():
         fi
 
         _hermes_live_verified=false
-        for _hermes_wait_i in $(seq 1 90); do
+        # First boot can spend several minutes fixing image ownership before
+        # creating config.yaml, especially under Docker Desktop emulation.
+        for _hermes_wait_i in $(seq 1 600); do
             _hermes_patch_rc=0
             _macos_patch_hermes_persisted_config \
                 "$_hermes_model" "$_hermes_base_url" "$MAX_CONTEXT" \

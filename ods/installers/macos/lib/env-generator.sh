@@ -263,6 +263,11 @@ generate_ods_env() {
         fi
         upsert_env_value "$env_path" "ODS_UID" "$compose_uid"
         upsert_env_value "$env_path" "ODS_GID" "$compose_gid"
+        # The image home is accessible only to its built-in node user.
+        # Docker Desktop translates bind-mount ownership independently of macOS IDs.
+        if ! env_key_exists "$env_path" "N8N_RUN_USER"; then
+            upsert_env_value "$env_path" "N8N_RUN_USER" "node"
+        fi
 
         local _switchboard_mode
         _switchboard_mode="$(read_env_value "$env_path" "ODS_MODEL_SWITCHBOARD")"
@@ -618,6 +623,7 @@ COMFYUI_CPU_RESERVATION=${comfyui_cpu_reservation}
 # Docker Compose reads these from .env without colliding with Bash's readonly UID.
 ODS_UID=${host_uid}
 ODS_GID=${host_gid}
+N8N_RUN_USER=node
 
 #=== Ports ===
 OLLAMA_PORT=${native_llama_port}
