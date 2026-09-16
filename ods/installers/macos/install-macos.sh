@@ -741,6 +741,10 @@ _macos_native_llama_pid_is_owned() {
 _macos_stop_install_owned_native_llama() {
     local reason="${1:-Stopping install-owned native llama-server}" pid attempt
     local -a candidates=() remaining=()
+    if [[ -f "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" ]]; then
+        bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" stop \
+            "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" || return 1
+    fi
     if [[ -f "$LLAMA_SERVER_PID_FILE" ]]; then
         pid="$(tr -dc '0-9' < "$LLAMA_SERVER_PID_FILE" 2>/dev/null || true)"
         _macos_native_llama_pid_is_owned "$pid" && candidates+=("$pid")
@@ -2274,12 +2278,9 @@ else
         [[ -n "$_spec_draft_type_v" ]] && _llama_args+=(--spec-draft-type-v "$_spec_draft_type_v")
         fi
 
-        (
-            cd "$INSTALL_DIR" || exit 1
-            exec "$LLAMA_SERVER_BIN" "${_llama_args[@]}"
-        ) > "$LLAMA_SERVER_LOG" 2>&1 &
-        LLAMA_PID=$!
-        echo "$LLAMA_PID" > "$LLAMA_SERVER_PID_FILE"
+        bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
+            "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" "${_llama_args[@]}"
+        LLAMA_PID="$(cat "$LLAMA_SERVER_PID_FILE")"
 
         # Wait for health endpoint
         ai "Waiting for llama-server to load model..."
@@ -2461,7 +2462,6 @@ else
     rm -f "$HOST_AGENT_BRIDGE_PLIST" 2>/dev/null || true
     launchctl bootout "gui/$(id -u)/${OPENCODE_PLIST_LABEL}" 2>/dev/null || true
     for _legacy_plist_label in \
-        com.ods.llama-server \
         com.ods.full-model-download; do
         launchctl bootout "gui/$(id -u)/${_legacy_plist_label}" 2>/dev/null || true
         rm -f "$HOME/Library/LaunchAgents/${_legacy_plist_label}.plist" 2>/dev/null || true

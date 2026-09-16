@@ -587,6 +587,12 @@ get_native_llama_status() {
     NATIVE_LLAMA_PID=0
     NATIVE_LLAMA_HEALTHY=false
 
+    local managed_pid
+    managed_pid="$(launchctl print "gui/$(id -u)/com.ods.llama-server" 2>/dev/null | awk '$1 == "pid" && $2 == "=" {print $3; exit}' || true)"
+    if [[ "$managed_pid" =~ ^[0-9]+$ ]] && kill -0 "$managed_pid" 2>/dev/null; then
+        printf '%s\n' "$managed_pid" > "$LLAMA_SERVER_PID_FILE"
+    fi
+
     if [[ ! -f "$LLAMA_SERVER_PID_FILE" ]]; then
         return
     fi
@@ -686,12 +692,10 @@ start_native_llama() {
     [[ -n "${ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_V:-}" ]] && llama_args+=(--spec-draft-type-v "$ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_V")
     fi
 
-    (
-        cd "$INSTALL_DIR" || exit 1
-        exec "$LLAMA_SERVER_BIN" "${llama_args[@]}"
-    ) > "$LLAMA_SERVER_LOG" 2>&1 &
-    local pid=$!
-    echo "$pid" > "$LLAMA_SERVER_PID_FILE"
+    bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
+        "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" "${llama_args[@]}" || return 1
+    local pid
+    pid="$(cat "$LLAMA_SERVER_PID_FILE")"
 
     ai_ok "Native llama-server started (PID ${pid})"
     ai "Waiting for health..."
@@ -711,6 +715,14 @@ start_native_llama() {
 
 stop_native_llama() {
     get_native_llama_status
+    local managed=false
+    launchctl print "gui/$(id -u)/com.ods.llama-server" >/dev/null 2>&1 && managed=true
+    bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" stop \
+        "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" || return 1
+    if $managed; then
+        ai_ok "Native llama-server LaunchAgent stopped"
+        return 0
+    fi
     if ! $NATIVE_LLAMA_RUNNING; then
         ai "Native llama-server not running"
         return
