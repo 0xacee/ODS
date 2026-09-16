@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
+import { createElement, StrictMode } from 'react'
 import { useSystemStatus } from '../useSystemStatus'
 
 describe('useSystemStatus', () => {
@@ -7,6 +8,7 @@ describe('useSystemStatus', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
@@ -128,6 +130,49 @@ describe('useSystemStatus', () => {
     // The hook keeps previous status on error by design
     // (see source: catch block only sets error, doesn't clear status)
     expect(result.current.status.gpu).toBeTruthy()
+  })
+
+  test('expires a stalled JSON body and ignores its late result after recovery', async () => {
+    vi.useFakeTimers()
+    let finishBody
+    let signal
+    fetch.mockImplementationOnce((_url, options) => {
+      signal = options.signal
+      return Promise.resolve({ ok: true, json: () => new Promise(resolve => { finishBody = resolve }) })
+    }).mockResolvedValue({ ok: true, json: async () => ({ uptime: 200, services: [] }) })
+    const { result, unmount } = renderHook(() => useSystemStatus())
+    await act(async () => { await vi.advanceTimersByTimeAsync(12000) })
+    expect(signal.aborted).toBe(true)
+    expect(result.current.error).toBe('Status request timed out')
+    expect(result.current.loading).toBe(false)
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    expect(result.current.status.uptime).toBe(200)
+    await act(async () => { finishBody({ uptime: 1 }); await Promise.resolve() })
+    expect(result.current.status.uptime).toBe(200)
+    expect(result.current.error).toBeNull()
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  test('StrictMode replacement owns a fresh request and unmount cancels it', async () => {
+    vi.useFakeTimers()
+    const signals = []
+    fetch.mockImplementation((_url, options) => {
+      signals.push(options.signal)
+      return new Promise(() => {})
+    })
+    const { unmount } = renderHook(() => useSystemStatus(), {
+      wrapper: ({ children }) => createElement(StrictMode, null, children),
+    })
+    expect(signals).toHaveLength(2)
+    expect(signals[0].aborted).toBe(true)
+    expect(signals[1].aborted).toBe(false)
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(fetch).toHaveBeenCalledTimes(2)
+    unmount()
+    expect(signals[1].aborted).toBe(true)
+    await act(async () => { await Promise.resolve() })
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   test('cleans up interval on unmount', async () => {
