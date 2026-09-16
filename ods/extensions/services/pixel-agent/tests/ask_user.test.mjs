@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createAskUserTool,parseQuestions} from '../plugin/ask-user.mjs';
+import {createAskUserTool,parseQuestions,choiceQuestionFromText} from '../plugin/ask-user.mjs';
 import {createToolLoopGuard} from '../plugin/tool-loop-guard.mjs';
 import {readFileSync} from 'node:fs';
 const questions=[{id:'style',question:'Qual estilo você prefere?',options:['Minimalista','Colorido']}];
@@ -50,5 +50,17 @@ test('deferred dispatch requires matching tool provenance and allows questions b
     assert.equal(guard.beforeToolCall(event,ctx)?.block,undefined);
     guard.afterToolCall(event,{...ctx,toolCallId:'ask'});
     assert.equal(Boolean(guard.deliveryVerificationForRun(ctx.runId).questions),valid);
+  }
+});
+
+test('explicit choice requests repair a plain preference question without retrying the model',()=>{
+  const text='Qual cor principal você prefere?\n\n- Azul - calma\n- Roxo - criatividade\n- Vermelho - energia';
+  assert.equal(choiceQuestionFromText(text).length,1);
+  for(const invalid of ['Example:\n'+text,'```\n'+text+'\n```',text+'\nExtra prose',text.replace('Qual cor principal você prefere?','Como instalar?'),text.replace('- Azul','1. Azul')]) assert.equal(choiceQuestionFromText(invalid),null);
+  for (const prompt of ['Me pergunte qual cor com opções para escolher.','Traduza este texto de perguntas com opções','Explique opções de cores.']) {
+    const guard=createToolLoopGuard(),ctx={agentId:'pixel',runId:prompt,sessionId:'session'};
+    guard.observeRun(ctx,'pixel',{prompt});
+    guard.beforeAgentFinalize({lastAssistantMessage:text},ctx);
+    assert.equal(Boolean(guard.deliveryVerificationForRun(ctx.runId).questions),prompt.startsWith('Me pergunte'));
   }
 });

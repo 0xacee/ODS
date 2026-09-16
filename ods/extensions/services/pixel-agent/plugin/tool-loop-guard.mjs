@@ -17,7 +17,7 @@ import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import { projectWebResult } from "./web-result-projection.mjs";
 import { createCompletionAssurance } from "./completion-assurance.mjs";
-import { parseQuestions, questionsText } from "./ask-user.mjs";
+import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
 import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent } from "./workspace-path-contract.mjs";
 
@@ -8043,6 +8043,8 @@ export function createToolLoopGuard({
     if (typeof runId === "string" && runId) {
       const state = stateFor(runId);
       state.completionAssurance.begin(currentOwnerIntentText(event?.messages, event?.prompt), event);
+      const ownerIntent=currentOwnerIntentText(event?.messages,event?.prompt);
+      if (ownerIntent) state.ownerQuestionIntent=requestsChoiceQuestion(ownerIntent);
       if (capabilities !== undefined) {
         state.configuredWorkspaceRoot = capabilities.workspaceRoot;
         state.privateBrowserAccess = capabilities.privateBrowserAccess === true &&
@@ -9354,6 +9356,9 @@ export function createToolLoopGuard({
     const runId = context?.runId ?? event?.runId;
     if (typeof runId !== "string" || !runId) return undefined;
     const state = runs.get(runId);
+    if (state?.ownerQuestionIntent && !state.ownerQuestions && !state.clientCancelled && !state.progressBudget.exhausted) {
+      state.ownerQuestions=choiceQuestionFromText(event?.lastAssistantMessage);
+    }
     if (state?.ownerQuestions) return {action:'finalize', reason:'Waiting for the owner clarification answer.'};
     if (state?.recursiveDeleteDenied || state?.progressBudget.exhausted || state?.clientCancelled || state?.webLoopAborted) return undefined;
     const continuation =

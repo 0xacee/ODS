@@ -1,5 +1,19 @@
 import {parseQuestions} from './questions-schema.mjs';
 export {parseQuestions};
+export function requestsChoiceQuestion(text) {
+  const value=String(text??'').normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase();
+  if (/^(?:traduza|translate|repita|repeat|explique|explain|cite|quote)\b/.test(value.trim())) return false;
+  return /\b(?:pergunte|perguntas|perguntar|ask|questions)\b/.test(value) && /\b(?:opcoes|escolha|escolher|escolhas|choices|options)\b/.test(value);
+}
+// A narrow presentation repair when the owner explicitly requested choices.
+// Never extract from prose, code, quoted examples, numbered steps or a plan.
+export function choiceQuestionFromText(text) {
+  if (typeof text!=='string' || text.length>1200) return null;
+  const lines=text.trim().split('\n').map(line=>line.trim()).filter(Boolean);
+  if (lines.length<3 || lines.length>5 || !/^(?:Qual\b.{0,270}\bprefere|Which\b.{0,260}\bprefer)\?$/i.test(lines[0])) return null;
+  if (!lines.slice(1).every(line=>/^[-*] \S/.test(line))) return null;
+  return parseQuestions([{id:'preference',question:lines[0],options:lines.slice(1).map(line=>line.slice(2))}]);
+}
 // Compact models sometimes skip tool discovery and use familiar field aliases.
 // Normalize only these unambiguous, side-effect-free question shapes; delivery
 // still uses the exact bounded contract and never invents an owner answer.

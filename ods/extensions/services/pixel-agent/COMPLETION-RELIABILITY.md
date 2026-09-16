@@ -52,8 +52,11 @@ parity test enforces this. At the tool input only, unambiguous small-model
 aliases (`text`, `choices`, `{text: ...}` options, omitted IDs and `wait: true`)
 normalize to the canonical contract. A boolean `required` hint never selects or
 submits an answer. Conflicting fields and unrecognized attributes fail.
-A model can still miss a suitable clarification or
-write an ordinary question instead of calling the tool.
+When the owner explicitly asks for questions with choices, a narrow presentation
+fallback also recognizes a complete final preference question followed by two to
+four bullet options. It creates the same bounded card without another model call.
+It rejects surrounding prose, code, translations, numbered steps and plans.
+A model can still miss a suitable clarification or produce unsupported wording.
 
 ## Focused verification
 
