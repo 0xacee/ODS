@@ -1,28 +1,37 @@
 #!/usr/bin/env bash
 # Exercise the real resolver and native launch assembly without running a GPU.
 set -euo pipefail
+if [[ "$(uname -s)" != Darwin ]]; then
+    echo '[SKIP] native model-store executable validation requires macOS'
+    exit 0
+fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
+TMP_DIR="$(cd "$TMP_DIR" && pwd -P)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 INSTALL_DIR="$TMP_DIR/install"
 SSD_DIR="$TMP_DIR/External SSD"
 export INSTALL_DIR SSD_DIR
+TEST_NATIVE_RUNTIME="$TMP_DIR/native-runtime-help"
+export TEST_NATIVE_RUNTIME
+cc "$ROOT_DIR/tests/fixtures/native-runtime-help.c" -o "$TEST_NATIVE_RUNTIME"
 mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/extensions/services/dashboard-api" "$INSTALL_DIR/data/models" "$INSTALL_DIR/bin" "$SSD_DIR"
 cp "$ROOT_DIR/scripts/resolve-model-store.py" "$INSTALL_DIR/scripts/"
-cp "$ROOT_DIR/extensions/services/dashboard-api/"{model_stores,env_values}.py "$INSTALL_DIR/extensions/services/dashboard-api/"
+cp "$ROOT_DIR/extensions/services/dashboard-api/"{model_stores,model_mtp,env_values}.py "$INSTALL_DIR/extensions/services/dashboard-api/"
 source "$ROOT_DIR/installers/macos/lib/native-model.sh"
 read_env_value() { sed -n "s/^$2=//p" "$1" | head -1; }
 fail() { echo "[FAIL] $*" >&2; exit 1; }
 
 write_fixture() {
     python3 - "$1" <<'PY'
-import hashlib, json, os, sys
+import hashlib, json, os, shutil, sys
 from pathlib import Path
 root, ssd = Path(os.environ["INSTALL_DIR"]), Path(os.environ["SSD_DIR"])
 model = ssd / "model $(literal) 'quoted'.gguf"
 model.write_bytes(b"GGUF-test")
 binary = ssd / "qualified runtime"
-binary.write_bytes(bytes.fromhex("cffaedfe") + b"test fixture only")
+# The compiled fixture answers --help without loading a model or opening ports.
+shutil.copyfile(os.environ['TEST_NATIVE_RUNTIME'], binary)
 binary.chmod(0o700)
 profile = dict(backend=sys.argv[1], executable=str(binary), contextLength=65536, mtp=True, draftTokens=2,
                runtimeSha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
@@ -45,7 +54,18 @@ macos_configure_llm_bridge_from_env() { :; }
 macos_bind_probe_host() { printf '%s' 127.0.0.1; }
 get_native_llama_status() { NATIVE_LLAMA_RUNNING=true; NATIVE_LLAMA_HEALTHY=true; NATIVE_LLAMA_PID=123; }
 stop_native_llama() { printf 'stop\n' >> "$CALLS"; }
-exec() { printf '%s\0' "$@" > "$ARGV"; printf 'start\n' >> "$CALLS"; }
+bash() {
+    if [[ "$1" == "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" ]]; then
+        [[ "$2" == start ]] || return 2
+        local binary="$4" pid_file="$5"
+        shift 5
+        printf '%s\0' "$binary" "$@" > "$ARGV"
+        printf 'start\n' >> "$CALLS"
+        printf '%s\n' "$$" > "$pid_file"
+    else
+        command bash "$@"
+    fi
+}
 sleep() { :; }
 curl() { return 0; }
 ai() { :; }; ai_ok() { :; }; ai_warn() { :; }; ai_err() { :; }
@@ -76,6 +96,9 @@ assert_rejected_without_stop() {
 write_fixture vulkan
 assert_rejected_without_stop "foreign Vulkan runtime"
 write_fixture metal
+export TEST_NATIVE_REJECT_COMMAND=1
+assert_rejected_without_stop "runtime rejecting launch arguments"
+unset TEST_NATIVE_REJECT_COMMAND
 printf 'changed' >> "$SSD_DIR/qualified runtime"
 assert_rejected_without_stop "changed runtime hash"
 write_fixture metal

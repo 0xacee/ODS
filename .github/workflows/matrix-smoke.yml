@@ -233,6 +233,9 @@ jobs:
       - name: macOS Dispatch Smoke
         run: bash tests/smoke/macos-dispatch.sh
 
+      - name: Native Model Store Restart Tests
+        run: /bin/bash tests/test-macos-native-model-store.sh
+
       - name: Atomic Environment Write Tests
         run: /bin/bash tests/test-atomic-env-writes.sh
 
