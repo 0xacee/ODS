@@ -67,8 +67,9 @@ upstream default. Other agents and existing jobs are unaffected.
   `metadata.chat_id`, or `metadata.conversation_id`, the ingress writes
   `user = "ods-" + sha256(chosen)`. The raw identifier is never passed
   upstream.
-- **Upstream is fixed.** Requests go only to
-  `http://127.0.0.1:${PIXEL_GATEWAY_PORT:-18789}/v1/chat/completions` with
+- **Upstream is fixed.** By default, read-only health discovery selects IPv6
+  or IPv4 loopback on `${PIXEL_GATEWAY_PORT:-18789}`. Requests then go to that
+  gateway with
   `Authorization: Bearer <gateway token>`, `Content-Type: application/json`,
   and `Accept` matching the stream mode. Connect/header/body/stream behavior is
   bounded by `AbortController`/timeouts; the total request budget is 32 minutes
@@ -80,6 +81,15 @@ upstream default. Other agents and existing jobs are unaffected.
   capped at 2 MiB and each stream line at 1 MiB.
   Upstream bodies are never reflected to the caller; failures produce generic
   errors.
+- **Docker Desktop transport (native macOS qualification).** The explicit
+  `PIXEL_GATEWAY_TRANSPORT=docker-desktop-host` setting selects only
+  `host.docker.internal` on the configured gateway port. The default remains
+  `loopback`; arbitrary hosts/URLs are rejected. The transport does not fall
+  back to container loopback, follow redirects, or replay failed mutations.
+  The ingress still exposes only its restricted Unix socket. This setting is
+  one prerequisite, not a complete macOS installer or proof of host isolation.
+  Qualification containers mount only the required private token/config file
+  read-only, retain the euid ownership check, and receive no Docker socket.
 - **Status projection.** On startup and every `PIXEL_STATUS_INTERVAL_MS`
   (default 30000) the service atomically writes a sanitized projection to
   `PIXEL_STATUS_FILE` (default `/run/ods-pixel/ods-status.json`). It reports a
