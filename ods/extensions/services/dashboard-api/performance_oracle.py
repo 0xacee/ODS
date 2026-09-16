@@ -1271,7 +1271,9 @@ def _downloaded_catalog_path(model: dict[str, Any], downloaded_files: dict[str, 
         ]
         downloaded = bool(part_paths) and all(part_paths)
         seen = {str(part.get("file", "")).lower() for part in parts if isinstance(part, dict)}
-        return downloaded, part_paths[0] if downloaded else None, seen if downloaded else set()
+        # A shard belongs to this catalog entry even before the whole download
+        # finishes; it must never become a standalone installed-model option.
+        return downloaded, part_paths[0] if downloaded else None, seen
 
     gguf = str(model["gguf"]).lower()
     path = downloaded_files.get(gguf)
