@@ -476,6 +476,28 @@ select option, select optgroup { background-color:rgb(var(--theme-card)); color:
 .pixel-preview-panel iframe { color-scheme:dark; }
 .pixel-app :is(.pixel-nav,.portal-panel-content,.pixel-chat-column > div,.pixel-task-files,.pixel-preview-source,.pixel-task-activity) { scrollbar-width:thin; scrollbar-color:var(--theme-scrollbar-thumb) var(--theme-scrollbar-track); }
 ::-webkit-scrollbar-corner { background:var(--theme-scrollbar-track); }
+/* Blend navigation scrolling into both the default shell and wallpaper glass. */
+.pixel-app .pixel-sidebar .pixel-nav {
+  --nav-scroll-thumb:rgb(var(--theme-text) / .24);
+  scrollbar-width:thin;
+  scrollbar-color:var(--nav-scroll-thumb) transparent;
+}
+.pixel-app .pixel-sidebar .pixel-nav:is(:hover,:focus-within) { --nav-scroll-thumb:rgb(var(--theme-text) / .42); }
+/* Use the pseudo-element path where supported so native arrow buttons don't
+   leave dark blocks at either end. Firefox keeps its native thin scrollbar. */
+@supports selector(::-webkit-scrollbar) {
+  .pixel-app .pixel-sidebar .pixel-nav { scrollbar-width:auto; scrollbar-color:auto; }
+  .pixel-sidebar .pixel-nav::-webkit-scrollbar { width:6px; height:6px; }
+  .pixel-sidebar .pixel-nav::-webkit-scrollbar-track,
+  .pixel-sidebar .pixel-nav::-webkit-scrollbar-corner { background:transparent; }
+  .pixel-sidebar .pixel-nav::-webkit-scrollbar-thumb { background:var(--nav-scroll-thumb); border-radius:999px; }
+  .pixel-sidebar .pixel-nav::-webkit-scrollbar-thumb:hover { background:rgb(var(--theme-text) / .58); }
+  .pixel-sidebar .pixel-nav::-webkit-scrollbar-button { display:none; width:0; height:0; }
+}
+@media (forced-colors:active) {
+  .pixel-app .pixel-sidebar .pixel-nav { scrollbar-color:auto; --nav-scroll-thumb:ButtonText; }
+  .pixel-sidebar .pixel-nav::-webkit-scrollbar-thumb:hover { background:Highlight; }
+}
 @container portal-chat (max-width:680px) {
   .pixel-chat-preview-layout { flex-direction:column; overflow-y:auto; }
   .pixel-preview-panel { width:100%; max-width:100%; height:42vh; min-height:240px; border-left:0; border-top:1px solid #303232; }
