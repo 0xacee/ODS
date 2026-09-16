@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, Copy, FileText, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import PortalFileTree from './PortalFileTree'
+import PortalFileTreeResize,{useFileTreeResize} from './PortalFileTreeResize'
 import { fileLanguage, PixelCodeLines, PixelLanguageBadge } from './PixelCodeBlock'
 import './pixel-file-changes.css'
 
@@ -99,20 +100,12 @@ function FileChange({file, onPreview, onOpenFile, treeOpen, onToggleTree}) {
 }
 
 /** Receives verified changes only. Does not derive counts from truncated rows. */
-export default function PixelFileChanges({changes = [], onPreview, selectedPath, onSelectFile, onOpenFile}) {
+export default function PixelFileChanges({changes = [], rootPath, onPreview, selectedPath, onSelectFile, onOpenFile}) {
   const [localPath, setLocalPath] = useState(null)
   const [treePreference, setTreePreference] = useState(null)
-  const [narrow, setNarrow] = useState(false)
   const panel = useRef(null)
-  useEffect(() => {
-    if (!panel.current || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(entries => {
-      const width = entries[0]?.contentRect.width
-      if (width > 0) setNarrow(width < 600)
-    })
-    observer.observe(panel.current)
-    return () => observer.disconnect()
-  }, [changes.length > 0])
+  const treeLayout=useFileTreeResize(panel,{enabled:changes.length>0})
+  const {narrow}=treeLayout
   if (!changes.length) return null
   const path = selectedPath ?? localPath
   const selected = changes.find(file => file.path === path) || changes[0]
@@ -122,8 +115,9 @@ export default function PixelFileChanges({changes = [], onPreview, selectedPath,
     onSelectFile?.(path,file)
     if (narrow) setTreePreference(false)
   }
-  return <div ref={panel} className={`pixel-file-changes portal-review-layout${treeOpen ? ' has-files' : ''}${narrow ? ' is-narrow' : ''}`} aria-label="File changes">
+  return <div ref={panel} className={`pixel-file-changes portal-review-layout${treeOpen ? ' has-files' : ''}${narrow ? ' is-narrow' : ' portal-tree-split'}`} style={treeLayout.style} aria-label="File changes">
     <FileChange key={selected.path} file={selected} onPreview={onPreview} onOpenFile={onOpenFile} treeOpen={treeOpen} onToggleTree={() => setTreePreference(!treeOpen)}/>
-    {treeOpen && <aside className="portal-review-files"><PortalFileTree files={changes} selectedPath={selected.path} onSelectFile={selectFile} label="Changed files" filterLabel="Filter changed files"/></aside>}
+    {treeOpen && <PortalFileTreeResize layout={treeLayout} label="Resize changed file list"/>}
+    {treeOpen && <aside className="portal-review-files"><PortalFileTree files={changes} rootPath={rootPath} selectedPath={selected.path} onSelectFile={selectFile} label="Changed files" filterLabel="Filter changed files"/></aside>}
   </div>
 }

@@ -19,9 +19,11 @@ afterEach(()=>vi.unstubAllGlobals())
 it('opens the clicked review file, then its source in one closable tab, without reloading the web frame',async()=>{
  const {container,rerender}=render(<PortalWorkspace {...props} request={{siteId:preview.siteId,kind:'review',path:'src/app.js'}}/>)
  expect(await screen.findByLabelText('Diff for src/app.js')).toBeVisible()
+ expect(screen.getByRole('button',{name:'Folder demo'})).toBeVisible()
  const frame=container.querySelector('iframe')
  fireEvent.click(screen.getByRole('button',{name:'Open file src/app.js'}))
  expect(await screen.findByLabelText('Code for src/app.js')).toHaveTextContent('const answer = 42;')
+ expect(screen.getByRole('navigation',{name:'File path'})).toHaveAttribute('title','demo/src/app.js')
  expect(screen.getAllByRole('tab',{name:'app.js'})).toHaveLength(1)
  fireEvent.click(screen.getByRole('tab',{name:'Review'}))
  fireEvent.click(await screen.findByRole('button',{name:'Open file src/app.js'}))
@@ -56,7 +58,7 @@ it('a chat summary opens the actual selected filename instead of an unrelated pr
  fireEvent.click(screen.getByRole('button',{name:/Web preview/}));expect(open).toHaveBeenCalledOnce()
  expect(screen.queryByRole('searchbox')).toBeNull()
 })
-it('waits for the new publication manifest before consuming a file request',async()=>{
+it('waits for the new publication manifest before opening its requested file',async()=>{
  const nextSource='export const ready = true;',nextFile={path:'src/new.js',bytes:nextSource.length,sha256:hash(nextSource)}
  const nextFiles=[files[0],nextFile],next={...preview,siteId:`site-${'b'.repeat(24)}`,sha256:'b'.repeat(64),files:2,bytes:nextFiles.reduce((n,f)=>n+f.bytes,0)}
  const response=text=>({ok:true,headers:new Map(),arrayBuffer:async()=>new TextEncoder().encode(text).buffer})
@@ -94,4 +96,41 @@ it('does not reopen a pending file after the user has switched tabs',async()=>{
  await act(async()=>release())
  expect(screen.getByRole('tab',{name:'Review'})).toHaveAttribute('aria-selected','true')
  expect(screen.queryByRole('tab',{name:'app.js'})).toBeNull()
+})
+it('offers a retry for an initial file request when the manifest is unavailable',async()=>{
+ const original=fetch;let failed=true
+ fetch=vi.fn(url=>url.includes('__ods_manifest__') && failed?Promise.reject(new Error('offline')):original(url))
+ render(<PortalWorkspace {...props} request={{siteId:preview.siteId,kind:'file',path:'src/app.js'}}/>)
+ expect(await screen.findByText('Files unavailable.')).toBeVisible()
+ failed=false
+ fireEvent.click(screen.getByRole('button',{name:'Retry',exact:true}))
+ expect(await screen.findByLabelText('Code for src/app.js')).toBeVisible()
+})
+it('shares the resizable file tree between preview and source and uses a drawer when narrow',async()=>{
+ const observers=new Map();let width=900
+ const clientWidth=vi.spyOn(HTMLElement.prototype,'clientWidth','get').mockImplementation(()=>width)
+ vi.stubGlobal('ResizeObserver',class {
+  constructor(callback){this.callback=callback}
+  observe(element){observers.set(element,this.callback)}
+  disconnect(){}
+ })
+ try {
+  const {container}=render(<PortalWorkspace {...props}/>)
+  fireEvent.click(screen.getByRole('button',{name:'Browse files'}))
+  const readme=await screen.findByRole('button',{name:'Open README.md'})
+  fireEvent.keyDown(screen.getByRole('separator',{name:'Resize file list'}),{key:'ArrowLeft',shiftKey:true})
+  const frame=container.querySelector('iframe')
+  fireEvent.click(readme)
+  expect(await screen.findByRole('heading',{name:'Project'})).toBeVisible()
+  expect(screen.getByRole('separator',{name:'Resize file list'})).toHaveAttribute('aria-valuenow','264')
+  fireEvent.click(screen.getByRole('tab',{name:'Preview'}))
+  expect(screen.getByRole('separator',{name:'Resize file list'})).toHaveAttribute('aria-valuenow','264')
+  expect(container.querySelector('iframe')).toBe(frame)
+  width=400
+  act(()=>observers.get(container.querySelector('.portal-workbench'))([{contentRect:{width}}]))
+  expect(screen.queryByRole('separator')).toBeNull()
+  fireEvent.click(screen.getByRole('button',{name:'Open README.md'}))
+  expect(await screen.findByRole('heading',{name:'Project'})).toBeVisible()
+  expect(screen.queryByRole('navigation',{name:'Published files'})).toBeNull()
+ } finally {clientWidth.mockRestore()}
 })

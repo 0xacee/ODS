@@ -11,9 +11,11 @@ it('binds comparison to both verified publications',()=>{
 })
 it('loads verified counts rather than parsing the reply',async()=>{
   vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,headers:new Map(),arrayBuffer:async()=>new TextEncoder().encode(JSON.stringify(value)).buffer}))
-  render(<PixelSnapshotChanges preview={preview} before={before}/> )
+  render(<PixelSnapshotChanges preview={{...preview,relativeDirectory:'Playground/demo'}} before={before}/> )
   expect(await screen.findByRole('region',{name:'Changes to index.html'})).toBeVisible()
   expect(screen.getAllByLabelText('1 lines added, 1 lines removed')).toHaveLength(2)
+  expect(screen.getByRole('button',{name:'Folder Playground'})).toBeVisible()
+  expect(screen.getByRole('button',{name:'Folder Playground/demo'})).toBeVisible()
 })
 
 it('rejects multiline and NUL-bearing diff rows without rejecting ordinary source',()=>{
@@ -35,4 +37,13 @@ it('opens a selected file from the compact summary without embedding its diff',a
   expect(onReview).toHaveBeenLastCalledWith(null)
   fireEvent.click(screen.getByRole('button',{name:/Web preview/}))
   expect(onPreview).toHaveBeenCalledTimes(1)
+})
+it('keeps the verified preview accessible when the independent comparison fails',async()=>{
+  vi.stubGlobal('fetch',vi.fn().mockRejectedValue(new Error('offline')))
+  const onPreview=vi.fn()
+  render(<PixelSnapshotChanges preview={preview} before={before} variant="summary" onPreview={onPreview}/>)
+  fireEvent.click(screen.getByRole('button',{name:/Web preview/}))
+  expect(onPreview).toHaveBeenCalledOnce()
+  expect(await screen.findByText('File comparison unavailable.')).toBeVisible()
+  expect(screen.getByRole('button',{name:/Web preview/})).toBeEnabled()
 })

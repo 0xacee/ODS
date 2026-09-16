@@ -15,9 +15,11 @@ it('opens a clean rendered document and keeps exact verified Markdown available 
   const value = '# Project notes\r\n\r\nA **working** example.\r\n'
   const file = fileFor('docs/README.md', value)
   vi.stubGlobal('fetch', vi.fn(async () => response(value)))
-  const {container} = render(<PixelPreviewSource workbench preview={{siteId}} file={file}/>)
+  const {container} = render(<PixelPreviewSource workbench preview={{siteId,relativeDirectory:'Playground/notes'}} file={file}/>)
   expect(await screen.findByRole('heading', {name:'Project notes'})).toBeVisible()
-  expect(screen.getByRole('navigation', {name:'File path'})).toHaveTextContent('docsREADME.md')
+  expect(screen.getByRole('navigation', {name:'File path'})).toHaveTextContent('PlaygroundnotesdocsREADME.md')
+  expect(screen.getByRole('navigation', {name:'File path'})).toHaveAttribute('title','Playground/notes/docs/README.md')
+  expect(fetch.mock.calls[0][0]).toBe(`/pixel-preview/${siteId}/docs/README.md`)
   expect(screen.queryByText(/SHA-256 verified/)).toBeNull()
   expect(screen.queryByRole('search')).toBeNull()
   expect(screen.queryByLabelText('Selected source excerpt')).toBeNull()

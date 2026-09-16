@@ -24,6 +24,8 @@ import {goalCommand,continueGoal} from '../lib/portalGoal'
 import PortalContextRing from '../components/PortalContextRing'
 import PortalAgentActivity from '../components/PortalAgentActivity'
 import PortalStreamingText from '../components/PortalStreamingText'
+import PortalResponseActions from '../components/PortalResponseActions'
+import {publicationDisplayText} from '../lib/publicationDisplay'
 import {parseQuestionsFrame, questionMetadata} from '../lib/pixelQuestions'
 import PixelTurnNavigation from '../components/PixelTurnNavigation'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
@@ -1434,10 +1436,12 @@ export default function Pixel({ systemStatus = null }) {
 
           </div>
         )}
-        {messages.map((message, index) => (
+        {messages.map((message, index) => {
+          const displayedContent=message.role==='assistant' ? publicationDisplayText(message.content,message.publication) : message.content
+          return (
           <div key={index} data-pixel-message-index={index} tabIndex={-1} data-pixel-response={message.role === 'assistant' ? '' : undefined} className={`mx-auto flex min-w-0 w-full max-w-5xl ${message.role === 'user' ? 'justify-end gap-2' : 'justify-start'}`}>
             {message.role === 'assistant' && <PixelMascot state={pixelReplyPose(message, sending && index === messages.length - 1)} settled={message.status !== 'streaming'} className="pixel-reply-character" />}
-            <div className={`min-w-0 max-w-[min(85%,48rem)] text-sm leading-6 [overflow-wrap:anywhere] ${message.role === 'user' ? 'rounded-[14px] px-3.5 py-2' : 'rounded-2xl px-4 py-3'} ${
+            <div className={`min-w-0 max-w-[min(85%,48rem)] text-sm leading-6 [overflow-wrap:anywhere] ${message.publication ? 'portal-publication-response' : ''} ${message.role === 'user' ? 'rounded-[14px] px-3.5 py-2' : 'rounded-2xl px-4 py-3'} ${
               message.role === 'user'
                 ? 'bg-theme-card text-theme-text'
                 : message.status === 'error'
@@ -1463,8 +1467,9 @@ export default function Pixel({ systemStatus = null }) {
               {message.role === 'assistant' && message.content ? (
                 <>
                   {message.publication && <PixelSnapshotChanges preview={message.publication} before={message.beforePublication} variant="summary" onPreview={()=>openPublication(message.publication,'preview')} onReview={path=>openPublication(message.publication,'review',path)}/>}
-                  {!message.questions && <PortalStreamingText active={message.status==='streaming'} components={MARKDOWN_COMPONENTS}>{message.content}</PortalStreamingText>}
+                  {!message.questions && (displayedContent || message.status==='streaming') && <PortalStreamingText active={message.status==='streaming'} components={MARKDOWN_COMPONENTS}>{displayedContent}</PortalStreamingText>}
                   <OperationsApprovalCard content={message.content} />
+                  {!message.questions && message.status!=='streaming' && <PortalResponseActions content={displayedContent}/>}
                 </>
               ) : (
                 <span className="break-words whitespace-pre-wrap">{message.content}</span>
@@ -1477,12 +1482,12 @@ export default function Pixel({ systemStatus = null }) {
             </div>
             {message.role === 'user' && <UserAvatar profile={profile} className="pixel-user-character"/>}
           </div>
-        ))}
+        )})}
         <div ref={scrollRef} />
       </div>
 
       <div className="pixel-composer px-4 py-3 sm:px-6">
-        {chatScroll.showLatest && <div className="mb-2 text-center"><button type="button" onClick={chatScroll.jumpToLatest} className="rounded border border-theme-border px-3 py-1 text-xs">Jump to latest</button></div>}
+        {chatScroll.showLatest && <div className="mb-2 text-center"><button type="button" onClick={chatScroll.jumpToLatest} className="portal-jump-latest">Jump to latest</button></div>}
         <div className={`portal-glass-composer mx-auto max-w-5xl ${messages.length===0 ? 'portal-neon-prompt' : ''}`}>
           {command && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl bg-theme-card/70 px-3 py-2 text-xs text-theme-text-secondary" role="group" aria-label="Agent team mode"><span className="font-medium text-theme-text">Agent team</span><span>Describe your task. Portal will choose the team.</span><button type="button" disabled={isDisabled} onClick={()=>setInput(command.task)} className="ml-auto whitespace-nowrap rounded px-2 py-1 hover:bg-theme-border/30">Exit team mode</button></div>}
           {goalDraft && <div className="portal-goal-mode" role="group" aria-label="Goal mode"><span>Goal</span><small>Describe the outcome. Portal will plan, work and check its progress.</small><button type="button" disabled={isDisabled} onClick={()=>setInput(goalDraft.task)}>Exit goal mode</button></div>}

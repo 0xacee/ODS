@@ -6,6 +6,7 @@ import PixelPreviewViewport from './PixelPreviewViewport'
 import PixelPreviewHistory from './PixelPreviewHistory'
 import PixelSnapshotChanges from './PixelSnapshotChanges'
 import PortalFileTree from './PortalFileTree'
+import PortalFileTreeResize,{useFileTreeResize} from './PortalFileTreeResize'
 import './portal-workspace.css'
 
 export default function PortalWorkspace({preview,before,previews=[],access,title,request,refresh=0,onRefresh,onSelectPreview,onClose,collapsed,onCollapse,onPublish,expanded,onExpand}) {
@@ -18,6 +19,7 @@ export default function PortalWorkspace({preview,before,previews=[],access,title
   const panelDomId=key=>`${workspaceId}-panel-${key.startsWith('file:')?'file':key}`
   const [treeOpen,setTreeOpen]=useState(false),[reviewPath,setReviewPath]=useState(null),[options,setOptions]=useState(false),[retry,setRetry]=useState(0)
   const consumed=useRef(null),root=useRef(null)
+  const treeLayout=useFileTreeResize(root,{narrowBelow:561})
   useEffect(()=>{
     setTabs([]);setActive(request?.siteId===preview?.siteId && request?.kind==='review'?'review':'preview');setReviewPath(null);setOptions(false);setPendingPath(null);setMissingPath(null)
   },[preview?.siteId])
@@ -32,12 +34,11 @@ export default function PortalWorkspace({preview,before,previews=[],access,title
     if(!files){setPendingPath(path);return}
     if(!files.some(file=>file.path===path)){setMissingPath(path);return}
     setMissingPath(null)
-    setTabs(value=>value.includes(path)?value:[...value,path]);setActive(`file:${path}`);setTreeOpen((root.current?.clientWidth || 0)>=560)
+    setTabs(value=>value.includes(path)?value:[...value,path]);setActive(`file:${path}`);setTreeOpen((root.current?.clientWidth || 0)>560)
   }
   useEffect(()=>{if(files && pendingPath){openFile(pendingPath);setPendingPath(null)}},[files,pendingPath])
   useEffect(()=>{
     if(!request || request===consumed.current || request.siteId!==preview?.siteId)return
-    if(request.kind==='file' && !files)return
     consumed.current=request
     if(request.kind==='file')openFile(request.path)
     else {setPendingPath(null);setMissingPath(null);setActive(request.kind==='review'?'review':'preview');setReviewPath(request.path || null)}
@@ -81,14 +82,16 @@ export default function PortalWorkspace({preview,before,previews=[],access,title
       </div>}
       {options && <div className="portal-workbench-options"><PixelPreviewHistory previews={previews} selected={preview} onSelect={onSelectPreview}/><p>Files belong to this published version.</p></div>}
       {/* Retain the frame while reading/reviewing files so its local state survives tab switches. */}
-      <div className="portal-workbench-content" id={panelDomId('preview')} role="tabpanel" aria-labelledby={tabDomId('preview')} hidden={active!=='preview'}>
+      <div className={`portal-workbench-content${treeOpen && !treeLayout.narrow?' portal-tree-split':''}`} style={treeLayout.style} id={panelDomId('preview')} role="tabpanel" aria-labelledby={tabDomId('preview')} hidden={active!=='preview'}>
         <PixelPreviewViewport key={`${preview.siteId}/${refresh}`} access={access} title={title} hidden={collapsed || active!=='preview'} compact/>
-        {treeOpen && <aside className="portal-workbench-file-tree">{files?<PortalFileTree files={files} selectedPath={null} onSelectFile={path=>openFile(path)} label="Published files" filterLabel="Filter task files"/>:error?<p role="alert">Files unavailable. <button onClick={()=>setRetry(value=>value+1)}>Retry</button></p>:<p role="status">Loading files…</p>}</aside>}
+        {treeOpen && <PortalFileTreeResize layout={treeLayout}/>}
+        {treeOpen && <aside className="portal-workbench-file-tree">{files?<PortalFileTree files={files} rootPath={preview.relativeDirectory} selectedPath={null} onSelectFile={path=>openFile(path)} label="Published files" filterLabel="Filter task files"/>:error?<p role="alert">Files unavailable. <button onClick={()=>setRetry(value=>value+1)}>Retry</button></p>:<p role="status">Loading files…</p>}</aside>}
       </div>
-      {active==='review' && <div className="portal-workbench-review" id={panelDomId('review')} role="tabpanel" aria-labelledby={tabDomId('review')}><PixelSnapshotChanges key={`${preview.siteId}/${refresh}`} preview={preview} before={before} selectedPath={reviewPath} onSelectFile={path=>setReviewPath(path)} onOpenFile={file=>openFile(file.path)}/></div>}
-      {fileView && <div className="portal-workbench-content" id={panelDomId(active)} role="tabpanel" aria-labelledby={tabDomId(active)}>
+      {active==='review' && <div className="portal-workbench-review" id={panelDomId('review')} role="tabpanel" aria-labelledby={tabDomId('review')}><PixelSnapshotChanges key={`${preview.siteId}/${refresh}`} preview={preview} rootPath={preview.relativeDirectory} before={before} selectedPath={reviewPath} onSelectFile={path=>setReviewPath(path)} onOpenFile={file=>openFile(file.path)}/></div>}
+      {fileView && <div className={`portal-workbench-content${treeOpen && !treeLayout.narrow?' portal-tree-split':''}`} style={treeLayout.style} id={panelDomId(active)} role="tabpanel" aria-labelledby={tabDomId(active)}>
         <div className="portal-workbench-document">{selected?<PixelPreviewSource key={`${preview.siteId}/${active}/${refresh}`} preview={preview} file={selected} workbench onOpenFile={openFile}/>:<p role="status">{error?'File unavailable.':'Loading file…'}{error && <button type="button" onClick={()=>setRetry(value=>value+1)}>Retry</button>}</p>}</div>
-        <aside className="portal-workbench-file-tree" hidden={!treeOpen}>{files && <PortalFileTree files={files} selectedPath={selected?.path} onSelectFile={path=>openFile(path)} label="Published files" filterLabel="Filter task files"/>}</aside>
+        {treeOpen && <PortalFileTreeResize layout={treeLayout}/>}
+        <aside className="portal-workbench-file-tree" hidden={!treeOpen}>{files && <PortalFileTree files={files} rootPath={preview.relativeDirectory} selectedPath={selected?.path} onSelectFile={path=>openFile(path)} label="Published files" filterLabel="Filter task files"/>}</aside>
       </div>}
     </div>}
   </div>

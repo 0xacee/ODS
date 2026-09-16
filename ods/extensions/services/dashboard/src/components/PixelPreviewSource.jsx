@@ -124,9 +124,10 @@ export default function PixelPreviewSource({ preview, file, workbench = false, o
     if (optionsRef.current) optionsRef.current.open = false
   }
   const artifact = {path, sha256:expectedDigest, bytes:file?.bytes}
+  const breadcrumbParts=[...(typeof preview.relativeDirectory==='string'?preview.relativeDirectory.replaceAll('\\','/').split('/').filter(Boolean):[]),...path.split('/')]
   if (workbench) return <section className="pixel-preview-source pixel-original-source portal-workspace-source" data-wrap-lines={wrapLines} aria-label={`File: ${path}`}>
     <header className="portal-source-header">
-      <nav aria-label="File path" className="portal-source-breadcrumb" title={path}>{path.split('/').map((part, index, parts) => <span key={index}>{index > 0 && <ChevronRight size={11} aria-hidden="true"/>}<span aria-current={index === parts.length - 1 ? 'page' : undefined}>{part}</span></span>)}</nav>
+      <nav aria-label="File path" className="portal-source-breadcrumb" title={breadcrumbParts.join('/')}>{breadcrumbParts.map((part, index, parts) => <span key={index}>{index > 0 && <ChevronRight size={11} aria-hidden="true"/>}<span aria-current={index === parts.length - 1 ? 'page' : undefined}>{part}</span></span>)}</nav>
       <div className="portal-source-actions">
         {language === 'markdown' && !plain && <button type="button" onClick={() => {setViewSource(value => !value); setShowFind(false); setShowExcerpt(false)}} disabled={source === null}>{viewSource ? 'View rendered' : 'View source'}</button>}
         {language && <button type="button" className="portal-source-icon-button" aria-label={copied ? 'Copied code' : 'Copy code'} title={copied ? 'Copied' : 'Copy source'} onClick={copy} disabled={source === null}>{copied ? <Check size={14}/> : <Copy size={14}/>}</button>}

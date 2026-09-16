@@ -5,11 +5,18 @@ import './portal-file-tree.css'
 
 const STATUS = {created:'Added',modified:'Modified',deleted:'Deleted',published:'Published'}
 
-function fileTree(files) {
+function fileTree(files,rootPath) {
   const root = {folders:new Map(), files:[]}
+  let directory=root, directoryPath=''
+  for(const part of rootPath.split('/').filter(Boolean)) {
+    directoryPath=directoryPath?`${directoryPath}/${part}`:part
+    const folder={name:part,path:directoryPath,folders:new Map(),files:[],rootDirectory:true}
+    directory.folders.set(part,folder)
+    directory=folder
+  }
   for (const file of files) {
     const parts = String(file.path).replaceAll('\\','/').split('/').filter(Boolean)
-    let parent = root, path = ''
+    let parent = directory, path = directoryPath
     for (const part of parts.slice(0,-1)) {
       path = path ? `${path}/${part}` : part
       if (!parent.folders.has(part)) parent.folders.set(part,{name:part,path,folders:new Map(),files:[]})
@@ -28,20 +35,24 @@ function ChangeStatus({change}) {
 
 /** An ordinary disclosure navigation: keyboard buttons retain native focus and
  * activation on every platform, without pretending to be an editor widget. */
-export default function PortalFileTree({files = [], selectedPath, onSelectFile, label = 'Files', filterLabel = 'Filter files'}) {
+export default function PortalFileTree({files = [], rootPath='', selectedPath, onSelectFile, label = 'Files', filterLabel = 'Filter files'}) {
   const [query, setQuery] = useState('')
   const [closed, setClosed] = useState(() => new Set())
-  const shown = useMemo(() => files.filter(file => String(file.path).toLowerCase().includes(query.trim().toLowerCase())),[files,query])
-  const tree = useMemo(() => fileTree(shown),[shown])
+  // This is the receipt's actual directory, not a synthetic workspace prefix.
+  // Files and callbacks remain relative to the immutable publication root.
+  const directory=typeof rootPath==='string'?rootPath.replaceAll('\\','/').split('/').filter(Boolean).join('/'):''
+  const shown = useMemo(() => files.filter(file => `${directory}/${file.path}`.toLowerCase().includes(query.trim().toLowerCase())),[files,query,directory])
+  const tree = useMemo(() => fileTree(shown,directory),[shown,directory])
   useEffect(() => {
-    const selected = String(selectedPath || '').replaceAll('\\','/')
+    if(!selectedPath)return
+    const selected = [directory,String(selectedPath).replaceAll('\\','/')].filter(Boolean).join('/')
     setClosed(current => new Set([...current].filter(path => !selected.startsWith(`${path}/`))))
-  },[selectedPath])
+  },[selectedPath,directory])
   const toggle = path => setClosed(current => {const next = new Set(current); if (next.has(path)) next.delete(path); else next.add(path); return next})
   function children(node) {
     return <ul>{[...node.folders.values()].sort((a,b) => a.name.localeCompare(b.name)).map(folder => {
       let branch = folder, name = folder.name
-      while (!branch.files.length && branch.folders.size === 1) {branch = [...branch.folders.values()][0]; name += `/${branch.name}`}
+      while (!branch.rootDirectory && !branch.files.length && branch.folders.size === 1) {branch = [...branch.folders.values()][0]; name += `/${branch.name}`}
       const open = Boolean(query.trim()) || !closed.has(branch.path)
       return <li className="portal-file-tree-folder" key={folder.path}>
         <button type="button" className="portal-file-tree-folder-button" aria-label={`Folder ${branch.path}`} aria-expanded={open} title={branch.path} onClick={() => toggle(branch.path)} disabled={Boolean(query.trim())}>

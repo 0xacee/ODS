@@ -153,3 +153,15 @@ Focused regressions cover opening a workspace before publication, publication
 switches during manifest loading, failed-manifest retries, obsolete pending file
 requests, exact file selection and draft-only publication requests. Existing
 snapshot integrity, clipboard, source and conversation recovery tests are retained.
+
+The code/file-list divider supports pointer dragging, keyboard resizing and
+container-size changes. Folder trees and breadcrumbs show the publication's real
+relative directory; paths sent to the snapshot API remain relative to that
+publication. Existing projects are not relabeled as Playground.
+
+On wallpaper themes, chat publication cards use a transparent blurred surface
+that picks up the wallpaper color. The jump-to-latest action and response copy
+icon have no box. The known successful publication footer is hidden only when
+the same verified publication already has a card. Stored text, model history,
+failure messages and useful answer content are preserved. A comparison fetch
+failure still leaves the verified web preview accessible.

@@ -822,10 +822,11 @@ describe('Pixel', () => {
     }
     const before = publication('a')
     const after = publication('b')
+    const originalContent = `Game updated\n\nYour preview is ready.\n\n[Open preview](${after.url})\n\nPublished from your workspace.\nPublication scope: this receipt verifies the published snapshot, not functional behavior or completion of other requested work.`
     const changes = {schemaVersion: 1, scope: 'published-snapshots', siteId: after.siteId, sha256: after.sha256, beforeSiteId: before.siteId, beforeSha256: before.sha256, changes: [{path: 'index.html', change: 'modified', additions: 22, deletions: 9, truncated: true, diff: []}]}
     globalThis.localStorage.setItem('ods.pixel.chat.v1', JSON.stringify({schema: 1, chatId: 'diff-history', messages: [
       {role: 'user', content: 'edit the game'},
-      {role: 'assistant', content: 'Game updated', publication: after, beforePublication: before},
+      {role: 'assistant', content: originalContent, publication: after, beforePublication: before},
     ]}))
     globalThis.fetch.mockImplementation(async (url) => {
       if (url.includes('__ods_changes__')) return {ok: true, headers: new Map(), arrayBuffer: async () => new TextEncoder().encode(JSON.stringify(changes)).buffer}
@@ -834,6 +835,11 @@ describe('Pixel', () => {
     })
     const view = render(<Pixel />)
     expect(await screen.findByRole('button',{name:/index\.html/})).toBeVisible()
+    expect(screen.getByText('Game updated')).toBeVisible()
+    expect(screen.queryByRole('link',{name:/Open preview/})).toBeNull()
+    expect(screen.queryByText(/Published from your workspace/)).toBeNull()
+    expect(screen.queryByText(/Publication scope:/)).toBeNull()
+    expect(screen.getByRole('button',{name:'Copy response'})).toBeVisible()
     await screen.findByText('Available')
     fireEvent.change(screen.getByPlaceholderText('Message Portal...'), {target: {value: 'another message'}})
     fireEvent.click(screen.getByTitle('Send'))
@@ -843,10 +849,10 @@ describe('Pixel', () => {
     expect(screen.getAllByLabelText('22 lines added, 9 lines removed')).toHaveLength(2)
     const call = globalThis.fetch.mock.calls.find(([url]) => url === '/api/pixel/chat/stream')
     expect(JSON.parse(call[1].body).messages).toEqual([
-      {role: 'user', content: 'edit the game'}, {role: 'assistant', content: 'Game updated'}, {role: 'user', content: 'another message'},
+      {role: 'user', content: 'edit the game'}, {role: 'assistant', content: originalContent}, {role: 'user', content: 'another message'},
     ])
     const stored = JSON.parse(localStorage.getItem('ods.pixel.chat.v1'))
-    expect(stored.messages[1]).toMatchObject({publication: after, beforePublication: before})
+    expect(stored.messages[1]).toMatchObject({content:originalContent, publication: after, beforePublication: before})
     view.unmount()
     render(<Pixel />)
     expect(await screen.findByRole('button',{name:/index\.html/})).toBeVisible()
