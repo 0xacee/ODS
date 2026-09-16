@@ -71,6 +71,9 @@ if sys.argv[1:] == ['--help']:
     raise SystemExit(0)
 if sys.argv[1:] == ['--info=progress2', '--version']:
     raise SystemExit(0 if os.environ['ODS_TEST_MODERN'] == '1' else 1)
+# Checksum verification is a read-only dry run, not a retried transfer.
+if '--dry-run' in sys.argv[1:]:
+    os.execv(os.environ['ODS_TEST_REAL_RSYNC'], ['rsync', *sys.argv[1:]])
 expected = '--info=progress2' if os.environ['ODS_TEST_MODERN'] == '1' else '--progress'
 if expected not in sys.argv[1:]:
     print('wrong progress mode: ' + repr(sys.argv), file=sys.stderr)
