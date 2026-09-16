@@ -51,6 +51,7 @@ ods_pixel_uninstall_managed() {
     local access_program="$libexec_dir/ods-pixel-access"
     local access_state="${ODS_PIXEL_UNINSTALL_ACCESS_STATE_DIR:-/var/lib/ods-pixel-access}"
     local access_config="$etc_dir/pixel-access.json"
+    local access_relay_key="$etc_dir/pixel-access-relay.key"
     local ops_user="pixel-ops-broker"
     local ops_group="pixel-ops"
     local ops_unit="$systemd_dir/pixel-ops-broker.service"
@@ -1336,7 +1337,7 @@ PY
             || -e "$access_state" || -L "$access_state" || -e "$access_config" || -L "$access_config" ]] || return 0
         sudo python3 - "$install_dir" "$owner_uid" "$root_uid" "$access_unit" \
             "$access_source" "$access_program" "$access_state" "$access_config" <<'PY'
-import fcntl, json, os, pathlib, pwd, stat, sys
+import fcntl, hashlib, json, os, pathlib, pwd, stat, sys
 install, owner_uid, root_uid, unit, source, program, state, config = sys.argv[1:]
 install = pathlib.Path(install).resolve()
 unit, source, program, state, config = map(pathlib.Path, (unit, source, program, state, config))
@@ -1360,6 +1361,13 @@ try:
     if (binding.get('install_dir') != str(install)
             or pwd.getpwnam(binding.get('owner', '')).pw_uid != int(owner_uid)):
         raise ValueError('access coordinator belongs to another installation')
+    relay_key = config.parent / 'pixel-access-relay.key'
+    if os.path.lexists(relay_key):
+        info = relay_key.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != int(owner_uid)
+                or info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size > 4096
+                or hashlib.sha256(relay_key.read_bytes()).hexdigest() != binding.get('edge_owner_key_sha256')):
+            raise ValueError('access relay credential changed or belongs to another installation')
     if os.path.lexists(unit):
         check(unit)
         if unit.read_bytes() != source.read_bytes():
@@ -1755,7 +1763,7 @@ PY
             "$workspace_preview_unit" "$workspace_preview_program" \
             "$system_observer_program" \
             || ! sudo rm -rf -- "$access_program" "$access_state" \
-            || ! sudo rm -f -- "$access_unit" "$access_config" \
+            || ! sudo rm -f -- "$access_unit" "$access_config" "$access_relay_key" \
             || ! sudo systemctl daemon-reload; then
             log_error "Could not remove ODS-managed Pixel system artifacts"
             return 1
