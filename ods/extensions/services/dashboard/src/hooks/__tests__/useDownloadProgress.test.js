@@ -339,20 +339,18 @@ describe('useDownloadProgress', () => {
     expect(result.current.formatBytes(null)).toBe('0 B')
   })
 
-  test('does not clear a newer outage with a stale success body and recovers on a fresh poll', async () => {
-    const body = deferred()
-    fetch.mockResolvedValueOnce({ ok: true, json: () => body.promise })
-      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ detail: 'Worker offline' }) })
+  test('retains transfer progress after an invalid JSON receipt and recovers on a fresh poll', async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'downloading', model: 'current', bytesDownloaded: 1, bytesTotal: 2 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => { throw new SyntaxError('Invalid progress JSON') } })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'idle' }) })
     const { result } = renderHook(() => useDownloadProgress())
-    await act(async () => { await Promise.resolve() })
+    await waitFor(() => expect(result.current.progress?.percent).toBe(50))
     await act(async () => { await result.current.refresh() })
-    expect(result.current.statusError).toBe('Worker offline')
-    await act(async () => { body.resolve({ status: 'downloading', model: 'old', bytesDownloaded: 1, bytesTotal: 2 }) })
-    expect(result.current.statusError).toBe('Worker offline')
-    expect(result.current.progress).toBeNull()
+    expect(result.current.statusError).toBe('Download status unavailable: Invalid progress JSON')
+    expect(result.current.progress).toMatchObject({ model: 'current', percent: 50 })
     await act(async () => { await result.current.refresh() })
     expect(result.current.statusError).toBeNull()
+    expect(result.current.progress).toBeNull()
   })
 
   test('formatEta formats minutes and seconds', () => {
