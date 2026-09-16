@@ -20,6 +20,7 @@ import { createCompletionAssurance } from "./completion-assurance.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
 import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent } from "./workspace-path-contract.mjs";
+import { routePlaygroundTool, requestsNewPlaygroundProject } from "./playground-projects.mjs";
 
 export const DEFAULT_WEB_TOOL_LIMITS = Object.freeze({
   search: 8,
@@ -5034,6 +5035,10 @@ export function userMessageRequestsWorkspaceTools(messages, prompt = undefined) 
   );
 }
 
+export function userMessageRequestsNewPlaygroundProject(messages, prompt = undefined) {
+  return requestsNewPlaygroundProject(currentOwnerIntentText(messages,prompt));
+}
+
 export function userMessageRequestsWorkspaceMutation(messages, prompt = undefined) {
   const text = currentOwnerIntentText(messages, prompt);
   if (!text || !userMessageRequestsWorkspaceTools([], text)) return false;
@@ -6278,6 +6283,23 @@ export function createToolLoopGuard({
     }
     const asksOwner = toolName === 'pixel_ods_ask_user' || (toolName === 'tool_call' && ['pixel_ods_ask_user','openclaw:pixel-ods:pixel_ods_ask_user'].includes(event?.params?.id));
     if (asksOwner || ['pixel_ods_goal','pixel_ods_activity'].includes(delegatedName)) return state?.clientCancelled ? {block:true,blockReason:CLIENT_CANCELLED_REASON} : undefined;
+    if (state && !state.clientCancelled && !state.recursiveDeleteDenied && !state.unrequestedOperationsTerminal
+      && !state.privateNetworkPrompt && !state.operationsRequired && !state.exactDownloadRequested && !state.codingExhausted) {
+      state.playgroundRouting ??= {};
+      const projectRoute = routePlaygroundTool({state:state.playgroundRouting,tool:toolName,
+        params:normalizedParams ?? event?.params,root:state.configuredWorkspaceRoot,
+        session:state.currentSessionKey ?? state.currentSessionId,intent:state.playgroundOwnerIntent,
+        preserveExisting:state.workspaceVisualContinuationRequested && !state.workspaceTaskDirectory?.startsWith('Playground/'),
+        continueProject:state.workspaceVisualContinuationRequested,
+        existingPaths:[...state.successfulReadPaths]});
+      if (projectRoute?.block) return projectRoute;
+      if (projectRoute?.params) normalizedParams = projectRoute.params;
+      const projectDirectory = state.playgroundRouting.binding?.directory;
+      if (projectDirectory && !state.workspaceTaskDirectory) {
+        state.workspaceTaskDirectory = projectDirectory;
+        state.workspacePreviewDirectory ??= projectDirectory;
+      }
+    }
     if (state?.workspacePreviewRequired && extensionlessHtmlWrite(toolName, normalizedParams ?? event?.params)) {
       return {block:true, blockReason: 'The write path names a FILE, not a directory. For this website, write the complete HTML to a fresh workspace-relative directory ending in /index.html (for example marketing-site/index.html). Do not write HTML to an extensionless directory name: it would prevent creating files inside it. Preserve any existing file and choose a fresh directory if that name is already a file.'};
     }
@@ -8071,6 +8093,7 @@ export function createToolLoopGuard({
       const state = stateFor(runId);
       state.completionAssurance.begin(currentOwnerIntentText(event?.messages, event?.prompt), event);
       const ownerIntent=currentOwnerIntentText(event?.messages,event?.prompt);
+      if (ownerIntent) state.playgroundOwnerIntent = ownerIntent;
       if (ownerIntent) state.ownerQuestionIntent=requestsChoiceQuestion(ownerIntent);
       if (teamRole) {state.managedTeamWorker=true;state.managedTeamReadOnly=teamRole!=='Builder';state.managedTeamCoordinator=teamRole==='Coordinator';state.ownerQuestionIntent=teamQuestionIntent;}
       if (capabilities !== undefined) {

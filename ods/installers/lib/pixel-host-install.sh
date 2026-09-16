@@ -4012,6 +4012,7 @@ ods_pixel_install_default_agent() {
     }
     plugin_root="${INSTALL_DIR:?}/extensions/services/pixel-agent"
     [[ -f "$plugin_root/plugin/openclaw.plugin.json" \
+        && -f "$plugin_root/plugin/playground-projects.mjs" \
         && -f "$plugin_root/host/pixel_ingress.mjs" \
         && -f "$plugin_root/host/task_activity_schema.mjs" \
         && -f "$plugin_root/host/questions_schema.mjs" \

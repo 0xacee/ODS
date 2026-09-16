@@ -21,10 +21,15 @@ import {
   userMessageRequestsPrivateUrl,
   userMessageRequestsWorkspaceVisualContinuation,
   userMessageRequestsWorkspacePreview,
+  userMessageRequestsWorkspaceTools,
+  userMessageRequestsNewPlaygroundProject,
 } from "./tool-loop-guard.mjs";
 
 const FILESYSTEM_DISCOVERY_CONTRACT =
   "Tool Search finds tools, not files. Discover deferred filesystem tools by names such as read, write, edit, apply_patch, exec and process, then call their exact id. Use exec with ls, find or rg --files to list directories; read needs a file path. Sandbox paths are already relative to the workspace root; do not add a workspace/ prefix. exec starts at /workspace. Do not use host-side workspace paths in the sandbox. Empty tool/memory searches or failed reads do not prove a project is absent; check the filesystem.";
+
+const PLAYGROUND_PROJECT_CONTRACT =
+  "For a new project, choose one short descriptive folder under Playground, for example Playground/snake-game or Playground/weather-tool, and create every project file there. This is a real workspace folder, not a display label. Use the exact canonical paths returned by tools, including any collision suffix, for later reads, edits, exec workdir and preview relativeDirectory. Preserve explicitly requested paths and existing projects in their current locations; never move them into Playground. Create the first file with write before running project commands. Keep shell commands relative to the chosen workdir; never invent host-specific paths.";
 
 export const ODS_CONVERSATION_CONTRACT = [
   "Answer the owner's actual request directly, accurately, and without inventing work.",
@@ -142,7 +147,7 @@ export const ODS_EXACT_DOWNLOAD_CONTRACT =
   "The owner's current request requires origin-exact bytes in the Pixel workspace. Discover or describe the approved tools as needed, then use pixel_ops_download_stage to obtain the bytes; the host guard binds the owner's one HTTPS URL, safe destination basename, and supplied SHA-256 when present. Wait for that job with pixel_ops_job_wait. After a succeeded terminal receipt, call pixel_ods_download_promote; the host guard binds the exact job, source, digest, filename, and workspace-relative destination. Do not use transformed web content or a reconstructed substitute for the original bytes, and do not read the root-only quarantine path. After verified promotion, continue the owner's authorized reading, analysis, report writing, and other work with normal tools and access checks. Do not execute downloaded code without authorization. Report the exact download receipt alongside the task results; it verifies bytes at publication, not later edits, analysis accuracy, or completion of the remaining work.";
 
 export const ODS_WORKSPACE_PREVIEW_CONTRACT =
-  "The owner's current request requires a novel live static browser visual authored by the active model. Do not call exec, mkdir, or start a server, and do not spend a response planning the design. In the first tool step call tool_call with id write and args containing one fresh directory path ending in /index.html plus model-authored HTML that implements the requested experience. A polished self-contained document is welcome when it fits naturally; a richer site, game, app, SVG, voxel scene, or visualization may instead reference a small set of local CSS, JavaScript, SVG, or data files inside that artifact directory that you write yourself in subsequent tool steps before publication. Do not use external CDNs, remote assets, generated starters, or placeholder functionality. Design and write every creative line for this request; ODS supplies no creative artifact bytes. Use semantic interactive elements such as button for requested controls, responsive layout, keyboard access, and reduced-motion behavior where applicable. Parent directories are created by write. After every required local file is written and the requested experience is complete, call pixel_ods_workspace_preview with exactly that directory. Only after its readback-verified receipt may you reply. That receipt proves publication and HTTP readback only: never claim a requested interaction was exercised unless an interaction-capable tool produced evidence for it.";
+  "The owner's current request requires a novel live static browser visual authored by the active model. Do not call exec, mkdir, or start a server, and do not spend a response planning the design. In the first tool step call tool_call with id write and args containing one fresh directory path ending in /index.html plus model-authored HTML that implements the requested experience. A polished self-contained document is welcome when it fits naturally; a richer site, game, app, SVG, voxel scene, or visualization may instead reference a small set of local CSS, JavaScript, SVG, or data files inside that artifact directory that you write yourself in subsequent tool steps before publication. Do not use external CDNs, remote assets, generated starters, or placeholder functionality. Design and write every creative line for this request; ODS supplies no creative artifact bytes. Use semantic interactive elements such as button for requested controls, responsive layout, keyboard access, and reduced-motion behavior where applicable. Parent directories are created by write. After every required local file is written and the requested experience is complete, call pixel_ods_workspace_preview with exactly that directory. Only after its readback-verified receipt may you reply. That receipt proves publication and HTTP readback only: never claim a requested interaction was exercised unless an interaction-capable tool produced evidence for it." + ` ${PLAYGROUND_PROJECT_CONTRACT}`;
 
 export const ODS_WORKSPACE_VISUAL_CONTINUATION_CONTRACT =
   "The owner is naturally continuing the most recently readback-verified visual artifact in this same Pixel chat. In the first tool step call tool_call with id read and args path index.html; the ODS guard binds that basename to the exact verified artifact directory. Then use only a focused edit on the returned path to make the requested change, and call pixel_ods_workspace_preview with that same directory. Do not call write, apply_patch, exec, process, mkdir, start a server, create another directory, or use a generated scaffold. The new preview receipt proves publication and static readback only; never claim an interaction was exercised without interaction-capable evidence.";
@@ -334,8 +339,11 @@ export function promptContractForAgent(
       : verificationStatus === "failed"
         ? ` ${ODS_VERIFICATION_FAILED_CONTRACT}`
         : "";
+  const project = !workspacePreview && (userMessageRequestsWorkspaceTools(event?.messages,event?.prompt)
+    || userMessageRequestsNewPlaygroundProject(event?.messages,event?.prompt))
+    ? ` ${PLAYGROUND_PROJECT_CONTRACT}` : "";
   return {
     appendSystemContext:
-      `${conversationContract}${githubSource}${extensionInventory}${extensionCatalog}${extensionLifecycle}${operationsContinuation}${operationsInventory}${operationsRequest}${exactDownload}${workspacePreview}${recovery}${verification}${privateUrl}`,
+      `${conversationContract}${githubSource}${extensionInventory}${extensionCatalog}${extensionLifecycle}${operationsContinuation}${operationsInventory}${operationsRequest}${exactDownload}${workspacePreview}${project}${recovery}${verification}${privateUrl}`,
   };
 }
