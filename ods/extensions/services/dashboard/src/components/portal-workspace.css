@@ -1,4 +1,20 @@
-.portal-workbench { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; height:100%; color:rgb(var(--theme-text-secondary)); background:rgb(var(--theme-card)); container:portal-workbench / inline-size; }
+.portal-workbench { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; height:100%; color:rgb(var(--theme-text-secondary)); background:transparent; container:portal-workbench / inline-size; }
+/* The surrounding panel supplies the same surface as Settings. Do not stack an
+   opaque editor canvas over its glass, or filter the published iframe itself. */
+.portal-workbench :is(.pixel-file-changes.portal-review-layout,.pixel-original-source) {
+  --pixel-canvas:inherit; --pixel-surface:inherit; --pixel-border:inherit;
+  --pixel-text:inherit; --pixel-muted:inherit; --pixel-row:rgb(var(--theme-text) / .04);
+  background:transparent;
+}
+.portal-workbench .portal-review-diff .artifact-diff-line.added { background:#32c9791c; }
+.portal-workbench .portal-review-diff .artifact-diff-line.removed { background:#ef66661c; }
+.portal-workbench .portal-review-diff :is(.diff-context-toggle,.diff-omitted) { background:rgb(var(--theme-text) / .04); color:var(--pixel-muted); }
+.portal-workbench .portal-review-diff .diff-context-toggle:hover { background:rgb(var(--theme-text) / .08); color:var(--pixel-text); }
+.portal-workbench .portal-review-layout.is-narrow .portal-review-files {
+  background:var(--portal-panel-fill,var(--pixel-canvas));
+  backdrop-filter:var(--portal-panel-filter,none);
+  -webkit-backdrop-filter:var(--portal-panel-filter,none);
+}
 .portal-workbench-tabs { display:flex; align-items:center; gap:8px; min-height:42px; padding:4px 8px; border-bottom:1px solid rgb(var(--theme-border) / .5); flex-shrink:0; }
 .portal-workbench-tabs [role=tablist] { display:flex; align-items:center; gap:4px; flex:1; min-width:0; overflow:auto; }
 .portal-workbench-tab { display:flex; align-items:center; flex-shrink:0; border-radius:8px; color:rgb(var(--theme-text-muted)); }
@@ -67,7 +83,7 @@
   :root[data-wallpaper] :is(.portal-preview-card,.portal-change-card) { backdrop-filter:none; -webkit-backdrop-filter:none; }
 }
 @container portal-workbench (max-width:560px) {
-  .portal-workbench-file-tree { position:absolute; inset:0 0 0 auto; z-index:3; width:min(240px,80%); background:rgb(var(--theme-card)); box-shadow:-8px 0 20px #0002; }
+  .portal-workbench-file-tree { position:absolute; inset:0 0 0 auto; z-index:3; width:min(240px,80%); background:var(--portal-panel-fill,var(--pixel-canvas)); backdrop-filter:var(--portal-panel-filter,none); -webkit-backdrop-filter:var(--portal-panel-filter,none); box-shadow:-8px 0 20px #0002; }
   .portal-workbench-window-actions button { padding:6px; }
   .portal-workbench-tab [role=tab] > span { max-width:100px; }
 }

@@ -208,3 +208,15 @@ Workspace requests are consumed once and scoped to the conversation so closing
 the tab or changing chats cannot reopen a stale selection. File requests leave
 the agent view before loading, keeping retry controls visible if a manifest
 cannot be fetched. Review omits the first-publication explanatory sentence.
+
+Workspace, Review, source files and Subagents share the Settings panel's glass
+surface on wallpaper themes. Inner canvases stay transparent; file drawers retain
+their own readable surface. Reduced transparency and browsers without backdrop
+blur use an opaque fallback. Published iframe content is not filtered.
+
+Answer links and tool sources show site favicons, including inside Subagents.
+The browser requests icons lazily from a fixed Google favicon-cache endpoint;
+only the public hostname is sent, without article paths, query strings or referrer.
+Local addresses and authenticated URLs use a globe. Missing/offline icons also
+fall back without removing or changing the link. The CSP permits only the icon
+endpoint, not arbitrary remote images. An icon is decoration, not source verification.

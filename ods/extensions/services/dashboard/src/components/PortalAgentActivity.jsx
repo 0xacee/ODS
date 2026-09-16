@@ -4,6 +4,7 @@ import {useEffect, useId, useLayoutEffect, useRef, useState} from 'react'
 import {Check, ChevronDown, Circle, FileSearch, FilePenLine, Globe2, Terminal, AlertCircle, Layers, MessageSquare, Wrench} from 'lucide-react'
 import {parseTaskActivity} from '../lib/pixelTaskActivity'
 import PortalActivityChange, {ActivityChangeCounts} from './PortalActivityChange'
+import PortalSiteIcon from './PortalSiteIcon'
 import './portal-agent-activity.css'
 
 const labels={read:'Reading files',run:'Running a command',edit:'Editing files',browser:'Browsing the web',preview:'Publishing a preview',action:'Running an operation',agent:'Coordinating agents',unknown:'Using a tool'}
@@ -34,7 +35,7 @@ function ActivityRow({event,active}) {
     </div>
     {type==='text' && ['failed','blocked','unconfirmed'].includes(state) && <small>{statusLabel}</small>}
     {expanded && (change?<PortalActivityChange change={change}/>:<pre className="portal-agent-detail">{display.detail}</pre>)}
-    {!!display?.sources.length && <ul className="portal-agent-sources" aria-label="Sources from this tool">{display.sources.map(source=><li key={source.url}><a href={source.url} target="_blank" rel="noopener noreferrer"><Globe2 size={12} aria-hidden="true"/><span>{source.title}</span><small>{new URL(source.url).hostname}</small></a></li>)}</ul>}
+    {!!display?.sources.length && <ul className="portal-agent-sources" aria-label="Sources from this tool">{display.sources.map(source=><li key={source.url}><a href={source.url} target="_blank" rel="noopener noreferrer"><PortalSiteIcon href={source.url}/><span>{source.title}</span><small>{new URL(source.url).hostname}</small></a></li>)}</ul>}
     {!!display?.steps.length && <ol className="portal-agent-plan" aria-label="Reported plan steps">{display.steps.map(step=><li key={step.id} data-state={step.status}>{step.status==='completed'?<Check size={13} aria-label="Completed"/>:step.status==='running'?<span className="portal-agent-dot" aria-label="In progress"/>:step.status==='blocked'?<AlertCircle size={13} aria-label="Blocked"/>:<Circle size={12} aria-label="Pending"/>}<span>{step.title}</span></li>)}</ol>}
   </li>
 }

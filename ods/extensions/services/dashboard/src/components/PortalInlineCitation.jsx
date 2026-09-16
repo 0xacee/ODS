@@ -1,6 +1,7 @@
 import {useId, useState} from 'react'
+import PortalSiteIcon from './PortalSiteIcon'
 
-/** Only links actually present in the answer. No fabricated references or fetches. */
+/** Decorate only links actually present in the answer; icons are not verification. */
 export default function PortalInlineCitation({href, children}) {
   const id=useId(), [open,setOpen]=useState(false)
   let url
@@ -9,7 +10,7 @@ export default function PortalInlineCitation({href, children}) {
   const target=snapshot && Number(snapshot[2])<=65535 ? `/pixel-preview/${snapshot[1]}/` : href
   return <span className="portal-citation" onMouseEnter={()=>setOpen(true)} onMouseLeave={()=>setOpen(false)}>
     <a href={target} target="_blank" rel="noopener noreferrer" aria-describedby={open?id:undefined} onFocus={()=>setOpen(true)} onBlur={()=>setOpen(false)} onKeyDown={event=>{if(event.key==='Escape')setOpen(false)}}>
-      {children}<span className="portal-citation-domain" aria-hidden="true">{snapshot ? 'Preview' : url.hostname.replace(/^www\./,'')}</span>
+      <PortalSiteIcon href={href}/>{children}<span className="portal-citation-domain" aria-hidden="true">{snapshot ? 'Preview' : url.hostname.replace(/^www\./,'')}</span>
     </a>
     {open && <span id={id} role="tooltip" className="portal-citation-tooltip"><strong>{url.hostname}</strong><span>{target}</span></span>}
   </span>

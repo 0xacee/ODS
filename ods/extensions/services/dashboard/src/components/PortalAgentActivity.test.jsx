@@ -22,6 +22,7 @@ it('collapses completed work and expands the chronological mixed log with safe s
  const {rerender}=render(<PortalAgentActivity task={{...task,state:'running',finishedAt:null}} active/>);
  expect(screen.getAllByText('Conferindo a documentação.')).toHaveLength(2);
  expect(screen.getByRole('link',{name:/Official docs/})).toHaveAttribute('href','https://react.dev/reference');
+ expect(new URL(screen.getByRole('link',{name:/Official docs/}).querySelector('img').src).searchParams.get('url')).toBe('https://react.dev');
  expect(screen.getByText('app.jsx')).toBeVisible();expect(screen.getByText('Run checks')).toBeVisible();
  rerender(<PortalAgentActivity task={task}/>);
  const trigger=screen.getByRole('button',{name:'Worked for 5s'});
