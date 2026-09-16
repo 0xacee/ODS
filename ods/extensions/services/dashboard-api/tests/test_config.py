@@ -33,6 +33,35 @@ features:
 """
 
 
+def test_apple_native_probes_follow_configured_endpoint_not_container_port():
+    services = {"llama-server": {"host": "host.docker.internal", "port": 8080,
+                                 "external_port": 8081}}
+    _apply_host_native_llm_service_override(services, "apple", {
+        "OLLAMA_URL": "http://host.docker.internal:8081",
+        "LLM_API_URL": "http://model-router:9099",
+    })
+    assert services["llama-server"] == {
+        "host": "host.docker.internal", "port": 8081, "external_port": 8081,
+    }
+
+
+@pytest.mark.parametrize("url", ["", "http://host:bad", "http://host:0", "https://host:8081",
+                                  "file:///tmp/model", "http://user:secret@host:8081",
+                                  "http://host:8081?token=x"])
+def test_apple_native_probes_reject_invalid_endpoint(url):
+    services = {"llama-server": {"host": "original", "port": 8080}}
+    _apply_host_native_llm_service_override(services, "apple", {"OLLAMA_URL": url})
+    assert services["llama-server"] == {"host": "original", "port": 8080}
+
+
+def test_apple_native_probe_override_leaves_external_backend_to_its_resolver():
+    services = {"llama-server": {"host": "original", "port": 8080}}
+    _apply_host_native_llm_service_override(services, "apple", {
+        "LLM_BACKEND": "external", "OLLAMA_URL": "http://host.docker.internal:8081",
+    })
+    assert services["llama-server"] == {"host": "original", "port": 8080}
+
+
 def test_bundled_llama_server_is_discoverable_on_cpu_fallback():
     manifest_path = Path(__file__).resolve().parents[2] / "llama-server" / "manifest.yaml"
     manifest = config.yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
