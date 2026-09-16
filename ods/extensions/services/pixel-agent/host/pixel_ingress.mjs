@@ -761,7 +761,7 @@ function parseVerificationResponse(value, runId) {
   return value;
 }
 
-async function verificationForRun(runId, token, gatewayPort, signal, deps) {
+async function readVerificationForRun(runId, token, gatewayPort, signal, deps) {
   if (typeof runId !== "string" || !OPENAI_RUN_ID.test(runId)) {
     throw new HttpError(502, "invalid upstream response");
   }
@@ -795,6 +795,25 @@ async function verificationForRun(runId, token, gatewayPort, signal, deps) {
     throw new HttpError(502, "verification state unavailable");
   }
   return parseVerificationResponse(parsed, runId);
+}
+
+async function verificationForRun(runId, token, gatewayPort, signal, deps) {
+  // Only re-read the same host receipt. Never resubmit the model request or
+  // replay tools when finalization and receipt availability briefly overlap.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await readVerificationForRun(runId, token, gatewayPort, signal, deps);
+    } catch (error) {
+      if (signal.aborted || attempt >= 2 || !OPENAI_RUN_ID.test(runId ?? '')) throw error;
+      await new Promise(resolve => {
+        const timer = deps.setTimeout(done, 100 * (attempt + 1));
+        function done() { deps.clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); }
+        signal.addEventListener('abort', done, {once:true});
+        if (signal.aborted) done();
+      });
+      if (signal.aborted) throw error;
+    }
+  }
 }
 
 function applyVerificationToCompletion(completion, verification) {
@@ -912,7 +931,7 @@ export function streamTaskActivity(res, user, token, gatewayPort, signal, deps =
         method:'POST', headers:upstreamHeaders(false, token), body:JSON.stringify({user}), redirect:'error', signal:controller.signal,
       });
       if (response.status !== 200 || !String(response.headers.get('content-type')).startsWith('application/json')) { await drain(response.body); return; }
-      const value = JSON.parse((await readBounded(response.body, 4096)).toString('utf8'));
+      const value = JSON.parse((await readBounded(response.body, 16384)).toString('utf8'));
       if (!value || Object.keys(value).join() !== 'task') return;
       const task = parseTaskActivity(value.task, value.task?.runId);
       if (!task || task.state !== 'running' || task.startedAt < since || (runId && task.runId !== runId)) return;

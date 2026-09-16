@@ -6,6 +6,7 @@ import PixelPromptLibrary from './PixelPromptLibrary'
 import { usePortalIdentity } from '../contexts/PortalIdentityContext'
 
 const commands = [
+  { title: 'Goal', detail: 'Plan, work and verify the outcome', icon: ListChecks, text: '/goal ' },
   { title: 'Plan', detail: 'Milestones and completion checks', icon: ListChecks, text: 'Plan this outcome with milestones and exact completion criteria: ' },
   { title: 'Research', detail: 'Current sources and visible provenance', icon: Globe2, text: 'Research this using current sources, inline citations, and evidence-versus-inference labels: ' },
   { title: 'Agents', detail: 'Let Portal plan the team', icon: Users, text: '/agents ' },

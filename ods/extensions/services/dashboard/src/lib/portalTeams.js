@@ -8,9 +8,15 @@ export function agentCommand(input) {
 export function teamMetadata(message) {
   if(message.role!=='assistant') return {}
   return {...(/^[a-f0-9]{32}$/.test(message.teamId || '') ? {teamId:message.teamId} : {}),
-    ...(/^[A-Za-z0-9_-]{1,128}$/.test(message.teamRequestId || '') ? {teamRequestId:message.teamRequestId} : {})}
+    ...(/^[A-Za-z0-9_-]{1,128}$/.test(message.teamRequestId || '') ? {teamRequestId:message.teamRequestId} : {}),
+    ...(message.goalMode===true ? {goalMode:true} : {})}
 }
 export function teamSummary(team) {
+  if(team.mode==='goal') {
+    const agent=team.agents[0]
+    const answer=agent?.output || agent?.conversation?.filter(m=>m.role==='assistant').at(-1)?.content
+    return answer || (ACTIVE_TEAMS.has(team.status) ? 'Working toward your goal…' : agent?.error || 'No result was produced.')
+  }
   const completed=team.agents.filter(a=>a.status==='completed').length
   const heading=team.agents[0]?.role==='coordinator' ? 'Portal is planning the team…' : `Agent team · ${completed}/${team.agents.length} finished · ${team.status}`
   if(ACTIVE_TEAMS.has(team.status)) return heading
@@ -55,7 +61,7 @@ export function usePortalTeams(chatId,enabled) {
     starting.current=true;setLaunching(true);setError('')
     try {
       const team=await teamRequest('start',{...payload,chat_id:chatId})
-      if(current.current===chatId){update(team);setSelected({teamId:team.id,agentId:'0'});setRevision(v=>v+1)}
+      if(current.current===chatId){update(team);if(team.mode!=='goal')setSelected({teamId:team.id,agentId:'0'});setRevision(v=>v+1)}
       return team
     } catch(e){if(current.current===chatId)setError(e.message);throw e}
     finally {starting.current=false;setLaunching(false)}

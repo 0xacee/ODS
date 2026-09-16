@@ -1,5 +1,6 @@
 // Content-free host observations for the Pixel workbench. Tool arguments,
-// output, paths, prompts and tokens never enter this projection.
+// output, paths and prompts never enter this projection. Token counts are
+// optional numeric measurements from the final model response, never estimates.
 const RUN = /^chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ORDER = ['read', 'agent', 'run', 'edit', 'browser', 'preview', 'action', 'unknown'];
 const KINDS = new Map([
@@ -36,7 +37,7 @@ function failedResult(event) {
   return false;
 }
 
-export function createTaskActivity({agentId = 'pixel', now = () => new Date().toISOString(), maximumRuns = 64, maximumCalls = 512} = {}) {
+export function createTaskActivity({agentId = 'pixel', now = () => new Date().toISOString(), maximumRuns = 64, maximumCalls = 512, goalForRun = () => null} = {}) {
   const runs = new Map();
   const identify = (event, context) => context?.agentId === agentId ? context.runId ?? event?.runId : undefined;
   function begin(event, context) {
@@ -48,7 +49,7 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
       if (!settled) return;
       runs.delete(settled[0]);
     }
-    runs.set(id, {runId:id, sessionKey:context?.sessionKey, startedAt:now(), finishedAt:null, state:'running', calls:new Map(), truncated:false});
+    runs.set(id, {runId:id, sessionKey:context?.sessionKey, startedAt:now(), finishedAt:null, state:'running', calls:new Map(), truncated:false, context:null});
   }
   function record(event, context, outcome) {
     const run = runs.get(identify(event, context));
@@ -72,10 +73,23 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
     // A blocked attempt must not later become a successful effect because a
     // wrapper emitted an after-hook. Duplicate hook delivery is idempotent.
     if (existing?.outcome === 'blocked' || (existing && outcome === 'running' && existing.outcome !== 'running')) return;
-    run.calls.set(callId, {kind:existing?.kind ?? kindFor(event, context), outcome, wrapped:existing?.wrapped ?? toolName === 'tool_call'});
+    run.calls.set(callId, {kind:existing?.kind ?? kindFor(event, context), outcome, startedAt:existing?.startedAt ?? now(), finishedAt:outcome === 'running' ? null : existing?.finishedAt ?? now(), wrapped:existing?.wrapped ?? toolName === 'tool_call'});
   }
   return {
     begin,
+    modelOutput(event, context) {
+      const run = runs.get(identify(event, context));
+      if (!run) return;
+      // event.usage is cumulative across tool turns; it is NOT occupancy.
+      const usage = event?.lastAssistant?.usage;
+      const valid = value => Number.isSafeInteger(value) && value >= 0 && value <= 10_000_000;
+      const window = event?.contextTokenBudget;
+      if (!valid(window) || window < 1 || !usage || !valid(usage.input) || !valid(usage.output)) return;
+      if (['cacheRead','cacheWrite'].some(key => usage[key] !== undefined && !valid(usage[key]))) return;
+      const used = usage.input + usage.output + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+      // All-zero usage is a common sentinel from providers without telemetry.
+      if (used > 0 && valid(used)) run.context = {used, window, measuredAt:now()};
+    },
     activeForUser(user) {
       if (typeof user !== 'string' || !/^ods-[a-f0-9]{64}$/.test(user)) return null;
       const matches = [...runs.values()].filter(run => run.state === 'running' && run.sessionKey === `agent:${agentId}:openai-user:${user}`);
@@ -103,11 +117,13 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
         groups.set(call.kind, group);
       }
       const activities = ORDER.filter(kind => groups.has(kind)).map(kind => groups.get(kind));
-      return {schemaVersion:1, runId:run.runId, startedAt:run.startedAt, finishedAt:run.finishedAt,
+      const events = [...run.calls.values()].map((call, index) => ({sequence:index + 1, kind:call.kind,
+        state:call.outcome, startedAt:call.startedAt, finishedAt:call.finishedAt})).slice(-24);
+      return {schemaVersion:2, runId:run.runId, startedAt:run.startedAt, finishedAt:run.finishedAt,
         state:run.state, calls:run.calls.size,
         failures:activities.reduce((sum, item) => sum + item.failures, 0),
         blocked:activities.reduce((sum, item) => sum + item.blocked, 0),
-        truncated:run.truncated, activities};
+        truncated:run.truncated, activities, events, context:run.context, goal:goalForRun(id)};
     },
   };
 }

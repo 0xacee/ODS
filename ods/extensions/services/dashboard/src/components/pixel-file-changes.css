@@ -69,3 +69,27 @@
 .pixel-original-source.pixel-preview-source { overflow:visible; flex:none; }
 .pixel-original-source .pixel-source-verification { margin:4px 0 12px; padding:0; color:var(--pixel-muted); font:400 .65rem/1.5 Inter,ui-sans-serif,system-ui,sans-serif; }
 @media (prefers-reduced-motion:reduce) { .pixel-file-changes .chat-file-change > summary::after { transition:none; } }
+
+/*!
+ * File-card organization adapted from UImaxxing, © 2026 Yogi Suria.
+ * Free to use, modify and ship in products, including commercial products.
+ * Not for republication as a component library or ML training data.
+ * https://uimaxx.ing/r/code-diff-card.json
+ * provenance-mark: uim1-1ea983e5.c49ab643
+ */
+.pixel-file-changes { margin:10px 0; border:1px solid var(--pixel-border); border-radius:12px; background:var(--pixel-surface); overflow:hidden; box-shadow:0 12px 28px -24px #0009; }
+.portal-diff-header { display:flex; align-items:center; gap:9px; min-height:44px; padding:10px 16px; border-bottom:1px solid var(--pixel-border); }
+.portal-diff-header > svg { flex-shrink:0; color:var(--pixel-muted); }
+.portal-diff-header > span { min-width:0; }
+.portal-diff-header .portal-diff-file-count { margin-left:auto; color:var(--pixel-muted); white-space:nowrap; font-size:10px; }
+.portal-diff-help { margin:0; padding:10px 16px; border-bottom:1px solid var(--pixel-border); color:var(--pixel-muted); font-size:11px; }
+.pixel-file-changes > div:not(.chat-file-change) { padding-left:10px; padding-right:10px; }
+.pixel-file-changes .chat-file-change { margin:7px; }
+.pixel-file-changes .chat-file-change > summary { min-height:38px; gap:10px; padding:7px 9px; border:1px solid transparent; border-radius:8px; }
+.pixel-file-changes .chat-file-change[open] > summary { border-color:#777a8140; background:linear-gradient(100deg,#cbd0dd10,#aeb6c305); color:var(--pixel-text); }
+.pixel-file-changes .chat-file-change > summary::after { content:none; }
+.pixel-file-changes .chat-file-change[open] .portal-diff-chevron { transform:rotate(90deg); }
+.pixel-file-changes .file-change-kind { color:var(--pixel-muted); font-size:10px; }
+.pixel-file-changes summary .artifact-line-counts { margin-left:auto; }
+.pixel-file-changes .pixel-code-block .code-block-header { flex-wrap:wrap; }
+@media (max-width:480px) { .portal-diff-header { gap:6px; padding:10px; font-size:11px; } }

@@ -27,13 +27,17 @@ from transition_gate import TransitionGate, GateError, strict_json, valid_bindin
 
 
 def valid_live_task_event(event):
-    """Only bounded content-free observations may bypass the answer buffer."""
+    """Only bounded observations and explicitly public plans bypass the answer buffer."""
     if not isinstance(event, dict) or set(event) != {"object", "id", "pixel_task"} or event["object"] != "ods.task.activity":
         return False
     task = event["pixel_task"]
-    if not isinstance(task, dict) or set(task) != {"schemaVersion", "runId", "startedAt", "finishedAt", "state", "calls", "failures", "blocked", "truncated", "activities"}:
+    extended = isinstance(task, dict) and task.get('schemaVersion') == 2
+    expected = {"schemaVersion", "runId", "startedAt", "finishedAt", "state", "calls", "failures", "blocked", "truncated", "activities"}
+    if extended:
+        expected |= {'events', 'context', 'goal'}
+    if not isinstance(task, dict) or set(task) != expected:
         return False
-    if type(task["schemaVersion"]) is not int or task["schemaVersion"] != 1 or task["state"] != "running" or task["finishedAt"] is not None or type(task["truncated"]) is not bool:
+    if type(task["schemaVersion"]) is not int or task["schemaVersion"] not in {1, 2} or task["state"] != "running" or task["finishedAt"] is not None or type(task["truncated"]) is not bool:
         return False
     if not isinstance(event["id"], str) or not re.fullmatch(r"chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", event["id"], re.I) or task["runId"] != event["id"]:
         return False
@@ -43,6 +47,8 @@ def valid_live_task_event(event):
     try:
         datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     except ValueError:
+        return False
+    if extended and not valid_task_details(task):
         return False
     count_keys = ("calls", "failures", "blocked")
     if any(type(task[key]) is not int or not 0 <= task[key] <= 512 for key in count_keys):
@@ -60,6 +66,50 @@ def valid_live_task_event(event):
         for key in count_keys:
             sums[key] += row[key]
     return all(sums[key] == task[key] for key in count_keys)
+
+def valid_task_details(task):
+    def timestamp(value):
+        if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", value):
+            return False
+        try:
+            datetime.fromisoformat(value.replace('Z', '+00:00'))
+            return True
+        except ValueError:
+            return False
+
+    def text(value, maximum):
+        return isinstance(value, str) and 0 < len(value.strip()) <= len(value) <= maximum and not re.search(r'[\x00-\x1f\x7f]', value)
+
+    events = task['events']
+    if type(task['calls']) is not int or not isinstance(events, list) or len(events) != min(task['calls'], 24):
+        return False
+    for sequence, event in enumerate(events, start=task['calls'] - len(events) + 1):
+        if not isinstance(event, dict) or set(event) != {'sequence','kind','state','startedAt','finishedAt'}:
+            return False
+        if type(event['sequence']) is not int or event['sequence'] != sequence or event['kind'] not in ('read','agent','run','edit','browser','preview','action','unknown') or event['state'] not in ('running','completed','failed','blocked'):
+            return False
+        if not timestamp(event['startedAt']) or event['startedAt'] < task['startedAt']:
+            return False
+        if event['state'] == 'running':
+            if event['finishedAt'] is not None:
+                return False
+        elif not timestamp(event['finishedAt']) or event['finishedAt'] < event['startedAt']:
+            return False
+    context = task['context']
+    if context is not None and (not isinstance(context, dict) or set(context) != {'used','window','measuredAt'} or any(type(context[k]) is not int or not 1 <= context[k] <= 10_000_000 for k in ('used','window')) or not timestamp(context['measuredAt']) or context['measuredAt'] < task['startedAt']):
+        return False
+    goal = task['goal']
+    if goal is not None:
+        if not isinstance(goal,dict) or set(goal) != {'status','summary','steps'} or goal['status'] not in ('active','completed','blocked','waiting') or not text(goal['summary'],300) or not isinstance(goal['steps'],list) or len(goal['steps']) > 8:
+            return False
+        seen = set()
+        for step in goal['steps']:
+            if not isinstance(step,dict) or set(step) != {'id','title','status'} or not isinstance(step['id'],str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,31}',step['id']) or step['id'] in seen or not text(step['title'],160) or step['status'] not in ('pending','running','completed','blocked'):
+                return False
+            seen.add(step['id'])
+        if goal['status'] == 'completed' and (not goal['steps'] or any(step['status'] != 'completed' for step in goal['steps'])):
+            return False
+    return True
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1089,15 +1139,18 @@ async def _stream_upstream(
                 await replace_pending(template, synthesize_finish=False)
             else:
                 await flush_pending()
-    except (ConnectionError, OSError, asyncio.TimeoutError):
+    except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
         if cancel_event is not None and cancel_event.is_set():
             await response.write(b"data: [DONE]\n\n")
         else:
+            # Fixed diagnostic category only, never payloads or exception text.
+            print(f'pixel-edge stream failed ({type(exc).__name__})', file=sys.stderr)
             await response.write(b'data: {"error":"upstream error"}\n\ndata: [DONE]\n\n')
-    except Exception:
+    except Exception as exc:
         if cancel_event is not None and cancel_event.is_set():
             await response.write(b"data: [DONE]\n\n")
         else:
+            print(f'pixel-edge stream failed ({type(exc).__name__})', file=sys.stderr)
             await response.write(b'data: {"error":"upstream error"}\n\ndata: [DONE]\n\n')
     return response
 

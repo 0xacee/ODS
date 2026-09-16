@@ -1,8 +1,8 @@
+import PixelLiveActivity from './PixelLiveActivity'
+import PortalStreamingText from './PortalStreamingText'
 import {useEffect,useRef,useState} from 'react'
 import {createPortal} from 'react-dom'
 import {X,Check,AlertCircle,Clock3,Square,Users} from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import PixelQuestions from './PixelQuestions'
 import {ACTIVE_TEAMS} from '../lib/portalTeams'
 
@@ -36,9 +36,9 @@ export default function PortalAgentDock({controller,renderApproval}) {
   async function perform(fn) {if(actingRef.current)return;actingRef.current=true;setActing(true);try{await fn()}finally{actingRef.current=false;setActing(false)}}
   if(!latest) return null
   return <>
-    <div className="ml-2 flex min-w-0 items-center -space-x-1" aria-label="Portal agent team">
+    {latest.mode!=='goal' && <div className="ml-2 flex min-w-0 items-center -space-x-1" aria-label="Portal agent team">
       {latest.agents.map((item,index)=><button key={item.id} type="button" aria-label={`${item.name} · ${states[item.status] || item.status}`} title={`${item.name} · ${states[item.status] || item.status}`} onClick={()=>select({teamId:latest.id,agentId:item.id})} className="rounded-full bg-transparent transition hover:-translate-y-0.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-theme-accent"><MiniPortal index={index} state={item.status}/></button>)}
-    </div>
+    </div>}
     {team && agent && createPortal(<div className="fixed inset-0 z-[80] flex justify-end bg-black/20 p-2" onPointerDown={e=>{if(e.target===e.currentTarget)select(null)}}>
       <section role="dialog" aria-modal="true" aria-label="Agent team activity" className="flex h-full w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-theme-border bg-theme-card text-theme-text shadow-2xl" onKeyDown={e=>{
         if(e.key!=='Tab')return
@@ -61,9 +61,9 @@ export default function PortalAgentDock({controller,renderApproval}) {
           {agent.status==='queued' && <p className="flex items-center gap-2 text-xs text-theme-text-muted"><Clock3 size={14}/>Waiting for its turn; it has not started.</p>}
           {agent.status==='running' && <p role="status" className="text-xs text-theme-text-secondary">Working{agent.activity ? ` · ${agent.activity.calls || 0} tool calls · ${agent.activity.failures || 0} failures` : ' · waiting for model output'}.</p>}
           {agent.runtime_wait && <p role="status" className="text-xs text-amber-300">Waiting for the model runtime to become ready. No new work has been sent.</p>}
-          {agent.activity?.activities?.length>0 && <div className="flex flex-wrap gap-2">{agent.activity.activities.map(item=><span key={item.kind} className="rounded-full border border-theme-border px-2 py-1 text-[11px] text-theme-text-muted">{item.kind} · {item.calls}</span>)}</div>}
-          {agent.conversation.map((message,index)=><article key={index} className={`min-w-0 rounded-xl p-3 ${message.role==='user'?'bg-theme-bg/60':'border border-theme-border/50'}`}><p className="mb-2 text-[10px] uppercase tracking-wider text-theme-text-muted">{message.role==='user'?'Assignment / owner input':agent.name}</p><div className="prose prose-sm prose-invert max-w-none break-words text-theme-text [&_pre]:overflow-x-auto"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div></article>)}
-          {agent.output && <div aria-label="Agent live response" className="prose prose-sm prose-invert max-w-none break-words text-theme-text"><ReactMarkdown remarkPlugins={[remarkGfm]}>{agent.output}</ReactMarkdown></div>}
+          <PixelLiveActivity task={agent.activity} active={agent.status==='running'}/>
+          {agent.conversation.map((message,index)=><article key={index} className={`min-w-0 rounded-xl p-3 ${message.role==='user'?'bg-theme-bg/60':'border border-theme-border/50'}`}><p className="mb-2 text-[10px] uppercase tracking-wider text-theme-text-muted">{message.role==='user'?'Assignment / owner input':agent.name}</p><div className="prose prose-sm prose-invert max-w-none break-words text-theme-text [&_pre]:overflow-x-auto"><PortalStreamingText>{message.content}</PortalStreamingText></div></article>)}
+          {agent.output && <div aria-label="Agent live response" className="prose prose-sm prose-invert max-w-none break-words text-theme-text"><PortalStreamingText active={agent.status==='running'}>{agent.output}</PortalStreamingText></div>}
           {renderApproval && agent.conversation.filter(m=>m.role==='assistant').map((message,index)=><div key={index}>{renderApproval(message.content)}</div>)}
           {agent.questions && agent.status==='waiting' && <PixelQuestions key={draftKey} questions={agent.questions} answers={drafts[draftKey] || {}} onChange={changeDraft} disabled={acting} onSubmit={()=>perform(()=>answer(team.id,agent.id,drafts[draftKey]))}/>}
           {(agent.error || team.notice || error) && <p role="alert" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed">{error || agent.error || team.notice}</p>}

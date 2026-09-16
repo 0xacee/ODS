@@ -1,3 +1,4 @@
+import {createGoalProgress, createGoalProgressTool, GOAL_CONTRACT} from './goal-progress.mjs';
 // Pixel ODS integration plugin entry.
 //
 // Registers status projection tools plus one targeted, strictly guarded public
@@ -54,7 +55,8 @@ const AGENT_ID = process.env.PIXEL_AGENT_ID ?? "pixel";
 const ABORT_BODY_LIMIT = 256;
 const OPENAI_RUN_ID = /^chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const toolLoopGuardRegistry = createToolLoopGuardRegistry();
-const taskActivity = createTaskActivity({agentId:AGENT_ID});
+const goalProgress = createGoalProgress({agentId:AGENT_ID});
+const taskActivity = createTaskActivity({agentId:AGENT_ID, goalForRun:id=>goalProgress.projection(id)});
 let execCancellationControl;
 let accessRuntime;
 const managedRuntimeRegistry = createManagedRuntimeRegistry();
@@ -242,14 +244,14 @@ export default definePluginEntry({
       const privateBrowserAccess = privateBrowserAccessForAgent(api.config, AGENT_ID);
       const workspaceRoot = api.config?.agents?.list?.find(agent => agent.id === AGENT_ID)?.workspace;
       toolLoopGuard.observeRun(context, AGENT_ID, event, { privateBrowserAccess, workspaceRoot });
-      if (!accessRuntime.isProbe(context)) taskActivity.begin(event, context);
+      if (!accessRuntime.isProbe(context)) { goalProgress.begin(event, context); taskActivity.begin(event, context); }
       const contract = promptContractForAgent(context, AGENT_ID, event, {
         verificationStatus: toolLoopGuard.verificationStatus(context?.runId),
         configuredContextWindow,
         configuredLeanPrompt,
         privateBrowserAccess,
       });
-      return contract ? { ...contract, appendSystemContext: `${contract.appendSystemContext} ${executionContext()}` } : undefined;
+      return contract ? { ...contract, ...(goalProgress.active(context?.runId ?? event?.runId) ? {appendContext:GOAL_CONTRACT} : {}), appendSystemContext: `${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()}` } : undefined;
     });
     api.on("model_call_started", (event, context) =>
       toolLoopGuard.observeModelCall(event, context, AGENT_ID)
@@ -257,11 +259,14 @@ export default definePluginEntry({
     api.on("model_call_ended", (event, context) =>
       toolLoopGuard.observeModelEnd(event, context, AGENT_ID)
     );
+    api.on("llm_output", (event, context) => {
+      if (!accessRuntime.isProbe(context)) taskActivity.modelOutput(event, context);
+    });
     if (!managedRuntime) {
       api.on("before_agent_run", (event, context) => accessRuntime.admit(undefined, context));
     }
     api.on("agent_end", (event, context) => {
-      if (!accessRuntime.isProbe(context)) taskActivity.finish(event, context);
+      if (!accessRuntime.isProbe(context)) { goalProgress.finish(event, context); taskActivity.finish(event, context); }
       if (!managedRuntime) return accessRuntime.finish({runId: event.runId}, context);
     });
     api.on("before_tool_call", async (event, context) => {
@@ -270,13 +275,14 @@ export default definePluginEntry({
         await toolLoopGuard.beforeToolCall(event, context, AGENT_ID),
         event, context, AGENT_ID,
       );
-      const decision = guard?.block ? guard : accessRuntime.beforeTool(event, context) ?? guard;
+      const decision = guard?.block ? guard : goalProgress.before(event, context) ?? accessRuntime.beforeTool(event, context) ?? guard;
       taskActivity.before(event, context, decision?.block === true);
       return decision;
     });
     api.on("after_tool_call", (event, context) => {
       accessRuntime.afterTool(event, context);
       if (!accessRuntime.isProbe(context)) {
+        goalProgress.update(event, context);
         taskActivity.after(event, context);
         return toolLoopGuard.afterToolCall(event, context, AGENT_ID);
       }
@@ -326,9 +332,13 @@ export default definePluginEntry({
     api.on("tool_result_persist", (event, context) =>
       toolLoopGuard.toolResultPersist(event, context, AGENT_ID)
     );
-    api.on("before_agent_finalize", (event, context) =>
-      toolLoopGuard.beforeAgentFinalize(event, context, AGENT_ID)
-    );
+    api.on("before_agent_finalize", (event, context) => {
+      const guardDecision = toolLoopGuard.beforeAgentFinalize(event, context, AGENT_ID);
+      const verification = toolLoopGuard.deliveryVerificationForRun(context?.runId ?? event?.runId);
+      return goalProgress.finalize(event, context, {guardDecision,
+        allowed:toolLoopGuard.continuationAllowed(context?.runId ?? event?.runId),
+        waiting:verification?.status === 'pending'});
+    });
     // Delivery rewriting is limited to host-authoritative failed or pending
     // verification state. It neither requests nor receives conversation data.
     api.on("reply_payload_sending", (event) =>
@@ -467,6 +477,7 @@ export default definePluginEntry({
       names: ["pixel_ods_research"],
     });
     registerTool(api, createAskUserTool(), {names:['pixel_ods_ask_user']});
+    registerTool(api, createGoalProgressTool(), {names:['pixel_ods_goal']});
 
     registerTool(api, createDownloadPromoteTool(), {
       names: ["pixel_ods_download_promote"],

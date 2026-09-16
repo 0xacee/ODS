@@ -17,6 +17,7 @@ import stat
 import tempfile
 import time
 import uuid
+from portal_goal import goal_prompt, goal_decision, public_plan
 
 ACTIVE = {"queued", "running", "waiting", "stopping", "interrupted"}
 TERMINAL = {"completed", "failed", "cancelled", "skipped"}
@@ -88,6 +89,10 @@ class TeamConflict(Exception):
 
 
 class _RetryReadOnly(Exception):
+    pass
+
+
+class _ContinueGoal(Exception):
     pass
 
 
@@ -173,9 +178,13 @@ class TeamManager:
     def list(self, owner, chat):
         return [self.view(row) for row in self.store.list(owner, chat)]
 
-    def start(self, owner, chat, request_id, goal, count, context):
+    def start(self, owner, chat, request_id, goal, count, context, mode='team'):
+        if mode not in {'team', 'goal'}:
+            raise TeamConflict('Unknown execution mode')
+        if mode == 'goal':
+            count = 1
         team_id = hashlib.sha256(f"{owner}\0{chat}\0{request_id}".encode()).hexdigest()[:32]
-        fingerprint = hashlib.sha256(json.dumps([goal, count, context], ensure_ascii=True).encode()).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps([goal, count, context] + (['goal'] if mode == 'goal' else []), ensure_ascii=True).encode()).hexdigest()
         existing = self.store.get(owner, team_id)
         if existing:
             if existing["fingerprint"] != fingerprint:
@@ -189,7 +198,7 @@ class TeamManager:
         row = {"id": team_id, "chat_id": chat, "request_id": request_id, "goal": goal, "context": context,
                "fingerprint": fingerprint, "instance": self.store.instance,
                "created": now, "updated": now, "status": "queued", "notice": "",
-               "stop_requested": False, "agents": []}
+               "stop_requested": False, "agents": [], "mode": mode}
         row["automatic"] = count is None
         for index, role in enumerate(roles_for(count) if count is not None else ['coordinator']):
             row["agents"].append(worker(team_id, index, role))
@@ -223,6 +232,8 @@ class TeamManager:
         self.store.save(owner, row)
 
     def _prompt(self, row, agent):
+        if row.get('mode') == 'goal':
+            return goal_prompt(row, agent)
         if agent['role'] == 'coordinator':
             return ("You are the Coordinator in the owner's Portal team. "
                     "Choose how many workers are useful for this request, from 1 to 6. "
@@ -273,6 +284,8 @@ class TeamManager:
                     agent["started"] = agent["started"] or time.time()
                     self._save(owner, row)
                     content, outcome, questions, done, error = "", None, None, False, False
+                    # Never reuse an earlier turn's completion plan as a fresh receipt.
+                    agent['activity'] = None
                     last_save = 0
                     async for frame in self.run(owner, agent):
                         if 'runtime_wait' in frame:
@@ -291,9 +304,10 @@ class TeamManager:
                             if len(content) > 24000:
                                 raise TeamConflict("Agent response exceeded the team display limit")
                         task = frame.get("pixel_task")
-                        if isinstance(task, dict) and task.get("schemaVersion") == 1:
-                            # Retain counts/categories only, never arbitrary execution arguments.
-                            agent["activity"] = {k: task[k] for k in ["state", "calls", "failures", "blocked", "activities"] if k in task}
+                        if isinstance(task, dict) and task.get("schemaVersion") in {1, 2}:
+                            # The retained transport has already validated this closed
+                            # projection. Preserve its schema so the UI can validate too.
+                            agent["activity"] = {k: task[k] for k in ["schemaVersion", "runId", "startedAt", "finishedAt", "state", "calls", "failures", "blocked", "truncated", "activities", "events", "context", "goal"] if k in task}
                         if choice.get("finish_reason") == "stop":
                             receipt = frame.get("pixel_outcome", {})
                             if receipt.get("schemaVersion") == 1 and receipt.get("status") in {"none", "passed", "pending", "failed"}:
@@ -312,12 +326,18 @@ class TeamManager:
                         agent["messages"].append({"role": "assistant", "content": content[:16000]})
                     agent["output"] = ""
                     if done and not error and outcome == "pending" and questions and not stopped:
+                        if row.get('mode') == 'goal':
+                            plan = public_plan((agent.get('activity') or {}).get('goal'))
+                            if plan and plan['steps']:
+                                agent['goal_plan'] = plan
                         agent["questions"] = questions
                         agent["status"], row["status"] = "waiting", "waiting"
                         self._save(owner, row)
                         return
                     if stopped:
-                        agent["status"] = "completed" if done and not error and outcome in {"none", "passed"} else "cancelled"
+                        plan = public_plan((agent.get('activity') or {}).get('goal'))
+                        goal_done = row.get('mode') != 'goal' or bool(plan and plan['status'] == 'completed')
+                        agent["status"] = "completed" if done and not error and outcome in {"none", "passed"} and goal_done else "cancelled"
                         agent["finished"] = time.time()
                         self._stop_remaining(owner, row)
                         return
@@ -332,7 +352,7 @@ class TeamManager:
                             raise _RetryReadOnly()
                         agent["status"] = "failed"
                         agent["error"] = (
-                            'The model runtime ended without a completed response. Earlier results were preserved.' if error or not done else
+                            'The response could not be received and confirmed. Earlier results were preserved; this turn was not replayed.' if error or not done else
                             'The model returned an empty answer. This task is not completed.' if not content.strip() else
                             'The agent could not verify completion. Its response is not a verified result.' if outcome == 'failed' else
                             'An action still requires attention or approval. Later agents were not started.' if outcome == 'pending' else
@@ -344,6 +364,24 @@ class TeamManager:
                         agent["finished"] = time.time()
                         self._save(owner, row)
                         return
+                    if row.get('mode') == 'goal':
+                        decision = goal_decision(agent)
+                        if decision == 'continue':
+                            agent['goal_round'] = agent.get('goal_round', 0) + 1
+                            agent['request_id'] = f"goal-{agent['goal_round']}-answer-{agent.get('clarifications', 0)}"
+                            # Retain a bounded recent transcript; the original objective
+                            # and public plan are repeated in the new user turn.
+                            recent = [m for m in agent['messages'] if m['role'] == 'assistant'][-2:]
+                            agent['messages'] = recent + [{'role': 'user', 'content': goal_prompt(row, agent)}]
+                            agent['status'], row['status'] = 'queued', 'queued'
+                            self._save(owner, row)
+                            raise _ContinueGoal()
+                        if decision:
+                            agent['status'], row['status'] = 'failed', 'failed'
+                            agent['error'] = decision
+                            agent['finished'] = time.time()
+                            self._save(owner, row)
+                            return
                     agent["status"] = "completed"
                     if agent.get('recoveries'):
                         row['notice']='The model connection recovered. Earlier completed work was not repeated.'
@@ -364,6 +402,11 @@ class TeamManager:
                     return await self._drive(owner, row)
             row["status"] = "completed"
             self._save(owner, row)
+        except _ContinueGoal:
+            # A new durable request after a confirmed terminal receipt, never
+            # replay of a turn that may already have produced side effects.
+            await asyncio.sleep(0)
+            return await self._drive(owner, row)
         except _RetryReadOnly:
             await asyncio.sleep(2)
             return await self._drive(owner,row)
@@ -421,16 +464,22 @@ class TeamManager:
         if row is None:
             return None
         agent = next((a for a in row["agents"] if a["id"] == agent_id), None)
-        if row["status"] != "waiting" or not agent or agent["status"] != "waiting" or agent["turn"] >= 4:
+        if row["status"] != "waiting" or not agent or agent["status"] != "waiting" or agent.get('clarifications', agent['turn']) >= 4:
             raise TeamConflict("This agent is not waiting for an answer, or its clarification limit was reached")
         questions = agent["questions"]
         if set(answers) != {q["id"] for q in questions} or any(not isinstance(x, str) or not x.strip() or len(x) > 1000 for x in answers.values()):
             raise TeamConflict("Answer each pending question")
         content = "\n\n".join(q["question"] + "\n" + answers[q["id"]].strip() for q in questions)
-        agent["messages"].append({"role": "user", "content": content})
+        if row.get('mode') == 'goal':
+            combined = (agent.get('goal_answers', '') + '\n\n' + content).strip()
+            if len(combined) > 4000:
+                raise TeamConflict('Please shorten these answers; the goal can retain up to 4,000 characters of clarification.')
+            agent['goal_answers'] = combined
+        agent["messages"].append({"role": "user", "content": goal_prompt(row, agent) if row.get('mode') == 'goal' else content})
         agent["conversation"].append({"role": "user", "content": content})
         agent["turn"] += 1
-        agent["request_id"] = f"turn-{agent['turn']}"
+        agent['clarifications'] = agent.get('clarifications', 0) + 1
+        agent["request_id"] = f"goal-{agent.get('goal_round', 0)}-answer-{agent['clarifications']}" if row.get('mode') == 'goal' else f"turn-{agent['turn']}"
         agent["questions"] = None
         agent["status"], row["status"] = "queued", "queued"
         row["instance"] = self.store.instance

@@ -5,13 +5,41 @@ export function parseTaskActivity(value, runId) {
   const timestamp = item => typeof item === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(item)
     && Number.isFinite(Date.parse(item)) && new Date(item).toISOString() === item;
   const count = item => Number.isInteger(item) && item >= 0 && item <= 512;
-  if (!keys(value,'schemaVersion,runId,startedAt,finishedAt,state,calls,failures,blocked,truncated,activities')
-    || value.schemaVersion !== 1 || value.runId !== runId
+  const extended = value?.schemaVersion === 2;
+  if (!keys(value,'schemaVersion,runId,startedAt,finishedAt,state,calls,failures,blocked,truncated,activities' + (extended ? ',events,context,goal' : ''))
+    || ![1,2].includes(value.schemaVersion) || value.runId !== runId
     || typeof runId !== 'string' || !/^chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)
     || !timestamp(value.startedAt) || !['running','completed','failed','finished'].includes(value.state)
     || (value.state === 'running' ? value.finishedAt !== null : !timestamp(value.finishedAt) || value.finishedAt < value.startedAt)
     || !count(value.calls) || !count(value.failures) || !count(value.blocked)
     || typeof value.truncated !== 'boolean' || !Array.isArray(value.activities) || value.activities.length > 8) return null;
+  if (extended) {
+    if (value.goal !== null) {
+      const goal=value.goal, ids=new Set();
+      const text=(s,n)=>typeof s==='string' && s.trim().length>0 && s.length<=n && !/[\u0000-\u001f\u007f]/.test(s);
+      if (!keys(goal,'status,summary,steps') || !['active','completed','blocked','waiting'].includes(goal.status)
+        || !text(goal.summary,300) || !Array.isArray(goal.steps) || goal.steps.length>8) return null;
+      for(const step of goal.steps) {
+        if(!keys(step,'id,title,status') || typeof step.id !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(step.id) || ids.has(step.id)
+          || !text(step.title,160) || !['pending','running','completed','blocked'].includes(step.status))return null;
+        ids.add(step.id);
+      }
+      if(goal.status==='completed' && (!goal.steps.length || goal.steps.some(step=>step.status!=='completed')))return null;
+    }
+    if (!Array.isArray(value.events) || value.events.length !== Math.min(value.calls,24)) return null;
+    let sequence = value.calls - value.events.length;
+    for (const event of value.events) {
+      if (!keys(event,'sequence,kind,state,startedAt,finishedAt') || event.sequence !== ++sequence
+        || !['read','agent','run','edit','browser','preview','action','unknown'].includes(event.kind)
+        || !['running','completed','failed','blocked'].includes(event.state)
+        || !timestamp(event.startedAt) || event.startedAt < value.startedAt
+        || (event.state === 'running' ? event.finishedAt !== null : !timestamp(event.finishedAt) || event.finishedAt < event.startedAt)) return null;
+    }
+    const context = value.context;
+    const tokens = n => Number.isSafeInteger(n) && n >= 1 && n <= 10_000_000;
+    if (context !== null && (!keys(context,'used,window,measuredAt') || !tokens(context.used)
+      || !tokens(context.window) || !timestamp(context.measuredAt) || context.measuredAt < value.startedAt)) return null;
+  }
   const seen = new Set();
   let calls = 0, failures = 0, blocked = 0;
   for (const item of value.activities) {

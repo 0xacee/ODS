@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import PixelConversationRecovery from '../components/PixelConversationRecovery'
 import { readConversations, saveConversation, createConversationWriter, SELECT_EVENT, DELETE_EVENT, deleteConversation, isConversationDeleted } from '../lib/pixelConversations'
-import ReactMarkdown from 'react-markdown'
 import {usePixelAutoScroll} from '../lib/usePixelAutoScroll'
-import remarkGfm from 'remark-gfm'
-import rehypeHighlight from 'rehype-highlight'
 import { Link } from 'react-router-dom'
 import PixelAdvice from '../components/PixelAdvice.jsx'
 import PixelMascot from '../components/PixelMascot.jsx'
@@ -24,6 +21,11 @@ import PixelSelectionActions from '../components/PixelSelectionActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
 import PixelQuestions from '../components/PixelQuestions'
+import PortalGoalPlan from '../components/PortalGoalPlan'
+import {goalCommand,continueGoal} from '../lib/portalGoal'
+import PortalContextRing from '../components/PortalContextRing'
+import PixelLiveActivity from '../components/PixelLiveActivity'
+import PortalStreamingText from '../components/PortalStreamingText'
 import {parseQuestionsFrame, questionMetadata} from '../lib/pixelQuestions'
 import PixelTurnNavigation from '../components/PixelTurnNavigation'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
@@ -568,7 +570,8 @@ export default function Pixel({ systemStatus = null }) {
   const scrollRef = useRef(null)
   const chatScroll = usePixelAutoScroll(messages, chatIdRef.current, scrollRef)
   const command=agentCommand(input)
-  const teams=usePortalTeams(chatIdRef.current,Boolean(command || messages.some(m=>m.teamId || m.teamRequestId)))
+  const goalDraft=goalCommand(input)
+  const teams=usePortalTeams(chatIdRef.current,Boolean(command || goalDraft || messages.some(m=>m.teamId || m.teamRequestId)))
   const teamAttempt=useRef(null)
   useEffect(()=>{
     if(!teams.teams.length)return
@@ -579,6 +582,17 @@ export default function Pixel({ systemStatus = null }) {
         const team=teams.teams.find(t=>t.id===message.teamId || t.request_id===message.teamRequestId)
         if(!team)return message
         const content=teamSummary(team)
+        if(team.mode==='goal') {
+          const agent=team.agents[0], active=['queued','running'].includes(team.status)
+          const observed=parseTaskActivity(agent?.activity,agent?.activity?.runId)
+          const plan=observed?.goal?.steps.length ? observed.goal : agent?.goal_plan || observed?.goal || message.task?.goal
+          const task=observed ? {...observed,goal:plan || null} : message.task ? {...message.task} : undefined
+          if(task?.goal && ['failed','cancelled','interrupted'].includes(team.status))task.goal={...task.goal,status:'blocked',summary:(agent?.error || team.notice || 'This goal was stopped. Review the saved work before continuing.').slice(0,300)}
+          const next={...message,teamId:team.id,goalMode:true,content,task,status:active?'streaming':'done',
+            questions:agent?.questions || undefined,goalNotice:agent?.error || team.notice || '',goalState:team.status}
+          if(JSON.stringify(message)===JSON.stringify(next))return message
+          changed=true;return next
+        }
         if(message.content===content && message.teamId===team.id)return message
         changed=true;return {...message,teamId:team.id,content}
       })
@@ -809,17 +823,19 @@ export default function Pixel({ systemStatus = null }) {
     const trimmed = (typeof answerOverride === 'string' ? answerOverride : input).trim()
     if (!trimmed || sending || abortRef.current || restoredActive || restoredChecking || status !== 'available' || trimmed.length > MAX_INPUT_LEN) return
     if(teams.busy)return
-    const teamCommand=agentCommand(trimmed)
+    if(goalCommand(trimmed) && !goalCommand(trimmed).task) { setStopError('Describe the goal you want to complete.'); return }
+    const requestedGoal=goalCommand(trimmed)
+    const teamCommand=agentCommand(trimmed) || requestedGoal
     if(teamCommand) {
       if(!teamCommand.task || teamCommand.task.length>8000){setStopError('Describe what you want the team to do, in up to 8,000 characters.');return}
       const signature=JSON.stringify([chatIdRef.current,trimmed])
       if(teamAttempt.current?.signature!==signature)teamAttempt.current={signature,id:makeChatId(),context:messages.filter(m=>!m.teamRequestId).slice(-4).map(m=>`${m.role}: ${m.content.slice(0,450)}`).join('\n').slice(-1800)}
       const requestId=teamAttempt.current.id
       const context=teamAttempt.current.context
-      setMessages(previous=>previous.some(m=>m.teamRequestId===requestId) ? previous : [...previous,{role:'user',content:trimmed},{role:'assistant',content:'Preparing the agent team…',teamRequestId:requestId,status:'done'}])
+      setMessages(previous=>previous.some(m=>m.teamRequestId===requestId) ? previous : [...previous,{role:'user',content:trimmed},{role:'assistant',content:requestedGoal?'Preparing your goal…':'Preparing the agent team…',teamRequestId:requestId,...(requestedGoal?{goalMode:true}:{}),status:'done'}])
       setStopError('')
       try {
-        const team=await teams.start({request_id:requestId,task:teamCommand.task,context})
+        const team=await teams.start({request_id:requestId,task:teamCommand.task,context,...(requestedGoal?{mode:'goal'}:{})})
         if(team){setInput('');teamAttempt.current=null}
       } catch(e){setStopError(e.message)}
       return
@@ -1210,7 +1226,11 @@ export default function Pixel({ systemStatus = null }) {
 
   const insertComposerText = useCallback(text => {
     if (sending || restoredActive || restoredChecking || stopping) return
-    setInput(value => agentCommand(text) ? `/agents ${agentCommand(value)?.task || (value==='/'?'':value)}` : appendComposerText(value, text))
+    setInput(value => {
+      const mode=agentCommand(text)?'agents':goalCommand(text)?'goal':null
+      const task=(agentCommand(value) || goalCommand(value))?.task ?? (value==='/'?'':value)
+      return mode ? `/${mode} ${task}` : appendComposerText(value, text)
+    })
     inputRef.current?.focus?.()
   }, [sending, restoredActive, restoredChecking, stopping])
 
@@ -1248,13 +1268,13 @@ export default function Pixel({ systemStatus = null }) {
   }, [sending, restoredActive, restoredChecking, stopping, updateRestoredActivity, teams.launching])
 
   const inputOver = input.length > MAX_INPUT_LEN
-  const inputEmpty = !(command ? command.task : input).trim()
+  const inputEmpty = !(command?.task ?? goalDraft?.task ?? input).trim()
   const isDisabled = sending || restoredActive || restoredChecking || stopping || teams.busy || status !== 'available'
   const workingElapsed = formatElapsed(workingElapsedSeconds)
   const statusLabel = stopping
     ? 'Stopping'
     : teams.busy
-      ? 'Agent team'
+      ? (teams.teams[0]?.mode==='goal' ? 'Goal active' : 'Agent team')
     : sending
       ? 'Working'
     : restoredActive
@@ -1445,17 +1465,21 @@ export default function Pixel({ systemStatus = null }) {
                   Recovered with a clean context
                 </div>
               )}
+              {message.role === 'assistant' && <PortalGoalPlan task={message.task} active={message.status==='streaming'} disabled={isDisabled || sending || restoredActive || restoredChecking} onResume={index===messages.length-1 && !message.questions ? ()=>sendMessage(continueGoal(messages,index)) : undefined}/>}
+              {message.role === 'assistant' && <PixelLiveActivity task={message.task} active={message.status === 'streaming'}/> }
               {message.role === 'assistant' && message.content ? (
                 <>
                   {message.publication && <PixelSnapshotChanges preview={message.publication} before={message.beforePublication} onPreview={() => {setPreview(message.publication);setWorkspaceOpen(true);setPreviewCollapsed(false);setPreviewTab('preview')}}/>}
-                  {!message.questions && <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={MARKDOWN_COMPONENTS}>{message.content}</ReactMarkdown>}
+                  {!message.questions && <PortalStreamingText active={message.status==='streaming'} components={MARKDOWN_COMPONENTS}>{message.content}</PortalStreamingText>}
                   <OperationsApprovalCard content={message.content} />
                 </>
               ) : (
                 <span className="break-words whitespace-pre-wrap">{message.content}</span>
               )}
-              {message.role === 'assistant' && message.questions && <PixelQuestions questions={message.questions} answers={message.questionDraft} answered={index<messages.length-1} disabled={isDisabled || sending || restoredActive || restoredChecking} onChange={questionDraft=>setMessages(previous=>previous.map((item,i)=>i===index?{...item,questionDraft}:item))} onSubmit={answer=>sendMessage(answer)}/>}
-              {message.teamId && <button type="button" onClick={()=>teams.select({teamId:message.teamId,agentId:'0'})} className="mt-3 rounded-lg border border-theme-border px-3 py-2 text-xs hover:bg-theme-border/30">View agents and conversations</button>}
+              {message.role === 'assistant' && message.questions && <PixelQuestions questions={message.questions} answers={message.questionDraft} answered={index<messages.length-1} disabled={message.goalMode ? message.goalState!=='waiting' : isDisabled || sending || restoredActive || restoredChecking} onChange={questionDraft=>setMessages(previous=>previous.map((item,i)=>i===index?{...item,questionDraft}:item))} onSubmit={answer=>message.goalMode ? teams.answer(message.teamId,'0',message.questionDraft) : sendMessage(message.task?.goal ? continueGoal(messages,index,answer) : answer)}/>}
+              {message.goalMode && message.goalNotice && <p role="status" className="mt-3 text-xs text-amber-300">{message.goalNotice}</p>}
+              {message.goalMode && ACTIVE_TEAMS.has(message.goalState) && <button type="button" onClick={()=>teams.stop(message.teamId)} className="mt-3 mr-2 rounded-lg border border-theme-border px-3 py-2 text-xs">{message.goalState==='stopping'?'Confirm stop':'Stop goal'}</button>}
+              {message.teamId && <button type="button" onClick={()=>teams.select({teamId:message.teamId,agentId:'0'})} className="mt-3 rounded-lg border border-theme-border px-3 py-2 text-xs hover:bg-theme-border/30">{message.goalMode?'View goal history':'View agents and conversations'}</button>}
               {message.status === 'streaming' && !message.content && (
                 <span role="status" className="inline-flex items-start gap-2 text-theme-text-muted">
                   <span>
@@ -1475,14 +1499,15 @@ export default function Pixel({ systemStatus = null }) {
 
       <div className="pixel-composer px-4 py-3 sm:px-6">
         {chatScroll.showLatest && <div className="mb-2 text-center"><button type="button" onClick={chatScroll.jumpToLatest} className="rounded border border-theme-border px-3 py-1 text-xs">Jump to latest</button></div>}
-        <div className="mx-auto max-w-5xl">
+        <div className={`mx-auto max-w-5xl ${messages.length===0 ? 'portal-neon-prompt' : ''}`}>
           {command && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl bg-theme-card/70 px-3 py-2 text-xs text-theme-text-secondary" role="group" aria-label="Agent team mode"><span className="font-medium text-theme-text">Agent team</span><span>Describe your task. Portal will choose the team.</span><button type="button" disabled={isDisabled} onClick={()=>setInput(command.task)} className="ml-auto whitespace-nowrap rounded px-2 py-1 hover:bg-theme-border/30">Exit team mode</button></div>}
+          {goalDraft && <div className="portal-goal-mode" role="group" aria-label="Goal mode"><span>Goal</span><small>Describe the outcome. Portal will plan, work and check its progress.</small><button type="button" disabled={isDisabled} onClick={()=>setInput(goalDraft.task)}>Exit goal mode</button></div>}
           {teams.error && <p role="alert" className="text-xs text-amber-300">{teams.error}</p>}
           <div className="pixel-composer-row">
           <textarea
             ref={inputRef}
-            value={command ? command.task : input}
-            onChange={(event) => setInput(command ? `/agents ${event.target.value}` : event.target.value)}
+            value={command ? command.task : goalDraft ? goalDraft.task : input}
+            onChange={(event) => setInput(command ? `/agents ${event.target.value}` : goalDraft ? `/goal ${event.target.value}` : event.target.value)}
             onKeyDown={(event) => {
               if (shouldSendMessage(event, sendKey.mode)) {
                 event.preventDefault()
@@ -1502,7 +1527,7 @@ export default function Pixel({ systemStatus = null }) {
           />
           <div className="pixel-composer-actions">
           <PixelDictation disabled={isDisabled} conversationId={chatIdRef.current} onInsert={insertComposerText}/>
-          {teams.busy && teams.teams[0] ? <button type="button" onClick={()=>teams.select({teamId:teams.teams[0].id,agentId:'0'})} title="View active agent team" className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-theme-border text-theme-text"><Square size={16}/></button> : sending || restoredActive ? (
+          {teams.busy && teams.teams[0] ? <button type="button" onClick={()=>teams.teams[0].mode==='goal'?teams.stop(teams.teams[0].id):teams.select({teamId:teams.teams[0].id,agentId:'0'})} title={teams.teams[0].mode==='goal'?'Stop goal':'View active agent team'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-theme-border text-theme-text"><Square size={16}/></button> : sending || restoredActive ? (
             <button
               onClick={stopStreaming}
               disabled={stopping}
@@ -1527,10 +1552,10 @@ export default function Pixel({ systemStatus = null }) {
           <div className="pixel-composer-secondary">
             <PixelComposerTools input={input} disabled={isDisabled} onInsert={insertComposerText}>
               <PixelTextFileInput key={`file-input-${chatIdRef.current}`} input={input} disabled={isDisabled} limit={MAX_INPUT_LEN} onInsert={insertComposerText}/>
-              <PixelDraftPreview key={`draft-preview-${chatIdRef.current}`} input={input}/>
+              <PixelDraftPreview key={`draft-preview-${chatIdRef.current}`} input={command?.task ?? goalDraft?.task ?? input}/>
             </PixelComposerTools>
             <div className="pixel-composer-limits">
-              {activeContext && <span title="Model context window shared by instructions, conversation, tools, and reply">{activeContext}</span>}
+              <PortalContextRing capacityLabel={activeContext} context={messages.at(-1)?.role==='assistant' ? messages.at(-1)?.task?.context : null} capacity={Number(agentRuntime?.contextLength || systemStatus?.inference?.contextSize || systemStatus?.model?.contextLength)} pending={sending || restoredActive}/>
               <span className={inputOver ? 'text-red-400' : ''} title="Characters in this message, not tokens or context usage">{input.length.toLocaleString()} / {MAX_INPUT_LEN.toLocaleString()} chars</span>
             </div>
           </div>

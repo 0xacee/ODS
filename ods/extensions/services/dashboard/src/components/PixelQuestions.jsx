@@ -1,5 +1,6 @@
 import {useId, useState} from 'react'
 import {ArrowRight, ArrowLeft, Check, MessageCircle} from 'lucide-react'
+import './portal-agent-experience.css'
 import {answersMessage} from '../lib/pixelQuestions'
 
 export default function PixelQuestions({questions,answers={},onChange,onSubmit,disabled=false,answered=false}) {
@@ -11,7 +12,7 @@ export default function PixelQuestions({questions,answers={},onChange,onSubmit,d
   const isCustom=custom[question.id] || (Boolean(answer) && !question.options.includes(answer))
   const complete=answersMessage(questions,answers)
   if (answered) return <div className="mt-3 inline-flex items-center gap-2 text-xs text-theme-text-muted"><Check size={14}/>Answered · continuing in this conversation</div>
-  return <section aria-label="Questions for you" className="mt-3 w-full min-w-0 rounded-2xl border border-theme-border bg-theme-card/95 p-4 shadow-lg sm:p-5">
+  return <section aria-label="Questions for you" className="portal-question-card mt-3 w-full min-w-0 rounded-2xl border border-theme-border bg-theme-card/95 p-4 shadow-lg sm:p-5">
     <div className="mb-4 flex items-center justify-between gap-3 text-xs text-theme-text-muted">
       <span className="inline-flex items-center gap-2"><MessageCircle size={15} className="text-theme-accent-light"/>Your input</span>
       <span aria-label="Question progress">{index+1} of {questions.length}</span>

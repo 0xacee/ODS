@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +24,7 @@ class TeamStart(BaseModel):
     task: str = Field(min_length=1, max_length=8000)
     count: int | None = Field(default=None, ge=1, le=6)
     context: str = Field(default="", max_length=1800)
+    mode: Literal['team', 'goal'] = 'team'
 
 
 class TeamList(BaseModel):
@@ -124,7 +126,7 @@ async def start(body: TeamStart, owner: str = Depends(verify_api_key)):
     if pixel._pixel_config() is None:
         raise HTTPException(503, "Portal is not enabled")
     try:
-        return manager().start(owner_namespace(owner), body.chat_id, body.request_id, body.task.strip(), body.count, body.context)
+        return manager().start(owner_namespace(owner), body.chat_id, body.request_id, body.task.strip(), body.count, body.context, body.mode)
     except TeamConflict as exc:
         raise HTTPException(409, str(exc)) from None
 

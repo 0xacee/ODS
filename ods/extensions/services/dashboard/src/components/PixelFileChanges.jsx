@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Pencil } from 'lucide-react'
+import { ChevronRight, Folder, ArrowRight } from 'lucide-react'
 import { fileLanguage, PixelCodeLines, PixelLanguageBadge } from './PixelCodeBlock'
 import './pixel-file-changes.css'
 
@@ -83,7 +83,7 @@ function FileChange({file, onPreview, expansion}) {
     }
   }
   return <details className="chat-file-change" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary><Pencil size={16} strokeWidth={1.25} aria-hidden="true"/><span className="file-change-name">{LABELS[file.change] || 'Changed'} {file.path}</span><PixelChangeCounts additions={file.additions} deletions={file.deletions}/></summary>
+    <summary><ChevronRight className="portal-diff-chevron" size={16} strokeWidth={1.5} aria-hidden="true"/><span className="file-change-name">{LABELS[file.change] || 'Changed'} {file.path}</span><PixelChangeCounts additions={file.additions} deletions={file.deletions}/></summary>
     {open && <div className="inline-artifact-content">
       {file.change === 'published' && <p className="pixel-publication-baseline">First published version. No earlier snapshot was available for comparison.</p>}
       {!validRows || !hasCounts && (file.additions !== null || file.deletions !== null) ? <p role="status">Changes could not be verified.</p> : !hasCounts ? <p role="status">Line comparison unavailable for this file.</p> : !rows.length ? <p role="status">{file.additions || file.deletions ? 'Line changes are unavailable for this file.' : 'No line changes.'}</p> : <section className="pixel-code-block artifact-diff" aria-label={`Changes to ${file.path}`}>
@@ -104,6 +104,8 @@ export default function PixelFileChanges({changes = [], onPreview}) {
   if (!changes.length) return null
   const shown = changes.filter(file => file.path.toLowerCase().includes(query.toLowerCase()) && (!kind || file.change === kind))
   return <div className="pixel-file-changes" aria-label="File changes">
+    <header className="portal-diff-header"><Folder size={16}/><span>Published files</span><ArrowRight size={13}/><span>Changes</span><span className="portal-diff-file-count">{changes.length} {changes.length===1?'file':'files'}</span></header>
+    <p className="portal-diff-help">Select a file to inspect its changes.</p>
     {(changes.length > 1 || query || kind) && <div className="my-2 flex flex-wrap items-center gap-2 text-xs">
       <input type="search" aria-label="Filter changed files" placeholder="Find a changed file…" className="min-w-0 rounded border border-theme-border bg-theme-bg p-2" value={query} onChange={event => setQuery(event.target.value)}/>
       <select aria-label="Change kind" className="rounded border border-theme-border bg-theme-bg p-2" value={kind} onChange={event => setKind(event.target.value)}><option value="">All changes</option>{Object.entries(LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select>

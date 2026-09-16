@@ -117,6 +117,26 @@ function startIngress({ token = TOKEN, gatewayPort, socket, deps } = {}) {
   });
 }
 
+test('re-reads a briefly unavailable final receipt without resubmitting work', async()=>{
+  let submissions=0, reads=0;
+  const verification={status:'unavailable'};
+  const gw=await fakeGateway({verification,onRequest:()=>submissions++,onVerificationRequest:()=>{
+    reads++;
+    if(reads===2)verification.status='none';
+  }});
+  const srv=await startIngress({gatewayPort:gw.port});
+  try {
+    const response=await request(srv,'POST','/v1/chat/completions',{
+      body:JSON.stringify({messages:[{role:'user',content:'Do the work'}],stream:true}),headers:{'Content-Type':'application/json'},
+    });
+    assert.equal(response.status,200);
+    assert.ok(response.body.includes('"pixel_outcome":{"schemaVersion":1,"status":"none"}'));
+    assert.equal(submissions,1);assert.equal(reads,2);
+  } finally {
+    await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));
+  }
+});
+
 function request(server, method, pathname, opts = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(

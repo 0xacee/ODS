@@ -1858,3 +1858,19 @@ class TestSSEPreludeBudget(BaseEdgeTest):
                 self.assertIn("openclaw/default is assistant text", body)
                 self.assertNotIn('"error"', body)
                 self.assertTrue(body.endswith("data: [DONE]\n\n"))
+
+
+class TaskDetailSchemaTest(unittest.TestCase):
+    def setUp(self):
+        self.environment = patch.dict(os.environ, {'PIXEL_OPENWEBUI_KEY': TOKEN, 'PIXEL_PREVIEW_PROXY_KEY': TOKEN})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def test_v2_live_public_plan_and_context_are_bounded(self):
+        from pixel_edge import valid_live_task_event
+        stamp='2026-09-15T10:00:00.000Z'
+        task={'schemaVersion':2,'runId':'chatcmpl_11111111-2222-4333-8444-555555555555','startedAt':stamp,'finishedAt':None,'state':'running','calls':0,'failures':0,'blocked':0,'truncated':False,'activities':[], 'events':[], 'context':{'used':810,'window':1000,'measuredAt':stamp},'goal':{'status':'active','summary':'Working','steps':[{'id':'read','title':'Read source','status':'pending'}]}}
+        event={'object':'ods.task.activity','id':task['runId'],'pixel_task':task}
+        self.assertTrue(valid_live_task_event(event))
+        for change in [{'events':[{'secret':'never'}]}, {'context':{'used':True,'window':1000,'measuredAt':stamp}}, {'goal':{**task['goal'],'status':'completed'}}, {'goal':{**task['goal'],'privateReasoning':'never'}}]:
+            self.assertFalse(valid_live_task_event({**event,'pixel_task':{**task,**change}}))

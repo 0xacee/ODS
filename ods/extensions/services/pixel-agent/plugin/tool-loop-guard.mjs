@@ -6264,7 +6264,7 @@ export function createToolLoopGuard({
     if (state?.managedTeamWorker && ['task','hub','sessions_spawn','sessions_send','subagents'].includes(delegatedName)) {
       return {block:true,blockReason:'This team is already managed by the owner. Do your assigned work in this session; creating or steering more agents is disabled for team workers.'};
     }
-    if (state?.managedTeamReadOnly && !['tool_search','read','web_search','web_fetch','pixel_ods_research','pixel_ods_web_extract','pixel_ods_ask_user','session_status','memory_search','memory_get'].includes(delegatedName)) {
+    if (state?.managedTeamReadOnly && !['tool_search','read','web_search','web_fetch','pixel_ods_research','pixel_ods_web_extract','pixel_ods_ask_user','pixel_ods_goal','session_status','memory_search','memory_get'].includes(delegatedName)) {
       return {block:true,blockReason:'Your team role is read-only. Do not create, edit, execute commands, publish, or operate services. Review the supplied evidence using read/search tools if needed, then return your findings as text. The Builder owns implementation and test execution.'};
     }
     if (state?.ownerQuestions) return {block:true, blockReason:'Waiting for the owner to answer the clarification questions. End this turn without further tools; never choose answers for the owner.'};
@@ -6272,7 +6272,7 @@ export function createToolLoopGuard({
       return { block: true, blockReason: RUN_PROGRESS_STOP_REASON };
     }
     const asksOwner = toolName === 'pixel_ods_ask_user' || (toolName === 'tool_call' && ['pixel_ods_ask_user','openclaw:pixel-ods:pixel_ods_ask_user'].includes(event?.params?.id));
-    if (asksOwner) return state?.clientCancelled ? {block:true,blockReason:CLIENT_CANCELLED_REASON} : undefined;
+    if (asksOwner || delegatedName === 'pixel_ods_goal') return state?.clientCancelled ? {block:true,blockReason:CLIENT_CANCELLED_REASON} : undefined;
     if (state?.workspacePreviewRequired && extensionlessHtmlWrite(toolName, normalizedParams ?? event?.params)) {
       return {block:true, blockReason: 'The write path names a FILE, not a directory. For this website, write the complete HTML to a fresh workspace-relative directory ending in /index.html (for example marketing-site/index.html). Do not write HTML to an extensionless directory name: it would prevent creating files inside it. Preserve any existing file and choose a fresh directory if that name is already a file.'};
     }
@@ -9756,6 +9756,12 @@ export function createToolLoopGuard({
     abortUserRun,
     verificationForRun,
     deliveryVerificationForRun,
+    continuationAllowed: (runId) => {
+      const state=runs.get(runId);
+      return Boolean(state && !state.clientCancelled && !state.progressBudget.exhausted
+        && !state.recursiveDeleteDenied && !state.webLoopAborted && !state.ownerQuestions
+        && !state.completionAssurance.terminal && !['failed','pending'].includes(verificationForRun(runId).status));
+    },
     verificationStatus: (runId) => runs.get(runId)?.latestVerificationStatus,
     trackedRunCount: () => runs.size,
     trackedUserCount: () => activeUsers.size,
