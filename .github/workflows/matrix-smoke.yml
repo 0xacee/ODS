@@ -239,6 +239,19 @@ jobs:
       - name: Unix Peer Identity Tests
         run: python3 extensions/services/pixel-agent/tests/test_unix_peer.py
 
+      - name: Set Up Pixel Edge Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.13'
+
+      - name: Native Pixel Edge Tests
+        env:
+          # Short, canonical paths satisfy both Unix socket length and custody checks.
+          TMPDIR: /private/tmp
+        run: |
+          python -m pip install -r extensions/services/pixel-edge/requirements.txt pytest
+          python -m pytest -q extensions/services/pixel-edge/tests
+
       - name: Atomic Environment Write Tests
         run: /bin/bash tests/test-atomic-env-writes.sh
 
