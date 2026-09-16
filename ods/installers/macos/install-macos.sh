@@ -1752,6 +1752,12 @@ else
     _previous_llm_bind="$(read_env_value "${INSTALL_DIR}/.env" "BIND_ADDRESS")"
     _previous_macos_gateway="$(read_env_value "${INSTALL_DIR}/.env" "ODS_MACOS_HOST_GATEWAY")"
     generate_ods_env "$INSTALL_DIR" "$SELECTED_TIER" "$FORCE"
+    # Reinstalls preserve .env, including an earlier AirPlay port remap.
+    # Use that same port for Compose, model downloads and readiness checks.
+    WHISPER_PORT="$(read_env_value "$INSTALL_DIR/.env" "WHISPER_PORT")"
+    WHISPER_PORT="${WHISPER_PORT//\"/}"
+    WHISPER_PORT="${WHISPER_PORT//\'/}"
+    export WHISPER_PORT="${WHISPER_PORT:-9000}"
     _MACOS_EXTERNAL_MODEL_READY=false
     _macos_active_store="$(read_env_value "${INSTALL_DIR}/.env" "ODS_ACTIVE_MODEL_STORE")"
     _macos_active_store="${_macos_active_store//\"/}"
@@ -3141,7 +3147,7 @@ else
     HEALTH_URLS=("http://${_health_llama_host}:${_health_llama_port}/health" "http://127.0.0.1:3000")
     HEALTH_CONTAINERS=("" "ods-webui")
 fi
-$ENABLE_VOICE && HEALTH_NAMES+=("Whisper (STT)") && HEALTH_URLS+=("http://127.0.0.1:9000/health") && HEALTH_CONTAINERS+=("ods-whisper")
+$ENABLE_VOICE && HEALTH_NAMES+=("Whisper (STT)") && HEALTH_URLS+=("http://127.0.0.1:${WHISPER_PORT:-9000}/health") && HEALTH_CONTAINERS+=("ods-whisper")
 $ENABLE_WORKFLOWS && HEALTH_NAMES+=("n8n (Workflows)") && HEALTH_URLS+=("http://127.0.0.1:5678/healthz") && HEALTH_CONTAINERS+=("ods-n8n")
 [[ -x "$OPENCODE_BIN" ]] && HEALTH_NAMES+=("OpenCode (IDE)") && HEALTH_URLS+=("http://127.0.0.1:${OPENCODE_PORT}") && HEALTH_CONTAINERS+=("")
 
