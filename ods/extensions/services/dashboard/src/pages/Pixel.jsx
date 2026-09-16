@@ -24,7 +24,7 @@ import PixelQuestions from '../components/PixelQuestions'
 import PortalGoalPlan from '../components/PortalGoalPlan'
 import {goalCommand,continueGoal} from '../lib/portalGoal'
 import PortalContextRing from '../components/PortalContextRing'
-import PixelLiveActivity from '../components/PixelLiveActivity'
+import PortalAgentActivity from '../components/PortalAgentActivity'
 import PortalStreamingText from '../components/PortalStreamingText'
 import {parseQuestionsFrame, questionMetadata} from '../lib/pixelQuestions'
 import PixelTurnNavigation from '../components/PixelTurnNavigation'
@@ -369,12 +369,6 @@ export function OperationsApprovalCard({ content }) {
       </div>
     </div>
   )
-}
-
-function workingDetail(elapsedSeconds, displayName) {
-  if (elapsedSeconds < 15) return 'Starting the owner-agent turn'
-  if (elapsedSeconds < 60) return `${displayName} is working with the active model`
-  return 'Still working — local model and tool turns can take several minutes'
 }
 
 function makeChatId() {
@@ -1466,7 +1460,7 @@ export default function Pixel({ systemStatus = null }) {
                 </div>
               )}
               {message.role === 'assistant' && <PortalGoalPlan task={message.task} active={message.status==='streaming'} disabled={isDisabled || sending || restoredActive || restoredChecking} onResume={index===messages.length-1 && !message.questions ? ()=>sendMessage(continueGoal(messages,index)) : undefined}/>}
-              {message.role === 'assistant' && <PixelLiveActivity task={message.task} active={message.status === 'streaming'}/> }
+              {message.role === 'assistant' && <PortalAgentActivity task={message.task} active={message.status === 'streaming'} status={message.status}/> }
               {message.role === 'assistant' && message.content ? (
                 <>
                   {message.publication && <PixelSnapshotChanges preview={message.publication} before={message.beforePublication} onPreview={() => {setPreview(message.publication);setWorkspaceOpen(true);setPreviewCollapsed(false);setPreviewTab('preview')}}/>}
@@ -1480,16 +1474,7 @@ export default function Pixel({ systemStatus = null }) {
               {message.goalMode && message.goalNotice && <p role="status" className="mt-3 text-xs text-amber-300">{message.goalNotice}</p>}
               {message.goalMode && ACTIVE_TEAMS.has(message.goalState) && <button type="button" onClick={()=>teams.stop(message.teamId)} className="mt-3 mr-2 rounded-lg border border-theme-border px-3 py-2 text-xs">{message.goalState==='stopping'?'Confirm stop':'Stop goal'}</button>}
               {message.teamId && <button type="button" onClick={()=>teams.select({teamId:message.teamId,agentId:'0'})} className="mt-3 rounded-lg border border-theme-border px-3 py-2 text-xs hover:bg-theme-border/30">{message.goalMode?'View goal history':'View agents and conversations'}</button>}
-              {message.status === 'streaming' && !message.content && (
-                <span role="status" className="inline-flex items-start gap-2 text-theme-text-muted">
-                  <span>
-                    <span className="pixel-working-label block">{workingDetail(workingElapsedSeconds, displayName)}</span>
-                    <span className="mt-0.5 block text-xs text-theme-text-muted/80">
-                      {workingElapsed} elapsed · You can stop safely at any time.
-                    </span>
-                  </span>
-                </span>
-              )}
+
             </div>
             {message.role === 'user' && <UserAvatar profile={profile} className="pixel-user-character"/>}
           </div>

@@ -437,6 +437,15 @@ test("prior website feedback does not require a preview for new scheduled file w
   assert.equal(userMessageRequestsWorkspacePreview([], "The last task succeeded. Improve the website and publish it."), true);
 });
 
+test("ordinary filenames cannot request website authorship or publication", () => {
+  for (const path of ['portal-check/nota.txt','site/data.json','dashboard/app.py','C:\\work\\portal\\notes.md']) {
+    assert.equal(userMessageRequestsWorkspacePreview([], `Edit ${path} and read the final content.`), false, path);
+    assert.equal(userMessageRequestsWorkspacePreview([], `Create ${path} with a greeting.`), false, path);
+  }
+  assert.equal(userMessageRequestsWorkspacePreview([], 'Teste de integração: usando a ferramenta edit, altere teste concluído para integração validada em portal-activity-check-20260916/nota.txt. O schema atual é {path, edits:[{oldText,newText}]}. Depois use a ferramenta read para ler esse arquivo e informe seu conteúdo final.'), false);
+  assert.equal(userMessageRequestsWorkspacePreview([], 'Build a website and write its data to portal/data.json.'), true);
+});
+
 test("preview intent treats HTML paths as targets rather than task instructions", () => {
   assert.equal(userMessageRequestsWorkspacePreview([], "Repair the server page at visualization/index.html and publish"), true);
   for (const directory of ["expense-review/static", "history-chart", "backend/service"]) {

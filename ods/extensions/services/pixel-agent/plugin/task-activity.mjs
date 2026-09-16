@@ -1,5 +1,6 @@
-// Content-free host observations for the Pixel workbench. Tool arguments,
-// output, paths and prompts never enter this projection. Token counts are
+import {displayForActivity} from './activity-display.mjs';
+// Bounded public host observations for the Pixel workbench. Only explicitly
+// selected/filtered metadata and excerpts enter this projection. Token counts are
 // optional numeric measurements from the final model response, never estimates.
 const RUN = /^chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ORDER = ['read', 'agent', 'run', 'edit', 'browser', 'preview', 'action', 'unknown'];
@@ -73,7 +74,8 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
     // A blocked attempt must not later become a successful effect because a
     // wrapper emitted an after-hook. Duplicate hook delivery is idempotent.
     if (existing?.outcome === 'blocked' || (existing && outcome === 'running' && existing.outcome !== 'running')) return;
-    run.calls.set(callId, {kind:existing?.kind ?? kindFor(event, context), outcome, startedAt:existing?.startedAt ?? now(), finishedAt:outcome === 'running' ? null : existing?.finishedAt ?? now(), wrapped:existing?.wrapped ?? toolName === 'tool_call'});
+    const display=outcome==='blocked' ? null : displayForActivity(event,context,existing?.display);
+    run.calls.set(callId, {kind:existing?.kind ?? kindFor(event, context), outcome, display, startedAt:existing?.startedAt ?? now(), finishedAt:outcome === 'running' ? null : existing?.finishedAt ?? now(), wrapped:existing?.wrapped ?? toolName === 'tool_call'});
   }
   return {
     begin,
@@ -118,8 +120,8 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
       }
       const activities = ORDER.filter(kind => groups.has(kind)).map(kind => groups.get(kind));
       const events = [...run.calls.values()].map((call, index) => ({sequence:index + 1, kind:call.kind,
-        state:call.outcome, startedAt:call.startedAt, finishedAt:call.finishedAt})).slice(-24);
-      return {schemaVersion:2, runId:run.runId, startedAt:run.startedAt, finishedAt:run.finishedAt,
+        state:call.outcome, startedAt:call.startedAt, finishedAt:call.finishedAt, display:call.display})).slice(-24);
+      return {schemaVersion:3, runId:run.runId, startedAt:run.startedAt, finishedAt:run.finishedAt,
         state:run.state, calls:run.calls.size,
         failures:activities.reduce((sum, item) => sum + item.failures, 0),
         blocked:activities.reduce((sum, item) => sum + item.blocked, 0),

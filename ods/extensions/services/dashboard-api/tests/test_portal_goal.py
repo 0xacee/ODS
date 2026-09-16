@@ -17,11 +17,14 @@ def goal_frame(status='active', changed=False):
 
 
 @pytest.mark.asyncio
-async def test_goal_continues_in_new_durable_turn_then_completes(tmp_path):
+@pytest.mark.parametrize('schema_version',[2,3])
+async def test_goal_continues_in_new_durable_turn_then_completes(tmp_path,schema_version):
     calls=[]
     async def run(owner,agent):
         calls.append(copy.deepcopy(agent))
-        yield goal_frame('completed' if len(calls)==2 else 'active')
+        frame=goal_frame('completed' if len(calls)==2 else 'active')
+        frame['pixel_task']['schemaVersion']=schema_version
+        yield frame
         for frame in finish('Actual final result' if len(calls)==2 else 'Partial work saved'):yield frame
     manager=TeamManager(TeamStore(tmp_path/'teams'),run,yes)
     initial=manager.start(OWNER,'chat','goal','Produce and check the result',None,'','goal')
@@ -35,6 +38,7 @@ async def test_goal_continues_in_new_durable_turn_then_completes(tmp_path):
     assert 'Saved public plan' in calls[1]['messages'][-1]['content']
     assert any(m['content']=='Partial work saved' for m in calls[1]['messages'])
     assert row['agents'][0]['activity']['goal']['status']=='completed'
+    assert row['agents'][0]['activity']['schemaVersion']==schema_version
     assert manager.start(OWNER,'chat','goal','Produce and check the result',None,'','goal')['id']==initial['id']
 
 

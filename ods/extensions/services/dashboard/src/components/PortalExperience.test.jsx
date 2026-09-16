@@ -2,7 +2,7 @@ import {fireEvent, render, screen} from '@testing-library/react'
 import PortalContextRing from './PortalContextRing'
 import PortalStreamingText from './PortalStreamingText'
 import PortalGoalPlan from './PortalGoalPlan'
-import PixelLiveActivity from './PixelLiveActivity'
+import PortalAgentActivity from './PortalAgentActivity'
 import {parseTaskActivity} from '../lib/pixelTaskActivity'
 import {continueGoal,goalCommand} from '../lib/portalGoal'
 const time='2026-09-15T10:00:00.000Z'
@@ -20,16 +20,29 @@ it('keeps all streaming text immediately available and preserves exact safe sour
   const {rerender}=render(<PortalStreamingText active>{'Answer with [evidence](https://example.com/source).'}</PortalStreamingText>)
   expect(screen.getByText(/Answer with/)).toBeVisible()
   expect(screen.getByRole('link')).toHaveAttribute('href','https://example.com/source')
+  expect(screen.getByText(/Answer with/).closest('[aria-busy]')).toHaveAttribute('aria-busy','true')
   fireEvent.focus(screen.getByRole('link'));expect(screen.getByRole('tooltip')).toHaveTextContent('example.com')
   rerender(<PortalStreamingText>{'Done. [unsafe](javascript:alert(1))'}</PortalStreamingText>)
   expect(screen.queryByRole('link')).toBeNull()
   expect(screen.getByText(/Done/)).toBeVisible()
 })
+it('animates appended text without remounting earlier chunks or discarding code',()=>{
+  const {container,rerender}=render(<PortalStreamingText active>Hello</PortalStreamingText>)
+  const first=container.querySelector('.portal-stream-reveal')
+  rerender(<PortalStreamingText active>{'Hello world\n\n```js\nconst n = 1;\n```'}</PortalStreamingText>)
+  expect(container.querySelector('p')).toHaveTextContent('Hello world')
+  expect(container.querySelector('.portal-stream-reveal')).toBe(first)
+  expect(container.querySelector('code')).toHaveTextContent('const n = 1;')
+  expect(container.querySelector('code .portal-stream-reveal')).toBeNull()
+  rerender(<PortalStreamingText>{'Hello world\n\n```js\nconst n = 1;\n```'}</PortalStreamingText>)
+  expect(container.querySelector('.portal-stream-reveal')).toBe(first)
+  expect(container.querySelector('[aria-busy]')).toHaveAttribute('aria-busy','false')
+})
 it('renders observed steps and pending work without equating tool success to completion',()=>{
   expect(parseTaskActivity(task,task.runId)).toBeTruthy()
-  render(<PixelLiveActivity task={task} active/>)
-  expect(screen.getByRole('list',{name:'Execution steps'})).toHaveTextContent('ReadingFinished')
-  expect(screen.getByText(/does not confirm/)).toBeVisible()
+  render(<PortalAgentActivity task={task} active/>)
+  expect(screen.getByRole('list',{name:'Execution steps'})).toHaveTextContent('Reading files')
+  expect(screen.queryByText('Live activity')).toBeNull()
 })
 it('a stopped goal remains resumable and keeps the original objective',()=>{
   const resume=vi.fn(), goal={status:'active',summary:'Working',steps:[{id:'build',title:'Build the page',status:'running'}]}

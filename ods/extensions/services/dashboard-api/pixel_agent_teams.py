@@ -304,7 +304,7 @@ class TeamManager:
                             if len(content) > 24000:
                                 raise TeamConflict("Agent response exceeded the team display limit")
                         task = frame.get("pixel_task")
-                        if isinstance(task, dict) and task.get("schemaVersion") in {1, 2}:
+                        if isinstance(task, dict) and task.get("schemaVersion") in {1, 2, 3}:
                             # The retained transport has already validated this closed
                             # projection. Preserve its schema so the UI can validate too.
                             agent["activity"] = {k: task[k] for k in ["schemaVersion", "runId", "startedAt", "finishedAt", "state", "calls", "failures", "blocked", "truncated", "activities", "events", "context", "goal"] if k in task}

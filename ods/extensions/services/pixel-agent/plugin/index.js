@@ -1,3 +1,4 @@
+import {createActivityTool, ACTIVITY_CONTRACT} from './activity-display.mjs';
 import {createGoalProgress, createGoalProgressTool, GOAL_CONTRACT} from './goal-progress.mjs';
 // Pixel ODS integration plugin entry.
 //
@@ -251,7 +252,7 @@ export default definePluginEntry({
         configuredLeanPrompt,
         privateBrowserAccess,
       });
-      return contract ? { ...contract, ...(goalProgress.active(context?.runId ?? event?.runId) ? {appendContext:GOAL_CONTRACT} : {}), appendSystemContext: `${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()}` } : undefined;
+      return contract ? { ...contract, ...(goalProgress.active(context?.runId ?? event?.runId) ? {appendContext:GOAL_CONTRACT} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()}` } : undefined;
     });
     api.on("model_call_started", (event, context) =>
       toolLoopGuard.observeModelCall(event, context, AGENT_ID)
@@ -478,6 +479,7 @@ export default definePluginEntry({
     });
     registerTool(api, createAskUserTool(), {names:['pixel_ods_ask_user']});
     registerTool(api, createGoalProgressTool(), {names:['pixel_ods_goal']});
+    registerTool(api, createActivityTool(), {names:['pixel_ods_activity']});
 
     registerTool(api, createDownloadPromoteTool(), {
       names: ["pixel_ods_download_promote"],

@@ -20,7 +20,7 @@ import os
 import re
 import sys
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from aiohttp import web, ClientSession, UnixConnector, ClientTimeout
 from transition_gate import TransitionGate, GateError, strict_json, valid_binding
@@ -31,13 +31,13 @@ def valid_live_task_event(event):
     if not isinstance(event, dict) or set(event) != {"object", "id", "pixel_task"} or event["object"] != "ods.task.activity":
         return False
     task = event["pixel_task"]
-    extended = isinstance(task, dict) and task.get('schemaVersion') == 2
+    extended = isinstance(task, dict) and task.get('schemaVersion') in (2, 3)
     expected = {"schemaVersion", "runId", "startedAt", "finishedAt", "state", "calls", "failures", "blocked", "truncated", "activities"}
     if extended:
         expected |= {'events', 'context', 'goal'}
     if not isinstance(task, dict) or set(task) != expected:
         return False
-    if type(task["schemaVersion"]) is not int or task["schemaVersion"] not in {1, 2} or task["state"] != "running" or task["finishedAt"] is not None or type(task["truncated"]) is not bool:
+    if type(task["schemaVersion"]) is not int or task["schemaVersion"] not in {1, 2, 3} or task["state"] != "running" or task["finishedAt"] is not None or type(task["truncated"]) is not bool:
         return False
     if not isinstance(event["id"], str) or not re.fullmatch(r"chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", event["id"], re.I) or task["runId"] != event["id"]:
         return False
@@ -67,6 +67,37 @@ def valid_live_task_event(event):
             sums[key] += row[key]
     return all(sums[key] == task[key] for key in count_keys)
 
+def valid_activity_display(value):
+    if value is None:
+        return True
+    def text(s,n):
+        return isinstance(s,str) and 0 < len(s.strip()) <= len(s) <= n and not re.search(r'[\x00-\x1f\x7f]',s)
+    if not isinstance(value,dict) or set(value) != {'type','label','detail','sources','steps','change'} or value['type'] not in ('text','search','tool','trace','steps') or not text(value['label'],160):
+        return False
+    if (value['detail'] is not None and not text(value['detail'],400)) or not isinstance(value['sources'],list) or len(value['sources'])>3 or not isinstance(value['steps'],list) or len(value['steps'])>8:
+        return False
+    for source in value['sources']:
+        if not isinstance(source,dict) or set(source)!={'title','url'} or not text(source['title'],120) or not text(source['url'],512):
+            return False
+        try:
+            url=urlsplit(source['url'])
+            if url.scheme not in ('http','https') or not url.hostname or url.username or url.password:
+                return False
+        except ValueError:
+            return False
+    seen=set()
+    for step in value['steps']:
+        if not isinstance(step,dict) or set(step)!={'id','title','status'} or not isinstance(step['id'],str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,31}',step['id']) or step['id'] in seen or not text(step['title'],160) or step['status'] not in ('pending','running','completed','blocked'):
+            return False
+        seen.add(step['id'])
+    if value['change'] is not None:
+        c=value['change']
+        def code(s):
+            return isinstance(s,str) and len(s)<=1000 and not re.search(r'[\x00-\x08\x0b-\x1f\x7f]',s)
+        if value['type']!='tool' or not isinstance(c,dict) or set(c)!={'file','kind','before','after','truncated'} or not text(c['file'],120) or c['kind'] not in ('write','edit','patch') or not code(c['before']) or not code(c['after']) or type(c['truncated']) is not bool:
+            return False
+    return (value['type']=='search' or not value['sources']) and (value['type']=='steps' or not value['steps'])
+
 def valid_task_details(task):
     def timestamp(value):
         if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", value):
@@ -84,7 +115,9 @@ def valid_task_details(task):
     if type(task['calls']) is not int or not isinstance(events, list) or len(events) != min(task['calls'], 24):
         return False
     for sequence, event in enumerate(events, start=task['calls'] - len(events) + 1):
-        if not isinstance(event, dict) or set(event) != {'sequence','kind','state','startedAt','finishedAt'}:
+        if not isinstance(event, dict) or set(event) != ({'sequence','kind','state','startedAt','finishedAt'} | ({'display'} if task['schemaVersion']==3 else set())):
+            return False
+        if task['schemaVersion']==3 and not valid_activity_display(event['display']):
             return False
         if type(event['sequence']) is not int or event['sequence'] != sequence or event['kind'] not in ('read','agent','run','edit','browser','preview','action','unknown') or event['state'] not in ('running','completed','failed','blocked'):
             return False

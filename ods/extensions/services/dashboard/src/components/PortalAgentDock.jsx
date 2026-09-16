@@ -1,4 +1,4 @@
-import PixelLiveActivity from './PixelLiveActivity'
+import PortalAgentActivity from './PortalAgentActivity'
 import PortalStreamingText from './PortalStreamingText'
 import {useEffect,useRef,useState} from 'react'
 import {createPortal} from 'react-dom'
@@ -61,7 +61,7 @@ export default function PortalAgentDock({controller,renderApproval}) {
           {agent.status==='queued' && <p className="flex items-center gap-2 text-xs text-theme-text-muted"><Clock3 size={14}/>Waiting for its turn; it has not started.</p>}
           {agent.status==='running' && <p role="status" className="text-xs text-theme-text-secondary">Working{agent.activity ? ` · ${agent.activity.calls || 0} tool calls · ${agent.activity.failures || 0} failures` : ' · waiting for model output'}.</p>}
           {agent.runtime_wait && <p role="status" className="text-xs text-amber-300">Waiting for the model runtime to become ready. No new work has been sent.</p>}
-          <PixelLiveActivity task={agent.activity} active={agent.status==='running'}/>
+          <PortalAgentActivity task={agent.activity} active={agent.status==='running'}/>
           {agent.conversation.map((message,index)=><article key={index} className={`min-w-0 rounded-xl p-3 ${message.role==='user'?'bg-theme-bg/60':'border border-theme-border/50'}`}><p className="mb-2 text-[10px] uppercase tracking-wider text-theme-text-muted">{message.role==='user'?'Assignment / owner input':agent.name}</p><div className="prose prose-sm prose-invert max-w-none break-words text-theme-text [&_pre]:overflow-x-auto"><PortalStreamingText>{message.content}</PortalStreamingText></div></article>)}
           {agent.output && <div aria-label="Agent live response" className="prose prose-sm prose-invert max-w-none break-words text-theme-text"><PortalStreamingText active={agent.status==='running'}>{agent.output}</PortalStreamingText></div>}
           {renderApproval && agent.conversation.filter(m=>m.role==='assistant').map((message,index)=><div key={index}>{renderApproval(message.content)}</div>)}

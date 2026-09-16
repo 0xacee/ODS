@@ -518,12 +518,12 @@ describe('Pixel', () => {
     const send = screen.getByTitle('Send')
     expect(send.parentElement).toContainElement(screen.getByRole('button', { name: 'Dictate message' }))
     expect(send.parentElement).toHaveClass('pixel-composer-actions')
-    expect(screen.getByText('64K context')).toHaveAttribute('title', expect.stringContaining('Model context'))
+    expect(screen.getByRole('button',{name:/Token usage unavailable.*65,536 token capacity/})).toBeInTheDocument()
     const counter = screen.getByTitle('Characters in this message, not tokens or context usage')
     expect(counter).toHaveTextContent(`0 / ${(16 * 1024).toLocaleString()} chars`)
     fireEvent.change(screen.getByPlaceholderText('Message Portal...'), { target: { value: 'Olá' } })
     expect(counter).toHaveTextContent(`3 / ${(16 * 1024).toLocaleString()} chars`)
-    expect(screen.getByText('64K context')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:/Token usage unavailable.*65,536 token capacity/})).toBeInTheDocument()
     const field = screen.getByPlaceholderText('Message Portal...')
     expect(field).toHaveClass('pixel-composer-input')
     expect(field.className).not.toContain('focus:ring')
@@ -923,7 +923,7 @@ describe('Pixel', () => {
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('What do you want to work on?')).toBeInTheDocument()
     expect(screen.getByText('Qwen3.5-9B-Q4_K_M.gguf')).toBeInTheDocument()
-    expect(screen.getByText('32K context')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:/Token usage unavailable.*32,768 token capacity/})).toBeInTheDocument()
 
     for (const name of ['Check ODS health','Build in my workspace','Research with sources','Plan a multi-step task']) expect(screen.queryByRole('button',{name:new RegExp(name)})).toBeNull()
     expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue('')
@@ -955,7 +955,7 @@ describe('Pixel', () => {
 
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('remote-owner-model')).toBeInTheDocument()
-    expect(screen.getByText('128K context')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:/Token usage unavailable.*131,072 token capacity/})).toBeInTheDocument()
     expect(screen.queryByText('Qwen3.5-9B-Q4_K_M.gguf')).not.toBeInTheDocument()
   })
 
@@ -988,7 +988,7 @@ describe('Pixel', () => {
 
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('small-owner-model')).toBeInTheDocument()
-    expect(screen.getByText('8K context')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:/Token usage unavailable.*8,192 token capacity/})).toBeInTheDocument()
     expect(screen.queryByText('Qwen3.5-9B-Q4_K_M.gguf')).not.toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
@@ -1003,7 +1003,7 @@ describe('Pixel', () => {
     render(<Pixel systemStatus={{ inference: { loadedModel: 'qwen3.5-9b', contextSize: 32768 } }} />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('Qwen3.6-35B-A3B-GGUF')).toBeInTheDocument()
-    expect(screen.getByText('64K context')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:/Token usage unavailable.*65,536 token capacity/})).toBeInTheDocument()
     expect(screen.queryByText('qwen3.5-9b')).not.toBeInTheDocument()
     expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   })
@@ -1033,7 +1033,7 @@ describe('Pixel', () => {
 
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('Qwen3.5-9B-Q4_K_M.gguf')).toBeInTheDocument()
-    expect(screen.getByText('32K context')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:/Token usage unavailable.*32,768 token capacity/})).toBeInTheDocument()
     expect(screen.queryByText('forged-runtime')).not.toBeInTheDocument()
   })
 
@@ -1299,7 +1299,7 @@ describe('Pixel', () => {
     fireEvent.click(screen.getByTitle('Send'))
 
     await waitFor(() => {
-      expect(screen.getByText('Hello world')).toBeInTheDocument()
+      expect(screen.getByText((_,node)=>node.tagName==='P' && node.textContent==='Hello world')).toBeInTheDocument()
     })
   })
 
@@ -1349,7 +1349,7 @@ describe('Pixel', () => {
     fireEvent.click(screen.getByTitle('Send'))
 
     await waitFor(() => {
-      expect(screen.getByText('Split test')).toBeInTheDocument()
+      expect(screen.getByText((_,node)=>node.tagName==='P' && node.textContent==='Split test')).toBeInTheDocument()
     })
   })
 
@@ -1693,8 +1693,8 @@ describe('Pixel', () => {
       expect(ta).toBeDisabled()
       expect(screen.getByText('Working')).toBeInTheDocument()
       expect(screen.getAllByText(/0:00 elapsed/).length).toBeGreaterThan(0)
-      expect(screen.getByText('Starting the owner-agent turn')).toBeInTheDocument()
-      const reply = screen.getByText('Starting the owner-agent turn').closest('[data-pixel-response]')
+      expect(screen.getByText('Thinking…')).toBeInTheDocument()
+      const reply = screen.getByText('Thinking…').closest('[data-pixel-response]')
       expect(reply.querySelectorAll('.pixel-character')).toHaveLength(1)
       expect(reply.querySelector('.pixel-reply-character')).not.toBeNull()
       expect(screen.queryByText('Available')).not.toBeInTheDocument()

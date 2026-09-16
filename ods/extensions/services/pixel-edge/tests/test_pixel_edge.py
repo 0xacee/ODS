@@ -1874,3 +1874,13 @@ class TaskDetailSchemaTest(unittest.TestCase):
         self.assertTrue(valid_live_task_event(event))
         for change in [{'events':[{'secret':'never'}]}, {'context':{'used':True,'window':1000,'measuredAt':stamp}}, {'goal':{**task['goal'],'status':'completed'}}, {'goal':{**task['goal'],'privateReasoning':'never'}}]:
             self.assertFalse(valid_live_task_event({**event,'pixel_task':{**task,**change}}))
+
+
+    def test_v3_public_activity_accepts_sources_and_rejects_untrusted_shapes(self):
+        from pixel_edge import valid_live_task_event, valid_activity_display
+        stamp='2026-09-15T10:00:00.000Z'
+        display={'type':'search','label':'Official docs','detail':None,'sources':[{'title':'Docs','url':'https://example.com/docs'}],'steps':[],'change':None}
+        task={'schemaVersion':3,'runId':'chatcmpl_11111111-2222-4333-8444-555555555555','startedAt':stamp,'finishedAt':None,'state':'running','calls':1,'failures':0,'blocked':0,'truncated':False,'activities':[{'kind':'browser','calls':1,'failures':0,'blocked':0}], 'events':[{'sequence':1,'kind':'browser','state':'completed','startedAt':stamp,'finishedAt':stamp,'display':display}], 'context':None,'goal':None}
+        self.assertTrue(valid_live_task_event({'object':'ods.task.activity','id':task['runId'],'pixel_task':task}))
+        for change in [{'privateReasoning':'never'}, {'sources':[{'title':'Unsafe','url':'javascript:alert(1)'}]}, {'type':'text'}, {'label':'x'*161}, {'sources':[{'title':'Login','url':'https://user:pass@example.com/'}]}]:
+            self.assertFalse(valid_activity_display({**display,**change}))

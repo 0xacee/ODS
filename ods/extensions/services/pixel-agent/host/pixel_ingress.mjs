@@ -31,7 +31,7 @@ const MAX_STREAM_RESPONSE = 4 * 1024 * 1024; // 4 MiB terminal completion cap fo
 // Keep this channel far below the normal completion cap while allowing the
 // guard's structurally rendered evidence to cross the private ingress intact.
 const MAX_VERIFICATION_TEXT = 32 * 1024;
-const MAX_VERIFICATION_RESPONSE = 64 * 1024;
+const MAX_VERIFICATION_RESPONSE = 1024 * 1024;
 const OPENAI_RUN_ID = /^chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OPERATIONS_UNAVAILABLE_ZERO_SUBMISSIONS_CODE =
   "operations-unavailable-zero-submissions";
@@ -931,7 +931,7 @@ export function streamTaskActivity(res, user, token, gatewayPort, signal, deps =
         method:'POST', headers:upstreamHeaders(false, token), body:JSON.stringify({user}), redirect:'error', signal:controller.signal,
       });
       if (response.status !== 200 || !String(response.headers.get('content-type')).startsWith('application/json')) { await drain(response.body); return; }
-      const value = JSON.parse((await readBounded(response.body, 16384)).toString('utf8'));
+      const value = JSON.parse((await readBounded(response.body, 1024 * 1024)).toString('utf8'));
       if (!value || Object.keys(value).join() !== 'task') return;
       const task = parseTaskActivity(value.task, value.task?.runId);
       if (!task || task.state !== 'running' || task.startedAt < since || (runId && task.runId !== runId)) return;
