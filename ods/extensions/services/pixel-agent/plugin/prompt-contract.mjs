@@ -5,6 +5,7 @@
 // untrusted projection or tool-result fields are never interpolated here.
 
 import {
+  managedTeamRole,
   githubReadmeUrl,
   userMessageGitHubFileUrl,
   userMessageGitHubRepositoryUrl,
@@ -265,6 +266,10 @@ export function promptContractForAgent(
   const conversationContract = leanPrompt
     ? ODS_COMPACT_CONVERSATION_CONTRACT
     : ODS_CONVERSATION_CONTRACT;
+  const teamRole=managedTeamRole(event);
+  if(teamRole==='Coordinator')return {appendSystemContext:'Plan the team size only. Choose the smallest useful number of workers, from 1 to 6. Honor an explicitly requested number within that limit. Return only JSON with one integer field, count. Do not perform the task, ask questions, or use tools.'};
+  if(teamRole && teamRole!=='Builder')return {appendSystemContext:
+    `You are a read-only ${teamRole} in the owner's managed team. Analyze the supplied request and earlier teammates' actual reports. Return concise findings in the owner's language. Do not repeat the earlier answer: identify concrete corrections, unsupported claims and remaining limitations. For research or current factual claims, consult primary sources with web search/fetch and cite what you actually verified. A teammate's prose is not proof. Subjective rankings require explicit criteria, not a purported objective winner. Do not carry out the Builder's implementation again. Do not create files, run commands, publish previews, or operate services: those tools are unavailable to your role. For a purely creative writing task, review the supplied text directly. If a necessary owner preference is missing, use pixel_ods_ask_user and wait. Never invent tool results or claim verification you did not perform.`};
   const recovery = needsLoopRecovery(event?.messages)
     ? ` ${ODS_LOOP_RECOVERY_CONTRACT}`
     : "";

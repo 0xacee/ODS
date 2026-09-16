@@ -12,6 +12,8 @@ import UserAvatar from '../components/UserAvatar'
 import {useLocalProfile} from '../lib/localProfile'
 import { pixelHeaderPose, pixelReplyPose } from '../lib/pixelMascotState'
 import PixelComposerTools from '../components/PixelComposerTools'
+import PortalAgentDock from '../components/PortalAgentDock'
+import {ACTIVE_TEAMS,agentCommand,teamMetadata,teamRequest,teamSummary,usePortalTeams} from '../lib/portalTeams'
 import PixelTextFileInput from '../components/PixelTextFileInput'
 import PixelDraftPreview from '../components/PixelDraftPreview'
 import PixelDictation from '../components/PixelDictation'
@@ -473,7 +475,7 @@ function loadStoredChat(selected) {
       totalBytes += new TextEncoder().encode(message.content).byteLength
       if (totalBytes > MAX_STORED_MESSAGE_BYTES) throw new Error('stored Pixel chat is too large')
       const task = message.role === 'assistant' && parseTaskActivity(message.task, message.task?.runId)
-      return { role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...questionMetadata(message) }
+      return { role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...questionMetadata(message), ...teamMetadata(message) }
     })
     // Reuse the terminal marker validator for persisted metadata. Never infer
     // an iframe URL from conversation text, and always use the authenticated
@@ -565,6 +567,24 @@ export default function Pixel({ systemStatus = null }) {
   const inputRef = useRef(null)
   const scrollRef = useRef(null)
   const chatScroll = usePixelAutoScroll(messages, chatIdRef.current, scrollRef)
+  const command=agentCommand(input)
+  const teams=usePortalTeams(chatIdRef.current,Boolean(command || messages.some(m=>m.teamId || m.teamRequestId)))
+  const teamAttempt=useRef(null)
+  useEffect(()=>{
+    if(!teams.teams.length)return
+    setMessages(previous=>{
+      let changed=false
+      const next=previous.map(message=>{
+        if(!message.teamId && !message.teamRequestId)return message
+        const team=teams.teams.find(t=>t.id===message.teamId || t.request_id===message.teamRequestId)
+        if(!team)return message
+        const content=teamSummary(team)
+        if(message.content===content && message.teamId===team.id)return message
+        changed=true;return {...message,teamId:team.id,content}
+      })
+      return changed ? next : previous
+    })
+  },[teams.teams])
 
   const activeModel = agentRuntime?.model || systemStatus?.inference?.loadedModel || systemStatus?.model?.name || ''
   const activeContext = formatContext(
@@ -760,7 +780,7 @@ export default function Pixel({ systemStatus = null }) {
     try {
       const storedMessages = messages.map(message => {
         const task = message.role === 'assistant' && parseTaskActivity(message.task, message.task?.runId)
-        return {role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...questionMetadata(message)}
+        return {role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...questionMetadata(message), ...teamMetadata(message)}
       })
       // Report storage limits without silently trimming previous turns.
       if (storedMessages.length > MAX_STORED_MESSAGES || storedMessages.reduce((total, message) => total + new TextEncoder().encode(message.content).byteLength, 0) > MAX_STORED_MESSAGE_BYTES) throw new Error('stored Pixel chat is too large')
@@ -788,6 +808,22 @@ export default function Pixel({ systemStatus = null }) {
   const sendMessage = useCallback(async (answerOverride) => {
     const trimmed = (typeof answerOverride === 'string' ? answerOverride : input).trim()
     if (!trimmed || sending || abortRef.current || restoredActive || restoredChecking || status !== 'available' || trimmed.length > MAX_INPUT_LEN) return
+    if(teams.busy)return
+    const teamCommand=agentCommand(trimmed)
+    if(teamCommand) {
+      if(!teamCommand.task || teamCommand.task.length>8000){setStopError('Describe what you want the team to do, in up to 8,000 characters.');return}
+      const signature=JSON.stringify([chatIdRef.current,trimmed])
+      if(teamAttempt.current?.signature!==signature)teamAttempt.current={signature,id:makeChatId(),context:messages.filter(m=>!m.teamRequestId).slice(-4).map(m=>`${m.role}: ${m.content.slice(0,450)}`).join('\n').slice(-1800)}
+      const requestId=teamAttempt.current.id
+      const context=teamAttempt.current.context
+      setMessages(previous=>previous.some(m=>m.teamRequestId===requestId) ? previous : [...previous,{role:'user',content:trimmed},{role:'assistant',content:'Preparing the agent team…',teamRequestId:requestId,status:'done'}])
+      setStopError('')
+      try {
+        const team=await teams.start({request_id:requestId,task:teamCommand.task,context})
+        if(team){setInput('');teamAttempt.current=null}
+      } catch(e){setStopError(e.message)}
+      return
+    }
 
     const userMessage = { role: 'user', content: trimmed }
     const originalContextStart = contextStartRef.current
@@ -1065,7 +1101,7 @@ export default function Pixel({ systemStatus = null }) {
         abortRef.current = null
       }
     }
-  }, [input, messages, preview, workspaceOpen, sending, status, restoredActive, restoredChecking, updateRestoredActivity])
+  }, [input, messages, preview, workspaceOpen, sending, status, restoredActive, restoredChecking, updateRestoredActivity, teams.busy, teams.start])
 
   const stopStreaming = useCallback(async () => {
     const controller = abortRef.current
@@ -1134,7 +1170,7 @@ export default function Pixel({ systemStatus = null }) {
   }, [stopping, interrupted, updateRestoredActivity])
 
   const startNewChat = useCallback(() => {
-    if (sending || restoredActive || restoredChecking || stopping) return
+    if (sending || restoredActive || restoredChecking || stopping || teams.launching) return
     chatIdRef.current = makeChatId()
     requestIdRef.current = null
     contextStartRef.current = 0
@@ -1146,16 +1182,23 @@ export default function Pixel({ systemStatus = null }) {
     setInterrupted(false)
     updateRestoredActivity('idle')
     inputRef.current?.focus?.()
-  }, [sending, restoredActive, restoredChecking, stopping, updateRestoredActivity])
+  }, [sending, restoredActive, restoredChecking, stopping, updateRestoredActivity, teams.launching])
 
   useEffect(() => {
-    const remove = event => {
+    const remove = async event => {
       const {chatId, complete} = event.detail
+      if(chatId===chatIdRef.current && teams.busy){complete('Stop the agent team before deleting this conversation.');return}
       if (sending || restoredActive || restoredChecking || stopping) {
         complete('Stop the current task before deleting a conversation.')
         return
       }
       try {
+        const stored=readConversations().find(item=>item.chatId===chatId)
+        if(stored?.messages?.some(message=>message.teamId || message.teamRequestId)) {
+          const result=await teamRequest('list',{chat_id:chatId})
+          if(!Array.isArray(result.teams))throw new Error('Could not verify the team status before deleting this conversation.')
+          if(result.teams.some(team=>ACTIVE_TEAMS.has(team.status))){complete('Stop the agent team before deleting this conversation.');return}
+        }
         deleteConversation(chatId)
         if (chatId === chatIdRef.current) startNewChat()
         complete('')
@@ -1163,11 +1206,11 @@ export default function Pixel({ systemStatus = null }) {
     }
     window.addEventListener(DELETE_EVENT, remove)
     return () => window.removeEventListener(DELETE_EVENT, remove)
-  }, [sending, restoredActive, restoredChecking, stopping, startNewChat])
+  }, [sending, restoredActive, restoredChecking, stopping, startNewChat, teams.busy])
 
   const insertComposerText = useCallback(text => {
     if (sending || restoredActive || restoredChecking || stopping) return
-    setInput(value => appendComposerText(value, text))
+    setInput(value => agentCommand(text) ? `/agents ${agentCommand(value)?.task || (value==='/'?'':value)}` : appendComposerText(value, text))
     inputRef.current?.focus?.()
   }, [sending, restoredActive, restoredChecking, stopping])
 
@@ -1178,7 +1221,7 @@ export default function Pixel({ systemStatus = null }) {
 
   useEffect(() => {
     const select = event => {
-      if (sending || restoredActive || restoredChecking || stopping) {
+      if (sending || restoredActive || restoredChecking || stopping || teams.launching) {
         setStopError('Stop the current task before switching conversations.')
         return
       }
@@ -1202,14 +1245,16 @@ export default function Pixel({ systemStatus = null }) {
     }
     window.addEventListener(SELECT_EVENT, select)
     return () => window.removeEventListener(SELECT_EVENT, select)
-  }, [sending, restoredActive, restoredChecking, stopping, updateRestoredActivity])
+  }, [sending, restoredActive, restoredChecking, stopping, updateRestoredActivity, teams.launching])
 
   const inputOver = input.length > MAX_INPUT_LEN
-  const inputEmpty = !input.trim()
-  const isDisabled = sending || restoredActive || restoredChecking || stopping || status !== 'available'
+  const inputEmpty = !(command ? command.task : input).trim()
+  const isDisabled = sending || restoredActive || restoredChecking || stopping || teams.busy || status !== 'available'
   const workingElapsed = formatElapsed(workingElapsedSeconds)
   const statusLabel = stopping
     ? 'Stopping'
+    : teams.busy
+      ? 'Agent team'
     : sending
       ? 'Working'
     : restoredActive
@@ -1240,6 +1285,7 @@ export default function Pixel({ systemStatus = null }) {
           <h1 className="text-base font-semibold leading-tight truncate max-w-[40vw]" title={displayName}>{displayName}</h1>
           <p className="text-[11px] text-theme-text-muted">Your local ODS owner agent</p>
         </div>
+        <PortalAgentDock controller={teams} renderApproval={content=><OperationsApprovalCard content={content}/>}/>
         </div>
 
         <div className="pixel-chat-header-actions">
@@ -1409,6 +1455,7 @@ export default function Pixel({ systemStatus = null }) {
                 <span className="break-words whitespace-pre-wrap">{message.content}</span>
               )}
               {message.role === 'assistant' && message.questions && <PixelQuestions questions={message.questions} answers={message.questionDraft} answered={index<messages.length-1} disabled={isDisabled || sending || restoredActive || restoredChecking} onChange={questionDraft=>setMessages(previous=>previous.map((item,i)=>i===index?{...item,questionDraft}:item))} onSubmit={answer=>sendMessage(answer)}/>}
+              {message.teamId && <button type="button" onClick={()=>teams.select({teamId:message.teamId,agentId:'0'})} className="mt-3 rounded-lg border border-theme-border px-3 py-2 text-xs hover:bg-theme-border/30">View agents and conversations</button>}
               {message.status === 'streaming' && !message.content && (
                 <span role="status" className="inline-flex items-start gap-2 text-theme-text-muted">
                   <span>
@@ -1429,11 +1476,13 @@ export default function Pixel({ systemStatus = null }) {
       <div className="pixel-composer px-4 py-3 sm:px-6">
         {chatScroll.showLatest && <div className="mb-2 text-center"><button type="button" onClick={chatScroll.jumpToLatest} className="rounded border border-theme-border px-3 py-1 text-xs">Jump to latest</button></div>}
         <div className="mx-auto max-w-5xl">
+          {command && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl bg-theme-card/70 px-3 py-2 text-xs text-theme-text-secondary" role="group" aria-label="Agent team mode"><span className="font-medium text-theme-text">Agent team</span><span>Describe your task. Portal will choose the team.</span><button type="button" disabled={isDisabled} onClick={()=>setInput(command.task)} className="ml-auto whitespace-nowrap rounded px-2 py-1 hover:bg-theme-border/30">Exit team mode</button></div>}
+          {teams.error && <p role="alert" className="text-xs text-amber-300">{teams.error}</p>}
           <div className="pixel-composer-row">
           <textarea
             ref={inputRef}
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
+            value={command ? command.task : input}
+            onChange={(event) => setInput(command ? `/agents ${event.target.value}` : event.target.value)}
             onKeyDown={(event) => {
               if (shouldSendMessage(event, sendKey.mode)) {
                 event.preventDefault()
@@ -1453,7 +1502,7 @@ export default function Pixel({ systemStatus = null }) {
           />
           <div className="pixel-composer-actions">
           <PixelDictation disabled={isDisabled} conversationId={chatIdRef.current} onInsert={insertComposerText}/>
-          {sending || restoredActive ? (
+          {teams.busy && teams.teams[0] ? <button type="button" onClick={()=>teams.select({teamId:teams.teams[0].id,agentId:'0'})} title="View active agent team" className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-theme-border text-theme-text"><Square size={16}/></button> : sending || restoredActive ? (
             <button
               onClick={stopStreaming}
               disabled={stopping}

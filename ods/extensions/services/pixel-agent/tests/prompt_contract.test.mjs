@@ -769,3 +769,11 @@ test("never interpolates context fields into the trusted prompt", () => {
   assert.ok(result);
   assert.ok(!result.appendSystemContext.includes(hostile));
 });
+
+test('team reviewers and coordinators do not receive the website implementation contract',()=>{
+  for(const role of ['Coordinator','Reviewer']) {
+    const value=promptContractForAgent({agentId:'pixel'},'pixel',{prompt:`Identity: Portal\n\nYou are the ${role} in the owner's Portal team.\nOwner request: build and publish a website.`});
+    assert.equal(value.appendSystemContext.includes(ODS_WORKSPACE_PREVIEW_CONTRACT),false);
+    assert.match(value.appendSystemContext,role==='Coordinator'?/JSON/:/read-only/);
+  }
+});

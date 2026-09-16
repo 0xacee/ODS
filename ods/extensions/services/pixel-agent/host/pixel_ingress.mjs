@@ -885,6 +885,7 @@ function completionSse(completion, verification) {
     ...(terminal && terminalPixel ? { pixel: terminalPixel } : {}),
     ...(terminal && verification?.task ? { pixel_task: verification.task } : {}),
     ...(terminal && verification?.questions ? { pixel_questions: {schemaVersion:1,questions:verification.questions} } : {}),
+    ...(terminal ? {pixel_outcome: {schemaVersion:1,status:verification?.status ?? 'none'}} : {}),
   });
   return Buffer.from(
     `data: ${envelope({ role: "assistant" }, null)}\n\n` +

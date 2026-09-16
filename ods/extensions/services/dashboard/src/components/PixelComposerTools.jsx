@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { AtSign, Slash, ShieldCheck, ListChecks, Globe2, CheckCheck } from 'lucide-react'
+import { AtSign, Slash, ShieldCheck, ListChecks, Globe2, CheckCheck, Users } from 'lucide-react'
 import PixelMascot from './PixelMascot'
 import PixelPromptLibrary from './PixelPromptLibrary'
 import { usePortalIdentity } from '../contexts/PortalIdentityContext'
@@ -8,6 +8,7 @@ import { usePortalIdentity } from '../contexts/PortalIdentityContext'
 const commands = [
   { title: 'Plan', detail: 'Milestones and completion checks', icon: ListChecks, text: 'Plan this outcome with milestones and exact completion criteria: ' },
   { title: 'Research', detail: 'Current sources and visible provenance', icon: Globe2, text: 'Research this using current sources, inline citations, and evidence-versus-inference labels: ' },
+  { title: 'Agents', detail: 'Let Portal plan the team', icon: Users, text: '/agents ' },
   { title: 'Review', detail: 'Risks and concrete next actions', icon: CheckCheck, text: 'Review this critically, identify real risks, and recommend concrete next actions: ' },
 ]
 const sources = [

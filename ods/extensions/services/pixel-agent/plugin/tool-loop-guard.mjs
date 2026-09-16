@@ -3980,6 +3980,15 @@ function currentUserText(messages, prompt = undefined) {
   return unwrapCurrentUserText(messageContentText(userMessage?.content));
 }
 
+export function managedTeamRole(event) {
+  const sources=[event?.prompt,...(Array.isArray(event?.messages)?event.messages.filter(m=>m?.role==='user').map(m=>messageContentText(m.content)):[])];
+  for(const text of sources) {
+    const match=typeof text==='string' && text.match(/(?:^|\n(?:User: )?)You are the (Coordinator|Builder|Explorer|Planner|Reviewer|Verifier|Reporter) in the owner's Portal team\./);
+    if(match)return match[1];
+  }
+  return undefined;
+}
+
 function currentOwnerIntentText(messages, prompt = undefined) {
   const currentText = currentUserText(messages, prompt);
   const deliveryContractIndex = currentText.lastIndexOf(
@@ -6250,6 +6259,14 @@ export function createToolLoopGuard({
     // policy and deterministic routing active from runId alone; operations
     // that truly need a session still fail closed on the optional sessionId.
     const state = runId ? stateFor(runId) : undefined;
+    const delegatedName=typeof toolName==='string' && toolName==='tool_call' ? String(event?.params?.id ?? '').split(':').at(-1) : toolName;
+    if(state?.managedTeamCoordinator)return {block:true,blockReason:'Choose the team size only. Return a JSON object with count from 1 to 6. Do not perform the task or use tools.'};
+    if (state?.managedTeamWorker && ['task','hub','sessions_spawn','sessions_send','subagents'].includes(delegatedName)) {
+      return {block:true,blockReason:'This team is already managed by the owner. Do your assigned work in this session; creating or steering more agents is disabled for team workers.'};
+    }
+    if (state?.managedTeamReadOnly && !['tool_search','read','web_search','web_fetch','pixel_ods_research','pixel_ods_web_extract','pixel_ods_ask_user','session_status','memory_search','memory_get'].includes(delegatedName)) {
+      return {block:true,blockReason:'Your team role is read-only. Do not create, edit, execute commands, publish, or operate services. Review the supplied evidence using read/search tools if needed, then return your findings as text. The Builder owns implementation and test execution.'};
+    }
     if (state?.ownerQuestions) return {block:true, blockReason:'Waiting for the owner to answer the clarification questions. End this turn without further tools; never choose answers for the owner.'};
     if (state?.progressBudget.exhausted) {
       return { block: true, blockReason: RUN_PROGRESS_STOP_REASON };
@@ -8028,6 +8045,11 @@ export function createToolLoopGuard({
 
   function observeRun(context, agentId = "pixel", event = undefined, capabilities = undefined) {
     if (context?.agentId !== agentId) return;
+    const teamRole=managedTeamRole(event);
+    const teamQuestionIntent=teamRole ? requestsChoiceQuestion(currentOwnerIntentText(event?.messages,event?.prompt)) : undefined;
+    // Analysis workers must not inherit the owner's implementation obligations
+    // from the handoff. Their tools remain strictly read-only, for every model.
+    if(teamRole && teamRole!=='Builder')event={...event,prompt:'Review the available evidence and return findings as text.',messages:[]};
     const runId = context?.runId;
     const sessionId = context?.sessionId;
     if (
@@ -8045,6 +8067,7 @@ export function createToolLoopGuard({
       state.completionAssurance.begin(currentOwnerIntentText(event?.messages, event?.prompt), event);
       const ownerIntent=currentOwnerIntentText(event?.messages,event?.prompt);
       if (ownerIntent) state.ownerQuestionIntent=requestsChoiceQuestion(ownerIntent);
+      if (teamRole) {state.managedTeamWorker=true;state.managedTeamReadOnly=teamRole!=='Builder';state.managedTeamCoordinator=teamRole==='Coordinator';state.ownerQuestionIntent=teamQuestionIntent;}
       if (capabilities !== undefined) {
         state.configuredWorkspaceRoot = capabilities.workspaceRoot;
         state.privateBrowserAccess = capabilities.privateBrowserAccess === true &&

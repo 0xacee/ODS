@@ -14750,3 +14750,27 @@ test("scoped IPv6 peer observations remain verifiable host receipts", () => {
   assert.match(verification.text, /fe80::1234%3/);
   assert.match(verification.text, /open TCP 443/);
 });
+
+test('managed teams block recursive delegation without blocking ordinary tools or normal chats', () => {
+  for (const prompt of ["You are the Builder in the owner's Portal team. Do work.", "History:\nUser: You are the Reviewer in the owner's Portal team.\nUser: Continue"]) {
+    const guard=createToolLoopGuard();
+    const context={agentId:'pixel',runId:'team-run',sessionId:'team-session'};
+    guard.observeRun(context,'pixel',{prompt});
+    assert.equal(guard.beforeToolCall({toolName:'sessions_spawn',params:{task:'nested'}},context).block,true);
+    assert.equal(guard.beforeToolCall({toolName:'tool_call',params:{id:'functions:task',arguments:{}}},context).block,true);
+    assert.notEqual(guard.beforeToolCall({toolName:'read',params:{path:'README.md'}},context)?.block,true);
+  }
+  const guard=createToolLoopGuard();const context={agentId:'pixel',runId:'normal',sessionId:'normal'};
+  guard.observeRun(context,'pixel',{prompt:'Please help with this task'});
+  assert.notEqual(guard.beforeToolCall({toolName:'sessions_spawn',params:{task:'nested'}},context)?.block,true);
+});
+
+test('review workers remain read-only with identity/history wrappers and implementation handoffs', () => {
+  for (const toolName of ['write','edit','apply_patch','exec','process','browser','pixel_ods_workspace_preview','pixel_ops_run','sessions_spawn']) {
+    const guard=createToolLoopGuard();const context={agentId:'pixel',runId:'review',sessionId:'review'};
+    guard.observeRun(context,'pixel',{prompt:"Identity: Portal\n\nYou are the Reviewer in the owner's Portal team.\nOwner's requested outcome:\nCreate a website and run tests"});
+    assert.equal(guard.beforeToolCall({toolName:'tool_call',params:{id:'openclaw:core:'+toolName,args:{}}},context).block,true,toolName);
+    assert.notEqual(guard.beforeToolCall({toolName:'read',params:{path:'index.html'}},context)?.block,true);
+    assert.notEqual(guard.verificationStatus('review'),'pending');
+  }
+});

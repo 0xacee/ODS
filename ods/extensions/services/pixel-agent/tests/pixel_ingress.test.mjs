@@ -1121,7 +1121,7 @@ test("preview delivery preserves useful answers and retains stale snapshots with
           const frames = stream ? response.body.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6))) : [];
           const delivered = stream ? frames.map(frame => frame.choices?.[0]?.delta?.content ?? "").join("") : JSON.parse(response.body).choices[0].message.content;
           assert.equal(delivered, status === "passed" && completionText ? `${prose}\n\n${text}\n${scope}` : text);
-          if (stream) assert.deepEqual(frames.at(-1).pixel, { schemaVersion: 1, preview });
+          if (stream) { assert.deepEqual(frames.at(-1).pixel, { schemaVersion: 1, preview }); assert.deepEqual(frames.at(-1).pixel_outcome, { schemaVersion: 1, status }); }
         } finally {
           await new Promise(resolve => srv.close(resolve));
           await new Promise(resolve => gw.server.close(resolve));
