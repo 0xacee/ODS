@@ -1,4 +1,3 @@
-import {useState} from 'react'
 import {render,screen,fireEvent,waitFor,cleanup} from '@testing-library/react'
 import {describe,it,expect,vi,afterEach} from 'vitest'
 import PortalAgentDock from './PortalAgentDock'
@@ -10,10 +9,6 @@ const team={id,goal:'Name a cafe',status:'waiting',agents:[
   {id:'1',name:'Reviewer',task:'Check names',status:'queued',turn:0,conversation:[]},
 ]}
 afterEach(()=>{cleanup();sessionStorage.clear();vi.unstubAllGlobals()})
-function Fixture({answer=vi.fn(),stop=vi.fn()}) {
-  const [selected,select]=useState({teamId:id,agentId:'0'})
-  return <PortalAgentDock controller={{teams:[team],selected,select,answer,stop}}/>
-}
 describe('Portal agent teams',()=>{
   it('parses counts, Portuguese alias and multiline tasks without treating other commands as teams',()=>{
     expect(agentCommand('/agents 3 Write\nand review')).toEqual({task:'3 Write\nand review'})
@@ -23,21 +18,16 @@ describe('Portal agent teams',()=>{
     expect(teamMetadata({role:'user',teamId:id})).toEqual({})
     expect(teamSummary({...team,status:'failed'})).toContain('No result was produced.')
   })
-  it('opens each real conversation, retains preference drafts across remount and submits to its exact agent',async()=>{
-    const answer=vi.fn();let view=render(<Fixture answer={answer}/>)
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('radio',{name:/Playful/}))
-    view.unmount();view=render(<Fixture answer={answer}/>)
-    await waitFor(()=>expect(screen.getByRole('radio',{name:/Playful/})).toBeChecked())
-    fireEvent.click(screen.getByRole('button',{name:'Continue'}))
-    expect(answer).toHaveBeenCalledExactlyOnceWith(id,'0',{style:'Playful'})
-    fireEvent.click(screen.getByRole('button',{name:'Reviewer Queued'}))
-    expect(screen.getByText('Waiting for its turn; it has not started.')).toBeInTheDocument()
-    expect(screen.queryByText('Choose a style')).not.toBeInTheDocument()
-    fireEvent.keyDown(window,{key:'Escape'})
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  it('opens a selected agent or the list through the workspace without a modal',()=>{
+    const onOpen=vi.fn()
+    render(<PortalAgentDock controller={{teams:[team],select:vi.fn()}} onOpen={onOpen}/>)
     fireEvent.click(screen.getByRole('button',{name:'Builder · Your input'}))
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(onOpen).toHaveBeenLastCalledWith({teamId:id,agentId:'0'})
+    fireEvent.click(screen.getByRole('button',{name:'Reviewer · Queued'}))
+    expect(onOpen).toHaveBeenLastCalledWith({teamId:id,agentId:'1'})
+    fireEvent.click(screen.getByRole('button',{name:'View subagents'}))
+    expect(onOpen).toHaveBeenLastCalledWith(null)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
   it('does not send duplicate starts while the request is pending',async()=>{
     let resolveStart,controller

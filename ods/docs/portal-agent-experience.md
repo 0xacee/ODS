@@ -143,8 +143,10 @@ deduplicated file tab. Verified Markdown is rendered as a document with a source
 toggle; relative file links resolve within that same publication.
 
 The preview iframe stays mounted across tab switches and panel collapse, so
-reading a file does not reset an interactive preview. Publication and viewport
-selectors remain available under compact options. Small panels use a file drawer;
+reading a file does not reset an interactive preview. The workspace uses the
+latest verified publication of the selected project, without a version selector.
+Review lists every current manifest file plus explicitly deleted paths, and
+opens unchanged files in the verified source viewer. Small panels use a file drawer;
 keyboard tab navigation, focus restoration and transparent, theme-aware scrollbars
 cover the chat and workspace. No external editor, undo or live repository state is
 implied: this view reads the existing verified publication snapshots.
@@ -165,3 +167,44 @@ icon have no box. The known successful publication footer is hidden only when
 the same verified publication already has a card. Stored text, model history,
 failure messages and useful answer content are preserved. A comparison fetch
 failure still leaves the verified web preview accessible.
+
+## Project directories and composer controls
+
+New projects use real `Playground/<descriptive-name>` directories below the
+configured agent workspace. The runtime reserves unused names, persists the
+conversation binding, and routes file operations, patch headers, exec workdirs
+and publication to the same directory. Explicit owner paths and legacy projects
+stay where they are. Shell source is never rewritten. A new project must begin
+with a file write before running project commands, including when a small model
+tries to start with an exec or patch. Native Windows and Linux tests cover name
+collisions, continuation, restart, unsafe paths and routing provenance.
+
+A local Qwen 3.5 4B run created `Playground/cafeteria-aurora/index.html`, then
+published it. Its actual workspace bytes matched the HTTP preview's verified
+entry hash. This verifies creation and publication, not every website interaction.
+
+The composer has a compact model selector in place of the character counter.
+It loads the installed catalog on first use and uses the existing model-switch
+API and readiness checks. The input length limit and context usage ring remain.
+The task list reflects validated goal or public plan events, with no simulated
+completion. Streaming text progressively reveals new answers even when all
+network deltas arrive in one batch; saved history, reduced-motion preferences,
+stops and errors render immediately. Display animation does not delay persistence
+or tool execution. These presentations adapt the task-list and streaming-response
+references to Portal's existing React components rather than installing a second
+UI stack.
+
+## Subagent workspace
+
+Agent icons and conversation links open a closable Subagents tab in the same
+workspace as Preview, Review and source files. The list groups the current
+conversation's agents by active, completed and attention states. Selecting an
+agent shows its recorded conversation, live activity, questions and actual
+retry/stop actions; the back button returns to the list. Question drafts survive
+tab switches and reopening the panel. A new publication does not displace the
+active agent conversation or reload the existing web frame.
+
+Workspace requests are consumed once and scoped to the conversation so closing
+the tab or changing chats cannot reopen a stale selection. File requests leave
+the agent view before loading, keeping retry controls visible if a manifest
+cannot be fetched. Review omits the first-publication explanatory sentence.

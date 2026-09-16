@@ -13,7 +13,7 @@ it('loads verified counts rather than parsing the reply',async()=>{
   vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,headers:new Map(),arrayBuffer:async()=>new TextEncoder().encode(JSON.stringify(value)).buffer}))
   render(<PixelSnapshotChanges preview={{...preview,relativeDirectory:'Playground/demo'}} before={before}/> )
   expect(await screen.findByRole('region',{name:'Changes to index.html'})).toBeVisible()
-  expect(screen.getAllByLabelText('1 lines added, 1 lines removed')).toHaveLength(2)
+  expect(screen.getAllByLabelText('1 lines added, 1 lines removed')).toHaveLength(1)
   expect(screen.getByRole('button',{name:'Folder Playground'})).toBeVisible()
   expect(screen.getByRole('button',{name:'Folder Playground/demo'})).toBeVisible()
 })

@@ -88,7 +88,8 @@ it('keeps an explicit final empty added line instead of dropping it', async () =
 it('calls a first snapshot Published rather than claiming the file was created during this turn', async () => {
   render(<PixelFileChanges changes={[{...change,change:'published'}]}/>)
   expect(screen.queryByText('Created index.html')).toBeNull()
-  expect(await screen.findByText(/No earlier snapshot was available for comparison/)).toBeVisible()
+  expect(screen.getByLabelText('Published')).toBeVisible()
+  expect(screen.queryByText(/No earlier snapshot was available for comparison/)).toBeNull()
 })
 
 it('keeps unknown binary or oversized line counts unknown instead of rendering zero', async () => {

@@ -22,6 +22,7 @@ import PixelQuestions from '../components/PixelQuestions'
 import PortalGoalPlan from '../components/PortalGoalPlan'
 import {goalCommand,continueGoal} from '../lib/portalGoal'
 import PortalContextRing from '../components/PortalContextRing'
+import PortalModelSelector from '../components/PortalModelSelector'
 import PortalAgentActivity from '../components/PortalAgentActivity'
 import PortalStreamingText from '../components/PortalStreamingText'
 import PortalResponseActions from '../components/PortalResponseActions'
@@ -402,6 +403,10 @@ function messagePublication(message) {
   return publication ? {publication, beforePublication:beforePublication?.relativeDirectory === publication.relativeDirectory ? beforePublication : null} : {}
 }
 
+export function latestProjectPublication(publication,messages) {
+  return [...messages].reverse().map(messagePublication).find(item=>item.publication?.relativeDirectory===publication?.relativeDirectory)?.publication || publication
+}
+
 function messageOutcome(message) {
   return message.role === 'assistant' && ['done', 'error', 'stopped'].includes(message.status)
     ? {status:message.status} : {}
@@ -542,16 +547,20 @@ export default function Pixel({ systemStatus = null }) {
   const [workingElapsedSeconds, setWorkingElapsedSeconds] = useState(0)
   const [agentRuntime, setAgentRuntime] = useState(null)
   const [modelSupport, setModelSupport] = useState(null)
+  const [modelSwitching,setModelSwitching]=useState(false)
+  const [modelStatusRefresh,setModelStatusRefresh]=useState(0)
   const [preview, setPreview] = useState(() => initialChat?.preview || null)
   const [previewRefresh, setPreviewRefresh] = useState(0)
   const [previewCollapsed, setPreviewCollapsed] = useState(false)
   const [previewWidth, setPreviewWidth] = useState(640)
   const [workspaceRequest, setWorkspaceRequest] = useState(null)
+  const handleWorkspaceRequest=useCallback(request=>setWorkspaceRequest(current=>current===request?null:current),[])
   const [workspaceExpanded, setWorkspaceExpanded] = useState(false)
   const [workspaceOpen, setWorkspaceOpen] = useState(() => initialChat?.workspaceOpen || false)
   function openPublication(publication, kind, path=null) {
-    setPreview(publication);setWorkspaceOpen(true);setPreviewCollapsed(false)
-    setWorkspaceRequest({siteId:publication.siteId,kind,path})
+    const current=latestProjectPublication(publication,messages)
+    setPreview(current);setWorkspaceOpen(true);setPreviewCollapsed(false)
+    setWorkspaceRequest({chatId:chatIdRef.current,siteId:current.siteId,kind,path})
   }
 
   const abortRef = useRef(null)
@@ -567,6 +576,16 @@ export default function Pixel({ systemStatus = null }) {
   const command=agentCommand(input)
   const goalDraft=goalCommand(input)
   const teams=usePortalTeams(chatIdRef.current,Boolean(command || goalDraft || messages.some(m=>m.teamId || m.teamRequestId)))
+  function openAgents(selection=null) {
+    teams.select(selection)
+    setWorkspaceOpen(true);setPreviewCollapsed(false)
+    setWorkspaceRequest({chatId:chatIdRef.current,kind:'agents'})
+  }
+  useEffect(()=>{
+    if(!teams.selected)return
+    setWorkspaceOpen(true);setPreviewCollapsed(false)
+    setWorkspaceRequest({chatId:chatIdRef.current,kind:'agents'})
+  },[teams.selected])
   const teamAttempt=useRef(null)
   useEffect(()=>{
     if(!teams.teams.length)return
@@ -599,7 +618,8 @@ export default function Pixel({ systemStatus = null }) {
   const activeContext = formatContext(
     agentRuntime?.contextLength || systemStatus?.inference?.contextSize || systemStatus?.model?.contextLength
   )
-  const previewAccess = resolvePreviewAccess(preview)
+  const currentPreview=preview ? latestProjectPublication(preview,messages) : null
+  const previewAccess = resolvePreviewAccess(currentPreview)
   const restoredActive = interrupted && !sending && restoredActivity === 'active'
   const restoredChecking = interrupted && !sending && restoredActivity === 'checking'
   const updateRestoredActivity = useCallback((value) => {
@@ -756,7 +776,7 @@ export default function Pixel({ systemStatus = null }) {
       if (poll !== null) globalThis.clearTimeout(poll)
       controller.abort()
     }
-  }, [])
+  }, [modelStatusRefresh])
 
   useEffect(() => () => {
     abortRef.current?.abort()
@@ -816,7 +836,7 @@ export default function Pixel({ systemStatus = null }) {
 
   const sendMessage = useCallback(async (answerOverride) => {
     const trimmed = (typeof answerOverride === 'string' ? answerOverride : input).trim()
-    if (!trimmed || sending || abortRef.current || restoredActive || restoredChecking || status !== 'available' || trimmed.length > MAX_INPUT_LEN) return
+    if (!trimmed || sending || modelSwitching || abortRef.current || restoredActive || restoredChecking || status !== 'available' || trimmed.length > MAX_INPUT_LEN) return
     if(teams.busy)return
     if(goalCommand(trimmed) && !goalCommand(trimmed).task) { setStopError('Describe the goal you want to complete.'); return }
     const requestedGoal=goalCommand(trimmed)
@@ -846,7 +866,7 @@ export default function Pixel({ systemStatus = null }) {
       userMessage,
     ]
     const visibleConversation = [...messages, userMessage]
-    setMessages([...visibleConversation, { role: 'assistant', content: '', status: 'streaming' }])
+    setMessages([...visibleConversation, { role: 'assistant', content: '', status: 'streaming', revealResponse:makeChatId() }])
     if (typeof answerOverride !== 'string') setInput('')
     setSending(true)
     setInterrupted(false)
@@ -1061,6 +1081,7 @@ export default function Pixel({ systemStatus = null }) {
             role: 'assistant',
             content: CLEAN_CONTEXT_RECOVERY_NOTICE,
             status: 'recovering',
+            revealResponse:makeChatId(),
           },
         ])
 
@@ -1112,7 +1133,7 @@ export default function Pixel({ systemStatus = null }) {
         abortRef.current = null
       }
     }
-  }, [input, messages, preview, workspaceOpen, sending, status, restoredActive, restoredChecking, updateRestoredActivity, teams.busy, teams.start])
+  }, [input, messages, preview, workspaceOpen, sending, modelSwitching, status, restoredActive, restoredChecking, updateRestoredActivity, teams.busy, teams.start])
 
   const stopStreaming = useCallback(async () => {
     const controller = abortRef.current
@@ -1264,7 +1285,7 @@ export default function Pixel({ systemStatus = null }) {
 
   const inputOver = input.length > MAX_INPUT_LEN
   const inputEmpty = !(command?.task ?? goalDraft?.task ?? input).trim()
-  const isDisabled = sending || restoredActive || restoredChecking || stopping || teams.busy || status !== 'available'
+  const isDisabled = sending || modelSwitching || restoredActive || restoredChecking || stopping || teams.busy || status !== 'available'
   const workingElapsed = formatElapsed(workingElapsedSeconds)
   const statusLabel = stopping
     ? 'Stopping'
@@ -1300,7 +1321,7 @@ export default function Pixel({ systemStatus = null }) {
           <h1 className="text-base font-semibold leading-tight truncate max-w-[40vw]" title={displayName}>{displayName}</h1>
           <p className="text-[11px] text-theme-text-muted">Your local ODS owner agent</p>
         </div>
-        <PortalAgentDock controller={teams} renderApproval={content=><OperationsApprovalCard content={content}/>}/>
+        <PortalAgentDock controller={teams} onOpen={openAgents}/>
         </div>
 
         <div className="pixel-chat-header-actions">
@@ -1326,20 +1347,6 @@ export default function Pixel({ systemStatus = null }) {
             <PixelHandoffApproval label="Approvals" />
             <PixelProviderScopes chatId={chatIdRef.current} sending={sending} />
           </div></details>
-          {activeModel && (
-            <div
-              className="pixel-chat-model hidden min-w-0 items-center px-2 py-1.5 font-mono text-[10px] text-theme-text-muted sm:flex"
-              title={activeModel}
-            >
-              <span className="truncate text-theme-text-secondary">{activeModel}</span>
-            </div>
-          )}
-          <Link
-            to="/models"
-            className="hidden rounded-lg px-2.5 py-1.5 text-xs font-medium text-theme-text-muted transition hover:bg-theme-surface-hover hover:text-theme-text sm:inline-flex"
-          >
-            Change model
-          </Link>
           <button type="button" aria-label="Workspace" aria-expanded={workspaceOpen} onClick={() => { setWorkspaceOpen(value => !value); setPreviewCollapsed(false) }} className="inline-flex items-center gap-1.5 bg-transparent px-2.5 py-1.5 text-xs text-theme-text-secondary hover:text-theme-text">
             <PanelRightOpen size={14}/><span>Workspace</span>
           </button>
@@ -1467,7 +1474,7 @@ export default function Pixel({ systemStatus = null }) {
               {message.role === 'assistant' && message.content ? (
                 <>
                   {message.publication && <PixelSnapshotChanges preview={message.publication} before={message.beforePublication} variant="summary" onPreview={()=>openPublication(message.publication,'preview')} onReview={path=>openPublication(message.publication,'review',path)}/>}
-                  {!message.questions && (displayedContent || message.status==='streaming') && <PortalStreamingText active={message.status==='streaming'} components={MARKDOWN_COMPONENTS}>{displayedContent}</PortalStreamingText>}
+                  {!message.questions && (displayedContent || message.status==='streaming') && <PortalStreamingText key={message.revealResponse || chatIdRef.current} active={message.status==='streaming'} animate={Boolean(message.revealResponse) || message.status==='streaming'} instant={['error','stopped','recovering'].includes(message.status)} onReveal={chatScroll.onContentResize} components={MARKDOWN_COMPONENTS}>{displayedContent}</PortalStreamingText>}
                   <OperationsApprovalCard content={message.content} />
                   {!message.questions && message.status!=='streaming' && <PortalResponseActions content={displayedContent}/>}
                 </>
@@ -1477,7 +1484,7 @@ export default function Pixel({ systemStatus = null }) {
               {message.role === 'assistant' && message.questions && <PixelQuestions questions={message.questions} answers={message.questionDraft} answered={index<messages.length-1} disabled={message.goalMode ? message.goalState!=='waiting' : isDisabled || sending || restoredActive || restoredChecking} onChange={questionDraft=>setMessages(previous=>previous.map((item,i)=>i===index?{...item,questionDraft}:item))} onSubmit={answer=>message.goalMode ? teams.answer(message.teamId,'0',message.questionDraft) : sendMessage(message.task?.goal ? continueGoal(messages,index,answer) : answer)}/>}
               {message.goalMode && message.goalNotice && <p role="status" className="mt-3 text-xs text-amber-300">{message.goalNotice}</p>}
               {message.goalMode && ACTIVE_TEAMS.has(message.goalState) && <button type="button" onClick={()=>teams.stop(message.teamId)} className="mt-3 mr-2 rounded-lg border border-theme-border px-3 py-2 text-xs">{message.goalState==='stopping'?'Confirm stop':'Stop goal'}</button>}
-              {message.teamId && <button type="button" onClick={()=>teams.select({teamId:message.teamId,agentId:'0'})} className="mt-3 rounded-lg border border-theme-border px-3 py-2 text-xs hover:bg-theme-border/30">{message.goalMode?'View goal history':'View agents and conversations'}</button>}
+              {message.teamId && <button type="button" onClick={()=>openAgents({teamId:message.teamId,agentId:'0'})} className="mt-3 rounded-lg border border-theme-border px-3 py-2 text-xs hover:bg-theme-border/30">{message.goalMode?'View goal history':'View agents and conversations'}</button>}
 
             </div>
             {message.role === 'user' && <UserAvatar profile={profile} className="pixel-user-character"/>}
@@ -1503,7 +1510,7 @@ export default function Pixel({ systemStatus = null }) {
                 sendMessage()
               }
             }}
-            placeholder={status === 'available'
+            placeholder={modelSwitching ? 'Switching model…' : status === 'available'
               ? `Message ${displayName}...`
               : status === 'switching'
                 ? 'Waiting for model switch...'
@@ -1516,7 +1523,7 @@ export default function Pixel({ systemStatus = null }) {
           />
           <div className="pixel-composer-actions">
           <PixelDictation disabled={isDisabled} conversationId={chatIdRef.current} onInsert={insertComposerText}/>
-          {teams.busy && teams.teams[0] ? <button type="button" onClick={()=>teams.teams[0].mode==='goal'?teams.stop(teams.teams[0].id):teams.select({teamId:teams.teams[0].id,agentId:'0'})} title={teams.teams[0].mode==='goal'?'Stop goal':'View active agent team'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-theme-border text-theme-text"><Square size={16}/></button> : sending || restoredActive ? (
+          {teams.busy && teams.teams[0] ? <button type="button" onClick={()=>teams.teams[0].mode==='goal'?teams.stop(teams.teams[0].id):openAgents({teamId:teams.teams[0].id,agentId:'0'})} title={teams.teams[0].mode==='goal'?'Stop goal':'View active agent team'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-theme-border text-theme-text"><Square size={16}/></button> : sending || restoredActive ? (
             <button
               onClick={stopStreaming}
               disabled={stopping}
@@ -1545,7 +1552,7 @@ export default function Pixel({ systemStatus = null }) {
             </PixelComposerTools>
             <div className="pixel-composer-limits">
               <PortalContextRing capacityLabel={activeContext} context={messages.at(-1)?.role==='assistant' ? messages.at(-1)?.task?.context : null} capacity={Number(agentRuntime?.contextLength || systemStatus?.inference?.contextSize || systemStatus?.model?.contextLength)} pending={sending || restoredActive}/>
-              <span className={inputOver ? 'text-red-400' : ''} title="Characters in this message, not tokens or context usage">{input.length.toLocaleString()} / {MAX_INPUT_LEN.toLocaleString()} chars</span>
+              <PortalModelSelector activeModel={activeModel} runtimeSource={agentRuntime?.source} busy={sending || restoredActive || restoredChecking || stopping || teams.busy || status==='switching'} onSwitchingChange={setModelSwitching} onSettled={()=>setModelStatusRefresh(value=>value+1)}/>
             </div>
           </div>
           <div className="mt-1.5 flex items-center justify-between gap-3 px-1 text-[10px] text-theme-text-muted/70">
@@ -1565,12 +1572,11 @@ export default function Pixel({ systemStatus = null }) {
         {workspaceOpen && (
           <aside aria-label="Preview panel" style={{'--preview-width':`${previewWidth}px`}} className={`pixel-preview-panel ${previewCollapsed ? 'is-collapsed' : ''} flex shrink-0 flex-col border-theme-border bg-theme-bg`}>
             {!previewCollapsed && <PanelResizeHandle width={previewWidth} onResize={setPreviewWidth} label="Resize preview panel" container=".pixel-chat-preview-layout" minimum={240} />}
-            <PortalWorkspace key={chatIdRef.current} preview={preview} access={previewAccess}
-              before={[...messages].reverse().find(message=>message.publication?.siteId===preview?.siteId)?.beforePublication || null}
-              previews={messages.map(message=>messagePublication(message).publication).filter(Boolean)}
-              title={`Interactive ${displayName} preview`} request={workspaceRequest} refresh={previewRefresh}
+            <PortalWorkspace key={chatIdRef.current} preview={currentPreview} access={previewAccess}
+              agents={teams} renderApproval={content=><OperationsApprovalCard content={content}/>}
+              before={[...messages].reverse().find(message=>message.publication?.siteId===currentPreview?.siteId)?.beforePublication || null}
+              title={`Interactive ${displayName} preview`} request={workspaceRequest?.chatId===chatIdRef.current?workspaceRequest:null} onRequestHandled={handleWorkspaceRequest} refresh={previewRefresh}
               onRefresh={()=>setPreviewRefresh(value=>value+1)}
-              onSelectPreview={publication=>{setPreview(publication);setPreviewRefresh(0)}}
               collapsed={previewCollapsed} onCollapse={()=>setPreviewCollapsed(value=>!value)}
               expanded={workspaceExpanded} onExpand={()=>setWorkspaceExpanded(value=>!value)}
               onClose={()=>{setWorkspaceOpen(false);setWorkspaceExpanded(false)}}

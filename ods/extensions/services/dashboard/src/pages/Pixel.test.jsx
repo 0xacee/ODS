@@ -14,12 +14,26 @@ import Pixel, {
   parseApprovalReceipt,
   parseVerifiedPreviewFrame,
   resolvePreviewAccess,
+  latestProjectPublication,
 } from './Pixel'
 
 const response = (body, status = 200) => ({
   ok: status >= 200 && status < 300,
   status,
   json: async () => body,
+})
+
+it('resolves old cards to the latest verified version of their own project',()=>{
+  const publication=(letter,directory)=>{
+    const sha256=letter.repeat(64),siteId=`site-${sha256.slice(0,24)}`
+    return {schemaVersion:1,kind:'ods-pixel-workspace-preview',relativeDirectory:directory,siteId,port:9437,url:`http://${siteId}.localhost:9437/${siteId}/`,files:2,bytes:100,sha256,entrySha256:sha256}
+  }
+  const old=publication('a','pacman-game'),current=publication('b','pacman-game'),other=publication('c','Playground/weather')
+  const messages=[old,current,other].map(p=>({role:'assistant',content:'Ready',publication:p}))
+  messages.push({role:'assistant',content:'Unverified',publication:{...current,url:'https://elsewhere.example/'}})
+  expect(latestProjectPublication(old,messages)).toEqual(current)
+  expect(latestProjectPublication(other,messages)).toEqual(other)
+  expect(messages[0].publication).toEqual(old)
 })
 
 // Build a fake fetch Response with streaming SSE body
@@ -216,10 +230,11 @@ describe('Pixel', () => {
     expect(screen.queryByLabelText('Snapshot details')).not.toBeInTheDocument()
     expect(screen.queryByText('Info', {exact:true})).not.toBeInTheDocument()
     expect(screen.getByRole('button', {name:'Browse files',exact:true})).toBeInTheDocument()
-    expect(screen.getByTitle('Open preview in a new tab')).toHaveAttribute('href', `/pixel-preview/${siteId}/`)
-    expect(screen.getByRole('link', { name: 'Open the verified preview' })).toHaveAttribute('href', `/pixel-preview/${siteId}/`)
-    expect(screen.getByRole('link', { name: 'Documentation' })).toHaveAttribute('href', 'https://example.com/docs')
-    expect(screen.getByRole('link', { name: 'Other host' })).toHaveAttribute('href', `http://${siteId}.localhost.example.com:9437/${siteId}/`)
+    fireEvent.click(screen.getByRole('button',{name:'Workspace options'}))
+    expect(screen.getByRole('link',{name:'Open preview in a new tab'})).toHaveAttribute('href', `/pixel-preview/${siteId}/`)
+    expect(await screen.findByRole('link', { name: 'Open the verified preview' })).toHaveAttribute('href', `/pixel-preview/${siteId}/`)
+    expect(await screen.findByRole('link', { name: 'Documentation' })).toHaveAttribute('href', 'https://example.com/docs')
+    expect(await screen.findByRole('link', { name: 'Other host' },{timeout:2000})).toHaveAttribute('href', `http://${siteId}.localhost.example.com:9437/${siteId}/`)
 
     await waitFor(() => expect(
       JSON.parse(globalThis.localStorage.getItem('ods.pixel.chat.v1')).preview
@@ -305,7 +320,7 @@ describe('Pixel', () => {
     const column = screen.getByPlaceholderText('Message Portal...').closest('.pixel-chat-column')
     expect(column.parentElement).toBe(panel.parentElement)
     expect(column).toContainElement(screen.getByRole('button',{name:'Workspace',exact:true}))
-    expect(column).toContainElement(screen.getByRole('link',{name:'Change model'}))
+    expect(column).toContainElement(screen.getByRole('button',{name:/Choose model:/}))
     expect(column).toContainElement(screen.getByRole('button',{name:'Search Pixel'}))
     expect(panel).not.toContainElement(screen.getByRole('heading',{name:'Portal',exact:true}))
     fireEvent.click(screen.getByTitle('Collapse preview'))
@@ -514,7 +529,7 @@ describe('Pixel', () => {
     expect(screen.queryByTitle('Interactive Portal preview')).not.toBeInTheDocument()
   })
 
-  it('keeps dictation beside send and distinguishes characters from model context', async () => {
+  it('keeps dictation beside send and places the model selector beside measured context', async () => {
     globalThis.fetch.mockResolvedValue(response({ available: true, model: 'pixel/default' }))
     render(<Pixel systemStatus={{ inference: { loadedModel: 'local-model', contextSize: 65536 } }} />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
@@ -522,10 +537,11 @@ describe('Pixel', () => {
     expect(send.parentElement).toContainElement(screen.getByRole('button', { name: 'Dictate message' }))
     expect(send.parentElement).toHaveClass('pixel-composer-actions')
     expect(screen.getByRole('button',{name:/Token usage unavailable.*65,536 token capacity/})).toBeInTheDocument()
-    const counter = screen.getByTitle('Characters in this message, not tokens or context usage')
-    expect(counter).toHaveTextContent(`0 / ${(16 * 1024).toLocaleString()} chars`)
+    expect(screen.queryByText(/chars$/)).not.toBeInTheDocument()
+    const selector=screen.getByRole('button',{name:'Choose model: local model'})
+    expect(selector.closest('.pixel-composer-limits')).toBeInTheDocument()
     fireEvent.change(screen.getByPlaceholderText('Message Portal...'), { target: { value: 'Olá' } })
-    expect(counter).toHaveTextContent(`3 / ${(16 * 1024).toLocaleString()} chars`)
+    expect(selector).toBeInTheDocument()
     expect(screen.getByRole('button',{name:/Token usage unavailable.*65,536 token capacity/})).toBeInTheDocument()
     const field = screen.getByPlaceholderText('Message Portal...')
     expect(field).toHaveClass('pixel-composer-input')
@@ -549,8 +565,8 @@ describe('Pixel', () => {
     fireEvent.change(screen.getByPlaceholderText('Message Portal...'), { target: { value: 'Show code' } })
     fireEvent.click(screen.getByTitle('Send'))
     await waitFor(() => expect(container.querySelector('.hljs-keyword')).toHaveTextContent('const'))
-    expect(container.querySelector('.hljs-string')).toHaveTextContent('"Pixel"')
-    expect(container.querySelector('.language-unknown-language')).toHaveTextContent('<video onerror="alert(1)">')
+    await waitFor(() => expect(container.querySelector('.hljs-string')).toHaveTextContent('"Pixel"'))
+    await waitFor(() => expect(container.querySelector('.language-unknown-language')).toHaveTextContent('<video onerror="alert(1)">'))
     expect(container.querySelector('video')).toBeNull()
   })
 
@@ -722,8 +738,8 @@ describe('Pixel', () => {
       'title',
       'Pixel is ready and adapts its tool flow for this model.'
     )
-    expect(screen.getAllByRole('link', { name: 'Change model' })).toHaveLength(1)
-    expect(screen.getAllByRole('link', { name: 'Change model' })[0]).toHaveAttribute('href', '/models')
+    expect(screen.getByRole('button', { name: /Choose model:/ })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Change model' })).not.toBeInTheDocument()
     expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   })
 
@@ -771,8 +787,8 @@ describe('Pixel', () => {
       'title',
       'This model failed Pixel tool qualification.'
     )
-    expect(screen.getAllByRole('link', { name: 'Change model' })).toHaveLength(1)
-    expect(screen.getAllByRole('link', { name: 'Change model' })[0]).toHaveAttribute('href', '/models')
+    expect(screen.getByRole('button', { name: /Choose model:/ })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Change model' })).not.toBeInTheDocument()
     expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   })
 
@@ -931,7 +947,7 @@ describe('Pixel', () => {
 
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('What do you want to work on?')).toBeInTheDocument()
-    expect(screen.getByText('Qwen3.5-9B-Q4_K_M.gguf')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Choose model: Qwen 3.5 9B'})).toBeInTheDocument()
     expect(screen.getByRole('button',{name:/Token usage unavailable.*32,768 token capacity/})).toBeInTheDocument()
 
     for (const name of ['Check ODS health','Build in my workspace','Research with sources','Plan a multi-step task']) expect(screen.queryByRole('button',{name:new RegExp(name)})).toBeNull()
@@ -963,7 +979,7 @@ describe('Pixel', () => {
     }} />)
 
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    expect(screen.getByText('remote-owner-model')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Choose model: remote owner model'})).toBeInTheDocument()
     expect(screen.getByRole('button',{name:/Token usage unavailable.*131,072 token capacity/})).toBeInTheDocument()
     expect(screen.queryByText('Qwen3.5-9B-Q4_K_M.gguf')).not.toBeInTheDocument()
   })
@@ -996,7 +1012,7 @@ describe('Pixel', () => {
     }} />)
 
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    expect(screen.getByText('small-owner-model')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Choose model: small owner model'})).toBeInTheDocument()
     expect(screen.getByRole('button',{name:/Token usage unavailable.*8,192 token capacity/})).toBeInTheDocument()
     expect(screen.queryByText('Qwen3.5-9B-Q4_K_M.gguf')).not.toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
@@ -1011,7 +1027,7 @@ describe('Pixel', () => {
     }))
     render(<Pixel systemStatus={{ inference: { loadedModel: 'qwen3.5-9b', contextSize: 32768 } }} />)
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    expect(screen.getByText('Qwen3.6-35B-A3B-GGUF')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Choose model: Qwen 3.6 35B'})).toBeInTheDocument()
     expect(screen.getByRole('button',{name:/Token usage unavailable.*65,536 token capacity/})).toBeInTheDocument()
     expect(screen.queryByText('qwen3.5-9b')).not.toBeInTheDocument()
     expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
@@ -1041,7 +1057,7 @@ describe('Pixel', () => {
     }} />)
 
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
-    expect(screen.getByText('Qwen3.5-9B-Q4_K_M.gguf')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Choose model: Qwen 3.5 9B'})).toBeInTheDocument()
     expect(screen.getByRole('button',{name:/Token usage unavailable.*32,768 token capacity/})).toBeInTheDocument()
     expect(screen.queryByText('forged-runtime')).not.toBeInTheDocument()
   })

@@ -70,7 +70,7 @@ select option, select optgroup { background-color:rgb(var(--theme-card)); color:
 .pixel-applications { margin-top:20px; }
 .pixel-applications summary { display:flex; align-items:center; gap:5px; min-height:30px; padding:5px 11px; list-style:none; border-radius:7px; color:#777d83; font:500 .74rem/20px Inter,ui-sans-serif,system-ui,sans-serif; cursor:pointer; }
 .pixel-applications summary::-webkit-details-marker { display:none; }
-.pixel-applications summary:hover { background:#171819; color:#c8ccd1; }
+.pixel-applications summary:hover { background:rgb(var(--theme-text) / .055); color:rgb(var(--theme-text-secondary)); }
 .pixel-applications summary:focus-visible { outline:1px solid #777d83; outline-offset:-1px; }
 .pixel-applications .rail-chevron { width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round; transform:rotate(-90deg); transition:transform .15s ease; }
 .pixel-applications[open] > summary > .rail-chevron { transform:rotate(0); }

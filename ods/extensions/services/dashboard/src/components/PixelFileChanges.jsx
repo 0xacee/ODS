@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Copy, FileText, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import PortalFileTree from './PortalFileTree'
 import PortalFileTreeResize,{useFileTreeResize} from './PortalFileTreeResize'
@@ -88,11 +88,11 @@ function FileChange({file, onPreview, onOpenFile, treeOpen, onToggleTree}) {
   return <section className="portal-review-diff pixel-code-block artifact-diff" aria-label={`Changes to ${file.path}`}>
     <header className="code-block-header portal-review-file-header">
       <PixelLanguageBadge path={file.path}/><span className="portal-review-path" title={file.path}>{file.path}</span><PixelChangeCounts additions={file.additions} deletions={file.deletions}/>
+      {file.change === 'deleted' && <span className="portal-review-deleted">Deleted</span>}
       {openFile && file.change !== 'deleted' && <button type="button" onClick={() => openFile(file)} title="Open file" aria-label={`Open file ${file.path}`}><FileText size={14} aria-hidden="true"/></button>}
       {canCopy && <button type="button" onClick={copy} disabled={copyState === 'Copying…'} title={copyState} aria-label={`Copy changes to ${file.path}`}>{copyState === 'Copied' ? <Check size={14} aria-hidden="true"/> : <Copy size={14} aria-hidden="true"/>}</button>}
       <button type="button" className="portal-review-tree-toggle" title={treeOpen ? 'Hide files' : 'Show files'} aria-label="Toggle changed files" aria-expanded={treeOpen} onClick={onToggleTree}><TreeIcon size={15} aria-hidden="true"/></button>
     </header>
-    {file.change === 'published' && <p className="portal-review-note">First published version. No earlier snapshot was available for comparison.</p>}
     {unverifiable ? <p className="portal-review-empty" role="status">Changes could not be verified.</p> : !hasCounts ? <p className="portal-review-empty" role="status">Line comparison unavailable for this file.</p> : !rows.length ? <p className="portal-review-empty" role="status">{file.additions || file.deletions ? 'Line changes are unavailable for this file.' : 'No line changes.'}</p> : <pre tabIndex={0} aria-label={`Diff for ${file.path}`}><DiffLines rows={rows} path={file.path}/></pre>}
     {file.truncated && !unverifiable && <p className="pixel-diff-notice" role="status">Only part of this diff is displayed. Counts cover the verified file change.</p>}
     {copyState === 'Copy failed' ? <p className="pixel-diff-notice" role="alert">Clipboard access failed. Select the changes to copy them manually.</p> : copyState === 'Copied' && <span className="sr-only" role="status">Changes copied.</span>}
@@ -100,24 +100,45 @@ function FileChange({file, onPreview, onOpenFile, treeOpen, onToggleTree}) {
 }
 
 /** Receives verified changes only. Does not derive counts from truncated rows. */
-export default function PixelFileChanges({changes = [], rootPath, onPreview, selectedPath, onSelectFile, onOpenFile}) {
+export default function PixelFileChanges({changes = [], files, comparisonReady=true, rootPath, onPreview, selectedPath, onSelectFile, onOpenFile}) {
   const [localPath, setLocalPath] = useState(null)
   const [treePreference, setTreePreference] = useState(null)
-  const panel = useRef(null)
-  const treeLayout=useFileTreeResize(panel,{enabled:changes.length>0})
+  const panel = useRef(null), openedUnchanged = useRef(null)
+  const hasManifest = Array.isArray(files)
+  const treeFiles = useMemo(() => {
+    if (!Array.isArray(files)) return changes
+    const byPath = new Map(changes.map(file => [file.path,file]))
+    // Only the current verified manifest supplies source files. Removed paths
+    // are review-only entries and never inherit an old snapshot's file hash.
+    return [...files.map(file => ({...file,...byPath.get(file.path)})),...changes.filter(file => file.change === 'deleted')]
+  }, [files,changes])
+  const treeLayout=useFileTreeResize(panel,{enabled:treeFiles.length>0})
   const {narrow}=treeLayout
-  if (!changes.length) return null
   const path = selectedPath ?? localPath
-  const selected = changes.find(file => file.path === path) || changes[0]
+  const missingSelection = hasManifest && comparisonReady && path && !treeFiles.some(file=>file.path===path)
+  const selected = missingSelection ? null : changes.find(file => file.path === path) || changes[0]
+  const requestedFile = hasManifest && files.find(file => file.path === selectedPath)
+  useEffect(() => {
+    if (!comparisonReady || !requestedFile || changes.some(file => file.path === requestedFile.path) || !onOpenFile) return
+    const key = `${requestedFile.path}/${requestedFile.sha256}`
+    if (openedUnchanged.current === key) return
+    openedUnchanged.current = key
+    onOpenFile(requestedFile)
+  }, [comparisonReady,requestedFile,changes,onOpenFile])
+  if (!treeFiles.length) return null
   const treeOpen = treePreference ?? !narrow
   const selectFile = (path, file) => {
+    if (hasManifest && !file.change) { onOpenFile?.(file); return }
     setLocalPath(path)
     onSelectFile?.(path,file)
     if (narrow) setTreePreference(false)
   }
   return <div ref={panel} className={`pixel-file-changes portal-review-layout${treeOpen ? ' has-files' : ''}${narrow ? ' is-narrow' : ' portal-tree-split'}`} style={treeLayout.style} aria-label="File changes">
-    <FileChange key={selected.path} file={selected} onPreview={onPreview} onOpenFile={onOpenFile} treeOpen={treeOpen} onToggleTree={() => setTreePreference(!treeOpen)}/>
+    {selected ? <FileChange key={selected.path} file={selected} onPreview={onPreview} onOpenFile={onOpenFile} treeOpen={treeOpen} onToggleTree={() => setTreePreference(!treeOpen)}/> : <section className="portal-review-diff pixel-code-block" aria-label="Project files">
+      <header className="code-block-header portal-review-file-header"><span>{missingSelection ? 'File unavailable' : comparisonReady ? 'No changes' : 'Project files'}</span><button type="button" className="portal-review-tree-toggle" title={treeOpen ? 'Hide files' : 'Show files'} aria-label="Toggle changed files" aria-expanded={treeOpen} onClick={() => setTreePreference(!treeOpen)}>{treeOpen ? <PanelRightClose size={15}/> : <PanelRightOpen size={15}/>}</button></header>
+      <p className="portal-review-empty" role={missingSelection ? 'status' : undefined}>{missingSelection ? 'This file is not part of the current project. Select another file.' : 'Select a file to view its contents.'}</p>
+    </section>}
     {treeOpen && <PortalFileTreeResize layout={treeLayout} label="Resize changed file list"/>}
-    {treeOpen && <aside className="portal-review-files"><PortalFileTree files={changes} rootPath={rootPath} selectedPath={selected.path} onSelectFile={selectFile} label="Changed files" filterLabel="Filter changed files"/></aside>}
+    {treeOpen && <aside className="portal-review-files"><PortalFileTree files={treeFiles} rootPath={rootPath} selectedPath={selected?.path} onSelectFile={selectFile} label={hasManifest ? 'Project files' : 'Changed files'} filterLabel={hasManifest ? 'Filter project files' : 'Filter changed files'}/></aside>}
   </div>
 }

@@ -3,11 +3,11 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import PortalInlineCitation from './PortalInlineCitation'
-import {useRef,useMemo} from 'react'
+import {useMemo,useLayoutEffect} from 'react'
+import {useResponseReveal} from '../lib/useResponseReveal'
 
-// Fade only newly delivered text nodes. Content is never queued, timed out,
-// split into artificial tokens or delayed behind the animation.
-function revealNewText({boundaries}) {
+// Fade newly revealed text nodes without replaying completed paragraphs.
+function revealNewText() {
   return tree=>{
     function visit(node,insideCode=false) {
       if(!node.children)return
@@ -16,8 +16,7 @@ function revealNewText({boundaries}) {
         if(child.type!=='text' || code){visit(child,code);return [child]}
         const start=child.position?.start?.offset
         if(!Number.isInteger(start))return [child]
-        const cuts=[0,...boundaries.filter(n=>n>start && n<start+child.value.length).map(n=>n-start),child.value.length]
-        return cuts.slice(0,-1).map((cut,i)=>({type:'element',tagName:'span',properties:{className:['portal-stream-reveal'],'data-stream-offset':start+cut},children:[{type:'text',value:child.value.slice(cut,cuts[i+1])}]}))
+        return [{type:'element',tagName:'span',properties:{className:['portal-stream-reveal'],'data-stream-offset':start},children:[child]}]
       })
     }
     visit(tree)
@@ -26,18 +25,15 @@ function revealNewText({boundaries}) {
 
 function StreamSpan({node,...props}) {return <span {...props}/>}
 const EMPTY_COMPONENTS={}
-export default function PortalStreamingText({children, active=false, components=EMPTY_COMPONENTS}) {
-  const received=useRef({text:'',boundaries:[0]})
-  const source=String(children ?? '')
-  if(source!==received.current.text) {
-    const previous=received.current
-    received.current={text:source,boundaries:source.startsWith(previous.text)?[0,...previous.boundaries.filter(n=>n!==0 && n!==previous.text.length).slice(-254),...(previous.text.length?[previous.text.length]:[])]:[0]}
-  }
-  const boundaries=received.current.boundaries
-  const plugins=useMemo(()=>[rehypeHighlight,[revealNewText,{boundaries}]],[boundaries])
+const PLUGINS=[rehypeHighlight,revealNewText]
+export default function PortalStreamingText({children, active=false, animate=active, instant=false, onReveal, components=EMPTY_COMPONENTS}) {
+  const fullSource=String(children ?? '')
+  const source=useResponseReveal(fullSource,{animate,instant})
+  const revealing=source!==fullSource
+  useLayoutEffect(()=>{onReveal?.()},[source,onReveal])
   const renderers=useMemo(()=>({...components,a:PortalInlineCitation,span:StreamSpan}),[components])
-  return <div className={`portal-streaming-text ${active?'is-streaming':''}`} aria-busy={active}>
-    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={plugins} components={renderers}>{source}</ReactMarkdown>
-    {active && <span className="portal-stream-cursor" aria-hidden="true"/>}
+  return <div className={`portal-streaming-text ${active || revealing?'is-streaming':''}`} aria-busy={active || revealing}>
+    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={PLUGINS} components={renderers}>{source}</ReactMarkdown>
+    {(active || revealing) && <span className="portal-stream-cursor" aria-hidden="true"/>}
   </div>
 }
