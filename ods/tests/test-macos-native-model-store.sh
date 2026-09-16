@@ -82,6 +82,7 @@ ssd = Path(sys.argv[2])
 assert args[0] == str(ssd / "qualified runtime"), args
 assert args[args.index("--model")+1] == str(ssd / "model $(literal) 'quoted'.gguf")
 assert args[args.index("--ctx-size")+1] == "32768"
+assert args.count("--parallel") == 1 and args[args.index("--parallel")+1] == "1"
 assert args.count("--cache-type-k") == 1 and args[args.index("--cache-type-k")+1] == "q4_0"
 assert args.count("--spec-type") == 1 and args[args.index("--spec-type")+1] == "draft-mtp"
 assert args[args.index("--spec-draft-type-v")+1] == "q4_0"

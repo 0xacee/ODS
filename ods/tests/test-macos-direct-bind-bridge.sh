@@ -572,6 +572,7 @@ FAKE_PYTHON
         ENV_ODS_MACOS_HOST_GATEWAY="$TEST_GATEWAY"
         ENV_ODS_MODE="local"
         ENV_LLAMA_REASONING="off"
+        ENV_LLAMA_PARALLEL="${TEST_PARALLEL:-}"
         unset ENV_LLAMA_ARG_FLASH_ATTN ENV_LLAMA_ARG_CACHE_TYPE_K \
             ENV_LLAMA_ARG_CACHE_TYPE_V ENV_LLAMA_ARG_N_CPU_MOE \
             ENV_LLAMA_ARG_SPEC_TYPE ENV_LLAMA_ARG_SPEC_DRAFT_N_MAX
@@ -642,6 +643,8 @@ FAKE_PYTHON
             [[ "$LAST_BRIDGE_ENABLED" == "true" ]] \
                 || fail "$label: restored bridge state was not persisted"
         fi
+        [[ "${events[${#events[@]}-1]}" == *"<--parallel> <${TEST_PARALLEL:-1}>"* ]] \
+            || fail "$label: native llama parallelism was not preserved"
         pass "$label"
     }
 
@@ -649,6 +652,8 @@ FAKE_PYTHON
     run_start_case "::" "192.168.106.1" direct "IPv6 wildcard boots out bridge before native llama"
     run_start_case "192.168.106.1" "192.168.106.1" direct "gateway bind boots out bridge before native llama"
     run_start_case "127.0.0.1" "192.168.106.1" bridge "returning to loopback recreates bridge before native llama"
+    TEST_PARALLEL=2
+    run_start_case "0.0.0.0" "192.168.106.1" direct "explicit native parallelism survives start"
 )
 
 echo "[OK] macOS direct-bind bridge contract holds"

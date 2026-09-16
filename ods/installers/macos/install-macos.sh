@@ -2270,6 +2270,8 @@ else
         if [[ "$MACOS_NATIVE_PROFILE" == true ]]; then
             _llama_args+=("${MACOS_NATIVE_PROFILE_ARGS[@]}")
         else
+        _parallel="$(read_env_value "$INSTALL_DIR/.env" "LLAMA_PARALLEL")"
+        _llama_args+=(--parallel "${_parallel:-1}")
         [[ -n "$_flash_attn" ]] && _llama_args+=(--flash-attn "$_flash_attn")
         [[ -n "$_cache_type_k" ]] && _llama_args+=(--cache-type-k "$_cache_type_k")
         [[ -n "$_cache_type_v" ]] && _llama_args+=(--cache-type-v "$_cache_type_v")
