@@ -10,8 +10,12 @@ export function parseConversationImport(value) {
     const status = ['done','error','stopped'].includes(message.status) ? message.status : message.status === 'streaming' ? 'stopped' : undefined
     return {role:message.role, content:message.content, ...(message.role === 'assistant' && status ? {status} : {})}
   })
-  if (chat.draft !== undefined && (typeof chat.draft !== 'string' || chat.draft.length > 16384)) throw new Error('The export contains an invalid or oversized draft.')
+  if (chat.draft !== undefined && typeof chat.draft !== 'string') throw new Error('The export contains an invalid or oversized draft.')
   const draft = chat.draft || ''
+  // A saved/recovery draft may exceed the send limit. Preserve it for editing
+  // while bounding the complete retained text in bytes, like message history.
+  bytes += new TextEncoder().encode(draft).byteLength
+  if (bytes > 4 * 1024 * 1024) throw new Error('The conversation exceeds the 4 MB retained-text limit.')
   if (!messages.length && !draft.trim()) throw new Error('The export contains no messages or draft.')
   // File-provided IDs, jobs, scopes and publication receipts never become live authority.
   return {schema:1, messages, draft, preview:null, workspaceOpen:false, inFlight:false, interrupted:false, requestId:null, contextStart:0}
