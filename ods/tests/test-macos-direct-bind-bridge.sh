@@ -598,6 +598,18 @@ FAKE_PYTHON
     ai_err() { :; }
     sleep() { command sleep 0.05; }
     curl() { grep -q '^exec' "$EVENT_LOG"; }
+    # Isolate launchd here; its real helper is covered by test_macos_native_service.py.
+    bash() {
+        if [[ "$1" == "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" ]]; then
+            [[ "$2" == start ]] || return 2
+            local binary="$4" pid_file="$5"
+            shift 5
+            "$binary" "$@"
+            printf '%s\n' "$$" > "$pid_file"
+        else
+            command bash "$@"
+        fi
+    }
 
     run_start_case() {
         local bind_address="$1" gateway_address="$2" expected_route="$3" label="$4"

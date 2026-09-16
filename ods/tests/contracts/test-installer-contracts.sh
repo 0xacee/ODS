@@ -305,6 +305,8 @@ bash tests/test-macos-cli-compose-failure.sh
 
 echo "[contract] macOS direct binds replace conflicting Colima bridges"
 bash tests/test-macos-direct-bind-bridge.sh
+python3 tests/test_macos_native_service.py
+bash tests/test-macos-native-llama-launch-cwd.sh
 
 echo "[contract] macOS CLI preserves cloud/local model routing"
 bash tests/test-macos-cli-mode-routing.sh
