@@ -15,6 +15,7 @@ async function fixture(t) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'ods-ingress-history-'));fs.chmodSync(dir,0o700);
   const ledger=createChatHistoryLedger(dir),calls=[],native=state();let chatFailure=false;
   const gateway=http.createServer(async(req,res)=>{
+    if(req.url==='/health') {res.setHeader('content-type','application/json');return res.end('{"ok":true}');}
     let raw='';for await(const part of req) raw+=part;
     const body=JSON.parse(raw||'{}');calls.push({path:req.url,body});res.setHeader('content-type','application/json');
     if(req.url==='/pixel-ods/context') return res.end(JSON.stringify(native));

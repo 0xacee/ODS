@@ -5,12 +5,12 @@ import {createActivityTool,displayForActivity} from '../plugin/activity-display.
 import {parseTaskActivity} from '../host/task_activity_schema.mjs';
 const runId='chatcmpl_11111111-2222-4333-8444-555555555555';
 const context={agentId:'pixel',runId,toolCallId:'call-1',toolName:'tool_call'};
-test('public updates and search sources survive the complete v3 projection without raw output',async()=>{
+test('public updates and search sources survive the complete projection without raw output',async()=>{
  const tracker=createTaskActivity();tracker.begin({},context);
  const event={params:{id:'pixel_ods_research',args:{query:'Documentação oficial'}}};
  tracker.before(event,context);
  tracker.after({...event,result:{details:{sources:[{title:'Reference',url:'https://example.com/docs'},{title:'Secret',url:'https://example.com/?token=secret'},{title:'Unsafe',url:'javascript:alert(1)'}],private:'hidden'},content:[{text:'secret body'}]}},context);
- const row=tracker.projection(runId);assert.equal(row.schemaVersion,3);assert.ok(parseTaskActivity(row,runId));
+ const row=tracker.projection(runId);assert.equal(row.schemaVersion,4);assert.ok(parseTaskActivity(row,runId));
  assert.equal(row.events[0].display.type,'search');assert.equal(row.events[0].display.sources.length,1);
  assert.equal(row.events[0].display.label,'Documentação oficial');assert.ok(!JSON.stringify(row).includes('secret'));
  const tool=createActivityTool();assert.equal((await tool.execute('x',{message:'Conferindo as fontes.'})).isError,undefined);

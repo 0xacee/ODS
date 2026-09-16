@@ -20,6 +20,65 @@ const stream=()=>{
 beforeEach(()=>{localStorage.clear();globalThis.fetch=vi.fn()})
 afterEach(()=>{vi.useRealTimers();vi.restoreAllMocks()})
 
+it('keeps native usage through delayed status hydration for the same model with a different advertised capacity',async()=>{
+  seed({draft:'Keep this draft'})
+  let finishStatus
+  const measured={...snapshot('idle',undefined,14320),model:{...snapshot().model,contextWindow:65536},
+    context:{...snapshot('idle',undefined,14320).context,window:65536}}
+  fetch.mockImplementation(url=>{
+    if(url==='/api/pixel/status')return new Promise(resolve=>{finishStatus=()=>resolve(response({available:true,runtime:{...runtime,contextLength:32768}}))})
+    return Promise.resolve(response(url==='/api/pixel/chat/context'?measured:{}))
+  })
+  render(<Pixel systemStatus={{inference:{loadedModel:'small-model',contextSize:65536}}}/>)
+  const label='22% full · 14,320 / 65,536 tokens used'
+  expect(await screen.findByRole('button',{name:label})).toBeVisible()
+  await act(async()=>finishStatus())
+  await screen.findByText('Available')
+  expect(screen.getByRole('button',{name:label})).toBeVisible()
+  expect(calls('/api/pixel/chat/context')).toHaveLength(1)
+  expect(calls('/api/pixel/chat/stream')).toHaveLength(0)
+  expect(calls('/api/pixel/chat/compact')).toHaveLength(0)
+  expect(stored()).toMatchObject({draft:'Keep this draft',messages:initial})
+})
+
+it.each(['model','provider'])('retains confirmed B through missing runtime and stale fallback A, but invalidates a confirmed %s switch',async switchKind=>{
+  vi.useFakeTimers()
+  seed({draft:'Preserve this draft'})
+  let status={available:true,runtime}
+  let measured=snapshot()
+  fetch.mockImplementation(async url=>response(url==='/api/pixel/chat/context'?measured:url==='/api/pixel/status'?status:{}))
+  render(<Pixel systemStatus={{inference:{loadedModel:'small-model',contextSize:8192}}}/>)
+  await act(async()=>{})
+  expect(screen.getByRole('button',{name:'15% full · 1,200 / 8,192 tokens used'})).toBeVisible()
+  const confirmedB={...runtime,model:'model-b'}
+  status={available:true,runtime:confirmedB}
+  measured={...snapshot('idle',undefined,2400),model:{...snapshot().model,id:'model-b'}}
+  await act(async()=>vi.advanceTimersByTimeAsync(3000))
+  const measuredB='29% full · 2,400 / 8,192 tokens used'
+  expect(screen.getByRole('button',{name:measuredB})).toBeVisible()
+  const reads=calls('/api/pixel/chat/context').length
+  for(const value of [{available:true},{available:false,state:'unavailable'},{available:true,runtime:confirmedB}]) {
+    status=value
+    await act(async()=>vi.advanceTimersByTimeAsync(3000))
+    expect(screen.getByRole('button',{name:measuredB})).toBeVisible()
+    if(!value.runtime) {
+      fireEvent.click(screen.getByRole('button',{name:'Choose model: Choose model'}))
+      await act(async()=>{})
+      expect(screen.getByRole('dialog',{name:'Choose model'})).toHaveTextContent('The conversation’s model source is not confirmed.')
+      fireEvent.click(screen.getByRole('button',{name:'Choose model: Choose model'}))
+    }
+  }
+  expect(calls('/api/pixel/chat/context')).toHaveLength(reads)
+  status={available:true,runtime:switchKind==='model'?{...confirmedB,model:'model-c'}
+    :{...confirmedB,source:'remote-provider',maxTokens:2048,reasoning:false}}
+  await act(async()=>vi.advanceTimersByTimeAsync(3000))
+  expect(screen.queryByRole('button',{name:measuredB})).toBeNull()
+  expect(screen.getByRole('button',{name:'Token usage unavailable · 8,192 token capacity'})).toBeVisible()
+  expect(calls('/api/pixel/chat/stream')).toHaveLength(0)
+  expect(calls('/api/pixel/chat/compact')).toHaveLength(0)
+  expect(stored()).toMatchObject({draft:'Preserve this draft',messages:initial})
+})
+
 it.each(['/compact','/compactar'])('runs %s as a session operation without appending a chat turn',async command=>{
   seed();let current=snapshot()
   fetch.mockImplementation(async(url,options)=>{
@@ -36,6 +95,29 @@ it.each(['/compact','/compactar'])('runs %s as a session operation without appen
   expect(calls('/api/pixel/chat/stream')).toHaveLength(0)
   expect(stored()).toMatchObject({chatId:'context-chat',messages:initial,draft:'',compactionRequestId:null})
   expect(screen.getByRole('button',{name:'0% full · 0 / 8,192 tokens used'})).toBeVisible()
+})
+
+it('uses the confirmed remote destination identity when two providers serve the same named model',async()=>{
+  vi.useFakeTimers()
+  seed({draft:'Keep this draft'})
+  const routeA='a'.repeat(64),routeB='b'.repeat(64)
+  let active={...runtime,source:'remote-provider',maxTokens:2048,reasoning:false,routeFingerprint:routeA}
+  let measured={...snapshot(),model:{...snapshot().model,routeFingerprint:routeA}}
+  fetch.mockImplementation(async url=>response(url==='/api/pixel/chat/context'?measured:url==='/api/pixel/status'?{available:true,runtime:active}:{}))
+  render(<Pixel/>)
+  await act(async()=>{})
+  expect(screen.getByRole('button',{name:'15% full · 1,200 / 8,192 tokens used'})).toBeVisible()
+  active={...active,routeFingerprint:routeB}
+  await act(async()=>vi.advanceTimersByTimeAsync(3000))
+  expect(screen.getByRole('button',{name:'Token usage unavailable · 8,192 token capacity'})).toBeVisible()
+  measured={...snapshot('idle',undefined,300),model:{...snapshot().model,routeFingerprint:routeB}}
+  await act(async()=>vi.advanceTimersByTimeAsync(1501))
+  fireEvent.mouseEnter(screen.getByRole('button',{name:'Token usage unavailable · 8,192 token capacity'}))
+  await act(async()=>{})
+  expect(screen.getByRole('button',{name:'4% full · 300 / 8,192 tokens used'})).toBeVisible()
+  expect(calls('/api/pixel/chat/stream')).toHaveLength(0)
+  expect(calls('/api/pixel/chat/compact')).toHaveLength(0)
+  expect(stored()).toMatchObject({draft:'Keep this draft',messages:initial})
 })
 
 it('keeps the draft and transcript while compacting and saves recovery identity before the POST',async()=>{
@@ -139,7 +221,8 @@ it('clears an unaccepted request when the API rejects compaction as busy',async(
   fetch.mockImplementation(async url=>url==='/api/pixel/chat/compact'
     ?response({detail:'Recover the active response first'},423):response({available:true,runtime}))
   render(<Pixel/>);await screen.findByText('Available');fireEvent.click(screen.getByTitle('Send'))
-  await screen.findByText(/No compaction was started; wait for the active work/)
+  await screen.findByText('Compaction can start after the current task finishes.')
+  expect(screen.queryByRole('button',{name:'Check status'})).toBeNull()
   expect(stored().compactionRequestId).toBeNull()
   expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue('/compact')
@@ -169,7 +252,6 @@ it.each([true,false])('resolves uncertain history only after an explicit stop an
     return Promise.resolve(response(url==='/api/pixel/chat/context'?context:{available:true,runtime}))
   })
   render(<Pixel/>);await screen.findByText('Available')
-  fireEvent.click(screen.getByRole('button',{name:/Token usage unavailable/}))
   const resolveButton=await screen.findByRole('button',{name:'Resolve interrupted turn'})
   expect(calls('/api/pixel/chat/cancel')).toHaveLength(0)
   expect(screen.getByPlaceholderText('Message Portal...')).toBeDisabled()
@@ -200,7 +282,6 @@ it('shows session token usage and capacity even when general model status report
     return response(url.startsWith('/api/pixel/chat/')?current:{available:true,runtime:{...runtime,contextLength:32768}})
   })
   render(<Pixel/>);await screen.findByText('Available')
-  fireEvent.click(screen.getByRole('button',{name:/Token usage unavailable/}))
   expect(await screen.findByRole('button',{name:'5% full · 3,590 / 65,536 tokens used'})).toBeVisible()
   fireEvent.change(screen.getByPlaceholderText('Message Portal...'),{target:{value:'/compact'}})
   fireEvent.click(screen.getByTitle('Send'))
@@ -208,14 +289,19 @@ it('shows session token usage and capacity even when general model status report
   expect(screen.getByRole('button',{name:'Token usage unavailable · 65,536 token capacity'})).toBeVisible()
 })
 
-it('does not present generic installer capacity as confirmed after reload before inspecting the session',async()=>{
+it('automatically inspects the session after reload and ignores the generic installer capacity',async()=>{
   seed()
   const current={...snapshot(),model:{...snapshot().model,contextWindow:65536},context:{...snapshot().context,used:3590,window:65536}}
   fetch.mockImplementation(async url=>response(url==='/api/pixel/chat/context'?current:{available:true}))
   render(<Pixel systemStatus={{inference:{loadedModel:'small-model',contextSize:32768}}}/>);await screen.findByText('Available')
-  const ring=screen.getByRole('button',{name:'Token usage unavailable'})
-  expect(calls('/api/pixel/chat/context')).toHaveLength(0)
+  const ring=await screen.findByRole('button',{name:'5% full · 3,590 / 65,536 tokens used'})
+  expect(calls('/api/pixel/chat/context').length).toBeGreaterThan(0)
   fireEvent.click(ring)
   expect(await screen.findByRole('button',{name:'5% full · 3,590 / 65,536 tokens used'})).toBeVisible()
   expect(screen.getByRole('tooltip')).not.toHaveTextContent('32K')
 })
+
+// Fix the numeric locale for English accessibility fixtures on every host OS.
+beforeEach(()=>{vi.spyOn(Number.prototype,'toLocaleString').mockImplementation(function(locales,options){
+  return new Intl.NumberFormat(locales || 'en-US',options).format(this.valueOf())
+})})

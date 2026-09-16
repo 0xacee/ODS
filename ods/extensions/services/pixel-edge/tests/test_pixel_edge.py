@@ -1884,3 +1884,17 @@ class TaskDetailSchemaTest(unittest.TestCase):
         self.assertTrue(valid_live_task_event({'object':'ods.task.activity','id':task['runId'],'pixel_task':task}))
         for change in [{'privateReasoning':'never'}, {'sources':[{'title':'Unsafe','url':'javascript:alert(1)'}]}, {'type':'text'}, {'label':'x'*161}, {'sources':[{'title':'Login','url':'https://user:pass@example.com/'}]}]:
             self.assertFalse(valid_activity_display({**display,**change}))
+
+    def test_v4_project_receipts_are_bounded_closed_and_never_accepted_on_older_versions(self):
+        from pixel_edge import valid_live_task_event
+        stamp='2026-09-16T10:00:00.000Z'
+        receipt={'schemaVersion':1,'kind':'ods-workspace-project','relativeDirectory':'Playground/http-method-smoke','observedAt':stamp}
+        task={'schemaVersion':4,'runId':'chatcmpl_11111111-2222-4333-8444-555555555555','startedAt':stamp,'finishedAt':None,'state':'running','calls':0,'failures':0,'blocked':0,'truncated':False,'activities':[], 'events':[], 'context':None,'goal':None,'projects':[receipt]}
+        event={'object':'ods.task.activity','id':task['runId'],'pixel_task':task}
+        self.assertTrue(valid_live_task_event(event))
+        for projects in [[receipt,receipt], [receipt]*9, [{**receipt,'relativeDirectory':'Playground/../escape'}],
+                         [{**receipt,'relativeDirectory':'Playground/CON.txt'}], [{**receipt,'relativeDirectory':'Playground/name.'}],
+                         [{**receipt,'observedAt':'2026-02-30T10:00:00.000Z'}], [{**receipt,'hostPath':'/private'}], None]:
+            self.assertFalse(valid_live_task_event({**event,'pixel_task':{**task,'projects':projects}}),projects)
+        self.assertFalse(valid_live_task_event({**event,'pixel_task':{**task,'schemaVersion':3}}))
+        self.assertTrue(valid_live_task_event({**event,'pixel_task':{**task,'projects':[{**receipt,'relativeDirectory':'Playground/COM10'}]}}))

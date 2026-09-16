@@ -38,13 +38,25 @@ function failedResult(event) {
   return false;
 }
 
-export function createTaskActivity({agentId = 'pixel', now = () => new Date().toISOString(), maximumRuns = 64, maximumCalls = 512, goalForRun = () => null} = {}) {
+export function createTaskActivity({agentId = 'pixel', now = () => new Date().toISOString(), maximumRuns = 64, maximumCalls = 512, goalForRun = () => null, projectsForSession = () => []} = {}) {
   const runs = new Map();
   const identify = (event, context) => context?.agentId === agentId ? context.runId ?? event?.runId : undefined;
+  function knownRun(event, context) {
+    const run=runs.get(identify(event,context));
+    const key=context?.sessionKey;
+    // Some HTTP turns acquire their session key only at the first tool hook.
+    // A conflicting key must never reassign this run to another conversation.
+    if(run && typeof key==='string' && key.startsWith(`agent:${agentId}:openai-user:ods-`)
+        && /^[a-f0-9]{64}$/.test(key.slice(`agent:${agentId}:openai-user:ods-`.length))) {
+      if(run.sessionKey && run.sessionKey!==key) {run.sessionConflict=true;run.sessionKey=undefined;}
+      else if(!run.sessionConflict) run.sessionKey=key;
+    }
+    return run;
+  }
   function begin(event, context) {
     const id = identify(event, context);
     if (!RUN.test(id ?? '')) return;
-    if (runs.has(id)) return;
+    if (runs.has(id)) {knownRun(event,context);return;}
     while (runs.size >= maximumRuns) {
       const settled = [...runs].find(([, run]) => run.state !== 'running');
       if (!settled) return;
@@ -53,7 +65,7 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
     runs.set(id, {runId:id, sessionKey:context?.sessionKey, startedAt:now(), finishedAt:null, state:'running', calls:new Map(), truncated:false, context:null});
   }
   function record(event, context, outcome) {
-    const run = runs.get(identify(event, context));
+    const run = knownRun(event, context);
     let callId = context?.toolCallId ?? event?.toolCallId;
     if (!run || typeof callId !== 'string' || !callId || callId.length > 256) return;
     const toolName = context?.toolName ?? event?.toolName;
@@ -80,7 +92,7 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
   return {
     begin,
     modelOutput(event, context) {
-      const run = runs.get(identify(event, context));
+      const run = knownRun(event, context);
       if (!run) return;
       // event.usage is cumulative across tool turns; it is NOT occupancy.
       const usage = event?.lastAssistant?.usage;
@@ -101,7 +113,7 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
     before(event, context, blocked = false) { record(event, context, blocked ? 'blocked' : 'running'); },
     after(event, context) { record(event, context, failedResult(event) ? 'failed' : 'completed'); },
     finish(event, context) {
-      const run = runs.get(identify(event, context));
+      const run = knownRun(event, context);
       if (!run) return;
       if (run.finishedAt) return;
       run.finishedAt = now();
@@ -121,11 +133,12 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
       const activities = ORDER.filter(kind => groups.has(kind)).map(kind => groups.get(kind));
       const events = [...run.calls.values()].map((call, index) => ({sequence:index + 1, kind:call.kind,
         state:call.outcome, startedAt:call.startedAt, finishedAt:call.finishedAt, display:call.display})).slice(-24);
-      return {schemaVersion:3, runId:run.runId, startedAt:run.startedAt, finishedAt:run.finishedAt,
+      return {schemaVersion:4, runId:run.runId, startedAt:run.startedAt, finishedAt:run.finishedAt,
         state:run.state, calls:run.calls.size,
         failures:activities.reduce((sum, item) => sum + item.failures, 0),
         blocked:activities.reduce((sum, item) => sum + item.blocked, 0),
-        truncated:run.truncated, activities, events, context:run.context, goal:goalForRun(id)};
+        truncated:run.truncated, activities, events, context:run.context, goal:goalForRun(id),
+        projects:projectsForSession(run.sessionKey).filter(project=>!run.finishedAt || project.observedAt<=run.finishedAt)};
     },
   };
 }

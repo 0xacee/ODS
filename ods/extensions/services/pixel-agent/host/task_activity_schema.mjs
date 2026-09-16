@@ -28,14 +28,25 @@ export function parseTaskActivity(value, runId) {
   const timestamp = item => typeof item === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(item)
     && Number.isFinite(Date.parse(item)) && new Date(item).toISOString() === item;
   const count = item => Number.isInteger(item) && item >= 0 && item <= 512;
-  const extended = [2,3].includes(value?.schemaVersion);
-  if (!keys(value,'schemaVersion,runId,startedAt,finishedAt,state,calls,failures,blocked,truncated,activities' + (extended ? ',events,context,goal' : ''))
-    || ![1,2,3].includes(value.schemaVersion) || value.runId !== runId
+  const extended = [2,3,4].includes(value?.schemaVersion);
+  if (!keys(value,'schemaVersion,runId,startedAt,finishedAt,state,calls,failures,blocked,truncated,activities' + (extended ? ',events,context,goal' : '') + (value?.schemaVersion===4?',projects':''))
+    || ![1,2,3,4].includes(value.schemaVersion) || value.runId !== runId
     || typeof runId !== 'string' || !/^chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)
     || !timestamp(value.startedAt) || !['running','completed','failed','finished'].includes(value.state)
     || (value.state === 'running' ? value.finishedAt !== null : !timestamp(value.finishedAt) || value.finishedAt < value.startedAt)
     || !count(value.calls) || !count(value.failures) || !count(value.blocked)
     || typeof value.truncated !== 'boolean' || !Array.isArray(value.activities) || value.activities.length > 8) return null;
+  if (value.schemaVersion===4) {
+    if (!Array.isArray(value.projects) || value.projects.length>8) return null;
+    const seen=new Set();
+    for (const project of value.projects) {
+      if (!keys(project,'schemaVersion,kind,relativeDirectory,observedAt') || project.schemaVersion!==1 || project.kind!=='ods-workspace-project'
+          || typeof project.relativeDirectory!=='string' || !/^Playground\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(project.relativeDirectory)
+          || project.relativeDirectory.endsWith('.') || /^Playground\/(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(project.relativeDirectory)
+          || !timestamp(project.observedAt) || (value.finishedAt && project.observedAt>value.finishedAt) || seen.has(project.relativeDirectory)) return null;
+      seen.add(project.relativeDirectory);
+    }
+  }
   if (extended) {
     if (value.goal !== null) {
       const goal=value.goal, ids=new Set();
@@ -52,7 +63,7 @@ export function parseTaskActivity(value, runId) {
     if (!Array.isArray(value.events) || value.events.length !== Math.min(value.calls,24)) return null;
     let sequence = value.calls - value.events.length;
     for (const event of value.events) {
-      if (!keys(event,'sequence,kind,state,startedAt,finishedAt'+(value.schemaVersion===3?',display':'')) || (value.schemaVersion===3 && !validActivityDisplay(event.display)) || event.sequence !== ++sequence
+      if (!keys(event,'sequence,kind,state,startedAt,finishedAt'+(value.schemaVersion>=3?',display':'')) || (value.schemaVersion>=3 && !validActivityDisplay(event.display)) || event.sequence !== ++sequence
         || !['read','agent','run','edit','browser','preview','action','unknown'].includes(event.kind)
         || !['running','completed','failed','blocked'].includes(event.state)
         || !timestamp(event.startedAt) || event.startedAt < value.startedAt

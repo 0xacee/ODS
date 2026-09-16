@@ -1,4 +1,5 @@
 import { conversationLabels, deleteConversationLabels } from './pixelConversationLabels'
+import {parseProjectTasks} from './pixelTaskActivity'
 
 export const CHAT_KEY = 'ods.pixel.chat.v1'
 const LIBRARY_KEY = 'ods.pixel.conversations.v1'
@@ -71,6 +72,8 @@ export function createConversationWriter(initial = null) {
 
 export function saveConversation(chat, checkpoint) {
   if (!valid(chat)) throw new Error('Invalid conversation')
+  if (chat.messages.some(message=>message.projectTasks!==undefined
+    && (message.role!=='assistant' || !parseProjectTasks(message.projectTasks)))) throw new Error('Invalid project metadata')
   if (deletedIds().includes(chat.chatId)) throw new Error('This conversation was deleted in another tab. Start a new chat.')
   // A read error is not an empty library. Never overwrite unreadable history.
   const entries = loadConversations(true)

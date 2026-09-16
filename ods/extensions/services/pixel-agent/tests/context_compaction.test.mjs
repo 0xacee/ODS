@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import {createHash} from 'node:crypto';
 import {Readable} from 'node:stream';
 import {createContextCompaction,readContextRequest} from '../plugin/context-compaction.mjs';
 
@@ -69,6 +70,18 @@ test('active admission and native run checks refuse compact without aborting or 
   const f=fixture(t);f.phase='busy';assert.equal((await f.runtime.compact(user,'busy')).status,'busy');
   f.phase='idle';f.active=true;assert.equal((await f.runtime.compact(user,'active')).status,'busy');
   assert.equal(f.calls.length,0);assert.equal(fs.readdirSync(f.directory).length,0);
+});
+
+test('another conversation does not make a context read busy or discard its usage',async t=>{
+  const f=fixture(t);f.phase='busy';
+  const snapshot=f.runtime.context(user);
+  assert.equal(snapshot.status,'ready');assert.equal(snapshot.context.used,17000);
+  assert.equal((await f.runtime.compact(user,'wait-for-other-run')).status,'busy');
+  assert.equal(f.calls.length,0);
+  f.phase='idle';
+  assert.equal((await f.runtime.compact(user,'wait-for-other-run')).compaction.status,'running');
+  await tick();f.result.resolve({key:sessionKey,ok:true,compacted:false});await tick();
+  assert.equal(f.calls.length,1);
 });
 
 test('admission race fails closed; recheck session rotation releases before any RPC',async t => {
@@ -173,13 +186,95 @@ test('model-bound measurement survives restart but invalidates same-window alias
   model='model-b.gguf';assert.equal(f.runtime.context(user).context,null);assert.equal(f.runtime.context(user).model.id,model);
   time++;f.runtime.observeModelOutput(event,ctx);assert.equal(f.runtime.context(user).context.used,9300);
   f.entry.updatedAt=time+100;f.entry.totalTokensFresh=false;
-  assert.equal(f.runtime.context(user).context,null,'new archive writes invalidate earlier prompt occupancy');
+  assert.equal(f.runtime.context(user).context.used,9300,'session metadata writes preserve the last measured call');
+  assert.equal(f.runtime.context(user).model.contextWindow,32000,'reported model budget matches the measured effective budget');
+  f.entry.compactionCount++;
+  assert.equal(f.runtime.context(user).context,null,'a later compaction invalidates the old occupancy');
 });
 
 test('native RPC explicit busy refusal releases admission without falsely reporting compaction',async t=>{
   const f=fixture(t);await f.runtime.compact(user,'rpc-race');await tick();
   f.result.reject(Object.assign(new Error('Session is active; retry compaction after the current run finishes.'),{name:'GatewayClientRequestError',gatewayCode:'UNAVAILABLE'}));await tick();
   assert.equal(f.runtime.context(user).compaction.status,'failed');assert.equal(f.runtime.context(user).compaction.reason,'runtime-busy');assert.equal(f.phase,'idle');
+});
+
+test('remote route identity invalidates same-model usage across providers and restart',t=>{
+  let fingerprint='a'.repeat(64),time=Date.now()+1000;
+  const f=fixture(t,{requireModelObservation:true,now:()=>time,
+    readConfig:()=>({agents:{list:[{id:'pixel',model:'ods-gateway/ods/current'}]},
+      models:{providers:{'ods-gateway':{models:[{id:'ods/current',name:'ODS Current (same-model)',contextWindow:32768}]}}},
+      plugins:{entries:{'pixel-ods':{config:fingerprint===undefined?{}:{modelRouteFingerprint:fingerprint}}}}})});
+  const event={lastAssistant:{usage:{input:9000,output:100}},contextTokenBudget:32768};
+  const ctx={agentId:'pixel',sessionKey,sessionId:f.entry.sessionId};
+  f.runtime.observeModelOutput(event,ctx);
+  assert.equal(createContextCompaction(f.args).context(user).context.used,9100);
+  assert.equal(f.runtime.context(user).model.routeFingerprint,fingerprint);
+  fingerprint='b'.repeat(64);
+  assert.equal(f.runtime.context(user).context,null);
+  assert.equal(createContextCompaction(f.args).context(user).context,null);
+  assert.equal(f.runtime.context(user).model.id,'same-model');
+  time++;f.runtime.observeModelOutput(event,ctx);
+  assert.equal(f.runtime.context(user).context.used,9100);
+  fingerprint=undefined;
+  assert.equal(f.runtime.context(user).context,null,'returning to local clears remote measurement');
+  assert.equal('routeFingerprint' in f.runtime.context(user).model,false);
+  time++;f.runtime.observeModelOutput(event,ctx);
+  assert.equal(f.runtime.context(user).context.used,9100,'legacy/local route remains measurable');
+  fingerprint='https://provider.invalid/secret';
+  assert.equal(f.runtime.context(user).status,'unavailable');
+  assert.equal(f.runtime.context(user).model,null,'invalid identity is neither trusted nor exposed');
+  fingerprint='a'.repeat(64)+'\n';
+  assert.equal(f.runtime.context(user).status,'unavailable');
+});
+
+test('local persisted usage from before route identities remains valid without a new run',t=>{
+  const f=fixture(t,{requireModelObservation:true});
+  const sha=value=>createHash('sha256').update(value).digest('hex');
+  const measurement={
+    modelRevision:sha(JSON.stringify(['ods-gateway','ods/current','local-4b.gguf',32768])),
+    sessionRevision:sha(`${sessionKey}\0${f.entry.sessionId}`),
+    used:7654,window:32768,measuredAt:Date.now(),compactionCount:0,
+  };
+  fs.writeFileSync(path.join(f.directory,`${user}.json`),JSON.stringify({version:1,operations:[],measurement}),{mode:0o600});
+  f.entry.totalTokensFresh=false;
+  assert.equal(createContextCompaction(f.args).context(user).context.used,7654);
+});
+
+test('settings cap reduction invalidates persisted usage across restart and restoration of the previous cap',t=>{
+  let cap=32768;
+  const readConfig=()=>({agents:{defaults:{contextTokens:16384},list:[{id:'pixel',model:'ods-gateway/ods/current',contextTokens:cap}]},
+    models:{providers:{'ods-gateway':{models:[{id:'ods/current',name:'ODS Current (local-4b.gguf)',contextWindow:32768}]}}},
+    plugins:{entries:{'pixel-ods':{config:{modelContextWindow:cap}}}}});
+  const f=fixture(t,{requireModelObservation:true,readConfig});f.entry.totalTokensFresh=false;
+  const ctx={agentId:'pixel',sessionKey,sessionId:f.entry.sessionId};
+  const event=window=>({contextTokenBudget:window,lastAssistant:{usage:{input:800,output:100}}});
+  f.runtime.observeModelOutput(event(32768),ctx);
+  assert.equal(f.runtime.context(user).context.window,32768,'explicit agent cap overrides the inherited default');
+  cap=8192;
+  const restarted=createContextCompaction({...f.args,instanceId:'smaller-context'});
+  assert.equal(restarted.context(user).context,null);
+  assert.equal(restarted.context(user).model.contextWindow,8192);
+  restarted.observeModelOutput(event(32768),ctx);
+  assert.equal(restarted.context(user).context,null,'old larger-budget event cannot validate the reduced budget');
+  cap=32768;
+  assert.equal(createContextCompaction({...f.args,instanceId:'restored-context'}).context(user).context,null,'old usage is not resurrected');
+  cap=8192;
+  restarted.observeModelOutput(event(8192),ctx);
+  assert.equal(restarted.context(user).context.window,8192);
+  assert.equal(restarted.context(user).context.used,900);
+});
+
+test('default cap bounds stale session capacity and native compaction measurements',async t=>{
+  const f=fixture(t,{requireModelObservation:true,readConfig:()=>({agents:{defaults:{contextTokens:8192},list:[{id:'pixel',model:'ods-gateway/ods/current'}]},
+    models:{providers:{'ods-gateway':{models:[{id:'ods/current',name:'ODS Current (local-4b.gguf)'}]}}},
+    plugins:{entries:{'pixel-ods':{config:{modelContextWindow:65536}}}}})});
+  assert.equal(f.runtime.context(user).model.contextWindow,8192,'session 32K and plugin 64K cannot override native 8K cap');
+  assert.equal(f.runtime.context(user).context,null,'a configured cap alone is not measured usage');
+  await f.runtime.compact(user,'smaller-context');await tick();
+  f.entry={...f.entry,compactionCount:1,totalTokensFresh:false};
+  f.result.resolve({key:sessionKey,ok:true,compacted:true,result:{tokensBefore:17000,tokensAfter:1200}});await tick();
+  assert.equal(f.runtime.context(user).context.window,8192);
+  assert.equal(f.runtime.context(user).context.used,1200);
 });
 
 test('unknown window produces model null instead of fabricated context capacity',t=>{
@@ -205,7 +300,7 @@ test('restart recovers an owned compaction hold before a different chat is opene
 test('startup recovery releases only exact historical maintenance custody, never an external lease',t=>{
   const f=fixture(t),token='c'.repeat(64);f.admission.acquire(token,f.admission.status().revision);
   const external=createContextCompaction({...f.args,instanceId:'new-gateway'});
-  assert.equal(f.phase,'held');assert.equal(external.context(other).status,'busy');assert.equal(f.releases.length,0);
+  assert.equal(f.phase,'held');assert.equal(external.context(other).status,'ready');assert.equal(f.releases.length,0);
   fs.writeFileSync(path.join(f.directory,`${user}.json`),JSON.stringify({version:1,operations:[],maintenance:{leaseToken:token,instance:'old-gateway'}}),{mode:0o600});
   const owned=createContextCompaction({...f.args,instanceId:'new-gateway'});
   assert.equal(f.phase,'idle');assert.equal(owned.context(other).status,'ready');assert.equal(f.releases.length,1);

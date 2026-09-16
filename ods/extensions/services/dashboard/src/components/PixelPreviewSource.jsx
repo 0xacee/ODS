@@ -1,3 +1,4 @@
+/* eslint-disable no-control-regex -- Reject control bytes in untrusted public input. */
 import { useEffect, useId, useRef, useState } from 'react'
 import { Check, ChevronRight, Copy, MoreHorizontal } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'

@@ -26,7 +26,7 @@ describe('publication display text', () => {
   })
 
   it('accepts the same publication relay and current origin relay, while preserving unrelated links', () => {
-    for (const url of [`/pixel-preview/${siteId}/`, `${location.origin}/pixel-preview/${siteId}/`]) {
+    for (const url of [`/pixel-preview/${siteId}/`, `${window.location.origin}/pixel-preview/${siteId}/`]) {
       expect(publicationDisplayText(receipt.replace(publication.url,url), publication)).toBe('')
     }
     for (const url of ['https://example.com/demo/', `https://unrelated.example/pixel-preview/${siteId}/`, `${publication.url}?version=2`, publication.url.replace('site-b','site-c')]) {

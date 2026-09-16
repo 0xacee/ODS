@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from pixel_agent_teams import TeamManager, TeamStore, TeamConflict, questions_valid
+from pixel_agent_teams import TeamManager, TeamStore, TeamConflict, questions_valid, project_receipts_valid
 from routers import pixel_teams
 from security import verify_api_key
 
@@ -58,6 +58,36 @@ async def test_real_session_ids_order_handoff_and_idempotency(tmp_path):
     assert all('chat_id' not in a and 'messages' not in a and 'context_messages' not in a and 'context_request_id' not in a for a in result['agents'])
     assert manager.list('b'*64, 'chat') == []
     assert manager.store.get('b'*64, one['id']) is None
+
+
+@pytest.mark.asyncio
+async def test_verified_project_receipts_survive_team_activity_persistence(tmp_path):
+    stamp='2026-09-16T10:00:00.000Z'
+    receipt={'schemaVersion':1,'kind':'ods-workspace-project','relativeDirectory':'Playground/http-method-smoke','observedAt':stamp}
+    task={'schemaVersion':4,'runId':'chatcmpl_11111111-2222-4333-8444-555555555555','startedAt':stamp,'finishedAt':stamp,'state':'completed','calls':0,'failures':0,'blocked':0,'truncated':False,'activities':[], 'events':[], 'context':None,'goal':None,'projects':[receipt]}
+    async def run(*_):
+        yield {'pixel_task':task}
+        for frame in finish('Created summary.json'): yield frame
+    directory=tmp_path/'teams'
+    manager=TeamManager(TeamStore(directory),run,yes)
+    manager.start(OWNER,'chat','attempt','Create a summary file',1,'')
+    await settle(manager)
+    assert manager.list(OWNER,'chat')[0]['agents'][0]['activity']==task
+    restored=TeamManager(TeamStore(directory),run,yes)
+    assert restored.list(OWNER,'chat')[0]['agents'][0]['activity']['projects']==[receipt]
+    assert restored.list('b'*64,'chat')==[]
+
+
+@pytest.mark.parametrize('change', [
+    {'relativeDirectory':'Playground/../escape'}, {'relativeDirectory':'Playground/CON'},
+    {'relativeDirectory':'Playground/name.'}, {'relativeDirectory':'/private'}, {'schemaVersion':True},
+    {'observedAt':'2026-02-30T00:00:00.000Z'}, {'observedAt':'2026-09-17T00:00:00.000Z'}, {'hostPath':'/private'},
+])
+def test_team_project_receipts_reject_untrusted_or_invalid_metadata(change):
+    receipt={'schemaVersion':1,'kind':'ods-workspace-project','relativeDirectory':'Playground/tool','observedAt':'2026-09-16T10:00:00.000Z'}
+    task={'projects':[{**receipt,**change}],'finishedAt':'2026-09-16T11:00:00.000Z'}
+    assert not project_receipts_valid(task)
+    assert not project_receipts_valid({'projects':[receipt,receipt]})
 
 
 @pytest.mark.asyncio

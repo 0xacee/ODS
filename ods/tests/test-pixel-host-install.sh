@@ -1685,6 +1685,20 @@ chmod 0600 "$reconcile_config"
 check _ods_pixel_uses_stable_model_alias "$owner" "$reconcile_home" "$gateway_answers"
 check _ods_pixel_stable_alias_matches_promoted_model "$owner" "$reconcile_home" \
     "$gateway_answers" qwen-gateway 65536 4096 false
+route_alias_answers="$TEST_ROOT/route-alias-onboarding.json"
+cp "$gateway_answers" "$route_alias_answers"
+route_fingerprint="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_ods_pixel_update_onboarding_model "$owner" "$reconcile_home" "$route_alias_answers" \
+    qwen-gateway 65536 4096 false "$route_fingerprint"
+route_alias_candidate="$(_ods_pixel_stage_stable_alias_candidate \
+    "$owner" "$reconcile_home" "$route_alias_answers")"
+check test "$(_ods_pixel_apply_runtime_budget "$owner" "$reconcile_home" \
+    "$route_alias_candidate" "$runtime_validator" "$route_alias_answers")" = unchanged
+check _ods_pixel_candidate_is_managed_runtime_update "$owner" "$reconcile_home" \
+    "$route_alias_candidate" "$route_alias_answers"
+check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["plugins"]["entries"]["pixel-ods"]["config"]["modelRouteFingerprint"] == sys.argv[2]' \
+    "$route_alias_candidate" "$route_fingerprint"
+rm -f -- "$route_alias_candidate"
 stale_alias_answers="$TEST_ROOT/stale-alias-onboarding.json"
 cp "$gateway_answers" "$stale_alias_answers"
 _ods_pixel_update_onboarding_model "$owner" "$reconcile_home" "$stale_alias_answers" \
@@ -2030,7 +2044,7 @@ resume = installer[resume_start:resume_end]
 stop = resume.index("systemctl stop openclaw-gateway.service")
 retire = resume.index("_ods_pixel_recreate_agent_sandbox \"$owner\" \"$home\" \"$openclaw_bin\"")
 start = resume.index("systemctl start openclaw-gateway.service", retire)
-health = resume.index("_ods_pixel_wait_http \"Pixel gateway\"", start)
+health = resume.index("_ods_pixel_wait_gateway", start)
 verify = resume.index("\"$pixel_root/pixel\" verify", health)
 assert stop < retire < start < health < verify
 helper_start = text.index("_ods_pixel_recreate_agent_sandbox()")

@@ -1,3 +1,6 @@
+/* eslint-disable no-control-regex -- Reject control bytes in untrusted public input. */
+import {continueGoal} from './portalGoal'
+
 const text = (value,max) => typeof value === 'string' && value.trim() && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value)
 export function parseQuestions(value) {
   if (!Array.isArray(value) || value.length < 1 || value.length > 3) return null
@@ -24,4 +27,13 @@ export function questionMetadata(message) {
 export function answersMessage(questions,answers) {
   if (!parseQuestions(questions) || !questions.every(q=>typeof answers?.[q.id] === 'string' && answers[q.id].trim() && answers[q.id].length<=1000)) return null
   return questions.map(q=>`${q.question}\n${answers[q.id].trim()}`).join('\n\n')
+}
+
+/** The answer remains a user turn in the transcript sent to the runtime, but
+ * its visible representation belongs to the preceding question card. */
+export function isQuestionAnswer(messages,index) {
+  const message=messages[index],previous=messages[index-1]
+  if(message?.role!=='user' || previous?.role!=='assistant')return false
+  const answer=answersMessage(previous.questions,previous.questionDraft)
+  return Boolean(answer && (message.content===answer || previous.task?.goal && message.content===continueGoal(messages,index-1,answer)))
 }

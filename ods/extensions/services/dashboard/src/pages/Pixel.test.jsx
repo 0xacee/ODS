@@ -71,7 +71,18 @@ const sseResponse = (frames, { status = 200, chunks } = {}) => {
 
 describe('Pixel', () => {
   beforeEach(() => {
-    globalThis.fetch = vi.fn()
+    // Stream fixtures are independent of background context reads. The full
+    // context lifecycle is exercised in PixelCompaction.test.jsx; retain all
+    // network observations here without consuming the next SSE fixture.
+    const responses=vi.fn()
+    const fetchMock=vi.fn((url,...args)=>url==='/api/pixel/chat/context'
+      ? Promise.resolve(response({schemaVersion:1,status:'missing',sessionRevision:null,context:null,model:null,
+        compaction:{status:'idle',count:0},history:{revision:null,acknowledgedMessages:0}}))
+      : responses(url,...args))
+    for(const method of ['mockResolvedValue','mockResolvedValueOnce','mockRejectedValue','mockRejectedValueOnce','mockImplementation','mockImplementationOnce']) {
+      fetchMock[method]=(...args)=>{responses[method](...args);return fetchMock}
+    }
+    globalThis.fetch = fetchMock
     globalThis.localStorage.clear()
   })
 
@@ -265,6 +276,7 @@ describe('Pixel', () => {
     render(<Pixel />)
     await screen.findByText('Available')
     fireEvent.click(screen.getByRole('button',{name:'Workspace',exact:true}))
+    fireEvent.click(screen.getByRole('tab',{name:'Preview',exact:true}))
     expect(screen.getByText('No files to show yet')).toBeVisible()
     expect(screen.queryByTitle('Interactive Portal preview')).toBeNull()
     fireEvent.click(screen.getByRole('button',{name:'Expand workspace'}))
@@ -276,6 +288,7 @@ describe('Pixel', () => {
     fireEvent.click(screen.getByTitle('Close preview'))
     expect(screen.queryByText('No files to show yet')).toBeNull()
     fireEvent.click(screen.getByRole('button',{name:'Workspace',exact:true}))
+    fireEvent.click(screen.getByRole('tab',{name:'Preview',exact:true}))
     expect(screen.getByText('No files to show yet')).toBeVisible()
   })
 
@@ -384,6 +397,8 @@ describe('Pixel', () => {
     expect(request.messages.at(-1)).toEqual({role:'user',content:'Qual estilo?\nClean'})
     expect(request.messages.every(message=>Object.keys(message).sort().join(',')==='content,role')).toBe(true)
     expect(screen.queryByRole('button',{name:'Continue',exact:true})).toBeNull()
+    expect(screen.getByRole('region',{name:'Your answers'})).toHaveTextContent('Clean')
+    expect(screen.queryByText('Qual estilo?\nClean')).toBeNull()
   })
 
   it('renders agent tables and task lists while keeping unsafe content inert', async () => {
@@ -551,7 +566,8 @@ describe('Pixel', () => {
     expect(field).toHaveValue('Olá\nsegunda linha\nterceira linha')
     expect(send.parentElement.parentElement).toHaveClass('pixel-composer-row')
     expect(send.parentElement).toContainElement(screen.getByRole('button',{name:'Dictate message'}))
-    expect(globalThis.fetch.mock.calls.every(([,options]) => options?.method !== 'POST')).toBe(true)
+    expect(globalThis.fetch.mock.calls.filter(([url])=>url!=='/api/pixel/chat/context').every(([,options]) => options?.method !== 'POST')).toBe(true)
+    expect(selector.closest('.pixel-composer-limits').lastElementChild).toContainElement(screen.getByRole('button',{name:'Token usage unavailable'}))
   })
 
   it('highlights fenced code while keeping unknown languages and HTML inert', async () => {
@@ -952,7 +968,7 @@ describe('Pixel', () => {
 
     for (const name of ['Check ODS health','Build in my workspace','Research with sources','Plan a multi-step task']) expect(screen.queryByRole('button',{name:new RegExp(name)})).toBeNull()
     expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue('')
-    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+    expect(globalThis.fetch.mock.calls.filter(([url])=>url==='/api/pixel/status')).toHaveLength(1)
   })
 
   it('shows the active remote Pixel runtime instead of the local rollback model', async () => {
@@ -1115,7 +1131,6 @@ describe('Pixel', () => {
       JSON.stringify({ choices: [{ delta: { content: 'First answer' } }] }),
       '[DONE]',
     ]))
-    globalThis.fetch.mockResolvedValueOnce(response({schemaVersion:1,status:'missing',sessionRevision:null,context:null,model:null,compaction:{status:'idle',count:0},history:{revision:null,acknowledgedMessages:0}}))
     globalThis.fetch.mockResolvedValueOnce(sseResponse([
       JSON.stringify({ choices: [{ delta: { content: 'Second answer' } }] }),
       '[DONE]',
@@ -1178,7 +1193,6 @@ describe('Pixel', () => {
       JSON.stringify({ choices: [{ delta: { content: 'Verified recovery result' } }] }),
       '[DONE]',
     ]))
-    globalThis.fetch.mockResolvedValueOnce(response({schemaVersion:1,status:'missing',sessionRevision:null,context:null,model:null,compaction:{status:'idle',count:0},history:{revision:null,acknowledgedMessages:0}}))
     globalThis.fetch.mockResolvedValueOnce(sseResponse([
       JSON.stringify({ choices: [{ delta: { content: 'Follow-up result' } }] }),
       '[DONE]',
@@ -1315,7 +1329,6 @@ describe('Pixel', () => {
       JSON.stringify({ choices: [{ delta: { content: 'First answer' } }] }),
       '[DONE]',
     ]))
-    globalThis.fetch.mockResolvedValueOnce(response({schemaVersion:1,status:'missing',sessionRevision:null,context:null,model:null,compaction:{status:'idle',count:0},history:{revision:null,acknowledgedMessages:0}}))
     globalThis.fetch.mockResolvedValueOnce(sseResponse([
       JSON.stringify({ choices: [{ delta: { content: 'Second answer' } }] }),
       '[DONE]',
@@ -2090,3 +2103,8 @@ describe('Pixel', () => {
     })
   })
 })
+
+// Fix the numeric locale for English accessibility fixtures on every host OS.
+beforeEach(()=>{vi.spyOn(Number.prototype,'toLocaleString').mockImplementation(function(locales,options){
+  return new Intl.NumberFormat(locales || 'en-US',options).format(this.valueOf())
+})})

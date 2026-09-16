@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -23,6 +24,31 @@ ACTIVE = {"queued", "running", "waiting", "stopping", "interrupted"}
 TERMINAL = {"completed", "failed", "cancelled", "skipped"}
 MAX_TEAMS = 128
 MAX_BYTES = 4 * 1024 * 1024
+
+
+def project_receipts_valid(task):
+    """Preserve only bounded, structured host associations across team reloads."""
+    projects = task.get('projects')
+    if not isinstance(projects, list) or len(projects) > 8:
+        return False
+    seen = set()
+    for item in projects:
+        if (not isinstance(item, dict) or set(item) != {'schemaVersion', 'kind', 'relativeDirectory', 'observedAt'}
+                or type(item['schemaVersion']) is not int or item['schemaVersion'] != 1 or item['kind'] != 'ods-workspace-project'):
+            return False
+        directory, stamp = item['relativeDirectory'], item['observedAt']
+        if (not isinstance(directory, str) or not re.fullmatch(r'Playground/[A-Za-z0-9][A-Za-z0-9._-]{0,63}', directory)
+                or directory.endswith('.') or re.match(r'Playground/(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)', directory, re.I)
+                or directory in seen or not isinstance(stamp, str) or not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z', stamp)):
+            return False
+        try:
+            datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%S.%fZ')
+        except ValueError:
+            return False
+        if task.get('finishedAt') is not None and (not isinstance(task['finishedAt'], str) or stamp > task['finishedAt']):
+            return False
+        seen.add(directory)
+    return True
 
 ROLES = {
     "coordinator": ("Coordinator", "Choose the smallest useful team for the owner's request."),
@@ -318,10 +344,11 @@ class TeamManager:
                             if len(content) > 24000:
                                 raise TeamConflict("Agent response exceeded the team display limit")
                         task = frame.get("pixel_task")
-                        if isinstance(task, dict) and task.get("schemaVersion") in {1, 2, 3}:
+                        if (isinstance(task, dict) and task.get("schemaVersion") in {1, 2, 3, 4}
+                                and (project_receipts_valid(task) if task['schemaVersion'] == 4 else 'projects' not in task)):
                             # The retained transport has already validated this closed
                             # projection. Preserve its schema so the UI can validate too.
-                            agent["activity"] = {k: task[k] for k in ["schemaVersion", "runId", "startedAt", "finishedAt", "state", "calls", "failures", "blocked", "truncated", "activities", "events", "context", "goal"] if k in task}
+                            agent["activity"] = {k: task[k] for k in ["schemaVersion", "runId", "startedAt", "finishedAt", "state", "calls", "failures", "blocked", "truncated", "activities", "events", "context", "goal", "projects"] if k in task}
                         if choice.get("finish_reason") == "stop":
                             receipt = frame.get("pixel_outcome", {})
                             if receipt.get("schemaVersion") == 1 and receipt.get("status") in {"none", "passed", "pending", "failed"}:

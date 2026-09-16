@@ -25,6 +25,8 @@ from urllib.parse import quote, urlsplit
 from aiohttp import web, ClientSession, UnixConnector, ClientTimeout
 from transition_gate import TransitionGate, GateError, strict_json, valid_binding
 from chat_context import project_context, valid_history_snapshot
+from access_mode import (public_status as public_access_status, valid_change as valid_access_change,
+                         valid_model_control, public_model_control)
 
 
 def valid_live_task_event(event):
@@ -32,13 +34,15 @@ def valid_live_task_event(event):
     if not isinstance(event, dict) or set(event) != {"object", "id", "pixel_task"} or event["object"] != "ods.task.activity":
         return False
     task = event["pixel_task"]
-    extended = isinstance(task, dict) and task.get('schemaVersion') in (2, 3)
+    extended = isinstance(task, dict) and task.get('schemaVersion') in (2, 3, 4)
     expected = {"schemaVersion", "runId", "startedAt", "finishedAt", "state", "calls", "failures", "blocked", "truncated", "activities"}
     if extended:
         expected |= {'events', 'context', 'goal'}
+    if isinstance(task, dict) and task.get('schemaVersion') == 4:
+        expected.add('projects')
     if not isinstance(task, dict) or set(task) != expected:
         return False
-    if type(task["schemaVersion"]) is not int or task["schemaVersion"] not in {1, 2, 3} or task["state"] != "running" or task["finishedAt"] is not None or type(task["truncated"]) is not bool:
+    if type(task["schemaVersion"]) is not int or task["schemaVersion"] not in {1, 2, 3, 4} or task["state"] != "running" or task["finishedAt"] is not None or type(task["truncated"]) is not bool:
         return False
     if not isinstance(event["id"], str) or not re.fullmatch(r"chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", event["id"], re.I) or task["runId"] != event["id"]:
         return False
@@ -112,13 +116,29 @@ def valid_task_details(task):
     def text(value, maximum):
         return isinstance(value, str) and 0 < len(value.strip()) <= len(value) <= maximum and not re.search(r'[\x00-\x1f\x7f]', value)
 
+    if task['schemaVersion'] == 4:
+        projects = task.get('projects')
+        if not isinstance(projects, list) or len(projects) > 8:
+            return False
+        seen = set()
+        for project in projects:
+            if (not isinstance(project, dict) or set(project) != {'schemaVersion', 'kind', 'relativeDirectory', 'observedAt'}
+                    or type(project['schemaVersion']) is not int or project['schemaVersion'] != 1
+                    or project['kind'] != 'ods-workspace-project' or not isinstance(project['relativeDirectory'], str)
+                    or not re.fullmatch(r'Playground/[A-Za-z0-9][A-Za-z0-9._-]{0,63}', project['relativeDirectory'])
+                    or project['relativeDirectory'].endswith('.')
+                    or re.match(r'Playground/(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)', project['relativeDirectory'], re.I)
+                    or not timestamp(project['observedAt']) or project['relativeDirectory'] in seen):
+                return False
+            seen.add(project['relativeDirectory'])
+
     events = task['events']
     if type(task['calls']) is not int or not isinstance(events, list) or len(events) != min(task['calls'], 24):
         return False
     for sequence, event in enumerate(events, start=task['calls'] - len(events) + 1):
-        if not isinstance(event, dict) or set(event) != ({'sequence','kind','state','startedAt','finishedAt'} | ({'display'} if task['schemaVersion']==3 else set())):
+        if not isinstance(event, dict) or set(event) != ({'sequence','kind','state','startedAt','finishedAt'} | ({'display'} if task['schemaVersion']>=3 else set())):
             return False
-        if task['schemaVersion']==3 and not valid_activity_display(event['display']):
+        if task['schemaVersion']>=3 and not valid_activity_display(event['display']):
             return False
         if type(event['sequence']) is not int or event['sequence'] != sequence or event['kind'] not in ('read','agent','run','edit','browser','preview','action','unknown') or event['state'] not in ('running','completed','failed','blocked'):
             return False
@@ -913,6 +933,80 @@ def _remember_chat_activity(app, chat_id, state):
             history.pop(previous, None)
 
 
+async def handle_access_mode(request: web.Request):
+    fail = _check_preview_auth(request)
+    if fail is not None:
+        return fail
+    # Sharing the chat key would let ordinary inference callers grant access.
+    if _constant_time_compare(config_token, preview_proxy_token):
+        return web.json_response({'error': 'owner-auth-unavailable'}, status=503)
+    if request.query_string:
+        return web.json_response({'error': 'invalid-request'}, status=400)
+    data = None
+    if request.method == 'POST':
+        if request.content_type != 'application/json':
+            return web.json_response({'error': 'invalid-content-type'}, status=415)
+        try:
+            data = strict_json(await _read_bounded(request.content, 1024))
+            if not valid_access_change(data):
+                raise ValueError()
+        except (ValueError, OSError, RecursionError):
+            return web.json_response({'error': 'invalid-request'}, status=400)
+    elif request.can_read_body:
+        return web.json_response({'error': 'invalid-request'}, status=400)
+    try:
+        connector = UnixConnector(path=_SOCKET_PATH)
+        timeout = ClientTimeout(total=308 if data is not None else 21, sock_connect=3)
+        async with ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.request(request.method, 'http://pixel-upstream/v1/access-mode',
+                    json=data, headers={'Authorization': 'Bearer ' + preview_proxy_token}) as response:
+                raw = await _read_bounded(response.content, 65536)
+                if response.status != 200:
+                    # Never retry an ambiguous transition. The controller's
+                    # durable journal, not this transport, owns recovery.
+                    status = response.status if response.status in (400, 403, 409, 503) else 503
+                    return web.json_response({'error': 'access-change-unconfirmed' if data else 'access-service-unavailable'}, status=status)
+                value = public_access_status(strict_json(raw))
+        return web.json_response(value, headers={'Cache-Control':'no-store'})
+    except Exception:
+        return web.json_response({'error':'access-service-unavailable'}, status=503)
+
+
+async def handle_model_control(request: web.Request):
+    """Private model lifecycle control; ordinary chat callers cannot mutate it."""
+    fail = _check_preview_auth(request)
+    if fail is not None:
+        return fail
+    if _constant_time_compare(config_token, preview_proxy_token):
+        return web.json_response({'error': 'owner-auth-unavailable'}, status=503)
+    if request.query_string:
+        return web.json_response({'error': 'invalid-request'}, status=400)
+    if request.content_type != 'application/json':
+        return web.json_response({'error': 'invalid-content-type'}, status=415)
+    try:
+        data = strict_json(await _read_bounded(request.content, 2048))
+        if not valid_model_control(data):
+            raise ValueError()
+    except (ValueError, OSError, RecursionError):
+        return web.json_response({'error': 'invalid-request'}, status=400)
+    try:
+        connector = UnixConnector(path=_SOCKET_PATH)
+        timeout = ClientTimeout(total=21 if data['operation'] == 'model-status' else 308, sock_connect=3)
+        async with ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.post('http://pixel-upstream/v1/model-control', json=data,
+                    headers={'Authorization': 'Bearer ' + preview_proxy_token}) as response:
+                raw = await _read_bounded(response.content, 65536)
+                if response.status != 200:
+                    status = response.status if response.status in (400, 403, 409, 503) else 503
+                    return web.json_response({'error': 'model-change-unconfirmed'}, status=status)
+                value = public_model_control(strict_json(raw))
+        return web.json_response(value, headers={'Cache-Control': 'no-store'})
+    except Exception:
+        # A lost reply does not cancel the controller's durable transaction.
+        # Status reconciliation belongs to the caller; mutations are never retried here.
+        return web.json_response({'error': 'model-control-unavailable'}, status=503)
+
+
 async def handle_transition(request: web.Request):
     # Reuse the server-injected Dashboard credential, never the model/chat key.
     # This credential already authenticates the private preview relay and must
@@ -1432,6 +1526,9 @@ def create_app() -> web.Application:
     app.router.add_get("/preview/{site_id}/{tail:.*}", handle_preview)
     app.router.add_get("/v1/models", handle_models)
     app.router.add_get("/v1/activity", handle_activity)
+    app.router.add_get('/v1/access-mode', handle_access_mode, allow_head=False)
+    app.router.add_post('/v1/access-mode', handle_access_mode)
+    app.router.add_post('/v1/model-control', handle_model_control)
     app.router.add_get("/v1/transition", handle_transition)
     app.router.add_post("/v1/transition/{operation:acquire|release|recover}", handle_transition)
     app.router.add_post("/v1/chat/completions", handle_chat_completions)

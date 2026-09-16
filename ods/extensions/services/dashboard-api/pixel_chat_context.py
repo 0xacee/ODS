@@ -51,6 +51,7 @@ class ContextModel(_Projection):
     id: str = Field(min_length=1, max_length=512, pattern=r"^[^\x00-\x1f\x7f]+$")
     provider: str = Field(min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$")
     contextWindow: int = Field(ge=1, le=10_000_000)
+    routeFingerprint: str | None = Field(default=None, min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
 
 
 class CompactionState(_Projection):

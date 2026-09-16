@@ -1,4 +1,5 @@
 import {useCallback,useEffect,useRef,useState} from 'react'
+import {parseProjectTasks,parseTaskActivity} from './pixelTaskActivity'
 
 export const ACTIVE_TEAMS = new Set(['queued','running','waiting','stopping','interrupted'])
 export function agentCommand(input) {
@@ -7,9 +8,20 @@ export function agentCommand(input) {
 }
 export function teamMetadata(message) {
   if(message.role!=='assistant') return {}
+  const projectTasks=parseProjectTasks(message.projectTasks)
   return {...(/^[a-f0-9]{32}$/.test(message.teamId || '') ? {teamId:message.teamId} : {}),
     ...(/^[A-Za-z0-9_-]{1,128}$/.test(message.teamRequestId || '') ? {teamRequestId:message.teamRequestId} : {}),
+    ...(projectTasks?.length ? {projectTasks} : {}),
     ...(message.goalMode===true ? {goalMode:true} : {})}
+}
+export function teamProjectTasks(team,previous) {
+  const tasks=new Map()
+  for(const candidate of [...(team.agents || []).map(agent=>agent.activity),...(parseProjectTasks(previous) || [])]) {
+    const task=parseTaskActivity(candidate,candidate?.runId)
+    if(task?.schemaVersion===4 && task.projects.length && !tasks.has(task.runId))tasks.set(task.runId,task)
+  }
+  return [...tasks.values()].sort((a,b)=>b.projects[0].observedAt.localeCompare(a.projects[0].observedAt)
+    || b.startedAt.localeCompare(a.startedAt)).slice(0,6)
 }
 export function teamSummary(team) {
   if(team.mode==='goal') {

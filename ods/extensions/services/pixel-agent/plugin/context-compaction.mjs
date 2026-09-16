@@ -33,8 +33,19 @@ function modelFor(config, entry, agentId) {
   const label = runtimeId === 'ods/current' ? 'Current' : 'Default';
   const match = alias && typeof configured?.name === 'string' ? configured.name.match(new RegExp(`^ODS ${label} \\((.+)\\)$`)) : null;
   const id = alias ? text(match?.[1]) : runtimeId;
-  const window = integer(configured?.contextWindow) || integer(entry?.contextTokens) || null;
-  return {provider,id,window,revision:hash(JSON.stringify([provider,runtimeId,id,window]))};
+  // Match the qualified SDK's agent-over-default context cap. Session metadata
+  // can supply a missing model capacity, but never override a smaller cap.
+  // The plugin's modelContextWindow is prompt metadata, not native usage proof.
+  const capacity = integer(configured?.contextTokens) || integer(configured?.contextWindow) || integer(entry?.contextTokens) || null;
+  const cap = integer(agent?.contextTokens ?? config?.agents?.defaults?.contextTokens) || null;
+  const window = capacity && cap ? Math.min(capacity,cap) : capacity;
+  const route = alias ? config?.plugins?.entries?.['pixel-ods']?.config?.modelRouteFingerprint : undefined;
+  if (route !== undefined && (typeof route !== 'string' || route.length !== 64 || !HASH.test(route))) throw ERROR();
+  const routeFingerprint = route ?? null;
+  const identity = [provider,runtimeId,id,window];
+  if (routeFingerprint) identity.push(routeFingerprint);
+  return {provider,id,window,routeFingerprint,
+    revision:hash(JSON.stringify(identity))};
 }
 
 export async function readContextRequest(req, compact = false) {
@@ -87,7 +98,8 @@ export function createContextCompaction({agentId = 'pixel', readSession, readCon
     if (value?.version !== 1 || !Array.isArray(value.operations) || value.operations.length > maximumRequests) throw ERROR();
     if (value.maintenance != null && (!HASH.test(value.maintenance.leaseToken ?? '') || !text(value.maintenance.instance))) throw ERROR();
     if (value.measurement != null && (!HASH.test(value.measurement.modelRevision ?? '') || !HASH.test(value.measurement.sessionRevision ?? '') ||
-        integer(value.measurement.used) === null || !integer(value.measurement.window) || !Number.isSafeInteger(value.measurement.measuredAt))) throw ERROR();
+        integer(value.measurement.used) === null || !integer(value.measurement.window) || !Number.isSafeInteger(value.measurement.measuredAt) ||
+        value.measurement.compactionCount !== undefined && integer(value.measurement.compactionCount) === null)) throw ERROR();
     const requests = new Set();
     for (const item of value.operations) {
       if (!item || !REQUEST.test(item.requestId ?? '') || requests.has(item.requestId) ||
@@ -135,10 +147,18 @@ export function createContextCompaction({agentId = 'pixel', readSession, readCon
   function project(user, entry, ledger, preferred) {
     const model = modelFor(readConfig(),entry,agentId), {provider,id,window} = model;
     const sessionRevision = revisionFor(user, entry);
+    if (ledger.measurement && (ledger.measurement.modelRevision !== model.revision || ledger.measurement.sessionRevision !== sessionRevision)) {
+      // Persist invalidation so selecting the previous route/budget again does
+      // not resurrect a measurement from before the intervening transition.
+      delete ledger.measurement; save(user,ledger);
+    }
     const proof = ledger.measurement?.modelRevision === model.revision && ledger.measurement.sessionRevision === sessionRevision
       ? ledger.measurement : null;
     const nativeFresh = entry?.totalTokensFresh === true && (!proof || entry.updatedAt >= proof.measuredAt);
-    const observedFresh = proof && (!Number.isSafeInteger(entry?.updatedAt) || entry.updatedAt <= proof.measuredAt);
+    // Session metadata is saved after llm_output and may have a newer timestamp.
+    // That alone does not invalidate this model's measured usage. A subsequent
+    // compaction does, unless it supplied its own post-compaction measurement.
+    const observedFresh = proof && (integer(entry?.compactionCount) ?? 0) <= (integer(proof.compactionCount) ?? 0);
     const used = !requireModelObservation || proof ? nativeFresh ? integer(entry.totalTokens) : observedFresh ? proof.used : null : null;
     const at = nativeFresh ? entry?.updatedAt : proof?.measuredAt;
     const measuredAt = Number.isSafeInteger(at) && at > 0 && at <= 8640000000000000 ? new Date(at).toISOString() : null;
@@ -149,10 +169,11 @@ export function createContextCompaction({agentId = 'pixel', readSession, readCon
     const status = admission.status();
     const uncertain = operation?.status === 'unknown' && admission.owns(operation.leaseToken);
     return {schemaVersion:1, status:uncertain || status?.available !== true ? 'unavailable'
-      : pending.size || status?.phase !== 'idle' || activeSession(keyFor(user)) ? 'busy' : sessionRevision ? 'ready' : 'missing',
+      : pending.has(user) || activeSession(keyFor(user)) ? 'busy' : sessionRevision ? 'ready' : 'missing',
       sessionExists:sessionRevision !== null, sessionRevision,
       context:used !== null && (proof?.window || window) && measuredAt ? {used,window:proof?.window || window,measuredAt} : null,
-      model:id && provider && window && provider !== 'ods-policy' ? {id,provider,contextWindow:window} : null, compaction};
+      model:id && provider && window && provider !== 'ods-policy' ? {id,provider,contextWindow:proof?.window || window,
+        ...(model.routeFingerprint ? {routeFingerprint:model.routeFingerprint} : {})} : null, compaction};
   }
   function unavailable(user) {
     return {schemaVersion:1,status:'unavailable',sessionExists:false,sessionRevision:null,context:null,model:null,compaction:idle(0)};
@@ -190,7 +211,7 @@ export function createContextCompaction({agentId = 'pixel', readSession, readCon
       if (item.status === 'completed' && item.tokensAfter !== null) {
         const latest=entryFor(user), model=modelFor(readConfig(),latest,agentId), revision=revisionFor(user,latest);
         if (model.window && revision) ledger.measurement={modelRevision:model.revision,sessionRevision:revision,
-          used:item.tokensAfter,window:model.window,measuredAt:now()};
+          used:item.tokensAfter,window:model.window,measuredAt:now(),compactionCount:integer(latest?.compactionCount) ?? 0};
       }
       await modelLease.close(); modelLease = undefined;
       save(user, ledger);
@@ -217,6 +238,7 @@ export function createContextCompaction({agentId = 'pixel', readSession, readCon
       const previous = ledger.operations.find(item => item.requestId === requestId);
       if (previous) return project(user, entryFor(user), ledger, previous);
       const entry = entryFor(user), snapshot = project(user, entry, ledger);
+      if (admission.status()?.available === true && admission.status().phase !== 'idle') return {...snapshot,status:'busy'};
       if (snapshot.status !== 'ready') return snapshot;
       // A full journal is a confirmed pre-admission refusal, not an unknown
       // RPC outcome. Return this request's receipt so callers can release their
@@ -240,7 +262,8 @@ export function createContextCompaction({agentId = 'pixel', readSession, readCon
       if (acquired && !pending.has(user)) {
         try { admission.release(token); } catch { /* Never claim release if proof failed. */ }
       }
-      return context(user);
+      const snapshot=context(user);
+      return admission.status()?.available === true && admission.status().phase !== 'idle' ? {...snapshot,status:'busy'} : snapshot;
     }
   }
   async function withMaintenance(user, callback) {
@@ -266,8 +289,8 @@ export function createContextCompaction({agentId = 'pixel', readSession, readCon
     const used=integer(counts.reduce((a,b)=>a+b,0));if(!used) return;
     try {
       const entry=entryFor(user), model=modelFor(readConfig(),entry,agentId), revision=revisionFor(user,{sessionId:context.sessionId});
-      if(!revision) return;
-      const ledger=read(user);ledger.measurement={modelRevision:model.revision,sessionRevision:revision,used,window,measuredAt:now()};
+      if(!revision || model.window && window>model.window) return;
+      const ledger=read(user);ledger.measurement={modelRevision:model.revision,sessionRevision:revision,used,window,measuredAt:now(),compactionCount:integer(entry?.compactionCount) ?? 0};
       save(user,ledger);
     } catch { /* Unknown metadata stays unknown; never break the agent reply. */ }
   }

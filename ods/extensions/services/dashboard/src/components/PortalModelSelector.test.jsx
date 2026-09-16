@@ -19,6 +19,32 @@ beforeEach(()=>{
 })
 afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals()})
 const posts=()=>fetch.mock.calls.filter(([,options])=>options?.method==='POST')
+
+it('keeps recovery accessible for an unknown model source and observes it after closing the menu',async()=>{
+  let resolveRecovery
+  const state={pending:true,phase:'applied',transactionId:'a'.repeat(64)}
+  vi.stubGlobal('fetch',vi.fn(async(url,options)=>{
+    if(url==='/api/models/recovery') {
+      if(options?.method==='POST')return await new Promise(resolve=>{resolveRecovery=resolve})
+      return {ok:true,json:async()=>state}
+    }
+    return {ok:true,json:async()=>payload()}
+  }))
+  const switching=vi.fn(),settled=vi.fn()
+  render(view({runtimeSource:undefined,onSwitchingChange:switching,onSettled:settled}))
+  await open()
+  fireEvent.click(await screen.findByRole('button',{name:'Recover model switch'}))
+  expect(switching).toHaveBeenLastCalledWith(true)
+  fireEvent.keyDown(window,{key:'Escape'})
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(switching).toHaveBeenLastCalledWith(true)
+  expect(posts()).toHaveLength(1)
+  expect(posts()[0][0]).toBe('/api/models/recovery')
+  state.pending=false;state.phase='completed'
+  await act(async()=>resolveRecovery({ok:true,json:async()=>state}))
+  expect(switching).toHaveBeenLastCalledWith(false)
+  expect(settled).toHaveBeenCalledOnce()
+})
 async function open() {
   const button=await screen.findByRole('button',{name:'Choose model: Qwen 3.5 4B'})
   fireEvent.click(button)
@@ -46,6 +72,34 @@ it('shows readable names and an installed-model menu, with an explicit switch co
   expect(posts()).toHaveLength(0)
 })
 
+it('accepts a measured native profile only at its proven context while retaining the switch confirmation',async()=>{
+  const candidate=inventory[2]
+  candidate.activationSupport={available:true,source:'measured-native',mode:'native-profile',contextLength:candidate.contextLength}
+  try {
+    render(view())
+    await open()
+    const option=screen.getByRole('menuitemradio',{name:/Large 100B/})
+    expect(option).toBeEnabled()
+    fireEvent.click(option)
+    expect(screen.getByRole('button',{name:'Switch model',exact:true})).toBeEnabled()
+    expect(posts()).toHaveLength(0)
+  } finally {delete candidate.activationSupport}
+})
+
+it.each([
+  {available:true,source:'estimate',mode:'native-profile',contextLength:32768},
+  {available:true,source:'measured-native',mode:'native-profile',contextLength:16384},
+  {available:false,source:'measured-native',mode:'native-profile',contextLength:32768},
+])('does not bypass memory protection for an unproven or mismatched native profile',async activationSupport=>{
+  inventory[2].activationSupport=activationSupport
+  try {
+    render(view())
+    await open()
+    expect(screen.getByRole('menuitemradio',{name:/Large 100B/})).toBeDisabled()
+    expect(posts()).toHaveLength(0)
+  } finally {delete inventory[2].activationSupport}
+})
+
 it('uses the real encoded activation route and waits for readiness instead of marking a POST as success',async()=>{
   vi.useFakeTimers()
   const switching=vi.fn(),settled=vi.fn()
@@ -57,6 +111,7 @@ it('uses the real encoded activation route and waits for readiness instead of ma
   fireEvent.click(screen.getByRole('button',{name:'Switch model',exact:true}))
   expect(posts()).toHaveLength(1)
   expect(posts()[0][0]).toBe(`/api/models/${encodeURIComponent(target)}/load`)
+  expect(JSON.parse(posts()[0][1].body)).toEqual({context_length:8192})
   expect(posts()[0][1]).toMatchObject({method:'POST',signal:expect.any(AbortSignal)})
   expect(switching).toHaveBeenLastCalledWith(true)
   current=target;ready=null
@@ -84,6 +139,38 @@ it('keeps the current model selected when the host rejects a swap during work',a
   expect(screen.getByRole('alert')).toHaveTextContent('Portal is working.')
   expect(screen.getByRole('menuitemradio',{name:/Uncensored/})).toHaveAttribute('aria-checked','true')
   expect(screen.getByRole('menuitemradio',{name:/Qwen 3.5 2B/})).toHaveAttribute('aria-checked','false')
+})
+
+it.each([true,false])('clears an earlier activation error only after confirmed recovery (success=%s)',async succeeds=>{
+  vi.useFakeTimers()
+  let recoveryState={pending:false,phase:'idle',transactionId:null}
+  vi.stubGlobal('fetch',vi.fn(async(url,options)=>{
+    if(url==='/api/models/recovery') {
+      if(options?.method==='POST') {
+        return {ok:succeeds,status:succeeds?200:409,json:async()=>succeeds
+          ? {pending:false,phase:'completed',transactionId:'a'.repeat(64),outcome:'rollback'}
+          : {...recoveryState,reason:'model-recovery-proof-required'}}
+      }
+      return {ok:true,json:async()=>recoveryState}
+    }
+    if(options?.method==='POST') {
+      recoveryState={pending:true,phase:'applied',transactionId:'a'.repeat(64)}
+      return {ok:false,status:500,json:async()=>({detail:'Previous activation could not be confirmed.'})}
+    }
+    return {ok:true,json:async()=>payload()}
+  }))
+  render(view())
+  fireEvent.click(screen.getByRole('button',{name:'Choose model: Qwen 3.5 4B'}))
+  await act(async()=>{})
+  fireEvent.click(screen.getByRole('menuitemradio',{name:/Qwen 3.5 2B/}))
+  fireEvent.click(screen.getByRole('button',{name:'Switch model',exact:true}))
+  await act(async()=>{await vi.advanceTimersByTimeAsync(5000)})
+  expect(screen.getByRole('alert')).toHaveTextContent('Previous activation could not be confirmed.')
+  fireEvent.click(screen.getByRole('button',{name:'Recover model switch'}))
+  await act(async()=>{})
+  if(succeeds)expect(screen.queryByRole('alert')).toBeNull()
+  else expect(screen.getAllByRole('alert').some(node=>node.textContent.includes('Previous activation could not be confirmed.'))).toBe(true)
+  expect(posts().map(([url])=>url)).toEqual([`/api/models/${encodeURIComponent(target)}/load`,'/api/models/recovery'])
 })
 
 it('prevents a pending confirmation from switching models after a task starts',async()=>{
@@ -161,4 +248,14 @@ it('does not request or poll the model catalog until the selector is first opene
   const reads=fetch.mock.calls.length
   await act(async()=>{await vi.advanceTimersByTimeAsync(30000)})
   expect(fetch.mock.calls.length).toBeGreaterThan(reads)
+})
+
+it('reports the active switch instead of an expected temporary unknown source',async()=>{
+  lifecycle={active:true,operation:'model_activation',modelId:target}
+  render(view({runtimeSource:undefined}))
+  await open()
+  expect(screen.getByText(/Switching/)).toBeVisible()
+  expect(screen.queryByText(/model source is not confirmed/)).toBeNull()
+  expect(screen.getByRole('menuitemradio',{name:/Qwen 3.5 2B/})).toHaveAttribute('title','A model operation is in progress.')
+  expect(posts()).toHaveLength(0)
 })

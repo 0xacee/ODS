@@ -61,7 +61,7 @@ it('acknowledges an agent request once so closing and remounting cannot replay i
 })
 it('leaves Subagents to expose retry when an incoming file request cannot load its manifest',async()=>{
  const original=fetch;let failed=true
- fetch=vi.fn(url=>url.includes('__ods_manifest__') && failed?Promise.reject(new Error('offline')):original(url))
+ globalThis.fetch=vi.fn(url=>url.includes('__ods_manifest__') && failed?Promise.reject(new Error('offline')):original(url))
  const {rerender}=render(<PortalWorkspace {...props} agents={agents} request={{kind:'agents'}}/>)
  await waitFor(()=>expect(fetch).toHaveBeenCalled())
  rerender(<PortalWorkspace {...props} agents={agents} request={{siteId:preview.siteId,kind:'file',path:'src/app.js'}}/>)
@@ -118,7 +118,7 @@ it('waits for the new publication manifest before opening its requested file',as
  const nextFiles=[files[0],nextFile],next={...preview,siteId:`site-${'b'.repeat(24)}`,sha256:'b'.repeat(64),files:2,bytes:nextFiles.reduce((n,f)=>n+f.bytes,0)}
  const response=text=>({ok:true,headers:new Map(),arrayBuffer:async()=>new TextEncoder().encode(text).buffer})
  const original=fetch;let release
- fetch=vi.fn(url=>{
+ globalThis.fetch=vi.fn(url=>{
   if(!url.includes(next.siteId))return original(url)
   if(!url.includes('__ods_manifest__'))return Promise.resolve(response(nextSource))
   return new Promise(resolve=>{release=()=>resolve(response(JSON.stringify({...manifest,siteId:next.siteId,sha256:next.sha256,files:nextFiles,bytes:next.bytes})))})
@@ -134,7 +134,7 @@ it('waits for the new publication manifest before opening its requested file',as
 })
 it('preserves an open-file action while a failed manifest is retried',async()=>{
  const original=fetch;let failManifest=true
- fetch=vi.fn(url=>url.includes('__ods_manifest__') && failManifest?Promise.reject(new Error('offline')):original(url))
+ globalThis.fetch=vi.fn(url=>url.includes('__ods_manifest__') && failManifest?Promise.reject(new Error('offline')):original(url))
  render(<PortalWorkspace {...props} request={{siteId:preview.siteId,kind:'review',path:'src/app.js'}}/>)
  fireEvent.click(await screen.findByRole('button',{name:'Open file src/app.js'}))
  expect(await screen.findByText('Files unavailable.')).toBeVisible()
@@ -144,7 +144,7 @@ it('preserves an open-file action while a failed manifest is retried',async()=>{
 })
 it('does not reopen a pending file after the user has switched tabs',async()=>{
  const original=fetch;let release
- fetch=vi.fn(url=>url.includes('__ods_manifest__')?new Promise(resolve=>{release=()=>resolve(original(url))}):original(url))
+ globalThis.fetch=vi.fn(url=>url.includes('__ods_manifest__')?new Promise(resolve=>{release=()=>resolve(original(url))}):original(url))
  render(<PortalWorkspace {...props} request={{siteId:preview.siteId,kind:'file',path:'src/app.js'}}/>)
  await waitFor(()=>expect(release).toBeTypeOf('function'))
  fireEvent.click(screen.getByRole('tab',{name:'Review'}))
@@ -154,7 +154,7 @@ it('does not reopen a pending file after the user has switched tabs',async()=>{
 })
 it('offers a retry for an initial file request when the manifest is unavailable',async()=>{
  const original=fetch;let failed=true
- fetch=vi.fn(url=>url.includes('__ods_manifest__') && failed?Promise.reject(new Error('offline')):original(url))
+ globalThis.fetch=vi.fn(url=>url.includes('__ods_manifest__') && failed?Promise.reject(new Error('offline')):original(url))
  render(<PortalWorkspace {...props} request={{siteId:preview.siteId,kind:'file',path:'src/app.js'}}/>)
  expect(await screen.findByText('Files unavailable.')).toBeVisible()
  failed=false
@@ -193,7 +193,7 @@ it('shares the resizable file tree between preview and source and uses a drawer 
 function changedProject(changes) {
  const before={...preview,siteId:`site-${'c'.repeat(24)}`,sha256:'c'.repeat(64)}
  const original=fetch
- fetch=vi.fn(url=>url.includes('__ods_changes__') ? Promise.resolve({ok:true,headers:new Map(),arrayBuffer:async()=>new TextEncoder().encode(JSON.stringify({...comparison,beforeSiteId:before.siteId,beforeSha256:before.sha256,changes})).buffer}) : original(url))
+ globalThis.fetch=vi.fn(url=>url.includes('__ods_changes__') ? Promise.resolve({ok:true,headers:new Map(),arrayBuffer:async()=>new TextEncoder().encode(JSON.stringify({...comparison,beforeSiteId:before.siteId,beforeSha256:before.sha256,changes})).buffer}) : original(url))
  return before
 }
 const modifiedIndex={...changes[0],change:'modified'}
@@ -218,7 +218,7 @@ it('reviews the complete current file tree, marks deletions, and opens unchanged
 
 it('keeps current files openable when comparison fails, without showing unverified changes',async()=>{
  const original=fetch
- fetch=vi.fn(url=>url.includes('__ods_changes__') ? Promise.reject(new Error('offline')) : original(url))
+ globalThis.fetch=vi.fn(url=>url.includes('__ods_changes__') ? Promise.reject(new Error('offline')) : original(url))
  render(<PortalWorkspace {...props} request={{siteId:preview.siteId,kind:'review'}}/>)
  const tree=await screen.findByRole('navigation',{name:'Project files'})
  expect(screen.getByText('File comparison unavailable.')).toBeVisible()

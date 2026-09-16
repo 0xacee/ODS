@@ -23,7 +23,7 @@ function PlanTasks({plan, active, onResume, disabled}) {
       <span className="portal-task-list-count" role="status" aria-label={total ? `${completed} of ${total} tasks reported completed` : 'Planning'}>{total ? `${completed}/${total}` : 'Planning'}</span>
       <ChevronDown className="portal-task-list-chevron" size={13} aria-hidden="true"/>
     </button>
-    <div className="portal-task-list-description"><p>{plan.summary}</p><span className="portal-task-list-state">{status}</span></div>
+    <div className="portal-task-list-description"><p>{plan.summary}</p>{!running && <span className="portal-task-list-state">{status}</span>}</div>
     <div id={`${id}-tasks`} role="region" aria-labelledby={`${id}-trigger`} hidden={!open}>
       <ol className="portal-task-list" aria-label="Reported tasks">{plan.steps.map(step => {
         const state = step.status === 'running' && !running ? plan.status === 'waiting' ? 'waiting' : 'paused' : step.status

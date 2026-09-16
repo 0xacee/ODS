@@ -107,3 +107,23 @@
 @container portal-chat (max-width:680px) {
   .portal-workbench[data-collapsed=true] .portal-workbench-tabs,.portal-workbench[data-collapsed=true] .portal-workbench-window-actions { flex-direction:row; }
 }
+
+/* Live edits share the workbench surface and remain available before publishing. */
+.portal-workbench-live { flex:1; min-height:0; overflow:auto; }
+.portal-workbench-live[hidden] { display:none; }
+.portal-live-review { padding:10px 12px; min-width:0; font-size:12px; }
+.portal-live-review > header { display:flex; justify-content:space-between; gap:12px; padding-bottom:8px; }
+.portal-live-review small,.portal-live-review > p { color:rgb(var(--theme-text-muted)); }
+.portal-live-review > nav { display:flex; gap:5px; overflow:auto; padding-bottom:8px; }
+.portal-live-review > nav button { display:flex; align-items:center; gap:6px; flex-shrink:0; padding:6px 8px; border-radius:6px; }
+.portal-live-review > nav button[aria-pressed=true] { background:rgb(var(--theme-text) / .08); }
+.portal-live-review > nav button > span { max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.portal-live-review-content { min-width:0; }
+.portal-live-review-note { display:block; padding:8px 0; font-size:11px; }
+
+.portal-workbench-live:empty { display:none; }
+
+/* Reserve a scroll lane separate from the tree's resize handle. */
+.pixel-app .pixel-chat-preview-layout .portal-review-diff > pre { scrollbar-gutter:stable; scrollbar-width:auto; }
+.pixel-app .pixel-chat-preview-layout .portal-review-diff > pre::-webkit-scrollbar { width:12px; height:12px; }
+.pixel-app .pixel-chat-preview-layout .portal-review-diff > pre::-webkit-scrollbar-thumb { border:2px solid transparent; background-clip:padding-box; }

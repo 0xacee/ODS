@@ -52,6 +52,7 @@ import {
 import { createEvidenceArtifactWriter } from "./evidence-artifact.mjs";
 import { createWorkspacePreviewTool } from "./workspace-preview.mjs";
 import { createTaskActivity } from "./task-activity.mjs";
+import { createWorkspaceProjects } from "./workspace-projects.mjs";
 import { createAccessRuntime, executionHostForAgent } from "./access-runtime.mjs";
 import { createManagedRuntimeRegistry } from "./managed-runtime-lifecycle.mjs";
 import {createContextCompaction, readContextRequest, prepareStableContextModel} from './context-compaction.mjs';
@@ -63,7 +64,8 @@ const ABORT_BODY_LIMIT = 256;
 const OPENAI_RUN_ID = /^chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const toolLoopGuardRegistry = createToolLoopGuardRegistry();
 const goalProgress = createGoalProgress({agentId:AGENT_ID});
-const taskActivity = createTaskActivity({agentId:AGENT_ID, goalForRun:id=>goalProgress.projection(id)});
+const workspaceProjects = createWorkspaceProjects();
+const taskActivity = createTaskActivity({agentId:AGENT_ID, goalForRun:id=>goalProgress.projection(id),projectsForSession:key=>workspaceProjects.forSession(key)});
 let execCancellationControl;
 let accessRuntime;
 let contextCompaction;
@@ -265,6 +267,7 @@ export default definePluginEntry({
         }),
       execControl: execCancellationControl,
       evidenceArtifactWriter,
+      onWorkspaceMutation:mutation=>workspaceProjects.record(mutation),
       warn: (message) => api.logger.warn(message),
     });
 
@@ -330,6 +333,9 @@ export default definePluginEntry({
           let body = "";
           for await (const chunk of req) { body += chunk.toString(); if (body.length > 512) throw new Error(); }
           const value = JSON.parse(body);
+          if (value?.operation === 'model-status' && Object.keys(value).join() === 'operation') {
+            sendJson(res, 200, accessRuntime.readModel()); return true;
+          }
           if (!value || Object.keys(value).sort().join() !== "operation,revision,token" ||
               !/^[a-f0-9]{64}$/.test(value.token) || !/^[a-f0-9]{64}$/.test(value.revision)) throw new Error();
           let result;
@@ -345,6 +351,9 @@ export default definePluginEntry({
           else if (value.operation === "settings-readback") {
             managedRuntime?.assertTransition();
             result = accessRuntime.readSettings(value.token, value.revision);
+          }
+          else if (value.operation === "model-readback") {
+            result = accessRuntime.readModel(value.token, value.revision);
           }
           else if (value.operation === "provider-readback") {
             managedRuntime?.assertTransition();

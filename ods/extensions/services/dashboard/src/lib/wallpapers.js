@@ -8,7 +8,7 @@ import bannalpsee from '../assets/wallpapers/bannalpsee.jpg'
 import vivoXFold from '../assets/wallpapers/vivo-x-fold.jpg'
 
 export const WALLPAPERS = [
-  {id:'ods', name:'Pixel', image:null},
+  {id:'ods', name:'Portal', image:null},
   {id:'blue', name:'Blue', image:blue},
   {id:'purple', name:'Purple', image:purple},
   {id:'red', name:'Red', image:red},

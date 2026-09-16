@@ -7,10 +7,11 @@ import PixelSnapshotChanges from './PixelSnapshotChanges'
 import PortalFileTree from './PortalFileTree'
 import PortalFileTreeResize,{useFileTreeResize} from './PortalFileTreeResize'
 import PortalSubagents from './PortalSubagents'
+import PortalLiveReview from './PortalLiveReview'
 import './portal-workspace.css'
 
-export default function PortalWorkspace({preview,before,access,title,request,onRequestHandled,refresh=0,onRefresh,onClose,collapsed,onCollapse,onPublish,expanded,onExpand,agents,renderApproval}) {
-  const [active,setActive]=useState(request?.kind==='agents'?'agents':'preview'),[tabs,setTabs]=useState([]),[manifest,setManifest]=useState(null)
+export default function PortalWorkspace({preview,before,access,title,request,onRequestHandled,refresh=0,onRefresh,onClose,collapsed,onCollapse,onPublish,expanded,onExpand,agents,renderApproval,task,working=false}) {
+  const [active,setActive]=useState(request?.kind==='agents'?'agents':!preview?'review':'preview'),[tabs,setTabs]=useState([]),[manifest,setManifest]=useState(null)
   const [agentsTabOpen,setAgentsTabOpen]=useState(request?.kind==='agents')
   const [pendingPath,setPendingPath]=useState(null),[missingPath,setMissingPath]=useState(null)
   const manifestKey=`${preview?.siteId}/${preview?.sha256}`
@@ -22,7 +23,7 @@ export default function PortalWorkspace({preview,before,access,title,request,onR
   const consumed=useRef(null),root=useRef(null)
   const treeLayout=useFileTreeResize(root,{narrowBelow:561})
   useEffect(()=>{
-    setTabs([]);setActive(current=>current==='agents'?'agents':request?.siteId===preview?.siteId && request?.kind==='review'?'review':'preview');setReviewPath(null);setOptions(false);setPendingPath(null);setMissingPath(null)
+    setTabs([]);setActive(current=>current==='agents'?'agents':request?.siteId===preview?.siteId && request?.kind==='review'?'review':!preview?'review':'preview');setReviewPath(null);setOptions(false);setPendingPath(null);setMissingPath(null)
   },[preview?.siteId])
   useEffect(()=>{
     setManifest(null)
@@ -46,7 +47,7 @@ export default function PortalWorkspace({preview,before,access,title,request,onR
     if(request.siteId!==preview?.siteId)return
     consumed.current=request
     if(request.kind==='file'){setActive('review');openFile(request.path)}
-    else {setPendingPath(null);setMissingPath(null);setActive(request.kind==='review'?'review':'preview');setReviewPath(request.path || null)}
+    else {setPendingPath(null);setMissingPath(null);setActive(request.kind==='review'?'review':!preview?'review':'preview');setReviewPath(request.path || null)}
     onRequestHandled?.(request)
   },[request,preview?.siteId,files,onRequestHandled])
   const selected=files?.find(file=>`file:${file.path}`===active)
@@ -81,7 +82,8 @@ export default function PortalWorkspace({preview,before,access,title,request,onR
         <button type="button" title="Close preview" aria-label="Close preview" onClick={onClose}><X size={14}/></button>
       </div>
     </header>
-    {!collapsed && !preview && active!=='agents' && <section className="portal-workbench-empty"><Files size={24}/><h2>No files to show yet</h2><p>Published files and web previews will appear here.</p>{onPublish && <button type="button" onClick={onPublish}>Ask Portal to publish</button>}</section>}
+    {!collapsed && !preview && active==='preview' && <section className="portal-workbench-empty"><Files size={24}/><h2>No files to show yet</h2><p>Published files and web previews will appear here.</p>{onPublish && <button type="button" onClick={onPublish}>Ask Portal to publish</button>}</section>}
+    <div className="portal-workbench-live" hidden={!!preview || collapsed || active!=='review'}><PortalLiveReview task={task} active={working}/></div>
     {agentsTabOpen && agents && <div className="portal-workbench-body" hidden={collapsed || active!=='agents'} id={panelDomId('agents')} role="tabpanel" aria-labelledby={tabDomId('agents')}><PortalSubagents controller={agents} renderApproval={renderApproval}/></div>}
     {preview && <div className="portal-workbench-body" hidden={collapsed || active==='agents'}>
       {missingPath && <p role="status" className="portal-source-notice">This file is not available in this publication. <button type="button" onClick={()=>setMissingPath(null)}>Dismiss</button></p>}

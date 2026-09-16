@@ -25,6 +25,9 @@ function plainIntent(value) {
 }
 export function requestsNewPlaygroundProject(intent) {
   const text = plainIntent(intent);
+  // Continuation quotes the old creation request, not a new reservation.
+  // Core tool policy still controls every inspection and mutation.
+  if (/^\s*(?:\/goal\s+)?Continue the goal from the preceding conversation using the existing work\./i.test(text)) return false;
   const clauses = text.split(/[;!?\n]|\.(?=\s|$)/);
   return clauses.some(clause =>
     (/\b(?:create|build|develop|design|implement|generate|write|crie|criar|cria|construa|construir|desenvolva|desenvolver|implemente|gere|escreva)\b/i.test(clause)

@@ -20,6 +20,7 @@ import { pathToFileURL } from "node:url";
 import { parseTaskActivity } from "./task_activity_schema.mjs";
 import { parseQuestions } from "./questions_schema.mjs";
 import {createChatHistoryLedger,HistoryError} from './chat_history_ledger.mjs';
+import {handleAccessMode, handleModelControl, readAccessOwnerKey} from './access_mode_relay.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -204,7 +205,7 @@ class HttpError extends Error {
 // bytes for longer than that while evaluating its first prompt. Use the core
 // HTTP client for this fixed loopback hop so the explicit connect and total
 // AbortController budgets below are the only transport deadlines.
-export function gatewayFetch(url, options = {}) {
+function directGatewayFetch(url, options = {}) {
   return new Promise((resolve, reject) => {
     let connectTimer = null;
     const clearConnectTimer = () => {
@@ -256,6 +257,69 @@ export function gatewayFetch(url, options = {}) {
   });
 }
 
+// A host can have different IPv4/IPv6 loopback paths (including WSL's IPv4
+// forwarding proxy). Discover a healthy local listener with a read-only GET
+// before sending any body. A reset after a POST is an unknown outcome: only
+// the next request may discover another endpoint, never replay that POST.
+export function createLoopbackGatewayFetch(fetchImpl = directGatewayFetch, {
+  probeTimeoutMs = 750, cacheMs = 5000, now = Date.now,
+} = {}) {
+  const endpoints = new Map();
+  const discoveries = new Map();
+  const validate = (url) => {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' || !['127.0.0.1', '[::1]', 'localhost'].includes(parsed.hostname)
+        || parsed.username || parsed.password || parsed.hash) throw new Error('invalid local gateway address');
+    return parsed;
+  };
+  const discover = async (port, headers) => {
+    const cached = endpoints.get(port);
+    if (cached && cached.expiresAt > now()) return cached.origin;
+    if (discoveries.has(port)) return discoveries.get(port);
+    const pending = (async () => {
+      for (const host of ['[::1]', '127.0.0.1']) {
+        const origin = `http://${host}:${port}`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), probeTimeoutMs);
+        timer.unref?.();
+        try {
+          const authorization = headers?.authorization ?? headers?.Authorization;
+          const response = await fetchImpl(`${origin}/health`, {
+            method:'GET', redirect:'error', signal:controller.signal,
+            headers:authorization ? {authorization, accept:'application/json'} : {accept:'application/json'},
+          });
+          await drain(response.body);
+          if (response.status < 200 || response.status >= 300) continue;
+          endpoints.set(port, {origin, expiresAt:now() + cacheMs});
+          return origin;
+        } catch { /* An unqualified family receives no mutation. */ }
+        finally { clearTimeout(timer); }
+      }
+      endpoints.delete(port);
+      throw new Error('local gateway unavailable');
+    })();
+    discoveries.set(port, pending);
+    try { return await pending; }
+    finally { discoveries.delete(port); }
+  };
+  return async (url, options = {}) => {
+    const parsed = validate(url), port = parsed.port || '80';
+    if (options.signal?.aborted) throw options.signal.reason ?? new Error('request aborted');
+    const origin = await discover(port, options.headers);
+    if (options.signal?.aborted) throw options.signal.reason ?? new Error('request aborted');
+    try {
+      return await fetchImpl(`${origin}${parsed.pathname}${parsed.search}`, options);
+    } catch (error) {
+      // HTTP bodies/streams are never retried. Even a transport reset can
+      // arrive after the gateway has accepted a mutation or started a run.
+      if (endpoints.get(port)?.origin === origin) endpoints.delete(port);
+      throw error;
+    }
+  };
+}
+
+export const gatewayFetch = createLoopbackGatewayFetch();
+
 const defaultDeps = {
   execFile,
   fetch: gatewayFetch,
@@ -305,6 +369,7 @@ export function validateConfig(cfg) {
     ["gateway token file", cfg.gatewayTokenFile],
     ["status file", cfg.statusFile],
     ...(cfg.chatStateDir ? [["chat state directory",cfg.chatStateDir]] : []),
+    ...(cfg.accessOwnerKeyFile ? [["access owner key file",cfg.accessOwnerKeyFile]] : []),
   ]) {
     if (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")) {
       throw new Error(`invalid ${label}`);
@@ -324,6 +389,7 @@ export function configFromEnv(env = process.env) {
     ingressGid: env.PIXEL_INGRESS_GID ? Number(env.PIXEL_INGRESS_GID) : null,
     odsVersion: env.PIXEL_ODS_VERSION || "unknown",
     appPorts: appPortsFromEnv(env),
+    accessOwnerKeyFile: env.PIXEL_ACCESS_OWNER_KEY_FILE || null,
     chatStateDir: env.PIXEL_CHAT_STATE_DIR || (process.platform === 'linux' ? '/var/lib/ods-pixel-chat' : path.join(process.platform === 'win32' ? env.LOCALAPPDATA || os.homedir() : path.join(os.homedir(),'Library','Application Support'),'ODS','chat-state')),
   };
   return validateConfig(cfg);
@@ -1367,7 +1433,7 @@ export async function writeStatus(
   return projection;
 }
 
-export function createIngressServer({ token, gatewayPort, deps = defaultDeps, historyLedger = null }) {
+export function createIngressServer({ token, gatewayPort, deps = defaultDeps, historyLedger = null, accessOwnerKey = null }) {
   const historyAborters=new Map();
   return http.createServer((req, res) => {
     let pathname;
@@ -1375,6 +1441,15 @@ export function createIngressServer({ token, gatewayPort, deps = defaultDeps, hi
       pathname = new URL(req.url, "http://pixel-ingress.invalid").pathname;
     } catch {
       sendError(res, 400, "bad request");
+      return;
+    }
+
+    if (pathname === '/v1/model-control') {
+      void handleModelControl(req, res, {ownerKey:typeof accessOwnerKey === 'function' ? accessOwnerKey() : accessOwnerKey});
+      return;
+    }
+    if (pathname === '/v1/access-mode') {
+      void handleAccessMode(req, res, {ownerKey:typeof accessOwnerKey === 'function' ? accessOwnerKey() : accessOwnerKey});
       return;
     }
 
@@ -1469,12 +1544,23 @@ async function handleCancel(req, res, token, gatewayPort, deps, ledger, historyA
     const pending=ledger?.read(user),local=historyAborters?.get(user);
     if(local && pending && local.requestId===pending.requestId) local.controller.abort();
     const aborted=await abortGatewayRun(user, token, gatewayPort, deps);
-    let idle=aborted;
-    if(!idle && pending && ['pending','unknown'].includes(pending.status)) {
-      try {const native=await nativeContextRequest('context',{user},token,gatewayPort,deps);idle=['ready','missing'].includes(native.status)} catch { /* No proof that the old run stopped. */ }
+    if(aborted) {
+      ledger?.interrupt(user,pending?.requestId);
+      sendJson(res,200,{aborted:true});
+      return;
     }
-    const recovered=idle && ledger?.interrupt(user,pending?.requestId);
-    sendJson(res,200,{aborted:aborted || recovered===true});
+    // A restart or a rejected pre-dispatch request may leave only the browser's
+    // interrupted marker. Prove this exact session idle under the history lock;
+    // absence of an abortable run alone is never enough to clear the warning.
+    const release=ledger?.lock(user);
+    try {
+      const native=await nativeContextRequest('context',{user},token,gatewayPort,deps);
+      const idle=['ready','missing'].includes(native.status);
+      const current=ledger?.read(user);
+      const unresolved=current && ['pending','unknown'].includes(current.status);
+      const recovered=idle && (!unresolved || ledger.interrupt(user,current.requestId));
+      sendJson(res,200,{aborted:recovered===true});
+    } finally {release?.();}
   } catch {sendError(res,503,'cancellation-unconfirmed');}
 }
 
@@ -1635,7 +1721,10 @@ export async function start(cfg = configFromEnv(), opts = {}) {
     startupStage = "socket-prepare";
     prepareSocketPath(cfg.socketPath);
     const historyLedger=createChatHistoryLedger(cfg.chatStateDir || path.join(path.dirname(cfg.socketPath),'chat-state'));
-    server = createIngressServer({ token, gatewayPort: cfg.gatewayPort, deps, historyLedger });
+    // Re-read on access requests so credential rotation or first installation
+    // does not restart an active chat. Missing/unsafe key disables only access.
+    const accessOwnerKey = () => readAccessOwnerKey(cfg.accessOwnerKeyFile, opts.euid);
+    server = createIngressServer({ token, gatewayPort: cfg.gatewayPort, deps, historyLedger, accessOwnerKey });
     startupStage = "socket-listen";
     await listenUnix(server, cfg.socketPath);
     startupStage = "runtime-state";

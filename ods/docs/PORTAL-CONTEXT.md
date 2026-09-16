@@ -11,6 +11,24 @@ settings determine when it runs. The dashboard does not start a competing
 summarizer based on a stale percentage or a fixed character count. Context usage
 is a runtime observation, not an estimate derived from the input box.
 
+Measurements are bound to the native session and the confirmed model route.
+Changing the model, its context capacity, or its remote destination invalidates
+the previous measurement. A credential-free route fingerprint distinguishes two
+remote providers serving the same model name. A transient status failure keeps
+the last confirmed identity, but cannot authorize a model switch. An unobserved
+new route reports usage as unavailable until the runtime supplies a measurement;
+it must not display the old model's count or invent zero usage.
+The effective context budget includes the native agent's configured cap (or its
+inherited default), bounded by the model's declared capacity. A previous session
+capacity or the plugin's prompt metadata cannot override a smaller native cap.
+Changing that budget invalidates the persisted measurement; restoring the old
+budget does not restore its old usage count.
+
+Conversation activity is separate from global runtime availability. Another
+chat being active does not make an idle conversation appear to be working. A
+manual compaction may still need to wait for the shared runtime's admission
+lease; that does not erase its history or restart its previous task.
+
 ## Delivery and recovery
 
 - The dashboard sends a versioned history snapshot with each identified turn.

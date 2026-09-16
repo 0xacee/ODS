@@ -10,6 +10,8 @@ Wants=network-online.target
 Type=simple
 User=__PIXEL_SERVICE_USER__
 Group=ods-pixel
+# Keep access to the owner's private control socket after overriding Group.
+SupplementaryGroups=__PIXEL_SERVICE_GID__
 ExecStart=/usr/bin/env node /usr/local/libexec/ods-pixel-ingress.mjs
 Restart=on-failure
 RestartSec=5

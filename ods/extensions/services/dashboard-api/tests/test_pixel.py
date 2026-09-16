@@ -443,6 +443,15 @@ def test_active_runtime_projection_accepts_a_constrained_adaptive_context():
     assert pixel._active_runtime_projection({"activeRuntime": runtime}) == runtime
 
 
+def test_active_remote_runtime_projects_only_a_valid_route_fingerprint():
+    runtime = {"source": "remote-provider", "model": "same-model", "contextLength": 8192,
+               "maxTokens": 1024, "reasoning": False, "routeFingerprint": "a" * 64}
+    assert pixel._active_runtime_projection({"activeRuntime": runtime}) == runtime
+    for invalid in (None, True, "private-url", "a" * 63, "a" * 64 + "\n", "A" * 64):
+        assert pixel._active_runtime_projection({"activeRuntime": {**runtime, "routeFingerprint": invalid}}) is None
+    assert pixel._active_runtime_projection({"activeRuntime": {**runtime, "baseUrl": "https://private.example"}}) is None
+
+
 @pytest.mark.asyncio
 async def test_status_projects_active_model_switch_without_touching_edge(monkeypatch):
     async def active_model_lifecycle(*_args, **_kwargs):

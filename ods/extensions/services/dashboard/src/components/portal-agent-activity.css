@@ -71,3 +71,6 @@
 .portal-agent-change .hljs-tag,.portal-agent-change .hljs-name,.portal-agent-change .hljs-attr,.portal-agent-change .hljs-attribute { color:#ffad66; }
 .portal-agent-change .hljs-operator { color:#77d9ef; }
 .portal-agent-change .hljs-punctuation { color:#c4c8d0; }
+
+.portal-agent-progress { padding:9px 0 4px; color:rgb(var(--theme-text-secondary)); font-size:12px; line-height:1.65; }
+.portal-agent-progress p { margin:0; }

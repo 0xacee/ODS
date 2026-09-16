@@ -2,6 +2,7 @@ import {useEffect,useId,useRef,useState} from 'react'
 import {Check,ChevronDown,Loader2,SlidersHorizontal} from 'lucide-react'
 import {Link} from 'react-router-dom'
 import {useModels} from '../hooks/useModels'
+import PortalModelRecovery from './PortalModelRecovery'
 import './portal-model-selector.css'
 
 export function modelDisplayName(model,compact=false) {
@@ -23,6 +24,12 @@ function details(model) {
   return [model.quantization,Number.isFinite(context) && context>0?`${Number((context/1024).toFixed(1))}K context`:null].filter(Boolean).join(' · ')
 }
 
+function verifiedNativeProfile(model) {
+  const support=model.activationSupport
+  return support?.available===true && support.source==='measured-native' && support.mode==='native-profile'
+    && Number.isInteger(support.contextLength) && support.contextLength===model.contextLength
+}
+
 /** A closed, unused selector must not start model-catalog requests or polling. */
 export default function PortalModelSelector(props) {
   const [started,setStarted]=useState(false)
@@ -37,13 +44,14 @@ export default function PortalModelSelector(props) {
 /** Once opened, retain the hook even while closed so an accepted swap stays observed. */
 function LoadedModelSelector({activeModel='',runtimeSource,busy=false,onSwitchingChange,onSettled}) {
   const catalog=useModels()
-  const {currentModel,activationReadyModel,loading,error,canActivateModels,activationModeError,activationLoading,modelLifecycle,actionLoadingModels=[],loadModel,refresh}=catalog
+  const {currentModel,activationReadyModel,loading,error,canActivateModels,activationModeError,activationLoading,modelLifecycle,actionLoadingModels=[],loadModel,refresh,clearMutationError}=catalog
   const models=Array.isArray(catalog.models)?catalog.models:[]
   const installed=models.filter(model=>model && typeof model.id==='string' && ['loaded','downloaded'].includes(model.status))
   const [open,setOpen]=useState(true),[confirmId,setConfirmId]=useState(null),[pending,setPending]=useState(false),[localError,setLocalError]=useState('')
+  const [recoveryPending,setRecoveryPending]=useState(false),[recoveryBusy,setRecoveryBusy]=useState(false)
   const root=useRef(null),trigger=useRef(null),list=useRef(null),mounted=useRef(true),submitLock=useRef(false)
   const id=useId(),remote=runtimeSource==='remote-provider',local=runtimeSource==='local-switchboard'
-  const switching=pending || Boolean(activationLoading) || Boolean(modelLifecycle?.active && modelLifecycle.operation==='model_activation')
+  const switching=pending || recoveryBusy || Boolean(activationLoading) || Boolean(modelLifecycle?.active && modelLifecycle.operation==='model_activation')
   const current=local?models.find(model=>model.id===currentModel):null
   const selectedId=local && activationReadyModel===currentModel?currentModel:null
   const activeName=current || activeModel
@@ -66,31 +74,38 @@ function LoadedModelSelector({activeModel='',runtimeSource,busy=false,onSwitchin
     else list.current?.querySelector('[aria-checked=true],button:not(:disabled)')?.focus()
   },[open,confirmId,loading])
   function unavailable(model) {
+    if(switching || modelLifecycle?.active || actionLoadingModels.length)return 'A model operation is in progress.'
+    if(recoveryPending)return 'Recover the interrupted model switch before loading another model.'
     if(remote)return 'This conversation uses a remote provider. Choose its model in provider settings.'
     if(!local)return 'The conversation’s model source is not confirmed. Review Models before switching.'
     if(busy)return 'Wait for the active task to finish before switching models.'
-    if(switching || modelLifecycle?.active || actionLoadingModels.length)return 'A model operation is in progress.'
     if(!canActivateModels)return activationModeError || 'Model switching is unavailable for this runtime.'
-    if(model.fitsVram!==true && !model.recommended)return 'Review this model’s memory requirements in Models before loading it.'
+    if(model.fitsVram!==true && !model.recommended && !verifiedNativeProfile(model))return 'Review this model’s memory requirements in Models before loading it.'
     return ''
   }
   async function activate() {
     if(!confirmation || unavailable(confirmation) || submitLock.current)return
     submitLock.current=true;setPending(true);setLocalError('');setConfirmId(null);onSwitchingChange?.(true)
-    try {await loadModel(confirmation.id)}
+    try {
+      const contextLength=Number(confirmation.contextLength)
+      if(!Number.isSafeInteger(contextLength) || contextLength<4096 || contextLength>10_000_000)
+        throw new Error('The model context is unavailable. Refresh the model list before switching.')
+      // Activate exactly the context shown in the confirmation, not a catalog default.
+      await loadModel(confirmation.id,{contextLength})
+    }
     catch (failure) {if(mounted.current)setLocalError(failure?.message || 'The model could not be activated.')}
     finally {
       submitLock.current=false
       if(mounted.current){setPending(false);onSettled?.()}
     }
   }
-  const reason=confirmation?unavailable(confirmation):remote?'This conversation uses a remote provider.':!local?'The conversation’s model source is not confirmed.':busy?'The current task is still running.':!canActivateModels && !loading?activationModeError:''
+  const reason=switching?'':confirmation?unavailable(confirmation):remote?'This conversation uses a remote provider.':!local?'The conversation’s model source is not confirmed.':busy?'The current task is still running.':!canActivateModels && !loading?activationModeError:''
   const showActiveFallback=activeModel && !current
   return <div ref={root} className="portal-model-selector">
     <button ref={trigger} type="button" className="portal-model-trigger" aria-label={`Choose model: ${modelDisplayName(activeName,true)}`} aria-haspopup="dialog" aria-expanded={open} aria-controls={open?id:undefined} title={modelDisplayName(activeName)} onClick={()=>{if(open)close();else {setOpen(true);void refresh()}}}>
       {switching && <Loader2 size={12} className="portal-model-loading" aria-hidden="true"/>}<span>{modelDisplayName(activeName,true)}</span><ChevronDown size={12} aria-hidden="true"/>
     </button>
-    {open && <section id={id} role="dialog" aria-label="Choose model" className="portal-model-menu">
+    <section id={id} role="dialog" aria-label="Choose model" className="portal-model-menu" hidden={!open} style={!open?{display:'none'}:undefined}>
       <header><strong>{confirmation?'Switch model':'Model'}</strong>{switching && <span role="status">Switching…</span>}</header>
       {confirmation?<div className="portal-model-confirmation">
         <p>Switch to <strong>{modelDisplayName(confirmation)}</strong>?</p><small>This changes the active model across ODS.</small>
@@ -114,6 +129,7 @@ function LoadedModelSelector({activeModel='',runtimeSource,busy=false,onSwitchin
         {(localError || error) && <p role="alert" className="portal-model-notice">{localError || error} <button type="button" onClick={()=>void refresh()}>Refresh</button></p>}
         <Link className="portal-model-manage" to={remote?'/pixel/settings?section=connections':'/models'}><SlidersHorizontal size={14} aria-hidden="true"/>{remote?'Provider settings':'Manage models'}</Link>
       </>}
-    </section>}
+      <PortalModelRecovery active={open} refreshKey={`${pending}:${Boolean(activationLoading)}`} onPendingChange={setRecoveryPending} onBusyChange={setRecoveryBusy} onRecovered={()=>{setLocalError('');clearMutationError();void refresh();onSettled?.()}}/>
+    </section>
   </div>
 }

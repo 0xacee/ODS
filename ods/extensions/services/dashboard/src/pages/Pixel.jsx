@@ -10,7 +10,7 @@ import {useLocalProfile} from '../lib/localProfile'
 import { pixelHeaderPose, pixelReplyPose } from '../lib/pixelMascotState'
 import PixelComposerTools from '../components/PixelComposerTools'
 import PortalAgentDock from '../components/PortalAgentDock'
-import {ACTIVE_TEAMS,agentCommand,teamMetadata,teamRequest,teamSummary,usePortalTeams} from '../lib/portalTeams'
+import {ACTIVE_TEAMS,agentCommand,teamMetadata,teamProjectTasks,teamRequest,teamSummary,usePortalTeams} from '../lib/portalTeams'
 import PixelTextFileInput from '../components/PixelTextFileInput'
 import PixelDraftPreview from '../components/PixelDraftPreview'
 import PixelDictation from '../components/PixelDictation'
@@ -27,8 +27,9 @@ import PortalModelSelector from '../components/PortalModelSelector'
 import PortalAgentActivity from '../components/PortalAgentActivity'
 import PortalStreamingText from '../components/PortalStreamingText'
 import PortalResponseActions from '../components/PortalResponseActions'
+import PortalResponseError from '../components/PortalResponseError'
 import {publicationDisplayText} from '../lib/publicationDisplay'
-import {parseQuestionsFrame, questionMetadata} from '../lib/pixelQuestions'
+import {isQuestionAnswer, parseQuestionsFrame, questionMetadata} from '../lib/pixelQuestions'
 import PixelTurnNavigation from '../components/PixelTurnNavigation'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
 import PortalWorkspace from '../components/PortalWorkspace'
@@ -68,7 +69,7 @@ const MARKDOWN_COMPONENTS = {
   pre: ({ children }) => <pre className="my-2 overflow-x-auto rounded border border-theme-border bg-theme-bg/70 [&>code]:block [&>code]:p-2">{children}</pre>,
   table: ({ children }) => (
     <div role="region" aria-label="Scrollable table" tabIndex={0} className="my-3 max-w-full overflow-x-auto rounded border border-theme-border">
-      <table className="w-full border-collapse text-left text-sm">{children}</table>
+      <table className="pixel-response-table w-full border-collapse text-left text-sm">{children}</table>
     </div>
   ),
   th: ({ children, style }) => <th scope="col" style={style} className="border-b border-theme-border bg-theme-bg/70 px-3 py-2 font-semibold">{children}</th>,
@@ -548,6 +549,7 @@ export default function Pixel({ systemStatus = null }) {
   const [activityRefresh, setActivityRefresh] = useState(0)
   const [workingElapsedSeconds, setWorkingElapsedSeconds] = useState(0)
   const [agentRuntime, setAgentRuntime] = useState(null)
+  const [contextRuntime, setContextRuntime] = useState(null)
   const [modelSupport, setModelSupport] = useState(null)
   const [modelSwitching,setModelSwitching]=useState(false)
   const [modelStatusRefresh,setModelStatusRefresh]=useState(0)
@@ -610,22 +612,24 @@ export default function Pixel({ systemStatus = null }) {
           if(JSON.stringify(message)===JSON.stringify(next))return message
           changed=true;return next
         }
-        if(message.content===content && message.teamId===team.id)return message
-        changed=true;return {...message,teamId:team.id,content}
+        const projectTasks=teamProjectTasks(team,message.projectTasks)
+        if(message.content===content && message.teamId===team.id
+          && JSON.stringify(message.projectTasks || [])===JSON.stringify(projectTasks))return message
+        changed=true;return {...message,teamId:team.id,content,...(projectTasks.length ? {projectTasks} : {})}
       })
       return changed ? next : previous
     })
   },[teams.teams])
 
-  const activeModel = agentRuntime?.model || systemStatus?.inference?.loadedModel || systemStatus?.model?.name || ''
+  const activeModel = agentRuntime?.model || (contextRuntime ? '' : systemStatus?.inference?.loadedModel || systemStatus?.model?.name || '')
   const activeContext = agentRuntime ? formatContext(agentRuntime.contextLength) : ''
   const currentPreview=preview ? latestProjectPublication(preview,messages) : null
   const previewAccess = resolvePreviewAccess(currentPreview)
   const restoredActive = interrupted && !sending && restoredActivity === 'active'
   const restoredChecking = interrupted && !sending && restoredActivity === 'checking'
-  const contextCapacity=Number(agentRuntime?.contextLength || systemStatus?.inference?.contextSize || systemStatus?.model?.contextLength) || null
-  const contextRuntimeKey=activeModel?`${agentRuntime?.source || ''}:${activeModel}:${contextCapacity || ''}`:''
-  const contextControl=usePortalContext({chatId:chatIdRef.current,runtimeKey:contextRuntimeKey,capacity:contextCapacity,
+  const contextCapacity=Number(contextRuntime?.contextLength || systemStatus?.inference?.contextSize || systemStatus?.model?.contextLength) || null
+  const contextControl=usePortalContext({chatId:chatIdRef.current,
+    runtimeIdentity:{model:contextRuntime?.model || activeModel,source:contextRuntime?.source || '',routeFingerprint:contextRuntime?.routeFingerprint},capacity:contextCapacity,
     initialRequestId:compactionRequestRef.current,
     blocked:sending || modelSwitching || stopping || teams.busy || (interrupted && restoredActivity!=='terminal') || status!=='available',
     onPendingChange:(id,chatId)=>{
@@ -728,12 +732,18 @@ export default function Pixel({ systemStatus = null }) {
         const response = await fetch('/api/pixel/status', { signal: controller.signal })
         if (!response.ok) throw new Error('status unavailable')
         const data = await response.json()
+        if (stopped) return
         const runtime = data?.runtime
         const runtimeKeys = runtime && typeof runtime === 'object' && !Array.isArray(runtime)
           ? Object.keys(runtime).sort().join('\n')
           : ''
-        const validRemoteRuntime = runtimeKeys === ['contextLength', 'maxTokens', 'model', 'reasoning', 'source'].join('\n')
+        const validRemoteRuntime = [
+          ['contextLength', 'maxTokens', 'model', 'reasoning', 'source'].join('\n'),
+          ['contextLength', 'maxTokens', 'model', 'reasoning', 'routeFingerprint', 'source'].join('\n'),
+        ].includes(runtimeKeys)
           && runtime.source === 'remote-provider'
+          && (runtime.routeFingerprint === undefined || typeof runtime.routeFingerprint === 'string'
+            && runtime.routeFingerprint.length === 64 && /^[a-f0-9]{64}$/.test(runtime.routeFingerprint))
           && Number.isInteger(runtime.maxTokens)
           && runtime.maxTokens >= 1
           && runtime.maxTokens <= runtime.contextLength
@@ -741,8 +751,7 @@ export default function Pixel({ systemStatus = null }) {
           && runtime.contextLength >= 4096
         const validLocalRuntime = runtimeKeys === ['contextLength', 'model', 'source'].join('\n')
           && runtime.source === 'local-switchboard'
-        setAgentRuntime(
-          (validRemoteRuntime || validLocalRuntime)
+        const confirmedRuntime = (validRemoteRuntime || validLocalRuntime)
           && typeof runtime.model === 'string'
           && runtime.model.length > 0
           && runtime.model.length <= 256
@@ -751,7 +760,11 @@ export default function Pixel({ systemStatus = null }) {
           && runtime.contextLength <= 10_000_000
             ? runtime
             : null
-        )
+        // Keep the last confirmed identity only for measured context. Model
+        // activation needs a current source proof; a missing projection must
+        // never authorize switching based on the previous local runtime.
+        setAgentRuntime(confirmedRuntime)
+        if (confirmedRuntime) setContextRuntime(confirmedRuntime)
         const support = data?.modelSupport
         const supportKeys = support && typeof support === 'object' && !Array.isArray(support)
           ? Object.keys(support).sort().join('\n')
@@ -781,7 +794,8 @@ export default function Pixel({ systemStatus = null }) {
             : 'unavailable')
         setStatusDetail(typeof data.detail === 'string' ? data.detail : '')
       } catch (error) {
-        if (error?.name !== 'AbortError') {
+        if (!stopped && error?.name !== 'AbortError') {
+          setAgentRuntime(null)
           setStatus('unavailable')
           setStatusDetail('Could not reach Pixel backend')
         }
@@ -1376,9 +1390,11 @@ export default function Pixel({ systemStatus = null }) {
               row?.scrollIntoView?.({block:'start', behavior:'auto'})
               row?.focus?.({preventScroll:true})
             }}/>
-            <PixelAdvice canInsert={!sending && !contextControl.busy} onInsert={text => setInput(current => current ? `${current}\n\n${text}` : text)} />
             <PixelHandoffApproval label="Approvals" />
-            <PixelProviderScopes chatId={chatIdRef.current} sending={sending} />
+            <details className="pixel-chat-options-advanced"><summary>Advanced tools</summary><div>
+              <PixelAdvice canInsert={!sending && !contextControl.busy} onInsert={text => setInput(current => current ? `${current}\n\n${text}` : text)} />
+              <PixelProviderScopes chatId={chatIdRef.current} sending={sending} />
+            </div></details>
           </div></details>
           <button type="button" aria-label="Workspace" aria-expanded={workspaceOpen} onClick={() => { setWorkspaceOpen(value => !value); setPreviewCollapsed(false) }} className="inline-flex items-center gap-1.5 bg-transparent px-2.5 py-1.5 text-xs text-theme-text-secondary hover:text-theme-text">
             <PanelRightOpen size={14}/><span>Workspace</span>
@@ -1477,6 +1493,7 @@ export default function Pixel({ systemStatus = null }) {
           </div>
         )}
         {messages.map((message, index) => {
+          if (isQuestionAnswer(messages,index)) return null
           const displayedContent=message.role==='assistant' ? publicationDisplayText(message.content,message.publication) : message.content
           return (
           <div key={index} data-pixel-message-index={index} tabIndex={-1} data-pixel-response={message.role === 'assistant' ? '' : undefined} className={`mx-auto flex min-w-0 w-full max-w-5xl ${message.role === 'user' ? 'justify-end gap-2' : 'justify-start'}`}>
@@ -1485,7 +1502,7 @@ export default function Pixel({ systemStatus = null }) {
               message.role === 'user'
                 ? 'bg-theme-card text-theme-text'
                 : message.status === 'error'
-                  ? 'border border-red-500/25 bg-red-500/10 text-red-200'
+                  ? 'bg-transparent text-theme-text-secondary'
                   : message.status === 'stopped'
                     ? 'pixel-stopped-response bg-transparent text-theme-text-secondary'
                   : 'bg-transparent text-theme-text-secondary'
@@ -1507,7 +1524,7 @@ export default function Pixel({ systemStatus = null }) {
               {message.role === 'assistant' && message.content ? (
                 <>
                   {message.publication && <PixelSnapshotChanges preview={message.publication} before={message.beforePublication} variant="summary" onPreview={()=>openPublication(message.publication,'preview')} onReview={path=>openPublication(message.publication,'review',path)}/>}
-                  {!message.questions && (displayedContent || message.status==='streaming') && <PortalStreamingText key={message.revealResponse || chatIdRef.current} active={message.status==='streaming'} animate={Boolean(message.revealResponse) || message.status==='streaming'} instant={['error','stopped','recovering'].includes(message.status)} onReveal={chatScroll.onContentResize} components={MARKDOWN_COMPONENTS}>{displayedContent}</PortalStreamingText>}
+                  {!message.questions && (displayedContent || message.status==='streaming') && (message.status==='error' ? <PortalResponseError content={displayedContent}/> : <PortalStreamingText key={message.revealResponse || chatIdRef.current} active={message.status==='streaming'} animate={Boolean(message.revealResponse) || message.status==='streaming'} instant={['stopped','recovering'].includes(message.status)} onReveal={chatScroll.onContentResize} components={MARKDOWN_COMPONENTS}>{displayedContent}</PortalStreamingText>)}
                   <OperationsApprovalCard content={message.content} />
                   {!message.questions && message.status!=='streaming' && <PortalResponseActions content={displayedContent}/>}
                 </>
@@ -1516,8 +1533,7 @@ export default function Pixel({ systemStatus = null }) {
               )}
               {message.role === 'assistant' && message.questions && <PixelQuestions questions={message.questions} answers={message.questionDraft} answered={index<messages.length-1} disabled={message.goalMode ? message.goalState!=='waiting' : isDisabled || sending || restoredActive || restoredChecking} onChange={questionDraft=>setMessages(previous=>previous.map((item,i)=>i===index?{...item,questionDraft}:item))} onSubmit={answer=>message.goalMode ? teams.answer(message.teamId,'0',message.questionDraft) : sendMessage(message.task?.goal ? continueGoal(messages,index,answer) : answer)}/>}
               {message.goalMode && message.goalNotice && <p role="status" className="mt-3 text-xs text-amber-300">{message.goalNotice}</p>}
-              {message.goalMode && ACTIVE_TEAMS.has(message.goalState) && <button type="button" onClick={()=>teams.stop(message.teamId)} className="mt-3 mr-2 rounded-lg border border-theme-border px-3 py-2 text-xs">{message.goalState==='stopping'?'Confirm stop':'Stop goal'}</button>}
-              {message.teamId && <button type="button" onClick={()=>openAgents({teamId:message.teamId,agentId:'0'})} className="mt-3 rounded-lg border border-theme-border px-3 py-2 text-xs hover:bg-theme-border/30">{message.goalMode?'View goal history':'View agents and conversations'}</button>}
+              {message.teamId && !(message.goalMode && ACTIVE_TEAMS.has(message.goalState)) && <button type="button" onClick={()=>openAgents({teamId:message.teamId,agentId:'0'})} className={message.goalMode?"mt-3 border-0 bg-transparent px-0 py-2 text-xs hover:underline":"mt-3 rounded-lg border border-theme-border px-3 py-2 text-xs hover:bg-theme-border/30"}>{message.goalMode?'View goal history':'View agents and conversations'}</button>}
 
             </div>
             {message.role === 'user' && <UserAvatar profile={profile} className="pixel-user-character"/>}
@@ -1556,11 +1572,11 @@ export default function Pixel({ systemStatus = null }) {
           />
           <div className="pixel-composer-actions">
           <PixelDictation disabled={isDisabled} conversationId={chatIdRef.current} onInsert={insertComposerText}/>
-          {teams.busy && teams.teams[0] ? <button type="button" onClick={()=>teams.teams[0].mode==='goal'?teams.stop(teams.teams[0].id):openAgents({teamId:teams.teams[0].id,agentId:'0'})} title={teams.teams[0].mode==='goal'?'Stop goal':'View active agent team'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-theme-border text-theme-text"><Square size={16}/></button> : sending || restoredActive ? (
+          {teams.busy && teams.teams[0] ? <button type="button" onClick={()=>teams.teams[0].mode==='goal'?teams.stop(teams.teams[0].id):openAgents({teamId:teams.teams[0].id,agentId:'0'})} title={teams.teams[0].mode==='goal'?'Stop goal':'View active agent team'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border-0 text-theme-text"><Square size={16}/></button> : sending || restoredActive ? (
             <button
               onClick={stopStreaming}
               disabled={stopping}
-              className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-theme-border bg-theme-surface text-theme-text transition hover:bg-theme-surface-hover disabled:cursor-wait disabled:opacity-70"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-xl border-0 bg-theme-surface text-theme-text transition hover:bg-theme-surface-hover disabled:cursor-wait disabled:opacity-70"
               title={stopping ? 'Stopping' : 'Stop'}
             >
               {stopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
@@ -1582,12 +1598,10 @@ export default function Pixel({ systemStatus = null }) {
             {contextControl.resolving && <Loader2 size={13} className="animate-spin" aria-hidden="true"/>}
             <span>{contextControl.recoveryNotice || 'The previous turn could not be confirmed. Resolve it before continuing; your conversation is preserved.'}</span>
             <button type="button" disabled={!contextControl.canResolve} onClick={()=>void contextControl.resolveInterrupted()}>Resolve interrupted turn</button>
-            <button type="button" disabled={contextControl.resolving} onClick={()=>void contextControl.refresh(true)}>Check history status</button>
           </div>}
           {contextControl.notice && <div className="portal-context-status" role={contextControl.phase==='failed'?'alert':'status'}>
             {contextControl.busy && contextControl.phase!=='unknown' && <Loader2 size={13} className="animate-spin" aria-hidden="true"/>}
             <span>{contextControl.notice}</span>
-            {['unknown','busy','failed','unavailable'].includes(contextControl.phase) && <button type="button" onClick={()=>void contextControl.refresh(true)}>Check status</button>}
             {['unknown','unavailable'].includes(contextControl.phase) && <button type="button" onClick={compactConversation}>Retry request</button>}
           </div>}
           <div className="pixel-composer-secondary">
@@ -1596,8 +1610,8 @@ export default function Pixel({ systemStatus = null }) {
               <PixelDraftPreview key={`draft-preview-${chatIdRef.current}`} input={command?.task ?? goalDraft?.task ?? input}/>
             </PixelComposerTools>
             <div className="pixel-composer-limits">
+              <PortalModelSelector activeModel={activeModel} runtimeSource={agentRuntime?.source} busy={sending || restoredActive || restoredChecking || stopping || teams.busy || contextControl.busy || status!=='available'} onSwitchingChange={setModelSwitching} onSettled={()=>setModelStatusRefresh(value=>value+1)}/>
               <PortalContextRing capacityLabel={activeContext} context={contextControl.context} capacity={contextControl.observedCapacity || agentRuntime?.contextLength} pending={sending || restoredActive || contextControl.busy} onRefresh={()=>void contextControl.refresh()}/>
-              <PortalModelSelector activeModel={activeModel} runtimeSource={agentRuntime?.source} busy={sending || restoredActive || restoredChecking || stopping || teams.busy || contextControl.busy || status==='switching'} onSwitchingChange={setModelSwitching} onSettled={()=>setModelStatusRefresh(value=>value+1)}/>
             </div>
           </div>
           <div className="mt-1.5 flex items-center justify-between gap-3 px-1 text-[10px] text-theme-text-muted/70">
@@ -1618,6 +1632,7 @@ export default function Pixel({ systemStatus = null }) {
           <aside aria-label="Preview panel" style={{'--preview-width':`${previewWidth}px`}} className={`pixel-preview-panel ${previewCollapsed ? 'is-collapsed' : ''} flex shrink-0 flex-col border-theme-border bg-theme-bg`}>
             {!previewCollapsed && <PanelResizeHandle width={previewWidth} onResize={setPreviewWidth} label="Resize preview panel" container=".pixel-chat-preview-layout" minimum={240} />}
             <PortalWorkspace key={chatIdRef.current} preview={currentPreview} access={previewAccess}
+              task={[...messages].reverse().find(message=>message.role==='assistant')?.task} working={sending || restoredActive}
               agents={teams} renderApproval={content=><OperationsApprovalCard content={content}/>}
               before={[...messages].reverse().find(message=>message.publication?.siteId===currentPreview?.siteId)?.beforePublication || null}
               title={`Interactive ${displayName} preview`} request={workspaceRequest?.chatId===chatIdRef.current?workspaceRequest:null} onRequestHandled={handleWorkspaceRequest} refresh={previewRefresh}

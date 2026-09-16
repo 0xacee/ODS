@@ -63,6 +63,12 @@
         "type": "integer",
         "minimum": 4096
       },
+      "modelRouteFingerprint": {
+        "type": "string",
+        "minLength": 64,
+        "maxLength": 64,
+        "pattern": "^[a-f0-9]{64}$"
+      },
       "leanPrompt": {
         "type": "boolean"
       },

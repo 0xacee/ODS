@@ -65,6 +65,11 @@ function fakeGateway({
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
+      if (req.url === '/health') {
+        res.writeHead(200, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({ok:true}));
+        return;
+      }
       const captured = {
         method: req.method,
         url: req.url,
@@ -878,6 +883,23 @@ test("SSE releases content-free task observations only in the matching terminal 
       }
     } finally { await new Promise(resolve=>srv.close(resolve)); await new Promise(resolve=>gw.server.close(resolve)); }
   }
+});
+
+test('terminal SSE preserves v4 verified project associations without a web publication',async()=>{
+  const stamp='2026-09-16T10:00:00.000Z';
+  const project={schemaVersion:1,kind:'ods-workspace-project',relativeDirectory:'Playground/http-method-smoke',observedAt:stamp};
+  const task={schemaVersion:4,runId:TEST_RUN_ID,startedAt:stamp,finishedAt:stamp,state:'completed',calls:0,failures:0,blocked:0,truncated:false,activities:[],events:[],context:null,goal:null,projects:[project]};
+  const gw=await fakeGateway({verification:{status:'none',task}});
+  const srv=await startIngress({gatewayPort:gw.port});
+  try {
+    const response=await request(srv,'POST','/v1/chat/completions',{body:JSON.stringify({stream:true,messages:[{role:'user',content:'test'}]}),headers:{'Content-Type':'application/json'}});
+    assert.equal(response.status,200);
+    const frames=response.body.split('\n').filter(line=>line.startsWith('data: {')).map(line=>JSON.parse(line.slice(6)));
+    assert.equal(frames.filter(frame=>frame.pixel_task).length,1);
+    assert.deepEqual(frames.at(-1).pixel_task,task);
+    assert.equal(frames.at(-1).choices[0].finish_reason,'stop');
+    assert.equal(frames.at(-1).pixel,undefined);
+  } finally {await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));}
 });
 
 test('question cards come only from validated pending verification on the terminal frame', async () => {

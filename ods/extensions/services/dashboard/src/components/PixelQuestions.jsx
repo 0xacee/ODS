@@ -11,8 +11,11 @@ export default function PixelQuestions({questions,answers={},onChange,onSubmit,d
   const answer=answers[question.id] || ''
   const isCustom=custom[question.id] || (Boolean(answer) && !question.options.includes(answer))
   const complete=answersMessage(questions,answers)
-  if (answered) return <div className="mt-3 inline-flex items-center gap-2 text-xs text-theme-text-muted"><Check size={14}/>Answered · continuing in this conversation</div>
-  return <section aria-label="Questions for you" className="portal-question-card mt-3 w-full min-w-0 rounded-2xl border border-theme-border bg-theme-card/95 p-4 shadow-lg sm:p-5">
+  if (answered) return <section aria-label="Your answers" className="portal-question-card portal-question-answered mt-3 w-full min-w-0 rounded-2xl border border-theme-border p-4 sm:p-5">
+    <div className="mb-3 inline-flex items-center gap-2 text-xs text-theme-text-muted"><Check size={14}/>Answered</div>
+    <dl className="space-y-3">{questions.map(item=><div key={item.id}><dt className="text-xs text-theme-text-muted">{item.question}</dt><dd className="mt-1 whitespace-pre-wrap text-sm text-theme-text">{answers[item.id]?.trim() || 'Answer unavailable'}</dd></div>)}</dl>
+  </section>
+  return <section aria-label="Questions for you" className="portal-question-card mt-3 w-full min-w-0 rounded-2xl border border-theme-border p-4 sm:p-5">
     <div className="mb-4 flex items-center justify-between gap-3 text-xs text-theme-text-muted">
       <span className="inline-flex items-center gap-2"><MessageCircle size={15} className="text-theme-accent-light"/>Your input</span>
       <span aria-label="Question progress">{index+1} of {questions.length}</span>

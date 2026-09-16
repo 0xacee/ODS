@@ -1,5 +1,5 @@
 /* Portal styling for the public plan, inspired by AI CSS's collapsible task list. */
-.portal-task-plan { width:100%; max-width:620px; min-width:0; margin:0 0 16px; padding:10px 12px; border:1px solid rgb(var(--theme-text) / .08); border-radius:12px; background:rgb(var(--theme-card) / .36); color:rgb(var(--theme-text-secondary)); font-size:12px; line-height:1.5; }
+.portal-task-plan { width:100%; max-width:620px; min-width:0; margin:0 0 16px; padding:10px 12px; border:0; border-radius:12px; background:rgb(var(--theme-card) / .36); color:rgb(var(--theme-text-secondary)); font-size:12px; line-height:1.5; }
 .portal-task-list-toggle { display:flex; align-items:center; width:100%; min-height:28px; gap:8px; padding:0; border:0; background:transparent; color:inherit; text-align:left; }
 .portal-task-list-symbol { display:inline-flex; flex-shrink:0; align-items:center; color:rgb(var(--theme-text-muted)); }
 .portal-task-plan[data-status=completed] .portal-task-list-symbol { color:var(--portal-plan-complete,#65bda0); }

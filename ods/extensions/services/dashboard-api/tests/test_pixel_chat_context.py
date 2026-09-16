@@ -85,6 +85,17 @@ def test_routes_require_auth_and_compact_requires_attempt():
         pixel.ChatResultRequest(chat_id="safe")
 
 
+def test_public_context_retains_route_identity_without_remote_connection_details():
+    value = state()
+    value["model"].update(routeFingerprint="a" * 64, baseUrl="https://private.example", apiKey="secret")
+    result = public_context(value)
+    assert result["model"] == {**state()["model"], "routeFingerprint": "a" * 64}
+    for invalid in (True, "a" * 63, "a" * 64 + "\n", "A" * 64, "https://private.example"):
+        value["model"]["routeFingerprint"] = invalid
+        with pytest.raises(ValidationError):
+            public_context(value)
+
+
 def test_compaction_is_started_once_and_context_reads_never_start_model_work(store, monkeypatch):
     calls = []
     value = state()

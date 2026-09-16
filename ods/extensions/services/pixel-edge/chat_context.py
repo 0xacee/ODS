@@ -32,6 +32,10 @@ def project_context(value):
                 or context is not None and context["window"] != model["contextWindow"]):
             raise ValueError("invalid model")
         result["model"] = {key: model[key] for key in ("id", "provider", "contextWindow")}
+        if "routeFingerprint" in model:
+            if not _text(model["routeFingerprint"], 64, r"^[a-f0-9]{64}$"):
+                raise ValueError("invalid model route")
+            result["model"]["routeFingerprint"] = model["routeFingerprint"]
     compact = value.get("compaction")
     if (not isinstance(compact, dict) or compact.get("status") not in {"idle", "running", "completed", "skipped", "failed", "unknown"}
             or not _number(compact.get("count"))):

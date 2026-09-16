@@ -25,6 +25,15 @@ def state(status="idle", request_id=None):
 
 
 class TestContextRoutes(BaseEdgeTest):
+    def test_model_route_projection_is_bounded_and_does_not_expose_connection_details(self):
+        value = state()
+        value["model"].update(routeFingerprint="a" * 64, baseUrl="https://private.example", apiKey="secret")
+        self.assertEqual(project_context(value)["model"], {**state()["model"], "routeFingerprint": "a" * 64})
+        for invalid in (None, True, "a" * 63, "a" * 64 + "\n", "A" * 64, "https://private.example"):
+            value["model"]["routeFingerprint"] = invalid
+            with self.assertRaises(ValueError):
+                project_context(value)
+
     async def test_auth_exact_bounded_input_and_no_history_route(self):
         for route in ("context", "compact"):
             async with self.client.post(f"http://localhost/v1/chat/{route}", json={"user": "chat"}) as response:

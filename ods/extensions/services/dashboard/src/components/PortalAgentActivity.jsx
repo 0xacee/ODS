@@ -3,6 +3,7 @@
 import {useEffect, useId, useLayoutEffect, useRef, useState} from 'react'
 import {Check, ChevronDown, Circle, FileSearch, FilePenLine, Globe2, Terminal, AlertCircle, Layers, MessageSquare, Wrench} from 'lucide-react'
 import {parseTaskActivity} from '../lib/pixelTaskActivity'
+import {activityProgressRows} from '../lib/portalActivityProgress'
 import PortalActivityChange, {ActivityChangeCounts} from './PortalActivityChange'
 import PortalSiteIcon from './PortalSiteIcon'
 import './portal-agent-activity.css'
@@ -47,6 +48,7 @@ export default function PortalAgentActivity({task:raw,active=false,status}) {
   const stopped=status==='stopped'
   const [open,setOpen]=useState(active||failed), [now,setNow]=useState(Date.now()), [fade,setFade]=useState({top:false,bottom:false})
   const events=task?.events || task?.activities.map((row,i)=>({sequence:i+1,kind:row.kind,state:row.blocked?'blocked':row.failures?'failed':active?'running':'completed',startedAt:task.startedAt,finishedAt:null})) || []
+  const progressRows=activityProgressRows(events,typeof navigator==='undefined'?'en':navigator.language)
   const start=task?.startedAt?Date.parse(task.startedAt):mountedAt.current
   const seconds=((task?.finishedAt?Date.parse(task.finishedAt):now)-start)/1000
   const current=[...events].reverse().find(event=>event.state==='running')
@@ -81,7 +83,7 @@ export default function PortalAgentActivity({task:raw,active=false,status}) {
     </button>
     <div id={`${id}-log`} role="region" aria-labelledby={`${id}-trigger`} hidden={!open}>
       <div ref={viewport} className="portal-agent-viewport" tabIndex={events.length?0:undefined} aria-label="Activity history" data-fade-top={fade.top} data-fade-bottom={fade.bottom} onScroll={()=>{const el=viewport.current;follow.current=el.scrollTop+el.clientHeight>=el.scrollHeight-12;refreshFade()}}>
-        <ol ref={content} className="portal-agent-stream" aria-label="Execution steps">{events.map(event=><ActivityRow key={event.sequence} event={event} active={active}/>)}</ol>
+        <ol ref={content} className="portal-agent-stream" aria-label="Execution steps">{progressRows.map(row=>row.event?<ActivityRow key={row.event.sequence} event={row.event} active={active}/>:<li key={row.id} className="portal-agent-progress"><p>{row.text}</p></li>)}</ol>
         {!events.length && !active && <p className="portal-agent-empty">No tool activity was recorded for this response.</p>}
         {task?.calls>events.length && <p className="portal-agent-empty">Showing the latest {events.length} of {task.calls} recorded actions.</p>}
       </div>
