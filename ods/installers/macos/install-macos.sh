@@ -1054,6 +1054,21 @@ _set_installer_python_cmd() {
     fi
 }
 
+_ensure_macos_agent_python() {
+    local bootstrap_python="$1"
+    local venv_dir="${INSTALL_DIR}/.venv/host-agent"
+    local runtime="${venv_dir}/bin/python"
+    if [[ ! -x "$runtime" ]]; then
+        "$bootstrap_python" -m venv "$venv_dir" >>"$ODS_LOG_FILE" 2>&1 || return 1
+    fi
+    if ! "$runtime" -c 'import yaml, huggingface_hub, hf_xet' >/dev/null 2>&1; then
+        "$runtime" -m pip install --quiet pyyaml 'huggingface_hub[hf_xet]>=0.27' \
+            >>"$ODS_LOG_FILE" 2>&1 || return 1
+    fi
+    "$runtime" -c 'import yaml, huggingface_hub, hf_xet' >/dev/null 2>&1 || return 1
+    AGENT_PYTHON="$runtime"
+}
+
 _ensure_macos_pyyaml() {
     local pycmd=""
     if declare -f ods_detect_python_cmd >/dev/null 2>&1; then
@@ -2990,14 +3005,13 @@ if [[ -f "${INSTALL_DIR}/bin/ods-host-agent.py" ]] && [[ -n "$AGENT_PYTHON" ]]; 
     if ! command -v docker >/dev/null 2>&1; then
         ai_warn "docker not found on PATH at install time — host agent will fail to start until Docker Desktop is launched and 'docker' resolves on your shell PATH"
     fi
-    if ! "$AGENT_PYTHON" -c "import huggingface_hub, hf_xet" >/dev/null 2>&1; then
-        ai "Installing ODS host-agent model downloader dependencies..."
-        if "$AGENT_PYTHON" -m pip install --user -q "huggingface_hub[hf_xet]>=0.27" 2>&1 | tee -a "$ODS_LOG_FILE" >/dev/null; then
-            ai_ok "ODS host-agent Hugging Face downloader ready"
-        else
-            ai_warn "Could not install huggingface_hub[hf_xet]; model manager downloads may fail on Xet-backed Hugging Face models."
-        fi
+    ai "Preparing isolated ODS host-agent Python runtime..."
+    if ! _ensure_macos_agent_python "$AGENT_PYTHON"; then
+        ai_err "Could not prepare host-agent Python dependencies. See $ODS_LOG_FILE."
+        exit 1
     fi
+    ODS_AGENT_PORT="$(read_env_value "$INSTALL_DIR/.env" "ODS_AGENT_PORT")"
+    ODS_AGENT_PORT="${ODS_AGENT_PORT:-7710}"
     cat > "$ODS_AGENT_PLIST" <<AGENT_PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
