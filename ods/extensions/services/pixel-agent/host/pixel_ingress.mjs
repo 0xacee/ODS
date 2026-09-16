@@ -17,6 +17,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { parseTaskActivity } from "./task_activity_schema.mjs";
+import { parseQuestions } from "./questions_schema.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -698,6 +699,8 @@ function parseVerificationResponse(value, runId) {
   if (hasPreview) expectedKeys.push("preview");
   const hasTask = Object.prototype.hasOwnProperty.call(value, "task");
   if (hasTask) expectedKeys.push("task");
+  const hasQuestions = Object.prototype.hasOwnProperty.call(value, 'questions');
+  if (hasQuestions) expectedKeys.push('questions');
   if (status === "passed" && carriesAuthoritativeText && value.deliveryMode === "append") {
     expectedKeys.push("deliveryMode");
   }
@@ -750,7 +753,8 @@ function parseVerificationResponse(value, runId) {
         value.text.length < 1 ||
         value.text.length > MAX_VERIFICATION_TEXT ||
         /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text))) ||
-    !previewValid || (hasTask && !parseTaskActivity(value.task, runId))
+    !previewValid || (hasTask && !parseTaskActivity(value.task, runId)) ||
+    (hasQuestions && (status !== 'pending' || !parseQuestions(value.questions)))
   ) {
     throw new HttpError(502, "verification state unavailable");
   }
@@ -880,6 +884,7 @@ function completionSse(completion, verification) {
     choices: [{ index: 0, delta, finish_reason: finishReason }],
     ...(terminal && terminalPixel ? { pixel: terminalPixel } : {}),
     ...(terminal && verification?.task ? { pixel_task: verification.task } : {}),
+    ...(terminal && verification?.questions ? { pixel_questions: {schemaVersion:1,questions:verification.questions} } : {}),
   });
   return Buffer.from(
     `data: ${envelope({ role: "assistant" }, null)}\n\n` +

@@ -860,6 +860,29 @@ test("SSE releases content-free task observations only in the matching terminal 
   }
 });
 
+test('question cards come only from validated pending verification on the terminal frame', async () => {
+  const questions=[{id:'style',question:'Qual estilo?',options:['Clean','Colorido']}];
+  for (const verification of [
+    {status:'pending',text:'Qual estilo?',questions},
+    {status:'passed',text:'Qual estilo?',questions},
+    {status:'pending',text:'Qual estilo?',questions:[{...questions[0],options:['Only']}]}]) {
+    const valid=verification.status==='pending' && verification.questions===questions;
+    const gw=await fakeGateway({verification,completionText:'I chose for you.'});
+    const srv=await startIngress({gatewayPort:gw.port});
+    try {
+      const response=await request(srv,'POST','/v1/chat/completions',{body:JSON.stringify({stream:true,messages:[{role:'user',content:'Ask first'}]}),headers:{'Content-Type':'application/json'}});
+      assert.doesNotMatch(response.body,/I chose for you/);
+      if (!valid) { assert.match(response.body,/upstream stream failed/); assert.doesNotMatch(response.body,/pixel_questions/); }
+      else {
+        const frames=response.body.split('\n').filter(line=>line.startsWith('data: {')).map(line=>JSON.parse(line.slice(6)));
+        assert.equal(frames.filter(frame=>frame.pixel_questions).length,1);
+        assert.deepEqual(frames.at(-1).pixel_questions,{schemaVersion:1,questions});
+        assert.equal(frames.at(-1).choices[0].finish_reason,'stop');
+      }
+    } finally { await new Promise(resolve=>srv.close(resolve)); await new Promise(resolve=>gw.server.close(resolve)); }
+  }
+});
+
 test("Operations verification text above the bounded 32 KiB cap remains fail-closed", async () => {
   const gw = await fakeGateway({
     verification: { status: "passed", text: "x".repeat(32 * 1024 + 1) },

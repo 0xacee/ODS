@@ -16,6 +16,8 @@ import path from "node:path";
 import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import { projectWebResult } from "./web-result-projection.mjs";
+import { createCompletionAssurance } from "./completion-assurance.mjs";
+import { parseQuestions, questionsText } from "./ask-user.mjs";
 import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent } from "./workspace-path-contract.mjs";
 
@@ -6024,6 +6026,7 @@ export function createToolLoopGuard({
     if (!state) {
       pruneRuns();
       state = {
+        completionAssurance: createCompletionAssurance(),
         progressBudget: createRunProgressBudget(),
         progressAbortAttempted: false,
         search: 0,
@@ -6247,9 +6250,12 @@ export function createToolLoopGuard({
     // policy and deterministic routing active from runId alone; operations
     // that truly need a session still fail closed on the optional sessionId.
     const state = runId ? stateFor(runId) : undefined;
+    if (state?.ownerQuestions) return {block:true, blockReason:'Waiting for the owner to answer the clarification questions. End this turn without further tools; never choose answers for the owner.'};
     if (state?.progressBudget.exhausted) {
       return { block: true, blockReason: RUN_PROGRESS_STOP_REASON };
     }
+    const asksOwner = toolName === 'pixel_ods_ask_user' || (toolName === 'tool_call' && ['pixel_ods_ask_user','openclaw:pixel-ods:pixel_ods_ask_user'].includes(event?.params?.id));
+    if (asksOwner) return state?.clientCancelled ? {block:true,blockReason:CLIENT_CANCELLED_REASON} : undefined;
     if (state?.workspacePreviewRequired && extensionlessHtmlWrite(toolName, normalizedParams ?? event?.params)) {
       return {block:true, blockReason: 'The write path names a FILE, not a directory. For this website, write the complete HTML to a fresh workspace-relative directory ending in /index.html (for example marketing-site/index.html). Do not write HTML to an extensionless directory name: it would prevent creating files inside it. Preserve any existing file and choose a fresh directory if that name is already a file.'};
     }
@@ -8036,6 +8042,7 @@ export function createToolLoopGuard({
     }
     if (typeof runId === "string" && runId) {
       const state = stateFor(runId);
+      state.completionAssurance.begin(currentOwnerIntentText(event?.messages, event?.prompt), event);
       if (capabilities !== undefined) {
         state.configuredWorkspaceRoot = capabilities.workspaceRoot;
         state.privateBrowserAccess = capabilities.privateBrowserAccess === true &&
@@ -8324,6 +8331,12 @@ export function createToolLoopGuard({
     const runId = context?.runId ?? event?.runId;
     if (typeof runId !== "string" || !runId) return;
     const state = stateFor(runId);
+    state.completionAssurance.observe(toolName, event);
+    const questionResult = toolName === 'pixel_ods_ask_user' ? event
+      : toolName === 'tool_call' ? toolSearchSelectedToolEvent(event, 'pixel_ods_ask_user', 'pixel-ods') : undefined;
+    if (!state.ownerQuestions && questionResult?.result?.details?.status === 'awaiting_user' && !failedToolOutcome(questionResult)) {
+      state.ownerQuestions = parseQuestions(questionResult.result.details.questions);
+    }
     const toolCallId = context?.toolCallId ?? event?.toolCallId;
     event = {...event, params: canonicalWorkspaceParams(toolName, event?.params, state.configuredWorkspaceRoot)};
     const pendingToolRun = pendingToolRuns.get(toolCallId);
@@ -8352,6 +8365,7 @@ export function createToolLoopGuard({
       if (envelope && pendingToolRun.runId === runId &&
           (!["web_search", "web_fetch"].includes(pendingToolRun.selectedToolName) ||
             isDeepStrictEqual(envelope.params, pendingToolRun.selectedParams))) {
+        state.completionAssurance.observe(pendingToolRun.selectedToolName, {result:envelope.result});
         // `tool_result_persist` runs with the same opaque call ID but may see
         // only the already-truncated model-visible content. Preserve this
         // bounded, structurally validated post-tool snapshot on that exact
@@ -9340,11 +9354,12 @@ export function createToolLoopGuard({
     const runId = context?.runId ?? event?.runId;
     if (typeof runId !== "string" || !runId) return undefined;
     const state = runs.get(runId);
-    if (state?.recursiveDeleteDenied || state?.progressBudget.exhausted) return undefined;
+    if (state?.ownerQuestions) return {action:'finalize', reason:'Waiting for the owner clarification answer.'};
+    if (state?.recursiveDeleteDenied || state?.progressBudget.exhausted || state?.clientCancelled || state?.webLoopAborted) return undefined;
     const continuation =
       trustedOperationsContinuation(state, runId) ??
       trustedWorkspacePreviewContinuation(state);
-    if (!continuation) return undefined;
+    if (!continuation) return state?.completionAssurance.finalize(event?.lastAssistantMessage ?? '');
     return {
       action: "revise",
       reason: "Pixel has not completed every owner-requested verified step.",
@@ -9634,6 +9649,10 @@ export function createToolLoopGuard({
   function deliveryVerificationForRun(runId) {
     const verification = verificationForRun(runId);
     const state = runs.get(runId);
+    if (state?.ownerQuestions && !state.clientCancelled) return {status:'pending',text:questionsText(state.ownerQuestions),questions:state.ownerQuestions};
+    if (state?.completionAssurance.terminal && verification.status === 'none') {
+      return {status:state.completionAssurance.terminalStatus, text:state.completionAssurance.terminal};
+    }
     if (state?.progressBudget.exhausted) {
       const preview = state.workspacePreview ?? state.workspaceLastVerifiedPreview;
       return {status: 'failed', text: RUN_PROGRESS_STOP_REASON + (preview

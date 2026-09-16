@@ -337,6 +337,37 @@ describe('Pixel', () => {
     expect(JSON.parse(calls.at(-1)[1].body).messages.every(message=>Object.keys(message).sort().join(',')==='content,role')).toBe(true)
   })
 
+  it('restores pending questions and choices then continues the same conversation without UI metadata', async () => {
+    const questions=[{id:'style',question:'Qual estilo?',options:['Clean','Colorido']}]
+    fetch.mockResolvedValueOnce(response({available:true}))
+    fetch.mockResolvedValueOnce(sseResponse([
+      JSON.stringify({choices:[{delta:{content:'Qual estilo?'}}]}),
+      JSON.stringify({pixel_questions:{schemaVersion:1,questions},choices:[{delta:{},finish_reason:'stop'}]}),'[DONE]']))
+    const first=render(<Pixel/>)
+    await screen.findByText('Available')
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'),{target:{value:'Pergunte antes de criar'}})
+    fireEvent.click(screen.getByTitle('Send'))
+    const clean=await screen.findByRole('radio',{name:/Clean/})
+    fireEvent.click(clean)
+    await waitFor(()=>expect(JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).messages.at(-1).questionDraft.style).toBe('Clean'))
+    const chatId=JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).chatId
+    first.unmount()
+    fetch.mockResolvedValueOnce(response({available:true}))
+    render(<Pixel/>)
+    await screen.findByText('Available')
+    expect(screen.getByRole('radio',{name:/Clean/})).toBeChecked()
+    fetch.mockResolvedValueOnce(sseResponse([JSON.stringify({choices:[{delta:{content:'Escolha recebida.'}}]}),'[DONE]']))
+    fireEvent.click(screen.getByRole('button',{name:'Continue',exact:true}))
+    await screen.findByText('Escolha recebida.')
+    const calls=fetch.mock.calls.filter(([url])=>url==='/api/pixel/chat/stream')
+    expect(calls).toHaveLength(2)
+    const request=JSON.parse(calls.at(-1)[1].body)
+    expect(request.chat_id).toBe(chatId)
+    expect(request.messages.at(-1)).toEqual({role:'user',content:'Qual estilo?\nClean'})
+    expect(request.messages.every(message=>Object.keys(message).sort().join(',')==='content,role')).toBe(true)
+    expect(screen.queryByRole('button',{name:'Continue',exact:true})).toBeNull()
+  })
+
   it('renders agent tables and task lists while keeping unsafe content inert', async () => {
     const content = [
       '**Files in log-lab:**',

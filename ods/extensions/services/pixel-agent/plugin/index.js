@@ -22,6 +22,8 @@ import {
   statusPayload,
 } from "./projection.mjs";
 import { promptContractForAgent } from "./prompt-contract.mjs";
+import { executionContext } from "./completion-assurance.mjs";
+import { createAskUserTool } from "./ask-user.mjs";
 import {
   appsToolText,
   statusToolText,
@@ -241,12 +243,13 @@ export default definePluginEntry({
       const workspaceRoot = api.config?.agents?.list?.find(agent => agent.id === AGENT_ID)?.workspace;
       toolLoopGuard.observeRun(context, AGENT_ID, event, { privateBrowserAccess, workspaceRoot });
       if (!accessRuntime.isProbe(context)) taskActivity.begin(event, context);
-      return promptContractForAgent(context, AGENT_ID, event, {
+      const contract = promptContractForAgent(context, AGENT_ID, event, {
         verificationStatus: toolLoopGuard.verificationStatus(context?.runId),
         configuredContextWindow,
         configuredLeanPrompt,
         privateBrowserAccess,
       });
+      return contract ? { ...contract, appendSystemContext: `${contract.appendSystemContext} ${executionContext()}` } : undefined;
     });
     api.on("model_call_started", (event, context) =>
       toolLoopGuard.observeModelCall(event, context, AGENT_ID)
@@ -463,6 +466,7 @@ export default definePluginEntry({
     registerTool(api, createPerplexicaResearchTool({ port: api.pluginConfig?.perplexicaPort }), {
       names: ["pixel_ods_research"],
     });
+    registerTool(api, createAskUserTool(), {names:['pixel_ods_ask_user']});
 
     registerTool(api, createDownloadPromoteTool(), {
       names: ["pixel_ods_download_promote"],

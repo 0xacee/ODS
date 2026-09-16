@@ -21,6 +21,8 @@ import { appendComposerText } from '../lib/pixelComposerText'
 import PixelSelectionActions from '../components/PixelSelectionActions'
 import PixelTaskFiles from '../components/PixelTaskFiles'
 import PixelTaskActivity from '../components/PixelTaskActivity'
+import PixelQuestions from '../components/PixelQuestions'
+import {parseQuestionsFrame, questionMetadata} from '../lib/pixelQuestions'
 import PixelTurnNavigation from '../components/PixelTurnNavigation'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
 import PixelPreviewViewport from '../components/PixelPreviewViewport'
@@ -415,6 +417,7 @@ function retainedResult(events) {
   let content = ''
   let preview = null
   let task = null
+  let questions = null
   let done = false
   let failed = false
   for (const line of events.split('\n')) {
@@ -434,11 +437,13 @@ function retainedResult(events) {
       if (candidate) preview = candidate
       const candidateTask = parseTaskActivityFrame(frame)
       if (candidateTask) task = candidateTask
+      const candidateQuestions = parseQuestionsFrame(frame)
+      if (candidateQuestions) questions = candidateQuestions
       const text = frame?.choices?.[0]?.delta?.content
       if (typeof text === 'string') content += text
     } catch { /* The same bounded SSE boundary applies to retained results. */ }
   }
-  return { content, preview: done && !failed ? preview : null, task, done, failed }
+  return { content, preview: done && !failed ? preview : null, task, questions: done && !failed ? questions : null, done, failed }
 }
 
 function loadStoredChat(selected) {
@@ -468,7 +473,7 @@ function loadStoredChat(selected) {
       totalBytes += new TextEncoder().encode(message.content).byteLength
       if (totalBytes > MAX_STORED_MESSAGE_BYTES) throw new Error('stored Pixel chat is too large')
       const task = message.role === 'assistant' && parseTaskActivity(message.task, message.task?.runId)
-      return { role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message) }
+      return { role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...questionMetadata(message) }
     })
     // Reuse the terminal marker validator for persisted metadata. Never infer
     // an iframe URL from conversation text, and always use the authenticated
@@ -610,6 +615,7 @@ export default function Pixel({ systemStatus = null }) {
                   : recovered.content || (successful ? 'Completed without a text response.' : 'Pixel could not complete the response. Check saved work before continuing.'),
                 status: result.state === 'cancelled' ? 'stopped' : successful ? 'done' : 'error',
                 ...(recovered.task ? {task:recovered.task} : {}),
+                ...(successful && recovered.questions ? {questions:recovered.questions} : {}),
                 ...(publication ? {publication,beforePublication:before} : {}),
               })})
               if (successful && recovered.preview) {
@@ -754,7 +760,7 @@ export default function Pixel({ systemStatus = null }) {
     try {
       const storedMessages = messages.map(message => {
         const task = message.role === 'assistant' && parseTaskActivity(message.task, message.task?.runId)
-        return {role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message)}
+        return {role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...questionMetadata(message)}
       })
       // Report storage limits without silently trimming previous turns.
       if (storedMessages.length > MAX_STORED_MESSAGES || storedMessages.reduce((total, message) => total + new TextEncoder().encode(message.content).byteLength, 0) > MAX_STORED_MESSAGE_BYTES) throw new Error('stored Pixel chat is too large')
@@ -779,8 +785,8 @@ export default function Pixel({ systemStatus = null }) {
     }
   }, [messages, preview, workspaceOpen, sending, interrupted, input])
 
-  const sendMessage = useCallback(async () => {
-    const trimmed = input.trim()
+  const sendMessage = useCallback(async (answerOverride) => {
+    const trimmed = (typeof answerOverride === 'string' ? answerOverride : input).trim()
     if (!trimmed || sending || abortRef.current || restoredActive || restoredChecking || status !== 'available' || trimmed.length > MAX_INPUT_LEN) return
 
     const userMessage = { role: 'user', content: trimmed }
@@ -794,7 +800,7 @@ export default function Pixel({ systemStatus = null }) {
     ]
     const visibleConversation = [...messages, userMessage]
     setMessages([...visibleConversation, { role: 'assistant', content: '', status: 'streaming' }])
-    setInput('')
+    if (typeof answerOverride !== 'string') setInput('')
     setSending(true)
     setInterrupted(false)
     updateRestoredActivity('idle')
@@ -816,6 +822,7 @@ export default function Pixel({ systemStatus = null }) {
       let recoveryEligible = false
       let verifiedPreview = null
       let taskActivity = null
+      let questions = null
 
       try {
         const requestId = makeChatId()
@@ -826,7 +833,7 @@ export default function Pixel({ systemStatus = null }) {
           conversationWriter.current({
             schema: 1, chatId, requestId, inFlight: true, interrupted: false,
             messages: [...visibleConversation, { role: 'assistant', content: '' }], preview,
-            draft: '', contextStart: contextStartRef.current, workspaceOpen,
+            draft: typeof answerOverride === 'string' ? input : '', contextStart: contextStartRef.current, workspaceOpen,
           })
         } catch {
           requestIdRef.current = null
@@ -909,6 +916,8 @@ export default function Pixel({ systemStatus = null }) {
               if (isCleanContextRecoveryFrame(frame)) recoveryEligible = true
               const candidatePreview = parseVerifiedPreviewFrame(frame)
               if (candidatePreview) verifiedPreview = candidatePreview
+              const candidateQuestions = parseQuestionsFrame(frame)
+              if (candidateQuestions) questions = candidateQuestions
               const candidateTask = parseTaskActivityFrame(frame)
               if (candidateTask) {
                 taskActivity = candidateTask
@@ -937,6 +946,7 @@ export default function Pixel({ systemStatus = null }) {
           recoveryEligible,
           verifiedPreview,
           taskActivity,
+          questions,
         }
       } finally {
         reader?.releaseLock?.()
@@ -960,6 +970,7 @@ export default function Pixel({ systemStatus = null }) {
         setMessages(previous => replaceLastAssistant(previous, {
           status: 'done',
           ...(attempt.taskActivity ? {task: attempt.taskActivity} : {}),
+          ...(attempt.questions && attempt.receivedDone && !attempt.receivedError ? {questions:attempt.questions} : {}),
           ...(attempt.verifiedPreview ? {publication:attempt.verifiedPreview, beforePublication:previousPublication?.relativeDirectory === attempt.verifiedPreview.relativeDirectory ? previousPublication : null} : {}),
           ...(recovered ? { recovered: true } : {}),
         }))
@@ -1391,12 +1402,13 @@ export default function Pixel({ systemStatus = null }) {
               {message.role === 'assistant' && message.content ? (
                 <>
                   {message.publication && <PixelSnapshotChanges preview={message.publication} before={message.beforePublication} onPreview={() => {setPreview(message.publication);setWorkspaceOpen(true);setPreviewCollapsed(false);setPreviewTab('preview')}}/>}
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={MARKDOWN_COMPONENTS}>{message.content}</ReactMarkdown>
+                  {!message.questions && <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={MARKDOWN_COMPONENTS}>{message.content}</ReactMarkdown>}
                   <OperationsApprovalCard content={message.content} />
                 </>
               ) : (
                 <span className="break-words whitespace-pre-wrap">{message.content}</span>
               )}
+              {message.role === 'assistant' && message.questions && <PixelQuestions questions={message.questions} answers={message.questionDraft} answered={index<messages.length-1} disabled={isDisabled || sending || restoredActive || restoredChecking} onChange={questionDraft=>setMessages(previous=>previous.map((item,i)=>i===index?{...item,questionDraft}:item))} onSubmit={answer=>sendMessage(answer)}/>}
               {message.status === 'streaming' && !message.content && (
                 <span role="status" className="inline-flex items-start gap-2 text-theme-text-muted">
                   <span>
