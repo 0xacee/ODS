@@ -2493,6 +2493,7 @@ host = source / 'extensions/services/pixel-agent/host'
 for name in ('access_mode_server.py', 'unix_peer.py', 'access_mode_worker.py', 'pixel_access_mode.py', 'access_mode_config.py', 'settings_transaction.py', 'provider_transaction.py', 'model_transaction.py'):
     write(target / name, (host / name).read_bytes(), 0o644)
 write(target / 'pixel_access_bridge.py', (source / 'bin/pixel_access_bridge.py').read_bytes(), 0o644)
+write(target / 'pixel_gateway_service.py', (source / 'bin/pixel_gateway_service.py').read_bytes(), 0o644)
 write(target / 'pixel_access_client.py', (source / 'bin/pixel_access_client.py').read_bytes(), 0o644)
 write(target / 'pixel_access_reconcile.py', (source / 'bin/pixel_access_reconcile.py').read_bytes(), 0o644)
 write(target / 'pixel_model_transition.py', (source / 'bin/pixel_model_transition.py').read_bytes(), 0o644)

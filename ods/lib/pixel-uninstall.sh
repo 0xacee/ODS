@@ -107,6 +107,7 @@ sources = {
     "provider_transaction.py": install / "extensions/services/pixel-agent/host/provider_transaction.py",
     "model_transaction.py": install / "extensions/services/pixel-agent/host/model_transaction.py",
     "pixel_access_bridge.py": install / "bin/pixel_access_bridge.py",
+    "pixel_gateway_service.py": install / "bin/pixel_gateway_service.py",
     "pixel_access_client.py": install / "bin/pixel_access_client.py",
     "pixel_access_reconcile.py": install / "bin/pixel_access_reconcile.py",
     "pixel_model_transition.py": install / "bin/pixel_model_transition.py",

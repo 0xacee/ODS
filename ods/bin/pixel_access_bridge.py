@@ -27,6 +27,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 import pixel_access_protocol as protocol
+from pixel_gateway_service import SystemdGatewayService
 
 UNIT = "openclaw-gateway.service"
 STATE = Path("/var/lib/ods-pixel-access")
@@ -283,6 +284,8 @@ class SystemdAccessBridge:
         self.settings_data_dir = settings_data_dir
         self.native_port = self.native_key = self.native_origin = None
         self._native_identity = None
+        self.gateway_service = SystemdGatewayService(
+            lambda *args, **kwargs: self.command(*args, **kwargs), AccessError, UNIT)
 
     def configured_gateway_port(self, config):
         port = self.gateway_port if self.gateway_port is not None else config.get("gateway", {}).get("port", 18789)
@@ -570,11 +573,7 @@ class SystemdAccessBridge:
         deadline = time.monotonic() + remaining(timeout)
         def budget(): return remaining(deadline - time.monotonic())
         def process_id():
-            raw = self.command(["systemctl", "show", UNIT, "--property=MainPID", "--value"],
-                               timeout=min(3, budget()))
-            if not raw.isdecimal() or int(raw) <= 0:
-                raise AccessError("runtime-unavailable-or-busy")
-            return int(raw)
+            return self.gateway_service.pid(timeout=min(3, budget()), require_running=True)
         pid = process_id()
         identity = (self.native_port, self.native_key, pid)
         candidates = ["http://[::1]:%d" % self.native_port, "http://127.0.0.1:%d" % self.native_port]
@@ -662,17 +661,7 @@ class SystemdAccessBridge:
         An unreachable HTTP endpoint alone never proves idle. Never stop/kill an
         active unit to satisfy this check.
         """
-        values = self.command(["systemctl", "show", UNIT, "--property=MainPID,ActiveState,ControlGroup"])
-        fields = dict(line.split("=", 1) for line in values.splitlines() if "=" in line)
-        if fields.get("MainPID") != "0" or fields.get("ActiveState") not in ("inactive", "failed"):
-            raise AccessError("native-idle-unconfirmed")
-        group = fields.get("ControlGroup", "")
-        if group:
-            root = Path("/sys/fs/cgroup")
-            path = (root / group.lstrip("/")).resolve()
-            if root not in path.parents: raise AccessError("native-idle-unconfirmed")
-            if path.exists() and (path / "cgroup.procs").read_text().strip():
-                raise AccessError("native-idle-unconfirmed")
+        self.gateway_service.assert_stopped()
         state = private_json(self.home / ".openclaw/.ods-access-runtime/state.json", self.owner.pw_uid, 4096)
         if (state.get("phase") != "held" or state.get("tokenHash") != hashlib.sha256(token.encode()).hexdigest()
                 or not HEX.fullmatch(state.get("revision", ""))):
@@ -857,7 +846,7 @@ class SystemdAccessBridge:
         self.discover(allow_installing=allow_installing)
         config, native, edge = self.worker(), self.native(), self.edge()
         if not native.get("available") or edge.get("capability") != "available": raise AccessError("admission-gate-unavailable")
-        pid = int(self.command(["systemctl", "show", UNIT, "--property=MainPID", "--value"]))
+        pid = self.gateway_service.pid()
         if native.get("pid") != pid or (pid <= 0 and not native.get("stopped")): raise AccessError("gateway-process-mismatch")
         pending = self.pending()
         revision = digest([config.get("config_sha256"), native.get("revision"), edge.get("revision"), pid,
@@ -905,10 +894,10 @@ class SystemdAccessBridge:
                 handle.flush()
                 os.fsync(handle.fileno())
         elif not enabled and self.dropin.exists(): self.dropin.unlink()
-        self.command(["systemctl", "daemon-reload"])
+        self.gateway_service.reload()
 
     def unit_boundary(self):
-        return self.command(["systemctl", "show", UNIT, "--property=ProtectSystem,ProtectHome,NoNewPrivileges,CapabilityBoundingSet,BindReadOnlyPaths,ReadOnlyPaths,PrivateTmp"])
+        return self.gateway_service.boundary()
 
     def provision_probe(self):
         base = Path("/var/lib/ods-pixel-access-probes")
@@ -1274,7 +1263,7 @@ class SystemdAccessBridge:
                     if len(agents) != 1: return False
                     self.dropin_for(agents[0].get("sandbox", {}).get("mode") == "off" and agents[0].get("tools", {}).get("exec", {}).get("host") == "gateway")
                     old_pid = native_at("pre-restart-read")["pid"]
-                    self.command(["systemctl", "restart", UNIT], timeout=60)
+                    self.gateway_service.restart(timeout=60)
                     # The pinned runtime can take over a minute to initialize
                     # on a supported guest. Observe the same restarted process;
                     # neither a failed poll nor slow readiness proves it idle.

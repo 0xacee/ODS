@@ -306,6 +306,7 @@ write_access_fixture() {
         "extensions/services/pixel-agent/host/provider_transaction.py"
         "extensions/services/pixel-agent/host/model_transaction.py"
         "bin/pixel_access_bridge.py"
+        "bin/pixel_gateway_service.py"
         "bin/pixel_access_client.py"
         "bin/pixel_access_reconcile.py"
         "bin/pixel_model_transition.py"
