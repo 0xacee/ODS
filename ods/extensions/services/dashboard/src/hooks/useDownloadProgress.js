@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 
 const TERMINAL_DOWNLOAD_STATUSES = new Set(['failed', 'error', 'cancelled'])
+// Allow the API's 30-second host-agent request to settle before giving up.
+const CANCEL_ACK_TIMEOUT_MS = 45000
 
 function isTerminalProgress(progress) {
   return TERMINAL_DOWNLOAD_STATUSES.has(progress?.status)
@@ -52,6 +54,7 @@ export function useDownloadProgress(pollIntervalMs = 1000) {
       }
       
       const data = await response.json()
+      if (requestId < latestAppliedProgressRequestRef.current) return null
       setStatusError(null)
       
       if (data.status === 'downloading' || data.status === 'verifying') {
@@ -161,16 +164,24 @@ export function useDownloadProgress(pollIntervalMs = 1000) {
     cancelInFlightRef.current = true
     setIsCancelling(true)
     setCancelError(null)
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), CANCEL_ACK_TIMEOUT_MS)
     try {
-      const response = await fetch('/api/models/download/cancel', { method: 'POST' })
-      if (!response.ok) {
-        throw new Error(await errorFromResponse(response, 'Failed to cancel download.'))
-      }
-      return await fetchProgress()
+      const response = await fetch('/api/models/download/cancel', {
+        method: 'POST',
+        signal: controller.signal,
+      })
+      if (!response.ok) throw new Error(await errorFromResponse(response, 'Failed to cancel download.'))
+      // The acknowledgement owns this guard. Status polling remains authoritative
+      // about the transfer and must not keep the Cancel button locked on a stall.
+      return fetchProgress()
     } catch (err) {
-      setCancelError(err?.message || 'Failed to cancel download.')
+      setCancelError(controller.signal.aborted
+        ? 'Cancellation was not acknowledged within 45 seconds. Check download progress before retrying.'
+        : err?.message || 'Failed to cancel download.')
       return null
     } finally {
+      clearTimeout(timeout)
       cancelInFlightRef.current = false
       setIsCancelling(false)
     }

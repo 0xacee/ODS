@@ -240,7 +240,9 @@ describe('useDownloadProgress', () => {
       await result.current.cancelDownload()
     })
 
-    expect(fetch).toHaveBeenCalledWith('/api/models/download/cancel', { method: 'POST' })
+    expect(fetch).toHaveBeenCalledWith('/api/models/download/cancel', {
+      method: 'POST', signal: expect.any(AbortSignal),
+    })
     expect(result.current.isDownloading).toBe(false)
     expect(result.current.progress).toMatchObject({
       status: 'cancelled',
@@ -335,6 +337,22 @@ describe('useDownloadProgress', () => {
     expect(result.current.formatBytes(512)).toBe('512 B')
     expect(result.current.formatBytes(0)).toBe('0 B')
     expect(result.current.formatBytes(null)).toBe('0 B')
+  })
+
+  test('does not clear a newer outage with a stale success body and recovers on a fresh poll', async () => {
+    const body = deferred()
+    fetch.mockResolvedValueOnce({ ok: true, json: () => body.promise })
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ detail: 'Worker offline' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'idle' }) })
+    const { result } = renderHook(() => useDownloadProgress())
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { await result.current.refresh() })
+    expect(result.current.statusError).toBe('Worker offline')
+    await act(async () => { body.resolve({ status: 'downloading', model: 'old', bytesDownloaded: 1, bytesTotal: 2 }) })
+    expect(result.current.statusError).toBe('Worker offline')
+    expect(result.current.progress).toBeNull()
+    await act(async () => { await result.current.refresh() })
+    expect(result.current.statusError).toBeNull()
   })
 
   test('formatEta formats minutes and seconds', () => {
