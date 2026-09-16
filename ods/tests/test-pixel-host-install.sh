@@ -1211,7 +1211,7 @@ assert value["tools"]["loopDetection"] == {
 context_window = model["contextWindow"]
 assert value["agents"]["defaults"]["compaction"] == {
     "reserveTokens": (context_window + 4 * model["maxTokens"] + 4) // 5,
-    "reserveTokensFloor": context_window // 2 if 8192 <= context_window < 32768 else 0,
+    "reserveTokensFloor": 0,
     "keepRecentTokens": max(512, min(20000, context_window // 16)),
 }
 if "qwen" in model["id"].lower() and model["reasoning"] is True:
