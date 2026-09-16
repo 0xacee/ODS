@@ -51,11 +51,63 @@ class _Subscription:
         return False
 
 
+async def _recover_history(owner, agent, *, allow_stop):
+    """Confirm both native history and retained attempts before continuing.
+
+    Activity alone says that a run ended, not whether its input was durably
+    acknowledged. Only an explicit Stop/Retry may cancel an uncertain run.
+    """
+    store = pixel._chat_results()
+    conversation = (owner_namespace(owner), agent["chat_id"])
+    attempts = list(dict.fromkeys([*agent.get("recovery_request_ids", []), agent.get("request_id")]))
+    keys = [(*conversation, attempt) for attempt in attempts if isinstance(attempt, str)]
+
+    def ready(context):
+        if context["history"]["status"] != "ready" or context["status"] not in {"ready", "missing"}:
+            return False
+        for key in keys:
+            row = pixel._result_state(store, key)
+            if row and row["state"] == "active":
+                return False
+            if row and row["state"] == "unresolved":
+                # No producer owns this receipt and native state proves idle.
+                # Preserve all saved chunks without pretending it completed.
+                store.finish(key, "interrupted")
+        return not store.has_pending(conversation)
+
+    try:
+        context = await pixel.pixel_chat_context(pixel.ChatCancelRequest(chat_id=agent["chat_id"]))
+        if ready(context):
+            return True
+        if not allow_stop:
+            return False
+        pending = next((key for key in reversed(keys)
+                        if (row := pixel._result_state(store, key)) and row["state"] in {"active", "unresolved"}), None)
+        result = await pixel.pixel_chat_cancel(pixel.ChatCancelRequest(
+            chat_id=agent["chat_id"], request_id=pending[2] if pending else None), owner)
+        if result.get("aborted") is not True:
+            return False
+        # A cancellation receipt cannot substitute for durable history readback.
+        return ready(await pixel.pixel_chat_context(pixel.ChatCancelRequest(chat_id=agent["chat_id"])))
+    except (HTTPException, KeyError, TypeError):
+        return False
+
+
 async def _run(owner, agent):
     # Internal team receipts use a separate namespace, never a credential or a
     # browser-supplied child session ID. Normal runtime policy still applies.
     # A healthy gateway alone does not prove the selected inference backend is
     # alive. Check before every worker, including read-only recovery attempts.
+    if agent.get("stop_requested"):
+        yield {"_done": True, "_state": "cancelled"}
+        return
+    if (agent.get("retries") or agent.get("recoveries")) and agent.get("context_messages"):
+        # Retry is an explicit owner action. Resolve an abandoned native turn
+        # first, even if its SSE delivery receipt ended normally with an error.
+        if not await _recover_history(owner, agent, allow_stop=bool(agent.get("retries"))):
+            yield {"error": {"code": "history_recovery_unconfirmed"}}
+            yield {"_done": True, "_state": "interrupted"}
+            return
     for attempt in range(3):
         if agent.get('stop_requested'):
             yield {'_done':True,'_state':'cancelled'}
@@ -74,7 +126,12 @@ async def _run(owner, agent):
     if agent.get('stop_requested'):
         yield {'_done':True,'_state':'cancelled'}
         return
-    body = pixel.ChatStreamRequest(chat_id=agent["chat_id"], request_id=agent["request_id"], messages=agent["messages"])
+    history = agent.get("context_messages")
+    body = pixel.ChatStreamRequest(
+        chat_id=agent["chat_id"], request_id=agent["request_id"],
+        messages=[history[-1]] if history else agent["messages"],
+        history_snapshot={"schemaVersion": 1, "messages": history} if history else None,
+    )
     response = await pixel._retained_chat_stream(_Subscription(), body, owner)
     buffered = ""
     async for chunk in response.body_iterator:
@@ -97,19 +154,13 @@ async def _run(owner, agent):
 async def _cancel(owner, agent):
     identity = (owner_namespace(owner), agent["chat_id"], agent["request_id"])
     row = pixel._result_state(pixel._chat_results(), identity)
-    if row is None or row["state"] in {"complete", "cancelled"}:
-        return True
-    if row["state"] == "interrupted":
-        activity = await pixel.pixel_chat_activity(pixel.ChatCancelRequest(chat_id=agent["chat_id"]))
-        if activity["state"] == "terminal":
+    if row and row["state"] in {"active", "unresolved"}:
+        result = await pixel.pixel_chat_cancel(pixel.ChatCancelRequest(chat_id=agent["chat_id"], request_id=agent["request_id"]), owner)
+        if result["aborted"]:
             return True
-        result = await pixel.pixel_chat_cancel(pixel.ChatCancelRequest(chat_id=agent["chat_id"]), owner)
-        return result["aborted"]
-    result = await pixel.pixel_chat_cancel(pixel.ChatCancelRequest(chat_id=agent["chat_id"], request_id=agent["request_id"]), owner)
-    if result["aborted"]:
-        return True
-    activity = await pixel.pixel_chat_activity(pixel.ChatCancelRequest(chat_id=agent["chat_id"]))
-    return activity["state"] == "terminal"
+    if row and row["state"] in {"complete", "cancelled"} and not agent.get("context_messages"):
+        return True  # Legacy worker with no durable-history delivery.
+    return await _recover_history(owner, agent, allow_stop=True)
 
 
 def manager():

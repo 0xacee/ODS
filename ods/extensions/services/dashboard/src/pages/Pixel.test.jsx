@@ -536,13 +536,13 @@ describe('Pixel', () => {
     const send = screen.getByTitle('Send')
     expect(send.parentElement).toContainElement(screen.getByRole('button', { name: 'Dictate message' }))
     expect(send.parentElement).toHaveClass('pixel-composer-actions')
-    expect(screen.getByRole('button',{name:/Token usage unavailable.*65,536 token capacity/})).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Token usage unavailable'})).toBeInTheDocument()
     expect(screen.queryByText(/chars$/)).not.toBeInTheDocument()
     const selector=screen.getByRole('button',{name:'Choose model: local model'})
     expect(selector.closest('.pixel-composer-limits')).toBeInTheDocument()
     fireEvent.change(screen.getByPlaceholderText('Message Portal...'), { target: { value: 'Olá' } })
     expect(selector).toBeInTheDocument()
-    expect(screen.getByRole('button',{name:/Token usage unavailable.*65,536 token capacity/})).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Token usage unavailable'})).toBeInTheDocument()
     const field = screen.getByPlaceholderText('Message Portal...')
     expect(field).toHaveClass('pixel-composer-input')
     expect(field.className).not.toContain('focus:ring')
@@ -948,7 +948,7 @@ describe('Pixel', () => {
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('What do you want to work on?')).toBeInTheDocument()
     expect(screen.getByRole('button',{name:'Choose model: Qwen 3.5 9B'})).toBeInTheDocument()
-    expect(screen.getByRole('button',{name:/Token usage unavailable.*32,768 token capacity/})).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Token usage unavailable'})).toBeInTheDocument()
 
     for (const name of ['Check ODS health','Build in my workspace','Research with sources','Plan a multi-step task']) expect(screen.queryByRole('button',{name:new RegExp(name)})).toBeNull()
     expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue('')
@@ -1058,7 +1058,7 @@ describe('Pixel', () => {
 
     await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByRole('button',{name:'Choose model: Qwen 3.5 9B'})).toBeInTheDocument()
-    expect(screen.getByRole('button',{name:/Token usage unavailable.*32,768 token capacity/})).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Token usage unavailable'})).toBeInTheDocument()
     expect(screen.queryByText('forged-runtime')).not.toBeInTheDocument()
   })
 
@@ -1115,6 +1115,7 @@ describe('Pixel', () => {
       JSON.stringify({ choices: [{ delta: { content: 'First answer' } }] }),
       '[DONE]',
     ]))
+    globalThis.fetch.mockResolvedValueOnce(response({schemaVersion:1,status:'missing',sessionRevision:null,context:null,model:null,compaction:{status:'idle',count:0},history:{revision:null,acknowledgedMessages:0}}))
     globalThis.fetch.mockResolvedValueOnce(sseResponse([
       JSON.stringify({ choices: [{ delta: { content: 'Second answer' } }] }),
       '[DONE]',
@@ -1143,13 +1144,16 @@ describe('Pixel', () => {
       { role: 'user', content: 'second turn' },
     ])
     expect(body.messages.every(message => Object.keys(message).sort().join(',') === 'content,role')).toBe(true)
+    expect(body.history_snapshot).toEqual({schemaVersion:1,messages:body.messages})
   })
 
-  it('recovers once from a host-authoritative zero-submission marker with clean future context', async () => {
+  it.each([0,2])('recovers once from a zero-submission marker while preserving history from contextStart=%s', async contextStart => {
     globalThis.localStorage.setItem('ods.pixel.chat.v1', JSON.stringify({
       schema: 1,
       chatId: 'long-running-chat',
+      contextStart,
       messages: [
+        ...(contextStart ? [{role:'user',content:'Excluded earlier request'},{role:'assistant',content:'Excluded earlier answer'}] : []),
         { role: 'user', content: 'old context' },
         { role: 'assistant', content: 'old answer' },
       ],
@@ -1174,6 +1178,7 @@ describe('Pixel', () => {
       JSON.stringify({ choices: [{ delta: { content: 'Verified recovery result' } }] }),
       '[DONE]',
     ]))
+    globalThis.fetch.mockResolvedValueOnce(response({schemaVersion:1,status:'missing',sessionRevision:null,context:null,model:null,compaction:{status:'idle',count:0},history:{revision:null,acknowledgedMessages:0}}))
     globalThis.fetch.mockResolvedValueOnce(sseResponse([
       JSON.stringify({ choices: [{ delta: { content: 'Follow-up result' } }] }),
       '[DONE]',
@@ -1196,9 +1201,15 @@ describe('Pixel', () => {
     expect(retryBody.messages).toEqual([
       { role: 'user', content: 'Inspect the installed extension.' },
     ])
+    expect(retryBody.history_snapshot).toEqual(firstBody.history_snapshot)
+    expect(retryBody.history_snapshot.messages).toEqual([
+      { role: 'user', content: 'old context' },
+      { role: 'assistant', content: 'old answer' },
+      ...retryBody.messages,
+    ])
     const savedRecovery = JSON.parse(localStorage.getItem('ods.pixel.chat.v1'))
-    expect(savedRecovery.contextStart).toBe(2)
-    expect(savedRecovery.messages[0].content).toBe('old context')
+    expect(savedRecovery.contextStart).toBe(contextStart)
+    expect(savedRecovery.messages[contextStart].content).toBe('old context')
     expect(screen.getByText('old answer')).toBeVisible()
 
     fireEvent.change(textarea, { target: { value: 'Continue from that verified result.' } })
@@ -1209,12 +1220,43 @@ describe('Pixel', () => {
     expect(JSON.parse(chatCalls[2][1].body)).toEqual({
       chat_id: retryBody.chat_id,
       request_id: expect.any(String),
+      history_snapshot:{schemaVersion:1,messages:[
+        { role: 'user', content: 'old context' },
+        { role: 'assistant', content: 'old answer' },
+        { role: 'user', content: 'Inspect the installed extension.' },
+        { role: 'assistant', content: 'Verified recovery result' },
+        { role: 'user', content: 'Continue from that verified result.' },
+      ]},
       messages: [
+        { role: 'user', content: 'old context' },
+        { role: 'assistant', content: 'old answer' },
         { role: 'user', content: 'Inspect the installed extension.' },
         { role: 'assistant', content: 'Verified recovery result' },
         { role: 'user', content: 'Continue from that verified result.' },
       ],
     })
+  })
+
+  it.each([409,412])('preserves the original history boundary when recovery is rejected with %s',async rejection=>{
+    const messages=[{role:'user',content:'Excluded request'},{role:'assistant',content:'Excluded answer'},
+      {role:'user',content:'The project is Cedar'},{role:'assistant',content:'I will remember Cedar'}]
+    localStorage.setItem('ods.pixel.chat.v1',JSON.stringify({schema:1,chatId:'retry-history-chat',contextStart:2,messages}))
+    const marker=JSON.stringify({choices:[{delta:{},finish_reason:'stop'}],pixel:{schemaVersion:1,recovery:'clean-context',reason:'operations-unavailable-zero-submissions'}})
+    let attempts=0
+    fetch.mockImplementation(async url=>{
+      if(url==='/api/pixel/chat/stream')return ++attempts===1?sseResponse([marker,'[DONE]']):response({detail:'Model preparation in progress'},rejection)
+      if(url==='/api/pixel/chat/context')return response({schemaVersion:1,status:'missing',sessionRevision:null,context:null,model:null,compaction:{status:'idle',count:0},history:{revision:null,acknowledgedMessages:0}})
+      return response({available:true})
+    })
+    render(<Pixel/>);await screen.findByText('Available')
+    const textarea=screen.getByPlaceholderText('Message Portal...')
+    fireEvent.change(textarea,{target:{value:'Continue Cedar'}})
+    fireEvent.click(screen.getByTitle('Send'))
+    await waitFor(()=>expect(textarea).toHaveValue('Continue Cedar'))
+    const calls=fetch.mock.calls.filter(([url])=>url==='/api/pixel/chat/stream')
+    expect(calls).toHaveLength(2)
+    expect(JSON.parse(calls[1][1].body).history_snapshot.messages).toEqual([...messages.slice(2),{role:'user',content:'Continue Cedar'}])
+    expect(JSON.parse(localStorage.getItem('ods.pixel.chat.v1'))).toMatchObject({contextStart:2,messages,draft:'Continue Cedar'})
   })
 
   it('stops honestly after a second host-authoritative zero-submission marker', async () => {
@@ -1273,6 +1315,7 @@ describe('Pixel', () => {
       JSON.stringify({ choices: [{ delta: { content: 'First answer' } }] }),
       '[DONE]',
     ]))
+    globalThis.fetch.mockResolvedValueOnce(response({schemaVersion:1,status:'missing',sessionRevision:null,context:null,model:null,compaction:{status:'idle',count:0},history:{revision:null,acknowledgedMessages:0}}))
     globalThis.fetch.mockResolvedValueOnce(sseResponse([
       JSON.stringify({ choices: [{ delta: { content: 'Second answer' } }] }),
       '[DONE]',

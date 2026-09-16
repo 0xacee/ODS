@@ -8,6 +8,7 @@
     "tools": [
       "pixel_ods_goal",
       "pixel_ods_activity",
+      "pixel_ods_history",
       "pixel_ods_ask_user",
       "pixel_ods_status",
       "pixel_ods_apps_list",
@@ -25,6 +26,7 @@
   "toolMetadata": {
     "pixel_ods_goal": {"replaySafe": true},
     "pixel_ods_activity": {"replaySafe": true},
+    "pixel_ods_history": {"replaySafe": true},
     "pixel_ods_ask_user": {"replaySafe": true},
     "pixel_ods_status": {
       "replaySafe": true

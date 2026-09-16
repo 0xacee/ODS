@@ -11,7 +11,11 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
   abortAgentHarnessRun,
   abortAndDrainAgentHarnessRun,
+  callGatewayTool,
+  resolveActiveEmbeddedRunSessionId,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
+import {getSessionEntry, patchSessionEntry, resolveStorePath} from "openclaw/plugin-sdk/session-store-runtime";
+import {withSessionTranscriptWriteLock} from 'openclaw/plugin-sdk/session-transcript-runtime';
 import {
   extractBasicHtmlContent,
   fetchWithWebToolsNetworkGuard,
@@ -50,6 +54,8 @@ import { createWorkspacePreviewTool } from "./workspace-preview.mjs";
 import { createTaskActivity } from "./task-activity.mjs";
 import { createAccessRuntime, executionHostForAgent } from "./access-runtime.mjs";
 import { createManagedRuntimeRegistry } from "./managed-runtime-lifecycle.mjs";
+import {createContextCompaction, readContextRequest, prepareStableContextModel} from './context-compaction.mjs';
+import {registerHistoryIntegration} from './history-context.mjs';
 import { createOpenClawCodingTools, resolveSandboxContext, OPENCLAW_VERSION } from "openclaw/plugin-sdk/agent-harness";
 
 const AGENT_ID = process.env.PIXEL_AGENT_ID ?? "pixel";
@@ -60,6 +66,8 @@ const goalProgress = createGoalProgress({agentId:AGENT_ID});
 const taskActivity = createTaskActivity({agentId:AGENT_ID, goalForRun:id=>goalProgress.projection(id)});
 let execCancellationControl;
 let accessRuntime;
+let contextCompaction;
+let currentManagedRuntime;
 const managedRuntimeRegistry = createManagedRuntimeRegistry();
 const evidenceArtifactWriter = createEvidenceArtifactWriter();
 
@@ -217,6 +225,28 @@ export default definePluginEntry({
       execControl: () => execCancellationControl, runtimeVersion: OPENCLAW_VERSION,
       hooksAllowed: api.config?.plugins?.entries?.["pixel-ods"]?.hooks?.allowConversationAccess === true});
     const managedRuntime = managedRuntimeRegistry.register(api, accessRuntime);
+    if (managedRuntime) currentManagedRuntime = managedRuntime;
+    contextCompaction ??= createContextCompaction({agentId:AGENT_ID,
+      readConfig:() => api.runtime?.config?.current?.() ?? api.config,
+      readSession:scope => getSessionEntry({...scope,
+        storePath:resolveStorePath((api.runtime?.config?.current?.() ?? api.config)?.session?.store, {agentId:AGENT_ID})}),
+      callGateway:callGatewayTool,
+      prepareModel:scope => {
+        if (currentManagedRuntime) {
+          // Per-turn managed routes need their own qualified maintenance lease;
+          // never replay an expired turn token or bypass handoff approval.
+          if (typeof currentManagedRuntime.prepareCompaction === 'function') return currentManagedRuntime.prepareCompaction(scope);
+          throw Object.assign(new Error('managed compaction unavailable'),{code:'unsupported-model'});
+        }
+        return prepareStableContextModel(scope);
+      },
+      activeSession:key => Boolean(resolveActiveEmbeddedRunSessionId(key)),
+      admission:{status:() => currentManagedRuntime?.status() ?? accessRuntime.status(),
+        acquire:(token, revision) => currentManagedRuntime ? currentManagedRuntime.acquireTransition(token, revision)
+          : accessRuntime.acquire(token, revision),
+        release:token => accessRuntime.release(token), owns:token => accessRuntime.owns(token)},
+    });
+    registerHistoryIntegration(api,{compactor:contextCompaction,getSessionEntry,patchSessionEntry,resolveStorePath,withSessionTranscriptWriteLock});
     const statusFile = statusFileFromEnv();
     const configuredContextWindow = api.pluginConfig?.modelContextWindow;
     const configuredLeanPrompt = api.pluginConfig?.leanPrompt === true;
@@ -261,7 +291,10 @@ export default definePluginEntry({
       toolLoopGuard.observeModelEnd(event, context, AGENT_ID)
     );
     api.on("llm_output", (event, context) => {
-      if (!accessRuntime.isProbe(context)) taskActivity.modelOutput(event, context);
+      if (!accessRuntime.isProbe(context)) {
+        taskActivity.modelOutput(event, context);
+        contextCompaction.observeModelOutput(event,context);
+      }
     });
     if (!managedRuntime) {
       api.on("before_agent_run", (event, context) => accessRuntime.admit(undefined, context));
@@ -368,6 +401,16 @@ export default definePluginEntry({
         return true;
       },
     });
+    for (const operation of ['context','compact']) {
+      api.registerHttpRoute({path:`/pixel-ods/${operation}`,auth:'gateway',match:'exact',
+        handler:async (req,res) => {
+          const parsed = await readContextRequest(req, operation === 'compact');
+          if (parsed.status !== 200) {sendJson(res,parsed.status,{error:'invalid context request'});return true;}
+          const result = operation === 'compact' ? await contextCompaction.compact(parsed.user,parsed.requestId)
+            : contextCompaction.context(parsed.user);
+          sendJson(res,200,result);return true;
+        }});
+    }
     // The OpenAI-compatible gateway route does not dispatch channel delivery
     // hooks. Give the private host ingress a narrow, authenticated way to ask
     // for host-observed verification and source-evidence truth before it

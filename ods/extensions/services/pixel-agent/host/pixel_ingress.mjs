@@ -14,16 +14,19 @@ import fs from "node:fs";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
+import os from "node:os";
 import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { parseTaskActivity } from "./task_activity_schema.mjs";
 import { parseQuestions } from "./questions_schema.mjs";
+import {createChatHistoryLedger,HistoryError} from './chat_history_ledger.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const MAX_BODY = 2 * 1024 * 1024; // 2 MiB request body cap
+const MAX_HISTORY_BODY = 8 * 1024 * 1024;
 const MAX_NONSTREAM_RESPONSE = 2 * 1024 * 1024; // 2 MiB non-stream response cap
 const MAX_STREAM_RESPONSE = 4 * 1024 * 1024; // 4 MiB terminal completion cap for SSE clients
 // A broad typed host report can legitimately include bounded summaries for
@@ -301,6 +304,7 @@ export function validateConfig(cfg) {
     ["socket path", cfg.socketPath],
     ["gateway token file", cfg.gatewayTokenFile],
     ["status file", cfg.statusFile],
+    ...(cfg.chatStateDir ? [["chat state directory",cfg.chatStateDir]] : []),
   ]) {
     if (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")) {
       throw new Error(`invalid ${label}`);
@@ -320,6 +324,7 @@ export function configFromEnv(env = process.env) {
     ingressGid: env.PIXEL_INGRESS_GID ? Number(env.PIXEL_INGRESS_GID) : null,
     odsVersion: env.PIXEL_ODS_VERSION || "unknown",
     appPorts: appPortsFromEnv(env),
+    chatStateDir: env.PIXEL_CHAT_STATE_DIR || (process.platform === 'linux' ? '/var/lib/ods-pixel-chat' : path.join(process.platform === 'win32' ? env.LOCALAPPDATA || os.homedir() : path.join(os.homedir(),'Library','Application Support'),'ODS','chat-state')),
   };
   return validateConfig(cfg);
 }
@@ -950,8 +955,9 @@ export function streamTaskActivity(res, user, token, gatewayPort, signal, deps =
   return () => { stopped = true; deps.clearTimeout(timer); inFlight?.abort(); };
 }
 
-async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps) {
+async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps, hooks = {}) {
   const controller = new AbortController();
+  hooks.onController?.(controller);
   const totalTimer = deps.setTimeout(() => controller.abort(), TOTAL_TIMEOUT_MS);
   const abortOnDownstreamClose = () => {
     if (!res.writableEnded) controller.abort();
@@ -983,6 +989,9 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
     stopActivity = streamTaskActivity(res, outgoing.user, token, gatewayPort, controller.signal, deps);
   }
   try {
+    await hooks.beforeRequest?.(controller.signal);
+    if(controller.signal.aborted) throw new HistoryError('history-preparation-interrupted',503);
+    hooks.onSubmitted?.();
     const upstream = await deps.fetch(
       `http://127.0.0.1:${gatewayPort}/v1/chat/completions`,
       {
@@ -1032,6 +1041,7 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
           controller.signal,
           deps
         );
+        await hooks.onComplete?.(completion,verification);
         deliveryStage = "delivery";
         res.end(completionSse(
           applyVerificationToCompletion(completion, verification),
@@ -1063,6 +1073,7 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
       controller.signal,
       deps
     );
+    await hooks.onComplete?.(completion,verification);
     const verifiedCompletion = applyVerificationToCompletion(completion, verification);
     const responseBody = verifiedCompletion === completion
       ? body
@@ -1356,7 +1367,8 @@ export async function writeStatus(
   return projection;
 }
 
-export function createIngressServer({ token, gatewayPort, deps = defaultDeps }) {
+export function createIngressServer({ token, gatewayPort, deps = defaultDeps, historyLedger = null }) {
+  const historyAborters=new Map();
   return http.createServer((req, res) => {
     let pathname;
     try {
@@ -1392,7 +1404,15 @@ export function createIngressServer({ token, gatewayPort, deps = defaultDeps }) 
         sendError(res, 415, "content type must be application/json");
         return;
       }
-      void handleChat(req, res, token, gatewayPort, deps);
+      void handleChat(req, res, token, gatewayPort, deps, historyLedger, historyAborters);
+      return;
+    }
+
+    if(['/v1/chat/context','/v1/chat/compact','/v1/chat/history'].includes(pathname)) {
+      if(req.method!=='POST') {sendError(res,405,'method not allowed');return;}
+      if(req.url!==pathname) {sendError(res,400,'invalid request');return;}
+      if(String(req.headers['content-type'] || '').split(';',1)[0].trim()!=='application/json') {sendError(res,415,'content type must be application/json');return;}
+      void handleContextControl(req,res,pathname,token,gatewayPort,deps,historyLedger);
       return;
     }
 
@@ -1406,7 +1426,7 @@ export function createIngressServer({ token, gatewayPort, deps = defaultDeps }) 
         sendError(res, 415, "content type must be application/json");
         return;
       }
-      void handleCancel(req, res, token, gatewayPort, deps);
+      void handleCancel(req, res, token, gatewayPort, deps, historyLedger, historyAborters);
       return;
     }
 
@@ -1414,7 +1434,7 @@ export function createIngressServer({ token, gatewayPort, deps = defaultDeps }) 
   });
 }
 
-async function handleCancel(req, res, token, gatewayPort, deps) {
+async function handleCancel(req, res, token, gatewayPort, deps, ledger, historyAborters) {
   let raw;
   try {
     raw = await readBody(req, MAX_CANCEL_BODY);
@@ -1445,13 +1465,23 @@ async function handleCancel(req, res, token, gatewayPort, deps) {
     return;
   }
   const user = computeSessionUser({ user: parsed.user });
-  sendJson(res, 200, { aborted: await abortGatewayRun(user, token, gatewayPort, deps) });
+  try {
+    const pending=ledger?.read(user),local=historyAborters?.get(user);
+    if(local && pending && local.requestId===pending.requestId) local.controller.abort();
+    const aborted=await abortGatewayRun(user, token, gatewayPort, deps);
+    let idle=aborted;
+    if(!idle && pending && ['pending','unknown'].includes(pending.status)) {
+      try {const native=await nativeContextRequest('context',{user},token,gatewayPort,deps);idle=['ready','missing'].includes(native.status)} catch { /* No proof that the old run stopped. */ }
+    }
+    const recovered=idle && ledger?.interrupt(user,pending?.requestId);
+    sendJson(res,200,{aborted:aborted || recovered===true});
+  } catch {sendError(res,503,'cancellation-unconfirmed');}
 }
 
-async function handleChat(req, res, token, gatewayPort, deps) {
+async function handleChat(req, res, token, gatewayPort, deps, historyLedger, historyAborters) {
   let raw;
   try {
-    raw = await readBody(req, MAX_BODY);
+    raw = await readBody(req, MAX_HISTORY_BODY);
   } catch (error) {
     sendError(
       res,
@@ -1473,16 +1503,107 @@ async function handleChat(req, res, token, gatewayPort, deps) {
     return;
   }
 
+  let release,prepared,submitted=false,completed=false,user;
   try {
-    const outgoing = buildOutgoing(parsed, computeSessionUser(parsed));
-    await forwardChat(res, outgoing, token, gatewayPort, deps);
+    if(!parsed.history_snapshot && raw.length>MAX_BODY) throw new HistoryError('request-too-large',413);
+    user=computeSessionUser(parsed);
+    const outgoing = buildOutgoing(parsed, user);
+    if(historyLedger && user) release=historyLedger.lock(user);
+    if(!parsed.history_snapshot) {await forwardChat(res,outgoing,token,gatewayPort,deps);return;}
+    if(!historyLedger || !user) throw new HistoryError('history-storage-unavailable',503);
+    const native=await nativeContextRequest('context',{user},token,gatewayPort,deps);
+    prepared=historyLedger.prepare(user,parsed.request_id,parsed.history_snapshot,native);
+    if(prepared.replay) {
+      const result=prepared.replay;
+      if(outgoing.stream) {res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store'});res.end(completionSse(applyVerificationToCompletion(result.completion,result.verification),result.verification));}
+      else sendJson(res,200,applyVerificationToCompletion(result.completion,result.verification));
+      return;
+    }
+    const latest=[...(outgoing.messages || [])].reverse().find(message=>message.role==='user');
+    if(!latest) throw new HistoryError('invalid-history-input',400);
+    // Identity/delivery policy belongs to the trusted API/edge messages. The
+    // snapshot is data only; it cannot introduce system/developer instructions.
+    outgoing.messages=[...(outgoing.messages || []).filter(message=>message.role==='system'),...prepared.delta.slice(0,-1),latest];
+    await forwardChat(res,outgoing,token,gatewayPort,deps,{
+      onController:controller=>historyAborters?.set(user,{requestId:parsed.request_id,controller}),
+      beforeRequest:async signal=>{
+        if(!prepared.hydrate) return;
+        const seeded=await nativeContextRequest('history',{user,request_id:parsed.request_id,messages:prepared.archive},token,gatewayPort,deps,signal,30000);
+        if(seeded?.hydrated!==true) throw new HistoryError('history-preparation-failed',503);
+        const request_id=`history-${createHash('sha256').update(`${parsed.request_id}:${prepared.state.revision}`).digest('hex')}`;
+        let state=await nativeContextRequest('compact',{user,request_id},token,gatewayPort,deps,signal);
+        while(state.compaction?.requestId===request_id && state.compaction.status==='running') {
+          await new Promise((resolve,reject)=>{
+            if(signal.aborted) {reject(new HistoryError('history-preparation-interrupted',503));return;}
+            const abort=()=>{deps.clearTimeout(timer);reject(new HistoryError('history-preparation-interrupted',503))};
+            const timer=deps.setTimeout(()=>{signal.removeEventListener('abort',abort);resolve()},1000);
+            signal.addEventListener('abort',abort,{once:true});
+          });
+          state=await nativeContextRequest('context',{user},token,gatewayPort,deps,signal);
+        }
+        if(state.compaction?.requestId!==request_id || !['completed','skipped'].includes(state.compaction.status)) throw new HistoryError('history-compaction-unconfirmed',503);
+      },
+      onSubmitted:()=>{submitted=true;},
+      onComplete:async(completion,verification)=>{
+        let after;
+        try {after=await nativeContextRequest('context',{user},token,gatewayPort,deps)} catch { /* The verified completion still proves this input ran. */ }
+        historyLedger.complete(user,prepared,completion,verification,after);
+        completed=true;
+      },
+    });
   } catch (error) {
     sendError(
       res,
-      error instanceof HttpError ? error.status : 400,
-      error instanceof HttpError ? error.message : "invalid request body"
+      error instanceof HttpError || error instanceof HistoryError ? error.status : 400,
+      error instanceof HttpError || error instanceof HistoryError ? error.message : "invalid request body"
     );
+  } finally {
+    if(historyAborters?.get(user)?.requestId===prepared?.state?.requestId) historyAborters.delete(user);
+    try {if(prepared?.state && !completed) {if(submitted) historyLedger.uncertain(user,prepared);else historyLedger.abandon(user,prepared);}} catch { /* A still-pending durable record remains unknown after restart. */ }
+    try {release?.()} catch { /* Keep serving unrelated conversations if a lock cannot be removed. */ }
   }
+}
+
+async function nativeContextRequest(operation,body,token,gatewayPort,deps,outerSignal,timeoutMs=10000) {
+  const controller=new AbortController(), abort=()=>controller.abort();
+  outerSignal?.addEventListener('abort',abort,{once:true});
+  if(outerSignal?.aborted) controller.abort();
+  const timer=deps.setTimeout(abort,timeoutMs);
+  try {
+    const response=await deps.fetch(`http://127.0.0.1:${gatewayPort}/pixel-ods/${operation}`,{method:'POST',headers:upstreamHeaders(false,token),body:JSON.stringify(body),redirect:'error',signal:controller.signal});
+    if(response.status!==200 || !String(response.headers.get('content-type') || '').startsWith('application/json')) {await drain(response.body);throw new HistoryError(response.status===409?'context-busy':'context-unavailable',response.status===409?409:503);}
+    const value=JSON.parse((await readBounded(response.body,32768)).toString('utf8'));
+    if(operation==='history') return value;
+    if(value?.schemaVersion!==1 || !['ready','missing','busy','unavailable'].includes(value.status) || !['idle','running','completed','skipped','failed','unknown'].includes(value.compaction?.status) || !Number.isInteger(value.compaction?.count)) throw new HistoryError('context-unavailable',503);
+    return value;
+  } catch(error) {if(error instanceof HistoryError) throw error;throw new HistoryError('context-unavailable',503)}
+  finally {deps.clearTimeout(timer);outerSignal?.removeEventListener('abort',abort);}
+}
+function publicContext(native,history) {
+  return {schemaVersion:1,status:history.status==='pending'?'busy':history.status==='unknown' && native.status!=='busy'?'unavailable':native.status,
+    sessionRevision:native.sessionRevision,context:native.context,model:native.model,compaction:native.compaction,history};
+}
+async function handleContextControl(req,res,pathname,token,gatewayPort,deps,ledger) {
+  let release;
+  try {
+    if(!ledger) throw new HistoryError('history-storage-unavailable',503);
+    const body=JSON.parse((await readBody(req,1024)).toString('utf8'));
+    if(!body || typeof body!=='object' || Array.isArray(body)) throw new HistoryError('invalid-context-request',400);
+    if(pathname==='/v1/chat/history') {
+      if(!/^ods-[a-f0-9]{64}$/.test(body.user || '') || Object.keys(body).some(key=>!['user','query','offset','limit'].includes(key))) throw new HistoryError('invalid-history-query',400);
+      sendJson(res,200,ledger.search(body.user,body));return;
+    }
+    const compact=pathname==='/v1/chat/compact';
+    if(Object.keys(body).sort().join()!==(compact?'request_id,user':'user') || !/^[A-Za-z0-9_-]{1,128}$/.test(body.user || '') || (compact && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.request_id || ''))) throw new HistoryError('invalid-context-request',400);
+    const user=computeSessionUser({user:body.user});
+    if(compact) {
+      release=ledger.lock(user);
+      if(ledger.projection(user).status!=='ready') throw new HistoryError('history-outcome-unknown',409);
+    }
+    const native=await nativeContextRequest(compact?'compact':'context',{user,...compact?{request_id:body.request_id}:{}},token,gatewayPort,deps);
+    sendJson(res,200,publicContext(native,ledger.projection(user)));
+  } catch(error) {sendError(res,error instanceof HistoryError?error.status:400,error instanceof HistoryError?error.message:'invalid-context-request')}
+  finally {try {release?.()} catch { /* Persistent lock keeps subsequent writes closed. */ }}
 }
 
 function listenUnix(server, socketPath) {
@@ -1513,7 +1634,8 @@ export async function start(cfg = configFromEnv(), opts = {}) {
     const token = gateway.token;
     startupStage = "socket-prepare";
     prepareSocketPath(cfg.socketPath);
-    server = createIngressServer({ token, gatewayPort: cfg.gatewayPort, deps });
+    const historyLedger=createChatHistoryLedger(cfg.chatStateDir || path.join(path.dirname(cfg.socketPath),'chat-state'));
+    server = createIngressServer({ token, gatewayPort: cfg.gatewayPort, deps, historyLedger });
     startupStage = "socket-listen";
     await listenUnix(server, cfg.socketPath);
     startupStage = "runtime-state";

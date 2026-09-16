@@ -55,7 +55,7 @@ async def test_real_session_ids_order_handoff_and_idempotency(tmp_path):
     result = manager.list(OWNER, 'chat')[0]
     assert result['status'] == 'completed'
     assert all(a['status'] == 'completed' for a in result['agents'])
-    assert all('chat_id' not in a and 'messages' not in a for a in result['agents'])
+    assert all('chat_id' not in a and 'messages' not in a and 'context_messages' not in a and 'context_request_id' not in a for a in result['agents'])
     assert manager.list('b'*64, 'chat') == []
     assert manager.store.get('b'*64, one['id']) is None
 
@@ -112,6 +112,13 @@ async def test_question_pauses_and_answer_continues_only_that_child(tmp_path):
     assert calls[0]['chat_id'] == calls[1]['chat_id'] != calls[2]['chat_id']
     assert calls[0]['request_id'] != calls[1]['request_id']
     assert calls[1]['messages'][-1] == {'role':'user','content':'Qual estilo?\nClean'}
+    assert calls[1]['context_messages'] == [
+        calls[0]['messages'][0], {'role': 'assistant', 'content': 'Qual estilo?'},
+        {'role': 'user', 'content': 'Qual estilo?\nClean'},
+    ]
+    saved = manager.store.get(OWNER, initial['id'])['agents'][0]
+    assert saved['context_messages'][-1] == {'role': 'assistant', 'content': 'Result based on the answer'}
+    assert saved['context_request_id'] == calls[1]['request_id']
     assert manager.list(OWNER, 'chat')[0]['status'] == 'completed'
 
 
@@ -223,8 +230,10 @@ async def test_automatic_team_uses_model_plan_with_bounded_fallback(tmp_path, pl
 @pytest.mark.asyncio
 async def test_retry_reviewer_preserves_builder_and_uses_new_attempt(tmp_path):
     calls=[]
+    recovery_ids=[]
     async def run(owner,agent):
         calls.append((agent['id'],agent['request_id']))
+        if agent['request_id']=='retry-1': recovery_ids.extend(agent.get('recovery_request_ids', []))
         if agent['role']=='reviewer' and agent['request_id']!='retry-1':
             yield {'error':{'message':'runtime unavailable'}}
             yield {'_done':True,'_state':'interrupted'}
@@ -241,6 +250,8 @@ async def test_retry_reviewer_preserves_builder_and_uses_new_attempt(tmp_path):
     with pytest.raises(TeamConflict):manager.retry(OWNER,row['id'],'1')
     await settle(manager)
     assert calls==[('0','turn-0'),('1','turn-0'),('1','recovery-1-turn-0'),('1','retry-1')]
+    assert recovery_ids==['turn-0','recovery-1-turn-0']
+    assert all('recovery_request_ids' not in agent for agent in manager.list(OWNER,'chat')[0]['agents'])
     assert manager.list(OWNER,'chat')[0]['status']=='completed'
 
 @pytest.mark.asyncio

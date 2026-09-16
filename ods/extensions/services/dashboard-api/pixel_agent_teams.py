@@ -22,7 +22,7 @@ from portal_goal import goal_prompt, goal_decision, public_plan
 ACTIVE = {"queued", "running", "waiting", "stopping", "interrupted"}
 TERMINAL = {"completed", "failed", "cancelled", "skipped"}
 MAX_TEAMS = 128
-MAX_BYTES = 512 * 1024
+MAX_BYTES = 4 * 1024 * 1024
 
 ROLES = {
     "coordinator": ("Coordinator", "Choose the smallest useful team for the owner's request."),
@@ -171,7 +171,7 @@ class TeamManager:
             if agent['status']=='failed' and not any(m['role']=='assistant' for m in agent['conversation']):
                 agent['error'] = 'No completed response was received from the model runtime. Earlier results were preserved; this review is incomplete.'
             agent['retryable'] = row['status']=='failed' and agent['status']=='failed' and agent['role']!='builder' and agent.get('retries',0)<2
-            for key in ["chat_id", "request_id", "messages", "stop_requested"]:
+            for key in ["chat_id", "request_id", "messages", "context_messages", "context_request_id", "recovery_request_ids", "stop_requested"]:
                 agent.pop(key, None)
         return row
 
@@ -280,6 +280,20 @@ class TeamManager:
                         prompt = self._prompt(row, agent)
                         agent["messages"] = [{"role": "user", "content": prompt}]
                         agent["conversation"].append({"role": "user", "content": f"{row['goal']}\n\n{agent['task']}"})
+                    # Keep the exact model-facing transcript separately from
+                    # display labels and bounded planning prompts. The native
+                    # session compacts it; subsequent goal rounds do not replay
+                    # the last two answers as a fresh user instruction.
+                    if agent.get("context_request_id") != agent["request_id"]:
+                        latest_user = next((m for m in reversed(agent["messages"]) if m["role"] == "user"), None)
+                        if latest_user is None:
+                            raise TeamConflict("The agent has no user request to continue")
+                        if "context_messages" not in agent:
+                            end = max(i for i, m in enumerate(agent["messages"]) if m["role"] == "user")
+                            agent["context_messages"] = copy.deepcopy(agent["messages"][:end + 1])
+                        else:
+                            agent["context_messages"].append(copy.deepcopy(latest_user))
+                        agent["context_request_id"] = agent["request_id"]
                     agent["status"], row["status"] = "running", "running"
                     agent["started"] = agent["started"] or time.time()
                     self._save(owner, row)
@@ -324,6 +338,7 @@ class TeamManager:
                     if content:
                         agent["conversation"].append({"role": "assistant", "content": content})
                         agent["messages"].append({"role": "assistant", "content": content[:16000]})
+                        agent["context_messages"].append({"role": "assistant", "content": content})
                     agent["output"] = ""
                     if done and not error and outcome == "pending" and questions and not stopped:
                         if row.get('mode') == 'goal':
@@ -344,6 +359,7 @@ class TeamManager:
                     if not done or error or not content.strip() or outcome not in {"none", "passed"}:
                         if (not done or error or not content.strip()) and agent['role']!='builder' and agent.get('recoveries',0)<1:
                             agent['recoveries']=1
+                            agent['recovery_request_ids'] = [*agent.get('recovery_request_ids', []), agent['request_id']][-4:]
                             agent['request_id']=f"recovery-1-turn-{agent['turn']}"
                             agent['status'], row['status'] = 'queued', 'queued'
                             agent['activity']=None
@@ -497,6 +513,7 @@ class TeamManager:
         if len(self.tasks)>=4 or (owner,team_id) in self.tasks:
             raise TeamConflict('The team queue is busy')
         agent['retries'] = agent.get('retries',0)+1
+        agent['recovery_request_ids'] = [*agent.get('recovery_request_ids', []), agent['request_id']][-4:]
         agent['request_id'] = f"retry-{agent['retries']}"
         agent['messages'] = [{'role':'user','content':self._prompt(row,agent)}]
         agent['conversation'].append({'role':'user','content':'Retry this review using the preserved earlier results.'})

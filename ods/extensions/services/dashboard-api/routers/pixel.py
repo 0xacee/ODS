@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from host_agent_client import AgentClientError, AgentHTTPError, async_request_json as request_agent_json
 from pixel_runtime_state import begin_pixel_stream, end_pixel_stream, try_begin_pixel_stream
@@ -27,6 +27,7 @@ from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, 
 from security import verify_api_key
 from config import read_live_env_value
 from pixel_chat_identity import asks_display_name, confirmed_display_name, display_name_stream, messages_with_identity
+from pixel_chat_context import HistorySnapshot, public_context
 
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,7 @@ class ChatStreamRequest(BaseModel):
     chat_id: str
     request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
     messages: list[_Message] = Field(min_length=1, max_length=50)
+    history_snapshot: HistorySnapshot | None = None
 
     @field_validator("chat_id")
     @classmethod
@@ -138,6 +140,16 @@ class ChatStreamRequest(BaseModel):
         if total > _MAX_TOTAL_MESSAGE_BYTES:
             raise ValueError("aggregate message content is too large")
         return messages
+
+    @model_validator(mode="after")
+    def _history_matches_turn(self):
+        if self.history_snapshot is not None:
+            if self.request_id is None:
+                raise ValueError("Persistent history requires a request_id")
+            latest = self.history_snapshot.messages[-1]
+            if latest.role != "user" or latest.model_dump() != self.messages[-1].model_dump():
+                raise ValueError("Conversation history must end with the submitted user message")
+        return self
 
 
 class ChatCancelRequest(BaseModel):
@@ -181,6 +193,56 @@ def _result_state(store, identity):
 
 class ChatResultRequest(ChatCancelRequest):
     request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+
+async def _chat_context_request(body: ChatCancelRequest, *, compact: bool = False):
+    config = _pixel_config()
+    if config is None:
+        raise HTTPException(503, "Portal is not enabled")
+    edge_url, key = config
+    payload = {"user": body.chat_id}
+    if compact:
+        payload["request_id"] = body.request_id
+    try:
+        # Starting a compaction returns a job receipt promptly. CPU/model time
+        # belongs to the runtime job, not the browser's HTTP connection.
+        timeout = httpx.Timeout(connect=3.0, read=20.0, write=5.0, pool=3.0)
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
+            async with client.stream(
+                "POST", f"{edge_url}/v1/chat/{'compact' if compact else 'context'}",
+                json=payload, headers=_edge_headers(key, accept="application/json"),
+            ) as response:
+                if response.status_code in {409, 423, 429}:
+                    raise HTTPException(response.status_code, "Portal is busy. Wait for the current task to finish.")
+                if response.status_code != 200 or not response.headers.get("content-type", "").lower().startswith("application/json"):
+                    raise ValueError("Invalid context response")
+                raw = await _bounded_response_bytes(response, 16 * 1024)
+        return public_context(json.loads(raw))
+    except (httpx.HTTPError, asyncio.TimeoutError):
+        # A timeout does not cancel a native compaction. The caller retains its
+        # request ID and reads /context before attempting any further mutation.
+        raise HTTPException(503, "Could not confirm context status. Check again before retrying compaction.") from None
+    except (ValueError, TypeError):
+        raise HTTPException(502, "Portal context status could not be verified") from None
+
+
+@router.post("/chat/context", dependencies=[Depends(verify_api_key)])
+async def pixel_chat_context(body: ChatCancelRequest):
+    return await _chat_context_request(body)
+
+
+@router.post("/chat/compact")
+async def pixel_chat_compact(body: ChatResultRequest, owner: str = Depends(verify_api_key)):
+    store = _chat_results()
+    if store.has_pending((owner_namespace(owner), body.chat_id)):
+        raise HTTPException(423, "Recover or finish the current response before compacting this conversation")
+    issue = await _model_readiness_issue()
+    if issue is not None:
+        raise HTTPException(409, issue[1])
+    # The ingress serializes this mutation with chat admission, including other
+    # dashboard processes and clients. Never invoke native sessions.compact
+    # directly here: that RPC may abort an active run.
+    return await _chat_context_request(body, compact=True)
 
 
 @router.post("/chat/result")
@@ -594,8 +656,10 @@ class _ClientDisconnected(Exception):
 async def _retained_chat_stream(request, body, owner):
     store = _chat_results()
     identity = (owner_namespace(owner), body.chat_id, body.request_id)
-    fingerprint = hashlib.sha256(json.dumps([m.model_dump() for m in body.messages],
-                                           sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+    fingerprint_input = [m.model_dump() for m in body.messages]
+    if body.history_snapshot is not None:
+        fingerprint_input = {"messages": fingerprint_input, "history_snapshot": body.history_snapshot.model_dump()}
+    fingerprint = hashlib.sha256(json.dumps(fingerprint_input, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
     existing = store.get(identity)
     direct_reply = None
     if existing is None:
@@ -668,14 +732,15 @@ async def _produce_retained_result(store, identity, body, config, messages):
     cancelled = False
     failed = False
     stopped = False
+    rejected = False
     try:
         timeout = httpx.Timeout(connect=5.0, read=_CHAT_STREAM_TIMEOUT_SECONDS, write=30.0, pool=5.0)
         async with async_timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
             async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
                 async with client.stream("POST", f"{edge_url}/v1/chat/completions",
-                        json={"model": _MODEL, "stream": True, "user": body.chat_id,
-                              "messages": messages},
+                        json=_edge_chat_body(body, messages),
                         headers=_edge_headers(key, accept="text/event-stream")) as upstream:
+                    rejected = 400 <= upstream.status_code < 500
                     if upstream.status_code != 200 or not upstream.headers.get("content-type", "").lower().startswith("text/event-stream"):
                         raise ValueError("Invalid upstream stream")
                     buffered = bytearray()
@@ -706,18 +771,28 @@ async def _produce_retained_result(store, identity, body, config, messages):
     finally:
         # Keep this conversation reserved until cancellation has finished. A late
         # native cancellation must never target the next attempt in this chat.
-        if not done_seen and not cancelled:
+        if not done_seen and not cancelled and not rejected:
             try:
                 stopped = await asyncio.wait_for(_cancel_edge_run(edge_url, key, body.chat_id), _CLIENT_CANCEL_TIMEOUT_SECONDS)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
         try:
             if not done_seen:
-                text = "Pixel was stopped." if cancelled else "Pixel could not complete the response. Check saved work before continuing."
+                text = ("Pixel was stopped." if cancelled else
+                        "Portal did not accept this turn. Check the conversation's context status before continuing." if rejected else
+                        "Pixel could not complete the response. Check saved work before continuing.")
                 store.append(identity, _error_event(text) + b"data: [DONE]\n\n", terminal=True)
         finally:
-            state = "complete" if done_seen else "cancelled" if cancelled else "interrupted" if failed and stopped else "unresolved" if failed else "complete"
+            state = "complete" if done_seen else "cancelled" if cancelled else "interrupted" if rejected or failed and stopped else "unresolved" if failed else "complete"
             store.finish(identity, state)
+
+
+def _edge_chat_body(body, messages):
+    result = {"model": _MODEL, "stream": True, "user": body.chat_id, "messages": messages}
+    if body.history_snapshot is not None:
+        result["history_snapshot"] = body.history_snapshot.model_dump()
+        result["request_id"] = body.request_id
+    return result
 
 
 async def _iter_upstream_chunks(
@@ -776,12 +851,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         _state, detail = readiness_issue
         raise HTTPException(status_code=409, detail=detail)
     edge_url, key = config
-    edge_body = {
-        "model": _MODEL,
-        "stream": True,
-        "user": body.chat_id,
-        "messages": await messages_with_identity(body.messages),
-    }
+    edge_body = _edge_chat_body(body, await messages_with_identity(body.messages))
 
     # Pixel Edge is capped at 33 minutes; retain one bounded minute of outer
     # headroom so this bridge never aborts a valid CPU-only first turn first.

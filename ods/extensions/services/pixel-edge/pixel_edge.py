@@ -24,6 +24,7 @@ from urllib.parse import quote, urlsplit
 
 from aiohttp import web, ClientSession, UnixConnector, ClientTimeout
 from transition_gate import TransitionGate, GateError, strict_json, valid_binding
+from chat_context import project_context, valid_history_snapshot
 
 
 def valid_live_task_event(event):
@@ -175,7 +176,7 @@ _HOP_BY_HOP = frozenset({
     "upgrade",
 })
 
-_MAX_BODY = 2 * 1024 * 1024          # 2 MiB request body
+_MAX_BODY = 8 * 1024 * 1024          # Full history envelope; ingress validates 4 MiB text
 _MAX_CANCEL_BODY = 256
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MiB non-stream response cap
 _MAX_CANCEL_RESPONSE_BYTES = 1024
@@ -308,6 +309,7 @@ _ADDRESS_BEARING_HOST_ACTIONS = {
 _CANCEL_EVENTS_KEY = web.AppKey("pixel_cancel_events", dict)
 _CHAT_ACTIVITY_KEY = web.AppKey("pixel_chat_activity", dict)
 _ACTIVE_REQUESTS_KEY = web.AppKey("pixel_active_requests", set)
+_COMPACTIONS_KEY = web.AppKey("pixel_compactions", dict)
 _TRANSITION_GATE_KEY = web.AppKey("pixel_transition_gate", TransitionGate)
 
 
@@ -787,6 +789,106 @@ async def handle_chat_activity(request: web.Request):
     return web.json_response({"state": state}, headers={"Cache-Control": "no-store"})
 
 
+async def _context_upstream(data, *, compact=False):
+    connector = UnixConnector(path=_SOCKET_PATH)
+    timeout = ClientTimeout(total=18, sock_connect=2, sock_read=16)
+    async with ClientSession(connector=connector, timeout=timeout) as session:
+        async with session.post(f"http://pixel-upstream/v1/chat/{'compact' if compact else 'context'}",
+                                json=data, headers={"Content-Type": "application/json", "Accept": "application/json"}) as response:
+            if response.status in {409, 423, 429}:
+                raise GateError("context_busy", response.status)
+            if response.status != 200 or "application/json" not in response.headers.get("Content-Type", "").lower():
+                raise ValueError("invalid context response")
+            return project_context(strict_json(await _read_bounded(response.content, 16 * 1024)))
+
+
+def _compact_terminal(result, request_id):
+    operation = result["compaction"]
+    # A restarted native process cannot still be running this job. Its outcome
+    # remains unknown; releasing admission is not a claim of successful compact.
+    return (operation.get("requestId") == request_id and (
+        operation["status"] in {"completed", "skipped", "failed"}
+        or operation["status"] == "unknown" and operation.get("reason") == "runtime-restarted"))
+
+
+async def _watch_compaction(app, identity, token):
+    # Native work outlives the initiating HTTP response. Keep model transitions
+    # fenced until a matching terminal receipt is observed, including after a
+    # temporary transport failure. Shutdown leaves the durable gate interrupted.
+    try:
+        while True:
+            await asyncio.sleep(2)
+            try:
+                result = await _context_upstream({"user": identity[0]})
+            except Exception:
+                continue
+            if _compact_terminal(result, identity[1]):
+                await app[_TRANSITION_GATE_KEY].finish(token)
+                app[_COMPACTIONS_KEY].pop(identity, None)
+                return
+    except asyncio.CancelledError:
+        return
+
+
+async def handle_chat_context(request: web.Request):
+    fail = _check_auth(request)
+    if fail is not None:
+        return fail
+    if request.content_type != "application/json":
+        return web.json_response({"error": "Content-Type must be application/json"}, status=415)
+    compact = request.path == "/v1/chat/compact"
+    try:
+        if request.query_string:
+            raise ValueError("query not allowed")
+        data = strict_json(await _read_bounded(request.content, 512))
+        keys = {"user", "request_id"} if compact else {"user"}
+        if (not isinstance(data, dict) or set(data) != keys
+                or any(not isinstance(item, str) or not _SAFE_CHAT_ID.fullmatch(item) for item in data.values())):
+            raise ValueError("invalid context request")
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return web.json_response({"error": "invalid context request"}, status=400)
+    token = None
+    identity = (data["user"], data.get("request_id"))
+    existing = request.app[_COMPACTIONS_KEY].get(identity)
+    if compact and existing is None:
+        if request.app[_CANCEL_EVENTS_KEY].get(data["user"]) or any(
+                user == data["user"] for user, _ in request.app[_COMPACTIONS_KEY]):
+            return web.json_response({"error": "context_busy"}, status=423)
+        token = object()
+        try:
+            await request.app[_TRANSITION_GATE_KEY].admit(token)
+        except GateError as exc:
+            return web.json_response({"error": exc.reason}, status=exc.status)
+        # Reserve before awaiting upstream so a duplicate POST cannot create a
+        # second lifetime token. Native ingress also deduplicates by request ID.
+        request.app[_COMPACTIONS_KEY][identity] = (token, None)
+    try:
+        result = await _context_upstream(data, compact=compact)
+        if compact and token is not None and (
+                _compact_terminal(result, data["request_id"])
+                or result["status"] != "unavailable" and (
+                    result["compaction"].get("requestId") != data["request_id"]
+                    or result["compaction"]["status"] == "idle")):
+            # A missing session or a busy runtime can reject admission with a
+            # valid status projection. There is no job to watch in that case.
+            await request.app[_TRANSITION_GATE_KEY].finish(token)
+            request.app[_COMPACTIONS_KEY].pop(identity, None)
+            token = None
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+    except GateError as exc:
+        if token is not None:
+            await request.app[_TRANSITION_GATE_KEY].finish(token)
+            request.app[_COMPACTIONS_KEY].pop(identity, None)
+            token = None
+        return web.json_response({"error": exc.reason}, status=exc.status)
+    except Exception:
+        return web.json_response({"error": "context status unavailable"}, status=502)
+    finally:
+        if token is not None:
+            task = asyncio.create_task(_watch_compaction(request.app, identity, token))
+            request.app[_COMPACTIONS_KEY][identity] = (token, task)
+
+
 def _finish_chat_activity(app, chat_id, cancel_event, terminal):
     active = app[_CANCEL_EVENTS_KEY].get(chat_id)
     if active is None:
@@ -877,6 +979,8 @@ async def handle_chat_completions(request: web.Request):
 
     if not isinstance(data, dict):
         return web.json_response({"error": "JSON object required"}, status=400)
+    if not valid_history_snapshot(data):
+        return web.json_response({"error": "invalid conversation history"}, status=400)
 
     req_model = data.get("model", "")
     if req_model not in _ALLOWED_MODELS:
@@ -1303,6 +1407,8 @@ def create_app() -> web.Application:
     app[_CANCEL_EVENTS_KEY] = {}
     app[_CHAT_ACTIVITY_KEY] = {}
     app[_ACTIVE_REQUESTS_KEY] = set()
+    app[_COMPACTIONS_KEY] = {}
+    compactions = app[_COMPACTIONS_KEY]
     gate = TransitionGate(
         os.environ.get("PIXEL_TRANSITION_STATE_DIR", ""), app[_ACTIVE_REQUESTS_KEY],
         owner_key_distinct=not _constant_time_compare(config_token, preview_proxy_token),
@@ -1311,6 +1417,11 @@ def create_app() -> web.Application:
 
     async def stop_admission(_application):
         await gate.shutdown()
+        tasks = [task for _, task in compactions.values() if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def close_gate(_application):
         gate.close()
@@ -1326,6 +1437,8 @@ def create_app() -> web.Application:
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_post("/v1/chat/cancel", handle_chat_cancel)
     app.router.add_post("/v1/chat/activity", handle_chat_activity)
+    app.router.add_post("/v1/chat/context", handle_chat_context)
+    app.router.add_post("/v1/chat/compact", handle_chat_context)
     # Catch-all registered last: unmatched paths AND unmatched methods → 404.
     app.router.add_route("*", "/{tail:.*}", handle_not_found)
     return app

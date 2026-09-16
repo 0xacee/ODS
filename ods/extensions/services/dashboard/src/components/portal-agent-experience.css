@@ -93,3 +93,7 @@
 @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) {
   :root .portal-glass-composer,.portal-recovery { background:rgb(var(--theme-card)); }
 }
+.portal-context-status { display:flex; align-items:center; flex-wrap:wrap; gap:6px 10px; padding:6px 4px; font-size:11px; line-height:1.5; color:rgb(var(--theme-text-muted)); }
+.portal-context-status > span { flex:1; min-width:180px; }
+.portal-context-status > button { padding:3px 5px; background:transparent; color:rgb(var(--theme-text-secondary)); text-decoration:underline; text-underline-offset:3px; }
+.portal-context-status > button:focus-visible { outline:1px solid currentColor; outline-offset:2px; }

@@ -206,7 +206,7 @@ async def _start_upstream():
     fd, path = tempfile.mkstemp(suffix=".sock")
     os.close(fd)
     os.unlink(path)
-    app = web.Application(client_max_size=2 * 1024 * 1024 + 1)
+    app = web.Application(client_max_size=8 * 1024 * 1024 + 1)
     app["chat_requests"] = []
     app["cancel_users"] = []
     app["native_runs"] = {}
@@ -1305,7 +1305,7 @@ class TestSizeLimit(BaseEdgeTest):
                     self.assertEqual(received["model"], "openclaw/default")
 
     async def test_chunked_over_limit_returns_413_without_upstream(self):
-        raw = b"x" * (2 * 1024 * 1024 + 1)
+        raw = b"x" * (self.pe._MAX_BODY + 1)
 
         async def chunks():
             for offset in range(0, len(raw), 65536):
@@ -1322,7 +1322,7 @@ class TestSizeLimit(BaseEdgeTest):
 
     async def test_oversized_body_rejected(self):
         big = json.dumps({"model": "pixel/default",
-                          "messages": [{"role": "user", "content": "x" * (2 * 1024 * 1024 + 1)}]})
+                          "messages": [{"role": "user", "content": "x" * (self.pe._MAX_BODY + 1)}]})
         async with self.client.post(
             "http://localhost/v1/chat/completions",
             headers={**self.auth(), "Content-Type": "application/json"},
