@@ -1,5 +1,6 @@
 """Local gateway selection on real loopback sockets; never installed services."""
 import contextlib
+import errno
 import json
 from pathlib import Path
 import socket
@@ -36,22 +37,33 @@ def gateways(*families, post_reset=False, snapshot=None):
             body = json.dumps(SNAPSHOT if snapshot is None else snapshot).encode()
             self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
     try:
-        port = 0
-        for family in families:
-            class Server(socketserver.ThreadingTCPServer):
-                address_family = family
-                daemon_threads = True
-                def server_bind(self):
-                    if self.address_family == socket.AF_INET6:
-                        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-                    super().server_bind()
+        # An ephemeral port free in one address family may be occupied in the
+        # other. Reserve both listeners before starting either worker.
+        for attempt in range(10):
+            port = 0
             try:
-                server = Server(("::1" if family == socket.AF_INET6 else "127.0.0.1", port), Handler)
-            except OSError:
-                if family == socket.AF_INET6: pytest.skip("IPv6 loopback unavailable on this test host")
+                for family in families:
+                    class Server(socketserver.ThreadingTCPServer):
+                        address_family = family
+                        daemon_threads = True
+                        def server_bind(self):
+                            if self.address_family == socket.AF_INET6:
+                                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                            super().server_bind()
+                    server = Server(("::1" if family == socket.AF_INET6 else "127.0.0.1", port), Handler)
+                    servers.append(server)
+                    port = server.server_address[1]
+                break
+            except OSError as error:
+                for server in servers:
+                    server.server_close()
+                servers.clear()
+                if error.errno == errno.EADDRINUSE and attempt < 9:
+                    continue
+                if family == socket.AF_INET6 and error.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL):
+                    pytest.skip("IPv6 loopback unavailable on this test host")
                 raise
-            servers.append(server)
-            port = server.server_address[1]
+        for server in servers:
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
             thread.start()
             threads.append(thread)

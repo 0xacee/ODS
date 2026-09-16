@@ -49,8 +49,8 @@ def _read_current_version() -> str:
         try:
             for line in _read_utf8(env_file).splitlines():
                 if line.startswith("ODS_VERSION="):
-                    version = parse_env_value(line.split("=", 1)[1]).strip()
-                    if version:
+                    version = parse_env_value(line.split("=", 1)[1])
+                    if version.strip():
                         return version
         except OSError:
             pass
