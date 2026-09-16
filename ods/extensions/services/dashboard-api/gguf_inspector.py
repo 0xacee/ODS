@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import struct
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 logger = logging.getLogger(__name__)
 
@@ -82,26 +82,39 @@ _FILE_TYPE_LABELS = {
     30: "IQ4_XS",
     31: "IQ1_M",
     32: "BF16",
-    33: "TQ1_0",
-    34: "TQ2_0",
+    # 33-35 were removed runtime-repacking formats, not ternary types.
+    36: "TQ1_0",
+    37: "TQ2_0",
+    38: "MXFP4_MOE",
+    39: "NVFP4",
+    40: "Q1_0",
+    41: "Q2_0",
 }
 
 
 class _Reader:
-    def __init__(self, data: bytes):
-        self.data = data
+    """Bound bytes materialized while seeking over unsampled metadata."""
+
+    def __init__(self, source: BinaryIO, budget: int, size: int):
+        self.source = source
+        self.remaining = budget
+        self.size = size
         self.offset = 0
 
     def read(self, size: int) -> bytes:
-        if self.offset + size > len(self.data):
+        if size > self.remaining:
+            raise ValueError("GGUF metadata read budget exceeded")
+        data = self.source.read(size)
+        if len(data) != size:
             raise ValueError("GGUF metadata ended unexpectedly")
-        chunk = self.data[self.offset:self.offset + size]
+        self.remaining -= size
         self.offset += size
-        return chunk
+        return data
 
     def skip(self, size: int) -> None:
-        if self.offset + size > len(self.data):
+        if self.offset + size > self.size:
             raise ValueError("GGUF metadata ended unexpectedly")
+        self.source.seek(size, 1)
         self.offset += size
 
     def unpack(self, fmt: str):
@@ -145,7 +158,7 @@ def _skip_value(reader: _Reader, value_type: int, depth: int = 0) -> None:
     raise ValueError(f"unsupported GGUF value type: {value_type}")
 
 
-def _read_array(reader: _Reader, depth: int = 0) -> Any:
+def _read_array(reader: _Reader, depth: int = 0, sample_limit: int = 64) -> Any:
     if depth >= _MAX_ARRAY_DEPTH:
         raise ValueError("GGUF array nesting too deep")
     item_type = reader.unpack("<I")
@@ -153,7 +166,6 @@ def _read_array(reader: _Reader, depth: int = 0) -> Any:
     if item_type not in _STRUCTS and item_type not in (8, 9):
         raise ValueError(f"unsupported GGUF array type: {item_type}")
 
-    sample_limit = 64
     sample = [_read_value(reader, item_type, depth + 1) for _ in range(min(length, sample_limit))]
     remaining = max(length - sample_limit, 0)
     if item_type in _STRUCTS:
@@ -204,7 +216,11 @@ def _first_value(metadata: dict[str, Any], suffixes: tuple[str, ...]) -> Any:
 
 
 def inspect_gguf(path: Path | str, max_metadata_bytes: int = 8 * 1024 * 1024) -> dict[str, Any]:
-    """Return normalized GGUF metadata, degrading to ``unknown`` on failure."""
+    """Inspect metadata with a bounded read budget, skipping unsampled tails.
+
+    ``max_metadata_bytes`` bounds materialized bytes, not skipped file offsets.
+    Tensor data is never read. Failures degrade to ``unknown``.
+    """
     p = Path(path)
     result: dict[str, Any] = {
         "path": str(p),
@@ -221,20 +237,25 @@ def inspect_gguf(path: Path | str, max_metadata_bytes: int = 8 * 1024 * 1024) ->
     try:
         result["size_bytes"] = p.stat().st_size
         with p.open("rb") as f:
-            data = f.read(max_metadata_bytes)
-        reader = _Reader(data)
-        if reader.read(4) != b"GGUF":
-            result["error"] = "not a GGUF file"
-            return result
-        version = reader.unpack("<I")
-        tensor_count = reader.unpack("<Q")
-        metadata_count = reader.unpack("<Q")
-        metadata: dict[str, Any] = {}
-        for _ in range(metadata_count):
-            key = reader.string()
-            value_type = reader.unpack("<I")
-            metadata[key] = _read_value(reader, value_type)
-
+            reader = _Reader(f, max_metadata_bytes, result["size_bytes"])
+            if reader.read(4) != b"GGUF":
+                result["error"] = "not a GGUF file"
+                return result
+            version = reader.unpack("<I")
+            tensor_count = reader.unpack("<Q")
+            metadata_count = reader.unpack("<Q")
+            metadata: dict[str, Any] = {}
+            for _ in range(metadata_count):
+                key = reader.string()
+                value_type = reader.unpack("<I")
+                if value_type == 9 and key.endswith(".attention.head_count_kv"):
+                    # Hybrid models can have more than 64 layers (e.g. Nemotron's
+                    # 88). KV estimation needs the complete per-layer array, not
+                    # the generic tokenizer sample. Keep a bounded allocation;
+                    # larger arrays still degrade to the sampled representation.
+                    metadata[key] = _read_array(reader, sample_limit=1024)
+                else:
+                    metadata[key] = _read_value(reader, value_type)
         file_type = metadata.get("general.file_type")
         architecture = metadata.get("general.architecture", "unknown")
         result.update({
