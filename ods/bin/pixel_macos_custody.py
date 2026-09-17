@@ -8,6 +8,7 @@ import errno
 import hashlib
 import os
 import plistlib
+import re
 import stat
 import sys
 from xml.parsers.expat import ExpatError
@@ -15,6 +16,81 @@ from xml.parsers.expat import ExpatError
 
 class CustodyError(ValueError):
     pass
+
+
+def verify_loaded_launchd_definition(raw, target, filename, expected):
+    """Compare a launchctl print snapshot with a trusted deployment definition.
+
+    This supplements on-disk custody: kickstart does not reload a changed plist.
+    It proves neither process identity nor absence of surviving descendants.
+    Unknown launchctl formatting fails closed; never parse untrusted output as
+    a deployment specification.
+    """
+    def fail():
+        raise CustodyError('launchd-loaded-definition-mismatch')
+
+    if (not isinstance(raw, str) or not isinstance(expected, dict)
+            or not isinstance(target, str) or not re.fullmatch(
+                r'(?:system|gui/[0-9]+)/[A-Za-z0-9][A-Za-z0-9.-]{0,127}', target)):
+        fail()
+    lines = raw.splitlines()
+    if not lines or lines[0] != target + ' = {' or lines[-1] != '}':
+        fail()
+
+    def scalar(name):
+        values = re.findall(r'^\t' + re.escape(name) + r' = ([^\n]*)$', raw, re.M)
+        if len(values) != 1:
+            fail()
+        return values[0]
+
+    def block(name, *, optional=False):
+        start = '\t' + name + ' = {'
+        positions = [i for i, line in enumerate(lines) if line == start]
+        if not positions and optional:
+            return []
+        if len(positions) != 1:
+            fail()
+        values = []
+        for line in lines[positions[0] + 1:]:
+            if line == '\t}':
+                return values
+            if not line.startswith('\t\t') or line.startswith('\t\t\t'):
+                fail()
+            values.append(line[2:])
+        fail()
+
+    args = expected.get('ProgramArguments')
+    environment = expected.get('EnvironmentVariables')
+    if (expected.get('Label') != target.split('/')[-1]
+            or not isinstance(args, list) or not args
+            or any(not isinstance(a, str) or not a or any(c in a for c in '\n\r\t') for a in args)
+            or not isinstance(environment, dict)
+            or any(not isinstance(k, str) or not isinstance(v, str)
+                   or any(c in k + v for c in '\n\r\t') for k, v in environment.items())):
+        fail()
+    for key, value in {'path': os.fspath(filename),
+                       'program': expected.get('Program', args[0]),
+                       'working directory': expected.get('WorkingDirectory'),
+                       'stdout path': expected.get('StandardOutPath'),
+                       'stderr path': expected.get('StandardErrorPath')}.items():
+        if not isinstance(value, str) or scalar(key) != value:
+            fail()
+    if block('arguments') != args or block('inherited environment', optional=True):
+        fail()
+    loaded = {}
+    for line in block('environment'):
+        key, separator, value = line.partition(' => ')
+        if not separator or not key or key in loaded:
+            fail()
+        loaded[key] = value
+    # launchd injects these independently of EnvironmentVariables.
+    if loaded.pop('XPC_SERVICE_NAME', None) != expected['Label']:
+        fail()
+    rate = loaded.pop('OSLogRateLimit', None)
+    if rate is not None and not rate.isdecimal():
+        fail()
+    if loaded != environment:
+        fail()
 
 
 def _require_no_acl(fd):

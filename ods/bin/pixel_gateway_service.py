@@ -56,6 +56,25 @@ class LaunchdGatewayService:
             raise error('invalid-launchd-service')
         self.command, self.error, self.target, self.verify = command, error, target, verify
 
+    def installation_binding(self, filename, expected):
+        """Require both protected plist bytes and the matching loaded job.
+
+        expected is supplied by trusted installation metadata, never inferred
+        from the user's current plist. This is not a process isolation proof.
+        """
+        from pixel_macos_custody import (CustodyError, launchd_document_binding,
+                                         verify_loaded_launchd_definition)
+        self.verify()
+        try:
+            binding = launchd_document_binding(filename, expected)
+            raw = self.command(['/bin/launchctl', 'print', self.target])
+            verify_loaded_launchd_definition(raw, self.target, filename, expected)
+            if launchd_document_binding(filename, expected) != binding:
+                raise CustodyError('launchd-document-changed')
+        except CustodyError as exc:
+            raise self.error(str(exc)) from None
+        return binding
+
     def pid(self, *, timeout=20, require_running=False):
         self.verify()
         raw = self.command(['/bin/launchctl', 'print', self.target], timeout=timeout)

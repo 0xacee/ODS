@@ -18,6 +18,55 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'bin'))
 import pixel_macos_custody as custody
 
 
+class LoadedDefinitionTests(unittest.TestCase):
+    def setUp(self):
+        self.target = 'system/com.ods.pixel'
+        self.path = '/Library/LaunchDaemons/com.ods.pixel.plist'
+        self.expected = {'Label': 'com.ods.pixel',
+                         'ProgramArguments': ['/usr/local/bin/node', '/opt/ODS Native/gateway.mjs'],
+                         'WorkingDirectory': '/opt/ODS Native',
+                         'StandardOutPath': '/var/log/pixel.log',
+                         'StandardErrorPath': '/var/log/pixel.log',
+                         'EnvironmentVariables': {'HOME': '/var/empty', 'PATH': '/usr/bin:/bin'}}
+        self.raw = ('system/com.ods.pixel = {\n'
+                    '\tpath = /Library/LaunchDaemons/com.ods.pixel.plist\n'
+                    '\tprogram = /usr/local/bin/node\n'
+                    '\targuments = {\n\t\t/usr/local/bin/node\n'
+                    '\t\t/opt/ODS Native/gateway.mjs\n\t}\n'
+                    '\tworking directory = /opt/ODS Native\n'
+                    '\tstdout path = /var/log/pixel.log\n'
+                    '\tstderr path = /var/log/pixel.log\n'
+                    '\tenvironment = {\n\t\tHOME => /var/empty\n'
+                    '\t\tPATH => /usr/bin:/bin\n\t\tOSLogRateLimit => 64\n'
+                    '\t\tXPC_SERVICE_NAME => com.ods.pixel\n\t}\n}\n')
+
+    def verify(self, raw):
+        custody.verify_loaded_launchd_definition(raw, self.target, self.path, self.expected)
+
+    def test_expected_loaded_definition(self):
+        self.verify(self.raw)
+
+    def test_stale_paths_arguments_environment_and_ambiguity_rejected(self):
+        changes = [
+            ('\tprogram = /usr/local/bin/node', '\tprogram = /tmp/node'),
+            ('\t\t/opt/ODS Native/gateway.mjs', '\t\t/opt/Old/gateway.mjs'),
+            ('\t\tHOME => /var/empty', '\t\tHOME => /tmp'),
+            ('\t\tHOME => /var/empty', '\t\tHOME => /var/empty\n\t\tHOME => /tmp'),
+            ('\tenvironment = {', '\tinherited environment = {\n\t\tSSH_AUTH_SOCK => /tmp/agent\n\t}\n\tenvironment = {'),
+            ('\t\tPATH => /usr/bin:/bin', '\t\tPATH => /usr/bin:/bin\n\t\tNODE_OPTIONS => --require=/tmp/inject.js'),
+            ('\tprogram = /usr/local/bin/node', '\tprogram = /usr/local/bin/node\n\tprogram = /tmp/node'),
+            ('system/com.ods.pixel = {', 'system/com.other = {'),
+            ('\tworking directory = /opt/ODS Native', '\t\tworking directory = /opt/ODS Native'),
+        ]
+        for before, after in changes:
+            with self.subTest(after=after), self.assertRaises(custody.CustodyError):
+                self.verify(self.raw.replace(before, after))
+
+    def test_empty_inherited_environment_allowed(self):
+        self.verify(self.raw.replace('\tenvironment = {',
+                                    '\tinherited environment = {\n\t}\n\tenvironment = {'))
+
+
 class MetadataTests(unittest.TestCase):
     def test_rejects_nonroot_writable_hardlinked_and_wrong_kind(self):
         valid = dict(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_nlink=1)

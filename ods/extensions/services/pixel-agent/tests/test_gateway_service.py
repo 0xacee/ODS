@@ -1,13 +1,28 @@
 import sys
 from pathlib import Path
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'bin'))
 from pixel_gateway_service import LaunchdGatewayService, SystemdGatewayService
 
 
 class GatewayServiceTests(unittest.TestCase):
+    def test_launchd_binding_checks_file_snapshot_and_file_again(self):
+        service = LaunchdGatewayService(Mock(return_value='snapshot'), ValueError,
+                                       'system/com.ods.fixture', Mock())
+        expected = {'Label': 'com.ods.fixture'}
+        binding = {'sha256': 'fixture'}
+        with patch('pixel_macos_custody.launchd_document_binding', return_value=binding) as disk, \
+                patch('pixel_macos_custody.verify_loaded_launchd_definition') as loaded:
+            self.assertEqual(service.installation_binding('/protected.plist', expected), binding)
+            self.assertEqual(disk.call_count, 2)
+            loaded.assert_called_once_with('snapshot', 'system/com.ods.fixture',
+                                           '/protected.plist', expected)
+            disk.side_effect = [binding, {'sha256': 'changed'}]
+            with self.assertRaisesRegex(ValueError, 'launchd-document-changed'):
+                service.installation_binding('/protected.plist', expected)
+
     def test_systemd_pid_and_timeout_preserved(self):
         command = Mock(return_value='123')
         service = SystemdGatewayService(command, ValueError, 'fixture.service')
