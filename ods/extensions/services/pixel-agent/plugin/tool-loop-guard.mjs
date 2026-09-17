@@ -2017,7 +2017,7 @@ function gpuEvidence(step) {
     value.schemaVersion !== 1 ||
     value.kind !== "ods-host-gpu" ||
     typeof value.available !== "boolean" ||
-    !["nvidia", "unavailable"].includes(value.backend) ||
+    !["nvidia", "metal", "unavailable"].includes(value.backend) ||
     !Array.isArray(value.devices) ||
     value.devices.length > 16
   ) {
@@ -2025,6 +2025,13 @@ function gpuEvidence(step) {
   }
   const devices = [];
   for (const device of value.devices) {
+    if (value.backend === "metal") {
+      if (!exactKeys(device, ["metal", "name"])) return undefined;
+      const name = cleanSingleLine(device.name, /^[A-Za-z0-9][A-Za-z0-9 ._+()/@-]{0,95}$/, 96);
+      if (!name || typeof device.metal !== "string" || !/^(supported|Metal [1-9])$/.test(device.metal)) return undefined;
+      devices.push(`${name} (${device.metal})`);
+      continue;
+    }
     if (!exactKeys(device, ["driver", "memoryMiB", "name"])) return undefined;
     const name = cleanSingleLine(device.name, /^[A-Za-z0-9][A-Za-z0-9 ._+()/@-]{0,95}$/, 96);
     const driver = cleanSingleLine(device.driver, /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/, 64);
@@ -2035,7 +2042,10 @@ function gpuEvidence(step) {
   }
   if (value.available !== (devices.length > 0)) return undefined;
   if (!value.available && (value.backend !== "unavailable" || devices.length > 0)) return undefined;
-  if (value.available && value.backend !== "nvidia") return undefined;
+  if (value.available && !["nvidia", "metal"].includes(value.backend)) return undefined;
+  if (value.available && value.backend === "metal") {
+    return `GPU capability: ${devices.join("; ")}. Runtime Metal utilization was not measured. Device identifiers and serial numbers are omitted.`;
+  }
   return value.available
     ? `GPU: ${devices.join("; ")}. Device identifiers and serial numbers are omitted.`
     : "GPU telemetry is unavailable through the bounded host observer.";
