@@ -74,3 +74,19 @@ python3 -m unittest discover -s ods/tests -p test_pixel_native_compose.py -v
 These tests validate Compose merging, identity/path/port substitution, retained
 Edge contracts and required parameters. They do not prove runtime connectivity,
 preview availability, restart recovery or full macOS security equivalence.
+
+## Native model bundle qualification
+
+Before distributing a locally compiled flat ARM64 llama.cpp bundle, check its
+loader metadata on macOS:
+
+```sh
+python3 installers/macos/lib/native-runtime-audit.py --bundle /path/to/bundle --minimum-macos 14.0
+```
+
+This rejects external Homebrew/build-directory dependencies, escaping symlinks,
+missing companion libraries and deployment targets newer than requested. It
+does not execute the binaries or qualify their CPU instructions, code signing,
+Metal correctness, TLS features or behavior on older hardware. It is a release
+qualification helper, not yet an automatic installer gate. Builds still need
+explicit baseline CPU settings and real supported-hardware testing.
