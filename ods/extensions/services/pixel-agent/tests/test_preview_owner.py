@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import sys
 if sys.platform == 'win32':
     from unittest import SkipTest
@@ -15,6 +16,22 @@ spec.loader.exec_module(preview)
 
 
 class PreviewOwnerTests(unittest.TestCase):
+    def test_request_cli_forwards_only_valid_bounded_publish(self):
+        payload = b'{"schemaVersion":1,"action":"publish","relativeDirectory":"demo"}'
+        with patch.object(preview.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(payload))), \
+                patch.object(preview.sys, 'stdout', io.StringIO()), \
+                patch.object(preview, 'client', return_value={'schemaVersion': 1}) as client:
+            self.assertEqual(preview.main(['preview', 'request']), 0)
+            self.assertEqual(client.call_args.args[0], preview.SOCKET_PATH)
+            self.assertEqual(client.call_args.args[1]['relativeDirectory'], 'demo')
+        for raw in (b'x' * 2049, payload.replace(b'demo', b'../etc'),
+                    payload.replace(b'publish', b'health')):
+            with patch.object(preview.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(raw))), \
+                    patch.object(preview.sys, 'stderr', io.StringIO()), \
+                    patch.object(preview, 'client') as client:
+                self.assertEqual(preview.main(['preview', 'request']), 1)
+                client.assert_not_called()
+
     def test_numeric_identity_requires_matching_real_and_effective_uid(self):
         for uid in (501, 732, 1000):
             with patch.object(preview.os, 'getuid', return_value=uid), \

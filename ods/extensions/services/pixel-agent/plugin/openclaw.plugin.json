@@ -69,6 +69,11 @@
         "maxLength": 64,
         "pattern": "^[a-f0-9]{64}$"
       },
+      "workspacePreviewTransport": {
+        "type": "string",
+        "enum": ["unix", "docker-desktop"],
+        "default": "unix"
+      },
       "leanPrompt": {
         "type": "boolean"
       },

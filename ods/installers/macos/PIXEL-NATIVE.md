@@ -20,10 +20,28 @@ The installer must supply:
 - `PIXEL_NATIVE_INGRESS_IMAGE`: the qualified image containing the Node runtime.
   Its gateway entry point and inherited health check are explicitly replaced.
 - `PIXEL_NATIVE_GATEWAY_PORT`: the native loopback listener, default 18789.
+- `PIXEL_NATIVE_WORKSPACE`: the existing canonical private workspace, mounted
+  read-only by the preview broker. `PIXEL_PREVIEW_PORT` defaults to 9437 and must
+  be free on host loopback. The broker uses the same port inside Docker so its
+  verified receipt identifies the actual published browser origin.
 - Shared Edge keys and preview runtime prerequisites. Compose interpolates the
   shared Linux fragment before applying overrides, so its
   `PIXEL_INGRESS_RUNTIME_DIR` variable must also be set even though that mount
-  is replaced by a Docker volume. It must not be used as the native socket path.
+  is replaced by a Docker volume. The same applies to
+  `PIXEL_PREVIEW_RUNTIME_DIR`. Neither variable is the native socket path.
+
+Native preview uses the shared snapshot engine in a dedicated non-root image.
+The broker receives no Docker socket and can only read the configured workspace
+and write its snapshot/runtime volumes. Its HTTP port is published on host
+loopback only. Edge receives the preview runtime volume read-only.
+The native plugin selects `workspacePreviewTransport: "docker-desktop"` in
+installer-owned plugin configuration. This invokes only the fixed
+`ods-pixel-workspace-preview` container's bounded `request` command; model input
+is JSON on stdin, never a container name, command, or host path. Linux defaults
+to the existing Unix-socket transport. Killing the Docker client stops waiting,
+not necessarily a publication already accepted by the broker; no receipt is
+returned after cancellation. The gateway's Docker authority still requires the
+independent qualification described below.
 
 The initializer owns only the runtime volume's top-level directory. It has no
 network or host bind mounts and does not recursively change existing history.

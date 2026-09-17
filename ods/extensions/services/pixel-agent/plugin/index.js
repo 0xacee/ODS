@@ -544,7 +544,7 @@ export default definePluginEntry({
       names: ["pixel_ods_download_promote"],
     });
 
-    registerTool(api, createWorkspacePreviewTool(), {
+    registerTool(api, createWorkspacePreviewTool({ transport: api.pluginConfig?.workspacePreviewTransport }), {
       names: ["pixel_ods_workspace_preview"],
     });
 

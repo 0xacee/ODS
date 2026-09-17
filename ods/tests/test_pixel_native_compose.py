@@ -25,6 +25,7 @@ class NativeComposeTests(unittest.TestCase):
             'PIXEL_NATIVE_UID': '732', 'PIXEL_INGRESS_GID': '81',
             'PIXEL_NATIVE_INGRESS_IMAGE': 'example.invalid/pixel-node:test',
             'PIXEL_NATIVE_CONFIG_PATH': self.temp.name + '/gateway config.json',
+            'PIXEL_NATIVE_WORKSPACE': self.temp.name + '/workspace',
             'PIXEL_NATIVE_GATEWAY_PORT': '19876',
             'PIXEL_OPENWEBUI_KEY': 'test-only-edge-key',
             'DASHBOARD_API_KEY': 'test-only-preview-key',
@@ -79,6 +80,7 @@ class NativeComposeTests(unittest.TestCase):
         self.assertTrue(mounts['/pixel-runtime']['read_only'])
         self.assertEqual(mounts['/pixel-transition-state']['source'], 'pixel-transition-state')
         self.assertTrue(mounts['/pixel-preview-runtime']['read_only'])
+        self.assertEqual(mounts['/pixel-preview-runtime']['source'], 'pixel-native-preview-runtime')
         self.assertEqual(edge['environment']['PIXEL_INGRESS_SOCKET'],
                          '/pixel-runtime/pixel-ingress.sock')
         self.assertEqual(services['dashboard-api']['environment']['PIXEL_EDGE_URL'],
@@ -86,9 +88,20 @@ class NativeComposeTests(unittest.TestCase):
         self.assertEqual(services['open-webui']['environment']['DEFAULT_MODELS'],
                          'pixel/default')
 
+    def test_preview_has_only_workspace_read_access_and_loopback_publish(self):
+        service = self.document()['services']['pixel-workspace-preview']
+        self.assertEqual(service['user'], '732:81')
+        self.assertEqual(service['ports'][0]['host_ip'], '127.0.0.1')
+        self.assertEqual(service['command'][-2:], ['732', '9437'])
+        self.assertTrue(service['read_only'])
+        mounts = {item['target']: item for item in service['volumes']}
+        self.assertEqual(set(mounts), {'/workspace', '/previews', '/run/ods-pixel-preview'})
+        self.assertTrue(mounts['/workspace']['read_only'])
+        self.assertFalse(mounts['/workspace']['bind']['create_host_path'])
+
     def test_missing_native_prerequisites_fail_closed(self):
         for key in ('PIXEL_NATIVE_UID', 'PIXEL_NATIVE_CONFIG_PATH',
-                    'PIXEL_NATIVE_INGRESS_IMAGE'):
+                    'PIXEL_NATIVE_INGRESS_IMAGE', 'PIXEL_NATIVE_WORKSPACE'):
             with self.subTest(key=key):
                 value = self.env.pop(key)
                 try:

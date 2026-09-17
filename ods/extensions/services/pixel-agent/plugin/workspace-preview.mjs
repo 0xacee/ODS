@@ -3,6 +3,7 @@
 // validates and snapshots every byte before returning a browser-verifiable URL.
 
 import net from "node:net";
+import { dockerWorkspacePreviewRequest } from "./workspace-preview-docker.mjs";
 
 const SOCKET_PATH = "/run/ods-pixel-preview/control.sock";
 const PATH_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -196,7 +197,9 @@ function failedResult(code) {
   };
 }
 
-export function createWorkspacePreviewTool({ request = socketRequest } = {}) {
+export function createWorkspacePreviewTool({ request, transport = "unix" } = {}) {
+  if (!["unix", "docker-desktop"].includes(transport)) throw new Error("invalid preview transport");
+  request ??= transport === "docker-desktop" ? dockerWorkspacePreviewRequest : socketRequest;
   return {
     name: "pixel_ods_workspace_preview",
     description:
