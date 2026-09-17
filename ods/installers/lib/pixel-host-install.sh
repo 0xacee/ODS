@@ -1634,15 +1634,30 @@ _ods_pixel_verify_plugin_loaded() {
             >/dev/null
 }
 
+_ods_pixel_exec_control_stat() {
+    local field="$1" path="$2" format
+    case "$(uname -s)" in
+        Darwin)
+            case "$field" in owner) format='%Su' ;; links) format='%l' ;; mode) format='%Lp' ;; *) return 1 ;; esac
+            /usr/bin/stat -f "$format" "$path"
+            ;;
+        Linux)
+            case "$field" in owner) format='%U' ;; links) format='%h' ;; mode) format='%a' ;; *) return 1 ;; esac
+            stat -c "$format" -- "$path"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 _ods_pixel_install_exec_control() {
     local owner="$1" home="$2" source="$3" sudo_source="$4"
     local parent="$home/.openclaw" root="$home/.openclaw/.ods-exec-control"
     local candidate
     for candidate in "$source" "$sudo_source"; do
         [[ -f "$candidate" && ! -L "$candidate" \
-            && "$(stat -c '%U' -- "$candidate")" == "$owner" \
-            && "$(stat -c '%h' -- "$candidate")" == 1 ]] || return 1
-        (( (8#$(stat -c '%a' -- "$candidate") & 0022) == 0 )) || return 1
+            && "$(_ods_pixel_exec_control_stat owner "$candidate")" == "$owner" \
+            && "$(_ods_pixel_exec_control_stat links "$candidate")" == 1 ]] || return 1
+        (( (8#$(_ods_pixel_exec_control_stat mode "$candidate") & 0022) == 0 )) || return 1
     done
     # A clean Pixel install has not run OpenClaw bootstrap yet, so its private
     # state directory legitimately does not exist. Create only that exact
@@ -1652,17 +1667,17 @@ _ods_pixel_install_exec_control() {
         ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "$parent" || return 1
     fi
     [[ -d "$parent" && ! -L "$parent" \
-        && "$(stat -c '%U' -- "$parent")" == "$owner" ]] || return 1
-    (( (8#$(stat -c '%a' -- "$parent") & 0022) == 0 )) || return 1
+        && "$(_ods_pixel_exec_control_stat owner "$parent")" == "$owner" ]] || return 1
+    (( (8#$(_ods_pixel_exec_control_stat mode "$parent") & 0022) == 0 )) || return 1
     if [[ -e "$root" || -L "$root" ]]; then
-        [[ -d "$root" && ! -L "$root" && "$(stat -c '%U' -- "$root")" == "$owner" \
-            && "$(stat -c '%a' -- "$root")" == 700 ]] || return 1
+        [[ -d "$root" && ! -L "$root" && "$(_ods_pixel_exec_control_stat owner "$root")" == "$owner" \
+            && "$(_ods_pixel_exec_control_stat mode "$root")" == 700 ]] || return 1
     fi
     for candidate in "$root/cancellable-exec.sh" "$root/sudo"; do
         if [[ -e "$candidate" || -L "$candidate" ]]; then
             [[ -f "$candidate" && ! -L "$candidate" \
-                && "$(stat -c '%U' -- "$candidate")" == "$owner" \
-                && "$(stat -c '%h' -- "$candidate")" == 1 ]] || return 1
+                && "$(_ods_pixel_exec_control_stat owner "$candidate")" == "$owner" \
+                && "$(_ods_pixel_exec_control_stat links "$candidate")" == 1 ]] || return 1
         fi
     done
     ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "$root" || return 1
@@ -1673,14 +1688,14 @@ _ods_pixel_install_exec_control() {
     [[ -d "$root" && ! -L "$root" \
         && -f "$root/cancellable-exec.sh" && ! -L "$root/cancellable-exec.sh" \
         && -f "$root/sudo" && ! -L "$root/sudo" \
-        && "$(stat -c '%U' -- "$root")" == "$owner" \
-        && "$(stat -c '%U' -- "$root/cancellable-exec.sh")" == "$owner" \
-        && "$(stat -c '%U' -- "$root/sudo")" == "$owner" \
-        && "$(stat -c '%a' -- "$root")" == 700 \
-        && "$(stat -c '%h' -- "$root/cancellable-exec.sh")" == 1 \
-        && "$(stat -c '%a' -- "$root/cancellable-exec.sh")" == 500 \
-        && "$(stat -c '%h' -- "$root/sudo")" == 1 \
-        && "$(stat -c '%a' -- "$root/sudo")" == 500 ]]
+        && "$(_ods_pixel_exec_control_stat owner "$root")" == "$owner" \
+        && "$(_ods_pixel_exec_control_stat owner "$root/cancellable-exec.sh")" == "$owner" \
+        && "$(_ods_pixel_exec_control_stat owner "$root/sudo")" == "$owner" \
+        && "$(_ods_pixel_exec_control_stat mode "$root")" == 700 \
+        && "$(_ods_pixel_exec_control_stat links "$root/cancellable-exec.sh")" == 1 \
+        && "$(_ods_pixel_exec_control_stat mode "$root/cancellable-exec.sh")" == 500 \
+        && "$(_ods_pixel_exec_control_stat links "$root/sudo")" == 1 \
+        && "$(_ods_pixel_exec_control_stat mode "$root/sudo")" == 500 ]]
 }
 
 _ods_pixel_recreate_agent_sandbox() {
