@@ -50,6 +50,26 @@ class CheckpointArgumentsTests(unittest.TestCase):
                 with self.assertRaises(subprocess.SubprocessError):
                     cache.qualify('/binary', ('1024', '', ''))
 
+    def test_idle_only_is_supported_without_checkpoint_flags(self):
+        with patch.object(cache.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '--sleep-idle-seconds N', '')):
+            self.assertEqual(cache.qualify('/binary', ('', '', '', '120')),
+                             ['--sleep-idle-seconds', '120'])
+        self.assertEqual(cache.requested_arguments(('', '', '', '-1')),
+                         ['--sleep-idle-seconds', '-1'])
+
+    def test_idle_requires_exact_capability(self):
+        for help_text in ('', '--sleep-idle-seconds-extra'):
+            with patch.object(cache.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, help_text, '')):
+                with self.assertRaises(ValueError):
+                    cache.qualify('/binary', ('', '', '', '120'))
+
+    def test_invalid_idle_does_not_execute(self):
+        for value in ('0', '-2', '86401', '1.5', '$(touch x)'):
+            with self.subTest(value=value), patch.object(cache.subprocess, 'run') as run:
+                with self.assertRaises(ValueError):
+                    cache.qualify('/binary', ('', '', '', value))
+                run.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

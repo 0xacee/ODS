@@ -95,6 +95,18 @@ This does not automatically upgrade the pinned runtime, backport a cache fix,
 or make an unqualified runtime safe to distribute. Smaller RAM budgets and
 checkpoint limits must still be tested with the selected model and workloads.
 
+Native idle unloading is separately opt-in with
+`LLAMA_ARG_SLEEP_IDLE_SECONDS=120` (1..86400 seconds, or `-1` to disable).
+The same pre-stop capability validation applies. This uses llama.cpp's own
+idle timer, not a process-killing watchdog: active inference stays running,
+and a new inference request reloads a sleeping model. Sleep releases the
+model and KV/prefix cache, so the first request after sleep is cold and can
+be slower. `/health`, `/props`, and `/models` do not wake the model; metrics
+scrapes and other tasks can prevent sleep or wake it. Qualify monitoring
+traffic as well as chat before enabling this in an installation. This is
+workstation memory relief, not a claim of faster inference or a default for
+all Macs.
+
 Before distributing a locally compiled flat ARM64 llama.cpp bundle, check its
 loader metadata on macOS:
 

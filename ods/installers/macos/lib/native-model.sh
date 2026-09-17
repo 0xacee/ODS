@@ -2,15 +2,17 @@
 # Resolve one qualified native model without evaluating registry data as shell.
 # Both installers and everyday restarts validate before stopping a live model.
 macos_resolve_checkpoint_args() {
-    local install_dir="$1" binary="$2" interval checkpoints cache_mib fields_file field
+    local install_dir="$1" binary="$2" interval checkpoints cache_mib idle_seconds fields_file field
     MACOS_NATIVE_CHECKPOINT_ARGS=()
     interval="$(read_env_value "${install_dir}/.env" LLAMA_ARG_CHECKPOINT_EVERY_NT)"
     checkpoints="$(read_env_value "${install_dir}/.env" LLAMA_ARG_CTX_CHECKPOINTS)"
     cache_mib="$(read_env_value "${install_dir}/.env" LLAMA_ARG_CACHE_RAM)"
-    [[ -n "$interval$checkpoints$cache_mib" ]] || return 0
+    idle_seconds="$(read_env_value "${install_dir}/.env" LLAMA_ARG_SLEEP_IDLE_SECONDS)"
+    [[ -n "$interval$checkpoints$cache_mib$idle_seconds" ]] || return 0
     fields_file="$(mktemp)" || return 1
     if ! "${ODS_PYTHON_CMD:-python3}" "${install_dir}/installers/macos/lib/native-checkpoint-args.py" \
-        --binary "$binary" --interval="$interval" --checkpoints="$checkpoints" --cache-mib="$cache_mib" > "$fields_file"; then
+        --binary "$binary" --interval="$interval" --checkpoints="$checkpoints" --cache-mib="$cache_mib" \
+        --idle-seconds="$idle_seconds" > "$fields_file"; then
         rm -f "$fields_file"
         return 1
     fi

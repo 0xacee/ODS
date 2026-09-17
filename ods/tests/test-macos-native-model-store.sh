@@ -157,6 +157,19 @@ for flag,value in (("--checkpoint-every-n-tokens","1024"),("--ctx-checkpoints","
 PY
 echo "[PASS] opt-in checkpoint settings require runtime support before stopping inference"
 
+printf 'LLAMA_ARG_SLEEP_IDLE_SECONDS=120\n' >> "$INSTALL_DIR/.env"
+assert_rejected_without_stop "runtime without idle unloading support"
+printf '#!/bin/sh\nprintf "%%s\\n" "--checkpoint-every-n-tokens --ctx-checkpoints --cache-ram --sleep-idle-seconds"\n' > "$LLAMA_SERVER_BIN"
+start_native_llama true || fail "supported idle settings rejected"
+python3 - "$ARGV" <<'PY'
+import sys
+from pathlib import Path
+args=Path(sys.argv[1]).read_bytes().decode().split("\0")[:-1]
+assert args.count("--sleep-idle-seconds") == 1
+assert args[args.index("--sleep-idle-seconds")+1] == "120"
+PY
+echo "[PASS] idle unloading is opt-in and capability-checked before stopping inference"
+
 # Exercise the installer argument/lifecycle block too, with the same real helper.
 INSTALL_LAUNCH="$(awk '/^        # Read reasoning mode from .env/ {p=1} /^        # Wait for health endpoint/ {p=0} p' "$ROOT_DIR/installers/macos/install-macos.sh")"
 [[ -n "$INSTALL_LAUNCH" ]] || fail "installer launch block not found"
@@ -171,7 +184,7 @@ python3 - "$ARGV" <<'PY'
 import sys
 from pathlib import Path
 args=Path(sys.argv[1]).read_bytes().decode().split("\0")[:-1]
-for flag,value in (("--checkpoint-every-n-tokens","1024"),("--ctx-checkpoints","8"),("--cache-ram","512")):
+for flag,value in (("--checkpoint-every-n-tokens","1024"),("--ctx-checkpoints","8"),("--cache-ram","512"),("--sleep-idle-seconds","120")):
     assert args.count(flag) == 1 and args[args.index(flag)+1] == value, args
 PY
 cp "$LLAMA_SERVER_BIN" "$TMP_DIR/checkpoint-runtime"

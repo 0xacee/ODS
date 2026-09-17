@@ -607,6 +607,8 @@ LLAMA_ARG_CACHE_TYPE_V=${LLAMA_ARG_CACHE_TYPE_V:-f16}
 # LLAMA_ARG_CHECKPOINT_EVERY_NT=1024
 # LLAMA_ARG_CTX_CHECKPOINTS=8
 # LLAMA_ARG_CACHE_RAM=512
+# Optional idle unloading: saves RAM between sessions, but loses prompt cache on sleep.
+# LLAMA_ARG_SLEEP_IDLE_SECONDS=120
 # Optional MoE only. Example for 8-12GB VRAM: LLAMA_ARG_N_CPU_MOE=25
 # Optional MTP speculative decoding only. Requires an MTP-capable GGUF and llama.cpp build.
 # LLAMA_ARG_SPEC_TYPE=draft-mtp

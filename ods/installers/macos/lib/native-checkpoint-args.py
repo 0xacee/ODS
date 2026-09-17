@@ -1,4 +1,4 @@
-"""Validate opt-in cache settings against the selected native runtime."""
+"""Validate opt-in cache and idle settings against the selected native runtime."""
 import argparse
 import re
 import subprocess
@@ -9,6 +9,7 @@ OPTIONS = (
     ("--checkpoint-every-n-tokens", -1, 262144),
     ("--ctx-checkpoints", 0, 64),
     ("--cache-ram", 0, 65536),
+    ("--sleep-idle-seconds", -1, 86400),
 )
 
 
@@ -23,7 +24,8 @@ def requested_arguments(values):
         if len(value) > 12 or not re.fullmatch(r"-?[0-9]+", value):
             raise ValueError(f"{flag} requires an integer")
         number = int(value)
-        if not lower <= number <= upper or flag == "--checkpoint-every-n-tokens" and number == 0:
+        zero_forbidden = flag in {"--checkpoint-every-n-tokens", "--sleep-idle-seconds"}
+        if not lower <= number <= upper or zero_forbidden and number == 0:
             raise ValueError(f"{flag} is outside the supported range")
         result.extend((flag, str(number)))
     return result
@@ -50,11 +52,12 @@ def main():
     parser.add_argument("--interval", default="")
     parser.add_argument("--checkpoints", default="")
     parser.add_argument("--cache-mib", default="")
+    parser.add_argument("--idle-seconds", default="")
     args = parser.parse_args()
     try:
-        arguments = qualify(args.binary, (args.interval, args.checkpoints, args.cache_mib))
+        arguments = qualify(args.binary, (args.interval, args.checkpoints, args.cache_mib, args.idle_seconds))
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f"ODS native cache configuration rejected: {error}", file=sys.stderr)
+        print(f"ODS native runtime tuning rejected: {error}", file=sys.stderr)
         return 1
     for argument in arguments:
         sys.stdout.buffer.write(argument.encode() + b"\0")
