@@ -36,7 +36,9 @@ test('keeps an overflowing final transcript recoverable without changing the cur
   fireEvent.click(screen.getByRole('button', {name:'Insert retained dictation'}))
   expect(field).toHaveValue('Short draft keep these words ')
   expect(screen.queryByRole('textbox', {name:'Retained dictation'})).not.toBeInTheDocument()
-  expect(fetch.mock.calls.some(([,options]) => options?.method === 'POST')).toBe(false)
+  // The context ring polls /api/pixel/chat/context on mount; retained dictation
+  // must not trigger any state-changing POST (stream, cancel, agents).
+  expect(fetch.mock.calls.some(([url,options]) => options?.method === 'POST' && url !== '/api/pixel/chat/context')).toBe(false)
 })
 
 test('counts back-to-back final events before render and preserves exact-fit text', async () => {
