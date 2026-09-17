@@ -126,7 +126,7 @@ def _prepare(bridge, journal, record, environment):
     after_binding = record['nextPlan']['fields']['binding']['after'] if record['nextPlan'] else None
     return environment.prepare(journal, before_sha=record['beforeSha'], after_sha=record['afterSha'],
         before_binding=before_binding, after_binding=after_binding, deployment_document=record['deployment'],
-        policy=record['policy'], expected=previous['environment'] if previous else None,
+        policy=record['policy'], expected=previous['environment'] if previous else environment.baseline(),
         restore=previous['baseline'] if after_binding is None else None)
 
 
@@ -159,7 +159,7 @@ def _start(bridge, request, snapshot, directory, runtime, environment):
         deployment_document, policy, check = runtime.deployment(next_plan['fields']['binding']['after'], directory)
         if check != custody:
             raise AccessError('provider-runtime-custody-changed')
-    expected = managed['environment'] if managed else {'environment': None, 'dropin': None}
+    expected = managed['environment'] if managed else environment.baseline()
     if environment.snapshot() != expected:
         raise AccessError('provider-service-baseline-conflict')
     transaction = os.urandom(32).hex()

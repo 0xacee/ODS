@@ -135,6 +135,15 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertEqual(verify.call_count, 2)
         command.assert_called_with(['/bin/launchctl', 'kickstart', '-k', target], timeout=17)
 
+    def test_launchd_stop_is_custody_checked_and_uses_bootout(self):
+        target = 'system/com.ods.pixel.gateway'
+        verify = Mock()
+        command = Mock(return_value=target + ' = {\n\tstate = running\n\tpid = 123\n}')
+        service = LaunchdGatewayService(command, ValueError, target, verify)
+        service.stop(timeout=11)
+        verify.assert_called_once_with()
+        command.assert_called_with(['/bin/launchctl', 'bootout', target], timeout=11)
+
     def test_launchd_malformed_duplicate_or_inconsistent_state_fails_closed(self):
         target = 'gui/501/com.ods.fixture'
         command = Mock()
