@@ -1360,6 +1360,8 @@ async def _stream_upstream(
             else:
                 event, content, finish_reason = _sse_event(line)
                 queue_pending(line, event, content, finish_reason)
+                if content is not None:
+                    pending_text += content
         if not passthrough and pending:
             normalized = pending_text.strip()
             if not normalized or normalized in _RESERVED_ASSISTANT_REPLIES:
@@ -1367,7 +1369,8 @@ async def _stream_upstream(
                     (item[1] for item in reversed(pending) if isinstance(item[1], dict)),
                     {"model": _PIXEL_REWRITE},
                 )
-                await replace_pending(template, synthesize_finish=False)
+                has_finish = any(item[3] is not None for item in pending)
+                await replace_pending(template, synthesize_finish=not has_finish)
             else:
                 await flush_pending()
     except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
