@@ -19,6 +19,17 @@ if [[ "$action" == stop ]]; then
     exit 0
 fi
 [[ "$action" == start ]] || exit 2
+memory_check="$(dirname "$0")/native-memory-budget.py"
+model_path=""
+previous=""
+for argument in "$@"; do
+    [[ "$previous" != --model && "$previous" != -m ]] || model_path="$argument"
+    previous="$argument"
+done
+if [[ -n "$model_path" && -f "$memory_check" ]]; then
+    "${ODS_PYTHON_CMD:-python3}" "$memory_check" --model "$model_path" || \
+        echo 'ODS: native memory estimate failed; review resource settings.' >&2
+fi
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/ODS" "$(dirname "$pid_file")"
 "${ODS_PYTHON_CMD:-python3}" - "$plist" "$install_dir" "$binary" "$HOME/Library/Logs/ODS/llama-server.log" "$@" <<'PY'
 import os
