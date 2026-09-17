@@ -77,6 +77,24 @@ preview availability, restart recovery or full macOS security equivalence.
 
 ## Native model bundle qualification
 
+For a separately qualified runtime with hybrid-model checkpoint support, the
+native installer and `ods` restart accept these optional `.env` settings:
+
+```dotenv
+LLAMA_ARG_CHECKPOINT_EVERY_NT=1024
+LLAMA_ARG_CTX_CHECKPOINTS=8
+LLAMA_ARG_CACHE_RAM=512
+```
+
+These are an example qualification profile, not universal defaults. Unset
+values preserve existing behavior. The selected executable must advertise
+each requested option in `--help`; invalid/unsupported settings fail before
+the normal native-model replacement step. Existing registered model profiles
+retain their own qualified argument lists instead of mixing in these settings.
+This does not automatically upgrade the pinned runtime, backport a cache fix,
+or make an unqualified runtime safe to distribute. Smaller RAM budgets and
+checkpoint limits must still be tested with the selected model and workloads.
+
 Before distributing a locally compiled flat ARM64 llama.cpp bundle, check its
 loader metadata on macOS:
 

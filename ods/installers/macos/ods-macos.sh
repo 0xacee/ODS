@@ -657,9 +657,6 @@ start_native_llama() {
     [[ "$native_port" =~ ^[0-9]+$ ]] || native_port="8080"
     local model_path="$MACOS_NATIVE_MODEL_PATH"
 
-    # Verification must finish before a restart can terminate working inference.
-    [[ "$replace" != true ]] || stop_native_llama
-
     mkdir -p "$(dirname "$LLAMA_SERVER_PID_FILE")"
 
     local reasoning="${ENV_LLAMA_REASONING:-off}"
@@ -691,8 +688,12 @@ start_native_llama() {
     [[ -n "${ENV_LLAMA_ARG_SPEC_DRAFT_N_MAX:-}" ]] && llama_args+=(--spec-draft-n-max "$ENV_LLAMA_ARG_SPEC_DRAFT_N_MAX")
     [[ -n "${ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_K:-}" ]] && llama_args+=(--spec-draft-type-k "$ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_K")
     [[ -n "${ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_V:-}" ]] && llama_args+=(--spec-draft-type-v "$ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_V")
+    macos_resolve_checkpoint_args "$INSTALL_DIR" "$LLAMA_SERVER_BIN" || return 1
+    llama_args+=("${MACOS_NATIVE_CHECKPOINT_ARGS[@]}")
     fi
 
+    # Artifact and argument verification must precede termination of working inference.
+    [[ "$replace" != true ]] || stop_native_llama
     bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
         "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" "${llama_args[@]}" || return 1
     local pid

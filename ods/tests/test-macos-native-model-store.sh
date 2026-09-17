@@ -142,6 +142,46 @@ assert args[args.index("--spec-type")+1] == "legacy"
 PY
 echo "[PASS] default installs retain the normal runtime and legacy tuning"
 
+mkdir -p "$INSTALL_DIR/installers/macos/lib"
+cp "$ROOT_DIR/installers/macos/lib/native-checkpoint-args.py" "$INSTALL_DIR/installers/macos/lib/"
+printf 'LLAMA_ARG_CHECKPOINT_EVERY_NT=1024\nLLAMA_ARG_CTX_CHECKPOINTS=8\nLLAMA_ARG_CACHE_RAM=512\n' >> "$INSTALL_DIR/.env"
+assert_rejected_without_stop "runtime without checkpoint support"
+printf '#!/bin/sh\nprintf "%%s\\n" "--checkpoint-every-n-tokens --ctx-checkpoints --cache-ram"\n' > "$LLAMA_SERVER_BIN"
+start_native_llama true || fail "supported checkpoint settings rejected"
+python3 - "$ARGV" <<'PY'
+import sys
+from pathlib import Path
+args=Path(sys.argv[1]).read_bytes().decode().split("\0")[:-1]
+for flag,value in (("--checkpoint-every-n-tokens","1024"),("--ctx-checkpoints","8"),("--cache-ram","512")):
+    assert args.count(flag) == 1 and args[args.index(flag)+1] == value, args
+PY
+echo "[PASS] opt-in checkpoint settings require runtime support before stopping inference"
+
+# Exercise the installer argument/lifecycle block too, with the same real helper.
+INSTALL_LAUNCH="$(awk '/^        # Read reasoning mode from .env/ {p=1} /^        # Wait for health endpoint/ {p=0} p' "$ROOT_DIR/installers/macos/install-macos.sh")"
+[[ -n "$INSTALL_LAUNCH" ]] || fail "installer launch block not found"
+MODEL_FULL_PATH="$INSTALL_DIR/data/models/default.gguf"
+MAX_CONTEXT=65536
+_macos_stop_install_owned_native_llama() { printf 'stop\n' >> "$CALLS"; }
+MACOS_NATIVE_PROFILE=false
+: > "$CALLS"
+(eval "$INSTALL_LAUNCH") || fail "installer rejected supported checkpoint runtime"
+[[ "$(cat "$CALLS")" == $'stop\nstart' ]] || fail "installer replacement order changed"
+python3 - "$ARGV" <<'PY'
+import sys
+from pathlib import Path
+args=Path(sys.argv[1]).read_bytes().decode().split("\0")[:-1]
+for flag,value in (("--checkpoint-every-n-tokens","1024"),("--ctx-checkpoints","8"),("--cache-ram","512")):
+    assert args.count(flag) == 1 and args[args.index(flag)+1] == value, args
+PY
+cp "$LLAMA_SERVER_BIN" "$TMP_DIR/checkpoint-runtime"
+printf '#!/bin/sh\nexit 0\n' > "$LLAMA_SERVER_BIN"
+: > "$CALLS"
+if (eval "$INSTALL_LAUNCH") >/dev/null 2>&1; then fail "installer accepted unsupported checkpoint runtime"; fi
+[[ ! -s "$CALLS" ]] || fail "installer stopped model before cache validation"
+cp "$TMP_DIR/checkpoint-runtime" "$LLAMA_SERVER_BIN"
+echo "[PASS] installer launch uses validated cache arguments and preserves live model on rejection"
+
 mv "$INSTALL_DIR/scripts/resolve-model-store.py" "$TMP_DIR/resolver.py"
 assert_rejected_without_stop "registered stores without resolver"
 rm "$INSTALL_DIR/data/model-stores.json"

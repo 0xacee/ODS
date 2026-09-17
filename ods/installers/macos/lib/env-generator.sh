@@ -602,6 +602,11 @@ $(if [[ -n "${LLAMA_SERVER_IMAGE:-}" ]]; then echo "LLAMA_SERVER_IMAGE=${LLAMA_S
 LLAMA_ARG_FLASH_ATTN=${LLAMA_ARG_FLASH_ATTN:-auto}
 LLAMA_ARG_CACHE_TYPE_K=${LLAMA_ARG_CACHE_TYPE_K:-f16}
 LLAMA_ARG_CACHE_TYPE_V=${LLAMA_ARG_CACHE_TYPE_V:-f16}
+# Optional native hybrid-model cache tuning; requires matching runtime --help support.
+# Empty/unset preserves runtime defaults; registered model profiles own their arguments.
+# LLAMA_ARG_CHECKPOINT_EVERY_NT=1024
+# LLAMA_ARG_CTX_CHECKPOINTS=8
+# LLAMA_ARG_CACHE_RAM=512
 # Optional MoE only. Example for 8-12GB VRAM: LLAMA_ARG_N_CPU_MOE=25
 # Optional MTP speculative decoding only. Requires an MTP-capable GGUF and llama.cpp build.
 # LLAMA_ARG_SPEC_TYPE=draft-mtp

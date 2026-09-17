@@ -2228,9 +2228,6 @@ else
 
         mkdir -p "$(dirname "$LLAMA_SERVER_PID_FILE")"
 
-        _macos_stop_install_owned_native_llama \
-            "Stopping prior install-owned native inference before replacement..."
-
         # Read reasoning mode from .env (default off to prevent thinking models
         # from consuming the entire token budget on internal reasoning)
         _reasoning=$(grep '^LLAMA_REASONING=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
@@ -2282,8 +2279,12 @@ else
         _spec_draft_type_v="$(read_env_value "$INSTALL_DIR/.env" "LLAMA_ARG_SPEC_DRAFT_TYPE_V")"
         [[ -n "$_spec_draft_type_k" ]] && _llama_args+=(--spec-draft-type-k "$_spec_draft_type_k")
         [[ -n "$_spec_draft_type_v" ]] && _llama_args+=(--spec-draft-type-v "$_spec_draft_type_v")
+        macos_resolve_checkpoint_args "$INSTALL_DIR" "$LLAMA_SERVER_BIN" || exit 1
+        _llama_args+=("${MACOS_NATIVE_CHECKPOINT_ARGS[@]}")
         fi
 
+        _macos_stop_install_owned_native_llama \
+            "Stopping prior install-owned native inference before replacement..."
         bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
             "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" "${_llama_args[@]}"
         LLAMA_PID="$(cat "$LLAMA_SERVER_PID_FILE")"
