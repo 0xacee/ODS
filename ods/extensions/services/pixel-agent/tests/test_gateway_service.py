@@ -8,6 +8,38 @@ from pixel_gateway_service import LaunchdGatewayService, SystemdGatewayService
 
 
 class GatewayServiceTests(unittest.TestCase):
+    def test_native_identity_requires_deployment_specification(self):
+        command = Mock()
+        service = LaunchdGatewayService(command, ValueError, 'system/com.ods.fixture', Mock())
+        with self.assertRaisesRegex(ValueError, 'specification-required'):
+            service.process_identity()
+        command.assert_not_called()
+
+    def test_native_identity_rechecks_service_pid(self):
+        spec = {'uid':501, 'gid':20, 'executable':'/fixture/node'}
+        service = LaunchdGatewayService(Mock(), ValueError, 'system/com.ods.fixture', Mock(), process=spec)
+        service.pid = Mock(return_value=123)
+        with patch('pixel_macos_process.process_identity', return_value=(123, 'creation')) as identity:
+            self.assertEqual(service.process_identity(), (123, 'creation'))
+            identity.assert_called_once_with(123, **spec)
+            self.assertEqual(service.pid.call_count, 2)
+            service.pid.side_effect = [123, 456]
+            with self.assertRaisesRegex(ValueError, 'process-changed'):
+                service.process_identity()
+
+    def test_native_identity_converts_failure_and_shares_deadline(self):
+        from pixel_macos_process import ProcessIdentityError
+        service = LaunchdGatewayService(Mock(), RuntimeError, 'system/com.ods.fixture', Mock(),
+            process={'uid':501, 'gid':20, 'executable':'/fixture/node'})
+        service.pid = Mock(return_value=123)
+        with patch('pixel_macos_process.process_identity', side_effect=ProcessIdentityError('unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'unavailable'):
+                service.process_identity()
+        with patch('pixel_gateway_service.time.monotonic', side_effect=[100, 100, 104]), \
+                patch('pixel_macos_process.process_identity', return_value=(123,)):
+            with self.assertRaisesRegex(RuntimeError, 'operation-timeout'):
+                service.process_identity(timeout=3)
+
     def test_launchd_binding_checks_file_snapshot_and_file_again(self):
         service = LaunchdGatewayService(Mock(return_value='snapshot'), ValueError,
                                        'system/com.ods.fixture', Mock())

@@ -5,6 +5,7 @@ Installation custody and access-mode isolation remain separate prerequisites.
 """
 from pathlib import Path
 import re
+import time
 
 
 class SystemdGatewayService:
@@ -31,6 +32,9 @@ class SystemdGatewayService:
             if path.exists() and (path / 'cgroup.procs').read_text().strip():
                 raise self.error('native-idle-unconfirmed')
 
+    def process_identity(self, *, timeout=20):
+        return (self.pid(timeout=timeout, require_running=True),)
+
     def boundary(self):
         return self.command(['systemctl', 'show', self.unit,
             '--property=ProtectSystem,ProtectHome,NoNewPrivileges,CapabilityBoundingSet,BindReadOnlyPaths,ReadOnlyPaths,PrivateTmp'])
@@ -49,12 +53,35 @@ class LaunchdGatewayService:
     Production uses a system job; GUI domains support isolated qualification.
     No request may supply target or the verifier.
     """
-    def __init__(self, command, error, target, verify):
+    def __init__(self, command, error, target, verify, *, process=None):
         if (not isinstance(target, str) or not re.fullmatch(
                 r'(?:system|gui/[0-9]+)/[A-Za-z0-9][A-Za-z0-9.-]{0,127}', target)
                 or not callable(verify)):
             raise error('invalid-launchd-service')
         self.command, self.error, self.target, self.verify = command, error, target, verify
+        # Supplied by the protected deployment, not by an API request or plist
+        # inferred from the currently running user-owned qualification job.
+        self.process = dict(process) if isinstance(process, dict) else None
+
+    def process_identity(self, *, timeout=20):
+        from pixel_macos_process import ProcessIdentityError, process_identity
+        if self.process is None or set(self.process) != {'uid', 'gid', 'executable'}:
+            raise self.error('gateway-process-specification-required')
+        deadline = time.monotonic() + timeout
+        def budget():
+            value = deadline - time.monotonic()
+            if value <= 0:
+                raise self.error('runtime-operation-timeout')
+            return value
+        pid = self.pid(timeout=budget(), require_running=True)
+        try:
+            identity = process_identity(pid, **self.process)
+        except ProcessIdentityError as exc:
+            raise self.error(str(exc)) from None
+        if self.pid(timeout=budget(), require_running=True) != pid:
+            raise self.error('gateway-process-changed')
+        budget()
+        return identity
 
     def installation_binding(self, filename, expected):
         """Require both protected plist bytes and the matching loaded job.

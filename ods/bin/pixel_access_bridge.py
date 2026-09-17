@@ -572,10 +572,11 @@ class SystemdAccessBridge:
         """
         deadline = time.monotonic() + remaining(timeout)
         def budget(): return remaining(deadline - time.monotonic())
-        def process_id():
-            return self.gateway_service.pid(timeout=min(3, budget()), require_running=True)
-        pid = process_id()
-        identity = (self.native_port, self.native_key, pid)
+        def process_identity():
+            return self.gateway_service.process_identity(timeout=min(3, budget()))
+        process = process_identity()
+        pid = process[0]
+        identity = (self.native_port, self.native_key, process)
         candidates = ["http://[::1]:%d" % self.native_port, "http://127.0.0.1:%d" % self.native_port]
         if pinned_origin is not None:
             if pinned_origin not in candidates:
@@ -602,7 +603,7 @@ class SystemdAccessBridge:
                     or type(snapshot.get("active")) is not int or snapshot["active"] < 0
                     or not isinstance(snapshot.get("revision"), str) or not HEX.fullmatch(snapshot["revision"])):
                 raise AccessError("admission-gate-unavailable")
-            if type(snapshot.get("pid")) is not int or snapshot["pid"] != pid or process_id() != pid:
+            if type(snapshot.get("pid")) is not int or snapshot["pid"] != pid or process_identity() != process:
                 raise AccessError("gateway-process-mismatch")
             self.native_origin, self._native_identity = origin, identity
             return snapshot

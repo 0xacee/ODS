@@ -75,6 +75,40 @@ These tests validate Compose merging, identity/path/port substitution, retained
 Edge contracts and required parameters. They do not prove runtime connectivity,
 preview availability, restart recovery or full macOS security equivalence.
 
+## Native process identity
+
+`LaunchdGatewayService.process_identity()` requires an approved deployment
+specification (`uid`, `gid`, absolute `executable`). It reads the kernel's
+process creation timestamp, effective/real/saved credentials and executable
+path through `libproc`, checks for changes during the read, and rechecks the
+service PID. Native admission discovery compares this entire identity before
+and after HTTP discovery, so reuse of a numeric PID cannot authorize a request.
+Missing specification, short API replies, process exit or identity changes
+fail closed. Linux retains its existing systemd PID contract.
+
+This does not prove the executable's file custody or signature, absence of
+descendants, sandbox policy, script identity or host-access equivalence. It
+does not enable the Darwin access bridge. A future protected deployment must
+ship `pixel_macos_process.py` alongside the service and custody adapters and
+provide the approved specification, not derive approval from an arbitrary
+currently running process.
+
+For an opt-in real lifecycle check using an already acquired qualified
+OpenClaw runtime (no package download and no production service restart):
+
+```sh
+python3 ods/tests/test-macos-pixel-lifecycle.py --node /absolute/path/to/node --openclaw-entrypoint /absolute/path/to/openclaw/openclaw.mjs
+```
+
+Run from the source repository as the regular login user. The test creates a
+random-label LaunchAgent with private disposable state, no plugins/tools, and
+an ephemeral loopback port. It pins Node through OpenClaw's supported
+`OPENCLAW_WRAPPER` interface, checks the actual kernel executable identity,
+restarts, and removes its own job. OpenClaw's default installer may select a
+system Node instead of the runtime used to invoke the CLI. The check requires
+version 2026.6.33 unless an explicitly qualified version is supplied with
+`--expected-version`. It does not prove reboot recovery or production custody.
+
 ## Native model bundle qualification
 
 For a separately qualified runtime with hybrid-model checkpoint support, the
