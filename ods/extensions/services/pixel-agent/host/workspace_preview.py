@@ -767,6 +767,23 @@ def _serve_connection(
         return
 
 
+def preview_owner_uid(owner: str) -> int:
+    """Numeric container identities must name this unprivileged process only."""
+    if not isinstance(owner, str):
+        raise PreviewError("invalid preview service configuration")
+    if re.fullmatch(r"[1-9][0-9]{0,9}", owner):
+        uid = int(owner)
+        if uid != os.getuid() or uid != os.geteuid():
+            raise PreviewError("preview must run as its configured owner")
+        return uid
+    if re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", owner) is None:
+        raise PreviewError("invalid preview service configuration")
+    uid = pwd.getpwnam(owner).pw_uid
+    if PROFILE_ID is not None and uid != os.getuid():
+        raise PreviewError("preview must run as its configured owner")
+    return uid
+
+
 def serve(
     socket_path: pathlib.Path,
     workspace: pathlib.Path,
@@ -781,13 +798,9 @@ def serve(
         or not previews.is_absolute()
         or previews == pathlib.Path("/")
         or type(port) is not int or not 1 <= port <= 65535
-        or (re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", owner) is None
-            and not (PROFILE_ID is not None and re.fullmatch(r"[1-9][0-9]{0,9}", owner)))
     ):
         raise PreviewError("invalid preview service configuration")
-    owner_uid = int(owner) if PROFILE_ID is not None and owner.isdecimal() else pwd.getpwnam(owner).pw_uid
-    if PROFILE_ID is not None and owner_uid != os.getuid():
-        raise PreviewError("preview must run as its configured owner")
+    owner_uid = preview_owner_uid(owner)
     _safe_root(workspace, owner_uid)
     previews.mkdir(mode=0o700, parents=True, exist_ok=True)
     _safe_root(previews, owner_uid)
