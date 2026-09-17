@@ -127,6 +127,56 @@ def test_policy_copy_pins_revision():
 SSE = b'data: {"id":"fixture","choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: [DONE]\n\n'
 
 
+class Chunks(httpx.AsyncByteStream):
+    def __init__(self,chunks):
+        self.chunks = chunks
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
+
+def streamed(chunks,events=None):
+    def handler(request):
+        return httpx.Response(200,headers={'content-type':'text/event-stream'},stream=Chunks(chunks))
+    return make_app(handler,events=events)
+
+
+@pytest.mark.parametrize('size',[1,2,5])
+def test_done_marker_is_detected_across_chunk_boundaries(size):
+    # The terminator scan must not depend on where transport chunks split a line.
+    stream = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+    chunks = [stream[i:i+size] for i in range(0,len(stream),size)]
+    response = asyncio.run(request_to(streamed(chunks),payload(True)))
+    assert response.status_code == 200
+    assert response.content == stream
+
+
+def test_done_marker_without_trailing_newline_still_completes():
+    body = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]'
+    response = asyncio.run(request_to(streamed([body]),payload(True)))
+    assert response.status_code == 200 and response.content == body
+
+
+def test_crlf_framed_done_marker_completes():
+    chunks = [b'data: {"choices":[{"delta":{"content":"ok"}}]}\r\n\r\ndata: [DONE]\r\n\r\n']
+    response = asyncio.run(request_to(streamed(chunks),payload(True)))
+    assert response.status_code == 200
+
+
+def test_marker_prefix_inside_a_longer_line_never_terminates():
+    # A transport split after "data: [DONE]" must not terminate the stream when
+    # the line continues; only a complete marker line is terminal.
+    events = []
+    chunks = [b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',b'data: [DONE]',b'trailing\n\n']
+    app = streamed(chunks,events)
+    async def check():
+        with pytest.raises(Exception):
+            await request_to(app,payload(True))
+        assert (await request_to(app,payload())).status_code==409
+    asyncio.run(check())
+    assert events[-1]['result']=='stream-interrupted'
+
+
 def test_stream_can_fallback_before_commit():
     calls = []
     def handler(request):
