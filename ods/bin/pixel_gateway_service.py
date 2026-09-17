@@ -8,6 +8,13 @@ import re
 import time
 
 
+def _boot_uuid(value, error):
+    if not isinstance(value, str) or not re.fullmatch(
+            r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', value):
+        raise error('settings-process-unavailable')
+    return value
+
+
 class SystemdGatewayService:
     def __init__(self, command, error, unit):
         self.command, self.error, self.unit = command, error, unit
@@ -34,6 +41,25 @@ class SystemdGatewayService:
 
     def process_identity(self, *, timeout=20):
         return (self.pid(timeout=timeout, require_running=True),)
+
+    def boot_identity(self):
+        try:
+            raw = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        except OSError:
+            raise self.error('settings-process-unavailable') from None
+        return _boot_uuid(raw, self.error)
+
+    def transaction_identity(self, *, timeout=20):
+        raw = self.command(['systemctl', 'show', self.unit,
+            '--property=MainPID,ActiveState,ExecMainStartTimestampMonotonic'], timeout=timeout)
+        fields = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+        try:
+            pid, started = int(fields['MainPID']), int(fields['ExecMainStartTimestampMonotonic'])
+        except (KeyError, ValueError):
+            raise self.error('settings-process-unavailable') from None
+        if fields.get('ActiveState') != 'active' or pid <= 0 or started <= 0:
+            raise self.error('settings-process-not-active')
+        return {'pid':pid, 'started':started, 'boot':self.boot_identity()}
 
     def boundary(self):
         return self.command(['systemctl', 'show', self.unit,
@@ -82,6 +108,25 @@ class LaunchdGatewayService:
             raise self.error('gateway-process-changed')
         budget()
         return identity
+
+    def transaction_identity(self, *, timeout=20):
+        deadline = time.monotonic() + timeout
+        def budget():
+            value = deadline - time.monotonic()
+            if value <= 0:
+                raise self.error('runtime-operation-timeout')
+            return value
+        before = self.process_identity(timeout=budget())
+        raw = self.command(['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'], timeout=budget())
+        boot = _boot_uuid(raw.strip().lower(), self.error)
+        after = self.process_identity(timeout=budget())
+        if before != after:
+            raise self.error('gateway-process-changed')
+        budget()
+        # Darwin exposes birth time as epoch microseconds, not systemd's
+        # monotonic start. Existing restart checks remain fail-closed if the
+        # clock moves backwards; never synthesize a later timestamp.
+        return {'pid':before[0], 'started':before[1] * 1000000 + before[2], 'boot':boot}
 
     def installation_binding(self, filename, expected):
         """Require both protected plist bytes and the matching loaded job.

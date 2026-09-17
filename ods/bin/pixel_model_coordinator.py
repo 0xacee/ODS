@@ -3,7 +3,7 @@ import hashlib
 import json
 import os
 import time
-from pixel_access_bridge import AccessError, UNIT, atomic_json, private_json, digest, remaining
+from pixel_access_bridge import AccessError, atomic_json, private_json, digest, remaining
 from pixel_settings.coordinator import _read, _identity, _valid_identity
 from pixel_model_contract import ModelError, checksum, target, plan, projection
 
@@ -101,7 +101,7 @@ def _activate(bridge, journal, expected_sha):
         if journal["phase"] not in ("applying", "restoring") or bridge.stopped_native(journal["token"]).get("stopped") is not True:
             raise
         before = journal["beforeIdentity"]
-    bridge.command(["systemctl", "restart", UNIT], timeout=60)
+    bridge.gateway_service.restart(timeout=60)
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         try:

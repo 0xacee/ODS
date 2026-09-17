@@ -8,6 +8,48 @@ from pixel_gateway_service import LaunchdGatewayService, SystemdGatewayService
 
 
 class GatewayServiceTests(unittest.TestCase):
+    def test_systemd_transaction_preserves_existing_receipt_format(self):
+        command = Mock(return_value='MainPID=123\nActiveState=active\nExecMainStartTimestampMonotonic=999')
+        service = SystemdGatewayService(command, ValueError, 'fixture.service')
+        boot = '11111111-2222-3333-4444-555555555555'
+        with patch('pixel_gateway_service.Path.read_text', return_value=boot + '\n'):
+            self.assertEqual(service.transaction_identity(timeout=4), {'pid':123, 'started':999, 'boot':boot})
+        command.assert_called_with(['systemctl', 'show', 'fixture.service',
+            '--property=MainPID,ActiveState,ExecMainStartTimestampMonotonic'], timeout=4)
+        for raw in ('', 'MainPID=0\nActiveState=active\nExecMainStartTimestampMonotonic=999',
+                    'MainPID=123\nActiveState=failed\nExecMainStartTimestampMonotonic=999'):
+            command.return_value = raw
+            with self.assertRaises(ValueError):
+                service.transaction_identity()
+
+    def test_boot_read_failure_is_not_fabricated(self):
+        service = SystemdGatewayService(Mock(), ValueError, 'fixture.service')
+        with patch('pixel_gateway_service.Path.read_text', side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(ValueError, 'settings-process-unavailable'):
+                service.boot_identity()
+
+    def test_native_transaction_uses_kernel_boot_uuid_and_stable_identity(self):
+        boot = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'
+        command = Mock(return_value=boot + '\n')
+        service = LaunchdGatewayService(command, ValueError, 'system/com.ods.fixture', Mock())
+        service.process_identity = Mock(return_value=(123, 1700000000, 123456))
+        self.assertEqual(service.transaction_identity(),
+            {'pid':123, 'started':1700000000123456, 'boot':boot.lower()})
+        self.assertEqual(command.call_args.args[0], ['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'])
+        self.assertEqual(service.process_identity.call_count, 2)
+        service.process_identity.side_effect = [(123, 1700000000, 123456), (123, 1700000001, 123456)]
+        with self.assertRaisesRegex(ValueError, 'process-changed'):
+            service.transaction_identity()
+
+    def test_native_transaction_invalid_boot_and_deadline_fail_closed(self):
+        service = LaunchdGatewayService(Mock(return_value='invalid'), ValueError, 'system/com.ods.fixture', Mock())
+        service.process_identity = Mock(return_value=(123, 1700000000, 0))
+        with self.assertRaisesRegex(ValueError, 'settings-process-unavailable'):
+            service.transaction_identity()
+        with patch('pixel_gateway_service.time.monotonic', side_effect=[100, 100, 104]):
+            with self.assertRaisesRegex(ValueError, 'operation-timeout'):
+                service.transaction_identity(timeout=3)
+
     def test_native_identity_requires_deployment_specification(self):
         command = Mock()
         service = LaunchdGatewayService(command, ValueError, 'system/com.ods.fixture', Mock())

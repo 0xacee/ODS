@@ -154,7 +154,7 @@ def activate(bridge, journal, environment, *, qualify_runtime):
     bridge.command(['systemctl', 'daemon-reload'])
     _unchanged(bridge, journal, environment, qualify_runtime)
     environment.verify(journal, selection)
-    bridge.command(['systemctl', 'restart', UNIT], timeout=60)
+    bridge.gateway_service.restart(timeout=60)
     deadline = time.monotonic() + remaining(120)
     while time.monotonic() < deadline:
         try:

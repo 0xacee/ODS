@@ -16,6 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bin'))
 from pixel_access_bridge import AccessError, atomic_json
+from pixel_gateway_service import SystemdGatewayService
 from pixel_provider import service_environment as env
 from pixel_provider.managed_deployment import deployment, required_policy
 
@@ -25,6 +26,9 @@ BINDING = {'schemaVersion': 1, 'activationId': '123e4567-e89b-12d3-a456-42661417
 
 class Bridge:
     def __init__(self, root):
+        self.gateway_service = SystemdGatewayService(
+            lambda *args, **kwargs: self.command(*args, **kwargs), AccessError, 'openclaw-gateway.service')
+        self.gateway_service.boot_identity = lambda: '11111111-2222-3333-4444-555555555555'
         self.state, self.home = root / 'state', root / 'home'
         self.state.mkdir(mode=0o700)
         (self.home / '.openclaw').mkdir(parents=True, mode=0o700)

@@ -56,7 +56,7 @@ def make_config():
 
 class Harness(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="pam-test-")
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="pam-test-"))
         self.cfg_path = os.path.join(self.tmp, "openclaw.json")
         self.state_dir = os.path.join(self.tmp, "state")
         self.write_config(make_config())

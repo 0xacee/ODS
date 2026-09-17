@@ -297,6 +297,7 @@ class FakeBridge(bridge.SystemdAccessBridge):
     """Fake the installed services, retaining the real coordinator and journals."""
     def __init__(self, root):
         super().__init__(root, "k" * 64, state=root / "state", dropin=root / "dropin")
+        self.gateway_service.boot_identity = lambda: '11111111-2222-3333-4444-555555555555'
         self.mode, self.managed, self.pid = "sandboxed", False, 123
         self.active = 0
         self.native_phase = self.edge_phase = "idle"
@@ -305,6 +306,24 @@ class FakeBridge(bridge.SystemdAccessBridge):
         self.probe_failure = None
         self.log = []
         self.fail = None
+
+    def use_launchd_fixture(self, monkeypatch):
+        """Real adapter/transactions, simulated kernel and launchd (not custody)."""
+        from pixel_gateway_service import LaunchdGatewayService
+        target = 'system/com.ods.fixture'
+        def native_command(args, timeout=20):
+            if args == ['/bin/launchctl', 'print', target]:
+                fields = '\tstate = not running' if self.stopped else f'\tstate = running\n\tpid = {self.pid}'
+                return target + ' = {\n' + fields + '\n}'
+            if args == ['/bin/launchctl', 'kickstart', '-k', target]:
+                return self.command(['restart'], timeout=timeout)
+            if args == ['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid']:
+                return '11111111-2222-3333-4444-555555555555'
+            raise AssertionError('Unexpected platform operation: ' + repr(args))
+        monkeypatch.setattr('pixel_macos_process.process_identity',
+            lambda pid, **kwargs: (pid, 1700000000, self.started, 501, 20, 501, 20, 501, 20, '/fixture/node'))
+        self.gateway_service = LaunchdGatewayService(native_command, bridge.AccessError, target, lambda: None,
+            process={'uid':501, 'gid':20, 'executable':'/fixture/node'})
 
     def discover(self, *, allow_installing=False):
         if allow_installing:

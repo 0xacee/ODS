@@ -93,6 +93,18 @@ ship `pixel_macos_process.py` alongside the service and custody adapters and
 provide the approved specification, not derive approval from an arbitrary
 currently running process.
 
+Model/settings/provider transaction identity and restart now dispatch through
+the selected service adapter. The receipt shape remains `{pid, started, boot}`.
+Linux retains `ExecMainStartTimestampMonotonic` and `/proc`'s boot ID. Darwin
+uses the verified process birth time in epoch microseconds plus
+`kern.bootsessionuuid`, with identity checked around the boot query. Receipts
+are platform-local; their timestamps must not be compared across platforms.
+Existing restart rules still require a different PID, the same boot UUID and
+a later birth time. A backwards clock adjustment therefore fails closed on
+macOS rather than manufacturing a successful restart. This does not port the
+remaining provider environment/drop-in logic, isolation boundary, stopped
+descendant proof or privileged bridge discovery.
+
 For an opt-in real lifecycle check using an already acquired qualified
 OpenClaw runtime (no package download and no production service restart):
 

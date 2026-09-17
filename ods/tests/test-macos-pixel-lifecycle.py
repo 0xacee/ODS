@@ -102,11 +102,19 @@ def main():
                 process={'uid':os.getuid(), 'gid':os.getgid(), 'executable':node})
             health()
             before = service.process_identity()
+            before_transaction = service.transaction_identity()
+            if before_transaction['pid'] != before[0]:
+                raise RuntimeError('Process changed during initial qualification')
             print('PASS: native health and exact process identity', flush=True)
             service.restart(timeout=20)
             health()
             if service.process_identity() == before:
                 raise RuntimeError('Gateway identity did not change after restart')
+            after_transaction = service.transaction_identity()
+            if (before_transaction['boot'] != after_transaction['boot']
+                    or before_transaction['pid'] == after_transaction['pid']
+                    or before_transaction['started'] >= after_transaction['started']):
+                raise RuntimeError('Restart transaction identity unconfirmed')
             print('PASS: native restart and new process identity', flush=True)
         finally:
             subprocess.run(['/bin/launchctl', 'bootout', target], capture_output=True, timeout=30)
