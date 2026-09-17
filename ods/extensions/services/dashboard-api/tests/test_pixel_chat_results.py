@@ -377,3 +377,22 @@ def test_completed_stream_wins_stop_during_upstream_context_teardown(store, monk
         assert store.get(IDENTITY)['state'] == 'complete'
         assert b'Saved result' in b''.join(row['data'] for row in store.chunks(IDENTITY))
     asyncio.run(run())
+
+
+def test_cancel_handles_evicted_or_missing_attempt_without_typeerror(store, monkeypatch):
+    async def run():
+        async def cancel(*args): return True
+        monkeypatch.setattr(pixel, '_cancel_edge_run', cancel)
+        call_count = 0
+        def mocked_get(key):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {'state': 'active', 'fingerprint': 'f', 'created': 12345.0, 'size': 0}
+            return None
+        monkeypatch.setattr(store, 'get', mocked_get)
+        result = await pixel.pixel_chat_cancel(
+            pixel.ChatCancelRequest(chat_id='chat-test', request_id='attempt-evicted'), OWNER
+        )
+        assert result == {'aborted': False}
+    asyncio.run(run())
