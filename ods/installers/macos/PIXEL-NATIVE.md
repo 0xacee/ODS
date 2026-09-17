@@ -1,0 +1,49 @@
+# Native Pixel transport integration
+
+`pixel-native.compose.yaml.disabled` is a staged installer component, not an
+installer entry point or a declaration that macOS host-access parity is ready.
+It does not start a gateway, accept a license, or grant host access.
+
+Compose ordering is the ODS base stack, the shared
+`extensions/services/pixel-edge/compose.yaml.disabled`, then this native
+fragment. Resolve paths relative to the ODS installation directory. Compose
+must support `!override`; validate the merged configuration before changing
+running services. The shared Edge fragment retains Portal routing, preview
+authentication, transition persistence, and Open WebUI defaults.
+
+The installer must supply:
+
+- `PIXEL_NATIVE_UID` and `PIXEL_INGRESS_GID`: the verified native runtime owner's
+  numeric identity, not a fixed 501/20 pair.
+- `PIXEL_NATIVE_CONFIG_PATH`: an existing private gateway configuration file
+  readable by that identity. Missing bind sources must not create directories.
+- `PIXEL_NATIVE_INGRESS_IMAGE`: the qualified image containing the Node runtime.
+  Its gateway entry point and inherited health check are explicitly replaced.
+- `PIXEL_NATIVE_GATEWAY_PORT`: the native loopback listener, default 18789.
+- Shared Edge keys and preview runtime prerequisites. Compose interpolates the
+  shared Linux fragment before applying overrides, so its
+  `PIXEL_INGRESS_RUNTIME_DIR` variable must also be set even though that mount
+  is replaced by a Docker volume. It must not be used as the native socket path.
+
+The initializer owns only the runtime volume's top-level directory. It has no
+network or host bind mounts and does not recursively change existing history.
+Ingress runs unprivileged and writes history/status and its Unix socket there;
+Edge mounts it read-only. Neither service receives the Docker daemon socket.
+The native gateway's separate Docker authority remains a security qualification
+requirement, not something this transport fragment resolves.
+
+Do not enable this fragment until native deployment custody, gateway lifecycle,
+preview/control-plane services and licensing are qualified. Existing local
+qualification containers and volumes have different names: migration must
+preserve their history and transition state before replacing them. Do not run
+`down --volumes` during installation, upgrade or rollback.
+
+Run the configuration contract tests without starting any service:
+
+```sh
+python3 -m unittest discover -s ods/tests -p test_pixel_native_compose.py -v
+```
+
+These tests validate Compose merging, identity/path/port substitution, retained
+Edge contracts and required parameters. They do not prove runtime connectivity,
+preview availability, restart recovery or full macOS security equivalence.
