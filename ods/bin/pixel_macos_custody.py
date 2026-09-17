@@ -60,7 +60,7 @@ def verify_loaded_launchd_definition(raw, target, filename, expected):
         fail()
 
     args = expected.get('ProgramArguments')
-    environment = expected.get('EnvironmentVariables')
+    environment = expected.get('EnvironmentVariables', {})
     if (expected.get('Label') != target.split('/')[-1]
             or not isinstance(args, list) or not args
             or any(not isinstance(a, str) or not a or any(c in a for c in '\n\r\t') for a in args)
@@ -75,7 +75,11 @@ def verify_loaded_launchd_definition(raw, target, filename, expected):
                        'stderr path': expected.get('StandardErrorPath')}.items():
         if not isinstance(value, str) or scalar(key) != value:
             fail()
-    if block('arguments') != args or block('inherited environment', optional=True):
+    # env -i is an explicit process boundary: launchd still lists session
+    # variables, but they are cleared before executing the approved arguments.
+    clean_environment = args[:2] == ['/usr/bin/env', '-i'] and len(args) > 2
+    if (block('arguments') != args
+            or block('inherited environment', optional=True) and not clean_environment):
         fail()
     loaded = {}
     for line in block('environment'):

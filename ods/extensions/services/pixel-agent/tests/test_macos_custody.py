@@ -66,6 +66,19 @@ class LoadedDefinitionTests(unittest.TestCase):
         self.verify(self.raw.replace('\tenvironment = {',
                                     '\tinherited environment = {\n\t}\n\tenvironment = {'))
 
+    def test_explicit_clean_environment_matches_loaded_job(self):
+        from pixel_launchd_environment import clean_gateway_document
+        self.expected['EnvironmentVariables'].update({
+            'OPENCLAW_STATE_DIR': '/opt/state', 'OPENCLAW_CONFIG_PATH': '/opt/config.json'})
+        self.expected = clean_gateway_document(self.expected)
+        raw = self.raw.replace('\tprogram = /usr/local/bin/node', '\tprogram = /usr/bin/env')
+        old_args = '\targuments = {\n\t\t/usr/local/bin/node\n\t\t/opt/ODS Native/gateway.mjs\n\t}'
+        new_args = '\targuments = {\n' + ''.join('\t\t' + arg + '\n' for arg in self.expected['ProgramArguments']) + '\t}'
+        raw = raw.replace(old_args, new_args)
+        raw = raw.replace('\t\tHOME => /var/empty\n', '').replace('\t\tPATH => /usr/bin:/bin\n', '')
+        raw = raw.replace('\tenvironment = {', '\tinherited environment = {\n\t\tSSH_AUTH_SOCK => /tmp/session\n\t}\n\tenvironment = {')
+        self.verify(raw)
+
 
 class MetadataTests(unittest.TestCase):
     def test_rejects_nonroot_writable_hardlinked_and_wrong_kind(self):
