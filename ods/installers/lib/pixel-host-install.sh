@@ -76,7 +76,15 @@ ods_pixel_install_owner() {
 
 ods_pixel_owner_home() {
     local owner="$1" home
-    home="$(getent passwd "$owner" 2>/dev/null | awk -F: 'NR == 1 { print $6 }')"
+    [[ "$owner" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || return 1
+    home="$(python3 - "$owner" <<'PY'
+import pwd, sys
+try:
+    print(pwd.getpwnam(sys.argv[1]).pw_dir)
+except KeyError:
+    sys.exit(1)
+PY
+    )" || return 1
     [[ "$home" == /* && "$home" != / && "$home" != *[[:space:]\\]* && -d "$home" && ! -L "$home" ]] || return 1
     printf '%s\n' "$home"
 }

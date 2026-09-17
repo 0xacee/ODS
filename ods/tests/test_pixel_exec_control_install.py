@@ -70,6 +70,21 @@ _ods_pixel_install_exec_control "$2" "$3" "$4" "$5"
         self.assertEqual(self.sources[1].read_bytes(), original)
         self.assertFalse((self.control / 'cancellable-exec.sh').exists())
 
+    def test_owner_home_uses_account_database_not_ambient_home(self):
+        owner = pwd.getpwuid(os.getuid())
+        result = subprocess.run(['bash', '-c', 'source "$1"; ods_pixel_owner_home "$2"',
+            'fixture', str(LIBRARY), owner.pw_name], capture_output=True, text=True,
+            env={**os.environ, 'HOME': str(self.home)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), owner.pw_dir)
+
+    def test_owner_home_rejects_invalid_or_absent_account(self):
+        for owner in ('../root', 'name with space', '-root', 'ods_missing_' + str(os.getpid())):
+            result = subprocess.run(['bash', '-c', 'source "$1"; ods_pixel_owner_home "$2"',
+                'fixture', str(LIBRARY), owner], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, '')
+
 
 if __name__ == '__main__':
     unittest.main()
