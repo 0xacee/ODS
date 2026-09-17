@@ -121,6 +121,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-cli-prompts-noninteractive.sh
 	@bash tests/test-agent-restart-nonfatal.sh
 	@bash tests/test-unix-restart-recreate-env.sh
+	@bash tests/test-ods-cli-host-cpu-fallback.sh
 	@echo ""
 	@echo "=== ods-cli install directory resolution ==="
 	@bash tests/test-cli-install-dir-resolution.sh
