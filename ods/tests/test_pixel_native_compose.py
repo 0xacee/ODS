@@ -17,8 +17,14 @@ class NativeComposeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='ods native compose ')
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name) / 'base.yaml'
-        self.base.write_text('services:\n  open-webui:\n    image: busybox:1.36.1\n'
-                             '  dashboard-api:\n    image: busybox:1.36.1\n')
+        services = {name: {'image': 'busybox:1.36.1'} for name in ('open-webui', 'dashboard-api')}
+        # Compare against explicit control values from this Compose version:
+        # v2 omits false, while newer serializers can omit true instead.
+        for flag in (False, True):
+            services['bind-' + str(flag).lower()] = {'image': 'busybox:1.36.1',
+                'volumes': [{'type': 'bind', 'source': self.temp.name,
+                             'target': '/fixture', 'bind': {'create_host_path': flag}}]}
+        self.base.write_text(json.dumps({'services': services}))
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(('PIXEL_', 'COMPOSE_'))}
         self.env.update({
@@ -49,6 +55,13 @@ class NativeComposeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
+    def assert_no_host_path_creation(self, mount):
+        services = self.document()['services']
+        flags = [services[name]['volumes'][0].get('bind', {}).get('create_host_path')
+                 for name in ('bind-false', 'bind-true')]
+        self.assertNotEqual(flags[0], flags[1], 'Compose did not distinguish explicit bind controls')
+        self.assertEqual(mount.get('bind', {}).get('create_host_path'), flags[0])
+
     def test_native_identity_paths_and_health(self):
         services = self.document()['services']
         ingress = services['pixel-native-ingress']
@@ -60,7 +73,7 @@ class NativeComposeTests(unittest.TestCase):
         config = mounts['/run/gateway.json']
         self.assertEqual(config['source'], self.env['PIXEL_NATIVE_CONFIG_PATH'])
         self.assertTrue(config['read_only'])
-        self.assertFalse(config['bind']['create_host_path'])
+        self.assert_no_host_path_creation(config)
         self.assertNotIn('ports', ingress)
         self.assertTrue(ingress['read_only'])
         self.assertEqual(ingress['cap_drop'], ['ALL'])
@@ -97,7 +110,7 @@ class NativeComposeTests(unittest.TestCase):
         mounts = {item['target']: item for item in service['volumes']}
         self.assertEqual(set(mounts), {'/workspace', '/previews', '/run/ods-pixel-preview'})
         self.assertTrue(mounts['/workspace']['read_only'])
-        self.assertFalse(mounts['/workspace']['bind']['create_host_path'])
+        self.assert_no_host_path_creation(mounts['/workspace'])
 
     def test_missing_native_prerequisites_fail_closed(self):
         for key in ('PIXEL_NATIVE_UID', 'PIXEL_NATIVE_CONFIG_PATH',
