@@ -43,6 +43,15 @@ not necessarily a publication already accepted by the broker; no receipt is
 returned after cancellation. The gateway's Docker authority still requires the
 independent qualification described below.
 
+The tool must pass both OpenClaw policy gates. In addition to the global
+`tools.allow`, add only `pixel_ods_workspace_preview` to the Pixel agent's
+`tools.sandbox.tools.alsoAllow`. Preserve existing deny rules. The default
+sandbox allowlist does not include plugin tools; enabling the transport alone
+can pass direct plugin tests while leaving the tool unavailable in a real chat.
+Do not use `group:plugins`, disable sandboxing, or enable elevated execution to
+make preview available. Validate the effective agent policy and a real Portal
+tool call after updating configuration.
+
 The initializer owns only the runtime volume's top-level directory. It has no
 network or host bind mounts and does not recursively change existing history.
 Ingress runs unprivileged and writes history/status and its Unix socket there;
