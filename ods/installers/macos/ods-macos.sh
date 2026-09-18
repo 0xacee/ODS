@@ -905,9 +905,15 @@ cmd_restart() {
         fi
         ai_ok "${service} restarted"
     else
-        # Restart native llama-server
+        # Restart the native llama-server best-effort. A missing model or
+        # runtime (a disconnected model drive, a CPU-only install, or a download
+        # still in flight) must not abort the whole command: `ods restart` still
+        # has to recreate the container services below so the dashboard and UI
+        # come back. This mirrors the contract pinned by
+        # tests/test-unix-restart-recreate-env.sh; a fatal `|| return 1` here
+        # (added in b344d73d) skipped the container restart entirely.
         macos_wait_for_bootstrap_compose_safe "restart" || return 1
-        start_native_llama true || return 1
+        start_native_llama true || ai_warn "Native llama-server did not restart; continuing with the container services."
 
         ai "Restarting all services..."
         # shellcheck disable=SC2086
