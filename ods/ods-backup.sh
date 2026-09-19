@@ -464,7 +464,14 @@ compress_backup() {
     local parent_dir
     parent_dir=$(dirname "$backup_dir")
 
-    tar czf "$parent_dir/$backup_name.tar.gz" -C "$parent_dir" "$backup_name"
+    # macOS `tar` (bsdtar) embeds AppleDouble `._*` metadata companions when the
+    # staged files carry extended attributes (e.g. com.apple.provenance, which the
+    # OS sets on ordinary files). The top-level `._<backup_id>` entry then fails
+    # backup-archive.py's member check on restore — its first path component is
+    # not the backup id — so the whole archive is rejected and macOS users cannot
+    # recover their own backups. COPYFILE_DISABLE tells bsdtar to omit that
+    # metadata; GNU tar on Linux ignores the variable, so this is a no-op there.
+    COPYFILE_DISABLE=1 tar czf "$parent_dir/$backup_name.tar.gz" -C "$parent_dir" "$backup_name"
     # The archive bundles the raw .env (DASHBOARD_API_KEY, session secret, service
     # passwords). Restrict it to the owner rather than leaving it world-readable
     # at the umask default, matching the 0600 the .env itself carries.
