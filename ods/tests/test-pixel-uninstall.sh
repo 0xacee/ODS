@@ -178,7 +178,7 @@ assert '"$root_uid" "$root_gid" "$owner_uid" "$owner_gid"' in text
 assert "info.st_gid != owner_gid" in text
 assert "info.st_gid != os.getgid()" not in text
 assert '_ods_pixel_validate_ingress_env "$ingress_env" "$root_uid"' in text
-assert 'sudo python3 - "$path" "$root_uid"' in text
+assert 'sudo python3 -I - "$path" "$root_uid"' in text
 PY
 then
     pass "root validation uses owner custody and privileged reads for protected ingress configuration"

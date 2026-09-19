@@ -25,7 +25,9 @@ _ods_pixel_validate_ingress_env() {
         log_error "sudo is required to validate the ODS-managed Pixel ingress environment"
         return 1
     }
-    sudo python3 - "$path" "$root_uid" <<'PY'
+    # Isolated mode prevents a permissive sudoers environment policy from
+    # influencing this privileged validator through PYTHONPATH/PYTHONHOME.
+    sudo python3 -I - "$path" "$root_uid" <<'PY'
 import pathlib
 import stat
 import sys
