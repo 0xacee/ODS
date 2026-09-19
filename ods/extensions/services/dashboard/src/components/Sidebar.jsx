@@ -12,6 +12,12 @@ import PixelConversationNavigation from './PixelConversationNavigation'
 import {useLocalProfile} from '../lib/localProfile'
 import UserAvatar from './UserAvatar'
 
+function withServiceToken(rawUrl, token) {
+  const url = new URL(rawUrl, window.location.origin)
+  url.searchParams.set('token', token)
+  return url.toString()
+}
+
 export default function Sidebar({ status, collapsed, onToggle }) {
   const profile = useLocalProfile()
   const { pathname } = useLocation()
@@ -73,7 +79,7 @@ export default function Sidebar({ status, collapsed, onToggle }) {
       {!pixelMode && applications.length > 0 && <details className="pixel-applications" open={query ? true : undefined}>
         <summary className="pixel-nav-item" aria-label="Applications" title="Applications"><Grid2X2 size={16}/><span>Applications</span><svg className="rail-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3 3 3-3"/></svg></summary>
         {applications.filter(link => link.label.toLowerCase().includes(query.toLowerCase())).map(({ key, label, icon: Icon, healthy, url }) => {
-          const href = key === 'openclaw' && serviceTokens.openclaw ? `${url}/?token=${encodeURIComponent(serviceTokens.openclaw)}` : url
+          const href = key === 'openclaw' && serviceTokens.openclaw ? withServiceToken(url, serviceTokens.openclaw) : url
           return <a key={key} className="pixel-nav-item" title={healthy ? label : `${label} · Offline`} aria-label={label} aria-disabled={!healthy} href={healthy ? href : undefined} target={healthy ? '_blank' : undefined} rel="noopener noreferrer"><Icon size={16} /><span>{label}</span>{!healthy && !collapsed && <small>Offline</small>}</a>
         })}
       </details>}
