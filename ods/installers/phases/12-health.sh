@@ -434,7 +434,12 @@ if $DOCKER_CMD inspect ods-perplexica &>/dev/null; then
     PERPLEXICA_URL="http://127.0.0.1:${SERVICE_PORTS[perplexica]:-3004}"
     _perplexica_switchboard_mode="$(printf '%s' "${ODS_MODEL_SWITCHBOARD:-enabled}" | tr '[:upper:]' '[:lower:]')"
     PERPLEXICA_MODEL="${LLM_MODEL:-default}"
-    if [[ -n "${GGUF_FILE:-}" ]]; then
+    if [[ -n "${EXTERNAL_LLM_URL:-}" && -n "${EXTERNAL_LLM_MODEL:-}" ]]; then
+        # Generic external installs intentionally keep the local tier GGUF
+        # metadata for recommendations. It must not replace the exact model
+        # selected from the external provider in Perplexica's persisted route.
+        PERPLEXICA_MODEL="$EXTERNAL_LLM_MODEL"
+    elif [[ -n "${GGUF_FILE:-}" ]]; then
         PERPLEXICA_MODEL="$GGUF_FILE"
         # Lemonade serves the model under a separate id. An AMD local install
         # runs Lemonade while LLM_BACKEND stays "llama-server", so the runtime

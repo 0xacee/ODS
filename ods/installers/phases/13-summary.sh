@@ -341,7 +341,9 @@ if ! $DRY_RUN; then
     # Check Perplexica config was seeded (phase 12 may have failed silently)
     if $DOCKER_CMD inspect ods-perplexica &>/dev/null; then
         _perplexica_model="${LLM_MODEL:-qwen3-30b-a3b}"
-        if [[ -n "${GGUF_FILE:-}" ]]; then
+        if [[ -n "${EXTERNAL_LLM_URL:-}" && -n "${EXTERNAL_LLM_MODEL:-}" ]]; then
+            _perplexica_model="$EXTERNAL_LLM_MODEL"
+        elif [[ -n "${GGUF_FILE:-}" ]]; then
             _perplexica_model="$GGUF_FILE"
             # Lemonade serves the model under a separate id, so the expected
             # route differs from the bare GGUF name. An AMD local install runs

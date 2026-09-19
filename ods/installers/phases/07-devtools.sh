@@ -158,6 +158,8 @@ else
             [[ -z "${ODS_MODEL_SWITCHBOARD:-}" ]] && ODS_MODEL_SWITCHBOARD=$(grep -m1 '^ODS_MODEL_SWITCHBOARD=' "$INSTALL_DIR/.env" | cut -d= -f2-)
             [[ -z "${LITELLM_KEY:-}" ]] && LITELLM_KEY=$(grep -m1 '^LITELLM_KEY=' "$INSTALL_DIR/.env" | cut -d= -f2-)
             [[ -z "${LITELLM_PORT:-}" ]] && LITELLM_PORT=$(grep -m1 '^LITELLM_PORT=' "$INSTALL_DIR/.env" | cut -d= -f2-)
+            [[ -z "${EXTERNAL_LLM_URL:-}" ]] && EXTERNAL_LLM_URL=$(grep -m1 '^EXTERNAL_LLM_URL=' "$INSTALL_DIR/.env" | cut -d= -f2-)
+            [[ -z "${EXTERNAL_LLM_MODEL:-}" ]] && EXTERNAL_LLM_MODEL=$(grep -m1 '^EXTERNAL_LLM_MODEL=' "$INSTALL_DIR/.env" | cut -d= -f2-)
         fi
         # Route through LiteLLM on AMD/Lemonade, direct to llama-server otherwise.
         #
@@ -186,6 +188,16 @@ else
             _opencode_model_id="ods/current"
             _opencode_model_name="ods/current"
             _opencode_provider_name="ODS switchboard"
+        elif [[ -n "${EXTERNAL_LLM_URL:-}" && -n "${EXTERNAL_LLM_MODEL:-}" ]]; then
+            # Generic external providers are materialized behind the same
+            # authenticated LiteLLM gateway as Pixel. Pointing OpenCode at the
+            # stale local tier port produces either connection failures or the
+            # misleading LiteLLM "No connected db" auth error.
+            _opencode_url="http://127.0.0.1:${LITELLM_PORT:-4000}/v1"
+            _opencode_key="${LITELLM_KEY:-}"
+            _opencode_model_id="$EXTERNAL_LLM_MODEL"
+            _opencode_model_name="$EXTERNAL_LLM_MODEL"
+            _opencode_provider_name="External LLM via ODS gateway"
         elif [[ "${ODS_MODE:-local}" == "lemonade" ]]; then
             _opencode_url="http://127.0.0.1:${LITELLM_PORT:-4000}/v1"
             _opencode_key="${LITELLM_KEY:-no-key}"
@@ -194,7 +206,7 @@ else
             _opencode_key="no-key"
         fi
         if [[ -z "${_opencode_key:-}" ]]; then
-            ai_err "OpenCode switchboard config requires LITELLM_KEY, but it is empty."
+            ai_err "OpenCode gateway config requires LITELLM_KEY, but it is empty."
             exit 1
         fi
         # OpenCode reserves `limit.output` from `limit.context` when deciding

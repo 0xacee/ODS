@@ -21,7 +21,9 @@ case "$PERPLEXICA_LLM_BASE_URL" in
 esac
 
 if [[ -z "$PERPLEXICA_MODEL" ]]; then
-    if [[ -n "${GGUF_FILE:-}" ]]; then
+    if [[ -n "${EXTERNAL_LLM_URL:-}" && -n "${EXTERNAL_LLM_MODEL:-}" ]]; then
+        PERPLEXICA_MODEL="$EXTERNAL_LLM_MODEL"
+    elif [[ -n "${GGUF_FILE:-}" ]]; then
         PERPLEXICA_MODEL="$GGUF_FILE"
         # An AMD local install runs Lemonade while LLM_BACKEND stays
         # "llama-server", so the runtime and the backend have to be checked
