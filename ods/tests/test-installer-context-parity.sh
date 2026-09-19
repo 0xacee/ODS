@@ -188,6 +188,10 @@ assert_grep "installers/phases/07-devtools.sh" 'ODS_MODEL_SWITCHBOARD' \
     "Linux OpenCode config reads switchboard mode"
 assert_grep "installers/phases/07-devtools.sh" '_opencode_model_id="ods/current"' \
     "Linux OpenCode config uses stable switchboard alias"
+assert_grep "installers/phases/07-devtools.sh" '_opencode_model_id="\$EXTERNAL_LLM_MODEL"' \
+    "Linux OpenCode config uses the exact generic external model"
+assert_grep "installers/phases/07-devtools.sh" '_opencode_url="http://127\.0\.0\.1:\$\{LITELLM_PORT:-4000\}/v1"' \
+    "Linux OpenCode generic external config routes through LiteLLM"
 assert_grep "installers/phases/07-devtools.sh" 'OpenCode config updated \(model, API key, and URL refreshed\)' \
     "Linux OpenCode reinstall migrates stale model route"
 assert_grep "installers/macos/install-macos.sh" '_opencode_switchboard_mode=.*ODS_MODEL_SWITCHBOARD' \

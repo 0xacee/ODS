@@ -177,11 +177,13 @@ assert 'owner_gid="$(id -g)"' in text
 assert '"$root_uid" "$root_gid" "$owner_uid" "$owner_gid"' in text
 assert "info.st_gid != owner_gid" in text
 assert "info.st_gid != os.getgid()" not in text
+assert '_ods_pixel_validate_ingress_env "$ingress_env" "$root_uid"' in text
+assert 'sudo python3 -I - "$path" "$root_uid"' in text
 PY
 then
-    pass "root Operations validation compares legacy source custody with the captured owner primary group"
+    pass "root validation uses owner custody and privileged reads for protected ingress configuration"
 else
-    fail "root Operations validation confuses its process group with the Pixel owner group"
+    fail "root validation does not preserve owner custody and protected ingress reads"
 fi
 
 if logger_output="$(bash -c '
@@ -299,6 +301,7 @@ write_access_fixture() {
         "$access_runtime_state"
     local -a access_sources=(
         "extensions/services/pixel-agent/host/access_mode_server.py"
+        "extensions/services/pixel-agent/host/unix_peer.py"
         "extensions/services/pixel-agent/host/access_mode_worker.py"
         "extensions/services/pixel-agent/host/pixel_access_mode.py"
         "extensions/services/pixel-agent/host/access_mode_config.py"
@@ -735,6 +738,19 @@ PY
     : >"$OPS_IDENTITY_LOG"
     : >"$DOCKER_LOG"
 }
+
+write_fixture
+printf '%s\n' 'PIXEL_STATUS_FILE=/tmp/drifted-status.json' >>"$ETC_DIR/pixel-agent.env"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "Pixel uninstall accepted a drifted protected ingress environment"
+elif [[ -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+    && -e "$SYSTEMD_DIR/pixel-ingress.service" \
+    && -e "$ETC_DIR/pixel-agent.env" \
+    && ! -s "$SYSTEMCTL_LOG" ]]; then
+    pass "protected ingress environment drift fails closed before service mutation"
+else
+    fail "protected ingress environment drift caused partial cleanup"
+fi
 
 write_fixture
 rm -f -- "$SYSTEMD_DIR/openclaw-gateway.service" "$SYSTEMD_DIR/pixel-ingress.service" \
@@ -1763,6 +1779,59 @@ else
         && -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" ]] \
         && pass "Pixel access program drift fails before service mutation" \
         || fail "Pixel access program drift caused partial cleanup"
+fi
+
+write_access_fixture
+rm -f -- "$INSTALL_DIR/bin/pixel_gateway_service.py" \
+    "$LIBEXEC_DIR/ods-pixel-access/pixel_gateway_service.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$LIBEXEC_DIR/ods-pixel-access" \
+        && ! -e "$ACCESS_STATE" \
+        && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" ]]; then
+    pass "ready legacy access bundle without the later gateway helper remains removable"
+else
+    fail "legacy access bundle was stranded by a later helper requirement"
+fi
+
+write_access_fixture
+rm -f -- "$LIBEXEC_DIR/ods-pixel-access/pixel_gateway_service.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "current ready access bundle accepted a missing gateway helper"
+else
+    [[ -e "$INSTALL_DIR/bin/pixel_gateway_service.py" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "current ready access bundle still fails closed when its gateway helper is partial" \
+        || fail "current partial access-bundle refusal caused mutation"
+fi
+
+write_access_fixture
+printf '%s\n' '# legacy access server without unix peer dependency' \
+    > "$INSTALL_DIR/extensions/services/pixel-agent/host/access_mode_server.py"
+cp "$INSTALL_DIR/extensions/services/pixel-agent/host/access_mode_server.py" \
+    "$LIBEXEC_DIR/ods-pixel-access/access_mode_server.py"
+chmod 0644 "$INSTALL_DIR/extensions/services/pixel-agent/host/access_mode_server.py" \
+    "$LIBEXEC_DIR/ods-pixel-access/access_mode_server.py"
+rm -f -- "$LIBEXEC_DIR/ods-pixel-access/unix_peer.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$LIBEXEC_DIR/ods-pixel-access" \
+        && ! -e "$ACCESS_STATE" \
+        && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" ]]; then
+    pass "ready legacy access server without a unix peer dependency remains removable"
+else
+    fail "legacy access server was stranded by the later unix peer helper"
+fi
+
+write_access_fixture
+rm -f -- "$LIBEXEC_DIR/ods-pixel-access/unix_peer.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "current ready access bundle accepted a missing unix peer helper"
+else
+    [[ -e "$INSTALL_DIR/extensions/services/pixel-agent/host/unix_peer.py" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "current unix peer dependency fails closed when its helper is missing" \
+        || fail "current unix peer refusal caused mutation"
 fi
 
 write_access_fixture

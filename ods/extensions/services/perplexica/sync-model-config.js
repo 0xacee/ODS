@@ -8,14 +8,20 @@ const runtime = String(
 ).toLowerCase();
 const lemonade = runtime === "lemonade" || mode === "lemonade";
 const ggufFile = String(process.env.GGUF_FILE || "").trim();
+const externalUrl = String(process.env.EXTERNAL_LLM_URL || "").trim();
+const externalModel = externalUrl
+  ? String(process.env.EXTERNAL_LLM_MODEL || "").trim()
+  : "";
 const model = String(
   switchboardMode === "enabled"
     ? "ods/current"
-    : mode === "cloud"
-    ? "default"
-    : lemonade
-      ? process.env.LEMONADE_MODEL || (ggufFile ? `extra.${ggufFile}` : "")
-      : ggufFile || process.env.LLM_MODEL || "",
+    : externalModel
+      ? externalModel
+      : mode === "cloud"
+        ? "default"
+        : lemonade
+          ? process.env.LEMONADE_MODEL || (ggufFile ? `extra.${ggufFile}` : "")
+          : ggufFile || process.env.LLM_MODEL || "",
 ).trim();
 function normalizeOpenAIBaseURL(value) {
   const trimmed = String(value || "").trim().replace(/\/+$/, "");

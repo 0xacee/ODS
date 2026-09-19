@@ -15,6 +15,53 @@ if ! declare -F log_error >/dev/null 2>&1; then
     log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 fi
 
+_ods_pixel_validate_ingress_env() {
+    local path="$1" root_uid="$2"
+
+    if [[ ! -e "$path" && ! -L "$path" ]]; then
+        return 0
+    fi
+    command -v sudo >/dev/null 2>&1 || {
+        log_error "sudo is required to validate the ODS-managed Pixel ingress environment"
+        return 1
+    }
+    # Isolated mode prevents a permissive sudoers environment policy from
+    # influencing this privileged validator through PYTHONPATH/PYTHONHOME.
+    sudo python3 -I - "$path" "$root_uid" <<'PY'
+import pathlib
+import stat
+import sys
+
+path = pathlib.Path(sys.argv[1])
+root_uid = int(sys.argv[2])
+info = path.lstat()
+if (
+    not stat.S_ISREG(info.st_mode)
+    or stat.S_ISLNK(info.st_mode)
+    or info.st_nlink != 1
+    or info.st_uid != root_uid
+    or info.st_size > 64 * 1024
+    or info.st_mode & 0o022
+):
+    raise SystemExit(f"unsafe managed Pixel artifact: {path}")
+
+entries = {}
+for line in path.read_text(encoding="utf-8").splitlines():
+    if not line or line.startswith("#"):
+        continue
+    key, separator, item = line.partition("=")
+    if not separator or key in entries:
+        raise SystemExit("invalid Pixel ingress environment")
+    entries[key] = item
+if (
+    entries.get("PIXEL_INGRESS_SOCKET") != "/run/ods-pixel/pixel-ingress.sock"
+    or entries.get("PIXEL_GATEWAY_TOKEN_FILE") != "/run/ods-pixel/openclaw.json"
+    or entries.get("PIXEL_STATUS_FILE") != "/run/ods-pixel/ods-status.json"
+):
+    raise SystemExit("Pixel ingress environment is not ODS-managed")
+PY
+}
+
 _ods_pixel_access_validate_or_remove() {
     local action="$1"
     shift
@@ -100,6 +147,7 @@ def source_file(path: pathlib.Path, maximum: int):
 unit_source = install / "extensions/services/pixel-agent/host/ods-pixel-access.service"
 sources = {
     "access_mode_server.py": install / "extensions/services/pixel-agent/host/access_mode_server.py",
+    "unix_peer.py": install / "extensions/services/pixel-agent/host/unix_peer.py",
     "access_mode_worker.py": install / "extensions/services/pixel-agent/host/access_mode_worker.py",
     "pixel_access_mode.py": install / "extensions/services/pixel-agent/host/pixel_access_mode.py",
     "access_mode_config.py": install / "extensions/services/pixel-agent/host/access_mode_config.py",
@@ -123,6 +171,18 @@ for name in (
     "runtime_custody.py", "coordinator.py",
 ):
     sources[f"pixel_provider/{name}"] = install / "bin/pixel_provider" / name
+
+# pixel_gateway_service.py joined the root-owned access bundle after managed
+# Pixel deployments already existed in public beta.  A historical deployment
+# is distinguishable without trusting mutable metadata: both its install-tree
+# source and its root-owned copy are absent.  Accept only that exact legacy
+# absence.  If either side exists, normal byte and completeness validation
+# remains mandatory, so a partial current bundle still fails closed.
+expected_sources = set(sources)
+legacy_gateway = "pixel_gateway_service.py"
+if (not present(sources[legacy_gateway])
+        and not present(program / legacy_gateway)):
+    expected_sources.remove(legacy_gateway)
 
 relay_key = config.parent / "pixel-access-relay.key"
 artifacts = (unit, program, config, relay_key, state_root, probe_owner, dropin,
@@ -176,8 +236,19 @@ if present(program):
             if not match or parent.name != "__pycache__" or source_relative not in sources:
                 raise SystemExit(f"unexpected Pixel access program file: {relative}")
             regular(child, root_uid, root_gid, 16 * 1024 * 1024)
-    if marker_state == "ready" and seen != set(sources):
-        raise SystemExit("ready Pixel access program bundle is partial: " + ", ".join(sorted(set(sources) - seen)))
+    # unix_peer.py was added to the access bundle after the helper already
+    # existed elsewhere in ODS.  A legacy access server is identifiable from
+    # the exact, already-validated installed/server source pair: neither
+    # imports unix_peer.  Preserve that historical uninstall path, but require
+    # the helper whenever the access server actually depends on it.
+    legacy_unix_peer = "unix_peer.py"
+    if legacy_unix_peer not in seen and "access_mode_server.py" in seen:
+        dependency = b"from unix_peer import"
+        if (dependency not in (program / "access_mode_server.py").read_bytes()
+                and dependency not in sources["access_mode_server.py"].read_bytes()):
+            expected_sources.remove(legacy_unix_peer)
+    if marker_state == "ready" and seen != expected_sources:
+        raise SystemExit("ready Pixel access program bundle is partial: " + ", ".join(sorted(expected_sources - seen)))
 
 config_present = present(config)
 if config_present:
@@ -502,6 +573,10 @@ ods_pixel_uninstall_managed() {
     owner_uid="$(id -u)"
     owner_gid="$(id -g)"
     owner_name="$(id -un)"
+    if ! _ods_pixel_validate_ingress_env "$ingress_env" "$root_uid"; then
+        log_error "ODS-managed Pixel ingress environment validation failed"
+        return 1
+    fi
     if ! cleanup_plan="$(python3 - \
         "$marker" "$install_dir" "$owner_home" "$(id -u)" "$root_uid" \
         "$gateway_unit" "$ingress_unit" "$ingress_env" "$ingress_program" "$source_program" \
@@ -1346,22 +1421,6 @@ if unix_peer_program.exists():
 if system_observer_program.exists():
     if system_observer_program.read_bytes() != system_observer_source.read_bytes():
         raise SystemExit("installed Pixel system observer drifted from this ODS install")
-
-if ingress_env.exists():
-    entries = {}
-    for line in ingress_env.read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#"):
-            continue
-        key, separator, item = line.partition("=")
-        if not separator or key in entries:
-            raise SystemExit("invalid Pixel ingress environment")
-        entries[key] = item
-    if (
-        entries.get("PIXEL_INGRESS_SOCKET") != "/run/ods-pixel/pixel-ingress.sock"
-        or entries.get("PIXEL_GATEWAY_TOKEN_FILE") != "/run/ods-pixel/openclaw.json"
-        or entries.get("PIXEL_STATUS_FILE") != "/run/ods-pixel/ods-status.json"
-    ):
-        raise SystemExit("Pixel ingress environment is not ODS-managed")
 
 if ingress_program.exists():
     if not source_program.exists() or source_program.is_symlink():
