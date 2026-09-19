@@ -1844,6 +1844,9 @@ else
 fi
 
 write_access_fixture
+printf '{}\n' > "$ACCESS_STATE/model-promotion-completed.json"
+printf '{}\n' > "$ACCESS_STATE/model-route-completed.json"
+chmod 0600 "$ACCESS_STATE/model-promotion-completed.json" "$ACCESS_STATE/model-route-completed.json"
 if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
     [[ ! -e "$ACCESS_STATE" && ! -e "$LIBEXEC_DIR/ods-pixel-access" \
         && ! -e "$ETC_DIR/pixel-access.json" && ! -e "$SYSTEMD_DIR/ods-pixel-access.service" ]] \
@@ -1852,6 +1855,39 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
         || fail "access coordinator cleanup was incomplete or out of order"
 else
     fail "verified access coordinator could not be removed"
+fi
+
+write_access_fixture
+printf '%s' '{"interrupted":' > "$ACCESS_STATE/.transition-abc123_4"
+chmod 0600 "$ACCESS_STATE/.transition-abc123_4"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$ACCESS_STATE" && ! -e "$ETC_DIR/pixel-access.json" ]]; then
+    pass "root-owned interrupted transition temp does not strand managed uninstall"
+else
+    fail "interrupted transition temp stranded managed uninstall"
+fi
+
+write_access_fixture
+printf '%s' '{"interrupted":' > "$ACCESS_STATE/.transition-abc123_4"
+chmod 0644 "$ACCESS_STATE/.transition-abc123_4"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "non-private interrupted transition temp was accepted"
+else
+    [[ -e "$ACCESS_STATE/.transition-abc123_4" \
+        && -e "$ACCESS_STATE/service-baseline.json" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "non-private transition temp fails before service mutation" \
+        || fail "non-private transition temp caused partial cleanup"
+fi
+
+write_access_fixture
+ln -s "$ETC_DIR/pixel-access.json" "$ACCESS_STATE/.transition-abc123_4"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "symlinked interrupted transition temp was accepted"
+else
+    [[ -L "$ACCESS_STATE/.transition-abc123_4" \
+        && -e "$ACCESS_STATE/service-baseline.json" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "unsafe transition temp fails before service mutation" \
+        || fail "unsafe transition temp caused partial cleanup"
 fi
 
 for scenario in foreign modified_unit modified_program relay_key state_symlink pending_transition stop_failure still_active; do

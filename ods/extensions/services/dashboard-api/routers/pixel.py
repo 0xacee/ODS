@@ -12,8 +12,9 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
-from typing import AsyncIterator, Literal
+from typing import AsyncIterator, Callable, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -26,6 +27,7 @@ from pixel_runtime_state import begin_pixel_stream, end_pixel_stream, try_begin_
 from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, owner_namespace
 from security import verify_api_key
 from config import read_live_env_value
+from helpers import get_loaded_model, get_llama_context_size
 from pixel_chat_identity import asks_display_name, confirmed_display_name, display_name_stream, messages_with_identity
 from pixel_chat_context import HistorySnapshot, public_context
 
@@ -37,6 +39,8 @@ _DEFAULT_EDGE_URL = "http://pixel-edge:9595"
 _MODEL = "pixel/default"
 _CHAT_STREAM_TIMEOUT_SECONDS = 2040.0
 _CLIENT_DISCONNECT_POLL_SECONDS = 0.25
+_STREAM_KEEPALIVE_SECONDS = 15.0
+_STREAM_KEEPALIVE = b": pixel working\n\n"
 _CLIENT_CANCEL_TIMEOUT_SECONDS = 7.0
 _MAX_KEY_LENGTH = 4096
 _MAX_STATUS_BYTES = 64 * 1024
@@ -60,6 +64,10 @@ _OPS_STATUSES = frozenset(
 )
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _MODEL_SWITCH_DETAIL = "Model switch in progress; Pixel will be ready when activation completes"
+_MODEL_IDENTITY_DETAIL = (
+    "Pixel cannot verify its recorded model against the loaded Lemonade model. "
+    "Re-select the model in Models before using Pixel."
+)
 _MODEL_ADAPTIVE_DETAIL = (
     "Pixel is ready and adapts its tool flow for this model. Model capability "
     "affects the quality and persistence of complex work, not access or the "
@@ -351,6 +359,8 @@ async def _local_inference_issue(host_status: object) -> str | None:
 
 
 def _model_readiness_issue_from_status(status: object) -> tuple[str, str] | None:
+    if isinstance(status, dict) and status.get("modelTransactionPending") is True:
+        return "model_switching", _MODEL_SWITCH_DETAIL
     switching = (
         isinstance(status, dict)
         and status.get("activeOperation") == "model_activation"
@@ -374,13 +384,13 @@ def _model_support_from_status(status: object) -> dict[str, str] | None:
 
 
 async def _model_readiness_issue() -> tuple[str, str] | None:
-    """Return a host-proven model transition, if present.
+    """Return a host-proven transition or an unverified Lemonade route.
 
-    A failed lifecycle probe does not falsely take down an otherwise healthy
-    Pixel edge. Model quality metadata is advisory; the edge readiness check
-    remains authoritative.
+    A failed host lifecycle probe alone does not take down the Pixel edge.
+    A recorded Lemonade route does require live identity proof before chat.
+    Model quality metadata remains advisory, not an access restriction.
     """
-    return _model_readiness_issue_from_status(await _host_model_status())
+    return await _model_readiness_issue_for_status(await _host_model_status())
 
 
 def _active_runtime_projection(status: object) -> dict[str, object] | None:
@@ -397,6 +407,21 @@ def _active_runtime_projection(status: object) -> dict[str, object] | None:
             and 1 <= runtime["contextLength"] <= 10_000_000
         ):
             return {key: runtime[key] for key in expected}
+        return None
+    if isinstance(runtime, dict) and runtime.get("source") == "external-host":
+        expected = {"source", "model"}
+        if (
+            expected <= set(runtime) <= expected | {"contextLength"}
+            and isinstance(runtime.get("model"), str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/+:-]{0,255}", runtime["model"])
+            and "://" not in runtime["model"]
+            and (
+                "contextLength" not in runtime
+                or type(runtime["contextLength"]) is int
+                and 1 <= runtime["contextLength"] <= 10_000_000
+            )
+        ):
+            return {key: runtime[key] for key in expected | {"contextLength"} if key in runtime}
         return None
     expected = {"source", "model", "contextLength", "maxTokens", "reasoning"}
     if (
@@ -417,6 +442,77 @@ def _active_runtime_projection(status: object) -> dict[str, object] | None:
     ):
         return None
     return {key: runtime[key] for key in expected | {"routeFingerprint"} if key in runtime}
+
+
+async def _verified_external_host_runtime(host_status: object) -> dict[str, object] | None:
+    """Identify a fixed external model from a live probe, never .env alone.
+
+    This is a status identity, not a model-switch or agent-quality proof. Do not
+    expose the configured origin, credentials, or provider response body.
+    """
+    if (
+        not isinstance(host_status, dict)
+        or host_status.get("activeRuntime") is not None
+        or os.environ.get("LLM_BACKEND", "").strip().casefold() != "external"
+        or read_live_env_value("LLM_BACKEND").strip().casefold() != "external"
+        or read_live_env_value("ODS_MODEL_SWITCHBOARD").strip().casefold() != "observe"
+        or read_live_env_value("EXTERNAL_LLM_PROVIDER").strip().casefold() != "openai-compatible"
+    ):
+        return None
+    expected = read_live_env_value("EXTERNAL_LLM_MODEL").strip()
+    if (
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/+:-]{0,255}", expected) is None
+        or "://" in expected
+    ):
+        return None
+    try:
+        loaded = await asyncio.wait_for(get_loaded_model(), timeout=3.0)
+    except (asyncio.TimeoutError, httpx.HTTPError, OSError, ValueError, TypeError):
+        return None
+    if loaded != expected:
+        return None
+    runtime: dict[str, object] = {"source": "external-host", "model": loaded}
+    try:
+        context = await asyncio.wait_for(get_llama_context_size(loaded), timeout=3.0)
+    except (asyncio.TimeoutError, httpx.HTTPError, OSError, ValueError, TypeError):
+        context = None
+    if type(context) is int and 1 <= context <= 10_000_000:
+        runtime["contextLength"] = context
+    return _active_runtime_projection({"activeRuntime": runtime})
+
+
+def _model_identity_tokens(value: str | None) -> set[str]:
+    """Compare a Lemonade ID with the equivalent GGUF basename, not a path."""
+    if not isinstance(value, str) or not value.strip():
+        return set()
+    name = Path(value.strip()).name.casefold()
+    tokens = {name}
+    if name.startswith("extra."):
+        tokens.add(name[6:])
+    for token in tuple(tokens):
+        if token.endswith(".gguf"):
+            tokens.add(token[:-5])
+    return tokens
+
+
+async def _model_readiness_issue_for_status(status: object) -> tuple[str, str] | None:
+    issue = _model_readiness_issue_from_status(status)
+    if issue is not None:
+        return issue
+    runtime = _active_runtime_projection(status)
+    if (runtime is None or runtime.get("source") != "local-switchboard"
+            or read_live_env_value("LLM_BACKEND").strip().casefold() != "lemonade"):
+        return None
+    try:
+        loaded = await asyncio.wait_for(get_loaded_model(), timeout=3.0)
+    except Exception as exc:
+        # Probe failures cannot validate a recorded external route. Do not log
+        # exception text; it may contain the private backend origin or key.
+        logger.warning("Pixel Lemonade identity probe failed (%s)", type(exc).__name__)
+        return "model_unavailable", _MODEL_IDENTITY_DETAIL
+    if not (_model_identity_tokens(runtime["model"]) & _model_identity_tokens(loaded)):
+        return "model_unavailable", _MODEL_IDENTITY_DETAIL
+    return None
 
 
 async def _model_activation_in_progress() -> bool:
@@ -443,7 +539,7 @@ async def pixel_status() -> dict[str, object]:
     if config is None:
         return {"available": False, "model": None, "detail": "Pixel is not enabled"}
     host_status = await _host_model_status()
-    readiness_issue = _model_readiness_issue_from_status(host_status)
+    readiness_issue = await _model_readiness_issue_for_status(host_status)
     if readiness_issue is not None:
         state, detail = readiness_issue
         return {
@@ -481,6 +577,8 @@ async def pixel_status() -> dict[str, object]:
             if inference_issue:
                 return {"available": False, "model": None, "state": "model_unavailable", "detail": inference_issue}
         runtime = _active_runtime_projection(host_status)
+        if available and runtime is None:
+            runtime = await _verified_external_host_runtime(host_status)
         if available and runtime is not None:
             result["runtime"] = runtime
         model_support = _model_support_from_status(host_status)
@@ -710,6 +808,7 @@ async def _retained_chat_stream(request, body, owner):
 
     async def subscribe():
         after = -1
+        last_sent = time.monotonic()
         while True:
             # Snapshot terminal state before yielding any bytes. Sending a chunk
             # can suspend this subscriber while the producer commits its tail.
@@ -718,10 +817,17 @@ async def _retained_chat_stream(request, body, owner):
             for chunk in store.chunks(identity, after):
                 after = chunk["sequence"]
                 yield chunk["data"]
+                last_sent = time.monotonic()
             if row is None or row["state"] != "active":
                 return
             if await request.is_disconnected():
                 return
+            if time.monotonic() - last_sent >= _STREAM_KEEPALIVE_SECONDS:
+                # A CPU-backed local model can spend minutes in prompt prefill.
+                # Keep the subscriber alive without inventing an answer or
+                # persisting transport-only comments in the result receipt.
+                yield _STREAM_KEEPALIVE
+                last_sent = time.monotonic()
             # Subscriber disposal never cancels the independent bounded producer.
             await asyncio.sleep(_CLIENT_DISCONNECT_POLL_SECONDS)
 
@@ -850,10 +956,12 @@ def _edge_chat_body(body, messages):
 async def _iter_upstream_chunks(
     upstream: httpx.Response,
     request: Request,
+    can_emit_keepalive: Callable[[], bool],
 ) -> AsyncIterator[bytes]:
     """Yield upstream bytes while promptly observing a silent client exit."""
     iterator = upstream.aiter_bytes().__aiter__()
     pending: asyncio.Task[bytes] | None = None
+    last_sent = time.monotonic()
     try:
         while True:
             pending = asyncio.create_task(anext(iterator))
@@ -866,12 +974,19 @@ async def _iter_upstream_chunks(
                     break
                 if await request.is_disconnected():
                     raise _ClientDisconnected
+                # A comment is safe only between complete SSE lines. The
+                # caller may be holding an upstream fragment without a newline;
+                # injecting a comment there would corrupt that data line.
+                if can_emit_keepalive() and time.monotonic() - last_sent >= _STREAM_KEEPALIVE_SECONDS:
+                    yield _STREAM_KEEPALIVE
+                    last_sent = time.monotonic()
             try:
                 chunk = pending.result()
             except StopAsyncIteration:
                 return
             pending = None
             yield chunk
+            last_sent = time.monotonic()
     finally:
         if pending is not None and not pending.done():
             pending.cancel()
@@ -977,7 +1092,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         try:
             async with async_timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
                 buffered = bytearray()
-                async for chunk in _iter_upstream_chunks(upstream, request):
+                async for chunk in _iter_upstream_chunks(upstream, request, lambda: not buffered):
                     buffered.extend(chunk)
                     while True:
                         newline = buffered.find(b"\n")
@@ -1028,4 +1143,3 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             "X-Accel-Buffering": "no",
         },
     )
-

@@ -340,6 +340,83 @@ async def test_status_returns_only_fixed_projection():
 
 
 @pytest.mark.asyncio
+async def test_status_projects_live_fixed_external_host_without_private_origin(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "external")
+    values = {
+        "LLM_BACKEND": "external",
+        "ODS_MODEL_SWITCHBOARD": "observe",
+        "EXTERNAL_LLM_PROVIDER": "openai-compatible",
+        "EXTERNAL_LLM_MODEL": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+    monkeypatch.setattr(pixel, "read_live_env_value", lambda key, default="": values.get(key, default))
+
+    async def loaded():
+        return "Qwen3.5-9B-Q4_K_M.gguf"
+
+    async def context(model):
+        assert model == "Qwen3.5-9B-Q4_K_M.gguf"
+        return 65536
+
+    monkeypatch.setattr(pixel, "get_loaded_model", loaded)
+    monkeypatch.setattr(pixel, "get_llama_context_size", context)
+    body = json.dumps({"data": [{"id": "pixel/default"}]}).encode()
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(FakeResponse(chunks=[body]))):
+        result = await pixel.pixel_status()
+
+    assert result["runtime"] == {
+        "source": "external-host", "model": "Qwen3.5-9B-Q4_K_M.gguf", "contextLength": 65536,
+    }
+    assert "host.lima.internal" not in json.dumps(result)
+    assert "apiKey" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loaded_model", [None, "different-model"])
+async def test_status_does_not_invent_external_host_identity_from_env(monkeypatch, loaded_model):
+    monkeypatch.setenv("LLM_BACKEND", "external")
+    values = {
+        "LLM_BACKEND": "external",
+        "ODS_MODEL_SWITCHBOARD": "observe",
+        "EXTERNAL_LLM_PROVIDER": "openai-compatible",
+        "EXTERNAL_LLM_MODEL": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+    monkeypatch.setattr(pixel, "read_live_env_value", lambda key, default="": values.get(key, default))
+
+    async def loaded():
+        return loaded_model
+
+    monkeypatch.setattr(pixel, "get_loaded_model", loaded)
+    body = json.dumps({"data": [{"id": "pixel/default"}]}).encode()
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(FakeResponse(chunks=[body]))):
+        result = await pixel.pixel_status()
+    assert "runtime" not in result
+
+
+@pytest.mark.asyncio
+async def test_external_host_identity_omits_unverified_context(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "external")
+    values = {
+        "LLM_BACKEND": "external",
+        "ODS_MODEL_SWITCHBOARD": "observe",
+        "EXTERNAL_LLM_PROVIDER": "openai-compatible",
+        "EXTERNAL_LLM_MODEL": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+    monkeypatch.setattr(pixel, "read_live_env_value", lambda key, default="": values.get(key, default))
+
+    async def loaded():
+        return "Qwen3.5-9B-Q4_K_M.gguf"
+
+    async def unknown_context(_model):
+        return None
+
+    monkeypatch.setattr(pixel, "get_loaded_model", loaded)
+    monkeypatch.setattr(pixel, "get_llama_context_size", unknown_context)
+    assert await pixel._verified_external_host_runtime({"status": "idle"}) == {
+        "source": "external-host", "model": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+
+
+@pytest.mark.asyncio
 async def test_status_projects_only_validated_active_remote_runtime(monkeypatch):
     async def active_remote_runtime(*_args, **_kwargs):
         return {
@@ -384,6 +461,9 @@ async def test_status_projects_only_validated_active_remote_runtime(monkeypatch)
         {"source": "local-switchboard", "model": "local-model", "contextLength": 0},
         {"source": "local-switchboard", "model": "local-model", "contextLength": 65536,
          "apiKey": "must-not-project"},
+        {"source": "external-host", "model": "Qwen.gguf", "apiKey": "must-not-project"},
+        {"source": "external-host", "model": "Qwen.gguf", "contextLength": True},
+        {"source": "external-host", "model": "http://private-origin"},
         {
             "source": "local",
             "model": "forged",
@@ -432,6 +512,104 @@ async def test_status_projects_local_identity_even_for_adaptive_model(monkeypatc
     assert result["modelSupport"]["tier"] == "adaptive"
 
 
+@pytest.mark.asyncio
+async def test_lemonade_model_drift_blocks_pixel_status_and_chat(monkeypatch):
+    runtime = {"source": "local-switchboard", "model": "Qwen3.6-35B-A3B-GGUF",
+               "contextLength": 65536}
+
+    async def recorded_status(*_args, **_kwargs):
+        return {"status": "idle", "activeRuntime": runtime}
+
+    async def physical_model():
+        return "Qwen3.5-2B-Q4_K_M"
+
+    monkeypatch.setattr(pixel, "request_agent_json", recorded_status)
+    monkeypatch.setattr(pixel, "read_live_env_value",
+                        lambda key: "lemonade" if key == "LLM_BACKEND" else "")
+    monkeypatch.setattr(pixel, "get_loaded_model", physical_model)
+    with patch.object(pixel.httpx, "AsyncClient",
+                      side_effect=AssertionError("stale route reached Pixel edge")):
+        status = await pixel.pixel_status()
+        body = pixel.ChatStreamRequest(
+            chat_id="drift-test", messages=[{"role": "user", "content": "hello"}]
+        )
+        with pytest.raises(HTTPException) as raised:
+            await pixel.pixel_chat_stream(ConnectedRequest(), body)
+    assert status == {
+        "available": False, "model": None, "state": "model_unavailable",
+        "detail": pixel._MODEL_IDENTITY_DETAIL,
+    }
+    assert raised.value.status_code == 409
+    assert raised.value.detail == pixel._MODEL_IDENTITY_DETAIL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loaded", ["Qwen3.6-35B-A3B-GGUF", "Qwen3.6-35B-A3B-GGUF.gguf"])
+async def test_matching_lemonade_model_keeps_pixel_available(monkeypatch, loaded):
+    runtime = {"source": "local-switchboard", "model": "Qwen3.6-35B-A3B-GGUF",
+               "contextLength": 65536}
+
+    async def recorded_status(*_args, **_kwargs):
+        return {"status": "idle", "activeRuntime": runtime}
+
+    async def physical_model():
+        return loaded
+
+    monkeypatch.setattr(pixel, "request_agent_json", recorded_status)
+    monkeypatch.setattr(pixel, "read_live_env_value",
+                        lambda key: "lemonade" if key == "LLM_BACKEND" else "")
+    monkeypatch.setattr(pixel, "get_loaded_model", physical_model)
+    body = json.dumps({"data": [{"id": "pixel/default"}]}).encode()
+    with patch.object(pixel.httpx, "AsyncClient",
+                      return_value=FakeClient(FakeResponse(chunks=[body]))):
+        status = await pixel.pixel_status()
+    assert status["available"] is True
+    assert status["runtime"] == runtime
+
+
+@pytest.mark.asyncio
+async def test_lemonade_probe_failure_fails_closed_without_logging_endpoint(monkeypatch, caplog):
+    runtime = {"source": "local-switchboard", "model": "Qwen3.6-35B-A3B-GGUF",
+               "contextLength": 65536}
+
+    async def recorded_status(*_args, **_kwargs):
+        return {"status": "idle", "activeRuntime": runtime}
+
+    async def failed_probe():
+        raise RuntimeError("private Lemonade origin and token")
+
+    monkeypatch.setattr(pixel, "request_agent_json", recorded_status)
+    monkeypatch.setattr(pixel, "read_live_env_value",
+                        lambda key: "lemonade" if key == "LLM_BACKEND" else "")
+    monkeypatch.setattr(pixel, "get_loaded_model", failed_probe)
+    result = await pixel.pixel_status()
+    assert result["available"] is False
+    assert result["state"] == "model_unavailable"
+    assert "private Lemonade" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_non_lemonade_runtime_does_not_probe_lemonade_identity(monkeypatch):
+    runtime = {"source": "local-switchboard", "model": "local-model",
+               "contextLength": 65536}
+
+    async def recorded_status(*_args, **_kwargs):
+        return {"status": "idle", "activeRuntime": runtime}
+
+    async def forbidden_probe():
+        raise AssertionError("non-Lemonade route was probed")
+
+    monkeypatch.setattr(pixel, "request_agent_json", recorded_status)
+    monkeypatch.setattr(pixel, "read_live_env_value", lambda _key: "llama.cpp")
+    monkeypatch.setattr(pixel, "get_loaded_model", forbidden_probe)
+    body = json.dumps({"data": [{"id": "pixel/default"}]}).encode()
+    with patch.object(pixel.httpx, "AsyncClient",
+                      return_value=FakeClient(FakeResponse(chunks=[body]))):
+        status = await pixel.pixel_status()
+    assert status["available"] is True
+    assert status["runtime"] == runtime
+
+
 def test_active_runtime_projection_accepts_a_constrained_adaptive_context():
     runtime = {
         "source": "remote-provider",
@@ -477,6 +655,28 @@ async def test_status_projects_active_model_switch_without_touching_edge(monkeyp
         "detail": pixel._MODEL_SWITCH_DETAIL,
     }
     assert "secret-model-name" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_pending_native_model_transaction_blocks_pixel_after_host_restart(monkeypatch):
+    async def pending_transaction(*_args, **_kwargs):
+        return {"status": "idle", "modelTransactionPending": True}
+
+    monkeypatch.setattr(pixel, "request_agent_json", pending_transaction)
+    with patch.object(
+        pixel.httpx,
+        "AsyncClient",
+        side_effect=AssertionError("pending model transaction reached Pixel edge"),
+    ):
+        status = await pixel.pixel_status()
+        assert status["available"] is False
+        assert status["state"] == "model_switching"
+        body = pixel.ChatStreamRequest.model_validate({
+            "chat_id": "pending_model", "messages": [{"role": "user", "content": "hello"}],
+        })
+        with pytest.raises(HTTPException) as exc:
+            await pixel.pixel_chat_stream(ConnectedRequest(), body)
+        assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -563,6 +763,86 @@ async def test_chat_forwards_exact_body_and_narrow_edge_key_only():
     assert capture["headers"]["Authorization"] == f"Bearer {EDGE_KEY}"
     assert "dashboard-test-key" not in json.dumps(capture)
     assert pixel_runtime_state._local_pixel_stream_active() is False
+
+
+@pytest.mark.asyncio
+async def test_chat_keeps_silent_local_inference_stream_alive_without_faking_answer(monkeypatch):
+    first = b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n'
+    done = b"data: [DONE]\n\n"
+
+    class SlowResponse(FakeResponse):
+        async def aiter_bytes(self):
+            yield first
+            await asyncio.sleep(0.08)
+            yield done
+
+    monkeypatch.setattr(pixel, "_STREAM_KEEPALIVE_SECONDS", 0.02)
+    monkeypatch.setattr(pixel, "_CLIENT_DISCONNECT_POLL_SECONDS", 0.005)
+    body = pixel.ChatStreamRequest.model_validate(
+        {"chat_id": "slow_cpu", "messages": [{"role": "user", "content": "hello"}]}
+    )
+    upstream = SlowResponse(content_type="text/event-stream")
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(upstream)):
+        response = await pixel.pixel_chat_stream(ConnectedRequest(), body)
+        streamed = await stream_body(response)
+
+    assert streamed.startswith(first)
+    assert streamed.endswith(done)
+    assert pixel._STREAM_KEEPALIVE in streamed[len(first):-len(done)]
+    assert streamed.count(b"data: [DONE]") == 1
+    assert pixel_runtime_state._local_pixel_stream_active() is False
+
+
+@pytest.mark.asyncio
+async def test_chat_keepalive_before_first_upstream_byte_is_only_a_comment(monkeypatch):
+    class SlowFirstResponse(FakeResponse):
+        async def aiter_bytes(self):
+            await asyncio.sleep(0.08)
+            yield b'data: {"choices":[{"delta":{"content":"ready"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setattr(pixel, "_STREAM_KEEPALIVE_SECONDS", 0.02)
+    monkeypatch.setattr(pixel, "_CLIENT_DISCONNECT_POLL_SECONDS", 0.005)
+    body = pixel.ChatStreamRequest.model_validate(
+        {"chat_id": "slow_first_byte", "messages": [{"role": "user", "content": "hello"}]}
+    )
+    upstream = SlowFirstResponse(content_type="text/event-stream")
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(upstream)):
+        response = await pixel.pixel_chat_stream(ConnectedRequest(), body)
+        streamed = await stream_body(response)
+
+    assert streamed.startswith(pixel._STREAM_KEEPALIVE)
+    assert b'ready' in streamed
+    assert streamed.endswith(b'data: [DONE]\n\n')
+
+
+@pytest.mark.asyncio
+async def test_chat_keepalive_never_splits_an_upstream_sse_line(monkeypatch):
+    first = b'data: {"choices":[{"delta":{"content":"par'
+    last = b'tial"}}]}\n\n'
+    done = b'data: [DONE]\n\n'
+
+    class FragmentedResponse(FakeResponse):
+        async def aiter_bytes(self):
+            yield first
+            await asyncio.sleep(0.08)
+            yield last
+            await asyncio.sleep(0.08)
+            yield done
+
+    monkeypatch.setattr(pixel, "_STREAM_KEEPALIVE_SECONDS", 0.02)
+    monkeypatch.setattr(pixel, "_CLIENT_DISCONNECT_POLL_SECONDS", 0.005)
+    body = pixel.ChatStreamRequest.model_validate(
+        {"chat_id": "fragmented_cpu", "messages": [{"role": "user", "content": "hello"}]}
+    )
+    upstream = FragmentedResponse(content_type="text/event-stream")
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(upstream)):
+        response = await pixel.pixel_chat_stream(ConnectedRequest(), body)
+        streamed = await stream_body(response)
+
+    assert streamed.startswith(first + last)
+    assert pixel._STREAM_KEEPALIVE in streamed[len(first + last):-len(done)]
+    assert streamed.endswith(done)
 
 
 @pytest.mark.asyncio

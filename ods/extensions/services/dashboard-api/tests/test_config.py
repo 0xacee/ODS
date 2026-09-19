@@ -1,5 +1,6 @@
 """Tests for config.py — manifest loading and service discovery."""
 
+import json
 import logging
 from pathlib import Path
 
@@ -70,7 +71,7 @@ def test_bundled_llama_server_is_discoverable_on_cpu_fallback():
     assert all("cpu" in feature["gpu_backends"] for feature in manifest["features"])
 
 
-def test_aider_library_extension_is_discoverable_on_cpu_fallback():
+def test_aider_library_extension_is_discoverable_on_cpu_fallback(tmp_path):
     manifest_path = (
         Path(__file__).resolve().parents[3]
         / "library"
@@ -80,7 +81,22 @@ def test_aider_library_extension_is_discoverable_on_cpu_fallback():
     )
     manifest = config.yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
 
+    assert "cpu" in manifest["service"]["gpu_backends"]
     assert "none" in manifest["service"]["gpu_backends"]
+    assert all("cpu" in feature["gpu_backends"] for feature in manifest["features"])
+    catalog_path = Path(__file__).resolve().parents[4] / "config" / "extensions-catalog.json"
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    aider = next(ext for ext in catalog["extensions"] if ext["id"] == "aider")
+    assert {"cpu", "none"}.issubset(aider["gpu_backends"])
+
+    installed = tmp_path / "aider"
+    installed.mkdir()
+    (installed / "manifest.yaml").write_text(manifest_path.read_text(encoding="utf-8"))
+    (installed / "compose.yaml").write_text("services:\n  aider:\n    image: test/aider\n")
+    services, features, errors = load_extension_manifests(tmp_path, "cpu")
+    assert errors == []
+    assert "aider" in services
+    assert any(feature["id"] == "ai-pair-programming" for feature in features)
 
 
 def test_manifest_loader_rejects_pathological_nesting(tmp_path):
@@ -429,6 +445,17 @@ class TestLoadExtensionManifests:
         assert services["open-webui"]["llm"]["probe"]["path"] == "/openai/v1/chat/completions"
         assert services["perplexica"]["llm"]["probe"]["path"] == "/api/search"
         assert services["privacy-shield"]["llm"]["probe"]["path"] == "/v1/chat/completions"
+
+    def test_open_webui_core_consumer_is_discoverable_on_cpu_backend(self):
+        """CPU/external-LLM installs still run Open WebUI through the gateway."""
+        services_dir = Path(__file__).resolve().parents[2]
+
+        services, _, errors = load_extension_manifests(services_dir, "cpu")
+
+        assert errors == []
+        assert services["open-webui"]["category"] == "core"
+        assert services["open-webui"]["llm"]["consumes"] is True
+        assert services["open-webui"]["llm"]["route"] == "gateway"
 
     def test_external_port_default_zero_disables_external_port_fallback(self, tmp_path):
         svc_dir = tmp_path / "internal-service"

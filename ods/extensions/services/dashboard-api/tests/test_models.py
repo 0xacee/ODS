@@ -1716,6 +1716,108 @@ def test_api_models_returns_full_catalog_without_fake_tokens(test_client, monkey
     assert payload["models"][0]["tokensPerSec"] is None
     assert payload["models"][0]["tokensPerSecEstimate"] == 130
     assert payload["models"][0]["performance"]["source"] == "benchmark_required"
+    assert payload["externalLemonade"] is False
+
+
+def test_api_models_reports_unmatched_external_runtime_without_fake_performance(test_client, monkeypatch, tmp_path):
+    models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
+    monkeypatch.setattr(models_router, "read_live_env_values", lambda _keys: {
+        "LLM_BACKEND": "lemonade",
+        "AMD_INFERENCE_RUNTIME_MODE": "external-lemonade",
+        "AMD_INFERENCE_MANAGED": "false",
+    })
+    _write_model_library(install_dir, [{
+        "id": "qwen3.6-35b-a3b-ud-q4",
+        "name": "Qwen 3.6 35B-A3B",
+        "gguf_file": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+        "size_mb": 21110,
+        "vram_required_gb": 24,
+        "context_length": 131072,
+        "quantization": "UD-Q4_K_M",
+        "specialty": "Quality",
+        "description": "Catalog quantization, not the observed external runtime.",
+        "llm_model_name": "qwen3.6-35b-a3b",
+    }])
+    runtime_name = "Qwen3.6-35B-A3B-GGUF"
+    recorded = []
+    monkeypatch.setattr(models_router, "get_gpu_info", lambda: _gpu())
+    monkeypatch.setattr(models_router, "get_loaded_model", AsyncMock(return_value=runtime_name))
+    monkeypatch.setattr(models_router, "get_llama_metrics", AsyncMock(return_value={"tokens_per_second": 42}))
+    monkeypatch.setattr(models_router, "get_llama_context_size", AsyncMock(return_value=None))
+    monkeypatch.setattr(models_router, "record_model_performance", lambda *args, **kwargs: recorded.append((args, kwargs)))
+
+    response = test_client.get("/api/models", headers=test_client.auth_headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    active = [entry for entry in payload["models"] if entry["status"] == "loaded"]
+    assert len(active) == 1
+    assert active[0]["name"] == runtime_name
+    assert active[0]["metadata"]["source"] == "runtime"
+    assert active[0]["sizeGb"] is None
+    assert active[0]["vramRequired"] is None
+    assert active[0]["quantization"] is None
+    assert payload["currentModel"] is None
+    assert payload["activationReadyModel"] is None
+    assert payload["loadedModel"] == runtime_name
+    assert payload["externalLemonade"] is True
+    assert recorded == []
+
+
+@pytest.mark.parametrize(
+    ("backend", "runtime_mode", "managed", "external", "expected"),
+    [
+        ("lemonade", "external-lemonade", "false", "", True),
+        ("lemonade", "windows-legacy-lemonade", "true", "", False),
+        ("lemonade", "", "", "true", True),
+        ("lemonade", "", "false", "", True),
+        ("llama-server", "external-lemonade", "false", "true", True),
+        ("llama-server", "linux-container", "true", "", False),
+    ],
+)
+def test_external_lemonade_runtime_flag(
+    monkeypatch, backend, runtime_mode, managed, external, expected
+):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "read_live_env_values", lambda _keys: {
+        "LLM_BACKEND": backend,
+        "AMD_INFERENCE_RUNTIME_MODE": runtime_mode,
+        "AMD_INFERENCE_MANAGED": managed,
+        "LEMONADE_EXTERNAL": external,
+    })
+
+    assert models_router._external_lemonade_runtime() is expected
+
+
+def test_load_model_rejects_external_lemonade_before_catalog_lookup(test_client, monkeypatch, tmp_path):
+    models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    (install_dir / ".env").write_text("ODS_MODE=lemonade\n", encoding="utf-8")
+    monkeypatch.setattr(models_router, "ODS_MODE_EFFECTIVE", "lemonade")
+    monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
+    monkeypatch.setattr(models_router, "read_live_env_values", lambda _keys: {
+        "LLM_BACKEND": "lemonade",
+        "LEMONADE_EXTERNAL": "true",
+    })
+    monkeypatch.setattr(
+        models_router,
+        "_find_loadable_model",
+        lambda _model_id: (_ for _ in ()).throw(
+            AssertionError("external Lemonade activation reached catalog lookup")
+        ),
+    )
+
+    response = test_client.post(
+        "/api/models/downloaded-model/load", headers=test_client.auth_headers
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error": "Externally managed Lemonade cannot use local model activation",
+        "code": "external_runtime_unmanaged",
+        "requestedModelId": "downloaded-model",
+    }
 
 
 def test_download_model_rejects_while_bootstrap_upgrade_active(test_client, monkeypatch, tmp_path):
@@ -1955,6 +2057,26 @@ def test_api_models_falls_back_to_loaded_model_probe(test_client, monkeypatch, t
     assert payload["currentModel"] == "qwen3.5-9b-q4"
     assert payload["loadedModel"] == "Qwen3.5-9B-Q4_K_M.gguf"
     assert payload["models"][0]["performance"]["source"] == "measured_local"
+
+
+def test_lemonade_model_probe_uses_physical_backend_not_litellm_alias(monkeypatch, tmp_path):
+    import routers.models as models_router
+
+    values = {
+        "LLM_API_URL": "http://litellm:4000",
+        "LEMONADE_CONTAINER_BASE_URL": "http://192.168.0.166:8080",
+        "LEMONADE_BASE_URL": "http://192.168.0.167:8080",
+    }
+    monkeypatch.setattr(models_router, "INSTALL_DIR", str(tmp_path))
+    monkeypatch.setattr(models_router, "read_env_value", lambda key, _root: values.get(key))
+    monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
+
+    assert models_router._configured_llm_base_url("llama-server", 8080) == "http://192.168.0.166:8080"
+    values.pop("LEMONADE_CONTAINER_BASE_URL")
+    assert models_router._configured_llm_base_url("llama-server", 8080) == "http://192.168.0.167:8080"
+
+    monkeypatch.setattr(models_router, "LLM_BACKEND", "llama-server")
+    assert models_router._configured_llm_base_url("llama-server", 8080) == "http://litellm:4000"
 
 
 def test_api_models_marks_installer_configured_model(test_client, monkeypatch, tmp_path):

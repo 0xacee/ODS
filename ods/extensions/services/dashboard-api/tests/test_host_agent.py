@@ -364,6 +364,34 @@ class TestResolveAgentBindAddr:
         monkeypatch.setattr(_mod, "_detect_docker_bridge_gateway", lambda: "172.17.0.1")
 
         assert _resolve_agent_bind_addr({}, "Linux") == "172.18.0.1"
+        assert _resolve_agent_bind_addr({}, "Linux", require_ods_network=True) == "172.18.0.1"
+
+    def test_managed_linux_refuses_boot_race_bridge_fallback(self, monkeypatch):
+        monkeypatch.setattr(_mod, "_running_under_wsl", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(_mod, "_detect_docker_network_gateway", lambda network: "")
+        monkeypatch.setattr(_mod, "_detect_docker_bridge_gateway", lambda: "172.17.0.1")
+
+        with pytest.raises(RuntimeError, match="ods-network is unavailable"):
+            _resolve_agent_bind_addr({}, "Linux", require_ods_network=True)
+
+        # An explicit operator bind remains an intentional override.
+        assert _resolve_agent_bind_addr(
+            {"ODS_AGENT_BIND": "127.0.0.1"}, "Linux", require_ods_network=True
+        ) == "127.0.0.1"
+
+    def test_managed_wsl_keeps_its_local_bridge_contract(self, monkeypatch):
+        monkeypatch.setattr(_mod, "_running_under_wsl", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(_mod, "_detect_docker_bridge_gateway", lambda: "172.17.0.1")
+        monkeypatch.setattr(_mod, "_local_bind_address_available", lambda address: address == "172.17.0.1")
+
+        assert _resolve_agent_bind_addr({}, "Linux", require_ods_network=True) == "172.17.0.1"
+
+    def test_systemd_unit_retries_until_scoped_network_exists(self):
+        unit = (_agent_path.parents[1] / "scripts/systemd/ods-host-agent.service").read_text(
+            encoding="utf-8"
+        )
+        assert "--require-ods-network" in unit
+        assert "StartLimitIntervalSec=0" in unit
 
     def test_wsl_native_docker_uses_locally_owned_bridge_gateway(self, monkeypatch):
         monkeypatch.setattr(_mod, "_running_under_wsl", lambda *_args, **_kwargs: True)
@@ -4490,7 +4518,10 @@ class TestModelActivationOwnership:
 
         assert handler.response_code == 200
         response = handler.parse_response()
-        assert response == {"status": "idle", "activeAgentViable": False}
+        assert response == {
+            "status": "idle", "activeAgentViable": False,
+            "modelTransactionPending": False,
+        }
         assert "runtimeModelId" not in response
         assert "capabilities" not in response
 
@@ -4519,6 +4550,7 @@ class TestModelActivationOwnership:
             "status": "idle",
             "activeAgentViable": True,
             "activeRuntime": {"source": "remote-provider", **runtime},
+            "modelTransactionPending": False,
         }
 
     def test_model_status_applies_new_pixel_specific_revocation(
@@ -4631,7 +4663,7 @@ class TestModelActivationOwnership:
         assert _mod._switchboard_state_needs_current_env_verification(state_path) is True
         payload = {"status": "idle"}
         _mod._project_switchboard_agent_viability(payload)
-        assert payload == {"status": "idle"}
+        assert payload == {"status": "idle", "modelTransactionPending": False}
 
     @pytest.mark.parametrize("agent_viable", [True, False])
     @pytest.mark.parametrize("backend", ["llama-server", "lemonade"])
@@ -7300,7 +7332,9 @@ class TestModelDownloadFileIntegrity:
         _mod.AgentHandler._handle_model_status(handler)
 
         assert handler.response_code == 200
-        assert handler.parse_response() == {"status": "idle"}
+        assert handler.parse_response() == {
+            "status": "idle", "modelTransactionPending": False,
+        }
         assert readiness_calls == []
         assert scheduled == ["model-status"]
         doc = json.loads(state_path.read_text(encoding="utf-8"))
@@ -7340,7 +7374,9 @@ class TestModelDownloadFileIntegrity:
         _mod.AgentHandler._handle_model_status(handler)
 
         assert handler.response_code == 200
-        assert handler.parse_response() == {"status": "idle"}
+        assert handler.parse_response() == {
+            "status": "idle", "modelTransactionPending": False,
+        }
         assert scheduled == ["model-status"]
 
     def test_empty_finished_download_is_failed_not_complete(self, tmp_path, monkeypatch):

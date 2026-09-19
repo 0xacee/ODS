@@ -112,8 +112,44 @@ if (( RAM_GB == 0 )) && [[ -f "$ROOT_DIR/.env" ]]; then
     [[ -n "${_env_ram:-}" ]] && RAM_GB="$_env_ram"
 fi
 
-# Disk: POSIX df -k — works on BSD and GNU identically (df -BG is GNU-only).
-DISK_GB="$(df -k "$HOME" 2>/dev/null | tail -1 | awk '{print int($4/1024/1024)}' || echo 0)"
+_doctor_disk_free_gb() {
+    local path="$1" value
+    value="$(df -k "$path" 2>/dev/null | tail -1 | awk '{print int($4/1024/1024)}' || true)"
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    printf '%s\n' "$value"
+}
+
+_doctor_external_inference_enabled() {
+    [[ -n "${EXTERNAL_LLM_URL:-}" \
+        || "${LEMONADE_EXTERNAL:-false}" == "true" \
+        || "${ODS_MODE:-local}" == "cloud" ]]
+}
+
+_doctor_select_disk() {
+    local home_path="${HOME:-$ROOT_DIR}" docker_root="" docker_disk_gb=0
+    DOCTOR_HOME_DISK_GB="$(_doctor_disk_free_gb "$home_path")"
+    DOCTOR_DISK_SOURCE="$home_path"
+    DISK_GB="$DOCTOR_HOME_DISK_GB"
+
+    # External inference stores neither the served model nor Docker images
+    # under HOME. When Docker has a separate data-root, apply the existing
+    # tier floor to the filesystem that actually grows during installation.
+    # Fall back to HOME if the daemon or data-root cannot be observed.
+    if _doctor_external_inference_enabled && command -v docker >/dev/null 2>&1; then
+        docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+        if [[ "$docker_root" == /* ]]; then
+            docker_disk_gb="$(_doctor_disk_free_gb "$docker_root")"
+            if [[ "$docker_disk_gb" =~ ^[0-9]+$ && "$docker_disk_gb" -gt 0 ]]; then
+                DISK_GB="$docker_disk_gb"
+                DOCTOR_DISK_SOURCE="$docker_root"
+            fi
+        fi
+    fi
+    export DISK_GB DOCTOR_HOME_DISK_GB DOCTOR_DISK_SOURCE
+}
+
+# POSIX df -k works on BSD and GNU identically (df -BG is GNU-only).
+_doctor_select_disk
 
 if [[ -x "$SCRIPT_DIR/scripts/build-capability-profile.sh" ]]; then
     CAP_ENV="$("$DOCTOR_BASH_CMD" "$SCRIPT_DIR/scripts/build-capability-profile.sh" --output "$CAP_FILE" --env)"
@@ -200,18 +236,36 @@ LLM_RECOVERY=""
 _doctor_check_external_llm() {
     local url="$1" provider="$2" model="$3"
     local health_path
+    local lemonade_key="" probe_ok=false
 
     LLM_URL="$url"
     LLM_PROVIDER="${provider:-external}"
     LLM_MODEL="$model"
+    LLM_RECOVERY=""
+    LLM_LOCAL_WARNING="false"
 
     case "$provider" in
         ollama)     health_path="/api/tags" ;;
         lmstudio)   health_path="/v1/models" ;;
+        lemonade)
+            local api_path="${LEMONADE_API_BASE_PATH:-/api/v1}"
+            api_path="/${api_path#/}"
+            health_path="${api_path%/}/models"
+            lemonade_key="${LEMONADE_API_KEY:-${LEMONADE_ADMIN_API_KEY:-${LITELLM_LEMONADE_API_KEY:-}}}"
+            ;;
         *)          health_path="/v1/models" ;;  # OpenAI-compat fallback
     esac
 
-    if command -v curl >/dev/null 2>&1 && curl -sf --max-time 5 "${url}${health_path}" > /dev/null 2>&1; then
+    if command -v curl >/dev/null 2>&1; then
+        if curl -sf --max-time 5 "${url%/}${health_path}" > /dev/null 2>&1; then
+            probe_ok=true
+        elif [[ "$provider" == lemonade && -n "$lemonade_key" ]] \
+                && curl -sf --max-time 5 -H "Authorization: Bearer ${lemonade_key}" \
+                    "${url%/}${health_path}" > /dev/null 2>&1; then
+            probe_ok=true
+        fi
+    fi
+    if [[ "$probe_ok" == true ]]; then
         LLM_STATUS="ok"
         log_ok "LLM backend: ${provider:-external} (external) — responding"
         log_ok "  Endpoint : $url"
@@ -279,6 +333,19 @@ _doctor_check_llm_backend() {
     if [ -n "$ext_url" ]; then
         # External LLM mode — skip llama-server check
         _doctor_check_external_llm "$ext_url" "$ext_provider" "$ext_model"
+    elif [[ "${LEMONADE_EXTERNAL:-false}" == "true" && ( "$mode" == "lemonade" || "${LLM_BACKEND:-}" == "lemonade" ) ]]; then
+        local lemonade_url="${LEMONADE_BASE_URL:-}"
+        if [[ -n "$lemonade_url" ]]; then
+            _doctor_check_external_llm "$lemonade_url" lemonade "${LEMONADE_MODEL:-}"
+        else
+            LLM_URL=""
+            LLM_PROVIDER="lemonade"
+            LLM_MODEL="${LEMONADE_MODEL:-}"
+            LLM_STATUS="fail"
+            LLM_RECOVERY="set LEMONADE_BASE_URL to the host-reachable Lemonade endpoint"
+            log_fail "LLM backend: lemonade (external) — host endpoint missing"
+            log_info "  Recovery : ${LLM_RECOVERY}"
+        fi
     elif [[ "$mode" == "cloud" ]]; then
         local cloud_url="${LLM_API_URL:-}"
         if [ -n "$cloud_url" ]; then
@@ -326,7 +393,7 @@ _doctor_check_llm_backend() {
             LLM_RECOVERY=""
         fi
     else
-        # Local, hybrid, lemonade modes (or default local) — existing llama-server container check unchanged
+        # Managed local/hybrid runtimes still use the local container check.
         _doctor_check_llama_server
     fi
 }
@@ -1079,13 +1146,13 @@ def _collect_inference_contract():
             )
 
     if lemonade_external:
-        if compose_flags_exists and not cloud_overlay:
+        if compose_flags_exists and cloud_overlay:
             issues.append(
                 _inference_issue(
-                    "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-MISSING",
+                    "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-CONFLICT",
                     "blocker",
                     ".compose-flags",
-                    "External Lemonade needs the cloud overlay so ODS does not start a managed llama-server.",
+                    "The cloud overlay disables model-router; external Lemonade must use its dedicated overlay so Pixel and model switching remain live.",
                 )
             )
         if compose_flags_exists and not lemonade_external_overlay:
@@ -1152,7 +1219,7 @@ def _collect_inference_contract():
         "ODS-RUNTIME-CLOUD-LLM-LOCAL-ROUTE": "Cloud mode still routes chat clients to local llama-server",
         "ODS-RUNTIME-CLOUD-HERMES-LOCAL-ROUTE": "Cloud mode still routes Hermes to local llama-server",
         "ODS-RUNTIME-CLOUD-GATEWAY-BYPASS": "Cloud mode bypasses the LiteLLM gateway",
-        "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-MISSING": "External Lemonade is missing the cloud compose overlay",
+        "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-CONFLICT": "External Lemonade incorrectly includes the cloud compose overlay",
         "ODS-RUNTIME-EXTERNAL-LEMONADE-OVERLAY-MISSING": "External Lemonade is missing its compose overlay",
         "ODS-RUNTIME-EXTERNAL-LEMONADE-LOCAL-ROUTE": "External Lemonade still routes clients to local llama-server",
         "ODS-RUNTIME-EXTERNAL-LEMONADE-UNAUTHENTICATED-HOST-ROUTE": "External Lemonade host route has no user-provided API key",
@@ -1175,8 +1242,8 @@ def _collect_inference_contract():
         "ODS-RUNTIME-CLOUD-GATEWAY-BYPASS": [
             "Route ODS services through LiteLLM so hosted, private-cloud, and auth behavior stay consistent.",
         ],
-        "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-MISSING": [
-            "Regenerate compose flags for external Lemonade so the managed llama-server is profiled out.",
+        "ODS-RUNTIME-EXTERNAL-LEMONADE-CLOUD-OVERLAY-CONFLICT": [
+            "Regenerate compose flags for external Lemonade without docker-compose.cloud.yml; its dedicated overlay disables only managed llama-server and retains model-router.",
         ],
         "ODS-RUNTIME-EXTERNAL-LEMONADE-OVERLAY-MISSING": [
             "Include docker-compose.lemonade-external.yml when LEMONADE_EXTERNAL=true.",
