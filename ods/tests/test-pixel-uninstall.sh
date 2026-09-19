@@ -1781,6 +1781,30 @@ else
 fi
 
 write_access_fixture
+rm -f -- "$INSTALL_DIR/bin/pixel_gateway_service.py" \
+    "$LIBEXEC_DIR/ods-pixel-access/pixel_gateway_service.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$LIBEXEC_DIR/ods-pixel-access" \
+        && ! -e "$ACCESS_STATE" \
+        && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" ]]; then
+    pass "ready legacy access bundle without the later gateway helper remains removable"
+else
+    fail "legacy access bundle was stranded by a later helper requirement"
+fi
+
+write_access_fixture
+rm -f -- "$LIBEXEC_DIR/ods-pixel-access/pixel_gateway_service.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "current ready access bundle accepted a missing gateway helper"
+else
+    [[ -e "$INSTALL_DIR/bin/pixel_gateway_service.py" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "current ready access bundle still fails closed when its gateway helper is partial" \
+        || fail "current partial access-bundle refusal caused mutation"
+fi
+
+write_access_fixture
 python3 - "$ETC_DIR/pixel-access.json" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])

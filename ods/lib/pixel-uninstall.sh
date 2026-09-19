@@ -169,6 +169,18 @@ for name in (
 ):
     sources[f"pixel_provider/{name}"] = install / "bin/pixel_provider" / name
 
+# pixel_gateway_service.py joined the root-owned access bundle after managed
+# Pixel deployments already existed in public beta.  A historical deployment
+# is distinguishable without trusting mutable metadata: both its install-tree
+# source and its root-owned copy are absent.  Accept only that exact legacy
+# absence.  If either side exists, normal byte and completeness validation
+# remains mandatory, so a partial current bundle still fails closed.
+expected_sources = set(sources)
+legacy_gateway = "pixel_gateway_service.py"
+if (not present(sources[legacy_gateway])
+        and not present(program / legacy_gateway)):
+    expected_sources.remove(legacy_gateway)
+
 relay_key = config.parent / "pixel-access-relay.key"
 artifacts = (unit, program, config, relay_key, state_root, probe_owner, dropin,
              provider_environment, provider_dropin)
@@ -221,8 +233,8 @@ if present(program):
             if not match or parent.name != "__pycache__" or source_relative not in sources:
                 raise SystemExit(f"unexpected Pixel access program file: {relative}")
             regular(child, root_uid, root_gid, 16 * 1024 * 1024)
-    if marker_state == "ready" and seen != set(sources):
-        raise SystemExit("ready Pixel access program bundle is partial: " + ", ".join(sorted(set(sources) - seen)))
+    if marker_state == "ready" and seen != expected_sources:
+        raise SystemExit("ready Pixel access program bundle is partial: " + ", ".join(sorted(expected_sources - seen)))
 
 config_present = present(config)
 if config_present:
