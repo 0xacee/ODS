@@ -75,8 +75,11 @@ upsert_env_value() {
     local env_path="$1"
     local key="$2"
     local value="$3"
-    if grep -qE "^${key}=" "$env_path" 2>/dev/null; then
-        sed -i '' "s|^${key}=.*|${key}=${value}|" "$env_path"
+    if awk -v k="$key" 'index($0, k "=") == 1 { found=1; exit } END { exit !found }' "$env_path" 2>/dev/null; then
+        awk -v k="$key" -v v="$value" '
+            index($0, k "=") == 1 { print k "=" v; next }
+            { print }
+        ' "$env_path" > "${env_path}.tmp" && cat "${env_path}.tmp" > "$env_path" && rm -f "${env_path}.tmp"
     else
         # Appending after a last line that has no newline would join the new
         # assignment onto that line and corrupt both keys.
