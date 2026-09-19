@@ -1579,7 +1579,7 @@ export default function Pixel({ systemStatus = null }) {
             }`}
           />
           <div className="pixel-composer-actions">
-          <PixelDictation disabled={isDisabled} conversationId={chatIdRef.current} onInsert={insertComposerText}/>
+          <PixelDictation disabled={isDisabled} conversationId={chatIdRef.current} input={input} limit={MAX_INPUT_LEN} onInsert={insertComposerText}/>
           {teams.busy && teams.teams[0] ? <button type="button" onClick={()=>teams.teams[0].mode==='goal'?teams.stop(teams.teams[0].id):openAgents({teamId:teams.teams[0].id,agentId:'0'})} title={teams.teams[0].mode==='goal'?'Stop goal':'View active agent team'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border-0 text-theme-text"><Square size={16}/></button> : sending || restoredActive ? (
             <button
               onClick={stopStreaming}
