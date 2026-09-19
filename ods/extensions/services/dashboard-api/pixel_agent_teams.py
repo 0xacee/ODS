@@ -62,6 +62,8 @@ ROLES = {
 
 
 def roles_for(count):
+    if not isinstance(count, int) or isinstance(count, bool) or count not in (1, 2, 3, 4, 5, 6):
+        raise ValueError("count must be an integer between 1 and 6")
     return {1: ["builder"], 2: ["builder", "reviewer"],
             3: ["explorer", "builder", "reviewer"],
             4: ["explorer", "planner", "builder", "reviewer"],
