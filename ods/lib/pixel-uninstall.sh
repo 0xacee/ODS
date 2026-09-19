@@ -145,6 +145,7 @@ def source_file(path: pathlib.Path, maximum: int):
 unit_source = install / "extensions/services/pixel-agent/host/ods-pixel-access.service"
 sources = {
     "access_mode_server.py": install / "extensions/services/pixel-agent/host/access_mode_server.py",
+    "unix_peer.py": install / "extensions/services/pixel-agent/host/unix_peer.py",
     "access_mode_worker.py": install / "extensions/services/pixel-agent/host/access_mode_worker.py",
     "pixel_access_mode.py": install / "extensions/services/pixel-agent/host/pixel_access_mode.py",
     "access_mode_config.py": install / "extensions/services/pixel-agent/host/access_mode_config.py",
@@ -233,6 +234,17 @@ if present(program):
             if not match or parent.name != "__pycache__" or source_relative not in sources:
                 raise SystemExit(f"unexpected Pixel access program file: {relative}")
             regular(child, root_uid, root_gid, 16 * 1024 * 1024)
+    # unix_peer.py was added to the access bundle after the helper already
+    # existed elsewhere in ODS.  A legacy access server is identifiable from
+    # the exact, already-validated installed/server source pair: neither
+    # imports unix_peer.  Preserve that historical uninstall path, but require
+    # the helper whenever the access server actually depends on it.
+    legacy_unix_peer = "unix_peer.py"
+    if legacy_unix_peer not in seen and "access_mode_server.py" in seen:
+        dependency = b"from unix_peer import"
+        if (dependency not in (program / "access_mode_server.py").read_bytes()
+                and dependency not in sources["access_mode_server.py"].read_bytes()):
+            expected_sources.remove(legacy_unix_peer)
     if marker_state == "ready" and seen != expected_sources:
         raise SystemExit("ready Pixel access program bundle is partial: " + ", ".join(sorted(expected_sources - seen)))
 

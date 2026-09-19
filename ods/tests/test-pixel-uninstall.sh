@@ -301,6 +301,7 @@ write_access_fixture() {
         "$access_runtime_state"
     local -a access_sources=(
         "extensions/services/pixel-agent/host/access_mode_server.py"
+        "extensions/services/pixel-agent/host/unix_peer.py"
         "extensions/services/pixel-agent/host/access_mode_worker.py"
         "extensions/services/pixel-agent/host/pixel_access_mode.py"
         "extensions/services/pixel-agent/host/access_mode_config.py"
@@ -1802,6 +1803,35 @@ else
         && -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" ]] \
         && pass "current ready access bundle still fails closed when its gateway helper is partial" \
         || fail "current partial access-bundle refusal caused mutation"
+fi
+
+write_access_fixture
+printf '%s\n' '# legacy access server without unix peer dependency' \
+    > "$INSTALL_DIR/extensions/services/pixel-agent/host/access_mode_server.py"
+cp "$INSTALL_DIR/extensions/services/pixel-agent/host/access_mode_server.py" \
+    "$LIBEXEC_DIR/ods-pixel-access/access_mode_server.py"
+chmod 0644 "$INSTALL_DIR/extensions/services/pixel-agent/host/access_mode_server.py" \
+    "$LIBEXEC_DIR/ods-pixel-access/access_mode_server.py"
+rm -f -- "$LIBEXEC_DIR/ods-pixel-access/unix_peer.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$LIBEXEC_DIR/ods-pixel-access" \
+        && ! -e "$ACCESS_STATE" \
+        && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" ]]; then
+    pass "ready legacy access server without a unix peer dependency remains removable"
+else
+    fail "legacy access server was stranded by the later unix peer helper"
+fi
+
+write_access_fixture
+rm -f -- "$LIBEXEC_DIR/ods-pixel-access/unix_peer.py"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "current ready access bundle accepted a missing unix peer helper"
+else
+    [[ -e "$INSTALL_DIR/extensions/services/pixel-agent/host/unix_peer.py" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "current unix peer dependency fails closed when its helper is missing" \
+        || fail "current unix peer refusal caused mutation"
 fi
 
 write_access_fixture
