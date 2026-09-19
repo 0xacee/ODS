@@ -707,14 +707,16 @@ async def pixel_chat_cancel(body: ChatCancelRequest, owner: str = Depends(verify
         try:
             aborted = await _cancel_edge_run(edge_url, key, body.chat_id)
             if aborted:
-                if store.get(identity)["state"] == "complete":
+                entry = store.get(identity)
+                if entry is None or entry["state"] == "complete":
                     return {"aborted": False}
                 _result_abort_ack.add(identity)
                 task = _result_tasks.get(identity)
                 if task is not None and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
-                if store.get(identity)["state"] == "complete":
+                entry = store.get(identity)
+                if entry is None or entry["state"] == "complete":
                     return {"aborted": False}
                 store.finish(identity, "cancelled")
             return {"aborted": aborted}
