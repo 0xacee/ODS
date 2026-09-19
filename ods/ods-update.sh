@@ -695,12 +695,32 @@ cmd_backup() {
         done
     done
 
+    # Cached compose flags — records which overlays were active, so rollback
+    # can bring the restored stack up with the same file selection (same set
+    # snapshot_pre_update captures).
+    if [[ -f "${INSTALL_DIR}/.compose-flags" ]]; then
+        cp "${INSTALL_DIR}/.compose-flags" "$backup_path/"
+        files_backed_up=$((files_backed_up + 1))
+    fi
+
+    # Per-extension config directories — the same set snapshot_pre_update
+    # captures. `ods update` delegates its pre-update snapshot to this
+    # command; without config-* entries a rollback cannot restore litellm,
+    # n8n, openclaw, or searxng configuration.
+    for ext_dir in litellm n8n openclaw searxng; do
+        local src="${INSTALL_DIR}/config/${ext_dir}"
+        if [[ -d "$src" ]]; then
+            cp -r "$src" "${backup_path}/config-${ext_dir}"
+            files_backed_up=$((files_backed_up + 1))
+        fi
+    done
+
     # Backup version file
     if [[ -f "$VERSION_FILE" ]]; then
         cp "$VERSION_FILE" "$backup_path/.version"
         files_backed_up=$((files_backed_up + 1))
     fi
-    
+
     # Generate metadata (use jq for safe JSON construction)
     jq -n \
         --arg bid "$backup_id" \
@@ -710,6 +730,18 @@ cmd_backup() {
         --arg dir "$INSTALL_DIR" \
         '{backup_id: $bid, timestamp: $ts, version: $ver, files_count: $fc, install_dir: $dir}' \
         > "$backup_path/metadata.json"
+
+    # snapshot.json routes restores through the transactional
+    # _restore_snapshot path, which knows how to put config-* directories
+    # back; the legacy flat-file restore used for metadata.json-only backups
+    # would silently drop them.
+    jq -n \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg ver "$(get_current_version)" \
+        --argjson fc "$files_backed_up" \
+        --arg dir "$INSTALL_DIR" \
+        '{type:"backup", timestamp:$ts, version:$ver, files_count:$fc, install_dir:$dir}' \
+        > "$backup_path/snapshot.json"
     
     log_ok "Backup created: ${backup_path}"
     log_info "Files backed up: ${files_backed_up}"
