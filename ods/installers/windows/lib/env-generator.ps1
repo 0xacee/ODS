@@ -61,6 +61,24 @@ function Resolve-WindowsODSPort {
     return $DefaultPort
 }
 
+function Get-WindowsDeviceName {
+    <#
+    .SYNOPSIS
+        Derive ODS_DEVICE_NAME from COMPUTERNAME, sanitized to the
+        .env.schema.json pattern (lowercase alnum/hyphen, max 32 chars,
+        first and last char alphanumeric). Mirrors the hostname sanitize in
+        installers/phases/06-directories.sh and macOS detect_device_name.
+        Returns "ods" when the sanitized name cannot satisfy the schema.
+    #>
+    $name = ([string]$env:COMPUTERNAME).ToLowerInvariant() `
+        -replace '[^a-z0-9-]+', '-' `
+        -replace '^-+', ''
+    if ($name.Length -gt 32) { $name = $name.Substring(0, 32) }
+    $name = $name -replace '-+$', ''
+    if ($name -match '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$') { return $name }
+    return "ods"
+}
+
 function Get-ODSDockerMemoryGB {
     try {
         $raw = (& docker info --format "{{.MemTotal}}" 2>$null | Select-Object -First 1)
@@ -1071,6 +1089,13 @@ RAG_EMBEDDING_MODEL=$ragEmbeddingModel
 RAG_OPENAI_API_BASE_URL=$ragOpenAiApiBaseUrl
 RAG_OPENAI_API_KEY=$ragOpenAiApiKey
 EMBEDDINGS_MEMORY_LIMIT=$embeddingsMemoryLimit
+
+#=== Device Identity ===
+# Used by ods-mdns to publish <name>.local on the LAN, by ods-proxy to route
+# auth/chat/dashboard subdomains, and by dashboard-api magic-link invite URLs.
+# Derived from COMPUTERNAME so multiple ODS installs on the same LAN do not
+# collide on a shared "ods" default. Override by editing and restarting.
+ODS_DEVICE_NAME=$(Get-EnvOrNew "ODS_DEVICE_NAME" (Get-WindowsDeviceName))
 
 #=== Web UI Settings ===
 # Loopback installs open directly. LAN installs require a login by default.
