@@ -88,10 +88,66 @@ class OwnerLauncherTests(unittest.TestCase):
             adapter.home = root
             adapter.owner = types.SimpleNamespace(pw_name="fixture")
             adapter.binary = str(root / "openclaw")
-            with patch.object(bridge.Path, "resolve", return_value=unsafe), patch.object(bridge.subprocess, "Popen") as launch:
+            with patch.object(bridge.platform, "system", return_value="Linux"), patch.object(bridge.Path, "resolve", return_value=unsafe), patch.object(bridge.subprocess, "Popen") as launch:
                 with self.assertRaisesRegex(bridge.AccessError, "unsafe-owner-launcher"):
                     adapter.worker()
             launch.assert_not_called()
+
+    def test_macos_worker_drops_all_identity_fields_before_exec(self):
+        import pwd
+        owner = types.SimpleNamespace(pw_name="fixture", pw_uid=501, pw_gid=20)
+        adapter = bridge.SystemdAccessBridge(Path("/tmp/ods"), "k" * 64)
+        adapter.owner = owner
+        with patch.object(bridge.platform, "system", return_value="Darwin"), \
+                patch.object(bridge.os, "geteuid", return_value=0), \
+                patch.object(pwd, "getpwnam", return_value=owner), \
+                patch.object(bridge.os, "getgrouplist", return_value=[20, 80]), \
+                patch.object(bridge.subprocess, "Popen") as launch:
+            adapter._launch_owner_worker({"HOME": "/private/tmp/fixture"})
+        args, options = launch.call_args.args[0], launch.call_args.kwargs
+        self.assertEqual(args[:3], [sys.executable, "-I", "-u"])
+        self.assertEqual(options["user"], 501)
+        self.assertEqual(options["group"], 20)
+        self.assertEqual(options["extra_groups"], [20, 80])
+        self.assertNotIn("preexec_fn", options)
+        self.assertNotIn("shell", options)
+
+    def test_macos_worker_refuses_root_or_changed_identity(self):
+        import pwd
+        adapter = bridge.SystemdAccessBridge(Path("/tmp/ods"), "k" * 64)
+        adapter.owner = types.SimpleNamespace(pw_name="fixture", pw_uid=501, pw_gid=20)
+        for uid, gid, euid in ((0, 0, 0), (502, 20, 0), (501, 21, 0), (501, 20, 501)):
+            with self.subTest(uid=uid, gid=gid, euid=euid), \
+                    patch.object(bridge.platform, "system", return_value="Darwin"), \
+                    patch.object(bridge.os, "geteuid", return_value=euid), \
+                    patch.object(pwd, "getpwnam", return_value=types.SimpleNamespace(pw_uid=uid, pw_gid=gid)), \
+                    patch.object(bridge.subprocess, "Popen") as launch:
+                with self.assertRaisesRegex(bridge.AccessError, "unsafe-owner-identity"):
+                    adapter._launch_owner_worker({})
+                launch.assert_not_called()
+
+    @unittest.skipUnless(os.geteuid() == 0, "real credential drop requires root")
+    def test_posix_child_really_has_target_credentials(self):
+        import pwd
+        owner = pwd.getpwnam("nobody")
+        if owner.pw_uid <= 0:
+            self.skipTest("positive unprivileged fixture identity required")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o755)
+            script = root / "access_mode_worker.py"
+            script.write_text("import json,os; print(json.dumps([os.getuid(),os.geteuid(),os.getgid(),os.getgroups()]))\n")
+            script.chmod(0o644)
+            adapter = bridge.SystemdAccessBridge(root, "k" * 64)
+            adapter.owner = owner
+            with patch.object(bridge.platform, "system", return_value="Darwin"), \
+                    patch.object(bridge, "__file__", str(root / "pixel_access_bridge.py")):
+                with adapter._launch_owner_worker({"HOME": directory, "PATH": "/usr/bin:/bin"}) as process:
+                    output, _ = process.communicate(timeout=10)
+                    self.assertEqual(process.returncode, 0)
+            uid, euid, gid, groups = json.loads(output)
+            self.assertEqual((uid, euid, gid), (owner.pw_uid, owner.pw_uid, owner.pw_gid))
+            self.assertEqual(sorted(groups), sorted(os.getgrouplist(owner.pw_name, owner.pw_gid)))
 
 
 class HostAgentDiscoveryTests(unittest.TestCase):
@@ -241,6 +297,7 @@ class FakeBridge(bridge.SystemdAccessBridge):
     """Fake the installed services, retaining the real coordinator and journals."""
     def __init__(self, root):
         super().__init__(root, "k" * 64, state=root / "state", dropin=root / "dropin")
+        self.gateway_service.boot_identity = lambda: '11111111-2222-3333-4444-555555555555'
         self.mode, self.managed, self.pid = "sandboxed", False, 123
         self.active = 0
         self.native_phase = self.edge_phase = "idle"
@@ -249,6 +306,24 @@ class FakeBridge(bridge.SystemdAccessBridge):
         self.probe_failure = None
         self.log = []
         self.fail = None
+
+    def use_launchd_fixture(self, monkeypatch):
+        """Real adapter/transactions, simulated kernel and launchd (not custody)."""
+        from pixel_gateway_service import LaunchdGatewayService
+        target = 'system/com.ods.fixture'
+        def native_command(args, timeout=20):
+            if args == ['/bin/launchctl', 'print', target]:
+                fields = '\tstate = not running' if self.stopped else f'\tstate = running\n\tpid = {self.pid}'
+                return target + ' = {\n' + fields + '\n}'
+            if args == ['/bin/launchctl', 'kickstart', '-k', target]:
+                return self.command(['restart'], timeout=timeout)
+            if args == ['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid']:
+                return '11111111-2222-3333-4444-555555555555'
+            raise AssertionError('Unexpected platform operation: ' + repr(args))
+        monkeypatch.setattr('pixel_macos_process.process_identity',
+            lambda pid, **kwargs: (pid, 1700000000, self.started, 501, 20, 501, 20, 501, 20, '/fixture/node'))
+        self.gateway_service = LaunchdGatewayService(native_command, bridge.AccessError, target, lambda: None,
+            process={'uid':501, 'gid':20, 'executable':'/fixture/node'})
 
     def discover(self, *, allow_installing=False):
         if allow_installing:

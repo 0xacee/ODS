@@ -21,15 +21,8 @@ assert_llama_exec_anchored() {
 
     [[ -f "$target" ]] || fail "missing $target"
 
-    awk '
-        /cd "\$INSTALL_DIR" \|\| exit 1/ { cd_seen=3 }
-        /exec "\$LLAMA_SERVER_BIN"/ {
-            if (!cd_seen) exit 1
-            exec_count++
-        }
-        { if (cd_seen > 0) cd_seen-- }
-        END { if (exec_count == 0) exit 2 }
-    ' "$target" || fail "$label: native llama-server exec must be immediately preceded by cd \"\$INSTALL_DIR\""
+    grep -qF 'bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start' "$target" \
+        || fail "$label: native llama-server must use the install-anchored LaunchAgent"
 
     pass "$label: native llama-server launches from INSTALL_DIR"
 }
@@ -46,8 +39,8 @@ assert_llama_exec_anchored "$bootstrap" "bootstrap hot-swap"
 assert_llama_exec_anchored "$installer" "macOS installer"
 assert_llama_exec_anchored "$cli" "ods-macos restart"
 
-grep -qF 'com.ods.llama-server' "$installer" \
-    || fail "macOS installer must unload legacy llama-server LaunchAgent"
+grep -qF 'bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" stop' "$installer" \
+    || fail "macOS installer must stop the managed native service before replacement"
 grep -qF 'com.ods.full-model-download' "$installer" \
     || fail "macOS installer must unload legacy full-model-download LaunchAgent"
 pass "macOS installer clears legacy native llama LaunchAgents"

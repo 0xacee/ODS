@@ -10,6 +10,7 @@ serves only those immutable snapshots with browser-hardening headers.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import difflib
 import http.client
 import http.server
@@ -23,13 +24,16 @@ import shutil
 import socket
 import socketserver
 import stat
-import struct
 import sys
 import tempfile
 import threading
 import urllib.parse
 from typing import Any
 
+_peer_spec = importlib.util.spec_from_file_location("ods_unix_peer", pathlib.Path(__file__).with_name("unix_peer.py"))
+_peer_module = importlib.util.module_from_spec(_peer_spec)
+_peer_spec.loader.exec_module(_peer_module)
+peer_ids = _peer_module.peer_ids
 
 SCHEMA_VERSION = 1
 KIND = "ods-pixel-workspace-preview"
@@ -704,8 +708,7 @@ def _serve_connection(
 ) -> None:
     response: dict[str, Any]
     try:
-        peer = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        _pid, uid, _gid = struct.unpack("3i", peer)
+        uid, _gid = peer_ids(connection)
         if uid != owner_uid:
             raise PreviewError("unauthorized preview peer")
         connection.settimeout(10)
@@ -764,12 +767,31 @@ def _serve_connection(
         return
 
 
+def preview_owner_uid(owner: str) -> int:
+    """Numeric container identities must name this unprivileged process only."""
+    if not isinstance(owner, str):
+        raise PreviewError("invalid preview service configuration")
+    if re.fullmatch(r"[1-9][0-9]{0,9}", owner):
+        uid = int(owner)
+        if uid != os.getuid() or uid != os.geteuid():
+            raise PreviewError("preview must run as its configured owner")
+        return uid
+    if re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", owner) is None:
+        raise PreviewError("invalid preview service configuration")
+    uid = pwd.getpwnam(owner).pw_uid
+    if PROFILE_ID is not None and uid != os.getuid():
+        raise PreviewError("preview must run as its configured owner")
+    return uid
+
+
 def serve(
     socket_path: pathlib.Path,
     workspace: pathlib.Path,
     previews: pathlib.Path,
     owner: str,
     port: int,
+    *,
+    listen_host: str = "127.0.0.1",
 ) -> int:
     if (
         socket_path != SOCKET_PATH
@@ -778,13 +800,10 @@ def serve(
         or not previews.is_absolute()
         or previews == pathlib.Path("/")
         or type(port) is not int or not 1 <= port <= 65535
-        or (re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", owner) is None
-            and not (PROFILE_ID is not None and re.fullmatch(r"[1-9][0-9]{0,9}", owner)))
+        or listen_host not in ("127.0.0.1", "0.0.0.0")
     ):
         raise PreviewError("invalid preview service configuration")
-    owner_uid = int(owner) if PROFILE_ID is not None and owner.isdecimal() else pwd.getpwnam(owner).pw_uid
-    if PROFILE_ID is not None and owner_uid != os.getuid():
-        raise PreviewError("preview must run as its configured owner")
+    owner_uid = preview_owner_uid(owner)
     _safe_root(workspace, owner_uid)
     previews.mkdir(mode=0o700, parents=True, exist_ok=True)
     _safe_root(previews, owner_uid)
@@ -799,7 +818,7 @@ def serve(
             raise PreviewError("unsafe existing preview HTTP socket")
         HTTP_SOCKET_PATH.unlink()
 
-    httpd = PreviewHTTPServer(("127.0.0.1", port), previews)
+    httpd = PreviewHTTPServer((listen_host, port), previews)
     http_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     http_thread.start()
     unix_httpd = PreviewUnixHTTPServer(str(HTTP_SOCKET_PATH), previews, port)
@@ -861,14 +880,26 @@ def client(socket_path: pathlib.Path, payload: dict[str, Any]) -> dict[str, Any]
 
 def main(argv: list[str]) -> int:
     try:
-        if len(argv) == 7 and argv[1] == "serve":
+        if len(argv) == 7 and argv[1] in ("serve", "serve-container"):
+            container = argv[1] == "serve-container"
+            if container and (not argv[5].isdecimal() or preview_owner_uid(argv[5]) == 0):
+                raise PreviewError("container preview requires numeric non-root owner")
             return serve(
                 pathlib.Path(argv[2]),
                 pathlib.Path(argv[3]),
                 pathlib.Path(argv[4]),
                 argv[5],
                 int(argv[6]),
+                listen_host="0.0.0.0" if container else "127.0.0.1",
             )
+        if len(argv) == 2 and argv[1] == "request":
+            raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+            if len(raw) > MAX_REQUEST_BYTES:
+                raise PreviewError("invalid preview request")
+            request = parse_request(raw)
+            value = client(SOCKET_PATH, request)
+            sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+            return 0
         if len(argv) == 3 and argv[1] == "health":
             value = client(
                 pathlib.Path(argv[2]),

@@ -87,6 +87,8 @@ def _trusted_executable(candidates: Sequence[str]) -> str | None:
 
 
 def observe_gpu() -> dict:
+    if sys.platform == "darwin":
+        return observe_metal()
     executable = _trusted_executable([
         "/usr/lib/wsl/lib/nvidia-smi",
         "/usr/bin/nvidia-smi",
@@ -125,6 +127,37 @@ def observe_gpu() -> dict:
         "backend": "nvidia" if devices else "unavailable",
         "devices": devices,
     }
+
+
+def observe_metal() -> dict:
+    devices = []
+    executable = _trusted_executable(["/usr/sbin/system_profiler"])
+    result = _run([executable, "SPDisplaysDataType", "-json"]) if executable else None
+    if result and result.returncode == 0 and not result.stderr.strip():
+        try:
+            value = json.loads(result.stdout)
+            rows = value.get("SPDisplaysDataType") if isinstance(value, dict) else None
+            if not isinstance(rows, list) or len(rows) > 16:
+                raise ValueError()
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError()
+                name = row.get("sppci_model")
+                family = row.get("spdisplays_mtlgpufamilysupport", row.get("spdisplays_metal"))
+                if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
+                    raise ValueError()
+                if family == "spdisplays_supported":
+                    metal = "supported"
+                elif isinstance(family, str) and re.fullmatch(r"spdisplays_metal[1-9]", family):
+                    metal = "Metal " + family[-1]
+                else:
+                    continue
+                # Never forward display identifiers or mislabel shared RAM as VRAM.
+                devices.append({"name": name, "metal": metal})
+        except (ValueError, TypeError):
+            devices = []
+    return {"schemaVersion": 1, "kind": "ods-host-gpu", "available": bool(devices),
+            "backend": "metal" if devices else "unavailable", "devices": devices}
 
 
 def _native_tailscale_state() -> tuple[bool, str, bool] | None:

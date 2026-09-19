@@ -80,6 +80,8 @@ for tier in 1 CLOUD; do
     install_dir="$TMP_DIR/tier-$tier"
     generate_env "$tier" "$install_dir"
     env_file="$install_dir/.env"
+    grep -qx 'N8N_RUN_USER=node' "$env_file" \
+        || fail "tier $tier must use the image user for n8n on macOS"
 
     dupes="$(duplicate_keys "$env_file")"
     [[ -z "$dupes" ]] \

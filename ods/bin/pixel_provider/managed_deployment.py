@@ -154,3 +154,28 @@ to the caller's reversible transaction, not to editable user preferences.
         raw = _encoded(value, code).replace(b'\\', b'\\\\').replace(b'"', b'\\"')
         lines.append(name.encode('ascii') + b'="' + raw + b'"\n')
     return b''.join(lines)
+
+
+def launchd_environment(deployment_document, policy):
+    """Return the same managed values for launchd's explicit environment.
+
+    macOS does not have systemd EnvironmentFile/BindPaths. The native plist
+    uses an ``env -i`` argument vector, so values remain explicit and scoped to
+    the approved gateway process rather than entering the user's login shell.
+    """
+    if type(deployment_document) is not dict or set(deployment_document) != DEPLOYMENT_KEYS:
+        raise StoreError('invalid-managed-deployment')
+    doc = deployment(
+        deployment_document['binding'], deployment_document['sourceRoot'],
+        deployment_document['hostPython'], deployment_document['providerDirectory'],
+        deployment_document['ownerScopes'], deployment_document['leaseTimeoutSeconds'],
+        deployment_document['approvalTimeoutSeconds'],
+    )
+    checked = _policy(policy)
+    pixel = next((p for p in checked['plugins'] if p['id'] == 'pixel-ods'), None)
+    if pixel is None or any(hook not in pixel['hooks'] for hook in REQUIRED_MANAGED_HOOKS):
+        raise StoreError('invalid-managed-policy')
+    return {
+        'OPENCLAW_REQUIRED_PLUGINS': _encoded(checked, 'invalid-managed-policy').decode('ascii'),
+        'PIXEL_ODS_PROVIDER_DEPLOYMENT': _encoded(doc, 'invalid-managed-deployment').decode('ascii'),
+    }

@@ -110,6 +110,12 @@
       "value": "python:3.11-slim"
     },
     {
+      "id": "pixel-workspace-preview.python",
+      "type": "image",
+      "path": "extensions/services/pixel-agent/host/Dockerfile.preview",
+      "value": "python:3.11-slim"
+    },
+    {
       "id": "remote-provider-egress.python",
       "type": "image",
       "path": "extensions/services/remote-provider-egress/Dockerfile",

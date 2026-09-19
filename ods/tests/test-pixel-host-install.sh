@@ -870,6 +870,8 @@ mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/config" \
       "$INSTALL_DIR/extensions/services/pixel-agent/host/workspace_preview.py"
   cp "$ROOT/extensions/services/pixel-agent/host/system_observe.py" \
       "$INSTALL_DIR/extensions/services/pixel-agent/host/system_observe.py"
+  cp "$ROOT/extensions/services/pixel-agent/host/unix_peer.py" \
+      "$INSTALL_DIR/extensions/services/pixel-agent/host/unix_peer.py"
   cp "$ROOT/extensions/services/pixel-agent/host/pixel-workspace-preview.service" \
       "$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-workspace-preview.service"
   cp "$ROOT/extensions/services/pixel-agent/host/pixel-ops-broker-ods.conf" \
@@ -881,6 +883,7 @@ mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/config" \
       "$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-artifact-promoter.service" \
       "$INSTALL_DIR/extensions/services/pixel-agent/host/workspace_preview.py" \
       "$INSTALL_DIR/extensions/services/pixel-agent/host/system_observe.py" \
+      "$INSTALL_DIR/extensions/services/pixel-agent/host/unix_peer.py" \
       "$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-workspace-preview.service" \
       "$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-ops-broker-ods.conf"
   chmod 0755 "$INSTALL_DIR/bin/ods-pixel-approve"
@@ -2315,7 +2318,7 @@ assert "_ods_pixel_write_extension_manager_unit" in text
 assert "owner-private ODS Pixel extension manager service" in text
 assert "_ods_pixel_write_artifact_promoter_unit" in text
 assert "owner-private ODS Pixel artifact promoter service" in text
-assert "ods-pixel-contract-v9" in text
+assert "ods-pixel-contract-v10" in text
 assert "ods-pixel-system-observe.py" in text
 assert "pixel-ops-broker-ods.conf" in text
 for family in ("AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK", "AF_VSOCK"):

@@ -204,20 +204,25 @@ export function createAccessRuntime({directory = path.join(os.homedir(), '.openc
     finally { if (fd !== undefined) fs.closeSync(fd); if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
   }
   function claimProcess() {
-    // Non-Linux POSIX surfaces retain the conservative legacy PID contract.
-    if (process.platform !== 'linux') return () => {};
+    if (!['linux', 'darwin'].includes(process.platform)) return () => {};
     // Linux requires util-linux /usr/bin/flock. The inherited descriptor shares
     // the parent's open file description, so its lock survives helper exit and
     // is released by close or gateway death, even during stale-record recovery.
     const claim = path.join(directory, '.process-claim');
     if (fs.existsSync(claim)) privateEntry(claim);
-    const fd = fs.openSync(claim, fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW, 0o600);
+    // Darwin O_EXLOCK (sys/fcntl.h) acquires a descriptor-owned flock during
+    // open. O_NONBLOCK refuses a competing owner without hanging the gateway.
+    // Node does not expose O_EXLOCK by name; never apply its value on Linux.
+    const macLock = process.platform === 'darwin' ? 0x20 | fs.constants.O_NONBLOCK : 0;
+    const fd = fs.openSync(claim, fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | macLock, 0o600);
     try {
       const opened = fs.fstatSync(fd), current = privateEntry(claim);
       if (opened.dev !== current.dev || opened.ino !== current.ino) throw new Error('process claim changed');
-      const result = spawnSync('/usr/bin/flock', ['--exclusive', '--nonblock', '3'],
-        {stdio: ['ignore', 'ignore', 'ignore', fd], timeout: 5000});
-      if (result.error || result.status !== 0) throw new Error('process claim unavailable');
+      if (process.platform === 'linux') {
+        const result = spawnSync('/usr/bin/flock', ['--exclusive', '--nonblock', '3'],
+          {stdio: ['ignore', 'ignore', 'ignore', fd], timeout: 5000});
+        if (result.error || result.status !== 0) throw new Error('process claim unavailable');
+      }
       return () => fs.closeSync(fd);
     } catch (error) { fs.closeSync(fd); throw error; }
   }

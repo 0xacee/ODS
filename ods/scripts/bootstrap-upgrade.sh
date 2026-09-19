@@ -3405,7 +3405,7 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
 
     LLAMA_SERVER_BIN="$INSTALL_DIR/bin/llama-server"
     LLAMA_SERVER_PID_FILE="$INSTALL_DIR/data/.llama-server.pid"
-    LLAMA_SERVER_LOG="$INSTALL_DIR/data/llama-server.log"
+    LLAMA_SERVER_LOG="$HOME/Library/Logs/ODS/llama-server.log"
 
     if [[ ! -x "$LLAMA_SERVER_BIN" ]]; then
         log "WARNING: llama-server binary not found at $LLAMA_SERVER_BIN. Cannot hot-swap."
@@ -3483,12 +3483,9 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
 
             # Relaunch with new model
             log "Starting native llama-server with ${_gguf_file}..."
-            (
-                cd "$INSTALL_DIR" || exit 1
-                exec "$LLAMA_SERVER_BIN" "${_llama_args[@]}"
-            ) > "$LLAMA_SERVER_LOG" 2>&1 &
-            _new_pid=$!
-            echo "$_new_pid" > "$LLAMA_SERVER_PID_FILE"
+            bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
+                "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" "${_llama_args[@]}"
+            _new_pid="$(cat "$LLAMA_SERVER_PID_FILE")"
 
             # Wait for health
             log "Waiting for native llama-server health..."
@@ -3512,18 +3509,15 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
                     kill -9 "$_new_pid" 2>/dev/null || true
                 fi
                 if [[ -n "${_old_model_path:-}" && -f "$_old_model_path" ]]; then
-                    (
-                        cd "$INSTALL_DIR" || exit 1
-                        exec "$LLAMA_SERVER_BIN" \
+                    bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
+                            "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" \
                             --host "$_bind" --port "$_native_port" \
                             --model "$_old_model_path" \
                             --ctx-size "$_ctx_size" \
                             --n-gpu-layers "$_gpu_layers" \
                             --reasoning-format "${_reasoning_fmt:-none}" \
                             --metrics
-                    ) > "$LLAMA_SERVER_LOG" 2>&1 &
-                    _rollback_pid=$!
-                    echo "$_rollback_pid" > "$LLAMA_SERVER_PID_FILE"
+                    _rollback_pid="$(cat "$LLAMA_SERVER_PID_FILE")"
                     log "Rolled back to previous model: $(basename "$_old_model_path") (PID $_rollback_pid)"
                 else
                     log "WARNING: Could not rollback — previous model not found."

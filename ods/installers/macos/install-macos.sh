@@ -744,6 +744,10 @@ _macos_native_llama_pid_is_owned() {
 _macos_stop_install_owned_native_llama() {
     local reason="${1:-Stopping install-owned native llama-server}" pid attempt
     local -a candidates=() remaining=()
+    if [[ -f "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" ]]; then
+        bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" stop \
+            "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" || return 1
+    fi
     if [[ -f "$LLAMA_SERVER_PID_FILE" ]]; then
         pid="$(tr -dc '0-9' < "$LLAMA_SERVER_PID_FILE" 2>/dev/null || true)"
         _macos_native_llama_pid_is_owned "$pid" && candidates+=("$pid")
@@ -1055,6 +1059,21 @@ _set_installer_python_cmd() {
     if declare -p _ods_python_cmd_cached >/dev/null 2>&1; then
         _ods_python_cmd_cached="$pycmd"
     fi
+}
+
+_ensure_macos_agent_python() {
+    local bootstrap_python="$1"
+    local venv_dir="${INSTALL_DIR}/.venv/host-agent"
+    local runtime="${venv_dir}/bin/python"
+    if [[ ! -x "$runtime" ]]; then
+        "$bootstrap_python" -m venv "$venv_dir" >>"$ODS_LOG_FILE" 2>&1 || return 1
+    fi
+    if ! "$runtime" -c 'import yaml, huggingface_hub, hf_xet' >/dev/null 2>&1; then
+        "$runtime" -m pip install --quiet pyyaml 'huggingface_hub[hf_xet]>=0.27' \
+            >>"$ODS_LOG_FILE" 2>&1 || return 1
+    fi
+    "$runtime" -c 'import yaml, huggingface_hub, hf_xet' >/dev/null 2>&1 || return 1
+    AGENT_PYTHON="$runtime"
 }
 
 _ensure_macos_pyyaml() {
@@ -1740,6 +1759,12 @@ else
     _previous_llm_bind="$(read_env_value "${INSTALL_DIR}/.env" "BIND_ADDRESS")"
     _previous_macos_gateway="$(read_env_value "${INSTALL_DIR}/.env" "ODS_MACOS_HOST_GATEWAY")"
     generate_ods_env "$INSTALL_DIR" "$SELECTED_TIER" "$FORCE"
+    # Reinstalls preserve .env, including an earlier AirPlay port remap.
+    # Use that same port for Compose, model downloads and readiness checks.
+    WHISPER_PORT="$(read_env_value "$INSTALL_DIR/.env" "WHISPER_PORT")"
+    WHISPER_PORT="${WHISPER_PORT//\"/}"
+    WHISPER_PORT="${WHISPER_PORT//\'/}"
+    export WHISPER_PORT="${WHISPER_PORT:-9000}"
     _MACOS_EXTERNAL_MODEL_READY=false
     _macos_active_store="$(read_env_value "${INSTALL_DIR}/.env" "ODS_ACTIVE_MODEL_STORE")"
     _macos_active_store="${_macos_active_store//\"/}"
@@ -2203,9 +2228,6 @@ else
 
         mkdir -p "$(dirname "$LLAMA_SERVER_PID_FILE")"
 
-        _macos_stop_install_owned_native_llama \
-            "Stopping prior install-owned native inference before replacement..."
-
         # Read reasoning mode from .env (default off to prevent thinking models
         # from consuming the entire token budget on internal reasoning)
         _reasoning=$(grep '^LLAMA_REASONING=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 || echo "")
@@ -2245,6 +2267,8 @@ else
         if [[ "$MACOS_NATIVE_PROFILE" == true ]]; then
             _llama_args+=("${MACOS_NATIVE_PROFILE_ARGS[@]}")
         else
+        _parallel="$(read_env_value "$INSTALL_DIR/.env" "LLAMA_PARALLEL")"
+        _llama_args+=(--parallel "${_parallel:-1}")
         [[ -n "$_flash_attn" ]] && _llama_args+=(--flash-attn "$_flash_attn")
         [[ -n "$_cache_type_k" ]] && _llama_args+=(--cache-type-k "$_cache_type_k")
         [[ -n "$_cache_type_v" ]] && _llama_args+=(--cache-type-v "$_cache_type_v")
@@ -2255,14 +2279,15 @@ else
         _spec_draft_type_v="$(read_env_value "$INSTALL_DIR/.env" "LLAMA_ARG_SPEC_DRAFT_TYPE_V")"
         [[ -n "$_spec_draft_type_k" ]] && _llama_args+=(--spec-draft-type-k "$_spec_draft_type_k")
         [[ -n "$_spec_draft_type_v" ]] && _llama_args+=(--spec-draft-type-v "$_spec_draft_type_v")
+        macos_resolve_checkpoint_args "$INSTALL_DIR" "$LLAMA_SERVER_BIN" || exit 1
+        _llama_args+=("${MACOS_NATIVE_CHECKPOINT_ARGS[@]}")
         fi
 
-        (
-            cd "$INSTALL_DIR" || exit 1
-            exec "$LLAMA_SERVER_BIN" "${_llama_args[@]}"
-        ) > "$LLAMA_SERVER_LOG" 2>&1 &
-        LLAMA_PID=$!
-        echo "$LLAMA_PID" > "$LLAMA_SERVER_PID_FILE"
+        _macos_stop_install_owned_native_llama \
+            "Stopping prior install-owned native inference before replacement..."
+        bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
+            "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" "${_llama_args[@]}"
+        LLAMA_PID="$(cat "$LLAMA_SERVER_PID_FILE")"
 
         # Wait for health endpoint
         ai "Waiting for llama-server to load model..."
@@ -2444,7 +2469,6 @@ else
     rm -f "$HOST_AGENT_BRIDGE_PLIST" 2>/dev/null || true
     launchctl bootout "gui/$(id -u)/${OPENCODE_PLIST_LABEL}" 2>/dev/null || true
     for _legacy_plist_label in \
-        com.ods.llama-server \
         com.ods.full-model-download; do
         launchctl bootout "gui/$(id -u)/${_legacy_plist_label}" 2>/dev/null || true
         rm -f "$HOME/Library/LaunchAgents/${_legacy_plist_label}.plist" 2>/dev/null || true
@@ -2777,7 +2801,9 @@ for service in (data.get("services") or {}).values():
         fi
 
         _hermes_live_verified=false
-        for _hermes_wait_i in $(seq 1 90); do
+        # First boot can spend several minutes fixing image ownership before
+        # creating config.yaml, especially under Docker Desktop emulation.
+        for _hermes_wait_i in $(seq 1 600); do
             _hermes_patch_rc=0
             _macos_patch_hermes_persisted_config \
                 "$_hermes_model" "$_hermes_base_url" "$MAX_CONTEXT" \
@@ -2992,14 +3018,13 @@ if [[ -f "${INSTALL_DIR}/bin/ods-host-agent.py" ]] && [[ -n "$AGENT_PYTHON" ]]; 
     if ! command -v docker >/dev/null 2>&1; then
         ai_warn "docker not found on PATH at install time — host agent will fail to start until Docker Desktop is launched and 'docker' resolves on your shell PATH"
     fi
-    if ! "$AGENT_PYTHON" -c "import huggingface_hub, hf_xet" >/dev/null 2>&1; then
-        ai "Installing ODS host-agent model downloader dependencies..."
-        if "$AGENT_PYTHON" -m pip install --user -q "huggingface_hub[hf_xet]>=0.27" 2>&1 | tee -a "$ODS_LOG_FILE" >/dev/null; then
-            ai_ok "ODS host-agent Hugging Face downloader ready"
-        else
-            ai_warn "Could not install huggingface_hub[hf_xet]; model manager downloads may fail on Xet-backed Hugging Face models."
-        fi
+    ai "Preparing isolated ODS host-agent Python runtime..."
+    if ! _ensure_macos_agent_python "$AGENT_PYTHON"; then
+        ai_err "Could not prepare host-agent Python dependencies. See $ODS_LOG_FILE."
+        exit 1
     fi
+    ODS_AGENT_PORT="$(read_env_value "$INSTALL_DIR/.env" "ODS_AGENT_PORT")"
+    ODS_AGENT_PORT="${ODS_AGENT_PORT:-7710}"
     cat > "$ODS_AGENT_PLIST" <<AGENT_PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -3129,7 +3154,7 @@ else
     HEALTH_URLS=("http://${_health_llama_host}:${_health_llama_port}/health" "http://127.0.0.1:3000")
     HEALTH_CONTAINERS=("" "ods-webui")
 fi
-$ENABLE_VOICE && HEALTH_NAMES+=("Whisper (STT)") && HEALTH_URLS+=("http://127.0.0.1:9000/health") && HEALTH_CONTAINERS+=("ods-whisper")
+$ENABLE_VOICE && HEALTH_NAMES+=("Whisper (STT)") && HEALTH_URLS+=("http://127.0.0.1:${WHISPER_PORT:-9000}/health") && HEALTH_CONTAINERS+=("ods-whisper")
 $ENABLE_WORKFLOWS && HEALTH_NAMES+=("n8n (Workflows)") && HEALTH_URLS+=("http://127.0.0.1:5678/healthz") && HEALTH_CONTAINERS+=("ods-n8n")
 [[ -x "$OPENCODE_BIN" ]] && HEALTH_NAMES+=("OpenCode (IDE)") && HEALTH_URLS+=("http://127.0.0.1:${OPENCODE_PORT}") && HEALTH_CONTAINERS+=("")
 

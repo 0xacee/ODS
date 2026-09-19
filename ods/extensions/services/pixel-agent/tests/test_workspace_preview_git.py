@@ -104,8 +104,10 @@ def _build_exact_repo_fixture(site: pathlib.Path) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(site.parent)
     subprocess.run(["git", "add", "."], capture_output=True, check=True, cwd=str(site), env=env)
+    # The mutation assertion includes .git; background Git maintenance must
+    # not create/remove its own lock files after the fixture returns.
     subprocess.run(
-        ["git", "commit", "-m", "initial"],
+        ["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "commit", "-m", "initial"],
         capture_output=True, check=True, cwd=str(site), env=env,
     )
 
@@ -815,4 +817,3 @@ def test_metadata_is_never_opened_or_traversed_and_alias_is_rejected():
         (site / "assets").symlink_to(site / ".git", target_is_directory=True)
         with pytest.raises(MODULE.PreviewError, match="unsafe"):
             MODULE.publish_snapshot(workspace, previews, site.name, os.getuid())
-

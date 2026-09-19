@@ -7,7 +7,6 @@ import pwd
 import socket
 import socketserver
 import stat
-import struct
 import sys
 
 sys.dont_write_bytecode = True
@@ -23,8 +22,8 @@ def protected(path):
 
 PROGRAM = Path(__file__).resolve().parent
 protected(PROGRAM)
-for name in ("access_mode_server.py", "pixel_access_bridge.py", "pixel_access_client.py", "pixel_access_reconcile.py",
-             "pixel_model_transition.py",
+for name in ("access_mode_server.py", "unix_peer.py", "pixel_access_bridge.py", "pixel_access_client.py", "pixel_access_reconcile.py",
+             "pixel_model_transition.py", "pixel_gateway_service.py",
              "access_mode_worker.py", "pixel_access_mode.py", "access_mode_config.py",
              "settings_transaction.py", "pixel_access_protocol.py", "pixel_settings/__init__.py",
              "pixel_settings/contract.py", "pixel_settings/projection.py", "pixel_settings/runtime.py", "pixel_settings/coordinator.py",
@@ -38,6 +37,7 @@ for name in ("pixel_model_contract.py", "pixel_model_coordinator.py", "model_tra
 sys.path.insert(0, str(PROGRAM))
 from pixel_access_bridge import AccessError, SystemdAccessBridge, private_json
 from pixel_access_protocol import control_request, decode_frame
+from unix_peer import peer_ids
 
 
 def main():
@@ -79,9 +79,9 @@ def main():
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
             self.connection.settimeout(340)
-            _pid, uid, _gid = struct.unpack("3i", self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
             status, body = 403, {"error": "owner-required"}
             try:
+                uid, _gid = peer_ids(self.connection)
                 if uid not in (0, owner.pw_uid): raise PermissionError()
                 raw = self.rfile.readline(2049)
                 if len(raw) > 2048 or not raw.endswith(b"\n"): raise ValueError()

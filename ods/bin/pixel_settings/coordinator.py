@@ -12,7 +12,7 @@ import re
 import stat
 import time
 
-from pixel_access_bridge import AccessError, UNIT, atomic_json, digest, remaining
+from pixel_access_bridge import AccessError, atomic_json, digest, remaining
 from pixel_access_protocol import decode_frame, HEX
 from .contract import SettingsError, preview_preferences
 from .runtime import compare_readback, declared_capabilities, saved_document
@@ -97,16 +97,10 @@ def _inputs(bridge, directory):
 
 
 def _identity(bridge):
-    raw = bridge.command(["systemctl", "show", UNIT, "--property=MainPID,ActiveState,ExecMainStartTimestampMonotonic"])
-    fields = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
-    try: pid, started = int(fields["MainPID"]), int(fields["ExecMainStartTimestampMonotonic"])
-    except (KeyError, ValueError): raise AccessError("settings-process-unavailable") from None
-    if fields.get("ActiveState") != "active" or pid <= 0 or started <= 0:
-        raise AccessError("settings-process-not-active")
-    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    if not re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", boot):
+    value = bridge.gateway_service.transaction_identity(timeout=remaining(20))
+    if not _valid_identity(value):
         raise AccessError("settings-process-unavailable")
-    return {"pid": pid, "started": started, "boot": boot}
+    return value
 
 
 def _valid_identity(value):
@@ -214,7 +208,7 @@ def _activate(bridge, journal):
     journal["restartIdentity"] = before
     _write(bridge, journal)
     # Do not call dropin_for or daemon-reload: this operation changes no access.
-    bridge.command(["systemctl", "restart", UNIT], timeout=60)
+    bridge.gateway_service.restart(timeout=60)
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         try:

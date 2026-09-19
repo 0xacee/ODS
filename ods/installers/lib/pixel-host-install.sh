@@ -76,7 +76,15 @@ ods_pixel_install_owner() {
 
 ods_pixel_owner_home() {
     local owner="$1" home
-    home="$(getent passwd "$owner" 2>/dev/null | awk -F: 'NR == 1 { print $6 }')"
+    [[ "$owner" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || return 1
+    home="$(python3 - "$owner" <<'PY'
+import pwd, sys
+try:
+    print(pwd.getpwnam(sys.argv[1]).pw_dir)
+except KeyError:
+    sys.exit(1)
+PY
+    )" || return 1
     [[ "$home" == /* && "$home" != / && "$home" != *[[:space:]\\]* && -d "$home" && ! -L "$home" ]] || return 1
     printf '%s\n' "$home"
 }
@@ -441,7 +449,7 @@ if not isinstance(policy_value, str) or pathlib.Path(policy_value) != expected_p
 policy_payload = read_private_regular(expected_policy, "Operations policy")
 catalog_payload = read_private_regular(catalog_path, "extension catalog")
 helper_payloads = []
-for helper in (helper_path, manager_path, manager_unit_path, approval_path, promoter_path, promoter_unit_path, operations_service_dropin_path, preview_path, preview_unit_path, system_observer_path):
+for helper in (helper_path, manager_path, manager_unit_path, approval_path, promoter_path, promoter_unit_path, operations_service_dropin_path, preview_path, preview_unit_path, system_observer_path, preview_path.with_name("unix_peer.py")):
     helper_info = helper.lstat()
     if (not stat.S_ISREG(helper_info.st_mode) or stat.S_ISLNK(helper_info.st_mode)
             or helper_info.st_nlink != 1 or helper_info.st_uid != os.getuid()
@@ -449,7 +457,7 @@ for helper in (helper_path, manager_path, manager_unit_path, approval_path, prom
         raise SystemExit("invalid ODS Pixel extension helper")
     helper_payloads.append(helper.read_bytes())
 digest = hashlib.sha256()
-digest.update(b"ods-pixel-contract-v9\0")
+digest.update(b"ods-pixel-contract-v10\0")
 for payload in (answers_payload, policy_payload, catalog_payload, *helper_payloads):
     digest.update(len(payload).to_bytes(8, "big"))
     digest.update(payload)
@@ -1634,15 +1642,30 @@ _ods_pixel_verify_plugin_loaded() {
             >/dev/null
 }
 
+_ods_pixel_exec_control_stat() {
+    local field="$1" path="$2" format
+    case "$(uname -s)" in
+        Darwin)
+            case "$field" in owner) format='%Su' ;; links) format='%l' ;; mode) format='%Lp' ;; *) return 1 ;; esac
+            /usr/bin/stat -f "$format" "$path"
+            ;;
+        Linux)
+            case "$field" in owner) format='%U' ;; links) format='%h' ;; mode) format='%a' ;; *) return 1 ;; esac
+            stat -c "$format" -- "$path"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 _ods_pixel_install_exec_control() {
     local owner="$1" home="$2" source="$3" sudo_source="$4"
     local parent="$home/.openclaw" root="$home/.openclaw/.ods-exec-control"
     local candidate
     for candidate in "$source" "$sudo_source"; do
         [[ -f "$candidate" && ! -L "$candidate" \
-            && "$(stat -c '%U' -- "$candidate")" == "$owner" \
-            && "$(stat -c '%h' -- "$candidate")" == 1 ]] || return 1
-        (( (8#$(stat -c '%a' -- "$candidate") & 0022) == 0 )) || return 1
+            && "$(_ods_pixel_exec_control_stat owner "$candidate")" == "$owner" \
+            && "$(_ods_pixel_exec_control_stat links "$candidate")" == 1 ]] || return 1
+        (( (8#$(_ods_pixel_exec_control_stat mode "$candidate") & 0022) == 0 )) || return 1
     done
     # A clean Pixel install has not run OpenClaw bootstrap yet, so its private
     # state directory legitimately does not exist. Create only that exact
@@ -1652,17 +1675,17 @@ _ods_pixel_install_exec_control() {
         ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "$parent" || return 1
     fi
     [[ -d "$parent" && ! -L "$parent" \
-        && "$(stat -c '%U' -- "$parent")" == "$owner" ]] || return 1
-    (( (8#$(stat -c '%a' -- "$parent") & 0022) == 0 )) || return 1
+        && "$(_ods_pixel_exec_control_stat owner "$parent")" == "$owner" ]] || return 1
+    (( (8#$(_ods_pixel_exec_control_stat mode "$parent") & 0022) == 0 )) || return 1
     if [[ -e "$root" || -L "$root" ]]; then
-        [[ -d "$root" && ! -L "$root" && "$(stat -c '%U' -- "$root")" == "$owner" \
-            && "$(stat -c '%a' -- "$root")" == 700 ]] || return 1
+        [[ -d "$root" && ! -L "$root" && "$(_ods_pixel_exec_control_stat owner "$root")" == "$owner" \
+            && "$(_ods_pixel_exec_control_stat mode "$root")" == 700 ]] || return 1
     fi
     for candidate in "$root/cancellable-exec.sh" "$root/sudo"; do
         if [[ -e "$candidate" || -L "$candidate" ]]; then
             [[ -f "$candidate" && ! -L "$candidate" \
-                && "$(stat -c '%U' -- "$candidate")" == "$owner" \
-                && "$(stat -c '%h' -- "$candidate")" == 1 ]] || return 1
+                && "$(_ods_pixel_exec_control_stat owner "$candidate")" == "$owner" \
+                && "$(_ods_pixel_exec_control_stat links "$candidate")" == 1 ]] || return 1
         fi
     done
     ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "$root" || return 1
@@ -1673,14 +1696,14 @@ _ods_pixel_install_exec_control() {
     [[ -d "$root" && ! -L "$root" \
         && -f "$root/cancellable-exec.sh" && ! -L "$root/cancellable-exec.sh" \
         && -f "$root/sudo" && ! -L "$root/sudo" \
-        && "$(stat -c '%U' -- "$root")" == "$owner" \
-        && "$(stat -c '%U' -- "$root/cancellable-exec.sh")" == "$owner" \
-        && "$(stat -c '%U' -- "$root/sudo")" == "$owner" \
-        && "$(stat -c '%a' -- "$root")" == 700 \
-        && "$(stat -c '%h' -- "$root/cancellable-exec.sh")" == 1 \
-        && "$(stat -c '%a' -- "$root/cancellable-exec.sh")" == 500 \
-        && "$(stat -c '%h' -- "$root/sudo")" == 1 \
-        && "$(stat -c '%a' -- "$root/sudo")" == 500 ]]
+        && "$(_ods_pixel_exec_control_stat owner "$root")" == "$owner" \
+        && "$(_ods_pixel_exec_control_stat owner "$root/cancellable-exec.sh")" == "$owner" \
+        && "$(_ods_pixel_exec_control_stat owner "$root/sudo")" == "$owner" \
+        && "$(_ods_pixel_exec_control_stat mode "$root")" == 700 \
+        && "$(_ods_pixel_exec_control_stat links "$root/cancellable-exec.sh")" == 1 \
+        && "$(_ods_pixel_exec_control_stat mode "$root/cancellable-exec.sh")" == 500 \
+        && "$(_ods_pixel_exec_control_stat links "$root/sudo")" == 1 \
+        && "$(_ods_pixel_exec_control_stat mode "$root/sudo")" == 500 ]]
 }
 
 _ods_pixel_recreate_agent_sandbox() {
@@ -2490,9 +2513,10 @@ def write(path, content, mode, uid=0, gid=0):
         if os.path.exists(temporary): os.unlink(temporary)
 
 host = source / 'extensions/services/pixel-agent/host'
-for name in ('access_mode_server.py', 'access_mode_worker.py', 'pixel_access_mode.py', 'access_mode_config.py', 'settings_transaction.py', 'provider_transaction.py', 'model_transaction.py'):
+for name in ('access_mode_server.py', 'unix_peer.py', 'access_mode_worker.py', 'pixel_access_mode.py', 'access_mode_config.py', 'settings_transaction.py', 'provider_transaction.py', 'model_transaction.py'):
     write(target / name, (host / name).read_bytes(), 0o644)
 write(target / 'pixel_access_bridge.py', (source / 'bin/pixel_access_bridge.py').read_bytes(), 0o644)
+write(target / 'pixel_gateway_service.py', (source / 'bin/pixel_gateway_service.py').read_bytes(), 0o644)
 write(target / 'pixel_access_client.py', (source / 'bin/pixel_access_client.py').read_bytes(), 0o644)
 write(target / 'pixel_access_reconcile.py', (source / 'bin/pixel_access_reconcile.py').read_bytes(), 0o644)
 write(target / 'pixel_model_transition.py', (source / 'bin/pixel_model_transition.py').read_bytes(), 0o644)
@@ -4299,6 +4323,7 @@ _ods_pixel_install_ingress() {
     local system_artifact_promoter="/usr/local/libexec/ods-pixel-artifact-promoter.py"
     local workspace_preview="$plugin_root/host/workspace_preview.py"
     local system_workspace_preview="/usr/local/libexec/ods-pixel-workspace-preview.py"
+    local unix_peer="$plugin_root/host/unix_peer.py"
     local system_observer="$plugin_root/host/system_observe.py"
     local installed_system_observer="/usr/local/libexec/ods-pixel-system-observe.py"
     local operations_service_dropin="$plugin_root/host/pixel-ops-broker-ods.conf"
@@ -4314,7 +4339,7 @@ _ods_pixel_install_ingress() {
         "$extension_manager" "$rendered_extension_manager_unit" \
         "$artifact_promoter" "$rendered_artifact_promoter_unit" \
         "$workspace_preview" "$rendered_workspace_preview_unit" \
-        "$system_observer" \
+        "$system_observer" "$unix_peer" \
         "$operations_service_dropin"; do
         [[ -f "$projection_source" && ! -L "$projection_source" ]] || return 1
         IFS='|' read -r kind uid mode size < <(stat -c '%F|%u|%a|%s' -- "$projection_source")
@@ -4394,6 +4419,8 @@ EOF
     ods_sudo install -o root -g root -m 0755 "$artifact_promoter" "$system_artifact_promoter"
     ods_sudo install -o root -g root -m 0755 "$workspace_preview" "$system_workspace_preview"
     ods_sudo install -o root -g root -m 0755 "$system_observer" "$installed_system_observer"
+    ods_sudo install -o root -g root -m 0644 "$unix_peer" /usr/local/libexec/unix_peer.py
+    ods_sudo install -o root -g root -m 0644 "$unix_peer" /opt/pixel-ops-broker/unix_peer.py
     if ods_sudo test -e "$operations_service_dropin_dir" \
         || ods_sudo test -L "$operations_service_dropin_dir"; then
         ods_sudo test -d "$operations_service_dropin_dir" || return 1
@@ -4412,6 +4439,8 @@ EOF
     ods_sudo cmp -s -- "$artifact_promoter" "$system_artifact_promoter"
     ods_sudo cmp -s -- "$workspace_preview" "$system_workspace_preview"
     ods_sudo cmp -s -- "$system_observer" "$installed_system_observer"
+    ods_sudo cmp -s -- "$unix_peer" /usr/local/libexec/unix_peer.py
+    ods_sudo cmp -s -- "$unix_peer" /opt/pixel-ops-broker/unix_peer.py
     ods_sudo cmp -s -- "$operations_service_dropin" "$installed_operations_service_dropin" \
         || return 1
     extension_probe="$(ods_sudo -u pixel-ops-broker /usr/bin/python3 \
@@ -4655,6 +4684,7 @@ ods_pixel_install_default_agent() {
         && -f "$plugin_root/host/artifact_promoter.py" \
         && -f "$plugin_root/host/pixel-artifact-promoter.service" \
         && -f "$plugin_root/host/workspace_preview.py" \
+        && -f "$plugin_root/host/unix_peer.py" \
         && -f "$plugin_root/host/pixel-workspace-preview.service" \
         && -f "$plugin_root/host/system_observe.py" \
         && -f "$plugin_root/host/openclaw_tool_recovery.py" \

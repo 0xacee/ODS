@@ -24,6 +24,33 @@ SPEC.loader.exec_module(system_observe)
 
 
 class SystemObserveTests(unittest.TestCase):
+    def setUp(self):
+        platform = mock.patch.object(system_observe.sys, 'platform', 'linux')
+        platform.start()
+        self.addCleanup(platform.stop)
+
+    def test_metal_capability_omits_serials_and_does_not_invent_vram(self):
+        value = {'SPDisplaysDataType': [{'sppci_model': 'Apple M5',
+                 'spdisplays_mtlgpufamilysupport': 'spdisplays_metal4',
+                 'spdisplays_ndrvs': [{'serial': 'private-display-serial'}]}]}
+        result = mock.Mock(returncode=0, stdout=json.dumps(value), stderr='')
+        with mock.patch.object(system_observe.sys, 'platform', 'darwin'), \
+                mock.patch.object(system_observe, '_trusted_executable', return_value='/usr/sbin/system_profiler'), \
+                mock.patch.object(system_observe, '_run', return_value=result) as run:
+            observation = system_observe.observe_gpu()
+        self.assertEqual(observation['backend'], 'metal')
+        self.assertEqual(observation['devices'], [{'name': 'Apple M5', 'metal': 'Metal 4'}])
+        self.assertNotIn('serial', json.dumps(observation))
+        self.assertNotIn('memory', json.dumps(observation))
+        run.assert_called_once_with(['/usr/sbin/system_profiler', 'SPDisplaysDataType', '-json'])
+
+    def test_metal_unknown_or_malformed_capability_is_not_claimed(self):
+        for value in (None, [], {'SPDisplaysDataType': [{}]},
+                      {'SPDisplaysDataType': [{'sppci_model': 'GPU', 'spdisplays_metal': 'unsupported'}]}):
+            with mock.patch.object(system_observe, '_trusted_executable', return_value='/usr/sbin/system_profiler'), \
+                    mock.patch.object(system_observe, '_run', return_value=mock.Mock(returncode=0, stderr='', stdout=json.dumps(value))):
+                self.assertFalse(system_observe.observe_metal()['available'])
+
     def test_cli_keeps_invalid_command_bytes_out_of_observation_receipts(self):
         for action in ("gpu", "tailscale"):
             for descriptor in (1, 2):

@@ -306,6 +306,7 @@ write_access_fixture() {
         "extensions/services/pixel-agent/host/provider_transaction.py"
         "extensions/services/pixel-agent/host/model_transaction.py"
         "bin/pixel_access_bridge.py"
+        "bin/pixel_gateway_service.py"
         "bin/pixel_access_client.py"
         "bin/pixel_access_reconcile.py"
         "bin/pixel_model_transition.py"
@@ -469,6 +470,8 @@ JSON
         "$INSTALL_DIR/extensions/services/pixel-agent/host/artifact_promoter.py"
     cp "$ROOT_DIR/extensions/services/pixel-agent/host/workspace_preview.py" \
         "$INSTALL_DIR/extensions/services/pixel-agent/host/workspace_preview.py"
+    cp "$ROOT_DIR/extensions/services/pixel-agent/host/unix_peer.py" \
+        "$INSTALL_DIR/extensions/services/pixel-agent/host/unix_peer.py"
     cp "$ROOT_DIR/extensions/services/pixel-agent/host/system_observe.py" \
         "$INSTALL_DIR/extensions/services/pixel-agent/host/system_observe.py"
     cp "$ROOT_DIR/extensions/services/pixel-agent/host/pixel-ops-broker-ods.conf" \
@@ -570,6 +573,9 @@ ENV
     chmod 0755 "$LIBEXEC_DIR/ods-pixel-artifact-promoter.py"
     chmod 0755 "$LIBEXEC_DIR/ods-pixel-workspace-preview.py"
     chmod 0755 "$LIBEXEC_DIR/ods-pixel-system-observe.py"
+    cp "$INSTALL_DIR/extensions/services/pixel-agent/host/unix_peer.py" "$LIBEXEC_DIR/unix_peer.py"
+    cp "$INSTALL_DIR/extensions/services/pixel-agent/host/unix_peer.py" "$OPS_INSTALL/unix_peer.py"
+    chmod 0644 "$LIBEXEC_DIR/unix_peer.py" "$OPS_INSTALL/unix_peer.py"
     chmod 0644 "$SYSTEMD_DIR/pixel-extension-manager.service" \
         "$SYSTEMD_DIR/pixel-artifact-promoter.service" \
         "$SYSTEMD_DIR/pixel-workspace-preview.service"
@@ -653,10 +659,11 @@ PY
         "$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-ops-broker-ods.conf" \
         "$INSTALL_DIR/extensions/services/pixel-agent/host/workspace_preview.py" \
         "$INSTALL_DIR/data/pixel/workspace-preview.service" \
-        "$INSTALL_DIR/extensions/services/pixel-agent/host/system_observe.py" <<'PY'
+        "$INSTALL_DIR/extensions/services/pixel-agent/host/system_observe.py" \
+        "$INSTALL_DIR/extensions/services/pixel-agent/host/unix_peer.py" <<'PY'
 import hashlib, pathlib, sys
 digest = hashlib.sha256()
-digest.update(b"ods-pixel-contract-v9\0")
+digest.update(b"ods-pixel-contract-v10\0")
 for raw in sys.argv[1:]:
     payload = pathlib.Path(raw).read_bytes()
     digest.update(len(payload).to_bytes(8, "big"))
@@ -899,6 +906,7 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
         && ! -e "$SYSTEMD_DIR/pixel-workspace-preview.service" \
         && ! -e "$LIBEXEC_DIR/ods-pixel-workspace-preview.py" \
         && ! -e "$LIBEXEC_DIR/ods-pixel-system-observe.py" \
+        && ! -e "$LIBEXEC_DIR/unix_peer.py" \
         && ! -e "$PREVIEW_STATE" \
         && ! -e "$OPS_ENV" && ! -e "$OPS_POLICY_DIR" \
         && ! -e "$OPS_INSTALL" && ! -e "$OPS_STATE" \
@@ -1148,7 +1156,7 @@ for drift_target in program broker-source-mode public-state-file onboarding-sour
     extension-manager-program extension-manager-unit extension-manager-owner-unit approval-helper \
     artifact-promoter-program artifact-promoter-unit artifact-promoter-owner-unit \
     workspace-preview-program workspace-preview-unit workspace-preview-owner-unit workspace-preview-state \
-    system-observer-program system-observer-source \
+    system-observer-program system-observer-source unix-peer-program unix-peer-ops unix-peer-source \
     unit dropin dropin-source environment policy; do
     write_ops_fixture
     case "$drift_target" in
@@ -1180,6 +1188,9 @@ PY
         workspace-preview-state) chmod 0600 "$PREVIEW_STATE/site-0123456789abcdef01234567/index.html" ;;
         system-observer-program) printf '%s\n' '# drift' >>"$LIBEXEC_DIR/ods-pixel-system-observe.py" ;;
         system-observer-source) printf '%s\n' '# drift' >>"$INSTALL_DIR/extensions/services/pixel-agent/host/system_observe.py" ;;
+        unix-peer-program) printf '%s\n' '# drift' >>"$LIBEXEC_DIR/unix_peer.py" ;;
+        unix-peer-ops) printf '%s\n' '# drift' >>"$OPS_INSTALL/unix_peer.py" ;;
+        unix-peer-source) printf '%s\n' '# drift' >>"$INSTALL_DIR/extensions/services/pixel-agent/host/unix_peer.py" ;;
         unit) printf '%s\n' '# drift' >>"$SYSTEMD_DIR/pixel-ops-broker.service" ;;
         dropin) printf '%s\n' '# drift' >>"$OPS_DROPIN" ;;
         dropin-source) printf '%s\n' '# drift' >>"$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-ops-broker-ods.conf" ;;
@@ -1232,7 +1243,7 @@ write_ops_fixture
 rm -f -- "$SYSTEMD_DIR/pixel-ops-broker.service" "$OPS_ENV" "$OPS_POLICY" \
     "$OPS_DROPIN" \
     "$OPS_INSTALL/broker.py" "$OPS_INSTALL/ods-extension-search.py" \
-    "$OPS_INSTALL/ods-extension-catalog.json" "$OPS_INSTALL/ods-extension-manager.py" \
+    "$OPS_INSTALL/ods-extension-catalog.json" "$OPS_INSTALL/ods-extension-manager.py" "$OPS_INSTALL/unix_peer.py" \
     "$OPS_PASSWD_STATE" "$OPS_GROUP_STATE"
 rmdir -- "$OPS_DROPIN_DIR" "$OPS_POLICY_DIR" "$OPS_INSTALL"
 rm -rf -- "$OPS_STATE"
@@ -1258,7 +1269,7 @@ chmod 0600 "$HOME_DIR/.config/ods/pixel-managed.json"
 rm -f -- "$SYSTEMD_DIR/pixel-ops-broker.service" "$OPS_ENV" "$OPS_POLICY" \
     "$OPS_DROPIN" \
     "$OPS_INSTALL/broker.py" "$OPS_INSTALL/ods-extension-search.py" \
-    "$OPS_INSTALL/ods-extension-catalog.json" "$OPS_INSTALL/ods-extension-manager.py" \
+    "$OPS_INSTALL/ods-extension-catalog.json" "$OPS_INSTALL/ods-extension-manager.py" "$OPS_INSTALL/unix_peer.py" \
     "$OPS_PASSWD_STATE"
 rmdir -- "$OPS_DROPIN_DIR" "$OPS_POLICY_DIR" "$OPS_INSTALL"
 rm -rf -- "$OPS_STATE"

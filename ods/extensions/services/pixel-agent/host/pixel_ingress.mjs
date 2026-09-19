@@ -262,8 +262,13 @@ function directGatewayFetch(url, options = {}) {
 // before sending any body. A reset after a POST is an unknown outcome: only
 // the next request may discover another endpoint, never replay that POST.
 export function createLoopbackGatewayFetch(fetchImpl = directGatewayFetch, {
-  probeTimeoutMs = 750, cacheMs = 5000, now = Date.now,
+  probeTimeoutMs = 750, cacheMs = 5000, now = Date.now, transport = 'loopback',
 } = {}) {
+  if (!['loopback', 'docker-desktop-host'].includes(transport)) throw new Error('invalid gateway transport');
+  // Docker Desktop reaches a native macOS gateway through its fixed host
+  // endpoint. Never accept a request-selected destination or fall back across
+  // these trust boundaries after a mutation may have been accepted.
+  const hosts = transport === 'docker-desktop-host' ? ['host.docker.internal'] : ['[::1]', '127.0.0.1'];
   const endpoints = new Map();
   const discoveries = new Map();
   const validate = (url) => {
@@ -277,7 +282,7 @@ export function createLoopbackGatewayFetch(fetchImpl = directGatewayFetch, {
     if (cached && cached.expiresAt > now()) return cached.origin;
     if (discoveries.has(port)) return discoveries.get(port);
     const pending = (async () => {
-      for (const host of ['[::1]', '127.0.0.1']) {
+      for (const host of hosts) {
         const origin = `http://${host}:${port}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), probeTimeoutMs);
@@ -308,7 +313,7 @@ export function createLoopbackGatewayFetch(fetchImpl = directGatewayFetch, {
     const origin = await discover(port, options.headers);
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('request aborted');
     try {
-      return await fetchImpl(`${origin}${parsed.pathname}${parsed.search}`, options);
+      return await fetchImpl(`${origin}${parsed.pathname}${parsed.search}`, {...options, redirect:'error'});
     } catch (error) {
       // HTTP bodies/streams are never retried. Even a transport reset can
       // arrive after the gateway has accepted a mutation or started a run.
@@ -332,6 +337,9 @@ const defaultDeps = {
 // ---------------------------------------------------------------------------
 
 export function validateConfig(cfg) {
+  if (!['loopback', 'docker-desktop-host'].includes(cfg.gatewayTransport ?? 'loopback')) {
+    throw new Error('invalid gateway transport');
+  }
   const port = Number(cfg.gatewayPort);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("invalid gateway port");
@@ -384,6 +392,7 @@ export function configFromEnv(env = process.env) {
     gatewayTokenFile:
       env.PIXEL_GATEWAY_TOKEN_FILE || "/etc/pixel/openclaw.json",
     gatewayPort: Number(env.PIXEL_GATEWAY_PORT || "18789"),
+    gatewayTransport: env.PIXEL_GATEWAY_TRANSPORT ?? 'loopback',
     statusFile: env.PIXEL_STATUS_FILE || "/run/ods-pixel/ods-status.json",
     statusIntervalMs: Number(env.PIXEL_STATUS_INTERVAL_MS || "30000"),
     ingressGid: env.PIXEL_INGRESS_GID ? Number(env.PIXEL_INGRESS_GID) : null,
@@ -1747,6 +1756,9 @@ export async function start(cfg = configFromEnv(), opts = {}) {
   let gateway;
   try {
     validateConfig(cfg);
+    if (!opts.deps?.fetch && cfg.gatewayTransport === 'docker-desktop-host') {
+      deps.fetch = createLoopbackGatewayFetch(directGatewayFetch, {transport: cfg.gatewayTransport});
+    }
     startupStage = "token-read";
     gateway = readGatewayConfiguration(cfg.gatewayTokenFile, opts.euid);
     const token = gateway.token;

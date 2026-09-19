@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import os
+import plistlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'bin'))
 from pixel_access_bridge import AccessError, atomic_json
+from pixel_gateway_service import LaunchdGatewayService, SystemdGatewayService
 from pixel_provider import service_environment as env
 from pixel_provider.managed_deployment import deployment, required_policy
 
@@ -25,6 +27,9 @@ BINDING = {'schemaVersion': 1, 'activationId': '123e4567-e89b-12d3-a456-42661417
 
 class Bridge:
     def __init__(self, root):
+        self.gateway_service = SystemdGatewayService(
+            lambda *args, **kwargs: self.command(*args, **kwargs), AccessError, 'openclaw-gateway.service')
+        self.gateway_service.boot_identity = lambda: '11111111-2222-3333-4444-555555555555'
         self.state, self.home = root / 'state', root / 'home'
         self.state.mkdir(mode=0o700)
         (self.home / '.openclaw').mkdir(parents=True, mode=0o700)
@@ -82,7 +87,8 @@ def arm(value, **overrides):
     b = value.bridge
     options = {'before_sha': hashlib.sha256(b.before).hexdigest(), 'after_sha': hashlib.sha256(b.after).hexdigest(),
                'before_binding': None, 'after_binding': copy.deepcopy(BINDING),
-               'deployment_document': deployment(BINDING, '/opt/ods/source', '/usr/bin/python3', '/home/ods/providers', True),
+               'deployment_document': deployment(BINDING, '/opt/ods/source', '/usr/bin/python3',
+                                                  str(b.home / 'providers'), True),
                'policy': required_policy()}
     options.update(overrides)
     return value.prepare(b.record, **options)
@@ -92,7 +98,7 @@ def test_forward_then_same_callback_rollback_restores_absence(participant):
     p, b = participant, participant.bridge
     record = arm(p)
     assert bytes.fromhex(record['after']['dropin']['hex']) == ('[Service]\nEnvironmentFile=' + str(p.environment)
-        + '\nBindPaths=/home/ods/providers\n').encode()
+        + '\nBindPaths=' + str(b.home / 'providers') + '\n').encode()
     assert p.snapshot() == {'environment': None, 'dropin': None}
     b.config.write_bytes(b.after)
     selected = p.apply(b.record)
@@ -105,6 +111,44 @@ def test_forward_then_same_callback_rollback_restores_absence(participant):
     assert p.verify(b.record, restored) == record['before']
     assert not p.environment.exists() and not p.dropin.exists()
     assert b.pending() == b.record and b.phase == 'held'
+
+
+def test_launchd_environment_rewrites_only_managed_env_i_arguments(participant):
+    _systemd, b = participant, participant.bridge
+    plist = b.home / 'service' / 'gateway.plist'
+    plist.parent.mkdir()
+    original = {
+        'Label': 'com.ods.fixture',
+        'ProgramArguments': ['/usr/bin/env', '-i', 'HOME=/private/fixture',
+                             'PATH=/usr/bin:/bin', '/usr/bin/node', '/opt/openclaw.mjs',
+                             'gateway', 'run', '--port', '18789'],
+        'WorkingDirectory': '/private/fixture', 'RunAtLoad': True,
+    }
+    plist.write_bytes(plistlib.dumps(original, sort_keys=True))
+    plist.chmod(0o644)
+    b.gateway_service = LaunchdGatewayService(lambda *args, **kwargs: '', AccessError,
+        'system/com.ods.fixture', lambda: None, plist=plist)
+    value = env.LaunchdServiceEnvironment(b, snapshotter=env._snapshot)
+    options = {'before_sha': hashlib.sha256(b.before).hexdigest(),
+               'after_sha': hashlib.sha256(b.after).hexdigest(),
+               'before_binding': None, 'after_binding': copy.deepcopy(BINDING),
+               'deployment_document': deployment(BINDING, '/opt/ods/source', '/usr/bin/python3',
+                                                  str(b.home / 'providers'), True),
+               'policy': required_policy(), 'expected': value.baseline()}
+    record = value.prepare(b.record, **options)
+    b.config.write_bytes(b.after)
+    selected = value.apply(b.record)
+    assert selected['side'] == 'after'
+    changed = plistlib.loads(plist.read_bytes())
+    arguments = changed['ProgramArguments']
+    assert arguments[:4] == ['/usr/bin/env', '-i', 'HOME=/private/fixture', 'PATH=/usr/bin:/bin']
+    assert sum(item.startswith('OPENCLAW_REQUIRED_PLUGINS=') for item in arguments) == 1
+    assert sum(item.startswith('PIXEL_ODS_PROVIDER_DEPLOYMENT=') for item in arguments) == 1
+    command_index = arguments.index('/usr/bin/node')
+    assert arguments[command_index:] == original['ProgramArguments'][4:]
+    b.config.write_bytes(b.before)
+    assert value.apply(b.record)['side'] == 'before'
+    assert plist.read_bytes() == bytes.fromhex(record['before']['environment']['hex'])
 
 
 @pytest.mark.parametrize('directory,error', [

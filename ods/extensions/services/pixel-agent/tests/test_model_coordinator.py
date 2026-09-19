@@ -65,13 +65,16 @@ class ModelBridge(FakeBridge):
     def owns_native_hold(self,snapshot,token):
         return self.native_phase=='held' and not self.active and token==self.pending()['token']
 
-@pytest.fixture
-def adapter(tmp_path,monkeypatch):
+@pytest.fixture(params=['systemd', 'launchd'])
+def adapter(tmp_path,monkeypatch,request):
     tmp_path.chmod(0o700)
     original=access.private_json
     read=lambda path,_uid,maximum=1048576:original(path,os.getuid(),maximum)
     monkeypatch.setattr(access,'private_json',read);monkeypatch.setattr(c,'private_json',read)
-    return ModelBridge(tmp_path)
+    instance = ModelBridge(tmp_path)
+    if request.param == 'launchd':
+        instance.use_launchd_fixture(monkeypatch)
+    return instance
 
 def begin(a):return c.control(a,'model-begin',{'revision':c.control(a,'model-status')['revision'],'transactionId':ID})
 def apply(a):return c.control(a,'model-apply',{'transactionId':ID,'target':NEW})

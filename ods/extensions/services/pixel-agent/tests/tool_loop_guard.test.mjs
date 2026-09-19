@@ -6507,6 +6507,28 @@ test("space-bearing process names do not admit markup or control characters", ()
   }
 });
 
+test("Metal host evidence describes capability without claiming measured utilization", () => {
+  const guard = createToolLoopGuard();
+  const jobId = "ops-1234567890123-abcdef123456";
+  guard.observeRun({agentId:"pixel",runId:"run-1",sessionId:"session-1"}, "pixel",
+    {prompt:"Inspect the host GPU and report its capabilities."});
+  afterCall(guard, "pixel_ops_workflow_submit", {event:{
+    params:{steps:[{id:"gpu",target:"ods-host",action:"host.gpu"}]},
+    result:{details:{jobId,status:"submitted",kind:"workflow"}},
+  }});
+  afterCall(guard, "pixel_ops_job_wait", {event:{params:{jobId},result:{details:{
+    jobId,status:"succeeded",waitTimedOut:false,
+    steps:[{stepId:"gpu",target:"ods-host",action:"host.gpu",exitCode:0,stderr:"",
+      outputTruncated:{stdout:false,stderr:false},riskSignals:[],
+      stdout:JSON.stringify({schemaVersion:1,kind:"ods-host-gpu",available:true,
+        backend:"metal",devices:[{name:"Apple M5",metal:"Metal 4"}]})}],
+  }}}});
+  const text = reply(guard)?.payload?.text;
+  assert.match(text, /GPU capability: Apple M5 \(Metal 4\)/);
+  assert.match(text, /Runtime Metal utilization was not measured/);
+  assert.doesNotMatch(text, /MiB|VRAM/);
+});
+
 test("renders a structurally validated broad host inventory without command arguments or environments", () => {
   const guard = createToolLoopGuard();
   const jobId = "ops-1234567890123-abcdef123456";

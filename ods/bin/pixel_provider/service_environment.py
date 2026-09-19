@@ -6,6 +6,7 @@ Nothing here grants runtime custody or interprets an owner-supplied path. A
 prepared environment is not an activated provider or successful inference.
 """
 import os
+import plistlib
 import re
 import stat
 import tempfile
@@ -15,7 +16,7 @@ from pixel_access_bridge import AccessError, atomic_json, digest
 from pixel_access_protocol import HEX, provider_binding
 from pixel_settings.coordinator import _read
 
-from .managed_deployment import environment_bytes
+from .managed_deployment import environment_bytes, launchd_environment
 
 ENVIRONMENT = Path('/etc/ods/pixel-provider.env')
 DROPIN = Path('/etc/systemd/system/openclaw-gateway.service.d/95-ods-provider.conf')
@@ -128,12 +129,20 @@ class ServiceEnvironment:
     before prepare. An old receipt cannot authorize a new transaction. Public
     requests must never select these paths or supply the private record.
     """
+    def __new__(cls, bridge, *args, **kwargs):
+        if cls is ServiceEnvironment and getattr(bridge.gateway_service, 'is_launchd', False):
+            return super().__new__(LaunchdServiceEnvironment)
+        return super().__new__(cls)
+
     def __init__(self, bridge, *, environment=ENVIRONMENT, dropin=DROPIN):
         self.bridge = bridge
         self.environment, self.dropin = Path(environment), Path(dropin)
 
     def snapshot(self):
         return _pair({'environment': _snapshot(self.environment), 'dropin': _snapshot(self.dropin)})
+
+    def baseline(self):
+        return {'environment': None, 'dropin': None}
 
     def _journal(self, journal):
         if (type(journal) is not dict or journal.get('kind') != 'provider'
@@ -255,6 +264,204 @@ class ServiceEnvironment:
         order = ('dropin', 'environment') if desired['dropin'] is None else ('environment', 'dropin')
         for key in order:
             _replace(getattr(self, key), current[key], desired[key])
+        if self.snapshot() != desired or self.select(journal)[1] != side:
+            raise AccessError('provider-service-file-changed')
+        return {'side': side, 'binding': record[side + 'Binding'], 'environmentHash': digest(desired)}
+
+    def verify(self, journal, selection):
+        record, side = self.select(journal)
+        if (selection != {'side': side, 'binding': record[side + 'Binding'], 'environmentHash': digest(record[side])}
+                or self.snapshot() != record[side]):
+            raise AccessError('provider-service-verification-changed')
+        return record[side]
+
+
+def _mac_snapshot(path):
+    from pixel_macos_custody import CustodyError, protected_bytes
+    try:
+        raw = protected_bytes(path)
+        info = Path(path).lstat()
+    except (CustodyError, OSError) as error:
+        raise AccessError(str(error)) from None
+    return {'hex': raw.hex(), 'mode': stat.S_IMODE(info.st_mode)}
+
+
+def _mac_plist(image):
+    _image(image)
+    try:
+        value = plistlib.loads(bytes.fromhex(image['hex']))
+    except (ValueError, TypeError, plistlib.InvalidFileException):
+        raise AccessError('invalid-provider-launchd-plist') from None
+    if type(value) is not dict:
+        raise AccessError('invalid-provider-launchd-plist')
+    return value
+
+
+def _mac_provider_arguments(arguments, variables):
+    managed = set(variables)
+    if (type(arguments) is not list or len(arguments) < 3
+            or arguments[:2] != ['/usr/bin/env', '-i']
+            or any(type(value) is not str or not value for value in arguments)):
+        raise AccessError('launchd-provider-environment-unavailable')
+    preserved, command, seen = [], [], set()
+    for value in arguments[2:]:
+        if not command and '=' in value and value.partition('=')[0].isidentifier():
+            key = value.partition('=')[0]
+            if key in managed:
+                if key in seen:
+                    raise AccessError('launchd-provider-environment-unavailable')
+                seen.add(key)
+            else:
+                preserved.append(value)
+        else:
+            command.append(value)
+    if not command:
+        raise AccessError('launchd-provider-environment-unavailable')
+    return ['/usr/bin/env', '-i', *preserved,
+            *(key + '=' + variables[key] for key in sorted(variables)), *command]
+
+
+def _mac_replace(path, expected, image, snapshot):
+    if snapshot(path) != expected:
+        raise AccessError('provider-service-file-changed')
+    if image == expected:
+        return
+    if image is None:
+        raise AccessError('provider-service-file-changed')
+    _parents(path)
+    fd, temporary = tempfile.mkstemp(prefix='.ods-provider-', dir=path.parent)
+    try:
+        os.fchmod(fd, image['mode'])
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(bytes.fromhex(image['hex']))
+            handle.flush()
+            os.fsync(handle.fileno())
+        if snapshot(path) != expected:
+            raise AccessError('provider-service-file-changed')
+        os.replace(temporary, path)
+        _sync(path.parent)
+        if snapshot(path) != image:
+            raise AccessError('provider-service-file-changed')
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+class LaunchdServiceEnvironment(ServiceEnvironment):
+    """Root-owned launchd plist participant for the native macOS gateway.
+
+    A system LaunchDaemon plist is the only accepted production target. The
+    owner-facing GUI LaunchAgent is deliberately rejected by custody checks
+    because it cannot provide the root boundary needed by provider activation.
+    """
+    def __init__(self, bridge, *, plist=None, snapshotter=None, **_ignored):
+        service_plist = plist if plist is not None else getattr(bridge.gateway_service, 'plist', None)
+        if not isinstance(service_plist, (str, Path)):
+            raise AccessError('launchd-plist-required')
+        self.bridge = bridge
+        self.plist = Path(service_plist)
+        self.environment, self.dropin = self.plist, None
+        self._snapshotter = snapshotter or _mac_snapshot
+
+    def _journal(self, journal):
+        if (type(journal) is not dict or journal.get('kind') != 'provider'
+                or any(type(journal.get(key)) is not str or not HEX.fullmatch(journal[key])
+                       for key in ('token', 'transactionId'))
+                or self.bridge.pending() != journal):
+            raise AccessError('provider-transition-changed')
+        _parents(self.bridge.state / RECORD)
+
+    def snapshot(self):
+        return {'environment': self._snapshotter(self.plist), 'dropin': None}
+
+    def baseline(self):
+        return self.snapshot()
+
+    def prepare(self, journal, *, before_sha, after_sha, before_binding, after_binding,
+                deployment_document=None, policy=None, restore=None, expected=None):
+        self._journal(journal)
+        for value in (before_sha, after_sha):
+            if type(value) is not str or not HEX.fullmatch(value):
+                raise AccessError('invalid-provider-config-hash')
+        if before_sha == after_sha:
+            raise AccessError('ambiguous-provider-config-hash')
+        provider_binding(before_binding)
+        provider_binding(after_binding)
+        before = self.snapshot()
+        expected = _pair(expected) if expected is not None else self.baseline()
+        if before != expected:
+            raise AccessError('provider-service-baseline-conflict')
+        if after_binding is None:
+            if deployment_document is not None or policy is not None or restore is None:
+                raise AccessError('provider-service-restore-required')
+            after = _pair(restore)
+            if after['environment'] is None or after['dropin'] is not None:
+                raise AccessError('invalid-provider-launchd-plist')
+        else:
+            if (restore is not None or type(deployment_document) is not dict
+                    or deployment_document.get('binding') != after_binding):
+                raise AccessError('provider-deployment-binding-mismatch')
+            variables = launchd_environment(deployment_document, policy)
+            current = _mac_plist(before['environment'])
+            current['ProgramArguments'] = _mac_provider_arguments(current.get('ProgramArguments'), variables)
+            encoded = plistlib.dumps(current, sort_keys=True)
+            after = {'environment': {'hex': encoded.hex(), 'mode': before['environment']['mode']}, 'dropin': None}
+        _pair(after)
+        record = {'schemaVersion': 1, 'transactionId': journal['transactionId'],
+                  'beforeSha': before_sha, 'afterSha': after_sha,
+                  'beforeBinding': before_binding, 'afterBinding': after_binding,
+                  'before': before, 'after': after}
+        if journal.get('serviceEnvironment') is not None:
+            raise AccessError('provider-service-already-prepared')
+        atomic_json(self.bridge.state / RECORD, record)
+        journal['serviceEnvironment'] = digest(record)
+        atomic_json(self.bridge.state / 'transition.json', journal)
+        return record
+
+    def load(self, journal):
+        self._journal(journal)
+        record = _read(self.bridge.state / RECORD, ROOT_UID, MAX_RECORD)[0]
+        keys = {'schemaVersion', 'transactionId', 'beforeSha', 'afterSha',
+                'beforeBinding', 'afterBinding', 'before', 'after'}
+        if (type(record) is not dict or set(record) != keys
+                or type(record['schemaVersion']) is not int or record['schemaVersion'] != 1
+                or record['transactionId'] != journal['transactionId']
+                or digest(record) != journal.get('serviceEnvironment')
+                or any(type(record[key]) is not str or not HEX.fullmatch(record[key])
+                       for key in ('beforeSha', 'afterSha'))
+                or record['beforeSha'] == record['afterSha']):
+            raise AccessError('invalid-provider-service-record')
+        for key in ('before', 'after'):
+            _pair(record[key])
+            provider_binding(record[key + 'Binding'])
+        return record
+
+    def select(self, journal):
+        record = self.load(journal)
+        _, checksum = _read(self.bridge.home / '.openclaw/openclaw.json', self.bridge.owner.pw_uid)
+        if checksum == record['beforeSha']:
+            side = 'before'
+        elif checksum == record['afterSha']:
+            side = 'after'
+        else:
+            raise AccessError('provider-config-changed')
+        return record, side
+
+    def apply(self, journal):
+        record, side = self.select(journal)
+        current = self.snapshot()
+        if current not in (record['before'], record['after']):
+            raise AccessError('provider-service-recovery-conflict')
+        if (self.bridge.native('acquire', journal['token']).get('phase') != 'held'
+                or self.bridge.edge('acquire', journal['token'], journal['edge_revision']).get('phase') != 'held'):
+            raise AccessError('runtime-busy')
+        native, edge = self.bridge.native(), self.bridge.edge()
+        if native.get('active') != 0 or edge.get('streams') != 0:
+            raise AccessError('runtime-busy')
+        if self.select(journal)[1] != side:
+            raise AccessError('provider-config-changed')
+        desired = record[side]
+        _mac_replace(self.plist, current['environment'], desired['environment'], self._snapshotter)
         if self.snapshot() != desired or self.select(journal)[1] != side:
             raise AccessError('provider-service-file-changed')
         return {'side': side, 'binding': record[side + 'Binding'], 'environmentHash': digest(desired)}

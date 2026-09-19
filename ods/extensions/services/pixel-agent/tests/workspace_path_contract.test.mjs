@@ -1,9 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {canonicalWorkspaceParams,extensionlessHtmlWrite,workspaceFileParent} from '../plugin/workspace-path-contract.mjs';
 import {createToolLoopGuard} from '../plugin/tool-loop-guard.mjs';
 const root='/home/owner/.openclaw/workspace-pixel';
 const context={agentId:'pixel',runId:'path-contract',sessionId:'session-path'};
+
+test('plugin passes inherited workspace to evidence tracking for absolute macOS paths',()=>{
+  const entry=readFileSync(new URL('../plugin/index.js',import.meta.url),'utf8');
+  const declaration=entry.match(/const workspaceRoot = ([\s\S]*?);/);
+  assert.ok(declaration);
+  const resolve=new Function('api','AGENT_ID',`return (${declaration[1]});`);
+  const macRoot='/Users/test/ods/data/pixel-native/workspace';
+  const config={agents:{defaults:{workspace:macRoot},list:[{id:'pixel'}]}};
+  assert.equal(resolve({config},'pixel'),macRoot);
+  const guard=createToolLoopGuard();
+  guard.observeRun(context,'pixel',{prompt:'Create and publish a website.'},
+    {workspaceRoot:resolve({config},'pixel')});
+  guard.afterToolCall({toolName:'write',params:{path:macRoot+'/demo/index.html',content:'<html></html>'},
+    result:{content:[{type:'text',text:'Successfully wrote file'}]}},context);
+  const decision=guard.beforeToolCall({toolName:'pixel_ods_workspace_preview',
+    params:{relativeDirectory:'demo'}},context);
+  assert.notEqual(decision?.block,true);
+  config.agents.list[0].workspace='/custom/pixel';
+  assert.equal(resolve({config},'pixel'),'/custom/pixel');
+  assert.match(entry,/observeRun\(context, AGENT_ID, event, \{ privateBrowserAccess, workspaceRoot \}\)/);
+});
 
 test('detects existing file parents without following links or escaping the workspace',()=>{
   const file=()=>({isSymbolicLink:()=>false,isFile:()=>true,isDirectory:()=>false});
@@ -26,6 +48,20 @@ test('only the trusted configured root maps to a workspace-relative path',()=>{
   assert.equal(canonicalWorkspaceParams('other',{path:root+'/demo'},root).path,root+'/demo');
   const other={id:'third-party:write',args:{path:root+'/demo'}};
   assert.deepEqual(canonicalWorkspaceParams('tool_call',other,root),other);
+});
+
+test('absolute reads qualify relative previews only inside the configured workspace',()=>{
+  const macRoot='/Users/test/ods/data/pixel-native/workspace';
+  for (const [file, allowed] of [[macRoot+'/demo/index.html',true],
+    [macRoot+'-other/demo/index.html',false], ['/tmp/demo/index.html',false]]) {
+    const guard=createToolLoopGuard();
+    guard.observeRun(context,'pixel',{prompt:'Create and publish a new website in demo.'},{workspaceRoot:macRoot});
+    guard.afterToolCall({toolName:'read',params:{path:file},
+      result:{content:[{type:'text',text:'<!doctype html><html><body>Test</body></html>'}]}},context);
+    const result=guard.beforeToolCall({toolName:'pixel_ods_workspace_preview',
+      params:{relativeDirectory:'demo'}},context);
+    assert.equal(result?.block===true,!allowed,file);
+  }
 });
 
 test('preview path alias is exact and cannot silently replace conflicting fields',()=>{
