@@ -480,6 +480,34 @@ function ConvertTo-ODSDotenvValue {
     return "'" + $text + "'"
 }
 
+function Get-WindowsHostLanIp {
+    <#
+    .SYNOPSIS
+        Detect the host's LAN IPv4 address (the address LAN clients use to
+        reach this machine). Mirrors installers/phases/06-directories.sh:
+        route-based detection first (which interface would reach the
+        internet), then the first non-loopback IPv4. Returns "" when no
+        LAN address can be determined.
+    #>
+    try {
+        $route = Find-NetRoute -RemoteIPAddress "1.1.1.1" -ErrorAction Stop |
+            Where-Object { $_.IPAddress -and $_.IPAddress -ne "127.0.0.1" } |
+            Select-Object -First 1
+        if ($route) { return $route.IPAddress }
+    } catch {
+        # Find-NetRoute is unavailable on some SKUs/roles; fall through.
+    }
+    try {
+        $addr = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+            Where-Object { $_.IPAddress -ne "127.0.0.1" } |
+            Select-Object -First 1
+        if ($addr) { return $addr.IPAddress }
+    } catch {
+        # No LAN address found; callers treat "" as "not applicable".
+    }
+    return ""
+}
+
 function New-ODSEnv {
     <#
     .SYNOPSIS
@@ -570,6 +598,17 @@ function New-ODSEnv {
         # On loopback, preserve an operator's explicit opt-in to authentication.
         $webuiAuth = Get-EnvOrNew "WEBUI_AUTH" "false"
     }
+
+    # Host LAN IP — mirrors installers/phases/06-directories.sh and the macOS
+    # env-generator: populated when binding to 0.0.0.0 so containers such as
+    # OpenClaw can whitelist the host's LAN origin in the Control UI
+    # (config/openclaw/inject-token.js). An operator-set value in an existing
+    # .env wins over the freshly detected one, matching _env_get semantics.
+    $hostLanIpDetected = ""
+    if ($bindAddress -eq "0.0.0.0") {
+        $hostLanIpDetected = Get-WindowsHostLanIp
+    }
+    $hostLanIp = Get-EnvOrNew "HOST_LAN_IP" $hostLanIpDetected
 
     $webuiPort = Resolve-WindowsODSPort `
         -Name "WEBUI_PORT" -DefaultPort 3000 `
@@ -927,6 +966,9 @@ function New-ODSEnv {
 # 127.0.0.1 = localhost only (secure default)
 # 0.0.0.0   = accessible from LAN (install with -Lan or set manually)
 BIND_ADDRESS=$bindAddress
+# Host LAN address for LAN-bound installs; lets OpenClaw whitelist the host's
+# LAN origin in the Control UI. Empty when binding only to localhost.
+HOST_LAN_IP=$hostLanIp
 # Docker Desktop containers reach loopback-only host services through this name.
 ODS_AGENT_HOST=$(Get-EnvOrNew "ODS_AGENT_HOST" "host.docker.internal")
 # The dashboard-api container must call the host agent over Docker Desktop's
