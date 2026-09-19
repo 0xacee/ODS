@@ -15,6 +15,51 @@ if ! declare -F log_error >/dev/null 2>&1; then
     log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 fi
 
+_ods_pixel_validate_ingress_env() {
+    local path="$1" root_uid="$2"
+
+    if [[ ! -e "$path" && ! -L "$path" ]]; then
+        return 0
+    fi
+    command -v sudo >/dev/null 2>&1 || {
+        log_error "sudo is required to validate the ODS-managed Pixel ingress environment"
+        return 1
+    }
+    sudo python3 - "$path" "$root_uid" <<'PY'
+import pathlib
+import stat
+import sys
+
+path = pathlib.Path(sys.argv[1])
+root_uid = int(sys.argv[2])
+info = path.lstat()
+if (
+    not stat.S_ISREG(info.st_mode)
+    or stat.S_ISLNK(info.st_mode)
+    or info.st_nlink != 1
+    or info.st_uid != root_uid
+    or info.st_size > 64 * 1024
+    or info.st_mode & 0o022
+):
+    raise SystemExit(f"unsafe managed Pixel artifact: {path}")
+
+entries = {}
+for line in path.read_text(encoding="utf-8").splitlines():
+    if not line or line.startswith("#"):
+        continue
+    key, separator, item = line.partition("=")
+    if not separator or key in entries:
+        raise SystemExit("invalid Pixel ingress environment")
+    entries[key] = item
+if (
+    entries.get("PIXEL_INGRESS_SOCKET") != "/run/ods-pixel/pixel-ingress.sock"
+    or entries.get("PIXEL_GATEWAY_TOKEN_FILE") != "/run/ods-pixel/openclaw.json"
+    or entries.get("PIXEL_STATUS_FILE") != "/run/ods-pixel/ods-status.json"
+):
+    raise SystemExit("Pixel ingress environment is not ODS-managed")
+PY
+}
+
 _ods_pixel_access_validate_or_remove() {
     local action="$1"
     shift
@@ -502,6 +547,10 @@ ods_pixel_uninstall_managed() {
     owner_uid="$(id -u)"
     owner_gid="$(id -g)"
     owner_name="$(id -un)"
+    if ! _ods_pixel_validate_ingress_env "$ingress_env" "$root_uid"; then
+        log_error "ODS-managed Pixel ingress environment validation failed"
+        return 1
+    fi
     if ! cleanup_plan="$(python3 - \
         "$marker" "$install_dir" "$owner_home" "$(id -u)" "$root_uid" \
         "$gateway_unit" "$ingress_unit" "$ingress_env" "$ingress_program" "$source_program" \
@@ -1346,22 +1395,6 @@ if unix_peer_program.exists():
 if system_observer_program.exists():
     if system_observer_program.read_bytes() != system_observer_source.read_bytes():
         raise SystemExit("installed Pixel system observer drifted from this ODS install")
-
-if ingress_env.exists():
-    entries = {}
-    for line in ingress_env.read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#"):
-            continue
-        key, separator, item = line.partition("=")
-        if not separator or key in entries:
-            raise SystemExit("invalid Pixel ingress environment")
-        entries[key] = item
-    if (
-        entries.get("PIXEL_INGRESS_SOCKET") != "/run/ods-pixel/pixel-ingress.sock"
-        or entries.get("PIXEL_GATEWAY_TOKEN_FILE") != "/run/ods-pixel/openclaw.json"
-        or entries.get("PIXEL_STATUS_FILE") != "/run/ods-pixel/ods-status.json"
-    ):
-        raise SystemExit("Pixel ingress environment is not ODS-managed")
 
 if ingress_program.exists():
     if not source_program.exists() or source_program.is_symlink():

@@ -177,11 +177,13 @@ assert 'owner_gid="$(id -g)"' in text
 assert '"$root_uid" "$root_gid" "$owner_uid" "$owner_gid"' in text
 assert "info.st_gid != owner_gid" in text
 assert "info.st_gid != os.getgid()" not in text
+assert '_ods_pixel_validate_ingress_env "$ingress_env" "$root_uid"' in text
+assert 'sudo python3 - "$path" "$root_uid"' in text
 PY
 then
-    pass "root Operations validation compares legacy source custody with the captured owner primary group"
+    pass "root validation uses owner custody and privileged reads for protected ingress configuration"
 else
-    fail "root Operations validation confuses its process group with the Pixel owner group"
+    fail "root validation does not preserve owner custody and protected ingress reads"
 fi
 
 if logger_output="$(bash -c '
@@ -735,6 +737,19 @@ PY
     : >"$OPS_IDENTITY_LOG"
     : >"$DOCKER_LOG"
 }
+
+write_fixture
+printf '%s\n' 'PIXEL_STATUS_FILE=/tmp/drifted-status.json' >>"$ETC_DIR/pixel-agent.env"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "Pixel uninstall accepted a drifted protected ingress environment"
+elif [[ -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+    && -e "$SYSTEMD_DIR/pixel-ingress.service" \
+    && -e "$ETC_DIR/pixel-agent.env" \
+    && ! -s "$SYSTEMCTL_LOG" ]]; then
+    pass "protected ingress environment drift fails closed before service mutation"
+else
+    fail "protected ingress environment drift caused partial cleanup"
+fi
 
 write_fixture
 rm -f -- "$SYSTEMD_DIR/openclaw-gateway.service" "$SYSTEMD_DIR/pixel-ingress.service" \
