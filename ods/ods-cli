@@ -379,7 +379,13 @@ _ods_cli_reload_model_env() {
 
 _get_host_logical_cpus() {
     local cores
-    cores=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo "1")
+    # nproc and /proc/cpuinfo are Linux-only; on macOS both are absent, so the
+    # old chain always fell through to 1 and starved the CPU budget whenever
+    # Docker's own NCPU was unavailable. Probe sysctl (macOS/BSD) between them.
+    cores=$(nproc 2>/dev/null \
+        || sysctl -n hw.logicalcpu 2>/dev/null \
+        || grep -c '^processor' /proc/cpuinfo 2>/dev/null \
+        || echo "1")
     if [[ "$cores" =~ ^[0-9]+$ ]] && [[ "$cores" -gt 0 ]]; then
         echo "$cores"
     else
