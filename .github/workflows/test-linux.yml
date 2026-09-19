@@ -70,7 +70,7 @@ jobs:
       - name: GPU assignment capacity contracts
         run: python -m pytest tests/test-assign-gpus.py tests/test_gpu_spare_capacity.py -q
       - name: macOS TCP bridge lifecycle contracts
-        run: python -m pytest tests/test_macos_llm_bridge.py -q
+        run: python -m pytest tests/test_macos_llm_bridge.py tests/test_macos_upsert_env_value.py -q
       - name: Sharing credential and owner control tests
         run: python -m pytest tests/pixel_inference -q
       - name: Inference perimeter and cancellation tests
