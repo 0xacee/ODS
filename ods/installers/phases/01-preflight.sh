@@ -47,6 +47,22 @@ log "curl: $(curl --version 2>/dev/null | sed -n '1p')"
 source "$SCRIPT_DIR/installers/lib/preflight-jq.sh"
 ods_preflight_require_jq
 
+# Fail early with a target-specific diagnosis instead of allowing a later
+# image/model download to look like an unexplained installer hang.
+_phase01_check_required_network() {
+    [[ "${OFFLINE_MODE:-false}" == "true" ]] && return 0
+    local target url
+    for target in "GitHub|https://github.com" "Docker Hub|https://registry-1.docker.io/v2/"; do
+        IFS='|' read -r target_name url <<< "$target"
+        if ! curl -fsS --connect-timeout 5 --max-time 10 -o /dev/null "$url"; then
+            error "Could not reach ${target_name}. Check DNS, proxy, or captive-portal access, then re-run the installer."
+        fi
+    done
+    log "Required network targets resolved: GitHub and Docker Hub"
+}
+
+_phase01_check_required_network
+
 # Check optional tools (warn but don't fail)
 OPTIONAL_TOOLS_MISSING=""
 if ! command -v rsync &> /dev/null; then
