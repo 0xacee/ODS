@@ -2067,6 +2067,15 @@ check test "$(GGUF_FILE='My Custom Model (Q4_K_M).gguf' \
     AMD_INFERENCE_RUNTIME=lemonade \
     LEMONADE_MODEL='extra.My Custom Model (Q4_K_M).gguf' \
     _ods_pixel_runtime_model_identity)" = 'extra.My Custom Model (Q4_K_M).gguf'
+check test "$(GGUF_FILE='stale-local.gguf' GPU_BACKEND=cpu \
+    LEMONADE_EXTERNAL=true LEMONADE_MODEL='Qwen3.6-35B-A3B-GGUF' \
+    _ods_pixel_runtime_model_identity)" = 'Qwen3.6-35B-A3B-GGUF'
+if GGUF_FILE='stale-local.gguf' GPU_BACKEND=cpu LEMONADE_EXTERNAL=true \
+    LEMONADE_MODEL='' _ods_pixel_runtime_model_identity >/dev/null 2>&1; then
+    fail "external Lemonade runtime identity requires the served model"
+else
+    pass "external Lemonade runtime identity requires the served model"
+fi
 check test "$(EXTERNAL_LLM_URL='http://10.0.2.2:18080' \
     EXTERNAL_LLM_MODEL='org/qwen+tools:remote' GGUF_FILE='stale-local.gguf' \
     _ods_pixel_runtime_model_identity)" = 'org/qwen+tools:remote'
@@ -2278,7 +2287,9 @@ import pathlib,sys
 text=pathlib.Path(sys.argv[1]).read_text()
 access_bridge=pathlib.Path(sys.argv[2]).read_text()
 installer=text[text.index("ods_pixel_install_default_agent() {"):]
-assert "local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay)" in installer
+assert "local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay searxng)" in installer
+assert "pixel_prerequisites+=(searxng)" not in installer
+assert installer.index("\"ODS local search\"") < installer.index("\"$pixel_root/pixel\" plan")
 assert "ods_pixel_run_as_owner \"$owner\" \"$home\" curl" in text
 assert "_ods_pixel_wait_ingress \"$owner\" \"$home\"" in installer
 assert installer.index("_ods_pixel_wait_ingress \"$owner\" \"$home\"") < installer.index("_ods_pixel_mark_ready \"$owner\" \"$home\"")

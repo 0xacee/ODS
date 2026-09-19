@@ -245,6 +245,434 @@ def test_external_lemonade_catalog_does_not_fall_back_to_stale_local_model(
     assert model == {}
 
 
+def test_external_lemonade_local_activation_rejects_before_mutation(
+    monkeypatch, tmp_path,
+):
+    install = tmp_path / "ods"
+    install.mkdir()
+    env_path = install / ".env"
+    original = (
+        "ODS_MODE=lemonade\nLLM_BACKEND=lemonade\nLEMONADE_EXTERNAL=true\n"
+        "LEMONADE_MODEL=Qwen3.6-35B-A3B-GGUF\n"
+    )
+    env_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install)
+    monkeypatch.setattr(_mod, "STARTUP_ODS_MODE", "lemonade")
+    monkeypatch.setattr(
+        _mod, "_load_model_library_records",
+        lambda: pytest.fail("external runtime must be rejected before model lookup"),
+    )
+    monkeypatch.setattr(
+        _mod, "_recreate_llama_server",
+        lambda *_args, **_kwargs: pytest.fail("external runtime must not be recreated"),
+    )
+    handler = _ResponseHandler()
+    _mod.AgentHandler._do_model_activate(handler, "Qwen3.5-2B-Q4_K_M")
+    assert handler.response_code == 409
+    assert handler.parse_response()["code"] == "external_runtime_unmanaged"
+    assert env_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("recovery", [
+    {"pending": True},
+    RuntimeError("unsafe journal"),
+])
+def test_host_model_status_marks_uncertain_native_transaction_pending(
+    monkeypatch, recovery,
+):
+    monkeypatch.setattr(_mod, "_active_remote_provider_pixel_runtime", lambda: None)
+    monkeypatch.setattr(_mod, "_switchboard_state", None)
+
+    def status():
+        if isinstance(recovery, Exception):
+            raise recovery
+        return recovery
+
+    monkeypatch.setattr(_mod, "_pixel_model_recovery_status", status)
+    payload = {}
+    _mod._project_switchboard_agent_viability(payload)
+    assert payload["modelTransactionPending"] is True
+
+
+def _external_lemonade_observation_fixture():
+    checkpoint = "unsloth/Qwen3.6-35B-A3B-GGUF:Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+    health = {
+        "status": "ok",
+        "model_loaded": "Qwen3.6-35B-A3B-GGUF",
+        "all_models_loaded": [{
+            "type": "llm",
+            "model_name": "Qwen3.6-35B-A3B-GGUF",
+            "recipe": "llamacpp",
+            "checkpoint": checkpoint,
+            "recipe_options": {"ctx_size": 65536, "llamacpp_backend": "vulkan"},
+        }],
+    }
+    catalog = {"data": [{
+        "id": "Qwen3.6-35B-A3B-GGUF",
+        "downloaded": True,
+        "recipe": "llamacpp",
+        "checkpoint": checkpoint,
+    }]}
+    return health, catalog
+
+
+def test_external_lemonade_observation_requires_exact_live_checkpoint():
+    health, catalog = _external_lemonade_observation_fixture()
+    assert _mod._verified_external_lemonade_observation(health, catalog) == {
+        "modelId": "Qwen3.6-35B-A3B-GGUF",
+        "checkpoint": catalog["data"][0]["checkpoint"],
+        "contextLength": 65536,
+        "backend": "vulkan",
+    }
+
+
+@pytest.mark.parametrize("damage", [
+    lambda health, catalog: health.update(status="loading"),
+    lambda health, catalog: health.update(model_loaded="another-model"),
+    lambda health, catalog: health["all_models_loaded"].append(
+        dict(health["all_models_loaded"][0])
+    ),
+    lambda health, catalog: health["all_models_loaded"][0]["recipe_options"].update(
+        ctx_size=True
+    ),
+    lambda health, catalog: catalog["data"][0].update(downloaded=False),
+    lambda health, catalog: catalog["data"][0].update(checkpoint="different.gguf"),
+    lambda health, catalog: catalog["data"].append(dict(catalog["data"][0])),
+])
+def test_external_lemonade_observation_fails_closed_on_ambiguous_evidence(damage):
+    health, catalog = _external_lemonade_observation_fixture()
+    damage(health, catalog)
+    with pytest.raises(ValueError, match="External Lemonade"):
+        _mod._verified_external_lemonade_observation(health, catalog)
+
+
+def test_external_lemonade_observation_endpoint_is_authenticated_and_redacted(monkeypatch):
+    monkeypatch.setattr(_mod, "AGENT_API_KEY", "observation-test-key")
+    monkeypatch.setattr(_mod, "load_env", lambda _path: {"LEMONADE_EXTERNAL": "true"})
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", lambda _env: {
+        "modelId": "Qwen3.6-35B-A3B-GGUF",
+        "checkpoint": "private-checkpoint-path.gguf",
+        "contextLength": 65536,
+        "backend": "vulkan",
+    })
+    server = _mod.ThreadedHTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        connection.request("GET", "/v1/model/external-observation")
+        denied = connection.getresponse()
+        assert denied.status == 401
+        denied.read()
+        connection.request("GET", "/v1/model/external-observation", headers={
+            "Authorization": "Bearer observation-test-key",
+        })
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read()) == {
+            "status": "verified",
+            "modelId": "Qwen3.6-35B-A3B-GGUF",
+            "contextLength": 65536,
+            "backend": "vulkan",
+        }
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_external_adoption_endpoint_requires_auth_and_preserves_pending_hold(monkeypatch):
+    monkeypatch.setattr(_mod, "AGENT_API_KEY", "adoption-test-key")
+    actions = []
+    monkeypatch.setattr(_mod, "_begin_model_activation", lambda model: (
+        actions.append(("begin", model)) or (True, None)
+    ))
+    monkeypatch.setattr(_mod, "_end_model_activation", lambda: actions.append(("end", None)))
+    monkeypatch.setattr(_mod, "_adopt_external_lemonade_model", lambda _model: (
+        (_ for _ in ()).throw(_mod._PixelModelTransactionUncertain("private detail"))
+    ))
+    monkeypatch.setattr(_mod, "_pixel_model_recovery_status", lambda: {"pending": True})
+    server = _mod.ThreadedHTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        body = json.dumps({"model_id": "loaded-B"})
+        headers = {"Content-Type": "application/json"}
+        connection.request("POST", "/v1/model/external-adopt", body=body, headers=headers)
+        denied = connection.getresponse()
+        assert denied.status == 401
+        denied.read()
+        connection.request("POST", "/v1/model/external-adopt", body=body, headers={
+            **headers, "Authorization": "Bearer adoption-test-key",
+        })
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 503
+        assert payload["code"] == "managed_model_recovery_required"
+        assert payload["pending"] is True
+        assert "private detail" not in json.dumps(payload)
+        assert actions == [("begin", "loaded-B"), ("end", None)]
+        monkeypatch.setattr(_mod, "_adopt_external_lemonade_model", lambda _model: (
+            (_ for _ in ()).throw(_mod._ExternalAdoptionReceiptUnavailable("private detail"))
+        ))
+        connection.request("POST", "/v1/model/external-adopt", body=body, headers={
+            **headers, "Authorization": "Bearer adoption-test-key",
+        })
+        receipt_response = connection.getresponse()
+        receipt_payload = json.loads(receipt_response.read())
+        assert receipt_response.status == 503
+        assert receipt_payload["code"] == "external_adoption_receipt_unavailable"
+        assert receipt_payload["pending"] is False
+        assert "private detail" not in json.dumps(receipt_payload)
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_external_lemonade_observation_rechecks_health_after_catalog(monkeypatch):
+    health, catalog = _external_lemonade_observation_fixture()
+    changed = json.loads(json.dumps(health))
+    changed["model_loaded"] = "another-model"
+    responses = iter([health, catalog, changed])
+    requested = []
+
+    class _Opener:
+        def open(self, request, timeout):
+            requested.append((request.full_url, timeout))
+            return io.BytesIO(json.dumps(next(responses)).encode("utf-8"))
+
+    monkeypatch.setattr(_mod.urllib_request, "build_opener", lambda *_args: _Opener())
+    with pytest.raises(ValueError, match="External Lemonade"):
+        _mod._read_external_lemonade_observation({
+            "LEMONADE_EXTERNAL": "true",
+            "LEMONADE_BASE_URL": "http://127.0.0.1:8080",
+        })
+    assert requested == [
+        ("http://127.0.0.1:8080/api/v1/health", 5),
+        ("http://127.0.0.1:8080/api/v1/models", 5),
+        ("http://127.0.0.1:8080/api/v1/health", 5),
+    ]
+
+
+@pytest.mark.parametrize(("persisted_model", "persisted_context", "live_model", "live_context", "proven"), [
+    ("Qwen3.5-2B-Q4_K_M", "65536", "Qwen3.5-2B-Q4_K_M", 65536, True),
+    ("Qwen3.6-35B-A3B-GGUF", "65536", "Qwen3.5-2B-Q4_K_M", 65536, False),
+    ("Qwen3.5-2B-Q4_K_M", "65536", "Qwen3.5-2B-Q4_K_M", 32768, False),
+    ("Qwen3.5-2B-Q4_K_M", "32768", "Qwen3.5-2B-Q4_K_M", 65536, False),
+])
+def test_external_pixel_recovery_proves_physical_and_persisted_model(
+    monkeypatch, persisted_model, persisted_context, live_model, live_context, proven,
+):
+    config = {
+        "LEMONADE_EXTERNAL": "true",
+        "LEMONADE_MODEL": persisted_model,
+        "CTX_SIZE": persisted_context,
+        "MAX_CONTEXT": persisted_context,
+        # The installer's local GGUF is unrelated to native Lemonade.
+        "GGUF_FILE": "Qwen3.5-9B-Q4_K_M.gguf",
+    }
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", lambda _env: {
+        "modelId": live_model, "contextLength": live_context,
+    })
+    monkeypatch.setattr(_mod, "_wait_for_model_readiness", lambda *_args, **_kwargs: (
+        pytest.fail("stale local GGUF must not prove external recovery")
+    ))
+    assert _mod._prove_pixel_model_contract(config, {
+        "model": "Qwen3.5-2B-Q4_K_M", "contextLength": 65536,
+    }) is proven
+
+
+@pytest.mark.parametrize("failure", [None, "router-stopped", "litellm", "receipt"])
+def test_external_adoption_converges_consumers_without_touching_native_runtime(
+    monkeypatch, tmp_path, failure,
+):
+    install = tmp_path / "ods"
+    install.mkdir()
+    env_path = install / ".env"
+    env_path.write_text(
+        "ODS_MODE=lemonade\nLEMONADE_EXTERNAL=true\nPIXEL_OPENWEBUI_KEY=test-key\n"
+        "LEMONADE_MODEL=Qwen3.6-35B-A3B-GGUF\nLLM_MODEL=old\n"
+        "GGUF_FILE=old.gguf\nCTX_SIZE=65536\nMAX_CONTEXT=65536\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install)
+    events = []
+    loaded = {
+        "modelId": "Qwen3.5-2B-Q4_K_M", "checkpoint": "Qwen3.5-2B-Q4_K_M.gguf",
+        "contextLength": 65536, "backend": "vulkan",
+    }
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", lambda _env: (
+        events.append("observe") or dict(loaded)
+    ))
+    monkeypatch.setattr(_mod, "_switchboard_state", object())
+    monkeypatch.setattr(_mod, "_capture_hermes_live_config", lambda _path: {
+        "exists": False, "source": "absent",
+    })
+    monkeypatch.setattr(_mod, "_capture_opencode_config", lambda: {"files": {}})
+    monkeypatch.setattr(_mod, "_capture_managed_opencode_state", lambda: {
+        "active": True, "system": "Linux",
+    })
+    monkeypatch.setattr(_mod, "_capture_container_state", lambda name: {
+        "exists": True,
+        "running": not (failure == "router-stopped" and name == "ods-model-router"),
+    })
+    monkeypatch.setattr(_mod, "_capture_perplexica_config", lambda *_args: {"values": {}})
+
+    class Transaction:
+        id = "a" * 64
+        target = None
+        journal = {"phase": "held"}
+
+        def _save(self, phase):
+            events.append(("journal", phase, self.target["model"]))
+
+        def apply(self, target):
+            events.append(("pixel-apply", target["model"]))
+            self.journal["phase"] = "applied"
+            return "reconciled"
+
+        def finish(self, outcome):
+            events.append(("pixel-finish", outcome))
+
+    monkeypatch.setattr(_mod, "_begin_or_resume_external_pixel_transaction", lambda _env, _target: Transaction())
+    monkeypatch.setattr(_mod, "_external_adoption_route_published", lambda *_args: False)
+    for name in (
+        "_write_lemonade_config", "_render_model_router_runtime_configs",
+        "_patch_hermes_model_config", "_update_opencode_config",
+        "_update_perplexica_model",
+        "_verify_litellm_route", "_verify_running_hermes_route",
+        "_verify_openclaw_model_env", "_restart_managed_opencode",
+    ):
+        monkeypatch.setattr(_mod, name, lambda *_args, _name=name, **_kwargs: (
+            events.append(_name) or True
+        ))
+    monkeypatch.setattr(_mod, "_wait_for_container_health", lambda name: (
+        events.append(("health", name)) or True
+    ))
+    if failure == "router-stopped":
+        with pytest.raises(RuntimeError, match="Model router must be running"):
+            _mod._adopt_external_lemonade_model(loaded["modelId"])
+        assert env_path.read_text(encoding="utf-8").startswith("ODS_MODE=lemonade\n")
+        assert not any(isinstance(event, tuple) and event[0] == "journal" for event in events)
+        return
+    if failure == "litellm":
+        def fail_route(_env):
+            events.append("_verify_litellm_route")
+            raise RuntimeError("LiteLLM route unavailable")
+        monkeypatch.setattr(_mod, "_verify_litellm_route", fail_route)
+    monkeypatch.setattr(_mod, "_restart_existing_container", lambda name, *_args, **_kwargs: (
+        events.append(("restart", name)) or True
+    ))
+    monkeypatch.setattr(_mod, "_recreate_openclaw_if_present", lambda *_args: (
+        events.append("openclaw") or True
+    ))
+    monkeypatch.setattr(_mod, "_publish_activation_route", lambda *_args: (
+        events.append("route") or {}
+    ))
+    def write_receipt(*_args):
+        events.append("receipt")
+        if failure == "receipt":
+            raise OSError("receipt unavailable")
+    monkeypatch.setattr(_mod, "_atomic_write_json", write_receipt)
+    monkeypatch.setattr(_mod, "_recreate_llama_server", lambda *_args, **_kwargs: (
+        pytest.fail("external adoption must never recreate native inference")
+    ))
+    monkeypatch.setattr(_mod, "_restart_windows_lemonade", lambda *_args: (
+        pytest.fail("external adoption must never restart native Lemonade")
+    ))
+
+    if failure == "litellm":
+        with pytest.raises(_mod._PixelModelTransactionUncertain):
+            _mod._adopt_external_lemonade_model(loaded["modelId"])
+        assert not any(isinstance(event, tuple) and event[0] == "pixel-finish" for event in events)
+        # A failed alias probe leaves a forward-only, held transaction. The
+        # proved B route must already be published so the probe cannot cause
+        # Lemonade to auto-load the previous A model.
+        assert events.index("route") < events.index("_verify_litellm_route")
+        assert _mod.load_env(env_path)["LEMONADE_MODEL"] == loaded["modelId"]
+        return
+    if failure == "receipt":
+        with pytest.raises(_mod._ExternalAdoptionReceiptUnavailable):
+            _mod._adopt_external_lemonade_model(loaded["modelId"])
+        assert events.index(("pixel-finish", "commit")) < events.index("receipt")
+        return
+    result = _mod._adopt_external_lemonade_model(loaded["modelId"])
+    assert result["status"] == "adopted"
+    persisted = _mod.load_env(env_path)
+    assert persisted["LEMONADE_MODEL"] == loaded["modelId"]
+    assert persisted["CTX_SIZE"] == persisted["MAX_CONTEXT"] == "65536"
+    assert events.index("_render_model_router_runtime_configs") < events.index(
+        ("restart", "ods-model-router")
+    )
+    assert events.index(("restart", "ods-model-router")) < events.index(
+        ("health", "ods-model-router")
+    )
+    assert events.index(("health", "ods-model-router")) < events.index(
+        ("restart", "ods-litellm")
+    )
+    assert events.index(("restart", "ods-litellm")) < events.index("route")
+    assert events.index("route") < events.index("_verify_litellm_route")
+    assert events.index("route") < events.index(("pixel-apply", loaded["modelId"]))
+    assert events.index(("pixel-finish", "commit")) < events.index("receipt")
+    assert events[-1] == "receipt"
+    for consumer in (
+        "_write_lemonade_config", "_render_model_router_runtime_configs",
+        "_update_opencode_config", "_update_perplexica_model", "openclaw",
+    ):
+        assert consumer in events
+
+
+def test_external_adoption_rejects_unobserved_target_without_writes(monkeypatch, tmp_path):
+    install = tmp_path / "ods"
+    install.mkdir()
+    env_path = install / ".env"
+    original = "LEMONADE_EXTERNAL=true\nLEMONADE_MODEL=old\nCTX_SIZE=65536\n"
+    env_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install)
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", lambda _env: {
+        "modelId": "loaded-B", "checkpoint": "B.gguf",
+        "contextLength": 65536, "backend": "vulkan",
+    })
+    monkeypatch.setattr(_mod, "_begin_or_resume_external_pixel_transaction", lambda *_args: (
+        pytest.fail("mismatched target must not create a transaction")
+    ))
+    with pytest.raises(ValueError, match="differs"):
+        _mod._adopt_external_lemonade_model("requested-C")
+    assert env_path.read_text(encoding="utf-8") == original
+
+
+def test_external_adoption_recognizes_existing_verified_route(monkeypatch, tmp_path):
+    monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+    route = tmp_path / "data" / "model-state.json"
+    _mod._switchboard_state.record_verified_route(
+        route, catalog_id="loaded-B", runtime_model_id="loaded-B",
+        backend_kind="lemonade", endpoint_id="lemonade-default",
+        native_route="loaded-B", context_length=65536,
+        capabilities={"chat": True}, proof_identity="loaded-B",
+    )
+    before = json.loads(route.read_text(encoding="utf-8"))
+    assert _mod._external_adoption_route_published("loaded-B", 65536)
+    assert not _mod._external_adoption_route_published("other-C", 65536)
+    assert json.loads(route.read_text(encoding="utf-8")) == before
+
+
+def test_external_adoption_preserves_catalog_pixel_viability_advisory(monkeypatch):
+    monkeypatch.setattr(_mod, "_load_model_library_records", lambda: [{
+        "id": "qwen3.5-2b-q4", "gguf_file": "Qwen3.5-2B-Q4_K_M.gguf",
+        "llm_model_name": "qwen3.5-2b", "app_compatibility": {
+            "agent_viability": {"status": "not_agent_viable"},
+        },
+    }])
+    small = _mod._external_adoption_capabilities("Qwen3.5-2B-Q4_K_M", 65536)
+    assert small == {"chat": True, "tools": False, "vision": False, "agentViable": False}
+    unknown = _mod._external_adoption_capabilities("different-64k-model", 65536)
+    assert unknown["agentViable"] is True
+
+
 def test_host_agent_keeps_gets_alive_and_closes_posts(monkeypatch):
     class _CountingServer(_mod.ThreadedHTTPServer):
         accepted_connections = 0
@@ -1128,6 +1556,32 @@ class TestWriteLemonadeConfig:
         assert "model: openai/Modern-Model" in content
         assert "extra.Modern-Model.gguf" not in content
 
+    def test_preserves_explicit_container_route_after_external_adoption(
+        self, monkeypatch, tmp_path,
+    ):
+        (tmp_path / ".env").write_text(
+            "AMD_INFERENCE_LOCATION=host\n"
+            "AMD_INFERENCE_PORT=8080\n"
+            "LEMONADE_CONTAINER_BASE_URL=http://192.168.0.166:8080\n"
+            "LEMONADE_API_BASE_PATH=/api/v1\n",
+            encoding="utf-8",
+        )
+        calls = []
+        monkeypatch.setattr(
+            _mod,
+            "_render_runtime_config",
+            lambda install_dir, surface, **kwargs: (
+                calls.append((install_dir, surface, kwargs)) or True
+            ),
+        )
+
+        _write_lemonade_config(tmp_path, "Modern-Model.gguf", "Modern-Model")
+
+        assert calls[0][1] == "litellm-lemonade"
+        assert calls[0][2]["lemonade_api_base"] == (
+            "http://192.168.0.166:8080/api/v1"
+        )
+
     def test_overwrites_previous(self, tmp_path):
         litellm_dir = tmp_path / "config" / "litellm"
         litellm_dir.mkdir(parents=True)
@@ -1207,6 +1661,54 @@ class TestSwitchboardRuntimeConfig:
         assert _mod._runtime_llama_api_base({
             "LLM_API_URL": "http://litellm:4000/v1",
         }) == "http://llama-server:8080/v1"
+
+    @pytest.mark.parametrize(
+        "container_base",
+        ["http://192.168.0.166:8080", "http://192.168.0.166:8080/api/v1"],
+    )
+    def test_host_lemonade_runtime_base_preserves_explicit_container_route(
+        self, container_base,
+    ):
+        assert _mod._runtime_lemonade_api_base({
+            "AMD_INFERENCE_LOCATION": "host",
+            "AMD_INFERENCE_PORT": "8080",
+            "LEMONADE_CONTAINER_BASE_URL": container_base,
+            "LEMONADE_API_BASE_PATH": "/api/v1",
+        }) == "http://192.168.0.166:8080/api/v1"
+
+    def test_host_lemonade_runtime_base_keeps_gateway_fallback(self):
+        assert _mod._runtime_lemonade_api_base({
+            "AMD_INFERENCE_LOCATION": "host",
+            "AMD_INFERENCE_PORT": "9234",
+        }) == "http://host.docker.internal:9234/api/v1"
+
+    @pytest.mark.parametrize(
+        "api_path",
+        [
+            "api/v1",
+            "/",
+            "/../admin",
+            "/api/../admin",
+            "/api\\v1",
+            "/api/v1?debug=1",
+            "/api/v1#fragment",
+            "/api/v1\nX-Injected: yes",
+            "/api/ v1",
+            "/api/v1\x7f",
+        ],
+    )
+    def test_host_lemonade_runtime_base_rejects_unsafe_api_path(self, api_path):
+        assert _mod._runtime_lemonade_api_base({
+            "AMD_INFERENCE_LOCATION": "host",
+            "LEMONADE_CONTAINER_BASE_URL": "http://192.168.0.166:8080",
+            "LEMONADE_API_BASE_PATH": api_path,
+        }) == "http://192.168.0.166:8080/api/v1"
+
+    def test_host_lemonade_runtime_base_rejects_invalid_fallback_port(self):
+        assert _mod._runtime_lemonade_api_base({
+            "AMD_INFERENCE_LOCATION": "host",
+            "AMD_INFERENCE_PORT": "8080/api/v1\nX-Injected: yes",
+        }) == "http://host.docker.internal:8080/api/v1"
 
     def test_windows_native_runtime_base_uses_host_gateway(self, monkeypatch):
         monkeypatch.setattr(_mod, "_is_windows_host_llama_server", lambda _env: True)

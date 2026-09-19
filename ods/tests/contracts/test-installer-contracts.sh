@@ -9,6 +9,12 @@ command -v jq >/dev/null 2>&1 || {
   exit 1
 }
 
+echo "[contract] n8n nonstandard-UID home and cookie policy"
+bash tests/test-n8n-cookie-policy.sh
+
+echo "[contract] installed preflight model route"
+bash tests/test-ods-preflight-llm-route.sh
+
 echo "[contract] backend contract files"
 for f in config/backends/amd.json config/backends/nvidia.json config/backends/cpu.json config/backends/apple.json; do
   test -f "$f" || { echo "[FAIL] missing $f"; exit 1; }
@@ -559,6 +565,9 @@ for f in "${_resolver_callers[@]}"; do
 done
 unset _resolver_callers
 
+echo "[contract] dry-run does not install a missing jq prerequisite"
+bash tests/test-installer-dry-run-jq.sh
+
 echo "[contract] optional extension compose files are installer-gated"
 bash tests/test-installer-feature-state-sync.sh
 # Bundled optional/recommended services that ship compose.yaml must not enter
@@ -596,6 +605,7 @@ done
 
 echo "[contract] SearXNG follows web search consumers, not only --recommended"
 bash tests/test-pixel-support-services.sh
+bash tests/test-pixel-model-relay-compose.sh
 grep -qE 'ENABLE_RECOMMENDED:-false' "$features_phase" \
   || { echo "[FAIL] ENABLE_SEARXNG derivation must consult ENABLE_RECOMMENDED"; exit 1; }
 grep -qE 'ENABLE_PIXEL_RUNTIME:-false' "$features_phase" \

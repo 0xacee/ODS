@@ -896,7 +896,7 @@ get_compose_flags() {
                 stale=1
             fi
             if [[ "$_external_lemonade_active" == "true" ]] && \
-               { [[ "$cached" == *"compose.local.yaml"* ]] || [[ "$cached" == *"docker-compose.amd.yml"* ]] || [[ "$cached" != *"docker-compose.cloud.yml"* ]] || [[ "$cached" != *"docker-compose.lemonade-external.yml"* ]]; }; then
+               { [[ "$cached" == *"compose.local.yaml"* ]] || [[ "$cached" == *"docker-compose.amd.yml"* ]] || [[ "$cached" == *"docker-compose.cloud.yml"* ]] || [[ "$cached" != *"docker-compose.lemonade-external.yml"* ]]; }; then
                 stale=1
             fi
             if [[ "$_ods_mode" != "cloud" ]] && [[ "$_external_lemonade_active" != "true" ]] && \
@@ -1325,6 +1325,10 @@ cmd_status() {
     cd "$INSTALL_DIR"
     load_env
     sr_load
+    # Only status needs the model-route selector. Keep unrelated CLI commands
+    # usable while repairing a partial install that is missing this library.
+    # shellcheck source=lib/preflight-llm-route.sh
+    . "$SCRIPT_DIR/lib/preflight-llm-route.sh"
 
     local flags_str
     flags_str=$(get_compose_flags)
@@ -1355,6 +1359,11 @@ cmd_status() {
 
     # Launch parallel health checks
     for sid in "${SERVICE_IDS[@]}"; do
+        # Cloud and external-model installs intentionally do not start the
+        # managed model stack. Report the active LiteLLM gateway instead.
+        if [[ "$sid" == "llama-server" || "$sid" == "model-router" ]] && ods_preflight_uses_litellm; then
+            continue
+        fi
         local health="${SERVICE_HEALTH[$sid]}"
         local port_env="${SERVICE_PORT_ENVS[$sid]}"
         local default_port="${SERVICE_PORTS[$sid]}"
@@ -1442,6 +1451,8 @@ cmd_status_json() {
     cd "$INSTALL_DIR"
     sr_load
     load_env
+    # shellcheck source=lib/preflight-llm-route.sh
+    . "$SCRIPT_DIR/lib/preflight-llm-route.sh"
 
     local flags_str
     flags_str=$(get_compose_flags)
@@ -1462,6 +1473,9 @@ cmd_status_json() {
     trap 'rm -f "$tmp"' RETURN
 
     for sid in "${SERVICE_IDS[@]}"; do
+        if [[ "$sid" == "llama-server" || "$sid" == "model-router" ]] && ods_preflight_uses_litellm; then
+            continue
+        fi
         local cat="${SERVICE_CATEGORIES[$sid]}"
         local health="${SERVICE_HEALTH[$sid]}"
         local port_env="${SERVICE_PORT_ENVS[$sid]}"

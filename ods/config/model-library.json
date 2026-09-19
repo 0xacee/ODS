@@ -356,6 +356,19 @@
       "tokens_per_sec_estimate": 80,
       "llm_model_name": "granite-4.0-h-tiny",
       "llama_server_image": null,
+      "app_compatibility": {
+        "opencode": {
+          "status": "unsupported_until_revalidated",
+          "label": "OpenCode revalidation required",
+          "reason": "In the 2026-09-17 Tower1 exact-head release cycle, OpenCode's build agent issued a read tool call against a fabricated path instead of returning its requested verification phrase on Granite 4.0 H-Tiny. The same installed OpenCode path answered on the baseline and neighboring Granite 4.0 models; Pixel, ODS Talk, LiteLLM, Open WebUI, and Perplexica passed on H-Tiny with exact model-route evidence. Keep this model out of Tower1 all-app release coverage until OpenCode behavior is revalidated.",
+          "evidence": "ods-public-beta-fleet-green-20260911/release-tower1-pr5579-471bc50-135daf6-r216/model-ui/cycle-002/tower1/model-ui.json",
+          "recordedAt": "2026-09-17T08:46:03Z",
+          "productSha": "471bc50df3b3a127aa83ac208c7220e19493d8f6",
+          "harnessSha": "135daf604399fe757e8364d3721767a22bafe541",
+          "hostScope": ["tower1"],
+          "expiresAt": "2026-10-17T00:00:00Z"
+        }
+      },
       "install_recommendation": false
     },
     {
@@ -779,12 +792,13 @@
         "perplexica": {
           "status": "unsupported_until_revalidated",
           "label": "Perplexica revalidation required",
-          "reason": "Earlier fleet runs found Perplexica nonce failures with this model on Tower2 and M5. A 2026-09-15 Tower3 public-beta run again returned an apologetic Perplexica response without the verification phrase, while ODS Talk, LiteLLM, Open WebUI, and Pixel routed and answered on the selected Granite model. Perplexica answered the same harmless payload after Tower3 recovered its Qwen3.5-27B model. Keep Granite 3.2 2B out of all-app release coverage on these hosts until Perplexica passes a real revalidation.",
-          "evidence": "fleet-test/runs/2026-07-23T21-41-59Z-release-product-cf6dffb8e8bb-harness-47eedd6c0b40-hosts-six-scope-6cycle-switchboard/model-ui/cycle-005/tower2; fleet-test/runs/2026-07-23T21-41-59Z-release-product-cf6dffb8e8bb-harness-47eedd6c0b40-hosts-six-scope-6cycle-switchboard/model-ui/cycle-005/m5-mbp; ods-public-beta-fleet-green-20260911/release-four-host-2f985137-abb61b2-r46/model-ui/cycle-006/tower3/model-ui.json; Tower3 Perplexica live comparator 2026-09-15T16:59Z",
-          "recordedAt": "2026-09-15T16:59:00Z",
-          "productSha": "2f985137b9680151395d59d0498a7fa7e169ff2e",
-          "harnessSha": "abb61b2586cb347e0a163d4f8feb2acf74e9cee0",
-          "hostScope": ["tower2", "m5-mbp", "tower3"]
+          "reason": "Fleet runs on Tower2, M5, Tower3, and Tower1 found Perplexica nonce failures with this model. On the 2026-09-17 Tower1 public-beta candidate, Perplexica returned an apologetic response without the verification phrase while Pixel, OpenCode, LiteLLM, Open WebUI, and ODS Talk answered on the selected Granite model. A Tower3 comparator answered the same harmless payload after restoring Qwen3.5-27B. Keep Granite 3.2 2B out of all-app release coverage on these hosts until Perplexica passes a real revalidation.",
+          "evidence": "fleet-test/runs/2026-07-23T21-41-59Z-release-product-cf6dffb8e8bb-harness-47eedd6c0b40-hosts-six-scope-6cycle-switchboard/model-ui/cycle-005/tower2; fleet-test/runs/2026-07-23T21-41-59Z-release-product-cf6dffb8e8bb-harness-47eedd6c0b40-hosts-six-scope-6cycle-switchboard/model-ui/cycle-005/m5-mbp; ods-public-beta-fleet-green-20260911/release-four-host-2f985137-abb61b2-r46/model-ui/cycle-006/tower3/model-ui.json; Tower3 Perplexica live comparator 2026-09-15T16:59Z; ods-public-beta-fleet-green-20260911/release-tower1-pr5579-afe7408-ff56b22-r208/model-ui/cycle-006/tower1/model-ui.json",
+          "recordedAt": "2026-09-17T01:19:42Z",
+          "productSha": "afe74085e572c167f44563efc68476f1a910e179",
+          "harnessSha": "ff56b224a69d8b955a23fd24af8407c9ccf6b4e8",
+          "hostScope": ["tower2", "m5-mbp", "tower3", "tower1"],
+          "expiresAt": "2026-10-17T00:00:00Z"
         },
         "hermes_talk": {
           "status": "unsupported_until_revalidated",

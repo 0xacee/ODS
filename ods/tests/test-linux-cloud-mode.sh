@@ -95,7 +95,7 @@ lemonade_flags="$(LEMONADE_EXTERNAL=true AMD_INFERENCE_RUNTIME=lemonade AMD_INFE
 lemonade_flags="${lemonade_flags//\\//}"
 
 contains "$lemonade_flags" "docker-compose.base.yml" "external Lemonade keeps base stack"
-contains "$lemonade_flags" "docker-compose.cloud.yml" "external Lemonade profiles managed llama-server out"
+rejects "$lemonade_flags" "docker-compose.cloud.yml" "external Lemonade retains model-router instead of cloud profile gate"
 contains "$lemonade_flags" "docker-compose.lemonade-external.yml" "external Lemonade layers dedicated overlay"
 rejects "$lemonade_flags" "docker-compose.cpu.yml" "external Lemonade does not include CPU llama-server overlay"
 
@@ -111,12 +111,24 @@ import sys
 import yaml
 
 services = yaml.safe_load(Path("docker-compose.cloud.yml").read_text(encoding="utf-8"))["services"]
-for name in ("llama-server", "model-router", "pixel-model-relay"):
+for name in ("llama-server", "model-router"):
     service = services.get(name, {})
     if "local-inference" not in service.get("profiles", []) or service.get("restart") != "no":
         print(f"[FAIL] cloud mode must profile {name} out with its local dependency chain", file=sys.stderr)
         sys.exit(1)
-print("[PASS] cloud mode profiles Pixel relay and its local model dependency together")
+if "pixel-model-relay" in services:
+    print("[FAIL] cloud overlay must not disable the enabled Pixel relay", file=sys.stderr)
+    sys.exit(1)
+print("[PASS] cloud mode profiles local inference out and retains Pixel's external gateway route")
+
+external = yaml.safe_load(Path("docker-compose.lemonade-external.yml").read_text(encoding="utf-8"))["services"]
+if external.get("llama-server", {}).get("profiles") != ["local-inference"]:
+    print("[FAIL] external Lemonade must disable only managed llama-server", file=sys.stderr)
+    sys.exit(1)
+if "profiles" in external.get("model-router", {}):
+    print("[FAIL] external Lemonade must leave model-router enabled", file=sys.stderr)
+    sys.exit(1)
+print("[PASS] external Lemonade disables managed llama-server and keeps model-router")
 PY
 
 if grep -Fq -- '--ods-mode "${ODS_MODE:-local}"' installers/lib/compose-select.sh \

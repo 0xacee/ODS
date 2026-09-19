@@ -2998,6 +2998,12 @@ _ods_pixel_runtime_model_identity() {
     if [[ -n "${EXTERNAL_LLM_URL:-}" ]]; then
         model="${EXTERNAL_LLM_MODEL:-}"
         [[ -n "$model" ]] || return 1
+    elif [[ "${LEMONADE_EXTERNAL:-false}" == true ]]; then
+        # WSL can attach to a Windows-hosted Lemonade server while its Linux
+        # hardware detector correctly reports CPU. Bind Pixel to the served
+        # model, not the stale GGUF selected before the external route.
+        model="${LEMONADE_MODEL:-}"
+        [[ -n "$model" ]] || return 1
     elif [[ "${GPU_BACKEND:-}" == amd \
         && "${LLM_BACKEND:-}" == lemonade \
         && "${AMD_INFERENCE_RUNTIME:-}" == lemonade ]]; then
@@ -4591,7 +4597,16 @@ ods_pixel_install_default_agent() {
     # transition gate. Start the edge before the host ingress is installed;
     # its transition endpoint is independent of upstream chat readiness, and
     # the final access reproof below still runs only after ingress is healthy.
-    local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay)
+    # Pixel's plan preflight probes SearXNG even when its agentic web-search
+    # provider is Parallel. ODS also shares SearXNG with OWUI/Perplexica, so
+    # a clean install must start it before Pixel plans its host deployment.
+    local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay searxng)
+    # Managed inference needs the router before the relay's real model probe.
+    # Cloud/external installs instead bind the relay to authenticated LiteLLM;
+    # their Compose overlays intentionally profile model-router out.
+    if [[ "${ODS_MODE:-local}" != cloud && -z "${EXTERNAL_LLM_URL:-}" ]]; then
+        pixel_prerequisites+=(model-router)
+    fi
     owner="${PIXEL_SERVICE_USER:-$(ods_pixel_install_owner)}" || return 1
     home="$(ods_pixel_owner_home "$owner")" || return 1
     pixel_gateway_port="$(_ods_pixel_gateway_port)" || {
@@ -4671,8 +4686,7 @@ ods_pixel_install_default_agent() {
         "$plugin_root/host/native_search.py" --answers-file "$answers" \
         --provider "${PIXEL_WEB_SEARCH_PROVIDER:-}")" || return 1
     case "$web_search_provider" in
-        searxng) pixel_prerequisites+=(searxng) ;;
-        parallel-free) ;;
+        searxng|parallel-free) ;;
         *) ai_bad "Pixel returned an invalid native search provider."; return 1 ;;
     esac
     ai "Starting the ODS model gateway, control API, and search prerequisites for Pixel review..."
@@ -4691,9 +4705,9 @@ ods_pixel_install_default_agent() {
     fi
     _ods_pixel_wait_model_gateway "ODS Pixel model relay" "${PIXEL_MODEL_RELAY_PORT:-4006}" \
         "${PIXEL_MODEL_RELAY_KEY:-}" "$gateway_alias" 180
-    if [[ "$web_search_provider" == searxng ]]; then
-        _ods_pixel_wait_http "ODS local search" "http://127.0.0.1:${SEARXNG_PORT:-8888}/search?q=pixel-preflight&format=json" 90 '.results | type == "array"'
-    fi
+    _ods_pixel_wait_http "ODS local search" \
+        "http://127.0.0.1:${SEARXNG_PORT:-8888}/search?q=pixel-preflight&format=json" \
+        90 '.results | type == "array"'
     _ods_pixel_wait_http "ODS control API" \
         "http://127.0.0.1:${DASHBOARD_API_PORT:-3002}/health" 90
 

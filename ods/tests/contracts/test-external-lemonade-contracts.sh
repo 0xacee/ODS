@@ -174,10 +174,12 @@ rm -f -- "$LOG_FILE"
 unset -f curl
 
 echo "[contract] external Lemonade preflight checks LiteLLM instead of managed llama-server"
-grep -q 'is_external_lemonade()' ods-preflight.sh \
+grep -q 'is_external_lemonade()' lib/preflight-llm-route.sh \
   || { echo "[FAIL] ods-preflight must detect external Lemonade mode"; exit 1; }
-grep -q 'LiteLLM external Lemonade gateway' ods-preflight.sh \
-  || { echo "[FAIL] ods-preflight must label the external Lemonade LiteLLM route"; exit 1; }
+grep -q 'if ods_preflight_uses_litellm; then' ods-preflight.sh \
+  || { echo "[FAIL] ods-preflight must select the external Lemonade LiteLLM route"; exit 1; }
+grep -q 'LiteLLM gateway' ods-preflight.sh \
+  || { echo "[FAIL] ods-preflight must label the LiteLLM route"; exit 1; }
 grep -q 'ods-litellm' ods-preflight.sh \
   || { echo "[FAIL] ods-preflight must check ods-litellm for external Lemonade"; exit 1; }
 
@@ -187,11 +189,13 @@ grep -q 'ODS-RUNTIME-EXTERNAL-LEMONADE-UNAUTHENTICATED-HOST-ROUTE' scripts/ods-d
 grep -q 'sk-ods-lemonade-' scripts/ods-doctor.sh \
   || { echo "[FAIL] ods-doctor must distinguish installer-generated LiteLLM provider keys from user Lemonade API keys"; exit 1; }
 
-echo "[contract] resolver selects cloud + external overlay instead of managed AMD overlay"
+echo "[contract] resolver selects external overlay with switchboard instead of cloud or managed AMD"
 resolved="$(LEMONADE_EXTERNAL=true ODS_MODE=lemonade \
   ./scripts/resolve-compose-stack.sh --script-dir "$ROOT_DIR" --ods-mode lemonade --gpu-backend amd --tier SH_LARGE --env)"
-grep -q 'docker-compose.cloud.yml' <<<"$resolved" \
-  || { echo "[FAIL] external Lemonade must include cloud overlay to disable managed llama-server"; exit 1; }
+if grep -q 'docker-compose.cloud.yml' <<<"$resolved"; then
+  echo "[FAIL] cloud overlay disables the model-router needed by external Lemonade switching"
+  exit 1
+fi
 grep -q 'docker-compose.lemonade-external.yml' <<<"$resolved" \
   || { echo "[FAIL] external Lemonade overlay missing from resolved stack"; exit 1; }
 if grep -q 'docker-compose.amd.yml' <<<"$resolved"; then
@@ -225,7 +229,7 @@ for backend in cpu amd nvidia; do
       resolve_compose_config
       printf '%s\n' "$COMPOSE_FLAGS"
     )"
-    [[ "$installer_resolved" == *docker-compose.cloud.yml* \
+    [[ "$installer_resolved" != *docker-compose.cloud.yml* \
        && "$installer_resolved" == *docker-compose.lemonade-external.yml* \
        && "$installer_resolved" != *"docker-compose.${backend}.yml"* \
        && "$installer_resolved" != *compose.local.yaml* ]] \
@@ -253,19 +257,26 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   for compose_file in "${compose_files[@]}"; do
     [[ -n "$compose_file" ]] && compose_args+=(-f "$compose_file")
   done
-  WEBUI_SECRET=test \
-  HERMES_DASHBOARD_SESSION_TOKEN=test-hermes-dashboard-session-token \
-  LITELLM_KEY=test \
-  OPENCLAW_TOKEN=test \
-  N8N_USER=test@example.local \
-  N8N_PASS=test \
-  SEARXNG_SECRET=test \
-  ODS_SESSION_SECRET=test \
-  LEMONADE_EXTERNAL=true \
-  ODS_MODE=lemonade \
-  GPU_BACKEND=amd \
-  docker compose "${compose_args[@]}" config --services >/dev/null \
+  external_services="$(env \
+    WEBUI_SECRET=test \
+    HERMES_DASHBOARD_SESSION_TOKEN=test-hermes-dashboard-session-token \
+    LITELLM_KEY=test \
+    OPENCLAW_TOKEN=test \
+    N8N_USER=test@example.local \
+    N8N_PASS=test \
+    SEARXNG_SECRET=test \
+    ODS_SESSION_SECRET=test \
+    LEMONADE_EXTERNAL=true \
+    ODS_MODE=lemonade \
+    GPU_BACKEND=amd \
+    docker compose "${compose_args[@]}" config --services)" \
     || { echo "[FAIL] external Lemonade compose config must not have missing dependencies"; exit 1; }
+  grep -qx 'model-router' <<<"$external_services" \
+    || { echo "[FAIL] external Lemonade must build the model-router for Pixel switching"; exit 1; }
+  if grep -qx 'llama-server' <<<"$external_services"; then
+    echo "[FAIL] external Lemonade must not start the managed llama-server"
+    exit 1
+  fi
 else
   echo "[SKIP] docker compose unavailable; resolver assertions cover compose selection"
 fi

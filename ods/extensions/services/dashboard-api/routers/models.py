@@ -29,6 +29,7 @@ from config import (
     ODS_MODE_EFFECTIVE,
     SERVICES,
     normalize_ods_mode,
+    read_live_env_values,
 )
 from gpu import get_gpu_info
 from helpers import (
@@ -76,6 +77,30 @@ def _installed_model_paths() -> dict[str, Path]:
 def _installed_model_path(filename: str) -> Path | None:
     return next((path for name, path in _installed_model_paths().items() if name.casefold() == filename.casefold()), None)
 _ENV_PATH = Path(INSTALL_DIR) / ".env"
+
+
+def _external_lemonade_runtime() -> bool:
+    """Whether Lemonade is owned by the host rather than this ODS install."""
+    env = read_live_env_values((
+        "LEMONADE_EXTERNAL", "AMD_INFERENCE_RUNTIME_MODE", "AMD_INFERENCE_MANAGED",
+        "ODS_MODE", "LLM_BACKEND", "AMD_INFERENCE_RUNTIME",
+    ))
+    runtime_mode = str(env.get("AMD_INFERENCE_RUNTIME_MODE") or "").strip().casefold()
+    managed = str(env.get("AMD_INFERENCE_MANAGED") or "").strip().casefold()
+    external = str(env.get("LEMONADE_EXTERNAL") or "").strip().casefold()
+    return (
+        runtime_mode == "external-lemonade"
+        or external in {"1", "true", "yes", "on"}
+        or (
+            managed in {"0", "false", "no", "off"}
+            and any(
+                str(env.get(key) or "").strip().casefold() == "lemonade"
+                for key in ("ODS_MODE", "LLM_BACKEND", "AMD_INFERENCE_RUNTIME")
+            )
+        )
+    )
+
+
 _HF_API_BASE = "https://huggingface.co"
 _HF_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 _HF_AUTHOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
@@ -353,6 +378,14 @@ def _strip_llm_api_suffix(base_url: str) -> str:
 
 
 def _configured_llm_base_url(host: str, port: int) -> str:
+    # LiteLLM's LLM_API_URL is an alias gateway, not the physical Lemonade
+    # runtime. Model identity and readiness probes must follow the same
+    # backend endpoint as the installed host-inference route.
+    if LLM_BACKEND == "lemonade":
+        for key in ("LEMONADE_CONTAINER_BASE_URL", "LEMONADE_BASE_URL"):
+            value = read_env_value(key, INSTALL_DIR)
+            if value:
+                return _strip_llm_api_suffix(value)
     for key in ("LLM_URL", "LLM_API_URL", "OLLAMA_URL"):
         value = read_env_value(key, INSTALL_DIR)
         if value:
@@ -1350,8 +1383,8 @@ async def list_models(api_key: str = Depends(verify_api_key)):
         payload,
         _model_lifecycle_from_agent_status(agent_status),
     )
-    if gpu_info and loaded_model and live_tps > 0:
-        loaded_entry = next((m for m in payload["models"] if m["status"] == "loaded"), None) or {}
+    loaded_entry = next((m for m in payload["models"] if m["status"] == "loaded"), None) or {}
+    if gpu_info and loaded_model and live_tps > 0 and loaded_entry.get("metadata", {}).get("source") != "runtime":
         signature = build_sample_signature(
             loaded_entry or {"id": loaded_model, "gguf": _read_active_model()},
             gpu_info,
@@ -1378,7 +1411,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
     payload["odsMode"] = ODS_MODE_EFFECTIVE
     payload["configuredMode"] = _configured_ods_mode()
     payload["llmBackend"] = LLM_BACKEND or "unknown"
-    loaded_entry = next((model for model in payload["models"] if model["status"] == "loaded"), None)
+    payload["externalLemonade"] = _external_lemonade_runtime()
     payload["activationReadyModel"] = (
         payload.get("currentModel")
         if loaded_entry
@@ -2007,6 +2040,91 @@ def recover_model_switch(body: dict | None = Body(default=None), api_key: str = 
     return value if isinstance(value, JSONResponse) else JSONResponse(value, headers={'Cache-Control': 'no-store'})
 
 
+def _external_model_observation_projection(value: Any) -> dict[str, Any]:
+    """Keep the browser response limited to a proved, nonsecret model identity."""
+    if not isinstance(value, dict):
+        raise ValueError('External model observation is invalid')
+    model_id = value.get('modelId')
+    context_length = value.get('contextLength')
+    backend = value.get('backend')
+    if (
+        value.get('status') != 'verified'
+        or not isinstance(model_id, str)
+        or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+:/ @(),=-]{0,255}', model_id) is None
+        or type(context_length) is not int
+        or not 1 <= context_length <= 10_000_000
+        or not isinstance(backend, str)
+        or re.fullmatch(r'[A-Za-z0-9._-]{1,64}', backend) is None
+    ):
+        raise ValueError('External model observation is invalid')
+    return {
+        'status': 'verified', 'modelId': model_id,
+        'contextLength': context_length, 'backend': backend,
+    }
+
+
+@router.get('/api/models/external-observation')
+def external_model_observation(api_key: str = Depends(verify_api_key)):
+    try:
+        value = request_agent_json('GET', '/v1/model/external-observation', timeout=20)
+        return JSONResponse(_external_model_observation_projection(value), headers={'Cache-Control': 'no-store'})
+    except AgentHTTPError as exc:
+        if exc.status_code == 409:
+            raise HTTPException(status_code=409, detail='External Lemonade is not configured') from None
+        raise HTTPException(status_code=503, detail='External Lemonade identity is unavailable') from None
+    except (AgentClientError, ValueError):
+        raise HTTPException(status_code=503, detail='External Lemonade identity is unavailable') from None
+
+
+@router.post('/api/models/external-adopt')
+def adopt_external_model(
+    body: dict | None = Body(default=None),
+    api_key: str = Depends(verify_api_key),
+):
+    model_id = body.get('model_id') if isinstance(body, dict) else None
+    if (
+        not isinstance(body, dict) or set(body) != {'model_id'}
+        or not isinstance(model_id, str)
+        or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+:/ @(),=-]{0,255}', model_id) is None
+    ):
+        raise HTTPException(status_code=400, detail='An exact model_id is required')
+    if pixel_stream_active():
+        raise HTTPException(status_code=409, detail={
+            'code': 'pixel_chat_active',
+            'message': 'Pixel is working. Stop the active response before adopting a model.',
+        })
+    try:
+        value = request_agent_json(
+            'POST', '/v1/model/external-adopt', payload={'model_id': model_id}, timeout=600,
+        )
+    except AgentHTTPError as exc:
+        if exc.status_code in {400, 409, 503}:
+            detail = _agent_http_detail(exc)
+            if isinstance(detail, dict):
+                projected = {key: detail[key] for key in ('error', 'code', 'pending') if key in detail}
+                detail = projected or 'External model adoption was not confirmed'
+            else:
+                detail = 'External model adoption was not confirmed'
+            raise HTTPException(status_code=exc.status_code, detail=detail) from None
+        raise HTTPException(status_code=502, detail='External model adoption failed') from None
+    except AgentClientError:
+        raise HTTPException(status_code=503, detail='External model adoption was not confirmed; refresh recovery status') from None
+    if (
+        not isinstance(value, dict) or value.get('status') != 'adopted'
+        or value.get('modelId') != model_id
+        or type(value.get('contextLength')) is not int
+        or not 16384 <= value['contextLength'] <= 10_000_000
+        or not isinstance(value.get('modelTransactionId'), str)
+        or re.fullmatch(r'[a-f0-9]{64}', value['modelTransactionId']) is None
+    ):
+        raise HTTPException(status_code=502, detail='External model adoption response is invalid')
+    return JSONResponse({
+        'status': 'adopted', 'modelId': model_id,
+        'contextLength': value.get('contextLength'),
+        'modelTransactionId': value.get('modelTransactionId'),
+    }, headers={'Cache-Control': 'no-store'})
+
+
 @router.post("/api/models/{model_id}/load")
 def load_model(
     model_id: str,
@@ -2023,6 +2141,15 @@ def load_model(
         raise HTTPException(
             status_code=409,
             detail={**mode_denial, "requestedModelId": model_id},
+        )
+    if _external_lemonade_runtime():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Externally managed Lemonade cannot use local model activation",
+                "code": "external_runtime_unmanaged",
+                "requestedModelId": model_id,
+            },
         )
 
     model = _find_loadable_model(model_id)
