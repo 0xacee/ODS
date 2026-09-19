@@ -19,7 +19,13 @@ fi
 command_text="$(printf '%s' "$encoded_command" | base64 -d 2>/dev/null)" || exit 125
 marker="$control_root/$marker_id.cancel"
 
-setsid sh -lc "$command_text" &
+if [ "$(uname -s)" = Darwin ]; then
+    # macOS has setsid(2), but no setsid command. Keep the child PID as
+    # process-group leader so cancellation also reaches its descendants.
+    /usr/bin/python3 -c 'import os, sys; os.setsid(); os.execv("/bin/sh", ["sh", "-lc", sys.argv[1]])' "$command_text" &
+else
+    setsid sh -lc "$command_text" &
+fi
 child_pid=$!
 
 terminate_child() {

@@ -276,7 +276,8 @@ export default definePluginEntry({
     // so every ODS lookup is followed by a user-visible answer.
     api.on("before_prompt_build", (event, context) => {
       const privateBrowserAccess = privateBrowserAccessForAgent(api.config, AGENT_ID);
-      const workspaceRoot = api.config?.agents?.list?.find(agent => agent.id === AGENT_ID)?.workspace;
+      const workspaceRoot = api.config?.agents?.list?.find(agent => agent.id === AGENT_ID)?.workspace
+        ?? api.config?.agents?.defaults?.workspace;
       toolLoopGuard.observeRun(context, AGENT_ID, event, { privateBrowserAccess, workspaceRoot });
       if (!accessRuntime.isProbe(context)) { goalProgress.begin(event, context); taskActivity.begin(event, context); }
       const contract = promptContractForAgent(context, AGENT_ID, event, {

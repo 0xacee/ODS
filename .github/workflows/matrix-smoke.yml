@@ -31,6 +31,9 @@ jobs:
       - name: WSL Logic Smoke
         run: bash tests/smoke/wsl-logic.sh
 
+      - name: Pixel Execution Cancellation
+        run: python3 tests/test_pixel_cancellable_exec.py
+
       - name: Mobile Dispatch Smoke
         run: bash tests/smoke/mobile-dispatch.sh
 
@@ -238,6 +241,9 @@ jobs:
 
       - name: Native Model Store Restart Tests
         run: /bin/bash tests/test-macos-native-model-store.sh
+
+      - name: Pixel Execution Cancellation
+        run: python3 tests/test_pixel_cancellable_exec.py
 
       - name: Unix Peer Identity Tests
         run: python3 extensions/services/pixel-agent/tests/test_unix_peer.py
