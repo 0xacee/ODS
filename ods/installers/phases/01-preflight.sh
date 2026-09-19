@@ -51,10 +51,19 @@ ods_preflight_require_jq
 # image/model download to look like an unexplained installer hang.
 _phase01_check_required_network() {
     [[ "${OFFLINE_MODE:-false}" == "true" ]] && return 0
-    local target url
+    local target target_name url status
     for target in "GitHub|https://github.com" "Docker Hub|https://registry-1.docker.io/v2/"; do
         IFS='|' read -r target_name url <<< "$target"
-        if ! curl -fsS --connect-timeout 5 --max-time 10 -o /dev/null "$url"; then
+        if ! status="$(curl -sS --connect-timeout 5 --max-time 10 -o /dev/null \
+            -w '%{http_code}' "$url")"; then
+            error "Could not reach ${target_name}. Check DNS, proxy, or captive-portal access, then re-run the installer."
+        fi
+        # Docker Registry v2 intentionally challenges anonymous clients with
+        # 401 plus WWW-Authenticate. That is positive reachability evidence,
+        # not an outage. GitHub must still return a successful/redirect class,
+        # and unexpected registry responses remain fail-closed.
+        if [[ ! "$status" =~ ^[23][0-9]{2}$ ]] \
+            && [[ "$target_name" != "Docker Hub" || "$status" != "401" ]]; then
             error "Could not reach ${target_name}. Check DNS, proxy, or captive-portal access, then re-run the installer."
         fi
     done
