@@ -205,6 +205,7 @@ Options:
     --offline         M1 mode: Configure for fully offline/air-gapped operation
     --lan             Bind services to 0.0.0.0 for LAN access (headless servers)
     --no-bootstrap    Skip bootstrap fast-start (download full model in foreground)
+    --bootstrap       Keep bootstrap fast-start enabled (default; explicit form of the default)
     --summary-json P  Write machine-readable install summary JSON to path P
     -h, --help        Show this help
 
@@ -285,6 +286,7 @@ while [[ $# -gt 0 ]]; do
         --offline) OFFLINE_MODE=true; shift ;;
         --lan) BIND_ADDRESS="0.0.0.0"; BIND_ADDRESS_EXPLICIT=true; shift ;;
         --no-bootstrap) NO_BOOTSTRAP=true; shift ;;
+        --bootstrap) NO_BOOTSTRAP=false; shift ;;
         --summary-json) SUMMARY_JSON_FILE="$2"; shift 2 ;;
         -h|--help) usage ;;
         *) error "Unknown option: $1" ;;
