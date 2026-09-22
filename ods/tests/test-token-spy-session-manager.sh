@@ -94,7 +94,6 @@ HOME=/fake/home
   || fail "~/path did not expand under HOME"
 [ "$(sm_expand_tilde '/abs/path')" = "/abs/path" ] || fail "absolute path was rewritten"
 [ "$(sm_expand_tilde '~other/x')" = "~other/x" ] || fail "another user's ~ was rewritten"
-# shellcheck enable=SC2088
 pass "tilde expansion is exact and scoped to the caller's HOME"
 
 echo "Test 7: shipped default AGENTS entry (~/...) actually reaches cleanup"
