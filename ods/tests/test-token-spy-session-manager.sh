@@ -86,12 +86,15 @@ pass "no session deleted when sessions.json is a partial write"
 rm -rf "$WORK"
 
 echo "Test 6: sm_expand_tilde maps ~/ entries against HOME only"
+# Literal "~/..." strings are the contract under test.
+# shellcheck disable=SC2088
 HOME=/fake/home
 [ "$(sm_expand_tilde '~')" = "/fake/home" ] || fail "bare ~ did not expand to HOME"
 [ "$(sm_expand_tilde '~/ods/data/sessions')" = "/fake/home/ods/data/sessions" ] \
   || fail "~/path did not expand under HOME"
 [ "$(sm_expand_tilde '/abs/path')" = "/abs/path" ] || fail "absolute path was rewritten"
 [ "$(sm_expand_tilde '~other/x')" = "~other/x" ] || fail "another user's ~ was rewritten"
+# shellcheck enable=SC2088
 pass "tilde expansion is exact and scoped to the caller's HOME"
 
 echo "Test 7: shipped default AGENTS entry (~/...) actually reaches cleanup"
