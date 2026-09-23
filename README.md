@@ -158,7 +158,7 @@ Windows recovery note: if the runtime folder is partial and `.\ods.ps1` is missi
 >
 > **Windows:** Requires Docker Desktop with WSL2 backend. NVIDIA GPUs use Docker GPU passthrough; AMD Strix Halo runs through the platform-specific accelerated path documented in the Windows installer and support matrix.
 >
-> **macOS:** Requires Apple Silicon (M1+) and Docker Desktop. llama-server runs natively with Metal GPU acceleration; all other services run in Docker.
+> **macOS:** Requires Apple Silicon (M1+) and Docker Desktop. llama-server uses native Metal acceleration; Pixel's gateway and managed host helpers also run natively. The UI, ingress, sandbox and supporting services run in Docker. See the [macOS Quickstart](ods/docs/MACOS-QUICKSTART.md).
 >
 > See the [Support Matrix](ods/docs/SUPPORT-MATRIX.md) for supported
 > platform claims and the [Validation Matrix](ods/docs/VALIDATION-MATRIX.md)
@@ -252,7 +252,7 @@ See the [macOS Quickstart](ods/docs/MACOS-QUICKSTART.md) for details.
 - **Kokoro** — text-to-speech
 
 ### Agents & Automation
-- **Pixel** — bundled core conversational agent on qualified Ubuntu 24.04/26.04 or Debian 12 systemd hosts, with no private repository access or separate license flag required; appears as `pixel/default` in Open WebUI and as a Dashboard toolbar app
+- **Pixel** — bundled core conversational agent on Apple Silicon macOS and qualified Ubuntu 24.04/26.04 or Debian 12 systemd hosts, including qualified WSL2 installations through the Linux installer. No private repository access or separate license flag is required; appears as `pixel/default` in Open WebUI and as a Dashboard toolbar app. The native PowerShell installer does not install the Pixel host runtime.
 - **Hermes Agent** — independent general-purpose agent, available alongside Pixel; includes memory, skills, and a magic-link-gated proxy
 - **OpenClaw** — deprecated legacy autonomous agent, still opt-in during the migration window
 - **n8n** — workflow automation with 400+ integrations (Slack, email, databases, APIs)

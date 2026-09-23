@@ -13,8 +13,9 @@ acceptance tests.
 The rollout is experimental: Hermes, OpenCode, Open WebUI and the other ODS
 applications remain available in parallel while Pixel matures. This integration
 does not require their removal or a Pixel-only core download. Hermes remains
-installed by default; OpenCode and deprecated OpenClaw remain separately
-selectable. Pixel's capability and model-flexibility goals are unchanged.
+available; the macOS installer disables it while native Pixel is selected.
+OpenCode and deprecated OpenClaw remain separately selectable. Pixel's
+capability and model-flexibility goals are unchanged.
 
 Pixel does not maintain a model allowlist and ODS does not block chat or tool
 use behind a "Pixel-ready" verdict. Every model or remote provider that is
@@ -45,7 +46,7 @@ use, without a separate agreement or acknowledgement flag. It does **not**
 license Pixel as a standalone product or under ODS's Apache-2.0 license. See
 the [repository licensing overview](../LICENSING.md).
 
-This technical integration therefore fails closed:
+The Linux/WSL2 installer applies the following technical eligibility rules:
 
 | Request | Qualified host | Result |
 |---------|----------------|--------|
@@ -55,18 +56,20 @@ This technical integration therefore fails closed:
 | `--pixel` | No | Installer stops before changing the agent route |
 | `--no-pixel` | Any | Pixel route is disabled; Hermes remains available |
 
-## Host eligibility
+## Linux and WSL2 eligibility
 
-Pixel is selected only on:
+The Linux installer selects Pixel on:
 
 - Ubuntu 24.04/26.04 LTS or Debian 12;
 - Linux with `systemd` as PID 1;
 - a native Linux host or WSL2 (WSL1 is rejected); and
 - an ODS-managed local, cloud, hybrid, Lemonade, or external OpenAI-compatible model route.
 
-ODS supports more platforms than Pixel. macOS, Windows-native, other Linux
-distributions continue to install ODS and use Hermes. External Ollama, LM Studio,
-and generic OpenAI-compatible endpoints are bound through authenticated LiteLLM;
+ODS supports more platforms than this Linux path. The native Windows PowerShell
+installer and other Linux distributions use Hermes. Docker Desktop's WSL2
+backend alone does not install Pixel: use the ODS Linux installer inside a
+qualified WSL2 distribution with systemd for that host runtime. External Ollama,
+LM Studio, and generic OpenAI-compatible endpoints are bound through authenticated LiteLLM;
 Pixel uses the exact selected upstream model behind `ods/current`. For a generic
 local/LAN endpoint, select `--external-llm-provider openai-compatible` together
 with `--external-llm-url` and `--external-llm-model`. This reuse path is for
@@ -74,7 +77,26 @@ credential-free upstreams; credentialed remote providers use the Remote GPU
 provider workflow. Do not put credentials in an endpoint URL.
 These are ODS capability gates, not a reduction of the ODS support matrix.
 
-## Architecture
+## Native macOS eligibility
+
+The Apple Silicon macOS installer enables native Pixel by default. It acquires
+the verified `vendor/pixel.bundle` from the public ODS checkout, prepares the
+gateway and managed host services, then activates them with the Docker ingress,
+edge, sandbox and preview services. Metal inference stays on the Mac. No
+separate Linux VM, Linux systemd, private GitHub repository or acknowledgement
+flag is needed for this path.
+
+`--no-pixel` selects the non-Pixel path for a fresh installation. The base
+installer rejects existing native Pixel state rather than silently replacing
+or disabling it; use the managed native update/migration path and preserve
+`data/pixel-native` and its receipts. Do not delete protected state or use force
+to work around that guard. See [MACOS-QUICKSTART.md](MACOS-QUICKSTART.md).
+
+## Linux host architecture
+
+The following systemd/socket layout describes Linux and WSL2. macOS uses native
+service management and a Docker ingress instead of these systemd services;
+the edge authentication, scoped tools and Operations approval boundaries remain.
 
 ```text
 Browser
