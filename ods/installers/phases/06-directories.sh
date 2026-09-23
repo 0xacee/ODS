@@ -1171,7 +1171,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # Generate .env file
     if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]]; then
         _phase06_pixel_runtime_layout || {
-            error "Pixel could not verify the WSL/Docker Desktop shared runtime mount"
+            error "Pixel could not verify the local WSL Docker daemon or Docker Desktop shared runtime mount"
             return 1
         }
     fi

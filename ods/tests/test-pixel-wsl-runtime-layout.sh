@@ -31,6 +31,7 @@ case "${1:-}" in
         printf '%s\n' "${MOCK_ENDPOINT:-unix:///var/run/docker.sock}"
         ;;
     info)
+        [[ "${MOCK_INFO_FAIL:-false}" != true ]] || exit 1
         printf '%s\n' "${MOCK_DOCKER_OS:-Docker Engine - Community}"
         ;;
     *) exit 2 ;;
@@ -89,10 +90,23 @@ pass 'resolved command used for context and daemon probes'
 DOCKER_CMD=docker
 expect_rejection 'unprivileged Docker socket denial fails closed'
 
+export MOCK_DIRECT_DENY=false DOCKER_HOST=unix:///var/run/docker.sock
+expect_layout 'explicit local Unix Docker host uses native WSL mounts' \
+    /run/ods-pixel /run/ods-pixel-preview rprivate
+unset DOCKER_HOST
+
 export MOCK_DIRECT_DENY=false MOCK_DOCKER_OS='Docker Desktop' MOCK_PROPAGATION=shared
 expect_layout 'Docker Desktop uses shared WSL bridge' \
     /mnt/host/wsl/ods-portal-runtime/ingress \
     /mnt/host/wsl/ods-portal-runtime/preview rshared
+
+DOCKER_CMD='sudo docker'
+export MOCK_DIRECT_DENY=true
+expect_layout 'Docker Desktop via resolved sudo command still uses shared bridge' \
+    /mnt/host/wsl/ods-portal-runtime/ingress \
+    /mnt/host/wsl/ods-portal-runtime/preview rshared
+DOCKER_CMD=docker
+export MOCK_DIRECT_DENY=false
 
 export MOCK_PROPAGATION=private
 expect_rejection 'Docker Desktop non-shared WSL mount fails closed'
@@ -100,9 +114,17 @@ expect_rejection 'Docker Desktop non-shared WSL mount fails closed'
 export MOCK_DOCKER_OS='Docker Engine - Community' MOCK_ENDPOINT=tcp://10.0.0.2:2376
 expect_rejection 'remote Docker context fails closed'
 
+export DOCKER_HOST=unix:///var/run/docker.sock
+expect_rejection 'local Unix override cannot mask a remote Docker context'
+unset DOCKER_HOST
+
 export MOCK_ENDPOINT=unix:///var/run/docker.sock DOCKER_HOST=tcp://10.0.0.2:2376
 expect_rejection 'remote Docker host override fails closed'
 unset DOCKER_HOST
+
+export MOCK_INFO_FAIL=true
+expect_rejection 'Docker info failure after local context probe fails closed'
+unset MOCK_INFO_FAIL
 
 export MOCK_DAEMON_AVAILABLE=false
 expect_rejection 'unavailable local daemon fails closed'
@@ -122,5 +144,10 @@ _phase06_pixel_runtime_layout "$scratch/osrelease-linux" "$scratch/wsl" \
     && "$PIXEL_RUNTIME_BIND_PROPAGATION_VALUE" == rprivate \
     && ! -s "$MOCK_CALLS" ]] || fail 'ordinary Linux unexpectedly probed Docker'
 pass 'ordinary Linux layout unchanged'
+
+grep -Fq 'Pixel could not verify the local WSL Docker daemon or Docker Desktop shared runtime mount' \
+    "$ROOT/installers/phases/06-directories.sh" \
+    || fail 'Phase 06 user-facing error omits daemon or Desktop mount failure'
+pass 'Phase 06 error names both possible WSL preflight causes'
 
 printf 'Results: %s passed, 0 failed\n' "$pass_count"
