@@ -243,6 +243,21 @@ describe('Settings', () => {
     expect(within(filters).getByRole('button', { name: 'inactive', exact: true })).toHaveAttribute('aria-pressed', 'true')
   })
 
+  test('includes undeployed and stopped services in the inactive filter', async () => {
+    renderSettings(url => url === '/api/settings/summary' ? response({...summary,
+      services: [
+        {id:'absent',name:'Undeployed service',status:'not_deployed',port:8001},
+        {id:'stopped',name:'Stopped service',status:'stopped',port:8002},
+        {id:'ready',name:'Ready service',status:'healthy',port:8003},
+      ],
+    }) : null)
+    const filters = await screen.findByRole('group', {name:'Filter routes'})
+    fireEvent.click(within(filters).getByRole('button', {name:'inactive',exact:true}))
+    expect(screen.getByText('Undeployed service')).toBeInTheDocument()
+    expect(screen.getByText('Stopped service')).toBeInTheDocument()
+    expect(screen.queryByText('Ready service')).not.toBeInTheDocument()
+  })
+
   test('preserves unsaved environment changes during a global refresh', async () => {
     const { fetchMock } = renderSettings()
     const input = await screen.findByDisplayValue('192.168.1.10')

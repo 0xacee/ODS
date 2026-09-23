@@ -51,7 +51,19 @@ export default function PixelSharingSettings() {
         ...(payload ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : {}),
       })
       if (!current()) return
-      if (!response.ok) throw new Error('Sharing request failed')
+      if (!response.ok) {
+        if (!action && response.status === 503) {
+          const failure = await response.json()
+          if (failure?.code === 'unsupported-platform') {
+            if (!current()) return
+            setSnapshot(null)
+            setIssued(null)
+            setError('Model sharing is not supported by this host. A Portal agent running in WSL does not enable sharing on a Windows host. Reloading will not enable this capability.')
+            return
+          }
+        }
+        throw new Error('Sharing request failed')
+      }
       const result = await response.json()
       const next = readSharing(result)
       const defaultUrl = `http://127.0.0.1:${next.transport.port}/v1`
