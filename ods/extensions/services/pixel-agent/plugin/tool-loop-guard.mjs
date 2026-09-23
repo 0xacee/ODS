@@ -5730,6 +5730,22 @@ export function userMessageRequiresWorkspacePreviewAuthorship(
   return (create.test(text) || portugueseWorkspaceBuildRequest(text)) && !rejectsCreation.test(text);
 }
 
+function directBasicSiteCreation(text) {
+  // This default is deliberately narrower than general website/app intent.
+  // Match the owner's direct creation request, not an example, report topic,
+  // checker, or a suggested implementation inside retrieved/quoted material.
+  const prose = text.replace(/(?:`{3}|~{3})[\s\S]*?(?:`{3}|~{3})/g, " ")
+    .replace(/^\s*>[^\n]*/gm, " ").replace(/"[^"\n]*"|`[^`\n]*`/g, " ")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return prose.split(/[!?;\n]+|\.(?=\s|$)/).some(clause => {
+    const request = clause.trim().replace(/^please[,\s]+/i, "")
+      .replace(/^(?:can|could|would)\s+you\s+(?:please\s+)?/i, "")
+      .replace(/^por\s+favor[,\s]+/i, "");
+    return /^(?:build|create|make|design|generate)\s+(?:(?:me|us)\s+)?(?:a|an)\s+(?:new\s+)?(?:(?:polished|responsive|accessible|clean|modern|small)[,\s]+){0,4}(?:basic|simple|one[- ]page|single[- ]page)[,\s]+(?:(?:polished|responsive|accessible|clean|modern|small|one[- ]page|single[- ]page)[,\s]+){0,4}(?:website|site|web\s*page|landing\s+page)\b/i.test(request)
+      || /^(?:crie|criar|faca|fazer|construa|construir)\s+(?:para\s+mim\s+)?(?:um|uma)\s+(?:(?:novo|nova)\s+)?(?:site|website|pagina\s+web|landing\s+page)\s+(?:simples|basico|basica|de\s+uma\s+pagina)\b/i.test(request);
+  });
+}
+
 export function workspacePreviewMode(messages, prompt = undefined) {
   if (!userMessageRequestsWorkspacePreview(messages, prompt)) return undefined;
   if (userMessageRequestsWorkspaceVisualContinuation(messages, prompt)) return "continuation";
@@ -5747,26 +5763,42 @@ export function workspacePreviewMode(messages, prompt = undefined) {
     /\b(?:research|inspect|read|review)\b[^.!?;\n]{0,96}\b(?:before|then|and)\b/i.test(text) ||
     /\btest(?:ing)?\b[^.!?;\n]{0,64}\bbefore\s+(?:publication|publishing)\b/i.test(text) ||
     /\b(?!index\.html\b)[A-Za-z0-9._-]+\.html\b/i.test(text);
-  // Only an explicit static implementation earns the write-first optimization.
-  // A website/dashboard by itself says nothing about its implementation or
-  // prerequisites. Unknown frameworks and ordinary tasks keep normal tools.
-  const simpleStaticTarget = /\b(?:static\s+(?:html\s+)?(?:page|site|website)|(?:plain|vanilla)\s+html|self[- ]contained\s+html|single[- ]file\s+html)\b/i.test(text);
+  // Explicit static HTML and a direct basic-site request have a useful default
+  // implementation. An unspecified app/dashboard does not. Additional stack,
+  // backend or independent deliverable requirements defeat the basic default,
+  // including implementations not named in the framework list above.
+  const explicitStaticTarget = /\b(?:static\s+(?:html\s+)?(?:page|site|website)|(?:plain|vanilla)\s+html|self[- ]contained\s+html|single[- ]file\s+html)\b/i.test(text);
+  const normalizedText = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const namedImplementation = [...text.matchAll(/\b(?:[Ii]n|[Ww]ith|[Ee]m|[Cc]om)\s+(?:(?:the|o|a)\s+)?([A-Z][A-Za-z0-9.+/-]*)/g)]
+    .some(match => !/\/index\.html\b/i.test(match[1]));
+  const implementationPrerequisites =
+    /\b(?:using|usando|utilizando|framework|backend|back[- ]end|server[- ]side|database|databases|sql|sqlite|postgresql|authentication|autenticacao|banco\s+de\s+dados|servidor|oauth|api|dependencies|dependencias|dependency|packages?|install|compile|compilation|repository|codebase)\b/i.test(normalizedText) ||
+    /\b(?:built\s+(?:with|in)|implemented\s+(?:with|in)|powered\s+by|build\s+(?:command|output|pipeline))\b/i.test(text) ||
+    namedImplementation ||
+    /\b(?:and|then|also)\s+(?:write|create|build|implement)\b[^.!?;\n]{0,64}\b(?:report|script|cli|program|tests?|documentation)\b/i.test(text);
+  const simpleStaticTarget = explicitStaticTarget || directBasicSiteCreation(text);
   // Creating a new site can still require evidence/assets before any write.
   // Do not force a placeholder index ahead of requested inspection or inputs.
   const latestUser = Array.isArray(messages)
     ? [...messages].reverse().find((message) => message?.role === "user")
     : undefined;
   const suppliedMedia = Array.isArray(latestUser?.content) && latestUser.content.some(
-    (part) => part && ["image", "image_url", "input_image", "file", "input_file"].includes(part.type)
+    // Unknown/nontext owner inputs may require inspection too. A text projection
+    // alone cannot prove the model has no supplied media or file prerequisites.
+    (part) => part && typeof part === "object" && !["text", "input_text"].includes(part.type)
   );
   const inputDependent = suppliedMedia ||
     /\b(?:attachments?|uploaded|screenshots?|references?|datasets?|csv|spreadsheets?|pdf)\b/i.test(text) ||
-    /\b(?:from|using|based\s+on|match|copy|recreate)\b[^.!?;\n]{0,96}\b(?:images?|photos?|logos?|files?|data|documents?|designs?|assets?)\b/i.test(text) ||
+    /\b(?:from|using|based\s+on|match(?:ing)?|copy|recreate)\b[^.!?;\n]{0,96}\b(?:images?|photos?|logos?|files?|data|documents?|designs?|assets?|audio|videos?|recordings?|transcripts?)\b/i.test(text) ||
+    /\b(?:imagem|imagens|dados|planilha|planilhas|anexo|anexos|gravacao|video|arquivo|arquivos)\b/i.test(normalizedText) ||
+    /\b(?:from|using|based\s+on|matching)\b[^.!?;\n]{0,96}\b(?:brief|brand\s+guide|project|workspace|folder|directory|repository|template)\b/i.test(text) ||
+    /\b(?:before|after)\b[^.!?;\n]{0,96}\b(?:ask|questions?|generate|assets?|decide|choose|confirm)\b/i.test(text) ||
+    /\b(?:ask|clarify|confirm|decide|generate|download)\b[^.!?;\n]{0,96}\b(?:first|before|then)\b/i.test(text) ||
     /\b(?:read|inspect|research|review|fetch|search)\b/i.test(text) ||
     (text.match(/\b[A-Za-z0-9_-][A-Za-z0-9._/-]*\.[A-Za-z0-9]{1,10}\b/gi) ?? [])
       .some(file => !/(?:^|\/)index\.html$/i.test(file)) ||
     /https?:\/\//i.test(text);
-  return !simpleStaticTarget || frameworkOrBuild || existingProject || inputDependent
+  return !simpleStaticTarget || frameworkOrBuild || implementationPrerequisites || existingProject || inputDependent
     ? "existing-project"
     : "new-static";
 }

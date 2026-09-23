@@ -32,6 +32,12 @@ PRs. Sanitized evidence should still identify the exact test, outcome and hashes
 
 ## Required journeys
 
+Routing controls must include the direct request "Make me a basic website" in
+addition to explicitly static HTML. Both can use the short entry-write/publication
+path only when no existing project, supplied input, framework/backend, or ordered
+prerequisite requires inspection or other work first. Reports about websites and
+ordinary coding remain independent tasks, not implicitly HTML deliverables.
+
 | Journey | Owner task | Independent acceptance |
 | --- | --- | --- |
 | Ordinary coding | Implement a standard-library TTL/LRU cache with an injectable clock, deterministic tests, and background test execution. | Replay a verifier-owned test suite for expiry, overwrite, capacity/eviction and empty cache. Observe the exact command reach terminal exit zero. No real-time sleeps, weakened assertions or unrelated file removal. |

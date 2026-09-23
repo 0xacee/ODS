@@ -43,6 +43,20 @@ function expectedWorkspaceContract(prompt) {
   return `${ODS_COMPACT_CONVERSATION_CONTRACT} ${contract} ${AGENT_SKILLS.workspace}`;
 }
 
+test('ordinary coding guidance requires real CLI entry points and owner-derived acceptance checks', () => {
+  const contract = promptContractForAgent(
+    {agentId:'pixel', contextTokenBudget:65536}, 'pixel',
+    {prompt:'Implement a Python CLI that reads usage records and writes a JSON report.'},
+    {configuredLeanPrompt:true}
+  ).appendSystemContext;
+  assert.match(contract, /documented command as a separate process/);
+  assert.match(contract, /output artifacts and exit status on normal and malformed input/);
+  assert.match(contract, /calling main in a test does not verify its entry point/);
+  assert.match(contract, /named keys\/paths and follow-up corrections/);
+  assert.match(contract, /explicitly protected tests/);
+  assert.doesNotMatch(contract, /call write once/);
+});
+
 test('every model contract distinguishes page reads from authorized execution and forbids nested transports', () => {
   for (const contract of [ODS_CONVERSATION_CONTRACT, ODS_COMPACT_CONVERSATION_CONTRACT]) {
     assert.match(contract,/never select tool_call itself/);

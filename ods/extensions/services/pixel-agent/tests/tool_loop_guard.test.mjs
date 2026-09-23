@@ -12091,6 +12091,8 @@ test("workspace preview modes keep the static fast path narrow", () => {
   for (const prompt of [
     "Create one small static HTML page under Playground/mac-preview/index.html and show me its working preview URL.",
     "Build a basic static HTML website and publish it.",
+    "Make me a basic website.",
+    "Build a basic responsive website and publish it.",
   ]) assert.equal(workspacePreviewMode([], prompt), "new-static", prompt);
   for (const prompt of [
     "Repair the existing React website project and publish its Vite build output.",
@@ -12102,7 +12104,6 @@ test("workspace preview modes keep the static fast path narrow", () => {
     "Read the brief first. Create and publish a website.",
     "Create and preview a website for https://example.org/ using its public content.",
     "Now make a breakout style videogame.",
-    "Build a basic responsive website and publish it.",
     "Build a fresh interactive website demo and show it to me.",
   ]) assert.equal(workspacePreviewMode([], prompt), "existing-project", prompt);
   assert.equal(workspacePreviewMode([], "Create a Python CLI and run its tests."), undefined);

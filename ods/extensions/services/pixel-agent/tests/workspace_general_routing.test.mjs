@@ -50,7 +50,7 @@ const flexible = [
   ['Create a website in Django and test it.','exec',{command:'python -m django --version'}],
   ['Build a website using Rails.','exec',{command:'ruby --version'}],
   ['Build a website in React and run its tests.','read',{path:'package.json'}],
-  ['Build a basic responsive website and publish it.','exec',{command:'ls'}],
+  ['Build a website and publish it.','exec',{command:'ls'}],
 ];
 
 for (const history of [false,true]) for (const wrapped of [false,true]) {
@@ -131,6 +131,7 @@ for (const history of [false,true]) for (const wrapped of [false,true]) for (con
   const path='Playground/site/index.html';
   guard.afterToolCall(toolEvent('read',{path},wrapped,{content:[{type:'text',text:'<h1>Old</h1>'}]}),context);
   assert.notEqual(guard.beforeToolCall(toolEvent('edit',{path,edits:[{oldText:'Old',newText:'New'}]},wrapped),context)?.block,true);
+  assert.equal(guard.beforeToolCall(toolEvent('write',{path:'replacement/index.html',content:'Replacement'},wrapped),context)?.block,true);
 });
 
 test('publish-only failure projection never infers a missing directory from free text',()=>{
