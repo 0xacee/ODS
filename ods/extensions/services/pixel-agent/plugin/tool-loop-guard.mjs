@@ -19,7 +19,7 @@ import { projectWebResult } from "./web-result-projection.mjs";
 import { createCompletionAssurance } from "./completion-assurance.mjs";
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
-import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
+import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, progressLaneStopReason, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent, nativeExecWorkdir } from "./workspace-path-contract.mjs";
 import { routePlaygroundTool, requestsNewPlaygroundProject } from "./playground-projects.mjs";
 import { workspaceMutationFiles } from "./workspace-projects.mjs";
@@ -3633,6 +3633,19 @@ function extensionDiscoveryEligible(state) {
     [...state.operationsRequiredActions].every((action) => EXTENSION_READ_ACTIONS.has(action));
 }
 
+function toolProgressLane(state, tool, wrappedTarget) {
+  // Opt in only for current, explicitly mixed owner scope. This attribution is
+  // accounting, not authority: all existing tool/broker boundaries still run.
+  if (!state?.workspaceLaneRequested || state.workspaceExtensionIsolated) return undefined;
+  const source = ['read','write','edit','apply_patch','exec','process'].includes(tool) ? 'core' : 'pixel-ods';
+  if (wrappedTarget !== undefined && ![tool,`openclaw:${source}:${tool}`].includes(wrappedTarget)) return undefined;
+  if (EXTENSION_REQUEST_TOOLS.has(tool)) return 'extension';
+  if (['read','write','edit','apply_patch','exec','process',WORKSPACE_PREVIEW_TOOL,
+    EVIDENCE_REPORT_TOOL,EVIDENCE_READBACK_TOOL,'pixel_ods_download_promote'].includes(tool)) return 'workspace';
+  // Missing hooks, malformed IDs and shared research remain globally bounded.
+  return undefined;
+}
+
 function extensionDiscoveryActive(state) {
   return extensionDiscoveryEligible(state) &&
     (state.extensionDiscoveryUsed || state.operationsRequiredActions.size > 0);
@@ -6347,7 +6360,8 @@ export function createToolLoopGuard({
     selectedToolName,
     selectedParams,
     verificationFingerprint,
-    transport
+    transport,
+    selectedToolTarget
   ) {
     if (typeof toolCallId !== "string" || !toolCallId) return;
     if (pendingToolRuns.has(toolCallId)) pendingToolRuns.delete(toolCallId);
@@ -6360,6 +6374,7 @@ export function createToolLoopGuard({
       selectedParams,
       verificationFingerprint,
       transport,
+      selectedToolTarget,
     });
   }
 
@@ -6648,6 +6663,16 @@ export function createToolLoopGuard({
     if (state?.ownerQuestions) return {block:true, blockReason:'Waiting for the owner to answer the clarification questions. End this turn without further tools; never choose answers for the owner.'};
     if (state?.progressBudget.exhausted) {
       return { block: true, blockReason: RUN_PROGRESS_STOP_REASON };
+    }
+    const progressLane = toolProgressLane(state, delegatedName,
+      toolName === 'tool_call' ? (normalizedParams ?? event?.params)?.id : undefined);
+    const progressParams = toolName === 'tool_call'
+      ? (normalizedParams ?? event?.params)?.args : normalizedParams ?? event?.params;
+    const observesPendingProcess = delegatedName === 'process' && progressParams?.action === 'poll' &&
+      state?.pendingExecSessions.has(progressParams?.sessionId);
+    if (state?.progressBudget.laneExhausted(progressLane) &&
+        !EXTENSION_METADATA_TOOLS.has(delegatedName) && !observesPendingProcess) {
+      return {block:true, blockReason:progressLaneStopReason(progressLane)};
     }
     if (state?.githubExtensionRequest && ['write','edit','apply_patch','exec','process'].includes(delegatedName)
         && state.preparationExecutionHost !== 'sandbox') {
@@ -7327,7 +7352,8 @@ export function createToolLoopGuard({
         selectedToolName === "exec"
           ? verificationExecFingerprint(selectedParams)
           : undefined,
-        toolName
+        toolName,
+        selectedToolTarget
       );
       if (
         selectedToolName !== SYNCHRONOUS_HOST_OBSERVE_TOOL &&
@@ -8735,7 +8761,9 @@ export function createToolLoopGuard({
         ? String(event.params?.id ?? '').split(':').at(-1) : toolName;
       state.progressBudget.observeResult({callId: toolCallId, tool: toolName,
         params: event.params, failed: failedToolOutcome(event), pending: running,
-        discovery:state.workspaceExtensionIsolated && EXTENSION_METADATA_TOOLS.has(effectiveProgressTool)});
+        discovery:state.workspaceLaneRequested && (EXTENSION_METADATA_TOOLS.has(effectiveProgressTool) ||
+          effectiveProgressTool === 'pixel_ops_inventory'),
+        lane:toolProgressLane(state, effectiveProgressTool,toolName === 'tool_call' ? event.params?.id : undefined)});
     }
     if (
       toolName === "tool_call" &&
@@ -9486,6 +9514,7 @@ export function createToolLoopGuard({
   function trustedOperationsContinuation(state, runId) {
     if (!state?.operationsRequired) return undefined;
     if (extensionDiscoveryActive(state)) return undefined;
+    if (state.progressBudget.laneExhausted('extension') && state.operationsExpectedExtensionLifecycle) return undefined;
     if (state.operationsExpectedExtensionLifecycle?.action === "install-next") {
       return catalogInstallationContinuation(state);
     }
@@ -9690,14 +9719,19 @@ export function createToolLoopGuard({
     if (state?.extensionCompletionGate?.active &&
         message.toolName !== 'pixel_ods_extension_request_status')
       state.extensionReadOnlyRecovery.otherToolSeen = true;
+    const progressLane = toolProgressLane(state, pending?.selectedToolName ?? message.toolName,
+      pending?.transport === 'tool_call' ? pending.selectedToolTarget : undefined);
     // Native loop blocks can bypass before/after_tool_call entirely. Count
     // their persisted error receipt too; call IDs prevent double accounting.
     if (state && message.isError === true) {
       state.progressBudget.observeResult({callId: toolCallId, tool: message.toolName,
-        failed: true});
+        failed: true, lane:progressLane});
     }
     if (state?.progressBudget.exhausted) {
       return {message: {...message, content: [{type: 'text', text: RUN_PROGRESS_STOP_REASON}]}};
+    }
+    if (message.isError === true && state?.progressBudget.laneExhausted(progressLane)) {
+      return {message:{...message,content:[...(message.content ?? []),{type:'text',text:progressLaneStopReason(progressLane)}]}};
     }
     const compactWebResult = pending?.transport === "tool_call" &&
       ["web_search", "web_fetch"].includes(pending.selectedToolName) &&
@@ -9710,7 +9744,7 @@ export function createToolLoopGuard({
       ? undefined
       : compactWorkspaceCoreResult(message, pending, state);
     const workspaceStageInstruction = (() => {
-      if (!compactCoreResult || !state?.workspaceTaskDirectory) return undefined;
+      if (!compactCoreResult || !state?.workspaceTaskDirectory || state.progressBudget.laneExhausted('workspace')) return undefined;
       const nextFile = state.workspaceMutationRequested
         ? state.workspaceRequestedFiles.find((file) =>
           !state.successfulWritePaths.has(`${state.workspaceTaskDirectory}/${file}`)
@@ -9752,6 +9786,7 @@ export function createToolLoopGuard({
       return undefined;
     })();
     const previewStageInstruction = (() => {
+      if (state?.progressBudget.laneExhausted('workspace')) return undefined;
       if (state?.workspacePreviewRequired && !state.workspacePreview && !state.workspacePreviewVerifiedDirectory &&
           !state.workspacePreviewForbidden && !state.operationsRequired && !state.exactDownloadRequested) {
         const directory = workspacePreviewDirectoryFromState(state);
@@ -9870,13 +9905,15 @@ export function createToolLoopGuard({
     }
     if (state?.ownerQuestions) return {action:'finalize', reason:'Waiting for the owner clarification answer.'};
     if (state?.recursiveDeleteDenied || state?.progressBudget.exhausted || state?.clientCancelled || state?.webLoopAborted) return undefined;
+    const extensionStopped = state?.progressBudget.laneExhausted('extension');
+    const workspaceStopped = state?.progressBudget.laneExhausted('workspace');
     const continuation =
       trustedOperationsContinuation(state, runId) ??
-      trustedWorkspacePreviewContinuation(state);
+      (workspaceStopped ? undefined : trustedWorkspacePreviewContinuation(state));
     if (!continuation) {
-      const decision = state?.extensionCompletionGate?.active
+      const decision = state?.extensionCompletionGate?.active && !extensionStopped
         ? state.extensionCompletionGate.finalize()
-        : state?.completionAssurance.finalize(event?.lastAssistantMessage ?? '');
+        : workspaceStopped ? undefined : state?.completionAssurance.finalize(event?.lastAssistantMessage ?? '');
       if (state?.extensionCompletionGate?.active)
         state.extensionDecisionRecovery.gateRevisionRequested = decision?.action === 'revise';
       return decision;
@@ -9893,6 +9930,14 @@ export function createToolLoopGuard({
   }
 
   function verificationForRun(runId) {
+    const verification = mixedTaskVerificationForRun(runId);
+    const stopped = runs.get(runId)?.progressBudget.exhaustedLanes ?? [];
+    if (!stopped.length) return verification;
+    return {...verification,status:'failed',
+      text:[verification.text,...stopped.map(progressLaneStopReason)].filter(Boolean).join('\n\n')};
+  }
+
+  function mixedTaskVerificationForRun(runId) {
     let verification = taskVerificationForRun(runId);
     const state = runs.get(runId);
     if (!state?.workspaceLaneRequested || !state.extensionCompletionGate?.active) return verification;
