@@ -897,11 +897,37 @@ async function verificationForRun(runId, token, gatewayPort, signal, deps) {
   }
 }
 
+function missingVisibleAssistantText(content) {
+  return typeof content === 'string' && (!content.trim() ||
+    ['NO_REPLY', 'No response from OpenClaw.', EMPTY_ASSISTANT_RESPONSE].includes(content.trim()));
+}
+
+function deliveryVerification(completion, verification) {
+  const choice = completion?.choices?.length === 1 ? completion.choices[0] : undefined;
+  const content = choice?.message?.content;
+  // Missing/non-text content is a malformed gateway envelope, not evidence of
+  // a model that completed silently. Reject it consistently for JSON and SSE.
+  if (typeof content !== 'string') throw new HttpError(502, 'invalid upstream response');
+  // A completed transport/run is not proof of a useful answer. The harness can
+  // skip before_agent_finalize for an empty assistant message, so classify its
+  // terminal result here, after reading the same run's trusted evidence. This
+  // never resubmits the owner request or repeats a possibly completed effect.
+  if (!missingVisibleAssistantText(content) || choice.finish_reason === 'tool_calls' ||
+      choice.message.tool_calls?.length || verification.text || verification.status === 'pending') return verification;
+  const { suppressStaleExecWarning, ...evidence } = verification;
+  return {
+    ...evidence, status:'failed',
+    text:'Pixel ended without a visible answer or a delivered result. This request is incomplete. ' +
+      'Earlier tool activity may have completed; check its receipts before repeating any action. ' +
+      'No detailed failure reason was returned.',
+  };
+}
+
 function applyVerificationToCompletion(completion, verification) {
   if (verification.deliveryMode === "append") {
     const choice = completion?.choices?.[0];
     const content = choice?.message?.content;
-    if (typeof content === "string" && content.trim()) {
+    if (typeof content === "string" && !missingVisibleAssistantText(content)) {
       // Both input components already have transport bounds. Preserve the
       // model's work summary; a verified observation is not the entire task.
       const scope = verification.preview
@@ -1243,13 +1269,13 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
           gatewayPort, controller.signal, deps);
         completionRunId = completion?.id;
         deliveryStage = "verification";
-        const verification = await verificationForRun(
+        const verification = deliveryVerification(completion, await verificationForRun(
           completion?.id,
           token,
           gatewayPort,
           controller.signal,
           deps
-        );
+        ));
         await hooks.onComplete?.(completion,verification);
         deliveryStage = "delivery";
         res.end(completionSse(
@@ -1280,13 +1306,13 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
       gatewayPort, controller.signal, deps);
     completion = await maybeContinueUnfinishedExtensionDecision(completion, gatewayOutgoing, token,
       gatewayPort, controller.signal, deps);
-    const verification = await verificationForRun(
+    const verification = deliveryVerification(completion, await verificationForRun(
       completion?.id,
       token,
       gatewayPort,
       controller.signal,
       deps
-    );
+    ));
     await hooks.onComplete?.(completion,verification);
     const verifiedCompletion = applyVerificationToCompletion(completion, verification);
     const responseBody = verifiedCompletion === completion && completion === originalCompletion
