@@ -173,6 +173,9 @@ export const EXEC_ARGUMENTS_REQUIRE_COMMAND_REASON =
 export const WORKSPACE_PREVIEW_REQUIRES_FILES_REASON =
   "Pixel cannot publish this website yet because this response has not created or inspected an index.html in the requested workspace directory. Create the static site files first, then call pixel_ods_workspace_preview with that one relative directory.";
 
+export const WORKSPACE_PREVIEW_FRESH_ENTRY_REASON =
+  "This is a new static browser artifact. Start with exactly one write of the complete entry document to a fresh workspace-relative path ending in /index.html. Do not inspect unrelated files, run commands, start a server, scaffold a framework, or use extension tools before that entry file exists. After the entry write succeeds, create any requested local assets, verify what the owner asked for, and publish that exact directory.";
+
 export const WORKSPACE_PREVIEW_REQUIRES_READBACK_REASON =
   "The host verified the published snapshot. The owner also requested file inspection; complete the remaining file reads alongside any other requested checks. Static publication does not prove functional behavior.";
 
@@ -5549,7 +5552,7 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
     (browserVisual && build) || portugueseWorkspaceBuildRequest(text);
 }
 
-function userMessageRequiresWorkspacePreviewAuthorship(
+export function userMessageRequiresWorkspacePreviewAuthorship(
   messages,
   prompt = undefined
 ) {
@@ -5578,6 +5581,31 @@ function userMessageRequiresWorkspacePreviewAuthorship(
     /\b(?:show|open|view|preview)\s+(?:me\s+)?(?:the|that|this|our|my)\b[^.!?;\n]{0,64}\b(?:apps?|applications?|artwork|animation|chart|diagram|game|illustration|site|website)\b/i.test(text);
   if (reuseExisting && !explicitCreation) return false;
   return (create.test(text) || portugueseWorkspaceBuildRequest(text)) && !rejectsCreation.test(text);
+}
+
+export function workspacePreviewMode(messages, prompt = undefined) {
+  if (!userMessageRequestsWorkspacePreview(messages, prompt)) return undefined;
+  if (userMessageRequestsWorkspaceVisualContinuation(messages, prompt)) return "continuation";
+  if (!userMessageRequiresWorkspacePreviewAuthorship(messages, prompt)) return "existing-project";
+  const text = currentOwnerIntentText(messages, prompt) ?? "";
+  // A requested framework or existing source tree needs inspection, dependency
+  // work and a real build. The deterministic entry-file fast path is only for
+  // a fresh static artifact where those steps add failure modes, not value.
+  const frameworkOrBuild =
+    /\b(?:angular|astro|bun|gatsby|jsx|next(?:\.js)?|node(?:\.js)?|npm|nuxt|parcel|pnpm|react|remix|rollup|svelte|tsx|typescript|vite|vue|webpack|yarn)\b/i.test(text) ||
+    /\b(?:build\s+command|build\s+output|compile|dependencies|package\.json|source\s+tree)\b/i.test(text);
+  const existingProject =
+    /\b(?:existing|current|previous|prior|already[- ]created|updated|revised|corrected|repair|fix|debug|migrate|upgrade|rename|move)\b/i.test(text) ||
+    /\b(?:preserve|keep)\b[^.!?;\n]{0,96}\b(?:framework|source|project)\b/i.test(text) ||
+    /\b(?:research|inspect|read|review)\b[^.!?;\n]{0,96}\b(?:before|then|and)\b/i.test(text) ||
+    /\btest(?:ing)?\b[^.!?;\n]{0,64}\bbefore\s+(?:publication|publishing)\b/i.test(text) ||
+    /\b(?!index\.html\b)[A-Za-z0-9._-]+\.html\b/i.test(text);
+  const simpleStaticTarget =
+    /\b(?:browser\s+app|dashboards?|forms?|frontends?|landing\s+pages?|sites?|static\s+(?:html\s+)?pages?|web\s+apps?|web\s+pages?|websites?)\b/i.test(text) ||
+    /(?:^|\/)index\.html\b/i.test(text);
+  return !simpleStaticTarget || frameworkOrBuild || existingProject
+    ? "existing-project"
+    : "new-static";
 }
 
 export function userMessageRequestsWorkspacePreviewInspection(
@@ -6358,6 +6386,7 @@ export function createToolLoopGuard({
         workspaceVerificationRequested: false,
         workspacePreviewRequired: false,
         workspacePreviewForbidden: false,
+        workspacePreviewMode: undefined,
         workspacePreviewAuthorshipRequired: false,
         workspacePreviewModelAuthored: false,
         workspaceVisualContinuationRequested: false,
@@ -7062,6 +7091,29 @@ export function createToolLoopGuard({
       !Array.isArray(pendingParams.args)
         ? pendingParams.args
         : pendingParams;
+    if (
+      state?.workspacePreviewMode === "new-static" &&
+      ![...state.successfulWritePaths].some((value) =>
+        typeof value === "string" && value.endsWith("/index.html")
+      )
+    ) {
+      const entryPath = selectedToolName === "write"
+        ? normalizeWorkspaceFilePath(selectedParams?.path)
+        : undefined;
+      const validEntryWrite =
+        selectedToolName === "write" &&
+        typeof selectedParams?.content === "string" &&
+        selectedParams.content.length > 0 &&
+        typeof entryPath === "string" &&
+        entryPath.endsWith("/index.html") &&
+        entryPath.split("/").every((part) => WORKSPACE_PATH_COMPONENT.test(part));
+      const workspaceBootstrapTool = [
+        "read", "write", "edit", "apply_patch", "exec", "process", WORKSPACE_PREVIEW_TOOL,
+      ].includes(selectedToolName);
+      if (!validEntryWrite && workspaceBootstrapTool) {
+        return { block: true, blockReason: WORKSPACE_PREVIEW_FRESH_ENTRY_REASON };
+      }
+    }
     // No broker submission does not mean no work happened. A clean-context
     // replay is safe only before any tool execution was attempted; a failed
     // or disconnected call may still have produced effects. Discovery alone
@@ -8262,6 +8314,9 @@ export function createToolLoopGuard({
           Boolean(trustedSessionPreview) || state.workspaceVisualArtifactProduced ||
           ((!visualContinuationRequested || explicitDelivery) && previewRequested)
         );
+        state.workspacePreviewMode = state.workspacePreviewRequired
+          ? (trustedSessionPreview ? "continuation" : workspacePreviewMode(event?.messages, event?.prompt))
+          : undefined;
         state.workspacePreviewAuthorshipRequired = Boolean(
           state.workspacePreviewRequired &&
           !trustedSessionPreview &&

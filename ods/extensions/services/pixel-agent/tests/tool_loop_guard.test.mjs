@@ -23,6 +23,7 @@ import {
   CANCELLABLE_EXEC_UNAVAILABLE_REASON,
   EXEC_ARGUMENTS_REQUIRE_COMMAND_REASON,
   WORKSPACE_PREVIEW_REQUIRES_FILES_REASON,
+  WORKSPACE_PREVIEW_FRESH_ENTRY_REASON,
   CLIENT_CANCELLED_REASON,
   DEFAULT_WEB_TOOL_LIMITS,
   canonicalGitHubSourceMatches,
@@ -121,6 +122,7 @@ import {
   userMessageRequestsWorkspaceMutation,
   userMessageRequestsWorkspacePreview,
   userMessageRequestsWorkspacePreviewInspection,
+  workspacePreviewMode,
   userMessageWorkspaceContinuationPath,
   userMessageWorkspaceDirectoryPath,
   userMessageRequestsOperationsEvidenceArtifact,
@@ -11998,7 +12000,7 @@ test("sandbox testing servers do not establish a verified preview", () => {
   assert.equal(reply(guard).payload.text, WORKSPACE_PREVIEW_UNVERIFIED_DELIVERY_PREFIX);
 });
 
-test("preview preparation permits mkdir without claiming publication", () => {
+test("new static preview starts with an entry write instead of shell scaffolding", () => {
   const guard = createToolLoopGuard();
   guard.observeRun(
     { agentId: "pixel", runId: "run-1", sessionId: "session-1" },
@@ -12016,11 +12018,20 @@ test("preview preparation permits mkdir without claiming publication", () => {
       },
     },
   });
-  assert.notEqual(mkdir?.block, true);
+  assert.deepEqual(mkdir, {
+    block: true,
+    blockReason: WORKSPACE_PREVIEW_FRESH_ENTRY_REASON,
+  });
   assert.equal(
     reply(guard).payload.text,
     WORKSPACE_PREVIEW_NOT_CREATED_DELIVERY_PREFIX
   );
+
+  const entry = {
+    path: "Playground/demo-interactive/index.html",
+    content: "<!doctype html><button>Try it</button>",
+  };
+  assert.notEqual(call(guard, "write", { event: { params: entry } })?.block, true);
 
   const unrelated = createToolLoopGuard();
   unrelated.observeRun(
@@ -12034,6 +12045,20 @@ test("preview preparation permits mkdir without claiming publication", () => {
     }).block,
     true
   );
+});
+
+test("workspace preview modes keep the static fast path narrow", () => {
+  for (const prompt of [
+    "Create one small static HTML page under Playground/mac-preview/index.html and show me its working preview URL.",
+    "Build a basic responsive website and publish it.",
+  ]) assert.equal(workspacePreviewMode([], prompt), "new-static", prompt);
+  for (const prompt of [
+    "Repair the existing React website project and publish its Vite build output.",
+    "Research the official sources, build a new visit planner in trip/planner.html, and open a preview.",
+    "Build and show a website, testing it before publication.",
+    "Now make a breakout style videogame.",
+  ]) assert.equal(workspacePreviewMode([], prompt), "existing-project", prompt);
+  assert.equal(workspacePreviewMode([], "Create a Python CLI and run its tests."), undefined);
 });
 
 for (const wrapped of [false, true]) {
