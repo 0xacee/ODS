@@ -3700,8 +3700,7 @@ function extensionDiscoveryVerification(state) {
   const evidence = [];
   const hostJobs = new Map();
   let successes = 0;
-  let inventoryEvidenceIndex = -1;
-  let verifiedInventoryReads = 0;
+  const inventoryEvidenceByTarget = new Map();
   for (const [jobId, submission] of state.operationsSubmittedJobs) {
     const outcome = state.operationsTerminalJobs.get(jobId);
     const hostObservation = submission.actions.length > 0 && submission.actions.every(({ target, action }) =>
@@ -3744,13 +3743,16 @@ function extensionDiscoveryVerification(state) {
           text.startsWith(OPERATIONS_EXTENSION_INVENTORY_EVIDENCE_PREFIX)) {
         // Every submitted broker job is still matched and validated above.
         // Repeating a complete catalog for each paginated model read can exceed
-        // the ingress's 32 KiB text bound even though one snapshot is small.
-        // Keep the last submitted validated snapshot in submission order,
-        // without claiming that older snapshots were identical.
-        if (inventoryEvidenceIndex >= 0) evidence[inventoryEvidenceIndex] = null;
-        inventoryEvidenceIndex = evidence.length;
+        // the ingress's character bound even though one snapshot is small.
+        // List parameters are validated as empty. Compact only the same exact
+        // target; another target's inventory remains independent evidence.
+        // Recording order does not establish submission or completion order.
+        const previous = inventoryEvidenceByTarget.get(action.target);
+        if (previous) evidence[previous.index] = null;
+        inventoryEvidenceByTarget.set(action.target, {
+          index: evidence.length, count: (previous?.count ?? 0) + 1,
+        });
         evidence.push(text);
-        verifiedInventoryReads++;
       } else {
         evidence.push(text);
       }
@@ -3766,10 +3768,13 @@ function extensionDiscoveryVerification(state) {
     }
     evidence.push(text);
   }
-  if (verifiedInventoryReads > 1) {
-    evidence[inventoryEvidenceIndex] +=
-      `\n- Inventory readback: ${verifiedInventoryReads} individually verified inventory reads; ` +
-      "last submitted validated snapshot shown. Earlier snapshots are not asserted identical.";
+  for (const { index, count } of inventoryEvidenceByTarget.values()) {
+    if (count > 1) {
+      evidence[index] +=
+        `\n- Inventory readback: ${count} individually verified inventory reads for this target; ` +
+        "last recorded validated snapshot shown; no chronological ordering is asserted. " +
+        "Other snapshots are not asserted identical.";
+    }
   }
   const text = evidence.filter((item) => item !== null).join("\n\n");
   if (text.length > MAX_INGRESS_VERIFICATION_TEXT) {
