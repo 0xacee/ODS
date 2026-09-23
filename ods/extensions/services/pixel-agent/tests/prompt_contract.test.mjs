@@ -27,6 +27,14 @@ import {
 import { AGENT_SKILLS } from "../plugin/agent-skills.mjs";
 import { workspacePreviewMode } from "../plugin/tool-loop-guard.mjs";
 
+test('framework workspace guidance requires real build output and nested-path asset verification', () => {
+  assert.match(AGENT_SKILLS.workspace, /run the framework's real build/);
+  assert.match(AGENT_SKILLS.workspace, /Never handwrite dist files/);
+  assert.match(AGENT_SKILLS.workspace, /relative asset URLs/);
+  assert.match(AGENT_SKILLS.workspace, /for Vite, --base=\.\//);
+  assert.match(AGENT_SKILLS.workspace, /scripts\/styles load and the application boots at the exact published URL/);
+});
+
 function expectedWorkspaceContract(prompt) {
   const route = workspacePreviewMode([], prompt);
   const contract = route === "new-static"
