@@ -226,7 +226,7 @@ class ApplyTests(unittest.TestCase):
     def test_rollback_does_not_mask_original_failure_when_restart_unavailable(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
-            fixture = build_fixture(home)
+            _unused_fixture = build_fixture(home)
             backup_root = home / ".local" / "state" / "pixel-mesh" / "discord-migration"
             real_run = mig.subprocess.run
 

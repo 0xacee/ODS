@@ -587,8 +587,8 @@ class PortalOutcomeSealedCorpusTests(unittest.TestCase):
     def test_duplicate_tuning_results_are_rejected_before_any_freeze_write(self):
         tuning_root, reveal_root, result, sentinel, tune, held = self.setup_sealed()
         mat = self.materialize_tuning(tuning_root)
-        config = self._pair_system(self.parent, mat)
-        output = self.parent / "campaign"
+        _unused_config = self._pair_system(self.parent, mat)
+        _unused_output = self.parent / "campaign"
         # Fabricate a duplicate tuning result list (both bound to the exact real task
         # digest so only the duplicate-id rejection is exercised) and ensure the freeze
         # validator rejects it before any freeze is written.
@@ -620,7 +620,7 @@ class PortalOutcomeSealedCorpusTests(unittest.TestCase):
         (tuning_root, reveal_root, result, sentinel, tune, held, mat, output, freeze,
          receipt_path, held_mat_root, guardian) = self.run_full_flow()
         manifest_path = reveal_root / "manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        _unused_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         # substituted task file
         task_path = reveal_root / "0001.task"
         real = task_path.read_bytes()
@@ -1186,7 +1186,7 @@ class PortalOutcomeSealedCorpusTests(unittest.TestCase):
         real_materialize = sealed.materializer.materialize
 
         def mismatched_staged_file(**kwargs):
-            returned = real_materialize(**kwargs)
+            _unused_returned = real_materialize(**kwargs)
             staging = kwargs["output_root"]
             path = staging / "materialization.json"
             drifted = json.loads(path.read_text(encoding="utf-8"))
@@ -1258,7 +1258,7 @@ class PortalOutcomeSealedCorpusTests(unittest.TestCase):
         new_receipt = self.parent / "real-vp-receipt.json"
         new_mat = self.parent / "real-vp-mat"
         with mock.patch.object(campaign, "_valid_pair", wraps=campaign._valid_pair) as spy:
-            retry = sealed.guardian_materialize_heldout(
+            _unused_retry = sealed.guardian_materialize_heldout(
                 **self._guardian_kwargs(tuning_root, reveal_root, output, new_receipt, new_mat),
             )
             self.assertGreaterEqual(spy.call_count, 1)

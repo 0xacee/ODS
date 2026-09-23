@@ -45,7 +45,7 @@ RESERVATION_JSON = {
 def reservation_json(**overrides):
     marker = dict(RESERVATION_JSON)
     marker.update(overrides)
-    body = {key: child for key, child in marker.items() if key != "markerSha256"}
+    _unused_body = {key: child for key, child in marker.items() if key != "markerSha256"}
     marker["markerSha256"] = migration.self_hash(marker, "markerSha256")
     return json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n"
 
@@ -203,7 +203,7 @@ class RestoreReceiptHelperTests(unittest.TestCase):
         marker = dict(RESERVATION_JSON)
         marker["markerSha256"] = None
         del marker["operation"]
-        body = {key: child for key, child in marker.items() if key != "markerSha256"}
+        _unused_body = {key: child for key, child in marker.items() if key != "markerSha256"}
         marker["markerSha256"] = migration.self_hash(marker, "markerSha256")
         write_reservation(
             self.receipt, json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",

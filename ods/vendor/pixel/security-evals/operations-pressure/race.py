@@ -9,7 +9,7 @@ import contextlib
 import importlib.util
 import io
 import json
-import socket
+import socket as socket
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,12 +77,14 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        state = root / "state"; state.mkdir()
+        state = root / "state"
+        state.mkdir()
         policy_path = root / "policy.json"
         value = policy(root, args.budget)
         policy_path.write_text(json.dumps(value), encoding="utf-8")
         grant = {**value["authority"]["grants"][0], "id": "one-use-race"}
-        grant_path = root / "grant.json"; grant_path.write_text(json.dumps(grant), encoding="utf-8")
+        grant_path = root / "grant.json"
+        grant_path.write_text(json.dumps(grant), encoding="utf-8")
 
         def issue() -> str:
             try:

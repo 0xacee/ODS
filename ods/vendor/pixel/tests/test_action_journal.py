@@ -194,7 +194,7 @@ os._exit(73)
     def test_terminal_cli_status_and_exact_pre_submit_cancel(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "journal"
-            journal = self.create(root)
+            _unused_journal = self.create(root)
             command = [sys.executable, str(CLI), "status", "--journal-root", str(root), "--action-id", self.action_id]
             status = json.loads(subprocess.run(command, check=True, capture_output=True, text=True).stdout)
             self.assertEqual(status["state"], "proposed")

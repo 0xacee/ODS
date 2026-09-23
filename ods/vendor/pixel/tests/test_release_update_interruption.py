@@ -12,7 +12,7 @@ import argparse
 import functools
 import json
 import os
-from pathlib import Path
+from pathlib import Path as Path
 import re
 import subprocess
 import unittest
@@ -355,7 +355,7 @@ class QualificationExecutionInterruptionTests(QualificationExecutionTests):
 
     def test_interruption_rejects_wrong_hash(self):
         candidate_id, _ = self.acquire_started_run()
-        preview = self.preview(candidate_id)
+        _unused_preview = self.preview(candidate_id)
         with self.assertRaisesRegex(self.release_update.UpdateError, "hash differs"):
             self.record_interruption(candidate_id, "ab" * 32)
         self.assertFalse(self.interruption_path(candidate_id).exists())

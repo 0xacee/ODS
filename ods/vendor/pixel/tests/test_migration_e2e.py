@@ -27,10 +27,11 @@ import os
 import shutil
 import subprocess
 import sys
+import unittest
 from pathlib import Path
 
 from tests.test_restore_migration_journal_deployment import (
-    CONTRACT, BACKUP, UNIT, FIXED_UNITS, FakeJournalHarnessBase,
+    CONTRACT as CONTRACT, BACKUP as BACKUP, UNIT, FIXED_UNITS, FakeJournalHarnessBase,
 )
 
 

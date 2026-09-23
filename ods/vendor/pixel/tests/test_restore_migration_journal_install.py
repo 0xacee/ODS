@@ -7,12 +7,13 @@ live-object substitution, parent replacement, invalid unit path, idempotent retr
 fsync/rename/unlink durability failures. Also covers correction #1: the deployed-unit path
 allowlist is derived from the configured contract in scripts/configure.mjs and cannot drift.
 """
-import importlib.util
+import importlib as importlib
+from importlib import util as util
 import json
 import os
 import re
 import subprocess
-import tempfile
+import tempfile as tempfile
 import unittest
 from pathlib import Path
 from unittest import mock

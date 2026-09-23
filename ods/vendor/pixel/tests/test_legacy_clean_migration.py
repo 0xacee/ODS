@@ -1746,7 +1746,7 @@ class MigrationActivateTests(unittest.TestCase):
     def test_activate_rollback_failure_is_reported_conservatively(self):
         plan, rehearsal, plan_out, rehearsal_out = self._make_plan_rehearsal()
         self._write_verify_pixel(fail_verify=True)
-        txn = self._install_transaction(pre_state=b"pre-state-bytes-0123456789\n")
+        _unused_txn = self._install_transaction(pre_state=b"pre-state-bytes-0123456789\n")
         self._patch("run_restore_migration_rollback", lambda *a, **k: (_ for _ in ()).throw(
             migration.MigrationError("rollback could not be completed exactly")))
         completion_out = self.directory / "completion.json"

@@ -226,7 +226,8 @@ class PortalOutcomeAssistantEvidenceTests(unittest.TestCase):
         self.assertTrue(lineage["lineageValidated"])
         encoded = "\n".join(path.read_text(encoding="utf-8") for path in (output / "evidence").iterdir())
         self.assertNotIn(PRIVATE_MESSAGE, encoded)
-        tampered = json.loads(json.dumps(envelope)); tampered["independentVerification"]["network"] = "bridge"
+        tampered = json.loads(json.dumps(envelope))
+        tampered["independentVerification"]["network"] = "bridge"
         with self.assertRaisesRegex(assistant_evidence.evaluation.OutcomeError, "invalid or exceeds"):
             self.emit(tampered, {"independent-verifier"}, source_sha256=source_sha)
 

@@ -2380,10 +2380,14 @@ def cmd_arm(custody: str, journal: str, token: str, contract: str, backup: str, 
         argv = argv[:-1]
     count = int(argv[0])
     offset = 1
-    destinations = argv[offset:offset + count]; offset += count
-    old_paths = argv[offset:offset + count]; offset += count
-    temporary_paths = argv[offset:offset + count]; offset += count
-    had_old = [_parse_had_old(x) for x in argv[offset:offset + count]]; offset += count
+    destinations = argv[offset:offset + count]
+    offset += count
+    old_paths = argv[offset:offset + count]
+    offset += count
+    temporary_paths = argv[offset:offset + count]
+    offset += count
+    had_old = [_parse_had_old(x) for x in argv[offset:offset + count]]
+    offset += count
     units = argv[offset:]
     if not (len(destinations) == count and len(old_paths) == count
             and len(temporary_paths) == count and len(had_old) == count):

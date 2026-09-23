@@ -117,8 +117,10 @@ class OperationsLiveTests(unittest.TestCase):
             canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
             manifest["manifestSha256"] = hashlib.sha256(canonical).hexdigest()
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            responses = root / "responses"; responses.mkdir()
-            transcripts = root / "transcripts"; transcripts.mkdir()
+            responses = root / "responses"
+            responses.mkdir()
+            transcripts = root / "transcripts"
+            transcripts.mkdir()
             response_text = " ".join(case.get("responseIncludes", []))
             (responses / "parallel-workflow.json").write_text(json.dumps({"text": response_text}), encoding="utf-8")
             names = [
@@ -157,8 +159,10 @@ class OperationsLiveTests(unittest.TestCase):
             canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
             manifest["manifestSha256"] = hashlib.sha256(canonical).hexdigest()
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            responses = root / "responses"; responses.mkdir()
-            transcripts = root / "transcripts"; transcripts.mkdir()
+            responses = root / "responses"
+            responses.mkdir()
+            transcripts = root / "transcripts"
+            transcripts.mkdir()
             for case in manifest["cases"]:
                 response_text = " ".join(case.get("responseIncludes", []))
                 response_text += " " + live_phrasing[case["id"]]
@@ -262,7 +266,8 @@ class OperationsLiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest_path = self.render(root / "rendered")
-            sessions = root / "sessions"; sessions.mkdir()
+            sessions = root / "sessions"
+            sessions.mkdir()
             transcript = sessions / "00000000-0000-0000-0000-000000000001.jsonl"
             transcript.write_text('{"message":{"content":[{"type":"toolCall","name":"pixel_ops_inventory"}]}}\n', encoding="utf-8")
             fake = root / "openclaw"
@@ -293,7 +298,8 @@ class OperationsLiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest_path = self.render(root / "rendered")
-            sessions = root / "sessions"; sessions.mkdir()
+            sessions = root / "sessions"
+            sessions.mkdir()
             transcript = sessions / "00000000-0000-0000-0000-000000000002.jsonl"
             transcript.write_text(
                 json.dumps({"message": {"role": "assistant", "content": [

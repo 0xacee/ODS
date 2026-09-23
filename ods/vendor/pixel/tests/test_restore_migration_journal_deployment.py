@@ -246,8 +246,6 @@ exit 0
         return self.run("arm", str(self.custody), str(journal), token, contract, backup,
                         "0", *units, str(spec), "--stage", str(stage))
 
-    def install(self, journal, **kw):
-        return self.run("install", str(self.custody), str(journal), **kw)
 
     def inspect(self, journal):
         proc = self.run("inspect", str(self.custody), str(journal))
@@ -309,7 +307,7 @@ class ArmValidationTests(FakeJournalHarnessBase):
         return dep
 
     def test_arm_rejects_bad_path_glob_traversal_root(self):
-        dep = self._live()
+        _unused_dep = self._live()
         bad_paths = ["/", "/etc", "/etc/*", "/a/../b", "/tmp/p?x", "/a/./b",
                      "/etc/passwd\n", "/.."]
         for i, bad in enumerate(bad_paths):
@@ -372,7 +370,7 @@ class ArmValidationTests(FakeJournalHarnessBase):
         self.assertIn("single-link", proc.stderr)
 
     def test_arm_rejects_symlink_escape_ancestor(self):
-        dep = self._live()
+        _unused_dep = self._live()
         journal = self.fake.custody / "t.json"
         real = self.base / "real-dir"
         real.mkdir()
@@ -387,7 +385,7 @@ class ArmValidationTests(FakeJournalHarnessBase):
 
     def test_arm_rejects_had_old_mismatch(self):
         dep = self._live()
-        journal = self.fake.custody / "t.json"
+        _unused_journal = self.fake.custody / "t.json"
         # hadOld=0 but path exists.
         items = [item("config", str(dep / "config" / "app.json"), 0, 0)]
         proc = self.fake.arm_fail(self.fake.custody / "ho1.json", items)
@@ -1224,7 +1222,7 @@ class CaptureOneShotTests(FakeJournalHarnessBase):
     def test_capture_rejects_recapture_overwrite(self):
         dep = self._deploy()
         config = str(write(dep / "config" / "app.json", "OLD"))
-        items = [item("config", config, 0, 1)]
+        _unused_items = [item("config", config, 0, 1)]
         journal = self.fake.custody / "t.json"
         token = self.fake.reserve(journal)
         self.assertEqual(self.fake.capture(journal, token, list(FIXED_UNITS)).returncode, 0)

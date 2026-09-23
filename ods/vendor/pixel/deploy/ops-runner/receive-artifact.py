@@ -67,7 +67,8 @@ def main() -> int:
         return 0
     except Exception:
         if descriptor is not None:
-            os.close(descriptor); descriptor = None
+            os.close(descriptor)
+            descriptor = None
         if created:
             try:
                 os.unlink(filename, dir_fd=job_fd)
@@ -77,7 +78,8 @@ def main() -> int:
     finally:
         if descriptor is not None:
             os.close(descriptor)
-        os.close(job_fd); os.close(root_fd)
+        os.close(job_fd)
+        os.close(root_fd)
 
 
 if __name__ == "__main__":

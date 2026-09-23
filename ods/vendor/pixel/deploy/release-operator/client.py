@@ -12,7 +12,7 @@ loopback address 127.0.0.1 on the fixed port 22, matching the port-22-only known
 
 from __future__ import annotations
 
-import json
+import json as json
 import os
 import re
 import stat

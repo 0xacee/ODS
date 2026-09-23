@@ -584,7 +584,7 @@ def run_campaign(
     )
     freeze_path = output_root / FREEZE_FILE
     tuning_baseline_freeze_sha256 = None
-    stored_identity: dict[str, Any] | None = None
+    _unused_stored_identity: dict[str, Any] | None = None
     stored_freeze: dict[str, Any] | None = None
 
     if partition == "tuning":

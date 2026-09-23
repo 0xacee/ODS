@@ -1638,7 +1638,8 @@ class Broker:
             assert process.stdout is not None and process.stderr is not None
             for stream_name, handle in (("stdout", process.stdout), ("stderr", process.stderr)):
                 thread = threading.Thread(target=capture, args=(stream_name, handle), name=f"pixel-ops-{job_id}-{stream_name}", daemon=True)
-                thread.start(); reader_threads.append(thread)
+                thread.start()
+                reader_threads.append(thread)
             while process.poll() is None:
                 authority_stopped = step["tier"] in {"read", "staging"} and not self.execution_allowed(step)
                 if self.cancelled(job_id) or (abort and abort.is_set()) or authority_stopped:
@@ -1800,7 +1801,8 @@ class Broker:
                 destination.unlink(missing_ok=True)
                 raise
             else:
-                os.fsync(descriptor); os.close(descriptor)
+                os.fsync(descriptor)
+                os.close(descriptor)
             result = {
                 "stepId": step["id"], "target": "broker", "action": step["action"], "exitCode": 0,
                 "durationSeconds": round(time.monotonic() - started, 3), "artifact": {
@@ -1874,7 +1876,8 @@ class Broker:
                 assert process.stdout is not None and process.stderr is not None
                 for stream_name, handle in (("stdout", process.stdout), ("stderr", process.stderr)):
                     thread = threading.Thread(target=capture, args=(stream_name, handle), name=f"pixel-transfer-{job_id}-{stream_name}", daemon=True)
-                    thread.start(); reader_threads.append(thread)
+                    thread.start()
+                    reader_threads.append(thread)
                 while process.poll() is None:
                     cancelled = self.cancelled(job_id)
                     aborted = bool(abort and abort.is_set())
@@ -2188,7 +2191,8 @@ def authority_audit_show(policy_path: Path, state: Path, limit: int) -> int:
                 chunk = os.read(descriptor, min(64 * 1024, window - total))
                 if not chunk:
                     break
-                chunks.append(chunk); total += len(chunk)
+                chunks.append(chunk)
+                total += len(chunk)
             payload = b"".join(chunks)
         finally:
             os.close(descriptor)

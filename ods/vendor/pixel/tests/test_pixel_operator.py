@@ -96,10 +96,10 @@ def write_state_systemctl(root: Path, *, active_code=0, enabled_code=0):
         "#!/bin/sh",
         'case "$1" in',
         "  is-enabled)",
-        f'    exit "$ENABLED_CODE"',
+        '    exit "$ENABLED_CODE"',
         "    ;;",
         "  is-active)",
-        f'    exit "$ACTIVE_CODE"',
+        '    exit "$ACTIVE_CODE"',
         "    ;;",
         "  *) exit 0 ;;",
         "esac",
@@ -121,12 +121,12 @@ def write_fake_systemctl(root: Path, *, active=True, enabled=True):
         "#!/bin/sh",
         'case "$1" in',
         "  is-enabled)",
-        f'    if [ "$2" = --quiet ]; then [ "$ENABLED_V" = 0 ] && exit 0 || exit 1; fi',
-        f'    [ "$ENABLED_V" = 0 ] && echo enabled && exit 0 || echo disabled && exit 1',
+        '    if [ "$2" = --quiet ]; then [ "$ENABLED_V" = 0 ] && exit 0 || exit 1; fi',
+        '    [ "$ENABLED_V" = 0 ] && echo enabled && exit 0 || echo disabled && exit 1',
         "    ;;",
         "  is-active)",
-        f'    if [ "$2" = --quiet ]; then [ "$ACTIVE_V" = 0 ] && exit 0 || exit 1; fi',
-        f'    [ "$ACTIVE_V" = 0 ] && echo active && exit 0 || echo inactive && exit 1',
+        '    if [ "$2" = --quiet ]; then [ "$ACTIVE_V" = 0 ] && exit 0 || exit 1; fi',
+        '    [ "$ACTIVE_V" = 0 ] && echo active && exit 0 || echo inactive && exit 1',
         "    ;;",
         "  *) exit 0 ;;",
         "esac",
@@ -457,7 +457,7 @@ class SecureCopyTests(unittest.TestCase):
 
     def test_copy_verifies_and_stages_bundle(self):
         manifest = b'{"schemaVersion":1}'
-        inbox = make_inbox_bundle(self.root, "goal", manifest, extra={"x.service": b"[Unit]\n"})
+        _unused_inbox = make_inbox_bundle(self.root, "goal", manifest, extra={"x.service": b"[Unit]\n"})
         bundle = pop.secure_copy_bundle(self.config, "goal", sha(manifest))
         self.assertEqual(bundle, self.root / "bundles" / "goal" / sha(manifest))
         self.assertEqual((bundle / "service-bundle.json").read_bytes(), manifest)
@@ -482,7 +482,8 @@ class SecureCopyTests(unittest.TestCase):
     def test_symlink_rejected(self):
         manifest = b'{"schemaVersion":1}'
         inbox = make_inbox_bundle(self.root, "goal", manifest)
-        outside = self.root / "outside"; outside.write_bytes(b"x")
+        outside = self.root / "outside"
+        outside.write_bytes(b"x")
         (inbox / "link.service").symlink_to(outside)
         with self.assertRaises(pop.PixelOperatorError):
             pop.secure_copy_bundle(self.config, "goal", sha(manifest))

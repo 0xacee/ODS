@@ -28,7 +28,7 @@ from pathlib import Path
 from pixel_release_grammar import (
     READERS,
     SHA256,
-    SYSTEMCTL_UNIT_VERBS,
+    SYSTEMCTL_UNIT_VERBS as SYSTEMCTL_UNIT_VERBS,
     UNITS,
     GrammarError,
     validate_operation,

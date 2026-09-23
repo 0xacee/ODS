@@ -3,11 +3,11 @@ import importlib.util
 import gc
 import io
 import json
-import os
+import os as os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
+import sys as sys
 import tempfile
 import unittest
 from unittest import mock

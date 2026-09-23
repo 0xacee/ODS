@@ -72,7 +72,7 @@ class WriteJournalTempCleanupTests(unittest.TestCase):
         real_write = os.write
 
         def short_then_fail(fd, view):
-            n = real_write(fd, view)
+            _unused_n = real_write(fd, view)
             raise OSError("simulated short-write tail failure")
 
         with mock.patch("os.write", side_effect=short_then_fail):

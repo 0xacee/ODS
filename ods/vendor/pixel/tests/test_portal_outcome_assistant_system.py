@@ -41,7 +41,9 @@ class BackendHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         body = json.loads(self.rfile.read(length).decode("utf-8"))
         if self.path != "/v1/chat/completions" or body.get("model") != MODEL or body.get("stream") is not True:
-            self.send_response(400); self.end_headers(); return
+            self.send_response(400)
+            self.end_headers()
+            return
         payload = (
             'data: {"choices":[{"delta":{"content":"VERIFIED"},"finish_reason":"stop"}],'
             '"usage":{"prompt_tokens":120,"completion_tokens":30}}\n\n'
@@ -112,16 +114,20 @@ class PortalOutcomeAssistantSystemTests(unittest.TestCase):
         self.thread.start()
 
     def tearDown(self):
-        self.backend.shutdown(); self.backend.server_close(); self.thread.join(timeout=2)
+        self.backend.shutdown()
+        self.backend.server_close()
+        self.thread.join(timeout=2)
         self.temp.cleanup()
 
     def fixture(self, name):
         run = self.base / name
         run.mkdir(mode=0o700)
-        home = run / "openclaw-home"; home.mkdir(mode=0o700)
+        home = run / "openclaw-home"
+        home.mkdir(mode=0o700)
         control_module.atomic_json(home / "openclaw.json", {"gateway": {"mode": "local"}}, 0o600)
         binary = run / "openclaw"
-        binary.write_text("fixture", encoding="utf-8"); binary.chmod(0o700)
+        binary.write_text("fixture", encoding="utf-8")
+        binary.chmod(0o700)
         onboarding = run / "onboarding.json"
         configured = control_module.merge_onboarding({}, control_module.default_onboarding())
         configured.update({
@@ -157,7 +163,8 @@ class PortalOutcomeAssistantSystemTests(unittest.TestCase):
             },
         }
         proxy_config = run / "proxy.json"
-        proxy_config.write_text(json.dumps(config) + "\n", encoding="utf-8"); proxy_config.chmod(0o600)
+        proxy_config.write_text(json.dumps(config) + "\n", encoding="utf-8")
+        proxy_config.chmod(0o600)
         return run, onboarding, proxy_config, run / "proxy-receipt.json", port
 
     def execute(self, name, runner):
@@ -181,7 +188,8 @@ class PortalOutcomeAssistantSystemTests(unittest.TestCase):
         self.assertEqual(envelope["modelProxyFinalReceipt"]["modelRequests"], 1)
         self.assertEqual(envelope["modelProxyFinalReceipt"]["inputTokens"], 120)
         self.assertTrue(assistant_system._listener_absent(port))
-        output = run / "evidence"; output.mkdir(mode=0o700)
+        output = run / "evidence"
+        output.mkdir(mode=0o700)
         emitted = assistant_evidence.validate_and_emit(
             root=ROOT, run_dir=output, assistant_evidence=envelope, request_payload=MESSAGE.encode(),
             request_sha256=hashlib.sha256(MESSAGE.encode()).hexdigest(),

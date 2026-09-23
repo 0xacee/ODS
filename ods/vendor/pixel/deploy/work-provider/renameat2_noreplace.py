@@ -79,7 +79,7 @@ def main() -> None:
     if not oldname_s.startswith(STAGING_PREFIX):
         _fail(f"oldname must be a staging file ({STAGING_PREFIX}*)")
     if newname_s not in ALLOWED_FINAL_NAMES:
-        _fail(f"newname must be in the closed credential registry")
+        _fail("newname must be in the closed credential registry")
 
     # -----------------------------------------------------------------------
     # Verify the parent-pinned directory fd is open and is a directory
@@ -96,7 +96,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     proc_link = f"/proc/self/fd/{DIR_FD}"
     try:
-        proc_stat = os.stat(proc_link)
+        _unused_proc_stat = os.stat(proc_link)
     except OSError as e:
         _fail(f"/proc/self/fd/{DIR_FD} unavailable: {e}")
 

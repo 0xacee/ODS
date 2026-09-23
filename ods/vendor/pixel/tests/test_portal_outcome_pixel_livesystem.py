@@ -229,11 +229,16 @@ class PixelOutcomeLiveSystemTests(unittest.TestCase):
 
     def test_assistant_product_run_executes_exact_preparation_and_collects_workspace_delta(self):
         with tempfile.TemporaryDirectory() as temporary:
-            parent = Path(temporary).resolve(); runtime_root = parent / "runtime"; run_dir = parent / "evidence"
-            runtime_root.mkdir(mode=0o700); run_dir.mkdir(mode=0o700)
+            parent = Path(temporary).resolve()
+            runtime_root = parent / "runtime"
+            run_dir = parent / "evidence"
+            runtime_root.mkdir(mode=0o700)
+            run_dir.mkdir(mode=0o700)
             templates = []
             for name in ("policy.json", "environment.json", "backend.json", "assistant.json"):
-                path = parent / name; private_json(path, {}); templates.append(path)
+                path = parent / name
+                private_json(path, {})
+                templates.append(path)
             config_path = parent / "system.json"
             private_json(config_path, {
                 "$schema": "https://osmantic.com/pixel/schemas/portal-outcome-pixel-system-v1.schema.json",
@@ -244,8 +249,11 @@ class PixelOutcomeLiveSystemTests(unittest.TestCase):
             })
             request = b"Improve the admitted local fixture."
             source = b"source archive fixture"
-            source_sha = hashlib.sha256(source).hexdigest(); plan_sha = "1" * 64; tree_sha = "2" * 64
-            model = {"modelId": "DeepSeek-V4-Flash-0731"}; inference = {"request": {"wireApi": "openai-chat-completions"}}
+            source_sha = hashlib.sha256(source).hexdigest()
+            plan_sha = "1" * 64
+            tree_sha = "2" * 64
+            model = {"modelId": "DeepSeek-V4-Flash-0731"}
+            inference = {"request": {"wireApi": "openai-chat-completions"}}
             observed = {}
 
             def assistant_runner(**options):
@@ -269,10 +277,13 @@ class PixelOutcomeLiveSystemTests(unittest.TestCase):
                 root=ROOT, configuration_path=config_path, assistant_runner=assistant_runner,
             )
             assistant_root = runtime_root / RUN_ID / "assistant"
-            workspace = assistant_root / "workspace"; home = assistant_root / "openclaw-home"; journal = parent / "journal"
+            workspace = assistant_root / "workspace"
+            home = assistant_root / "openclaw-home"
+            journal = parent / "journal"
             for directory in (assistant_root, workspace, workspace / "source", home, journal):
                 directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-            original = b"original\n"; (workspace / "source" / "main.txt").write_bytes(original)
+            original = b"original\n"
+            (workspace / "source" / "main.txt").write_bytes(original)
             inventory = assistant_root / "source-inventory.json"
             private_json(inventory, {
                 "schemaVersion": 1, "archiveSha256": source_sha, "archiveBytes": len(source),
@@ -282,7 +293,8 @@ class PixelOutcomeLiveSystemTests(unittest.TestCase):
                     "bytes": len(original), "sha256": hashlib.sha256(original).hexdigest(), "inert": False,
                 }],
             })
-            onboarding = assistant_root / "onboarding.json"; private_json(onboarding, {"fixture": True})
+            onboarding = assistant_root / "onboarding.json"
+            private_json(onboarding, {"fixture": True})
             proxy_config = assistant_root / "model-proxy.json"
             private_json(proxy_config, {
                 "schemaVersion": 1, "jobId": "work-1786622400100-abcdefabcdef",
@@ -293,7 +305,8 @@ class PixelOutcomeLiveSystemTests(unittest.TestCase):
                 "allowedTools": ["read", "write"], "receiptPath": "/run/pixel-work-output/model-proxy-receipt.json",
                 "qualification": {"profile": "assistant"}, "inference": {}, "budgets": {},
             })
-            openclaw = parent / "openclaw"; openclaw.write_text("fixture", encoding="utf-8")
+            openclaw = parent / "openclaw"
+            openclaw.write_text("fixture", encoding="utf-8")
             if os.name != "nt": openclaw.chmod(0o700)
             preparation = {
                 "schemaVersion": 1, "operation": "pixel-portal-outcome-assistant-preparation", "runId": RUN_ID,
@@ -314,12 +327,15 @@ class PixelOutcomeLiveSystemTests(unittest.TestCase):
                 "actionJournalRoots": [str(journal)], "externalEffects": False,
                 "boundary": livesystem.ASSISTANT_PREPARATION_BOUNDARY,
             }
-            system._run_dirs[RUN_ID] = run_dir; system._started.add(RUN_ID); system._profiles[RUN_ID] = "assistant"
+            system._run_dirs[RUN_ID] = run_dir
+            system._started.add(RUN_ID)
+            system._profiles[RUN_ID] = "assistant"
             system._runtime_controls[RUN_ID] = {"condition": "cold-first-request"}
             system._contracts[RUN_ID] = (b"model", b"inference", "3" * 64, "4" * 64, model, inference)
             system._invoke = mock.Mock(return_value=preparation)
             admission = {"profile": "assistant", "budgets": {"artifactBytes": 1_048_576}}
-            changed_identity = dict(preparation); changed_identity["openclawBinarySha256"] = "0" * 64
+            changed_identity = dict(preparation)
+            changed_identity["openclawBinarySha256"] = "0" * 64
             with self.assertRaisesRegex(livesystem.evaluation.OutcomeError, "executable identity changed"):
                 livesystem._assistant_preparation(
                     changed_identity, root=ROOT, runtime_root=runtime_root, run_id=RUN_ID,
@@ -358,10 +374,12 @@ class PixelOutcomeLiveSystemTests(unittest.TestCase):
 
     def test_assistant_independent_verifier_is_controller_selected_no_network_and_fail_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
-            workspace = Path(temporary).resolve() / "workspace"; workspace.mkdir(mode=0o700)
+            workspace = Path(temporary).resolve() / "workspace"
+            workspace.mkdir(mode=0o700)
             (workspace / "main.py").write_text("print('ok')\n", encoding="utf-8")
             image = "sha256:" + "a" * 64
-            system = object.__new__(livesystem.PixelDockerSystem); system.docker_path = "docker"
+            system = object.__new__(livesystem.PixelDockerSystem)
+            system.docker_path = "docker"
             system._assistant_verifier_check = mock.Mock(return_value={
                 "id": "semantic", "kind": "command", "criterionIndexes": [0], "status": "pass",
                 "runtimeMilliseconds": 12, "exitCode": 0, "signal": None, "timedOut": False,
@@ -407,7 +425,8 @@ class PixelOutcomeLiveSystemTests(unittest.TestCase):
     def test_assistant_collection_reads_payloads_only_for_changed_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary).resolve()
-            workspace = parent / "workspace"; workspace.mkdir(mode=0o700)
+            workspace = parent / "workspace"
+            workspace.mkdir(mode=0o700)
             unchanged = b"u" * 524288
             changed_before = b"before\n"
             changed_after = b"after\n"

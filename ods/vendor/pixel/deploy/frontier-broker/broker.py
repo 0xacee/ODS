@@ -2461,8 +2461,8 @@ class Broker:
             price_age = utcnow().date() - datetime.strptime(cost["asOf"], "%Y-%m-%d").date()
             if price_age.days > LIVE_QUALIFICATION_COST_MAX_AGE_DAYS:
                 raise BrokerError("API-key live qualification pricing evidence is older than 31 days")
-            credential = read_api_credential(credential_path)
-            credential = ""
+            _unused_credential = read_api_credential(credential_path)
+            _unused_credential = ""
             billing_boundary = "platform-api"
         required_cost_ceiling = (
             estimate_cost(

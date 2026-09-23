@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
-import secrets
+import secrets as secrets
 import subprocess
 import sys
 import unittest
@@ -1040,7 +1040,7 @@ class QualificationHostExecutionTests(QualificationExecutionTests):
             harness.cleanup_docker(name, self._expected(name))
 
     def test_env_probe_fails_when_unexpected_variable_injected(self):
-        harness = load_harness()
+        _unused_harness = load_harness()
         source_root = self._env_probe_source()
         probe = source_root / "scripts" / "safe.sh"
         base = {

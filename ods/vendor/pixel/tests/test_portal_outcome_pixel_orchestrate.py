@@ -187,7 +187,7 @@ class FakeResearchPixelSystem(FakePixelSystem):
         source_id = "source-0123456789abcdef"
         content_sha = "2" * 64
         receipt_sha = "3" * 64
-        evidence_sha = "4" * 64
+        _unused_evidence_sha = "4" * 64
         authority = {
             "directNetwork": False, "credentials": False, "externalWrites": False, "accounts": False,
             "messages": False, "publish": False, "purchase": False, "policyMutation": False,
@@ -284,7 +284,8 @@ class FakeAssistantPixelSystem(FakePixelSystem):
         binary.parent.mkdir(mode=0o700, parents=True)
         binary.write_text("#!/bin/sh\n", encoding="utf-8")
         binary.chmod(0o700)
-        home = self.base / "openclaw-home"; home.mkdir(mode=0o700)
+        home = self.base / "openclaw-home"
+        home.mkdir(mode=0o700)
         control_module.atomic_json(home / "openclaw.json", {"gateway": {"mode": "local"}}, 0o600)
         configured = control_module.merge_onboarding({}, control_module.default_onboarding())
         configured.update({
@@ -555,7 +556,8 @@ class PortalOutcomePixelOrchestrateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)
             task_path, model, inference = self.assistant_task_bundle(parent)
-            run_dir = (parent / "assistant-run").resolve(); run_dir.mkdir(mode=0o700)
+            run_dir = (parent / "assistant-run").resolve()
+            run_dir.mkdir(mode=0o700)
             system = FakeAssistantPixelSystem(model, inference)
             times = iter(["2026-08-13T12:00:00Z", "2026-08-13T12:00:02Z"])
             record = pixel.orchestrate_pixel_run(
@@ -576,7 +578,8 @@ class PortalOutcomePixelOrchestrateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)
             task_path, model, inference = self.controller_task_bundle(parent)
-            run_dir = (parent / "controller-run").resolve(); run_dir.mkdir(mode=0o700)
+            run_dir = (parent / "controller-run").resolve()
+            run_dir.mkdir(mode=0o700)
             system = FakeControllerPixelSystem(model, inference)
             times = iter(["2026-08-13T12:00:00Z", "2026-08-13T12:00:02Z"])
             record = pixel.orchestrate_pixel_run(
@@ -600,7 +603,8 @@ class PortalOutcomePixelOrchestrateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)
             task_path, model, inference = self.controller_task_bundle(parent)
-            run_dir = (parent / "controller-tamper").resolve(); run_dir.mkdir(mode=0o700)
+            run_dir = (parent / "controller-tamper").resolve()
+            run_dir.mkdir(mode=0o700)
             system = TamperedController(model, inference)
             with self.assertRaisesRegex(pixel.evaluation.OutcomeError, "custody"):
                 pixel.orchestrate_pixel_run(

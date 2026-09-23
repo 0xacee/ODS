@@ -2016,7 +2016,7 @@ def cmd_activate(args: argparse.Namespace) -> int:
     # the pass completion, even if commit cleanup fails: the verified new live state is
     # retained and any old-state cleanup is left pending/failed for an idempotent resume.
     terminal = False
-    committed = False
+    _unused_committed = False
     try:
         # Execute the trusted target restore in its explicit migration-only mode. It accepts
         # exactly the authenticated 3.2 root contract (bound to the plan's root-contract hash),
@@ -2076,7 +2076,7 @@ def cmd_activate(args: argparse.Namespace) -> int:
         if migration_receipt is not None:
             _require_installed_release(install_dir, migration_receipt)
         run_restore_migration_commit(pixel, journal)
-        committed = True
+        _unused_committed = True
         return 0
     except MigrationError:
         if terminal:

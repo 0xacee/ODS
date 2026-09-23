@@ -210,7 +210,8 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             root = Path(directory)
             policy_path = root / "policy.json"
             policy_path.write_text(json.dumps(validated), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             with self.assertRaisesRegex(BROKER.BrokerError, "cannot cross the forced-command SSH boundary"):
                 broker.command_for({
@@ -473,7 +474,8 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             root = Path(directory)
             policy_path = root / "policy.json"
             policy_path.write_text(json.dumps(policy()), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             plan = BROKER.compile_request(broker.policy, self.request(kind="action", target="control", action="host.identity"))
             plan["steps"][0]["argv"] = ["/bin/echo", "tampered"]
@@ -487,7 +489,8 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             root = Path(directory)
             policy_path = root / "policy.json"
             policy_path.write_text(json.dumps(policy()), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             plan = BROKER.compile_request(broker.policy, self.request(kind="action", target="control", action="host.identity"))
             BROKER.atomic_json(broker.path("plans", plan["jobId"]), plan)
@@ -520,17 +523,21 @@ class OpsBrokerPolicyTests(unittest.TestCase):
     def test_output_flood_is_bounded_without_tempfile_growth(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            value = policy(str(root)); value["maxOutputBytes"] = 4096
+            value = policy(str(root))
+            value["maxOutputBytes"] = 4096
             value["actions"]["output.flood"] = {
                 "description": "bounded output", "tier": "read", "targets": ["control"],
                 "argv": ["/usr/bin/python3", "-c", "import sys; sys.stdout.write('x'*1048576)"],
                 "cwd": str(root), "timeoutSeconds": 10, "exclusiveTarget": False,
             }
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             request = self.request(kind="action", target="control", action="output.flood")
-            path = broker.directories["requests"] / f"{request['jobId']}.json"; path.write_text(json.dumps(request), encoding="utf-8")
+            path = broker.directories["requests"] / f"{request['jobId']}.json"
+            path.write_text(json.dumps(request), encoding="utf-8")
             broker.serve(once=True)
             result = BROKER.read_regular_json(broker.path("results", request["jobId"]), BROKER.MAX_RESULT_BYTES)
             self.assertEqual(result["status"], "succeeded")
@@ -547,14 +554,20 @@ class OpsBrokerPolicyTests(unittest.TestCase):
                 "fail.fast": {"description": "fail", "tier": "read", "targets": ["control"], "argv": ["/bin/false"], "cwd": str(root)},
                 "sleep.long": {"description": "sleep", "tier": "read", "targets": ["control"], "argv": ["/bin/sleep", "30"], "cwd": str(root)},
             })
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir(); broker = BROKER.Broker(policy_path, state)
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            broker = BROKER.Broker(policy_path, state)
             request = self.request(kind="workflow", steps=[
                 {"id": "fail", "target": "control", "action": "fail.fast"},
                 {"id": "sleeper", "target": "control", "action": "sleep.long"},
             ])
-            path = broker.directories["requests"] / f"{request['jobId']}.json"; path.write_text(json.dumps(request), encoding="utf-8")
-            started = time.monotonic(); broker.serve(once=True); elapsed = time.monotonic() - started
+            path = broker.directories["requests"] / f"{request['jobId']}.json"
+            path.write_text(json.dumps(request), encoding="utf-8")
+            started = time.monotonic()
+            broker.serve(once=True)
+            elapsed = time.monotonic() - started
             result = BROKER.read_regular_json(broker.path("results", request["jobId"]), BROKER.MAX_RESULT_BYTES)
             self.assertEqual(result["status"], "failed")
             self.assertLess(elapsed, 5)
@@ -572,10 +585,14 @@ class OpsBrokerPolicyTests(unittest.TestCase):
                 "description": "remote echo", "tier": "read", "targets": ["control"],
                 "argv": ["/bin/echo", "REMOTE_OK"], "cwd": str(root), "exclusiveTarget": False,
             }
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir(); broker = BROKER.Broker(policy_path, state)
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            broker = BROKER.Broker(policy_path, state)
             request = self.request(kind="action", target="control", action="remote.echo")
-            path = broker.directories["requests"] / f"{request['jobId']}.json"; path.write_text(json.dumps(request), encoding="utf-8")
+            path = broker.directories["requests"] / f"{request['jobId']}.json"
+            path.write_text(json.dumps(request), encoding="utf-8")
             broker.serve(once=True)
             result = BROKER.read_regular_json(broker.path("results", request["jobId"]), BROKER.MAX_RESULT_BYTES)
             self.assertEqual(result["status"], "succeeded")
@@ -598,8 +615,11 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             value["targets"]["control"].update({
                 "backend": "ssh", "sshHost": "fake-worker", "expectedHostname": "fake-worker", "dedicatedRunner": True,
             })
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir(); broker = BROKER.Broker(policy_path, state)
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            broker = BROKER.Broker(policy_path, state)
             BROKER.atomic_json(broker.path("results", source_job), {
                 "jobId": source_job, "status": "succeeded", "steps": [{
                     "artifact": {"filename": filename, "path": str(source), "sha256": checksum, "bytes": len(payload)}
@@ -656,19 +676,25 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             transfer_job = "ops-1780000000004-abcdef123456"
             filename, payload = "payload.bin", b"cancel this transfer\n"
             source = root / "artifacts" / source_job / filename
-            source.parent.mkdir(parents=True); source.write_bytes(payload)
+            source.parent.mkdir(parents=True)
+            source.write_bytes(payload)
             checksum = hashlib.sha256(payload).hexdigest()
-            value = policy(str(root)); value["sshBinary"] = str(ROOT / "tests/fixtures/bin/ssh")
+            value = policy(str(root))
+            value["sshBinary"] = str(ROOT / "tests/fixtures/bin/ssh")
             value["targets"]["control"].update({"backend": "ssh", "sshHost": "fake-worker", "expectedHostname": "fake-worker", "dedicatedRunner": True})
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir(); broker = BROKER.Broker(policy_path, state)
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            broker = BROKER.Broker(policy_path, state)
             BROKER.atomic_json(broker.path("results", source_job), {"jobId": source_job, "status": "succeeded", "steps": [{"artifact": {"filename": filename, "path": str(source), "sha256": checksum, "bytes": len(payload)}}]})
             request = self.request(kind="transfer", jobId=transfer_job, sourceJobId=source_job, target="control", filename=filename)
             broker.path("requests", transfer_job).write_text(json.dumps(request), encoding="utf-8")
             saved = {key: os.environ.get(key) for key in ("PIXEL_RUNNER_ARTIFACT_ROOT", "PIXEL_FAKE_ARTIFACT_RECEIVER", "PIXEL_FAKE_TRANSFER_SLEEP")}
             os.environ.update({"PIXEL_RUNNER_ARTIFACT_ROOT": str(root / "runner-artifacts"), "PIXEL_FAKE_ARTIFACT_RECEIVER": str(ROOT / "deploy/ops-runner/receive-artifact.py"), "PIXEL_FAKE_TRANSFER_SLEEP": "30"})
             try:
-                thread = threading.Thread(target=broker.serve, kwargs={"once": True}, daemon=True); thread.start()
+                thread = threading.Thread(target=broker.serve, kwargs={"once": True}, daemon=True)
+                thread.start()
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
                     result_path = broker.path("results", transfer_job)
@@ -693,11 +719,16 @@ class OpsBrokerPolicyTests(unittest.TestCase):
                 "description": "sleep", "tier": "read", "targets": ["control"],
                 "argv": ["/bin/sleep", "30"], "cwd": str(root), "timeoutSeconds": 60,
             }
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir(); broker = BROKER.Broker(policy_path, state)
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            broker = BROKER.Broker(policy_path, state)
             request = self.request(kind="action", target="control", action="sleep.long")
-            path = broker.directories["requests"] / f"{request['jobId']}.json"; path.write_text(json.dumps(request), encoding="utf-8")
-            thread = threading.Thread(target=broker.serve, kwargs={"once": True}, daemon=True); thread.start()
+            path = broker.directories["requests"] / f"{request['jobId']}.json"
+            path.write_text(json.dumps(request), encoding="utf-8")
+            thread = threading.Thread(target=broker.serve, kwargs={"once": True}, daemon=True)
+            thread.start()
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 result_path = broker.path("results", request["jobId"])
@@ -719,11 +750,16 @@ class OpsBrokerPolicyTests(unittest.TestCase):
                 "description": "sleep", "tier": "read", "targets": ["control"],
                 "argv": ["/bin/sleep", "30"], "cwd": str(root), "timeoutSeconds": 60,
             }
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir(); broker = BROKER.Broker(policy_path, state)
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            broker = BROKER.Broker(policy_path, state)
             request = self.request(kind="action", target="control", action="sleep.long")
-            path = broker.directories["requests"] / f"{request['jobId']}.json"; path.write_text(json.dumps(request), encoding="utf-8")
-            thread = threading.Thread(target=broker.serve, kwargs={"once": True}, daemon=True); thread.start()
+            path = broker.directories["requests"] / f"{request['jobId']}.json"
+            path.write_text(json.dumps(request), encoding="utf-8")
+            thread = threading.Thread(target=broker.serve, kwargs={"once": True}, daemon=True)
+            thread.start()
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 result_path = broker.path("results", request["jobId"])
@@ -746,8 +782,10 @@ class OpsBrokerPolicyTests(unittest.TestCase):
                 "idempotent": False, "reversible": True, "targets": ["control"],
                 "argv": ["/bin/sleep", "30"], "cwd": str(root), "timeoutSeconds": 60, "isolation": "dedicated-runner",
             }
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             grant_path = root / "grant.json"
             grant_path.write_text(json.dumps({
                 "id": "temporary-staging", "level": "bounded-auto", "actions": ["sleep.staging"],
@@ -758,8 +796,10 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             BROKER.authority_grant(policy_path, state, grant_path, 5)
             broker = BROKER.Broker(policy_path, state)
             request = self.request(kind="action", target="control", action="sleep.staging")
-            path = broker.directories["requests"] / f"{request['jobId']}.json"; path.write_text(json.dumps(request), encoding="utf-8")
-            thread = threading.Thread(target=broker.serve, kwargs={"once": True}, daemon=True); thread.start()
+            path = broker.directories["requests"] / f"{request['jobId']}.json"
+            path.write_text(json.dumps(request), encoding="utf-8")
+            thread = threading.Thread(target=broker.serve, kwargs={"once": True}, daemon=True)
+            thread.start()
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 result_path = broker.path("results", request["jobId"])
@@ -774,16 +814,21 @@ class OpsBrokerPolicyTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "approval execution tests use the Linux deployment contract")
     def test_exact_approved_change_executes_once(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); marker = root / "applied.txt"
+            root = Path(directory)
+            marker = root / "applied.txt"
             value = policy(str(root))
             value["actions"]["change.marker"] = {
                 "description": "marker", "tier": "change", "targets": ["control"],
                 "argv": ["/usr/bin/touch", str(marker)], "cwd": str(root), "timeoutSeconds": 10,
             }
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir(); broker = BROKER.Broker(policy_path, state)
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
+            broker = BROKER.Broker(policy_path, state)
             request = self.request(kind="action", target="control", action="change.marker")
-            path = broker.directories["requests"] / f"{request['jobId']}.json"; path.write_text(json.dumps(request), encoding="utf-8")
+            path = broker.directories["requests"] / f"{request['jobId']}.json"
+            path.write_text(json.dumps(request), encoding="utf-8")
             broker.ingest(path)
             status = BROKER.read_regular_json(broker.path("results", request["jobId"]), BROKER.MAX_RESULT_BYTES)
             self.assertEqual(status["status"], "awaiting-approval")
@@ -873,8 +918,10 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             root = Path(directory)
             value = policy_v2()
             value["authority"]["grants"][0]["maxExecutions"] = 2
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             plan = BROKER.compile_request(broker.policy, self.request(
                 kind="action", target="control", action="service.restart", parameters={"service": "demo"},
@@ -891,8 +938,10 @@ class OpsBrokerPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             value = policy_v2()
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             BROKER.authority_pause(policy_path, state, True, "test pause")
             broker = BROKER.Broker(policy_path, state)
             self.assertTrue(broker.paused())
@@ -909,10 +958,13 @@ class OpsBrokerPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             value = policy_v2()
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             grant = {**value["authority"]["grants"][0], "id": "temporary-managed"}
-            grant_path = root / "grant.json"; grant_path.write_text(json.dumps(grant), encoding="utf-8")
+            grant_path = root / "grant.json"
+            grant_path.write_text(json.dumps(grant), encoding="utf-8")
             BROKER.authority_grant(policy_path, state, grant_path, 5)
             broker = BROKER.Broker(policy_path, state)
             self.assertEqual([item["id"] for item in broker.active_leases()], ["temporary-managed"])
@@ -925,8 +977,10 @@ class OpsBrokerPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             value = policy_v2()
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             with mock.patch.object(BROKER.time, "monotonic", return_value=100.0):
                 broker = BROKER.Broker(policy_path, state)
             broker.inventory_refresh_seconds = 5
@@ -972,8 +1026,10 @@ class OpsBrokerPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             value = policy_v2()
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             with mock.patch.object(broker, "refresh_inventory_if_due", return_value=False) as refresh:
                 broker.serve(once=True)
@@ -983,10 +1039,13 @@ class OpsBrokerPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             value = policy_v2()
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             grant = {**value["authority"]["grants"][0], "id": "unknown-target", "targets": ["missing-target"]}
-            grant_path = root / "grant.json"; grant_path.write_text(json.dumps(grant), encoding="utf-8")
+            grant_path = root / "grant.json"
+            grant_path.write_text(json.dumps(grant), encoding="utf-8")
             with self.assertRaisesRegex(BROKER.BrokerError, "unknown target"):
                 BROKER.authority_grant(policy_path, state, grant_path, 5)
 
@@ -1033,15 +1092,19 @@ class OpsBrokerPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             value = policy_v2()
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             collision = {**value["authority"]["grants"][0]}
-            collision_path = root / "collision.json"; collision_path.write_text(json.dumps(collision), encoding="utf-8")
+            collision_path = root / "collision.json"
+            collision_path.write_text(json.dumps(collision), encoding="utf-8")
             with self.assertRaisesRegex(BROKER.BrokerError, "collides with a standing grant"):
                 BROKER.authority_grant(policy_path, state, collision_path, 5)
 
             grant = {**collision, "id": "one-use-race"}
-            grant_path = root / "grant.json"; grant_path.write_text(json.dumps(grant), encoding="utf-8")
+            grant_path = root / "grant.json"
+            grant_path.write_text(json.dumps(grant), encoding="utf-8")
             outcomes = []
             barrier = threading.Barrier(3)
 
@@ -1070,15 +1133,18 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             value = policy()
             validated = BROKER.validate_policy(value)
             expected = BROKER.digest(validated)
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             self.assertEqual(broker.policy_sha256, expected)
             self.assertEqual(BROKER.policy_inventory(validated)["policySha256"], expected)
             # Mutate runtime state only: pause, then a lease, then job use.
             BROKER.authority_pause(policy_path, state, True, "test pause")
             grant = {**policy_v2()["authority"]["grants"][0], "id": "state-mutation-lease"}
-            grant_path = root / "grant.json"; grant_path.write_text(json.dumps(grant), encoding="utf-8")
+            grant_path = root / "grant.json"
+            grant_path.write_text(json.dumps(grant), encoding="utf-8")
             BROKER.authority_grant(policy_path, state, grant_path, 5)
             broker.refresh_inventory()
             stored = json.loads((state / "inventory.json").read_text(encoding="utf-8"))
@@ -1171,8 +1237,10 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             root = Path(directory)
             value = policy(str(root))
             value["actions"]["host.identity"]["cwd"] = str(root)
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             expected = broker.policy_sha256
             # Awaiting-approval result for a change-tier job binds the plan digest.
@@ -1205,8 +1273,10 @@ class OpsBrokerPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             value = policy(str(root))
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             expected = broker.policy_sha256
 
@@ -1235,13 +1305,16 @@ class OpsBrokerPolicyTests(unittest.TestCase):
             value_a = policy(str(root))
             validated_a = BROKER.validate_policy(value_a)
             digest_a = BROKER.digest(validated_a)
-            policy_a_path = root / "policy-a.json"; policy_a_path.write_text(json.dumps(value_a), encoding="utf-8")
+            policy_a_path = root / "policy-a.json"
+            policy_a_path.write_text(json.dumps(value_a), encoding="utf-8")
             value_b = policy(str(root))
             value_b["download"]["maxBytes"] = 4096  # different validated policy digest
             validated_b = BROKER.validate_policy(value_b)
             digest_b = BROKER.digest(validated_b)
-            policy_b_path = root / "policy-b.json"; policy_b_path.write_text(json.dumps(value_b), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_b_path = root / "policy-b.json"
+            policy_b_path.write_text(json.dumps(value_b), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             broker_a = BROKER.Broker(policy_a_path, state)
             self.assertNotEqual(digest_a, digest_b)
             request = self.request(kind="action", target="control", action="service.restart", parameters={"service": "demo"})
@@ -1285,8 +1358,10 @@ class OpsBrokerPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             value = policy_v2(root=str(root))
-            policy_path = root / "policy.json"; policy_path.write_text(json.dumps(value), encoding="utf-8")
-            state = root / "state"; state.mkdir()
+            policy_path = root / "policy.json"
+            policy_path.write_text(json.dumps(value), encoding="utf-8")
+            state = root / "state"
+            state.mkdir()
             broker = BROKER.Broker(policy_path, state)
             plan = BROKER.compile_request(broker.policy, self.request(
                 kind="action", target="control", action="host.identity",

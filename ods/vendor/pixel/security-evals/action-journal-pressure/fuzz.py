@@ -3,7 +3,7 @@
 
 import importlib.util
 import json
-import os
+import os as os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -31,13 +31,21 @@ def main() -> int:
             )
             route = index % 4
             if route == 0:
-                journal.begin_submit(action_id); journal.succeed(action_id, f"{index + 3:064x}"); expected = "succeeded"
+                journal.begin_submit(action_id)
+                journal.succeed(action_id, f"{index + 3:064x}")
+                expected = "succeeded"
             elif route == 1:
-                journal.begin_submit(action_id); journal.mark_unknown(action_id); journal.begin_reconcile(action_id); journal.mark_unknown(action_id, "provider-not-observable"); expected = "unknown"
+                journal.begin_submit(action_id)
+                journal.mark_unknown(action_id)
+                journal.begin_reconcile(action_id)
+                journal.mark_unknown(action_id, "provider-not-observable")
+                expected = "unknown"
             elif route == 2:
-                journal.fail(action_id, "local-validation-failed"); expected = "failed"
+                journal.fail(action_id, "local-validation-failed")
+                expected = "failed"
             else:
-                journal.cancel(action_id); expected = "canceled"
+                journal.cancel(action_id)
+                expected = "canceled"
             status = journal.status(action_id)
             if status["state"] != expected or (expected != "proposed" and status["retryAllowed"]):
                 raise AssertionError("journal stress state or retry decision differs")
