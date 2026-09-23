@@ -1786,6 +1786,20 @@ class TestOpenCodeModelRoute:
         assert calls[0][1]["creationflags"] == 0x08000000
         assert calls[0][1]["env"]["ODS_EXPECTED_GGUF"] == "model.gguf"
 
+    @pytest.mark.parametrize("failure", ["timeout", "missing"])
+    def test_windows_context_inspection_fails_closed_without_replay(self, monkeypatch, failure):
+        calls = []
+        monkeypatch.setattr(_mod, "_windows_management_shell", lambda: "selected-pwsh.exe")
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            assert kwargs["timeout"] == 15
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            raise FileNotFoundError("selected shell disappeared")
+        monkeypatch.setattr(_mod.subprocess, "run", run)
+        assert _mod._windows_lemonade_process_context_length("model.gguf") is None
+        assert len(calls) == 1
+
     @pytest.mark.parametrize("arguments,expected", [
         ('--ctx-size 65536', 65536),
         ('"--ctx-size" "65536"', 65536),
@@ -1813,7 +1827,24 @@ class TestOpenCodeModelRoute:
                 '"C:\\Program Files\\llama-server.exe" "--model" "C:\\Models\\model.gguf" '
                 + arguments + ' "--parallel" "1"')
             fixture = 'function Get-CimInstance { [pscustomobject]@{CommandLine=$env:ODS_CONTEXT_TEST_COMMAND_LINE; CreationDate=1} }\n'
-            return _real_subprocess_run([*command[:-1], fixture + command[-1]], **kwargs)
+            # This integration case tests the real parser, not cold PowerShell
+            # startup latency on a shared CI runner. Keep the production limit
+            # independently asserted and fail visibly on fixture process errors.
+            assert kwargs["timeout"] == 15
+            kwargs["timeout"] = 60
+            try:
+                result = _real_subprocess_run([*command[:-1], fixture + command[-1]], **kwargs)
+            except subprocess.TimeoutExpired as exc:
+                pytest.fail(
+                    f"PowerShell parser fixture timed out after {exc.timeout}s for {arguments!r}",
+                    pytrace=False,
+                )
+            assert result.returncode in (0, 1), (
+                f"PowerShell parser fixture exit={result.returncode}; "
+                f"stdout={result.stdout[:500]!r}; stderr={result.stderr[:500]!r}"
+            )
+            assert not result.stderr.strip(), f"PowerShell parser fixture stderr={result.stderr[:500]!r}"
+            return result
         monkeypatch.setattr(_mod.subprocess, "run", run)
         assert _mod._windows_lemonade_process_context_length("model.gguf") == expected
         assert len(calls) == 1
