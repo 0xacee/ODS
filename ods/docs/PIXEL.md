@@ -295,12 +295,12 @@ PIXEL_SOURCE_REF=<40-character-commit> \
 ./install.sh --pixel
 ```
 
-The canonical remote URL is an explicit development override, not needed for
-normal installs. A local source
-must be a clean Git checkout below `PIXEL_SOURCE_DIR`; the owner directories
-must not be group- or world-writable. Remote Git credential prompts are
-disabled and source operations are bounded. Normal ODS users need no Pixel Git
-credentials.
+Public ODS installs accept only the verified bundle shipped in ODS or an
+explicit absolute local checkout; remote source URLs are not supported,
+including as development overrides. A local source must be a clean Git
+checkout below `PIXEL_SOURCE_DIR`; the owner directories must not be group-
+or world-writable. Source operations are bounded. Normal ODS users need no
+Pixel Git credentials.
 
 ## User experience
 
@@ -567,6 +567,14 @@ finds an existing OpenClaw configuration, Pixel gateway environment, Pixel
 onboarding record, active release, runtime attestation, or gateway systemd unit
 without its management marker, the installer stops and leaves that deployment
 untouched.
+
+An upgrade from the former ODS-managed Pixel source pin migrates the canonical
+`https://github.com/Osmantic/Pixel.git` setting to ODS's bundled source without
+contacting that repository. Before replacing installed ODS files, the installer
+verifies and retires the previous managed Pixel release using its exact local
+source checkout. If that checkout is missing or changed, the upgrade stops
+before retirement or source copy; restore the checkout from a local backup and
+retry. Custom remote source settings are not silently migrated.
 
 ## Configuration reference
 

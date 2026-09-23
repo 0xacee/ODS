@@ -183,7 +183,7 @@ def test_initial_preparation_orders_stages_and_records_failures(tmp_path, monkey
             install_dir=tmp_path if automatic else None, native_home=home if automatic else None,
             node='/node', runtime=None if acquiring else '/runtime',
             sandbox_image=None if acquiring else 'sha256:' + 'b' * 64,
-            npm=None if fault == 'npm' else '/npm', license_authorized=False,
+            npm=None if fault == 'npm' else '/npm',
             destination=destination, docker='/docker', docker_socket='/socket', ods_source=tmp_path,
             ingress_image='sha256:' + 'c' * 64, compose_project='ods', ingress_gid=20)
     failed = fault not in (None, 'acquire', 'source', 'auto')
@@ -287,8 +287,7 @@ def test_legacy_preparation_preserves_active_files_and_keeps_phase_receipts(tmp_
     monkeypatch.setattr(module, 'helper', helpers.__getitem__)
     def run():
         return module.prepare_migration(source=tmp_path, ref='c' * 40, node='/node', runtime='/runtime',
-            docker='/docker', ods_source=tmp_path, install_dir=tmp_path, destination=destination,
-            license_authorized=False)
+            docker='/docker', ods_source=tmp_path, install_dir=tmp_path, destination=destination)
     if fault:
         with pytest.raises(ValueError): run()
     else:

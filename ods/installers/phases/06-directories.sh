@@ -119,6 +119,85 @@ else
     # shellcheck source=../../lib/safe-env.sh
     source "$SCRIPT_DIR/lib/safe-env.sh"
 
+    _env_existing=""
+    [[ -f "$INSTALL_DIR/.env" ]] && _env_existing="$INSTALL_DIR/.env"
+
+    # Resolve the requested source before replacing installed code or retiring
+    # a managed Pixel. Never source the owner's .env as shell code. Decode with
+    # the same grammar used when its values were written so quoted values stay
+    # literal across an upgrade.
+    _env_get() {
+        local key="$1" default="${2:-}"
+        if [[ -n "$_env_existing" ]]; then
+            local val
+            val=$(grep -m1 "^${key}=" "$_env_existing" 2>/dev/null | cut -d= -f2- || true)
+            val="$(safe_env_decode_value "$val")"
+            if [[ -n "$val" ]]; then
+                printf '%s\n' "$val"
+                return
+            fi
+        fi
+        printf '%s\n' "$default"
+    }
+
+    _env_get_explicit_first() {
+        local key="$1" default="${2:-}" val
+        val="${!key-}"
+        if [[ -n "$val" ]]; then
+            printf '%s\n' "$val"
+            return
+        fi
+        _env_get "$key" "$default"
+    }
+
+    _phase06_requested_pixel_url=""
+    _phase06_requested_pixel_ref=""
+    _phase06_requested_pixel_dir=""
+    if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]]; then
+        _phase06_requested_pixel_url="$(_env_get_explicit_first PIXEL_SOURCE_URL bundled)"
+        _phase06_requested_pixel_ref="$(_env_get_explicit_first PIXEL_SOURCE_REF "$ODS_PIXEL_BUNDLED_REF")"
+        _phase06_requested_pixel_dir="$(_env_get_explicit_first PIXEL_SOURCE_DIR "")"
+        # This is an upgrade sentinel only; no private repository is fetched.
+        if [[ "$_phase06_requested_pixel_url" == 'https://github.com/Osmantic/Pixel.git' \
+            && "$_phase06_requested_pixel_ref" == 'b33730436baf5d98bf58f7d57c090318fe19f433' ]]; then
+            _phase06_requested_pixel_url=bundled
+            _phase06_requested_pixel_ref="$ODS_PIXEL_BUNDLED_REF"
+            ai "Migrating the former Pixel source setting to the bundled ODS release."
+        fi
+        [[ "$_phase06_requested_pixel_ref" =~ ^[0-9a-f]{40}$ ]] || {
+            error "Pixel requires an exact source commit before an upgrade."
+            return 1
+        }
+        if [[ "$_phase06_requested_pixel_url" == bundled ]]; then
+            _phase06_source_bundle="$SCRIPT_DIR/vendor/pixel.bundle"
+            [[ "$_phase06_requested_pixel_ref" == "$ODS_PIXEL_BUNDLED_REF" \
+                && -f "$_phase06_source_bundle" && ! -L "$_phase06_source_bundle" \
+                && "$(sha256sum -- "$_phase06_source_bundle" | cut -d ' ' -f 1)" == "$ODS_PIXEL_BUNDLED_SHA256" ]] || {
+                error "The requested bundled Pixel source is absent or changed; the installed release was left intact."
+                return 1
+            }
+            unset _phase06_source_bundle
+        elif [[ "$_phase06_requested_pixel_url" == /* ]]; then
+            PIXEL_SOURCE_URL="$_phase06_requested_pixel_url" \
+                PIXEL_SOURCE_REF="$_phase06_requested_pixel_ref" \
+                PIXEL_SOURCE_DIR="$_phase06_requested_pixel_dir" \
+                ods_pixel_validate_source || {
+                    error "The requested local Pixel source is invalid; the installed release was left intact."
+                    return 1
+                }
+            env -i PATH="$PATH" HOME="$HOME" GIT_CONFIG_NOSYSTEM=1 \
+                GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=file GIT_NO_REPLACE_OBJECTS=1 \
+                git -C "$_phase06_requested_pixel_url" cat-file -e \
+                "${_phase06_requested_pixel_ref}^{commit}" || {
+                    error "The requested local Pixel commit is unavailable; the installed release was left intact."
+                    return 1
+                }
+        else
+            error "Pixel source must be bundled or an absolute local checkout; the installed release was left intact."
+            return 1
+        fi
+    fi
+
     # A Pixel-to-Hermes rerun must retire the exact ODS-managed host runtime,
     # not merely remove the Compose edge from the next launch. Do this before
     # copying new source over an existing install so the fail-closed cleanup can
@@ -126,7 +205,6 @@ else
     _phase06_pixel_marker="$HOME/.config/ods/pixel-managed.json"
     _phase06_pixel_source_transition=0
     if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" \
-        && -n "${PIXEL_SOURCE_REF:-}" \
         && ( -e "$_phase06_pixel_marker" || -L "$_phase06_pixel_marker" ) ]]; then
         _phase06_pixel_owner="$(ods_pixel_install_owner)" || {
             error "Could not identify the ODS owner for a Pixel source transition."
@@ -137,7 +215,7 @@ else
             return 1
         }
         _ods_pixel_source_transition_required \
-            "$_phase06_pixel_owner" "$_phase06_pixel_home" "$PIXEL_SOURCE_REF" \
+            "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_requested_pixel_ref" \
             || _phase06_pixel_source_transition=$?
         case "$_phase06_pixel_source_transition" in
             0)
@@ -148,8 +226,8 @@ else
                 _phase06_step "rebind-pixel-source"
                 ai "Retiring the verified prior Pixel source before applying the new immutable source..."
                 if ! _ods_pixel_restore_transition_source \
-                    "$_phase06_pixel_owner" "$_phase06_pixel_home" "$PIXEL_SOURCE_REF" >/dev/null; then
-                    error "Could not reconstruct the exact prior Pixel source needed for safe retirement."
+                    "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_requested_pixel_ref" >/dev/null; then
+                    error "Could not verify the prior Pixel checkout for safe retirement. Restore its local backup before retrying; no private repository was contacted."
                     return 1
                 fi
                 if ! ods_pixel_uninstall_managed "$INSTALL_DIR" "$_phase06_pixel_home"; then
@@ -193,27 +271,6 @@ else
                 ;;
         esac
     fi
-
-    _env_existing=""
-    [[ -f "$INSTALL_DIR/.env" ]] && _env_existing="$INSTALL_DIR/.env"
-
-    # Safe reader: extract a value from existing .env without sourcing it.
-    # Decode it with the same grammar as lib/safe-env.sh, so a value the
-    # dashboard or the owner quoted ('pa$$word', "it's") comes back literally;
-    # the .env template writes preserved values back with dotenv_value.
-    _env_get() {
-        local key="$1" default="${2:-}"
-        if [[ -n "$_env_existing" ]]; then
-            local val
-            val=$(grep -m1 "^${key}=" "$_env_existing" 2>/dev/null | cut -d= -f2- || true)
-            val="$(safe_env_decode_value "$val")"
-            if [[ -n "$val" ]]; then
-                printf '%s\n' "$val"
-                return
-            fi
-        fi
-        printf '%s\n' "$default"
-    }
 
     _phase06_compose_uid=$(_env_get ODS_UID "")
     _phase06_compose_gid=$(_env_get ODS_GID "")
@@ -536,16 +593,6 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         printf '%s\n' "$default"
     }
 
-    _env_get_explicit_first() {
-        local key="$1" default="${2:-}" val
-        val="${!key-}"
-        if [[ -n "$val" ]]; then
-            echo "$val"
-            return
-        fi
-        _env_get "$key" "$default"
-    }
-
     _phase06_detect_lemonade_url() {
         command -v curl >/dev/null 2>&1 || return 1
         local candidate
@@ -725,15 +772,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         [[ -z "$PIXEL_INGRESS_GID_VALUE" || "$PIXEL_INGRESS_GID_VALUE" =~ ^[1-9][0-9]*$ ]] || \
             error "Existing PIXEL_INGRESS_GID is invalid"
 
-        PIXEL_SOURCE_URL_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_URL "bundled")"
-        PIXEL_SOURCE_REF_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_REF "$ODS_PIXEL_BUNDLED_REF")"
-        # Migrate the former public-beta private-repository default without
-        # requiring that repository or its credentials on an ODS upgrade.
-        if [[ "$PIXEL_SOURCE_URL_VALUE" == "https://github.com/Osmantic/Pixel.git" \
-            && "$PIXEL_SOURCE_REF_VALUE" == "b33730436baf5d98bf58f7d57c090318fe19f433" ]]; then
-            PIXEL_SOURCE_URL_VALUE=bundled
-            PIXEL_SOURCE_REF_VALUE="$ODS_PIXEL_BUNDLED_REF"
-        fi
+        PIXEL_SOURCE_URL_VALUE="$_phase06_requested_pixel_url"
+        PIXEL_SOURCE_REF_VALUE="$_phase06_requested_pixel_ref"
         PIXEL_GATEWAY_PORT_VALUE="$(_env_get_explicit_first PIXEL_GATEWAY_PORT "18789")"
         PIXEL_PREVIEW_PORT_VALUE="$(_env_get_explicit_first PIXEL_PREVIEW_PORT "9437")"
         [[ "$PIXEL_GATEWAY_PORT_VALUE" =~ ^[1-9][0-9]{0,4}$ \
@@ -757,7 +797,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
             *) ai_bad "PIXEL_WEB_SEARCH_PROVIDER must be parallel-free or searxng."; return 1 ;;
         esac
         export PIXEL_WEB_SEARCH_PROVIDER="$PIXEL_WEB_SEARCH_PROVIDER_VALUE"
-        PIXEL_SOURCE_DIR_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_DIR "")"
+        PIXEL_SOURCE_DIR_VALUE="$_phase06_requested_pixel_dir"
         # Phase 11 installs Pixel in this same installer shell. Preserve the
         # resolved immutable source contract in that shell as well as in .env;
         # transient environment prefixes used for validation do not persist.

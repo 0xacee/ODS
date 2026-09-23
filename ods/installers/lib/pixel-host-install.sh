@@ -2,6 +2,11 @@
 # Install and verify Pixel's host-side ODS integration. Importing this file has
 # no side effects. Callers must have already selected ENABLE_PIXEL_RUNTIME=true.
 
+# Model reconciliation also imports this library directly from ods-host-agent.
+# Keep the bundle pin and digest verifier available on that path.
+# shellcheck source=installers/lib/pixel-integration.sh
+source "$(dirname "${BASH_SOURCE[0]}")/pixel-integration.sh"
+
 _ods_pixel_default_output_tokens() {
     # Shared usability default, not an assertion of provider output capacity.
     # Unknown model families remain usable; no model-name or reasoning policy.
@@ -262,20 +267,29 @@ _ods_pixel_source_transition_required() {
 # marker's exact prior commit from the currently authorized source repository
 # before the uninstaller uses those bytes to authenticate privileged artifacts.
 _ods_pixel_restore_transition_source() {
-    local owner="$1" home="$2" requested_ref="$3" transition state source_ref source_root
+    local owner="$1" home="$2" requested_ref="$3" transition state source_ref source_root source_url
     transition="$(_ods_pixel_source_transition_state "$owner" "$home" "$requested_ref")" || return 1
     IFS='|' read -r state source_ref <<<"$transition"
     [[ "$state" =~ ^(ready|installing|deactivating)$ \
         && "$source_ref" =~ ^[0-9a-f]{40}$ \
         && ( "$state" == deactivating || "$source_ref" != "$requested_ref" ) ]] || return 1
     source_root="${INSTALL_DIR:?}/data/pixel/source-$source_ref"
-    local PIXEL_SOURCE_REF="$source_ref"
-    # A public-bundle upgrade can retire a legacy deployment only when its
-    # exact prior checkout is still locally available. Verify that checkout
-    # below; never try to reconstruct it from a retired private remote.
+    # Retirement must verify the source that actually installed the old
+    # deployment. Prefer its existing checkout; never fetch a retired private
+    # source or try to obtain its ref from the new one-commit ODS bundle.
     if [[ -d "$source_root/.git" && ! -L "$source_root" && ! -L "$source_root/.git" ]]; then
-        local PIXEL_SOURCE_URL="$source_root"
+        source_url="$source_root"
+    elif [[ "${PIXEL_SOURCE_URL:-}" == /* ]]; then
+        # Developer checkouts may still reconstruct an ancestor from a local
+        # repository. This path remains file-only inside _source_checkout.
+        source_url="$PIXEL_SOURCE_URL"
+    elif [[ "${PIXEL_SOURCE_URL:-}" == bundled && "$source_ref" == "$ODS_PIXEL_BUNDLED_REF" ]]; then
+        source_url=bundled
+    else
+        printf '%s\n' 'error: prior Pixel source checkout is missing; restore its local backup before retrying' >&2
+        return 1
     fi
+    local PIXEL_SOURCE_URL="$source_url" PIXEL_SOURCE_REF="$source_ref"
     _ods_pixel_source_checkout "$owner" "$home" "$source_root" >/dev/null || return 1
     printf '%s\n' "$source_root"
 }
@@ -1943,11 +1957,10 @@ _ods_pixel_restore_model_reconciliation() {
 
 _ods_pixel_reconciliation_source_url() {
     local source_ref="$1"
-    local bundled_ref='817214d5ec3d8aa583fe50c1dc7561f3c1a16dff'
     [[ "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 1
     if [[ -n "${PIXEL_SOURCE_URL:-}" ]]; then
         if [[ "$PIXEL_SOURCE_URL" == bundled ]]; then
-            if [[ "$source_ref" != "$bundled_ref" ]]; then
+            if [[ "$source_ref" != "$ODS_PIXEL_BUNDLED_REF" ]]; then
                 printf '%s\n' 'error: The installed Pixel source pin differs from the public bundle. Reinstall the managed Pixel runtime before changing models.' >&2
                 return 1
             fi
@@ -1956,7 +1969,7 @@ _ods_pixel_reconciliation_source_url() {
             return 1
         fi
         printf '%s\n' "$PIXEL_SOURCE_URL"
-    elif [[ "$source_ref" == "$bundled_ref" ]]; then
+    elif [[ "$source_ref" == "$ODS_PIXEL_BUNDLED_REF" ]]; then
         printf '%s\n' bundled
     else
         printf '%s\n' 'error: The installed Pixel source pin is not in the public bundle. Reinstall the managed runtime or configure its exact absolute local source before changing models.' >&2
@@ -2617,10 +2630,12 @@ _ods_pixel_source_checkout() {
     local owner="$1" home="$2" source_root="$3"
     local source="${PIXEL_SOURCE_URL:?}" ref="${PIXEL_SOURCE_REF:?}"
     local source_timeout="${ODS_PIXEL_SOURCE_TIMEOUT_SECONDS:-180}"
-    local bundled_ref='817214d5ec3d8aa583fe50c1dc7561f3c1a16dff'
+    local -a git_env=(env -i PATH="$PATH" HOME="$home" USER="$owner" LOGNAME="$owner"
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+        GIT_ALLOW_PROTOCOL=file GIT_NO_REPLACE_OBJECTS=1)
     [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || return 1
     if [[ "$source" == bundled ]]; then
-        if [[ "$ref" != "$bundled_ref" ]]; then
+        if [[ "$ref" != "$ODS_PIXEL_BUNDLED_REF" ]]; then
             printf '%s\n' 'error: The requested Pixel pin is not in the verified public bundle' >&2
             return 1
         fi
@@ -2630,6 +2645,9 @@ _ods_pixel_source_checkout() {
     fi
     [[ "$source_root" == /* && "$source_root" != / && ! -L "$source_root" ]] || return 1
     [[ "$source_timeout" =~ ^[0-9]+$ && "$source_timeout" -ge 1 && "$source_timeout" -le 900 ]] || return 1
+    if [[ "$source" == bundled ]]; then
+        [[ "$ref" == "$ODS_PIXEL_BUNDLED_REF" ]] && ods_pixel_bundled_source || return 1
+    fi
 
     if [[ ! -e "$source_root" ]]; then
         local parent="${source_root%/*}" stage checkout
@@ -2637,26 +2655,22 @@ _ods_pixel_source_checkout() {
         stage="$(ods_pixel_run_as_owner "$owner" "$home" mktemp -d "$parent/.pixel-source.XXXXXX")" || return 1
         checkout="$stage/checkout"
         if [[ "$source" == bundled ]]; then
-            if ! ods_pixel_bundled_source; then
-                ods_pixel_run_as_owner "$owner" "$home" rm -rf -- "$stage"
-                return 1
-            fi
             if ! ods_pixel_run_as_owner_with_umask "$owner" "$home" 0022 timeout "${source_timeout}s" \
-                env GIT_TERMINAL_PROMPT=0 git -c credential.interactive=never \
+                "${git_env[@]}" git -c credential.interactive=never \
                 clone --no-local --no-checkout -- "${INSTALL_DIR:?}/vendor/pixel.bundle" "$checkout" >/dev/null; then
                 ods_pixel_run_as_owner "$owner" "$home" rm -rf -- "$stage"
                 return 1
             fi
         else
             if ! ods_pixel_run_as_owner_with_umask "$owner" "$home" 0022 timeout "${source_timeout}s" \
-                env GIT_TERMINAL_PROMPT=0 git -c credential.interactive=never \
+                "${git_env[@]}" git -c credential.interactive=never \
                 clone --no-local --no-checkout -- "$source" "$checkout" >/dev/null; then
                 ods_pixel_run_as_owner "$owner" "$home" rm -rf -- "$stage"
                 return 1
             fi
         fi
         if ! ods_pixel_run_as_owner_with_umask "$owner" "$home" 0022 timeout 60s \
-            env GIT_TERMINAL_PROMPT=0 git -C "$checkout" -c advice.detachedHead=false checkout --detach "$ref" >/dev/null \
+            "${git_env[@]}" git -C "$checkout" -c advice.detachedHead=false checkout --detach "$ref" >/dev/null \
             || ! ods_pixel_run_as_owner "$owner" "$home" mv -T -- "$checkout" "$source_root"; then
             ods_pixel_run_as_owner "$owner" "$home" rm -rf -- "$stage"
             return 1
@@ -2668,9 +2682,9 @@ _ods_pixel_source_checkout() {
     # before cloning; this closes the narrow replacement window between mv and
     # the exact-commit/clean-tree verification below.
     [[ ! -L "$source_root" && -d "$source_root/.git" && ! -L "$source_root/.git" ]] || return 1
-    [[ "$(ods_pixel_run_as_owner "$owner" "$home" git -C "$source_root" rev-parse HEAD)" == "$ref" ]] || return 1
-    ods_pixel_run_as_owner "$owner" "$home" git -C "$source_root" diff --quiet --ignore-submodules --
-    ods_pixel_run_as_owner "$owner" "$home" git -C "$source_root" diff --cached --quiet --ignore-submodules --
+    [[ "$(ods_pixel_run_as_owner "$owner" "$home" "${git_env[@]}" git -C "$source_root" rev-parse HEAD)" == "$ref" ]] || return 1
+    ods_pixel_run_as_owner "$owner" "$home" "${git_env[@]}" git -C "$source_root" diff --quiet --ignore-submodules --
+    ods_pixel_run_as_owner "$owner" "$home" "${git_env[@]}" git -C "$source_root" diff --cached --quiet --ignore-submodules --
     printf '%s\n' "$source_root"
 }
 

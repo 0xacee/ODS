@@ -145,7 +145,7 @@ the execution-control bind source. The overlay only produces an unpublished
 candidate; neither caller skips its final configuration validation.
 
 The opt-in real renderer/loader test is available with already prepared,
-licensed source/runtime inputs. It neither installs services nor starts a model:
+local source/runtime inputs. It neither installs services nor starts a model:
 
 ```sh
 ODS_TEST_NATIVE_CONFIG_LIVE=1 \
@@ -1245,11 +1245,11 @@ and integrated recovery remain release gates.
 
 The preparation entry point can now acquire the runtime when `--runtime` is
 omitted (requires `--npm`), and build/qualify the sandbox when `--sandbox-image`
-is omitted. Neither operation requires a separate license-authorization flag before
-creating preparation state or performing downloads/builds. It uses the existing
-pinned bootstrap, not a second installer implementation, and records acquisition
-or sandbox qualification failures separately. Supplied runtime/image inputs keep
-the previously qualified path. Ordering/license/failure coverage passed; a full
+is omitted. The selected Pixel source comes from ODS's bundle by default or an
+explicit local checkout. It uses the existing pinned bootstrap, not a second
+installer implementation, and records acquisition or sandbox qualification
+failures separately. Supplied runtime/image inputs keep
+the previously qualified path. Ordering and failure coverage passed; a full
 fresh-download combined run has not been qualified by those unit tests.
 
 The full acquisition preparation path was subsequently run on this Mac with no
@@ -1328,8 +1328,9 @@ The preparation CLI can now omit `--source`: it acquires ODS's bundled Pixel sou
 the caller-selected exact commit and validates its release manifest before
 runtime acquisition. Existing destinations are refused. A failed clone or
 verification leaves no published source checkout and records the preparation
-phase without command stderr or credentials. The bootstrap helper also accepts
-an authorized local repository, matching the shared Linux source workflow.
+phase without command stderr or credentials. The standalone bootstrap helper
+also defaults to the bundled source. An explicit override accepts only a local
+bundle or checkout; remote Pixel repositories are rejected.
 No new release pin is introduced and no existing checkout is reset.
 
 Source acquisition is covered with real local Git repositories, including
@@ -1796,7 +1797,7 @@ full migration, a reboot, or the final Portal workflow.
 `pixel-native-prepare.py migrate` stages the legacy candidate, services and
 runtime and writes a private preparation receipt. It preserves the active
 configuration/environment and detects source drift. It requires explicit
-licensed source/runtime inputs and does not start or replace services.
+local source/runtime inputs and does not start or replace services.
 `pixel-macos-access-install.py migrate-native` defaults to a read-only plan;
 `--activate` is an explicit root-only invocation of the joint executor.
 This low-level entry point is not yet the complete owner-side migration flow.

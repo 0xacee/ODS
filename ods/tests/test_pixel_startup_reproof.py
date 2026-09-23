@@ -52,6 +52,18 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(check.call_count, 3)
         self.assertEqual(self.sleep.call_args_list, [unittest.mock.call(30)] * 2)
 
+    def test_host_agent_starts_reproof_monitor_on_native_linux_and_macos(self):
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                    and n.name == 'main')
+        startup = next(node for node in ast.walk(main) if isinstance(node, ast.If)
+                       and any(isinstance(child, ast.Name)
+                               and child.id == '_monitor_native_pixel_access'
+                               for child in ast.walk(node)))
+        enabled = compile(ast.Expression(startup.test), str(SOURCE), 'eval')
+        for system, expected in (('Linux', True), ('Darwin', True), ('Windows', False)):
+            self.system.return_value = system
+            self.assertIs(eval(enabled, self.scope), expected)
+
     def test_busy_preflight_can_be_checked_later_but_pending_cannot(self):
         failure = {'stage': 'unsafe-state', 'projection': {'scope': 'owner-host',
                    'available': True, 'busy': True, 'pending': False}}
@@ -76,8 +88,15 @@ class StartupTests(unittest.TestCase):
         self.end.assert_called_once_with('pixel_startup_reproof')
         self.sleep.assert_not_called()
 
-    def test_other_platform_or_missing_helper_is_read_only(self):
+    def test_linux_reuses_the_same_protected_helper_and_lock(self):
         self.system.return_value = 'Linux'
+        self.assertIs(self.call(), True)
+        self.assertEqual(self.run.call_args.args[0], ['/usr/bin/python3', '-I',
+            '/usr/local/libexec/ods-pixel-access/pixel_access_reconcile.py', '--startup'])
+        self.end.assert_called_once_with('pixel_startup_reproof')
+
+    def test_other_platform_or_missing_helper_is_read_only(self):
+        self.system.return_value = 'Windows'
         self.call()
         self.system.return_value = 'Darwin'
         self.exists.return_value = False

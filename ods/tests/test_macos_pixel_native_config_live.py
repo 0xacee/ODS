@@ -122,7 +122,7 @@ def test_real_native_candidate_preserves_shared_ods_policy(tmp_path, qualificati
         receipt_path = preparation.prepare(source=source, ref=ref, answers=None if acquiring else answers, node=node,
             install_dir=installed if acquiring else None, native_home=home if acquiring else None,
             runtime=None if acquiring else runtime, sandbox_image=None if acquiring else image, destination=output,
-            npm=os.environ.get('ODS_TEST_PIXEL_NPM'), license_authorized=acquiring,
+            npm=os.environ.get('ODS_TEST_PIXEL_NPM'),
             docker=os.environ['ODS_TEST_PIXEL_DOCKER'],
             docker_socket=os.environ['ODS_TEST_PIXEL_DOCKER_SOCKET'], ods_source=ROOT,
             ingress_image='sha256:' + 'b' * 64, compose_project='ods-qualification', ingress_gid=os.getgid())

@@ -102,7 +102,7 @@ def test_update_orders_existing_helpers_and_restores_docker_environment(tmp_path
     monkeypatch.setenv('DOCKER_HOST', 'tcp://unrelated.invalid:2375')
     before = dict(os.environ)
     try:
-        arguments = dict(install_dir=installed, ods_source=source, license_authorized=True,
+        arguments = dict(install_dir=installed, ods_source=source,
             prepare_only=failure == 'prepare-only')
         if failure not in (None, 'prepare-only'):
             with pytest.raises(ValueError): module.update(**arguments)

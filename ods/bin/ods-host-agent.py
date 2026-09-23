@@ -17600,7 +17600,7 @@ def _request_server_shutdown(server, signum=None):
 def _reconcile_native_pixel_startup():
     """Re-prove an unchanged native policy, serialized with model operations."""
     helper = Path('/usr/local/libexec/ods-pixel-access/pixel_access_reconcile.py')
-    if platform.system() != 'Darwin' or not helper.exists():
+    if platform.system() not in ('Darwin', 'Linux') or not helper.exists():
         return
     # Execute only the installed root-owned helper, never an owner checkout.
     try:
@@ -17790,7 +17790,7 @@ def main():
         STARTUP_ODS_MODE,
     )
     try:
-        if platform.system() == 'Darwin':
+        if platform.system() in ('Darwin', 'Linux'):
             threading.Thread(target=_monitor_native_pixel_access,
                              name='ods-pixel-startup-reproof', daemon=True).start()
         server.serve_forever()

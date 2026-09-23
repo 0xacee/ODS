@@ -441,15 +441,15 @@ if ! ods_pixel_validate_source 2>/dev/null; then
 else
     fail "Bundled Pixel source should refuse the former private-repo ref"
 fi
-unset INSTALL_DIR PIXEL_SOURCE_URL PIXEL_SOURCE_REF
+unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF
 
-# The former private GitHub source must not be a public-beta dependency.
+# The former private URL is rejected even with an immutable ref.
 PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
 PIXEL_SOURCE_REF="abcdef0123456789abcdef0123456789abcdef01"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Former private GitHub source is rejected"
 else
-    fail "Former private GitHub source should be rejected"
+    fail "Former private GitHub source must be rejected"
 fi
 
 # URL with credentials
@@ -471,7 +471,7 @@ else
 fi
 
 # Short SHA ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="abcdef01"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Short SHA ref is rejected"
@@ -480,7 +480,7 @@ else
 fi
 
 # Uppercase hex ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Uppercase hex ref is rejected"
@@ -489,7 +489,7 @@ else
 fi
 
 # Branch name as ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="main"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Branch name ref is rejected"
@@ -507,7 +507,7 @@ else
 fi
 
 # Missing ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 unset PIXEL_SOURCE_REF
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Missing ref is rejected"
@@ -609,11 +609,11 @@ fi
 
 if ! (
     ods_pixel_activate_source_contract \
-        "https://github.com/Osmantic/Pixel.git" "main" ""
+        "https://github.com/Osmantic/Pixel.git" "$ODS_PIXEL_BUNDLED_REF" ""
 ); then
-    pass "Invalid Pixel source contract is not activated"
+    pass "Remote Pixel source contract is not activated"
 else
-    fail "Invalid Pixel source contract should fail before Phase 11"
+    fail "Remote Pixel source contract should fail before Phase 11"
 fi
 
 # ---- ods_pixel_generate_key tests --------------------------------------------

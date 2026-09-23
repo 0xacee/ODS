@@ -805,19 +805,153 @@ else
     fail "missing prior Pixel validation source was not reconstructed safely"
 fi
 
+# A normal upgrade has no shell-level Pixel ref. Verify its pre-copy transition
+# can retire the old marker from the present checkout without a private remote
+# or the old commit in the new ODS bundle.
+printf 'PIXEL_SOURCE_URL=bundled\nPIXEL_SOURCE_REF=%s\n' \
+    "$ODS_PIXEL_BUNDLED_REF" > "$transition_install/.env"
+phase06_pre_copy="$(sed -n '/^    _env_existing=""/,/^    unset _phase06_pixel_marker _phase06_pixel_source_transition/p' \
+    "$ROOT/installers/phases/06-directories.sh")"
+_phase06_pre_copy_fixture() { eval "$phase06_pre_copy"; }
+if (
+    unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF PIXEL_SOURCE_DIR
+    HOME="$transition_home"
+    INSTALL_DIR="$transition_install"
+    SCRIPT_DIR="$ROOT"
+    ENABLE_PIXEL_RUNTIME=true
+    ai() { :; }
+    error() { printf '%s\n' "$*" >&2; return 1; }
+    _phase06_step() { :; }
+    ods_pixel_install_owner() { printf '%s\n' "$owner"; }
+    ods_pixel_owner_home() { printf '%s\n' "$transition_home"; }
+    ods_pixel_uninstall_managed() { : > "$transition_install/retired"; }
+    source "$ROOT/lib/safe-env.sh"
+    _phase06_pre_copy_fixture
+    [[ "$_phase06_requested_pixel_url" == bundled \
+        && "$_phase06_requested_pixel_ref" == "$ODS_PIXEL_BUNDLED_REF" \
+        && -f "$transition_install/retired" ]]
+); then
+    pass "old managed Pixel transitions to bundle before source copy without remote access"
+else
+    fail "old managed Pixel did not transition before source copy"
+fi
+printf 'PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\nPIXEL_SOURCE_REF=%s\n' \
+    b33730436baf5d98bf58f7d57c090318fe19f433 > "$transition_install/.env"
+if (
+    unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF PIXEL_SOURCE_DIR
+    HOME="$TEST_ROOT/no-marker-home"
+    INSTALL_DIR="$transition_install"
+    SCRIPT_DIR="$ROOT"
+    ENABLE_PIXEL_RUNTIME=true
+    ai() { :; }
+    error() { printf '%s\n' "$*" >&2; return 1; }
+    source "$ROOT/lib/safe-env.sh"
+    _phase06_pre_copy_fixture
+    [[ "$_phase06_requested_pixel_url" == bundled \
+        && "$_phase06_requested_pixel_ref" == "$ODS_PIXEL_BUNDLED_REF" ]]
+); then
+    pass "old canonical Pixel environment pin resolves to bundle before source copy"
+else
+    fail "old canonical Pixel environment pin did not migrate before source copy"
+fi
+legacy_ref=b33730436baf5d98bf58f7d57c090318fe19f433
+legacy_install="$TEST_ROOT/legacy-ods"
+legacy_home="$TEST_ROOT/legacy-home"
+legacy_checkout="$legacy_install/data/pixel/source-$legacy_ref"
+mkdir -p "$legacy_home/.config/ods" "$legacy_checkout/.git"
+printf 'PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\nPIXEL_SOURCE_REF=%s\n' \
+    "$legacy_ref" > "$legacy_install/.env"
+printf '{"schema_version":2,"manager":"ods","state":"ready","initial_active_state":"absent","install_dir":"%s","pixel_source_ref":"%s"}\n' \
+    "$legacy_install" "$legacy_ref" > "$legacy_home/.config/ods/pixel-managed.json"
+chmod 0600 "$legacy_home/.config/ods/pixel-managed.json"
+if (
+    unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF PIXEL_SOURCE_DIR
+    HOME="$legacy_home"
+    INSTALL_DIR="$legacy_install"
+    SCRIPT_DIR="$ROOT"
+    ENABLE_PIXEL_RUNTIME=true
+    ai() { :; }
+    error() { printf '%s\n' "$*" >&2; return 1; }
+    _phase06_step() { :; }
+    ods_pixel_install_owner() { printf '%s\n' "$owner"; }
+    ods_pixel_owner_home() { printf '%s\n' "$legacy_home"; }
+    _ods_pixel_source_checkout() {
+        [[ "$PIXEL_SOURCE_URL" == "$legacy_checkout" \
+            && "$PIXEL_SOURCE_REF" == "$legacy_ref" \
+            && "$3" == "$legacy_checkout" ]] || return 1
+        : > "$legacy_install/old-checkout-verified"
+        printf '%s\n' "$legacy_checkout"
+    }
+    ods_pixel_uninstall_managed() { : > "$legacy_install/retired"; }
+    source "$ROOT/lib/safe-env.sh"
+    _phase06_pre_copy_fixture
+    [[ "$_phase06_requested_pixel_url" == bundled \
+        && "$_phase06_requested_pixel_ref" == "$ODS_PIXEL_BUNDLED_REF" \
+        && -f "$legacy_install/old-checkout-verified" \
+        && -f "$legacy_install/retired" ]]
+); then
+    pass "canonical legacy environment and marker retire from local checkout before source copy"
+else
+    fail "canonical legacy environment did not retire its old managed Pixel safely"
+fi
+printf 'PIXEL_SOURCE_URL=https://example.invalid/custom-pixel.git\nPIXEL_SOURCE_REF=%s\n' \
+    b33730436baf5d98bf58f7d57c090318fe19f433 > "$transition_install/.env"
+if (
+    unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF PIXEL_SOURCE_DIR
+    HOME="$TEST_ROOT/no-marker-home"
+    INSTALL_DIR="$transition_install"
+    SCRIPT_DIR="$ROOT"
+    ENABLE_PIXEL_RUNTIME=true
+    ai() { :; }
+    error() { :; return 1; }
+    source "$ROOT/lib/safe-env.sh"
+    _phase06_pre_copy_fixture
+); then
+    fail "custom remote Pixel source was silently replaced by the ODS bundle"
+else
+    pass "custom remote Pixel source fails closed instead of silently changing releases"
+fi
+printf 'PIXEL_SOURCE_URL=bundled\nPIXEL_SOURCE_REF=%s\n' \
+    "$ODS_PIXEL_BUNDLED_REF" > "$transition_install/.env"
+rm -f -- "$transition_install/retired"
+mv -- "$transition_install/data/pixel/source-$previous_source_ref" \
+    "$transition_install/data/pixel/source-$previous_source_ref.saved"
+if (
+    unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF PIXEL_SOURCE_DIR
+    HOME="$transition_home"
+    INSTALL_DIR="$transition_install"
+    SCRIPT_DIR="$ROOT"
+    ENABLE_PIXEL_RUNTIME=true
+    ai() { :; }
+    error() { printf '%s\n' "$*" >&2; return 1; }
+    _phase06_step() { :; }
+    ods_pixel_install_owner() { printf '%s\n' "$owner"; }
+    ods_pixel_owner_home() { printf '%s\n' "$transition_home"; }
+    ods_pixel_uninstall_managed() { : > "$transition_install/retired"; }
+    source "$ROOT/lib/safe-env.sh"
+    _phase06_pre_copy_fixture
+); then
+    fail "missing prior Pixel checkout was accepted for retirement"
+elif [[ ! -e "$transition_install/retired" ]]; then
+    pass "missing prior Pixel checkout fails before retirement or source copy"
+else
+    fail "missing prior Pixel checkout retired the installed release"
+fi
+mv -- "$transition_install/data/pixel/source-$previous_source_ref.saved" \
+    "$transition_install/data/pixel/source-$previous_source_ref"
 if (
     INSTALL_DIR="$transition_install"
     PIXEL_SOURCE_URL=bundled
-    PIXEL_SOURCE_REF=817214d5ec3d8aa583fe50c1dc7561f3c1a16dff
+    PIXEL_SOURCE_REF="$requested_source_ref"
     restored="$(_ods_pixel_restore_transition_source \
-        "$owner" "$transition_home" "$PIXEL_SOURCE_REF")"
+        "$owner" "$transition_home" "$requested_source_ref")"
     [[ "$restored" == "$transition_install/data/pixel/source-$previous_source_ref" \
         && "$(git -C "$restored" rev-parse HEAD)" == "$previous_source_ref" \
         && -z "$(git -C "$restored" status --porcelain)" ]]
 ); then
-    pass "public bundle transition verifies an existing legacy checkout without fetching the private source"
+    pass "prior Pixel checkout verifies locally even with bundled target source"
 else
-    fail "public bundle transition could not reuse the verified local legacy checkout"
+    fail "prior Pixel checkout verification still depends on the former remote source"
 fi
 
 sudo_mask_probe="$TEST_ROOT/sudo-mask-probe"
@@ -842,7 +976,14 @@ cat > "$mock_bin/git" <<'SH'
 sleep 10
 SH
 chmod +x "$mock_bin/git"
-PIXEL_SOURCE_URL="$TEST_ROOT/slow-local-source"
+PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_REF="$previous_source_ref"
+if _ods_pixel_source_checkout "$owner" "$home" "$source_checkout" >/dev/null 2>&1; then
+    fail "remote Pixel source is rejected even with an existing checkout"
+else
+    pass "remote Pixel source is rejected before reusing an existing checkout"
+fi
+PIXEL_SOURCE_URL="$source_fixture"
 PIXEL_SOURCE_REF="$(printf 'f%.0s' {1..40})"
 timed_checkout="$TEST_ROOT/timed-checkouts/source-$PIXEL_SOURCE_REF"
 if PATH="$mock_bin:$PATH" ODS_PIXEL_SOURCE_TIMEOUT_SECONDS=1 \
@@ -1919,14 +2060,14 @@ chmod 0600 "$reconcile_marker"
 check test "$(_ods_pixel_managed_source_ref "$owner" "$reconcile_home")" = "$reconcile_ref"
 if (
     unset PIXEL_SOURCE_URL
-    [[ "$(_ods_pixel_reconciliation_source_url 817214d5ec3d8aa583fe50c1dc7561f3c1a16dff)" == bundled ]]
+    [[ "$(_ods_pixel_reconciliation_source_url "$ODS_PIXEL_BUNDLED_REF")" == bundled ]]
     ! _ods_pixel_reconciliation_source_url b33730436baf5d98bf58f7d57c090318fe19f433 >/dev/null 2>&1
     PIXEL_SOURCE_URL=bundled
     ! _ods_pixel_reconciliation_source_url b33730436baf5d98bf58f7d57c090318fe19f433 >/dev/null 2>&1
     PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git
-    ! _ods_pixel_reconciliation_source_url 817214d5ec3d8aa583fe50c1dc7561f3c1a16dff >/dev/null 2>&1
+    ! _ods_pixel_reconciliation_source_url "$ODS_PIXEL_BUNDLED_REF" >/dev/null 2>&1
     PIXEL_SOURCE_URL=/safe/developer-checkout
-    [[ "$(_ods_pixel_reconciliation_source_url 817214d5ec3d8aa583fe50c1dc7561f3c1a16dff)" == /safe/developer-checkout ]]
+    [[ "$(_ods_pixel_reconciliation_source_url "$ODS_PIXEL_BUNDLED_REF")" == /safe/developer-checkout ]]
 ); then
     pass "model reconciliation uses bundled or explicit local source and rejects private or mismatched pins"
 else
@@ -2619,6 +2760,13 @@ handoff = (
 )
 assert handoff in phase
 assert phase.index(handoff) < phase.index("PIXEL_SOURCE_URL=$(dotenv_quote")
+legacy_upgrade = "if [[ \"$_phase06_requested_pixel_url\" == " + chr(39) + "https://github.com/Osmantic/Pixel.git" + chr(39)
+assert legacy_upgrade in phase
+assert "\"$_phase06_requested_pixel_ref\" == " + chr(39) + "b33730436baf5d98bf58f7d57c090318fe19f433" + chr(39) in phase
+assert phase.index(legacy_upgrade) < phase.index(handoff)
+assert phase.index("_env_existing=\"\"") < phase.index("_phase06_step \"rebind-pixel-source\"")
+assert "\"$_phase06_pixel_owner\" \"$_phase06_pixel_home\" \"$_phase06_requested_pixel_ref\"" in phase
+assert "&& -n \"${PIXEL_SOURCE_REF:-}\"" not in phase
 preflight = phase.index("_phase06_step \"preflight-pixel-source\"")
 checkout = phase.index("if ! _ods_pixel_source_checkout", preflight)
 assert phase.index(handoff) < preflight < checkout < phase.index("PIXEL_SOURCE_URL=$(dotenv_quote")
@@ -2627,7 +2775,8 @@ restore = phase.index("_ods_pixel_restore_transition_source", rebind)
 retire = phase.index("ods_pixel_uninstall_managed", restore)
 assert rebind < restore < retire < preflight
 assert "Pixel source is unavailable. Verify the bundled source" in phase
-assert "PIXEL_SOURCE_REF_VALUE=\"$(_env_get_explicit_first PIXEL_SOURCE_REF \"$ODS_PIXEL_BUNDLED_REF\")\"" in phase
+assert "_phase06_requested_pixel_ref=\"$(_env_get_explicit_first PIXEL_SOURCE_REF \"$ODS_PIXEL_BUNDLED_REF\")\"" in phase
+assert "PIXEL_SOURCE_REF_VALUE=\"$_phase06_requested_pixel_ref\"" in phase
 assert "PIXEL_GATEWAY_PORT_VALUE=\"$(_env_get_explicit_first PIXEL_GATEWAY_PORT \"18789\")\"" in phase
 assert "PIXEL_PREVIEW_PORT_VALUE=\"$(_env_get_explicit_first PIXEL_PREVIEW_PORT \"9437\")\"" in phase
 assert "export PIXEL_GATEWAY_PORT=\"$PIXEL_GATEWAY_PORT_VALUE\"" in phase

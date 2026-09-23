@@ -1,7 +1,7 @@
 """Acquire a pinned, owner-run OpenClaw runtime for native Pixel provisioning.
 
-This stages artifacts only. It neither activates a gateway nor accepts a
-license on the owner's behalf. The caller must supply the selected Pixel ref.
+This stages artifacts only and never activates a gateway. The caller must
+supply the selected Pixel ref.
 """
 import argparse
 import base64
@@ -77,21 +77,19 @@ def selected_release(source, ref):
 
 ODS_BUNDLED_REF = '817214d5ec3d8aa583fe50c1dc7561f3c1a16dff'
 ODS_BUNDLED_SHA256 = '8fea465b1b42d82da0a286936d0e029b038321fd39793f5a849843ef11aee865'
+ODS_BUNDLED_SOURCE = Path(__file__).resolve().parents[3] / 'vendor/pixel.bundle'
 
 
-def acquire_source(*, ref, destination, license_authorized=False,
-                   source_url=None):
+def acquire_source(*, ref, destination, source_url=None):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise BootstrapError('native-macos-owner-required')
     if not re.fullmatch(r'[a-f0-9]{40}', ref):
         raise BootstrapError('exact-pixel-source-ref-required')
-    # The public ODS installer passes its pinned local bundle. Developer
-    # checkouts must also be explicit local paths; no remote source fallback.
-    if source_url is None:
-        raise BootstrapError('explicit-local-pixel-source-required')
-    local = Path(source_url)
+    # The standalone helper defaults to ODS's pinned bundle. An explicit
+    # override may be a local bundle or clean checkout, never a remote URL.
+    local = Path(source_url) if source_url is not None else ODS_BUNDLED_SOURCE
     if not local.is_absolute() or local.is_symlink():
-        raise BootstrapError('bundled-or-local-pixel-source-required')
+        raise BootstrapError('local-pixel-source-required')
     if local.is_file():
         if local.name != 'pixel.bundle' or ref != ODS_BUNDLED_REF:
             raise BootstrapError('invalid-bundled-pixel-source')
@@ -100,14 +98,24 @@ def acquire_source(*, ref, destination, license_authorized=False,
         if hashlib.sha256(local.read_bytes()).hexdigest() != ODS_BUNDLED_SHA256:
             raise BootstrapError('bundled-pixel-source-digest-mismatch')
     elif not local.is_dir():
-        raise BootstrapError('bundled-or-local-pixel-source-required')
+        raise BootstrapError('local-pixel-source-required')
     source_url = str(local.resolve(strict=True))
     destination = Path(destination)
     if not destination.is_absolute() or os.path.lexists(destination):
         raise BootstrapError('new-absolute-source-destination-required')
     destination = destination.parent.resolve(strict=True) / destination.name
     temporary = Path(tempfile.mkdtemp(prefix='.pixel-source-', dir=destination.parent))
-    env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+    # Ambient Git URL rewrites and helpers must not redirect this local clone
+    # or its exact-ref fetch to any private or public network repository.
+    env = {
+        'PATH': os.environ.get('PATH', os.defpath),
+        'HOME': str(temporary),
+        'GIT_CONFIG_NOSYSTEM': '1',
+        'GIT_CONFIG_GLOBAL': os.devnull,
+        'GIT_TERMINAL_PROMPT': '0',
+        'GIT_ALLOW_PROTOCOL': 'file',
+        'GIT_NO_REPLACE_OBJECTS': '1',
+    }
     try:
         checkout = temporary / 'checkout'
         command(['git', '-c', 'credential.interactive=never', 'clone', '--no-local',
@@ -327,7 +335,6 @@ def sandbox_main():
     parser = argparse.ArgumentParser(description='Prepare and verify the native Pixel Docker sandbox')
     for name in ('source', 'source-ref', 'docker'):
         parser.add_argument('--' + name, required=True)
-    parser.add_argument('--license-authorized', action='store_true')
     args = parser.parse_args(sys.argv[2:])
     try:
         receipt = prepare_sandbox(source=args.source, ref=args.source_ref, docker=args.docker)
@@ -347,8 +354,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('source', 'source-ref', 'destination', 'node', 'npm'):
         parser.add_argument('--' + name, required=True)
-    parser.add_argument('--license-authorized', action='store_true',
-                        help='Confirm the caller already obtained applicable Pixel authorization')
     args = parser.parse_args()
     try:
         path = stage(source=args.source, ref=args.source_ref, destination=args.destination,

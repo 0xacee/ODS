@@ -31,7 +31,8 @@ PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="$ODS_PIXEL_BUNDLED_REF"
 ods_pixel_validate_source
 source_root="$scratch/source-$PIXEL_SOURCE_REF"
-observed_checkout="$(_ods_pixel_source_checkout "$(id -un)" "$HOME" "$source_root")" || {
+observed_checkout="$(GIT_CONFIG_GLOBAL=/untrusted/host-gitconfig GIT_ALLOW_PROTOCOL=https \
+    _ods_pixel_source_checkout "$(id -un)" "$HOME" "$source_root")" || {
     echo 'Bundled Pixel source checkout failed' >&2
     exit 1
 }

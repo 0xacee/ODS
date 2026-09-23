@@ -4548,6 +4548,52 @@ def test_managed_pixel_reconcile_rejects_relative_source(tmp_path, monkeypatch):
         _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
 
 
+def test_managed_pixel_reconcile_rejects_remote_source(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text(
+        "PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(
+        _mod.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("remote source must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="configured Pixel source"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
+
+
+def test_managed_pixel_reconcile_rejects_old_ref_without_local_checkout(
+    tmp_path, monkeypatch,
+):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text(
+        "PIXEL_SOURCE_REF=b33730436baf5d98bf58f7d57c090318fe19f433\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(
+        _mod.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("old bundle ref must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="reinstall the managed runtime"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
+
+
 @pytest.mark.parametrize(
     "gateway_port",
     ["", "   ", "0", "01", "65536", "123456", "abc", "-1"],
