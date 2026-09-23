@@ -10,8 +10,11 @@ import json
 import os
 import pathlib
 import socket
+import stat
 import tempfile
 import threading
+
+import pytest
 
 
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "host" / "workspace_preview.py"
@@ -19,6 +22,49 @@ SPEC = importlib.util.spec_from_file_location("workspace_preview", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
+
+
+@pytest.mark.parametrize("fault", [None, "foreign-owner", "different-inode",
+    "group-writable", "non-root-mount-owner"])
+def test_virtiofs_mount_root_requires_same_private_owner_inode(tmp_path, monkeypatch, fault):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o700)
+    workspace.chmod(0o700)
+    original_lstat = pathlib.Path.lstat
+    original_stat = os.stat
+
+    def changed(info, *, owner=None, inode=None, mode=None):
+        fields = list(info)
+        if owner is not None:
+            fields[4] = owner
+        if inode is not None:
+            fields[1] = inode
+        if mode is not None:
+            fields[0] = mode
+        return os.stat_result(fields)
+
+    def mount_lstat(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if path == workspace:
+            return changed(info, owner=777 if fault == "non-root-mount-owner" else 0)
+        return info
+
+    def real_directory_stat(path, *args, **kwargs):
+        info = original_stat(path, *args, **kwargs)
+        if path == os.fspath(workspace) + "/.":
+            return changed(info,
+                owner=os.getuid() + 1 if fault == "foreign-owner" else os.getuid(),
+                inode=info.st_ino + 1 if fault == "different-inode" else info.st_ino,
+                mode=stat.S_IFDIR | 0o720 if fault == "group-writable" else info.st_mode)
+        return info
+
+    monkeypatch.setattr(pathlib.Path, "lstat", mount_lstat)
+    monkeypatch.setattr(os, "stat", real_directory_stat)
+    if fault is None:
+        MODULE._safe_root(workspace, os.getuid())
+    else:
+        with pytest.raises(MODULE.PreviewError, match="unsafe preview root"):
+            MODULE._safe_root(workspace, os.getuid())
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
