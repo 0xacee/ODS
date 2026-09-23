@@ -188,6 +188,17 @@ export const WORKSPACE_PREVIEW_REQUIRES_FILES_REASON =
 export const WORKSPACE_PREVIEW_FRESH_ENTRY_REASON =
   "This is a new static browser artifact. Start with exactly one write of the complete entry document to a fresh workspace-relative path ending in /index.html. Do not inspect unrelated files, run commands, start a server, scaffold a framework, or use extension tools before that entry file exists. After the entry write succeeds, create any requested local assets, verify what the owner asked for, and publish that exact directory.";
 
+const WORKSPACE_PREVIEW_FAILURE_REASONS = Object.freeze({
+  unsupported_file_type: "the directory contains an unsupported preview file type",
+  missing_entry: "the directory lacks a nonempty index.html entry",
+  too_many_files: "the directory exceeds the preview file-count limit",
+  snapshot_too_large: "the directory exceeds the preview size limit",
+  unsafe_file: "a file failed the preview safety checks",
+  unsafe_directory: "the directory failed the preview path or permission checks",
+  cancelled: "waiting for the preview was cancelled; publication may still be pending",
+  unavailable: "the preview was unavailable; the tool supplied no more specific verified cause",
+});
+
 export const WORKSPACE_PREVIEW_REQUIRES_READBACK_REASON =
   "The host verified the published snapshot. The owner also requested file inspection; complete the remaining file reads alongside any other requested checks. Static publication does not prove functional behavior.";
 
@@ -5366,7 +5377,7 @@ function ownerForbidsWorkspacePreview(messages, prompt) {
     .split(/[!?;\n]+|\.(?=\s|$)|\b(?:but|however|instead|then)\b/i)
     .some((clause) => /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\b[^.!?;\n]{0,160}\b(?:and|or)\s+(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(clause));
   if (coordinatedProhibition) return true;
-  return portuguesePreviewForbidden(text) || /\b(?:only|just)\s+(?:the\s+)?(?:code|source(?:\s+code)?)\b/i.test(text) || /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:(?:create|build|edit|write|run|execute)\s*(?:,\s*|and\s+|or\s+))*(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(text);
+  return portuguesePreviewForbidden(text) || /\b(?:only|just)\s+(?:the\s+)?(?:code|source(?:\s+code)?)\b/i.test(text) || /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:(?:try|attempt)\s+to\s+)?(?:(?:create|build|edit|write|run|execute)\s*(?:,\s*|and\s+|or\s+))*(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(text);
 }
 
 function portuguesePreviewForbidden(text) {
@@ -5459,10 +5470,11 @@ function workspacePreviewInstructionText(text) {
 
 function hasExplicitWorkspacePreviewDirective(text) {
   if (hasPortugueseWorkspacePreviewDirective(text)) return true;
+  if (/(?:^|[.!?;\n]|\b(?:and|then|now)\s+)\s*(?:please\s+)?(?:call|use|invoke)\s+(?:the\s+)?pixel_ods_workspace_preview\b/i.test(text)) return true;
   // A requested delivery action can follow a diagnosis or code repair. Do not
   // mistake a subordinate "why we should publish" for that owner command.
   const commands = text.matchAll(
-    /(?:^|[.!?;\n]|\b(?:and(?:\s+then)?|then)\s+)\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(display|preview|publish|republish|serve|open|show|view)\s+([^!?;\n]{1,512})/gi
+    /(?:^|[.!?;\n]|\b(?:and(?:\s+then)?|then|now)\s+)\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:try\s+to\s+)?(display|preview|publish|republish|serve|open|show|view)\s+([^!?;\n]{1,512})/gi
   );
   return [...commands].some((match) => {
     const target = match[2].split(/\.(?=\s|$)|\b(?:and|then|but|however|instead)\b/i)[0];
@@ -5513,6 +5525,48 @@ function requestsNamedSessionPreview(text, preview) {
   return !/\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:publish(?:ing)?|republish(?:ing)?|preview(?:ing)?|display(?:ing)?|show(?:ing)?|open(?:ing)?|view(?:ing)?)\b/i.test(ownerText);
 }
 
+function workspacePreviewRestrictions(text) {
+  // This narrow boundary is only for publication of an unchanged artifact.
+  // "Do not create new files" cannot revoke an independently requested edit,
+  // and "do not edit other files" cannot forbid the named repair target.
+  const positive = workspacePreviewInstructionText(text).replace(
+    /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without|no)\b(?:(?!\b(?:but|instead|then)\b)[^.!?;\n])*/gi, " ");
+  if (/\b(?:build|create|develop|generate|implement|make|write|edit|fix|repair|modify|update|add|change|remove|delete|rename|move|patch|improve)\b/i.test(positive)) return undefined;
+  const excluded = text.split(/[!?;\n]+|\.(?=\s|$)|\b(?:but|however|instead|then)\b/i)
+    .map(clause => clause.match(/\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|without)\b([^.!?;\n]{1,320})/i)?.[1] ?? "")
+    .join("\n");
+  const paths = new Set([...text.matchAll(/(?:^|[\s`"'])(?:\/workspace\/)?([A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){1,11})(?=$|[\s`"',;!?]|\.(?:\s|$))/g)]
+    .map(match => match[1].replace(/[.!?;,]+$/, "").replace(/\/index\.html$/i, "")));
+  return {
+    mutation: /\b(?:create|write|edit|modify|change|delete)\b[^\n]{0,64}\b(?:files?|directories|anything)\b/i.test(excluded),
+    exec: /\b(?:run|use|execute)\b[^\n]{0,48}\b(?:shell|commands?|exec)\b/i.test(excluded),
+    web: /\b(?:contact|visit|fetch|browse|use)\b[^\n]{0,48}\b(?:external|websites?|sites?|network|web|internet)\b/i.test(excluded),
+    directory: paths.size === 1 ? [...paths][0] : undefined,
+  };
+}
+
+function clauseRequestsVisualArtifact(clause, actionPattern, targetPattern) {
+  // The visual noun must be the requested object, not the subject of a
+  // report/test or a modifier of a different program ("website checker").
+  // This is a conservative delivery hint, not a grammar for all owner tasks.
+  const targets = clause.matchAll(new RegExp(targetPattern.source, "gi"));
+  for (const target of targets) {
+    const prefix = clause.slice(0, target.index);
+    const actions = [...prefix.matchAll(new RegExp(actionPattern.source, "gi"))];
+    const action = actions.at(-1);
+    const tail = clause.slice(target.index + target[0].length);
+    if (!action && /\b(?:keep|preserve)\b/i.test(prefix) &&
+        /^\s+and\s+(?:add|change|edit|improve|make|modify|patch|refresh|remove|tweak|update)\b/i.test(tail)) return true;
+    if (!action) continue;
+    if (/\b(?:how|why|whether)\s+(?:to\s+|(?:(?:we|you|one|they|I)\s+)?(?:should|could|can|would)\s+)?$/i.test(prefix.slice(0, action.index))) continue;
+    const objectPrefix = prefix.slice(action.index + action[0].length).replace(/\bfrom\s+scratch\b/gi, " ");
+    if (objectPrefix.length > 128 || /\b(?:about|for|of|on|from|using|to|that|which|explaining|describing|discussing|covering|regarding)\b/i.test(objectPrefix)) continue;
+    if (/^\s+(?!(?:in|with|for|about|from|using|to|and|that|which|you|we|I|me)\b)(?:[\w-]+\s+){0,2}(?:reports?|tests?|test\s+plans?|checkers?|validators?|scrapers?|letters?|checklists?|articles?|documentation|audits?)\b/i.test(tail)) continue;
+    return true;
+  }
+  return false;
+}
+
 export function userMessageRequestsWorkspacePreview(messages, prompt = undefined) {
   const text = workspacePreviewInstructionText(currentOwnerIntentText(messages, prompt));
   if (!text) return false;
@@ -5540,8 +5594,9 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
   const websitePattern =
     /\b(?:browser\b[^.!?;\n]{0,32}\bapps?|dashboards?|frontends?|landing\s+pages?|portals?|sites?|web\b[^.!?;\n]{0,32}\bapps?|web\s*pages?|websites?)\b/i;
   const website = websitePattern.test(actionText);
+  const browserInterfacePattern = /\b(?:forms?|user\s+interfaces?|ui\s+demos?|wireframes?)\b/i;
   const browserInterface =
-    /\b(?:forms?|user\s+interfaces?|ui\s+demos?|wireframes?)\b/i.test(actionText) ||
+    browserInterfacePattern.test(actionText) ||
     (/\bprototypes?\b/i.test(actionText) &&
       /\b(?:browser|checkout|flow|form|interface|onboarding|screen|sign[- ]?up|ui|ux|web)\b/i.test(actionText));
   const buildAction =
@@ -5556,8 +5611,8 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
   // scheduled-work request into a mandatory website build.
   const websiteAction = actionText
     .split(/[!?;\n]+|\.(?=\s|$)|\b(?:and|then|but|however|instead)\s+(?=(?:build|create|develop|design|generate|implement|make|write)\b)/i)
-    .some((clause) => websitePattern.test(clause) &&
-      (buildAction.test(clause) || reviseAction.test(clause)));
+    .some((clause) => clauseRequestsVisualArtifact(clause, buildAction, websitePattern) ||
+      clauseRequestsVisualArtifact(clause, reviseAction, websitePattern));
   // A timer or another named utility can be explicitly requested as HTML
   // without using a fixed vocabulary of website/app names. Bind its creation
   // to the same sentence so an earlier saved HTML file grants no authority.
@@ -5568,14 +5623,15 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
   // because a later clause asks for an unrelated JSON file or workflow.
   const application = actionText
     .split(/[.!?;\n]+|\b(?:and|then|but|however|instead)\s+(?=(?:build|create|develop|design|generate|implement|make|write|add|change|continue|edit|improve|keep|modify|patch|refresh|remove|republish|tweak|update|work)\b)/i)
-    .some((clause) => /\b(?:apps?|applications?)\b/i.test(clause) &&
-      (buildAction.test(clause) || reviseAction.test(clause)));
+    .some((clause) => clauseRequestsVisualArtifact(clause, buildAction, /\b(?:apps?|applications?)\b/i) ||
+      clauseRequestsVisualArtifact(clause, reviseAction, /\b(?:apps?|applications?)\b/i));
   // An output format alone does not require an HTML wrapper. SVG files may
   // be delivered directly; explicit browser publication still requires proof.
-  const browserVisual =
-    /\b(?:artworks?|animated\s+(?:art|illustrations?|scenes?)|interactive\s+(?:art|charts?|diagrams?))\b/i.test(actionText) ||
-    /\b(?:breakout|brick[- ]?breakers?|browser[- ]?games?|canvas\s+(?:demos?|games?)|interactive\s+(?:demos?|experiences?|visuali[sz]ations?)|task\s+boards?|to-?do\s+(?:apps?|boards?|lists?)|video\s*games?|videogames?|visual\s+(?:demos?|showcases?)|visuali[sz]ations?|voxel(?:[- ](?:based|styles?))?|webgl\s+(?:demos?|scenes?))\b/i.test(actionText) ||
-    /\b(?:arcade|board|card|puzzle|racing|rhythm|strategy|word)?\s*games?\b/i.test(actionText);
+  const browserVisual = [
+    /\b(?:artworks?|animated\s+(?:art|illustrations?|scenes?)|interactive\s+(?:art|charts?|diagrams?))\b/i,
+    /\b(?:breakout|brick[- ]?breakers?|browser[- ]?games?|canvas\s+(?:demos?|games?)|interactive\s+(?:demos?|experiences?|visuali[sz]ations?)|task\s+boards?|to-?do\s+(?:apps?|boards?|lists?)|video\s*games?|videogames?|visual\s+(?:demos?|showcases?)|visuali[sz]ations?|voxel(?:[- ](?:based|styles?))?|webgl\s+(?:demos?|scenes?))\b/i,
+    /\b(?:arcade|board|card|puzzle|racing|rhythm|strategy|word)?\s*games?\b/i,
+  ].some(pattern => clauseRequestsVisualArtifact(actionText, buildAction, pattern));
   const explicitBrowser =
     website || /\b(?:browser|canvas|html|svg|webgl)\b/i.test(actionText);
   const nativeImplementation =
@@ -5635,7 +5691,11 @@ export function userMessageRequestsWorkspacePreview(messages, prompt = undefined
     /\b(?:controls?|interacti(?:ve|on)|keyboard|mobile|phone|touch)\b/i.test(text);
   return directPreview || unreachableLocalPreview || interactiveDelivery ||
     websiteAction ||
-    ((application || browserInterface || htmlCreation) && (build || revise)) ||
+    ((application || (browserInterface && (
+      clauseRequestsVisualArtifact(actionText, buildAction, browserInterfacePattern) ||
+      clauseRequestsVisualArtifact(actionText, reviseAction, browserInterfacePattern) ||
+      clauseRequestsVisualArtifact(actionText, buildAction, /\bprototypes?\b/i)
+    )) || htmlCreation) && (build || revise)) ||
     (browserVisual && build) || portugueseWorkspaceBuildRequest(text);
 }
 
@@ -5687,9 +5747,10 @@ export function workspacePreviewMode(messages, prompt = undefined) {
     /\b(?:research|inspect|read|review)\b[^.!?;\n]{0,96}\b(?:before|then|and)\b/i.test(text) ||
     /\btest(?:ing)?\b[^.!?;\n]{0,64}\bbefore\s+(?:publication|publishing)\b/i.test(text) ||
     /\b(?!index\.html\b)[A-Za-z0-9._-]+\.html\b/i.test(text);
-  const simpleStaticTarget =
-    /\b(?:browser\s+app|dashboards?|forms?|frontends?|landing\s+pages?|sites?|static\s+(?:html\s+)?pages?|web\s+apps?|web\s+pages?|websites?)\b/i.test(text) ||
-    /(?:^|\/)index\.html\b/i.test(text);
+  // Only an explicit static implementation earns the write-first optimization.
+  // A website/dashboard by itself says nothing about its implementation or
+  // prerequisites. Unknown frameworks and ordinary tasks keep normal tools.
+  const simpleStaticTarget = /\b(?:static\s+(?:html\s+)?(?:page|site|website)|(?:plain|vanilla)\s+html|self[- ]contained\s+html|single[- ]file\s+html)\b/i.test(text);
   // Creating a new site can still require evidence/assets before any write.
   // Do not force a placeholder index ahead of requested inspection or inputs.
   const latestUser = Array.isArray(messages)
@@ -5702,6 +5763,8 @@ export function workspacePreviewMode(messages, prompt = undefined) {
     /\b(?:attachments?|uploaded|screenshots?|references?|datasets?|csv|spreadsheets?|pdf)\b/i.test(text) ||
     /\b(?:from|using|based\s+on|match|copy|recreate)\b[^.!?;\n]{0,96}\b(?:images?|photos?|logos?|files?|data|documents?|designs?|assets?)\b/i.test(text) ||
     /\b(?:read|inspect|research|review|fetch|search)\b/i.test(text) ||
+    (text.match(/\b[A-Za-z0-9_-][A-Za-z0-9._/-]*\.[A-Za-z0-9]{1,10}\b/gi) ?? [])
+      .some(file => !/(?:^|\/)index\.html$/i.test(file)) ||
     /https?:\/\//i.test(text);
   return !simpleStaticTarget || frameworkOrBuild || existingProject || inputDependent
     ? "existing-project"
@@ -6627,6 +6690,12 @@ export function createToolLoopGuard({
     // that truly need a session still fail closed on the optional sessionId.
     const state = runId ? stateFor(runId) : undefined;
     const delegatedName=typeof toolName==='string' && toolName==='tool_call' ? String((normalizedParams ?? event?.params)?.id ?? '').split(':').at(-1) : toolName;
+    const previewRestrictions = state?.workspacePreviewRestrictions;
+    if ((previewRestrictions?.mutation && ["write", "edit", "apply_patch"].includes(delegatedName)) ||
+        (previewRestrictions?.exec && ["exec", "process"].includes(delegatedName)) ||
+        (previewRestrictions?.web && ["web_search", "web_fetch", "pixel_ods_research", "pixel_ods_web_extract", "browser"].includes(delegatedName))) {
+      return {block:true, blockReason:"The owner requested publication of existing files and explicitly excluded this action. Use the preview tool for the requested directory, then report its actual result; do not create a replacement or substitute another capability."};
+    }
     if (state?.extensionPendingHandoff &&
         (!state.workspaceLaneRequested || EXTENSION_REQUEST_TOOLS.has(delegatedName))) return {
       block:true, blockReason:state.workspaceLaneRequested
@@ -7172,6 +7241,10 @@ export function createToolLoopGuard({
       }
       const validDirectory = typeof directory === "string" && directory.length > 0 &&
         directory.split("/").every((part) => WORKSPACE_PATH_COMPONENT.test(part));
+      if (state.workspacePreviewRestrictions?.mutation && state.workspacePreviewRestrictions.directory &&
+          directory !== state.workspacePreviewRestrictions.directory) {
+        return {block:true, blockReason:"The owner requested publication of one exact existing directory. Do not substitute another directory or create a replacement."};
+      }
       const requiresAuthoredSnapshot = workspacePreviewRequiresAuthoredSnapshot(state, directory);
       const hasObservedIndex = validDirectory &&
         (state.successfulWritePaths.has(`${directory}/index.html`) ||
@@ -8459,6 +8532,9 @@ export function createToolLoopGuard({
             event?.prompt
           )
         );
+        state.workspacePreviewRestrictions = explicitDelivery && !state.workspacePreviewAuthorshipRequired
+          ? workspacePreviewRestrictions(ownerIntent)
+          : undefined;
         state.workspacePreviewInspectionRequested =
           userMessageRequestsWorkspacePreviewInspection(
             event?.messages,
@@ -9006,6 +9082,11 @@ export function createToolLoopGuard({
         previewEvent?.params?.relativeDirectory
       );
       if (requestedDirectory) state.workspacePreviewDirectory = requestedDirectory;
+      const failedPreview = previewEvent.result?.details;
+      state.workspacePreviewFailureCode = previewEvent.result?.isError === true &&
+        failedPreview?.schemaVersion === 1 && failedPreview.kind === "ods-pixel-workspace-preview" &&
+        failedPreview.status === "failed" && Object.hasOwn(WORKSPACE_PREVIEW_FAILURE_REASONS, failedPreview.errorCode)
+        ? failedPreview.errorCode : undefined;
       const preview = state.ownerIntentObserved && !state.workspacePreviewForbidden && workspacePreviewOutcome(
         previewEvent,
         state.workspacePreviewDirectory,
@@ -9666,6 +9747,9 @@ export function createToolLoopGuard({
     ) {
       return undefined;
     }
+    // A failed publish-only probe is the requested evidence. Do not retry it
+    // or manufacture the missing artifact when the owner prohibited writes.
+    if (state.workspacePreviewRestrictions?.mutation && state.workspacePreviewAttempted && !state.workspacePreview) return undefined;
     if (state.workspacePreview) {
       if (workspacePreviewReadbackComplete(state)) return undefined;
       const nextPath = workspacePreviewNextKnownReadPath(state);
@@ -9677,8 +9761,13 @@ export function createToolLoopGuard({
           : `The published snapshot is verified. Complete the requested unread static files inside ${state.workspacePreview.relativeDirectory} and any remaining owner-requested checks before replying.`,
       };
     }
-    const directory = workspacePreviewDirectoryFromState(state);
+    const directory = (state.workspacePreviewRestrictions?.mutation && state.workspacePreviewRestrictions.directory) ||
+      workspacePreviewDirectoryFromState(state);
     if (!directory) {
+      if (state.workspacePreviewRestrictions?.mutation) return {
+        stage: "workspace-preview-existing",
+        instruction: "Call pixel_ods_workspace_preview with the exact directory requested by the owner. Do not create or change files or substitute a different directory. Report the tool's actual result, including failure; do not invent a preview URL.",
+      };
       return {
         stage: "workspace-preview-files",
         instruction:
@@ -9987,6 +10076,12 @@ export function createToolLoopGuard({
       !state.exactDownloadRequested
     ) {
       if (!state.workspacePreview) {
+        if (state.workspacePreviewRestrictions?.mutation && state.workspacePreviewAttempted) return {
+          status: "failed",
+          text: "ODS could not publish that directory: " +
+            (WORKSPACE_PREVIEW_FAILURE_REASONS[state.workspacePreviewFailureCode] ?? "no valid publication receipt was returned") +
+            ". No verified preview URL was returned; the requested no-edit restriction remains in effect.",
+        };
         // A command may have changed the workspace, but it cannot change the
         // immutable host publication. Retain its usable link without treating
         // it as verification of the latest workspace or a completed request.
