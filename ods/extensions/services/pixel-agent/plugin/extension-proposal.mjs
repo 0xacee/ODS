@@ -26,9 +26,21 @@ const PREPARATION_NEXT = Object.freeze({
 // request inspector pins the repository before the strict compiler sees it.
 const proposalCommitSchema = {type:'string', pattern:'^(?:[a-f0-9]{40}|HEAD)$',
   description:'Optional verified full commit SHA. Omit or use HEAD so ODS pins the saved request repository to its current default-branch commit. Branch names and tags are not immutable commits.'};
+// Keep the strict compiler's 2048-character checks, but do not expose them as
+// JSON-schema maxLength. llama.cpp expands them into char{1,2048} and
+// char{0,2048} in the combined Pixel grammar. This exceeds its repetition
+// limit and breaks unrelated tools such as workspace preview.
+const strictVerificationSchema = sourceRecipeSchema.properties.pythonVerification;
+const {maxLength:expressionLimit, ...modelExpression} = strictVerificationSchema.properties.expression;
+const {maxLength:expectedLimit, ...modelExpected} = strictVerificationSchema.properties.expected;
+const modelVerificationSchema = {...strictVerificationSchema, properties:{
+  expression:{...modelExpression, description:`${modelExpression.description} Maximum ${expressionLimit} characters; ODS validates this limit.`},
+  expected:{...modelExpected, description:`${modelExpected.description} Maximum ${expectedLimit} characters; ODS validates this limit.`},
+}};
 const proposalSourceSchema = {...sourceRecipeSchema,
   required:sourceRecipeSchema.required.filter(key => key !== 'commit'),
-  properties:{...sourceRecipeSchema.properties, commit:proposalCommitSchema}};
+  properties:{...sourceRecipeSchema.properties, commit:proposalCommitSchema,
+    pythonVerification:modelVerificationSchema}};
 
 async function pinRequestCommit(submit, identity, repository) {
   const receipt = await submit({schemaVersion:1, action:'github-request-pin', ...identity});
@@ -275,7 +287,7 @@ export function createPythonLibraryProposalTool(context, dependencies = {}) {
     properties:Object.fromEntries(fields.map(key => [key, sourceRecipeSchema.properties[key]]))};
   parameters.properties.commit = proposalCommitSchema;
   parameters.properties.description = sourceRecipeSchema.properties.description;
-  parameters.properties.pythonVerification = sourceRecipeSchema.properties.pythonVerification;
+  parameters.properties.pythonVerification = modelVerificationSchema;
   parameters.properties.pythonVersion = {...parameters.properties.pythonVersion,
     description:'JSON string for a Python 3 minor version supported by inspected metadata, for example "3.12". Never send a number.'};
   parameters.properties.pythonImports = {...parameters.properties.pythonImports,
