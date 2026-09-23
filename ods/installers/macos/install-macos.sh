@@ -191,6 +191,7 @@ if [[ -f "${SOURCE_ROOT}/lib/python-cmd.sh" ]]; then
     source "${SOURCE_ROOT}/lib/python-cmd.sh"
 fi
 source "${SOURCE_ROOT}/installers/lib/readiness-summary.sh"
+source "${SOURCE_ROOT}/installers/lib/secure-log.sh"
 
 # ── File-local helpers ──
 _close_inherited_fds_for_daemon() {
@@ -1221,9 +1222,9 @@ if ! $OPENCLAW_EXPLICIT; then
     unset _existing_openclaw
 fi
 
-# Initialize log file
-mkdir -p "$(dirname "$ODS_LOG_FILE")"
-: > "$ODS_LOG_FILE"
+# Reuse the same private-log guard as Linux. In particular, an existing log
+# under macOS /tmp must be privatized before any diagnostic can append to it.
+ods_prepare_install_log "$ODS_LOG_FILE" || exit 1
 
 # ============================================================================
 # PHASE 1 -- PREFLIGHT CHECKS

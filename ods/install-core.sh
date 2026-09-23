@@ -72,6 +72,7 @@ if [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
 fi
 
 source "$SCRIPT_DIR/installers/lib/constants.sh"
+source "$SCRIPT_DIR/installers/lib/secure-log.sh"
 source "$SCRIPT_DIR/installers/lib/logging.sh"
 source "$SCRIPT_DIR/installers/lib/ui.sh"
 source "$SCRIPT_DIR/installers/lib/sudo.sh"
@@ -265,8 +266,8 @@ while [[ $# -gt 0 ]]; do
         --no-opencode) ENABLE_OPENCODE=false; shift ;;
         --comfyui) ENABLE_COMFYUI=true; shift ;;
         --no-comfyui) ENABLE_COMFYUI=false; shift ;;
-        --odsforge) warn "ODSForge has been removed; ignoring --odsforge"; shift ;;
-        --no-odsforge) warn "ODSForge has been removed; ignoring --no-odsforge"; shift ;;
+        --odsforge) printf '%s\n' '[WARN] ODSForge has been removed; ignoring --odsforge' >&2; shift ;;
+        --no-odsforge) printf '%s\n' '[WARN] ODSForge has been removed; ignoring --no-odsforge' >&2; shift ;;
         --langfuse) ENABLE_LANGFUSE=true; shift ;;
         # NOTE: with --all, --no-langfuse must appear AFTER --all on the command
         # line (flag processing is case-loop ordered, matching comfyui).
@@ -287,9 +288,15 @@ while [[ $# -gt 0 ]]; do
         --no-bootstrap) NO_BOOTSTRAP=true; shift ;;
         --summary-json) SUMMARY_JSON_FILE="$2"; shift 2 ;;
         -h|--help) usage ;;
-        *) error "Unknown option: $1" ;;
+        *) printf '[ERROR] Unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
 done
+
+# Help and malformed options exit without creating a log. Every remaining
+# path prepares a private diagnostic file before the first logging call.
+if ! ods_prepare_install_log "$LOG_FILE"; then
+    exit 1
+fi
 
 # Argument parsing establishes interactivity. Resolve the presentation once so
 # non-interactive/CI/GUI output cannot inherit terminal color from a real TTY.
