@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# Prepare the Linux installer's diagnostic log before any message can append.
+# Prepare the Linux/macOS installer's diagnostic log before any message can append.
+
+_ods_install_log_mode() {
+    if [[ "$(uname -s)" == Darwin ]]; then
+        # %p includes special permission bits; %Lp omits the sticky bit on macOS.
+        stat -f '%p' "$1"
+    else
+        stat -c '%a' -- "$1"
+    fi
+}
 
 ods_prepare_install_log() {
     local log_path="$1" parent parent_mode file_mode
@@ -8,12 +17,16 @@ ods_prepare_install_log() {
     [[ "$log_path" == /dev/null ]] && return 0
 
     parent="$(dirname -- "$log_path")" || return 1
-    if [[ ! -d "$parent" || -L "$parent" ]]; then
+    if [[ ! -d "$parent" ]]; then
         printf '%s\n' '[ERROR] Installer log directory is missing or unsafe.' >&2
         return 1
     fi
-    parent_mode="$(stat -c '%a' -- "$parent")" || return 1
-    if [[ ! "$parent_mode" =~ ^[0-7]{3,4}$ ]] \
+    # Resolve trusted system aliases such as macOS /tmp -> /private/tmp, then
+    # open through the resolved parent rather than through a mutable symlink.
+    parent="$(cd -P -- "$parent" && pwd)" || return 1
+    log_path="$parent/$(basename -- "$log_path")"
+    parent_mode="$(_ods_install_log_mode "$parent")" || return 1
+    if [[ ! "$parent_mode" =~ ^[0-7]{3,6}$ ]] \
         || (( (8#$parent_mode & 0022) != 0 && (8#$parent_mode & 01000) == 0 )); then
         printf '%s\n' '[ERROR] Installer log directory is writable by others without sticky protection.' >&2
         return 1
@@ -24,7 +37,7 @@ ods_prepare_install_log() {
         return 1
     fi
     if [[ -e "$log_path" ]]; then
-        if [[ ! -f "$log_path" || ! -O "$log_path" ]] || ! chmod 600 -- "$log_path"; then
+        if [[ ! -f "$log_path" || ! -O "$log_path" ]] || ! chmod 600 "$log_path"; then
             printf '%s\n' '[ERROR] Installer log must be an owned regular file.' >&2
             return 1
         fi
@@ -39,8 +52,8 @@ ods_prepare_install_log() {
         printf '%s\n' '[ERROR] Installer log ownership changed unexpectedly.' >&2
         return 1
     fi
-    file_mode="$(stat -c '%a' -- "$log_path")" || return 1
-    if [[ "$file_mode" != 600 ]]; then
+    file_mode="$(_ods_install_log_mode "$log_path")" || return 1
+    if [[ ! "$file_mode" =~ ^[0-7]{3,6}$ ]] || (( (8#$file_mode & 07777) != 0600 )); then
         printf '%s\n' '[ERROR] Installer log is not private.' >&2
         return 1
     fi
