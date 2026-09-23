@@ -20,12 +20,24 @@ if (hash(source) !== manifest.sourceSha256) {
   for (const [before, after] of [...replacements].reverse()) source = source.replace(after, before);
 }
 assert.equal(hash(source), manifest.sourceSha256);
+let beforeTerminalFix = source;
+for (const [before, after] of manifest.previousReplacements['7d316a5a6fd334482d9d85456be9cf422e20636fd55a2d8a789fe03ec58d198e']) beforeTerminalFix = beforeTerminalFix.replace(before, after);
 for (const [before, after] of manifest.replacements) source = source.replace(before, after);
 assert.equal(hash(source), manifest.patchedSha256);
 const start = source.indexOf('\tasync runAutoCompaction(reason, willRetry) {');
 const end = source.indexOf('\n\t/**', start);
 assert.ok(start > 0 && end > start);
 const runAutoCompaction = new Function(`return ({${source.slice(start, end)}}).runAutoCompaction`)();
+function extractPrompt(text) {
+  const begin = text.indexOf('\tasync prompt(text, options) {');
+  const finish = text.indexOf('\n\t/**', begin);
+  assert.ok(begin > 0 && finish > begin);
+  return new Function(`return ({${text.slice(begin, finish)}}).prompt`)();
+}
+const prompt = extractPrompt(source);
+const baselineStart = beforeTerminalFix.indexOf('\tasync runAutoCompaction(reason, willRetry) {');
+const baselineEnd = beforeTerminalFix.indexOf('\n\t/**', baselineStart);
+const baselineCompaction = new Function(`return ({${beforeTerminalFix.slice(baselineStart, baselineEnd)}}).runAutoCompaction`)();
 const eventStart = source.indexOf('\tasync handleAgentEventUnlocked(event) {');
 const eventEnd = source.indexOf('\n\twillRetryAfterAgentEnd(', eventStart);
 assert.ok(eventStart > 0 && eventEnd > eventStart);
@@ -75,12 +87,92 @@ test('ordinary compaction does not delete a completed answer or start another tu
   assert.equal(f.continued(), 0);
 });
 
-test('a completed assistant answer is never silently dropped even with retry requested', async () => {
-  const f = fixture('stop');
-  await runAutoCompaction.call(f.session, 'threshold', true);
-  await assert.rejects(f.agent.continue(), /Cannot continue from message role: assistant/);
-  assert.equal(f.agent.state.messages.at(-1), f.tail);
+for (const stopReason of ['stop', 'aborted', 'toolUse']) {
+  test(`${stopReason} assistant tail is preserved without advertising an impossible retry`, async () => {
+    const f = fixture(stopReason);
+    assert.equal(await runAutoCompaction.call(f.session, 'overflow', true), false);
+    assert.equal(f.events.at(-1).willRetry, false);
+    assert.deepEqual(f.agent.state.messages, [...f.prior, f.tail]);
+    assert.equal(f.continued(), 0);
+  });
+}
+
+function prePromptFixture(compact = runAutoCompaction, stopReason = 'stop') {
+  const f = fixture(stopReason);
+  const submitted = [], preflight = [];
+  Object.assign(f.session, {
+    model: {provider:'fixture'}, isStreaming:false, pendingNextTurnMessages:[],
+    currentExtensionRunner: {hasHandlers:() => false, emitBeforeAgentStart:async () => undefined},
+    sessionModelRegistry: {hasConfiguredAuth:() => true},
+    flushPendingBashMessages:() => {}, findLastAssistantMessage:() => f.tail,
+    checkCompaction:() => compact.call(f.session, 'overflow', true),
+    handlePostAgentRun:async () => false,
+    runAgentPrompt:async messages => {submitted.push(...messages);},
+  });
+  return {...f, submitted, preflight, run:() => prompt.call(f.session, 'A fresh owned research request.', {
+    expandPromptTemplates:false, preflightResult:value => preflight.push(value),
+  })};
+}
+
+test('reviewed baseline reproduces a retry event followed by rejected preflight and no new user', async () => {
+  const f = prePromptFixture(baselineCompaction);
+  await assert.rejects(f.run(), /Cannot continue from message role: assistant/);
+  assert.equal(f.events.at(-1).willRetry, true);
+  assert.deepEqual(f.preflight, [false]);
+  assert.equal(f.submitted.length, 0);
 });
+
+for (const stopReason of ['stop', 'aborted']) {
+  test(`real pre-prompt caller proceeds once after compacted ${stopReason} history`, async () => {
+    const f = prePromptFixture(runAutoCompaction, stopReason);
+    await f.run();
+    assert.equal(f.events.at(-1).willRetry, false, 'no pending retry is advertised to the subscription');
+    assert.deepEqual(f.preflight, [true]);
+    assert.equal(f.submitted.length, 1);
+    assert.deepEqual(f.submitted[0].content, [{type:'text',text:'A fresh owned research request.'}]);
+    assert.deepEqual(f.agent.state.messages, [...f.prior, f.tail]);
+    assert.equal(f.continued(), 0);
+  });
+}
+
+for (const queue of ['steer', 'followUp']) {
+  test(`completed tail still allows the real Agent's queued ${queue} continuation`, async () => {
+    const f = fixture('stop');
+    const queued = {role:'user',content:[{type:'text',text:'Existing queued request'}],timestamp:5};
+    f.agent[queue](queued);
+    const dispatched=[];
+    f.agent.runPromptMessages = async messages => {dispatched.push(...messages);};
+    assert.equal(await runAutoCompaction.call(f.session,'overflow',true),true);
+    assert.equal(f.events.at(-1).willRetry,true);
+    await f.agent.continue();
+    assert.deepEqual(dispatched,[queued]);
+    assert.deepEqual(f.agent.state.messages,[...f.prior,f.tail]);
+  });
+}
+
+test('observed tool-result, abort, and completed stub tail never replays its prior owner request', async () => {
+  const f = prePromptFixture();
+  f.prior.push({role:'assistant',content:[],stopReason:'aborted',timestamp:3.5});
+  const priorHistory = structuredClone([...f.prior,f.tail]);
+  await f.run();
+  assert.deepEqual(f.agent.state.messages,priorHistory);
+  assert.equal(f.submitted.filter(m => m.role === 'user').length,1);
+  assert.equal(f.submitted[0].content[0].text,'A fresh owned research request.');
+  assert.ok(!JSON.stringify(f.submitted).includes('Research and prepare only'));
+  assert.equal(f.events.at(-1).willRetry,false);
+});
+
+for (const name of ['AbortError','TimeoutError']) {
+  test(`new prompt ${name} propagates without replay or synthetic completion`, async () => {
+    const f = prePromptFixture();
+    const cancellation = new Error('fixture owned run ended'); cancellation.name=name;
+    f.session.runAgentPrompt = async messages => {f.submitted.push(...messages); throw cancellation;};
+    await assert.rejects(f.run(), error => error === cancellation);
+    assert.equal(f.submitted.length,1);
+    assert.equal(f.events.at(-1).willRetry,false);
+    assert.equal(f.continued(),0);
+  });
+}
 
 for (const outcome of ['aborted', 'skipped']) {
   test(`${outcome} compaction does not authorize a continuation`, async () => {
