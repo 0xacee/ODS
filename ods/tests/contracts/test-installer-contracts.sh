@@ -472,6 +472,7 @@ run_phase03_rag_guard() {
     ODS_MODE=local
     ENABLE_RAG=true
     ENABLE_HERMES=false
+    ENABLE_PIXEL=false
     ENABLE_OPENCLAW=false
     ENABLE_COMFYUI=false
     ENABLE_WORKFLOWS=false
