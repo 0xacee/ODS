@@ -335,7 +335,8 @@ async def test_status_returns_only_fixed_projection():
     response = FakeResponse(chunks=[body])
     with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(response)):
         result = await pixel.pixel_status()
-    assert result == {"available": True, "model": "pixel/default", "detail": "Owner agent ready"}
+    assert result == {"available": True, "model": "pixel/default", "detail": "Owner agent available; release identity is not fully verified",
+                      "runtimeIdentity": pixel.unknown_runtime_identity(), "runtimeMatchesRelease": None}
     assert secret not in json.dumps(result)
 
 
@@ -443,7 +444,8 @@ async def test_status_projects_only_validated_active_remote_runtime(monkeypatch)
     assert result == {
         "available": True,
         "model": "pixel/default",
-        "detail": "Owner agent ready",
+        "detail": "Owner agent available; release identity is not fully verified",
+        "runtimeIdentity": pixel.unknown_runtime_identity(), "runtimeMatchesRelease": None,
         "runtime": {
             "source": "remote-provider",
             "model": "remote-owner-model",
@@ -700,7 +702,8 @@ async def test_status_keeps_adaptive_model_available_with_fixed_advisory(monkeyp
     assert result == {
         "available": True,
         "model": "pixel/default",
-        "detail": "Owner agent ready",
+        "detail": "Owner agent available; release identity is not fully verified",
+        "runtimeIdentity": pixel.unknown_runtime_identity(), "runtimeMatchesRelease": None,
         "modelSupport": {
             "tier": "adaptive",
             "detail": pixel._MODEL_ADAPTIVE_DETAIL,

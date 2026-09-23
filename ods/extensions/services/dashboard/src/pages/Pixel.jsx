@@ -24,6 +24,7 @@ import {goalCommand,continueGoal} from '../lib/portalGoal'
 import PortalContextRing from '../components/PortalContextRing'
 import {compactCommand,CONTEXT_REQUEST_ID,historySnapshot,usePortalContext} from '../lib/portalContext'
 import PortalModelSelector from '../components/PortalModelSelector'
+import PortalRuntimeIdentity from '../components/PortalRuntimeIdentity'
 import PortalAgentActivity from '../components/PortalAgentActivity'
 import PortalExtensionSetup from '../components/PortalExtensionSetup'
 import PortalExtensionProgress from '../components/PortalExtensionProgress'
@@ -556,6 +557,7 @@ export default function Pixel({ systemStatus = null }) {
   const [agentRuntime, setAgentRuntime] = useState(null)
   const [contextRuntime, setContextRuntime] = useState(null)
   const [modelSupport, setModelSupport] = useState(null)
+  const [runtimeIdentity, setRuntimeIdentity] = useState(null)
   const [modelSwitching,setModelSwitching]=useState(false)
   const [modelStatusRefresh,setModelStatusRefresh]=useState(0)
   const [preview, setPreview] = useState(() => initialChat?.preview || null)
@@ -743,6 +745,7 @@ export default function Pixel({ systemStatus = null }) {
         if (!response.ok) throw new Error('status unavailable')
         const data = await response.json()
         if (stopped) return
+        setRuntimeIdentity(data?.runtimeIdentity ?? null)
         const runtime = data?.runtime
         const runtimeKeys = runtime && typeof runtime === 'object' && !Array.isArray(runtime)
           ? Object.keys(runtime).sort().join('\n')
@@ -812,6 +815,7 @@ export default function Pixel({ systemStatus = null }) {
       } catch (error) {
         if (!stopped && error?.name !== 'AbortError') {
           setAgentRuntime(null)
+          setRuntimeIdentity(null)
           setStatus('unavailable')
           setStatusDetail('Could not reach Pixel backend')
         }
@@ -1430,6 +1434,7 @@ export default function Pixel({ systemStatus = null }) {
             }}/>
             <PixelHandoffApproval label="Approvals" />
             <details className="pixel-chat-options-advanced"><summary>Advanced tools</summary><div>
+              <PortalRuntimeIdentity identity={runtimeIdentity} runtime={agentRuntime} />
               <PixelAdvice canInsert={!sending && !contextControl.busy} onInsert={text => setInput(current => current ? `${current}\n\n${text}` : text)} />
               <PixelProviderScopes chatId={chatIdRef.current} sending={sending} />
             </div></details>

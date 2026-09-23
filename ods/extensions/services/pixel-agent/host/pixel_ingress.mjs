@@ -1353,6 +1353,51 @@ export async function checkGatewayReachable(gatewayPort, deps = defaultDeps) {
   }
 }
 
+export function projectRuntimeIdentity(value) {
+  const identity = value?.identities, schemas = value?.toolSchemas;
+  const nullableHash = item => item === null || typeof item === 'string' && /^[a-f0-9]{64}$/.test(item);
+  const reasons = {partial:'release-binding-unavailable', mismatch:'runtime-files-changed', unavailable:'runtime-identity-unavailable'};
+  if (!value || value.schemaVersion !== 1 || !Object.hasOwn(reasons, value.state)
+      || value.reasonCode !== reasons[value.state] || value.boundary !== 'initialization-files-not-evaluated-code-or-release-proof'
+      || !['match','mismatch','unavailable'].includes(value.diskComparison)
+      || (value.state === 'mismatch') !== (value.diskComparison === 'mismatch')
+      || value.runtimeMatchesRelease !== (value.state === 'mismatch' ? false : null)
+      || typeof value.observedAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.observedAt)
+      || !Number.isFinite(Date.parse(value.observedAt)) || Math.abs(Date.now() - Date.parse(value.observedAt)) > 120000
+      || !identity || identity.odsReleaseCommit !== null || identity.pixelSourceRevision !== null || identity.previewImageDigest !== null
+      || !nullableHash(identity.pluginSha256) || !nullableHash(identity.openclawModuleSha256)
+      || !(identity.openclawVersion === null || typeof identity.openclawVersion === 'string' && /^[0-9]{4}\.[0-9]+\.[0-9]+(?:-[0-9]+)?$/.test(identity.openclawVersion))
+      || !schemas || schemas.boundary !== 'latest-created-plugin-tools-not-offered-surface'
+      || !Number.isInteger(schemas.registeredPluginToolCount) || schemas.registeredPluginToolCount < 0 || schemas.registeredPluginToolCount > 64
+      || !nullableHash(schemas.registeredPluginToolSchemasSha256)
+      || (schemas.registeredPluginToolCount === 0) !== (schemas.registeredPluginToolSchemasSha256 === null)
+      || schemas.offeredToolCount !== null || schemas.offeredToolSchemasSha256 !== null) throw new Error('invalid runtime identity');
+  return {
+    schemaVersion:1, state:value.state, diskComparison:value.diskComparison, runtimeMatchesRelease:value.runtimeMatchesRelease,
+    reasonCode:value.reasonCode, observedAt:value.observedAt, boundary:value.boundary,
+    identities:Object.fromEntries(['odsReleaseCommit','pixelSourceRevision','pluginSha256','openclawVersion','openclawModuleSha256','previewImageDigest'].map(key=>[key,identity[key]])),
+    toolSchemas:Object.fromEntries(['boundary','registeredPluginToolCount','registeredPluginToolSchemasSha256','offeredToolCount','offeredToolSchemasSha256'].map(key=>[key,schemas[key]])),
+  };
+}
+
+async function handleRuntimeIdentity(res, token, gatewayPort, deps) {
+  const controller = new AbortController();
+  const timer = deps.setTimeout(() => controller.abort(), GATEWAY_PROBE_TIMEOUT_MS);
+  try {
+    const response = await deps.fetch(`http://127.0.0.1:${gatewayPort}/pixel-ods/runtime-identity`, {
+      headers:{Authorization:`Bearer ${token}`, Accept:'application/json'}, redirect:'error', signal:controller.signal,
+    });
+    if (response.status !== 200 || !response.headers.get('content-type')?.startsWith('application/json')) throw new Error('unavailable');
+    let raw = '';
+    for await (const chunk of response.body) {
+      raw += Buffer.from(chunk).toString('utf8');
+      if (Buffer.byteLength(raw) > 8192) throw new Error('unavailable');
+    }
+    sendJson(res, 200, projectRuntimeIdentity(JSON.parse(raw)));
+  } catch { sendJson(res, 503, {error:'runtime-identity-unavailable'}); }
+  finally { deps.clearTimeout(timer); }
+}
+
 function execFilePromise(execImpl, command, args, options) {
   return new Promise((resolve, reject) => {
     let completed = false;
@@ -1618,6 +1663,12 @@ export function createIngressServer({ token, gatewayPort, deps = defaultDeps, hi
         });
         res.end(JSON.stringify({ status: ready ? "ok" : "unavailable" }));
       });
+      return;
+    }
+
+    if (pathname === '/v1/runtime-identity') {
+      if (req.method !== 'GET' || req.url !== pathname) { sendError(res, 400, 'invalid request'); return; }
+      void handleRuntimeIdentity(res, token, gatewayPort, deps);
       return;
     }
 

@@ -30,6 +30,7 @@ from config import read_live_env_value
 from helpers import get_loaded_model, get_llama_context_size
 from pixel_chat_identity import messages_with_identity
 from pixel_chat_context import HistorySnapshot, public_context
+from pixel_runtime_identity import project_runtime_identity, unknown_runtime_identity
 
 
 logger = logging.getLogger(__name__)
@@ -584,6 +585,23 @@ async def pixel_status() -> dict[str, object]:
         model_support = _model_support_from_status(host_status)
         if available and model_support is not None:
             result["modelSupport"] = model_support
+        # Availability is not installed-release verification. A missing, old,
+        # or malformed diagnostic route must not disable otherwise working chat.
+        identity = unknown_runtime_identity()
+        if available:
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(4.0), trust_env=False, follow_redirects=False) as client:
+                    async with client.stream("GET", f"{edge_url}/v1/runtime-identity",
+                                             headers=_edge_headers(key, accept="application/json")) as response:
+                        if response.status_code == 200 and response.headers.get("content-type", "").lower().startswith("application/json"):
+                            identity = project_runtime_identity(json.loads(await _bounded_response_bytes(response, 8192)))
+            except (httpx.HTTPError, asyncio.TimeoutError, ValueError, TypeError):
+                pass
+        result["runtimeIdentity"] = identity
+        result["runtimeMatchesRelease"] = identity["runtimeMatchesRelease"]
+        if available:
+            result["detail"] = "Owner agent available; " + ("runtime files changed since initialization" if identity["state"] == "mismatch"
+                                                         else "release identity is not fully verified")
         return result
     except (httpx.HTTPError, asyncio.TimeoutError) as exc:
         # Exception text and request objects can contain upstream credentials.
