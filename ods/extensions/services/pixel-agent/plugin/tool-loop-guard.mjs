@@ -5603,7 +5603,20 @@ export function workspacePreviewMode(messages, prompt = undefined) {
   const simpleStaticTarget =
     /\b(?:browser\s+app|dashboards?|forms?|frontends?|landing\s+pages?|sites?|static\s+(?:html\s+)?pages?|web\s+apps?|web\s+pages?|websites?)\b/i.test(text) ||
     /(?:^|\/)index\.html\b/i.test(text);
-  return !simpleStaticTarget || frameworkOrBuild || existingProject
+  // Creating a new site can still require evidence/assets before any write.
+  // Do not force a placeholder index ahead of requested inspection or inputs.
+  const latestUser = Array.isArray(messages)
+    ? [...messages].reverse().find((message) => message?.role === "user")
+    : undefined;
+  const suppliedMedia = Array.isArray(latestUser?.content) && latestUser.content.some(
+    (part) => part && ["image", "image_url", "input_image", "file", "input_file"].includes(part.type)
+  );
+  const inputDependent = suppliedMedia ||
+    /\b(?:attachments?|uploaded|screenshots?|references?|datasets?|csv|spreadsheets?|pdf)\b/i.test(text) ||
+    /\b(?:from|using|based\s+on|match|copy|recreate)\b[^.!?;\n]{0,96}\b(?:images?|photos?|logos?|files?|data|documents?|designs?|assets?)\b/i.test(text) ||
+    /\b(?:read|inspect|research|review|fetch|search)\b/i.test(text) ||
+    /https?:\/\//i.test(text);
+  return !simpleStaticTarget || frameworkOrBuild || existingProject || inputDependent
     ? "existing-project"
     : "new-static";
 }
