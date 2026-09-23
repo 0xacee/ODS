@@ -4692,7 +4692,12 @@ export function userMessageRequestsExtensionInventory(messages, prompt = undefin
     /\b(?:which|what|list|show|inspect|audit|inventory|report|tell\s+me)\b/i;
   // File extensions and a later request to report source hashes are unrelated
   // to installed ODS extensions. Do not combine those clauses into host work.
-  const clauses = text.split(/[!?;\n]+|\.(?=\s|$)/).filter((clause) =>
+  const clauses = text.split(/[!?;\n]+|\.(?=\s|$)/).map(clause =>
+    // A saved request's status/source is coordinator metadata, not a request
+    // to inventory installed extensions. Remove only that compound noun so
+    // an independently requested installed inventory in the same clause stays.
+    clause.replace(/\b(?:ODS\s+)?extensions?\s+(?:(?:installation|integration|install)\s+)?requests?\b/gi, 'managed request')
+  ).filter((clause) =>
     !/^\s*(?:please\s+)?(?:do\s+not|don['’]t|never|avoid|skip|omit)\b/i.test(clause) &&
     !/\b(?:file|filename)\s+extensions?\b/i.test(clause));
   return clauses.some((clause) =>
@@ -7137,6 +7142,9 @@ export function createToolLoopGuard({
       const directory = hasRelativeDirectory || hasDirectory
         ? providedDirectory
         : observedDirectory;
+      if (state.workspaceVisualContinuationRequested && directory !== state.workspaceTaskDirectory) {
+        return {block:true, blockReason:WORKSPACE_VISUAL_CONTINUATION_SCOPE_REASON};
+      }
       const validDirectory = typeof directory === "string" && directory.length > 0 &&
         directory.split("/").every((part) => WORKSPACE_PATH_COMPONENT.test(part));
       const requiresAuthoredSnapshot = workspacePreviewRequiresAuthoredSnapshot(state, directory);
@@ -7238,7 +7246,8 @@ export function createToolLoopGuard({
           .split("/")
           .every((part) => WORKSPACE_PATH_COMPONENT.test(part));
       if (
-        !["read", "write", "edit", "exec", "process", "tool_search", "tool_describe", WORKSPACE_PREVIEW_TOOL].includes(selectedToolName) ||
+        (!["read", "write", "edit", "exec", "process", "tool_search", "tool_describe", WORKSPACE_PREVIEW_TOOL].includes(selectedToolName) &&
+          !(state.workspaceExtensionIsolated && EXTENSION_METADATA_TOOLS.has(selectedToolName))) ||
         (FILE_PATH_TOOLS.has(selectedToolName) && !insideContinuationDirectory)
       ) {
         return {
