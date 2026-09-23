@@ -440,7 +440,7 @@ fi
 
 echo ""
 if $DRY_RUN; then
-    signal "Plan simulated. No changes were made."
+    signal "Plan simulated. No installation changes were made."
 else
     signal "Broadcast stable. You're free now."
 fi

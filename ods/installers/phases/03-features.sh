@@ -717,8 +717,12 @@ LLAMA_ARG_TENSOR_SPLIT=$(echo "$GPU_ASSIGNMENT_JSON" | jq -r '
     end
   end')
 
-# Persist topology for the dashboard API (mounted read-only at /ods/config)
-mkdir -p "$INSTALL_DIR/config"
-cp "$TOPOLOGY_FILE" "$INSTALL_DIR/config/gpu-topology.json"
-chmod 644 "$INSTALL_DIR/config/gpu-topology.json"
+# Persist topology for the dashboard API (mounted read-only at /ods/config).
+# A dry run may calculate the assignment, but must not create or replace
+# anything in the installation directory.
+if ! $DRY_RUN; then
+    mkdir -p "$INSTALL_DIR/config"
+    cp "$TOPOLOGY_FILE" "$INSTALL_DIR/config/gpu-topology.json"
+    chmod 644 "$INSTALL_DIR/config/gpu-topology.json"
+fi
 rm -f "$TOPOLOGY_FILE"
