@@ -119,7 +119,9 @@ test('framework entry reads qualify relative previews only inside the configured
 
 test('a read cannot stand in for authoring a requested new static entry',()=>{
   const guard=createToolLoopGuard();
-  guard.observeRun(context,'pixel',{prompt:'Create and publish a new website in demo.'},{workspaceRoot:root});
+  // Write-first authorship applies only when the owner requests a static
+  // implementation; unspecified/framework projects retain inspection/builds.
+  guard.observeRun(context,'pixel',{prompt:'Create and publish a new static HTML website in demo.'},{workspaceRoot:root});
   guard.afterToolCall({toolName:'read',params:{path:root+'/demo/index.html'},
     result:{content:[{type:'text',text:'<!doctype html><html><body>Old</body></html>'}]}},context);
   assert.equal(guard.beforeToolCall({toolName:'pixel_ods_workspace_preview',
