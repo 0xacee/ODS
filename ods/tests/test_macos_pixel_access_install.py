@@ -2473,7 +2473,8 @@ def test_recovery_cli_dispatches_without_install_source_and_redacts_errors(monke
         assert json.loads(output.out)['status'] == 'restored'
         proof.assert_called_once_with('owner')
         recover.assert_called_once_with(bridge, current_digest='a' * 64,
-            candidate_digest='b' * 64, owner_name='owner')
+            candidate_digest='b' * 64, owner_name='owner', on_reproved=recover.call_args.kwargs['on_reproved'])
+        assert callable(recover.call_args.kwargs['on_reproved'])
 
 
 @pytest.mark.parametrize('arguments', [[], ['--owner', 'owner'],
