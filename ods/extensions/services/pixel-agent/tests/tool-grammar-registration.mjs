@@ -9,6 +9,7 @@ export async function registeredPixelTools() {
   const source = await readFile(entry, 'utf8');
   const isolated = source.replace(/from\s+(['"])([^'"]+)\1/g, (match, quote, specifier) => {
     if (specifier.startsWith('.')) return `from ${JSON.stringify(new URL(specifier, entry).href)}`;
+    if (specifier === 'node:url') return match;
     if (!specifier.startsWith('openclaw/plugin-sdk/')) throw new Error(`Unexpected plugin import: ${specifier}`);
     return match;
   });
