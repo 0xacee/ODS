@@ -267,14 +267,29 @@ _ods_pixel_source_transition_required() {
 # marker's exact prior commit from the currently authorized source repository
 # before the uninstaller uses those bytes to authenticate privileged artifacts.
 _ods_pixel_restore_transition_source() {
-    local owner="$1" home="$2" requested_ref="$3" transition state source_ref source_root
+    local owner="$1" home="$2" requested_ref="$3" transition state source_ref source_root source_url
     transition="$(_ods_pixel_source_transition_state "$owner" "$home" "$requested_ref")" || return 1
     IFS='|' read -r state source_ref <<<"$transition"
     [[ "$state" =~ ^(ready|installing|deactivating)$ \
         && "$source_ref" =~ ^[0-9a-f]{40}$ \
         && ( "$state" == deactivating || "$source_ref" != "$requested_ref" ) ]] || return 1
     source_root="${INSTALL_DIR:?}/data/pixel/source-$source_ref"
-    local PIXEL_SOURCE_REF="$source_ref"
+    # Retirement must verify the source that actually installed the old
+    # deployment. Prefer its existing checkout; never fetch a retired private
+    # source or try to obtain its ref from the new one-commit ODS bundle.
+    if [[ -d "$source_root/.git" && ! -L "$source_root" && ! -L "$source_root/.git" ]]; then
+        source_url="$source_root"
+    elif [[ "${PIXEL_SOURCE_URL:-}" == /* ]]; then
+        # Developer checkouts may still reconstruct an ancestor from a local
+        # repository. This path remains file-only inside _source_checkout.
+        source_url="$PIXEL_SOURCE_URL"
+    elif [[ "${PIXEL_SOURCE_URL:-}" == bundled && "$source_ref" == "$ODS_PIXEL_BUNDLED_REF" ]]; then
+        source_url=bundled
+    else
+        printf '%s\n' 'error: prior Pixel source checkout is missing; restore its local backup before retrying' >&2
+        return 1
+    fi
+    local PIXEL_SOURCE_URL="$source_url" PIXEL_SOURCE_REF="$source_ref"
     _ods_pixel_source_checkout "$owner" "$home" "$source_root" >/dev/null || return 1
     printf '%s\n' "$source_root"
 }

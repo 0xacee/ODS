@@ -568,6 +568,14 @@ onboarding record, active release, runtime attestation, or gateway systemd unit
 without its management marker, the installer stops and leaves that deployment
 untouched.
 
+An upgrade from the former ODS-managed Pixel source pin migrates the canonical
+`https://github.com/Osmantic/Pixel.git` setting to ODS's bundled source without
+contacting that repository. Before replacing installed ODS files, the installer
+verifies and retires the previous managed Pixel release using its exact local
+source checkout. If that checkout is missing or changed, the upgrade stops
+before retirement or source copy; restore the checkout from a local backup and
+retry. Custom remote source settings are not silently migrated.
+
 ## Configuration reference
 
 | Variable | Default / owner | Meaning |
