@@ -5078,7 +5078,7 @@ test("repeated verified inventory reads stay within the host ingress text limit"
   assert.ok(verification.text.length <= 32 * 1024, "the ingress accepts at most 32 KiB of verification text");
   assert.equal(verification.text.split(OPERATIONS_EXTENSION_INVENTORY_EVIDENCE_PREFIX).length - 1, 1);
   assert.match(verification.text, /12 individually verified inventory reads/);
-  assert.match(verification.text, /latest validated snapshot/);
+  assert.match(verification.text, /last submitted validated snapshot/);
   assert.match(verification.text, /extension-30/);
   assert.match(verification.text, /ops-1234567890123-00000000000b/);
 });

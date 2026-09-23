@@ -3705,9 +3705,9 @@ function extensionDiscoveryVerification(state) {
           text.startsWith(OPERATIONS_EXTENSION_INVENTORY_EVIDENCE_PREFIX)) {
         // Every submitted broker job is still matched and validated above.
         // Repeating a complete catalog for each paginated model read can exceed
-        // the ingress's 32 KiB text bound even though the latest snapshot alone
-        // is small. Keep the most recent verified snapshot in chronological
-        // position, without claiming that older snapshots were identical.
+        // the ingress's 32 KiB text bound even though one snapshot is small.
+        // Keep the last submitted validated snapshot in submission order,
+        // without claiming that older snapshots were identical.
         if (inventoryEvidenceIndex >= 0) evidence[inventoryEvidenceIndex] = null;
         inventoryEvidenceIndex = evidence.length;
         evidence.push(text);
@@ -3730,7 +3730,7 @@ function extensionDiscoveryVerification(state) {
   if (verifiedInventoryReads > 1) {
     evidence[inventoryEvidenceIndex] +=
       `\n- Inventory readback: ${verifiedInventoryReads} individually verified inventory reads; ` +
-      "latest validated snapshot shown. Earlier snapshots are not asserted identical.";
+      "last submitted validated snapshot shown. Earlier snapshots are not asserted identical.";
   }
   const text = evidence.filter((item) => item !== null).join("\n\n");
   if (text.length > MAX_INGRESS_VERIFICATION_TEXT) {
