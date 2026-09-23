@@ -1490,7 +1490,7 @@ normalized_agent_tools["deny"] = [
     if item not in {
         "web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
         "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-        "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance",
+        "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry",
         "pixel_web_extract"
     }
 ]
@@ -1500,7 +1500,7 @@ for extension_tool in (
     "cron", "create_goal", "get_goal", "update_goal", "update_plan",
     "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
     "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance"
+    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"
 ):
     if extension_tool not in normalized_also_allow:
         normalized_also_allow.append(extension_tool)
@@ -1508,7 +1508,7 @@ for permitted_tool in (
     "cron", "create_goal", "get_goal", "update_goal", "update_plan",
     "web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
     "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance"
+    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"
 ):
     if permitted_tool not in normalized_sandbox_allow:
         normalized_sandbox_allow.append(permitted_tool)
@@ -1649,7 +1649,7 @@ _ods_pixel_refresh_plugin_registry() {
     registry="$(ods_pixel_run_as_owner "$owner" "$home" "$openclaw_bin" \
         plugins registry --refresh --json 2>/dev/null)" || return 1
     jq -e --arg root "$plugin_root" '
-        (["pixel_ods_apps_list", "pixel_ods_download_promote", "pixel_ods_evidence_readback", "pixel_ods_evidence_report", "pixel_ods_extensions", "pixel_ods_host_command_propose", "pixel_ods_host_observe", "pixel_ods_status", "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance"] | sort) as $tools
+        (["pixel_ods_apps_list", "pixel_ods_download_promote", "pixel_ods_evidence_readback", "pixel_ods_evidence_report", "pixel_ods_extensions", "pixel_ods_host_command_propose", "pixel_ods_host_observe", "pixel_ods_status", "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"] | sort) as $tools
         | .refreshed == true
         and .registry.version == 1
         and .registry.refreshReason == "manual"
@@ -1669,7 +1669,7 @@ _ods_pixel_verify_plugin_loaded() {
     local owner="$1" home="$2" openclaw_bin="$3" plugin_root="$4"
     ods_pixel_run_as_owner "$owner" "$home" "$openclaw_bin" plugins list --json 2>/dev/null \
         | jq -e --arg root "$plugin_root" '
-            ["pixel_ods_apps_list", "pixel_ods_download_promote", "pixel_ods_evidence_readback", "pixel_ods_evidence_report", "pixel_ods_extensions", "pixel_ods_host_command_propose", "pixel_ods_host_observe", "pixel_ods_status", "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance"] as $tools
+            ["pixel_ods_apps_list", "pixel_ods_download_promote", "pixel_ods_evidence_readback", "pixel_ods_evidence_report", "pixel_ods_extensions", "pixel_ods_host_command_propose", "pixel_ods_host_observe", "pixel_ods_status", "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"] as $tools
             | [
                 .plugins[]?
                 | select(
@@ -1957,20 +1957,22 @@ _ods_pixel_restore_model_reconciliation() {
 
 _ods_pixel_reconciliation_source_url() {
     local source_ref="$1"
+    [[ "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 1
     if [[ -n "${PIXEL_SOURCE_URL:-}" ]]; then
-        [[ "$PIXEL_SOURCE_URL" == bundled || "$PIXEL_SOURCE_URL" == /* ]] || {
-            printf '%s\n' 'error: Pixel source must be bundled or an absolute local checkout' >&2
-            return 1
-        }
-        if [[ "$PIXEL_SOURCE_URL" == bundled && "$source_ref" != "$ODS_PIXEL_BUNDLED_REF" ]]; then
-            printf '%s\n' 'error: installed Pixel source ref is not in the ODS bundle; update ODS first' >&2
+        if [[ "$PIXEL_SOURCE_URL" == bundled ]]; then
+            if [[ "$source_ref" != "$ODS_PIXEL_BUNDLED_REF" ]]; then
+                printf '%s\n' 'error: The installed Pixel source pin differs from the public bundle. Reinstall the managed Pixel runtime before changing models.' >&2
+                return 1
+            fi
+        elif [[ "$PIXEL_SOURCE_URL" != /* || "$PIXEL_SOURCE_URL" == / ]]; then
+            printf '%s\n' 'error: Pixel model reconciliation requires the verified ODS bundle or an explicit absolute local source checkout' >&2
             return 1
         fi
         printf '%s\n' "$PIXEL_SOURCE_URL"
     elif [[ "$source_ref" == "$ODS_PIXEL_BUNDLED_REF" ]]; then
         printf '%s\n' bundled
     else
-        printf '%s\n' 'error: installed Pixel source has no local checkout; update ODS first' >&2
+        printf '%s\n' 'error: The installed Pixel source pin is not in the public bundle. Reinstall the managed runtime or configure its exact absolute local source before changing models.' >&2
         return 1
     fi
 }
@@ -2631,13 +2633,18 @@ _ods_pixel_source_checkout() {
     local -a git_env=(env -i PATH="$PATH" HOME="$home" USER="$owner" LOGNAME="$owner"
         GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
         GIT_ALLOW_PROTOCOL=file GIT_NO_REPLACE_OBJECTS=1)
+    [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || return 1
+    if [[ "$source" == bundled ]]; then
+        if [[ "$ref" != "$ODS_PIXEL_BUNDLED_REF" ]]; then
+            printf '%s\n' 'error: The requested Pixel pin is not in the verified public bundle' >&2
+            return 1
+        fi
+    elif [[ "$source" != /* || "$source" == / || "$source" == *$'\n'* || "$source" == *$'\r'* ]]; then
+        printf '%s\n' 'error: Pixel checkout requires the verified ODS bundle or an absolute local source' >&2
+        return 1
+    fi
     [[ "$source_root" == /* && "$source_root" != / && ! -L "$source_root" ]] || return 1
     [[ "$source_timeout" =~ ^[0-9]+$ && "$source_timeout" -ge 1 && "$source_timeout" -le 900 ]] || return 1
-    [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || return 1
-    [[ "$source" == bundled || "$source" == /* ]] || {
-        printf '%s\n' 'error: Pixel source must be bundled or an absolute local checkout' >&2
-        return 1
-    }
     if [[ "$source" == bundled ]]; then
         [[ "$ref" == "$ODS_PIXEL_BUNDLED_REF" ]] && ods_pixel_bundled_source || return 1
     fi
@@ -4014,7 +4021,16 @@ _ods_pixel_install_ingress() {
     local operations_service_dropin="$plugin_root/host/pixel-ops-broker-ods.conf"
     local operations_service_dropin_dir="/etc/systemd/system/pixel-ops-broker.service.d"
     local installed_operations_service_dropin="$operations_service_dropin_dir/10-ods-host-observation.conf"
+    local wsl_bridge=false
+    local wsl_bridge_source="$plugin_root/host/pixel-wsl-runtime-bridge.sh"
+    local wsl_bridge_unit="$plugin_root/host/pixel-wsl-runtime-bridge.service"
     local ods_version="${VERSION:-2.6.0}"
+    if grep -Fxq 'PIXEL_RUNTIME_BIND_PROPAGATION=rshared' "${INSTALL_DIR:?}/.env"; then
+        grep -Fxq 'PIXEL_INGRESS_RUNTIME_DIR=/mnt/host/wsl/ods-portal-runtime/ingress' "$INSTALL_DIR/.env" || return 1
+        grep -Fxq 'PIXEL_PREVIEW_RUNTIME_DIR=/mnt/host/wsl/ods-portal-runtime/preview' "$INSTALL_DIR/.env" || return 1
+        grep -qi microsoft /proc/sys/kernel/osrelease || return 1
+        wsl_bridge=true
+    fi
     [[ "$ods_version" =~ ^[0-9]+(\.[0-9]+){1,3}([-+][A-Za-z0-9.-]+)?$ ]] || return 1
     [[ -f "$token_file" && ! -L "$token_file" ]] || return 1
     [[ "$(stat -c '%u' -- "$token_file")" == "$(id -u "$owner")" ]] || return 1
@@ -4033,6 +4049,15 @@ _ods_pixel_install_ingress() {
         (( (8#$mode & 0022) == 0 )) || return 1
     done
     (( (8#$(stat -c '%a' -- "$extension_catalog") & 0077) == 0 )) || return 1
+    if "$wsl_bridge"; then
+        for projection_source in "$wsl_bridge_source" "$wsl_bridge_unit"; do
+            [[ -f "$projection_source" && ! -L "$projection_source" ]] || return 1
+            IFS='|' read -r kind uid mode size < <(stat -c '%F|%u|%a|%s' -- "$projection_source")
+            [[ "$kind" == "regular file" && "$uid" == "$(id -u "$owner")" \
+                && "$size" =~ ^[0-9]+$ && "$size" -le 2097152 ]] || return 1
+            (( (8#$mode & 0022) == 0 )) || return 1
+        done
+    fi
 
     gateway_port="$(_ods_pixel_gateway_port)" || return 1
     [[ "$preview_port" =~ ^[0-9]+$ ]] || return 1
@@ -4153,6 +4178,14 @@ EOF
         /etc/systemd/system/pixel-workspace-preview.service
     ods_sudo cmp -s -- "$rendered_workspace_preview_unit" \
         /etc/systemd/system/pixel-workspace-preview.service
+    if "$wsl_bridge"; then
+        ods_sudo install -o root -g root -m 0755 "$wsl_bridge_source" \
+            /usr/local/libexec/ods-pixel-wsl-runtime-bridge || return 1
+        ods_sudo install -o root -g root -m 0644 "$wsl_bridge_unit" \
+            /etc/systemd/system/ods-pixel-wsl-runtime-bridge.service || return 1
+        ods_sudo cmp -s -- "$wsl_bridge_source" /usr/local/libexec/ods-pixel-wsl-runtime-bridge || return 1
+        ods_sudo cmp -s -- "$wsl_bridge_unit" /etc/systemd/system/ods-pixel-wsl-runtime-bridge.service || return 1
+    fi
     rm -f -- "$stage/pixel-agent.env" "$stage/pixel-ingress.service"
     rmdir -- "$stage"
     ods_sudo systemctl daemon-reload || return 1
@@ -4189,6 +4222,11 @@ PY
     # reviewed program or environment changes. Restart only the ingress here;
     # the Pixel gateway was already verified above and need not be disturbed.
     ods_sudo systemctl restart pixel-ingress.service || return 1
+    if "$wsl_bridge"; then
+        ods_sudo systemctl enable ods-pixel-wsl-runtime-bridge.service || return 1
+        ods_sudo systemctl start ods-pixel-wsl-runtime-bridge.service || return 1
+        ods_sudo systemctl is-active --quiet ods-pixel-wsl-runtime-bridge.service || return 1
+    fi
     ods_sudo systemctl is-active --quiet openclaw-gateway.service pixel-ingress.service \
         pixel-extension-manager.service pixel-artifact-promoter.service \
         pixel-workspace-preview.service || return 1
