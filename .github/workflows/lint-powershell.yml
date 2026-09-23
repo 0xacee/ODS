@@ -76,6 +76,14 @@ jobs:
         shell: pwsh
         run: ./tests/contracts/test-windows-hermes-config-runtime.ps1
 
+      - name: Windows Hermes Credential Relock Contract (PowerShell 7)
+        shell: pwsh
+        run: ./tests/contracts/test-windows-hermes-config-acl-repeat.ps1
+
+      - name: Windows Hermes Credential Relock Contract (Windows PowerShell)
+        shell: powershell
+        run: ./tests/contracts/test-windows-hermes-config-acl-repeat.ps1
+
       - name: Windows Model Activation Contract
         shell: pwsh
         run: ./tests/test-windows-model-activation.ps1

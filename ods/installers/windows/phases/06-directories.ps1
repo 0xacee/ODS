@@ -524,9 +524,13 @@ agent:
             # current-user-only protection used for .env, including on
             # reinstalls where icacls may have made the grant explicit.
             $secretItem = Get-Item -LiteralPath $Path
-            $secretAcl = $secretItem.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            if ($PSVersionTable.PSEdition -eq 'Core') {
+                $secretAcl = [System.IO.FileSystemAclExtensions]::GetAccessControl($secretItem, [System.Security.AccessControl.AccessControlSections]::Access)
+            } else {
+                $secretAcl = $secretItem.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+            }
             $secretAcl.SetAccessRuleProtection($true, $false)
-            foreach ($existingRule in @($secretAcl.Access)) {
+            foreach ($existingRule in @($secretAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))) {
                 $secretAcl.RemoveAccessRuleSpecific($existingRule)
             }
             $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -536,7 +540,11 @@ agent:
                 "Allow"
             )
             $secretAcl.SetAccessRule($currentUserRule)
-            $secretItem.SetAccessControl($secretAcl)
+            if ($PSVersionTable.PSEdition -eq 'Core') {
+                [System.IO.FileSystemAclExtensions]::SetAccessControl($secretItem, $secretAcl)
+            } else {
+                $secretItem.SetAccessControl($secretAcl)
+            }
         } catch {
             Write-AIWarn "Could not restrict Hermes credential file permissions: $Path"
             return $false
