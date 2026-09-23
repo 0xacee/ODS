@@ -15,7 +15,8 @@ from model_mtp import mtp_metadata, parse_runtime_capability, recommend_mtp, qua
 def test_runtime_probe_distinguishes_modern_loading_from_router_compatibility(tmp_path, monkeypatch, declared, expected, compatible):
     import model_mtp
     import subprocess
-    runtime = tmp_path/'runtime'; runtime.write_bytes(b'fixture')
+    runtime = tmp_path/'runtime'
+    runtime.write_bytes(b'fixture')
     calls = []
     def run(command, **kwargs):
         calls.append((command,kwargs))
@@ -82,7 +83,8 @@ def test_mtp_is_recommended_only_for_matching_valid_paired_measurements():
     for bad in (None, {}, {**measured,"mtp":measured["mtp"][:1]}):
         assert recommend_mtp(bad,measured["signature"])["recommendation"] == "benchmark-required"
     for key,value in (("valid",False),("tokens",10),("acceptedDraftTokens",0),("milliseconds",float("nan"))):
-        invalid=deepcopy(measured);invalid["mtp"][0][key]=value
+        invalid=deepcopy(measured)
+        invalid["mtp"][0][key]=value
         assert recommend_mtp(invalid,measured["signature"])["recommendation"] == "benchmark-required"
 
 
@@ -147,9 +149,12 @@ def test_verified_profile_exposes_separate_availability_without_claiming_gpu_fit
     qualified, measured = memory_evidence()
     fit = qualify_memory_fit(measured, qualified)
     data, external = tmp_path/'data', tmp_path/'external'
-    data.mkdir(); external.mkdir()
-    model = external/'model.gguf'; model.write_bytes(b'fixture')
-    projector = external/'mmproj-F16.gguf'; projector.write_bytes(b'vision')
+    data.mkdir()
+    external.mkdir()
+    model = external/'model.gguf'
+    model.write_bytes(b'fixture')
+    projector = external/'mmproj-F16.gguf'
+    projector.write_bytes(b'vision')
     fit.update(visionProjectorSize=projector.stat().st_size, visionProjectorMtimeNs=projector.stat().st_mtime_ns)
     profile = {'modelSha256':'a'*64,'runtimeSha256':'b'*64,'qualificationSignature':qualified['signature'],
         'contextLength':16384,'draftTokens':2,'backend':'vulkan','mtp':True,'memoryQualification':fit}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression test for service-registry manifest UTF-8 parsing and GPU backend coercion."""
 import subprocess
-import sys
+import sys as sys
 import tempfile
 from pathlib import Path
 

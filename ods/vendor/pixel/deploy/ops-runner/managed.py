@@ -61,7 +61,8 @@ def secure_json(path: Path) -> dict[str, Any]:
             chunk = os.read(descriptor, min(64 * 1024, MAX_CONFIG + 1 - total))
             if not chunk:
                 break
-            chunks.append(chunk); total += len(chunk)
+            chunks.append(chunk)
+            total += len(chunk)
             if total > MAX_CONFIG:
                 raise ManagedError("managed configuration exceeds its size limit")
         payload = b"".join(chunks)
@@ -477,7 +478,8 @@ def staged_verified_artifact(
                 total += len(chunk)
                 if total > maximum:
                     raise ManagedError("artifact exceeds its configured byte limit")
-                checksum.update(chunk); write_all(temporary_descriptor, chunk)
+                checksum.update(chunk)
+                write_all(temporary_descriptor, chunk)
             final = os.fstat(source_descriptor)
             if (
                 total != opened.st_size
@@ -487,7 +489,8 @@ def staged_verified_artifact(
                 raise ManagedError("artifact changed while it was being staged")
             os.fsync(temporary_descriptor)
         finally:
-            os.close(source_descriptor); os.close(temporary_descriptor)
+            os.close(source_descriptor)
+            os.close(temporary_descriptor)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise

@@ -3086,7 +3086,7 @@ def _reconcile_ods_managed_pixel_model(
     owner, home = identity
     env_values = load_env(INSTALL_DIR / ".env")
     configured_ref = str(env_values.get("PIXEL_SOURCE_REF") or "")
-    bundled_ref = "55837c2d1231a7d0a36f82975d3069e754cc413f"
+    bundled_ref = "c3b573f9741fd402878176ac1d534201a904732a"
     source_url = str(env_values.get("PIXEL_SOURCE_URL") or "bundled")
     if any(character in source_url for character in "\r\n\x00"):
         raise RuntimeError("The configured Pixel source URL is invalid")
@@ -4133,8 +4133,10 @@ def _recover_pixel_model_transaction(config: dict) -> dict:
                     or _pixel_model_config_digests()!=current):
                 return pending
             transaction=_PixelModelTransaction(config)
-            transaction.id=journal['transactionId'];transaction.previous=journal['previous']
-            transaction.target=journal['target'];transaction.journal=journal
+            transaction.id=journal['transactionId']
+            transaction.previous=journal['previous']
+            transaction.target=journal['target']
+            transaction.journal=journal
             if status['status']=='completed':
                 transaction._save('completed','commit')
             else:
@@ -4175,8 +4177,10 @@ def _recover_pixel_model_transaction(config: dict) -> dict:
         if _pixel_model_config_digests()!=current:
             return pending
         transaction=_PixelModelTransaction(config)
-        transaction.id=journal['transactionId'];transaction.previous=journal['previous']
-        transaction.target=journal['target'];transaction.journal=journal
+        transaction.id=journal['transactionId']
+        transaction.previous=journal['previous']
+        transaction.target=journal['target']
+        transaction.journal=journal
         if status is not None and status['status']=='completed':
             if status['outcome']!=outcome or status['contract']!=expected:
                 return pending
@@ -4327,7 +4331,8 @@ def _cached_managed_pixel_runtime_contract() -> dict | None:
         files=[]
         for path in (INSTALL_DIR/'.env',_pixel_model_journal_path(),_remote_provider_route_state_path()):
             try:
-                info=path.stat();files.append((info.st_mtime_ns,info.st_size))
+                info=path.stat()
+                files.append((info.st_mtime_ns,info.st_size))
             except FileNotFoundError:files.append(None)
         key=(str(INSTALL_DIR),tuple(files))
     except OSError:return None
@@ -10543,7 +10548,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         if not check_auth(self):
             return
         try:
-            models_dir = INSTALL_DIR / "data" / "models"
+            _models_dir = INSTALL_DIR / "data" / "models"
             env_path = INSTALL_DIR / ".env"
 
             try:
@@ -11195,10 +11200,13 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         body=read_json_body(self)
         if body is None:return
-        if body!={}:json_response(self,400,{'error':'Recovery accepts an empty request only'});return
+        if body!={}:
+            json_response(self,400,{'error':'Recovery accepts an empty request only'})
+            return
         acquired,_active=_begin_model_lifecycle('model_recovery')
         if not acquired:
-            json_response(self,409,{'error':'Model lifecycle is busy'});return
+            json_response(self,409,{'error':'Model lifecycle is busy'})
+            return
         try:
             result=_recover_pixel_model_transaction(load_env(INSTALL_DIR/'.env'))
             json_response(self,409 if result['pending'] else 200,result,no_store=True)

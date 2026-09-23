@@ -7,7 +7,7 @@ import tempfile
 import time
 from pixel_access_bridge import AccessError, atomic_json, private_json, digest, remaining, runtime_config_path
 from pixel_settings.coordinator import _read, _identity, _valid_identity
-from pixel_model_contract import ModelError, checksum, target, plan, projection
+from pixel_model_contract import ModelError as ModelError, checksum, target, plan, projection
 
 
 def _sha(value):
@@ -300,7 +300,8 @@ def control(bridge, operation, request=None):
             if journal["phase"] == "acquiring":
                 if config_sha != journal["beforeSha"]: raise AccessError("model-config-changed")
                 worker("model-begin")
-                journal["phase"] = "held"; _write(bridge, journal)
+                journal["phase"] = "held"
+                _write(bridge, journal)
             return _status(bridge)
         if operation == "model-apply":
             if journal["phase"] in ("restoring", "releasing"): raise AccessError("model-transaction-finishing")
@@ -312,7 +313,8 @@ def control(bridge, operation, request=None):
             result = worker("model-apply", model_target=request["target"])
             if result["configSha256"] != journal["afterSha"]: raise AccessError("model-projection-mismatch")
             _activate(bridge, journal, journal["afterSha"])
-            journal["phase"] = "applied"; _write(bridge, journal)
+            journal["phase"] = "applied"
+            _write(bridge, journal)
             return _status(bridge)
         outcome = request["outcome"]
         if "outcome" in journal and journal["outcome"] != outcome: raise AccessError("model-outcome-conflict")
@@ -321,12 +323,14 @@ def control(bridge, operation, request=None):
             # The process can have accepted the target before its HTTP reply or
             # phase checkpoint was lost. Prove it, without dispatching apply again.
             _verify(bridge, journal, expected_sha)
-            journal["phase"] = "applied"; _write(bridge, journal)
+            journal["phase"] = "applied"
+            _write(bridge, journal)
         if outcome == "commit" and journal["phase"] not in ("applied", "releasing"):
             raise AccessError("model-apply-unverified")
         owner = bridge.worker("model-status")
         if outcome == "rollback" and owner["pending"]:
-            journal["phase"] = "restoring"; _write(bridge, journal)
+            journal["phase"] = "restoring"
+            _write(bridge, journal)
             worker("model-rollback")
         elif outcome == "rollback" and config_sha != journal["beforeSha"]:
             raise AccessError("model-rollback-conflict")
@@ -341,7 +345,8 @@ def control(bridge, operation, request=None):
         _verify(bridge, journal, expected_sha)
         if owner["pending"]: worker("model-finish", model_outcome=outcome)
         _bind_managed_marker(bridge, journal, expected_sha)
-        journal.update(phase="releasing", outcome=outcome); _write(bridge, journal)
+        journal.update(phase="releasing", outcome=outcome)
+        _write(bridge, journal)
         atomic_json(bridge.state / "model-route-completed.json", {"transactionId": journal["transactionId"], "outcome": outcome, "configSha256": expected_sha})
         bridge.edge("release", journal["token"], journal["edge_revision"])
         bridge.native("release", journal["token"])

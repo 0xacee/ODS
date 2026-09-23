@@ -7,7 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
+import threading as threading
 import time
 import unittest
 import unittest.mock as mock
@@ -154,7 +154,7 @@ class DispatcherTests(unittest.TestCase):
             f"{helper} unit install gateway {'0' * 64} ; /usr/bin/id",
             f"cd /tmp && exec {helper} status",
             f"{helper} status && echo pwned",
-            f"$(id)",
+            "$(id)",
         ]
         for command in commands:
             completed = self.run_dispatch(command)
@@ -209,7 +209,8 @@ class ManagedUnitTests(unittest.TestCase):
     def test_install_and_remove_template_by_sha(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             gateway_bytes = b"[Unit]\nDescription=gateway\n"
             config_path, config = write_config(root, templates={"gateway": {"bytes": gateway_bytes, "destination": dest_dir / "gateway.service"}})
             destination = dest_dir / "gateway.service"
@@ -235,7 +236,8 @@ class ManagedUnitTests(unittest.TestCase):
     def test_digest_mismatch_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"real\n", "destination": dest_dir / "gateway.service"}})
             completed = self.run_managed(config_path, "unit", "install", "gateway", "0" * 64)
             self.assertNotEqual(completed.returncode, 0)
@@ -244,7 +246,8 @@ class ManagedUnitTests(unittest.TestCase):
     def test_prior_template_install_for_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             current = b"current\n"
             prior = b"prior\n"
             config_path, _ = write_config(root, templates={"gateway": {"bytes": current, "prior": prior, "destination": dest_dir / "gateway.service"}})
@@ -259,7 +262,8 @@ class ManagedUnitTests(unittest.TestCase):
     def test_unexpected_existing_destination_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             destination = dest_dir / "gateway.service"
             destination.write_bytes(b"unexpected bytes not matching any template\n")
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"real\n", "destination": destination}})
@@ -270,7 +274,8 @@ class ManagedUnitTests(unittest.TestCase):
     def test_idempotent_install_repairs_unsafe_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             gateway_bytes = b"[Unit]\nDescription=gateway\n"
             config_path, _ = write_config(root, templates={"gateway": {"bytes": gateway_bytes, "destination": dest_dir / "gateway.service"}})
             destination = dest_dir / "gateway.service"
@@ -293,7 +298,8 @@ class ManagedUnitTests(unittest.TestCase):
     def test_status_fails_closed_on_unsafe_installed_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             gateway_bytes = b"g\n"
             config_path, _ = write_config(root, templates={"gateway": {"bytes": gateway_bytes, "destination": dest_dir / "gateway.service"}})
             destination = dest_dir / "gateway.service"
@@ -307,7 +313,8 @@ class ManagedUnitTests(unittest.TestCase):
     def test_status_fails_closed_on_unsafe_template_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             gateway_bytes = b"g\n"
             config_path, _ = write_config(root, templates={"gateway": {"bytes": gateway_bytes, "destination": dest_dir / "gateway.service"}})
             (root / "gateway.template").chmod(0o666)
@@ -318,8 +325,10 @@ class ManagedUnitTests(unittest.TestCase):
     def test_symlink_and_hardlink_substitution_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
-            outside = root / "outside"; outside.write_bytes(b"outside\n")
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
+            outside = root / "outside"
+            outside.write_bytes(b"outside\n")
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"real\n", "destination": dest_dir / "gateway.service"}})
             destination = dest_dir / "gateway.service"
             destination.symlink_to(outside)
@@ -336,9 +345,12 @@ class ManagedUnitTests(unittest.TestCase):
     def test_template_symlink_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
-            real = root / "real-template"; real.write_bytes(b"real\n")
-            fake = root / "gateway.template"; fake.symlink_to(real)
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
+            real = root / "real-template"
+            real.write_bytes(b"real\n")
+            fake = root / "gateway.template"
+            fake.symlink_to(real)
             config = {
                 "schemaVersion": 1,
                 "units": {"gateway": {"name": "gateway.service", "destination": str(dest_dir / "gateway.service"), "template": str(fake), "templateSha256": sha(b"real\n")}},
@@ -353,7 +365,8 @@ class ManagedUnitTests(unittest.TestCase):
     def test_arbitrary_unit_verb_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             for args in (
                 ("unit", "install", "evil", "0" * 64),
@@ -370,7 +383,8 @@ class ManagedUnitTests(unittest.TestCase):
     def test_receipts_parse_bind_and_no_replace(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, config = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             receipt_root = Path(config["receiptRoot"])
             self.run_managed(config_path, "unit", "install", "gateway", sha(b"x\n"))
@@ -431,7 +445,8 @@ class ManagedSystemctlProbeTests(unittest.TestCase):
     def test_systemctl_preserves_now_and_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, config = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             fake, log = self._fake_systemctl(root, exit_code=0)
             completed = self.run_managed(
@@ -455,7 +470,8 @@ class ManagedSystemctlProbeTests(unittest.TestCase):
     def test_systemctl_failure_is_nonzero_with_failure_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, config = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             fake, _ = self._fake_systemctl(root, exit_code=7)
             completed = self.run_managed(
@@ -475,7 +491,8 @@ class ManagedSystemctlProbeTests(unittest.TestCase):
     def test_systemctl_verb_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             fake, _ = self._fake_systemctl(root, exit_code=0)
             for args in (("systemctl", "daemon-reload"), ("systemctl", "is-active", "gateway"), ("systemctl", "restart", "courier")):
@@ -488,7 +505,8 @@ class ManagedSystemctlProbeTests(unittest.TestCase):
     def test_bounded_run_env_is_fixed_and_sets_home_root(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             fake = Path(directory) / "fake-systemctl"
             env_log = Path(directory) / "env.log"
@@ -511,8 +529,11 @@ class ManagedSystemctlProbeTests(unittest.TestCase):
     def test_probe_exactness_and_failure_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            readable = root / "readable"; readable.write_bytes(b"x")
-            unreadable = root / "unreadable"; unreadable.write_bytes(b"x"); unreadable.chmod(0o000)
+            readable = root / "readable"
+            readable.write_bytes(b"x")
+            unreadable = root / "unreadable"
+            unreadable.write_bytes(b"x")
+            unreadable.chmod(0o000)
             config = {
                 "schemaVersion": 1,
                 "units": {"gateway": {"name": "gateway.service", "destination": str(root / "gateway.service"), "template": str(root / "gateway.template"), "templateSha256": sha(b"x\n")}, "courier": {"name": "courier.service", "destination": str(root / "courier.service"), "template": str(root / "courier.template"), "templateSha256": sha(b"x\n")}},
@@ -571,7 +592,8 @@ class ClientAndConfigTests(unittest.TestCase):
     def test_config_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             self.assertEqual(self.run_managed(config_path, "--validate-config").returncode, 0)
             value = json.loads(config_path.read_text())
@@ -586,7 +608,8 @@ class ClientAndConfigTests(unittest.TestCase):
     def test_config_validation_containers_and_names(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             value = json.loads(config_path.read_text())
             # units must be an object.
@@ -614,7 +637,8 @@ class ClientAndConfigTests(unittest.TestCase):
     def test_absent_reader_allowed_but_probe_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, config = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             value = json.loads(config_path.read_text())
             # Frontier disabled: omit the frontier reader entirely (ops-only provisioning).
@@ -630,7 +654,8 @@ class ClientAndConfigTests(unittest.TestCase):
     def test_status_is_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             gateway_bytes = b"g\n"
             config_path, _ = write_config(root, templates={"gateway": {"bytes": gateway_bytes, "destination": dest_dir / "gateway.service"}})
             status = self.run_managed(config_path, "status")
@@ -648,7 +673,8 @@ class ClientAndConfigTests(unittest.TestCase):
     def test_status_fails_closed_on_unsafe_and_tampered(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"g\n", "destination": dest_dir / "gateway.service"}})
             # Unsafe destination symlink -> fail closed, not reported absent.
             (dest_dir / "gateway.service").symlink_to(root / "outside")
@@ -665,7 +691,8 @@ class ClientAndConfigTests(unittest.TestCase):
     def test_status_rejects_hardlinks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, _ = write_config(root, templates={"gateway": {"bytes": b"g\n", "destination": dest_dir / "gateway.service"}})
             # Hardlinked destination -> fail closed (an extra name can hide a swap).
             destination = dest_dir / "gateway.service"
@@ -886,9 +913,14 @@ class StagingValidationTests(unittest.TestCase):
 
     def _staging(self, directory):
         root = Path(directory)
-        templates = root / "templates"; templates.mkdir()
-        gateway = templates / "gateway.template"; gateway.write_bytes(b"g\n"); gateway.chmod(0o644)
-        courier = templates / "courier.template"; courier.write_bytes(b"c\n"); courier.chmod(0o644)
+        templates = root / "templates"
+        templates.mkdir()
+        gateway = templates / "gateway.template"
+        gateway.write_bytes(b"g\n")
+        gateway.chmod(0o644)
+        courier = templates / "courier.template"
+        courier.write_bytes(b"c\n")
+        courier.chmod(0o644)
         config = {
             "schemaVersion": 1,
             "units": {
@@ -956,7 +988,8 @@ class ConcurrencyAndProvisioningTests(unittest.TestCase):
     def test_concurrent_operations_are_serialized_by_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dest_dir = root / "etc"; dest_dir.mkdir()
+            dest_dir = root / "etc"
+            dest_dir.mkdir()
             config_path, config = write_config(root, templates={"gateway": {"bytes": b"x\n", "destination": dest_dir / "gateway.service"}})
             lock_path = Path(config["receiptRoot"]).parent / "operator.lock"
             lock_path.parent.mkdir(parents=True, exist_ok=True)

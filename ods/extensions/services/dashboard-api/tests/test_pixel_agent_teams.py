@@ -1,6 +1,6 @@
 import asyncio
 import copy
-import json
+import json as json
 import os
 
 import pytest
@@ -157,7 +157,8 @@ async def test_cancel_survives_activity_updates_and_does_not_start_next_agent(tm
     started, proceed = asyncio.Event(), asyncio.Event()
     calls = []
     async def run(owner, agent):
-        calls.append(agent['id']); started.set()
+        calls.append(agent['id'])
+        started.set()
         await proceed.wait()
         yield {'pixel_task':{'schemaVersion':1,'calls':1,'activities':[]}}
         yield {'error':{'message':'Stopped'}}
@@ -181,7 +182,9 @@ async def test_unacknowledged_stop_and_restart_never_claim_cancelled_or_replay(t
     started, proceed = asyncio.Event(), asyncio.Event()
     calls=[]
     async def run(*_):
-        calls.append(1);started.set();await proceed.wait()
+        calls.append(1)
+        started.set()
+        await proceed.wait()
         for frame in finish(): yield frame
     async def no(*_): return False
     directory=tmp_path/'teams'
@@ -194,7 +197,8 @@ async def test_unacknowledged_stop_and_restart_never_claim_cancelled_or_replay(t
     assert recovered.list(OWNER,'chat')[0]['status']=='interrupted'
     assert len(calls)==1 and not recovered.tasks
     with pytest.raises(TeamConflict): recovered.start(OWNER,'chat','b','Do new work',1,'')
-    proceed.set();await settle(manager)
+    proceed.set()
+    await settle(manager)
 
 
 @pytest.mark.asyncio
@@ -202,7 +206,9 @@ async def test_global_lane_and_immediate_cancellation_of_queued_team(tmp_path):
     started, proceed=asyncio.Event(),asyncio.Event()
     calls=[]
     async def run(owner, agent):
-        calls.append(agent['chat_id']);started.set();await proceed.wait()
+        calls.append(agent['chat_id'])
+        started.set()
+        await proceed.wait()
         for frame in finish():yield frame
     manager=TeamManager(TeamStore(tmp_path/'teams'),run,yes)
     manager.start(OWNER,'first','a','First task',1,'')
@@ -212,7 +218,8 @@ async def test_global_lane_and_immediate_cancellation_of_queued_team(tmp_path):
     assert len(calls)==1
     result=await manager.stop(OWNER,second['id'])
     assert result['status']=='cancelled'
-    proceed.set();await settle(manager)
+    proceed.set()
+    await settle(manager)
     assert len(calls)==1
 
 
@@ -221,14 +228,16 @@ def test_questions_bounds_and_private_history_paths(tmp_path):
     assert not questions_valid([{'id':'x','question':'Q','options':['A','A']}])
     store=TeamStore(tmp_path/'teams')
     with pytest.raises(ValueError):store.get(OWNER,'../escape')
-    outside=tmp_path/'other.json';outside.write_text('{}')
+    outside=tmp_path/'other.json'
+    outside.write_text('{}')
     if os.name=='posix':
         (store.directory/f'{OWNER}-{"b"*32}.json').symlink_to(outside)
         with pytest.raises(ValueError):store.get(OWNER,'b'*32)
 
 
 def test_routes_require_owner_and_validate_count_and_answer_scope(tmp_path, monkeypatch):
-    app=FastAPI();app.include_router(pixel_teams.router)
+    app=FastAPI()
+    app.include_router(pixel_teams.router)
     with TestClient(app) as client:
         assert client.post('/api/pixel/agents/list',json={'chat_id':'chat'}).status_code in (401,403)
     app.dependency_overrides[verify_api_key]=lambda:'owner'
@@ -320,7 +329,9 @@ async def test_unavailable_runtime_never_dispatches_a_worker(monkeypatch):
 async def test_stop_during_health_check_never_starts_inference(monkeypatch):
     from unittest.mock import AsyncMock
     agent={}
-    async def health(_):agent['stop_requested']=True;return None
+    async def health(_):
+        agent['stop_requested']=True
+        return None
     dispatch=AsyncMock()
     monkeypatch.setattr(pixel_teams.pixel,'_host_model_status',AsyncMock(return_value={}))
     monkeypatch.setattr(pixel_teams.pixel,'_local_inference_issue',health)

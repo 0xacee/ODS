@@ -603,7 +603,8 @@ class PortalOutcomeOrchestrateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)
             task_path, model_contract, artifact_path = self.controller_fixture(parent)
-            run_dir = parent / "controller-run"; run_dir.mkdir(mode=0o700)
+            run_dir = parent / "controller-run"
+            run_dir.mkdir(mode=0o700)
             independent = {
                 "schemaVersion": 1, "format": "codex-neutral-independent-verification-v1",
                 "sourceSnapshotSha256": json.loads(task_path.read_text(encoding="utf-8"))["bindings"]["sourceSnapshot"]["sha256"],

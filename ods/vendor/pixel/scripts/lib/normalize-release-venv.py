@@ -22,6 +22,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+from typing import NoReturn
 
 
 def die(message: str) -> "NoReturn":

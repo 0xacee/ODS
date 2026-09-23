@@ -19,8 +19,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions/services/dashboard-api"))
 from model_memory import (
     context_fitting_model,
-    estimated_context_kv_gb,
-    estimated_param_billions,
+    estimated_context_kv_gb as estimated_context_kv_gb,
+    estimated_param_billions as estimated_param_billions,
     memory_metadata,
     required_model_memory_gb,
 )

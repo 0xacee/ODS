@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from extension_projects import associate_project, read_projects, validate_project
+from extension_projects import associate_project, read_projects as read_projects, validate_project
 from routers import extensions
 
 

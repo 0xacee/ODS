@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import platform
 import pwd
-import socket
+import socket as socket
 import socketserver
 import stat
 import sys

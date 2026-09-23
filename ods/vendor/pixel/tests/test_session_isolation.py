@@ -19,10 +19,13 @@ class SessionIsolationHarnessTests(unittest.TestCase):
     def test_operator_probe_invokes_discovered_tool_handler(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            package = root / "openclaw"; package.mkdir()
+            package = root / "openclaw"
+            package.mkdir()
             (package / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
-            binary = package / "openclaw.mjs"; binary.write_text("\n", encoding="utf-8")
-            dist = package / "dist"; dist.mkdir()
+            binary = package / "openclaw.mjs"
+            binary.write_text("\n", encoding="utf-8")
+            dist = package / "dist"
+            dist.mkdir()
             (dist / "openclaw-tools-fixture.js").write_text(
                 "function createSessionsHistoryTool() {}\n"
                 "function createOpenClawTools() { return [{name:'sessions_history', execute: async () => "
@@ -79,7 +82,8 @@ class SessionIsolationHarnessTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake.chmod(0o755)
-            state = root / "state"; state.mkdir()
+            state = root / "state"
+            state.mkdir()
             env_file = root / "pixel.env"
             env_file.write_text(
                 f"OPENCLAW_BIN={fake}\nOPENCLAW_HOME={state}\nPIXEL_AGENT_ID=pixel\nPIXEL_WORKSPACE={root}\n",

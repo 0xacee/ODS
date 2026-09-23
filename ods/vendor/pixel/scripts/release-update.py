@@ -8272,7 +8272,7 @@ def _recover_execution_result_marker(
     start_path = state["run_dir"] / QUALIFICATION_EXECUTION_START_FILE
     start_bytes = read_regular(start_path, MAX_STAGE_RECEIPT, "qualification execution start")
     assert_private_single_link(start_path, "qualification execution start")
-    start = qualification_validate_execution_start(state, start_bytes, claim, spec)
+    _unused_start = qualification_validate_execution_start(state, start_bytes, claim, spec)
     if (
         result.get("candidateId") != state["candidate_id"]
         or result.get("activationHash") != state["activation_hash"]

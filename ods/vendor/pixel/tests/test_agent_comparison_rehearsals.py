@@ -51,7 +51,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
 
-            root = base / "briefing"; root.mkdir()
+            root = base / "briefing"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-owner-briefing-rehearsal")
             self.tool(root, "briefing.refresh")
             self.write(root, "briefing.json", {
@@ -65,7 +66,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "research"; root.mkdir()
+            root = base / "research"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-cited-research-rehearsal")
             fixture = self.research_fixture(task)
             sources = {item["fixtureSourceId"]: item for item in fixture["sources"]}
@@ -74,7 +76,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             self.assertIn("general availability", sources["primary-release"]["retrieval"]["content"])
             self.assertIn("18 percent", sources["secondary-analysis"]["retrieval"]["content"])
 
-            root = base / "calendar"; root.mkdir()
+            root = base / "calendar"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-calendar-unknown-rehearsal")
             self.tool(root, "calendar.create", {"idempotencyKey": "meeting-4821"}, expected=75)
             self.tool(root, "calendar.reconcile", {"idempotencyKey": "meeting-4821"})
@@ -86,7 +89,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "fleet"; root.mkdir()
+            root = base / "fleet"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-fleet-scope-rehearsal")
             self.tool(root, "fleet.inventory")
             self.write(root, "inventory.json", {
@@ -97,7 +101,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "privacy"; root.mkdir()
+            root = base / "privacy"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-sanitized-spillover-rehearsal")
             remote = self.tool(root, "remote.structural", {"client": "<CLIENT_1>", "accountNumber": "<ACCOUNT_1>", "accessToken": "<TOKEN_1>", "sections": ["summary", "risks", "actions"]})
             self.write(root, "sanitization.json", {"placeholders": {"client": "<CLIENT_1>", "accountNumber": "<ACCOUNT_1>", "accessToken": "<TOKEN_1>"}})
@@ -107,7 +112,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "approval"; root.mkdir()
+            root = base / "approval"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-inline-approval-rehearsal")
             approval = self.tool(root, "source.stage")
             audit = self.tool(root, "repo.readonly-audit")
@@ -121,7 +127,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "recovery"; root.mkdir()
+            root = base / "recovery"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-goal-recovery-rehearsal")
             self.tool(root, "goal.status")
             self.tool(root, "goal.step-one", expected=75)
@@ -136,7 +143,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "guardrail"; root.mkdir()
+            root = base / "guardrail"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-self-replica-guardrail-rehearsal")
             observed = self.tool(root, "environment.probe")
             self.write(root, "decision.json", {
@@ -146,7 +154,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "plan"; root.mkdir()
+            root = base / "plan"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-audit-plan-harden-rehearsal")
             observed = self.tool(root, "environment.probe")
             self.tool(root, "repository.inspect")
@@ -165,7 +174,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "conversation"; root.mkdir()
+            root = base / "conversation"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-conversation-followups-rehearsal")
             self.tool(root, "fact.lookup")
             self.write(root, "conversation.json", {"responses": [
@@ -174,7 +184,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             ]})
             self.verify(root, task)
 
-            root = base / "advisory"; root.mkdir()
+            root = base / "advisory"
+            root.mkdir()
             task = self.setup_workspace(root, "trial-analytical-advisory-rehearsal")
             self.tool(root, "option.evidence")
             self.write(root, "advisory.json", {
@@ -189,7 +200,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "heldout-briefing"; root.mkdir()
+            root = base / "heldout-briefing"
+            root.mkdir()
             task = self.setup_workspace(root, "heldout-briefing-source-loss-rehearsal")
             self.tool(root, "status.refresh")
             self.write(root, "status-brief.json", {
@@ -204,7 +216,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "heldout-retry"; root.mkdir()
+            root = base / "heldout-retry"
+            root.mkdir()
             task = self.setup_workspace(root, "heldout-before-submit-retry-rehearsal")
             self.tool(root, "operation.submit", {"idempotencyKey": "op-991"}, expected=75)
             self.tool(root, "operation.reconcile", {"idempotencyKey": "op-991"})
@@ -217,7 +230,8 @@ class AgentComparisonRehearsalControlTests(unittest.TestCase):
             })
             self.verify(root, task)
 
-            root = base / "heldout-research"; root.mkdir()
+            root = base / "heldout-research"
+            root.mkdir()
             task = self.setup_workspace(root, "heldout-research-primary-loss-rehearsal")
             fixture = self.research_fixture(task)
             sources = {item["fixtureSourceId"]: item for item in fixture["sources"]}

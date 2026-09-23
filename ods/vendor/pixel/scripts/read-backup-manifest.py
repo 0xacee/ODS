@@ -19,7 +19,7 @@ import posixpath
 import sys
 import tarfile
 
-from pathlib import Path
+from pathlib import Path as Path
 
 
 MANIFEST = ".pixel-backup-manifest.json"

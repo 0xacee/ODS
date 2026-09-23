@@ -1,5 +1,5 @@
 """Real macOS kernel checks over disposable, user-owned filesystem fixtures."""
-import os
+import os as os
 from pathlib import Path
 import subprocess
 import sys

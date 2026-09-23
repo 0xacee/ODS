@@ -8,7 +8,7 @@ from host_agent_client import AgentUnavailable
 import pixel_chat_identity
 from routers import pixel
 from test_pixel import ConnectedRequest, FakeClient, FakeResponse, stream_body
-from test_pixel_chat_results import store, OWNER
+from test_pixel_chat_results import store as store, OWNER
 
 
 @pytest.mark.parametrize('retained', [False, True])

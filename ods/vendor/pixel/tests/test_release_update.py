@@ -1389,7 +1389,7 @@ class ReleaseUpdateTests(unittest.TestCase):
         rollback_result = self.release_update.finalize_recovery(argparse.Namespace(
             **vars(recovery_arguments), recovery_hash=rollback_recovery["recoveryHash"], confirm=True,
         ))
-        rollback_result_arguments = argparse.Namespace(
+        _unused_rollback_result_arguments = argparse.Namespace(
             **vars(rollback_arguments), rollback_hash=rollback_preview["rollbackHash"], outcome="rolled-back",
             phase="record", confirm=True,
         )
@@ -3236,13 +3236,13 @@ class QualificationLifecycleTests(unittest.TestCase):
             self.release_update.qualification_prepare(overlapping)
 
     def test_qualification_rejects_unknown_top_level_on_idempotent_reuse(self):
-        prepared = self.release_update.qualification_prepare(self.prepare_arguments())
+        _unused_prepared = self.release_update.qualification_prepare(self.prepare_arguments())
         (self.qualification_root / "unexpected").write_text("state\n", encoding="ascii")
         with self.assertRaisesRegex(self.release_update.UpdateError, "contains an unexpected entry"):
             self.release_update.qualification_prepare(self.prepare_arguments())
 
     def test_qualification_rejects_symlinked_top_level_state(self):
-        prepared = self.release_update.qualification_prepare(self.prepare_arguments())
+        _unused_prepared = self.release_update.qualification_prepare(self.prepare_arguments())
         candidates = self.qualification_root / "candidates"
         os.symlink(candidates, self.qualification_root / "rehearsals")
         with self.assertRaisesRegex(self.release_update.UpdateError, "must not contain symbolic links"):
@@ -4092,7 +4092,7 @@ class QualificationExecutionTests(QualificationHostRunTests):
             claim_path, self.release_update.MAX_STAGE_RECEIPT, "qualification execution claim",
         )
         claim, spec_bytes, spec = self.release_update.qualification_validate_execution_claim(state, claim_bytes)
-        spec_path = state["run_dir"] / self.release_update.QUALIFICATION_EXECUTION_SPEC_FILE
+        _unused_spec_path = state["run_dir"] / self.release_update.QUALIFICATION_EXECUTION_SPEC_FILE
         start_path = state["run_dir"] / self.release_update.QUALIFICATION_EXECUTION_START_FILE
         start_bytes = self.release_update.read_regular(
             start_path, self.release_update.MAX_STAGE_RECEIPT, "qualification execution start",

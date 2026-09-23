@@ -6,7 +6,7 @@ if sys.platform == "win32":
 import json
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path as Path
 import pytest
 from test_model_transaction import config, NEW, ID, sha
 from test_access_bridge import FakeBridge
@@ -20,7 +20,9 @@ from pixel_model_contract import projection
 class ModelBridge(FakeBridge):
     def __init__(self, root):
         super().__init__(root)
-        self.started=1000; self.stopped=False; self.failure=None
+        self.started=1000
+        self.stopped=False
+        self.failure=None
         self.discover()
         self.path=self.home / '.openclaw/openclaw.json'
         self.path.parent.mkdir(mode=0o700)
@@ -38,8 +40,10 @@ class ModelBridge(FakeBridge):
     def command(self,args,timeout=20):
         if 'restart' in args:
             if self.failure=='restart':
-                self.stopped=True;raise AccessError('host-command-failed')
-            self.started+=1000;self.stopped=False
+                self.stopped=True
+                raise AccessError('host-command-failed')
+            self.started+=1000
+            self.stopped=False
             self.loaded=json.loads(self.path.read_text())
             return super().command(args,timeout)
         if any('ExecMainStartTimestampMonotonic' in arg for arg in args):
@@ -70,7 +74,8 @@ def adapter(tmp_path,monkeypatch,request):
     tmp_path.chmod(0o700)
     original=access.private_json
     read=lambda path,_uid,maximum=1048576:original(path,os.getuid(),maximum)
-    monkeypatch.setattr(access,'private_json',read);monkeypatch.setattr(c,'private_json',read)
+    monkeypatch.setattr(access,'private_json',read)
+    monkeypatch.setattr(c,'private_json',read)
     instance = ModelBridge(tmp_path)
     if request.param == 'launchd':
         instance.use_launchd_fixture(monkeypatch)
@@ -107,11 +112,14 @@ def finish(a,outcome='commit'):return c.control(a,'model-finish',{'transactionId
 
 def test_64k_to_16k_holds_through_actual_runtime_readback(adapter):
     previous_marker = json.loads(adapter.marker_path.read_text())['configuration_sha256']
-    assert begin(adapter)['pending'];assert adapter.native_phase==adapter.edge_phase=='held'
-    result=apply(adapter);assert result['status']=='applied' and result['contract']==NEW
+    assert begin(adapter)['pending']
+    assert adapter.native_phase==adapter.edge_phase=='held'
+    result=apply(adapter)
+    assert result['status']=='applied' and result['contract']==NEW
     assert adapter.log.count('restart')==1
     assert adapter.native_phase==adapter.edge_phase=='held'
-    done=finish(adapter);assert done['outcome']=='commit' and not done['pending']
+    done=finish(adapter)
+    assert done['outcome']=='commit' and not done['pending']
     assert json.loads(adapter.marker_path.read_text())['configuration_sha256'] == c._marker_digest(json.loads(adapter.path.read_text()))
     assert json.loads(adapter.marker_path.read_text())['configuration_sha256'] != previous_marker
     assert adapter.marker_path.stat().st_mode & 0o777 == 0o600
@@ -168,7 +176,8 @@ def test_bootstrap_completion_does_not_block_browser_model_switch(adapter):
                  "outcome": "applied", "config_sha256": sha(adapter.path)}
     atomic_json(adapter.state / "model-completed.json", promotion)
     assert c.control(adapter, 'model-status')['status'] == 'ready'
-    begin(adapter);apply(adapter)
+    begin(adapter)
+    apply(adapter)
     done=finish(adapter)
     assert done['status'] == 'completed' and done['outcome'] == 'commit'
     assert (adapter.state / "model-route-completed.json").exists()
@@ -191,7 +200,8 @@ def test_malformed_legacy_promotion_receipt_fails_closed(adapter):
 
 @pytest.mark.parametrize('failure',['preinvoke','lost-reply'])
 def test_lost_reply_or_partial_begin_can_restore_exact_bytes(adapter,failure):
-    before=adapter.path.read_bytes();adapter.failure=failure
+    before=adapter.path.read_bytes()
+    adapter.failure=failure
     prior_marker = adapter.marker_path.read_bytes()
     with pytest.raises(AccessError):
         begin(adapter)
@@ -250,7 +260,8 @@ def test_marker_digest_matches_independent_installer_contract():
 
 def test_model_finish_preserves_hold_if_marker_changes_during_switch(adapter):
     original = json.loads(adapter.marker_path.read_text())
-    begin(adapter); apply(adapter)
+    begin(adapter)
+    apply(adapter)
     changed = dict(original, configuration_sha256='f' * 64)
     atomic_json(adapter.marker_path, changed)
     with pytest.raises(AccessError, match='model-marker-drifted'):
@@ -262,7 +273,8 @@ def test_model_finish_preserves_hold_if_marker_changes_during_switch(adapter):
 
 
 def test_marker_rebind_is_idempotent_after_interrupted_release(adapter):
-    begin(adapter); apply(adapter)
+    begin(adapter)
+    apply(adapter)
     adapter.fail = 'release'
     with pytest.raises(AccessError): finish(adapter)
     bound = adapter.marker_path.read_bytes()
@@ -272,7 +284,8 @@ def test_marker_rebind_is_idempotent_after_interrupted_release(adapter):
 
 
 def test_prepatch_pending_journal_can_complete_without_adopting_drift(adapter):
-    begin(adapter); apply(adapter)
+    begin(adapter)
+    apply(adapter)
     journal = adapter.pending()
     journal.pop('markerBeforeSha')
     atomic_json(adapter.state / 'transition.json', journal)
@@ -281,7 +294,8 @@ def test_prepatch_pending_journal_can_complete_without_adopting_drift(adapter):
 
 
 def test_model_finish_refuses_changed_before_snapshot_without_rebinding_marker(adapter):
-    begin(adapter); apply(adapter)
+    begin(adapter)
+    apply(adapter)
     before_path = adapter.state / 'model-before.json'
     before = json.loads(before_path.read_text())
     marker = adapter.marker_path.read_bytes()
@@ -314,7 +328,9 @@ def test_normal_nonwritable_config_parent_is_accepted(adapter):
     assert finish(adapter, 'rollback')['outcome'] == 'rollback'
 
 def test_partial_release_reacquires_owned_hold_and_finishes(adapter):
-    begin(adapter);apply(adapter);adapter.fail='release'
+    begin(adapter)
+    apply(adapter)
+    adapter.fail='release'
     with pytest.raises(AccessError):finish(adapter)
     assert adapter.pending()['phase']=='releasing' and adapter.edge_phase=='idle'
     adapter.fail=None
@@ -325,7 +341,8 @@ def test_conflicting_request_active_run_and_config_drift_rejected(adapter):
     adapter.active=1
     with pytest.raises(AccessError,match='runtime-busy'):begin(adapter)
     assert not adapter.pending()
-    adapter.active=0;begin(adapter)
+    adapter.active=0
+    begin(adapter)
     with pytest.raises(AccessError,match='transaction-conflict'):
         c.control(adapter,'model-apply',{'transactionId':'c'*64,'target':NEW})
     with pytest.raises(AccessError,match='apply-unverified'):finish(adapter)
@@ -335,7 +352,8 @@ def test_conflicting_request_active_run_and_config_drift_rejected(adapter):
 
 def test_status_never_claims_disk_changes_as_loaded_runtime(adapter):
     before=c.control(adapter,'model-status')['contract']
-    begin(adapter);adapter.failure='lost-reply'
+    begin(adapter)
+    adapter.failure='lost-reply'
     with pytest.raises(AccessError):apply(adapter)
     status=c.control(adapter,'model-status')
     assert status['pending'] and status['status']=='held' and status['contract']==before
@@ -343,7 +361,9 @@ def test_status_never_claims_disk_changes_as_loaded_runtime(adapter):
     assert apply(adapter)['contract']==NEW
 
 def test_failed_restart_restores_previous_config_and_owned_stopped_unit(adapter):
-    before=adapter.path.read_bytes();begin(adapter);adapter.failure='restart'
+    before=adapter.path.read_bytes()
+    begin(adapter)
+    adapter.failure='restart'
     with pytest.raises(AccessError):apply(adapter)
     assert adapter.stopped and adapter.pending() and adapter.path.read_bytes()!=before
     adapter.failure=None
@@ -366,8 +386,11 @@ def test_status_refuses_partial_hold_and_owner_snapshot_failure(adapter):
     finish(adapter,'rollback')
 
 def test_status_recovers_applied_phase_only_with_live_contract_and_both_holds(adapter):
-    begin(adapter);apply(adapter)
-    journal=adapter.pending();journal['phase']='applying';atomic_json(adapter.state/'transition.json',journal)
+    begin(adapter)
+    apply(adapter)
+    journal=adapter.pending()
+    journal['phase']='applying'
+    atomic_json(adapter.state/'transition.json',journal)
     assert c.control(adapter,'model-status')['status']=='applied'
     assert finish(adapter)['outcome']=='commit'
     # A second private transaction tests the missing Edge proof separately.

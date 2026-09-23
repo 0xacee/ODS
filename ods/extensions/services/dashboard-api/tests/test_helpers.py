@@ -386,7 +386,7 @@ class TestGetCpuMetrics:
 
     def test_linux_cpu_metrics_handles_corrupt_sensor(self, monkeypatch):
         from unittest.mock import mock_open
-        fake_stat = "cpu  100 200 300 400 500 600 700 800\n"
+        _fake_stat = "cpu  100 200 300 400 500 600 700 800\n"
         monkeypatch.setattr("builtins.open", mock_open(read_data="corrupted_not_a_number\n"))
         monkeypatch.setattr("glob.glob", lambda pat: ["/sys/class/thermal/thermal_zone0/type"])
         from helpers import _get_cpu_metrics_linux

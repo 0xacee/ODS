@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime as datetime, timezone as timezone
 import copy
 import hashlib
 import importlib.util

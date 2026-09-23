@@ -171,7 +171,9 @@ def test_bootstrap_source_hint_cannot_fabricate_provenance(source, monkeypatch, 
         put(source.ods, 'untracked.txt', b'not a clean checkout')
         hint = str(source.ods)
     elif fault == 'non-git':
-        root = source.tmp / 'archive'; shutil.copytree(source.ods, root); hint = str(root)
+        root = source.tmp / 'archive'
+        shutil.copytree(source.ods, root)
+        hint = str(root)
     else:
         hint = {'missing': str(source.tmp / 'missing'), 'relative': 'relative', 'empty': ''}[fault]
     monkeypatch.setenv('ODS_BOOTSTRAP_SOURCE_DIR', hint)

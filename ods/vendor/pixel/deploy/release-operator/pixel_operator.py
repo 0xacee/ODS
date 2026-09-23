@@ -31,7 +31,7 @@ override.
 
 from __future__ import annotations
 
-import fcntl
+import fcntl as fcntl
 import ctypes
 import errno
 import hashlib
@@ -1595,7 +1595,7 @@ def _broker_snapshot_manifest(value, limbs):
     manifest = {"schemaVersion": 1, "kind": BROKER_SNAPSHOT_KIND, "limbs": {}}
     payloads = {}
     for limb in limbs:
-        install_dir = _broker_install_dir(value, limb)
+        _unused_install_dir = _broker_install_dir(value, limb)
         records = []
         for relative, mode, runtime_relative, installable in BROKER_FILES[limb]:
             target = _broker_target_path(value, limb, relative, allow_missing_parent=True)

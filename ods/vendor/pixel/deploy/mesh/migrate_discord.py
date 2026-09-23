@@ -39,7 +39,7 @@ import os
 import secrets
 import shutil
 import subprocess
-import sys
+import sys as sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone

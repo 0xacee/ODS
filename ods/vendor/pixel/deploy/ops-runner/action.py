@@ -69,7 +69,8 @@ def secure_json(path: Path) -> dict[str, Any]:
             chunk = os.read(descriptor, min(64 * 1024, MAX_CONFIG + 1 - total))
             if not chunk:
                 break
-            chunks.append(chunk); total += len(chunk)
+            chunks.append(chunk)
+            total += len(chunk)
             if total > MAX_CONFIG:
                 raise ActionError("action configuration exceeds its size limit")
         payload = b"".join(chunks)
@@ -408,7 +409,8 @@ def secure_archive(source: Path, destination_descriptor: int, destination_name: 
         with os.fdopen(os.dup(temporary_descriptor), "w+b") as handle:
             with tarfile.open(fileobj=handle, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
                 add_directory(archive, source_descriptor, source.name)
-            handle.flush(); os.fsync(handle.fileno())
+            handle.flush()
+            os.fsync(handle.fileno())
         os.link(
             temporary_name, destination_name, src_dir_fd=destination_descriptor,
             dst_dir_fd=destination_descriptor, follow_symlinks=False,
@@ -472,15 +474,18 @@ def artifact_action(configuration: dict[str, Any], arguments: list[str]) -> dict
                 size += len(chunk)
                 if size > maximum:
                     raise ActionError("collection source exceeds its byte limit")
-                checksum.update(chunk); write_all(destination_descriptor, chunk)
+                checksum.update(chunk)
+                write_all(destination_descriptor, chunk)
             os.fsync(destination_descriptor)
         except Exception:
             try: os.unlink(destination_name, dir_fd=collection_descriptor)
             except FileNotFoundError: pass
             raise
         finally:
-            os.close(destination_descriptor); os.close(source_descriptor)
-            os.close(collection_descriptor); os.close(root_descriptor)
+            os.close(destination_descriptor)
+            os.close(source_descriptor)
+            os.close(collection_descriptor)
+            os.close(root_descriptor)
         return {"operation": "artifact.collect", "source": source_id, "path": f"collections/{destination_name}", "sha256": checksum.hexdigest(), "bytes": size}
     if operation == "archive" and len(arguments) == 3:
         source = under(root, arguments[1])
@@ -491,7 +496,8 @@ def artifact_action(configuration: dict[str, Any], arguments: list[str]) -> dict
         try:
             entries, _total, checksum, size = secure_archive(source, archive_descriptor, destination_name, maximum)
         finally:
-            os.close(archive_descriptor); os.close(root_descriptor)
+            os.close(archive_descriptor)
+            os.close(root_descriptor)
         return {"operation": "artifact.archive", "path": f"archives/{destination_name}", "sha256": checksum, "bytes": size, "entries": entries}
     if operation == "cleanup" and len(arguments) == 2:
         target = under(root, arguments[1])

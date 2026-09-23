@@ -23,7 +23,7 @@ def test_bundled_pixel_pin_tracks_parent_installer():
     phase = (root/'installers/phases/06-directories.sh').read_text()
     integration = (root/'installers/lib/pixel-integration.sh').read_text()
     verifier = (root/'scripts/verify-pixel-bundle.py').read_text()
-    bundled_ref = '55837c2d1231a7d0a36f82975d3069e754cc413f'
+    bundled_ref = 'c3b573f9741fd402878176ac1d534201a904732a'
     assert f"ODS_PIXEL_BUNDLED_REF='{bundled_ref}'" in integration
     assert 'PIXEL_SOURCE_REF "$ODS_PIXEL_BUNDLED_REF"' in phase
     assert f'PIXEL_SOURCE_REF={bundled_ref}' in (root/'.env.example').read_text()
@@ -231,7 +231,8 @@ def test_agent_inherits_admission_if_supervisor_closes_its_handle(client_dir):
             pass
     finally:
         if child.poll() is None:
-            child.kill(); child.wait()
+            child.kill()
+            child.wait()
 
 
 def test_ambient_profile_not_inherited(client_dir,monkeypatch):
@@ -323,7 +324,8 @@ time.sleep(120)
         assert record['status'] == 'interrupted'
     finally:
         if owner.poll() is None:
-            owner.kill(); owner.wait()
+            owner.kill()
+            owner.wait()
         for pid in pids:
             try:
                 os.kill(pid,signal.SIGKILL)

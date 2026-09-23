@@ -10,11 +10,15 @@ from test_host_agent import _mod, TestRemoteProviderLifecycle as _LifecycleFixtu
 
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
-    root=tmp_path/'ods';root.mkdir()
-    data=root/'data';data.mkdir()
-    cloud=root/'config/litellm/cloud.yaml';cloud.parent.mkdir(parents=True)
+    root=tmp_path/'ods'
+    root.mkdir()
+    data=root/'data'
+    data.mkdir()
+    cloud=root/'config/litellm/cloud.yaml'
+    cloud.parent.mkdir(parents=True)
     cloud.write_text('previous cloud\n')
-    env=root/'.env';env.write_text('ODS_MODE=local\nLLM_API_URL=http://llama-server:8080\nPIXEL_OPENWEBUI_KEY=fixture-chat-key\nGGUF_FILE=local.gguf\n')
+    env=root/'.env'
+    env.write_text('ODS_MODE=local\nLLM_API_URL=http://llama-server:8080\nPIXEL_OPENWEBUI_KEY=fixture-chat-key\nGGUF_FILE=local.gguf\n')
     env.chmod(0o600)
     monkeypatch.setattr(_mod,'INSTALL_DIR',root)
     monkeypatch.setattr(_mod,'DATA_DIR',data)
@@ -26,7 +30,9 @@ def runtime(tmp_path, monkeypatch):
 
     class Transaction:
         def __init__(self):
-            self.previous=deepcopy(state.native);self.target=None;self.completed=False
+            self.previous=deepcopy(state.native)
+            self.target=None
+            self.completed=False
         def verify_held(self):
             state.events.append('verify-held')
             if state.failure=='ownership':
@@ -34,7 +40,9 @@ def runtime(tmp_path, monkeypatch):
             assert state.held
         def apply(self,target):
             assert state.held
-            self.target=deepcopy(target);state.native=deepcopy(target);state.events.append('apply')
+            self.target=deepcopy(target)
+            state.native=deepcopy(target)
+            state.events.append('apply')
             if state.failure=='apply':raise _mod._PixelModelTransactionUncertain('apply unknown')
             return 'reconciled'
         def finish(self,outcome):
@@ -47,14 +55,17 @@ def runtime(tmp_path, monkeypatch):
                     assert receipt['proven'] and receipt['routeFingerprint']==self.target['routeFingerprint']
             if state.failure=='finish':raise _mod._PixelModelTransactionUncertain('finish unknown')
             state.native=deepcopy(self.target if outcome=='commit' else self.previous)
-            self.completed=True;state.held=False
+            self.completed=True
+            state.held=False
             if state.failure=='final-journal':raise OSError('final journal write failed')
     def begin(_env):
         state.events.append('begin')
         if state.failure=='begin':raise _mod._PixelModelTransactionRejected('busy')
         assert not state.held
         state.held=True
-        tx=Transaction();state.transactions.append(tx);return tx
+        tx=Transaction()
+        state.transactions.append(tx)
+        return tx
     monkeypatch.setattr(_mod,'_begin_pixel_model_transaction',begin)
     def inspect():
         assert not state.held, 'pending native status must use transaction.previous'
@@ -63,15 +74,20 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(_mod,'_active_remote_provider_pixel_runtime',lambda:None)
     monkeypatch.setattr(_mod,'_capture_container_state',lambda *_:{'exists':True,'running':True})
     def restart(*_args,**_kwargs):
-        assert state.held;state.events.append('restart')
+        assert state.held
+        state.events.append('restart')
         return True
     monkeypatch.setattr(_mod,'_restart_existing_container',restart)
     def restore(*_args,**_kwargs):
-        assert state.held;state.events.append('restore-container');return True
+        assert state.held
+        state.events.append('restore-container')
+        return True
     monkeypatch.setattr(_mod,'_restore_container_state',restore)
     monkeypatch.setattr(_mod,'_wait_for_container_health',lambda *_:None)
     def render(_route,_env):
-        assert state.held;state.events.append('render');cloud.write_text('remote cloud\n')
+        assert state.held
+        state.events.append('render')
+        cloud.write_text('remote cloud\n')
     monkeypatch.setattr(_mod,'_render_remote_provider_cloud_config',render)
     def verify(_env,**_kwargs):
         state.events.append('route-proof')
@@ -127,14 +143,16 @@ def test_two_remote_providers_with_same_model_use_distinct_transactions_and_fing
 
 
 def test_refused_begin_changes_no_provider_files(runtime):
-    before=files(runtime.root);runtime.failure='begin'
+    before=files(runtime.root)
+    runtime.failure='begin'
     with pytest.raises(_mod._RemoteProviderApplyError,match='busy'):configure(runtime)
     assert files(runtime.root)==before
     assert runtime.events==['begin']
 
 
 def test_route_failure_restores_egress_and_consumers_before_proven_rollback(runtime):
-    before=files(runtime.root);runtime.failure='route'
+    before=files(runtime.root)
+    runtime.failure='route'
     with pytest.raises(_mod._RemoteProviderApplyError,match='route unavailable'):configure(runtime)
     assert files(runtime.root)==before
     assert runtime.events.index('verify-held')<runtime.events.index('restore-container')
@@ -166,7 +184,8 @@ def test_disable_proves_local_runtime_and_removes_receipts_before_commit(runtime
 
 def test_ssh_replacement_of_active_remote_is_refused_before_staging(runtime):
     configure(runtime)
-    before=files(runtime.root);runtime.events.clear()
+    before=files(runtime.root)
+    runtime.events.clear()
     with pytest.raises(_mod._RemoteProviderApplyError,match='Disable the active remote provider'):
         configure(runtime,ssh=True)
     assert files(runtime.root)==before

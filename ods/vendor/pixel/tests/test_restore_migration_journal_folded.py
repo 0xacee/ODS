@@ -17,8 +17,8 @@ import json
 import os
 import shutil
 import stat
-import sys
-import tempfile
+import sys as sys
+import tempfile as tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -572,7 +572,7 @@ class RepairedFoldBlockersTests(FoldedHarnessBase):
         stage_rel = str(live_root).lstrip("/")
         safe_dir(restore_stage / stage_rel / "releases")
         os.symlink("3.2.2", restore_stage / stage_rel / "releases" / "current")
-        cand = Path(it["newPath"]).name
+        _unused_cand = Path(it["newPath"]).name
         migration_stage = self.base / "migration-stage"
         safe_dir(migration_stage)
         spec = self.fake._spec([it])
@@ -676,7 +676,7 @@ class RepairedFoldBlockersTests(FoldedHarnessBase):
         restore_stage = self.base / "restore-stage"
         safe_dir(restore_stage)
         # The ancestor scripts dir is NOT present in the restore stage.
-        stage_rel = str(live_root).lstrip("/")
+        _unused_stage_rel = str(live_root).lstrip("/")
         spec = self.fake._spec([it])
         migration_stage = self.base / "migration-stage"
         safe_dir(migration_stage)

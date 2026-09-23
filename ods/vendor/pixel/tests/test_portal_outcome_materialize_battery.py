@@ -175,7 +175,7 @@ class PortalOutcomeBatteryMaterializationTests(unittest.TestCase):
             task_id = "battery-repo-atomic-checkpoint"
             matched_task = json.loads((matched_root / task_id / "task.json").read_text(encoding="utf-8"))
             quality_task = json.loads((quality_root / task_id / "task.json").read_text(encoding="utf-8"))
-            matched_environment = json.loads((matched_root / task_id / "environment.json").read_text(encoding="utf-8"))
+            _unused_matched_environment = json.loads((matched_root / task_id / "environment.json").read_text(encoding="utf-8"))
             quality_environment = json.loads((quality_root / task_id / "environment.json").read_text(encoding="utf-8"))
             matched_tools = json.loads((matched_root / task_id / "tools.json").read_text(encoding="utf-8"))
             quality_tools = json.loads((quality_root / task_id / "tools.json").read_text(encoding="utf-8"))

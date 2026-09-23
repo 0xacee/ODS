@@ -5,7 +5,7 @@ import importlib.util
 import json
 import os
 import random
-import re
+import re as re
 import tempfile
 import time
 from pathlib import Path

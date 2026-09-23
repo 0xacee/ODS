@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import asyncio as asyncio
 import os
 import sys
 import unittest

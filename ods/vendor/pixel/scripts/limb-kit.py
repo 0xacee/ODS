@@ -1923,7 +1923,7 @@ def unbind_operations(args: argparse.Namespace) -> dict[str, Any]:
 def install(args: argparse.Namespace) -> dict[str, Any]:
     if not args.confirm:
         raise PackError("installing a limb pack requires --confirm")
-    verified = verify(args)
+    _unused_verified = verify(args)
     source = safe_root(args.directory, must_exist=True)
     manifest, _ = read_json(source / "pixel-limb.json", 256 * 1024, "limb manifest")
     manifest = validate_manifest(manifest)
@@ -2050,7 +2050,7 @@ def semver_tuple(value: str) -> tuple[int, int, int]:
 def upgrade(args: argparse.Namespace) -> dict[str, Any]:
     if not args.confirm:
         raise PackError("upgrading a limb pack requires --confirm")
-    verified = verify(args)
+    _unused_verified = verify(args)
     source = safe_root(args.directory, must_exist=True)
     manifest, _ = read_json(source / "pixel-limb.json", 256 * 1024, "limb manifest")
     manifest = validate_manifest(manifest)

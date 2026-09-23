@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Regression test for installers/lib/path-utils.sh normalization and disk space bounds."""
-import os
+import os as os
 from pathlib import Path
 import subprocess
 import tempfile

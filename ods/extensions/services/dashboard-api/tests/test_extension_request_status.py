@@ -15,9 +15,12 @@ from routers import extensions
 
 
 def test_status_distinguishes_proposal_preparation_and_observed_runtime(monkeypatch, tmp_path):
-    requests = tmp_path / '.extension-requests'; requests.mkdir()
-    drafts = tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
-    library = tmp_path / 'library'; library.mkdir()
+    requests = tmp_path / '.extension-requests'
+    requests.mkdir()
+    drafts = tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
+    library = tmp_path / 'library'
+    library.mkdir()
     proposal = candidate()
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
     monkeypatch.setattr(extensions, 'EXTENSIONS_LIBRARY_DIR', library)
@@ -76,9 +79,12 @@ def test_status_distinguishes_proposal_preparation_and_observed_runtime(monkeypa
 
 def test_advance_resolves_only_unchanged_owner_bound_prepared_recipe(monkeypatch, tmp_path):
     from unittest.mock import Mock
-    requests=tmp_path / '.extension-requests'; requests.mkdir()
-    drafts=tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
-    library=tmp_path / 'library'; library.mkdir()
+    requests=tmp_path / '.extension-requests'
+    requests.mkdir()
+    drafts=tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
+    library=tmp_path / 'library'
+    library.mkdir()
     proposal=candidate()
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
     monkeypatch.setattr(extensions, 'EXTENSIONS_LIBRARY_DIR', library)
@@ -111,9 +117,12 @@ def test_advance_resolves_only_unchanged_owner_bound_prepared_recipe(monkeypatch
 def test_retry_uses_only_owner_bound_request_identity(monkeypatch, tmp_path):
     from unittest.mock import Mock
     from extension_requests import _identity
-    requests = tmp_path / '.extension-requests'; requests.mkdir()
-    drafts = tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
-    library = tmp_path / 'library'; library.mkdir()
+    requests = tmp_path / '.extension-requests'
+    requests.mkdir()
+    drafts = tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
+    library = tmp_path / 'library'
+    library.mkdir()
     proposal = candidate()
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
     monkeypatch.setattr(extensions, 'EXTENSIONS_LIBRARY_DIR', library)
@@ -150,9 +159,12 @@ def test_retry_uses_only_owner_bound_request_identity(monkeypatch, tmp_path):
 
 def test_research_only_request_cannot_advance_or_retry_prepared_recipe(monkeypatch, tmp_path):
     from unittest.mock import Mock
-    requests = tmp_path / '.extension-requests'; requests.mkdir()
-    drafts = tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
-    library = tmp_path / 'library'; library.mkdir()
+    requests = tmp_path / '.extension-requests'
+    requests.mkdir()
+    drafts = tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
+    library = tmp_path / 'library'
+    library.mkdir()
     proposal = candidate()
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
     monkeypatch.setattr(extensions, 'EXTENSIONS_LIBRARY_DIR', library)
@@ -174,9 +186,12 @@ def test_research_only_request_cannot_advance_or_retry_prepared_recipe(monkeypat
 
 @pytest.mark.parametrize('message', ['sim', 'pode seguir', 'como está indo?'])
 def test_followup_context_contains_original_request_and_observed_installation(monkeypatch, tmp_path, message):
-    requests = tmp_path / '.extension-requests'; requests.mkdir()
-    drafts = tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
-    library = tmp_path / 'library'; library.mkdir()
+    requests = tmp_path / '.extension-requests'
+    requests.mkdir()
+    drafts = tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
+    library = tmp_path / 'library'
+    library.mkdir()
     proposal = candidate()
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
     monkeypatch.setattr(extensions, 'EXTENSIONS_LIBRARY_DIR', library)

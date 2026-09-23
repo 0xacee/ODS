@@ -5,7 +5,7 @@ if sys.platform == "win32":
     raise SkipTest("POSIX custody tests run in Linux/WSL")
 import hashlib
 import json
-import os
+import os as os
 from pathlib import Path
 import pytest
 
@@ -37,7 +37,8 @@ def call(owner, operation, **kw):
         expected_config_sha256=sha(path),validate_config=lambda p: bool(json.loads(Path(p).read_text())),check_no_active_run=lambda:False,**kw)
 
 def test_apply_context_and_exact_rollback(owner):
-    path,state=owner;before=path.read_bytes()
+    path,state=owner
+    before=path.read_bytes()
     call(owner,"model-begin")
     call(owner,"model-apply",proposed={**NEW,"routeFingerprint":"b"*64})
     current=json.loads(path.read_bytes())
@@ -53,20 +54,25 @@ def test_apply_context_and_exact_rollback(owner):
 
 def test_replay_target_cas_and_busy_checks(owner):
     path,state=owner
-    call(owner,"model-begin");call(owner,"model-begin")
-    call(owner,"model-apply",proposed=NEW);first=path.read_bytes()
-    call(owner,"model-apply",proposed=NEW);assert path.read_bytes()==first
+    call(owner,"model-begin")
+    call(owner,"model-begin")
+    call(owner,"model-apply",proposed=NEW)
+    first=path.read_bytes()
+    call(owner,"model-apply",proposed=NEW)
+    assert path.read_bytes()==first
     with pytest.raises(ModelError,match="target-changed"): call(owner,"model-apply",proposed={**NEW,"model":"other"})
     path.write_bytes(first+b" ")
     with pytest.raises(ModelError,match="config-changed"): call(owner,"model-rollback")
 
 def test_backup_tamper_and_other_transition_rejected(owner):
-    path,state=owner;call(owner,"model-begin")
+    path,state=owner
+    call(owner,"model-begin")
     (state/tx.BACKUP).write_bytes(b"{}")
     with pytest.raises(ModelError,match="backup-mismatch"):call(owner,"model-rollback")
 
 def test_local_clear_and_invalid_target_no_mutation(owner):
-    c=config();c["plugins"]["entries"]["pixel-ods"]["config"]["modelRouteFingerprint"]="b"*64
+    c=config()
+    c["plugins"]["entries"]["pixel-ods"]["config"]["modelRouteFingerprint"]="b"*64
     assert "routeFingerprint" not in projection(plan(c,NEW))["contract"]
     for value in ({**NEW,"contextLength":True},{**NEW,"maxTokens":17000},{**NEW,"routeFingerprint":"b"*64+"\n"},{**NEW,"baseUrl":"https://injected"}):
         with pytest.raises(ModelError):plan(c,value)

@@ -135,7 +135,8 @@ def test_effect_order_retains_original_hold_through_real_proof_and_native_releas
 
 @pytest.mark.parametrize('after', [False, True])
 def test_interruption_at_every_durable_write_observation_and_effect_resumes_exactly(after):
-    reference = FaultAdapter(); pure.execute(reference.value, reference)
+    reference = FaultAdapter()
+    pure.execute(reference.value, reference)
     for index in range(len(reference.events)):
         adapter = FaultAdapter(index, after)
         with pytest.raises(OSError): pure.execute(adapter.value, adapter)
@@ -149,7 +150,8 @@ def test_interruption_at_every_durable_write_observation_and_effect_resumes_exac
 
 @pytest.mark.parametrize('field', ['archive', 'context', 'service', 'hold'])
 def test_authority_byte_drift_is_not_adopted(field):
-    authority, value = fixture(); authority['snapshots'][field] += b' '
+    authority, value = fixture()
+    authority['snapshots'][field] += b' '
     with pytest.raises((pure.ProofError, repair.RepairError)):
         pure.validate(repair, value, **authority)
 
@@ -160,7 +162,9 @@ def test_authority_byte_drift_is_not_adopted(field):
     lambda a: a.update(candidate='0' * 64), lambda a: a['owner'].update(uid=502),
 ])
 def test_repair_settings_owner_and_selection_are_exact(change):
-    authority, value = fixture(); authority = copy.deepcopy(authority); change(authority)
+    authority, value = fixture()
+    authority = copy.deepcopy(authority)
+    change(authority)
     with pytest.raises((pure.ProofError, repair.RepairError)):
         pure.validate(repair, value, **authority)
 
@@ -172,7 +176,8 @@ def test_repair_settings_owner_and_selection_are_exact(change):
     lambda v: v['identities']['access'].__setitem__(2, 1000000),
 ])
 def test_closed_journal_schema_and_phase_contract(change):
-    authority, value = fixture(); change(value)
+    authority, value = fixture()
+    change(value)
     with pytest.raises((pure.ProofError, repair.RepairError)):
         pure.validate(repair, value, **authority)
 
@@ -191,15 +196,18 @@ def test_unknown_native_state_never_releases_edge(phase, fault):
     adapter.persist = original
     native = adapter.observed['native']
     if fault == 'other-token':
-        native['phase'] = 'held'; adapter.observed['owned'] = False
+        native['phase'] = 'held'
+        adapter.observed['owned'] = False
     elif fault == 'process': native['pid'] += 1
     elif fault == 'busy': native['active'] = 1
     elif fault == 'proof':
         # Before acquiring, arbitrary old proof is not authority; acquisition
         # deliberately clears it. All subsequent phases reject unknown proof.
         if phase == 'acquiring-native':
-            native['phase'] = 'held'; adapter.observed['owned'] = True
-        native['proof'] = {'executed': True}; adapter.observed['ready'] = True
+            native['phase'] = 'held'
+            adapter.observed['owned'] = True
+        native['proof'] = {'executed': True}
+        adapter.observed['ready'] = True
     elif fault == 'revision':
         native['revision'] = 'invalid'
     else: native['runtime_version'] = 'other'
@@ -251,7 +259,8 @@ def test_fixed_child_command_and_actual_closed_protocol():
     lambda v: v['gatewayIdentity'].__setitem__(3, 0), lambda v: v['gatewayIdentity'].__setitem__(2, 1000000),
 ])
 def test_actual_child_builder_rejects_command_path_owner_and_scope_injection(change):
-    value = request(); change(value)
+    value = request()
+    change(value)
     with pytest.raises(ValueError): child.request_bytes(value)
 
 
@@ -262,7 +271,9 @@ def test_actual_child_parser_rejects_missing_duplicate_and_oversized_input(body)
 
 def child_runtime(monkeypatch, *, action='snapshot', fault=None):
     """Execute the actual fixed child, mocking only OS custody and installed IO."""
-    ns = child_namespace(); value = request(); value['action'] = action
+    ns = child_namespace()
+    value = request()
+    value['action'] = action
     _, intent = fixture()
     observed = sample(intent, held=action in ('acquire', 'probe'), ready=action != 'acquire')
     events = []
@@ -276,7 +287,8 @@ def child_runtime(monkeypatch, *, action='snapshot', fault=None):
         events.append('authority')
         if fault == 'authority' and events.count('authority') == 2: raise ValueError('private')
         if fault == 'late-proof' and events.count('authority') == 2:
-            observed['native']['proof'] = None; observed['ready'] = False
+            observed['native']['proof'] = None
+            observed['ready'] = False
         return settings
     ns['authority'] = authority
     ns['key_bytes'] = lambda *a: events.append('key') or 'private-fixture-key'
@@ -288,7 +300,8 @@ def child_runtime(monkeypatch, *, action='snapshot', fault=None):
     @contextmanager
     def bounded(seconds):
         assert seconds == 140
-        events.append('bound'); yield
+        events.append('bound')
+        yield
     def native(operation=None, token=None, **kwargs):
         events.append('native:' + str(operation))
         if operation: assert token == value['token']
@@ -339,7 +352,8 @@ def test_actual_child_authority_checks_every_fixed_module_and_settings(monkeypat
     settings = dict(owner='fixture', state_dir=str(ns['STATE']), gateway_target='system/com.ods.pixel-native-gateway',
         gateway_plist='/Library/LaunchDaemons/com.ods.pixel-native-gateway.plist',
         openclaw_bin=str(ns['ROOT'] / 'openclaw-gateway-launcher'), edge_owner_key_sha256='f' * 64)
-    config = json.dumps(settings).encode(); value['settingsSha256'] = repair.sha(config)
+    config = json.dumps(settings).encode()
+    value['settingsSha256'] = repair.sha(config)
     reads = []
     def read(path, **kwargs):
         reads.append(path)
@@ -349,7 +363,8 @@ def test_actual_child_authority_checks_every_fixed_module_and_settings(monkeypat
     ns['private_metadata'] = lambda path, mode: None
     ns['os'] = SimpleNamespace(path=SimpleNamespace(lexists=lambda path: fault == 'pending'))
     if fault == 'wrong-path':
-        settings['openclaw_bin'] = '/tmp/arbitrary'; config = json.dumps(settings).encode()
+        settings['openclaw_bin'] = '/tmp/arbitrary'
+        config = json.dumps(settings).encode()
         value['settingsSha256'] = repair.sha(config)
     custody = SimpleNamespace(protected_tree_metadata=lambda p: None, protected_bytes=read)
     if fault:
@@ -368,8 +383,11 @@ def source(name, namespace):
 def test_real_adapter_and_hold_helper_resample_after_slow_checks_before_release(monkeypatch, phase, fault):
     authority, value = fixture()
     value.update(phase='releasing-edge', leaseRevision='2' * 64, proof=proof(value))
-    hold = repair._hold(authority['snapshots']['hold']); hold['phase'] = phase
-    disk = [copy.deepcopy(hold)]; events = []; observed = sample(value, ready=True)
+    hold = repair._hold(authority['snapshots']['hold'])
+    hold['phase'] = phase
+    disk = [copy.deepcopy(hold)]
+    events = []
+    observed = sample(value, ready=True)
     def acquire_release(plan, container, operation, binding):
         events.append(operation)
         if operation == 'acquire':
@@ -379,7 +397,8 @@ def test_real_adapter_and_hold_helper_resample_after_slow_checks_before_release(
         assert events[-2] == 'fresh-child'
         return {'capability': 'available', 'phase': 'idle', 'streams': 0, 'admission_blocked': False}
     def write(path, record):
-        events.append('journal:' + record['phase']); disk[0] = record
+        events.append('journal:' + record['phase'])
+        disk[0] = record
     monkeypatch.setitem(sys.modules, 'pixel_access_bridge', SimpleNamespace(
         private_json=lambda *a: disk[0], atomic_json=write))
     finish = source('_finish_migration_hold', {'_edge_hold_journal': lambda p: 'hold',
@@ -408,7 +427,8 @@ def test_real_adapter_and_hold_helper_resample_after_slow_checks_before_release(
 
 @pytest.mark.parametrize('fault', [None, 'timeout', 'exit', 'large', 'duplicate', 'shape'])
 def test_real_adapter_child_transport_is_fixed_bounded_and_private(monkeypatch, fault):
-    authority, value = fixture(); events = []
+    authority, value = fixture()
+    events = []
     adapter = object.__new__(live.Adapter)
     adapter.i, adapter.repair, adapter.child = SimpleNamespace(InstallError=ValueError), repair, child
     adapter.settings_hash, adapter.mode = authority['settings_hash'], authority['mode']
@@ -470,7 +490,8 @@ def test_actual_transition_gate_lost_release_reply_retries_only_original_receipt
     gate._write = lambda state: setattr(gate, 'state', state)
     token, revision = 'd' * 64, gate.state['revision']
     status = asyncio.run(gate.acquire(token, revision))
-    _, value = fixture(); value.update(phase='releasing-edge', leaseRevision='2' * 64, proof=proof(value))
+    _, value = fixture()
+    value.update(phase='releasing-edge', leaseRevision='2' * 64, proof=proof(value))
     disk = [dict(schemaVersion=1, phase='held', container='c' * 64,
                  binding=dict(token=token, revision=revision), status=status)]
     events, lose = [], [True]
@@ -494,7 +515,8 @@ def test_actual_transition_gate_lost_release_reply_retries_only_original_receipt
     assert gate.state['phase'] == 'idle' and disk[0]['phase'] == 'releasing'
     assert gate.state['revision'] != revision and gate.state['released']['revision'] == revision
     if interference == 'new-turn':
-        asyncio.run(gate.admit('turn')); asyncio.run(gate.finish('turn'))
+        asyncio.run(gate.admit('turn'))
+        asyncio.run(gate.finish('turn'))
     elif interference == 'different-token':
         asyncio.run(gate.acquire('f' * 64, gate.state['revision']))
     before = copy.deepcopy(gate.state)
@@ -512,7 +534,8 @@ def test_actual_transition_gate_lost_release_reply_retries_only_original_receipt
 def test_archived_repaired_route_holds_lock_through_proof_and_skips_legacy_release(monkeypatch, tmp_path, kind, loading):
     if loading == 'native-module' and os.name == 'nt':
         pytest.skip('Full POSIX installer import runs in Linux/macOS CI')
-    _, _, snapshots, repaired, _ = base.fixture(); repaired['phase'] = 'rolled-back' if kind == 'rolled-back' else 'repaired'
+    _, _, snapshots, repaired, _ = base.fixture()
+    repaired['phase'] = 'rolled-back' if kind == 'rolled-back' else 'repaired'
     hold = repair._hold(snapshots['hold'])
     events, held = [], []
     plan = dict(access_settings={'gateway_port': 18789})
@@ -524,9 +547,12 @@ def test_archived_repaired_route_holds_lock_through_proof_and_skips_legacy_relea
     @contextmanager
     def locked(**kwargs):
         assert kwargs == {'completed_digest': base.CANDIDATE}
-        held.append(True); events.append('lock')
+        held.append(True)
+        events.append('lock')
         try: yield
-        finally: held.pop(); events.append('unlock')
+        finally:
+            held.pop()
+            events.append('unlock')
     def run_locked(installer, **kwargs):
         assert held and kwargs['services'] == services and kwargs['records'] == records
         assert kwargs['selection'] == dict(current_digest=base.CURRENT, candidate_digest=base.CANDIDATE, owner_name='fixture')

@@ -296,7 +296,8 @@ def _assistant_workspace_files(root: Path, byte_ceiling: int) -> dict[str, tuple
                 with os.fdopen(descriptor, "rb", closefd=False) as handle:
                     observed = 0
                     while chunk := handle.read(1_048_576):
-                        observed += len(chunk); digest.update(chunk)
+                        observed += len(chunk)
+                        digest.update(chunk)
             finally:
                 os.close(descriptor)
             if observed != metadata.st_size:
@@ -503,7 +504,12 @@ class PixelDockerSystem:
         if os.name != "nt":
             command.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
         command.extend(["--entrypoint", check["argv"][0], image_digest, *check["argv"][1:]])
-        timed_out = False; spawn_failed = False; exit_code = None; signal_name = None; stdout = b""; stderr = b""
+        timed_out = False
+        spawn_failed = False
+        exit_code = None
+        signal_name = None
+        stdout = b""
+        stderr = b""
         try:
             result = subprocess.run(command, capture_output=True, timeout=check["timeoutSeconds"])
             exit_code = result.returncode if 0 <= result.returncode <= 255 else None
@@ -512,7 +518,9 @@ class PixelDockerSystem:
                 except ValueError: signal_name = f"SIGUNKNOWN{-result.returncode}"
             stdout, stderr = result.stdout, result.stderr
         except subprocess.TimeoutExpired as exc:
-            timed_out = True; stdout = exc.stdout or b""; stderr = exc.stderr or b""
+            timed_out = True
+            stdout = exc.stdout or b""
+            stderr = exc.stderr or b""
         except OSError:
             spawn_failed = True
         finally:
@@ -555,7 +563,9 @@ class PixelDockerSystem:
         candidate_sha256 = evaluation.sha256(evaluation.canonical([
             {"path": path, "sha256": item[0], "bytes": item[1]} for path, item in sorted(files.items())
         ]))
-        checks = []; total_runtime = 0; total_output = 0
+        checks = []
+        total_runtime = 0
+        total_output = 0
         for index, check in enumerate(verification["checks"]):
             if check["kind"] == "patch-integrity":
                 checks.append({

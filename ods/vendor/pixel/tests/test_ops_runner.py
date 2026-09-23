@@ -63,8 +63,10 @@ class OpsRunnerTests(unittest.TestCase):
 
     def test_receiver_refuses_symlinked_job_directory(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "artifacts"; root.mkdir()
-            outside = Path(directory) / "outside"; outside.mkdir()
+            root = Path(directory) / "artifacts"
+            root.mkdir()
+            outside = Path(directory) / "outside"
+            outside.mkdir()
             (root / JOB_ID).symlink_to(outside, target_is_directory=True)
             completed = self.run_receiver(root, b"payload")
             self.assertNotEqual(completed.returncode, 0)
@@ -96,8 +98,10 @@ class OpsDispatchTests(unittest.TestCase):
 
     def test_forced_dispatch_allows_only_typed_commands_without_a_shell(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "jobs"; root.mkdir()
-            child = root / "work"; child.mkdir()
+            root = Path(directory) / "jobs"
+            root.mkdir()
+            child = root / "work"
+            child.mkdir()
             commands = [
                 "hostname",
                 f"cd -- {shlex.quote(str(child))} && exec /bin/hostname",
@@ -128,10 +132,15 @@ class OpsDispatchTests(unittest.TestCase):
 
     def test_forced_dispatch_rejects_shells_options_and_path_escape(self):
         with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory); root = base / "jobs"; root.mkdir()
-            child = root / "work"; child.mkdir()
-            outside = base / "outside"; outside.mkdir()
-            link = root / "escape"; link.symlink_to(outside, target_is_directory=True)
+            base = Path(directory)
+            root = base / "jobs"
+            root.mkdir()
+            child = root / "work"
+            child.mkdir()
+            outside = base / "outside"
+            outside.mkdir()
+            link = root / "escape"
+            link.symlink_to(outside, target_is_directory=True)
             commands = [
                 "/bin/bash -lc id",
                 f"cd -- {shlex.quote(str(child))} && exec /bin/sh -c id",
@@ -167,16 +176,21 @@ class OpsActionPackTests(unittest.TestCase):
     def test_read_repository_and_artifact_actions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            jobs = root / "jobs"; jobs.mkdir()
-            repository = jobs / "client-app"; repository.mkdir()
+            jobs = root / "jobs"
+            jobs.mkdir()
+            repository = jobs / "client-app"
+            repository.mkdir()
             subprocess.run(["git", "init", "-q", "-b", "main", str(repository)], check=True)
             subprocess.run(["git", "-C", str(repository), "config", "user.email", "pixel@example.invalid"], check=True)
             subprocess.run(["git", "-C", str(repository), "config", "user.name", "Pixel Test"], check=True)
             (repository / "README.md").write_text("fixture\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
             subprocess.run(["git", "-C", str(repository), "commit", "-qm", "fixture"], check=True)
-            source = root / "fixture.log"; source.write_text("evidence\n", encoding="utf-8")
-            data = jobs / "data"; data.mkdir(); (data / "payload.txt").write_text("payload\n", encoding="utf-8")
+            source = root / "fixture.log"
+            source.write_text("evidence\n", encoding="utf-8")
+            data = jobs / "data"
+            data.mkdir()
+            (data / "payload.txt").write_text("payload\n", encoding="utf-8")
             configuration = root / "actions.json"
             configuration.write_text(json.dumps({
                 "schemaVersion": 1, "jobRoot": str(jobs), "maxArtifactBytes": 1024 * 1024,
@@ -203,14 +217,20 @@ class OpsActionPackTests(unittest.TestCase):
 
     def test_archive_refuses_symlinks_and_cleanup_stays_below_job_root(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); jobs = root / "jobs"; jobs.mkdir()
-            source = jobs / "source"; source.mkdir(); (source / "link").symlink_to("/etc/passwd")
+            root = Path(directory)
+            jobs = root / "jobs"
+            jobs.mkdir()
+            source = jobs / "source"
+            source.mkdir()
+            (source / "link").symlink_to("/etc/passwd")
             configuration = root / "actions.json"
             configuration.write_text(json.dumps({"schemaVersion": 1, "jobRoot": str(jobs)}), encoding="utf-8")
             completed = self.run_action(configuration, "artifact", "archive", "source", "archive.tar.gz")
             self.assertNotEqual(completed.returncode, 0)
             self.assertFalse((jobs / "archive.tar.gz").exists())
-            trash = jobs / "trash"; trash.mkdir(); (trash / "file").write_text("x", encoding="utf-8")
+            trash = jobs / "trash"
+            trash.mkdir()
+            (trash / "file").write_text("x", encoding="utf-8")
             completed = self.run_action(configuration, "artifact", "cleanup", "trash")
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
             self.assertFalse(trash.exists())
@@ -219,9 +239,12 @@ class OpsActionPackTests(unittest.TestCase):
 
     def test_transactional_deployment_rolls_back_failed_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); releases = root / "releases"; releases.mkdir()
+            root = Path(directory)
+            releases = root / "releases"
+            releases.mkdir()
             for name, healthy in (("v1", True), ("v2", True), ("bad", False)):
-                release = releases / name; release.mkdir()
+                release = releases / name
+                release.mkdir()
                 if healthy: (release / "healthy").write_text("ok", encoding="utf-8")
             current, previous = root / "current", root / "previous"
             current.symlink_to(releases / "v1")
@@ -271,9 +294,13 @@ class OpsActionPackTests(unittest.TestCase):
             self.skipTest("managed TESTING mode requires a non-root euid")
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); releases = root / "releases"; releases.mkdir()
+            root = Path(directory)
+            releases = root / "releases"
+            releases.mkdir()
             for name in ("v0", "v1", "v2"):
-                release = releases / name; release.mkdir(); (release / "healthy").write_text("ok", encoding="utf-8")
+                release = releases / name
+                release.mkdir()
+                (release / "healthy").write_text("ok", encoding="utf-8")
             current, previous = root / "current", root / "previous"
             current.symlink_to(releases / "v1")
             previous.symlink_to(releases / "v0")
@@ -308,8 +335,11 @@ class OpsActionPackTests(unittest.TestCase):
 
     def test_package_hash_verification_and_failure_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); artifacts = root / "artifacts"; artifacts.mkdir()
-            package = artifacts / "package.bin"; package.write_bytes(b"package\n")
+            root = Path(directory)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            package = artifacts / "package.bin"
+            package.write_bytes(b"package\n")
             checksum = hashlib.sha256(package.read_bytes()).hexdigest()
             configuration = root / "managed.json"
             base = {
@@ -334,7 +364,8 @@ class OpsActionPackTests(unittest.TestCase):
             self.assertEqual(list((root / "verified").iterdir()), [])
             wrong = self.run_managed(configuration, "package", "verify", "fixture", str(package), "0" * 64)
             self.assertNotEqual(wrong.returncode, 0)
-            symlink = artifacts / "package-link.bin"; symlink.symlink_to(package)
+            symlink = artifacts / "package-link.bin"
+            symlink.symlink_to(package)
             linked = self.run_managed(configuration, "package", "verify", "fixture", str(symlink), checksum)
             self.assertNotEqual(linked.returncode, 0)
             base["packages"]["fixture"]["verifyCommand"] = ["/bin/false"]
@@ -350,10 +381,14 @@ class OpsActionPackTests(unittest.TestCase):
 
     def test_semantic_configuration_validation_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); jobs = root / "jobs"; jobs.mkdir()
-            repository = jobs / "repo"; repository.mkdir()
+            root = Path(directory)
+            jobs = root / "jobs"
+            jobs.mkdir()
+            repository = jobs / "repo"
+            repository.mkdir()
             subprocess.run(["git", "init", "-q", "-b", "main", str(repository)], check=True)
-            source = root / "source.log"; source.write_text("fixture\n", encoding="utf-8")
+            source = root / "source.log"
+            source.write_text("fixture\n", encoding="utf-8")
             actions = root / "actions.json"
             value = {
                 "schemaVersion": 1, "jobRoot": str(jobs),
@@ -374,8 +409,10 @@ class OpsActionPackTests(unittest.TestCase):
             actions.write_text(json.dumps(value), encoding="utf-8")
             self.assertNotEqual(self.run_action(actions, "--validate-config").returncode, 0)
 
-            releases = root / "releases"; releases.mkdir()
-            current = root / "current"; previous = root / "previous"
+            releases = root / "releases"
+            releases.mkdir()
+            current = root / "current"
+            previous = root / "previous"
             managed = root / "managed.json"
             managed_value = {
                 "schemaVersion": 1, "artifactRoots": [str(jobs)], "verifiedArtifactRoot": str(root / "verified"),
@@ -394,8 +431,11 @@ class OpsActionPackTests(unittest.TestCase):
 
     def test_runner_output_is_streamed_bounded_and_grandchildren_are_stopped(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); jobs = root / "jobs"; jobs.mkdir()
-            repository = jobs / "repo"; repository.mkdir()
+            root = Path(directory)
+            jobs = root / "jobs"
+            jobs.mkdir()
+            repository = jobs / "repo"
+            repository.mkdir()
             subprocess.run(["git", "init", "-q", "-b", "main", str(repository)], check=True)
             flood = "import sys; sys.stdout.write('A'*2000000); sys.stderr.write('B'*2000000)"
             orphan = "import subprocess; p=subprocess.Popen(['/bin/sleep','30']); print(p.pid, flush=True)"
@@ -420,7 +460,8 @@ class OpsActionPackTests(unittest.TestCase):
             with self.assertRaises(ProcessLookupError):
                 os.kill(child_pid, 0)
 
-            artifact = root / "artifact.bin"; artifact.write_bytes(b"fixture")
+            artifact = root / "artifact.bin"
+            artifact.write_bytes(b"fixture")
             checksum = hashlib.sha256(artifact.read_bytes()).hexdigest()
             managed = root / "managed.json"
             managed.write_text(json.dumps({

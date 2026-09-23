@@ -23,7 +23,7 @@ def test_native_host_endpoints_and_broker_identity(monkeypatch, platform):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         modules[name] = module
-    prefix = '/private/var' if platform == 'darwin' else ''
+    _prefix = '/private/var' if platform == 'darwin' else ''
     state = '/private/var/lib' if platform == 'darwin' else '/var/lib'
     manager, promoter = modules['extension_manager'], modules['artifact_promoter']
     assert manager.BROKER_USER == promoter.BROKER_USER == ('_ods_pixel_ops' if platform == 'darwin' else 'pixel-ops-broker')

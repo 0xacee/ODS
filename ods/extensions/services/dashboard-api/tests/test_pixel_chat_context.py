@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from test_pixel import ConnectedRequest, FakeClient, FakeResponse, stream_body
-from test_pixel_chat_results import OWNER, store, FINAL
+from test_pixel_chat_results import OWNER, store as store, FINAL
 from routers import pixel
 from routers import pixel_teams
 from pixel_chat_context import HistorySnapshot, MAX_HISTORY_BYTES, public_context
