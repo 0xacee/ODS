@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   ODS_COMPACT_CONVERSATION_CONTRACT,
   ODS_CONVERSATION_CONTRACT,
+  ODS_SEPTEMBER16_CONVERSATION_CONTRACT,
   ODS_EXTENSION_CATALOG_CONTRACT,
   ODS_EXTENSION_GITHUB_CONTRACT,
   ODS_EXTENSION_INVENTORY_CONTRACT,
@@ -405,14 +406,29 @@ test("restores the full September 16 operating core while retaining compact fall
   const result = promptContractForAgent({ agentId: "pixel" }, "pixel");
   assert.equal(result.appendSystemContext, ODS_CONVERSATION_CONTRACT);
   assert.equal(ODS_TOOL_REPLY_CONTRACT, ODS_CONVERSATION_CONTRACT);
-  assert.equal(ODS_CONVERSATION_CONTRACT.length, 17751);
+  assert.equal(ODS_SEPTEMBER16_CONVERSATION_CONTRACT.length, 17751);
   // SHA-256 of the evaluated full core at 44fb4335 and pre-merge 15eb56fa.
-  assert.equal(createHash('sha256').update(ODS_CONVERSATION_CONTRACT).digest('hex'),
+  assert.equal(createHash('sha256').update(ODS_SEPTEMBER16_CONVERSATION_CONTRACT).digest('hex'),
     '94d4a2c3cf7c7469219f0592a4a6f9e451dff0e92b8918bfb1adbbc1827c97de');
   assert.equal(ODS_COMPACT_CONVERSATION_CONTRACT.length, 3087);
+  assert.ok(ODS_CONVERSATION_CONTRACT.startsWith(ODS_SEPTEMBER16_CONVERSATION_CONTRACT + ' '));
+  assert.ok(ODS_CONVERSATION_CONTRACT.length < 19000);
   assert.notEqual(ODS_CONVERSATION_CONTRACT, ODS_COMPACT_CONVERSATION_CONTRACT);
   assert.match(result.appendSystemContext, /Never say you ran, executed/);
   assert.match(result.appendSystemContext, /use python3 and unittest directly/);
+});
+
+test('full restoration retains newer CLI verification and authorization-state guidance exactly', () => {
+  const supplement = ODS_CONVERSATION_CONTRACT.slice(ODS_SEPTEMBER16_CONVERSATION_CONTRACT.length + 1);
+  assert.match(supplement, /documented command in a separate process/);
+  assert.match(supplement, /normal\/malformed input exit status; import-only tests are insufficient/);
+  assert.match(supplement, /Load pixel_ods_skill/);
+  assert.match(supplement, /Prior explicit authorization remains valid within scope/);
+  assert.match(supplement, /wait without starting the dependent action/);
+  assert.match(supplement, /If work is running, report its state rather than asking to start it/);
+  assert.match(supplement, /Ask before irreversible or high-consequence external effects/);
+  // Each supplement is retained from the existing compact core, not new policy.
+  for (const sentence of supplement.split(/(?<=\.) /)) assert.ok(ODS_COMPACT_CONVERSATION_CONTRACT.includes(sentence));
 });
 
 test('full-context ordinary tasks receive historical process, verification and stopping guidance automatically', () => {
