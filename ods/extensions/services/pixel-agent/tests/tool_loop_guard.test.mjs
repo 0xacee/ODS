@@ -597,6 +597,8 @@ for (const prompt of [
   "Never create and publish a website.",
   "Read the files without showing a preview.",
   "Do not edit, publish, run or delete anything.",
+  "Read Playground/mac-preview-1790150681/index.html and report its h1 text exactly. Do not edit files or publish anything.",
+  "Read the index. Do not run commands, edit files, or republish anything.",
 ]) {
   test("exact index read cannot override the owner's publication constraint: " + prompt, () => {
     const { write, params, details } = seedNamedPreview(createToolLoopGuard());
@@ -623,6 +625,29 @@ test("publication fails closed when a tool hook has no observed owner run", () =
       assert.match(result.blockReason, /current owner request is unavailable/);
     }
   }
+});
+
+test("a coordinated no-publication constraint also blocks wrapped preview calls", () => {
+  const guard = createToolLoopGuard();
+  const context = { agentId: "pixel", runId: "run-1", sessionId: "session-1" };
+  guard.observeRun(context, "pixel", {
+    prompt: "Read Playground/mac-preview-1790150681/index.html and report its h1 text exactly. Do not edit files or publish anything.",
+  });
+  const result = guard.beforeToolCall({toolName:"tool_call", params:{
+    id:"openclaw:pixel-ods:pixel_ods_workspace_preview", args:{relativeDirectory:"Playground/mac-preview-1790150681"},
+  }}, context);
+  assert.equal(result?.block, true);
+  assert.match(result.blockReason, /explicitly prohibits/);
+});
+
+test("an edit prohibition does not block an independently requested existing preview", () => {
+  const { write, params } = seedNamedPreview(createToolLoopGuard());
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", {
+    prompt: `Do not edit files, but publish the existing ${write.path}.`,
+  });
+  afterCall(guard, "read", { event: { params: { path: write.path }, result: { content: [{ type: "text", text: write.content }] } } });
+  assert.notEqual(call(guard, "pixel_ods_workspace_preview", { event: { params } })?.block, true);
 });
 
 test("optional workspace evidence does not require publishing a preview", () => {

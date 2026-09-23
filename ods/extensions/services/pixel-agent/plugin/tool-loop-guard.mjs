@@ -5326,6 +5326,13 @@ function ownerForbidsWorkspacePreview(messages, prompt) {
   // Preserve explicit owner constraints without requiring a positive visual
   // vocabulary to use the local snapshot tool. These are delivery actions,
   // not filenames, quoted examples, or another clause's edit restriction.
+  // A coordinated prohibition can include objects: "Do not edit files or
+  // publish anything". Stop at contrast/sentence boundaries so "do not edit
+  // files, but publish the existing site" remains a publication request.
+  const coordinatedProhibition = text
+    .split(/[!?;\n]+|\.(?=\s|$)|\b(?:but|however|instead|then)\b/i)
+    .some((clause) => /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\b[^.!?;\n]{0,160}\b(?:and|or)\s+(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(clause));
+  if (coordinatedProhibition) return true;
   return portuguesePreviewForbidden(text) || /\b(?:only|just)\s+(?:the\s+)?(?:code|source(?:\s+code)?)\b/i.test(text) || /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:(?:create|build|edit|write|run|execute)\s*(?:,\s*|and\s+|or\s+))*(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(text);
 }
 
