@@ -4590,7 +4590,7 @@ def test_managed_pixel_reconcile_rejects_old_ref_without_local_checkout(
         lambda *_args, **_kwargs: pytest.fail("old bundle ref must fail before subprocess"),
     )
 
-    with pytest.raises(RuntimeError, match="update ODS first"):
+    with pytest.raises(RuntimeError, match="reinstall the managed runtime"):
         _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
 
 
