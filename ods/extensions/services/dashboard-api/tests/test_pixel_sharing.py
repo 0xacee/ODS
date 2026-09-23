@@ -70,6 +70,22 @@ def device_fixture():
 
 class TestPixelSharingRouter:
 
+    @pytest.mark.parametrize('body', [
+        {'code': 'unsupported-platform', 'error': 'private-sentinel'},
+        {'code': 'unknown', 'error': 'private-sentinel'}, [], 'private-sentinel',
+    ])
+    def test_sharing_capability_reason_is_allowlisted(self, client, mock_request, body):
+        mock_request.side_effect = api.AgentHTTPError(503, 'private-sentinel', json.dumps(body))
+        response = client.get('/api/pixel/inference-sharing',
+            headers={'Authorization': 'Bearer test-key-12345'})
+        assert response.status_code == 503
+        assert 'private-sentinel' not in response.text
+        if isinstance(body, dict) and body.get('code') == 'unsupported-platform':
+            assert response.json()['code'] == 'unsupported-platform'
+            assert response.headers['Cache-Control'] == 'no-store'
+        else:
+            assert response.json() == {'detail': 'Sharing request failed'}
+
     def test_get_unauthenticated(self, client):
         resp = client.get("/api/pixel/inference-sharing")
         assert resp.status_code == 401

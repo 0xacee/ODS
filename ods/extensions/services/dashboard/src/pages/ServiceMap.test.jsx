@@ -4,6 +4,17 @@ import ServiceMap, { buildTopology } from './ServiceMap'
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
+it('does not append a zero to status for services without a port', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok:true,json:async () => ({
+    services: [{id:'router',name:'Model router',status:'healthy',port:0}],
+  })}))
+  render(<ServiceMap compact />)
+  const row = await screen.findByRole('button', {name:/Model router/})
+  expect(row).toBeVisible()
+  expect(row.querySelector('.integration-status')).toHaveTextContent(/^healthy$/)
+  expect(screen.queryByText('healthy0')).not.toBeInTheDocument()
+})
+
 it('fits the map initially, offers actual size, and opens details by keyboard', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => statusPayload }))
   render(<ServiceMap />)

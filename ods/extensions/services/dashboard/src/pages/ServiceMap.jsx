@@ -299,7 +299,7 @@ function CompactIntegrations({ nodes, edges, capturedAt, refresh, error }) {
     {!visible.length ? <p className="integrations-empty">{nodes.length ? 'No matching services.' : 'No services reported.'}</p> : view === 'list' ? <div className="integrations-list">
       {LAYERS.map(layer => {
         const members = visible.filter(node => node.category === layer).sort((a, b) => a.name.localeCompare(b.name))
-        return members.length > 0 && <section key={layer}><h3>{LAYER_LABELS[layer].toLowerCase().replace('-', ' ')}</h3>{members.map(node => <button type="button" key={node.id} onClick={() => setSelectedId(node.id)} aria-pressed={selectedId === node.id}><span className="integration-name"><span className={`integration-dot ${statusMeta(node.status).dot}`} /><span>{node.name}</span></span><span className="integration-status">{node.status.replaceAll('_', ' ')}{node.port && <small>:{node.port}</small>}</span></button>)}</section>
+        return members.length > 0 && <section key={layer}><h3>{LAYER_LABELS[layer].toLowerCase().replace('-', ' ')}</h3>{members.map(node => <button type="button" key={node.id} onClick={() => setSelectedId(node.id)} aria-pressed={selectedId === node.id}><span className="integration-name"><span className={`integration-dot ${statusMeta(node.status).dot}`} /><span>{node.name}</span></span><span className="integration-status">{node.status.replaceAll('_', ' ')}{Boolean(node.port) && <small>:{node.port}</small>}</span></button>)}</section>
       })}
     </div> : <div className="integrations-map" role="region" aria-label="Service topology" tabIndex={0}>
       <p>Known dependencies · select a service to highlight its connections</p>

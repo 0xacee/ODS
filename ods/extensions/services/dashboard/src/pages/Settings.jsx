@@ -387,7 +387,7 @@ export default function Settings({ activeSection = 'all' }) {
   const routeCounts = useMemo(() => {
     const online = services.filter(service => service.status === 'healthy')
     const degraded = services.filter(service => service.status === 'degraded')
-    const inactive = services.filter(service => ['down', 'unhealthy', 'unknown'].includes(service.status))
+    const inactive = services.filter(service => !['healthy', 'degraded'].includes(service.status))
     return { online, degraded, inactive }
   }, [services])
 
@@ -650,7 +650,7 @@ function RoutingTableCard({ services, counts, routeFilter, onRouteFilterChange, 
         <div className="settings-route-summary">
           <RouteStatusCard tone="online" label="Online" count={counts.online.length} description="Healthy services in the current status cache" />
           <RouteStatusCard tone="degraded" label="Degraded" count={counts.degraded.length} description="Services reporting degraded health" />
-          <RouteStatusCard tone="inactive" label="Inactive" count={counts.inactive.length} description="Down, unhealthy, or unknown services" />
+          <RouteStatusCard tone="inactive" label="Inactive" count={counts.inactive.length} description="Stopped, undeployed, unhealthy, or unknown services" />
         </div>
 
         <div className="mt-5">
