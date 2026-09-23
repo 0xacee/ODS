@@ -16,7 +16,9 @@ permissions:
 
 jobs:
   preview-browser:
-    runs-on: ubuntu-24.04
+    # Keep Chromium's OS sandbox enabled. Ubuntu 24.04's AppArmor policy
+    # rejects this standalone browser's user namespaces before tests start.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
