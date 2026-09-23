@@ -875,8 +875,11 @@ async def _produce_retained_result(store, identity, body, config, messages, *, o
                                             continue
                                         for field in ("delta", "message"):
                                             payload = choice.get(field)
-                                            if isinstance(payload, dict) and isinstance(payload.get("content"), str) \
-                                                    and payload["content"]:
+                                            if isinstance(payload, dict) and (
+                                                (isinstance(payload.get("content"), str) and payload["content"])
+                                                or bool(payload.get("tool_calls"))
+                                                or bool(payload.get("function_call"))
+                                            ):
                                                 answer_seen = True
                             if stripped == b"data: [DONE]":
                                 if not answer_seen and not terminal_error_seen:
