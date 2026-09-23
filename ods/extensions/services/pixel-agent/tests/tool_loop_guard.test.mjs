@@ -12056,9 +12056,18 @@ test("workspace preview modes keep the static fast path narrow", () => {
     "Repair the existing React website project and publish its Vite build output.",
     "Research the official sources, build a new visit planner in trip/planner.html, and open a preview.",
     "Build and show a website, testing it before publication.",
+    "Create a new website matching the uploaded screenshot and preview it.",
+    "Build a dashboard using sales.csv and show me a preview.",
+    "Create a website from the brand assets and publish it.",
+    "Read the brief first. Create and publish a website.",
+    "Create and preview a website for https://example.org/ using its public content.",
     "Now make a breakout style videogame.",
   ]) assert.equal(workspacePreviewMode([], prompt), "existing-project", prompt);
   assert.equal(workspacePreviewMode([], "Create a Python CLI and run its tests."), undefined);
+  assert.equal(workspacePreviewMode([{ role: "user", content: [
+    { type: "text", text: "Create and preview a website." },
+    { type: "image", data: "opaque-test-image", mimeType: "image/png" },
+  ] }]), "existing-project");
 });
 
 for (const wrapped of [false, true]) {
