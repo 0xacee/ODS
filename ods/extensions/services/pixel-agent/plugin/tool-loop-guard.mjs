@@ -5436,7 +5436,7 @@ function hasPortugueseWorkspacePreviewDirective(text) {
   return false;
 }
 
-function workspacePreviewInstructionText(text) {
+function workspacePreviewInstructionText(text, {preserveFileTargets = false} = {}) {
   // This is an intent projection only. Keep the owner's original message and
   // tool contents intact; quoted examples must not become delivery commands.
   let projected = text
@@ -5451,7 +5451,9 @@ function workspacePreviewInstructionText(text) {
     " "
   );
   const quotedTarget = (value) =>
-    /^(?:\.\.?\/)?[A-Za-z0-9_/-][A-Za-z0-9._/-]*\.html?$/i.test(value.trim())
+    (preserveFileTargets
+      ? /^(?:\.\.?\/)?[A-Za-z0-9_/-][A-Za-z0-9._/-]*\.[A-Za-z0-9]{1,10}$/
+      : /^(?:\.\.?\/)?[A-Za-z0-9_/-][A-Za-z0-9._/-]*\.html?$/i).test(value.trim())
       ? value
       : " ";
   // Preserve a quoted HTML filename as an action target, but not arbitrary
@@ -5461,7 +5463,7 @@ function workspacePreviewInstructionText(text) {
     // named by their segments (for example portal-check/notes.txt). Preserve
     // HTML/SVG targets because explicit visual delivery can name those files.
     .replace(/\b[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+)*\.[A-Za-z0-9]{1,10}\b/g,
-      path => /\.(?:html?|svg)$/i.test(path) ? path : " ")
+      path => preserveFileTargets || /\.(?:html?|svg)$/i.test(path) ? path : " ")
     .replace(/"((?:\\.|[^"\\])*)"|`((?:\\.|[^`\\])*)`/g,
       (_match, quoted, inline) => quotedTarget(quoted ?? inline))
     .replace(/(^|[\s(=,:])'((?:\\.|[^'\\])*)'(?=$|[\s).,;:!?])/g,
@@ -5526,23 +5528,81 @@ function requestsNamedSessionPreview(text, preview) {
 }
 
 function workspacePreviewRestrictions(text) {
-  // This narrow boundary is only for publication of an unchanged artifact.
-  // "Do not create new files" cannot revoke an independently requested edit,
-  // and "do not edit other files" cannot forbid the named repair target.
-  const positive = workspacePreviewInstructionText(text).replace(
+  // A positive repair does not erase the owner's independent exclusions.
+  // Only a single explicitly named file gets the narrow existing-file gate;
+  // this is not a general natural-language permission parser or filesystem sandbox.
+  const positive = workspacePreviewInstructionText(text, {preserveFileTargets:true}).replace(
     /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without|no)\b(?:(?!\b(?:but|instead|then)\b)[^.!?;\n])*/gi, " ");
-  if (/\b(?:build|create|develop|generate|implement|make|write|edit|fix|repair|modify|update|add|change|remove|delete|rename|move|patch|improve)\b/i.test(positive)) return undefined;
+  const authorship = /\b(?:build|create|develop|generate|implement|make|write|edit|fix|repair|modify|update|add|change|remove|delete|rename|move|patch|improve)\b/i.test(positive);
   const excluded = text.split(/[!?;\n]+|\.(?=\s|$)|\b(?:but|however|instead|then)\b/i)
     .map(clause => clause.match(/\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|without)\b([^.!?;\n]{1,320})/i)?.[1] ?? "")
     .join("\n");
   const paths = new Set([...text.matchAll(/(?:^|[\s`"'])(?:\/workspace\/)?([A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){1,11})(?=$|[\s`"',;!?]|\.(?:\s|$))/g)]
     .map(match => match[1].replace(/[.!?;,]+$/, "").replace(/\/index\.html$/i, "")));
+  const noNewFiles = /\b(?:create|add|write)\b[^\n]{0,48}\b(?:new|any)\b[^\n]{0,24}\bfiles?\b/i.test(excluded);
+  const noOtherFiles = /\b(?:edit|modify|change|write)\b[^\n]{0,48}\bother\s+files?\b/i.test(excluded);
+  const repairTargets = new Set([...positive.matchAll(
+    /\b(?:edit|update|fix|repair|modify|patch|improve)\s+(?:(?:the|existing|current)\s+)*(?:file\s+)?((?:\.\/|\/workspace\/)?[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,11}\.[A-Za-z0-9]{1,10})(?=$|[\s,;.!?])/gi
+  )].map(match => normalizeWorkspaceFilePath(match[1])));
+  const existingFile = (noNewFiles || noOtherFiles) && repairTargets.size === 1
+    ? [...repairTargets][0] : undefined;
   return {
-    mutation: /\b(?:create|write|edit|modify|change|delete)\b[^\n]{0,64}\b(?:files?|directories|anything)\b/i.test(excluded),
-    exec: /\b(?:run|use|execute)\b[^\n]{0,48}\b(?:shell|commands?|exec)\b/i.test(excluded),
+    mutation: !authorship && /\b(?:create|write|edit|modify|change|delete)\b[^\n]{0,64}\b(?:files?|directories|anything)\b/i.test(excluded),
+    existingFile,
+    // Arbitrary commands cannot be checked against a single-file edit boundary.
+    exec: Boolean(existingFile) || /\b(?:run|use|execute)\b[^\n]{0,48}\b(?:shell|commands?|exec)\b/i.test(excluded),
     web: /\b(?:contact|visit|fetch|browse|use)\b[^\n]{0,48}\b(?:external|websites?|sites?|network|web|internet)\b/i.test(excluded),
     directory: paths.size === 1 ? [...paths][0] : undefined,
   };
+}
+
+function scopedExistingFileMutationAllowed(state, tool, params) {
+  const path = state?.workspacePreviewRestrictions?.existingFile;
+  if (!path) return true;
+  // This is current-turn read evidence, not an atomic filesystem existence
+  // check. Core file tools and the sandbox still own race/link containment.
+  if (!state.successfulReadPaths.has(path)) return false;
+  if (tool === 'write' || tool === 'edit') {
+    const keys = tool === 'write' ? ['path', 'content'] : ['path', 'edits'];
+    return params && typeof params === 'object' && !Array.isArray(params) &&
+      Object.keys(params).every(key => keys.includes(key)) &&
+      normalizeWorkspaceFilePath(params.path) === path;
+  }
+  // Accept only one explicit update with bounded, ordinary patch hunks. The
+  // actual patch tool still checks context; Add/Delete/Move and unknown syntax
+  // never get inferred or silently rewritten into an update of the target.
+  if (tool !== 'apply_patch' || !params || Object.keys(params).length !== 1 ||
+      typeof params.input !== 'string' || params.input.length > 131072) return false;
+  const lines = params.input.replace(/\r\n?/g, '\n').trim().split('\n');
+  if (lines.length > 4096 || lines[0] !== '*** Begin Patch' || lines.at(-1) !== '*** End Patch' ||
+      !lines[1]?.startsWith('*** Update File: ') ||
+      normalizeWorkspaceFilePath(lines[1].slice('*** Update File: '.length)) !== path) return false;
+  let hunk = false, changed = false;
+  for (let index = 2; index < lines.length - 1; index += 1) {
+    const line = lines[index];
+    if (line === '@@' || line.startsWith('@@ ')) { hunk = true; continue; }
+    if (line === '*** End of File' && index === lines.length - 2 && changed) continue;
+    if (!hunk || !/^[ +\-]/.test(line)) return false;
+    if (/^[+\-]/.test(line)) changed = true;
+  }
+  return hunk && changed;
+}
+
+function workspacePreviewRestrictionReason(state, tool, params) {
+  const restriction = state?.workspacePreviewRestrictions;
+  if (!restriction) return undefined;
+  const scopedMutation = restriction.existingFile &&
+    ['write', 'edit', 'apply_patch', 'move', 'rename', 'delete', 'mkdir',
+      EVIDENCE_REPORT_TOOL, 'pixel_ods_download_promote'].includes(tool);
+  if ((scopedMutation && !scopedExistingFileMutationAllowed(state, tool, params)) ||
+      (restriction.mutation && ['write', 'edit', 'apply_patch'].includes(tool)) ||
+      (restriction.exec && ['exec', 'process'].includes(tool)) ||
+      (restriction.web && ['web_search', 'web_fetch', 'pixel_ods_research', 'pixel_ods_web_extract', 'browser'].includes(tool))) {
+    return restriction.existingFile
+      ? `The owner restricted this repair to the existing file ${restriction.existingFile}. Read that exact file successfully in this turn, then edit it or use an Update File-only patch. Do not create, rename, move, delete, or change other files, and do not use shell commands or excluded web tools to bypass this boundary.`
+      : 'The owner requested publication of existing files and explicitly excluded this action. Use the preview tool for the requested directory, then report its actual result; do not create a replacement or substitute another capability.';
+  }
+  return undefined;
 }
 
 function clauseRequestsVisualArtifact(clause, actionPattern, targetPattern) {
@@ -6722,12 +6782,9 @@ export function createToolLoopGuard({
     // that truly need a session still fail closed on the optional sessionId.
     const state = runId ? stateFor(runId) : undefined;
     const delegatedName=typeof toolName==='string' && toolName==='tool_call' ? String((normalizedParams ?? event?.params)?.id ?? '').split(':').at(-1) : toolName;
-    const previewRestrictions = state?.workspacePreviewRestrictions;
-    if ((previewRestrictions?.mutation && ["write", "edit", "apply_patch"].includes(delegatedName)) ||
-        (previewRestrictions?.exec && ["exec", "process"].includes(delegatedName)) ||
-        (previewRestrictions?.web && ["web_search", "web_fetch", "pixel_ods_research", "pixel_ods_web_extract", "browser"].includes(delegatedName))) {
-      return {block:true, blockReason:"The owner requested publication of existing files and explicitly excluded this action. Use the preview tool for the requested directory, then report its actual result; do not create a replacement or substitute another capability."};
-    }
+    const requestedRestriction = workspacePreviewRestrictionReason(state, delegatedName,
+      toolName === 'tool_call' ? (normalizedParams ?? event?.params)?.args : normalizedParams ?? event?.params);
+    if (requestedRestriction) return {block:true, blockReason:requestedRestriction};
     if (state?.extensionPendingHandoff &&
         (!state.workspaceLaneRequested || EXTENSION_REQUEST_TOOLS.has(delegatedName))) return {
       block:true, blockReason:state.workspaceLaneRequested
@@ -6796,6 +6853,9 @@ export function createToolLoopGuard({
         existingPaths:[...state.successfulReadPaths]});
       if (projectRoute?.block) return projectRoute;
       if (projectRoute?.params) normalizedParams = projectRoute.params;
+      const routedRestriction = workspacePreviewRestrictionReason(state, delegatedName,
+        toolName === 'tool_call' ? (normalizedParams ?? event?.params)?.args : normalizedParams ?? event?.params);
+      if (routedRestriction) return {block:true, blockReason:routedRestriction};
       const projectDirectory = state.playgroundRouting.binding?.directory;
       if (projectDirectory && !state.workspaceTaskDirectory) {
         state.workspaceTaskDirectory = projectDirectory;
@@ -7325,6 +7385,10 @@ export function createToolLoopGuard({
       !Array.isArray(pendingParams.args)
         ? pendingParams.args
         : pendingParams;
+    // Re-check after transport/runner aliases and path routing. An innocuous
+    // outer name must not become an excluded exec or a different file later.
+    const selectedRestriction = workspacePreviewRestrictionReason(state, selectedToolName, selectedParams);
+    if (selectedRestriction) return {block:true, blockReason:selectedRestriction};
     if (
       state?.workspacePreviewMode === "new-static" &&
       ![...state.successfulWritePaths].some((value) =>
@@ -9071,6 +9135,11 @@ export function createToolLoopGuard({
         : undefined;
     if (failedRead) {
       const readPath = normalizeWorkspaceFilePath(failedRead.params?.path);
+      if (state.workspacePreviewRestrictions?.existingFile === readPath) {
+        // A later failed read cannot leave stale existence evidence usable by
+        // this constrained repair. This does not change ordinary repair state.
+        state.successfulReadPaths.delete(readPath);
+      }
       const result = failedRead.result;
       const details = result?.details;
       const missingDetails = details && typeof details === "object" &&
