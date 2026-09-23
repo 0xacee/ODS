@@ -4664,6 +4664,10 @@ export function userMessageExtensionLifecycleIntent(messages, prompt = undefined
     /\b(install|enable|disable|remove|uninstall)\s+(?:the\s+)?(?:(?:installed|existing|enabled|disabled)\s+)?(?:ODS\s+)?extension\s+(?:(?:with\s+)?(?:the\s+)?(?:exact\s+)?id\s+)?[`"']?([a-z0-9](?:[a-z0-9_-]|\.(?=[a-z0-9])){0,63})(?![a-z0-9_-]|\.(?=[a-z0-9]))[`"']?/i
   ) ?? text.match(
     /\b(install|enable|disable|remove|uninstall)\s+(?:the\s+)?[`"']?((?!ODS\b|extension\b)[a-z0-9](?:[a-z0-9_-]|\.(?=[a-z0-9])){0,63})[`"']?\s+(?:as\s+(?:an?\s+)?|(?:as\s+)?the\s+)?(?:ODS\s+)?extension\b/i
+  ) ?? text.match(
+    /\b(installing|enabling|disabling|removing|uninstalling)\s+(?:the\s+)?(?:one\s+)?(?:(?:cataloged|managed|ODS)\s+){0,3}extension\s+(?:(?:with\s+)?(?:the\s+)?(?:exact\s+)?id\s+)?[`"']?([a-z0-9](?:[a-z0-9_-]|\.(?=[a-z0-9])){0,63})(?![a-z0-9_-]|\.(?=[a-z0-9]))[`"']?/i
+  ) ?? text.match(
+    /\bods\.extensions\.(install|enable|disable|remove)\s+(?:with\s+)?serviceId\s*(?:[:=]\s*|\s+)[`"']?([a-z0-9](?:[a-z0-9_-]|\.(?=[a-z0-9])){0,63})(?![a-z0-9_-]|\.(?=[a-z0-9]))[`"']?/i
   );
   if (!match) return undefined;
   // Naming the extension before its type is ordinary owner language. It
@@ -4673,8 +4677,21 @@ export function userMessageExtensionLifecycleIntent(messages, prompt = undefined
   if (/\b(?:not|don['’]t|never|avoid|skip|without|explain|example|tutorial)\b/i.test(prefix) ||
       /[`"']\s*$/.test(prefix)) return undefined;
   const requested = match[1].toLowerCase();
+  const symbolicLifecycle = /^ods\.extensions\./i.test(text.slice(match.index));
+  // Gerunds and symbolic broker IDs can occur in a description or question.
+  // Bind them only when this owner clause actually directs plan/action work.
+  if ((requested.endsWith("ing") || symbolicLifecycle) &&
+      (!/\b(?:authoriz(?:e|ed)|approv(?:e|ed)|prepare|create|draft|generate|submit|request|proceed|want|need)\b/i.test(prefix) ||
+        /\b(?:what|how|why|whether|if|consider(?:ing)?|hypothetical(?:ly)?|documentation|docs?|says?|discuss|explanation|explaining)\b/i.test(prefix) ||
+        (symbolicLifecycle && !/\b(?:plan|approval|authoriz(?:e|ed)|approv(?:e|ed)|submit|execute|run)\b/i.test(prefix)))) {
+    return undefined;
+  }
+  const action = ({
+    installing: "install", enabling: "enable", disabling: "disable",
+    removing: "remove", uninstalling: "remove", uninstall: "remove",
+  })[requested] ?? requested;
   return {
-    action: requested === "uninstall" ? "remove" : requested,
+    action,
     serviceId: match[2].toLowerCase(),
   };
 }
@@ -7318,6 +7335,15 @@ export function createToolLoopGuard({
           ? { params: { id: effectiveToolName, args: { jobId } } }
           : { params: { jobId } };
       }
+      if (state.operationsExpectedExtensionLifecycle) {
+        // An old approved job is not authority for this owner's new plan.
+        // Only a job submitted in this turn can be read or waited on.
+        return { block: true, blockReason: OPERATIONS_EXTENSION_LIFECYCLE_SEQUENCE_REASON };
+      }
+    }
+    if (state?.operationsExpectedExtensionLifecycle &&
+        (effectiveToolName === "pixel_ops_job_events" || effectiveToolName === "pixel_ops_job_cancel")) {
+      return { block: true, blockReason: OPERATIONS_EXTENSION_LIFECYCLE_SEQUENCE_REASON };
     }
     if (state?.operationsRequired && !state.operationsHostCommandRequested &&
         effectiveToolName === SYNCHRONOUS_HOST_COMMAND_TOOL) {
@@ -7533,10 +7559,12 @@ export function createToolLoopGuard({
     }
 
     // Required host evidence does not impose an order on independent workspace
-    // or public research work. Each tool still passes its own checks below;
-    // web observations never satisfy a required Operations receipt.
+    // or public research work. A single-extension lifecycle route is different:
+    // only the broker inspection and one action are in scope for this turn.
+    // Web/workspace calls cannot satisfy or replace that pending receipt.
     const operationsMayContinueWithIndependentTools =
       state?.operationsRequired === true &&
+      !state.operationsExpectedExtensionLifecycle &&
       (WORKSPACE_CONTINUATION_TOOLS.has(effectiveToolName) ||
         WEB_TOOLS.has(effectiveToolName));
     if (
