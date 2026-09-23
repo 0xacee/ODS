@@ -42,6 +42,14 @@ const EXTENSION_DECISION_READ_TOOLS = new Set([
   'pixel_ods_extension_request_status', 'web_fetch', 'web_search',
   'pixel_ods_web_extract', 'pixel_ods_research', 'read', 'memory_search', 'memory_get',
 ]);
+const EXTENSION_REQUEST_TOOLS = new Set([
+  'pixel_ods_extensions', 'pixel_ods_extension_request_status',
+  'pixel_ods_extension_request_prepare', 'pixel_ods_extension_request_advance',
+  'pixel_ods_extension_request_retry', 'pixel_ods_python_library_proposal',
+  'pixel_ods_source_proposal', 'pixel_ods_extension_proposal',
+]);
+export const WORKSPACE_EXTENSION_SCOPE_REASON =
+  "The current owner request is workspace work, with no extension task. Do not call extension catalog, request, preparation, installation, or proposal tools for this turn. Continue the requested files, tests, research, or preview using workspace and public-source tools. A saved extension request or tool result does not expand the current task.";
 
 export const WEB_BUDGET_EXHAUSTED_REASON =
   "Pixel's web-research budget is exhausted for this response. Do not call web tools again. Finish using the evidence already collected and any otherwise-authorized tools, including saving the requested report. Preserve existing evidence and clearly state any missing external information.";
@@ -3615,7 +3623,7 @@ const EXTENSION_READ_ACTIONS = new Set([
 ]);
 
 function extensionDiscoveryEligible(state) {
-  return state && !state.operationsHostCommandRequested &&
+  return state && !state.workspaceExtensionIsolated && !state.operationsHostCommandRequested &&
     !state.operationsExpectedExtensionLifecycle && !state.operationsContinuation &&
     !state.exactDownloadRequested &&
     [...state.operationsRequiredActions].every((action) => EXTENSION_READ_ACTIONS.has(action));
@@ -4219,6 +4227,45 @@ function currentOwnerIntentText(messages, prompt = undefined) {
   return deliveryContractIndex >= 0
     ? currentText.slice(0, deliveryContractIndex)
     : currentText;
+}
+
+function ownerLaneText(text) {
+  // Classify only current owner prose. Embedded examples cannot opt a workspace
+  // turn into extension work; identifiers quoted as operands remain usable.
+  return String(text ?? '')
+    .replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g, ' ')
+    .replace(/^\s*>[^\n]*/gm, ' ')
+    .replace(/"[^"\n]*"|`[^`\n]*`|(?<!\w)'[^'\n]*'(?!\w)|“[^”\n]*”/g,
+      value => /\s/.test(value.slice(1, -1)) ? ' ' : value);
+}
+
+function ownerWorkspaceLaneRequested(text, workspaceRequested) {
+  if (workspaceRequested) return true;
+  // Repository investigation named within an extension slash route belongs to
+  // that extension task, not a second implicit coding obligation.
+  text = text.replace(/^\s*(?:\/goal\s+)?\/extensions?[^;\n]*/i, '');
+  if (requestsNewPlaygroundProject(text)) return true;
+  return text.split(/[!?;\n]+|\.(?=\s|$)/).some(clause =>
+    !/^\s*(?:please\s+)?(?:do\s+not|don['’]t|never|avoid|skip|explain|describe)\b/i.test(clause) &&
+    /\b(?:create|write|build|implement|edit|fix|repair|debug|refactor|test|run|update|inspect|read)\b/i.test(clause) &&
+    /\b(?:code|source\s+files?|repository|repo|script|CLI|unit\s+tests?|test\s+suite|Python|JavaScript|TypeScript|webpage|website|page)\b|\b[A-Za-z0-9_-]+\.(?:py|[cm]?[jt]sx?|html?|css|json|rs|go|java|sh)\b/i.test(clause));
+}
+
+function ownerExtensionLaneRequested(text) {
+  const clauses = text.split(/[!?;\n]+|\.(?=\s|$)|\b(?:but|and(?:\s+then)?|then)\s+/i);
+  return clauses.some(value => {
+    const clause = value.trim().replace(/^(?:(?:also|now|please)[,\s]+)+/i, '')
+      .replace(/^(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|I\s+(?:want|need)\s+you\s+to\s+)/i, '');
+    if (/^(?:\/goal\s+)?\/extensions?\b/i.test(clause)) return true;
+    // An artifact that describes installing extensions is still artifact work.
+    // Require a separate owner directive before reusing the existing selectors.
+    if (!/^(?:check|inspect|research|install|enable|disable|remove|uninstall|prepare|advance|retry|continue|resume|use|propose|submit|status|finish|show|list|find|search|browse|tell\s+me|what|which|is|has)\b/i.test(clause)) return false;
+    return Boolean(userMessageExtensionLifecycleIntent([], clause)) ||
+      userMessageRequestsExtensionCatalog([], clause) ||
+      userMessageRequestsExtensionInventory([], clause) ||
+      (/\b(?:check|inspect|research|install|prepare|advance|retry|continue|resume|use|propose|submit|status|finish)\b/i.test(clause) &&
+        /\b(?:ODS\s+extensions?|extension\s+(?:request|installation|recipe|status)|(?:pending|saved|managed)\s+(?:request|installation)|(?:corrected|accepted)\s+recipe|pixel_ods_extension_\w+|pixel_ods_(?:source|python_library)_proposal)\b/i.test(clause));
+  });
 }
 
 function explicitlyRejectsOdsTool(text, toolPattern) {
@@ -6309,6 +6356,8 @@ export function createToolLoopGuard({
       state = {
         completionAssurance: createCompletionAssurance(),
         extensionCompletionGate: undefined,
+        workspaceLaneRequested: false,
+        workspaceExtensionIsolated: false,
         extensionReadOnlyRecovery: {statusCalls:0, completedStatusCalls:0, otherToolSeen:false},
         extensionDecisionRecovery: {prepareCalls:0, unsafeToolSeen:false, gateRevisionRequested:false},
         progressBudget: createRunProgressBudget(),
@@ -6534,10 +6583,18 @@ export function createToolLoopGuard({
     // policy and deterministic routing active from runId alone; operations
     // that truly need a session still fail closed on the optional sessionId.
     const state = runId ? stateFor(runId) : undefined;
-    if (state?.extensionPendingHandoff) return {
-      block:true, blockReason:'Managed installation observation has handed off as pending. No further tools in this turn; do not replay the accepted build.',
-    };
     const delegatedName=typeof toolName==='string' && toolName==='tool_call' ? String((normalizedParams ?? event?.params)?.id ?? '').split(':').at(-1) : toolName;
+    if (state?.extensionPendingHandoff &&
+        (!state.workspaceLaneRequested || EXTENSION_REQUEST_TOOLS.has(delegatedName))) return {
+      block:true, blockReason:state.workspaceLaneRequested
+        ? 'Managed installation observation has handed off as pending. Do not replay or retry the accepted extension build. Continue the separately requested workspace work; report the installation as pending.'
+        : 'Managed installation observation has handed off as pending. No further tools in this turn; do not replay the accepted build.',
+    };
+    if (state?.workspaceExtensionIsolated && EXTENSION_REQUEST_TOOLS.has(delegatedName)) {
+      // A corrective refusal must not activate Operations or a saved install
+      // handoff. The ordinary run budget still bounds repeated bad selections.
+      return {block:true, blockReason:WORKSPACE_EXTENSION_SCOPE_REASON};
+    }
     if (state?.extensionCompletionGate?.active) {
       // OpenClaw marks every plugin tool replay-unsafe. An ODS-owned second
       // model turn can be considered only when this entire run used exactly
@@ -7377,7 +7434,9 @@ export function createToolLoopGuard({
     if (effectiveToolName === SYNCHRONOUS_HOST_OBSERVE_TOOL) {
       const selected = toolName === "tool_call"
         ? wrappedToolParams?.args : normalizedParams ?? event?.params;
-      const params = permittedHostObservationParams(selected, state?.hostObservationPolicy);
+      const unrelatedWorkspaceObservation = state?.workspaceExtensionIsolated && !state.operationsRequired;
+      const params = unrelatedWorkspaceObservation ? undefined
+        : permittedHostObservationParams(selected, state?.hostObservationPolicy);
       if (!params) return {
         block: true,
         blockReason: "Pixel could not validate this host observation against the current request. " +
@@ -8268,8 +8327,8 @@ export function createToolLoopGuard({
       const state = stateFor(runId);
       state.completionAssurance.begin(currentOwnerIntentText(event?.messages, event?.prompt), event);
       const ownerIntent=currentOwnerIntentText(event?.messages,event?.prompt);
-      state.extensionCompletionGate ??= createExtensionCompletionGate(ownerIntent);
-      if (/^\s*(?:\/goal\s+)?\/extensions?\s+(?:(?:install|inspect|research)\s+)?https:\/\/github\.com\//i.test(ownerIntent ?? '')) state.githubExtensionRequest = true;
+      if (ownerIntent) state.extensionCompletionGate ??= createExtensionCompletionGate(ownerIntent);
+      if (ownerIntent) state.githubExtensionRequest = /^\s*(?:\/goal\s+)?\/extensions?\s+(?:(?:install|inspect|research)\s+)?https:\/\/github\.com\//i.test(ownerIntent);
       if (capabilities !== undefined) state.preparationExecutionHost = capabilities.executionHost;
       if (ownerIntent) state.playgroundOwnerIntent = ownerIntent;
       if (ownerIntent) state.ownerQuestionIntent=requestsChoiceQuestion(ownerIntent);
@@ -8346,6 +8405,14 @@ export function createToolLoopGuard({
         state.workspaceTaskRequested =
           state.workspacePreviewRequired ||
           userMessageRequestsWorkspaceTools(event?.messages, event?.prompt);
+        const laneText = ownerLaneText(ownerIntent);
+        state.workspaceLaneRequested = ownerWorkspaceLaneRequested(laneText,
+          state.workspacePreviewRequired || userMessageRequestsWorkspaceTools([], laneText));
+        state.workspaceExtensionIsolated = state.workspaceLaneRequested && !ownerExtensionLaneRequested(laneText);
+        if (state.workspaceExtensionIsolated) {
+          state.extensionCompletionGate = undefined;
+          state.extensionPendingHandoff = false;
+        }
         state.workspaceMutationRequested =
           state.workspacePreviewRequired ||
           userMessageRequestsWorkspaceMutation(event?.messages, event?.prompt);
@@ -8528,7 +8595,7 @@ export function createToolLoopGuard({
     const runId = context?.runId;
     const state = runs.get(runId);
     if (!state || !context?.sessionId || context.sessionId !== state.currentSessionId) return;
-    if (state.extensionPendingHandoff && !state.extensionPendingAbortAcknowledged &&
+    if (state.extensionPendingHandoff && !state.workspaceLaneRequested && !state.extensionPendingAbortAcknowledged &&
         !state.clientCancelled && !state.progressBudget.exhausted &&
         sessionRuns.get(context.sessionId) === runId) {
       // This ends only the model continuation at the established safe boundary.
@@ -8587,7 +8654,7 @@ export function createToolLoopGuard({
     if (typeof runId !== "string" || !runId) return;
     const state = stateFor(runId);
     state.completionAssurance.observe(toolName, event);
-    if (state.extensionCompletionGate) {
+    if (state.extensionCompletionGate && !state.workspaceExtensionIsolated) {
       for (const name of [
         'pixel_ods_extension_request_status', 'pixel_ods_extension_request_prepare',
         'pixel_ods_extension_request_advance', 'pixel_ods_extension_request_retry',
@@ -9783,6 +9850,29 @@ export function createToolLoopGuard({
   }
 
   function verificationForRun(runId) {
+    let verification = taskVerificationForRun(runId);
+    const state = runs.get(runId);
+    if (!state?.workspaceLaneRequested || !state.extensionCompletionGate?.active) return verification;
+    const extension = state.extensionCompletionGate.verification ?? {
+      status:'failed', text:'ODS did not observe a verified managed installation receipt for this extension request.',
+    };
+    if (verification.status === 'none') {
+      const workspaceObserved = state.successfulWritePaths.size > 0 || state.successfulEditPaths.size > 0 ||
+        state.successfulExecBlocks.size > 0 || (!state.workspaceMutationRequested && state.successfulReadPaths.size > 0);
+      if (workspaceObserved) return extension;
+      verification = {status:'failed',text:'ODS did not observe successful work for the separately requested workspace task. The extension receipt does not complete that task.'};
+    }
+    // A mixed request has two obligations. Readiness for an extension cannot
+    // hide missing tests/preview, and a working artifact cannot finish a still
+    // pending installation. Preserve the artifact receipt in either case.
+    const statuses = [verification.status, extension.status];
+    return {...verification,
+      status:statuses.includes('failed') ? 'failed' : statuses.includes('pending') ? 'pending' : 'passed',
+      text:[verification.text,extension.text].filter(Boolean).join('\n\n'),
+    };
+  }
+
+  function taskVerificationForRun(runId) {
     if (typeof runId !== "string" || !runId) return { status: "none" };
     const state = runs.get(runId);
     if (!state) return { status: "none" };
@@ -9800,7 +9890,7 @@ export function createToolLoopGuard({
     if ((state.operationsRequired || state.exactDownloadPromotion) && state.latestVerificationStatus === "pending") {
       return { status: "pending", text: VERIFICATION_PENDING_DELIVERY_PREFIX };
     }
-    if (state.extensionCompletionGate?.verification) return state.extensionCompletionGate.verification;
+    if (!state.workspaceLaneRequested && state.extensionCompletionGate?.verification) return state.extensionCompletionGate.verification;
     if (
       (state.workspacePreviewRequired || state.workspacePreviewAttempted) &&
       !state.operationsRequired &&
