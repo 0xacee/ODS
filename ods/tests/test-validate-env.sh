@@ -616,7 +616,7 @@ cp "$TMP_DIR/valid.env" "$TMP_DIR/library-invalid-port.env"
 printf 'DIFY_PORT=65536\n' >> "$TMP_DIR/library-invalid-port.env"
 if out=$("$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" "$TMP_DIR/library-invalid-port.env" "$ROOT_DIR/.env.schema.json" 2>&1); then
     fail "Out-of-range library port passed validation"
-elif [[ "$out" == *"DIFY_PORT: value 65536 is > maximum 65535"* ]]; then
+elif [[ "$out" == *"DIFY_PORT: value is > maximum 65535"* ]]; then
     pass "Library ports retain numeric range validation"
 else
     fail "Library port was rejected for the wrong reason: $out"
