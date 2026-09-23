@@ -91,29 +91,34 @@ def test_every_authority_snapshot_is_bound(field):
     lambda i: i.update(heldRecord=base64.b64encode(b'{}').decode()),
 ])
 def test_intent_rejects_changed_scope_or_metadata(change):
-    _, _, snapshots, intent, _ = fixture(); change(intent)
+    _, _, snapshots, intent, _ = fixture()
+    change(intent)
     with pytest.raises(repair.RepairError):
         repair.validate_intent(intent, current=CURRENT, candidate=CANDIDATE, owner=OWNER, snapshots=snapshots)
 
 
 @pytest.mark.parametrize('phase', sorted(repair.PHASES - {'repaired', 'rolled-back'}))
 def test_incomplete_sidecar_blocks_recovery_and_finalization(phase):
-    _, _, snapshots, intent, records = fixture(); intent['phase'] = phase
+    _, _, snapshots, intent, records = fixture()
+    intent['phase'] = phase
     with pytest.raises(repair.RepairError, match='incomplete'):
         projection(records, intent, snapshots)
 
 
 @pytest.mark.parametrize('phase', ['held', 'releasing', 'released'])
 def test_completed_overlay_survives_only_the_genuine_hold_release_progression(phase):
-    _, after, snapshots, intent, records = fixture(); intent['phase'] = 'repaired'
+    _, after, snapshots, intent, records = fixture()
+    intent['phase'] = 'repaired'
     original = copy.deepcopy((snapshots, records))
-    held = json.loads(snapshots['hold']); held['phase'] = phase
+    held = json.loads(snapshots['hold'])
+    held['phase'] = phase
     snapshots['hold'] = snapshots['hold'] if phase == 'held' else json.dumps(held).encode()
     result = projection(records, intent, snapshots)
     assert result[0]['after'] == after and result[0]['before'] == records[0]['before']
     assert result[1] == records[1]
     assert records == original[1] and snapshots['archive'] == original[0]['archive']
-    held['binding']['revision'] = 'f' * 64; snapshots['hold'] = encoded(held)
+    held['binding']['revision'] = 'f' * 64
+    snapshots['hold'] = encoded(held)
     with pytest.raises(repair.RepairError):
         projection(records, intent, snapshots)
 
@@ -123,7 +128,8 @@ def test_no_sidecar_or_verified_rollback_gives_no_exception():
     assert projection(records, None, snapshots) is records
     intent['phase'] = 'rolled-back'
     assert projection(records, intent, snapshots) is records
-    held = json.loads(snapshots['hold']); held['phase'] = 'released'
+    held = json.loads(snapshots['hold'])
+    held['phase'] = 'released'
     snapshots['hold'] = encoded(held)
     with pytest.raises(repair.RepairError):
         projection(records, intent, snapshots)
@@ -134,7 +140,9 @@ def test_no_sidecar_or_verified_rollback_gives_no_exception():
     lambda r: r.pop(0), lambda r: r.append(copy.deepcopy(r[0])),
 ])
 def test_overlay_is_exactly_one_original_record(change):
-    _, _, snapshots, intent, records = fixture(); intent['phase'] = 'repaired'; change(records)
+    _, _, snapshots, intent, records = fixture()
+    intent['phase'] = 'repaired'
+    change(records)
     with pytest.raises(repair.RepairError):
         projection(records, intent, snapshots)
 
@@ -210,7 +218,9 @@ def test_every_durable_phase_and_effect_resumes_under_the_original_hold(rollback
 
 @pytest.mark.parametrize('phase', sorted(repair.PHASES))
 def test_unknown_bytes_never_authorize_resume_or_rollback(phase):
-    adapter = FaultAdapter(); adapter.value['phase'] = phase; adapter.body = b'unknown'
+    adapter = FaultAdapter()
+    adapter.value['phase'] = phase
+    adapter.body = b'unknown'
     for rollback in [False, True]:
         with pytest.raises(repair.RepairError):
             repair.execute(adapter.value, adapter, rollback=rollback)
@@ -218,7 +228,9 @@ def test_unknown_bytes_never_authorize_resume_or_rollback(phase):
 
 
 def test_stopped_label_without_a_valid_new_generation_witness_stays_held():
-    adapter = FaultAdapter(); adapter.value['phase'] = 'starting'; adapter.body = adapter.after
+    adapter = FaultAdapter()
+    adapter.value['phase'] = 'starting'
+    adapter.body = adapter.after
     adapter.running = False
     def ambiguous(_value):
         raise repair.RepairError('native-stop-witness-unavailable')
@@ -248,8 +260,10 @@ def test_explicit_rollback_from_each_interrupted_forward_step(after):
 
 @pytest.mark.parametrize('phase', ['held', 'releasing', 'released'])
 def test_finalization_requires_ordinary_recovery_to_release_the_bound_hold(phase):
-    _, _, snapshots, intent, records = fixture(); intent['phase'] = 'repaired'
-    hold = json.loads(snapshots['hold']); hold['phase'] = phase
+    _, _, snapshots, intent, records = fixture()
+    intent['phase'] = 'repaired'
+    hold = json.loads(snapshots['hold'])
+    hold['phase'] = phase
     if phase != 'held':
         snapshots['hold'] = json.dumps(hold).encode()
     projection(records, intent, snapshots)
@@ -489,7 +503,8 @@ class PublicationFilesystem:
         self.root, self.failure, self.after, self.events = root, failure, after, []
         self.O_WRONLY, self.O_CREAT, self.O_EXCL, self.O_NOFOLLOW = os.O_WRONLY, os.O_CREAT, os.O_EXCL, 0
     def effect(self, name, action):
-        index = len(self.events); self.events.append(name)
+        index = len(self.events)
+        self.events.append(name)
         failed = index == self.failure
         if failed: self.failure = None
         if failed and not self.after: raise OSError('injected before ' + name)
@@ -535,7 +550,8 @@ def publication_adapter(monkeypatch, root, failure=None, after=False):
 
 @pytest.mark.parametrize('after', [False, True])
 def test_initial_intent_publication_faults_leave_absence_or_complete_single_link_authority(monkeypatch, tmp_path, after):
-    baseline = tmp_path / 'baseline'; baseline.mkdir()
+    baseline = tmp_path / 'baseline'
+    baseline.mkdir()
     adapter, fs = publication_adapter(monkeypatch, baseline)
     adapter._write(baseline / 'intent.json', {'phase': 'prepared'})
     for index, event in enumerate(fs.events):
@@ -543,7 +559,8 @@ def test_initial_intent_publication_faults_leave_absence_or_complete_single_link
             # This successful precondition is a FileNotFoundError, not a
             # returned effect after which the test can inject another error.
             continue
-        directory = tmp_path / str(index); directory.mkdir()
+        directory = tmp_path / str(index)
+        directory.mkdir()
         adapter, _ = publication_adapter(monkeypatch, directory, index, after)
         target = directory / 'intent.json'
         with pytest.raises(OSError): adapter._write(target, {'phase': 'prepared'})
@@ -574,7 +591,8 @@ def test_initial_publication_never_overwrites_an_existing_intent(monkeypatch, tm
     ('starting', False, 'old', False, 'reject'),
 ])
 def test_real_service_adapter_preserves_birth_and_stop_witness_authority(phase, running, identity, witness, expected):
-    _, _, _, intent, _ = fixture(); intent['phase'] = phase
+    _, _, _, intent, _ = fixture()
+    intent['phase'] = phase
     events = []
     def assert_stopped():
         events.append('witness')
@@ -601,7 +619,8 @@ def test_real_service_adapter_preserves_birth_and_stop_witness_authority(phase, 
     'other-process', 'old-access-process', 'unavailable', 'pending-status', 'busy-status',
     'bad-scope', 'bad-surface', 'bad-reason', 'services-readiness', 'gateway-readiness', 'late-authority-drift'])
 def test_real_adapter_revalidates_all_authority_before_terminal_repair(monkeypatch, fault):
-    before, after, snapshots, intent, records = fixture(); intent['phase'] = 'verifying'
+    before, after, snapshots, intent, records = fixture()
+    intent['phase'] = 'verifying'
     if fault in ('archive', 'context', 'service', 'hold'): snapshots[fault] += b' '
     plan = {'owner': SimpleNamespace(pw_name='fixture', pw_uid=501, pw_gid=20),
             'access_settings': {'gateway_policy': {}, 'gateway_port': 18789}}
@@ -661,7 +680,9 @@ def test_real_adapter_revalidates_all_authority_before_terminal_repair(monkeypat
 def test_real_hold_adapter_only_reads_the_bound_live_container(monkeypatch, fault):
     _, _, snapshots, _, _ = fixture()
     hold = json.loads(snapshots['hold'])
-    if fault == 'released': hold['phase'] = 'released'; snapshots['hold'] = encoded(hold)
+    if fault == 'released':
+        hold['phase'] = 'released'
+        snapshots['hold'] = encoded(hold)
     commands, requests = [], []
     container = ('f' if fault == 'different-container' else 'c') * 64
     running = 'false' if fault == 'not-running' else 'true'
@@ -713,7 +734,8 @@ def test_installer_recovery_wrapper_applies_only_the_validated_completed_excepti
         monkeypatch.syspath_prepend(str(ROOT / 'bin'))
         spec = importlib.util.spec_from_file_location('repair_native_installer',
             ROOT / 'installers/macos/lib/pixel-macos-access-install.py')
-        native = importlib.util.module_from_spec(spec); spec.loader.exec_module(native)
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
         for name, value in namespace.items(): monkeypatch.setattr(native, name, value)
         load = native._load_upgrade_recovery
     else:

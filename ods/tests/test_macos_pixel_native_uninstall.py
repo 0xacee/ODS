@@ -123,19 +123,22 @@ class RetirementSelection(unittest.TestCase):
 
     def test_sandbox_wrong_control_binding_refused(self):
         for change in ({'Source': '/foreign'}, {'RW': True}, {'Type': 'volume'}):
-            value = self.sandbox(); value['Mounts'][1].update(change)
+            value = self.sandbox()
+            value['Mounts'][1].update(change)
             with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'mount-mismatch'):
                 self.select_sandbox(value)
 
     def test_sandbox_preserved_container_skipped_only_when_stopped(self):
-        value = self.sandbox(); value['Name'] = '/ods-pixel-retired-' + 'a' * 16
+        value = self.sandbox()
+        value['Name'] = '/ods-pixel-retired-' + 'a' * 16
         value['State']['Running'] = False
         self.assertIsNone(self.select_sandbox(value))
         value['State']['Running'] = True
         with self.assertRaisesRegex(ValueError, 'name-mismatch'): self.select_sandbox(value)
 
     def test_sandbox_retirement_stops_then_renames_exact_id(self):
-        value = self.sandbox(); plan = self.select_sandbox(value)
+        value = self.sandbox()
+        plan = self.select_sandbox(value)
         client = object.__new__(retirement.NativeSandboxes)
         def call(*args):
             if args[0] == 'stop': value['State']['Running'] = False
@@ -145,10 +148,13 @@ class RetirementSelection(unittest.TestCase):
             client.preserve([plan])
             self.assertEqual(commands.call_args_list[0].args, ('stop', '--time', '10', 'a' * 64))
             self.assertEqual(commands.call_args_list[1].args, ('rename', 'a' * 64, 'ods-pixel-retired-' + 'a' * 16))
-            commands.reset_mock(); client.preserve([plan]); commands.assert_not_called()
+            commands.reset_mock()
+            client.preserve([plan])
+            commands.assert_not_called()
 
     def test_sandbox_mount_order_changes_between_inspections(self):
-        value = self.sandbox(); plan = copy.deepcopy(self.select_sandbox(value))
+        value = self.sandbox()
+        plan = copy.deepcopy(self.select_sandbox(value))
         client = object.__new__(retirement.NativeSandboxes)
         def inspect(_):
             value['Mounts'].reverse()
@@ -160,13 +166,16 @@ class RetirementSelection(unittest.TestCase):
                 patch.object(client, 'call', side_effect=call) as commands:
             client.preserve([plan])
             self.assertEqual([c.args[0] for c in commands.call_args_list], ['stop', 'rename'])
-            commands.reset_mock(); client.preserve([plan]); commands.assert_not_called()
+            commands.reset_mock()
+            client.preserve([plan])
+            commands.assert_not_called()
 
     def test_sandbox_changed_mount_fields_fail_before_stop(self):
         for field, replacement in [('Source', '/foreign'), ('RW', False),
                 ('Type', 'volume'), ('Mode', 'unexpected'), ('Propagation', 'rshared'),
                 ('Destination', '/foreign')]:
-            value = self.sandbox(); plan = copy.deepcopy(self.select_sandbox(value))
+            value = self.sandbox()
+            plan = copy.deepcopy(self.select_sandbox(value))
             value['Mounts'][0][field] = replacement
             value['Mounts'].reverse()
             client = object.__new__(retirement.NativeSandboxes)
@@ -176,10 +185,12 @@ class RetirementSelection(unittest.TestCase):
                 commands.assert_not_called()
 
     def test_sandbox_duplicate_missing_and_malformed_mounts_fail_before_stop(self):
-        original = self.sandbox(); plan = copy.deepcopy(self.select_sandbox(original))
+        original = self.sandbox()
+        plan = copy.deepcopy(self.select_sandbox(original))
         for mounts in [original['Mounts'][:1], original['Mounts'] * 2, None, {},
                 ['bad'], [{'Destination': None}], [{'Destination': ''}]]:
-            value = copy.deepcopy(original); value['Mounts'] = mounts
+            value = copy.deepcopy(original)
+            value['Mounts'] = mounts
             client = object.__new__(retirement.NativeSandboxes)
             with self.subTest(mounts=mounts), patch.object(client, 'inspect', return_value=value), \
                     patch.object(client, 'call') as commands:
@@ -187,8 +198,10 @@ class RetirementSelection(unittest.TestCase):
                 commands.assert_not_called()
 
     def test_sandbox_identity_changed_fails_before_stop(self):
-        value = self.sandbox(); plan = self.select_sandbox(value)
-        changed = copy.deepcopy(value); changed['Image'] = 'sha256:' + 'c' * 64
+        value = self.sandbox()
+        plan = self.select_sandbox(value)
+        changed = copy.deepcopy(value)
+        changed['Image'] = 'sha256:' + 'c' * 64
         client = object.__new__(retirement.NativeSandboxes)
         with patch.object(client, 'inspect', return_value=changed), patch.object(client, 'call') as commands:
             with self.assertRaisesRegex(ValueError, 'identity-changed'): client.preserve([plan])

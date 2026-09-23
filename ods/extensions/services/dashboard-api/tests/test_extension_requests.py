@@ -178,17 +178,20 @@ def test_revision_binding_requires_exact_previous_binding_and_preserves_identity
     from extension_recipe_drafts import save_draft
     initial = candidate()
     create_request(tmp_path, 'owner', 'chat', 'turn', '/extensions ' + initial['repository'], now=10)
-    drafts = tmp_path / 'drafts'; drafts.mkdir()
+    drafts = tmp_path / 'drafts'
+    drafts.mkdir()
     def bind(value, **kwargs):
         validation = evidence(value)
         draft = save_draft(drafts, 'owner', value, validation)
         return bind_proposal(tmp_path, 'owner', 'chat', 'turn', value, validation, draft, now=11, **kwargs)
     first = bind(initial)
-    revised = copy.deepcopy(initial); revised['commit'] = 'b' * 40
+    revised = copy.deepcopy(initial)
+    revised['commit'] = 'b' * 40
     for expected in [{}, {**first['proposal'], 'recipeDigest': 'c' * 64}]:
         with pytest.raises(ValueError): bind(revised, expected_proposal=expected)
         assert read_request(tmp_path, 'owner', 'chat', 'turn', now=11) == first
-    renamed = copy.deepcopy(revised); renamed['manifest']['service']['id'] = 'other'
+    renamed = copy.deepcopy(revised)
+    renamed['manifest']['service']['id'] = 'other'
     with pytest.raises(ValueError): bind(renamed, expected_proposal=first['proposal'])
     second = bind(revised, expected_proposal=first['proposal'])
     assert second['proposal'] != first['proposal']
@@ -238,14 +241,16 @@ def test_proposal_is_bound_to_repo_and_cannot_change_after_acceptance(tmp_path):
     import copy
     proposal = candidate()
     create_request(tmp_path, 'owner', 'chat', 'turn', '/extensions ' + proposal['repository'], now=10)
-    drafts = tmp_path / 'drafts'; drafts.mkdir()
+    drafts = tmp_path / 'drafts'
+    drafts.mkdir()
     validation = evidence(proposal)
     draft = save_draft(drafts, 'owner', proposal, validation)
     result = bind_proposal(tmp_path, 'owner', 'chat', 'turn', proposal, validation, draft, now=11)
     assert result['proposal']['extensionId'] == 'apache-answer'
     assert result['proposal']['draftId'] == draft['draftId']
     assert bind_proposal(tmp_path, 'owner', 'chat', 'turn', proposal, validation, draft, now=12) == result
-    changed = copy.deepcopy(proposal); changed['commit'] = 'b' * 40
+    changed = copy.deepcopy(proposal)
+    changed['commit'] = 'b' * 40
     changed_validation = evidence(changed)
     changed_draft = save_draft(drafts, 'owner', changed, changed_validation)
     with pytest.raises(ValueError):
@@ -260,7 +265,8 @@ def test_proposal_route_saves_only_for_active_matching_owner_request(monkeypatch
     from test_extension_recipe_validation import candidate, ODS
     from unittest.mock import AsyncMock
     proposal = candidate()
-    requests = tmp_path / '.extension-requests'; requests.mkdir()
+    requests = tmp_path / '.extension-requests'
+    requests.mkdir()
     create_request(requests, 'owner', 'chat', 'turn', '/extensions ' + proposal['repository'])
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
     monkeypatch.setattr(extensions, 'EXTENSIONS_DIR', ODS / 'extensions/services')
@@ -366,8 +372,10 @@ def test_followup_recovers_bound_proposal_without_network_research(monkeypatch, 
     from test_extension_recipe_drafts import evidence
     from unittest.mock import AsyncMock
     proposal = candidate()
-    requests = tmp_path / '.extension-requests'; requests.mkdir()
-    drafts = tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
+    requests = tmp_path / '.extension-requests'
+    requests.mkdir()
+    drafts = tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
     draft = save_draft(drafts, 'owner', proposal, evidence(proposal))
     create_request(requests, 'owner', 'chat', 'original', '/extensions ' + proposal['repository'])
     bind_proposal(requests, 'owner', 'chat', 'original', proposal, evidence(proposal), draft)
@@ -416,7 +424,8 @@ def test_session_scope_endpoint_uses_authenticated_owner(monkeypatch, tmp_path):
     import json
     from starlette.requests import Request
     from routers import extensions
-    directory = tmp_path / '.extension-requests'; directory.mkdir()
+    directory = tmp_path / '.extension-requests'
+    directory.mkdir()
     create_request(directory, 'owner', 'chat', 'original', COMMAND)
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
     async def call(owner, payload):
@@ -437,12 +446,14 @@ def test_session_scope_endpoint_uses_authenticated_owner(monkeypatch, tmp_path):
 def test_status_discovers_existing_repository_without_binding_or_installing(monkeypatch, tmp_path):
     from routers import extensions
     from unittest.mock import AsyncMock
-    requests = tmp_path / '.extension-requests'; requests.mkdir()
+    requests = tmp_path / '.extension-requests'
+    requests.mkdir()
     roots = [tmp_path / name for name in ('user', 'built-in', 'library')]
     for root in roots: root.mkdir()
     create_request(requests, 'owner', 'chat', 'turn', COMMAND)
     for identifier in ('existing-a', 'existing-b'):
-        target = roots[2] / identifier; target.mkdir()
+        target = roots[2] / identifier
+        target.mkdir()
         (target / 'upstream.json').write_text(json.dumps({'repository': 'https://github.com/owner/repo'}))
     # Higher-priority definitions shadow a lower-priority repository match.
     (roots[0] / 'existing-b').mkdir()

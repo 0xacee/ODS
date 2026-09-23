@@ -4730,7 +4730,9 @@ class TestModelActivateRollback:
         env_path.write_text(original,encoding='utf-8')
         previous={'model':'old-model.gguf','contextLength':65536,'maxTokens':3072,'reasoning':True,'routeFingerprint':'d'*64}
         state={'schemaVersion':1,'status':'ready','revision':'a'*64,'contract':previous,'pending':False,'transactionId':None,'outcome':None}
-        calls=[];proofs=[];restarts=[]
+        calls=[]
+        proofs=[]
+        restarts=[]
         def control(operation,request=None,*,config):
             calls.append(operation)
             if operation=='model-status':
@@ -4758,7 +4760,8 @@ class TestModelActivateRollback:
                 state.update(status='completed',pending=False,outcome=request['outcome'])
             return dict(state)
         def readiness(*args,**kwargs):
-            identity=kwargs.get('gguf_file');proofs.append(identity)
+            identity=kwargs.get('gguf_file')
+            proofs.append(identity)
             if failure=='rollback-unproved' and identity=='old-model.gguf':return False
             return _mock_verified_readiness(*args,**kwargs)
         real_write=_mod._atomic_write_json

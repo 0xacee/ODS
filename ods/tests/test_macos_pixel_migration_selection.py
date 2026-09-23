@@ -136,7 +136,7 @@ def test_joint_recovery_context_retains_prior_bytes_and_rejects_mixed_selections
 def test_recovery_checks_installed_paths_without_requiring_staging(monkeypatch, fault):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'bin'))
     import pixel_macos_custody as custody
-    current = module._bundle.INSTALL_ROOT / ('a' * 64)
+    _current = module._bundle.INSTALL_ROOT / ('a' * 64)
     candidate = module._bundle.INSTALL_ROOT / ('b' * 64)
     parent = module.RUNTIME_CONFIG_ROOT / '501'
     old_path = str(parent / ('openclaw-' + 'a' * 64 + '.json'))

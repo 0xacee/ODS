@@ -12,7 +12,7 @@ import subprocess
 import shutil
 import tempfile
 import threading
-import time
+import time as time
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace

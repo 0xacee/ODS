@@ -8,7 +8,8 @@ from extension_integration import integration_guidance
 
 
 def recipe(root, *, readme='Use this API with your project.\nSee configuration.'):
-    folder = root / 'demo'; folder.mkdir(parents=True)
+    folder = root / 'demo'
+    folder.mkdir(parents=True)
     (folder / 'manifest.yaml').write_text(yaml.safe_dump({'service': {
         'id': 'demo', 'type': 'docker', 'container_name': 'ods-demo', 'port': 8080,
         'external_port_env': 'DEMO_PORT', 'external_port_default': 1234,

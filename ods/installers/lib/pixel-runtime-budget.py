@@ -1,5 +1,12 @@
 """Stage the shared ODS runtime overlay; the caller must validate before replacing."""
-import copy, json, os, pathlib, re, stat, sys, tempfile
+import copy
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+import tempfile
 
 path = pathlib.Path(sys.argv[1])
 if not sys.argv[2].isdigit() or not 1 <= int(sys.argv[2]) <= 65535:

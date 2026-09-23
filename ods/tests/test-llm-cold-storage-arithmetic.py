@@ -3,7 +3,7 @@
 from pathlib import Path
 import subprocess
 import tempfile
-import time
+import time as time
 import unittest
 
 ROOT_DIR = Path(__file__).resolve().parents[1]

@@ -568,7 +568,8 @@ class NativeReacquireTests(unittest.TestCase):
         def reply(_origin, _path, _key, payload=None, **_kwargs):
             if payload: raise bridge.AccessError('runtime-unavailable-or-busy', http_status=409)
             if self.calls:
-                state=json.loads(self.record.read_text()); state['tokenHash']='0'*64
+                state=json.loads(self.record.read_text())
+                state['tokenHash']='0'*64
                 self.record.write_text(json.dumps(state))
             self.calls += 1
             return self.snapshot

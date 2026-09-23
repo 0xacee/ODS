@@ -1406,7 +1406,7 @@ def test_bridge_maps_approval_request_and_keeps_authoritative_payload(monkeypatc
 
 
 def test_interrupt_active_prompt_requires_ack_then_evicts_connection(monkeypatch):
-    import asyncio as _asyncio
+    import asyncio as asyncio
     import hermes_bridge
 
     hermes_bridge._CONNECTION_POOL.clear()

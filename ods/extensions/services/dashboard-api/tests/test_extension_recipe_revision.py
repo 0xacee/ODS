@@ -7,7 +7,8 @@ from extension_installation import InstallationJournal
 
 @pytest.fixture
 def recipe(tmp_path):
-    directory = tmp_path / 'extension'; directory.mkdir()
+    directory = tmp_path / 'extension'
+    directory.mkdir()
     (directory / 'manifest.yaml').write_bytes(b'old manifest')
     (directory / 'compose.yaml').write_bytes(b'old compose')
     (directory / 'data').mkdir()
@@ -36,7 +37,8 @@ def test_bound_revision_refuses_unverified_attempt_before_changing_files(recipe,
     revision.stage_revision(file_journal, directories, replacements)
     attempts = InstallationJournal(file_journal.parent / 'attempts.json')
     expected = {'action':'install', 'state':'accepted', 'operationId':'a'*32}
-    attempts.records['example'] = expected.copy(); attempts.save()
+    attempts.records['example'] = expected.copy()
+    attempts.save()
     old = {'extensionId':'example', 'draftId':'a'*64, 'recipeDigest':'b'*64}
     new = {**old, 'draftId':'c'*64, 'recipeDigest':'d'*64}
     observed = {'service_id':'example', 'operation_id':'a'*32, 'state':'failed'}
@@ -91,7 +93,8 @@ def test_symlink_and_duplicate_journal_entries_are_rejected(recipe):
     journal.write_text(json.dumps(record))
     with pytest.raises(ValueError): revision.recover_revision(journal, directories)
     path = directories['user'] / 'manifest.yaml'
-    path.unlink(); path.symlink_to(directories['user'] / '.env')
+    path.unlink()
+    path.symlink_to(directories['user'] / '.env')
     with pytest.raises(ValueError): revision.recover_revision(journal, directories)
     assert (directories['user'] / '.env').read_bytes() == b'private settings'
 
@@ -102,7 +105,8 @@ def test_bound_revision_recovers_each_commit_boundary(recipe, monkeypatch, failu
     revision.stage_revision(file_journal, directories, replacements)
     attempts = InstallationJournal(file_journal.parent / 'attempts.json')
     expected = {'action':'install', 'state':'accepted', 'operationId':'a'*32}
-    attempts.records['example'] = expected.copy(); attempts.save()
+    attempts.records['example'] = expected.copy()
+    attempts.save()
     old = {'extensionId':'example', 'draftId':'a'*64, 'recipeDigest':'b'*64}
     new = {**old, 'draftId':'c'*64, 'recipeDigest':'d'*64}
     state = {'binding': old}

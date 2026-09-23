@@ -16,9 +16,12 @@ from extension_requests import create_request, bind_proposal, cancel_request
 @pytest.mark.parametrize('interruption', [None, 'cancel', 'replace'])
 def test_request_preparation_rechecks_scope_after_upstream_lookup(monkeypatch, tmp_path, interruption):
     proposal = candidate()
-    drafts = tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
-    requests = tmp_path / '.extension-requests'; requests.mkdir()
-    library = tmp_path / 'library'; library.mkdir()
+    drafts = tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
+    requests = tmp_path / '.extension-requests'
+    requests.mkdir()
+    library = tmp_path / 'library'
+    library.mkdir()
     draft = save_draft(drafts, 'owner', proposal, evidence(proposal))
     create_request(requests, 'owner', 'chat', 'turn', '/extensions install ' + proposal['repository'])
     bind_proposal(requests, 'owner', 'chat', 'turn', proposal, evidence(proposal), draft)
@@ -105,7 +108,8 @@ def test_extra_script_or_changed_digest_is_rejected(tmp_path):
 
 def test_prepared_recipe_is_discoverable_and_stages_without_curated_privileges(monkeypatch, tmp_path):
     proposal = candidate()
-    library = tmp_path / 'library'; library.mkdir()
+    library = tmp_path / 'library'
+    library.mkdir()
     publish_package(library, proposal, evidence(proposal), upstream(proposal))
     monkeypatch.setattr(extensions, 'EXTENSION_CATALOG', [])
     monkeypatch.setattr(extensions, 'EXTENSIONS_LIBRARY_DIR', library)
@@ -127,8 +131,10 @@ def test_prepared_recipe_is_discoverable_and_stages_without_curated_privileges(m
 
 def test_prepare_route_publishes_configuration_and_retry_does_not_overwrite(monkeypatch, tmp_path):
     proposal = candidate()
-    drafts = tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
-    library = tmp_path / 'library'; library.mkdir()
+    drafts = tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
+    library = tmp_path / 'library'
+    library.mkdir()
     receipt = save_draft(drafts, 'owner', proposal, evidence(proposal))
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
     monkeypatch.setattr(extensions, 'EXTENSIONS_LIBRARY_DIR', library)

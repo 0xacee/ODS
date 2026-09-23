@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from test_pixel import FakeResponse, FakeClient
 from routers import pixel
 import security
-from pixel_runtime_identity import project_runtime_identity, unknown_runtime_identity
+from pixel_runtime_identity import project_runtime_identity as project_runtime_identity, unknown_runtime_identity
 
 
 def observed():

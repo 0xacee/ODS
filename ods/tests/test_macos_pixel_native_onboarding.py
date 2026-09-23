@@ -1,7 +1,8 @@
 import importlib.util
 import json
 # Load host stdlib before platform simulation; Linux has no macOS _scproxy.
-import urllib.request
+import urllib as urllib
+from urllib import request as request
 from pathlib import Path
 
 import pytest

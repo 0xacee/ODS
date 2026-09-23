@@ -1,6 +1,6 @@
 import importlib.util
 import json
-import os
+import os as os
 from pathlib import Path
 from types import SimpleNamespace
 

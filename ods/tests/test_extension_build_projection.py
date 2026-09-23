@@ -43,7 +43,8 @@ def test_rejects_external_or_privileged_builds(tmp_path, build):
 
 def test_rejects_symlink_escape(tmp_path):
     check, extension = validator(tmp_path)
-    outside = tmp_path / 'private'; outside.write_text('secret')
+    outside = tmp_path / 'private'
+    outside.write_text('secret')
     try: (extension / 'leak').symlink_to(outside)
     except OSError: pytest.skip('symlink privilege unavailable')
     with pytest.raises(ValueError): check(extension / 'compose.yaml', {'context': '.'})

@@ -1986,7 +1986,7 @@ def _runtime_config(plan, *, write=False):
         else ('openclaw.json',))
     if path not in {RUNTIME_CONFIG_ROOT / str(owner.pw_uid) / name for name in names}:
         raise InstallError('native-candidate-config-path-invalid')
-    name = path.name
+    _name = path.name
     if _configuration_bytes(selection['source_config'], owner.pw_uid) != selection['source_config_bytes']:
         raise InstallError('native-config-changed')
     sys.path.insert(0, str(HERE.parents[2] / 'bin'))

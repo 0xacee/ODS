@@ -55,7 +55,7 @@ from performance_oracle import (
     current_model_matches,
     find_catalog_model,
     load_model_catalog,
-    model_files_dir,
+    model_files_dir as model_files_dir,
     read_env_file_value,
     read_env_value,
 )

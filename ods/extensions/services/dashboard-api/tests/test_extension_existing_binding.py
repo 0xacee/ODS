@@ -27,16 +27,19 @@ def existing(monkeypatch, tmp_path):
     roots = [tmp_path / name for name in ('user', 'builtin', 'library')]
     for root in roots:
         root.mkdir()
-    schema = tmp_path / 'schema'; schema.mkdir()
+    schema = tmp_path / 'schema'
+    schema.mkdir()
     shutil.copyfile(Path(extensions.__file__).resolve().parents[3] / 'schema/service-manifest.v1.json',
                     schema / 'service-manifest.v1.json')
     manifest = candidate()['manifest']
     manifest['service']['id'] = 'example'
-    package = roots[2] / 'example'; package.mkdir()
+    package = roots[2] / 'example'
+    package.mkdir()
     for name, content in {'manifest.yaml': yaml.safe_dump(manifest), 'compose.yaml': 'services: {}',
                           'upstream.json': json.dumps({'repository': 'https://github.com/owner/repo', 'origin':'github-proposal'})}.items():
         (package / name).write_text(content, encoding='utf-8')
-    directory = tmp_path / '.extension-requests'; directory.mkdir()
+    directory = tmp_path / '.extension-requests'
+    directory.mkdir()
     create_request(directory, 'owner', 'chat', 'original', '/extensions install https://github.com/owner/repo')
     for key, root in zip(('USER_EXTENSIONS_DIR', 'EXTENSIONS_DIR', 'EXTENSIONS_LIBRARY_DIR'), roots):
         monkeypatch.setattr(extensions, key, root)

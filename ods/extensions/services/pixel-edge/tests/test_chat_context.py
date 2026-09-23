@@ -1,7 +1,7 @@
 """Context route and lifecycle tests using the real edge HTTP server."""
 import asyncio
 import copy
-import json
+import json as json
 from unittest.mock import patch
 
 from test_pixel_edge import BaseEdgeTest

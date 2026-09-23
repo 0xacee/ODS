@@ -24,9 +24,12 @@ def _request():
 
 def _accepted_request(monkeypatch, tmp_path):
     proposal = candidate()
-    drafts = tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
-    requests = tmp_path / '.extension-requests'; requests.mkdir()
-    library = tmp_path / 'library'; library.mkdir()
+    drafts = tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
+    requests = tmp_path / '.extension-requests'
+    requests.mkdir()
+    library = tmp_path / 'library'
+    library.mkdir()
     draft = save_draft(drafts, 'owner', proposal, evidence(proposal))
     create_request(requests, 'owner', 'chat', 'turn', '/extensions install ' + proposal['repository'])
     bind_proposal(requests, 'owner', 'chat', 'turn', proposal, evidence(proposal), draft)

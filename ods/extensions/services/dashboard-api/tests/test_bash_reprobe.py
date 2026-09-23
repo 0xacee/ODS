@@ -14,7 +14,7 @@ The regression was reproduced by the public-beta Windows fleet lane.
 import importlib.util
 import subprocess
 import sys
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PureWindowsPath as PureWindowsPath
 
 import pytest
 

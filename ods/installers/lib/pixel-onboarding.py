@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Shared ODS Pixel onboarding contract for native host installers."""
 
-import json, os, pathlib, re, stat, sys, tempfile
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+import tempfile
 
 (out, openclaw_bin, home, model, context, max_tokens, reasoning,
  gateway_alias, gateway_label, model_gateway_port, pixel_gateway_port, gateway_key_path,

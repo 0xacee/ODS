@@ -1444,11 +1444,13 @@ class RecipeValidationTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(data)
         server = HTTPServer(('127.0.0.1', 0), Handler)
-        worker = threading.Thread(target=server.serve_forever, daemon=True);worker.start()
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
         try:
             with tempfile.TemporaryDirectory() as directory:
                 env = pathlib.Path(directory) / '.env'
-                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n');env.chmod(0o600)
+                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n')
+                env.chmod(0o600)
                 result = manager._submit_request_proposal(env, server.server_port, json.dumps(envelope).encode())
             self.assertEqual(result['proposal']['recipeDigest'], digest)
             self.assertEqual(observed, [('/api/extensions/github/requests/proposal',
@@ -1462,7 +1464,8 @@ class RecipeValidationTests(unittest.TestCase):
                                'chatId': 'chat', 'requestId': 'turn'}
             with tempfile.TemporaryDirectory() as directory:
                 env = pathlib.Path(directory) / '.env'
-                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n');env.chmod(0o600)
+                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n')
+                env.chmod(0o600)
                 result = manager._read_request_status(env, server.server_port, json.dumps(status_envelope).encode())
             self.assertEqual(result, receipt)
             self.assertEqual(observed[-1], ('/api/extensions/github/requests/status',
@@ -1471,7 +1474,8 @@ class RecipeValidationTests(unittest.TestCase):
                        'runtimeError': 'Source image build failed. ' + 'x' * 7000}
             with tempfile.TemporaryDirectory() as directory:
                 env = pathlib.Path(directory) / '.env'
-                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n');env.chmod(0o600)
+                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n')
+                env.chmod(0o600)
                 result = manager._read_request_status(env, server.server_port, json.dumps(status_envelope).encode())
             self.assertEqual(result['runtimeError'], receipt['runtimeError'])
             self.assertEqual(observed[-1], ('/api/extensions/github/requests/status',
@@ -1483,7 +1487,8 @@ class RecipeValidationTests(unittest.TestCase):
             prepare_envelope = {**status_envelope, 'action': 'github-request-prepare'}
             with tempfile.TemporaryDirectory() as directory:
                 env = pathlib.Path(directory) / '.env'
-                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n');env.chmod(0o600)
+                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n')
+                env.chmod(0o600)
                 result = manager._prepare_request(env, server.server_port, json.dumps(prepare_envelope).encode())
             self.assertEqual(result, receipt)
             self.assertEqual(observed[-1], ('/api/extensions/github/requests/prepare',
@@ -1494,7 +1499,8 @@ class RecipeValidationTests(unittest.TestCase):
                        'installationStarted': False, 'runtimeVerified': False}
             with tempfile.TemporaryDirectory() as directory:
                 env = pathlib.Path(directory) / '.env'
-                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n');env.chmod(0o600)
+                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n')
+                env.chmod(0o600)
                 binding_envelope = {**prepare_envelope, 'extensionId': 'example'}
                 result = manager._prepare_request(env, server.server_port, json.dumps(binding_envelope).encode())
                 self.assertEqual(result, receipt)
@@ -1510,7 +1516,8 @@ class RecipeValidationTests(unittest.TestCase):
             advance_envelope = {**status_envelope, 'action': 'github-request-advance'}
             with tempfile.TemporaryDirectory() as directory:
                 env = pathlib.Path(directory) / '.env'
-                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n');env.chmod(0o600)
+                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n')
+                env.chmod(0o600)
                 result = manager._advance_request(env, server.server_port, json.dumps(advance_envelope).encode())
                 self.assertEqual(result, receipt)
                 receipt['state'] = 'succeeded'  # Acceptance cannot masquerade as completion.
@@ -1522,7 +1529,8 @@ class RecipeValidationTests(unittest.TestCase):
             retry_envelope = {**status_envelope, 'action': 'github-request-retry'}
             with tempfile.TemporaryDirectory() as directory:
                 env = pathlib.Path(directory) / '.env'
-                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n');env.chmod(0o600)
+                env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n')
+                env.chmod(0o600)
                 result = manager._advance_request(env, server.server_port, json.dumps(retry_envelope).encode())
                 self.assertEqual(result, receipt)
             self.assertEqual(observed[-1], ('/api/extensions/github/requests/retry',
@@ -1537,7 +1545,9 @@ class RecipeValidationTests(unittest.TestCase):
                                           path=path, timeout=2, body=body)
             self.assertEqual(len(observed), 9)
         finally:
-            server.shutdown();server.server_close();worker.join(timeout=2)
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
 
 
     def test_preparation_rejection_preserves_only_verified_scope_and_reason(self):
@@ -1547,7 +1557,8 @@ class RecipeValidationTests(unittest.TestCase):
                      'chatId':'chat', 'requestId':'turn', 'reason':'proposal_required', 'installationStarted':False}
         with tempfile.TemporaryDirectory() as directory:
             env = pathlib.Path(directory) / '.env'
-            env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n'); env.chmod(0o600)
+            env.write_text('DASHBOARD_API_KEY=' + 'a' * 64 + '\n')
+            env.chmod(0o600)
             with patch.object(manager, '_request_json') as transport:
                 for reason in ('proposal_required', 'integration_selection_required',
                                'license_review_required', 'repository_evidence_unavailable',
@@ -1597,10 +1608,13 @@ class CredentialProjectionTests(unittest.TestCase):
             self.assertEqual(self.destination.read_bytes(), before)
 
     def test_symlinks_and_nonprivate_destination_are_rejected(self):
-        real = self.source.with_name('actual'); self.source.rename(real); self.source.symlink_to(real)
+        real = self.source.with_name('actual')
+        self.source.rename(real)
+        self.source.symlink_to(real)
         with self.assertRaises(manager.ManagerError):
             manager._refresh_projected_credential(self.source, self.destination)
-        self.source.unlink();real.rename(self.source)
+        self.source.unlink()
+        real.rename(self.source)
         self.destination.chmod(0o644)
         with self.assertRaises(manager.ManagerError):
             manager._refresh_projected_credential(self.source, self.destination)

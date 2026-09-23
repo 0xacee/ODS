@@ -65,8 +65,10 @@ def test_preparation_fetches_pinned_dockerfile_and_staged_enable_rechecks_it(mon
     value = proposal()
     if inline:
         value['compose']['services']['apache-answer']['build']['dockerfile_inline'] = 'FROM scratch\nCOPY . /app\n'
-    library = tmp_path / 'library'; library.mkdir()
-    drafts = tmp_path / '.extension-recipe-drafts'; drafts.mkdir()
+    library = tmp_path / 'library'
+    library.mkdir()
+    drafts = tmp_path / '.extension-recipe-drafts'
+    drafts.mkdir()
     draft = save_draft(drafts, 'owner', value, evidence(value))
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
     monkeypatch.setattr(extensions, 'EXTENSIONS_LIBRARY_DIR', library)
