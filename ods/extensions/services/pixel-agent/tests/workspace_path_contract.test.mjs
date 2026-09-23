@@ -77,7 +77,9 @@ test('plugin passes inherited workspace to evidence tracking for absolute macOS 
   assert.notEqual(decision?.block,true);
   config.agents.list[0].workspace='/custom/pixel';
   assert.equal(resolve({config},'pixel'),'/custom/pixel');
-  assert.match(entry,/observeRun\(context, AGENT_ID, event, \{ privateBrowserAccess, workspaceRoot, executionHost: executionHostForAgent\(api.config, AGENT_ID\) \}\)/);
+  assert.match(entry,/const executionHost = executionHostForAgent\(api.config, AGENT_ID\)/);
+  assert.match(entry,/observeRun\(context, AGENT_ID, event, \{ privateBrowserAccess, workspaceRoot, executionHost \}\)/);
+  assert.match(entry,/promptContractForAgent\(context, AGENT_ID, event, \{[^}]*executionHost,/);
 });
 
 test('detects existing file parents without following links or escaping the workspace',()=>{
