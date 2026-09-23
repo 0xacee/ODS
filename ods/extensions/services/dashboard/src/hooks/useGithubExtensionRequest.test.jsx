@@ -149,3 +149,30 @@ test('a lost creation acknowledgement preserves the scope and resume reads the s
   expect(fetcher.mock.calls.some(([, options]) => JSON.parse(options.body).action === 'cancel')).toBe(false)
   view.unmount()
 })
+
+test('resume after failure observes installing then ready using only the same request reads', async () => {
+  vi.useFakeTimers()
+  let runtimeStatus = 'error'
+  const fetcher = vi.fn().mockImplementation(async url => response(url.endsWith('/status')
+    ? {...observed, runtimeStatus} : proposed))
+  vi.stubGlobal('fetch', fetcher)
+  const view = renderHook(() => useGithubExtensionRequest('chat'))
+  await act(async () => view.result.current.start(command, identity))
+  expect(view.result.current.state.state).toBe('failed')
+  fetcher.mockClear()
+  runtimeStatus = 'installing'
+  await act(async () => { view.result.current.resume(); view.result.current.resume() })
+  expect(view.result.current.state.state).toBe('pending')
+  expect(fetcher).toHaveBeenCalledTimes(2)
+  runtimeStatus = 'cli_installed'
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+  expect(view.result.current.state.state).toBe('succeeded')
+  expect(fetcher).toHaveBeenCalledTimes(4)
+  await act(async () => { await vi.advanceTimersByTimeAsync(15000) })
+  expect(fetcher).toHaveBeenCalledTimes(4)
+  for (const [url, options] of fetcher.mock.calls) {
+    expect(url).toMatch(/^\/api\/extensions\/github\/requests(?:\/status)?$/)
+    expect(JSON.parse(options.body)).toEqual(url.endsWith('/status') ? identity : {action: 'read', ...identity})
+  }
+  view.unmount()
+})

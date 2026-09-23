@@ -84,6 +84,17 @@ export function createExtensionCompletionGate(ownerText) {
   };
   return {
     get active() { return active; },
+    handoffPending(result) {
+      const value = validatedStatus(result), observation = result?.details?.observation;
+      if (!active || !serverAuthorized || !value || value !== status ||
+          value.authorizationMode !== 'install' || value.requestState !== 'pending' ||
+          !value.prepared || !IN_PROGRESS.has(value.runtimeStatus) ||
+          observation?.kind !== 'ods-extension-pending-handoff' ||
+          observation.chatId !== identity?.chatId || observation.requestId !== identity?.requestId ||
+          observation.extensionId !== value.extensionId) return false;
+      this.finalize();
+      return terminal?.status === 'pending';
+    },
     get observedInstallStatus() {
       // This is a session-bound, schema-validated read receipt. It never
       // authorizes a new request or proves an installation by itself.
@@ -97,6 +108,16 @@ export function createExtensionCompletionGate(ownerText) {
         ? {chatId:identity.chatId, requestId:identity.requestId} : undefined;
     },
     observe(tool, result) {
+      // Conversational follow-ups need no slash command. Only this validated
+      // managed read can establish saved install authority for a pending handoff.
+      if (!active && tool === STATUS && result?.details?.observation?.kind === 'ods-extension-pending-handoff') {
+        const value = validatedStatus(result);
+        if (value?.authorizationMode === 'install' && value.requestState === 'pending' &&
+            value.prepared && IN_PROGRESS.has(value.runtimeStatus) &&
+            value.observation.chatId === value.chatId &&
+            value.observation.requestId === value.requestId &&
+            value.observation.extensionId === value.extensionId) active = true;
+      }
       if (!active) return;
       if (tool === STATUS) {
         const value = validatedStatus(result);

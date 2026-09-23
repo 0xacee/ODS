@@ -6,7 +6,7 @@ import './portal-extension-setup.css'
 const labels = {none: 'Ready', install: 'Waiting to install', enable: 'Waiting to start',
   wait: 'Installing', blocked: 'Needs attention'}
 
-export default function PortalExtensionProgress({command, active = false, projectPath, installation, onStopInstallation, onRecheckInstallation}) {
+export default function PortalExtensionProgress({command, active = false, projectPath, installation, onStopInstallation, onRecheckInstallation, onRecheckGithubObservation}) {
   const boundTarget = installation && installation.command === command && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(installation.target || '')
     ? installation.target : undefined
   const target = extensionSetupTarget(command) || boundTarget
@@ -15,15 +15,30 @@ export default function PortalExtensionProgress({command, active = false, projec
   const installing = installState === 'pending'
   const mentionedProjects = typeof command === 'string' ? command.match(/Playground\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/g) || [] : []
   const associationProject = mentionedProjects.some(path => path !== projectPath) ? undefined : projectPath
-  const [plan, setPlan] = useState(null)
+  const scope = installState && [installation.chatId, installation.requestId].every(value =>
+    typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value))
+    ? JSON.stringify([installation.chatId, installation.requestId, target, command]) : null
+  const [observation, setObservation] = useState(null)
+  const plan = observation?.scope === scope ? observation.plan : null
   const [error, setError] = useState(false)
   const [revision, setRevision] = useState(0)
   const linked = useRef(null)
+  const rechecked = useRef({scope: null, phases: new Set()})
   const [association, setAssociation] = useState('')
+  useEffect(() => {
+    if (rechecked.current.scope !== scope) rechecked.current = {scope, phases: new Set()}
+    if (!scope || !onRecheckGithubObservation || error || !plan ||
+        !['failed', 'reconciliation_required'].includes(installState)) return
+    const phase = plan.steps.find(step => step.extensionId === target)?.action
+    if (!['wait', 'none'].includes(phase) || rechecked.current.phases.has(phase)) return
+    // A service plan can prompt a scoped read, never establish request success.
+    rechecked.current.phases.add(phase)
+    onRecheckGithubObservation()
+  }, [scope, plan, error, installState, target, onRecheckGithubObservation])
   useEffect(() => {
     const controller = new AbortController()
     let alive = true, timer, timeout
-    setPlan(null); setError(false); setAssociation('')
+    setObservation(null); setError(false); setAssociation('')
     if (!target) return () => controller.abort()
     async function load() {
       try {
@@ -39,7 +54,7 @@ export default function PortalExtensionProgress({command, active = false, projec
               (s.action === 'none' && !['enabled', 'cli_installed'].includes(s.status)) ||
               (s.action === 'wait' && !['installing', 'setting_up'].includes(s.status)))) throw new Error('plan')
         if (!alive) return
-        setPlan(next); setError(false)
+        setObservation({scope, plan: next}); setError(false)
         if (canAssociate && next.steps.every(s => s.action === 'none') && /^Playground\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(associationProject || '')) {
           const identity = `${target}/${projectPath}`
           if (linked.current !== identity) {
@@ -67,7 +82,7 @@ export default function PortalExtensionProgress({command, active = false, projec
     }
     load()
     return () => { alive = false; clearTimeout(timer); clearTimeout(timeout); controller.abort() }
-  }, [target, active, installing, canAssociate, revision, projectPath, associationProject])
+  }, [target, scope, active, installing, canAssociate, revision, projectPath, associationProject])
   if (!target && installation?.command === command && installation.state === 'reconciliation_required') {
     return <section className="portal-extension-progress" aria-label="Extension installation progress">
       <p role="status">The extension recipe could not be confirmed. The existing request has been preserved.</p>
@@ -90,6 +105,9 @@ export default function PortalExtensionProgress({command, active = false, projec
     {installState === 'reconciliation_required' && onRecheckInstallation && <button type="button" onClick={onRecheckInstallation}>Recheck installation</button>}
     {installState === 'blocked' && <p role="status">Installation cannot continue with the current host or extension state.</p>}
     {installing && onStopInstallation && <button type="button" onClick={onStopInstallation}>Stop further installation steps</button>}
-    {!active && <button type="button" onClick={() => setRevision(value => value + 1)}>Refresh status</button>}
+    {!active && <button type="button" onClick={() => {
+      if (scope) onRecheckGithubObservation?.()
+      setRevision(value => value + 1)
+    }}>Refresh status</button>}
   </section>
 }
