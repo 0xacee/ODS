@@ -5096,6 +5096,97 @@ test("renders a strictly validated live extension inventory receipt", () => {
   assert.match(text, /grants no installation, configuration, credential, Docker, or shell authority/);
 });
 
+test("repeated verified inventory reads stay within the host ingress text limit", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel",
+    { prompt: "List installed ODS extensions." });
+  const params = { target: "ods-host", action: "ods.extensions.list" };
+  for (let index = 0; index < 12; index++) {
+    const step = discoveryStep("ods.extensions.list");
+    const result = JSON.parse(step.stdout);
+    result.extensions = Array.from({ length: 31 }, (_, entry) => ({
+      id: `extension-${String(entry).padStart(2, "0")}`,
+      name: `Extension ${String(entry).padStart(2, "0")} ${"n".repeat(60)}`,
+      category: "optional", status: "enabled", source: "core", installable: false,
+    }));
+    Object.assign(result.summary, { total: 31, installed: 31, enabled: 31 });
+    step.stdout = JSON.stringify(result) + "\n";
+    recordDiscovery(guard, params, `ops-1234567890123-${index.toString(16).padStart(12, "0")}`,
+      "succeeded", [step]);
+  }
+  const verification = guard.deliveryVerificationForRun("run-1");
+  assert.equal(verification.status, "passed");
+  assert.equal(verification.deliveryMode, "append");
+  assert.ok(verification.text.length <= 32 * 1024, "the ingress accepts at most 32768 UTF-16 code units of verification text");
+  assert.equal(verification.text.split(OPERATIONS_EXTENSION_INVENTORY_EVIDENCE_PREFIX).length - 1, 1);
+  assert.match(verification.text, /12 individually verified inventory reads/);
+  assert.match(verification.text, /last recorded validated snapshot/);
+  assert.match(verification.text, /extension-30/);
+  assert.match(verification.text, /ops-1234567890123-00000000000b/);
+});
+
+test("inventory receipt compaction still rejects a malformed earlier broker job", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel",
+    { prompt: "List installed ODS extensions." });
+  const params = { target: "ods-host", action: "ods.extensions.list" };
+  recordDiscovery(guard, params, "ops-1234567890123-000000000001");
+  const invalid = discoveryStep("ods.extensions.list");
+  invalid.stdout = "{}\n";
+  recordDiscovery(guard, params, "ops-1234567890123-000000000002", "succeeded", [invalid]);
+  recordDiscovery(guard, params, "ops-1234567890123-000000000003");
+  assert.equal(guard.deliveryVerificationForRun("run-1").status, "failed");
+});
+
+test("inventory compaction retains a validated snapshot for each exact target without chronology claims", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel",
+    { prompt: "List installed ODS extensions on both configured targets." });
+  const records = [
+    ["ods-host", "primary-first", "000000000004"],
+    ["other-host", "other-first", "000000000003"],
+    ["ods-host", "primary-last-recorded", "000000000002"],
+    ["other-host", "other-last-recorded", "000000000001"],
+  ];
+  for (const [target, id, suffix] of records) {
+    const step = discoveryStep("ods.extensions.list");
+    step.target = target;
+    const result = JSON.parse(step.stdout);
+    result.extensions = [{ id, name: id, category: "optional", status: "enabled",
+      source: "core", installable: false }];
+    Object.assign(result.summary, { total: 1, installed: 1, enabled: 1 });
+    step.stdout = JSON.stringify(result) + "\n";
+    recordDiscovery(guard, { target, action: "ods.extensions.list" },
+      `ops-1234567890123-${suffix}`, "succeeded", [step]);
+  }
+  const verification = guard.deliveryVerificationForRun("run-1");
+  assert.equal(verification.status, "passed");
+  assert.equal(verification.text.split(OPERATIONS_EXTENSION_INVENTORY_EVIDENCE_PREFIX).length - 1, 2);
+  assert.match(verification.text, /primary-last-recorded/);
+  assert.match(verification.text, /other-last-recorded/);
+  assert.doesNotMatch(verification.text, /primary-first|other-first/);
+  assert.equal(verification.text.split("2 individually verified inventory reads for this target").length - 1, 2);
+  assert.match(verification.text, /last recorded validated snapshot/);
+  assert.match(verification.text, /no chronological ordering is asserted/);
+  assert.doesNotMatch(verification.text, /last submitted|latest snapshot/);
+});
+
+test("distinct verified extension evidence fails closed when it exceeds ingress capacity", () => {
+  const guard = createToolLoopGuard();
+  guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel",
+    { prompt: "Inspect the installed ODS extensions." });
+  for (let index = 0; index < 128; index++) {
+    const serviceId = `extension-${String(index).padStart(3, "0")}`;
+    recordDiscovery(guard, { target: "ods-host", action: "ods.extensions.inspect",
+      parameters: { serviceId } }, `ops-1234567890123-${index.toString(16).padStart(12, "0")}`);
+  }
+  const verification = guard.deliveryVerificationForRun("run-1");
+  assert.equal(verification.status, "failed");
+  assert.ok(verification.text.length <= 32 * 1024);
+  assert.match(verification.text, /cannot deliver their combined evidence/);
+  assert.doesNotMatch(verification.text, /Installation state:|Missing required configuration keys:/);
+});
+
 for (const inflatedCount of [false, true]) {
   test(`inventory keeps pending and failed installations distinct: inflated=${inflatedCount}`, () => {
     const guard = createToolLoopGuard();

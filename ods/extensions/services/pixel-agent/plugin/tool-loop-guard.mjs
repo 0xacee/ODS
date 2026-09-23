@@ -32,6 +32,10 @@ export const DEFAULT_WEB_TOOL_LIMITS = Object.freeze({
   failedVerificationAttempts: 6,
 });
 
+// Match the host ingress's MAX_VERIFICATION_TEXT. A verified producer must
+// never make a completed run fail only because its delivery text is oversized.
+const MAX_INGRESS_VERIFICATION_TEXT = 32 * 1024;
+
 const MAX_COMPARE_SWAP_REPAIR_CHARS = 32_768;
 const MAX_COMPARE_SWAP_REPAIRS_PER_PATH = 3;
 const MAX_TRACKED_WORKSPACE_FILE_BYTES = 4 * 1024 * 1024;
@@ -3696,6 +3700,7 @@ function extensionDiscoveryVerification(state) {
   const evidence = [];
   const hostJobs = new Map();
   let successes = 0;
+  const inventoryEvidenceByTarget = new Map();
   for (const [jobId, submission] of state.operationsSubmittedJobs) {
     const outcome = state.operationsTerminalJobs.get(jobId);
     const hostObservation = submission.actions.length > 0 && submission.actions.every(({ target, action }) =>
@@ -3734,7 +3739,23 @@ function extensionDiscoveryVerification(state) {
       });
       if (index < 0) return { status: "failed", text: OPERATIONS_UNVERIFIED_DELIVERY_PREFIX };
       remaining.splice(index, 1);
-      evidence.push(text);
+      if (action.action === "ods.extensions.list" &&
+          text.startsWith(OPERATIONS_EXTENSION_INVENTORY_EVIDENCE_PREFIX)) {
+        // Every submitted broker job is still matched and validated above.
+        // Repeating a complete catalog for each paginated model read can exceed
+        // the ingress's character bound even though one snapshot is small.
+        // List parameters are validated as empty. Compact only the same exact
+        // target; another target's inventory remains independent evidence.
+        // Recording order does not establish submission or completion order.
+        const previous = inventoryEvidenceByTarget.get(action.target);
+        if (previous) evidence[previous.index] = null;
+        inventoryEvidenceByTarget.set(action.target, {
+          index: evidence.length, count: (previous?.count ?? 0) + 1,
+        });
+        evidence.push(text);
+      } else {
+        evidence.push(text);
+      }
       successes += 1;
     }
   }
@@ -3747,7 +3768,22 @@ function extensionDiscoveryVerification(state) {
     }
     evidence.push(text);
   }
-  return { status: successes > 0 ? "passed" : "failed", text: evidence.join("\n\n") };
+  for (const { index, count } of inventoryEvidenceByTarget.values()) {
+    if (count > 1) {
+      evidence[index] +=
+        `\n- Inventory readback: ${count} individually verified inventory reads for this target; ` +
+        "last recorded validated snapshot shown; no chronological ordering is asserted. " +
+        "Other snapshots are not asserted identical.";
+    }
+  }
+  const text = evidence.filter((item) => item !== null).join("\n\n");
+  if (text.length > MAX_INGRESS_VERIFICATION_TEXT) {
+    return { status: "failed", text:
+      "Pixel validated the extension-discovery jobs but cannot deliver their combined evidence " +
+      "within the bounded verification response. Narrow the request and retry; omitted results " +
+      "are not presented as verified in this reply." };
+  }
+  return { status: successes > 0 ? "passed" : "failed", text };
 }
 
 function installationEvidence(result, jobId) {
