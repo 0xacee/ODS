@@ -1,6 +1,8 @@
 import {render, cleanup, fireEvent, act, screen} from '@testing-library/react'
 import {afterEach, expect, it, vi} from 'vitest'
 import mascotSource from '../../public/pixel-mascot.js?raw'
+import cloudDemoHtml from '../../public/portal-cloud.html?raw'
+import cloudDemoSource from '../../public/portal-cloud.js?raw'
 import vm from 'node:vm'
 import PixelMascot from './PixelMascot'
 import {pixelHeaderPose, pixelReplyPose} from '../lib/pixelMascotState'
@@ -45,6 +47,25 @@ function loadRenderer(reduced = false) {
   vm.runInNewContext(mascotSource,runtime)
   return {renderer:runtime.PixelMascot, runtime, advance:time => {now=time;const pending=frame;frame=undefined;pending?.(time)}}
 }
+
+it('renders every demo state without inline scripts or legacy facial props', () => {
+  const demo = document.createElement('div')
+  demo.innerHTML = cloudDemoHtml
+  document.body.append(demo)
+  expect([...demo.querySelectorAll('script')].every(script => script.hasAttribute('src'))).toBe(true)
+  const {renderer} = loadRenderer(true)
+  vm.runInNewContext(cloudDemoSource, {document, PixelMascot:renderer})
+  const clouds = [...demo.querySelectorAll('.pixel-mascot')]
+  expect(clouds).toHaveLength(7)
+  for (const cloud of clouds) {
+    expect(cloud.querySelector('.pixel-mascot-body')).not.toBeNull()
+    expect(cloud.querySelector('.pixel-mascot-eye, .portal-thinking-lens, .portal-thinking-question')).toBeNull()
+    const sleep = cloud.querySelector('.portal-cloud-sleep')
+    expect(Number(sleep.getAttribute('opacity')) > 0).toBe(cloud.dataset.mascotState === 'sleeping')
+    renderer.destroy(cloud)
+  }
+  demo.remove()
+})
 
 it('animates cloud drift while thinking and settles with no facial props',()=>{
   const {renderer,advance}=loadRenderer()
@@ -186,9 +207,11 @@ it('suppresses optional gestures and RAFs with reduced motion while retaining re
   advance(2000)
   expect(element.dataset.portalGesture).toBeUndefined()
   renderer.setState(element,'sleeping')
-  expect(element.querySelector('text')).toBeNull()
+  expect(element.querySelector('.portal-cloud-sleep').textContent).toBe('zzz')
+  expect(Number(element.querySelector('.portal-cloud-sleep').getAttribute('opacity'))).toBeGreaterThan(0)
   expect(Number(element.querySelector('.portal-cloud-wind').getAttribute('opacity'))).toBe(.55)
   renderer.setState(element,'idle')
+  expect(element.querySelector('.portal-cloud-sleep').getAttribute('opacity')).toBe('0')
   expect(element.dataset.portalGesture).toBeUndefined()
   expect(runtime.requestAnimationFrame).not.toHaveBeenCalled()
   renderer.destroy(element);element.remove()
@@ -291,7 +314,8 @@ it('tracks the pointer, alternates play, and gently animates sleep until the mas
   renderer.setState(element,'sleeping')
   advance(7000)
   expect(element.title).toBe('Nova · sleeping')
-  expect(element.querySelector('text')).toBeNull()
+  expect(element.querySelector('.portal-cloud-sleep').textContent).toBe('zzz')
+  expect(Number(element.querySelector('.portal-cloud-sleep').getAttribute('opacity'))).toBeGreaterThan(0)
   expect(Number(element.querySelector('.portal-cloud-wind').getAttribute('opacity'))).toBe(.55)
   runtime.requestAnimationFrame.mockClear()
   const sleepPose=motion.getAttribute('transform')
