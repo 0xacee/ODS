@@ -706,10 +706,28 @@ async def test_status_keeps_adaptive_model_available_with_fixed_advisory(monkeyp
         "runtimeIdentity": pixel.unknown_runtime_identity(), "runtimeMatchesRelease": None,
         "modelSupport": {
             "tier": "adaptive",
-            "detail": pixel._MODEL_ADAPTIVE_DETAIL,
+            "detail": pixel._MODEL_CAPABILITY_DETAIL,
         },
     }
     assert "secret" not in json.dumps(result)
+    assert "not agent-qualified" in result["modelSupport"]["detail"]
+    assert "may be unreliable" in result["modelSupport"]["detail"]
+    assert "ready" not in result["modelSupport"]["detail"]
+    assert "adapt" not in result["modelSupport"]["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("viability", [True, None, "false", 0, "unknown"])
+async def test_status_does_not_infer_failed_qualification_from_unknown_or_qualified_metadata(monkeypatch, viability):
+    async def model_status(*_args, **_kwargs):
+        return {"status": "idle", "activeAgentViable": viability}
+
+    monkeypatch.setattr(pixel, "request_agent_json", model_status)
+    body = json.dumps({"data": [{"id": "pixel/default"}]}).encode()
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(FakeResponse(chunks=[body]))):
+        result = await pixel.pixel_status()
+    assert result["available"] is True
+    assert "modelSupport" not in result
 
 
 @pytest.mark.asyncio

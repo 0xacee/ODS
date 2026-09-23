@@ -69,10 +69,9 @@ _MODEL_IDENTITY_DETAIL = (
     "Pixel cannot verify its recorded model against the loaded Lemonade model. "
     "Re-select the model in Models before using Pixel."
 )
-_MODEL_ADAPTIVE_DETAIL = (
-    "Pixel is ready and adapts its tool flow for this model. Model capability "
-    "affects the quality and persistence of complex work, not access or the "
-    "broker-enforced safety boundary."
+_MODEL_CAPABILITY_DETAIL = (
+    "The active model is recorded as not agent-qualified. Tool-driven tasks "
+    "may be unreliable; chat and experiments remain available."
 )
 
 
@@ -380,7 +379,9 @@ def _model_support_from_status(status: object) -> dict[str, str] | None:
     intelligence, so an unqualified model remains usable and testable.
     """
     if isinstance(status, dict) and status.get("activeAgentViable") is False:
-        return {"tier": "adaptive", "detail": _MODEL_ADAPTIVE_DETAIL}
+        # Keep the legacy wire value for rolling UI upgrades. It denotes an
+        # advisory, not evidence that the runtime adapts or the model can act.
+        return {"tier": "adaptive", "detail": _MODEL_CAPABILITY_DETAIL}
     return None
 
 

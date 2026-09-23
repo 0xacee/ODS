@@ -64,6 +64,8 @@ import {
   X,
 } from 'lucide-react'
 
+const MODEL_CAPABILITY_DETAIL = 'The active model is recorded as not agent-qualified. Tool-driven tasks may be unreliable; chat and experiments remain available.'
+
 const MARKDOWN_COMPONENTS = {
   p: ({ children }) => <p className="break-words [&:not(:first-child)]:mt-3">{children}</p>,
   ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-5">{children}</ul>,
@@ -798,14 +800,11 @@ export default function Pixel({ systemStatus = null }) {
         // Treat the former hard-gate status as an advisory during rolling
         // upgrades so a stale API cannot make the new UI exclude a model.
         const legacyAdaptive = data.state === 'model_incompatible'
-        setModelSupport(validatedSupport || (legacyAdaptive
-          ? {
-              tier: 'adaptive',
-              detail: typeof data.detail === 'string' && data.detail.trim()
-                ? data.detail
-                : 'Pixel is ready and will adapt its tool flow for this model.',
-            }
-          : null))
+        // Older APIs called this tier "adaptive" and claimed readiness. That
+        // label records lack of qualification, not measured tool adaptation.
+        setModelSupport(validatedSupport || legacyAdaptive
+          ? { tier: 'adaptive', detail: MODEL_CAPABILITY_DETAIL }
+          : null)
         setStatus(data.available === true || legacyAdaptive
           ? 'available'
           : data.state === 'model_switching'
@@ -1477,6 +1476,11 @@ export default function Pixel({ systemStatus = null }) {
           </span>
         </div>
       </header>
+      {status === 'available' && modelSupport && (
+        <p role="status" aria-label="Model capability" className="shrink-0 border-b border-theme-border px-4 py-2 text-xs text-amber-300 sm:px-6">
+          {modelSupport.detail}
+        </p>
+      )}
       <div role="region" aria-label="Conversation messages" tabIndex={-1} onScroll={chatScroll.onScroll} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6">
         {interrupted && !sending && (
           <div role="status" className="mx-auto w-full max-w-5xl rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">

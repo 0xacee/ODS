@@ -744,7 +744,7 @@ describe('Pixel', () => {
     expect(screen.getByPlaceholderText('Waiting for model switch...')).toBeDisabled()
   })
 
-  it('keeps an adaptive model available without presenting a warning gate', async () => {
+  it('keeps an unqualified model available with a visible capability advisory, not an admission gate', async () => {
     globalThis.fetch.mockResolvedValue(response({
       available: true,
       model: 'pixel/default',
@@ -761,12 +761,28 @@ describe('Pixel', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByText('Available')).toHaveAttribute(
       'title',
-      'Pixel is ready and adapts its tool flow for this model.'
+      'The active model is recorded as not agent-qualified. Tool-driven tasks may be unreliable; chat and experiments remain available.'
     )
+    expect(screen.getByRole('status', { name: 'Model capability' })).toBeVisible()
+    expect(screen.getByRole('status', { name: 'Model capability' })).toHaveTextContent('not agent-qualified')
+    expect(screen.getByRole('status', { name: 'Model capability' })).toHaveTextContent('Tool-driven tasks may be unreliable')
+    expect(screen.queryByText(/ready and adapts/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Choose model:/ })).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Change model' })).not.toBeInTheDocument()
     expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
   })
+
+  it.each([null, undefined, {}, { tier: 'qualified', detail: 'Qualified' },
+    { tier: 'unknown', detail: 'Unknown' }, { tier: 'adaptive', detail: null }])(
+    'does not infer a qualification warning from absent, qualified or unknown support: %j', async modelSupport => {
+      globalThis.fetch.mockResolvedValue(response({ available: true, model: 'pixel/default', modelSupport }))
+      render(<Pixel />)
+      await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
+      expect(screen.queryByRole('status', { name: 'Model capability' })).not.toBeInTheDocument()
+      expect(screen.getByText('Available')).not.toHaveAttribute('title')
+      expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
+    }
+  )
 
   it('preserves a draft when model viability changes before stream acceptance', async () => {
     globalThis.fetch
@@ -810,8 +826,9 @@ describe('Pixel', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByText('Available')).toHaveAttribute(
       'title',
-      'This model failed Pixel tool qualification.'
+      'The active model is recorded as not agent-qualified. Tool-driven tasks may be unreliable; chat and experiments remain available.'
     )
+    expect(screen.getByRole('status', { name: 'Model capability' })).toBeVisible()
     expect(screen.getByRole('button', { name: /Choose model:/ })).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Change model' })).not.toBeInTheDocument()
     expect(screen.getByPlaceholderText('Message Portal...')).toBeEnabled()
