@@ -295,12 +295,12 @@ PIXEL_SOURCE_REF=<40-character-commit> \
 ./install.sh --pixel
 ```
 
-The canonical remote URL is an explicit development override, not needed for
-normal installs. A local source
-must be a clean Git checkout below `PIXEL_SOURCE_DIR`; the owner directories
-must not be group- or world-writable. Remote Git credential prompts are
-disabled and source operations are bounded. Normal ODS users need no Pixel Git
-credentials.
+Public ODS installs accept only the verified bundle shipped in ODS or an
+explicit absolute local checkout; remote source URLs are not supported,
+including as development overrides. A local source must be a clean Git
+checkout below `PIXEL_SOURCE_DIR`; the owner directories must not be group-
+or world-writable. Source operations are bounded. Normal ODS users need no
+Pixel Git credentials.
 
 ## User experience
 
