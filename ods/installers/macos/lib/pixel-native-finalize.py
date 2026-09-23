@@ -116,6 +116,47 @@ def update_selection_records(previous, activation, prepared, proof, install_dir)
         'activation': {**activation, **identities}}
 
 
+def compose_flags(install_dir, process_env):
+    cache = install_dir / '.compose-flags'
+    if os.path.lexists(cache):
+        raw = cache.read_text()
+    else:
+        # Extension changes invalidate this disposable cache. Resolve the saved
+        # selection like ods-cli, without sourcing .env or publishing a new cache.
+        environment = helper('pixel-native-env')
+        keys = {'TIER', 'GPU_BACKEND', 'GPU_COUNT', 'ODS_MODE',
+            'ODS_SKIP_GPU_OVERLAYS', 'ODS_SKIP_GPU_OVERLAYS_FOR', 'WHISPER_ACCELERATION',
+            'LEMONADE_EXTERNAL', 'AMD_INFERENCE_RUNTIME', 'AMD_INFERENCE_MANAGED', 'EXTERNAL_LLM_URL'}
+        saved = {}
+        for line in environment.snapshot(install_dir / '.env')[0].decode('utf-8').splitlines():
+            match = environment.ASSIGNMENT.fullmatch(line)
+            if match and match[1] in keys:
+                if match[1] in saved:
+                    raise ValueError('duplicate-compose-selection')
+                saved[match[1]] = environment.values.parse_env_value(match[2])
+        backend = saved.get('GPU_BACKEND', '').strip().lower()
+        tier = saved.get('TIER', '').strip() or '1'
+        count = saved.get('GPU_COUNT', '').strip() or '1'
+        mode = saved.get('ODS_MODE', '').strip().lower() or 'local'
+        if (not re.fullmatch('[a-z][a-z0-9_-]*', backend)
+                or not re.fullmatch('[A-Za-z0-9_]+', tier)
+                or not re.fullmatch('[0-9]+', count)
+                or mode not in {'local', 'cloud', 'hybrid', 'lemonade'}):
+            raise ValueError('saved-compose-selection-required')
+        resolver = install_dir / 'scripts/resolve-compose-stack.sh'
+        if not resolver.is_file() or resolver.resolve(strict=True) != resolver:
+            raise ValueError('installed-compose-resolver-required')
+        resolver_env = {**process_env, **{key: saved.get(key, '') for key in keys}}
+        raw = subprocess.run(['/bin/bash', str(resolver), '--script-dir', str(install_dir),
+            '--tier', tier, '--gpu-backend', backend, '--gpu-count', count, '--ods-mode', mode],
+            cwd=install_dir, env=resolver_env, capture_output=True, text=True,
+            check=True, timeout=30).stdout
+    tokens = shlex.split(raw)
+    if not tokens or len(tokens) % 2 or any(token != '-f' for token in tokens[::2]):
+        raise ValueError('resolved-compose-flags-required')
+    return tokens
+
+
 def refresh_clients(install_dir):
     """Recreate native consumers from the resolved stack, preserving volumes.
 
@@ -137,9 +178,7 @@ def refresh_clients(install_dir):
     process_env = {key: value for key, value in os.environ.items()
         if key not in ('DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH', 'DOCKER_HOST')}
     process_env['DOCKER_HOST'] = endpoint
-    tokens = shlex.split((install_dir / '.compose-flags').read_text())
-    if not tokens or len(tokens) % 2 or any(token != '-f' for token in tokens[::2]):
-        raise ValueError('resolved-compose-flags-required')
+    tokens = compose_flags(install_dir, process_env)
     command = [transport['docker'], 'compose', '--project-directory', str(install_dir),
         '--project-name', transport['project'], '--env-file', str(install_dir / '.env')]
     for value in stack.resolve_files(install_dir, tokens[1::2]):

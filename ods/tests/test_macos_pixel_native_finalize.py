@@ -124,12 +124,20 @@ def test_update_publication_is_atomic_and_replayable(tmp_path, monkeypatch, faul
     assert not list(directory.glob('.selection-*'))
 
 
+@pytest.mark.parametrize('cached', [True, False])
 @pytest.mark.parametrize('fault', [None, 'socket', 'flags', 'project', 'missing', 'legacy-map',
-    'legacy-list', 'start', 'probe'])
-def test_refresh_clients_uses_native_stack_and_verifies_from_dashboard(tmp_path, monkeypatch, fault):
+    'legacy-list', 'start', 'probe', 'escape'])
+def test_refresh_clients_uses_native_stack_and_verifies_from_dashboard(tmp_path, monkeypatch, fault, cached):
     installed = tmp_path / 'ods'
     installed.mkdir()
-    (installed / '.compose-flags').write_text('--invalid' if fault == 'flags' else '-f base.yaml -f legacy.yaml')
+    flags = '--invalid' if fault == 'flags' else '-f base.yaml -f legacy.yaml'
+    if cached: (installed / '.compose-flags').write_text(flags)
+    (installed / '.env').write_text('GPU_BACKEND="apple" # saved hardware\nODS_MODE=local\n')
+    (installed / '.env').chmod(0o600)
+    resolver = installed / 'scripts/resolve-compose-stack.sh'
+    resolver.parent.mkdir()
+    resolver.write_text('# fixture')
+    (tmp_path / 'outside.yaml').write_text('services: {}')
     for name in ('base.yaml', 'native.yaml'): (installed / name).write_text('services: {}')
     environment = dict(PIXEL_HISTORY_DOCKER='/docker', PIXEL_HISTORY_PROJECT='ods',
         PIXEL_HISTORY_IMAGE='fixture', PIXEL_HISTORY_USER='501:20', DOCKER_HOST='unix:///local.sock')
@@ -137,9 +145,12 @@ def test_refresh_clients_uses_native_stack_and_verifies_from_dashboard(tmp_path,
         _native_transport_environment=lambda *a: None, _launchd=SimpleNamespace(GATEWAY_PLIST='/gateway.plist'))
     def resolve(path, files):
         assert path == installed and files == ['base.yaml', 'legacy.yaml']
-        return ['base.yaml', 'native.yaml']
+        return ['../outside.yaml'] if fault == 'escape' else ['base.yaml', 'native.yaml']
     stack = SimpleNamespace(resolve_files=resolve)
-    monkeypatch.setattr(module, 'helper', lambda name: installer if name == 'pixel-macos-access-install' else stack)
+    native_env = module.helper('pixel-native-env')
+    monkeypatch.setattr(module, 'helper', lambda name: {
+        'pixel-macos-access-install': installer, 'pixel-native-stack': stack,
+        'pixel-native-env': native_env}[name])
     monkeypatch.setattr(module.Path, 'is_socket', lambda path: fault != 'socket')
     monkeypatch.setenv('DOCKER_CONTEXT', 'remote')
     monkeypatch.setenv('DOCKER_TLS_VERIFY', '1')
@@ -150,7 +161,17 @@ def test_refresh_clients_uses_native_stack_and_verifies_from_dashboard(tmp_path,
     if fault == 'legacy-map': document['services']['dashboard-api']['extra_hosts'] = {'pixel-edge': 'host-gateway'}
     if fault == 'legacy-list': document['services']['open-webui']['extra_hosts'] = ['Pixel-Edge=host-gateway']
     calls = []
+    resolutions = []
     def run(command, **kwargs):
+        if command[0] == '/bin/bash':
+            resolutions.append(command)
+            assert not cached
+            assert command == ['/bin/bash', str(resolver), '--script-dir', str(installed),
+                '--tier', '1', '--gpu-backend', 'apple', '--gpu-count', '1', '--ods-mode', 'local']
+            assert kwargs['env']['GPU_BACKEND'] == 'apple'
+            assert kwargs['env']['DOCKER_HOST'] == 'unix:///local.sock'
+            assert kwargs['check'] is True and kwargs['timeout'] == 30
+            return SimpleNamespace(stdout=flags)
         calls.append(command)
         assert str(installed / 'native.yaml') in command
         assert str(installed / 'legacy.yaml') not in command
@@ -170,6 +191,70 @@ def test_refresh_clients_uses_native_stack_and_verifies_from_dashboard(tmp_path,
             'dashboard-api', 'open-webui']
         assert calls[2][-6:-1] == ['exec', '-T', 'dashboard-api', 'python3', '-c']
         assert 'http://pixel-edge:9595/health' in calls[2][-1]
+    assert len(resolutions) == (0 if cached or fault == 'socket' else 1)
+    assert (installed / '.compose-flags').exists() == cached
+    if cached: assert (installed / '.compose-flags').read_text() == flags
+
+
+@pytest.mark.parametrize('fault', [None, 'missing-gpu', 'invalid-gpu', 'duplicate', 'bad-count',
+    'bad-mode', 'resolver-missing', 'resolver-error', 'resolver-timeout', 'empty', 'flags',
+    'corrupt-cache', 'dangling-cache', 'none', 'arc', 'suppressed-env', 'legacy-skip'])
+def test_missing_cache_resolves_saved_selection_fail_closed(tmp_path, monkeypatch, fault):
+    values = dict(TIER='AP_PRO', GPU_BACKEND='apple', GPU_COUNT='2', ODS_MODE='cloud',
+        WHISPER_ACCELERATION='cpu', EXTERNAL_LLM_URL='http://localhost:1234',
+        ODS_SKIP_GPU_OVERLAYS='whisper')
+    if fault == 'missing-gpu': del values['GPU_BACKEND']
+    if fault == 'invalid-gpu': values['GPU_BACKEND'] = '$(false)'
+    if fault in ('none', 'arc'): values['GPU_BACKEND'] = fault
+    if fault in ('suppressed-env', 'legacy-skip'):
+        del values['ODS_SKIP_GPU_OVERLAYS']
+        del values['EXTERNAL_LLM_URL']
+    if fault == 'legacy-skip': values['ODS_SKIP_GPU_OVERLAYS_FOR'] = 'whisper'
+    if fault == 'bad-count': values['GPU_COUNT'] = 'many'
+    if fault == 'bad-mode': values['ODS_MODE'] = 'unknown'
+    text = ''.join(key + '=' + value + '\n' for key, value in values.items())
+    if fault == 'duplicate': text += 'GPU_BACKEND=cpu\n'
+    marker = tmp_path / 'must-not-exist'
+    text += 'UNRELATED=$(touch ' + str(marker) + ')\nBASH_ENV=/untrusted\n'
+    env_path = tmp_path / '.env'
+    env_path.write_text(text)
+    env_path.chmod(0o600)
+    resolver = tmp_path / 'scripts/resolve-compose-stack.sh'
+    resolver.parent.mkdir()
+    if fault != 'resolver-missing': resolver.write_text('# fixture')
+    cache = tmp_path / '.compose-flags'
+    if fault == 'corrupt-cache': cache.write_text('--bad')
+    if fault == 'dangling-cache': cache.symlink_to(tmp_path / 'absent')
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command[-8:] == ['--tier', 'AP_PRO', '--gpu-backend', values['GPU_BACKEND'],
+            '--gpu-count', '2', '--ods-mode', 'cloud']
+        assert kwargs['env']['GPU_BACKEND'] == values['GPU_BACKEND']
+        assert kwargs['env']['WHISPER_ACCELERATION'] == 'cpu'
+        for key in ('EXTERNAL_LLM_URL', 'ODS_SKIP_GPU_OVERLAYS', 'ODS_SKIP_GPU_OVERLAYS_FOR'):
+            assert kwargs['env'][key] == values.get(key, '')
+        assert kwargs['env']['LEMONADE_EXTERNAL'] == ''
+        assert 'UNRELATED' not in kwargs['env'] and 'BASH_ENV' not in kwargs['env']
+        if fault == 'resolver-error': raise subprocess.CalledProcessError(1, command)
+        if fault == 'resolver-timeout': raise subprocess.TimeoutExpired(command, 30)
+        return SimpleNamespace(stdout='' if fault == 'empty' else
+            '--bad' if fault == 'flags' else '-f base.yaml -f native.yaml')
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    process_env = {'GPU_BACKEND': 'nvidia', 'LEMONADE_EXTERNAL': 'true',
+        'EXTERNAL_LLM_URL': 'http://stale:1234', 'ODS_SKIP_GPU_OVERLAYS': 'stale',
+        'ODS_SKIP_GPU_OVERLAYS_FOR': 'stale'}
+    successes = (None, 'none', 'arc', 'suppressed-env', 'legacy-skip')
+    if fault not in successes:
+        with pytest.raises((ValueError, OSError, subprocess.SubprocessError)):
+            module.compose_flags(tmp_path, process_env)
+    else:
+        assert module.compose_flags(tmp_path, process_env) == ['-f', 'base.yaml', '-f', 'native.yaml']
+    assert len(calls) == (1 if fault in (*successes, 'resolver-error', 'resolver-timeout', 'empty', 'flags') else 0)
+    assert env_path.read_text() == text
+    assert not marker.exists()
+    assert module.os.path.lexists(cache) == (fault in ('corrupt-cache', 'dangling-cache'))
+    if fault == 'corrupt-cache': assert cache.read_text() == '--bad'
 
 
 @pytest.mark.parametrize('fault', [None, 'runtime', 'services', 'storage', 'install', 'pending', 'inactive'])
