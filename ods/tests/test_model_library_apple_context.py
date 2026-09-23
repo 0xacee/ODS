@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import importlib.util
 from pathlib import Path
 
 
@@ -60,10 +61,32 @@ def test_apple_silicon_16gb_avoids_8gb_profile() -> None:
     assert int(env.get("MAX_CONTEXT", "0")) > 16384
 
 
+def test_profile_scope_preserves_larger_hosts_and_low_ram_guard() -> None:
+    spec = importlib.util.spec_from_file_location("ods_apple_selector", SELECTOR)
+    selector = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(selector)
+    model = next(m for m in selector.load_catalog(CATALOG) if m["id"] == "phi4-mini-q4")
+    for ram in (7, 8, 10):
+        assert selector.matching_runtime_profile(model, "apple", "unified", 0, ram, "arm64")
+    for ram in (11, 16, 24, 32, 64, 128):
+        assert selector.matching_runtime_profile(model, "apple", "unified", 0, ram, "arm64") is None
+        assert not selector.hardware_matching_profiles(model, "apple", "unified", 0, "arm64", ram), (
+            "A larger host must not lose the model through the profile safety gate", ram
+        )
+    # Below the minimum, the profile still forbids an unsafe generic fallback.
+    assert selector.matching_runtime_profile(model, "apple", "unified", 0, 6, "arm64") is None
+    assert selector.hardware_matching_profiles(model, "apple", "unified", 0, "arm64", 6)
+    for backend in ("amd", "nvidia", "cpu"):
+        for ram in (8, 16, 32, 64):
+            assert not selector.hardware_matching_profiles(model, backend, "discrete", 8192, "amd64", ram)
+            assert not selector.hardware_matching_profiles(model, backend, "unified", 8192, "amd64", ram)
+
+
 def main() -> int:
     test_apple_silicon_8gb_clamps_phi4_mini_context()
     test_apple_silicon_16gb_avoids_8gb_profile()
-    print("Apple Silicon model selector context tests passed: 2")
+    test_profile_scope_preserves_larger_hosts_and_low_ram_guard()
+    print("Apple Silicon model selector context tests passed: 3")
     return 0
 
 
