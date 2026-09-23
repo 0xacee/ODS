@@ -283,7 +283,10 @@ def test_reviewed_replacement_launch_identity_clears_seventeen_owner_groups(monk
 
 
 @pytest.mark.parametrize('fault', [None, 'held', 'releasing', 'incomplete', 'unknown-bytes',
-    'no-proof', 'wrong-policy', 'pending', 'busy', 'unavailable', 'hold-changed-during-proof'])
+    'no-proof', 'wrong-policy', 'pending', 'busy', 'unavailable', 'hold-changed-during-proof',
+    'late-proof-loss', 'late-access-birth', 'late-gateway-birth', 'late-transition', 'late-policy',
+    'late-launchctl-proof-loss', 'final-status-birth-change', 'late-revision', 'lock-busy',
+    'repair-removed-before-lock', 'archive-changed-before-lock'])
 @pytest.mark.parametrize('loading', ['portable-function', 'native-module'])
 def test_real_finalizer_path_never_promotes_repair_to_access_readiness(monkeypatch, fault, loading):
     if loading == 'native-module' and os.name == 'nt':
@@ -307,34 +310,77 @@ def test_real_finalizer_path_never_promotes_repair_to_access_readiness(monkeypat
     if fault == 'wrong-policy': status.update(effective_mode='full-access', configured_mode='full-access')
     if fault in ('pending', 'busy'): status[fault] = True
     if fault == 'unavailable': status.update(available=False)
-    checks = []
+    checks, transitions = [], set()
+    process_identities = {'access': [123, 456, 0], 'gateway': [789, 456, 0], 'relay': [900, 456, 0]}
+    locked, repair_present, status_reads, launchctl_reads = False, True, 0, 0
+    @contextmanager
+    def recovery_locked(*, completed_digest):
+        nonlocal locked, repair_present
+        assert completed_digest == CANDIDATE and not locked
+        if fault == 'lock-busy': raise ValueError('transition-busy')
+        locked = True
+        checks.append('lock')
+        if fault == 'repair-removed-before-lock': repair_present = False
+        if fault == 'archive-changed-before-lock': archive['phase'] = 'restored'
+        try:
+            yield
+        finally:
+            locked = False
+            checks.append('unlock')
+    def recovery_bridge(**kwargs):
+        assert kwargs == dict(current_digest=CURRENT, candidate_digest=CANDIDATE, owner_name='fixture')
+        return SimpleNamespace(recovery_locked=recovery_locked)
     def load(**kwargs):
+        assert locked
         checks.append('effective-records')
         assert kwargs == dict(current_digest=CURRENT, candidate_digest=CANDIDATE,
                               owner_name='fixture', completed=True)
         return plan, SimpleNamespace(value=archive), projection(records, intent, snapshots)
     def live_status(*args, **kwargs):
+        nonlocal status_reads
+        assert locked
+        status_reads += 1
         assert kwargs == {'owner_gid': OWNER['gid']}
         checks.append('read-only-access-proof')
         if fault == 'hold-changed-during-proof': snapshots['hold'] += b' '
-        return status
+        if fault == 'final-status-birth-change' and status_reads == 2: process_identities['access'][0] += 1
+        return dict(status)
+    def verify_services(value):
+        assert locked
+        checks.append('services-ready')
+        if fault == 'late-proof-loss': status.update(available=False, runtime_verified=False, reason='inspection-failed')
+        if fault == 'late-access-birth': process_identities['access'][0] += 1
+        if fault == 'late-gateway-birth': process_identities['gateway'][0] += 1
+        if fault == 'late-transition': transitions.add('transition.json')
+        if fault == 'late-policy': transitions.add('policy-activation.json')
+        if fault == 'late-revision': status['revision'] = 'different-proof'
+    def launchctl(*args, **kwargs):
+        nonlocal launchctl_reads
+        assert locked
+        launchctl_reads += 1
+        if fault == 'late-launchctl-proof-loss' and launchctl_reads == 3:
+            status.update(available=False, runtime_verified=False, reason='inspection-failed')
+        return SimpleNamespace(stdout='state = running\n')
     installer = SimpleNamespace(_controller_repair_path=lambda value: repair_path,
         _controller_private_bytes=lambda *args: raw, _repair=repair,
         _load_upgrade_recovery=load, _verify_recovery_bindings=lambda *args: None,
         _controller_repair_snapshots=lambda value: dict(snapshots),
-        _upgrade_services=lambda *args: (None, {'access': object()}),
+        _upgrade_services=lambda *args: (None, {name: name for name in process_identities}),
+        _upgrade_service_identity=lambda service: tuple(process_identities[service]),
+        _recovery_bridge=recovery_bridge,
         _policy=SimpleNamespace(policy_state=lambda value: {'activeMode': 'sandboxed'}),
-        _verify_new_services=lambda value: checks.append('services-ready'))
+        _verify_new_services=verify_services)
     monkeypatch.setitem(sys.modules, 'pixel_access_bridge', SimpleNamespace(private_json=lambda path, *args:
         {'selection': selection} if path.name == 'service-installation.json' else archive))
     monkeypatch.setitem(sys.modules, 'pixel_macos_custody', SimpleNamespace(protected_bytes=lambda path, **kwargs:
         (b'unknown' if fault == 'unknown-bytes' else after) if path == repair.TARGET else b'keep'))
     namespace = dict(sys=SimpleNamespace(platform='darwin', path=[]),
-        os=SimpleNamespace(geteuid=lambda: 0, path=SimpleNamespace(lexists=lambda path: path == repair_path)),
+        os=SimpleNamespace(geteuid=lambda: 0, path=SimpleNamespace(lexists=lambda path:
+            path == repair_path and repair_present or path.name in transitions)),
         re=re, Path=Path, HERE=ROOT / 'installers/macos/lib', base64=base64,
         hashlib=__import__('hashlib'), pwd=SimpleNamespace(getpwnam=lambda name: plan['owner']),
         helper=lambda name: installer if name == 'pixel-macos-access-install' else SimpleNamespace(controller_status=live_status),
-        subprocess=SimpleNamespace(run=lambda *args, **kwargs: SimpleNamespace(stdout='state = running\n')))
+        subprocess=SimpleNamespace(run=launchctl))
     if loading == 'native-module':
         spec = importlib.util.spec_from_file_location('repair_native_finalize',
             ROOT / 'installers/macos/lib/pixel-native-finalize.py')
@@ -344,6 +390,7 @@ def test_real_finalizer_path_never_promotes_repair_to_access_readiness(monkeypat
             monkeypatch.setattr(native, name, value)
         proof = native.protected_proof
     else:
+        source_function('installers/macos/lib/pixel-native-finalize.py', '_protected_selection_proof', namespace)
         proof = source_function('installers/macos/lib/pixel-native-finalize.py', 'protected_proof', namespace)
     if fault:
         with pytest.raises(ValueError):
@@ -351,7 +398,38 @@ def test_real_finalizer_path_never_promotes_repair_to_access_readiness(monkeypat
     else:
         assert proof('fixture', CANDIDATE, 'f' * 64, 'a' * 40) == dict(
             status='active', runtimeDigest=CANDIDATE, serviceDigest='f' * 64)
-        assert checks == ['effective-records', 'read-only-access-proof', 'services-ready']
+        assert checks == ['lock', 'effective-records', 'read-only-access-proof', 'services-ready',
+                          'read-only-access-proof', 'unlock']
+    assert not locked
+
+
+@pytest.mark.parametrize('pending', [False, True])
+def test_unrepaired_finalization_keeps_the_existing_unlocked_contract(monkeypatch, pending):
+    body = b'activated'
+    archive = {'phase': 'active', 'candidateDigest': CANDIDATE, 'files': [{
+        'path': '/protected/file', 'after': base64.b64encode(body).decode(), 'afterSha256': repair.sha(body)}]}
+    selection = dict(expected_digest='f' * 64, expected_ref='a' * 40)
+    checked = []
+    # Deliberately no recovery bridge, repair verifier, or access-status API:
+    # an ordinary archive still follows its original public proof contract.
+    installer = SimpleNamespace(_controller_repair_path=lambda value: Path('/protected/repair.json'),
+        _verify_new_services=lambda plan: checked.append(plan))
+    monkeypatch.setitem(sys.modules, 'pixel_access_bridge', SimpleNamespace(private_json=lambda path, *args:
+        {'selection': selection} if path.name == 'service-installation.json' else archive))
+    monkeypatch.setitem(sys.modules, 'pixel_macos_custody', SimpleNamespace(protected_bytes=lambda *args, **kwargs: body))
+    namespace = dict(sys=SimpleNamespace(platform='darwin', path=[]),
+        os=SimpleNamespace(geteuid=lambda: 0, path=SimpleNamespace(lexists=lambda path: pending and path.name == 'runtime-upgrade.json')),
+        re=re, Path=Path, HERE=ROOT / 'installers/macos/lib', base64=base64, hashlib=__import__('hashlib'),
+        pwd=SimpleNamespace(getpwnam=lambda owner: SimpleNamespace(pw_uid=501)), helper=lambda name: installer,
+        subprocess=SimpleNamespace(run=lambda *args, **kwargs: SimpleNamespace(stdout='state = running\n')))
+    source_function('installers/macos/lib/pixel-native-finalize.py', '_protected_selection_proof', namespace)
+    proof = source_function('installers/macos/lib/pixel-native-finalize.py', 'protected_proof', namespace)
+    if pending:
+        with pytest.raises(ValueError, match='still-pending'): proof('fixture', CANDIDATE, 'f' * 64, 'a' * 40)
+        assert checked == []
+    else:
+        assert proof('fixture', CANDIDATE, 'f' * 64, 'a' * 40)['status'] == 'active'
+        assert len(checked) == 1
 
 
 @pytest.mark.parametrize('field', ['available', 'scope', 'configured_mode', 'effective_mode',
