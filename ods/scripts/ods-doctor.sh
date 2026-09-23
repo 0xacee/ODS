@@ -299,6 +299,35 @@ _doctor_check_external_llm() {
 _doctor_check_llama_server() {
     local port="${OLLAMA_PORT:-${LLAMA_SERVER_PORT:-${SERVICE_PORTS[llama-server]:-11434}}}"
     local health_path="${SERVICE_HEALTH[llama-server]:-/health}"
+    LLM_PROVIDER="llama-server"
+    LLM_RECOVERY=""
+
+    if [[ "$(uname -s)" == Darwin ]]; then
+        port="${ODS_NATIVE_LLAMA_PORT:-8080}"
+        local probe_host
+        # Reuse the installer's bind handling without importing its globals.
+        probe_host="$(
+            source "$ROOT_DIR/installers/macos/lib/constants.sh"
+            macos_bind_probe_host "${BIND_ADDRESS:-127.0.0.1}"
+        )" || probe_host=""
+        LLM_URL=""
+        if [[ "$port" =~ ^[0-9]+$ && ${#port} -le 5 ]] \
+            && (( 10#$port > 0 && 10#$port <= 65535 )) && [[ -n "$probe_host" ]]; then
+            LLM_URL="http://${probe_host}:${port}"
+        fi
+        if [[ -n "$LLM_URL" ]] && command -v curl >/dev/null 2>&1 \
+            && curl -sf --max-time 5 "${LLM_URL}/health" >/dev/null 2>&1; then
+            LLM_STATUS="ok"
+            log_ok "LLM backend: llama-server (native Metal) - responding"
+            log_ok "  Endpoint : $LLM_URL"
+        else
+            LLM_STATUS="fail"
+            LLM_RECOVERY="check BIND_ADDRESS and ODS_NATIVE_LLAMA_PORT; run ods restart"
+            log_fail "LLM backend: llama-server (native Metal) - not responding"
+            log_info "  Recovery : $LLM_RECOVERY"
+        fi
+        return
+    fi
     local container_name
     container_name=$(sr_container "llama-server" 2>/dev/null || echo "ods-llama-server")
 
@@ -507,8 +536,7 @@ collect_extension_diagnostics() {
         # Check container state
         if [[ "$DOCKER_DAEMON" == "true" && -n "$container" ]]; then
             local inspect_output
-            inspect_output=$(docker inspect --format '{{.State.Status}}' "$container" 2>&1)
-            if [[ $? -eq 0 ]]; then
+            if inspect_output=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null); then
                 container_state="$inspect_output"
             else
                 container_state="not_found"
@@ -526,6 +554,15 @@ collect_extension_diagnostics() {
                         issues+=("health_check_failed")
                     fi
                 fi
+            elif [[ "$container_state" == exited \
+                    && "${SERVICE_PORTS[$sid]:-0}" == 0 \
+                    && "${SERVICE_STARTUP_CHECKS[$sid]:-true}" == false \
+                    && "${SERVICE_SOCKET_ONLY[$sid]:-0}" != 1 ]] \
+                && [[ "$(docker inspect --format '{{.State.ExitCode}} {{.State.OOMKilled}}' "$container" 2>/dev/null)" == '0 false' ]] \
+                && jq -e --arg sid "$sid" 'type == "object" and .service_id == $sid and .status == "started" and .exit_verified == true' \
+                    "$ROOT_DIR/data/extension-progress/$sid.json" >/dev/null 2>&1; then
+                # CLI tools finish normally; a stopped daemon is still a fault.
+                health_status="completed"
             else
                 issues+=("container_not_running")
             fi
