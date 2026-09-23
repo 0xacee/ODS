@@ -39,7 +39,7 @@ export function createRunProgressBudget() {
       if (++rounds > RUN_PROGRESS_LIMITS.roundsWithoutProgress) terminal = true;
       return terminal;
     },
-    observeResult({ callId, tool, params, failed, pending = false }) {
+    observeResult({ callId, tool, params, failed, pending = false, discovery = false }) {
       if (terminal || typeof callId !== 'string' || !callId || seenCalls.has(callId)) return;
       seenCalls.add(callId);
       if (seenCalls.size > 256) seenCalls.delete(seenCalls.values().next().value);
@@ -53,7 +53,7 @@ export function createRunProgressBudget() {
       // Discovery changes the available schemas, not the task's outcome. A
       // successful search between failed actions must not erase their history
       // or let differently worded searches keep a run alive indefinitely.
-      if (tool === 'tool_search' || tool === 'tool_describe' || tool === 'pixel_ods_skill') return;
+      if (discovery || tool === 'tool_search' || tool === 'tool_describe' || tool === 'pixel_ods_skill') return;
       consecutiveFailures = 0;
       // An actual running-process receipt is a verified wait, not a failure.
       // Plain text saying "running" must never be supplied as this signal.

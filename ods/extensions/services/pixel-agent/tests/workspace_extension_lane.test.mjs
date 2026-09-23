@@ -1,14 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createToolLoopGuard, WORKSPACE_EXTENSION_SCOPE_REASON} from '../plugin/tool-loop-guard.mjs';
+import {createToolLoopGuard, WORKSPACE_EXTENSION_SCOPE_REASON, EXTENSION_MUTATION_EXCLUDED_REASON} from '../plugin/tool-loop-guard.mjs';
 
 const context = runId => ({agentId:'pixel', runId, sessionId:'same-owner-session'});
 const pending = {details:{schemaVersion:1,kind:'ods-extension-request-status',
   chatId:'chat',requestId:'request',authorizationMode:'install',requestState:'pending',
   proposalAccepted:true,integrationBound:false,prepared:true,extensionId:'example',runtimeStatus:'installing',
   observation:{kind:'ods-extension-pending-handoff',chatId:'chat',requestId:'request',extensionId:'example'}}};
-const specialistNames = ['pixel_ods_extensions','pixel_ods_extension_request_status',
-  'pixel_ods_extension_request_prepare','pixel_ods_extension_request_advance','pixel_ods_extension_request_retry',
+const specialistNames = ['pixel_ods_extension_request_prepare','pixel_ods_extension_request_advance','pixel_ods_extension_request_retry',
   'pixel_ods_python_library_proposal','pixel_ods_source_proposal','pixel_ods_extension_proposal'];
 function event(name, params = {}, result, wrapped = false) {
   const sourceName = ['read','write','edit','exec','process','apply_patch'].includes(name) ? 'core' : 'pixel-ods';
@@ -32,6 +31,8 @@ for (const wrapped of [false,true]) test(`workspace rejects extension detours be
     WORKSPACE_EXTENSION_SCOPE_REASON);
   for (const name of specialistNames) assert.equal(call(guard,ctx,name,{},wrapped)?.blockReason,
     WORKSPACE_EXTENSION_SCOPE_REASON,name);
+  for (const name of ['pixel_ods_extensions','pixel_ods_extension_request_status'])
+    assert.notEqual(call(guard,ctx,name,{},wrapped)?.block,true,'read-only discovery stays available');
   assert.notEqual(call(guard,ctx,'write',{path:'example/index.html',content:'<h1>new</h1>'},wrapped)?.block,true);
   guard.afterToolCall(event('write',{path:'example/index.html',content:'<h1>new</h1>'},
     {content:[{type:'text',text:'Successfully wrote example/index.html'}]},wrapped),ctx);
@@ -58,10 +59,72 @@ for (const prompt of [
 ]) test(`ordinary work keeps specialists out: ${prompt}`, () => {
   const guard=createToolLoopGuard(), ctx=context('ordinary');
   guard.observeRun(ctx,'pixel',{prompt});
-  assert.equal(call(guard,ctx,'pixel_ods_extension_request_prepare')?.blockReason,WORKSPACE_EXTENSION_SCOPE_REASON);
+  assert.ok([WORKSPACE_EXTENSION_SCOPE_REASON,EXTENSION_MUTATION_EXCLUDED_REASON].includes(
+    call(guard,ctx,'pixel_ods_extension_request_prepare')?.blockReason));
   assert.notEqual(call(guard,ctx,'web_search',{query:'official Python documentation'})?.block,true);
   assert.notEqual(call(guard,ctx,'tool_search',{query:'pixel_ods_workspace_preview'})?.block,true);
 });
+
+for (const wrapped of [false,true]) test(`framework integration retains safe extension metadata without adopting its lifecycle (wrapped=${wrapped})`, () => {
+  const guard=createToolLoopGuard(),ctx=context('framework-metadata');
+  guard.observeRun(ctx,'pixel',{prompt:'Integrate the ODS extension example into my existing React project in /workspace/app and run its tests.'});
+  for (const name of ['pixel_ods_extensions','pixel_ods_extension_request_status'])
+    assert.notEqual(call(guard,ctx,name,{},wrapped)?.block,true,name);
+  guard.afterToolCall(event('pixel_ods_extension_request_status',{},pending,wrapped),ctx);
+  assert.notEqual(call(guard,ctx,'read',{path:'app/package.json'},wrapped)?.block,true);
+  assert.equal(call(guard,ctx,'pixel_ods_extension_request_prepare',{},wrapped)?.blockReason,WORKSPACE_EXTENSION_SCOPE_REASON);
+  assert.doesNotMatch(guard.deliveryVerificationForRun(ctx.runId).text ?? '',/Operations Broker|installation/);
+  assert.doesNotMatch(guard.beforeAgentFinalize({lastAssistantMessage:'Not yet complete.'},ctx)?.retry?.instruction ?? '',/extension_request/);
+});
+
+test('a frontend using existing ODS services can inspect extension metadata without requiring lifecycle work', () => {
+  const guard=createToolLoopGuard(),ctx=context('existing-services');
+  guard.observeRun(ctx,'pixel',{prompt:'Build a frontend in /workspace/app using the existing ODS services.'});
+  assert.notEqual(call(guard,ctx,'pixel_ods_extensions')?.block,true);
+  assert.notEqual(call(guard,ctx,'pixel_ods_extension_request_status')?.block,true);
+  assert.notEqual(call(guard,ctx,'read',{path:'app/package.json'})?.block,true);
+});
+
+for (const wrapped of [false,true]) test(`available metadata still respects an explicit owner read exclusion (wrapped=${wrapped})`, () => {
+  const guard=createToolLoopGuard(),ctx=context('no-metadata');
+  guard.observeRun(ctx,'pixel',{prompt:'Fix /workspace/app.py. Do not query the extension catalog or extension request status.'});
+  for(const name of ['pixel_ods_extensions','pixel_ods_extension_request_status'])
+    assert.equal(call(guard,ctx,name,{},wrapped)?.block,true,name);
+});
+
+for (const wrapped of [false,true]) test(`current mixed no-mutation instruction overrides saved install authority (wrapped=${wrapped})`, () => {
+  const guard=createToolLoopGuard(),ctx=context('mixed-no-mutation');
+  guard.observeRun(ctx,'pixel',{prompt:'Build /workspace/app and inspect the managed extension request status. Do not prepare, advance, retry, or install any extension.'},
+    {executionHost:'sandbox'});
+  assert.notEqual(call(guard,ctx,'pixel_ods_extension_request_status',{},wrapped)?.block,true);
+  guard.afterToolCall(event('pixel_ods_extension_request_status',{},pending,wrapped),ctx);
+  for (const name of specialistNames) assert.equal(call(guard,ctx,name,{},wrapped)?.blockReason,EXTENSION_MUTATION_EXCLUDED_REASON,name);
+  assert.notEqual(call(guard,ctx,'read',{path:'app/package.json'},wrapped)?.block,true);
+  assert.doesNotMatch(guard.beforeAgentFinalize({lastAssistantMessage:'Status inspected.'},ctx)?.retry?.instruction ?? '',/extension_request_(?:prepare|advance|retry)|(?:source|library)_proposal/);
+});
+
+for (const wrapped of [false,true]) {
+  test(`workspace metadata reads cannot reset consecutive failure accounting (wrapped=${wrapped})`, () => {
+    const guard=createToolLoopGuard(),ctx=context('metadata-failures');
+    guard.observeRun(ctx,'pixel',{prompt:'Fix /workspace/app.py and run unit tests.'});
+    for (let i=0;i<4;i++) {
+      guard.afterToolCall({...event('exec',{command:'python -m unittest'},
+        {isError:true,content:[{type:'text',text:'failed'}]},wrapped),toolCallId:`failure-${i}`},ctx);
+      guard.afterToolCall({...event('pixel_ods_extension_request_status',{},pending,wrapped),toolCallId:`metadata-${i}`},ctx);
+    }
+    assert.match(call(guard,ctx,'read',{path:'app.py'})?.blockReason ?? '',/stopped after repeated tool failures/);
+  });
+  test(`workspace metadata-only rounds retain the global no-progress limit (wrapped=${wrapped})`, () => {
+    const guard=createToolLoopGuard(),ctx=context('metadata-rounds');
+    guard.observeRun(ctx,'pixel',{prompt:'Fix /workspace/app.py and run unit tests.'});
+    for (let i=0;i<9;i++) {
+      guard.observeModelCall({},ctx);
+      guard.afterToolCall({...event('pixel_ods_extensions',{query:`catalog-${i}`},
+        {details:{status:'succeeded'}},wrapped),toolCallId:`catalog-${i}`},ctx);
+    }
+    assert.match(call(guard,ctx,'read',{path:'app.py'})?.blockReason ?? '',/stopped after repeated tool failures/);
+  });
+}
 
 test('repository investigation within an extension route retains its terminal pending handoff', () => {
   const aborted=[];

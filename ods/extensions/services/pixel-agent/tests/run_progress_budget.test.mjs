@@ -67,6 +67,18 @@ test('after-tool and persist delivery of one failure count only once', () => {
   assert.equal(budget.exhausted, true);
 });
 
+test('caller-classified metadata cannot reset failures or count as task progress', () => {
+  const budget=createRunProgressBudget();
+  for(let i=0;i<4;i++) {
+    budget.observeResult({callId:`failure-${i}`,tool:'exec',failed:true});
+    budget.observeResult({callId:`metadata-${i}`,tool:'tool_call',failed:false,discovery:true});
+    assert.equal(budget.exhausted,i===3);
+  }
+  const failedMetadata=createRunProgressBudget();
+  for(let i=0;i<4;i++) failedMetadata.observeResult({callId:`metadata-${i}`,tool:'tool_call',failed:true,discovery:true});
+  assert.equal(failedMetadata.exhausted,true,'metadata errors still count');
+});
+
 test('verified pending process receipts do not exhaust progress rounds', () => {
   const budget = createRunProgressBudget();
   for (let i = 0; i < 100; i++) {
