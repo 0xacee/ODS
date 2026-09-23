@@ -12,7 +12,15 @@ extract_function() {
     ' "$ROOT/ods-cli"
 }
 
-eval "$(extract_function _ods_cli_wait_for_hermes_ready)"
+# Keep the real readiness probes separate from the retry-only mocks below.
+# A missing extraction must fail the first probe.
+actual_hermes_readiness() {
+    echo "Hermes readiness implementation was not extracted from ods-cli" >&2
+    return 1
+}
+
+eval "$(extract_function _ods_cli_wait_for_hermes_ready \
+    | sed '1s/^_ods_cli_wait_for_hermes_ready()/actual_hermes_readiness()/')"
 eval "$(extract_function _ods_cli_wait_for_hermes_ready_with_retry)"
 
 success() { :; }
@@ -39,27 +47,27 @@ docker() {
 
 MOCK_CONTAINER_MISSING=1
 ODS_HERMES_READY_TIMEOUT=1 ODS_HERMES_READY_INTERVAL=1 \
-    _ods_cli_wait_for_hermes_ready
+    actual_hermes_readiness
 
 MOCK_CONTAINER_MISSING=0
 printf '%s\n' starting healthy > "$sequence_file"
 ODS_HERMES_READY_TIMEOUT=2 ODS_HERMES_READY_INTERVAL=1 \
-    _ods_cli_wait_for_hermes_ready
+    actual_hermes_readiness
 
 printf '%s\n' unhealthy healthy > "$sequence_file"
 ODS_HERMES_READY_TIMEOUT=2 ODS_HERMES_READY_INTERVAL=1 \
-    _ods_cli_wait_for_hermes_ready
+    actual_hermes_readiness
 
 printf '%s\n' unhealthy unhealthy > "$sequence_file"
 if ODS_HERMES_READY_TIMEOUT=2 ODS_HERMES_READY_INTERVAL=1 \
-    _ods_cli_wait_for_hermes_ready; then
+    actual_hermes_readiness; then
     echo "Hermes readiness accepted a persistently unhealthy container" >&2
     exit 1
 fi
 
 printf '%s\n' starting starting > "$sequence_file"
 if ODS_HERMES_READY_TIMEOUT=2 ODS_HERMES_READY_INTERVAL=1 \
-    _ods_cli_wait_for_hermes_ready; then
+    actual_hermes_readiness; then
     echo "Hermes readiness accepted a container that never became healthy" >&2
     exit 1
 fi
