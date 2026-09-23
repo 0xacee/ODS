@@ -1564,6 +1564,7 @@ export default function Pixel({ systemStatus = null }) {
                   command={githubExtensionInstallation?.command || messages[index - 1].content} active={message.status === 'streaming'}
                   installation={githubExtensionInstallation || extensionInstallation}
                   onRecheckInstallation={githubExtensionInstallation ? resumeGithubExtensionInstallation : resumeExtensionInstallation}
+                  onRecheckGithubObservation={githubExtensionInstallation ? resumeGithubExtensionInstallation : undefined}
                   onStopInstallation={githubExtensionInstallation ? stopGithubExtensionInstallation : stopExtensionInstallation}
                   projectPath={conversationProject({messages, preview})?.path}/>}
               {message.role === 'assistant' && index === messages.length - 1 && integrationRecovery &&

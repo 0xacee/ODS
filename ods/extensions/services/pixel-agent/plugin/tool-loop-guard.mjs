@@ -6462,6 +6462,9 @@ export function createToolLoopGuard({
     // policy and deterministic routing active from runId alone; operations
     // that truly need a session still fail closed on the optional sessionId.
     const state = runId ? stateFor(runId) : undefined;
+    if (state?.extensionPendingHandoff) return {
+      block:true, blockReason:'Managed installation observation has handed off as pending. No further tools in this turn; do not replay the accepted build.',
+    };
     const delegatedName=typeof toolName==='string' && toolName==='tool_call' ? String((normalizedParams ?? event?.params)?.id ?? '').split(':').at(-1) : toolName;
     if (state?.extensionCompletionGate?.active) {
       // OpenClaw marks every plugin tool replay-unsafe. An ODS-owned second
@@ -8409,6 +8412,16 @@ export function createToolLoopGuard({
     const runId = context?.runId;
     const state = runs.get(runId);
     if (!state || !context?.sessionId || context.sessionId !== state.currentSessionId) return;
+    if (state.extensionPendingHandoff && !state.extensionPendingAbortAcknowledged &&
+        !state.clientCancelled && !state.progressBudget.exhausted &&
+        sessionRuns.get(context.sessionId) === runId) {
+      // This ends only the model continuation at the established safe boundary.
+      // Never signal execControl or the independently accepted host operation.
+      try {
+        state.extensionPendingAbortAcknowledged =
+          abortRun?.(context.sessionId, state.currentSessionKey) === true;
+      } catch (error) { warn(`Pixel pending handoff failed: ${String(error)}`); }
+    }
     stopExhaustedRun(state, runId);
   }
 
@@ -8458,7 +8471,7 @@ export function createToolLoopGuard({
     if (typeof runId !== "string" || !runId) return;
     const state = stateFor(runId);
     state.completionAssurance.observe(toolName, event);
-    if (state.extensionCompletionGate?.active) {
+    if (state.extensionCompletionGate) {
       for (const name of [
         'pixel_ods_extension_request_status', 'pixel_ods_extension_request_prepare',
         'pixel_ods_extension_request_advance', 'pixel_ods_extension_request_retry',
@@ -8467,7 +8480,13 @@ export function createToolLoopGuard({
       ]) {
         const observed = toolName === name ? event : toolName === 'tool_call'
           ? toolSearchSelectedToolEvent(event, name, 'pixel-ods') : undefined;
-        if (observed) state.extensionCompletionGate.observe(name, observed.result);
+        if (observed) {
+          state.extensionCompletionGate.observe(name, observed.result);
+          if (!state.clientCancelled && !state.progressBudget.exhausted &&
+              name === 'pixel_ods_extension_request_status' &&
+              state.extensionCompletionGate.handoffPending(observed.result))
+            state.extensionPendingHandoff = true;
+        }
       }
       if (toolName === 'pixel_ods_extension_request_status' &&
           state.extensionCompletionGate.observedInstallStatus)
@@ -9989,7 +10008,7 @@ export function createToolLoopGuard({
       const record = state?.extensionReadOnlyRecovery;
       if (!observed || !record || record.otherToolSeen || record.statusCalls !== 1 ||
           record.completedStatusCalls !== 1 || state.clientCancelled ||
-          state.progressBudget.exhausted || state.ownerQuestions || state.webLoopAborted)
+          state.progressBudget.exhausted || state.extensionPendingHandoff || state.ownerQuestions || state.webLoopAborted)
         return {schemaVersion:1, kind:'ods-extension-read-only-continuation', eligible:false};
       return {schemaVersion:1, kind:'ods-extension-read-only-continuation',
         eligible:true, chatId:observed.chatId, requestId:observed.requestId};

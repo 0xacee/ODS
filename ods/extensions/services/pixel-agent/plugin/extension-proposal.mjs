@@ -1,5 +1,6 @@
 import net from 'node:net';
 import {createHash} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {compileSourceRecipe, sourceRecipeSchema} from './extension-source-recipe.mjs';
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -82,7 +83,61 @@ const noActiveRequest = () => ({isError:true, content:[{type:'text',text:
   'There is no active GitHub installation request in this conversation. This does not establish whether an extension is installed. The catalog lookup is available through pixel_ods_extensions. No operation was started.'}]});
 
 // Read managed state through the same session-bound channel as proposals.
-export function createExtensionRequestStatusTool(context, {submit = submitExtensionProposal} = {}) {
+export function createExtensionRequestStatusTool(context, {
+  submit = submitExtensionProposal, waitMs = 30000, pollMs = 1000,
+  now = () => performance.now(), sleep = delay,
+} = {}) {
+  const snapshot = createExtensionRequestSnapshotTool(context, {submit});
+  if (!snapshot) return null;
+  return {...snapshot,
+    description:snapshot.description + ' An authorized pending build is observed for at most 30 seconds including network reads. If still pending, this turn hands off normally; do not poll through advance or retry.',
+    async execute(id, args, signal) {
+    const stopped = () => ({isError:true, content:[{type:'text', text:
+      'Managed request observation stopped or changed identity. Installation outcome is unconfirmed; no build was cancelled or replayed.'}]});
+    const pending = result => !result?.isError && result.details?.authorizationMode === 'install'
+      && result.details.requestState === 'pending' && result.details.prepared
+      && ['installing','setting_up'].includes(result.details.runtimeStatus);
+    // Resolve once. Every subsequent read remains on this exact request, never
+    // advance/retry, even if the conversation selects another request meanwhile.
+    // Runtime status does not certify an operationId or exclude an external
+    // replacement attempt for the same extension; no operation success is inferred.
+    const deadline = now() + Math.min(30000, Math.max(1, waitMs));
+    const reader = createExtensionRequestSnapshotTool(context, {
+      submit: payload => {
+        const remaining = Math.ceil(deadline - now());
+        if (remaining <= 0) throw new Error('Observation deadline');
+        const timeout = AbortSignal.timeout(remaining);
+        return submit(payload, {signal:signal ? AbortSignal.any([signal, timeout]) : timeout});
+      },
+    });
+    try {
+      signal?.throwIfAborted();
+      let result = await reader.execute(id, args);
+      signal?.throwIfAborted();
+      if (!pending(result)) return result;
+      const {chatId, requestId, extensionId} = result.details;
+      while (now() < deadline) {
+        await sleep(Math.min(Math.max(1, pollMs), deadline - now()), undefined, {signal});
+        signal?.throwIfAborted();
+        if (now() >= deadline) break;
+        result = await reader.execute(id, {chatId, requestId});
+        signal?.throwIfAborted();
+        if (result.isError) return result;
+        if (result.details?.chatId !== chatId || result.details?.requestId !== requestId
+            || result.details?.extensionId !== extensionId) return stopped();
+        if (!pending(result)) return result;
+      }
+      // Native after_tool_call retains content/details, not custom top-level
+      // fields. This is adapter metadata, not a host operation receipt.
+      return {...result, details:{...result.details,
+        observation:{kind:'ods-extension-pending-handoff', chatId, requestId, extensionId}},
+        content:[...result.content, {type:'text', text:
+          'The bounded read-only observation ended while this managed request was still pending. End this turn normally as pending. Do not call status, advance or retry again in this turn. The accepted host build continues independently.'}]};
+    } catch { return stopped(); }
+  }};
+}
+
+function createExtensionRequestSnapshotTool(context, {submit = submitExtensionProposal} = {}) {
   if (context?.agentId !== 'pixel' || typeof context.sessionKey !== 'string'
       || !/^agent:pixel:openai-user:ods-[a-f0-9]{64}$/.test(context.sessionKey)) return null;
   return {
@@ -261,7 +316,7 @@ function createExtensionRequestInstallationTool(context, submit, retry) {
           // Observe the exact request that was advanced. Resolving the active
           // chat again could select a newer request and misdescribe an older
           // operation whose outcome is still uncertain.
-          const observed = await createExtensionRequestStatusTool(context,{submit}).execute(_id,identity);
+          const observed = await createExtensionRequestSnapshotTool(context,{submit}).execute(_id,identity);
           const status = observed?.details;
           if (status?.chatId !== identity.chatId || status.requestId !== identity.requestId
               || status.requestState !== 'pending' || status.runtimeStatus !== 'not_observed'
@@ -372,18 +427,23 @@ export function createExtensionRequestPrepareTool(context, {submit = submitExten
 
 // This channel operates only on existing owner-bound requests. Host advancement
 // resolves its immutable recipe server-side; no command, target or credential input.
-export function submitExtensionProposal(payload, {connect = net.createConnection, platform = process.platform} = {}) {
+export function submitExtensionProposal(payload, {connect = net.createConnection, platform = process.platform, signal} = {}) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Observation cancelled'));
     const socket = connect({path: managerSocket(platform)});
     let buffer = Buffer.alloc(0), finished = false;
     const finish = (error, value) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       socket.destroy();
       if (error) reject(new Error('Extension proposal unavailable')); else resolve(value);
     };
     const timer = setTimeout(() => finish(true), ['github-request-prepare','github-request-advance'].includes(payload?.action) ? 105000 : 45000);
+    const onAbort = () => finish(true);
+    signal?.addEventListener('abort', onAbort, {once:true});
+    if (signal?.aborted) return onAbort();
     socket.on('connect', () => socket.write(JSON.stringify(payload) + '\n'));
     socket.on('error', () => finish(true));
     socket.on('end', () => finish(true));
@@ -405,7 +465,7 @@ export function submitExtensionProposal(payload, {connect = net.createConnection
 // researches and chooses the recipe; ODS performs the routine state transitions
 // from validated receipts so a small model cannot silently skip preparation.
 async function coordinateAuthorizedProposal(context, submit, callId, identity, extensionId, draft) {
-  const observed = await createExtensionRequestStatusTool(context, {submit}).execute(callId, identity);
+  const observed = await createExtensionRequestSnapshotTool(context, {submit}).execute(callId, identity);
   const status = observed?.details;
   if (status?.authorizationMode !== 'install' || status.requestState !== 'pending'
       || !status.proposalAccepted || status.extensionId !== extensionId
