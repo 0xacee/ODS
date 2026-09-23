@@ -13,6 +13,7 @@ from pathlib import Path
 import plistlib
 import pwd
 import subprocess
+import stat
 import sys
 import uuid
 
@@ -25,6 +26,9 @@ NAME = '_ods_pixel_ops'
 HOME = '/private/var/lib/pixel-ops-broker'
 ROOT = Path('/private/var/lib/ods-pixel-access')
 PREFIX = 'dsAttrTypeStandard:'
+SYSTEM_JOBS = ('com.ods.pixel-native-gateway', 'com.ods.pixel-access',
+    'com.ods.pixel-access-relay', 'com.ods.pixel-native-manager',
+    'com.ods.pixel-native-promoter', 'com.ods.pixel-native-operations')
 
 
 def dscl(*arguments):
@@ -156,6 +160,64 @@ def provision():
             os.close(lock)
 
 
+def verify_identity_only():
+    """Read-only proof that a retained service account is the *only* Pixel state.
+
+    This permits a deliberately cleaned test host to reinstall without adopting
+    an arbitrary account or silently resuming a partial/active installation.
+    """
+    if sys.platform != 'darwin' or os.geteuid() != 0:
+        raise ValueError('macos-root-required')
+    with custody.protected_directory(ROOT) as directory:
+        if (stat.S_IMODE(os.fstat(directory).st_mode) != 0o700
+                or set(os.listdir(directory)) != {'ops-identity.json', 'ops-identity.lock'}):
+            raise ValueError('operations-identity-not-only-protected-state')
+        lock = os.open('ops-identity.lock', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+        try:
+            custody._verify_fd(lock, directory=False)
+            if stat.S_IMODE(os.fstat(lock).st_mode) != 0o600:
+                raise ValueError('operations-identity-lock-custody-invalid')
+            fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            receipt = os.open('ops-identity.json', os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=directory)
+            try:
+                custody._verify_fd(receipt, directory=False)
+                if stat.S_IMODE(os.fstat(receipt).st_mode) != 0o600:
+                    raise ValueError('operations-identity-receipt-custody-invalid')
+            finally:
+                os.close(receipt)
+            intent = validate_intent(json.loads(custody.protected_bytes(
+                ROOT / 'ops-identity.json', limit=4096)))
+            for kind in ('Groups', 'Users'):
+                verify_record(read_record(kind), expected_attributes(intent, kind), complete=True)
+            user, group = pwd.getpwnam(NAME), grp.getgrnam(NAME)
+            if (user.pw_uid != intent['id'] or user.pw_gid != intent['id']
+                    or group.gr_gid != intent['id']):
+                raise ValueError('operations-identity-id-conflict')
+            for entry in pwd.getpwall():
+                if entry.pw_uid == intent['id'] and entry.pw_name != NAME:
+                    raise ValueError('operations-identity-id-collision')
+            for entry in grp.getgrall():
+                if ((entry.gr_gid == intent['id'] and entry.gr_name != NAME)
+                        or NAME in entry.gr_mem):
+                    raise ValueError('operations-identity-unexpected-membership')
+            processes = subprocess.run(['/bin/ps', '-axo', 'uid='], capture_output=True,
+                text=True, timeout=15, check=True)
+            if str(intent['id']) in processes.stdout.split():
+                raise ValueError('operations-identity-process-active')
+            for label in SYSTEM_JOBS:
+                job = subprocess.run(['/bin/launchctl', 'print', 'system/' + label],
+                    capture_output=True, timeout=15, check=False)
+                if job.returncode != 113:
+                    raise ValueError('operations-identity-service-loaded-or-ambiguous')
+            return {'name': NAME, 'uid': intent['id'], 'gid': intent['id']}
+        finally:
+            os.close(lock)
+
+
 if __name__ == '__main__':
-    argparse.ArgumentParser(description=__doc__).parse_args()
-    print(json.dumps(provision(), sort_keys=True))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--verify-identity-only', action='store_true')
+    args = parser.parse_args()
+    print(json.dumps(verify_identity_only() if args.verify_identity_only else provision(),
+        sort_keys=True))
