@@ -172,18 +172,19 @@ def test_empty_home_proof_requires_exact_empty_identity_home(tmp_path, monkeypat
     home = tmp_path / 'ops-home'
     home.mkdir(mode=0o750)
     home.chmod(0o700 if fault == 'mode' else 0o750)
+    home_info = home.stat()
     if fault == 'content': (home / 'old-state').write_text('keep')
     if fault == 'symlink':
         home.rename(tmp_path / 'real-home')
         home.symlink_to(tmp_path / 'real-home', target_is_directory=True)
     monkeypatch.setattr(account, 'HOME', str(home))
     monkeypatch.setattr(account, 'verify_identity_only', lambda: {
-        'name': account.NAME, 'uid': os.getuid(), 'gid': os.getgid()})
+        'name': account.NAME, 'uid': home_info.st_uid, 'gid': home_info.st_gid})
     if fault:
         with pytest.raises((ValueError, OSError)):
             account.verify_empty_home_only()
     else:
-        assert account.verify_empty_home_only()['uid'] == os.getuid()
+        assert account.verify_empty_home_only()['uid'] == home_info.st_uid
 
 
 @pytest.mark.skipif(sys.platform != 'darwin' or os.geteuid() != 0 or
