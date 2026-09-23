@@ -167,11 +167,20 @@ def _safe_root(path: pathlib.Path, owner_uid: int) -> None:
     if (
         not stat.S_ISDIR(info.st_mode)
         or stat.S_ISLNK(info.st_mode)
-        or info.st_uid != owner_uid
         or info.st_mode & 0o022
         or path.resolve(strict=True) != path
     ):
         raise PreviewError("unsafe preview root")
+    if info.st_uid != owner_uid:
+        # Colima's VirtioFS can report a bind mount point as root-owned while
+        # the directory reached through it retains its real host-owner UID.
+        # Only admit that exact mount-point discrepancy, never a symlink,
+        # different inode, or permissive directory.
+        actual = os.stat(os.fspath(path) + "/.")
+        if (info.st_uid != 0 or actual.st_uid != owner_uid
+                or (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino)
+                or not stat.S_ISDIR(actual.st_mode) or actual.st_mode & 0o022):
+            raise PreviewError("unsafe preview root")
 
 
 def _directory_walk_failed(error: OSError) -> None:
