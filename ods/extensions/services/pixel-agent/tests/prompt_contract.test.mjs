@@ -478,6 +478,23 @@ test("adds a sequential approval-aware contract for extension lifecycle requests
   assert.match(result.appendSystemContext, /later succeeded receipt proves it/);
 });
 
+test("natural and plan-only managed-extension directives receive lifecycle guidance", () => {
+  for (const prompt of [
+    "I authorize installing the one cataloged managed extension go-httpbin.",
+    "Prepare exactly one immutable Operations Broker approval plan for cataloged ODS extension action ods.extensions.install with serviceId go-httpbin; do not execute.",
+  ]) {
+    const result = promptContractForAgent({ agentId: "pixel" }, "pixel", { prompt });
+    assert.match(result.appendSystemContext, /First call only pixel_ops_inventory/);
+    assert.match(result.appendSystemContext, /Do not call apps, status, exec, web, memory/);
+    assert.match(result.appendSystemContext, /never approve it yourself/);
+  }
+  const question = promptContractForAgent(
+    { agentId: "pixel" }, "pixel",
+    { prompt: "What does ods.extensions.install with serviceId go-httpbin do?" }
+  );
+  assert.doesNotMatch(question.appendSystemContext, /First call only pixel_ops_inventory/);
+});
+
 test("adds a read-only exact-job continuation contract after external approval", () => {
   const jobId = "ops-1234567890123-abcdef123456";
   const planHash = "a".repeat(64);

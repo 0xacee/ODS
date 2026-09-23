@@ -5308,6 +5308,83 @@ test("classifies one exact extension lifecycle action and owner extension ID", (
   );
 });
 
+test("natural managed-extension and plan-only requests bind one exact lifecycle action", () => {
+  for (const prompt of [
+    "I authorize installing the one cataloged managed extension go-httpbin.",
+    "Prepare exactly one immutable Operations Broker approval plan for cataloged ODS extension action ods.extensions.install with serviceId go-httpbin; do not execute.",
+  ]) {
+    assert.deepEqual(userMessageExtensionLifecycleIntent([], prompt), {
+      action: "install", serviceId: "go-httpbin",
+    }, prompt);
+    assert.deepEqual(userMessageOperationsRequirements([], prompt), {
+      required: true,
+      actions: ["ods.extensions.inspect", "ods.extensions.install"],
+    }, prompt);
+  }
+  assert.equal(
+    userMessageExtensionLifecycleIntent([], "Do not install the ODS extension go-httpbin; explain what it does."),
+    undefined
+  );
+  for (const mentionOnly of [
+    "I am considering installing the cataloged managed extension go-httpbin.",
+    "What does ods.extensions.install with serviceId go-httpbin do?",
+    "The docs say ods.extensions.install with serviceId go-httpbin is the action name.",
+    "Prepare an explanation of the action ods.extensions.install with serviceId go-httpbin.",
+    "Create a test fixture mentioning ods.extensions.install with serviceId go-httpbin.",
+  ]) {
+    assert.equal(userMessageExtensionLifecycleIntent([], mentionOnly), undefined, mentionOnly);
+  }
+});
+
+test("plan-only managed-extension requests cannot wander into workspace or web tools", () => {
+  const prompt = "Prepare exactly one immutable Operations Broker approval plan for cataloged ODS extension action ods.extensions.install with serviceId go-httpbin; do not execute.";
+  const aborts = [];
+  const guard = createToolLoopGuard({ abortRun: (sessionId) => {
+    aborts.push(sessionId);
+    return true;
+  } });
+  guard.observeRun(
+    { agentId: "pixel", runId: "run-1", sessionId: "session-1" },
+    "pixel",
+    { prompt }
+  );
+  guard.observeModelCall(
+    { runId: "run-1", callId: "call-1" },
+    { agentId: "pixel", runId: "run-1", sessionId: "session-1" }
+  );
+  assert.equal(call(guard, "exec", {
+    event: { params: { command: "pwd" } },
+  })?.blockReason, OPERATIONS_REQUIRES_BROKER_REASON);
+  assert.equal(call(guard, "web_search", {
+    event: { params: { query: "go-httpbin" } },
+  })?.blockReason, OPERATIONS_REQUIRES_BROKER_REASON);
+  // A model-provided prior approval cannot skip the current exact inspection
+  // or smuggle an old job/hash into this plan-only request.
+  assert.equal(call(guard, "pixel_ops_run", {
+    event: { params: {
+      target: "ods-host", action: "ods.extensions.install",
+      parameters: { serviceId: "go-httpbin" },
+      jobId: "ops-1234567890123-abcdef123456", planHash: "a".repeat(64),
+    } },
+  })?.blockReason, OPERATIONS_EXTENSION_LIFECYCLE_SEQUENCE_REASON);
+  assert.equal(call(guard, "pixel_ops_job_get", {
+    event: { params: { jobId: "ops-1234567890123-abcdef123456" } },
+  })?.blockReason, OPERATIONS_EXTENSION_LIFECYCLE_SEQUENCE_REASON);
+  for (const toolName of ["pixel_ops_job_events", "pixel_ops_job_cancel"]) {
+    assert.equal(call(guard, toolName, {
+      event: { params: { jobId: "ops-1234567890123-abcdef123456" } },
+    })?.blockReason, OPERATIONS_EXTENSION_LIFECYCLE_SEQUENCE_REASON);
+  }
+  guard.observeModelCall(
+    { runId: "run-1", callId: "call-2" },
+    { agentId: "pixel", runId: "run-1", sessionId: "session-1" }
+  );
+  assert.equal(call(guard, "exec", {
+    event: { params: { command: "pwd" } },
+  })?.blockReason, OPERATIONS_LOOP_ABORT_REASON);
+  assert.deepEqual(aborts, ["session-1"]);
+});
+
 test("binds Operations continuation only to one exact current-message job and plan hash", () => {
   const jobId = "ops-1234567890123-abcdef123456";
   const planHash = "a".repeat(64);
