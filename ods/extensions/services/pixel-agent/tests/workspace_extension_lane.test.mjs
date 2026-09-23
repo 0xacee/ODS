@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createToolLoopGuard, WORKSPACE_EXTENSION_SCOPE_REASON, EXTENSION_MUTATION_EXCLUDED_REASON} from '../plugin/tool-loop-guard.mjs';
+import {createHash} from 'node:crypto';
+import {createToolLoopGuard, userMessageRequestsExtensionInventory, userMessageOperationsRequirements,
+  WORKSPACE_EXTENSION_SCOPE_REASON, EXTENSION_MUTATION_EXCLUDED_REASON} from '../plugin/tool-loop-guard.mjs';
 
 const context = runId => ({agentId:'pixel', runId, sessionId:'same-owner-session'});
 const pending = {details:{schemaVersion:1,kind:'ods-extension-request-status',
@@ -19,6 +21,77 @@ function event(name, params = {}, result, wrapped = false) {
 function call(guard, ctx, name, params = {}, wrapped = false) {
   return guard.beforeToolCall(event(name,params,undefined,wrapped),ctx);
 }
+
+function previewReceipt(relativeDirectory, content) {
+  // The one-entry publisher digest protocol; this is a unit receipt fixture,
+  // not installed or browser-level acceptance evidence.
+  const entry=Buffer.from('index.html'),bytes=Buffer.from(content);
+  const pathLength=Buffer.alloc(4),contentLength=Buffer.alloc(8);
+  pathLength.writeUInt32BE(entry.length);
+  contentLength.writeBigUInt64BE(BigInt(bytes.length));
+  const sha256=createHash('sha256').update(pathLength).update(entry).update(contentLength).update(bytes).digest('hex');
+  const siteId=`site-${sha256.slice(0,24)}`;
+  return {details:{schemaVersion:1,kind:'ods-pixel-workspace-preview',status:'succeeded',relativeDirectory,
+    files:1,bytes:bytes.length,sha256,siteId,entryFile:'index.html',entrySha256:createHash('sha256').update(bytes).digest('hex'),
+    port:9437,url:`http://${siteId}.localhost:9437/${siteId}/`,httpStatus:200,readbackVerified:true,executable:false,overwritten:false}};
+}
+
+for(const prompt of [
+  'Inspect the saved extension request status.',
+  'Show the status of the managed ODS extension installation request.',
+  'Show source metadata for the saved extension request.',
+  'Build /workspace/app and inspect the managed extension request status. Do not prepare, advance, retry, or install any extension.',
+]) test(`saved-request metadata is not installed-extension inventory: ${prompt}`,()=>{
+  assert.equal(userMessageRequestsExtensionInventory([],prompt),false);
+  assert.equal(userMessageOperationsRequirements([],prompt).required,false);
+});
+
+for(const prompt of [
+  'List installed ODS extensions.',
+  'Show which ODS extensions are enabled.',
+  'Inspect the current status of ODS extensions.',
+  'List installed ODS extensions and inspect the saved extension request status.',
+]) test(`requested installed inventory remains required: ${prompt}`,()=>{
+  assert.equal(userMessageRequestsExtensionInventory([],prompt),true);
+  assert.ok(userMessageOperationsRequirements([],prompt).actions.includes('ods.extensions.list'));
+});
+
+for(const wrapped of [false,true]) test(`preview continuation can inspect earlier integration metadata without escaping its project (wrapped=${wrapped})`,()=>{
+  const guard=createToolLoopGuard(),first=context('initial-service-app'),followup=context('same-service-app');
+  const original='<!doctype html><title>Service app</title><button>slow</button>';
+  const updated=original.replace('slow','fast');
+  guard.observeRun(first,'pixel',{prompt:'Create /workspace/service-app/index.html using the existing ODS services and show a preview.'});
+  const file={path:'service-app/index.html',content:original};
+  guard.afterToolCall(event('write',file,{details:{status:'completed'}}),first);
+  guard.afterToolCall(event('pixel_ods_workspace_preview',{relativeDirectory:'service-app'},previewReceipt('service-app',original)),first);
+  assert.equal(guard.deliveryVerificationForRun(first.runId).status,'passed');
+  guard.observeRun(followup,'pixel',{messages:[
+    {role:'user',content:'Create a website using the existing ODS services.'},
+    {role:'assistant',content:'Published service-app.'},
+    {role:'user',content:'The button does not work. Investigate your existing artifact, fix the defect using the earlier service reference, and republish the same artifact.'},
+  ]});
+  for(const name of ['pixel_ods_extensions','pixel_ods_extension_request_status'])
+    assert.notEqual(call(guard,followup,name,{},wrapped)?.block,true,name);
+  guard.afterToolCall(event('pixel_ods_extension_request_status',{},pending,wrapped),followup);
+  assert.equal(call(guard,followup,'write',{path:'service-app/index.html',content:updated},wrapped)?.block,true,'read-before-edit remains required');
+  assert.equal(call(guard,followup,'read',{path:'other-app/index.html'},wrapped)?.block,true,'metadata grants no other-project access');
+  assert.notEqual(call(guard,followup,'read',{path:file.path},wrapped)?.block,true);
+  guard.afterToolCall(event('read',{path:file.path},{content:[{type:'text',text:original}]},wrapped),followup);
+  assert.equal(call(guard,followup,'pixel_ods_workspace_preview',{relativeDirectory:'service-app'},wrapped)?.block,true,'metadata/read is not an edit');
+  const edits={path:file.path,edits:[{oldText:'slow',newText:'fast'}]};
+  assert.notEqual(call(guard,followup,'edit',edits,wrapped)?.block,true);
+  guard.afterToolCall(event('edit',edits,{details:{status:'completed'}},wrapped),followup);
+  const wrongPreview=call(guard,followup,'pixel_ods_workspace_preview',{relativeDirectory:'other-app'},wrapped);
+  assert.ok(wrongPreview?.block ||
+    (wrongPreview?.params?.args ?? wrongPreview?.params)?.relativeDirectory==='service-app','publication cannot change project');
+  assert.notEqual(call(guard,followup,'pixel_ods_workspace_preview',{relativeDirectory:'service-app'},wrapped)?.block,true);
+  guard.afterToolCall(event('pixel_ods_workspace_preview',{relativeDirectory:'service-app'},previewReceipt('service-app',updated),wrapped),followup);
+  const result=guard.deliveryVerificationForRun(followup.runId);
+  assert.equal(result.status,'passed');
+  assert.equal(result.preview.relativeDirectory,'service-app');
+  assert.doesNotMatch(result.text,/installation|Operations Broker/);
+  assert.equal(call(guard,followup,'pixel_ods_extension_request_prepare',{},wrapped)?.blockReason,WORKSPACE_EXTENSION_SCOPE_REASON);
+});
 
 for (const wrapped of [false,true]) test(`workspace rejects extension detours before and after entry work (wrapped=${wrapped})`, () => {
   const guard=createToolLoopGuard(), ctx=context('workspace');
