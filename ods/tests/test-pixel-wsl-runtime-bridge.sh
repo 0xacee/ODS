@@ -23,7 +23,8 @@ assert 'ExecStart=/usr/local/libexec/ods-pixel-wsl-runtime-bridge ensure' in uni
 assert 'ExecStop=/usr/local/libexec/ods-pixel-wsl-runtime-bridge remove' in unit
 assert 'PIXEL_RUNTIME_BIND_PROPAGATION_VALUE=rshared' in phase
 assert 'PIXEL_INGRESS_RUNTIME_DIR_VALUE=/mnt/host/wsl/ods-portal-runtime/ingress' in phase
-assert 'docker info --format' in phase
+assert '"${docker_command[@]}" info --format' in phase
+assert '"${docker_command[@]}" context inspect' in phase
 assert 'systemctl enable ods-pixel-wsl-runtime-bridge.service' in installer
 assert 'systemctl start ods-pixel-wsl-runtime-bridge.service' in installer
 assert 'systemctl disable --now ods-pixel-wsl-runtime-bridge.service' in uninstall

@@ -76,18 +76,34 @@ _phase06_env_hex_secret() {
     printf '%s%s' "$prefix" "$value"
 }
 
+# Optional paths are only passed by the isolated WSL mount contract test.
+# shellcheck disable=SC2120
 _phase06_pixel_runtime_layout() {
     PIXEL_INGRESS_RUNTIME_DIR_VALUE=/run/ods-pixel
     PIXEL_PREVIEW_RUNTIME_DIR_VALUE=/run/ods-pixel-preview
     PIXEL_RUNTIME_BIND_PROPAGATION_VALUE=rprivate
-    [[ -r /proc/sys/kernel/osrelease ]] || return 0
-    grep -qi microsoft /proc/sys/kernel/osrelease || return 0
+    local kernel_release="${1:-/proc/sys/kernel/osrelease}" wsl_mount="${2:-/mnt/wsl}"
+    [[ -r "$kernel_release" ]] || return 0
+    grep -qi microsoft "$kernel_release" || return 0
     # Docker Desktop's daemon runs in a different WSL distro. /run in this
     # distro is therefore not its /run; /mnt/wsl is the shared tmpfs bridge.
-    local docker_os
-    docker_os="$(timeout 10s docker info --format '{{.OperatingSystem}}' 2>/dev/null)" || return 1
+    # Phase 05 may select sudo docker before a new docker group membership
+    # takes effect. Probe with that same command, not an unprivileged client.
+    local -a docker_command=(docker)
+    case "${DOCKER_CMD:-docker}" in
+        docker) ;;
+        'sudo docker') docker_command=(sudo docker) ;;
+        *) return 1 ;;
+    esac
+    # A remote daemon cannot bind this distro's /run or /mnt/wsl. Check both
+    # the explicit override and the selected context before trusting its OS.
+    [[ -z "${DOCKER_HOST:-}" || "${DOCKER_HOST}" == unix:///* ]] || return 1
+    local docker_endpoint docker_os
+    docker_endpoint="$(timeout 10s "${docker_command[@]}" context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)" || return 1
+    [[ "$docker_endpoint" == unix:///* ]] || return 1
+    docker_os="$(timeout 10s "${docker_command[@]}" info --format '{{.OperatingSystem}}' 2>/dev/null)" || return 1
     [[ "$docker_os" == "Docker Desktop" ]] || return 0
-    [[ -d /mnt/wsl && "$(findmnt -n -o PROPAGATION -T /mnt/wsl)" == shared ]] || return 1
+    [[ -d "$wsl_mount" && "$(findmnt -n -o PROPAGATION -T "$wsl_mount")" == shared ]] || return 1
     PIXEL_INGRESS_RUNTIME_DIR_VALUE=/mnt/host/wsl/ods-portal-runtime/ingress
     PIXEL_PREVIEW_RUNTIME_DIR_VALUE=/mnt/host/wsl/ods-portal-runtime/preview
     PIXEL_RUNTIME_BIND_PROPAGATION_VALUE=rshared
@@ -1155,7 +1171,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # Generate .env file
     if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]]; then
         _phase06_pixel_runtime_layout || {
-            error "Pixel could not verify the WSL/Docker Desktop shared runtime mount"
+            error "Pixel could not verify the local WSL Docker daemon or Docker Desktop shared runtime mount"
             return 1
         }
     fi
