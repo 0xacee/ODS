@@ -678,7 +678,7 @@ def _scan_compose_content(
                 )
         if not trusted and "build" in svc_def:
             try:
-                from extension_recipe_package import verify_package
+                from extension_recipe_package import verify_package, verify_installed_package
                 from extension_source_build import source_builds
                 package = compose_path.parent
                 for filename in ('upstream.json', 'manifest.yaml'):
@@ -689,7 +689,10 @@ def _scan_compose_content(
                 candidate = {'repository': provenance['repository'], 'commit': provenance['commit'],
                              'manifest': yaml.safe_load((package / 'manifest.yaml').read_text(encoding='utf-8')),
                              'compose': data}
-                verify_package(package, candidate, compose_name=compose_path.name)
+                verify = (verify_installed_package
+                    if package.parent.resolve() == USER_EXTENSIONS_DIR.resolve()
+                    else verify_package)
+                verify(package, candidate, compose_name=compose_path.name)
                 if svc_name not in {entry['service'] for entry in source_builds(candidate)}:
                     raise ValueError('Source service is not reviewed')
             except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError):

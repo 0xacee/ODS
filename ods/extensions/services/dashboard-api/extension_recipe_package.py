@@ -10,7 +10,7 @@ import yaml
 
 from extension_github import repository_identity
 from extension_license import RECOGNIZED_OPEN_SOURCE_LICENSES, verified_expression_evidence
-from extension_source_build import verify_source_receipts
+from extension_source_build import source_builds, verify_source_receipts
 
 class LicenseEvidenceError(ValueError):
     """The repository's license cannot be established from this commit."""
@@ -43,15 +43,26 @@ def package_receipt(candidate):
 
 def verify_package(directory, candidate, *, compose_name='compose.yaml'):
     """An existing exact package is reusable, never silently repaired or overwritten."""
+    return _verify_package(directory, candidate, compose_name=compose_name, installed=False)
+
+
+def verify_installed_package(directory, candidate, *, compose_name='compose.yaml'):
+    """Allow only validated installer bookkeeping and the exact build projection."""
+    return _verify_package(directory, candidate, compose_name=compose_name, installed=True)
+
+
+def _verify_package(directory, candidate, *, compose_name, installed):
     directory = Path(directory)
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError('Invalid recipe package')
     if compose_name not in {'compose.yaml', 'compose.yaml.disabled'}:
         raise ValueError('Invalid recipe Compose filename')
     names = {'manifest.yaml', compose_name, 'upstream.json'}
-    if {path.name for path in directory.iterdir()} != names:
+    actual = {path.name for path in directory.iterdir()}
+    artifacts = {'.ods-library-receipt.json', '.ods-build-context-compose.yaml.json'} if installed else set()
+    if not names <= actual or actual - names - artifacts:
         raise ValueError('Recipe package has unexpected files')
-    for name in names:
+    for name in actual:
         path = directory / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 524288:
             raise ValueError('Invalid recipe package file')
@@ -65,6 +76,27 @@ def verify_package(directory, candidate, *, compose_name='compose.yaml'):
             or provenance.get('origin') != 'github-proposal'):
         raise ValueError('Recipe provenance changed')
     verify_source_receipts(candidate, provenance.get('sourceFiles'))
+    if installed:
+        receipt = directory / '.ods-library-receipt.json'
+        if receipt.name in actual:
+            value = json.loads(receipt.read_text(encoding='utf-8'))
+            # This receipt records the original install, not current source
+            # authority. Generated projections can change the installed tree.
+            if (not isinstance(value, dict)
+                    or set(value) != {'schema_version', 'source_digest', 'installed_digest', 'installed_at'}
+                    or type(value['schema_version']) is not int or value['schema_version'] != 1
+                    or any(not isinstance(value[key], str) or not re.fullmatch('[a-f0-9]{64}', value[key])
+                           for key in ('source_digest', 'installed_digest'))
+                    or not isinstance(value['installed_at'], str) or not 1 <= len(value['installed_at']) <= 64):
+                raise ValueError('Invalid installed recipe receipt')
+        projection = directory / '.ods-build-context-compose.yaml.json'
+        if projection.name in actual:
+            builds = source_builds(candidate)
+            expected = {'services': {entry['service']: {'build': {
+                'context': candidate['compose']['services'][entry['service']]['build']['context']}}
+                for entry in builds}}
+            if not builds or json.loads(projection.read_text(encoding='utf-8')) != expected:
+                raise ValueError('Installed build projection changed')
     return provenance
 
 
