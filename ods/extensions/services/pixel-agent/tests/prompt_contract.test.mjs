@@ -49,11 +49,12 @@ test('ordinary coding guidance requires real CLI entry points and owner-derived 
     {prompt:'Implement a Python CLI that reads usage records and writes a JSON report.'},
     {configuredLeanPrompt:true}
   ).appendSystemContext;
-  assert.match(contract, /documented command as a separate process/);
-  assert.match(contract, /output artifacts and exit status on normal and malformed input/);
-  assert.match(contract, /calling main in a test does not verify its entry point/);
-  assert.match(contract, /named keys\/paths and follow-up corrections/);
-  assert.match(contract, /explicitly protected tests/);
+  assert.match(contract, /documented command in a separate process/);
+  assert.match(contract, /output artifacts, and normal\/malformed input exit status/);
+  assert.match(contract, /import-only tests are insufficient/);
+  assert.match(contract, /exact requested keys\/paths and follow-up corrections/);
+  assert.match(contract, /Preserve protected inputs\/tests/);
+  assert.match(AGENT_SKILLS.workspace, /calling main in a test does not verify its entry point/);
   assert.doesNotMatch(contract, /call write once/);
 });
 
