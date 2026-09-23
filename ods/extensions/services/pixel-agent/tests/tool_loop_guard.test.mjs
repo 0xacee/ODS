@@ -610,6 +610,21 @@ for (const prompt of [
   });
 }
 
+test("publication fails closed when a tool hook has no observed owner run", () => {
+  for (const wrapped of [false, true]) {
+    const guard = createToolLoopGuard();
+    const event = wrapped
+      ? { toolName: "tool_call", params: { id: "openclaw:pixel-ods:pixel_ods_workspace_preview", args: { relativeDirectory: "demo" } } }
+      : { toolName: "pixel_ods_workspace_preview", params: { relativeDirectory: "demo" } };
+    for (const context of [{ agentId: "pixel" }, { agentId: "pixel", sessionId: "unknown-session" },
+      { agentId: "pixel", runId: "unobserved-run", sessionId: "unknown-session" }]) {
+      const result = guard.beforeToolCall(event, context);
+      assert.equal(result?.block, true);
+      assert.match(result.blockReason, /current owner request is unavailable/);
+    }
+  }
+});
+
 test("optional workspace evidence does not require publishing a preview", () => {
   const guard = createToolLoopGuard();
   guard.observeRun({ agentId: "pixel", runId: "run-1", sessionId: "session-1" }, "pixel", { prompt: "Explain the saved implementation." });

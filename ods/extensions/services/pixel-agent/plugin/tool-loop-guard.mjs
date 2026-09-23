@@ -7075,8 +7075,8 @@ export function createToolLoopGuard({
       toolName === "tool_call" && typeof pendingParams?.id === "string"
         ? pendingParams.id.split(":").at(-1)
         : toolName;
-    if (state && pendingSelectedName === WORKSPACE_PREVIEW_TOOL) {
-      if (!state.ownerIntentObserved || state.workspacePreviewForbidden) {
+    if (pendingSelectedName === WORKSPACE_PREVIEW_TOOL) {
+      if (!state?.ownerIntentObserved || state.workspacePreviewForbidden) {
         return {
           block: true,
           blockReason:
