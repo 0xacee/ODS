@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
-import { projectWebResult } from "./web-result-projection.mjs";
+import { captureNativeWebSearchResult, projectNativeWebSearchResult, projectWebResult } from "./web-result-projection.mjs";
 import { createCompletionAssurance } from "./completion-assurance.mjs";
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
@@ -9076,7 +9076,11 @@ export function createToolLoopGuard({
       );
       if (envelope && pendingToolRun.runId === runId &&
           (!["web_search", "web_fetch"].includes(pendingToolRun.selectedToolName) ||
-            isDeepStrictEqual(envelope.params, pendingToolRun.selectedParams))) {
+            (isDeepStrictEqual(envelope.params, pendingToolRun.selectedParams) &&
+              (!event?.runId || event.runId === runId) &&
+              (!event?.toolCallId || event.toolCallId === toolCallId) &&
+              (!event?.toolName || event.toolName === toolName) &&
+              (!context?.sessionId || context.sessionId === state.currentSessionId)))) {
         state.completionAssurance.observe(pendingToolRun.selectedToolName, {result:envelope.result});
         // `tool_result_persist` runs with the same opaque call ID but may see
         // only the already-truncated model-visible content. Preserve this
@@ -9087,6 +9091,15 @@ export function createToolLoopGuard({
           result: envelope.result,
         };
       }
+    }
+    if (toolName === "web_search" && pendingToolRun?.transport === "web_search" &&
+        pendingToolRun.selectedToolName === "web_search" && pendingToolRun.runId === runId &&
+        (!event?.runId || event.runId === runId) &&
+        (!event?.toolCallId || event.toolCallId === toolCallId) &&
+        (!event?.toolName || event.toolName === toolName) &&
+        (!context?.sessionId || context.sessionId === state.currentSessionId) &&
+        !event.error && isDeepStrictEqual(event.params, pendingToolRun.selectedParams)) {
+      pendingToolRun.capturedNativeWebSearchResult = captureNativeWebSearchResult(event.result);
     }
     const directMutation =
       WORKSPACE_MUTATION_TOOLS.has(toolName) &&
@@ -10125,11 +10138,24 @@ export function createToolLoopGuard({
     if (message.isError === true && state?.progressBudget.laneExhausted(progressLane)) {
       return {message:{...message,content:[...(message.content ?? []),{type:'text',text:progressLaneStopReason(progressLane)}]}};
     }
-    const compactWebResult = pending?.transport === "tool_call" &&
+    const boundWebCall = pending &&
+      (!state?.currentSessionId || sessionRuns.get(state.currentSessionId) === pending.runId) &&
+      (!message.toolCallId || message.toolCallId === toolCallId) &&
+      (!event?.toolCallId || event.toolCallId === toolCallId) &&
+      (!context?.sessionId || context.sessionId === state?.currentSessionId);
+    const compactWebResult = boundWebCall && pending?.transport === "tool_call" &&
       ["web_search", "web_fetch"].includes(pending.selectedToolName) &&
       (!context?.runId || context.runId === pending.runId) &&
       (!event?.runId || event.runId === pending.runId)
       ? projectWebResult(message, pending.capturedToolSearchEnvelope)
+      : undefined;
+    const compactNativeWebResult = boundWebCall && pending?.transport === "web_search" &&
+      pending.selectedToolName === "web_search" &&
+      (!message.toolCallId || message.toolCallId === toolCallId) &&
+      (!event?.toolCallId || event.toolCallId === toolCallId) &&
+      (!context?.runId || context.runId === pending.runId) &&
+      (!event?.runId || event.runId === pending.runId)
+      ? projectNativeWebSearchResult(message, pending.capturedNativeWebSearchResult)
       : undefined;
     const nativeFailure = pending?.nativeUnittestFailure;
     const compactNativeVerification = nativeFailure && pending.transport === "exec" &&
@@ -10281,12 +10307,13 @@ export function createToolLoopGuard({
       !compactNativeVerification &&
       !compactCoreResult &&
       !compactWebResult &&
+      !compactNativeWebResult &&
       !previewStageInstruction &&
       !sandboxPathCorrection
     ) {
       return undefined;
     }
-    const compactMessage = compactNativeVerification ?? compactVerification ?? compactCoreResult ?? compactWebResult ?? message;
+    const compactMessage = compactNativeVerification ?? compactVerification ?? compactCoreResult ?? compactWebResult ?? compactNativeWebResult ?? message;
     const content = hostEvidence
       ? [{
         type: "text",
