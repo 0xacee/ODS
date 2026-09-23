@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createToolLoopGuard, workspacePreviewMode, WORKSPACE_PREVIEW_FRESH_ENTRY_REASON} from '../plugin/tool-loop-guard.mjs';
-import {promptContractForAgent, ODS_WORKSPACE_NEW_STATIC_CONTRACT} from '../plugin/prompt-contract.mjs';
+import {createToolLoopGuard, workspacePreviewMode, userMessageRequestsWorkspacePreview,
+  WORKSPACE_PREVIEW_FRESH_ENTRY_REASON} from '../plugin/tool-loop-guard.mjs';
+import {promptContractForAgent, ODS_WORKSPACE_NEW_STATIC_CONTRACT,
+  ODS_WORKSPACE_PREVIEW_CONTRACT} from '../plugin/prompt-contract.mjs';
 
 const context = {agentId:'pixel',runId:'basic-site-routing',sessionId:'basic-site-routing'};
 const basic = [
@@ -12,6 +14,10 @@ const basic = [
   'Design a simple accessible web page with a blue heading and a contact section.',
   'Create a simple one-page website for a bakery with a hero, menu and footer.',
   'Make a simple website in Playground/cafe/index.html.',
+  'Make a basic website with a dark background and a contact section.',
+  'Make a basic website with plain HTML and CSS.',
+  'Create a simple website. Then publish its preview.',
+  'Create and publish a new static HTML website at demo/index.html.',
   'Crie um site simples e mostre a prévia.',
   'Por favor, faça para mim um site básico.',
   'Construa uma página web simples.',
@@ -46,6 +52,38 @@ const flexible = [
   ['Build a basic site matching this video.','read',{path:'video.mp4'}],
   ['Crie um site simples com base na imagem.','read',{path:'reference.png'}],
   ['Crie um site simples a partir dos dados da planilha.','read',{path:'metrics.csv'}],
+  ['Make me a basic website in django.','exec',{command:'python -m django --version'}],
+  ['Create a static HTML website in django.','exec',{command:'python -m django --version'}],
+  ['Create and publish a new static HTML website in demo.','read',{path:'README.md'}],
+  ['Make me a basic website in blazor.','exec',{command:'dotnet --version'}],
+  ['Make me a basic website with quuxstack.','read',{path:'README.md'}],
+  ['Make me a basic website with the quuxstack.','read',{path:'README.md'}],
+  ['Make me a basic website on anunknownstack.','read',{path:'README.md'}],
+  ['Make me a basic website on Django.','exec',{command:'python -m django --version'}],
+  ['Create a simple website leveraging anunknownstack.','read',{path:'README.md'}],
+  ['Faça um site básico em umaframeworknova.','read',{path:'README.md'}],
+  ['Make me a basic website without static HTML.','exec',{command:'ls'}],
+  ['Make me a basic website, not a static site.','read',{path:'README.md'}],
+  ['Create a simple website mockup as an SVG.','write',{path:'mockup.svg',content:'<svg xmlns="http://www.w3.org/2000/svg"/>'}],
+  ['Make me a basic website. Check what is already in the workspace first.','read',{path:'README.md'}],
+  ['Make me a basic website. Examine the project before changing anything.','read',{path:'README.md'}],
+  ['Make me a basic website and check the workspace first.','read',{path:'README.md'}],
+  ['Create a static HTML website. Check the project first.','read',{path:'README.md'}],
+  ['Make me a basic website. Consult the brief before starting.','read',{path:'NOTES'}],
+  ['Make me a basic website, plus a Python CLI.','write',{path:'cli.py',content:'print(1)'}],
+  ['Create a basic website. Start by making a test suite.','write',{path:'test_site.py',content:'import unittest'}],
+  ['Create a static HTML website. Start by making a test suite.','write',{path:'test_site.py',content:'import unittest'}],
+  ['Build a simple website performance analyzer.','write',{path:'analyzer.py',content:'print(1)'}],
+  ['Build a simple website crawler. Then publish its preview.','write',{path:'crawler.py',content:'print(1)'}],
+];
+const softwareObjects = [
+  'Build a simple website crawler.',
+  'Build a simple website security scanner.',
+  'Create a simple website uptime monitor.',
+  'Make a basic website generator.',
+  'Create a simple website sitemap generator.',
+  'Create a simple landing page template generator.',
+  'Build a basic website translation utility.',
 ];
 const ordinary = [
   'Write a report about how to create a basic website.',
@@ -77,6 +115,17 @@ for (const wrapped of [false,true]) for (const history of [false,true]) {
     guard.observeRun(context,'pixel',owner);
     assert.equal(workspacePreviewMode(owner.messages,owner.prompt),'existing-project');
     assert.notEqual(guard.beforeToolCall(tool(name,args),context)?.block,true);
+    assert.equal(promptContractForAgent(context,'pixel',owner,{configuredLeanPrompt:true}).appendSystemContext.includes(ODS_WORKSPACE_NEW_STATIC_CONTRACT),false);
+  });
+  for (const prompt of softwareObjects) test(`website modifier is not a page object (wrapped=${wrapped},history=${history}): ${prompt}`,()=>{
+    const owner=event(prompt), guard=createToolLoopGuard();
+    guard.observeRun(context,'pixel',owner);
+    assert.equal(userMessageRequestsWorkspacePreview(owner.messages,owner.prompt),false);
+    assert.equal(workspacePreviewMode(owner.messages,owner.prompt),undefined);
+    assert.notEqual(guard.beforeToolCall(tool('write',{path:'utility.py',content:'print(1)'}),context)?.block,true);
+    const contract=promptContractForAgent(context,'pixel',owner,{configuredLeanPrompt:true}).appendSystemContext;
+    assert.equal(contract.includes(ODS_WORKSPACE_NEW_STATIC_CONTRACT),false);
+    assert.equal(contract.includes(ODS_WORKSPACE_PREVIEW_CONTRACT),false);
   });
   for (const prompt of ordinary) test(`basic site phrase is not an object request (wrapped=${wrapped},history=${history}): ${prompt}`,()=>{
     const owner=event(prompt), guard=createToolLoopGuard();

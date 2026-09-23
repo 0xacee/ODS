@@ -5621,7 +5621,7 @@ function clauseRequestsVisualArtifact(clause, actionPattern, targetPattern) {
     if (/\b(?:how|why|whether)\s+(?:to\s+|(?:(?:we|you|one|they|I)\s+)?(?:should|could|can|would)\s+)?$/i.test(prefix.slice(0, action.index))) continue;
     const objectPrefix = prefix.slice(action.index + action[0].length).replace(/\bfrom\s+scratch\b/gi, " ");
     if (objectPrefix.length > 128 || /\b(?:about|for|of|on|from|using|to|that|which|explaining|describing|discussing|covering|regarding)\b/i.test(objectPrefix)) continue;
-    if (/^\s+(?!(?:in|with|for|about|from|using|to|and|that|which|you|we|I|me)\b)(?:[\w-]+\s+){0,2}(?:reports?|tests?|test\s+plans?|checkers?|validators?|scrapers?|letters?|checklists?|articles?|documentation|audits?)\b/i.test(tail)) continue;
+    if (/^\s+(?!(?:in|with|for|about|from|using|to|and|that|which|you|we|I|me)\b)(?:[\w-]+\s+){0,2}(?:reports?|tests?|test\s+plans?|checkers?|validators?|scrapers?|crawlers?|scanners?|monitors?|generators?|utilities|utility|tools?|letters?|checklists?|articles?|documentation|audits?)\b/i.test(tail)) continue;
     return true;
   }
   return false;
@@ -5797,13 +5797,27 @@ function directBasicSiteCreation(text) {
   const prose = text.replace(/(?:`{3}|~{3})[\s\S]*?(?:`{3}|~{3})/g, " ")
     .replace(/^\s*>[^\n]*/gm, " ").replace(/"[^"\n]*"|`[^`\n]*`/g, " ")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  return prose.split(/[!?;\n]+|\.(?=\s|$)/).some(clause => {
+  let creation = false;
+  const clauses = prose.split(/[!?;\n]+|\.(?=\s|$)/).filter(clause => clause.trim());
+  for (const clause of clauses) {
     const request = clause.trim().replace(/^please[,\s]+/i, "")
       .replace(/^(?:can|could|would)\s+you\s+(?:please\s+)?/i, "")
       .replace(/^por\s+favor[,\s]+/i, "");
-    return /^(?:build|create|make|design|generate)\s+(?:(?:me|us)\s+)?(?:a|an)\s+(?:new\s+)?(?:(?:polished|responsive|accessible|clean|modern|small)[,\s]+){0,4}(?:basic|simple|one[- ]page|single[- ]page)[,\s]+(?:(?:polished|responsive|accessible|clean|modern|small|one[- ]page|single[- ]page)[,\s]+){0,4}(?:website|site|web\s*page|landing\s+page)\b/i.test(request)
-      || /^(?:crie|criar|faca|fazer|construa|construir)\s+(?:para\s+mim\s+)?(?:um|uma)\s+(?:(?:novo|nova)\s+)?(?:site|website|pagina\s+web|landing\s+page)\s+(?:simples|basico|basica|de\s+uma\s+pagina)\b/i.test(request);
-  });
+    const match = request.match(/^(?:build|create|make|design|generate)\s+(?:(?:me|us)\s+)?(?:a|an)\s+(?:new\s+)?(?:(?:polished|responsive|accessible|clean|modern|small)[,\s]+){0,4}(?:basic|simple|one[- ]page|single[- ]page)[,\s]+(?:(?:polished|responsive|accessible|clean|modern|small|one[- ]page|single[- ]page)[,\s]+){0,4}(?:website|site|web\s*page|landing\s+page)\b/i)
+      ?? request.match(/^(?:crie|criar|faca|fazer|construa|construir)\s+(?:para\s+mim\s+)?(?:um|uma)\s+(?:(?:novo|nova)\s+)?(?:site|website|pagina\s+web|landing\s+page)\s+(?:simples|basico|basica|de\s+uma\s+pagina)\b/i);
+    if (match) {
+      const tail = request.slice(match[0].length).trim();
+      // A bare noun after "website" may be the real object (crawler, content
+      // analyzer, or an unknown future tool). Do not force HTML by guessing.
+      if (tail && !/^(?:[,:(]|(?:for|with|without|in|on|about|from|using|via|leveraging|and|then|that|which|to|called|named|para|com|sem|em|e)\b)/i.test(tail)) return false;
+      creation = true;
+    } else if (!/^(?:(?:and|then|now|e|depois)\s+)?(?:publish|preview|show|display|serve|publique|mostre)\b/i.test(request)) {
+      // Unknown additional instructions can contain prerequisites. Preserve
+      // ordinary tools instead of trying to enumerate every inspection verb.
+      return false;
+    }
+  }
+  return creation;
 }
 
 export function workspacePreviewMode(messages, prompt = undefined) {
@@ -5829,13 +5843,23 @@ export function workspacePreviewMode(messages, prompt = undefined) {
   // including implementations not named in the framework list above.
   const explicitStaticTarget = /\b(?:static\s+(?:html\s+)?(?:page|site|website)|(?:plain|vanilla)\s+html|self[- ]contained\s+html|single[- ]file\s+html)\b/i.test(text);
   const normalizedText = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const namedImplementation = [...text.matchAll(/\b(?:[Ii]n|[Ww]ith|[Ee]m|[Cc]om)\s+(?:(?:the|o|a)\s+)?([A-Z][A-Za-z0-9.+/-]*)/g)]
-    .some(match => !/\/index\.html\b/i.test(match[1]));
+  const namedImplementation = [...text.matchAll(/\b(in|on|with|em|com|via|leveraging)\s+([^!?;\n]{1,192})/gi)]
+    .some(([, preposition, target]) => {
+      if (/^(?:(?:plain|vanilla|static)\s+)?html\b|^(?:\.?\/?[A-Za-z0-9._/-]+\/)?index\.html\b/i.test(target)) return false;
+      // Case cannot distinguish a stack from prose. Only an explicit HTML/
+      // entry path or a clear presentation phrase retains this optimization;
+      // unknown "in/with quux" implementations keep their normal tools.
+      return !(/^(?:with|com)$/i.test(preposition) &&
+        /^(?:(?:a|an|the|um|uma|o)\s+)?(?:blue|red|green|black|white|dark|light|hero|menu|footer|header|heading|title|contact|navigation|button|section|background)\b/i.test(target));
+    });
+  const nonStaticImplementation =
+    /\b(?:without|not|no|avoid|do\s+not\s+use|don't\s+use)\s+(?:an?\s+)?(?:(?:plain|static|single[- ]file|self[- ]contained)\s+)?(?:html|static(?:\s+(?:site|website|page))?)\b/i.test(text) ||
+    /\b(?:as|in)\s+(?:an?\s+)?(?:svg|pdf|png|jpeg|image)\b/i.test(text);
   const implementationPrerequisites =
     /\b(?:using|usando|utilizando|framework|backend|back[- ]end|server[- ]side|database|databases|sql|sqlite|postgresql|authentication|autenticacao|banco\s+de\s+dados|servidor|oauth|api|dependencies|dependencias|dependency|packages?|install|compile|compilation|repository|codebase)\b/i.test(normalizedText) ||
     /\b(?:built\s+(?:with|in)|implemented\s+(?:with|in)|powered\s+by|build\s+(?:command|output|pipeline))\b/i.test(text) ||
-    namedImplementation ||
-    /\b(?:and|then|also)\s+(?:write|create|build|implement)\b[^.!?;\n]{0,64}\b(?:report|script|cli|program|tests?|documentation)\b/i.test(text);
+    namedImplementation || nonStaticImplementation ||
+    /\b(?:and|then|also|plus)\b[^.!?;\n]{0,96}\b(?:report|script|cli|program|tests?|documentation)\b/i.test(text);
   const simpleStaticTarget = explicitStaticTarget || directBasicSiteCreation(text);
   // Creating a new site can still require evidence/assets before any write.
   // Do not force a placeholder index ahead of requested inspection or inputs.
@@ -5854,6 +5878,8 @@ export function workspacePreviewMode(messages, prompt = undefined) {
     /\b(?:from|using|based\s+on|matching)\b[^.!?;\n]{0,96}\b(?:brief|brand\s+guide|project|workspace|folder|directory|repository|template)\b/i.test(text) ||
     /\b(?:before|after)\b[^.!?;\n]{0,96}\b(?:ask|questions?|generate|assets?|decide|choose|confirm)\b/i.test(text) ||
     /\b(?:ask|clarify|confirm|decide|generate|download)\b[^.!?;\n]{0,96}\b(?:first|before|then)\b/i.test(text) ||
+    /\b(?:check|examine|survey|look\s+(?:at|around|through))\b[^.!?;\n]{0,96}\b(?:workspace|project|folder|directory|source|first|before)\b/i.test(text) ||
+    /\b(?:start|begin)\s+(?:by|with)\b/i.test(text) ||
     /\b(?:read|inspect|research|review|fetch|search)\b/i.test(text) ||
     (text.match(/\b[A-Za-z0-9_-][A-Za-z0-9._/-]*\.[A-Za-z0-9]{1,10}\b/gi) ?? [])
       .some(file => !/(?:^|\/)index\.html$/i.test(file)) ||
