@@ -1436,8 +1436,11 @@ def _migration_edge_context(plan):
     environment = {key: source[key] for key in ('HOME', 'PATH', 'DOCKER_HOST', 'DOCKER_CONFIG') if key in source}
     if (not environment.get('PATH') or not environment.get('DOCKER_HOST', '').startswith('unix:///')):
         raise InstallError('native-migration-docker-environment-required')
+    # Docker's per-owner socket is owned by this uid. Drop root's supplementary
+    # groups explicitly; copying every macOS directory-service group can exceed
+    # the subprocess setgroups limit and prevent migration before activation.
     return dict(cwd='/', env=environment, user=owner.pw_uid, group=owner.pw_gid,
-                extra_groups=os.getgrouplist(owner.pw_name, owner.pw_gid))
+                extra_groups=[])
 
 
 def _migration_edge_request(plan, container, operation=None, binding=None):
@@ -1759,7 +1762,7 @@ def _relocate_upgrade_receipt(plan, previous, candidate, *, restore=False):
         input=json.dumps(dict(source=source, target=target, sourceHash=source_hash, targetHash=target_hash)) + '\n',
         text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=False,
         cwd='/', env=env, user=owner.pw_uid, group=owner.pw_gid,
-        extra_groups=os.getgrouplist(owner.pw_name, owner.pw_gid))
+        extra_groups=[])
     if result.returncode != 0 or len(result.stdout) > 1024:
         raise InstallError('runtime-upgrade-owner-relocation-failed')
     response = json.loads(result.stdout)
@@ -2465,7 +2468,7 @@ def _reprove_installed_access(plan):
     result = subprocess.run(['/usr/bin/python3', '-I', str(helper), '--startup'],
         cwd='/', env={'HOME': owner.pw_dir, 'PATH': '/usr/bin:/bin'},
         user=owner.pw_uid, group=owner.pw_gid,
-        extra_groups=os.getgrouplist(owner.pw_name, owner.pw_gid),
+        extra_groups=[],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, timeout=360, check=False)
     if result.returncode != 0 or len(result.stdout) > 1024:
