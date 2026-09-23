@@ -527,6 +527,20 @@ test('simple source proposals use the same scoped API and immutable recipe valid
   assert.equal((await tool.execute('id', {...args, source})).isError, true);
 });
 
+test('advanced proposal still rejects Python verification over 2048 characters before submission', async () => {
+  const calls=[];
+  const tool=createExtensionProposalTool(context,{submit:async payload=>{calls.push(payload);return receipt;}});
+  const source={repository:'https://github.com/o/r',commit:'a'.repeat(40),
+    serviceId:'example',name:'Example',port:0,cliOnly:true,pythonVersion:'3.12',
+    pythonImports:['example']};
+  for (const pythonVerification of [{expression:'x'.repeat(2049),expected:'x'},
+    {expression:'x',expected:'x'.repeat(2049)}]) {
+    assert.equal((await tool.execute('id',{chatId:'chat',requestId:'turn',
+      source:{...source,pythonVerification}})).isError,true);
+    assert.equal(calls.some(payload=>payload.action==='github-request-propose'),false);
+  }
+});
+
 for (const [platform, path] of [['darwin', '/private/var/lib/ods-pixel-manager/extension-manager.sock'], ['linux', '/run/ods-pixel-manager/extension-manager.sock']]) {
   test(`proposal reaches the native manager on ${platform}`, async () => {
     const socket = new EventEmitter();
@@ -625,9 +639,23 @@ test('flat Python library can add a documented function check without host comma
   assert.match(candidate.compose.services.example.command[2],/assert str\(actual\) ==/);
   assert.match(candidate.compose.services.example.command[2],/modules\[/);
   assert.equal(tool.parameters.properties.pythonVerification.required.join(','),'expression,expected');
+  const modelVerification = tool.parameters.properties.pythonVerification.properties;
+  const advancedVerification = createExtensionProposalTool(context).parameters.properties.source
+    .properties.pythonVerification.properties;
+  for (const field of ['expression','expected']) {
+    assert.equal(Object.hasOwn(modelVerification[field],'maxLength'),false);
+    assert.equal(Object.hasOwn(advancedVerification[field],'maxLength'),false);
+    assert.match(modelVerification[field].description,/Maximum 2048 characters/);
+  }
   calls.length=0;
   assert.equal((await tool.execute('one',{...input,pythonVerification:{expression:'',expected:'x'}})).isError,true);
   assert.deepEqual(calls.map(x=>x.action),['github-request-resolve']);
+  for (const pythonVerification of [{expression:'x'.repeat(2049),expected:'x'},
+    {expression:'x',expected:'x'.repeat(2049)}]) {
+    calls.length=0;
+    assert.equal((await tool.execute('one',{...input,pythonVerification})).isError,true);
+    assert.deepEqual(calls.map(x=>x.action),['github-request-resolve']);
+  }
 });
 
 
