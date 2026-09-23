@@ -1392,7 +1392,14 @@ readiness checks. Only then does it activate the gateway/access services.
 Failures before gateway activation retain admission. The private
 `service-installation.json` records selection and last progress without exception
 text; existing journals/spools are refused rather than erased or silently
-adopted. This is initial-install integration, not update/recovery support.
+adopted. The sole exception is an empty retained Operations service-account
+home after an explicit test-host retirement: a root helper must prove that the
+identity receipt is the only protected state, its account and launchd jobs are
+inactive, and the home has the exact owner, mode and no entries. The installer
+then securely provisions that empty inode in place because macOS System Policy
+may refuse to unlink another account's home even to root. Any nonempty home,
+other native residue or unverified identity still fails closed; this is not
+general migration or automatic recovery support.
 Successfully started auxiliary jobs may remain after a later gateway failure;
 the hold and journals remain necessary for explicit recovery.
 
@@ -2082,6 +2089,46 @@ observer timeout; later backend evidence showed interruption and an idle model
 slot, not successful artifact creation. Its cancellation caller also timed out,
 so that observation does not prove an acknowledged cancellation response. Draft
 PR 6155 contains the implementation and is not a claim of completed qualification.
+
+#### Expected Release Source Bindings
+
+New owner preparations include `ods-release-selection.json` **inside** the runtime
+bundle inventory. Its bytes are covered by the existing selected bundle digest,
+protected publication and transaction journals; it is not a separate activation
+receipt. `pixel-runtime-bundle.py`'s `expected_release_selection` accessor verifies
+the complete bundle before returning this record. Verification does not start a
+process, select an active release or alter rollback artifacts.
+This is owner-produced local Git evidence bound to an approved artifact digest,
+not an upstream signature or independent release authority.
+
+Service staging selects a clean ODS Git commit before copying service source.
+Runtime staging reuses that commit, even if checkout HEAD has since changed, and
+compares every copied ODS plugin file, the exec wrapper and shared repair manifest
+inputs with that selected Git tree. The embedded, digest-bound service manifest
+likewise records the exact copied ODS service files. Git replacement objects are
+disabled. Missing Git metadata, dirty source, unavailable service provenance or
+changed source bytes produce `odsSource.state: unknown`, not an inferred commit
+or an installation refusal. Legacy bundles remain readable as unknown.
+
+`verified-source-bindings` means only `sourceScope: recorded-bindings-only`.
+It does **not** establish provenance for the entire ODS tree. Generated operations
+policy and extension catalog remain artifact-digest-bound with source provenance
+unknown. The vendor Pixel broker is not attributed to ODS; `pixelSourceRevision`
+records the qualified Pixel selection checked by `selected_release`, not an
+independent byte proof for every Pixel or third-party runtime component. The
+full bundle inventory continues to cover those selected artifact bytes.
+
+The record always has `scope: expected-artifacts-not-running` and
+`runtimeMatchesRelease: null`. It does not prove loaded process bytes, preview
+container identity, final model-offered schemas or successful general tasks.
+Those require separate fresh process and installed acceptance evidence. Initial
+and migration preparation forward the service manifest and ODS source through
+staging only; activation and finalization behavior are unchanged.
+
+Portable source tests are in `tests/test_macos_pixel_release_selection.py`.
+The real POSIX copier migration/rollback check in that file and existing Mac
+service/candidate/prepare suites require the native installer CI lane; a Windows
+portable pass alone is not macOS installation qualification.
 
 ### Native Exec Working Directory And Shell
 

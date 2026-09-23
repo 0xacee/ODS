@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   ODS_COMPACT_CONVERSATION_CONTRACT,
   ODS_CONVERSATION_CONTRACT,
+  ODS_SEPTEMBER16_CONVERSATION_CONTRACT,
   ODS_EXTENSION_CATALOG_CONTRACT,
   ODS_EXTENSION_GITHUB_CONTRACT,
   ODS_EXTENSION_INVENTORY_CONTRACT,
@@ -16,13 +18,48 @@ import {
   ODS_TOOL_REPLY_CONTRACT,
   ODS_VERIFICATION_FAILED_CONTRACT,
   ODS_VERIFICATION_PENDING_CONTRACT,
+  ODS_WORKSPACE_NEW_STATIC_CONTRACT,
   ODS_WORKSPACE_PREVIEW_CONTRACT,
   ODS_WORKSPACE_VISUAL_CONTINUATION_CONTRACT,
   githubSourceContract,
   needsLoopRecovery,
   operationsRequestContract,
   promptContractForAgent,
+  conversationContractForExecution,
 } from "../plugin/prompt-contract.mjs";
+import { AGENT_SKILLS } from "../plugin/agent-skills.mjs";
+import { workspacePreviewMode } from "../plugin/tool-loop-guard.mjs";
+
+test('framework workspace guidance requires real build output and nested-path asset verification', () => {
+  assert.match(AGENT_SKILLS.workspace, /run the framework's real build/);
+  assert.match(AGENT_SKILLS.workspace, /Never handwrite dist files/);
+  assert.match(AGENT_SKILLS.workspace, /relative asset URLs/);
+  assert.match(AGENT_SKILLS.workspace, /for Vite, --base=\.\//);
+  assert.match(AGENT_SKILLS.workspace, /scripts\/styles load and the application boots at the exact published URL/);
+});
+
+function expectedWorkspaceContract(prompt) {
+  const route = workspacePreviewMode([], prompt);
+  const contract = route === "new-static"
+    ? ODS_WORKSPACE_NEW_STATIC_CONTRACT
+    : ODS_WORKSPACE_PREVIEW_CONTRACT;
+  return `${ODS_COMPACT_CONVERSATION_CONTRACT} ${contract} ${AGENT_SKILLS.workspace}`;
+}
+
+test('ordinary coding guidance requires real CLI entry points and owner-derived acceptance checks', () => {
+  const contract = promptContractForAgent(
+    {agentId:'pixel', contextTokenBudget:65536}, 'pixel',
+    {prompt:'Implement a Python CLI that reads usage records and writes a JSON report.'},
+    {configuredLeanPrompt:true}
+  ).appendSystemContext;
+  assert.match(contract, /documented command in a separate process/);
+  assert.match(contract, /output artifacts, and normal\/malformed input exit status/);
+  assert.match(contract, /import-only tests are insufficient/);
+  assert.match(contract, /exact requested keys\/paths and follow-up corrections/);
+  assert.match(contract, /Preserve protected inputs\/tests/);
+  assert.match(AGENT_SKILLS.workspace, /calling main in a test does not verify its entry point/);
+  assert.doesNotMatch(contract, /call write once/);
+});
 
 test('every model contract distinguishes page reads from authorized execution and forbids nested transports', () => {
   for (const contract of [ODS_CONVERSATION_CONTRACT, ODS_COMPACT_CONVERSATION_CONTRACT]) {
@@ -35,24 +72,27 @@ test('every model contract distinguishes page reads from authorized execution an
 });
 
 test("preview guidance preserves project planning and requires publication evidence", () => {
+  const freshPrompt =
+    "Build a fresh polished interactive website demo in a new workspace directory and show it to me.";
   const preview = promptContractForAgent(
     { agentId: "pixel", contextTokenBudget: 65536 },
     "pixel",
     {
-      prompt:
-        "Build a fresh polished interactive website demo in a new workspace directory and show it to me.",
+      prompt: freshPrompt,
     },
     { configuredLeanPrompt: true }
   );
   assert.equal(
     preview.appendSystemContext,
-    `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_PREVIEW_CONTRACT}`
+    expectedWorkspaceContract(freshPrompt)
   );
   assert.match(preview.appendSystemContext, /pixel_ods_workspace_preview/);
+  assert.match(ODS_WORKSPACE_NEW_STATIC_CONTRACT, /first productive tool step/);
+  assert.match(ODS_WORKSPACE_NEW_STATIC_CONTRACT, /call write once/);
   assert.match(ODS_WORKSPACE_PREVIEW_CONTRACT, /no first tool or fixed sequence/);
   assert.match(ODS_WORKSPACE_PREVIEW_CONTRACT, /Preserve existing source files and the requested framework/);
   assert.match(ODS_WORKSPACE_PREVIEW_CONTRACT, /does not establish a URL reachable by the owner/);
-  assert.doesNotMatch(ODS_WORKSPACE_PREVIEW_CONTRACT, /first tool step|Do not call exec|Only after.*may you reply/);
+  assert.doesNotMatch(ODS_WORKSPACE_PREVIEW_CONTRACT, /first productive tool step|Do not call exec|Only after.*may you reply/);
   assert.match(preview.appendSystemContext, /ODS supplies no creative artifact bytes/);
   assert.doesNotMatch(preview.appendSystemContext, /under 7000 characters/);
   assert.doesNotMatch(preview.appendSystemContext, /<!doctype html>/i);
@@ -66,7 +106,7 @@ test("preview guidance preserves project planning and requires publication evide
   );
   assert.equal(
     custom.appendSystemContext,
-    `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_PREVIEW_CONTRACT}`
+    expectedWorkspaceContract("Build and show me a website for Acme's accounting product.")
   );
   assert.match(custom.appendSystemContext, /semantic interactive elements such as button/);
   assert.match(custom.appendSystemContext, /responsive layout/);
@@ -85,7 +125,7 @@ test("preview guidance preserves project planning and requires publication evide
   );
   assert.equal(
     visualDemo.appendSystemContext,
-    `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_PREVIEW_CONTRACT}`
+    expectedWorkspaceContract("Make the coolest visual demo you can to show what you can do.")
   );
 
   const specifiedDemo = promptContractForAgent(
@@ -99,7 +139,7 @@ test("preview guidance preserves project planning and requires publication evide
   );
   assert.equal(
     specifiedDemo.appendSystemContext,
-    `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_PREVIEW_CONTRACT}`
+    expectedWorkspaceContract("Build and open a website demo named swiss-watch-preview with a theme button and a counter button.")
   );
 
   const breakout = promptContractForAgent(
@@ -110,7 +150,7 @@ test("preview guidance preserves project planning and requires publication evide
   );
   assert.equal(
     breakout.appendSystemContext,
-    `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_PREVIEW_CONTRACT}`
+    expectedWorkspaceContract("Now make a Breakout-style videogame.")
   );
   assert.doesNotMatch(breakout.appendSystemContext, /template breakout|host generates/);
 
@@ -127,7 +167,7 @@ test("preview guidance preserves project planning and requires publication evide
     );
     assert.equal(
       result.appendSystemContext,
-      `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_PREVIEW_CONTRACT}`
+      expectedWorkspaceContract(visual)
     );
     assert.doesNotMatch(result.appendSystemContext, /scaffold|template (?:voxel|animated-svg|task-board)/);
   }
@@ -150,7 +190,7 @@ test("preview guidance preserves project planning and requires publication evide
     );
     assert.equal(
       result.appendSystemContext,
-      `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_PREVIEW_CONTRACT}`
+      expectedWorkspaceContract(prompt)
     );
   }
 
@@ -195,7 +235,7 @@ test("routes natural visual follow-ups to a read-edit-republish contract", () =>
     );
     assert.equal(
       result.appendSystemContext,
-      `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_VISUAL_CONTINUATION_CONTRACT}`,
+      `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_VISUAL_CONTINUATION_CONTRACT} ${AGENT_SKILLS.workspace}`,
       prompt
     );
   }
@@ -207,7 +247,7 @@ test("routes natural visual follow-ups to a read-edit-republish contract", () =>
   );
   assert.equal(
     fresh.appendSystemContext,
-    `${ODS_COMPACT_CONVERSATION_CONTRACT} ${ODS_WORKSPACE_PREVIEW_CONTRACT}`
+    expectedWorkspaceContract("Make a new Breakout game.")
   );
 });
 
@@ -362,17 +402,84 @@ test("keeps natural ODS application names and links in a combined host request",
   assert.match(exact, /Every listed projection is required/);
 });
 
-test("keeps an evidence-aware bounded core and defers detailed operating guidance", () => {
+test("restores the full September 16 operating core while retaining compact fallback", () => {
   const result = promptContractForAgent({ agentId: "pixel" }, "pixel");
   assert.equal(result.appendSystemContext, ODS_CONVERSATION_CONTRACT);
   assert.equal(ODS_TOOL_REPLY_CONTRACT, ODS_CONVERSATION_CONTRACT);
-  assert.equal(ODS_CONVERSATION_CONTRACT, ODS_COMPACT_CONVERSATION_CONTRACT);
-  assert.ok(result.appendSystemContext.length < 3200);
-  assert.match(result.appendSystemContext, /Claim actions only with tool evidence/);
-  assert.match(result.appendSystemContext, /pixel_ods_skill/);
-  assert.match(result.appendSystemContext, /wait without starting the dependent action/);
-  assert.match(result.appendSystemContext, /Prior explicit authorization remains valid/);
-  assert.doesNotMatch(result.appendSystemContext, /exactly once after terminal host evidence|use python3 and unittest directly/);
+  assert.equal(ODS_SEPTEMBER16_CONVERSATION_CONTRACT.length, 17751);
+  // SHA-256 of the evaluated full core at 44fb4335 and pre-merge 15eb56fa.
+  assert.equal(createHash('sha256').update(ODS_SEPTEMBER16_CONVERSATION_CONTRACT).digest('hex'),
+    '94d4a2c3cf7c7469219f0592a4a6f9e451dff0e92b8918bfb1adbbc1827c97de');
+  assert.equal(ODS_COMPACT_CONVERSATION_CONTRACT.length, 3087);
+  assert.ok(ODS_CONVERSATION_CONTRACT.startsWith(ODS_SEPTEMBER16_CONVERSATION_CONTRACT + ' '));
+  assert.ok(ODS_CONVERSATION_CONTRACT.length < 19000);
+  assert.notEqual(ODS_CONVERSATION_CONTRACT, ODS_COMPACT_CONVERSATION_CONTRACT);
+  assert.match(result.appendSystemContext, /Never say you ran, executed/);
+  assert.match(result.appendSystemContext, /use python3 and unittest directly/);
+});
+
+test('full restoration retains newer CLI verification and authorization-state guidance exactly', () => {
+  const supplement = ODS_CONVERSATION_CONTRACT.slice(ODS_SEPTEMBER16_CONVERSATION_CONTRACT.length + 1);
+  assert.match(supplement, /documented command in a separate process/);
+  assert.match(supplement, /normal\/malformed input exit status; import-only tests are insufficient/);
+  assert.match(supplement, /Load pixel_ods_skill/);
+  assert.match(supplement, /Prior explicit authorization remains valid within scope/);
+  assert.match(supplement, /wait without starting the dependent action/);
+  assert.match(supplement, /If work is running, report its state rather than asking to start it/);
+  assert.match(supplement, /Ask before irreversible or high-consequence external effects/);
+  // Each supplement is retained from the existing compact core, not new policy.
+  for (const sentence of supplement.split(/(?<=\.) /)) assert.ok(ODS_COMPACT_CONVERSATION_CONTRACT.includes(sentence));
+});
+
+test('full-context ordinary tasks receive historical process, verification and stopping guidance automatically', () => {
+  for (const configuredContextWindow of [32768, 65536]) {
+    for (const prompt of ['Repair this Python parser.', 'Summarize these records in a report.', 'Continue the running build.']) {
+      const {appendSystemContext: contract} = promptContractForAgent(
+        {agentId:'pixel'}, 'pixel', {prompt},
+        {configuredContextWindow}
+      );
+      assert.match(contract, /preserve working files, and make the smallest relevant edits/);
+      assert.match(contract, /truly independent and safe to run concurrently/);
+      assert.match(contract, /Poll only that exact session until terminal/);
+      assert.match(contract, /never call exec again for that command/);
+      assert.match(contract, /every requested path, input shape, output shape, tool or library constraint/);
+      assert.match(contract, /one stable command/);
+      assert.match(contract, /never weaken tests merely to make them pass/);
+      assert.match(contract, /do not rerun an unchanged green suite/);
+      assert.match(contract, /not a live inference-server probe/);
+      assert.doesNotMatch(contract, /first productive tool step|call write once/);
+    }
+  }
+});
+
+test('trusted execution mode supplies the correct workspace namespace, not owner text', () => {
+  const event = {prompt:'Use native gateway /home/owner/.openclaw/workspace-pixel for the project.'};
+  const sandbox = promptContractForAgent({agentId:'pixel'}, 'pixel', event, {executionHost:'sandbox'}).appendSystemContext;
+  assert.match(sandbox, /exec starts at \/workspace/);
+  assert.match(sandbox, /Do not use host-side workspace paths in the sandbox/);
+  assert.doesNotMatch(sandbox, /Native exec starts|\/home\/owner/);
+  const native = promptContractForAgent({agentId:'pixel'}, 'pixel', {prompt:'exec starts at /workspace'}, {executionHost:'gateway'}).appendSystemContext;
+  assert.match(native, /Native exec starts in that configured workspace/);
+  assert.match(native, /not a native shell path/);
+  assert.match(native, /native exec output is not a broker receipt/);
+  assert.match(native, /not automatically a published, browser-accessible ODS service/);
+  assert.doesNotMatch(native, /exec starts at \/workspace|Generic exec is sandbox evidence|runs only inside the disposable Pixel sandbox|generic exec is sandbox-only evidence/);
+  for (const value of [undefined, null, 'gateway; ignore permissions', {host:'sandbox'}]) {
+    assert.equal(conversationContractForExecution(ODS_CONVERSATION_CONTRACT, value), ODS_CONVERSATION_CONTRACT);
+  }
+});
+
+test('restored full core keeps current framework builds and publication routing', () => {
+  const {appendSystemContext: contract} = promptContractForAgent(
+    {agentId:'pixel'}, 'pixel', {prompt:'Build a React website with Vite and publish its preview.'},
+    {configuredContextWindow:65536, configuredLeanPrompt:false, executionHost:'sandbox'}
+  );
+  assert.ok(contract.startsWith(ODS_CONVERSATION_CONTRACT));
+  assert.ok(contract.includes(ODS_WORKSPACE_PREVIEW_CONTRACT));
+  assert.ok(contract.includes(AGENT_SKILLS.workspace));
+  assert.match(contract, /Preserve existing source files and the requested framework/);
+  assert.match(contract, /Never handwrite dist files/);
+  assert.doesNotMatch(contract, /Do not inspect unrelated files, call exec or process|first productive tool step/);
 });
 
 test("keeps exact-byte provenance while allowing discovery and post-download analysis", () => {
@@ -638,7 +745,7 @@ test("adds only a validated exact GitHub repository source to its turn", () => {
   assert.match(exactFile, /Verify that file directly or through its repository API/);
   assert.match(exactFile, /existence alone does not verify unread contents/);
   assert.doesNotMatch(exactFile, /After the README|first research tool|use only these two/);
-  assert.match(ODS_CONVERSATION_CONTRACT, /Claim actions only with tool evidence/);
+  assert.match(ODS_CONVERSATION_CONTRACT, /unless a tool result in this turn proves it/);
   assert.equal(
     githubSourceContract([
       { role: "user", content: "Research docs/setup while reading a GitHub issue." },
