@@ -247,7 +247,7 @@ def configure_legacy_environment(*, preparation, docker, project):
 
 
 def prepare_migration(*, source, ref, node, runtime, docker, ods_source, install_dir,
-                      destination, license_authorized=False, gateway_port=18789, access_port=18790):
+                      destination, gateway_port=18789, access_port=18790):
     """Stage a legacy migration without changing credentials, state or services."""
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
@@ -330,7 +330,7 @@ def prepare_migration(*, source, ref, node, runtime, docker, ods_source, install
 
 def prepare(*, source=None, ref, answers=None, node, runtime=None, sandbox_image=None, destination,
             docker, docker_socket, ods_source, ingress_image, compose_project,
-            ingress_gid, research_port=3004, npm=None, license_authorized=False,
+            ingress_gid, research_port=3004, npm=None,
             install_dir=None, native_home=None):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
@@ -368,7 +368,6 @@ def prepare(*, source=None, ref, answers=None, node, runtime=None, sandbox_image
             record['phase'] = 'source-acquisition'
             checkpoint()
             source = config.bootstrap.acquire_source(ref=ref, destination=destination / 'source',
-                license_authorized=license_authorized,
                 source_url=str(Path(ods_source) / 'vendor/pixel.bundle'))
         if answers is None:
             record['phase'] = 'credentials'
@@ -430,7 +429,6 @@ def migration_main(argv):
     parser = argparse.ArgumentParser(description='Prepare a legacy native migration without activating it.')
     for name in ('source', 'ref', 'node', 'runtime', 'docker', 'ods-source', 'install-dir', 'destination'):
         parser.add_argument('--' + name, required=True)
-    parser.add_argument('--license-authorized', action='store_true')
     parser.add_argument('--gateway-port', type=int, default=18789)
     parser.add_argument('--access-port', type=int, default=18790)
     args = parser.parse_args(argv)
@@ -466,11 +464,10 @@ def main():
     onboarding.add_argument('--answers', help='Existing private onboarding contract')
     onboarding.add_argument('--install-dir', help='Generate onboarding from this installed ODS environment')
     parser.add_argument('--native-home', help='New native home for generated onboarding; parent must exist')
-    parser.add_argument('--source', help='Existing exact checkout; otherwise acquire the official Pixel source')
+    parser.add_argument('--source', help='Existing exact checkout; otherwise acquire the bundled ODS Pixel source')
     parser.add_argument('--runtime')
     parser.add_argument('--sandbox-image')
     parser.add_argument('--npm')
-    parser.add_argument('--license-authorized', action='store_true')
     parser.add_argument('--ingress-gid', required=True, type=int)
     parser.add_argument('--research-port', default=3004, type=int)
     args = parser.parse_args()

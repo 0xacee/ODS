@@ -441,15 +441,15 @@ if ! ods_pixel_validate_source 2>/dev/null; then
 else
     fail "Bundled Pixel source should refuse the former private-repo ref"
 fi
-unset INSTALL_DIR PIXEL_SOURCE_URL PIXEL_SOURCE_REF
+unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF
 
-# Valid GitHub URL + valid ref
+# The former private URL is rejected even with an immutable ref.
 PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
 PIXEL_SOURCE_REF="abcdef0123456789abcdef0123456789abcdef01"
-if ods_pixel_validate_source; then
-    pass "Valid GitHub URL + valid ref accepted"
+if ! ods_pixel_validate_source 2>/dev/null; then
+    pass "Former private GitHub source is rejected"
 else
-    fail "Valid GitHub URL + valid ref should be accepted"
+    fail "Former private GitHub source must be rejected"
 fi
 
 # URL with credentials
@@ -471,7 +471,7 @@ else
 fi
 
 # Short SHA ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="abcdef01"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Short SHA ref is rejected"
@@ -480,7 +480,7 @@ else
 fi
 
 # Uppercase hex ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Uppercase hex ref is rejected"
@@ -489,7 +489,7 @@ else
 fi
 
 # Branch name as ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="main"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Branch name ref is rejected"
@@ -507,7 +507,7 @@ else
 fi
 
 # Missing ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 unset PIXEL_SOURCE_REF
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Missing ref is rejected"
@@ -595,11 +595,10 @@ section "ods_pixel_activate_source_contract"
 if (
     unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF PIXEL_SOURCE_DIR
     ods_pixel_activate_source_contract \
-        "https://github.com/Osmantic/Pixel.git" \
-        "abcdef0123456789abcdef0123456789abcdef01" ""
+        bundled "$ODS_PIXEL_BUNDLED_REF" ""
     python3 -c 'import os
-assert os.environ["PIXEL_SOURCE_URL"] == "https://github.com/Osmantic/Pixel.git"
-assert os.environ["PIXEL_SOURCE_REF"] == "abcdef0123456789abcdef0123456789abcdef01"
+assert os.environ["PIXEL_SOURCE_URL"] == "bundled"
+assert os.environ["PIXEL_SOURCE_REF"] == "817214d5ec3d8aa583fe50c1dc7561f3c1a16dff"
 assert os.environ["PIXEL_SOURCE_DIR"] == ""'
 ); then
     pass "Validated Pixel source contract persists across installer phases"
@@ -609,11 +608,11 @@ fi
 
 if ! (
     ods_pixel_activate_source_contract \
-        "https://github.com/Osmantic/Pixel.git" "main" ""
+        "https://github.com/Osmantic/Pixel.git" "$ODS_PIXEL_BUNDLED_REF" ""
 ); then
-    pass "Invalid Pixel source contract is not activated"
+    pass "Remote Pixel source contract is not activated"
 else
-    fail "Invalid Pixel source contract should fail before Phase 11"
+    fail "Remote Pixel source contract should fail before Phase 11"
 fi
 
 # ---- ods_pixel_generate_key tests --------------------------------------------

@@ -16,6 +16,7 @@ import signal
 import stat
 import subprocess
 import tarfile
+import tempfile
 import threading
 import uuid
 
@@ -23,12 +24,15 @@ from .connection import normalize_connection
 from .connection_transport import probe_connection
 from .store import MAX_BYTES, StoreError, decode_document
 
-PIXEL_COMMIT = 'b33730436baf5d98bf58f7d57c090318fe19f433'
+PIXEL_COMMIT = '817214d5ec3d8aa583fe50c1dc7561f3c1a16dff'
+PIXEL_BUNDLE_SHA256 = '8fea465b1b42d82da0a286936d0e029b038321fd39793f5a849843ef11aee865'
+PIXEL_BUNDLE = Path(__file__).resolve().parents[2]/'vendor/pixel.bundle'
 # Preparation follows the current paired installer. Loading must not rewrite or
 # invalidate clients prepared with an earlier supported renderer. These exact
 # receipt identities do not certify custody of an owner's writable source tree.
 PREPARED_PIXEL_COMMITS = frozenset((
     PIXEL_COMMIT,
+    'b33730436baf5d98bf58f7d57c090318fe19f433',
     '9409d1ae894394a4848bf5b41a6323e64c577f06',
     '70f44c90ac40b8409ebc965becc5b085a053e270',
 ))
@@ -75,8 +79,48 @@ def _command(args, *, env=None, timeout=30):
         raise StoreError('client-preparation-failed') from None
 
 
-def _pixel_archive(repository):
-    raw = _command(['git','--no-replace-objects','-C',str(repository),'archive','--format=tar',PIXEL_COMMIT])
+def _pixel_archive():
+    # Stage the exact public ODS bundle; neither an ambient Git remote nor a
+    # separately cloned (possibly private) Pixel repository is consulted.
+    try:
+        fd = os.open(PIXEL_BUNDLE,os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd,'rb') as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 64*1024*1024:
+                raise StoreError('invalid-pixel-source')
+            bundle = handle.read(64*1024*1024+1)
+    except OSError:
+        raise StoreError('invalid-pixel-source') from None
+    if len(bundle) > 64*1024*1024 or hashlib.sha256(bundle).hexdigest() != PIXEL_BUNDLE_SHA256:
+        raise StoreError('invalid-pixel-source')
+    with tempfile.TemporaryDirectory(prefix='ods-pixel-client-') as temporary:
+        source_bundle = Path(temporary)/'pixel.bundle'
+        source_bundle.write_bytes(bundle)
+        repository = Path(temporary)/'pixel'
+        # Ignore ambient Git URL rewrites, helpers and alternate object paths.
+        # Only the file protocol is needed to unpack this verified local bundle.
+        git_env = {
+            'PATH': os.environ.get('PATH',os.defpath),
+            'HOME': temporary,
+            'GIT_CONFIG_NOSYSTEM': '1',
+            'GIT_CONFIG_GLOBAL': os.devnull,
+            'GIT_TERMINAL_PROMPT': '0',
+            'GIT_ALLOW_PROTOCOL': 'file',
+            'GIT_NO_REPLACE_OBJECTS': '1',
+        }
+        try:
+            _command(['git','-C',str(temporary),'-c','credential.interactive=never',
+                'clone','--quiet','--no-local',
+                '--no-checkout','--',str(source_bundle),str(repository)],env=git_env)
+            if (_command(['git','-C',str(repository),'rev-parse','HEAD'],env=git_env).decode().strip() != PIXEL_COMMIT
+                    or _command(['git','-C',str(repository),'rev-list','--count','--all'],env=git_env).decode().strip() != '1'
+                    or _command(['git','-C',str(repository),'bundle','list-heads',
+                        str(source_bundle)],env=git_env).decode().strip() != PIXEL_COMMIT+' HEAD'):
+                raise StoreError('invalid-pixel-source')
+            raw = _command(['git','--no-replace-objects','-C',str(repository),
+                'archive','--format=tar',PIXEL_COMMIT],env=git_env)
+        except StoreError:
+            raise StoreError('invalid-pixel-source') from None
     if len(raw) > 64*1024*1024:
         raise StoreError('invalid-pixel-source')
     try:
@@ -123,7 +167,7 @@ def _render_environment(source, directory):
     return result
 
 
-def prepare_client(connection, directory, *, confirmed_endpoint, pixel_repository,
+def prepare_client(connection, directory, *, confirmed_endpoint,
                    openclaw_bin, reasoning, sandbox_image='openclaw-sandbox:bookworm-slim'):
     if os.name != 'posix':
         raise StoreError('unsupported-platform')
@@ -142,7 +186,7 @@ def prepare_client(connection, directory, *, confirmed_endpoint, pixel_repositor
         raise StoreError('unsupported-openclaw-version')
     connection = normalize_connection(connection)
     metadata = probe_connection(connection,confirmed_endpoint=confirmed_endpoint)
-    archive = _pixel_archive(pixel_repository)
+    archive = _pixel_archive()
     # A failed/partial preparation stays private for inspection. Never replace
     # it or infer permission to reuse someone else's existing client directory.
     try:

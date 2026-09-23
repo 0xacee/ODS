@@ -4430,7 +4430,7 @@ def test_managed_pixel_reconcile_uses_positional_args_and_minimal_environment(
     install_dir.mkdir()
     home.mkdir()
     (install_dir / ".env").write_text(
-        "PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\n"
+        "PIXEL_SOURCE_URL=bundled\n"
         f"{gateway_setting}",
         encoding="utf-8",
     )
@@ -4468,9 +4468,7 @@ def test_managed_pixel_reconcile_uses_positional_args_and_minimal_environment(
     ]
     assert captured["kwargs"]["timeout"] == 900
     assert captured["kwargs"]["check"] is False
-    assert captured["kwargs"]["env"]["PIXEL_SOURCE_URL"] == (
-        "https://github.com/Osmantic/Pixel.git"
-    )
+    assert captured["kwargs"]["env"]["PIXEL_SOURCE_URL"] == "bundled"
     assert captured["kwargs"]["env"]["PIXEL_GATEWAY_PORT"] == expected_gateway_port
     assert "UNRELATED_SECRET" not in captured["kwargs"]["env"]
 
@@ -4522,6 +4520,52 @@ def test_managed_pixel_reconcile_rejects_relative_source(tmp_path, monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="configured Pixel source"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
+
+
+def test_managed_pixel_reconcile_rejects_remote_source(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text(
+        "PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(
+        _mod.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("remote source must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="configured Pixel source"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
+
+
+def test_managed_pixel_reconcile_rejects_old_ref_without_local_checkout(
+    tmp_path, monkeypatch,
+):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text(
+        "PIXEL_SOURCE_REF=b33730436baf5d98bf58f7d57c090318fe19f433\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(
+        _mod.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("old bundle ref must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="update ODS first"):
         _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
 
 

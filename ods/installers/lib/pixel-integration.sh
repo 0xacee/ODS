@@ -170,7 +170,7 @@ _ods_pixel_secure_owner_directory() {
 }
 
 # The public ODS release carries Pixel source and a one-commit local bundle.
-# Remote or owner-controlled local checkouts remain explicit developer overrides.
+# Owner-controlled local checkouts remain explicit developer overrides.
 ODS_PIXEL_BUNDLED_REF='817214d5ec3d8aa583fe50c1dc7561f3c1a16dff'
 ODS_PIXEL_BUNDLED_SHA256='8fea465b1b42d82da0a286936d0e029b038321fd39793f5a849843ef11aee865'
 
@@ -196,10 +196,6 @@ ods_pixel_validate_source() {
     if [[ "$source" == bundled ]]; then
         [[ "$ref" == "$ODS_PIXEL_BUNDLED_REF" ]] && ods_pixel_bundled_source
         return
-    fi
-
-    if [[ "$source" == "https://github.com/Osmantic/Pixel.git" ]]; then
-        return 0
     fi
 
     [[ "$source" == /* && "$owner_root" == /* ]] || {

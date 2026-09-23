@@ -38,7 +38,7 @@ def activation_command(preparation, prepared, *, install_dir, ods_source, owner,
     return command
 
 
-def update(*, install_dir, ods_source, license_authorized=False, prepare_only=False):
+def update(*, install_dir, ods_source, prepare_only=False):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     install_dir, ods_source = Path(install_dir).resolve(strict=True), Path(ods_source).resolve(strict=True)
@@ -72,14 +72,14 @@ def update(*, install_dir, ods_source, license_authorized=False, prepare_only=Fa
         print('Native update preparation: ' + str(work), flush=True)
         config = helper('pixel-native-config')
         source = config.bootstrap.acquire_source(ref=initial.DEFAULT_REF,
-            destination=work / 'source', license_authorized=True,
+            destination=work / 'source',
             source_url=str(ods_source / 'vendor/pixel.bundle'))
         runtime = work / 'acquired-runtime'
         config.bootstrap.stage(source=source, ref=initial.DEFAULT_REF, destination=runtime, node=node, npm=npm)
         preparation = work / 'preparation'
         helper('pixel-native-prepare').prepare_migration(source=source, ref=initial.DEFAULT_REF,
             node=node, runtime=runtime, docker=transport['docker'], ods_source=ods_source,
-            install_dir=install_dir, destination=preparation, license_authorized=True)
+            install_dir=install_dir, destination=preparation)
         prepared = config.private_json(preparation / 'preparation.json')
         command = activation_command(preparation, prepared, install_dir=install_dir,
             ods_source=ods_source, owner=owner, transport=transport)
@@ -99,7 +99,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--install-dir', required=True)
     parser.add_argument('--ods-source', required=True)
-    parser.add_argument('--license-authorized', action='store_true')
     parser.add_argument('--prepare-only', action='store_true')
     args = parser.parse_args()
     try:

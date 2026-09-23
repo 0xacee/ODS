@@ -22,10 +22,78 @@ def test_bundled_pixel_pin_tracks_parent_installer():
     root = Path(__file__).resolve().parents[2]
     phase = (root/'installers/phases/06-directories.sh').read_text()
     integration = (root/'installers/lib/pixel-integration.sh').read_text()
+    verifier = (root/'scripts/verify-pixel-bundle.py').read_text()
     bundled_ref = '817214d5ec3d8aa583fe50c1dc7561f3c1a16dff'
     assert f"ODS_PIXEL_BUNDLED_REF='{bundled_ref}'" in integration
     assert 'PIXEL_SOURCE_REF "$ODS_PIXEL_BUNDLED_REF"' in phase
     assert f'PIXEL_SOURCE_REF={bundled_ref}' in (root/'.env.example').read_text()
+    assert mod.PIXEL_COMMIT == bundled_ref
+    assert f'REF = "{bundled_ref}"' in verifier
+    assert f'SHA256 = "{mod.PIXEL_BUNDLE_SHA256}"' in verifier
+
+
+def test_prepare_cli_has_no_private_repository_option():
+    cli = Path(__file__).resolve().parents[2]/'bin/ods-pixel-connect'
+    help_text = subprocess.check_output([sys.executable,str(cli),'--help'],text=True)
+    assert '--pixel-repository' not in help_text
+    assert '--directory' in help_text
+
+
+def test_archive_stages_ods_bundle_without_remote_or_private_repo(monkeypatch):
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL','/untrusted/host-gitconfig')
+    monkeypatch.setenv('GIT_ALLOW_PROTOCOL','https')
+    command = mod._command
+    calls = []
+
+    def audited_command(args, *, env=None, timeout=30):
+        assert env is not None
+        assert env['GIT_CONFIG_NOSYSTEM'] == '1'
+        assert env['GIT_CONFIG_GLOBAL'] == os.devnull
+        assert env['GIT_ALLOW_PROTOCOL'] == 'file'
+        assert env['GIT_TERMINAL_PROMPT'] == '0'
+        assert env['HOME'] != os.environ.get('HOME')
+        calls.append(args)
+        return command(args,env=env,timeout=timeout)
+
+    monkeypatch.setattr(mod,'_command',audited_command)
+    with mod._pixel_archive() as archive:
+        names = set(archive.getnames())
+        assert 'scripts/configure.mjs' in names
+        assert 'scripts/render-config.mjs' in names
+    assert len(calls) == 5
+
+
+def test_prepare_client_uses_shipped_bundle_without_private_checkout(tmp_path,monkeypatch):
+    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM','1')
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL','/dev/null')
+    monkeypatch.setenv('GIT_TERMINAL_PROMPT','0')
+    monkeypatch.setenv('GIT_ASKPASS','/bin/false')
+    monkeypatch.setattr(mod,'probe_connection',lambda *a,**kw: {
+        'contextLength':32768,'maxOutputTokens':4096,'routedModel':'GLM'})
+    runtime = tmp_path/'openclaw'
+    runtime.write_text('#!/bin/sh\nprintf "OpenClaw 2026.6.33 (fixture)\\n"\n')
+    runtime.chmod(0o700)
+    conn = deepcopy(BASE_CONN)
+    conn['expiresAt'] = int(time.time())+3600
+    directory = tmp_path/'new-client'
+    result = mod.prepare_client(conn,directory,confirmed_endpoint=conn['baseUrl'],
+        openclaw_bin=str(runtime),reasoning=False)
+    assert result['status'] == 'prepared-not-activated'
+    assert mod.load_client(directory)[1]['pixelCommit'] == mod.PIXEL_COMMIT
+    assert (directory/'pixel-source/scripts/configure.mjs').is_file()
+
+
+@pytest.mark.parametrize('source',('missing','tampered','symlink'))
+def test_archive_rejects_missing_or_changed_bundle_without_git(tmp_path,monkeypatch,source):
+    bundle = tmp_path/'pixel.bundle'
+    if source == 'tampered':
+        bundle.write_bytes(mod.PIXEL_BUNDLE.read_bytes()+b'changed')
+    elif source == 'symlink':
+        bundle.symlink_to(mod.PIXEL_BUNDLE)
+    monkeypatch.setattr(mod,'PIXEL_BUNDLE',bundle)
+    monkeypatch.setattr(mod,'_command',lambda *a,**kw: pytest.fail('untrusted bundle invoked Git'))
+    with pytest.raises(mod.StoreError,match='invalid-pixel-source'):
+        mod._pixel_archive()
 
 
 @pytest.fixture(params=(
@@ -117,7 +185,7 @@ def test_directory_permissions(client_dir,directory):
 def test_invalid_image_before_any_effect(tmp_path,monkeypatch):
     monkeypatch.setattr(mod,'_command',lambda *a,**kw: pytest.fail('spawned before validation'))
     with pytest.raises(mod.StoreError,match='invalid-sandbox-image'):
-        mod.prepare_client({},tmp_path/'new',confirmed_endpoint='',pixel_repository='',
+        mod.prepare_client({},tmp_path/'new',confirmed_endpoint='',
             openclaw_bin='/bin/true',reasoning=False,sandbox_image='image\nINJECTED=1')
     assert not (tmp_path/'new').exists()
 
@@ -125,7 +193,7 @@ def test_invalid_image_before_any_effect(tmp_path,monkeypatch):
 def test_existing_directory_preserved(client_dir,monkeypatch):
     monkeypatch.setattr(mod,'_command',lambda *a,**kw: pytest.fail('spawned before validation'))
     with pytest.raises(mod.StoreError,match='client-directory-exists'):
-        mod.prepare_client({},client_dir,confirmed_endpoint='',pixel_repository='',
+        mod.prepare_client({},client_dir,confirmed_endpoint='',
             openclaw_bin='/bin/true',reasoning=False)
     assert mod.load_client(client_dir)
 

@@ -26,8 +26,7 @@ def test_preflight_never_mutates_existing_installations(tmp_path, monkeypatch, f
         return ((fault == 'existing' and str(path).endswith('pixel-access.json')) or
                 (fault == 'partial' and str(path).endswith('pixel-native')))
     monkeypatch.setattr(module.os.path, 'lexists', exists)
-    args = dict(install_dir='relative' if fault == 'relative' else tmp_path / 'ods',
-        license_authorized=False)
+    args = dict(install_dir='relative' if fault == 'relative' else tmp_path / 'ods')
     if fault:
         with pytest.raises(ValueError): module.preflight(**args)
     else:
@@ -82,7 +81,7 @@ def test_initial_installer_connects_resolved_stack_and_native_activation(tmp_pat
     def prepare(**kwargs):
         events.append('prepare')
         assert kwargs['compose_project'] == 'ods-fixture'
-        assert kwargs['license_authorized'] is True
+        assert 'license_authorized' not in kwargs
         assert kwargs['ingress_image'] == 'sha256:' + 'a' * 64
         assert kwargs['native_home'] == install_dir / 'data/pixel-native/home'
         if fault == 'prepare': raise ValueError('prepare-failed')
@@ -95,7 +94,7 @@ def test_initial_installer_connects_resolved_stack_and_native_activation(tmp_pat
     def run():
         return module.install(install_dir=install_dir, ods_source=install_dir,
             compose_files=[] if fault == 'compose' else files[:1],
-            ref='invalid' if fault == 'ref' else module.DEFAULT_REF, license_authorized=True)
+            ref='invalid' if fault == 'ref' else module.DEFAULT_REF)
     if fault:
         with pytest.raises(ValueError): run()
         if fault not in ('prepare', 'activate'):

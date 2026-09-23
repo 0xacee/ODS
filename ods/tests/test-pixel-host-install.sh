@@ -828,6 +828,13 @@ sleep 10
 SH
 chmod +x "$mock_bin/git"
 PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_REF="$previous_source_ref"
+if _ods_pixel_source_checkout "$owner" "$home" "$source_checkout" >/dev/null 2>&1; then
+    fail "remote Pixel source is rejected even with an existing checkout"
+else
+    pass "remote Pixel source is rejected before reusing an existing checkout"
+fi
+PIXEL_SOURCE_URL="$source_fixture"
 PIXEL_SOURCE_REF="$(printf 'f%.0s' {1..40})"
 timed_checkout="$TEST_ROOT/timed-checkouts/source-$PIXEL_SOURCE_REF"
 if PATH="$mock_bin:$PATH" ODS_PIXEL_SOURCE_TIMEOUT_SECONDS=1 \
@@ -1895,14 +1902,16 @@ chmod 0600 "$reconcile_marker"
 check test "$(_ods_pixel_managed_source_ref "$owner" "$reconcile_home")" = "$reconcile_ref"
 if (
     unset PIXEL_SOURCE_URL
-    [[ "$(_ods_pixel_reconciliation_source_url 817214d5ec3d8aa583fe50c1dc7561f3c1a16dff)" == bundled ]]
-    [[ "$(_ods_pixel_reconciliation_source_url b33730436baf5d98bf58f7d57c090318fe19f433)" == 'https://github.com/Osmantic/Pixel.git' ]]
+    [[ "$(_ods_pixel_reconciliation_source_url "$ODS_PIXEL_BUNDLED_REF")" == bundled ]]
+    ! _ods_pixel_reconciliation_source_url b33730436baf5d98bf58f7d57c090318fe19f433 >/dev/null 2>&1
+    PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git
+    ! _ods_pixel_reconciliation_source_url "$ODS_PIXEL_BUNDLED_REF" >/dev/null 2>&1
     PIXEL_SOURCE_URL=/safe/developer-checkout
-    [[ "$(_ods_pixel_reconciliation_source_url 817214d5ec3d8aa583fe50c1dc7561f3c1a16dff)" == /safe/developer-checkout ]]
+    [[ "$(_ods_pixel_reconciliation_source_url "$ODS_PIXEL_BUNDLED_REF")" == /safe/developer-checkout ]]
 ); then
-    pass "model reconciliation chooses bundled source for the public ref and preserves developer overrides"
+    pass "model reconciliation uses bundled/local source and rejects remote fallback"
 else
-    fail "model reconciliation chooses bundled source for the public ref and preserves developer overrides"
+    fail "model reconciliation must not use a remote fallback"
 fi
 mkdir -p "$reconcile_home/.config/pixel-deployment"
 chmod 0700 "$reconcile_home/.config/pixel-deployment"
@@ -2591,6 +2600,11 @@ handoff = (
 )
 assert handoff in phase
 assert phase.index(handoff) < phase.index("PIXEL_SOURCE_URL=$(dotenv_quote")
+legacy_upgrade = "if [[ \"$PIXEL_SOURCE_URL_VALUE\" == https://*"
+assert legacy_upgrade in phase
+assert "\"$PIXEL_SOURCE_REF_VALUE\" == \"b33730436baf5d98bf58f7d57c090318fe19f433\"" in phase
+assert phase.index(legacy_upgrade) < phase.index(handoff)
+assert "https://github.com/Osmantic/Pixel.git" not in phase
 preflight = phase.index("_phase06_step \"preflight-pixel-source\"")
 checkout = phase.index("if ! _ods_pixel_source_checkout", preflight)
 assert phase.index(handoff) < preflight < checkout < phase.index("PIXEL_SOURCE_URL=$(dotenv_quote")

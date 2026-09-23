@@ -29,12 +29,53 @@ def test_public_ods_bundle_acquires_without_private_repository(tmp_path, monkeyp
     if tampered:
         with pytest.raises(bootstrap.BootstrapError, match='bundled-pixel-source-digest-mismatch'):
             bootstrap.acquire_source(ref=bootstrap.ODS_BUNDLED_REF,
-                destination=destination, license_authorized=True, source_url=str(bundle))
+                destination=destination, source_url=str(bundle))
         assert not destination.exists()
     else:
         assert bootstrap.acquire_source(ref=bootstrap.ODS_BUNDLED_REF,
-            destination=destination, license_authorized=True, source_url=str(bundle)) == destination
+            destination=destination, source_url=str(bundle)) == destination
         assert bootstrap.selected_release(destination, bootstrap.ODS_BUNDLED_REF)['pixel'] == '4.3.27'
+
+
+def test_standalone_acquisition_defaults_to_ods_bundle(tmp_path, monkeypatch):
+    monkeypatch.setattr(bootstrap.sys, 'platform', 'darwin')
+    monkeypatch.setattr(bootstrap.os, 'geteuid', lambda: 501)
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', '/untrusted/host-gitconfig')
+    monkeypatch.setenv('GIT_ALLOW_PROTOCOL', 'https')
+    original_command = bootstrap.command
+    local_git_calls = []
+
+    def audited_command(args, **kwargs):
+        if any(action in args for action in ('clone', 'fetch')):
+            env = kwargs['env']
+            assert env['GIT_CONFIG_NOSYSTEM'] == '1'
+            assert env['GIT_CONFIG_GLOBAL'] == bootstrap.os.devnull
+            assert env['GIT_ALLOW_PROTOCOL'] == 'file'
+            assert env['GIT_TERMINAL_PROMPT'] == '0'
+            local_git_calls.append(args)
+        return original_command(args, **kwargs)
+
+    monkeypatch.setattr(bootstrap, 'command', audited_command)
+    destination = tmp_path / 'source'
+    assert bootstrap.acquire_source(ref=bootstrap.ODS_BUNDLED_REF, destination=destination) == destination
+    assert bootstrap.selected_release(destination, bootstrap.ODS_BUNDLED_REF)['pixel'] == '4.3.27'
+    assert len(local_git_calls) == 2
+
+
+@pytest.mark.parametrize('source_url', [
+    'https://github.com/Osmantic/Pixel.git',
+    'git@github.com:Osmantic/Pixel.git',
+    'ssh://git@github.com/Osmantic/Pixel.git',
+    'relative/pixel.bundle',
+])
+def test_acquisition_refuses_remote_and_relative_sources(tmp_path, monkeypatch, source_url):
+    monkeypatch.setattr(bootstrap.sys, 'platform', 'darwin')
+    monkeypatch.setattr(bootstrap.os, 'geteuid', lambda: 501)
+    destination = tmp_path / 'source'
+    with pytest.raises(bootstrap.BootstrapError, match='local-pixel-source-required'):
+        bootstrap.acquire_source(ref=bootstrap.ODS_BUNDLED_REF,
+            destination=destination, source_url=source_url)
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize('fault', [None, 'unreferenced', 'ref', 'existing', 'missing-commit', 'release'])
@@ -70,7 +111,7 @@ def test_source_acquisition_uses_exact_commit_without_changing_input(tmp_path, r
     def run():
         return bootstrap.acquire_source(ref=('main' if fault == 'ref' else
             '0' * 40 if fault == 'missing-commit' else ref), destination=destination,
-            license_authorized=False, source_url=str(source))
+            source_url=str(source))
     if fault not in (None, 'unreferenced'):
         with pytest.raises((bootstrap.BootstrapError, KeyError)):
             run()

@@ -42,7 +42,7 @@ def command(args, *, env=None, timeout=60):
     return result.stdout.strip()
 
 
-def preflight(install_dir, *, license_authorized=None):
+def preflight(install_dir):
     if sys.platform != 'darwin' or platform.machine() != 'arm64' or os.geteuid() == 0:
         raise ValueError('native-apple-silicon-owner-required')
     install_dir = Path(install_dir)
@@ -94,8 +94,8 @@ def node_tools():
     return selected
 
 
-def install(*, install_dir, ods_source, compose_files, license_authorized=False, ref=DEFAULT_REF):
-    install_dir = preflight(install_dir, license_authorized=license_authorized).resolve(strict=True)
+def install(*, install_dir, ods_source, compose_files, ref=DEFAULT_REF):
+    install_dir = preflight(install_dir).resolve(strict=True)
     if not re.fullmatch('[a-f0-9]{40}', ref):
         raise ValueError('exact-pixel-source-ref-required')
     paths = [Path(path).resolve(strict=True) for path in compose_files]
@@ -149,7 +149,7 @@ def install(*, install_dir, ods_source, compose_files, license_authorized=False,
     prepared = root / 'preparation'
     helper('prepare').prepare(ref=ref, node=node, npm=npm, destination=prepared,
         docker=docker, docker_socket=socket, ods_source=ods_source, ingress_image=image,
-        compose_project=project, ingress_gid=os.getgid(), license_authorized=True,
+        compose_project=project, ingress_gid=os.getgid(),
         install_dir=install_dir, native_home=root / 'home')
     helper('activate').activate(preparation=prepared, install_dir=install_dir, ods_source=ods_source,
         compose_files=[*paths, *fragments], configure_stack=True)
@@ -161,18 +161,17 @@ def main():
     parser.add_argument('--install-dir', required=True)
     parser.add_argument('--ods-source')
     parser.add_argument('--compose-file', action='append', default=[])
-    parser.add_argument('--license-authorized', action='store_true')
     parser.add_argument('--ref', default=DEFAULT_REF)
     parser.add_argument('--preflight-only', action='store_true')
     args = parser.parse_args()
     try:
         if args.preflight_only:
-            preflight(args.install_dir, license_authorized=args.license_authorized)
+            preflight(args.install_dir)
         else:
             if not args.ods_source:
                 raise ValueError('ods-source-required')
             install(install_dir=args.install_dir, ods_source=args.ods_source, compose_files=args.compose_file,
-                license_authorized=args.license_authorized, ref=args.ref)
+                ref=args.ref)
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         # Error codes contain no captured subprocess output, environment or keys.
         guidance = ERROR_GUIDANCE.get(str(error),
