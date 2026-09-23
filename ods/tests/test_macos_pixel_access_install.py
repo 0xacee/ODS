@@ -40,6 +40,20 @@ def test_migration_docker_child_drops_supplementary_groups(monkeypatch):
     assert context['env']['DOCKER_HOST'].startswith('unix:///Users/fixture/')
 
 
+def test_native_access_worker_drops_supplementary_groups(monkeypatch):
+    """Controller inspection must work for Mac owners with many groups."""
+    import pwd
+    import pixel_access_bridge as bridge_module
+    owner = SimpleNamespace(pw_name='fixture', pw_uid=501, pw_gid=20)
+    bridge = object.__new__(bridge_module.LaunchdAccessBridge)
+    bridge.owner = owner
+    monkeypatch.setattr(bridge_module.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(pwd, 'getpwnam', lambda _: owner)
+    monkeypatch.setattr(bridge_module.os, 'getgrouplist', lambda *_: list(range(17)))
+    assert bridge._native_owner_identity() == {
+        'user': 501, 'group': 20, 'extra_groups': []}
+
+
 @pytest.mark.parametrize('version', ['previous', 'candidate', 'unknown'])
 def test_absent_upgrade_requires_matching_definition_and_stop_witness(version):
     services = {}
