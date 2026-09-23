@@ -788,7 +788,7 @@ describe('Pixel', () => {
     globalThis.fetch
       .mockResolvedValueOnce(response({ available: true, model: 'pixel/default', detail: 'local' }))
       .mockResolvedValueOnce(response({
-        detail: 'The active model is not qualified for Pixel tool use.',
+        detail: 'Pixel is ready and adapts its tool flow for this model.',
       }, 412))
 
     render(<Pixel />)
@@ -802,6 +802,8 @@ describe('Pixel', () => {
     expect(screen.getByPlaceholderText('Message Portal...')).toHaveValue(
       'keep this owner request'
     )
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Model capability' })).toHaveTextContent('not agent-qualified'))
+    expect(screen.getByRole('status', { name: 'Model capability' })).not.toHaveTextContent('ready and adapts')
   })
 
   it('maps the legacy incompatible status to a usable adaptive status', async () => {

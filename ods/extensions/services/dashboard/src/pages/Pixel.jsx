@@ -1135,7 +1135,7 @@ export default function Pixel({ systemStatus = null }) {
       }
       if (attempt.kind === 'adaptive') {
         setStatus('available')
-        setModelSupport({ tier: 'adaptive', detail: attempt.detail })
+        setModelSupport({ tier: 'adaptive', detail: MODEL_CAPABILITY_DETAIL })
         setInput(trimmed)
         contextStartRef.current = originalContextStart
         setMessages(messages)
@@ -1174,7 +1174,7 @@ export default function Pixel({ systemStatus = null }) {
           setMessages(messages)
           setInput(trimmed)
           setStatus('available')
-          setModelSupport({ tier: 'adaptive', detail: attempt.detail })
+          setModelSupport({ tier: 'adaptive', detail: MODEL_CAPABILITY_DETAIL })
           return
         }
         if (!attempt.receivedError && attempt.receivedDone && attempt.recoveryEligible) {
