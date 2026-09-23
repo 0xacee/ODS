@@ -80,6 +80,7 @@ class RuntimeIdentityTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_old_malformed_or_large_runtime_stays_unknown(self):
         headers = {"Authorization": "Bearer " + "c" * 64}
         for status, raw in ((404, b"private-secret"), (200, b"x" * 8193),
+                            (200, b"[" * 4000 + b"0" + b"]" * 4000),
                             (200, json.dumps({**self.value, "runtimeMatchesRelease": True}).encode())):
             self.reply_status, self.raw = status, raw
             async with self.client.get(self.url, headers=headers) as response:

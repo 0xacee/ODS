@@ -18,7 +18,7 @@ from typing import AsyncIterator, Callable, Literal
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -534,8 +534,12 @@ async def _bounded_response_bytes(response: httpx.Response, limit: int) -> bytes
 
 
 @router.get("/status", dependencies=[Depends(verify_api_key)])
-async def pixel_status() -> dict[str, object]:
+async def pixel_status(http_response: Response = None) -> dict[str, object]:
     """Return a fixed, nonsecret Pixel availability projection."""
+    # The browser-facing response is newly constructed, so upstream no-store
+    # headers do not survive automatically. Never cache a live identity check.
+    if http_response is not None:
+        http_response.headers["Cache-Control"] = "no-store"
     config = _pixel_config()
     if config is None:
         return {"available": False, "model": None, "detail": "Pixel is not enabled"}
@@ -595,7 +599,7 @@ async def pixel_status() -> dict[str, object]:
                                              headers=_edge_headers(key, accept="application/json")) as response:
                         if response.status_code == 200 and response.headers.get("content-type", "").lower().startswith("application/json"):
                             identity = project_runtime_identity(json.loads(await _bounded_response_bytes(response, 8192)))
-            except (httpx.HTTPError, asyncio.TimeoutError, ValueError, TypeError):
+            except (httpx.HTTPError, asyncio.TimeoutError, ValueError, TypeError, RecursionError):
                 pass
         result["runtimeIdentity"] = identity
         result["runtimeMatchesRelease"] = identity["runtimeMatchesRelease"]

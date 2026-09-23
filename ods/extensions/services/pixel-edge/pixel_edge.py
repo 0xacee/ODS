@@ -796,7 +796,7 @@ async def handle_runtime_identity(request: web.Request):
                     if len(raw) > 8192:
                         raise ValueError("too large")
                 result = project_runtime_identity(strict_json(bytes(raw)))
-    except (ValueError, TypeError, OSError, asyncio.TimeoutError, ClientError):
+    except (ValueError, TypeError, OSError, asyncio.TimeoutError, ClientError, RecursionError):
         result = unknown_runtime_identity()
     return web.json_response(result, headers={"Cache-Control": "no-store"})
 

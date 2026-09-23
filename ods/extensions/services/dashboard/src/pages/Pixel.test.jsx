@@ -97,6 +97,15 @@ describe('Pixel', () => {
     expect(formatElapsed(3671)).toBe('1:01:11')
   })
 
+  it('bypasses cached availability and runtime identity on status reads', async () => {
+    globalThis.fetch.mockResolvedValue(response({available:true}))
+    render(<Pixel />)
+    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
+    const calls = globalThis.fetch.mock.calls.filter(([url]) => url === '/api/pixel/status')
+    expect(calls).toHaveLength(1)
+    expect(calls[0][1]).toEqual(expect.objectContaining({cache:'no-store', signal:expect.anything()}))
+  })
+
   it('keeps prompts clean without copy/reuse controls or inline tool-call summaries',async()=>{
     localStorage.setItem('ods.pixel.chat.v1',JSON.stringify({schema:1,chatId:'clean-chat',messages:[
       {role:'user',content:'A clean prompt'},

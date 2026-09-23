@@ -7,9 +7,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from test_pixel import FakeResponse, FakeClient
 from routers import pixel
+import security
 from pixel_runtime_identity import project_runtime_identity, unknown_runtime_identity
 
 
@@ -45,7 +48,7 @@ def test_edge_and_dashboard_share_the_projection_contract():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["partial", "mismatch", "missing", "bad", "timeout"])
+@pytest.mark.parametrize("kind", ["partial", "mismatch", "missing", "bad", "timeout", "nested"])
 async def test_status_keeps_chat_available_without_promoting_partial_identity(monkeypatch, kind):
     monkeypatch.setenv("PIXEL_OPENWEBUI_KEY", "e" * 64)
     async def host(*_args, **_kwargs):
@@ -64,6 +67,10 @@ async def test_status_keeps_chat_available_without_promoting_partial_identity(mo
                 self.response = FakeResponse(chunks=[b'{"data":[{"id":"pixel/default"}]}'])
             elif kind == "timeout":
                 raise pixel.httpx.ReadTimeout("private upstream token")
+            elif kind == "nested":
+                # Below the wire byte cap but beyond Python's parser nesting
+                # budget. Diagnostics cannot take down healthy chat status.
+                self.response = FakeResponse(chunks=[b"[" * 4000 + b"0" + b"]" * 4000])
             else:
                 self.response = FakeResponse(status=404 if kind == "missing" else 200,
                                              chunks=[json.dumps(value).encode()])
@@ -77,3 +84,22 @@ async def test_status_keeps_chat_available_without_promoting_partial_identity(mo
     assert "must-not-leak" not in json.dumps(status)
     assert calls[-1][1] == "http://pixel-edge:9595/v1/runtime-identity"
     assert calls[-1][2]["headers"]["Authorization"] == "Bearer " + "e" * 64
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_authenticated_status_never_caches_live_or_unknown_identity(monkeypatch, enabled):
+    monkeypatch.setattr(security, "DASHBOARD_API_KEY", "identity-test-owner-key")
+    if enabled:
+        monkeypatch.setenv("PIXEL_OPENWEBUI_KEY", "e" * 64)
+    else:
+        monkeypatch.delenv("PIXEL_OPENWEBUI_KEY", raising=False)
+    async def host(*_args, **_kwargs):
+        return {"status": "idle"}
+    monkeypatch.setattr(pixel, "request_agent_json", host)
+    app = FastAPI()
+    app.include_router(pixel.router)
+    with patch.object(pixel.httpx, "AsyncClient", return_value=FakeClient(FakeResponse(chunks=[b'{"data":[{"id":"pixel/default"}]}']))):
+        result = TestClient(app).get("/api/pixel/status", headers={"Authorization": "Bearer identity-test-owner-key"})
+    assert result.status_code == 200
+    assert result.headers["Cache-Control"] == "no-store"
+    assert result.json()["available"] is enabled

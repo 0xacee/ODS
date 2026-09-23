@@ -741,7 +741,7 @@ export default function Pixel({ systemStatus = null }) {
     let poll = null
     async function fetchStatus() {
       try {
-        const response = await fetch('/api/pixel/status', { signal: controller.signal })
+        const response = await fetch('/api/pixel/status', { signal: controller.signal, cache: 'no-store' })
         if (!response.ok) throw new Error('status unavailable')
         const data = await response.json()
         if (stopped) return
