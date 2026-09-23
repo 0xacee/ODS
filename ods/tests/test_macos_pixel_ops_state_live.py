@@ -92,6 +92,15 @@ def test_verified_empty_retained_home_can_be_provisioned_in_place(monkeypatch):
         state = root / 'retained-home'
         state.mkdir(mode=0o750)
         os.chown(state, broker.pw_uid, broker.pw_gid)
+        ops.acl(state, 'user:' + gateway.pw_name + ' allow search,add_file,add_subdirectory')
+        def gateway_write():
+            return subprocess.run(['/usr/bin/python3', '-I', '-c',
+                'import sys; open(sys.argv[1], "w").write("fixture")', str(state / 'unexpected')],
+                user=gateway.pw_uid, group=gateway.pw_gid, extra_groups=[], cwd='/',
+                env={'PATH': '/usr/bin:/bin'}, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=10)
+        assert gateway_write().returncode == 0
+        (state / 'unexpected').unlink()
         monkeypatch.setattr(ops, 'RETAINED_HOME', state)
         assert ops.reusable_empty_home(state, broker_uid=broker.pw_uid, broker_gid=broker.pw_gid)
         assert ops.provision(state=state, gateway_uid=gateway.pw_uid,
@@ -100,6 +109,9 @@ def test_verified_empty_retained_home_can_be_provisioned_in_place(monkeypatch):
         assert {path.name for path in state.iterdir()} == {
             name.split('/')[0] for name in ops.PRIVATE + ops.PROJECTIONS +
             ops.STORAGE + ops.SUBMISSIONS}
+        denied = gateway_write()
+        assert denied.returncode != 0 and 'PermissionError' in denied.stderr
+        assert not (state / 'unexpected').exists()
         assert not ops.reusable_empty_home(state, broker_uid=broker.pw_uid, broker_gid=broker.pw_gid)
         with pytest.raises(ValueError, match='new-operations-state-required'):
             ops.provision(state=state, gateway_uid=gateway.pw_uid,

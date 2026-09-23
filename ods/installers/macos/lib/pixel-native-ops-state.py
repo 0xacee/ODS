@@ -115,11 +115,15 @@ def provision(*, state, gateway_uid, broker_uid, broker_gid, reuse_empty_home=Fa
                         raise ValueError('new-operations-state-required')
                     os.fchown(fd, 0, 0)
                     os.fchmod(fd, 0o700)
-                    if os.listdir(fd):
-                        raise ValueError('operations-home-changed-during-provision')
                     subprocess.run(['/bin/chmod', '-N', str(state)], check=True,
                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, timeout=10)
+                    # POSIX mode/ownership do not revoke named Darwin ACL
+                    # grants. Verify their removal on the pinned root-owned
+                    # inode before checking for additions made while writable.
+                    custody._verify_fd(fd, directory=True)
+                    if os.listdir(fd):
+                        raise ValueError('operations-home-changed-during-provision')
                     for child in stage.iterdir():
                         os.rename(child, state / child.name)
                     reader = 'user:' + gateway.pw_name + ' allow '
