@@ -144,6 +144,10 @@ for(const wrapped of [false,true]) test(`stopped workspace may only poll its alr
   assert.match(call('process',{action:'poll',sessionId:'foreign-process'})?.blockReason??'',/workspace portion.*stopped/);
   assert.match(call('process',{action:'write',sessionId:'accepted-process',data:'run more'})?.blockReason??'',/workspace portion.*stopped/);
   after('process',{action:'poll',sessionId:'accepted-process'},
+    {details:{status:'running',sessionId:'accepted-process'}},'pending-process');
+  assert.match(call('write',{path:'report.md',content:'Premature'})?.blockReason??'',/workspace portion.*stopped/,
+    'a verified pending callback cannot reopen its stopped lane');
+  after('process',{action:'poll',sessionId:'accepted-process'},
     {details:{status:'completed',sessionId:'accepted-process',exitCode:0}},'finished-process');
   assert.equal(guard.deliveryVerificationForRun(context.runId).status,'failed');
   assert.match(call('write',{path:'report.md',content:'Done'})?.blockReason??'',/workspace portion.*stopped/);
@@ -191,5 +195,36 @@ test('finalization and persisted metadata do not coach a suspended workspace lan
   const persisted=guard.toolResultPersist({toolCallId:'extension-ready',message:{toolName:'pixel_ods_extension_request_status',
     content:[{type:'text',text:'Extension ready'}]}},context);
   assert.doesNotMatch(JSON.stringify(persisted??{}),/workspace_preview|Finish all requested files|Publish last/);
+  assert.equal(guard.deliveryVerificationForRun(context.runId).status,'failed');
+});
+
+for(const wrapped of [false,true]) test(`a promise cannot reopen suspended installation after workspace completion (wrapped=${wrapped})`,()=>{
+  const {guard,call,after}=fixture(wrapped);
+  for(let i=0;i<4;i++) after('pixel_ods_extension_request_prepare',{}, {isError:true},`prepare-${i}`);
+  const file={path:'report.md',content:'Findings saved. Extension installation failed.'};
+  assert.notEqual(call('write',file)?.block,true);
+  after('write',file,{details:{status:'completed'}},'write-report');
+  after('read',{path:file.path},{content:[{type:'text',text:file.content}]},'read-report');
+  const final=guard.beforeAgentFinalize({lastAssistantMessage:'The report is saved. I will install it now.'},context);
+  assert.equal(final?.retry,undefined,'generic completion recovery must not solicit the stopped installation');
+  assert.equal(guard.deliveryVerificationForRun(context.runId).status,'failed');
+  assert.match(call('pixel_ods_extension_request_prepare')?.blockReason??'',/extension portion.*stopped/);
+});
+
+for(const wrapped of [false,true]) test(`stopped installation still permits the exact remaining workspace publication (wrapped=${wrapped})`,()=>{
+  const {guard,call,after}=fixture(wrapped);
+  guard.observeRun(context,'pixel',{prompt:'/extensions install https://github.com/example/project; create /workspace/report/index.html and show its preview.'},
+    {executionHost:'sandbox'});
+  for(let i=0;i<4;i++) after('pixel_ods_extension_request_prepare',{}, {isError:true},`prepare-${i}`);
+  const file={path:'report/index.html',content:'<!doctype html><title>Report</title>'};
+  assert.notEqual(call('write',file)?.block,true);
+  after('write',file,{details:{status:'completed'}},'write-report');
+  const before=guard.beforeAgentFinalize({lastAssistantMessage:'I will install it now.'},context);
+  assert.match(before?.retry?.instruction??'',/id pixel_ods_workspace_preview/);
+  assert.match(before?.retry?.instruction??'',/"relativeDirectory":"report"/);
+  assert.doesNotMatch(before?.retry?.instruction??'',/Continue the actual owner-requested task|extension_request/);
+  after('pixel_ods_workspace_preview',{relativeDirectory:'report'},previewReceipt('report',file.content),'publish-report');
+  const afterPublication=guard.beforeAgentFinalize({lastAssistantMessage:'I will install it now.'},context);
+  assert.equal(afterPublication?.retry,undefined);
   assert.equal(guard.deliveryVerificationForRun(context.runId).status,'failed');
 });

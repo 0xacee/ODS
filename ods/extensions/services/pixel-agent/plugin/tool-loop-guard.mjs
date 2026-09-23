@@ -9913,7 +9913,9 @@ export function createToolLoopGuard({
     if (!continuation) {
       const decision = state?.extensionCompletionGate?.active && !extensionStopped
         ? state.extensionCompletionGate.finalize()
-        : workspaceStopped ? undefined : state?.completionAssurance.finalize(event?.lastAssistantMessage ?? '');
+        // Generic promise recovery cannot distinguish the suspended portion
+        // from remaining work. Only the scoped continuations above may retry.
+        : extensionStopped || workspaceStopped ? undefined : state?.completionAssurance.finalize(event?.lastAssistantMessage ?? '');
       if (state?.extensionCompletionGate?.active)
         state.extensionDecisionRecovery.gateRevisionRequested = decision?.action === 'revise';
       return decision;
