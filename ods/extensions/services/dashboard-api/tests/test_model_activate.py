@@ -388,7 +388,11 @@ def test_external_adoption_endpoint_requires_auth_and_preserves_pending_hold(mon
     monkeypatch.setattr(_mod, "_begin_model_activation", lambda model: (
         actions.append(("begin", model)) or (True, None)
     ))
-    monkeypatch.setattr(_mod, "_end_model_activation", lambda: actions.append(("end", None)))
+    activation_ended = threading.Event()
+    def end_activation():
+        actions.append(("end", None))
+        activation_ended.set()
+    monkeypatch.setattr(_mod, "_end_model_activation", end_activation)
     monkeypatch.setattr(_mod, "_adopt_external_lemonade_model", lambda _model: (
         (_ for _ in ()).throw(_mod._PixelModelTransactionUncertain("private detail"))
     ))
@@ -413,6 +417,9 @@ def test_external_adoption_endpoint_requires_auth_and_preserves_pending_hold(mon
         assert payload["code"] == "managed_model_recovery_required"
         assert payload["pending"] is True
         assert "private detail" not in json.dumps(payload)
+        # The HTTP body can reach the client before the handler's finally
+        # finishes. Synchronize on that cleanup instead of scheduler timing.
+        assert activation_ended.wait(timeout=5)
         assert actions == [("begin", "loaded-B"), ("end", None)]
         monkeypatch.setattr(_mod, "_adopt_external_lemonade_model", lambda _model: (
             (_ for _ in ()).throw(_mod._ExternalAdoptionReceiptUnavailable("private detail"))
@@ -3008,6 +3015,19 @@ class TestRestartWindowsLemonade:
         shell = shutil.which("pwsh") or shutil.which("powershell.exe")
         if not shell:
             pytest.skip("PowerShell is unavailable")
+        if sys.platform != "win32":
+            # WSL can expose powershell.exe on PATH even when Windows interop
+            # is disabled. Only run this cross-OS fixture when the shell can
+            # actually start; native Windows must still fail if it cannot.
+            try:
+                probe = _real_subprocess_run(
+                    [shell, "-NoProfile", "-NonInteractive", "-Command", "exit 0"],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pytest.skip("PowerShell is present but not runnable")
+            if probe.returncode != 0:
+                pytest.skip("PowerShell is present but not runnable")
 
         local_app_data = tmp_path / "AppData" / "Local"
         lemonade_exe = (
@@ -4453,6 +4473,56 @@ def test_managed_pixel_reconcile_uses_positional_args_and_minimal_environment(
     )
     assert captured["kwargs"]["env"]["PIXEL_GATEWAY_PORT"] == expected_gateway_port
     assert "UNRELATED_SECRET" not in captured["kwargs"]["env"]
+
+
+@pytest.mark.parametrize("explicit_source", [True, False])
+def test_managed_pixel_reconcile_accepts_bundled_source(
+    tmp_path, monkeypatch, explicit_source,
+):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    source_ref = "817214d5ec3d8aa583fe50c1dc7561f3c1a16dff"
+    source_setting = "PIXEL_SOURCE_URL=bundled\n" if explicit_source else ""
+    (install_dir / ".env").write_text(
+        f"{source_setting}PIXEL_SOURCE_REF={source_ref}\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0, stdout="reconciled\n", stderr="")
+
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+    assert _mod._reconcile_ods_managed_pixel_model("safe-model", 65536) == "reconciled"
+    assert captured["env"]["PIXEL_SOURCE_URL"] == "bundled"
+
+
+def test_managed_pixel_reconcile_rejects_relative_source(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text("PIXEL_SOURCE_URL=../pixel\n", encoding="utf-8")
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(
+        _mod.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("an invalid source must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="configured Pixel source"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
 
 
 @pytest.mark.parametrize(
