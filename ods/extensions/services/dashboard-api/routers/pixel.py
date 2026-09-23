@@ -18,7 +18,7 @@ from typing import AsyncIterator, Callable, Literal
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -30,6 +30,7 @@ from config import read_live_env_value
 from helpers import get_loaded_model, get_llama_context_size
 from pixel_chat_identity import messages_with_identity
 from pixel_chat_context import HistorySnapshot, public_context
+from pixel_runtime_identity import project_runtime_identity, unknown_runtime_identity
 
 
 logger = logging.getLogger(__name__)
@@ -68,10 +69,9 @@ _MODEL_IDENTITY_DETAIL = (
     "Pixel cannot verify its recorded model against the loaded Lemonade model. "
     "Re-select the model in Models before using Pixel."
 )
-_MODEL_ADAPTIVE_DETAIL = (
-    "Pixel is ready and adapts its tool flow for this model. Model capability "
-    "affects the quality and persistence of complex work, not access or the "
-    "broker-enforced safety boundary."
+_MODEL_CAPABILITY_DETAIL = (
+    "The active model is recorded as not agent-qualified. Tool-driven tasks "
+    "may be unreliable; chat and experiments remain available."
 )
 
 
@@ -379,7 +379,9 @@ def _model_support_from_status(status: object) -> dict[str, str] | None:
     intelligence, so an unqualified model remains usable and testable.
     """
     if isinstance(status, dict) and status.get("activeAgentViable") is False:
-        return {"tier": "adaptive", "detail": _MODEL_ADAPTIVE_DETAIL}
+        # Keep the legacy wire value for rolling UI upgrades. It denotes an
+        # advisory, not evidence that the runtime adapts or the model can act.
+        return {"tier": "adaptive", "detail": _MODEL_CAPABILITY_DETAIL}
     return None
 
 
@@ -533,8 +535,12 @@ async def _bounded_response_bytes(response: httpx.Response, limit: int) -> bytes
 
 
 @router.get("/status", dependencies=[Depends(verify_api_key)])
-async def pixel_status() -> dict[str, object]:
+async def pixel_status(http_response: Response = None) -> dict[str, object]:
     """Return a fixed, nonsecret Pixel availability projection."""
+    # The browser-facing response is newly constructed, so upstream no-store
+    # headers do not survive automatically. Never cache a live identity check.
+    if http_response is not None:
+        http_response.headers["Cache-Control"] = "no-store"
     config = _pixel_config()
     if config is None:
         return {"available": False, "model": None, "detail": "Pixel is not enabled"}
@@ -584,6 +590,23 @@ async def pixel_status() -> dict[str, object]:
         model_support = _model_support_from_status(host_status)
         if available and model_support is not None:
             result["modelSupport"] = model_support
+        # Availability is not installed-release verification. A missing, old,
+        # or malformed diagnostic route must not disable otherwise working chat.
+        identity = unknown_runtime_identity()
+        if available:
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(4.0), trust_env=False, follow_redirects=False) as client:
+                    async with client.stream("GET", f"{edge_url}/v1/runtime-identity",
+                                             headers=_edge_headers(key, accept="application/json")) as response:
+                        if response.status_code == 200 and response.headers.get("content-type", "").lower().startswith("application/json"):
+                            identity = project_runtime_identity(json.loads(await _bounded_response_bytes(response, 8192)))
+            except (httpx.HTTPError, asyncio.TimeoutError, ValueError, TypeError, RecursionError):
+                pass
+        result["runtimeIdentity"] = identity
+        result["runtimeMatchesRelease"] = identity["runtimeMatchesRelease"]
+        if available:
+            result["detail"] = "Owner agent available; " + ("runtime files changed since initialization" if identity["state"] == "mismatch"
+                                                         else "release identity is not fully verified")
         return result
     except (httpx.HTTPError, asyncio.TimeoutError) as exc:
         # Exception text and request objects can contain upstream credentials.
