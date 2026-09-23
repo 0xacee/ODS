@@ -31,8 +31,58 @@ def test_preflight_never_mutates_existing_installations(tmp_path, monkeypatch, f
         with pytest.raises(ValueError): module.preflight(**args)
     else:
         assert module.preflight(**args) == tmp_path / 'ods'
-        assert len(checked) == 3
+        assert len(checked) == 2 + len(module.NATIVE_RESIDUE_PATHS)
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('verified', [True, False])
+def test_preflight_retained_identity_requires_root_proof(tmp_path, monkeypatch, verified):
+    monkeypatch.setattr(module.sys, 'platform', 'darwin')
+    monkeypatch.setattr(module.platform, 'machine', lambda: 'arm64')
+    monkeypatch.setattr(module.os, 'geteuid', lambda: 501)
+    monkeypatch.setattr(module.os.path, 'lexists',
+        lambda path: str(path) == '/private/var/lib/ods-pixel-access')
+    calls = []
+    monkeypatch.setattr(module, 'retained_identity_only',
+        lambda: calls.append('verified') or verified)
+    if verified:
+        assert module.preflight(tmp_path / 'fresh-ods') == tmp_path / 'fresh-ods'
+    else:
+        with pytest.raises(ValueError, match='existing-native-pixel'):
+            module.preflight(tmp_path / 'fresh-ods')
+    assert calls == ['verified']
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('residue', module.NATIVE_RESIDUE_PATHS)
+def test_preflight_refuses_any_other_native_global_state(
+        tmp_path, monkeypatch, residue):
+    monkeypatch.setattr(module.sys, 'platform', 'darwin')
+    monkeypatch.setattr(module.platform, 'machine', lambda: 'arm64')
+    monkeypatch.setattr(module.os, 'geteuid', lambda: 501)
+    monkeypatch.setattr(module.os.path, 'lexists',
+        lambda path: str(path) in (str(residue), '/private/var/lib/ods-pixel-access'))
+    monkeypatch.setattr(module, 'retained_identity_only',
+        lambda: pytest.fail('residue must be rejected before account proof'))
+    with pytest.raises(ValueError, match='existing-native-pixel'):
+        module.preflight(tmp_path / 'fresh-ods')
+
+
+def test_retained_identity_proof_is_read_only_and_fails_closed(monkeypatch):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    assert module.retained_identity_only() is True
+    argv, kwargs = calls[0]
+    assert argv == ['/usr/bin/sudo', '-n', '/usr/bin/python3',
+        str(module.HERE / 'pixel-native-ops-account.py'), '--verify-identity-only']
+    assert kwargs['stdin'] == subprocess.DEVNULL and kwargs['check'] is False
+    assert len(calls) == 1
+    monkeypatch.setattr(module.subprocess, 'run',
+        lambda *args, **kwargs: SimpleNamespace(returncode=1))
+    assert module.retained_identity_only() is False
 
 
 @pytest.mark.parametrize('fault', [None, 'ref', 'compose', 'remote', 'project', 'services', 'image', 'probe', 'prepare', 'activate'])

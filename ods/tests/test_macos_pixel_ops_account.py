@@ -1,5 +1,7 @@
 import copy
+from contextlib import contextmanager
 import importlib.util
+import json
 import plistlib
 import os
 import sys
@@ -104,6 +106,64 @@ def test_ambiguous_hidden_attribute_refused(monkeypatch):
     body = plistlib.dumps({'dsAttrTypeNative:IsHidden': ['1'], 'dsAttrTypeStandard:IsHidden': ['0']})
     monkeypatch.setattr(account, 'dscl', lambda *args: SimpleNamespace(returncode=0, stdout=body, stderr=b''))
     with pytest.raises(ValueError): account.read_record('Users')
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='Darwin directory-fd semantics')
+@pytest.mark.parametrize('fault', [None, 'extra-state', 'receipt-mode', 'foreign-user',
+    'active-process', 'loaded-service', 'unexpected-membership'])
+def test_retained_identity_only_proof_is_read_only_and_fail_closed(
+        tmp_path, monkeypatch, fixture, fault):
+    intent, records, writes = fixture
+    identity = tmp_path / 'identity'
+    identity.mkdir(mode=0o700)
+    identity.chmod(0o700)
+    for name in ('ops-identity.json', 'ops-identity.lock'):
+        path = identity / name
+        path.write_text(json.dumps(intent) if name.endswith('.json') else '')
+        path.chmod(0o600)
+    if fault == 'extra-state': (identity / 'active.json').write_text('keep')
+    if fault == 'receipt-mode': (identity / 'ops-identity.json').chmod(0o644)
+    monkeypatch.setattr(account, 'ROOT', identity)
+    monkeypatch.setattr(account.os, 'geteuid', lambda: 0)
+
+    @contextmanager
+    def directory(path):
+        assert path == identity
+        fd = os.open(identity, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try: yield fd
+        finally: os.close(fd)
+
+    monkeypatch.setattr(account.custody, 'protected_directory', directory)
+    monkeypatch.setattr(account.custody, '_verify_fd', lambda fd, **kwargs: os.fstat(fd))
+    monkeypatch.setattr(account.custody, 'protected_bytes',
+        lambda path, **kwargs: Path(path).read_bytes())
+    monkeypatch.setattr(account, 'read_record', lambda kind: {
+        key: [value] for key, value in account.expected_attributes(intent, kind).items()})
+    monkeypatch.setattr(account.pwd, 'getpwnam', lambda name: SimpleNamespace(
+        pw_uid=intent['id'] + (1 if fault == 'foreign-user' else 0), pw_gid=intent['id']))
+    monkeypatch.setattr(account.grp, 'getgrnam', lambda name: SimpleNamespace(gr_gid=intent['id']))
+    monkeypatch.setattr(account.grp, 'getgrall', lambda: [SimpleNamespace(
+        gr_gid=80, gr_name='other', gr_mem=[account.NAME] if fault == 'unexpected-membership' else [])])
+    commands = []
+    def run(argv, **kwargs):
+        commands.append(argv)
+        if argv[:2] == ['/bin/ps', '-axo']:
+            return SimpleNamespace(stdout=str(intent['id']) if fault == 'active-process' else '',
+                returncode=0)
+        assert argv[:2] == ['/bin/launchctl', 'print']
+        return SimpleNamespace(returncode=0 if fault == 'loaded-service' else 113)
+    monkeypatch.setattr(account.subprocess, 'run', run)
+    before = {path.name: (path.read_bytes(), path.stat().st_mode)
+        for path in identity.iterdir()}
+    if fault:
+        with pytest.raises(ValueError): account.verify_identity_only()
+    else:
+        assert account.verify_identity_only() == {
+            'name': account.NAME, 'uid': intent['id'], 'gid': intent['id']}
+        assert len(commands) == 1 + len(account.SYSTEM_JOBS)
+    assert not writes
+    assert before == {path.name: (path.read_bytes(), path.stat().st_mode)
+        for path in identity.iterdir()}
 
 
 @pytest.mark.skipif(sys.platform != 'darwin' or os.geteuid() != 0 or
