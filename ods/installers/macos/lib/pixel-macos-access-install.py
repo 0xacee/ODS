@@ -49,6 +49,9 @@ _bundle_spec.loader.exec_module(_bundle)
 _upgrade_spec = importlib.util.spec_from_file_location('pixel_runtime_upgrade', HERE / 'pixel-runtime-upgrade.py')
 _upgrade = importlib.util.module_from_spec(_upgrade_spec)
 _upgrade_spec.loader.exec_module(_upgrade)
+_repair_spec = importlib.util.spec_from_file_location('pixel_controller_repair', HERE / 'pixel-controller-repair.py')
+_repair = importlib.util.module_from_spec(_repair_spec)
+_repair_spec.loader.exec_module(_repair)
 _services_spec = importlib.util.spec_from_file_location('pixel_native_services', HERE / 'pixel-native-services.py')
 _native_services = importlib.util.module_from_spec(_services_spec)
 _services_spec.loader.exec_module(_native_services)
@@ -2240,7 +2243,7 @@ def _recovery_file_contract():
     return required, optional
 
 
-def _load_upgrade_recovery(*, current_digest, candidate_digest, owner_name, completed=False):
+def _load_upgrade_recovery_base(*, current_digest, candidate_digest, owner_name, completed=False):
     """Read recovery authority under the caller's controller lock; no mutation."""
     from pixel_access_bridge import private_json
     # Validate before using the externally selected digest in a filename.
@@ -2281,6 +2284,55 @@ def _load_upgrade_recovery(*, current_digest, candidate_digest, owner_name, comp
             or managed.get('selection') != plan.get('native_services')):
         raise InstallError('native-service-recovery-selection-changed')
     _verify_recovery_runtime(plan)
+    return plan, journal, records
+
+
+def _controller_repair_path(candidate):
+    if type(candidate) is not str or not re.fullmatch('[a-f0-9]{64}', candidate):
+        raise InstallError('controller-repair-selection-invalid')
+    return _launchd.ACCESS_STATE / ('runtime-controller-repair-' + candidate + '.json')
+
+
+def _controller_private_bytes(path, limit):
+    from pixel_macos_custody import protected_bytes
+    body = protected_bytes(path, limit=limit)
+    info = Path(path).lstat()
+    if stat.S_IMODE(info.st_mode) != 0o600 or info.st_gid != 0:
+        raise InstallError('controller-repair-private-record-required')
+    return body
+
+
+def _controller_repair_snapshots(candidate):
+    names = {'archive': 'runtime-upgrade-' + candidate + '.completed.json',
+             'context': 'runtime-upgrade-context-' + candidate + '.json',
+             'service': 'service-installation.json',
+             'hold': 'runtime-upgrade-edge-' + candidate + '.json'}
+    return {key: _controller_private_bytes(_launchd.ACCESS_STATE / name,
+                65536 if key == 'hold' else _upgrade.JOURNAL_LIMIT) for key, name in names.items()}
+
+
+def _controller_repair_owner(plan):
+    owner = plan['owner']
+    return {'name': owner.pw_name, 'uid': owner.pw_uid, 'gid': owner.pw_gid}
+
+
+def _load_upgrade_recovery(*, current_digest, candidate_digest, owner_name, completed=False):
+    plan, journal, records = _load_upgrade_recovery_base(current_digest=current_digest,
+        candidate_digest=candidate_digest, owner_name=owner_name, completed=completed)
+    path = _controller_repair_path(candidate_digest)
+    if os.path.lexists(path):
+        if not completed:
+            raise InstallError('controller-repair-incomplete')
+        body = _controller_private_bytes(path, _repair.LIMIT)
+        snapshots = _controller_repair_snapshots(candidate_digest)
+        if json.loads(snapshots['archive']) != journal.value:
+            raise InstallError('controller-repair-archive-changed')
+        records = _repair.effective_records(records, _repair._object(body, _repair.LIMIT),
+            current=current_digest, candidate=candidate_digest, owner=_controller_repair_owner(plan),
+            snapshots=snapshots)
+        if (_controller_private_bytes(path, _repair.LIMIT) != body
+                or _controller_repair_snapshots(candidate_digest) != snapshots):
+            raise InstallError('controller-repair-authority-changed')
     return plan, journal, records
 
 
@@ -2871,6 +2923,9 @@ def _migration_main(argv):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == 'repair-controller':
+        sys.path.insert(0, str(HERE.parents[2] / 'bin'))
+        return _controller_repair_main(argv[1:])
     if argv and argv[0] == 'migrate-native':
         sys.path.insert(0, str(HERE.parents[2] / 'bin'))
         return _migration_main(argv[1:])
@@ -2970,6 +3025,35 @@ def main(argv=None):
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0
+
+
+def _controller_repair_main(argv):
+    parser = argparse.ArgumentParser(description='Repair one reviewed controller defect under its retained admission hold.')
+    parser.add_argument('--owner', required=True)
+    parser.add_argument('--current-bundle-digest', required=True)
+    parser.add_argument('--bundle-digest', required=True)
+    parser.add_argument('--repair', required=True, choices=(_repair.REPAIR,))
+    action = parser.add_mutually_exclusive_group()
+    for name in ('apply', 'resume', 'rollback'):
+        action.add_argument('--' + name, action='store_true')
+    args = parser.parse_args(argv)
+    try:
+        spec = importlib.util.spec_from_file_location('pixel_controller_repair_live', HERE / 'pixel-controller-repair-live.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # This module can also be loaded through importlib by the test suite.
+        from types import SimpleNamespace
+        installer = SimpleNamespace(**globals())
+        result = module.run(installer, selection=dict(current_digest=args.current_bundle_digest,
+            candidate_digest=args.bundle_digest, owner_name=args.owner), apply=args.apply,
+            resume=args.resume, rollback=args.rollback)
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except Exception as error:
+        # Never print private archive, transport, owner environment or response text.
+        code = error.code if isinstance(error, InstallError) else 'controller-repair-failed'
+        print('error: ' + code + '; do not release admission; retain repair and activation receipts', file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

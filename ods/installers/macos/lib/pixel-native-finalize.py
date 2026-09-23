@@ -47,10 +47,36 @@ def protected_proof(owner, runtime, services, source_ref):
     record = private_json(completed, 0, 32 * 1024 * 1024)
     if record.get('phase') != 'active' or record.get('candidateDigest') != runtime:
         raise ValueError('native-upgrade-not-active')
+    repair_path = installer._controller_repair_path(runtime)
+    repair_before = None
+    repair_snapshots = None
+    effective = None
+    if os.path.lexists(repair_path):
+        # A completed repair is a separate exact-byte exception, never a rewrite
+        # of the original activation archive or evidence of access readiness.
+        repair_before = installer._controller_private_bytes(repair_path, installer._repair.LIMIT)
+        plan, journal, effective = installer._load_upgrade_recovery(
+            current_digest=record['currentDigest'], candidate_digest=runtime,
+            owner_name=owner, completed=True)
+        installer._verify_recovery_bindings(plan, effective)
+        if journal.value != record:
+            raise ValueError('native-upgrade-changed-during-verification')
+        repair_snapshots = installer._controller_repair_snapshots(runtime)
+        installer._repair.require_finalizable(
+            installer._repair._object(repair_before, installer._repair.LIMIT), repair_snapshots)
+        # Repair success proves controller inspection, not runtime access. Do
+        # not publish ready owner receipts until normal recovery and same-mode
+        # access reproof have actually succeeded. This path performs no reproof.
+        _, repaired_services = installer._upgrade_services(plan, effective)
+        status = helper('pixel-controller-repair-live').controller_status(installer, repaired_services['access'],
+            owner_gid=plan['owner'].pw_gid)
+        mode = installer._policy.policy_state(plan['access_settings']['gateway_policy'])['activeMode']
+        if not installer._repair.access_ready(status) or status.get('surface') != 'darwin' or status.get('effective_mode') != mode:
+            raise ValueError('controller-repair-access-reproof-required')
     # The root-owned journal is the authority for the activated file set.
-    for item in record['files']:
-        body = base64.b64decode(item['after'], validate=True)
-        if (hashlib.sha256(body).hexdigest() != item['afterSha256']
+    for item in effective if effective is not None else record['files']:
+        body = item['after'] if effective is not None else base64.b64decode(item['after'], validate=True)
+        if (effective is None and hashlib.sha256(body).hexdigest() != item['afterSha256']
                 or protected_bytes(item['path'], limit=8 * 1024 * 1024) != body):
             raise ValueError('native-activated-files-changed')
     service_record = private_json(state / 'service-installation.json', 0, 2 * 1024 * 1024)
@@ -63,7 +89,11 @@ def protected_proof(owner, runtime, services, source_ref):
             capture_output=True, text=True, timeout=15, check=True)
         if not re.search(r'^\s*state = running\s*$', result.stdout, re.M):
             raise ValueError('native-job-not-running')
-    if os.path.lexists(pending) or private_json(completed, 0, 32 * 1024 * 1024) != record:
+    if (os.path.lexists(pending) or private_json(completed, 0, 32 * 1024 * 1024) != record
+            or os.path.lexists(repair_path) != (repair_before is not None)
+            or repair_before is not None and (
+                installer._controller_private_bytes(repair_path, installer._repair.LIMIT) != repair_before
+                or installer._controller_repair_snapshots(runtime) != repair_snapshots)):
         raise ValueError('native-upgrade-changed-during-verification')
     return {'status': 'active', 'runtimeDigest': runtime, 'serviceDigest': services}
 
