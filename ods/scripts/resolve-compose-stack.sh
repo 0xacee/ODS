@@ -802,12 +802,13 @@ if user_ext_dir.exists():
                     service = manifest.get("service", {}) if isinstance(manifest, dict) else {}
                 else:
                     service = {}
-                # Apply gpu_backends filter — same predicate as the built-in loop above.
+                # Imported recipes without GPU metadata are unrestricted, as
+                # in the catalog. Explicit backend restrictions still apply.
                 # Gated on isinstance(manifest, dict) so the manifest-less compat
                 # carve-out (legacy user extensions that pre-date the manifest convention)
                 # falls through unfiltered.
                 if isinstance(manifest, dict):
-                    backends = service.get("gpu_backends", ["amd", "nvidia"])
+                    backends = service.get("gpu_backends", ["all"])
                     # "none" means CPU-only — compatible with any GPU backend
                     if gpu_backend not in backends and "all" not in backends and "none" not in backends:
                         continue

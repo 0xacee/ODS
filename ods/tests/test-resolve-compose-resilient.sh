@@ -777,5 +777,11 @@ else
 fi
 
 echo ""
+if python3 -m pytest -q "$ROOT_DIR/tests/test_extension_build_projection.py" -k test_resolver_; then
+    pass "Imported recipe backend selection preserves provenance and disabled controls"
+else
+    fail "Imported recipe backend selection regression"
+fi
+
 echo "Result: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]
