@@ -244,6 +244,8 @@ def matching_runtime_profile(model: dict[str, Any], backend: str, memory_type: s
         try:
             if profile.get("system_ram_min_gb") is not None and float(ram_gb or 0) < float(profile["system_ram_min_gb"]):
                 continue
+            if profile.get("system_ram_max_gb") is not None and float(ram_gb or 0) > float(profile["system_ram_max_gb"]):
+                continue
         except (TypeError, ValueError):
             continue
         return profile
