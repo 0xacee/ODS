@@ -3493,7 +3493,7 @@ fi
         printf 'llama-server|http://%s:%s/health||http://localhost:%s/v1\n' "$_health_llama_host" "$_health_llama_port" "$_health_llama_port"
     fi
     printf 'Dashboard API|http://127.0.0.1:3002/health|ods-dashboard-api|http://localhost:3002\n'
-    printf 'Perplexica|http://127.0.0.1:3004|ods-perplexica|http://localhost:3004\n'
+    $ENABLE_PERPLEXICA && printf 'Perplexica|http://127.0.0.1:3004|ods-perplexica|http://localhost:3004\n'
     $ENABLE_VOICE && printf 'Whisper (STT)|http://127.0.0.1:%s/health|ods-whisper|http://localhost:%s\n' "${WHISPER_PORT:-9000}" "${WHISPER_PORT:-9000}"
     $ENABLE_WORKFLOWS && printf 'n8n|http://127.0.0.1:5678/healthz|ods-n8n|http://localhost:5678\n'
     [[ -x "$OPENCODE_BIN" ]] && printf 'OpenCode (IDE)|http://127.0.0.1:%s||http://localhost:%s\n' "$OPENCODE_PORT" "$OPENCODE_PORT"
