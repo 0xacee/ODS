@@ -158,7 +158,8 @@ Options:
     -h, --help      Show this help
 
 This will remove:
-    - Docker containers, images, and volumes for ODS
+    - ODS service containers
+    - ODS Docker volumes (unless --keep-data)
     - Installation directory ($INSTALL_DIR)
     - ODS-managed Pixel host services and private configuration
     - Systemd user services (opencode-web, openclaw timers)
@@ -166,6 +167,11 @@ This will remove:
     - macOS LaunchAgents (com.ods.host-agent, com.ods.opencode-web, legacy agents)
     - CLI symlinks (/usr/local/bin/ods, ~/.local/bin/ods, legacy /usr/local/bin/ods-cli)
     - Backup directory (~/.ods)
+
+Preserved:
+    - Docker images and shared build cache
+    - On macOS, native Pixel recovery archives and stopped, renamed sandboxes
+    - The dedicated macOS Pixel Operations identity, verified before reinstall
 
 EOF
             exit 0
@@ -343,6 +349,7 @@ if command -v docker &>/dev/null; then
     fi
 
     log_ok "Docker cleanup complete"
+    log_info "Docker images and shared build cache retained"
 else
     log_warn "Docker not found — skipping container cleanup"
 fi
