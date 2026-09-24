@@ -29,8 +29,12 @@ test('only description-equal excerpt removal can delete the excerpts key',()=>{
  assert.equal(Object.hasOwn(JSON.parse(projected.content[0].text).results[0],'excerpts'),false);
  assert.equal(projected.details.results[0].excerpts[0],description);
 });
-test('no duplicates leave native result untouched',()=>{
- const p=payload();p.results[0].excerpts=['unique'];assert.equal(projectNativeWebSearchResult(message,result(p)),undefined);assert.equal(captureNativeWebSearchResult(result(p)),undefined);
+test('no duplicates preserve exact native evidence and add separate source guidance',()=>{
+ const p=payload();p.results[0].excerpts=['unique'];const input=result(p);const before=structuredClone(input);
+ const projected=projectNativeWebSearchResult(message,input);
+ assert.deepEqual(projected.content[0],input.content[0]);assert.deepEqual(projected.details,p);
+ assert.match(projected.content[1].text,/not source evidence/);assert.match(projected.content[1].text,/publisher identity/);
+ assert.deepEqual(captureNativeWebSearchResult(input),before);assert.deepEqual(input,before);
 });
 test('fetch projection does not reinterpret similarly shaped page evidence',()=>{
  const fetchTool={...tool,id:'openclaw:core:web_fetch',name:'web_fetch'};const inner=result();
