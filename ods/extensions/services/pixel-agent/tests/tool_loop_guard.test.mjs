@@ -15963,6 +15963,33 @@ for (const matched of [true,false]) test(`post-publication grep checks require e
   assert.equal(guard.verificationForRun('run-1').status,matched?'passed':'failed');
 });
 
+test('invalid JSON publication stays failed until repaired files are republished',()=>{
+  const context={agentId:'pixel',runId:'json-export',sessionId:'json-session',sessionKey:'agent:pixel:json'};
+  const guard=createToolLoopGuard();
+  guard.observeRun(context,'pixel',{prompt:'Create and publish a static website in export-site with a JSON data export.'});
+  let sequence=0;
+  const invoke=(name,params,result)=>{
+    const id='json-'+(++sequence),ctx={...context,toolName:name,toolCallId:id};
+    const prepared=guard.beforeToolCall({toolName:name,params,toolCallId:id},ctx);
+    assert.notEqual(prepared?.block,true);
+    guard.afterToolCall({toolName:name,params:prepared?.params??params,result,toolCallId:id},ctx);
+    guard.toolResultPersist({toolName:name,toolCallId:id,message:{role:'toolResult',toolName:name,toolCallId:id,...result}},ctx);
+  };
+  const written={content:[{type:'text',text:'written'}],details:{status:'completed'}};
+  const entry={path:'export-site/index.html',content:'<!doctype html><title>Source export</title>'};
+  invoke('write',entry,written);
+  invoke('write',{path:'export-site/export.json',content:'{"source":"""broken"""}'},written);
+  invoke('pixel_ods_workspace_preview',{relativeDirectory:'export-site'},{isError:true,content:[{type:'text',text:'Invalid JSON at export.json line 1 column 13'}],details:{schemaVersion:1,kind:'ods-pixel-workspace-preview',status:'failed',errorCode:'invalid_json_artifact'}});
+  assert.equal(guard.verificationForRun(context.runId).status,'failed');
+  assert.match(guard.verificationForRun(context.runId).text,/did not verify a browser-accessible preview/i);
+  const repaired={path:'export-site/export.json',content:JSON.stringify({source:'"""valid source text"""\n'})};
+  invoke('write',repaired,written);
+  assert.equal(guard.verificationForRun(context.runId).status,'failed','a repair alone cannot publish a preview');
+  const snapshot=workspacePreviewSnapshot('export-site',[entry,repaired]);
+  invoke('pixel_ods_workspace_preview',{relativeDirectory:'export-site'},{content:[{type:'text',text:'published'}],details:{schemaVersion:1,kind:'ods-pixel-workspace-preview',status:'succeeded',relativeDirectory:'export-site',port:9437,url:`http://${snapshot.siteId}.localhost:9437/${snapshot.siteId}/`,...snapshot,httpStatus:200,readbackVerified:true,executable:false,overwritten:false}});
+  assert.equal(guard.verificationForRun(context.runId).status,'passed');
+});
+
 for(const fault of ['unknown-exec','failed','running','env','pending-read','wrong-run','wrong-session','wrong-key','ended']) test(`final preview revalidation fails closed: ${fault}`,async()=>{
   let probes=0;const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return true;});
   const params={command:fault==='unknown-exec'?'python3 test.py':'ls -la signal-garden/'};

@@ -184,6 +184,36 @@ test("receipt names only delivered files when requested source copies remain out
   assert.match(result.content[0].text, /does not determine whether requested files or checks are missing/);
 });
 
+test("invalid JSON publication requests repair from actual source bytes", async () => {
+  const tool = createWorkspacePreviewTool({request:async()=>({
+    schemaVersion:1,kind:'ods-pixel-workspace-preview',status:'failed',
+    boundary:testing.BOUNDARY,error:'ODS workspace preview publication failed',
+    errorCode:'invalid_json_artifact',artifactError:{path:'export.json',line:2,column:18},
+  })});
+  const result=await tool.execute('invalid-source-export',{relativeDirectory:'project/public'});
+  assert.equal(result.isError,true);
+  assert.equal(result.details.errorCode,'invalid_json_artifact');
+  assert.match(result.content[0].text,/actual final files.*JSON serializer.*parse it back/);
+  assert.match(result.content[0].text,/Do not hand-transcribe/);
+  assert.match(result.content[0].text,/export.json.*line 2, column 18/);
+  assert.deepEqual(result.details.artifactError,{path:'export.json',line:2,column:18});
+});
+
+test('invalid artifact diagnostics cannot reveal uncontracted host details',async()=>{
+  for(const artifactError of [
+    {path:'/etc/private.json',line:1,column:1},
+    {path:'../private.json',line:1,column:1},
+    {path:'export.json',line:1,column:1,content:'secret'},
+    {path:'export.json',line:-1,column:1},
+    {path:'export.json',line:null,column:1},
+  ]){
+    const tool=createWorkspacePreviewTool({request:async()=>({schemaVersion:1,kind:'ods-pixel-workspace-preview',status:'failed',boundary:testing.BOUNDARY,error:'ODS workspace preview publication failed',errorCode:'invalid_json_artifact',artifactError})});
+    const result=await tool.execute('invalid-diagnostic',{relativeDirectory:'project/public'});
+    assert.equal(result.details.errorCode,'unavailable');
+    assert.doesNotMatch(JSON.stringify(result),/private|secret/);
+  }
+});
+
 test("bounded lists explicitly report omitted paths and never claim completeness", async () => {
   const tool = createWorkspacePreviewTool({ request: async () => succeededResponse({
     publishedPaths: ["assets/app.js"], publishedPathsOmitted: 2,

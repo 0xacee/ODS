@@ -194,6 +194,7 @@ export const WORKSPACE_PREVIEW_FRESH_ENTRY_REASON =
   "This is a new static browser artifact. Start with exactly one write of the complete entry document to a fresh workspace-relative path ending in /index.html. Do not inspect unrelated files, run commands, start a server, scaffold a framework, or use extension tools before that entry file exists. After the entry write succeeds, create any requested local assets, verify what the owner asked for, and publish that exact directory.";
 
 const WORKSPACE_PREVIEW_FAILURE_REASONS = Object.freeze({
+  invalid_json_artifact: "a .json artifact failed parsing; serialize its actual source data and validate the resulting file before publication",
   unsupported_file_type: "the directory contains an unsupported preview file type",
   missing_entry: "the directory lacks a nonempty index.html entry",
   too_many_files: "the directory exceeds the preview file-count limit",

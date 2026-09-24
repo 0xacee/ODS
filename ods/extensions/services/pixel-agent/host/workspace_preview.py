@@ -84,6 +84,12 @@ class PreviewError(Exception):
     """A generic fail-closed preview error."""
 
 
+class JsonArtifactError(PreviewError):
+    def __init__(self, relative: str, line: int | None, column: int | None):
+        super().__init__("invalid preview JSON artifact")
+        self.diagnostic = {"path": relative, "line": line, "column": column}
+
+
 def configure_portal(profile_id: str) -> None:
     """Bind this broker process to one supervisor-selected Hermes profile.
 
@@ -106,6 +112,7 @@ def _profile_fields() -> dict[str, str]:
 
 
 PREVIEW_FAILURE_CODES = {
+    "invalid preview JSON artifact": "invalid_json_artifact",
     "unsupported preview file type": "unsupported_file_type",
     "preview requires index.html": "missing_entry",
     "preview contains too many files": "too_many_files",
@@ -300,6 +307,26 @@ def _read_stable(source: pathlib.Path, expected: os.stat_result) -> bytes:
         os.close(descriptor)
 
 
+def _validate_json_artifact(data: bytes, relative: str) -> None:
+    """Validate captured JSON bytes without rewriting the owner's artifact."""
+    def invalid_constant(_value):
+        raise ValueError("non-JSON numeric constant")
+
+    try:
+        json.loads(data.decode("utf-8"), object_pairs_hook=_json_object,
+                   parse_constant=invalid_constant)
+    except json.JSONDecodeError as error:
+        raise JsonArtifactError(relative, error.lineno, error.colno) from error
+    except UnicodeDecodeError as error:
+        prefix = data[:error.start].decode("utf-8")
+        raise JsonArtifactError(relative, prefix.count("\n") + 1,
+                                len(prefix.rsplit("\n", 1)[-1]) + 1) from error
+    except (ValueError, RecursionError, PreviewError) as error:
+        # The decoder does not supply offsets for duplicate keys, nonstandard
+        # constants or excessive nesting. Do not invent a source location.
+        raise JsonArtifactError(relative, None, None) from error
+
+
 def publish_snapshot(
     workspace: pathlib.Path,
     previews: pathlib.Path,
@@ -313,6 +340,8 @@ def publish_snapshot(
     total = 0
     for relative, source, info in sources:
         data = _read_stable(source, info)
+        if pathlib.PurePosixPath(relative).suffix.lower() == ".json":
+            _validate_json_artifact(data, relative)
         total += len(data)
         if total > MAX_TOTAL_BYTES:
             raise PreviewError("preview is too large")
@@ -751,7 +780,7 @@ def _verify_http(port: int, site_id: str, entry_sha256: str) -> None:
         connection.close()
 
 
-def _error_result(code: str = "unavailable") -> dict[str, Any]:
+def _error_result(code: str = "unavailable", diagnostic=None) -> dict[str, Any]:
     return {
         "schemaVersion": SCHEMA_VERSION,
         "kind": KIND,
@@ -760,6 +789,7 @@ def _error_result(code: str = "unavailable") -> dict[str, Any]:
         "error": "ODS workspace preview publication failed",
         "errorCode": code if code in PREVIEW_FAILURE_CODES.values() else "unavailable",
         "boundary": BOUNDARY,
+        **({"artifactError": diagnostic} if code == "invalid_json_artifact" and diagnostic else {}),
     }
 
 
@@ -821,9 +851,10 @@ def _serve_connection(
                     }
                 )
     except PreviewError as error:
-        # Only fixed categories cross the socket, never arbitrary exception
-        # text, paths, file contents, or operating-system error details.
-        response = _error_result(PREVIEW_FAILURE_CODES.get(str(error), "unavailable"))
+        # Only fixed categories and captured JSON artifact-relative locations
+        # cross the socket; no source excerpts, absolute paths or OS details.
+        response = _error_result(PREVIEW_FAILURE_CODES.get(str(error), "unavailable"),
+                                 error.diagnostic if isinstance(error, JsonArtifactError) else None)
     except (OSError, ValueError, TypeError, KeyError):
         response = _error_result()
     encoded = (json.dumps(response, sort_keys=True, separators=(",", ":")) + "\n").encode()
