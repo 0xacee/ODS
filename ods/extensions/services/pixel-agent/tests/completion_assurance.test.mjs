@@ -136,3 +136,190 @@ test('short continuation keeps research requirements from the preceding owner re
   other.begin('continue',{messages:[{role:'user',content:'Notícias de hoje'},{role:'user',content:'Explique álgebra'},{role:'user',content:'continue'}]});
   assert.equal(other.finalize('Explicação de álgebra.'),undefined);
 });
+
+const pageReceipt = (url, status = 200) => ({result:{details:{url, finalUrl:url, status, text:'Returned page evidence.'}}});
+function sourceReadGuard() {
+  const guard = createCompletionAssurance();
+  guard.begin('Search the web and open sources before citing findings.');
+  return guard;
+}
+
+test('explicit source reads distinguish search leads from successfully opened pages', () => {
+  const guard = sourceReadGuard(), url = 'https://example.org/event';
+  guard.observe('web_search', {result:{details:{results:[{url}]}}});
+  const answer = `The event is confirmed. [Source](${url})`;
+  const correction = guard.finalize(answer);
+  assert.equal(correction?.action, 'revise');
+  assert.equal(correction.retry.maxAttempts, 1);
+  assert.equal(guard.terminalStatus, 'failed');
+  assert.doesNotMatch(guard.terminal, /event is confirmed/);
+  guard.observe('web_fetch', pageReceipt(url));
+  assert.equal(guard.finalize(answer), undefined);
+  assert.equal(guard.terminal, undefined);
+});
+
+test('403, failed, empty and wrapped receipts cannot establish source reads', () => {
+  for (const [tool, receipt] of [
+    ['web_fetch', pageReceipt('https://example.org/page', 403)],
+    ['web_fetch', {...pageReceipt('https://example.org/page'), error:'failed'}],
+    ['web_fetch', {result:{...pageReceipt('https://example.org/page').result,isError:true}}],
+    ['web_fetch', {result:{details:{url:'https://example.org/page',status:200,text:''}}}],
+    ['tool_call', pageReceipt('https://example.org/page')],
+  ]) {
+    const guard = sourceReadGuard(); guard.observe(tool, receipt);
+    assert.equal(guard.finalize('Verified: https://example.org/page')?.action, 'revise');
+    assert.equal(guard.finalize('Verified: https://example.org/page')?.action, 'finalize');
+    assert.equal(guard.terminalStatus, 'failed');
+  }
+});
+
+test('honest local limitations do not repeat denied fetches', () => {
+  for (const answer of [
+    'I could not read the sources; the task remains incomplete.',
+    'Unverified search lead: https://example.org/page',
+    'https://example.org/page — not opened because the fetch returned HTTP 403.',
+    '[Source not verified](https://example.org/page).',
+  ]) {
+    const guard = sourceReadGuard();
+    guard.observe('web_search',{result:{details:{results:[{url:'https://example.org/page'}]}}});
+    guard.observe('web_fetch',pageReceipt('https://example.org/page',403));
+    assert.equal(guard.finalize(answer), undefined, answer);
+  }
+});
+
+test('one valid source or unrelated limitation cannot cover an unread citation', () => {
+  const guard = sourceReadGuard();
+  guard.observe('web_fetch',pageReceipt('https://example.org/read'));
+  for (const answer of [
+    'Fact: https://example.org/read. Another fact: https://example.org/unread. Retail availability is unavailable.',
+    'https://example.org/read — unavailable stock. Another fact: https://example.org/unread.',
+  ]) assert.ok(guard.finalize(answer), answer);
+  assert.equal(guard.finalize('Fact: https://example.org/read. Unverified lead: https://example.org/unread'), undefined);
+  assert.equal(guard.terminal, undefined);
+});
+
+test('redirects and page anchors count; neighboring paths and guessed replacements do not', () => {
+  const guard = sourceReadGuard();
+  const receipt = pageReceipt('https://example.org/old');
+  receipt.result.details.finalUrl = 'https://example.org/page_(topic)';
+  guard.observe('web_fetch',receipt);
+  assert.equal(guard.finalize('[Read](https://example.org/page_(topic)#section)'), undefined);
+  assert.equal(guard.finalize('Original: https://example.org/old'), undefined);
+  assert.equal(guard.finalize('Source: https://example.org/page_(topic)/other')?.action, 'revise');
+});
+
+test('targeted extraction requires returned evidence, not an unmatched query or recovered missing URL', () => {
+  for (const [details, accepted] of [
+    [{matched:true},true], [{matched:false,mode:'overview'},true], [{matched:false},false],
+  ]) {
+    const guard = sourceReadGuard();
+    guard.observe('pixel_ods_web_extract',{result:{details:{boundary:'public-web-read-only',source_url:'https://example.org/read',...details},content:[{type:'text',text:'Evidence'}]}});
+    // Ordinary citation presence must also recognize the exact extraction URL.
+    const result = guard.finalize('Read: https://example.org/read');
+    assert.equal(result?.action, accepted ? undefined : 'revise');
+  }
+});
+
+test('source-read state is current-turn only and JSON citations remain subject to the check', () => {
+  const first = sourceReadGuard(), second = sourceReadGuard();
+  first.observe('web_fetch',pageReceipt('https://example.org/read'));
+  const answer = '```json\n{"source":"https://example.org/read","value":42}\n```';
+  assert.equal(first.finalize(answer),undefined);
+  assert.equal(second.finalize(answer)?.action,'revise');
+});
+
+test('ordinary search, explicitly unread lists and translation requests retain their prior behavior', () => {
+  for (const request of ['Search the web for sources.', 'Search the web; do not open sources.', 'Translate: open sources.']) {
+    const guard = createCompletionAssurance(); guard.begin(request);
+    guard.observe('web_search',{result:{details:{results:[{url:'https://example.org/lead'}]}}});
+    assert.equal(guard.finalize('https://example.org/lead'),undefined,request);
+  }
+});
+
+for (const name of ['web_fetch','pixel_ods_web_extract']) for (const deferred of [false,true]) {
+  test(`actual guard preserves failed delivery until a successful read: ${name}, deferred=${deferred}`, () => {
+    const guard = createToolLoopGuard();
+    const context = {agentId:'pixel',runId:'source-read-run',sessionId:'source-read-session'};
+    guard.observeRun(context,'pixel',{prompt:'Search the web and open sources before citing findings.'});
+    const answer = {lastAssistantMessage:'Confirmed finding: https://example.org/page'};
+    assert.equal(guard.beforeAgentFinalize(answer,context)?.action,'revise');
+    assert.equal(guard.deliveryVerificationForRun(context.runId).status,'failed');
+    const params = {url:'https://example.org/page'};
+    const sourceName = name === 'web_fetch' ? 'core' : 'pixel-ods';
+    const id = `openclaw:${sourceName}:${name}`;
+    const toolName = deferred ? 'tool_call' : name;
+    const args = deferred ? {id,args:params} : params;
+    const call = {toolName,params:args,toolCallId:'read-call'};
+    const ctx = {...context,toolName,toolCallId:'read-call'};
+    assert.notEqual(guard.beforeToolCall(call,ctx)?.block,true);
+    const result = name === 'web_fetch' ? pageReceipt(params.url).result : {
+      details:{boundary:'public-web-read-only',source_url:params.url,matched:true},content:[{type:'text',text:'Page evidence'}],
+    };
+    const envelope = {tool:{id,source:'openclaw',sourceName,name},result};
+    const observed = deferred ? {content:[{type:'text',text:JSON.stringify(envelope)}],details:envelope} : result;
+    guard.afterToolCall({...call,result:observed},ctx);
+    assert.equal(guard.beforeAgentFinalize(answer,context),undefined);
+    assert.notEqual(guard.deliveryVerificationForRun(context.runId)?.status,'failed');
+  });
+}
+
+test('short continuation carries the requested source-read boundary without trusting old receipts', () => {
+  const guard = createCompletionAssurance();
+  guard.begin('continue',{messages:[{role:'user',content:'Search the web and open sources.'},{role:'user',content:'continue'}]});
+  assert.equal(guard.finalize('Verified https://example.org/source')?.action,'revise');
+});
+
+test('successful browser snapshot retains existing assurance; discovery, navigation and failures do not bypass', () => {
+  const result = {details:{ok:true,url:'https://example.org/page'},content:[{type:'text',text:'Visible page snapshot'}]};
+  for (const [tool, event, fallback] of [
+    ['browser',{params:{action:'snapshot'},result},true],
+    ['browser',{params:{action:'navigate'},result},false],
+    ['tool_search',{params:{action:'snapshot'},result},false],
+    ['browser',{params:{action:'snapshot'},result:{...result,isError:true}},false],
+    ['browser',{params:{action:'snapshot'},result:{...result,details:{...result.details,ok:false}}},false],
+    ['browser',{params:{action:'snapshot'},result:{...result,details:{...result.details,status:403}}},false],
+    ['browser',{params:{action:'snapshot'},result:{details:result.details,content:[]}},false],
+  ]) {
+    const guard = sourceReadGuard(); guard.observe(tool,event);
+    assert.equal(guard.finalize('Source: https://example.org/page')?.action, fallback ? undefined : 'revise');
+  }
+  const guard = sourceReadGuard();
+  guard.observe('browser',{params:{action:'snapshot'},result});
+  assert.equal(guard.finalize('A research answer without citations.')?.action,'revise','ordinary attribution check remains enabled');
+  assert.equal(guard.finalize('Source: https://example.org/page. Other fact: https://example.org/unread')?.retry?.idempotencyKey,
+    'ods-opened-source-attribution','snapshot of A cannot excuse an unread B');
+});
+
+test('actual source-reading request wording enables the boundary', () => {
+  const guard = createCompletionAssurance();
+  guard.begin('Search the live web for public events. Actually search and open sources. Give a direct official source URL. Explain any unavailable result honestly.');
+  guard.observe('web_search',{result:{details:{results:[{url:'https://example.org/event'}]}}});
+  assert.equal(guard.finalize('Verified: https://example.org/event')?.retry?.idempotencyKey,'ods-opened-source-attribution');
+});
+
+test('omitted citations cannot turn search-only leads into successful requested reads', () => {
+  const guard = sourceReadGuard();
+  guard.observe('web_search',{result:{details:{results:[{url:'https://example.org/lead'}]}}});
+  for (let i = 0; i < 2; i++) assert.equal(guard.finalize('Here is a finding without a source link.')?.action,'revise');
+  assert.equal(guard.finalize('Here is a finding without a source link.')?.action,'finalize');
+  assert.equal(guard.terminalStatus,'failed');
+  assert.doesNotMatch(guard.terminal,/finding|example.org/);
+  assert.match(guard.terminal,/incomplete/);
+  assert.equal(guard.finalize('Unverified lead, not opened: https://example.org/lead'),undefined);
+  assert.equal(guard.terminal,undefined);
+});
+
+test('a failed read can be disclosed with its URL without first running search', () => {
+  const guard = sourceReadGuard();
+  guard.observe('web_fetch',{result:{...pageReceipt('https://example.org/page',403).result,isError:true}});
+  assert.equal(guard.finalize('Not opened: https://example.org/page (HTTP 403). Research remains incomplete.'),undefined);
+});
+
+test('citation fallback after an actual read cannot append other unread search leads', () => {
+  const guard = sourceReadGuard();
+  guard.observe('web_search',{result:{details:{results:[{url:'https://example.org/lead'}]}}});
+  guard.observe('web_fetch',pageReceipt('https://example.org/read'));
+  for (let i=0;i<3;i++) guard.finalize('Finding without a citation.');
+  assert.match(guard.terminal,/https:\/\/example.org\/read/);
+  assert.doesNotMatch(guard.terminal,/https:\/\/example.org\/lead/);
+});
