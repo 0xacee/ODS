@@ -102,6 +102,22 @@ resolve_compose_flags() {
     printf '%s\n' "$flags"
 }
 
+preserve_model_cache() {
+    local source="$INSTALL_DIR/data/models" entry
+    [[ ! -L "$INSTALL_DIR/data" && ! -L "$source" ]] || return 1
+    [[ -e "$source" ]] || return 0
+    [[ -d "$source" ]] || return 1
+    MODELS_BACKUP="$HOME/.ods-models-backup"
+    # Atomic creation refuses existing backups and dangling symlinks. Never
+    # overwrite a prior user's cache or continue deletion after a failed move.
+    (umask 077; mkdir "$MODELS_BACKUP") || return 1
+    for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        mv "$entry" "$MODELS_BACKUP/" || return 1
+    done
+    log_info "Models preserved at: $MODELS_BACKUP"
+}
+
 KEEP_MODELS=false
 KEEP_DATA=false
 FORCE=false
@@ -150,7 +166,7 @@ ODS Uninstaller
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-    --keep-models   Keep downloaded AI models (saves re-download time)
+    --keep-models   Keep models at ~/.ods-models-backup (must not already exist)
     --keep-data     Keep user data (chat history, n8n workflows, etc.)
     --force         Skip confirmation prompts
     --non-interactive  Never prompt for sudo; require cached or passwordless sudo
@@ -493,11 +509,9 @@ fi
 # 5. Remove install directory (with optional data/model preservation)
 log_info "Removing installation directory..."
 INSTALL_DIR_CLEANED=true
-if $KEEP_MODELS && [[ -d "$INSTALL_DIR/data/models" ]]; then
-    MODELS_BACKUP="$HOME/.ods-models-backup"
-    mkdir -p "$MODELS_BACKUP"
-    mv "$INSTALL_DIR/data/models"/* "$MODELS_BACKUP/" 2>/dev/null || true
-    log_info "Models preserved at: $MODELS_BACKUP"
+if $KEEP_MODELS && ! preserve_model_cache; then
+    log_error "Model preservation failed; installation deletion stopped. Keep remaining files in $INSTALL_DIR/data/models and $HOME/.ods-models-backup for recovery."
+    exit 1
 fi
 
 if $KEEP_DATA; then
