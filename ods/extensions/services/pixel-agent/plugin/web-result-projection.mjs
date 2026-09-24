@@ -3,8 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 const record = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
 const MAX_SEARCH_TEXT_CHARS = 256 * 1024;
-// Match the pinned native after-tool sanitizer; projection must not expand its
-// model-facing text allowance, even when structured details remain complete.
+export const SEARCH_SOURCE_EVIDENCE_GUIDANCE = "ODS research guidance (not source evidence): Search hits are leads. Read the selected source and match the exact requested entity, variant, place and date before citing a claim. A related model or event is not interchangeable. Check publisher identity before calling a page official; resellers and aggregators are independent sources. Report unavailable evidence honestly. A price or Add to Cart button alone does not establish in-stock availability.";
+export const EMPTY_SEARCH_RECOVERY_GUIDANCE = "ODS search recovery (not source evidence): This query returned no results; that does not prove the requested information is absent. Within the remaining research allowance, try one shorter query for one entity and one fact. Remove optional date, availability or multiple-retailer qualifiers while retaining required identity constraints. Check dates and availability on the returned pages. If a useful source was already found, read it rather than repeating discovery. Do not repeat the same empty query or invent a citation.";
+// Match the pinned native after-tool sanitizer for source text, even when
+// structured details remain complete. Fixed ODS guidance is a separate block.
 const NATIVE_SEARCH_TEXT_CHARS = 8_000;
 function nativeSearchText(text) {
   if (text.length <= NATIVE_SEARCH_TEXT_CHARS) return text;
@@ -54,9 +56,13 @@ function deduplicatedSearchContent(result, native = false) {
     if (excerpts.length === 0) delete projected.excerpts;
     results.push(projected);
   }
-  if (!changed) return undefined;
-  const text = JSON.stringify({ ...payload, results }, null, 2);
-  return [{ ...result.content[0], text: native ? nativeSearchText(text) : text }];
+  if (!changed && result.isError === true) return undefined;
+  const text = changed ? JSON.stringify({ ...payload, results }, null, 2) : result.content[0].text;
+  // Fixed ODS guidance is separate from the unchanged evidence/receipt. It
+  // grants no calls or authority and does not expand the source-text cap.
+  const guidance = result.isError === true ? [] : [{ type: "text", text:
+    payload.results.length === 0 ? EMPTY_SEARCH_RECOVERY_GUIDANCE : SEARCH_SOURCE_EVIDENCE_GUIDANCE }];
+  return [{ ...result.content[0], text: native ? nativeSearchText(text) : text }, ...guidance];
 }
 
 // Called only after exact native call/run/params binding by the guard. Snapshot
