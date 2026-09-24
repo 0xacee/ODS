@@ -93,7 +93,7 @@ Lemonade's deterministic `collection.router` behavior is a strong fit for AMD/Le
 
 ### LiteLLM alone
 
-LiteLLM already provides the public gateway and model aliases, but ODS v1.81.3 is configured from a read-only YAML mount with no database-backed management plane. Today that YAML contains the concrete model ID, so changing the alias still requires rewriting the file and restarting LiteLLM. Enabling LiteLLM's database management stack solely for one mutable local alias would add a database, migration, and admin surface to every ODS installation.
+LiteLLM already provides the public gateway and model aliases, but ODS's pinned LiteLLM is configured from a read-only YAML mount with no database-backed management plane. Today that YAML contains the concrete model ID, so changing the alias still requires rewriting the file and restarting LiteLLM. Enabling LiteLLM's database management stack solely for one mutable local alias would add a database, migration, and admin surface to every ODS installation.
 
 Keep LiteLLM for auth, OpenAI compatibility, policy, and provider translation. Put ODS's small mutable routing decision behind it, where ODS can test and version the behavior independently.
 
@@ -229,7 +229,21 @@ For Lemonade, capture and preserve `x_lemonade_route` and the `X-Lemonade-Route`
 
 For end-to-end app probes that do not expose upstream headers, the fleet prompt carries a signed marker: `[ODS_PROBE id=<lowercase-uuid> sig=<base64url>]`. The signature is unpadded base64url HMAC-SHA256 over the lowercase UUID bytes using the run-scoped `ODS_FLEET_PROBE_KEY`. The model-router records evidence only when that key is configured, the marker has exactly one canonical UUID/signature pair, and constant-time verification succeeds. Production installs without that test-only key ignore markers and expose no probe lookup data.
 
-The model-router keeps at most 2,048 evidence records for 15 minutes in memory. Each record contains only probe UUID, timestamp, consumer-visible requested alias, concrete route, backend, `routeSeq`, status, and response model. It never stores prompt text, messages, generated text, tokens, API keys, cookies, or authorization headers. `/internal/route-evidence/{probeId}` is reachable only on the Compose network and requires `Authorization: Bearer <ODS_ROUTER_INTERNAL_KEY>`; dashboard-api exposes the authenticated product proxy above.
+The model-router keeps at most 2,048 evidence records for 15 minutes in memory. Each record contains bounded route metadata (probe and request UUIDs, timestamp, router instance, requested alias, concrete route, endpoint/backend, path, `routeSeq`, status, response model and Lemonade route when available). Signed probes additionally record `offeredTools`: a versioned count and SHA256 fingerprint of the actual outgoing tool definitions, or an explicit unavailable result. It never stores prompt text, messages, generated text, tool names or schema bodies, tokens, API keys, cookies, or authorization headers. `/internal/route-evidence/{probeId}` is reachable only on the Compose network and requires `Authorization: Bearer <ODS_ROUTER_INTERNAL_KEY>`; dashboard-api exposes the authenticated, closed-field product proxy above.
+
+The `offeredTools` boundary is `router-forwarded-tools-not-execution-proof`.
+It does not attest evaluated plugin code, backend schema acceptance or successful
+tool execution, and is not a complete running-release match. Encoding
+`json-sort-keys-ascii-v1` means SHA256 of Python JSON encoding of
+`{"present": "tools" in payload, "tools": payload.get("tools", [])}` with sorted
+object keys, preserved array order, compact separators, ASCII escapes and no
+NaN/Infinity. Missing and empty tools intentionally differ. More than 256 tools,
+more than 256 KiB of encoded definitions, or unencodable/non-list tools produce
+`state: unavailable` with null count/hash; inference is not blocked or changed.
+No tool fingerprint is computed for unsigned/unconfigured probes or added to
+ordinary token telemetry. Each probe UUID retains its latest recorded request,
+not a history of every model call; correlate `requestId` with `X-ODS-Request-Id`,
+and do not treat one record as proof of all offers in a multi-call agent turn.
 
 ### 3.5 Reload behavior
 
@@ -443,7 +457,7 @@ Primary changes:
 - Add `ods/config/model-router/endpoints.json`, generated at install from known runtime topology and mounted read-only. State selects only an `endpointId` from this file.
 - Include model-router in local, Lemonade, and hybrid Compose stacks; exclude it from cloud-only routing. It has no host port.
 - Change LiteLLM local/Lemonade templates to map `ods/current`, `default`, and the compatibility wildcard to model-router permanently when enabled.
-- Add `ODS_MODEL_SWITCHBOARD=legacy|observe|enabled`; ship `observe` by default in this PR. `legacy` renders the pre-switchboard LiteLLM config, `observe` runs router/state checks without consumer traffic, and `enabled` sends the stable aliases through model-router.
+- `ODS_MODEL_SWITCHBOARD=enabled` is the production default after live request-drain and rollback qualification. `observe` remains a non-routing diagnostic mode, and `legacy` renders the pre-switchboard LiteLLM configuration for explicit rollback.
 
 Required LiteLLM shape when enabled:
 

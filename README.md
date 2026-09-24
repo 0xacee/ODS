@@ -15,7 +15,7 @@
 AI server and homelab setup is rapidly becoming a solved problem.
 It should feel that way for everyone.
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License: Apache 2.0 + Pixel ODS-only](https://img.shields.io/badge/License-Apache%202.0%20%2B%20Pixel%20ODS--only-blue.svg)](ods/LICENSING.md)
 [![GitHub Stars](https://img.shields.io/github/stars/Osmantic/ODS)](https://github.com/Osmantic/ODS/stargazers)
 [![Release](https://img.shields.io/github/v/release/Osmantic/ODS)](https://github.com/Osmantic/ODS/releases)
 
@@ -40,6 +40,11 @@ fleet and distro lab: zero-prereq bootstrap, fresh installs, product flows,
 full-model capabilities, lifecycle recovery, and the final User Green gate. See
 [Release Validation](ods/docs/RELEASE_VALIDATION.md) for what a green
 run proves.
+
+**September public-beta candidate:** The accumulated Portal and platform changes
+are being prepared for `main`. Full fleet qualification is incomplete; see the
+[promotion record](ods/docs/PUBLIC_BETA_PROMOTION_2026-09.md) for known task
+limitations, available evidence, and remaining release gates.
 
 **Repo layout:** the repository root holds the public README, installers,
 security policy, GitHub workflows, and project coordination docs. The
@@ -148,7 +153,7 @@ Windows recovery note: if the runtime folder is partial and `.\ods.ps1` is missi
 > | **Windows** (NVIDIA + AMD) | **Supported** — install and run today |
 > | **macOS** (Apple Silicon) | **Supported** — install and run today |
 >
-> **Tested Linux distros:** Ubuntu 24.04/22.04, Debian 12, Linux Mint 21.3, Fedora 41+, Rocky Linux 9, Arch Linux, Manjaro, CachyOS, and openSUSE Tumbleweed. Other distros using apt, dnf, pacman, or zypper should also work — [open an issue](https://github.com/Osmantic/ODS/issues) if yours doesn't.
+> **Tested Linux distros:** Ubuntu 26.04/24.04/22.04, Debian 12, Linux Mint 21.3, Fedora 41+, Rocky Linux 9, Arch Linux, Manjaro, CachyOS, and openSUSE Tumbleweed. Other distros using apt, dnf, pacman, or zypper should also work — [open an issue](https://github.com/Osmantic/ODS/issues) if yours doesn't.
 >
 > **Release validation:** Operational changes run through a release-grade gate
 > that covers zero-prereq bootstrap, clean installs, product behavior,
@@ -158,7 +163,7 @@ Windows recovery note: if the runtime folder is partial and `.\ods.ps1` is missi
 >
 > **Windows:** Requires Docker Desktop with WSL2 backend. NVIDIA GPUs use Docker GPU passthrough; AMD Strix Halo runs through the platform-specific accelerated path documented in the Windows installer and support matrix.
 >
-> **macOS:** Requires Apple Silicon (M1+) and Docker Desktop. llama-server runs natively with Metal GPU acceleration; all other services run in Docker.
+> **macOS:** Requires Apple Silicon (M1+) and Docker Desktop. llama-server uses native Metal acceleration; Portal's gateway and managed host helpers also run natively. The UI, ingress, sandbox and supporting services run in Docker. See the [macOS Quickstart](ods/docs/MACOS-QUICKSTART.md).
 >
 > See the [Support Matrix](ods/docs/SUPPORT-MATRIX.md) for supported
 > platform claims and the [Validation Matrix](ods/docs/VALIDATION-MATRIX.md)
@@ -252,7 +257,8 @@ See the [macOS Quickstart](ods/docs/MACOS-QUICKSTART.md) for details.
 - **Kokoro** — text-to-speech
 
 ### Agents & Automation
-- **Hermes Agent** — default local-first autonomous/browser agent with memory, skills, and a magic-link-gated proxy
+- **Portal** — bundled core conversational assistant on Apple Silicon macOS and qualified Ubuntu 24.04/26.04 or Debian 12 systemd hosts, including qualified WSL2 installations through the Linux installer. No private repository access or separate license flag is required; available in the Dashboard and through a compatible Open WebUI model route. The native PowerShell installer does not install the Portal host runtime.
+- **Hermes Agent** — independent general-purpose agent, available alongside Portal; includes memory, skills, and a magic-link-gated proxy
 - **OpenClaw** — deprecated legacy autonomous agent, still opt-in during the migration window
 - **n8n** — workflow automation with 400+ integrations (Slack, email, databases, APIs)
 - **APE** — Agent Policy Engine for auditing and governing autonomous tool calls
@@ -283,7 +289,7 @@ The installer detects your GPU and first assigns a deterministic hardware tier. 
 
 `MODEL_PROFILE=qwen` is the default non-Gemma catalog profile, so the effective pick can be Qwen, Phi, or DeepSeek depending on what fits best. `MODEL_PROFILE=gemma4` forces Gemma 4 where available, and `MODEL_PROFILE=auto` uses Gemma 4 on NVIDIA, Apple Silicon, and Intel Arc tiers. Override tier selection with `./install.sh --tier 3`; override the model family with `MODEL_PROFILE=gemma4 ./install.sh` or `MODEL_PROFILE=auto ./install.sh`.
 
-When Hermes is enabled, which is the default agent path, installers keep the first-run bootstrap model at a 64K context floor and promote the full local model context to 128K where the selected model supports it. That avoids Hermes's hard 64K minimum while preserving the under-2-minute first chat experience. The examples below are current catalog-selector outputs for common hardware envelopes; exact installs can differ with detected VRAM/RAM, host architecture, existing downloads, or explicit profile overrides. Throughput still needs a local benchmark after first launch.
+When the Hermes fallback is enabled, installers keep the first-run bootstrap model at a 64K context floor and promote the full local model context to 128K where the selected model supports it. That avoids Hermes's hard 64K minimum while preserving the under-2-minute first chat experience. The examples below are current catalog-selector outputs for common hardware envelopes; exact installs can differ with detected VRAM/RAM, host architecture, existing downloads, or explicit profile overrides. Throughput still needs a local benchmark after first launch.
 
 ### NVIDIA
 
@@ -439,7 +445,7 @@ Other tools get you part of the way. ODS gets you the whole way.
 | One-command install | Everything, auto-configured | LLM + chat only | LLM only |
 | Hardware auto-detect + model selection | NVIDIA + AMD Strix Halo + Apple Silicon + Intel Arc + CPU/cloud fallback | No | No |
 | AMD APU unified memory support | Platform-specific accelerated backend, selected by installer | Partial (Vulkan) | No |
-| Autonomous AI agents | Hermes Agent default; OpenClaw legacy opt-in | No | No |
+| Autonomous AI agents | Bundled Portal on qualified hosts; Hermes available alongside it; OpenClaw legacy opt-in | No | No |
 | Workflow automation | n8n (400+ integrations) | No | No |
 | Voice (STT + TTS) | Whisper + Kokoro | No | No |
 | Image generation | ComfyUI | No | No |
@@ -455,6 +461,8 @@ Other tools get you part of the way. ODS gets you the whole way.
 |---|---|
 | [Quickstart](ods/QUICKSTART.md) | Step-by-step install guide with troubleshooting |
 | [Docs Index](ods/docs/README.md) | Maintained map for operators, contributors, and reviewers |
+| [Portal runtime](ods/docs/PIXEL.md) | Eligibility, licensing boundary, architecture, install, security, tools, rollback, and qualification |
+| [Licensing](ods/LICENSING.md) | Apache-2.0 ODS code, Pixel's ODS-only grant, and third-party notices |
 | [Build On ODS](ods/docs/BUILD-ON-ODS-SERVER.md) | Forking, custom editions, extension templates, and downstream validation |
 | [Forkability](ods/docs/FORKABILITY.md) | How to fork, audit, customize, and independently operate ODS |
 | [Maintainer Runbook](ods/docs/MAINTAINER_RUNBOOK.md) | Release, rollback, validation, and operator continuity guidance for maintainers and forks |
@@ -489,7 +497,9 @@ ODS has been recognized by the local AI and developer community, including AMD F
 
 ## License
 
-Apache 2.0 — Use it, modify it, ship it. See [LICENSE](LICENSE).
+ODS code is Apache-2.0 except the bundled Pixel source, which has a separate
+ODS-only use and distribution grant. See [Licensing](ods/LICENSING.md),
+[LICENSE](LICENSE), and [Pixel's license](ods/vendor/pixel/LICENSE.md).
 
 ---
 

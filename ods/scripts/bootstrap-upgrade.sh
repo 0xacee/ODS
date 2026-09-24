@@ -38,6 +38,146 @@ BOOTSTRAP_GGUF_FILE="${7:-Qwen3.5-2B-Q4_K_M.gguf}"
 LOG_TAG="[BOOTSTRAP-UPGRADE]"
 
 log()  { echo "$LOG_TAG $(date '+%H:%M:%S') $*"; }
+MODEL_ROUTER_SWAP_GATE_TOKEN=""
+MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID=""
+
+model_router_swap_gate_call() {
+    local action="$1" token="$2" lease_seconds="${3:-30}"
+    [[ -n "${DOCKER_CMD:-}" ]] || return 1
+    $DOCKER_CMD exec \
+        -e ODS_SWAP_GATE_ACTION="$action" \
+        -e ODS_SWAP_GATE_TOKEN="$token" \
+        -e ODS_SWAP_GATE_LEASE_SECONDS="$lease_seconds" \
+        ods-model-router python -c '
+import json, os, urllib.error, urllib.request
+key = os.environ.get("ODS_ROUTER_INTERNAL_KEY") or os.environ.get("DASHBOARD_API_KEY") or ""
+if not key:
+    raise SystemExit(2)
+payload = {
+    "action": os.environ["ODS_SWAP_GATE_ACTION"],
+    "token": os.environ["ODS_SWAP_GATE_TOKEN"],
+}
+if payload["action"] == "begin":
+    payload["leaseSeconds"] = int(os.environ["ODS_SWAP_GATE_LEASE_SECONDS"])
+request = urllib.request.Request(
+    "http://127.0.0.1:9099/internal/model-swap/admission",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=5) as response:
+        body = json.load(response)
+except (OSError, ValueError, urllib.error.HTTPError):
+    raise SystemExit(3)
+expected = "closed" if payload["action"] == "begin" else "open"
+raise SystemExit(0 if body.get("status") == expected else 4)
+' >/dev/null 2>&1
+}
+
+model_router_swap_gate_health() {
+    [[ -n "${DOCKER_CMD:-}" ]] || return 1
+    $DOCKER_CMD exec ods-model-router python -c '
+import json, urllib.request
+with urllib.request.urlopen("http://127.0.0.1:9099/health", timeout=5) as response:
+    body = json.load(response)
+active = body.get("activeRequests")
+queued = body.get("queuedRequests")
+gate = body.get("modelSwapGateActive")
+if isinstance(active, bool) or not isinstance(active, int) or active < 0:
+    raise SystemExit(2)
+if isinstance(queued, bool) or not isinstance(queued, int) or queued < 0:
+    raise SystemExit(2)
+if not isinstance(gate, bool):
+    raise SystemExit(2)
+print(f"{active} {queued} {1 if gate else 0}")
+' 2>/dev/null
+}
+
+release_model_router_swap_gate() {
+    local token="${MODEL_ROUTER_SWAP_GATE_TOKEN:-}"
+    local heartbeat_pid="${MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID:-}"
+    [[ -n "$token" ]] || return 0
+    MODEL_ROUTER_SWAP_GATE_TOKEN=""
+    MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID=""
+    if [[ -n "$heartbeat_pid" ]]; then
+        kill "$heartbeat_pid" >/dev/null 2>&1 || true
+        wait "$heartbeat_pid" >/dev/null 2>&1 || true
+    fi
+    if model_router_swap_gate_call end "$token" 30; then
+        log "Reopened model-router request admission."
+    else
+        log "WARNING: could not explicitly reopen model-router admission; its short lease will expire automatically."
+    fi
+}
+
+acquire_model_router_swap_gate() {
+    local switchboard_mode token drain_attempts state active queued gate consecutive_idle=0
+    switchboard_mode="$(read_env_value ODS_MODEL_SWITCHBOARD | tr '[:upper:]' '[:lower:]')"
+    [[ "$switchboard_mode" == "enabled" ]] || {
+        log "Model switchboard is ${switchboard_mode:-unset}; no router admission gate is active for this explicit legacy/observe route."
+        return 0
+    }
+    if ! $DOCKER_CMD ps --filter name=ods-model-router --format '{{.Names}}' 2>/dev/null \
+        | grep -qx 'ods-model-router'; then
+        log "ERROR: model switchboard is enabled but ods-model-router is not running."
+        return 1
+    fi
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        token="$(tr -d '-' </proc/sys/kernel/random/uuid)"
+    elif command -v uuidgen >/dev/null 2>&1; then
+        token="$(uuidgen | tr -d '-')"
+    else
+        token="ods-swap-$$-$(date +%s)-${RANDOM}${RANDOM}"
+    fi
+    if ! model_router_swap_gate_call begin "$token" 30; then
+        log "ERROR: model-router refused the request-admission gate."
+        return 1
+    fi
+    MODEL_ROUTER_SWAP_GATE_TOKEN="$token"
+    (
+        while sleep 10; do
+            model_router_swap_gate_call begin "$token" 30 || exit 1
+        done
+    ) >/dev/null 2>&1 &
+    MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID=$!
+
+    drain_attempts="${ODS_BOOTSTRAP_ROUTER_DRAIN_ATTEMPTS:-600}"
+    if ! [[ "$drain_attempts" =~ ^[0-9]+$ ]] || (( drain_attempts < 1 )); then
+        drain_attempts=600
+    fi
+    log "Closed model-router admission; draining active model requests before promotion..."
+    for _drain_i in $(seq 1 "$drain_attempts"); do
+        state="$(model_router_swap_gate_health)" || {
+            log "ERROR: model-router drain health could not be verified."
+            release_model_router_swap_gate
+            return 1
+        }
+        read -r active queued gate <<<"$state"
+        if [[ "$gate" != "1" ]]; then
+            log "ERROR: model-router admission gate was lost while draining."
+            release_model_router_swap_gate
+            return 1
+        fi
+        if [[ "$active" == "0" ]]; then
+            consecutive_idle=$(( consecutive_idle + 1 ))
+            if (( consecutive_idle >= 2 )); then
+                log "Model-router drained (active=0, queued=${queued}); promotion may mutate runtime state."
+                return 0
+            fi
+        else
+            consecutive_idle=0
+            if (( _drain_i == 1 || _drain_i % 15 == 0 )); then
+                log "Waiting for ${active} active model request(s) to finish (${queued} queued)."
+            fi
+        fi
+        sleep 1
+    done
+    log "ERROR: active model requests did not drain within ${drain_attempts} seconds."
+    release_model_router_swap_gate
+    return 1
+}
+
 release_model_lifecycle_lock() {
     if declare -F ods_model_lifecycle_lock_release >/dev/null 2>&1; then
         ods_model_lifecycle_lock_release
@@ -68,7 +208,7 @@ acquire_model_lifecycle_lock() {
     [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]] || return 0
     ods_model_lifecycle_lock_acquire "$INSTALL_DIR" "background full-model activation"
 }
-fail() { log "ERROR: $*"; release_model_lifecycle_lock; release_upgrade_lock; exit 1; }
+fail() { log "ERROR: $*"; release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock; exit 1; }
 
 if [[ -z "$INSTALL_DIR" || ! -d "$INSTALL_DIR" ]]; then
     log "ERROR: install directory does not exist: ${INSTALL_DIR:-<empty>}"
@@ -88,6 +228,68 @@ ENV_FILE="$INSTALL_DIR/.env"
 MODELS_INI="$INSTALL_DIR/config/llama-server/models.ini"
 STATUS_FILE="$INSTALL_DIR/data/bootstrap-status.json"
 UPGRADE_LOCK_DIR=""
+
+reconcile_ods_managed_pixel_model() {
+    local target_model="${1:-$FULL_LLM_MODEL}"
+    [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]] || return 0
+
+    local owner home marker sudo_helper pixel_helper target_context target_max_tokens target_reasoning reasoning_mode
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        owner="${SUDO_USER:-}"
+    else
+        owner="$(id -un)"
+    fi
+    [[ -n "$owner" && "$owner" != root ]] || return 0
+    home="$(getent passwd "$owner" 2>/dev/null | awk -F: 'NR == 1 { print $6 }')"
+    [[ "$home" == /* && "$home" != / && -d "$home" && ! -L "$home" ]] || return 1
+    marker="$home/.config/ods/pixel-managed.json"
+    [[ -e "$marker" || -L "$marker" ]] || return 0
+
+    sudo_helper="$INSTALL_DIR/installers/lib/sudo.sh"
+    pixel_helper="$INSTALL_DIR/installers/lib/pixel-host-install.sh"
+    [[ -f "$sudo_helper" && ! -L "$sudo_helper" && -f "$pixel_helper" && ! -L "$pixel_helper" ]] || {
+        log "ERROR: ODS-managed Pixel exists, but its reconciliation helpers are unavailable."
+        return 1
+    }
+    INTERACTIVE=false
+    if [[ ${EUID:-$(id -u)} -eq 0 ]] \
+        || { command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }; then
+        ODS_SUDO_AVAILABLE=true
+    else
+        ODS_SUDO_AVAILABLE=false
+    fi
+    export INTERACTIVE ODS_SUDO_AVAILABLE
+    # shellcheck source=installers/lib/sudo.sh
+    . "$sudo_helper"
+    # shellcheck source=installers/lib/pixel-host-install.sh
+    . "$pixel_helper"
+
+    target_context="$(read_env_value MAX_CONTEXT)"
+    [[ "$target_context" =~ ^[0-9]+$ ]] || target_context="$(read_env_value CTX_SIZE)"
+    if ! [[ "$target_context" =~ ^[0-9]+$ && "$target_context" -ge 4096 ]]; then
+        log "ERROR: ODS-managed Pixel requires a promoted model context of at least 4096 tokens."
+        return 1
+    fi
+    target_max_tokens="$(_ods_pixel_default_output_tokens "$target_context")" || {
+        log "ERROR: ODS-managed Pixel received an invalid promoted context budget."
+        return 1
+    }
+    target_reasoning=false
+    reasoning_mode="$(read_env_value LLAMA_REASONING | tr '[:upper:]' '[:lower:]')"
+    [[ -n "$reasoning_mode" ]] || reasoning_mode=off
+    if [[ ! "$reasoning_mode" =~ ^(off|none|false|0)$ ]]; then
+        target_reasoning=true
+    fi
+
+    log "Reconciling the ODS-managed Pixel route to ${target_model} at ${target_context} tokens..."
+    if ods_pixel_reconcile_promoted_model "$owner" "$home" "$target_model" ready \
+        "$target_context" "$target_max_tokens" "$target_reasoning"; then
+        log "ODS-managed Pixel now targets ${target_model}."
+        return 0
+    fi
+    log "ERROR: ODS-managed Pixel model reconciliation failed."
+    return 1
+}
 
 # Cross-platform file size (GNU stat on Linux/WSL2, BSD stat on macOS)
 # IMPORTANT: Try GNU stat -c %s FIRST (Linux). stat -f on Linux returns filesystem
@@ -200,6 +402,36 @@ compose_recreate_llama_server_with_retry() {
     done
 }
 
+compose_recreate_hermes() {
+    local -a compose_args=()
+
+    if declare -p COMPOSE_ARGS >/dev/null 2>&1 && [[ ${#COMPOSE_ARGS[@]} -gt 0 ]]; then
+        compose_args=("${COMPOSE_ARGS[@]}")
+    elif declare -p WINDOWS_LEMONADE_COMPOSE_ARGS >/dev/null 2>&1 \
+      && [[ ${#WINDOWS_LEMONADE_COMPOSE_ARGS[@]} -gt 0 ]]; then
+        compose_args=("${WINDOWS_LEMONADE_COMPOSE_ARGS[@]}")
+    elif [[ -s "$INSTALL_DIR/.compose-flags" ]]; then
+        read -ra compose_args <<< "$(cat "$INSTALL_DIR/.compose-flags")"
+    elif is_windows_bash && load_windows_lemonade_compose_args; then
+        compose_args=("${WINDOWS_LEMONADE_COMPOSE_ARGS[@]}")
+    fi
+
+    if [[ ${#compose_args[@]} -eq 0 || -z "${DOCKER_COMPOSE_CMD:-}" ]]; then
+        log "WARNING: cannot recreate Hermes because the active compose stack is unavailable."
+        return 1
+    fi
+
+    # Atomic installer updates replace bind-mounted files by inode. Docker
+    # Desktop cannot reliably restart a container whose old mount source was
+    # replaced, so recreate Hermes through the exact active Compose stack.
+    (
+        cd "$INSTALL_DIR"
+        env -u GGUF_FILE -u LLM_MODEL -u LEMONADE_MODEL -u MAX_CONTEXT -u CTX_SIZE \
+            $DOCKER_COMPOSE_CMD "${compose_args[@]}" \
+            up -d --force-recreate --no-deps hermes
+    )
+}
+
 release_upgrade_lock() {
     if [[ -n "${UPGRADE_LOCK_DIR:-}" && -d "$UPGRADE_LOCK_DIR" ]]; then
         rm -rf "$UPGRADE_LOCK_DIR"
@@ -236,7 +468,7 @@ acquire_upgrade_lock() {
 
     UPGRADE_LOCK_DIR="$lock_dir"
     printf '%s\n' "$$" > "$pid_file"
-    trap 'release_model_lifecycle_lock; release_upgrade_lock' EXIT
+    trap 'release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock' EXIT
 }
 
 model_sha256() {
@@ -385,12 +617,14 @@ discard_active_model_config_snapshot() {
 
 restore_docker_llama_server_after_swap_failure() {
     local health_url="${1:-}"
+    local reconcile_pixel="${2:-false}"
     local compose_arg_count=0
-    local previous_gguf previous_gpu_backend previous_model_id
+    local previous_gguf previous_gpu_backend previous_llm_model previous_model_id
     local rollback_healthy=false
 
     previous_gguf="$(snapshot_env_value GGUF_FILE)"
     previous_gpu_backend="$(snapshot_env_value GPU_BACKEND | tr '[:upper:]' '[:lower:]')"
+    previous_llm_model="$(snapshot_env_value LLM_MODEL)"
     previous_model_id="$(snapshot_env_value LEMONADE_MODEL)"
     if [[ -z "$previous_model_id" && -n "$previous_gguf" ]]; then
         previous_model_id="extra.${previous_gguf}"
@@ -442,6 +676,11 @@ restore_docker_llama_server_after_swap_failure() {
                 log "WARNING: previous runtime is healthy, but its restored LiteLLM route could not be proved."
                 return 1
             fi
+        fi
+        if [[ "$reconcile_pixel" == "true" && -n "$previous_llm_model" ]] \
+            && ! reconcile_ods_managed_pixel_model "$previous_llm_model"; then
+            log "WARNING: previous inference runtime is healthy, but the managed Pixel route could not be reconciled to ${previous_llm_model}."
+            return 1
         fi
         log "Rollback complete: llama-server is healthy with the previous active model config."
         return 0
@@ -1400,7 +1639,7 @@ patch_hermes_yaml_with_sed() {
     base_url_sed="$(sed_replacement_escape "$base_url_yaml")" || return 1
 
     local sed_args=(
-        -e "s|^  default: \".*\"[[:space:]]*$|  default: \"${model_sed}\"|"
+        -e "s|^  default: .*[[:space:]]*$|  default: \"${model_sed}\"|"
         -e "s|^  context_length: .*|  context_length: ${context_length}|"
         -e "s|^    context_length: .*|    context_length: ${context_length}|"
     )
@@ -1408,7 +1647,7 @@ patch_hermes_yaml_with_sed() {
         sed_args+=(-e "s|^    request_timeout_seconds: 180[[:space:]]*$|    request_timeout_seconds: ${request_timeout_seconds}|")
     fi
     if [[ -n "$base_url" ]]; then
-        sed_args+=(-e "s|^  base_url: \".*\"[[:space:]]*$|  base_url: \"${base_url_sed}\"|")
+        sed_args+=(-e "s|^  base_url: .*[[:space:]]*$|  base_url: \"${base_url_sed}\"|")
     fi
 
     if sed -i.bak \
@@ -1440,12 +1679,12 @@ patch_hermes_yaml_in_container() {
     base_url_sed="$(sed_replacement_escape "$base_url_yaml")" || return 1
 
     local sed_args=(
-        -e "s|^  default: \".*\"[[:space:]]*$|  default: \"${model_sed}\"|"
+        -e "s|^  default: .*[[:space:]]*$|  default: \"${model_sed}\"|"
         -e "s|^  context_length: .*|  context_length: ${context_length}|"
         -e "s|^    context_length: .*|    context_length: ${context_length}|"
     )
     if [[ -n "$base_url" ]]; then
-        sed_args+=(-e "s|^  base_url: \".*\"|  base_url: \"${base_url_sed}\"|")
+        sed_args+=(-e "s|^  base_url: .*[[:space:]]*$|  base_url: \"${base_url_sed}\"|")
     fi
     if [[ "$request_timeout_seconds" != "180" ]]; then
         sed_args+=(-e "s|^    request_timeout_seconds: 180[[:space:]]*$|    request_timeout_seconds: ${request_timeout_seconds}|")
@@ -1459,7 +1698,11 @@ patch_hermes_yaml_in_container() {
         )
     fi
 
-    $DOCKER_CMD exec ods-hermes sed -i \
+    # Git for Windows rewrites POSIX-looking arguments passed to native
+    # executables (for example /opt/data/config.yaml becomes
+    # C:/Program Files/Git/opt/data/config.yaml).  That path belongs inside
+    # the container, so keep the docker argv byte-for-byte on every host.
+    MSYS_NO_PATHCONV=1 $DOCKER_CMD exec ods-hermes sed -i \
         "${sed_args[@]}" \
         /opt/data/config.yaml
 }
@@ -1479,7 +1722,7 @@ patch_hermes_model_after_swap() {
     fi
     if [[ "$switchboard_mode" == "enabled" ]]; then
         new_model="ods/current"
-        [[ -n "$hermes_base_url" ]] || hermes_base_url="http://litellm:4000/v1"
+        [[ -n "$hermes_base_url" ]] || hermes_base_url="http://model-router:9099/v1"
     fi
 
     log "Patching Hermes config after full-model swap: ${old_model} -> ${new_model}"
@@ -1512,8 +1755,8 @@ patch_hermes_model_after_swap() {
                 log "ERROR: Could not patch Hermes live config after full-model swap."
                 return 1
             }
-        $DOCKER_CMD restart ods-hermes 2>&1 || {
-            log "ERROR: Could not restart Hermes after full-model swap."
+        compose_recreate_hermes 2>&1 || {
+            log "ERROR: Could not recreate Hermes after full-model swap."
             return 1
         }
     elif [[ "$live_host_patch_failed" == "true" ]]; then
@@ -1551,22 +1794,66 @@ load_windows_lemonade_compose_args() {
     [[ ${#WINDOWS_LEMONADE_COMPOSE_ARGS[@]} -eq 0 ]] || return 0
     [[ -n "${DOCKER_COMPOSE_CMD:-}" ]] || return 1
 
-    if [[ -f "$INSTALL_DIR/.compose-flags" ]]; then
-        read -ra WINDOWS_LEMONADE_COMPOSE_ARGS <<< "$(cat "$INSTALL_DIR/.compose-flags")"
-    elif [[ -x "$INSTALL_DIR/scripts/resolve-compose-stack.sh" ]]; then
-        local tier resolved_env resolved_flags
+    local resolved_flags="" recovered_flags=false
+    if [[ -s "$INSTALL_DIR/.compose-flags" ]]; then
+        resolved_flags="$(cat "$INSTALL_DIR/.compose-flags")"
+    fi
+    if [[ -z "$resolved_flags" && -s "$INSTALL_DIR/logs/compose-launch.txt" ]]; then
+        # The Windows launcher records the exact successfully started stack.
+        # Recover it when an interrupted copy or filesystem quirk leaves the
+        # ordinary cache absent; this is the same fallback used by ods.ps1.
+        resolved_flags="$(sed -n 's/^compose_flags=//p' "$INSTALL_DIR/logs/compose-launch.txt" | tr -d '\r' | tail -1)"
+        [[ -z "$resolved_flags" ]] || recovered_flags=true
+    fi
+    if [[ -z "$resolved_flags" && -x "$INSTALL_DIR/scripts/resolve-compose-stack.sh" ]]; then
+        local tier gpu_count ods_mode resolved_env
         tier="$(read_env_value TIER)"
         [[ -n "$tier" ]] || tier="1"
+        gpu_count="$(read_env_value GPU_COUNT)"
+        [[ -n "$gpu_count" ]] || gpu_count="1"
+        ods_mode="$(read_env_value ODS_MODE)"
+        [[ -n "$ods_mode" ]] || ods_mode="lemonade"
         resolved_env=$("$INSTALL_DIR/scripts/resolve-compose-stack.sh" \
             --script-dir "$INSTALL_DIR" \
             --tier "$tier" \
             --gpu-backend amd \
+            --gpu-count "$gpu_count" \
+            --ods-mode "$ods_mode" \
             --env 2>/dev/null || true)
         resolved_flags=$(printf '%s\n' "$resolved_env" | sed -n 's/^COMPOSE_FLAGS="\([^"]*\)".*/\1/p')
-        [[ -n "$resolved_flags" ]] && read -ra WINDOWS_LEMONADE_COMPOSE_ARGS <<< "$resolved_flags"
+        [[ -z "$resolved_flags" ]] || recovered_flags=true
     fi
 
-    [[ ${#WINDOWS_LEMONADE_COMPOSE_ARGS[@]} -gt 0 ]]
+    [[ -n "$resolved_flags" ]] || return 1
+    local -a candidate_args=()
+    read -ra candidate_args <<< "$resolved_flags"
+    [[ ${#candidate_args[@]} -gt 0 ]] || return 1
+
+    local index compose_file compose_file_count=0
+    for ((index = 0; index < ${#candidate_args[@]}; index++)); do
+        [[ "${candidate_args[$index]}" == "-f" ]] || continue
+        (( index + 1 < ${#candidate_args[@]} )) || return 1
+        compose_file="${candidate_args[$((index + 1))]}"
+        compose_file_count=$((compose_file_count + 1))
+        case "$compose_file" in
+            /*) ;;
+            [A-Za-z]:[/\\]*|\\\\*)
+                if command -v cygpath >/dev/null 2>&1; then
+                    compose_file="$(cygpath -u "$compose_file" 2>/dev/null)" || return 1
+                fi
+                ;;
+            *) compose_file="$INSTALL_DIR/$compose_file" ;;
+        esac
+        [[ -f "$compose_file" ]] || return 1
+        index=$((index + 1))
+    done
+    (( compose_file_count > 0 )) || return 1
+
+    if [[ "$recovered_flags" == "true" ]]; then
+        printf '%s\n' "$resolved_flags" > "$INSTALL_DIR/.compose-flags" || return 1
+    fi
+    WINDOWS_LEMONADE_COMPOSE_ARGS=("${candidate_args[@]}")
+    return 0
 }
 
 refresh_windows_lemonade_litellm_after_swap() {
@@ -1595,14 +1882,14 @@ refresh_windows_lemonade_litellm_after_swap() {
         log "ERROR: runtime config renderer is unavailable for Windows Lemonade"
         return 1
     fi
-    if ! "$renderer_py" "$renderer_script" \
+    if ! ODS_RENDER_LITELLM_KEY="$lemonade_api_key" \
+        "$renderer_py" "$renderer_script" \
         --surface litellm-lemonade \
         --ods-mode lemonade \
         --gpu-backend amd \
         --gguf-file "$FULL_GGUF_FILE" \
         --lemonade-model-id "$model_id" \
         --lemonade-api-base "$lemonade_api_base" \
-        --litellm-key "$lemonade_api_key" \
         --output-root "$INSTALL_DIR" \
         --write >/dev/null 2>&1; then
         log "ERROR: runtime config renderer failed for Windows Lemonade"
@@ -1805,8 +2092,8 @@ restart_windows_lemonade_dependents_after_rollback() {
         $DOCKER_CMD restart ods-litellm 2>&1 || dependents_ok=false
     fi
     if [[ "$WINDOWS_LEMONADE_HERMES_PRESENT" == "true" ]]; then
-        log "Restarting Hermes with its restored config..."
-        $DOCKER_CMD restart ods-hermes 2>&1 || dependents_ok=false
+        log "Recreating Hermes with its restored config..."
+        compose_recreate_hermes 2>&1 || dependents_ok=false
     fi
     if [[ "$WINDOWS_LEMONADE_OPENCLAW_PRESENT" == "true" ]]; then
         log "Recreating OpenClaw with the restored model environment..."
@@ -1822,8 +2109,10 @@ snapshot_env_value() {
 }
 
 rollback_windows_lemonade_swap() {
-    local previous_gguf previous_model_id rollback_ok=true inference_restored=false route_verified=false
+    local reconcile_pixel="${1:-false}"
+    local previous_gguf previous_llm_model previous_model_id rollback_ok=true inference_restored=false route_verified=false
     previous_gguf="$(snapshot_env_value GGUF_FILE)"
+    previous_llm_model="$(snapshot_env_value LLM_MODEL)"
     previous_model_id="$(snapshot_env_value LEMONADE_MODEL)"
     [[ -n "$previous_gguf" ]] || previous_gguf="$BOOTSTRAP_GGUF_FILE"
 
@@ -1842,9 +2131,21 @@ rollback_windows_lemonade_swap() {
     if [[ "$WINDOWS_LEMONADE_OPENCLAW_PRESENT" == "true" && -n "$previous_model_id" ]]; then
         verify_windows_lemonade_openclaw_model_env "$previous_model_id" || rollback_ok=false
     fi
-    if [[ "$inference_restored" == "true" && -n "$previous_model_id" ]] \
-        && verify_windows_lemonade_downstream_route "$previous_model_id" "previous model route"; then
-        route_verified=true
+    if [[ "$reconcile_pixel" == "true" && -n "$previous_llm_model" ]] \
+        && ! reconcile_ods_managed_pixel_model "$previous_llm_model"; then
+        rollback_ok=false
+    fi
+
+    # Downstream verification traverses the model router. Keep admission
+    # closed until every previous consumer has been restored, then reopen it
+    # so the proof cannot queue behind this transaction's own swap gate.
+    if [[ "$rollback_ok" == "true" && "$inference_restored" == "true" && -n "$previous_model_id" ]]; then
+        release_model_router_swap_gate
+        if verify_windows_lemonade_downstream_route "$previous_model_id" "previous model route"; then
+            route_verified=true
+        else
+            rollback_ok=false
+        fi
     else
         rollback_ok=false
     fi
@@ -1860,10 +2161,11 @@ rollback_windows_lemonade_swap() {
 
 windows_lemonade_swap_failed() {
     WINDOWS_LEMONADE_SWAP_FAILURE="$1"
+    local reconcile_pixel="${2:-false}"
     WINDOWS_LEMONADE_ROLLBACK_VERIFIED=false
     log "Windows Lemonade full-model activation failed: ${WINDOWS_LEMONADE_SWAP_FAILURE}"
     log "Restoring previous active model config after Windows Lemonade swap timeout or post-swap failure..."
-    if rollback_windows_lemonade_swap; then
+    if rollback_windows_lemonade_swap "$reconcile_pixel"; then
         WINDOWS_LEMONADE_ROLLBACK_VERIFIED=true
     fi
     return 1
@@ -1900,8 +2202,26 @@ activate_windows_lemonade_full_model() {
         windows_lemonade_swap_failed "the host agent could not reconcile the promoted switchboard route"
         return 1
     fi
+    if ! reconcile_ods_managed_pixel_model; then
+        windows_lemonade_swap_failed "the managed Pixel route could not be reconciled" true
+        return 1
+    fi
+
+    # The downstream proof itself traverses the switchboard. Reopen request
+    # admission only after every promoted consumer is coherent; otherwise the
+    # probe queues behind our own renewable gate and can stall for an hour.
+    release_model_router_swap_gate
     if ! verify_windows_lemonade_downstream_route "$model_id" "full model route"; then
-        windows_lemonade_swap_failed "the full model failed through the configured downstream route"
+        # Re-establish the drained transaction boundary before mutating state
+        # during rollback. If that cannot be proven, leave the promoted state
+        # untouched and fail closed for operator inspection.
+        if acquire_model_router_swap_gate; then
+            windows_lemonade_swap_failed "the full model failed through the configured downstream route" true
+        else
+            WINDOWS_LEMONADE_SWAP_FAILURE="the full model failed through the configured downstream route, and request admission could not be re-closed for safe rollback"
+            WINDOWS_LEMONADE_ROLLBACK_VERIFIED=false
+            log "Windows Lemonade full-model activation failed: ${WINDOWS_LEMONADE_SWAP_FAILURE}"
+        fi
         return 1
     fi
     return 0
@@ -2210,7 +2530,11 @@ fi
 if [[ "$_dl_success" != "true" ]]; then
     monitor_download "$_part_path" "$TOTAL_BYTES" &
     _monitor_pid=$!
-    trap 'kill $_monitor_pid 2>/dev/null || true; write_failed_download_status "$_part_path" "$TOTAL_BYTES" "Download interrupted; partial file preserved for resume."; release_model_lifecycle_lock; release_upgrade_lock; exit 1' TERM INT
+    # Exit 75 distinguishes a supervisor-retryable session/bridge interruption
+    # from a genuine bounded download failure (exit 1). A deliberate
+    # `systemctl stop` still suppresses Restart=, while the portable nohup path
+    # remains honestly failed until `ods start` or `ods restart` resumes it.
+    trap 'kill $_monitor_pid 2>/dev/null || true; write_failed_download_status "$_part_path" "$TOTAL_BYTES" "Download interrupted; partial file preserved for resume."; release_model_lifecycle_lock; release_upgrade_lock; exit 75' HUP TERM INT
 
     # Download with resume support. curl success is not enough: finalizing the
     # .part file can fail, and checksum verification can expose a corrupt
@@ -2361,6 +2685,14 @@ elif [[ -n "$DOCKER_CMD" ]]; then
     # llama-server hot-swap. Snapshot whenever Docker is available so every
     # Docker failure path can restore the last known-good model config.
     _docker_llama_swap_applies=true
+fi
+
+if [[ "$_windows_lemonade_swap_applies" == "true" || "$_windows_native_llama_swap_applies" == "true" || "$_docker_llama_swap_applies" == "true" ]]; then
+    if ! acquire_model_router_swap_gate; then
+        write_status "failed" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 \
+            "Full model downloaded and verified, but ODS could not safely drain model traffic before activation. The current model was left unchanged; re-run to retry."
+        fail "Could not safely drain model traffic before full-model activation."
+    fi
 fi
 
 if [[ "$_windows_lemonade_swap_applies" == "true" || "$_windows_native_llama_swap_applies" == "true" || "$_docker_llama_swap_applies" == "true" ]]; then
@@ -2811,14 +3143,14 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
             fi
             if [[ ! -f "$_renderer_script" ]] \
                 || ! command -v "$_renderer_py" >/dev/null 2>&1 \
-                || ! "$_renderer_py" "$_renderer_script" \
+                || ! ODS_RENDER_LITELLM_KEY="$LITELLM_LEMONADE_API_KEY" \
+                    "$_renderer_py" "$_renderer_script" \
                     --surface litellm-lemonade \
                     --ods-mode lemonade \
                     --gpu-backend amd \
                     --gguf-file "$FULL_GGUF_FILE" \
                     --lemonade-model-id "$_lemonade_model_id" \
                     --lemonade-api-base "$_lemonade_api_base" \
-                    --litellm-key "$LITELLM_LEMONADE_API_KEY" \
                     --output-root "$INSTALL_DIR" \
                     --write >/dev/null 2>&1; then
                 log "ERROR: runtime config renderer failed for the Lemonade route"
@@ -2872,6 +3204,19 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
             unset _direct_model _direct_port
         fi
         HOT_SWAP_VERIFIED=true
+        # Pixel is host-side OpenClaw, so it does not inherit the promoted
+        # model from a container recreate. Reconcile it before discarding the
+        # bootstrap snapshot or deleting the bootstrap GGUF; otherwise Pixel
+        # keeps requesting a model that no longer exists.
+        if ! reconcile_ods_managed_pixel_model; then
+            _rollback_status="Previous active model config restore was attempted; inspect the logs before retrying."
+            if restore_docker_llama_server_after_swap_failure "$_health_url" true; then
+                _rollback_status="Previous active model config and Pixel route restored; re-run to retry the full-model swap."
+            fi
+            write_status "failed" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 \
+                "Full model served, but ODS could not reconcile the managed Pixel route. ${_rollback_status}"
+            exit 1
+        fi
         discard_active_model_config_snapshot
         # Recreate OpenClaw so inject-token.js picks up the new GGUF_FILE/LLM_MODEL
         # from .env. A restart alone won't work — env vars are baked in at container
@@ -2934,7 +3279,7 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
         fi
         if [[ "$_hermes_switchboard_mode" == "enabled" ]]; then
             _hermes_new_model="ods/current"
-            [[ -n "$_hermes_base_url" ]] || _hermes_base_url="http://litellm:4000/v1"
+            [[ -n "$_hermes_base_url" ]] || _hermes_base_url="http://model-router:9099/v1"
         fi
         log "Patching Hermes config: model.default $_hermes_old_model -> $_hermes_new_model"
         _hermes_request_timeout=180
@@ -2969,8 +3314,8 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
                 "$_hermes_new_model" "$FULL_MAX_CONTEXT" "$_hermes_base_url" "$_hermes_request_timeout" true \
                 2>&1 || \
                 log "WARNING: Could not patch Hermes /opt/data/config.yaml (non-fatal — operator can hand-edit and 'docker restart ods-hermes')"
-            log "Restarting Hermes to pick up model change..."
-            $DOCKER_CMD restart ods-hermes 2>&1 || log "WARNING: Hermes restart failed (non-fatal — hand-restart with 'docker restart ods-hermes')"
+            log "Recreating Hermes to pick up model change..."
+            compose_recreate_hermes 2>&1 || log "WARNING: Hermes recreate failed (non-fatal — hand-recreate with 'docker compose up -d --force-recreate --no-deps hermes')"
 
             # Pre-warm the freshly-swapped LLM + Hermes's 14K-token system prompt.
             #
@@ -3023,7 +3368,11 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
                 sleep 2
             done
             if $_hermes_ready; then
-                if $DOCKER_CMD exec ods-hermes timeout 90 \
+                # Git Bash rewrites leading-slash arguments passed to native
+                # Windows executables unless path conversion is disabled. Keep
+                # the container's Hermes path intact just as the live-config
+                # patch above keeps /opt/data/config.yaml intact.
+                if MSYS_NO_PATHCONV=1 $DOCKER_CMD exec ods-hermes timeout 90 \
                     /opt/hermes/.venv/bin/hermes -z "ping" --yolo \
                     >/dev/null 2>&1; then
                     log "Hermes system prompt cached — first user prompt will be fast."
@@ -3056,7 +3405,7 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
 
     LLAMA_SERVER_BIN="$INSTALL_DIR/bin/llama-server"
     LLAMA_SERVER_PID_FILE="$INSTALL_DIR/data/.llama-server.pid"
-    LLAMA_SERVER_LOG="$INSTALL_DIR/data/llama-server.log"
+    LLAMA_SERVER_LOG="$HOME/Library/Logs/ODS/llama-server.log"
 
     if [[ ! -x "$LLAMA_SERVER_BIN" ]]; then
         log "WARNING: llama-server binary not found at $LLAMA_SERVER_BIN. Cannot hot-swap."
@@ -3134,12 +3483,9 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
 
             # Relaunch with new model
             log "Starting native llama-server with ${_gguf_file}..."
-            (
-                cd "$INSTALL_DIR" || exit 1
-                exec "$LLAMA_SERVER_BIN" "${_llama_args[@]}"
-            ) > "$LLAMA_SERVER_LOG" 2>&1 &
-            _new_pid=$!
-            echo "$_new_pid" > "$LLAMA_SERVER_PID_FILE"
+            bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
+                "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" "${_llama_args[@]}"
+            _new_pid="$(cat "$LLAMA_SERVER_PID_FILE")"
 
             # Wait for health
             log "Waiting for native llama-server health..."
@@ -3163,18 +3509,15 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
                     kill -9 "$_new_pid" 2>/dev/null || true
                 fi
                 if [[ -n "${_old_model_path:-}" && -f "$_old_model_path" ]]; then
-                    (
-                        cd "$INSTALL_DIR" || exit 1
-                        exec "$LLAMA_SERVER_BIN" \
+                    bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
+                            "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" \
                             --host "$_bind" --port "$_native_port" \
                             --model "$_old_model_path" \
                             --ctx-size "$_ctx_size" \
                             --n-gpu-layers "$_gpu_layers" \
                             --reasoning-format "${_reasoning_fmt:-none}" \
                             --metrics
-                    ) > "$LLAMA_SERVER_LOG" 2>&1 &
-                    _rollback_pid=$!
-                    echo "$_rollback_pid" > "$LLAMA_SERVER_PID_FILE"
+                    _rollback_pid="$(cat "$LLAMA_SERVER_PID_FILE")"
                     log "Rolled back to previous model: $(basename "$_old_model_path") (PID $_rollback_pid)"
                 else
                     log "WARNING: Could not rollback — previous model not found."
@@ -3329,6 +3672,19 @@ elif [[ -f "$HOME/Library/LaunchAgents/com.ods.host-agent.plist" ]]; then
     log "Restarting ods-host-agent (launchctl)..."
     launchctl kickstart -k "gui/$(id -u)/com.ods.host-agent" 2>&1 || \
         log "WARNING: Could not restart host agent (non-fatal)"
+elif is_windows_bash; then
+    _windows_agent_ps="$(windows_ps_command)"
+    _windows_agent_cli="$INSTALL_DIR/installers/windows/ods.ps1"
+    if [[ -z "$_windows_agent_ps" || ! -f "$_windows_agent_cli" ]]; then
+        log "WARNING: Could not locate the Windows ODS CLI for host agent restart (non-fatal)"
+    elif ! _windows_agent_cli_arg="$(windows_path "$_windows_agent_cli")"; then
+        log "WARNING: Could not resolve the Windows ODS CLI path for host agent restart (non-fatal)"
+    else
+        log "Restarting ods-host-agent (Windows)..."
+        "$_windows_agent_ps" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+            -File "$_windows_agent_cli_arg" agent restart 2>&1 || \
+            log "WARNING: Could not restart host agent (non-fatal)"
+    fi
 fi
 
 notify_host_agent_model_status() {

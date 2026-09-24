@@ -31,6 +31,9 @@ jobs:
       - name: WSL Logic Smoke
         run: bash tests/smoke/wsl-logic.sh
 
+      - name: Pixel Execution Cancellation
+        run: python3 tests/test_pixel_cancellable_exec.py
+
       - name: Mobile Dispatch Smoke
         run: bash tests/smoke/mobile-dispatch.sh
 
@@ -40,6 +43,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - distro: ubuntu-26.04
+            container: ubuntu:26.04
+            expected_pkg: apt
           - distro: ubuntu-24.04
             container: ubuntu:24.04
             expected_pkg: apt
@@ -91,6 +97,19 @@ jobs:
                 return "$status"
               fi
               echo "Command failed (attempt ${attempt}/${max}): $*"
+              # A CachyOS CDN edge can serve a database/signature pair from
+              # different syncs. Retry the next bundled mirror, retaining all
+              # pacman signature checks and the original three-attempt bound.
+              mirror_file=/etc/pacman.d/cachyos-mirrorlist
+              if [ "$1" = pacman ] && [ -f "$mirror_file" ] \
+                  && [ "$(grep -c '^Server' "$mirror_file")" -gt 1 ]; then
+                mirror_tmp=$(mktemp)
+                awk '/^Server/ {if (!first) {first=$0;next}} {print} END {if (first) print first}' \
+                  "$mirror_file" > "$mirror_tmp"
+                cat "$mirror_tmp" > "$mirror_file"
+                rm -f "$mirror_tmp"
+                echo "Retrying with the next bundled CachyOS mirror; signatures remain required."
+              fi
               echo "Retrying in ${delay}s..."
               sleep "$delay"
               attempt=$((attempt + 1))
@@ -206,9 +225,18 @@ jobs:
         run: |
           bash -n install-core.sh
           bash -n installers/lib/packaging.sh
+          # A step exits with the status of its last command, so the loop
+          # must carry a failed check out instead of ending on an echo.
+          status=0
           for f in installers/phases/*.sh; do
-            bash -n "$f" && echo "  OK: $f" || echo "  FAIL: $f"
+            if bash -n "$f"; then
+              echo "  OK: $f"
+            else
+              echo "  FAIL: $f"
+              status=1
+            fi
           done
+          exit "$status"
 
   macos-smoke:
     runs-on: macos-latest
@@ -223,6 +251,39 @@ jobs:
 
       - name: macOS Dispatch Smoke
         run: bash tests/smoke/macos-dispatch.sh
+
+      - name: macOS Installer Presentation Contract
+        run: /bin/bash tests/contracts/test-macos-installer-presentation.sh
+
+      - name: Native Model Store Restart Tests
+        run: /bin/bash tests/test-macos-native-model-store.sh
+
+      - name: Pixel Execution Cancellation
+        run: python3 tests/test_pixel_cancellable_exec.py
+
+      - name: Unix Peer Identity Tests
+        run: python3 extensions/services/pixel-agent/tests/test_unix_peer.py
+
+      - name: Set Up Pixel Edge Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.13'
+
+      - name: Native Pixel Edge Tests
+        env:
+          # Short, canonical paths satisfy both Unix socket length and custody checks.
+          TMPDIR: /private/tmp
+        run: |
+          python -m pip install -r extensions/services/pixel-edge/requirements.txt pytest
+          python -m pytest -q extensions/services/pixel-edge/tests
+
+      - name: Native Pixel Installer And Recovery Tests
+        env:
+          TMPDIR: /private/tmp
+        run: |
+          python -m pip install pytest-subtests "PyYAML>=6.0,<7.0"
+          python -m pytest -q tests/test_macos_pixel_*.py tests/test_macos_runtime_*.py tests/test_macos_upgrade_process_crash.py tests/test_macos_protected_replace.py tests/test_pixel_startup_reproof.py tests/test_pixel_native_compose.py
+          python -m unittest discover -s tests -p 'test_pixel_*.py' -q
 
       - name: Atomic Environment Write Tests
         run: /bin/bash tests/test-atomic-env-writes.sh

@@ -55,9 +55,12 @@ retired_umbrella_middle = base64.b64decode("aG91c2U=").decode("ascii")
 retired_umbrella_suffix = base64.b64decode("YWk=").decode("ascii")
 separator = r"[\s_.-]*"
 
+retired_fleet_pattern = re.compile(
+    retired_product_prefix + separator + retired_fleet_name, re.IGNORECASE
+)
 patterns = [
     re.compile(retired_product_prefix + separator + retired_product_name, re.IGNORECASE),
-    re.compile(retired_product_prefix + separator + retired_fleet_name, re.IGNORECASE),
+    retired_fleet_pattern,
     re.compile(retired_product_prefix + separator + retired_gateway_name, re.IGNORECASE),
     re.compile(
         retired_org_prefix + separator + retired_org_middle + separator + retired_org_suffix,
@@ -99,8 +102,12 @@ retired_binary_hashes = {
     "b2ef042415a842f038c9103bfad53f4b73fc6bdceb642fe0491c0ee825868043",
 }
 
-def has_retired_reference(value):
-    return any(pattern.search(value) for pattern in patterns)
+def has_retired_reference(value, *, allow_fleet=False):
+    return any(
+        pattern.search(value)
+        for pattern in patterns
+        if not (allow_fleet and pattern is retired_fleet_pattern)
+    )
 
 positive_samples = [
     retired_product_prefix + retired_product_name,
@@ -122,6 +129,9 @@ if not all(has_retired_reference(sample) for sample in positive_samples):
     raise SystemExit("[FAIL] Retired-name guard misses a supported identifier form")
 if any(has_retired_reference(sample) for sample in negative_samples):
     raise SystemExit("[FAIL] Retired-name guard rejects unrelated language")
+if (has_retired_reference(retired_product_prefix + retired_fleet_name, allow_fleet=True)
+        or not has_retired_reference(retired_product_prefix + retired_product_name, allow_fleet=True)):
+    raise SystemExit("[FAIL] Vendored Pixel exception is broader than the Fleet name")
 
 repo_path = pathlib.Path(repo_root)
 tracked_output = subprocess.check_output(
@@ -135,7 +145,12 @@ tracked_files = [
 
 matches = []
 for relative_path in tracked_files:
-    if has_retired_reference(relative_path):
+    # Pixel's source includes its own Fleet integration. That identifier is
+    # valid inside the separately licensed vendor tree, but ODS-facing files
+    # and all other retired names remain guarded. Binary fingerprints are
+    # checked for every tracked file, including this vendor tree.
+    allow_fleet = relative_path.startswith("ods/vendor/pixel/")
+    if has_retired_reference(relative_path, allow_fleet=allow_fleet):
         matches.append(relative_path)
         continue
 
@@ -154,7 +169,7 @@ for relative_path in tracked_files:
 
     text = data.decode("utf-8", errors="ignore")
     for line_number, line in enumerate(text.splitlines(), start=1):
-        if has_retired_reference(line):
+        if has_retired_reference(line, allow_fleet=allow_fleet):
             matches.append(f"{relative_path}:{line_number}:{line}")
 
 if matches:
@@ -202,6 +217,14 @@ require_literal "$REPO_ROOT/README.md" 'Choose your system, copy the block' "Fro
 require_literal "$REPO_ROOT/README.md" '**Linux or macOS**' "Front-page Linux/macOS install label"
 require_literal "$REPO_ROOT/README.md" '**Windows PowerShell**' "Front-page Windows install label"
 require_literal "$REPO_ROOT/README.md" 'Docker must be installed and running' "Front-page Docker prerequisite"
+require_literal "$REPO_ROOT/README.md" '[Licensing](ods/LICENSING.md)' "Front-page mixed-license guidance"
+require_literal "$ROOT_DIR/README.md" '[Licensing](LICENSING.md)' "ODS mixed-license guidance"
+if grep -qF 'separate written license authorization' "$REPO_ROOT/README.md"; then
+    fail "Front page still requires separate Pixel license authorization"
+fi
+if grep -qF 'qualified/licensed hosts' "$REPO_ROOT/README.md"; then
+    fail "Front page still calls qualified Pixel hosts licensed"
+fi
 
 for file in "${windows_copy_paste_docs[@]}"; do
     require_literal "$file" "$WINDOWS_SOURCE_ZIP_URL" "Windows no-Git source ZIP install"

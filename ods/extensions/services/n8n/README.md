@@ -66,8 +66,8 @@ curl -X POST http://localhost:3002/api/workflows/my-workflow-id/enable
 
 | Path (host) | Mounted at (container) | Contents |
 |-------------|------------------------|----------|
-| `data/n8n/` | `/home/node/.n8n` | Workflows, credentials, execution history |
-| `config/n8n/` | `/home/node/workflows` | Pre-built workflow templates |
+| `data/n8n/` | `/tmp/.n8n` | Workflows, credentials, execution history (persistent bind mount) |
+| `config/n8n/` | `/tmp/workflows` | Pre-built workflow templates |
 
 ## LLM Integration
 
@@ -115,6 +115,7 @@ docker compose logs n8n
 
 **File permission errors on startup:**
 - n8n runs as `UID:GID` set in `.env` (default `1000:1000`)
+- Native macOS installs set `N8N_RUN_USER=node` because the image home directory is not accessible to the macOS host UID. Other platforms retain `ODS_UID:ODS_GID`; `N8N_RUN_USER` can explicitly override it.
 - Ensure `data/n8n/` is owned by that user: `chown -R 1000:1000 ods/data/n8n`
 
 ## License

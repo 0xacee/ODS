@@ -24,6 +24,7 @@ import {
 } from 'lucide-react'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
+import CompactDashboard from '../components/CompactDashboard'
 import { serviceUrl } from '../lib/serviceUrls'
 
 // Compute overall health from services (excludes not_deployed from counts)
@@ -606,7 +607,7 @@ function buildChartPoints(values, maxValue) {
   })
 }
 
-export default function Dashboard({ status, loading }) {
+export default function Dashboard({ status, loading, compact = false }) {
   const [featuresData, setFeaturesData] = useState(null)
   const [serviceResources, setServiceResources] = useState(null)
 
@@ -697,12 +698,17 @@ export default function Dashboard({ status, loading }) {
 
   if (status?.gpu) {
     if (status.gpu.memoryType === 'unified') {
-      // Apple Silicon: GPU utilization isn't available (always 0), show chip info instead.
+      const hasGpuUsage = Number.isFinite(status.gpu.utilization)
       systemMetrics.push({
         icon: Zap,
-        label: 'Chip',
-        value: status.gpu.name.replace('Apple ', ''),
-        subvalue: 'Apple Silicon',
+        label: hasGpuUsage ? 'GPU' : 'Chip',
+        value: hasGpuUsage ? `${status.gpu.utilization}%` : status.gpu.name.replace('Apple ', ''),
+        subvalue: hasGpuUsage ? status.gpu.name : status.gpu.name.startsWith('Apple ') ? 'Apple Silicon' : 'Unified memory',
+        percent: hasGpuUsage ? status.gpu.utilization : undefined,
+      })
+      if (Number.isFinite(status.gpu.vramUsed)) systemMetrics.push({
+        icon: HardDrive, label: 'GPU memory', value: `${status.gpu.vramUsed.toFixed(1)} GB`,
+        subvalue: 'Dedicated + shared',
       })
       if (status?.ram) {
         systemMetrics.push({
@@ -778,6 +784,12 @@ export default function Dashboard({ status, loading }) {
 
   systemMetrics.push(
     {
+      icon: Zap,
+      label: 'Tokens / second',
+      value: Number.isFinite(status?.inference?.tokensPerSecond) ? `${status.inference.tokensPerSecond.toFixed(1)} tok/s` : '—',
+      subvalue: Number.isFinite(status?.inference?.tokensPerSecond) ? 'runtime reading' : 'telemetry unavailable',
+    },
+    {
       icon: Brackets,
       label: 'Context',
       value: status?.inference?.contextSize ? `${(status.inference.contextSize / 1024).toFixed(0)}k` : '—',
@@ -796,6 +808,8 @@ export default function Dashboard({ status, loading }) {
       subvalue: 'loaded',
     }
   )
+
+  if (compact) return <CompactDashboard metrics={systemMetrics} services={status?.services || []} health={health}/>
 
   return (
     <div className="p-8">
@@ -862,7 +876,7 @@ export default function Dashboard({ status, loading }) {
                   Multi-GPU System · {status.gpu.gpu_count} GPUs
                 </p>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  {status.gpu.name} · {status.gpu.utilization}% avg util · {status.gpu.vramUsed?.toFixed(1)}/{status.gpu.vramTotal} GB VRAM
+                  {status.gpu.name} · {Number.isFinite(status.gpu.utilization) ? `${status.gpu.utilization}% avg util` : 'Utilization unavailable'} · {Number.isFinite(status.gpu.vramUsed) ? `${status.gpu.vramUsed.toFixed(1)}/${status.gpu.vramTotal} GB VRAM` : 'VRAM usage unavailable'}
                 </p>
               </div>
             </div>
@@ -1021,8 +1035,8 @@ const SystemOverviewPanel = memo(function SystemOverviewPanel({ tokensPerSecond,
           currentDisplay={(tokensPerSecond || 0).toFixed(1)}
           unit="tokens / sec"
           delta={computeDeltaFromSamples(history, range, 'tokensPerSecond', tokensPerSecond)}
-          accent="rgba(168,85,247,0.98)"
-          fill="rgba(157,0,255,0.52)"
+          accent="rgba(190,196,205,0.98)"
+          fill="rgba(190,196,205,0.12)"
           defaultMax={12}
           axisFormatter={(value) => `${Math.round(value)}`}
         />
@@ -1041,8 +1055,8 @@ const SystemOverviewPanel = memo(function SystemOverviewPanel({ tokensPerSecond,
           currentDisplay={formatTokenCount(totalTokens || 0)}
           unit="tokens"
           delta={computeDeltaFromSamples(history, range, 'totalTokens', totalTokens)}
-          accent="rgba(251,146,60,0.98)"
-          fill="rgba(245,158,11,0.48)"
+          accent="rgba(139,151,166,0.98)"
+          fill="rgba(139,151,166,0.12)"
           defaultMax={6000}
           axisFormatter={(value) => formatTokenCount(Math.round(value))}
           divided
@@ -1171,7 +1185,6 @@ const OverviewChart = memo(function OverviewChart({
             stroke={`url(#overview-line-${chartId})`}
             strokeWidth="3"
             strokeLinecap="round"
-            style={{ filter: `drop-shadow(0 0 4px ${accent})` }}
           />
         ) : (
           <text

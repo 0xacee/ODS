@@ -1,6 +1,10 @@
 # ODS Extensions Library
 
-**33 service extensions being tested for ODS. 17 are already in production — these are next.**
+Installable recipes and reference integrations for ODS. The generated catalog combines this library with native services, giving native definitions precedence when IDs match. A catalog entry does not by itself mean that an application has been tested or has a deployable recipe.
+
+The expansion toward 200 entries is tracked in [EXTENSION-EXPANSION.md](../../docs/EXTENSION-EXPANSION.md). The [200-project research list](../../docs/EXTENSION-CANDIDATES-200-2026-09-20.md) records candidate projects separately from implemented recipes.
+
+New recipes include `upstream.json` with the source repository, code license, pinned image, available architectures and runtime validation status. Audit library recipes with `python scripts/audit-extensions.py --include-library <service-id> ...` from the ODS directory.
 
 Each extension is a self-contained directory with a `manifest.yaml` (service metadata), `compose.yaml` (Docker Compose fragment), and optional Dockerfiles, workflows, and documentation. Drop any of these into your ODS's `extensions/services/` directory and run `ods enable <service-id>`.
 
@@ -73,6 +77,8 @@ Each extension is a self-contained directory with a `manifest.yaml` (service met
 | [`frigate/`](services/frigate/) | Frigate — NVR with real-time AI object detection | NVIDIA |
 | [`gitea/`](services/gitea/) | Gitea — lightweight self-hosted Git | CPU |
 | [`baserow/`](services/baserow/) | Baserow — open-source Airtable alternative | CPU |
+| [`miniflux/`](services/miniflux/) | Miniflux — RSS/Atom reading and research API | CPU |
+| [`ntfy/`](services/ntfy/) | ntfy — authenticated local workflow notifications | CPU |
 | [`sillytavern/`](services/sillytavern/) | SillyTavern — advanced roleplay/chat frontend | AMD, NVIDIA, Apple |
 
 ### Data & ML
