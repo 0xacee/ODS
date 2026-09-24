@@ -17,6 +17,28 @@ test('deadline aborts the probe and late success cannot alter a verdict',async()
   assert.equal(await boundedPreviewVerification(async()=>{throw new Error('offline');},{},()=>true),false);
 });
 
+test('bounded grep inspections admit literal patterns and status echo, not shell execution',()=>{
+  for (const command of [
+    "grep -n 'FLEET-1d7e261d3b' Playground/site/index.html",
+    "grep -n 'Show sold out' Playground/site/index.html",
+    "grep -c 'import\\|require\\|cdn\\|https://' Playground/site/index.html Playground/site/styles.css; echo \"exit=$?\"",
+    'grep -F "sold out" site/index.html',
+    "grep -n '$(touch injected)' site/index.html",
+  ]) assert.equal(inspectionRevalidationCandidate({command}),true,command);
+  for (const command of [
+    'grep word site/index.html; touch changed',
+    'grep word site/index.html > site/result.txt',
+    'grep word site/index.html | tee site/result.txt',
+    'grep "$(touch changed)" site/index.html',
+    'grep "`touch changed`" site/index.html',
+    'grep word "$INPUT"',
+    'grep word site/index.html; echo "exit=$? $(touch changed)"',
+    'grep -f pattern-file site/index.html',
+    'grep --unknown word site/index.html',
+    "grep 'unterminated site/index.html",
+  ]) assert.equal(inspectionRevalidationCandidate({command}),false,command);
+});
+
 test('changed generation during an awaited probe rejects success',async()=>{
   let current=true;
   assert.equal(await boundedPreviewVerification(async()=>{current=false;return true;},{},()=>current),false);

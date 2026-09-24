@@ -15945,6 +15945,24 @@ function revalidationGuardFixture(verify) {
   return {guard,context,invoke};
 }
 
+for (const matched of [true,false]) test(`post-publication grep checks require exact host bytes: matched=${matched}`,async()=>{
+  let probes=0;
+  const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return matched;});
+  for (const [index,command] of [
+    "grep -n 'FLEET-marker' signal-garden/index.html",
+    "grep -n 'hidden' signal-garden/index.html",
+    "grep -n 'Show sold out' signal-garden/index.html",
+    'grep -n \'localStorage\' signal-garden/index.html; echo "exit=$?"',
+    'grep -c \'import\\|require\\|cdn\\|https://\' signal-garden/index.html; echo "exit=$?"',
+    "grep -n 'overflow' signal-garden/index.html",
+    "grep -n '375\\|viewport\\|clamp\\|min-width' signal-garden/index.html",
+  ].entries()) invoke('exec',{command},{content:[{type:'text',text:'observed'}],details:{status:'completed',exitCode:0}},'grep-'+index);
+  assert.equal(guard.verificationForRun('run-1').status,'failed','syntax alone cannot restore the preview');
+  assert.equal(await guard.revalidateWorkspacePreview({},context),matched);
+  assert.equal(probes,1);
+  assert.equal(guard.verificationForRun('run-1').status,matched?'passed':'failed');
+});
+
 for(const fault of ['unknown-exec','failed','running','env','pending-read','wrong-run','wrong-session','wrong-key','ended']) test(`final preview revalidation fails closed: ${fault}`,async()=>{
   let probes=0;const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return true;});
   const params={command:fault==='unknown-exec'?'python3 test.py':'ls -la signal-garden/'};
