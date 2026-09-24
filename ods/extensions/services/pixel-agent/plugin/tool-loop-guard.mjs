@@ -9104,6 +9104,18 @@ export function createToolLoopGuard({
         };
       }
     }
+    if (toolName === 'tool_call' && ['pixel_ods_web_extract', 'browser'].includes(pendingToolRun?.selectedToolName) &&
+        pendingToolRun.runId === runId) {
+      const selected = pendingToolRun.selectedToolName;
+      const envelope = toolSearchEventEnvelope(event, selected, selected === 'browser' ? 'core' : 'pixel-ods');
+      if (envelope && isDeepStrictEqual(envelope.params, pendingToolRun.selectedParams) &&
+          (!event?.runId || event.runId === runId) &&
+          (!event?.toolCallId || event.toolCallId === toolCallId) &&
+          (!event?.toolName || event.toolName === toolName) &&
+          (!context?.sessionId || context.sessionId === state.currentSessionId)) {
+        state.completionAssurance.observe(selected, {params:envelope.params, result:envelope.result});
+      }
+    }
     if (toolName === "web_search" && pendingToolRun?.transport === "web_search" &&
         pendingToolRun.selectedToolName === "web_search" && pendingToolRun.runId === runId &&
         (!event?.runId || event.runId === runId) &&
