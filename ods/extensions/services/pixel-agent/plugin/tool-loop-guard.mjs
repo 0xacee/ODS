@@ -6029,6 +6029,16 @@ function workspacePreviewDirectoryFromState(state) {
   return state?.workspacePreviewDirectory;
 }
 
+function workspacePreviewMissingEntryReason(state, directory) {
+  const directories = [...(state?.boundPreviewWriteDirectories ?? [])];
+  // A hint is not selection or authority. Ambiguous writes must not choose a
+  // project, and malformed requests retain the ordinary rejection.
+  if (directories.length !== 1 || typeof directory !== "string" ||
+      directory.length > 512 || !directory.split("/").every(part => WORKSPACE_PATH_COMPONENT.test(part)) ||
+      directories[0] === directory) return WORKSPACE_PREVIEW_REQUIRES_FILES_REASON;
+  return `${WORKSPACE_PREVIEW_REQUIRES_FILES_REASON} This turn successfully wrote index.html in workspace-relative directory "${directories[0]}", not "${directory}". If that is the intended artifact, use its exact directory for the preview request. Preserve the existing files; no directory was changed or published by this rejection.`;
+}
+
 function workspacePreviewRequiresAuthoredSnapshot(state, directory) {
   // After a verified snapshot, further checks/repairs operate on an existing
   // artifact. Require a new host receipt without claiming all bytes were
@@ -6665,6 +6675,7 @@ export function createToolLoopGuard({
         invalidEditCreateBlocks: 0,
         oversizedEditBlocks: 0,
         successfulWritePaths: new Set(),
+        boundPreviewWriteDirectories: new Set(),
         successfulEditPaths: new Set(),
         successfulWriteContentByPath: new Map(),
         compareSwapRepairCounts: new Map(),
@@ -7478,7 +7489,7 @@ export function createToolLoopGuard({
         if (validDirectory && !state.workspacePreviewAuthorshipRequired) {
           return { block: true, blockReason: `Read ${directory}/index.html before publishing that exact directory. Preserve existing files; a different directory's readback cannot verify this target.` };
         }
-        return { block: true, blockReason: WORKSPACE_PREVIEW_REQUIRES_FILES_REASON };
+        return { block: true, blockReason: workspacePreviewMissingEntryReason(state, directory) };
       }
       state.workspacePreviewDirectory = directory;
       if (toolName === "tool_call") {
@@ -9202,6 +9213,23 @@ export function createToolLoopGuard({
       ? normalizeWorkspaceFilePath(successfulMutation.event?.params?.path)
       : undefined;
     if (completedWritePath) {
+      // Unlike general mutation bookkeeping, recovery hints require the exact
+      // current-run dispatched write and matching completion. Model prose,
+      // unbound callbacks, prior turns and filesystem discovery cannot supply it.
+      if (pendingToolRun?.runId === runId && pendingToolRun.selectedToolName === "write" &&
+          pendingToolRun.transport === toolName && state.ownerIntentObserved &&
+          (!event?.runId || event.runId === runId) &&
+          (!event?.toolCallId || event.toolCallId === toolCallId) &&
+          (!context?.sessionId || context.sessionId === state.currentSessionId) &&
+          isDeepStrictEqual(successfulMutation.event.params, pendingToolRun.selectedParams) &&
+          completedWritePath.length <= 512 && completedWritePath.endsWith("/index.html") &&
+          completedWritePath.split("/").every(part => WORKSPACE_PATH_COMPONENT.test(part))) {
+        // Two different entries already make the hint ambiguous. Keep that
+        // state bounded without choosing one by insertion order.
+        if (state.boundPreviewWriteDirectories.size < 2) {
+          state.boundPreviewWriteDirectories.add(completedWritePath.slice(0, -"/index.html".length));
+        }
+      }
       state.successfulWritePaths.add(completedWritePath);
       const writtenContent = successfulMutation.event?.params?.content;
       if (
