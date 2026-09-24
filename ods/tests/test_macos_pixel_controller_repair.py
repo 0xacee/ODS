@@ -33,8 +33,8 @@ def encoded(value):
 
 
 def fixture():
-    # Use the actual reviewed 6410 source bytes, not a placeholder Python file.
-    after = (ROOT / 'bin/pixel_access_bridge.py').read_bytes().replace(b'\r\n', b'\n')
+    # Pin the actual reviewed 6410 bytes independently of today's live bridge.
+    after = (ROOT / 'tests/fixtures/macos-controller-repair/pixel_access_bridge_pr6410.py.txt').read_bytes().replace(b'\r\n', b'\n')
     assert repair.sha(after) == repair.AFTER
     before = after.replace(repair.NEW_HUNK, repair.OLD_HUNK, 1)
     assert repair.sha(before) == repair.BEFORE

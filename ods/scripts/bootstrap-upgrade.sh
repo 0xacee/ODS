@@ -40,6 +40,11 @@ LOG_TAG="[BOOTSTRAP-UPGRADE]"
 log()  { echo "$LOG_TAG $(date '+%H:%M:%S') $*"; }
 MODEL_ROUTER_SWAP_GATE_TOKEN=""
 MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID=""
+BOOTSTRAP_PIXEL_TRANSACTION=""
+BOOTSTRAP_PIXEL_OWNER=""
+BOOTSTRAP_PIXEL_HOME=""
+BOOTSTRAP_PIXEL_CONFIG_MUTATED=false
+BOOTSTRAP_PIXEL_RELEASE_FAILED=false
 
 model_router_swap_gate_call() {
     local action="$1" token="$2" lease_seconds="${3:-30}"
@@ -229,11 +234,12 @@ MODELS_INI="$INSTALL_DIR/config/llama-server/models.ini"
 STATUS_FILE="$INSTALL_DIR/data/bootstrap-status.json"
 UPGRADE_LOCK_DIR=""
 
-reconcile_ods_managed_pixel_model() {
-    local target_model="${1:-$FULL_LLM_MODEL}"
+prepare_bootstrap_pixel_model() {
+    BOOTSTRAP_PIXEL_OWNER=""
+    BOOTSTRAP_PIXEL_HOME=""
     [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]] || return 0
 
-    local owner home marker sudo_helper pixel_helper target_context target_max_tokens target_reasoning reasoning_mode
+    local owner home marker sudo_helper pixel_helper
     if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
         owner="${SUDO_USER:-}"
     else
@@ -264,6 +270,60 @@ reconcile_ods_managed_pixel_model() {
     # shellcheck source=installers/lib/pixel-host-install.sh
     . "$pixel_helper"
 
+    BOOTSTRAP_PIXEL_OWNER="$owner"
+    BOOTSTRAP_PIXEL_HOME="$home"
+}
+
+acquire_bootstrap_pixel_model_transaction() {
+    prepare_bootstrap_pixel_model || return 1
+    [[ -n "$BOOTSTRAP_PIXEL_OWNER" ]] || return 0
+    local binary transaction
+    binary="$(_ods_pixel_openclaw_bin "$BOOTSTRAP_PIXEL_OWNER" "$BOOTSTRAP_PIXEL_HOME")" || return 1
+    _ods_pixel_install_access_service "$BOOTSTRAP_PIXEL_OWNER" "$binary" || return 1
+    # Drain whole Portal turns before closing model-router admission: an active
+    # turn may still need more inference requests to finish its tools/follow-up.
+    transaction="$(_ods_pixel_model_transition begin "$BOOTSTRAP_PIXEL_OWNER" "$BOOTSTRAP_PIXEL_HOME")" || return 1
+    [[ "$transaction" =~ ^[0-9a-f]{64}$ ]] || return 1
+    BOOTSTRAP_PIXEL_TRANSACTION="$transaction"
+    log "Closed Pixel admission and drained active Portal turns before model promotion."
+}
+
+finish_bootstrap_pixel_model_transaction() {
+    local outcome="$1"
+    [[ -n "$BOOTSTRAP_PIXEL_TRANSACTION" ]] || return 0
+    [[ "$BOOTSTRAP_PIXEL_RELEASE_FAILED" != true ]] || return 1
+    if ! _ods_pixel_model_transition finish "$BOOTSTRAP_PIXEL_OWNER" "$BOOTSTRAP_PIXEL_HOME" \
+        "$BOOTSTRAP_PIXEL_TRANSACTION" "$outcome"; then
+        BOOTSTRAP_PIXEL_RELEASE_FAILED=true
+        log "ERROR: Pixel model transaction release requires recovery; do not mutate the route further."
+        return 1
+    fi
+    BOOTSTRAP_PIXEL_TRANSACTION=""
+}
+
+cleanup_bootstrap_pixel_model_transaction() {
+    [[ -n "$BOOTSTRAP_PIXEL_TRANSACTION" ]] || return 0
+    # A lost finish reply can follow a partial gate release. Do not replay it
+    # from EXIT even when inference configuration was never changed.
+    [[ "$BOOTSTRAP_PIXEL_RELEASE_FAILED" != true ]] || return 1
+    if [[ "$BOOTSTRAP_PIXEL_CONFIG_MUTATED" == false ]]; then
+        finish_bootstrap_pixel_model_transaction rolled-back || return 1
+    else
+        # Never reopen Portal admission on a possibly half-promoted route.
+        # A verified rollback or the same transaction's recovery must do so.
+        log "ERROR: Unfinished Pixel model transaction retained for explicit recovery."
+        return 1
+    fi
+}
+
+reconcile_ods_managed_pixel_model() {
+    local target_model="${1:-$FULL_LLM_MODEL}" outcome="${2:-applied}"
+    local owner home target_context target_max_tokens target_reasoning reasoning_mode
+    if [[ -z "$BOOTSTRAP_PIXEL_TRANSACTION" ]]; then
+        prepare_bootstrap_pixel_model || return 1
+    fi
+    owner="$BOOTSTRAP_PIXEL_OWNER"; home="$BOOTSTRAP_PIXEL_HOME"
+    [[ -n "$owner" ]] || return 0
     target_context="$(read_env_value MAX_CONTEXT)"
     [[ "$target_context" =~ ^[0-9]+$ ]] || target_context="$(read_env_value CTX_SIZE)"
     if ! [[ "$target_context" =~ ^[0-9]+$ && "$target_context" -ge 4096 ]]; then
@@ -283,7 +343,8 @@ reconcile_ods_managed_pixel_model() {
 
     log "Reconciling the ODS-managed Pixel route to ${target_model} at ${target_context} tokens..."
     if ods_pixel_reconcile_promoted_model "$owner" "$home" "$target_model" ready \
-        "$target_context" "$target_max_tokens" "$target_reasoning"; then
+        "$target_context" "$target_max_tokens" "$target_reasoning" "" "$BOOTSTRAP_PIXEL_TRANSACTION"; then
+        finish_bootstrap_pixel_model_transaction "$outcome" || return 1
         log "ODS-managed Pixel now targets ${target_model}."
         return 0
     fi
@@ -468,7 +529,7 @@ acquire_upgrade_lock() {
 
     UPGRADE_LOCK_DIR="$lock_dir"
     printf '%s\n' "$$" > "$pid_file"
-    trap 'release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock' EXIT
+    trap 'cleanup_bootstrap_pixel_model_transaction; release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock' EXIT
 }
 
 model_sha256() {
@@ -573,6 +634,10 @@ snapshot_active_model_config() {
 }
 
 restore_active_model_config() {
+    if [[ "${BOOTSTRAP_PIXEL_RELEASE_FAILED:-false}" == true ]]; then
+        log "ERROR: Pixel transaction release is uncertain; automatic config/model-file rollback suppressed."
+        return 1
+    fi
     [[ -n "${ACTIVE_CONFIG_SNAPSHOT_DIR:-}" && -d "$ACTIVE_CONFIG_SNAPSHOT_DIR" ]] || return 1
 
     if [[ -f "$ACTIVE_CONFIG_SNAPSHOT_DIR/env" ]]; then
@@ -618,6 +683,11 @@ discard_active_model_config_snapshot() {
 restore_docker_llama_server_after_swap_failure() {
     local health_url="${1:-}"
     local reconcile_pixel="${2:-false}"
+    if [[ "$BOOTSTRAP_PIXEL_RELEASE_FAILED" == true ]]; then
+        log "ERROR: Pixel transaction release is uncertain; automatic inference rollback suppressed."
+        return 1
+    fi
+    [[ -z "$BOOTSTRAP_PIXEL_TRANSACTION" ]] || reconcile_pixel=true
     local compose_arg_count=0
     local previous_gguf previous_gpu_backend previous_llm_model previous_model_id
     local rollback_healthy=false
@@ -678,7 +748,7 @@ restore_docker_llama_server_after_swap_failure() {
             fi
         fi
         if [[ "$reconcile_pixel" == "true" && -n "$previous_llm_model" ]] \
-            && ! reconcile_ods_managed_pixel_model "$previous_llm_model"; then
+            && ! reconcile_ods_managed_pixel_model "$previous_llm_model" rolled-back; then
             log "WARNING: previous inference runtime is healthy, but the managed Pixel route could not be reconciled to ${previous_llm_model}."
             return 1
         fi
@@ -721,6 +791,10 @@ move_bootstrap_model_aside_for_windows_swap() {
 }
 
 restore_bootstrap_model_after_windows_swap_failure() {
+    if [[ "${BOOTSTRAP_PIXEL_RELEASE_FAILED:-false}" == true ]]; then
+        log "ERROR: Pixel transaction release is uncertain; automatic config/model-file rollback suppressed."
+        return 1
+    fi
     [[ -n "$BOOTSTRAP_SWAP_BACKUP_PATH" && -f "$BOOTSTRAP_SWAP_BACKUP_PATH" ]] || return 0
 
     mv "$BOOTSTRAP_SWAP_BACKUP_PATH" "$BOOTSTRAP_PATH" || return 1
@@ -2110,6 +2184,11 @@ snapshot_env_value() {
 
 rollback_windows_lemonade_swap() {
     local reconcile_pixel="${1:-false}"
+    if [[ "${BOOTSTRAP_PIXEL_RELEASE_FAILED:-false}" == true ]]; then
+        log "ERROR: Pixel transaction release is uncertain; automatic Windows inference rollback suppressed."
+        return 1
+    fi
+    [[ -z "${BOOTSTRAP_PIXEL_TRANSACTION:-}" ]] || reconcile_pixel=true
     local previous_gguf previous_llm_model previous_model_id rollback_ok=true inference_restored=false route_verified=false
     previous_gguf="$(snapshot_env_value GGUF_FILE)"
     previous_llm_model="$(snapshot_env_value LLM_MODEL)"
@@ -2131,9 +2210,11 @@ rollback_windows_lemonade_swap() {
     if [[ "$WINDOWS_LEMONADE_OPENCLAW_PRESENT" == "true" && -n "$previous_model_id" ]]; then
         verify_windows_lemonade_openclaw_model_env "$previous_model_id" || rollback_ok=false
     fi
-    if [[ "$reconcile_pixel" == "true" && -n "$previous_llm_model" ]] \
-        && ! reconcile_ods_managed_pixel_model "$previous_llm_model"; then
-        rollback_ok=false
+    if [[ "$reconcile_pixel" == "true" ]]; then
+        if [[ "$rollback_ok" != true || "$inference_restored" != true || -z "$previous_llm_model" ]] \
+            || ! reconcile_ods_managed_pixel_model "$previous_llm_model" rolled-back; then
+            rollback_ok=false
+        fi
     fi
 
     # Downstream verification traverses the model router. Keep admission
@@ -2688,6 +2769,11 @@ elif [[ -n "$DOCKER_CMD" ]]; then
 fi
 
 if [[ "$_windows_lemonade_swap_applies" == "true" || "$_windows_native_llama_swap_applies" == "true" || "$_docker_llama_swap_applies" == "true" ]]; then
+    if ! acquire_bootstrap_pixel_model_transaction; then
+        write_status "failed" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 \
+            "Full model downloaded and verified, but ODS could not safely drain Portal work before activation. Current model configuration was left unchanged; inspect Pixel transition recovery before retrying."
+        fail "Could not safely drain Portal work before full-model activation."
+    fi
     if ! acquire_model_router_swap_gate; then
         write_status "failed" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 \
             "Full model downloaded and verified, but ODS could not safely drain model traffic before activation. The current model was left unchanged; re-run to retry."
@@ -2711,6 +2797,7 @@ if [[ "$_windows_lemonade_swap_applies" == "true" || "$_windows_native_llama_swa
 fi
 
 # ── Phase 3: Update .env ──
+BOOTSTRAP_PIXEL_CONFIG_MUTATED=true
 write_status "swapping" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 ""
 log "Updating .env..."
 if promote_full_model_env "initial full-model promotion"; then

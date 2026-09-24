@@ -80,7 +80,7 @@ class FakeBridge(SystemdAccessBridge):
             raise AssertionError("edge operation preceded durable journal")
         if self.fail_edge is not None and self.fail_edge == operation:
             raise AccessError("edge-test-failure")
-        if operation in ("acquire", "recover"):
+        if operation in ("acquire", "drain", "recover"):
             self.edge_state["phase"] = "held"
             if self.edge_streams:
                 self.edge_state["streams"] = self.edge_streams.pop(0)
@@ -98,10 +98,14 @@ class FakeBridge(SystemdAccessBridge):
             raise AssertionError("native operation preceded durable journal")
         if self.fail_native is not None and self.fail_native == operation:
             raise AccessError("native-test-failure")
+        if operation is None and self.native_active:
+            self.native_state["active"] = self.native_active.pop(0)
+            if self.native_state["active"] == 0:
+                self.native_state["phase"] = "idle"
         if operation == "acquire":
+            if self.native_state["active"]:
+                raise AccessError("native-transition-busy-active-run")
             self.native_state["phase"] = "held"
-            if self.native_active:
-                self.native_state["active"] = self.native_active.pop(0)
         elif operation == "release":
             self.native_state["phase"] = "idle"
             self.native_state["active"] = 0
@@ -154,13 +158,44 @@ class ModelTransitionTests(unittest.TestCase):
             self.assertEqual(pending["phase"], "held")
             self.assertFalse(any(key in pending for key in ("ttl", "expires", "expires_at")))
             self.assertIn("discover-installing", bridge.calls)
-            self.assertLess(bridge.calls.index("edge:acquire"), bridge.calls.index("native:acquire"))
+            self.assertLess(bridge.calls.index("edge:drain"), bridge.calls.index("native:acquire"))
             self.assertGreaterEqual(bridge.calls.count("edge:acquire"), 3)
             self.assertGreater(
                 bridge.calls.index("verify:sandboxed"),
                 max(index for index, call in enumerate(bridge.calls)
                     if call in ("edge:acquire", "native:acquire")),
             )
+
+    def test_begin_closes_admission_and_drains_ordinary_busy_portal_turns(self):
+        with tempfile.TemporaryDirectory() as root:
+            bridge = FakeBridge(root)
+            bridge.edge_state.update(phase="busy", streams=1)
+            bridge.native_state.update(phase="busy", active=1)
+            bridge.edge_streams = [1, 1, 0]
+            bridge.native_active = [1, 1, 0]
+            with patch("pixel_access_bridge.time.sleep", return_value=None):
+                result = bridge.model_begin()
+            self.assertEqual(result["status"], "held")
+            self.assertEqual(bridge.pending()["phase"], "held")
+            self.assertEqual(bridge.edge_state["streams"], 0)
+            self.assertEqual(bridge.native_state["active"], 0)
+            self.assertGreaterEqual(bridge.calls.count("edge:acquire"), 3)
+            self.assertGreaterEqual(bridge.calls.count("native:status"), 3)
+            self.assertLess(bridge.calls.index("edge:drain"), bridge.calls.index("native:acquire"))
+            self.assertNotIn("edge:release", bridge.calls)
+            self.assertNotIn("native:release", bridge.calls)
+
+    def test_busy_admission_does_not_adopt_held_or_interrupted_gates(self):
+        for surface in ("edge_state", "native_state"):
+            for phase in ("held", "interrupted"):
+                with self.subTest(surface=surface, phase=phase), tempfile.TemporaryDirectory() as root:
+                    bridge = FakeBridge(root)
+                    getattr(bridge, surface)["phase"] = phase
+                    with self.assertRaisesRegex(AccessError, "transition-recovery-required"):
+                        bridge.model_begin()
+                    self.assertIsNone(bridge.pending())
+                    self.assertNotIn("edge:acquire", bridge.calls)
+                    self.assertNotIn("native:acquire", bridge.calls)
 
     def test_begin_reproofs_exact_stale_runtime_under_held_gates(self):
         with tempfile.TemporaryDirectory() as root:
@@ -238,7 +273,7 @@ class ModelTransitionTests(unittest.TestCase):
     def test_begin_failure_retains_root_journal(self):
         with tempfile.TemporaryDirectory() as root:
             bridge = FakeBridge(root)
-            bridge.fail_edge = "acquire"
+            bridge.fail_edge = "drain"
             with self.assertRaisesRegex(AccessError, "edge-test-failure"):
                 bridge.model_begin()
             pending = bridge.pending()

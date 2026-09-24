@@ -192,7 +192,7 @@ def _edge_container_request(container_id, path, key, payload, timeout=20, *, pro
     retain admission holds until its normal recovery proves the resulting state.
     """
     if (not isinstance(container_id, str) or not HEX.fullmatch(container_id)
-            or path not in ("/v1/transition", "/v1/transition/acquire", "/v1/transition/drain",
+            or path not in ("/v1/transition", "/v1/transition/acquire",
                             "/v1/transition/recover", "/v1/transition/release")):
         raise AccessError("edge-container-unavailable")
     if (not isinstance(key, str) or not 32 <= len(key) <= 4096
@@ -512,7 +512,7 @@ class SystemdAccessBridge:
         except ValueError: raise AccessError("invalid-service-origin") from None
         if (parts.scheme != "http" or not (address.is_loopback or address.is_private)
                 or parts.username or parts.password or parts.query or parts.fragment or parts.path
-                or path not in ("/health", "/pixel-ods/access-runtime", "/v1/transition", "/v1/transition/acquire", "/v1/transition/drain",
+                or path not in ("/health", "/pixel-ods/access-runtime", "/v1/transition", "/v1/transition/acquire",
                                 "/v1/transition/recover", "/v1/transition/release")):
             raise AccessError("invalid-service-origin")
         budget = remaining(timeout)
@@ -680,7 +680,7 @@ class SystemdAccessBridge:
                 "pid": 0, "proof": None, "stopped": True}
 
     def edge(self, operation=None, token=None, revision=None):
-        if operation not in (None, "acquire", "drain", "release", "recover"):
+        if operation not in (None, "acquire", "release", "recover"):
             raise AccessError("invalid-edge-operation")
         budget = remaining(20)
         started = time.monotonic()
@@ -1105,11 +1105,8 @@ class SystemdAccessBridge:
             if (configured_mode not in ("full-access", "sandboxed")
                     or not (runtime_ready or stale_runtime_proof)):
                 raise AccessError("runtime-proof-required")
-            # An ordinary active turn is exactly what the bounded drain below
-            # is for. Held/interrupted phases and pending journals still fail
-            # closed; never adopt a different controller's admission hold.
-            if (snapshot["_native"].get("phase") not in ("idle", "busy")
-                    or snapshot["_edge"].get("phase") not in ("idle", "busy")):
+            if (snapshot["_native"].get("phase") != "idle"
+                    or snapshot["_edge"].get("phase") != "idle"):
                 raise AccessError("transition-recovery-required")
             pending = {"kind": "model", "transaction_id": os.urandom(32).hex(),
                        "token": os.urandom(32).hex(), "phase": "acquiring",
@@ -1119,22 +1116,17 @@ class SystemdAccessBridge:
             # Durable intent precedes both admission-gate acquisition calls.
             atomic_json(self.state / "transition.json", pending)
             try:
-                edge = self.edge("drain", pending["token"], pending["edge_revision"])
+                edge = self.edge("acquire", pending["token"], pending["edge_revision"])
                 pending["edge_revision"] = edge["revision"]
                 pending["phase"] = "draining"
                 atomic_json(self.state / "transition.json", pending)
-                # Edge holds new Portal admission durably while existing
-                # turns keep their native/tools/inference path until finished.
-                # Acquiring native first would reject or disrupt a busy turn.
+                self.native("acquire", pending["token"])
                 deadline = time.monotonic() + MODEL_DRAIN_TIMEOUT
                 while True:
-                    native = self.native(timeout=5)
+                    native = self.native("acquire", pending["token"], timeout=5)
                     edge = self.edge("acquire", pending["token"], pending["edge_revision"])
-                    if (native.get("phase") == "idle" and edge.get("phase") == "held"
+                    if (native.get("phase") == "held" and edge.get("phase") == "held"
                             and not native.get("active") and not edge.get("streams")):
-                        native = self.native("acquire", pending["token"], timeout=5)
-                        if native.get("phase") != "held" or native.get("active"):
-                            raise AccessError("native-lease-unconfirmed")
                         break
                     if time.monotonic() >= deadline:
                         raise AccessError("runtime-busy")
