@@ -1930,6 +1930,10 @@ _ods_pixel_model_transition() {
             [[ -z "$transaction_id" && -z "$outcome" ]] || return 1
             ods_pixel_run_as_owner "$owner" "$home" python3 -I "$helper" begin
             ;;
+        status)
+            [[ -z "$transaction_id" && -z "$outcome" ]] || return 1
+            ods_pixel_run_as_owner "$owner" "$home" python3 -I "$helper" status
+            ;;
         finish)
             [[ "$transaction_id" =~ ^[0-9a-f]{64}$
                 && ( "$outcome" == applied || "$outcome" == rolled-back ) ]] || return 1
@@ -2001,12 +2005,19 @@ _ods_pixel_reconciliation_source_url() {
 ods_pixel_reconcile_promoted_model() {
     local owner="$1" home="$2" promoted_model="$3" final_state="${4:-ready}"
     local promoted_context="${5:-}" promoted_max_tokens="${6:-}" promoted_reasoning="${7:-}"
-    local route_fingerprint="${8:-}"
+    local route_fingerprint="${8:-}" borrowed_transaction="${9:-}"
     local source_ref source_root source_url pixel_root answers candidate backup contract_sha256 openclaw_bin failed=false
     local model_transaction="" release_failed=false
     local stable_alias=false staged_alias_candidate=""
     local failure_phase="unknown"
     [[ "$final_state" == ready || "$final_state" == installing ]] || return 1
+    if [[ -n "$borrowed_transaction" ]]; then
+        [[ "$borrowed_transaction" =~ ^[0-9a-f]{64}$ ]] || return 1
+        local held_status
+        held_status="$(_ods_pixel_model_transition status "$owner" "$home")" || return 1
+        printf '%s' "$held_status" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("pending") is True and d.get("kind")=="model" and d.get("phase")=="held" and d.get("transaction_id")==sys.argv[1] else 1)' "$borrowed_transaction" || return 1
+        model_transaction="$borrowed_transaction"
+    fi
     source_ref="$(_ods_pixel_managed_source_ref "$owner" "$home")" || return 1
     source_url="$(_ods_pixel_reconciliation_source_url "$source_ref")" || return 1
     local PIXEL_SOURCE_REF="$source_ref"
@@ -2060,9 +2071,11 @@ ods_pixel_reconcile_promoted_model() {
     backup="$(_ods_pixel_model_reconciliation_snapshot "$owner" "$home" "$answers")" || return 1
     # Update the root-custodied controller before taking the model hold. This
     # restarts only the access coordinator, not the active Pixel gateway.
-    _ods_pixel_install_access_service "$owner" "$openclaw_bin" || return 1
-    model_transaction="$(_ods_pixel_model_transition begin "$owner" "$home")" || return 1
-    [[ "$model_transaction" =~ ^[0-9a-f]{64}$ ]] || return 1
+    if [[ -z "$borrowed_transaction" ]]; then
+        _ods_pixel_install_access_service "$owner" "$openclaw_bin" || return 1
+        model_transaction="$(_ods_pixel_model_transition begin "$owner" "$home")" || return 1
+        [[ "$model_transaction" =~ ^[0-9a-f]{64}$ ]] || return 1
+    fi
 
     if ! _ods_pixel_update_onboarding_model "$owner" "$home" "$answers" "$promoted_model" \
         "$promoted_context" "$promoted_max_tokens" "$promoted_reasoning" "$route_fingerprint"; then
@@ -2149,7 +2162,7 @@ ods_pixel_reconcile_promoted_model() {
             fi
         fi
     fi
-    if [[ "$failed" == false ]] \
+    if [[ "$failed" == false && -z "$borrowed_transaction" ]] \
         && ! _ods_pixel_model_transition finish "$owner" "$home" \
             "$model_transaction" applied; then
         failed=true
@@ -2178,8 +2191,8 @@ ods_pixel_reconcile_promoted_model() {
         "$failure_phase" >&2
     if _ods_pixel_restore_model_reconciliation "$owner" "$home" "$pixel_root" "$answers" "$backup" \
         "$model_transaction" \
-        && _ods_pixel_model_transition finish "$owner" "$home" \
-            "$model_transaction" rolled-back; then
+        && { [[ -n "$borrowed_transaction" ]] || _ods_pixel_model_transition finish "$owner" "$home" \
+            "$model_transaction" rolled-back; }; then
         printf '%s\n' 'warning: previous Pixel model route restored and verified; rollback=verified' >&2
     else
         printf '%s\n' "error: Pixel model reconciliation and verified rollback both failed; rollback=failed evidence=$backup" >&2
