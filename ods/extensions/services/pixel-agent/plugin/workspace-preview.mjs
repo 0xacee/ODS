@@ -183,6 +183,7 @@ function socketRequest(payload, { socketPath = SOCKET_PATH, signal, timeoutMs = 
 }
 
 const FAILURE_MESSAGES = {
+  invalid_json_artifact: "A .json artifact is not valid unambiguous UTF-8 JSON. Generate serialized data from the actual final files using a JSON serializer, parse it back, and compare the decoded contents with those files before retrying. Do not hand-transcribe escaped source code or rename required files to bypass validation.",
   unsupported_file_type: "The project contains an unsupported preview file type. Inspect its file list and keep unrelated files outside the static site directory; CSV and TSV data files are supported.",
   missing_entry: "The selected directory needs a nonempty index.html at its root. Check the directory and entry file before retrying.",
   too_many_files: "The selected site exceeds 128 files. Keep dependencies, build caches, and unrelated files outside the published directory.",
@@ -191,10 +192,21 @@ const FAILURE_MESSAGES = {
   unsafe_directory: "The selected directory failed validation. Check its path, ownership, permissions, and symlinks; do not blindly relax permissions.",
 };
 
+function validArtifactError(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).sort().join(',') === 'column,line,path' &&
+    typeof value.path === 'string' && value.path.length <= 4096 &&
+    value.path.split('/').every(part=>/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(part) && part!=='.' && part!=='..') &&
+    (value.line===null && value.column===null ||
+      Number.isSafeInteger(value.line) && value.line>0 && value.line<=4*1024*1024+1 &&
+      Number.isSafeInteger(value.column) && value.column>0 && value.column<=4*1024*1024+1);
+}
+
 function validatedFailureCode(value) {
   if (
     value && typeof value === "object" && !Array.isArray(value) &&
-    Object.keys(value).sort().join("\n") === "boundary\nerror\nerrorCode\nkind\nschemaVersion\nstatus" &&
+    Object.keys(value).filter(key=>key!=='artifactError').sort().join("\n") === "boundary\nerror\nerrorCode\nkind\nschemaVersion\nstatus" &&
+    (!Object.hasOwn(value,'artifactError') || value.errorCode==='invalid_json_artifact' && validArtifactError(value.artifactError)) &&
     value.schemaVersion === 1 && value.kind === "ods-pixel-workspace-preview" &&
     value.status === "failed" && value.boundary === BOUNDARY &&
     value.error === "ODS workspace preview publication failed" &&
@@ -203,14 +215,15 @@ function validatedFailureCode(value) {
   return undefined;
 }
 
-function failedResult(code) {
+function failedResult(code, diagnostic) {
+  const location = diagnostic ? ` Artifact ${JSON.stringify(diagnostic.path)}${diagnostic.line===null ? '' : ` at line ${diagnostic.line}, column ${diagnostic.column}`}.` : '';
   return {
     content: [{
       type: "text",
       text: code === "cancelled"
         ? "Pixel stopped waiting for preview publication. A request already accepted by the host may still complete; no new verified preview receipt is returned."
         : code
-        ? `ODS could not publish the preview. ${FAILURE_MESSAGES[code]} Do not claim a localhost URL is live until publication succeeds.`
+        ? `ODS could not publish the preview.${location} ${FAILURE_MESSAGES[code]} Do not claim a localhost URL is live until publication succeeds.`
         : "ODS could not publish a verified browser preview. Keep the site files in the workspace, correct the reported file or entry-point problem if one was returned, and do not claim a localhost URL is live.",
     }],
     details: {
@@ -219,6 +232,7 @@ function failedResult(code) {
       status: "failed",
       errorCode: code ?? "unavailable",
       boundary: BOUNDARY,
+      ...(diagnostic ? {artifactError:diagnostic} : {}),
     },
     isError: true,
   };
@@ -250,7 +264,7 @@ export function createWorkspacePreviewTool({ request, transport = "unix" } = {})
         const raw = await request(normalized, { signal });
         signal?.throwIfAborted();
         const failureCode = validatedFailureCode(raw);
-        if (failureCode) return failedResult(failureCode);
+        if (failureCode) return failedResult(failureCode, raw.artifactError);
         const response = validResponse(raw, normalized);
         return {
           content: [{

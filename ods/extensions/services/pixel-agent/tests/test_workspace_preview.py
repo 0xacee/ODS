@@ -583,7 +583,7 @@ def test_published_path_receipt_excludes_unpublished_sibling_source_copies(tmp_p
     for folder, names in ((project, ["report.py.txt", "totals.py.txt", "test_totals.py.txt"]),
                           (public, ["index.html", "sources.json", "test-results.txt"])):
         for name in names:
-            (folder / name).write_text("actual bytes")
+            (folder / name).write_text('{}' if name.endswith('.json') else "actual bytes")
             (folder / name).chmod(0o600)
     result = MODULE.publish_snapshot(workspace, previews, "public", os.getuid())
     assert result["publishedPaths"] == ["index.html", "sources.json", "test-results.txt"]
