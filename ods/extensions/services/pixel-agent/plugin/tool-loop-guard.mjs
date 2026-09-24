@@ -15,7 +15,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
-import { captureNativeWebSearchResult, projectNativeWebSearchResult, projectWebResult } from "./web-result-projection.mjs";
+import { captureNativeWebSearchResult, projectNativeWebSearchResult, projectWebResult,
+  successfulTruncatedFetch, projectNativeFetchGuidance, TRUNCATED_FETCH_EXTRACTION_GUIDANCE } from "./web-result-projection.mjs";
 import { createCompletionAssurance } from "./completion-assurance.mjs";
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
@@ -83,8 +84,7 @@ export const WEB_FETCH_READ_ONLY_REASON =
 
 const WEB_FETCH_ACTION_FIELDS = new Set(["method", "headers", "body", "data", "json", "form", "payload"]);
 
-export const WEB_FETCH_TRUNCATED_PIVOT_REASON =
-  "The fetched public page was truncated. Only the returned content is evidence. Choose targeted extraction, another relevant source, or continue other authorized work; do not claim unread content was verified.";
+export const WEB_FETCH_TRUNCATED_PIVOT_REASON = TRUNCATED_FETCH_EXTRACTION_GUIDANCE;
 
 export const WEB_FETCH_PUBLIC_ONLY_REASON =
   "Pixel blocked this fetch because web_fetch is restricted to public HTTP(S) hostnames and must not contact local, private, or raw-IP destinations. Do not retry that access through another tool. Other authorized work may continue, including approved ODS tools, public research, and saving verified findings.";
@@ -9102,6 +9102,7 @@ export function createToolLoopGuard({
           tool: envelope.tool,
           result: envelope.result,
         };
+        pendingToolRun.capturedToolSearchFailed = Boolean(event.error || event.result?.isError);
       }
     }
     if (toolName === 'tool_call' && ['pixel_ods_web_extract', 'browser'].includes(pendingToolRun?.selectedToolName) &&
@@ -9124,6 +9125,15 @@ export function createToolLoopGuard({
         (!context?.sessionId || context.sessionId === state.currentSessionId) &&
         !event.error && isDeepStrictEqual(event.params, pendingToolRun.selectedParams)) {
       pendingToolRun.capturedNativeWebSearchResult = captureNativeWebSearchResult(event.result);
+    }
+    if (toolName === 'web_fetch' && pendingToolRun?.transport === 'web_fetch' &&
+        pendingToolRun.selectedToolName === 'web_fetch' && pendingToolRun.runId === runId &&
+        (!event?.runId || event.runId === runId) &&
+        (!event?.toolCallId || event.toolCallId === toolCallId) &&
+        (!event?.toolName || event.toolName === toolName) &&
+        (!context?.sessionId || context.sessionId === state.currentSessionId) &&
+        !event.error && isDeepStrictEqual(event.params, pendingToolRun.selectedParams)) {
+      pendingToolRun.successfulTruncatedNativeFetch = successfulTruncatedFetch(event.result);
     }
     const directMutation =
       WORKSPACE_MUTATION_TOOLS.has(toolName) &&
@@ -10188,7 +10198,7 @@ export function createToolLoopGuard({
       ["web_search", "web_fetch"].includes(pending.selectedToolName) &&
       (!context?.runId || context.runId === pending.runId) &&
       (!event?.runId || event.runId === pending.runId)
-      ? projectWebResult(message, pending.capturedToolSearchEnvelope)
+      ? projectWebResult(message, pending.capturedToolSearchEnvelope, !pending.capturedToolSearchFailed)
       : undefined;
     const compactNativeWebResult = boundWebCall && pending?.transport === "web_search" &&
       pending.selectedToolName === "web_search" &&
@@ -10198,6 +10208,11 @@ export function createToolLoopGuard({
       (!event?.runId || event.runId === pending.runId)
       ? projectNativeWebSearchResult(message, pending.capturedNativeWebSearchResult)
       : undefined;
+    const nativeFetchGuidance = boundWebCall && pending?.transport === 'web_fetch' &&
+      pending.selectedToolName === 'web_fetch' &&
+      (!context?.runId || context.runId === pending.runId) &&
+      (!event?.runId || event.runId === pending.runId)
+      ? projectNativeFetchGuidance(message, pending.successfulTruncatedNativeFetch) : undefined;
     const nativeFailure = pending?.nativeUnittestFailure;
     const compactNativeVerification = nativeFailure && pending.transport === "exec" &&
       message.role === "toolResult" && message.toolName === "exec" &&
@@ -10349,12 +10364,13 @@ export function createToolLoopGuard({
       !compactCoreResult &&
       !compactWebResult &&
       !compactNativeWebResult &&
+      !nativeFetchGuidance &&
       !previewStageInstruction &&
       !sandboxPathCorrection
     ) {
       return undefined;
     }
-    const compactMessage = compactNativeVerification ?? compactVerification ?? compactCoreResult ?? compactWebResult ?? compactNativeWebResult ?? message;
+    const compactMessage = compactNativeVerification ?? compactVerification ?? compactCoreResult ?? compactWebResult ?? compactNativeWebResult ?? nativeFetchGuidance ?? message;
     const content = hostEvidence
       ? [{
         type: "text",
