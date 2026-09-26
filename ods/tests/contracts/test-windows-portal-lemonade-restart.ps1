@@ -1,4 +1,4 @@
-# Durable Lemonade task: filesystem fixtures and mocked processes/APIs.
+# Durable Lemonade task: mocked APIs plus fixture-owned Windows dummy trees.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../../installers/windows/lib/wsl-portal-amd.ps1')
 $script:restartChecks = 0
@@ -53,12 +53,28 @@ try {
     $script:launched = $false; $script:occupied = $false; $script:foreignAfter = $false
     $script:descendant = $false; $script:foreignParent = $false; $script:lookalikeDir = $false; $script:oldListener = $false
     $script:healthy = $true; $script:failConfig = $false; $script:failLoad = $false
+    $script:workers = $false; $script:exitBeforeFailure = $false; $script:reusedRoot = $false
+    $script:killFailure = 0; $script:runtimeHandles = @{}
+    $script:failOwnershipWrites = $false; $script:denyRecordOnFailure = $false; $script:runtimeExitCode = 0
+    $script:privateWriter = ${function:Write-ODSPrivateEnvFile}
+    function Write-ODSPrivateEnvFile { param($Path, $Content)
+        if ($script:failOwnershipWrites -and $Path -like '*process-ownership.json') {
+            throw [IO.IOException]::new('mock ownership write denied')
+        }
+        & $script:privateWriter -Path $Path -Content $Content
+    }
     $script:modernMode = $true
     $script:buildLaunchContract = ${function:Get-ODSLemonadeLaunchContract}
     function New-FakeLemonadeChild {
-        $child = [pscustomobject]@{ Id = 4242; StartTime = [datetime]'2026-01-01T00:00:00'; HasExited = $false; ExitCode = 0; Killed = $false }
-        $child | Add-Member ScriptMethod WaitForExit { $script:calls.Add('wait'); $this.HasExited = $true }
+        $child = [pscustomobject]@{ Id = 4242; Handle = 4242; Path = $script:runtimePlan.ExecutablePath
+            StartTime = [datetime]'2026-01-01T00:00:00'; ExitTime = [datetime]'2026-01-01T00:00:03'
+            HasExited = $false; ExitCode = $script:runtimeExitCode; Killed = $false }
+        $child | Add-Member ScriptMethod WaitForExit { param($Milliseconds)
+            if ($null -ne $Milliseconds) { return $this.HasExited }
+            $script:calls.Add('wait'); $this.HasExited = $true
+        }
         $child | Add-Member ScriptMethod Kill { $script:calls.Add('kill'); $this.Killed = $true; $this.HasExited = $true }
+        $child | Add-Member ScriptMethod Dispose { }
         return $child
     }
     function Get-ODSLemonadeLaunchContract { param($ExecutablePath, $Port, $ModelsDir, $ContextSize)
@@ -67,6 +83,7 @@ try {
             -ContextSize $ContextSize -VersionOverride $version
     }
     function Get-NetTCPConnection { param($LocalPort, $State, $ErrorAction)
+        if ($script:workers -and $script:runtimeHandles.ContainsKey(4243) -and $script:runtimeHandles[4243].HasExited) { return }
         if ($script:occupied -or ($script:launched -and $script:foreignAfter)) {
             return [pscustomobject]@{ LocalAddress = '127.0.0.1'; OwningProcess = 9999 }
         }
@@ -76,14 +93,39 @@ try {
         }
     }
     function Get-Process { param($Id, $ErrorAction)
-        return [pscustomobject]@{ Path = $script:runtimePlan.ExecutablePath; StartTime = [datetime]'2026-01-01T00:00:00' }
+        if ($Id -eq 4242) { return $script:child }
+        if ($script:runtimeHandles.ContainsKey($Id)) { return $script:runtimeHandles[$Id] }
+        $node = @(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq $Id })[0]
+        if (-not $node) { throw 'Mock process is absent.' }
+        $handle = [pscustomobject]@{ Id = $Id; Handle = $Id; Path = $node.ExecutablePath
+            StartTime = $node.CreationDate; HasExited = $false }
+        $handle | Add-Member ScriptMethod Kill {
+            if ($script:killFailure -eq $this.Id) { throw [System.ComponentModel.Win32Exception]::new('mock cleanup denied') }
+            $script:calls.Add("kill:$($this.Id)"); $this.HasExited = $true
+        }
+        $handle | Add-Member ScriptMethod WaitForExit { param($Milliseconds) return $this.HasExited }
+        $handle | Add-Member ScriptMethod Dispose { }
+        $script:runtimeHandles[$Id] = $handle
+        return $handle
     }
     function Get-CimInstance { param($ClassName, $Filter, $ErrorAction)
-        $parent = if ($script:foreignParent -or $Filter -ne 'ProcessId=4243') { 99 } else { 4242 }
+        $parent = if ($script:foreignParent -or ($Filter -and $Filter -ne 'ProcessId=4243')) { 99 } else { 4242 }
         $directory = Split-Path -Parent $script:runtimePlan.ExecutablePath
         if ($script:lookalikeDir) { $directory += '-other' }
         $created = if ($script:oldListener) { [datetime]'2025-01-01T00:00:00' } else { [datetime]'2026-01-01T00:00:01' }
-        return [pscustomobject]@{ ExecutablePath = (Join-Path $directory 'lemonade-router.exe'); ParentProcessId = $parent; CreationDate = $created }
+        $router = [pscustomobject]@{ ProcessId = 4243; ExecutablePath = (Join-Path $directory 'lemonade-router.exe'); ParentProcessId = $parent; CreationDate = $created }
+        if ($Filter) { return $router }
+        if (-not $script:child.HasExited) {
+            [pscustomobject]@{ ProcessId = 4242; ParentProcessId = 5; ExecutablePath = $script:runtimePlan.ExecutablePath; CreationDate = $script:child.StartTime }
+        } elseif ($script:reusedRoot) {
+            [pscustomobject]@{ ProcessId = 4242; ParentProcessId = 5; ExecutablePath = (Join-Path $fixture 'unrelated.exe'); CreationDate = [datetime]'2026-01-01T00:00:04' }
+            [pscustomobject]@{ ProcessId = 4245; ParentProcessId = 4242; ExecutablePath = (Join-Path $fixture 'unrelated-child.exe'); CreationDate = [datetime]'2026-01-01T00:00:05' }
+        }
+        if ($script:descendant) { $router }
+        if ($script:workers) {
+            [pscustomobject]@{ ProcessId = 4244; ParentProcessId = 4243; ExecutablePath = (Join-Path $fixture 'runtime-cache/llama-server.exe'); CreationDate = [datetime]'2026-01-01T00:00:02' }
+            [pscustomobject]@{ ProcessId = 4999; ParentProcessId = 5; ExecutablePath = $script:runtimePlan.ExecutablePath; CreationDate = [datetime]'2025-01-01T00:00:00' }
+        }
     }
     function Start-Process { param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, [switch]$PassThru)
         $expected = if ($script:modernMode) { '--port 13305 --host 127.0.0.1' } else {
@@ -92,13 +134,17 @@ try {
         Assert-Restart ($WindowStyle -eq 'Hidden' -and $ArgumentList -eq $expected) 'restarted server retains its version-specific flags, hidden window and loopback binding'
         $script:calls.Add('start'); $script:launched = $true
         $script:configured = $false; $script:loaded = ''
+        $script:runtimeHandles = @{}
         $script:child = New-FakeLemonadeChild
         return $script:child
     }
     function Wait-ODSPortalLemonadeHealth($Port, $Seconds) { $script:calls.Add('health'); return $script:healthy }
     function Set-ODSLemonadeModernRuntimeConfig { param($Port, $ModelsDir, $ContextSize)
         $script:calls.Add('config')
-        if ($script:failConfig) { throw 'configuration verification failed' }
+        if ($script:failConfig) {
+            if ($script:denyRecordOnFailure) { $script:failOwnershipWrites = $true }
+            throw 'configuration verification failed'
+        }
         Assert-Restart ($Port -eq 13305 -and $ModelsDir -eq $script:runtimePlan.ModelsDir -and $ContextSize -eq 65536) 'restart restores the planned models directory and context through the shared verifier'
         $script:configured = $true
     }
@@ -109,7 +155,10 @@ try {
     }
     function Set-ODSLemonadeLoadedModel { param($Port, $ModelId, $ContextSize, $TimeoutSec)
         $script:calls.Add('load')
-        if ($script:failLoad) { throw 'loaded context verification failed' }
+        if ($script:failLoad) {
+            if ($script:exitBeforeFailure) { $script:child.HasExited = $true }
+            throw 'loaded context verification failed'
+        }
         $expectedModel = if ($script:modernMode) { 'Model-9B' } else { 'extra.Model-9B.gguf' }
         Assert-Restart (($script:configured -or -not $script:modernMode) -and $ModelId -eq $expectedModel -and $ContextSize -eq 65536 -and $TimeoutSec -eq 900) 'restart loads the exact selected model even when health is already green but nothing is loaded'
         $script:loaded = $ModelId
@@ -136,6 +185,43 @@ try {
         Assert-Restart ($message -and -not (Test-Path -LiteralPath $registration.ReadyPath) -and $script:child.Killed) "$failure publishes no readiness and stops only the child it launched"
         Set-Variable -Name $failure -Value $false -Scope Script
     }
+    $ownershipPath = Join-Path $runtimeDir 'process-ownership.json'
+    $script:workers = $true; $script:descendant = $true
+    foreach ($failure in @('failConfig', 'failLoad', 'root-exited', 'root-pid-reused', 'ownership-write-failure', 'nonzero-root-exit', 'partial-cleanup')) {
+        $script:launched = $false; $script:calls.Clear()
+        $script:failConfig = $failure -in @('failConfig', 'ownership-write-failure')
+        $script:failLoad = -not $script:failConfig -and $failure -ne 'nonzero-root-exit'
+        $script:denyRecordOnFailure = $failure -eq 'ownership-write-failure'
+        $script:runtimeExitCode = if ($failure -eq 'nonzero-root-exit') { 7 } else { 0 }
+        $script:exitBeforeFailure = $failure -in @('root-exited', 'root-pid-reused')
+        $script:reusedRoot = $failure -eq 'root-pid-reused'
+        $script:killFailure = if ($failure -eq 'partial-cleanup') { 4243 } else { 0 }
+        $message = ''
+        try { $null = Invoke-ODSPortalLemonadeRuntime $registration.Plan $registration.ReadyPath } catch { $message = $_.Exception.Message }
+        Assert-Restart ($message -and -not (Test-Path -LiteralPath $registration.ReadyPath) -and
+            -not $script:calls.Contains('kill:4999') -and -not $script:calls.Contains('kill:4245')) "$failure never publishes readiness or kills an unrelated process"
+        if ($failure -eq 'partial-cleanup') {
+            $script:partialOwnership = Get-Content -LiteralPath $ownershipPath -Raw
+            $savedOwnership = $script:partialOwnership | ConvertFrom-Json
+            Assert-Restart ($savedOwnership.Processes.Count -eq 3 -and $script:child.HasExited -and
+                -not $script:runtimeHandles[4243].HasExited -and -not $script:runtimeHandles[4244].HasExited) 'partial cleanup keeps exact descendant identities after its parent exits'
+            Remove-Item -LiteralPath $ownershipPath -Force
+        } elseif ($failure -eq 'ownership-write-failure') {
+            Assert-Restart ($script:runtimeHandles[4243].HasExited -and $script:runtimeHandles[4244].HasExited -and
+                $message -match 'configuration verification failed' -and $message -match 'mock ownership write denied') 'ownership write failure still closes the tree and retains both actionable failures'
+            $script:failOwnershipWrites = $false
+        } else {
+            Assert-Restart ($script:runtimeHandles[4243].HasExited -and $script:runtimeHandles[4244].HasExited -and
+                -not (Test-Path -LiteralPath $ownershipPath)) "$failure closes the owned router and worker outside the executable directory"
+            $script:failConfig = $false; $script:failLoad = $false
+            $script:runtimeExitCode = 0
+            $script:launched = $false; $script:reusedRoot = $false
+            Assert-Restart ((Invoke-ODSPortalLemonadeRuntime $registration.Plan $registration.ReadyPath) -eq 0) "$failure can start and verify its model on the next attempt"
+        }
+    }
+    $script:workers = $false; $script:exitBeforeFailure = $false; $script:reusedRoot = $false
+    $script:killFailure = 0; $script:failConfig = $false; $script:failLoad = $false
+    $script:runtimeExitCode = 0; $script:denyRecordOnFailure = $false
     $script:occupied = $true; $script:launched = $false; $script:calls.Clear()
     $message = ''
     try { $null = Invoke-ODSPortalLemonadeRuntime $registration.Plan $registration.ReadyPath } catch { $message = $_.Exception.Message }
@@ -266,6 +352,29 @@ try {
         } else { Assert-Restart ($message -and $script:stopCalls.Count -eq 0) "$case never treats stale PID evidence as process ownership" }
     }
 
+    foreach ($case in @('startup-cleanup-retry', 'startup-recycled-worker')) {
+        Reset-StopFixture
+        $script:stopTask.Actions = @($registration.Action)
+        $script:stopTask.State = 'Ready'; $script:engineId = 0
+        $script:processNodes = @(
+            [pscustomobject]@{ ProcessId = 4243; ParentProcessId = 4242; ExecutablePath = (Join-Path (Split-Path -Parent $contract.ExecutablePath) 'lemonade-router.exe'); CreationDate = [datetime]'2026-01-01T00:00:01' }
+            [pscustomobject]@{ ProcessId = 4244; ParentProcessId = 4243; ExecutablePath = (Join-Path $fixture 'runtime-cache/llama-server.exe'); CreationDate = [datetime]'2026-01-01T00:00:02' }
+            [pscustomobject]@{ ProcessId = 4999; ParentProcessId = 5; ExecutablePath = $contract.ExecutablePath; CreationDate = [datetime]'2025-01-01T00:00:00' }
+        )
+        if ($case -eq 'startup-recycled-worker') {
+            $script:processNodes[1].ParentProcessId = 4999
+            $script:processNodes[1].CreationDate = [datetime]'2026-01-02T00:00:00'
+        }
+        Write-ODSPrivateEnvFile -Path $ownershipPath -Content $script:partialOwnership
+        Write-ODSPrivateEnvFile -Path $registration.ReadyPath -Content '{"Error":"Startup failed; cleanup was interrupted."}'
+        Stop-ODSPortalLemonade $contract.ExecutablePath
+        $expectedStops = if ($case -eq 'startup-cleanup-retry') { 'kill:4243,kill:4244' } else { 'kill:4243' }
+        Assert-Restart (($script:stopCalls -join ',') -eq $expectedStops -and -not (Test-Path -LiteralPath $ownershipPath)) "$case recovers only exact surviving process identities independently of a failed readiness record"
+        $message = ''
+        try { $null = Wait-ODSPortalLemonadeReady $registration 1 } catch { $message = $_.Exception.Message }
+        Assert-Restart ($message -match 'Startup failed') "$case never promotes its ownership record to readiness"
+    }
+
     $legacyPath = Join-Path (Get-ODSPortalStateDir) 'lemonade-launch.task.ps1'
     $legacyText = '$exe = ' + (ConvertTo-ODSPowerShellSingleQuotedLiteral $contract.ExecutablePath) + "`n" +
         '$argumentString = ''--port 13305 --host 127.0.0.1''' + "`n" +
@@ -292,6 +401,77 @@ try {
             Assert-Restart (-not $message -and ($script:stopCalls -join ',') -eq 'task,kill:100,kill:101,kill:102,kill:103') 'former ODS 10.7 launcher migrates using literal AST settings and its exact task process tree'
         } else {
             Assert-Restart ($message -and $message -notmatch 'must never execute' -and $script:stopCalls.Count -eq 0) "$case is rejected without evaluating the former launcher or stopping processes"
+        }
+    }
+
+    if ($onWindows) {
+        # Real disposable process trees prove Windows handle semantics. Every
+        # process is started by this fixture; no service, task or runtime runs.
+        foreach ($name in @('Start-Process', 'Get-Process', 'Get-CimInstance', 'Get-Command')) {
+            Remove-Item -LiteralPath "Function:$name"
+        }
+        $shellPath = (Microsoft.PowerShell.Management\Get-Process -Id $PID).Path
+        $dummyScript = Join-Path $fixture 'dummy-parent.ps1'
+        $dummyRecord = Join-Path $fixture 'dummy-child.json'
+        $dummySource = @'
+param([string]$Shell, [string]$Record)
+$ErrorActionPreference = 'Stop'
+$child = Start-Process -FilePath $Shell -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 120"' -WindowStyle Hidden -PassThru
+$null = $child.Handle
+@{ ProcessId = $child.Id; StartedAt = $child.StartTime.ToUniversalTime().ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath ($Record + '.partial')
+Move-Item -LiteralPath ($Record + '.partial') -Destination $Record
+Start-Sleep -Seconds 120
+'@
+        [IO.File]::WriteAllText($dummyScript, $dummySource, [Text.UTF8Encoding]::new($true))
+        $unrelated = Microsoft.PowerShell.Management\Start-Process -FilePath $shellPath `
+            -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 120"' -WindowStyle Hidden -PassThru
+        $null = $unrelated.Handle
+        try {
+            foreach ($exitFirst in @($false, $true)) {
+                $parent = $null; $dummyChild = $null; $owned = $null
+                if (Test-Path -LiteralPath $dummyRecord) { Remove-Item -LiteralPath $dummyRecord -Force }
+                try {
+                    $arguments = '-NoProfile -NonInteractive -File "' + $dummyScript + '" -Shell "' + $shellPath + '" -Record "' + $dummyRecord + '"'
+                    $parent = Microsoft.PowerShell.Management\Start-Process -FilePath $shellPath -ArgumentList $arguments -WindowStyle Hidden -PassThru
+                    $null = $parent.Handle
+                    # JSON ownership dates are UTC; CIM returns local dates.
+                    $rootIdentity = [pscustomobject]@{ ProcessId = $parent.Id; CreationDate = $parent.StartTime.ToUniversalTime(); ExecutablePath = $shellPath; ExitedAt = $null }
+                    $deadline = [datetime]::UtcNow.AddSeconds(15)
+                    while (-not (Test-Path -LiteralPath $dummyRecord) -and [datetime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+                    $record = Get-Content -LiteralPath $dummyRecord -Raw | ConvertFrom-Json
+                    $candidate = Microsoft.PowerShell.Management\Get-Process -Id $record.ProcessId -ErrorAction Stop
+                    try {
+                        $null = $candidate.Handle
+                        Assert-Restart ([math]::Abs(($candidate.StartTime.ToUniversalTime() - ([datetime]$record.StartedAt).ToUniversalTime()).TotalMilliseconds) -lt 1) 'real dummy child is retained by its exact recorded process identity'
+                        $dummyChild = $candidate
+                        $candidate = $null
+                    } finally {
+                        # A failed identity check never authorizes final cleanup
+                        # to terminate whichever process now owns that PID.
+                        if ($candidate) { $candidate.Dispose() }
+                    }
+                    if ($exitFirst) {
+                        $parent.Kill()
+                        if (-not $parent.WaitForExit(5000)) { throw 'Dummy parent did not exit.' }
+                        $rootIdentity.ExitedAt = $parent.ExitTime
+                        Assert-Restart (-not $dummyChild.HasExited) 'Windows dummy child survives its parent, exercising the original orphan failure'
+                    }
+                    $owned = Get-ODSPortalOwnedProcessTree @($rootIdentity) @(CimCmdlets\Get-CimInstance Win32_Process -ErrorAction Stop)
+                    Stop-ODSPortalOwnedProcesses $owned.Handles
+                    Assert-Restart ($parent.HasExited -and $dummyChild.HasExited -and -not $unrelated.HasExited) "real cleanup (parent exited=$exitFirst) closes only its own tree and preserves the unrelated dummy"
+                } finally {
+                    if ($owned) { foreach ($handle in $owned.Handles) { $handle.Dispose() } }
+                    foreach ($process in @($parent, $dummyChild)) {
+                        if ($process) {
+                            if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
+                            $process.Dispose()
+                        }
+                    }
+                }
+            }
+        } finally {
+            if (-not $unrelated.HasExited) { $unrelated.Kill(); $null = $unrelated.WaitForExit(5000) }
+            $unrelated.Dispose()
         }
     }
 } finally {

@@ -153,6 +153,74 @@ function Get-ODSPortalTaskEngineId {
     return 0
 }
 
+function Get-ODSPortalOwnedProcessTree([object[]]$Roots, [object[]]$Nodes) {
+    $tree = [Collections.Generic.List[object]]::new()
+    foreach ($root in $Roots) { $tree.Add($root) }
+    for ($index = 0; $index -lt $tree.Count; $index++) {
+        $parent = $tree[$index]
+        if ($parent.CreationDate -isnot [datetime] -or -not $parent.ExecutablePath) {
+            throw "Cannot read the owned Lemonade process identity (PID $($parent.ProcessId)); no process was stopped."
+        }
+        foreach ($node in @($Nodes | Where-Object { $_.ParentProcessId -eq $parent.ProcessId })) {
+            if ($node.CreationDate -isnot [datetime] -or $node.CreationDate.ToUniversalTime() -lt $parent.CreationDate.ToUniversalTime()) {
+                throw 'The Lemonade process ancestry is stale or ambiguous; no process was stopped.'
+            }
+            # A retained process handle supplies the original root's exit time.
+            # Children born after that exit belong to a reused PID, not to us.
+            if ($parent.ExitedAt -and $node.CreationDate.ToUniversalTime() -gt $parent.ExitedAt.ToUniversalTime()) { continue }
+            $known = @($tree | Where-Object { $_.ProcessId -eq $node.ProcessId })
+            if ($known.Count) {
+                if ($known.Count -ne 1 -or $known[0].CreationDate.ToUniversalTime() -ne $node.CreationDate.ToUniversalTime() -or
+                    $known[0].ExecutablePath -ine $node.ExecutablePath -or
+                    $node.ProcessId -in @($tree | Select-Object -First ($index + 1) | ForEach-Object { $_.ProcessId })) {
+                    throw 'The Lemonade process ancestry is stale or ambiguous; no process was stopped.'
+                }
+                continue
+            }
+            $tree.Add($node)
+        }
+    }
+    $handles = [Collections.Generic.List[object]]::new()
+    try {
+        foreach ($node in $tree) {
+            if ($node.ExitedAt) { continue }
+            $process = Get-Process -Id $node.ProcessId -ErrorAction Stop
+            $handles.Add($process)
+            $null = $process.Handle
+            if ($process.Path -ine $node.ExecutablePath -or
+                [math]::Abs(($process.StartTime.ToUniversalTime() - $node.CreationDate.ToUniversalTime()).TotalMilliseconds) -ge 1) {
+                throw 'A Lemonade process changed during ownership verification; no process was stopped.'
+            }
+        }
+        return [pscustomobject]@{ Nodes = $tree; Handles = $handles }
+    } catch {
+        foreach ($process in $handles) { $process.Dispose() }
+        throw
+    }
+}
+
+function Stop-ODSPortalOwnedProcesses($Handles) {
+    # Parents first prevent the router from launching replacement children.
+    foreach ($process in $Handles) {
+        if (-not $process.HasExited) {
+            try { $process.Kill() } catch [InvalidOperationException] { if (-not $process.HasExited) { throw } }
+        }
+    }
+    foreach ($process in $Handles) {
+        if (-not $process.WaitForExit(5000)) { throw 'An owned Lemonade process did not exit within five seconds.' }
+    }
+}
+
+function Write-ODSPortalProcessOwnership([string]$Path, $Plan, $Nodes) {
+    $records = @($Nodes | ForEach-Object {
+        @{ ProcessId = $_.ProcessId; ExecutablePath = $_.ExecutablePath
+            StartedAt = $_.CreationDate.ToUniversalTime().ToString('o')
+            ExitedAt = if ($_.ExitedAt) { $_.ExitedAt.ToUniversalTime().ToString('o') } else { $null } }
+    })
+    $ownership = @{ ExecutablePath = $Plan.ExecutablePath; Port = $Plan.Port; Processes = $records }
+    Write-ODSPrivateEnvFile -Path $Path -Content ($ownership | ConvertTo-Json -Depth 4 -Compress)
+}
+
 function Stop-ODSPortalLemonade([string]$ExecutablePath) {
     # Capture the task's actual process tree before Task Scheduler removes its
     # root. Matching an installation directory does not prove process ownership.
@@ -173,6 +241,7 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
     $action = $actions[0]
     $runtimeDir = Join-Path (Get-ODSPortalStateDir) 'portal-runtime'
     $readyPath = Join-Path $runtimeDir 'ready.json'
+    $ownershipPath = Join-Path $runtimeDir 'process-ownership.json'
     $actionExe = [string]$action.Execute
     $durable = $false
     if ($actionExe -ieq $ExecutablePath) {
@@ -235,6 +304,7 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
     $engineId = Get-ODSPortalTaskEngineId
     $nodes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
     $root = $null
+    $recovered = @()
     if ($engineId -gt 0) {
         # On current Windows the engine PID is the action itself. Older task
         # engines can parent it; require the exact action and a unique match.
@@ -251,9 +321,36 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
         if ($root.ProcessId -ne $engineId) {
             $engines = @($nodes | Where-Object { $_.ProcessId -eq $engineId })
             if ($engines.Count -ne 1 -or $engines[0].CreationDate -isnot [datetime] -or
-                $root.CreationDate -lt $engines[0].CreationDate) {
+                $root.CreationDate.ToUniversalTime() -lt $engines[0].CreationDate.ToUniversalTime()) {
                 throw 'The Portal task engine ancestry cannot be proved; no process was stopped.'
             }
+        }
+    } elseif ($durable -and (Test-Path -LiteralPath $ownershipPath -PathType Leaf)) {
+        # Startup failure is not readiness. Its private ownership record remains
+        # usable after a partial cleanup or after the task wrapper has exited.
+        $ownership = Get-Content -LiteralPath $ownershipPath -Raw | ConvertFrom-Json
+        if ($ownership.ExecutablePath -ine $ExecutablePath -or $ownership.Port -ne $port -or
+            -not @($ownership.Processes).Count) { throw 'The saved Lemonade ownership does not match its launch plan.' }
+        foreach ($saved in $ownership.Processes) {
+            $started = [datetime]$saved.StartedAt
+            if ([int]$saved.ProcessId -lt 1 -or -not [IO.Path]::IsPathRooted([string]$saved.ExecutablePath)) {
+                throw 'The saved Lemonade process ownership is invalid.'
+            }
+            if ($saved.ExitedAt) {
+                $exited = [datetime]$saved.ExitedAt
+                if ($exited.ToUniversalTime() -lt $started.ToUniversalTime()) { throw 'The saved Lemonade process lifetime is invalid.' }
+                $recovered += [pscustomobject]@{ ProcessId = $saved.ProcessId; CreationDate = $started
+                    ExecutablePath = $saved.ExecutablePath; ExitedAt = $exited }
+                continue
+            }
+            $matchesById = @($nodes | Where-Object {
+                $_.ProcessId -eq $saved.ProcessId -and $_.ExecutablePath -ieq $saved.ExecutablePath -and
+                $_.CreationDate -is [datetime] -and
+                [math]::Abs(($_.CreationDate.ToUniversalTime() - $started.ToUniversalTime()).TotalMilliseconds) -lt 1
+            })
+            if ($matchesById.Count -gt 1) { throw 'The saved Lemonade process ownership is ambiguous.' }
+            # A missing or recycled PID is never a reason to stop its new owner.
+            $recovered += $matchesById
         }
     } elseif ($durable -and (Test-Path -LiteralPath $readyPath -PathType Leaf)) {
         $ready = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
@@ -268,41 +365,18 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
             }
         }
     }
-    if (-not $root) {
+    if (-not $root -and -not $recovered.Count) {
         if ($task.State -notin @('Ready', 'Disabled') -or @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue).Count) {
             throw "Cannot prove ownership of Lemonade on port $port. No process was stopped; close the previous ODS runtime explicitly before retrying."
         }
         return
     }
 
-    $tree = [Collections.Generic.List[object]]::new()
-    $tree.Add($root)
-    for ($index = 0; $index -lt $tree.Count; $index++) {
-        $parent = $tree[$index]
-        if ($parent.CreationDate -isnot [datetime] -or -not $parent.ExecutablePath) {
-            throw 'Cannot read the owned Lemonade process identity; no process was stopped.'
-        }
-        foreach ($node in @($nodes | Where-Object { $_.ParentProcessId -eq $parent.ProcessId })) {
-            if ($node.CreationDate -isnot [datetime] -or $node.CreationDate -lt $parent.CreationDate -or
-                $node.ProcessId -in @($tree | ForEach-Object { $_.ProcessId })) {
-                throw 'The Lemonade process ancestry is stale or ambiguous; no process was stopped.'
-            }
-            $tree.Add($node)
-        }
-    }
     # Hold process handles before stopping the task, so a recycled PID cannot
     # redirect a later Kill(). Children may live outside Lemonade's bin folder.
-    $handles = [Collections.Generic.List[object]]::new()
+    $roots = if ($root) { @($root) } else { $recovered }
+    $owned = Get-ODSPortalOwnedProcessTree $roots $nodes
     try {
-        foreach ($node in $tree) {
-            $process = Get-Process -Id $node.ProcessId -ErrorAction Stop
-            $handles.Add($process)
-            $null = $process.Handle
-            if ($process.Path -ine $node.ExecutablePath -or
-                [math]::Abs(($process.StartTime.ToUniversalTime() - $node.CreationDate.ToUniversalTime()).TotalMilliseconds) -ge 1) {
-                throw 'A Lemonade process changed during ownership verification; no process was stopped.'
-            }
-        }
         $currentTasks = @(Get-ScheduledTask -TaskName $script:ODSPortalLemonadeTaskName -ErrorAction Stop)
         if ($currentTasks.Count -ne 1 -or $currentTasks[0].TaskPath -ne $task.TaskPath -or
             $currentTasks[0].Principal.UserId -ne $task.Principal.UserId -or @($currentTasks[0].Actions).Count -ne 1 -or
@@ -311,17 +385,10 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
             throw 'The Portal Lemonade task changed during ownership verification; no process was stopped.'
         }
         if ($engineId -gt 0) { Stop-ScheduledTask -TaskName $script:ODSPortalLemonadeTaskName -TaskPath '\' -ErrorAction Stop }
-        # Parents first prevent the router from launching replacement children.
-        foreach ($process in $handles) {
-            if (-not $process.HasExited) {
-                try { $process.Kill() } catch [InvalidOperationException] { if (-not $process.HasExited) { throw } }
-            }
-        }
-        foreach ($process in $handles) {
-            if (-not $process.WaitForExit(5000)) { throw 'An owned Lemonade process did not exit within five seconds.' }
-        }
+        Stop-ODSPortalOwnedProcesses $owned.Handles
+        if ($durable -and (Test-Path -LiteralPath $ownershipPath)) { Remove-Item -LiteralPath $ownershipPath -Force }
     } finally {
-        foreach ($process in $handles) { $process.Dispose() }
+        foreach ($process in $owned.Handles) { $process.Dispose() }
     }
 }
 
@@ -397,9 +464,15 @@ function Invoke-ODSPortalLemonadeRuntime($Plan, [string]$ReadyPath) {
         throw "Lemonade port $($Plan.Port) is already occupied; no existing process was changed."
     }
     $child = $null
+    $identity = $null
+    $ownershipPath = Join-Path (Split-Path -Parent $ReadyPath) 'process-ownership.json'
     try {
         $child = Start-Process -FilePath $contract.ExecutablePath -ArgumentList $contract.ArgumentString `
             -WorkingDirectory (Split-Path -Parent $contract.ExecutablePath) -WindowStyle Hidden -PassThru
+        $null = $child.Handle
+        $identity = [pscustomobject]@{ ProcessId = $child.Id; CreationDate = $child.StartTime
+            ExecutablePath = $contract.ExecutablePath; ExitedAt = $null }
+        Write-ODSPortalProcessOwnership $ownershipPath $Plan @($identity)
         if (-not (Wait-ODSPortalLemonadeHealth $Plan.Port 60)) {
             throw 'The Portal Lemonade process did not become healthy within 60 seconds.'
         }
@@ -414,10 +487,49 @@ function Invoke-ODSPortalLemonadeRuntime($Plan, [string]$ReadyPath) {
         $ready = @{ ProcessId = $child.Id; StartedAt = $child.StartTime.ToUniversalTime().ToString('o'); Port = $Plan.Port; ModelId = $modelId; ContextSize = $Plan.ContextSize }
         Write-ODSPrivateEnvFile -Path $ReadyPath -Content ($ready | ConvertTo-Json -Compress)
         $child.WaitForExit()
+        if ($child.ExitCode -ne 0) { throw "The Portal Lemonade process exited with code $($child.ExitCode)." }
         return $child.ExitCode
     } catch {
-        if ($child -and -not $child.HasExited) { $child.Kill(); $child.WaitForExit() }
+        $startupFailure = $_.Exception.Message
+        if ($identity) {
+            if ($child.HasExited) { $identity.ExitedAt = $child.ExitTime }
+            try {
+                try {
+                    if (Test-Path -LiteralPath $ReadyPath) { Remove-Item -LiteralPath $ReadyPath -Force }
+                    Write-ODSPortalProcessOwnership $ownershipPath $Plan @($identity)
+                } finally {
+                    # Cleanup must still run when disk space or ACLs prevent
+                    # writing the failure record or removing stale readiness.
+                    try {
+                        $owned = Get-ODSPortalOwnedProcessTree @($identity) @(Get-CimInstance Win32_Process -ErrorAction Stop)
+                    } catch {
+                        # This retained handle cannot point at a recycled PID.
+                        # An unproved descendant is deliberately left untouched.
+                        if (-not $child.HasExited) {
+                            $child.Kill()
+                            if (-not $child.WaitForExit(5000)) { throw 'The launched Lemonade process did not exit within five seconds.' }
+                        }
+                        $identity.ExitedAt = $child.ExitTime
+                        Write-ODSPortalProcessOwnership $ownershipPath $Plan @($identity)
+                        throw
+                    }
+                    try {
+                        # Preserve every child identity before stopping its
+                        # parent, so interrupted cleanup can resume on rerun.
+                        try { Write-ODSPortalProcessOwnership $ownershipPath $Plan $owned.Nodes }
+                        finally { Stop-ODSPortalOwnedProcesses $owned.Handles }
+                        Remove-Item -LiteralPath $ownershipPath -Force
+                    } finally {
+                        foreach ($process in $owned.Handles) { $process.Dispose() }
+                    }
+                }
+            } catch {
+                throw "Lemonade startup failed: $startupFailure Cleanup could not be completed or recorded: $($_.Exception.Message)"
+            }
+        }
         throw
+    } finally {
+        if ($child) { $child.Dispose() }
     }
 }
 
@@ -441,6 +553,7 @@ function New-ODSPortalLemonadeRuntimeAction($Contract, [string]$GgufFile) {
     $readyPath = Join-Path $runtimeDir 'ready.json'
     if (Test-Path -LiteralPath $readyPath) { Remove-Item -LiteralPath $readyPath -Force }
     $definitions = foreach ($name in @('Test-ODSPortalLemonadeHealth', 'Wait-ODSPortalLemonadeHealth',
+            'Get-ODSPortalOwnedProcessTree', 'Stop-ODSPortalOwnedProcesses', 'Write-ODSPortalProcessOwnership',
             'Assert-ODSPortalLemonadeListener', 'Invoke-ODSPortalLemonadeRuntime')) {
         "function $name {`n$((Get-Command $name -CommandType Function).Definition)`n}"
     }
