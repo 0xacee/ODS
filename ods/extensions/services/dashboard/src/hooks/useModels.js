@@ -177,7 +177,7 @@ function modelActivationModeError(effectiveMode, configuredMode, llmBackend, ext
     return 'This install routes to a model service outside ODS. Downloading a model here does not switch the active model; reconnect ODS to its supported runtime integration to manage model changes.'
   }
   if (externalLemonade) {
-    return 'Lemonade is managed outside ODS. Change the loaded model in Lemonade, then use Adopt loaded model here to update ODS and Portal.'
+    return 'Change the loaded model in Lemonade, then use Adopt loaded model here to update ODS and Portal.'
   }
   if (effectiveMode === 'unknown' || configuredMode === 'unknown') {
     return 'ODS could not verify the active runtime mode. Repair or restart ODS before running a local model.'

@@ -207,7 +207,7 @@ describe('useModels', () => {
     await act(async () => { await result.current.loadModel(target) })
 
     expect(fetch.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(0)
-    expect(result.current.error).toContain('managed outside ODS')
+    expect(result.current.error).toBe('Change the loaded model in Lemonade, then use Adopt loaded model here to update ODS and Portal.')
   })
 
   test('ODS-managed Lemonade retains local model activation', async () => {
