@@ -143,6 +143,36 @@ test('compact external mode keeps the catalog visible without promising local ac
   expect(screen.queryByText(/--no-external-llm/)).not.toBeInTheDocument()
 })
 
+test.each([false, true])('loaded external Lemonade describes managed model changes without claiming runtime failure (compact=%s)', async (compact) => {
+  const state = baseState({
+    odsMode: 'lemonade', configuredMode: 'lemonade', llmBackend: 'lemonade',
+    externalLemonade: true, canActivateModels: false,
+    activationModeError: 'Change the loaded model in Lemonade, then adopt it here.',
+    currentModel: 'qwen3.5-9b-q4', loadedModel: 'extra.Qwen3.5-9B-Q4_K_M.gguf',
+    models: [model({ status: 'loaded' }), model({ id: 'another-model', name: 'Another model', status: 'downloaded' })],
+  })
+  useModelsMock.mockReturnValue(state)
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true, status: 200, json: async () => ({
+      status: 'verified', modelId: state.loadedModel, contextLength: 65536,
+    }),
+  }))
+  try {
+    render(createElement(MemoryRouter, null, createElement(Models, { compact })))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Adopt loaded model in ODS' })).toBeEnabled())
+    expect(screen.getByText('Model changes managed externally')).toBeVisible()
+    expect(screen.queryByText('Local model runtime unavailable')).not.toBeInTheDocument()
+    const notice = screen.getByText('Model changes managed externally').closest('section')
+    expect(within(notice).getByText(state.activationModeError)).toBeVisible()
+    for (const button of screen.getAllByRole('button', { name: 'Run' })) {
+      expect(button).toBeDisabled()
+    }
+    expect(state.loadModel).not.toHaveBeenCalled()
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})
+
 test('compact catalog uses fitted pages and preserves filter reset behavior', () => {
   useModelsMock.mockReturnValue(baseState({models:Array.from({length:12},(_,i)=>model({id:`m${i}`,name:`Catalog model ${i}`}))}))
   render(createElement(MemoryRouter,null,createElement(Models,{compact:true})))

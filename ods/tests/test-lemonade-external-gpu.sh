@@ -51,17 +51,25 @@ check '[[ "$shown" == "None|0" ]]' "without an external Lemonade the Linux probe
 fallback_source="$(sed -n '/# No GPU detected - fall back to CPU-only mode/,/^    return 1$/p' "$ROOT/installers/lib/detection.sh")"
 [[ -n "$fallback_source" ]] || { echo "FAIL: CPU fallback block not found" >&2; exit 1; }
 probe() {
-    ai() { printf 'AI:%s' "$1"; }
-    warn() { printf 'WARN:%s' "$1"; }
-    log() { :; }
+    ai() { printf 'AI:%s\n' "$1"; }
+    warn() { printf 'WARN:%s\n' "$1"; }
+    log() { printf 'LOG:%s\n' "$1"; }
     eval "fallback() { ${fallback_source}
 }"
     fallback || true
+    printf 'BACKEND:%s|VRAM:%s|COUNT:%s' "$GPU_BACKEND" "$GPU_VRAM" "$GPU_COUNT"
 }
 said="$(LEMONADE_EXTERNAL=true LEMONADE_GPU_NAME='AMD Radeon RX 9070 XT' probe)"
 check '[[ "$said" == "AI:"*"runs on AMD Radeon RX 9070 XT through Lemonade"* ]]' "Lemonade route replaces the CPU-only warning ($said)"
+check '[[ "$said" == *"LOG:Model inference uses the external Lemonade GPU: AMD Radeon RX 9070 XT."* && "$said" != *"CPU-only mode"* && "$said" != *"CPU inference"* && "$said" != *"Consider adding a GPU"* ]]' \
+    "external Lemonade log does not claim local CPU inference"
+check '[[ "$said" == *"BACKEND:cpu|VRAM:0|COUNT:0" ]]' "external inference leaves the Linux GPU backend unchanged"
 said="$(LEMONADE_EXTERNAL=false LEMONADE_GPU_NAME='' probe)"
 check '[[ "$said" == "WARN:No GPU detected."* ]]' "other hosts keep the CPU-only warning"
+check '[[ "$said" == *"LOG:CPU-only mode: llama.cpp will use CPU inference."* ]]' "local CPU inference keeps its diagnostic log"
+said="$(LEMONADE_EXTERNAL=true LEMONADE_GPU_NAME='' probe)"
+check '[[ "$said" == "WARN:No GPU detected."* && "$said" == *"LOG:CPU-only mode: llama.cpp will use CPU inference."* ]]' \
+    "an external flag without a GPU name keeps the CPU diagnostics"
 
 echo "Results: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]

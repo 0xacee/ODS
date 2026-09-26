@@ -112,6 +112,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Portal reads the loaded Windows/WSL Lemonade model from the Linux host
   agent's verified external-model observation instead of calling the
   Windows-only model-status endpoint on that Linux agent.
+- Models describes externally managed Lemonade model changes without
+  incorrectly reporting that the local runtime is unavailable. Adoption
+  remains available; model activation still follows the runtime's capabilities.
+- The Windows/WSL hardware scan no longer claims CPU inference immediately
+  after identifying the Windows GPU used by Lemonade. Linux services retain
+  their detected backend.
 - Explicit Hermes and OpenClaw flags now take precedence in the Custom
   feature menu as well as presets. The Windows Pixel path no longer asks to
   enable agents that its command line explicitly disabled.

@@ -321,7 +321,7 @@ export default function Models({ compact = false }) {
           <div className="flex min-w-0 items-start gap-3">
             <AlertCircle size={18} className="mt-0.5 shrink-0 text-theme-text-secondary" />
             <div>
-              <p className="text-sm font-semibold text-theme-text-secondary">{llmBackend === 'external' ? 'Model changes managed externally' : 'Local model runtime unavailable'}</p>
+              <p className="text-sm font-semibold text-theme-text-secondary">{llmBackend === 'external' || externalLemonade ? 'Model changes managed externally' : 'Local model runtime unavailable'}</p>
               <p className="mt-1 text-sm text-theme-text-secondary/75">{activationModeError}</p>
               {!compact && <p className="mt-1 text-xs text-theme-text-secondary/60">Model downloads and deletion remain available.</p>}
             </div>
