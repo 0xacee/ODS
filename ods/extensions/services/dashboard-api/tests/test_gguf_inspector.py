@@ -274,6 +274,46 @@ def test_deeply_nested_array_degrades_without_recursion_error(tmp_path):
 
 # ── file_type / quantization normalization ──────────────────────────────────
 
+@pytest.mark.parametrize(("file_type", "quantization"), [
+    # llama_ftype / LlamaFileType in llama.cpp/include/llama.h. These IDs differ
+    # from GGML tensor types: a Q8_0 file records 7, not tensor type 8.
+    (7, "Q8_0"), (8, "Q5_0"), (9, "Q5_1"),
+    (15, "Q4_K_M"), (32, "BF16"), (36, "TQ1_0"), (37, "TQ2_0"),
+    # Removed file formats must not be relabelled as unrelated live formats.
+    (6, "6"), (33, "33"), (34, "34"), (35, "35"),
+])
+def test_file_type_uses_model_file_enum_not_tensor_enum(tmp_path, file_type, quantization):
+    path = _write(tmp_path, "model.gguf", build_gguf([
+        ("general.architecture", STR, "qwen3"),
+        ("general.file_type", U32, file_type),
+    ]))
+    result = inspect_gguf(path)
+    assert result["readable"] is True
+    assert result["quantization"] == quantization
+
+
+def test_qwen_q8_metadata_reaches_model_library_badge(tmp_path):
+    from performance_oracle import build_models_payload
+
+    filename = "Qwen3-0.6B-Q8_0.gguf"
+    path = _write(tmp_path, filename, build_gguf([
+        ("general.architecture", STR, "qwen3"),
+        ("general.file_type", U32, 7),
+        ("qwen3.context_length", U32, 40960),
+    ]))
+    model = {
+        "id": "hf-qwen3-0.6b", "name": "Qwen3-0.6B-Q8_0", "gguf_file": filename,
+        "quantization": "Q8_0", "context_length": 40960, "source": "huggingface",
+    }
+    payload = build_models_payload(
+        None, None, 0, tmp_path, tmp_path / "data", catalog=[model], evidence=[],
+        downloaded_files_override={filename: path},
+    )
+    entry = next(item for item in payload["models"] if item["id"] == model["id"])
+    assert entry["status"] == "downloaded"
+    assert entry["quantization"] == "Q8_0"
+
+
 def test_unknown_file_type_falls_back_to_stringified_int(tmp_path):
     path = _write(tmp_path, "unk.gguf", build_gguf([
         ("general.architecture", STR, "gpt2"),

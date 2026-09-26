@@ -68,6 +68,8 @@ function Reset-Scenario {
     $script:installNeedsRestart = $false
     $script:amdPlan = $null
     $script:amdArgs = @()
+    $script:linuxHome = '/home/user'
+    $script:amdBinding = @()
 }
 function Test-ODSPortalVirtualization { $script:calls.Add('virt-check'); return $script:virtualization }
 function Get-ODSPortalFreeSystemGB { return $script:freeGB }
@@ -94,7 +96,11 @@ function New-ODSPortalLinuxAccount([string]$Distro, $Account) {
 }
 function Get-ODSPortalWindowsNvidiaDriver { return $script:nvidiaDriver }
 function Get-ODSPortalAmdPlan([string]$SourceRoot) { $script:calls.Add('amd-plan'); return $script:amdPlan }
-function Initialize-ODSPortalAmdLemonade($Plan, [string]$SourceRoot, [bool]$NonInteractive) { $script:calls.Add('amd-lemonade:' + $Plan.GpuName); return $script:amdArgs }
+function Initialize-ODSPortalAmdLemonade($Plan, [string]$SourceRoot, [bool]$NonInteractive, [string]$WslDistro, [string]$WslInstallDir) {
+    $script:calls.Add('amd-lemonade:' + $Plan.GpuName)
+    $script:amdBinding = @($WslDistro, $WslInstallDir)
+    return $script:amdArgs
+}
 function Test-ODSPortalAdministrator { return $script:scenario -eq 'admin' }
 function Test-ODSNativeWindowsInstall { return $script:scenario -eq 'native' }
 function Get-Command { if ($script:scenario -eq 'no-wsl') { return $null }; return [pscustomobject]@{ Name='wsl.exe' } }
@@ -122,6 +128,7 @@ function Invoke-ODSPortalWsl([string[]]$Arguments) {
     $code = 0
     $output = ''
     switch -Regex ($key) {
+        '^--distribution (Ubuntu|Ubuntu-24.04) --exec printenv HOME$' { $output = $script:linuxHome; break }
         '^--version$' { $output="Versao do WSL: 2.6.1.0`nVersao do kernel: 6.6.87.2"; if ($script:scenario -eq 'old-wsl') { $output="WSL version: 0.60.0`nKernel version: 6.6.87.2" }; if ($script:scenario -eq 'inbox-wsl') { $code=1; $output='Invalid command line option' }; break }
         '^--status$' { if ($script:scenario -eq 'features') { $code=1 }; break }
         '^--list --quiet$' { if ($script:scenario -ne 'missing' -or ($script:downloaded -and -not $script:registerNeeded)) { $output='Ubuntu-24.04' }; if ($script:scenario -eq 'existing-ubuntu') { $output='Ubuntu' }; break }
@@ -233,6 +240,23 @@ try {
     Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'AMD host installs through Windows Lemonade'
     Check (($script:capturedArguments -join ' ') -match '--pixel --no-hermes --no-openclaw --lemonade-url http://localhost:8080 --lemonade-model extra\.Qwen3\.5-9B-Q4_K_M\.gguf --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304 --tier 2$') 'AMD host passes the Lemonade route and GPU tier to Linux'
     Check ($script:calls.IndexOf('amd-lemonade:AMD Radeon RX 9070 XT') -lt $script:calls.IndexOf('install:Ubuntu-24.04')) 'Lemonade is ready before the Linux installer starts'
+    Check (($script:amdBinding -join '|') -ceq 'Ubuntu-24.04|/home/user/ods' -and $script:capturedRoot -ceq '/home/user/ods') 'default AMD binding and delegated install use the same explicit Linux path'
+    Reset-Scenario
+    $script:amdPlan = $fixturePlan; $script:amdArgs = $fixtureLemonadeArgs; $script:linuxHome = "/home/some user's home"
+    $null = Invoke-ODSPortalSetup @{} 'unused'
+    Check ($script:amdBinding[1] -ceq "/home/some user's home/ods" -and $script:capturedRoot -ceq $script:amdBinding[1]) 'HOME spaces and apostrophes survive binding without shell interpolation'
+    Reset-Scenario
+    $script:amdPlan = $fixturePlan; $script:amdArgs = $fixtureLemonadeArgs
+    $null = Invoke-ODSPortalSetup @{InstallDir='/srv/ODS data'} 'unused'
+    Check ($script:amdBinding[1] -ceq '/srv/ODS data' -and $script:capturedRoot -ceq '/srv/ODS data' -and
+        -not ($script:calls -like '*printenv HOME')) 'custom install directory is bound verbatim without querying HOME'
+    foreach ($badHome in @("/home/user`n/tmp/other", '/home/user/../other', 'relative/home', '/')) {
+        Reset-Scenario
+        $script:amdPlan = $fixturePlan; $script:linuxHome = $badHome
+        $message = ''
+        try { $null = Invoke-ODSPortalSetup @{} 'unused' } catch { $message = $_.Exception.Message }
+        Check ($message -and -not ($script:calls -like 'amd-lemonade:*') -and -not ($script:calls -like 'install:*')) 'ambiguous or non-normalized HOME stops before model and Linux installation'
+    }
     Reset-Scenario
     $script:amdPlan = $fixturePlan
     $script:amdArgs = $fixtureLemonadeArgs

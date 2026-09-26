@@ -274,13 +274,26 @@ function Initialize-ODSPortalDocker([string]$Distro, [System.Collections.IDictio
     return $null
 }
 
-function Add-ODSPortalAmdArguments([string[]]$LinuxArgs, [System.Collections.IDictionary]$Options, [string]$SourceRoot, [bool]$NonInteractive) {
+function Add-ODSPortalAmdArguments([string[]]$LinuxArgs, [System.Collections.IDictionary]$Options, [string]$SourceRoot, [bool]$NonInteractive, [string]$WslDistro = '') {
     # An AMD GPU runs the model through Lemonade Server on Windows; everything
     # else keeps the in-WSL route. An explicit -Tier stays the user's choice.
     $plan = Get-ODSPortalAmdPlan $SourceRoot
     if ($null -eq $plan) { return $LinuxArgs }
+    $wslInstallDir = [string]$Options['InstallDir']
+    if ($WslDistro) {
+        if (-not $wslInstallDir) {
+            $linuxHome = Invoke-ODSPortalWsl -Arguments @('--distribution', $WslDistro, '--exec', 'printenv', 'HOME')
+            if ($linuxHome.Code -ne 0 -or $linuxHome.Output -notmatch '^/[^\x00-\x1f\x7f]+$') {
+                throw 'Could not resolve the normal WSL user home for the managed Windows model binding.'
+            }
+            $wslInstallDir = $linuxHome.Output.TrimEnd('/') + '/ods'
+        }
+        Assert-ODSPortalWslBinding $WslDistro $wslInstallDir
+        # Pin the same directory into windows.ps1 and the Linux installer.
+        $Options['InstallDir'] = $wslInstallDir
+    }
     Write-ODSPortalStage 3 'AMD GPU' "$($plan.GpuName) ($([math]::Round($plan.VramMB / 1024)) GB): model $($plan.Model) runs through Lemonade Server on Windows."
-    $amdArgs = @(Initialize-ODSPortalAmdLemonade $plan $SourceRoot $NonInteractive)
+    $amdArgs = @(Initialize-ODSPortalAmdLemonade $plan $SourceRoot $NonInteractive $WslDistro $wslInstallDir)
     if ($amdArgs.Count -gt 0 -and -not $Options['Tier']) { $amdArgs += @('--tier', $plan.LinuxTier) }
     return @($LinuxArgs + $amdArgs)
 }
@@ -346,7 +359,7 @@ function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string
     if (-not $Options['Cloud']) {
         $nvidiaDriver = Get-ODSPortalWindowsNvidiaDriver
         Assert-ODSPortalNvidiaReady $distro $nvidiaDriver
-        if ($null -eq $nvidiaDriver) { $linuxArgs = @(Add-ODSPortalAmdArguments $linuxArgs $Options (Split-Path -Parent $InstallerRoot) $nonInteractive) }
+        if ($null -eq $nvidiaDriver) { $linuxArgs = @(Add-ODSPortalAmdArguments $linuxArgs $Options (Split-Path -Parent $InstallerRoot) $nonInteractive $distro) }
     }
     Write-ODSPortalStage 4 'INSTALL PIXEL / PORTAL' "Prerequisites passed for $distro. Starting the Linux installer."
     Write-Host '         When Ubuntu asks for your [sudo] password, type your Ubuntu password and press Enter. Nothing appears while you type.'

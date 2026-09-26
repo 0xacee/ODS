@@ -194,7 +194,8 @@ describe('useModels', () => {
     const target = 'downloaded-model'
     fetch.mockResolvedValue(modelsResponse(
       [{ id: target, status: 'downloaded' }],
-      { odsMode: 'lemonade', configuredMode: 'lemonade', llmBackend: 'lemonade', externalLemonade: true }
+      { odsMode: 'lemonade', configuredMode: 'lemonade', llmBackend: 'lemonade', externalLemonade: true,
+        modelManagement: { managed: false, canActivate: false, canUnload: false, running: false } }
     ))
 
     const { result } = renderHook(() => useModels())

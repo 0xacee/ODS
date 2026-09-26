@@ -66,6 +66,10 @@ def _isolate_opencode_config(monkeypatch, tmp_path):
         lambda: {"system": _mod.platform.system(), "active": False},
     )
     monkeypatch.setattr(_mod, "_opencode_installed", lambda: False)
+    # These fixtures describe synthetic containers. Never fingerprint a real
+    # developer's running gateway and accidentally converge it during a test.
+    # Live-input reuse is exercised separately in test_model_switch_speed.py.
+    monkeypatch.setattr(_mod, "_dependent_bind_inputs", lambda _container: None)
 
 
 @pytest.fixture(autouse=True)

@@ -147,3 +147,4 @@ Check ($message -match 'did not finish restoring') 'Lemonade that never proves i
 
 Out-Pass "Passed $script:checks Windows Portal AMD contracts."
 & (Join-Path $PSScriptRoot 'test-windows-portal-lemonade-restart.ps1')
+& (Join-Path $PSScriptRoot 'test-windows-portal-model-control.ps1')

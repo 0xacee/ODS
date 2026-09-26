@@ -123,7 +123,7 @@ Windows users should not run the `curl ... | bash` command from PowerShell. The 
 
 After the installer completes successfully, Portal opens at **http://localhost:3001/pixel** (the Windows installer opens it for you and prints the exact URL). **http://localhost:3000** is Open WebUI, a separate interface. Verify that Portal is available and send a message; a loaded dashboard alone does not prove Pixel is ready. If installation fails or Portal is degraded, follow the [Windows Quickstart checks](ods/docs/WINDOWS-QUICKSTART.md#verify-portalpixel) before proceeding.
 
-WSL GPU access must be checked separately. NVIDIA needs a supported Windows driver and GPU access inside WSL/Docker. A working AMD/Lemonade server on Windows does not automatically become an ODS-managed WSL backend. Use a supported backend detected inside WSL, CPU, or an explicitly configured reachable model endpoint; see the [WSL2 GPU guide](ods/docs/WINDOWS-WSL2-GPU-GUIDE.md).
+WSL GPU access must be checked separately. NVIDIA needs a supported Windows driver and GPU access inside WSL/Docker. On AMD, Windows setup runs Lemonade through an ODS task bound to the selected WSL installation. Once that ownership is verified, Dashboard **Models** supports compatible GGUF downloads (including Hugging Face), activation, context changes, and unload/resume. An independently configured Lemonade service remains externally managed. Older ODS tasks without the installation binding require an installer rerun; see the [Windows Quickstart](ods/docs/WINDOWS-QUICKSTART.md#manage-amd-models-from-portal) and [WSL2 GPU guide](ods/docs/WINDOWS-WSL2-GPU-GUIDE.md).
 
 For Linux, macOS, or the recommended Windows/WSL installation, uninstall from the matching Linux/macOS terminal (open Ubuntu on Windows):
 

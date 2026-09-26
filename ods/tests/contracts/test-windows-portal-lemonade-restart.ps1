@@ -8,7 +8,7 @@ function Assert-Restart([bool]$Condition, [string]$Message) {
     Microsoft.PowerShell.Utility\Write-Host "PASS $Message"
 }
 
-$fixture = Join-Path ([IO.Path]::GetTempPath()) ("ods-modern-task-' " + [guid]::NewGuid().ToString('N'))
+$fixture = Join-Path ([IO.Path]::GetTempPath()) ("ods-modern-task-' " + [char]0x00E9 + '-' + [guid]::NewGuid().ToString('N'))
 $previousLocalAppData = $env:LOCALAPPDATA
 $env:LOCALAPPDATA = $fixture
 New-Item -ItemType Directory -Path $fixture -Force | Out-Null
@@ -23,7 +23,7 @@ try {
     }
     $registration = New-ODSPortalLemonadeRuntimeAction $contract 'Model-9B.gguf'
     $runtimeDir = Split-Path -Parent $registration.ReadyPath
-    $saved = Get-Content -LiteralPath (Join-Path $runtimeDir 'runtime.json') -Raw | ConvertFrom-Json
+    $saved = Get-Content -LiteralPath (Join-Path $runtimeDir 'runtime.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-Restart ($saved.ModelsDir -eq $contract.ModelsDir -and $saved.GgufFile -eq 'Model-9B.gguf' -and $saved.ContextSize -eq 65536) 'durable JSON preserves selected model, context and paths without command interpolation'
     Assert-Restart ($registration.Action.Arguments -match '-NoProfile.+-WindowStyle Hidden.+-File' -and
         $registration.Action.Arguments.Contains((Join-Path $runtimeDir 'launch.ps1'))) 'Portal task launches its durable script hidden'
@@ -43,9 +43,33 @@ try {
     $tokens = $null; $parseErrors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $runtimeDir 'launch.ps1'), [ref]$tokens, [ref]$parseErrors)
     Assert-Restart ($parseErrors.Count -eq 0) 'generated durable launcher parses in this PowerShell version'
-    $launcher = Get-Content -LiteralPath (Join-Path $runtimeDir 'launch.ps1') -Raw
+    $launcher = Get-Content -LiteralPath (Join-Path $runtimeDir 'launch.ps1') -Raw -Encoding UTF8
     Assert-Restart ($launcher.Contains("Join-Path `$PSScriptRoot 'backend-contract.ps1'") -and
         $launcher.Contains('Invoke-ODSPortalLemonadeRuntime $plan') -and -not $launcher.Contains($PSScriptRoot)) 'task dependencies resolve beside the durable launcher, independently of the checkout'
+
+    # Run the generated plan reader in this PowerShell, replacing only the
+    # runtime call with an observation. No process, task or network API runs.
+    $planFile = Join-Path $runtimeDir 'runtime.json'
+    $originalPlanJson = [IO.File]::ReadAllText($planFile)
+    $unicodeFile = 'Model-' + [char]0x00E9 + '-' + [char]0x4E2D + '.gguf'
+    $unicodePlan = $originalPlanJson | ConvertFrom-Json
+    $unicodePlan.GgufFile = $unicodeFile
+    Write-ODSPrivateEnvFile -Path $planFile -Content ($unicodePlan | ConvertTo-Json -Compress)
+    $invokeLine = '    $code = Invoke-ODSPortalLemonadeRuntime $plan (Join-Path $PSScriptRoot ''ready.json'')'
+    $observeOnly = @'
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'read-plan-probe.json'), ($plan | ConvertTo-Json -Compress))
+    $code = 0
+'@
+    Assert-Restart ($launcher.Contains($invokeLine)) 'generated plan reader can be isolated before any runtime call'
+    $probePath = Join-Path $runtimeDir 'read-plan-probe.ps1'
+    Write-ODSPrivateEnvFile -Path $probePath -Content $launcher.Replace($invokeLine, $observeOnly)
+    $testShell = (Get-Process -Id $PID).Path
+    & $testShell -NoProfile -ExecutionPolicy Bypass -File $probePath
+    Assert-Restart ($LASTEXITCODE -eq 0) 'generated UTF-8 plan reader runs without invoking a runtime'
+    $readBack = [IO.File]::ReadAllText((Join-Path $runtimeDir 'read-plan-probe.json')) | ConvertFrom-Json
+    Assert-Restart ($readBack.GgufFile -ceq $unicodeFile -and $readBack.ExecutablePath -ceq $contract.ExecutablePath -and
+        $readBack.ModelsDir -ceq $contract.ModelsDir) 'durable startup preserves Unicode filenames and Windows user paths from UTF-8 JSON'
+    Write-ODSPrivateEnvFile -Path $planFile -Content $originalPlanJson
 
     # Simulate sign-in with a fresh process and empty server configuration.
     $script:runtimePlan = $registration.Plan
@@ -169,7 +193,7 @@ try {
             $script:launched = $false; $script:calls.Clear()
             $script:descendant = $boot -eq 2
             $code = Invoke-ODSPortalLemonadeRuntime $registration.Plan $registration.ReadyPath
-            $ready = Get-Content -LiteralPath $registration.ReadyPath -Raw | ConvertFrom-Json
+            $ready = Get-Content -LiteralPath $registration.ReadyPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $expectedModel = if ($mode) { 'Model-9B' } else { 'extra.Model-9B.gguf' }
             $expectedCalls = if ($mode) { 'start,health,config,resolve,load,wait' } else { 'start,health,resolve,load,wait' }
             Assert-Restart ($code -eq 0 -and $ready.ModelId -eq $expectedModel -and $ready.ProcessId -eq 4242 -and
@@ -201,7 +225,7 @@ try {
         Assert-Restart ($message -and -not (Test-Path -LiteralPath $registration.ReadyPath) -and
             -not $script:calls.Contains('kill:4999') -and -not $script:calls.Contains('kill:4245')) "$failure never publishes readiness or kills an unrelated process"
         if ($failure -eq 'partial-cleanup') {
-            $script:partialOwnership = Get-Content -LiteralPath $ownershipPath -Raw
+            $script:partialOwnership = Get-Content -LiteralPath $ownershipPath -Raw -Encoding UTF8
             $savedOwnership = $script:partialOwnership | ConvertFrom-Json
             Assert-Restart ($savedOwnership.Processes.Count -eq 3 -and $script:child.HasExited -and
                 -not $script:runtimeHandles[4243].HasExited -and -not $script:runtimeHandles[4244].HasExited) 'partial cleanup keeps exact descendant identities after its parent exits'
@@ -394,7 +418,9 @@ try {
             'foreign-legacy-exe' { $contents = $contents.Replace('LemonadeServer.exe', 'UnrelatedServer.exe') }
             'nonloopback-setting' { $contents = $contents.Replace('127.0.0.1', '0.0.0.0') }
         }
-        Write-ODSPrivateEnvFile -Path $legacyPath -Content $contents
+        # Legacy PowerShell source needs a BOM for Unicode literals on 5.1;
+        # the runtime JSON above remains UTF-8 without a BOM.
+        Write-ODSPrivateEnvFile -Path $legacyPath -Content ([string][char]0xFEFF + $contents)
         $message = ''
         try { Stop-ODSPortalLemonade $contract.ExecutablePath } catch { $message = $_.Exception.Message }
         if ($case -eq 'former-modern') {

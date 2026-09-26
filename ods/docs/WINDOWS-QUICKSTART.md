@@ -89,11 +89,21 @@ Pixel is the agent, not the model server. NVIDIA runs the model inside WSL (Dock
 
 For AMD, Windows setup automatically passes `--lemonade-host-transport model-router` to the Linux installer and saves `LEMONADE_HOST_TRANSPORT=model-router` in the runtime `.env`. Windows and Ubuntu can have different localhost listeners. The WSL host agent therefore checks the Windows model through this installation's running model-router container, using its configured `host.docker.internal` endpoint. Before sending a request, it checks the container's ODS labels, installation mounts and Lemonade endpoint. Missing or mismatched ownership keeps the route unverified; model identity, context and a successful completion are still required for readiness.
 
-Lemonade stays bound to Windows `127.0.0.1`; this transport does not enable LAN access or select cloud inference. The Linux setting `LEMONADE_EXTERNAL=true` means Lemonade is managed outside the Linux stack, on the same Windows computer. Other Lemonade installations use the default `--lemonade-host-transport direct`, which probes from the host agent's own network context.
+Lemonade stays bound to Windows `127.0.0.1`; this transport does not enable LAN access or select cloud inference. The Linux setting `LEMONADE_EXTERNAL=true` describes where Lemonade runs, outside the Linux stack on the same Windows computer. Permission to manage it is verified separately against the ODS task and its installation binding. Other Lemonade installations use the default `--lemonade-host-transport direct`, which probes from the host agent's own network context.
 
 The `ODSLemonadeRuntime` task starts at Windows sign-in, restores the selected model and context, and verifies the loaded model before setup proceeds. Its launcher and configuration live in `%LOCALAPPDATA%\ODS\lemonade\portal-runtime`, so removing the temporary installer checkout does not break the next startup. Startup failures are recorded in `lemonade-launch.log` in that directory.
 
 After a Windows restart, sign in, let Docker Desktop connect to Ubuntu, then check Portal availability and send a message again. A registered task or a healthy Lemonade API alone does not prove that model generation resumed successfully.
+
+## Manage AMD models from Portal
+
+With the Windows ODS task bound to this Ubuntu distribution and ODS runtime directory, open **Models** in Portal or the Dashboard. The installer registers `%LOCALAPPDATA%\ODS\lemonade\models` as the shared model store; catalog and Hugging Face GGUF downloads go there, with progress, cancellation and checksum verification. They do not require another copy inside Ubuntu.
+
+After a download is verified, use **Run** and choose its context. **Configure context** changes the active model through the same verified activation flow. ODS updates the Windows startup selection and the route used by Portal and ODS apps. Model architecture, memory, context and app compatibility still determine whether a particular GGUF can run.
+
+**Unload model** stops the owned runtime to release GPU memory and keeps the saved model selection. Portal remains paused while inference is stopped. Use **Resume model** to restore the saved model and verify its route before changing models or context again.
+
+These controls appear only after ODS verifies the task, Windows account, WSL installation and registered model store. For an older ODS task created without this binding, rerun the current Windows installer for the same distribution and runtime directory. Do not create the binding by editing runtime files. An independent Lemonade service remains external: change its model in Lemonade, then use **Adopt loaded model** to update the ODS route. Adoption does not grant runtime control or change Lemonade's startup selection. See [Model Management](MODEL-MANAGEMENT.md#windows-amd-with-portal-in-wsl) for details.
 
 ## Existing native Windows installations
 

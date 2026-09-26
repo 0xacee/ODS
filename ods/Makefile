@@ -82,6 +82,8 @@ test: ## Run unit and contract tests
 	@bash tests/test-lemonade-host-transport.sh
 	@python3 tests/test-lemonade-container-transport.py
 	@python3 tests/test-wsl-lemonade-proof.py
+	@python3 tests/test-wsl-lemonade-control.py
+	@python3 tests/test-configure-wsl-model-store.py
 	@bash tests/test-litellm-amd-auth-enforced.sh
 	@bash tests/contracts/test-windows-strix-tier-map.sh
 	@bash tests/contracts/test-windows-llm-model-readiness.sh

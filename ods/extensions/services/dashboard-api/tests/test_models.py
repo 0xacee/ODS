@@ -1821,6 +1821,9 @@ def test_api_models_returns_full_catalog_without_fake_tokens(test_client, monkey
 
 def test_api_models_reports_unmatched_external_runtime_without_fake_performance(test_client, monkeypatch, tmp_path):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "request_agent_json", lambda *_args, **_kwargs: {
+        "managed": False, "canActivate": False, "canUnload": False, "running": False,
+    })
     monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
     monkeypatch.setattr(models_router, "read_live_env_values", lambda _keys: {
         "LLM_BACKEND": "lemonade",
@@ -1893,6 +1896,9 @@ def test_external_lemonade_runtime_flag(
 
 def test_load_model_rejects_external_lemonade_before_catalog_lookup(test_client, monkeypatch, tmp_path):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "request_agent_json", lambda *_args, **_kwargs: {
+        "managed": False, "canActivate": False, "canUnload": False, "running": False,
+    })
     (install_dir / ".env").write_text("ODS_MODE=lemonade\n", encoding="utf-8")
     monkeypatch.setattr(models_router, "ODS_MODE_EFFECTIVE", "lemonade")
     monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")

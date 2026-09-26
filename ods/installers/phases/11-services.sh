@@ -522,6 +522,20 @@ else
         _phase11_apply_cpu_fallback "$_amd_missing_devices"
     fi
 
+    # An owned Windows Lemonade task serves its private Windows model store.
+    # Register that read-only API mount before resolving the Compose overlays.
+    if [[ "${LEMONADE_HOST_TRANSPORT:-$(_phase11_env_get LEMONADE_HOST_TRANSPORT direct)}" == "model-router" ]]; then
+        _wsl_store_python="${ODS_PYTHON_CMD:-}"
+        if [[ -z "$_wsl_store_python" ]]; then
+            _wsl_store_python="$(command -v python3 || command -v python)"
+        fi
+        if ! "$_wsl_store_python" "$INSTALL_DIR/scripts/configure-wsl-model-store.py" \
+            --install-dir "$INSTALL_DIR" >> "$LOG_FILE" 2>&1; then
+            error "The registered Windows Lemonade runtime could not be verified; stopping before service configuration."
+            return 1
+        fi
+    fi
+
     # Re-resolve compose flags against the actual install directory.
     # Phase 03 may have disabled services (e.g., ComfyUI on Tier 0) after
     # COMPOSE_FLAGS was first set in Phase 02, making the cached value stale.

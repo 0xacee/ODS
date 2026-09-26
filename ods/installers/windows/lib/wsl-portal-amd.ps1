@@ -263,7 +263,7 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
         }
         $actionExe = $shell[0].Source
         if ($action.Arguments -ceq $expectedArgs) {
-            $plan = Get-Content -LiteralPath (Join-Path $runtimeDir 'runtime.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+            $plan = Get-Content -LiteralPath (Join-Path $runtimeDir 'runtime.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
             if ($action.WorkingDirectory -ine $runtimeDir -or $plan.ExecutablePath -ine $ExecutablePath -or
                 $plan.ModelsDir -ine (Join-Path (Get-ODSPortalStateDir) 'models')) {
                 throw 'The saved Portal Lemonade plan belongs to a different runtime; no process was stopped.'
@@ -328,7 +328,7 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
     } elseif ($durable -and (Test-Path -LiteralPath $ownershipPath -PathType Leaf)) {
         # Startup failure is not readiness. Its private ownership record remains
         # usable after a partial cleanup or after the task wrapper has exited.
-        $ownership = Get-Content -LiteralPath $ownershipPath -Raw | ConvertFrom-Json
+        $ownership = Get-Content -LiteralPath $ownershipPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($ownership.ExecutablePath -ine $ExecutablePath -or $ownership.Port -ne $port -or
             -not @($ownership.Processes).Count) { throw 'The saved Lemonade ownership does not match its launch plan.' }
         foreach ($saved in $ownership.Processes) {
@@ -353,7 +353,7 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
             $recovered += $matchesById
         }
     } elseif ($durable -and (Test-Path -LiteralPath $readyPath -PathType Leaf)) {
-        $ready = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
+        $ready = Get-Content -LiteralPath $readyPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if (-not $ready.Error -and $ready.ProcessId -and $ready.StartedAt) {
             $matchesById = @($nodes | Where-Object { $_.ProcessId -eq $ready.ProcessId })
             if ($matchesById.Count -eq 1 -and $matchesById[0].ExecutablePath -ieq $ExecutablePath -and
@@ -533,9 +533,18 @@ function Invoke-ODSPortalLemonadeRuntime($Plan, [string]$ReadyPath) {
     }
 }
 
-function New-ODSPortalLemonadeRuntimeAction($Contract, [string]$GgufFile) {
+function Assert-ODSPortalWslBinding([string]$WslDistro, [string]$WslInstallDir) {
+    if ($WslDistro -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' -or $WslDistro -match '^docker-desktop' -or
+        $WslInstallDir -notmatch '^/[^\x00-\x1f\x7f]+$' -or $WslInstallDir -match '(^|/)\.\.?(/|$)' -or
+        $WslInstallDir.Contains('//') -or $WslInstallDir.EndsWith('/')) {
+        throw 'An explicit WSL distribution and normalized absolute Linux installation directory are required.'
+    }
+}
+
+function New-ODSPortalLemonadeRuntimeAction($Contract, [string]$GgufFile, [string]$WslDistro = '', [string]$WslInstallDir = '') {
     # All dependencies live beside the private plan, never in a temporary
     # checkout. Existing private-file writer verifies owner-only Windows ACLs.
+    if ($WslDistro -or $WslInstallDir) { Assert-ODSPortalWslBinding $WslDistro $WslInstallDir }
     $runtimeDir = Join-Path (Get-ODSPortalStateDir) 'portal-runtime'
     New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
     foreach ($name in @('backend-contract.ps1', 'env-generator.ps1')) {
@@ -548,6 +557,10 @@ function New-ODSPortalLemonadeRuntimeAction($Contract, [string]$GgufFile) {
         ModelsDir = $Contract.ModelsDir
         ContextSize = $Contract.ContextSize
         GgufFile = $GgufFile
+    }
+    if ($WslDistro -or $WslInstallDir) {
+        $plan.WslDistro = $WslDistro
+        $plan.WslInstallDir = $WslInstallDir
     }
     Write-ODSPrivateEnvFile -Path (Join-Path $runtimeDir 'runtime.json') -Content ($plan | ConvertTo-Json -Compress)
     $readyPath = Join-Path $runtimeDir 'ready.json'
@@ -563,7 +576,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'env-generator.ps1')
 __PORTAL_FUNCTIONS__
 try {
-    $plan = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'runtime.json') -Raw | ConvertFrom-Json
+    $plan = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'runtime.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $code = Invoke-ODSPortalLemonadeRuntime $plan (Join-Path $PSScriptRoot 'ready.json')
     exit $code
 } catch {
@@ -587,7 +600,7 @@ function Wait-ODSPortalLemonadeReady($Registration, [int]$Seconds = 1020) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path -LiteralPath $Registration.ReadyPath -PathType Leaf) {
-            $ready = Get-Content -LiteralPath $Registration.ReadyPath -Raw | ConvertFrom-Json
+            $ready = Get-Content -LiteralPath $Registration.ReadyPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($ready.Error) { throw [string]$ready.Error }
             if ($ready.Port -ne $Registration.Plan.Port -or $ready.ContextSize -ne $Registration.Plan.ContextSize -or
                 [string]::IsNullOrWhiteSpace([string]$ready.ModelId)) { throw 'The Portal Lemonade ready record does not match its plan.' }
@@ -599,10 +612,10 @@ function Wait-ODSPortalLemonadeReady($Registration, [int]$Seconds = 1020) {
     throw "Lemonade did not finish restoring its model. Check $(Join-Path (Split-Path -Parent $Registration.ReadyPath) 'lemonade-launch.log')."
 }
 
-function Register-ODSPortalLemonadeTask($Contract, [string]$GgufFile = '') {
+function Register-ODSPortalLemonadeTask($Contract, [string]$GgufFile = '', [string]$WslDistro = '', [string]$WslInstallDir = '') {
     # One task for this Windows user: starts at sign-in (so the model survives a
     # restart) and now. It binds 127.0.0.1 only.
-    $registration = New-ODSPortalLemonadeRuntimeAction $Contract $GgufFile
+    $registration = New-ODSPortalLemonadeRuntimeAction $Contract $GgufFile $WslDistro $WslInstallDir
     $action = $registration.Action
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
@@ -613,7 +626,7 @@ function Register-ODSPortalLemonadeTask($Contract, [string]$GgufFile = '') {
     return $registration
 }
 
-function Initialize-ODSPortalAmdLemonade($Plan, [string]$SourceRoot, [bool]$NonInteractive) {
+function Initialize-ODSPortalAmdLemonade($Plan, [string]$SourceRoot, [bool]$NonInteractive, [string]$WslDistro = '', [string]$WslInstallDir = '') {
     # Returns the Linux installer arguments for the Windows Lemonade route, or
     # an empty array when the user keeps the CPU route.
     $exe = Install-ODSPortalLemonade $SourceRoot $NonInteractive
@@ -626,7 +639,7 @@ function Initialize-ODSPortalAmdLemonade($Plan, [string]$SourceRoot, [bool]$NonI
     $port = Select-ODSPortalLemonadePort
     $contract = Get-ODSLemonadeLaunchContract -ExecutablePath $exe -Port $port -ModelsDir $modelsDir -ContextSize $Plan.ContextSize
     Write-Host "         Starting Lemonade Server $($contract.Version) on 127.0.0.1:$port..."
-    $registration = Register-ODSPortalLemonadeTask $contract $Plan.GgufFile
+    $registration = Register-ODSPortalLemonadeTask $contract $Plan.GgufFile $WslDistro $WslInstallDir
     Write-Host '         Restoring the configured GPU model (the first load also downloads the GPU runtime)...'
     $modelId = Wait-ODSPortalLemonadeReady $registration
     Write-Host "         GPU model ready: $modelId ($($Plan.ContextSize) tokens of context)."
