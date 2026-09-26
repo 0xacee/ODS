@@ -11386,6 +11386,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         """Expose only a verified, nonsecret external runtime identity."""
         if not check_auth(self):
             return
+        include_stats = parse_qs(urlparse(self.path).query).get("stats") == ["1"]
         try:
             env = load_env(INSTALL_DIR / ".env")
             if not _external_lemonade_runtime(env):
@@ -11394,7 +11395,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                     no_store=True,
                 )
                 return
-            observed = _read_external_lemonade_observation(env)
+            observed = (_read_external_lemonade_observation(env, include_stats=True)
+                        if include_stats else _read_external_lemonade_observation(env))
         except (OSError, ValueError, RuntimeError, urllib_error.URLError, subprocess.TimeoutExpired):
             # Neither the configured origin nor upstream response is safe to
             # reflect into an authenticated browser-visible error.
@@ -11403,12 +11405,15 @@ class AgentHandler(BaseHTTPRequestHandler):
                 no_store=True,
             )
             return
-        json_response(self, 200, {
+        payload = {
             "status": "verified",
             "modelId": observed["modelId"],
             "contextLength": observed["contextLength"],
             "backend": observed["backend"],
-        }, no_store=True)
+        }
+        if include_stats:
+            payload["stats"] = observed["stats"]
+        json_response(self, 200, payload, no_store=True)
 
     def _handle_external_model_adopt(self):
         """Converge ODS consumers on the already loaded external model."""
@@ -14468,10 +14473,12 @@ def _verified_external_lemonade_observation(health: object, catalog: object) -> 
     }
 
 
-def _read_external_lemonade_observation(env: dict) -> dict:
-    """Read bounded health/catalog/health observations from one fixed origin."""
+def _read_external_lemonade_observation(env: dict, *, include_stats: bool = False) -> dict:
+    """Read a stable runtime identity, optionally with its last completion stats."""
     if not _external_lemonade_runtime(env):
         raise ValueError("External Lemonade is not configured")
+    if include_stats and not _lemonade_uses_container_transport(env):
+        raise ValueError("External Lemonade telemetry requires the owned container transport")
     base_url = _lemonade_runtime_base_url(env)
     if not base_url:
         raise ValueError("External Lemonade origin is invalid")
@@ -14479,7 +14486,11 @@ def _read_external_lemonade_observation(env: dict) -> dict:
         urllib_request.ProxyHandler({}), _BackendHealthNoRedirect()
     )
     payloads = []
-    for path in ("/api/v1/health", "/api/v1/models", "/api/v1/health"):
+    paths = ["/api/v1/health", "/api/v1/models"]
+    if include_stats:
+        paths.append("/api/v1/stats")
+    paths.append("/api/v1/health")
+    for path in paths:
         if _lemonade_uses_container_transport(env):
             payloads.append(json.loads(_lemonade_container_body(env, path.removeprefix("/api/v1"))))
             continue
@@ -14492,8 +14503,27 @@ def _read_external_lemonade_observation(env: dict) -> dict:
             raise ValueError("External Lemonade response is too large")
         payloads.append(json.loads(raw.decode("utf-8")))
     observed = _verified_external_lemonade_observation(payloads[0], payloads[1])
-    if _verified_external_lemonade_observation(payloads[2], payloads[1]) != observed:
+    if _verified_external_lemonade_observation(payloads[-1], payloads[1]) != observed:
         raise ValueError("External Lemonade identity changed during observation")
+    if include_stats:
+        # Lemonade stats belong to its most recently accessed WrappedServer,
+        # as does health.model_loaded. Other loaded runtimes could race this
+        # sample; do not attribute their output to the observed LLM.
+        if any(len(health["all_models_loaded"]) != 1 for health in (payloads[0], payloads[-1])):
+            raise ValueError("External Lemonade telemetry model is ambiguous")
+        raw_stats = payloads[2]
+        if not isinstance(raw_stats, dict) or "error" in raw_stats:
+            raise ValueError("External Lemonade telemetry is unavailable")
+        stats = {}
+        for key in ("time_to_first_token", "tokens_per_second", "input_tokens", "output_tokens", "prompt_tokens"):
+            value = raw_stats.get(key)
+            valid = type(value) in (int, float) and 0 <= value <= 2**53 - 1 and math.isfinite(value)
+            if valid and key == "tokens_per_second":
+                valid = 0 < value <= 10_000
+            elif valid and key.endswith("_tokens"):
+                valid = int(value) == value
+            stats[key] = value if valid else None
+        observed["stats"] = stats
     return observed
 
 

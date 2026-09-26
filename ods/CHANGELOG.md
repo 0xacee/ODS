@@ -109,9 +109,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   process descendants, including cached llama.cpp workers. Other Lemonade
   instances are preserved. Both the former direct task and the Lemonade
   10.7 task launcher migrate to the durable launcher.
+- Failed Windows AMD startup cleans up the verified process tree, including
+  workers that outlive their parent. Separate process ownership records allow
+  an interrupted cleanup to resume without treating a failed launch as ready.
 - Portal reads the loaded Windows/WSL Lemonade model from the Linux host
   agent's verified external-model observation instead of calling the
   Windows-only model-status endpoint on that Linux agent.
+- The Windows/WSL Dashboard reads Lemonade's measured last-completion speed
+  through the authenticated host agent and owned model-router transport.
+  Repeated samples remain the last measurement rather than becoming live
+  throughput or accumulating into an invented token total.
 - Models describes externally managed Lemonade model changes without
   incorrectly reporting that the local runtime is unavailable. Adoption
   remains available; model activation still follows the runtime's capabilities.

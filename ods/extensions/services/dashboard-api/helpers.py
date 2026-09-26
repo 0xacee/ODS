@@ -600,7 +600,13 @@ async def _fetch_llama_metrics(model_hint: Optional[str] = None, counter_id: Opt
     try:
         if LLM_BACKEND == "lemonade":
             if read_live_env_value("AMD_INFERENCE_LOCATION").lower() == "host":
-                host_status = await request_agent_json("GET", "/v1/llm/status", timeout=6)
+                if read_live_env_value("LEMONADE_HOST_TRANSPORT") == "model-router":
+                    host_status = await request_agent_json("GET", "/v1/model/external-observation?stats=1", timeout=6)
+                    if (not isinstance(host_status, dict) or host_status.get("status") != "verified"
+                            or host_status.get("modelId") != model_hint):
+                        raise ValueError("Lemonade telemetry does not match the observed model")
+                else:
+                    host_status = await request_agent_json("GET", "/v1/llm/status", timeout=6)
                 stats = host_status.get("stats")
             else:
                 if "llama-server" not in SERVICES:

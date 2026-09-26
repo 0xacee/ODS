@@ -1,5 +1,6 @@
 """Prove a Windows Lemonade route without confusing WSL's localhost with it."""
 import importlib.util
+import copy
 import json
 from pathlib import Path
 import subprocess
@@ -138,6 +139,78 @@ class WindowsLemonadeProof(unittest.TestCase):
                            ("LEMONADE_CONTAINER_BASE_URL", "http://host.docker.internal:18080")):
             with self.subTest(key=key), patch.object(agent, "load_env", return_value={**ENV, key: value}):
                 self.assertFalse(agent._initial_switchboard_route_env_matches(ENV))
+
+
+class WindowsLemonadeTelemetry(unittest.TestCase):
+    def setUp(self):
+        self.health = {
+            "status": "ok", "model_loaded": MODEL,
+            "all_models_loaded": [{
+                "model_name": MODEL, "checkpoint": "C:/private/models/model.gguf", "type": "llm",
+                "recipe": "llamacpp", "recipe_options": {"ctx_size": 65536, "llamacpp_backend": "vulkan"},
+            }],
+        }
+        self.catalog = {"data": [{"id": MODEL, "checkpoint": "C:/private/models/model.gguf",
+                                   "downloaded": True, "recipe": "llamacpp"}]}
+        self.stats = {"tokens_per_second": 24.577333938267465, "output_tokens": 163,
+                      "input_tokens": 1196, "prompt_tokens": 18188, "time_to_first_token": 1.992152,
+                      "prompt": "private prompt", "decode_token_times": [0.01]}
+
+    def observe(self, stats=None, final_health=None):
+        replies = [self.health, self.catalog, self.stats if stats is None else stats,
+                   self.health if final_health is None else final_health]
+        with patch.object(agent, "_lemonade_container_body", side_effect=[json.dumps(row) for row in replies]) as request:
+            result = agent._read_external_lemonade_observation(ENV, include_stats=True)
+        self.assertEqual([call.args[1] for call in request.call_args_list], ["/health", "/models", "/stats", "/health"])
+        return result
+
+    def test_real_stats_are_bound_to_the_stable_model_without_generating(self):
+        result = self.observe()
+        self.assertEqual(result["modelId"], MODEL)
+        self.assertEqual(result["contextLength"], 65536)
+        self.assertEqual(result["stats"], {key: self.stats[key] for key in (
+            "tokens_per_second", "output_tokens", "input_tokens", "prompt_tokens", "time_to_first_token")})
+
+    def test_stats_failure_is_unavailable_without_affecting_plain_observation(self):
+        for error in (OSError("HTTP 404"), subprocess.TimeoutExpired("docker", 5)):
+            with self.subTest(error=error), patch.object(agent, "_lemonade_container_body", side_effect=[
+                    json.dumps(self.health), json.dumps(self.catalog), error]):
+                with self.assertRaises(type(error)):
+                    agent._read_external_lemonade_observation(ENV, include_stats=True)
+        with patch.object(agent, "_lemonade_container_body", side_effect=[
+                json.dumps(self.health), json.dumps(self.catalog), json.dumps(self.health)]) as request:
+            self.assertNotIn("stats", agent._read_external_lemonade_observation(ENV))
+            self.assertEqual([call.args[1] for call in request.call_args_list], ["/health", "/models", "/health"])
+
+    def test_model_context_changes_and_other_loaded_runtimes_reject_stats(self):
+        changed = copy.deepcopy(self.health)
+        changed["all_models_loaded"][0]["recipe_options"]["ctx_size"] = 32768
+        other = copy.deepcopy(self.health)
+        other["all_models_loaded"].append({"type": "tts", "model_name": "audio"})
+        for last in (changed, other, {**self.health, "model_loaded": "other-model"}):
+            with self.subTest(last=last), self.assertRaises(ValueError):
+                self.observe(final_health=last)
+
+    def test_invalid_numbers_and_private_fields_never_escape(self):
+        for invalid in (True, "24.5", -1, float("nan"), float("inf"), 10**400):
+            with self.subTest(invalid=str(invalid)):
+                result = self.observe(stats={**dict.fromkeys(self.stats, invalid), "prompt": "private prompt"})
+                self.assertTrue(all(value is None for value in result["stats"].values()))
+                self.assertNotIn("prompt", result["stats"])
+        result = self.observe(stats={"tokens_per_second": 0, "output_tokens": 0, "input_tokens": 1.5})
+        self.assertIsNone(result["stats"]["tokens_per_second"])
+        self.assertEqual(result["stats"]["output_tokens"], 0)
+        self.assertIsNone(result["stats"]["input_tokens"])
+
+    def test_nonobject_and_error_payloads_do_not_create_measurements(self):
+        for invalid in ([], "stats", {"error": "unsupported", "tokens_per_second": 24}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.observe(stats=invalid)
+
+    def test_stats_do_not_expand_direct_external_runtime_access(self):
+        with patch.object(agent, "_lemonade_container_body") as request, self.assertRaises(ValueError):
+            agent._read_external_lemonade_observation({**ENV, "LEMONADE_HOST_TRANSPORT": "direct"}, include_stats=True)
+        request.assert_not_called()
 
 
 if __name__ == "__main__":

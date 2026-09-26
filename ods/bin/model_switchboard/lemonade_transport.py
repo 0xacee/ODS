@@ -1,4 +1,4 @@
-"""Prove host Lemonade through this installation's existing router container."""
+"""Observe host Lemonade through this installation's existing router container."""
 
 from __future__ import annotations
 
@@ -141,8 +141,8 @@ def request(install_dir: Path, api_base: str, path: str,
             or any(ord(char) <= 32 or ord(char) == 127 for char in api_base)):
         raise ValueError("Lemonade API base must be a credential-free HTTP(S) /api/v1 URL")
     _ = parsed.port
-    if path not in {"/health", "/models", "/chat/completions"}:
-        raise ValueError("Unsupported Lemonade proof route")
+    if path not in {"/health", "/models", "/stats", "/chat/completions"}:
+        raise ValueError("Unsupported Lemonade observation route")
     if (path == "/chat/completions") != isinstance(payload, dict):
         raise ValueError("Only a chat-completion proof accepts a JSON payload")
     if payload is not None and not isinstance(payload, dict):

@@ -33,12 +33,12 @@ class OwnershipTests(unittest.TestCase):
     def process(self, stdout=b"", code=0, stderr=b""):
         return subprocess.CompletedProcess([], code, stdout, stderr)
 
-    def run_request(self, info=None, candidates=None, response=b'{"status":"ok"}', **kwargs):
+    def run_request(self, info=None, candidates=None, response=b'{"status":"ok"}', path="/health", **kwargs):
         results = [self.process(candidates if candidates is not None else (CONTAINER_ID + "\n").encode()),
                    self.process(json.dumps(self.info if info is None else info).encode()),
                    self.process(response)]
         with patch.object(transport.subprocess, "run", side_effect=results) as run:
-            result = transport.request(self.root, API_BASE, "/health", **kwargs)
+            result = transport.request(self.root, API_BASE, path, **kwargs)
         return result, run.call_args_list
 
     def test_owned_container_is_pinned_and_secrets_only_use_stdin(self):
@@ -50,6 +50,13 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(json.loads(calls[2].kwargs["input"])["api_key"], "private-test-key")
         self.assertEqual(calls[2].kwargs["timeout"], 15)
         self.assertNotIn(".Config.Env", calls[1].args[0][5])
+
+    def test_stats_use_the_owned_container_and_no_post_payload(self):
+        result, calls = self.run_request(path="/stats", response=b'{"tokens_per_second":24.5}')
+        self.assertEqual(json.loads(result), {"tokens_per_second": 24.5})
+        message = json.loads(calls[2].kwargs["input"])
+        self.assertEqual(message["path"], "/stats")
+        self.assertIsNone(message["payload"])
 
     def test_missing_ambiguous_or_short_container_id_stops_before_inspection(self):
         for candidates in (b"", b"abc\n", ((CONTAINER_ID + "\n") * 2).encode()):
@@ -92,6 +99,7 @@ class OwnershipTests(unittest.TestCase):
                     ("http://host/v1", "/health", {}),
                     (API_BASE, "//other/health", {}),
                     (API_BASE, "/load", {"payload": {"model_name": "other"}}),
+                    (API_BASE, "/stats", {"payload": {}}),
                     (API_BASE, "/health", {"payload": {}}),
                     (API_BASE, "/chat/completions", {}),
                     (API_BASE, "/health", {"api_key": "key\r\ninjected: yes"}),
@@ -195,6 +203,11 @@ class WorkerTests(unittest.TestCase):
         result = self.worker("/chat/completions", payload)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.server.requests[-1], ("/api/v1/chat/completions", "Bearer private-test-key", payload))
+
+    def test_stats_are_read_only_through_the_same_bounded_worker(self):
+        result = self.worker("/stats")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.server.requests, [("/api/v1/stats", "Bearer private-test-key", None)])
 
     def test_changed_missing_duplicate_endpoint_rejects_before_http(self):
         for rows in ([], [self.endpoint, self.endpoint],
