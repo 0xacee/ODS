@@ -80,6 +80,7 @@ test: ## Run unit and contract tests
 	@echo "=== AMD/Lemonade contracts ==="
 	@bash tests/contracts/test-amd-lemonade-contracts.sh
 	@bash tests/test-lemonade-host-transport.sh
+	@bash tests/test-wsl-agent-start.sh
 	@python3 tests/test-lemonade-container-transport.py
 	@python3 tests/test-wsl-lemonade-proof.py
 	@python3 tests/test-wsl-lemonade-control.py

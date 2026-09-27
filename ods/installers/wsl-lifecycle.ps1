@@ -359,15 +359,21 @@ function ConvertTo-ODSWindowsArgument([string]$Value) {
     $quoted.ToString()
 }
 
+function Assert-ODSWslRootArguments([string[]]$Arguments) {
+    $allowed=@('pixel-ingress.service','openclaw-gateway.service','pixel-extension-manager.service','pixel-artifact-promoter.service','pixel-workspace-preview.service','pixel-preview-inspection.service')
+    $native=$Arguments[1] -cin @('start','stop') -and $Arguments[2] -cin $allowed
+    $agentRestart=$Arguments[1] -ceq 'restart' -and $Arguments[2] -ceq 'ods-host-agent.service'
+    if ($Arguments.Count -ne 3 -or $Arguments[0] -cne '/usr/bin/systemctl' -or -not ($native -or $agentRestart)) {
+        throw 'Only exact native systemctl lifecycle commands may run as WSL root'
+    }
+}
+
 function Invoke-ODSWslBoundedCommand($Identity,[string[]]$Arguments,[int]$Seconds=15,[switch]$AsRoot,[switch]$ListRunning,[switch]$Mutation) {
     Assert-ODSWslStartupStillWanted
     if ($ListRunning -and ($AsRoot -or $Arguments.Count -or $Mutation)) { throw 'Distribution listing accepts no executable arguments' }
     $target = @('--distribution',$Identity.distro)
     if ($AsRoot) {
-        $allowed=@('pixel-ingress.service','openclaw-gateway.service','pixel-extension-manager.service','pixel-artifact-promoter.service','pixel-workspace-preview.service','pixel-preview-inspection.service')
-        if ($Arguments.Count -ne 3 -or $Arguments[0] -cne '/usr/bin/systemctl' -or $Arguments[1] -cnotin @('start','stop') -or $Arguments[2] -cnotin $allowed) {
-            throw 'Only exact native systemctl lifecycle commands may run as WSL root'
-        }
+        Assert-ODSWslRootArguments $Arguments
         $target += @('--user','root')
     }
     # A Linux acknowledgement clears a completed, non-timeout operation.
@@ -658,12 +664,18 @@ function New-ODSWslInstallerCommand([string]$RepoRoot,[string[]]$Arguments,[stri
 
 function Assert-ODSWslStackPlan($Identity,[string]$Action,$Plan) {
     $required=@('schemaVersion','action','installRoot','ownerUid','nativeUnits')
+    $allowedNames=$required+@('hostAgentRestart')
     $names=@($Plan.PSObject.Properties.Name)
-    if ($names.Count -ne $required.Count -or @($names | Where-Object { $_ -notin $required }).Count -gt 0 -or
+    if ($names.Count -notin @(5,6) -or @($names | Where-Object { $_ -cnotin $allowedNames }).Count -gt 0 -or
+        @($required | Where-Object { $_ -cnotin $names }).Count -gt 0 -or
         $Plan.schemaVersion -ne 1 -or ($Plan.schemaVersion -isnot [int] -and $Plan.schemaVersion -isnot [long]) -or
         $Plan.action -isnot [string] -or $Plan.action -cne $Action -or $Plan.installRoot -isnot [string] -or $Plan.installRoot -cne $Identity.installRoot -or
         ($Plan.ownerUid -isnot [int] -and $Plan.ownerUid -isnot [long]) -or $Plan.ownerUid -le 0 -or $Plan.ownerUid -gt 4294967294 -or
         $Plan.nativeUnits -isnot [Array]) { throw 'Invalid owner-verified WSL lifecycle plan' }
+    if ($names -ccontains 'hostAgentRestart' -and
+        ($Plan.hostAgentRestart -isnot [bool] -or ($Action -cne 'start' -and $Plan.hostAgentRestart))) {
+        throw 'Invalid owner-verified host agent restart request'
+    }
     $allowed=@('pixel-ingress.service','openclaw-gateway.service','pixel-extension-manager.service','pixel-artifact-promoter.service','pixel-workspace-preview.service','pixel-preview-inspection.service')
     if ($Plan.nativeUnits.Count -ne 0) {
         # The owner-side verifier accepts only a complete legacy installation
@@ -678,9 +690,7 @@ function Assert-ODSWslStackPlan($Identity,[string]$Action,$Plan) {
 function Invoke-ODSWslCommand($Identity,[string[]]$Arguments,[switch]$AsRoot) {
     $target=@('--distribution',$Identity.distro)
     if ($AsRoot) {
-        $allowed=@('pixel-ingress.service','openclaw-gateway.service','pixel-extension-manager.service','pixel-artifact-promoter.service','pixel-workspace-preview.service','pixel-preview-inspection.service')
-        if ($Arguments.Count -ne 3 -or $Arguments[0] -cne '/usr/bin/systemctl' -or
-            $Arguments[1] -cnotin @('start','stop') -or $Arguments[2] -cnotin $allowed) { throw 'Only exact native systemctl lifecycle commands may run as WSL root' }
+        Assert-ODSWslRootArguments $Arguments
         $target+=@('--user','root')
     }
     if ($script:ODSWslStartupDeadline) {
@@ -696,12 +706,13 @@ function Invoke-ODSWslCommand($Identity,[string[]]$Arguments,[switch]$AsRoot) {
 
 function Invoke-ODSWslNativeUnit($Identity,[string]$Action,[string]$Unit) {
     $allowed=@('pixel-ingress.service','openclaw-gateway.service','pixel-extension-manager.service','pixel-artifact-promoter.service','pixel-workspace-preview.service','pixel-preview-inspection.service')
-    if ($Action -notin @('start','stop') -or $Unit -cnotin $allowed) { throw 'Invalid fixed native lifecycle command' }
+    $agentRestart=$Action -ceq 'restart' -and $Unit -ceq 'ods-host-agent.service'
+    if (-not $agentRestart -and ($Action -cnotin @('start','stop') -or $Unit -cnotin $allowed)) { throw 'Invalid fixed native lifecycle command' }
     # The signed-in Windows distro owner already has WSL --user root authority.
     # Execute only this fixed system executable/argv; never owner Python/bash.
     Invoke-ODSWslCommand $Identity @('/usr/bin/systemctl',$Action,$Unit) -AsRoot
     $state=(Invoke-ODSWslCommand $Identity @('/usr/bin/systemctl','show',$Unit,'--property=ActiveState','--value') | Out-String).Trim()
-    if (($Action -eq 'start' -and $state -ne 'active') -or
+    if (($Action -in @('start','restart') -and $state -ne 'active') -or
         ($Action -eq 'stop' -and $state -notin @('inactive','failed'))) { throw "Native ODS unit did not reach the requested state: $Unit" }
 }
 
@@ -719,6 +730,7 @@ function Invoke-ODSWslStack($Identity,[string]$Action) {
     # Compose always executes as the ordinary Linux owner, never as root.
     Invoke-ODSWslCommand $Identity @('python3',$program,"compose-$Action",$Identity.installRoot)
     if ($Action -eq 'start') {
+        if ($plan.hostAgentRestart) { Invoke-ODSWslNativeUnit $Identity 'restart' 'ods-host-agent.service' }
         [Array]::Reverse($units)
         foreach ($unit in $units) { Invoke-ODSWslNativeUnit $Identity 'start' $unit }
     }

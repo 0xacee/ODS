@@ -205,15 +205,46 @@ try {
     Reject { Assert-ODSWslStackPlan $a stop $bad } 'reject coerced boolean owner UID'
     $bad=$script:plan|ConvertTo-Json -Depth 5|ConvertFrom-Json;$bad|Add-Member executable '/bin/bash'
     Reject { Assert-ODSWslStackPlan $a stop $bad } 'reject extra executable metadata'
+    $managedPlan=$complete|ConvertTo-Json -Depth 5|ConvertFrom-Json
+    $managedPlan|Add-Member hostAgentRestart $false
+    Assert-ODSWslStackPlan $a stop $managedPlan
+    Check $true 'optional host agent restart false remains valid on stop'
+    $managedPlan.action='start';$managedPlan.hostAgentRestart=$true
+    Assert-ODSWslStackPlan $a start $managedPlan
+    Check $true 'strict boolean host agent restart is accepted only on start'
+    foreach($invalid in @('true',1,$null)){
+        $bad=$managedPlan|ConvertTo-Json -Depth 5|ConvertFrom-Json;$bad.hostAgentRestart=$invalid
+        Reject {Assert-ODSWslStackPlan $a start $bad} 'host agent restart rejects non-boolean values'
+    }
+    $bad=$managedPlan|ConvertTo-Json -Depth 5|ConvertFrom-Json;$bad.action='stop'
+    Reject {Assert-ODSWslStackPlan $a stop $bad} 'stop cannot request a host agent restart'
+    Assert-ODSWslRootArguments @('/usr/bin/systemctl','restart','ods-host-agent.service')
+    Check $true 'root allowlist accepts only the fixed host agent restart tuple'
+    foreach($rootArguments in @(
+        @('/usr/bin/systemctl','start','ods-host-agent.service'),
+        @('/usr/bin/systemctl','stop','ods-host-agent.service'),
+        @('/usr/bin/systemctl','restart','pixel-ingress.service'),
+        @('/usr/bin/systemctl','restart','docker.service'),
+        @('/usr/bin/systemctl','Restart','ods-host-agent.service'),
+        @('/usr/bin/systemctl','restart','ods-host-agent.service; id'),
+        @('/usr/bin/systemctl','restart','ods-host-agent.service','docker.service'),
+        @('python3','restart','ods-host-agent.service')
+    )){
+        Reject {Assert-ODSWslRootArguments $rootArguments} ('root rejects non-allowlisted tuple: '+($rootArguments -join ' '))
+    }
     Reject { Invoke-ODSWslCommand $a @('python3','owner.py') -AsRoot } 'root transport rejects owner Python before execution'
     Reject { Invoke-ODSWslCommand $a @('/bin/bash','-c','anything') -AsRoot } 'root transport rejects shell execution'
     Reject { Invoke-ODSWslCommand $a @('/usr/bin/systemctl','stop','docker.service') -AsRoot } 'root transport rejects unrelated services'
     Reject { Invoke-ODSWslCommand $a @('/usr/bin/systemctl','stop','pixel-ingress.service','docker.service') -AsRoot } 'root transport rejects extra argv'
     $script:transport=@();$script:unitState='inactive';$script:nativeFail=$false
+    $script:agentState='active';$script:agentFail=$false;$script:composeFail=$false
     function Invoke-ODSWslCommand { param($Identity,[string[]]$Arguments,[switch]$AsRoot)
         $script:transport+=[pscustomobject]@{distro=$Identity.distro;arguments=$Arguments;asRoot=[bool]$AsRoot}
         if($AsRoot -and $script:nativeFail){throw 'native stop failed'}
+        if($AsRoot -and $Arguments[2] -ceq 'ods-host-agent.service' -and $script:agentFail){throw 'host agent restart failed'}
         if($Arguments[0] -eq 'python3' -and $Arguments[2] -like 'plan-*'){return ($script:plan|ConvertTo-Json -Depth 5)}
+        if($Arguments[0] -eq 'python3' -and $Arguments[2] -eq 'compose-start' -and $script:composeFail){throw 'owner Compose failed'}
+        if($Arguments[0] -eq '/usr/bin/systemctl' -and $Arguments[1] -eq 'show' -and $Arguments[2] -ceq 'ods-host-agent.service'){return $script:agentState}
         if($Arguments[0] -eq '/usr/bin/systemctl' -and $Arguments[1] -eq 'show'){return $script:unitState}
     }
     $null=Invoke-ODSWslStack $a stop
@@ -237,6 +268,30 @@ try {
     $script:transport=@();$script:plan.action='stop';$script:unitState='inactive';$script:nativeFail=$true
     Reject { Invoke-ODSWslStack $a stop } 'native stop failure is propagated'
     Check (@($script:transport|Where-Object {$_.arguments[2] -eq 'compose-stop'}).Count -eq 0) 'native stop failure prevents Compose stop'
+
+    $script:nativeFail=$false;$script:unitState='active';$script:plan=$managedPlan;$script:transport=@()
+    $null=Invoke-ODSWslStack $a start
+    Check ($script:transport[1].arguments[2] -ceq 'compose-start' -and -not $script:transport[1].asRoot -and
+        ($script:transport[2].arguments -join ' ') -ceq '/usr/bin/systemctl restart ods-host-agent.service' -and $script:transport[2].asRoot) 'owned Compose completes before the fixed root host agent restart'
+    Check (($script:transport[3].arguments -join ' ') -ceq '/usr/bin/systemctl show ods-host-agent.service --property=ActiveState --value' -and
+        -not $script:transport[3].asRoot -and $script:transport[4].arguments[1] -ceq 'start') 'host agent active state is confirmed as owner before any Pixel unit starts'
+    foreach($failure in @('compose','restart','inactive')){
+        $script:transport=@();$script:composeFail=$failure -eq 'compose';$script:agentFail=$failure -eq 'restart'
+        $script:agentState=if($failure -eq 'inactive'){'inactive'}else{'active'}
+        Reject {Invoke-ODSWslStack $a start} "$failure failure propagates from managed startup"
+        Check (@($script:transport|Where-Object {$_.asRoot -and $_.arguments[1] -ceq 'start'}).Count -eq 0) "$failure failure prevents Pixel units starting"
+        if($failure -eq 'compose'){Check (@($script:transport|Where-Object asRoot).Count -eq 0) 'failed Compose performs no root mutation'}
+    }
+    $script:composeFail=$false;$script:agentFail=$false;$script:agentState='active'
+    $script:plan.hostAgentRestart=$false;$script:transport=@()
+    $null=Invoke-ODSWslStack $a start
+    Check (@($script:transport|Where-Object {$_.arguments[2] -ceq 'ods-host-agent.service'}).Count -eq 0) 'false host agent flag preserves the existing start path'
+    $script:plan.action='stop';$script:unitState='inactive';$script:transport=@()
+    $null=Invoke-ODSWslStack $a stop
+    Check (@($script:transport|Where-Object {$_.arguments[2] -ceq 'ods-host-agent.service'}).Count -eq 0) 'stop never restarts or stops the host agent'
+    $script:plan.hostAgentRestart=$true;$script:transport=@()
+    Reject {Invoke-ODSWslStack $a stop} 'invalid stop restart flag fails before dispatch'
+    Check ($script:transport.Count -eq 1 -and -not $script:transport[0].asRoot) 'invalid restart plan dispatches no Compose or root command'
 
     $script:events=@();$script:stopFail=$false
     function Get-ODSWslIdentity { param($Distro,$InstallRoot); $a }
