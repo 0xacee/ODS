@@ -450,6 +450,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # any link where a regular file or directory is required.
     for _installed_code_root in \
         "$INSTALL_DIR/bin" \
+        "$INSTALL_DIR/lib" \
         "$INSTALL_DIR/scripts" \
         "$INSTALL_DIR/config" \
         "$INSTALL_DIR/extensions"
@@ -464,6 +465,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         \( -name '*.sh' -o -name 'ods-cli' \) \
         \( -perm -020 -o -perm -002 \) -exec chmod go-w {} + \
         || error "Could not secure installed root executables"
+    [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] || error "Unsafe installed root"
+    chmod go-w "$INSTALL_DIR" || error "Could not secure installed root"
     unset _installed_code_root
 
     # Windows-mounted WSL checkouts commonly present every copied file as
