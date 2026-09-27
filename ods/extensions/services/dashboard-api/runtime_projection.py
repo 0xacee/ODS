@@ -52,5 +52,3 @@ def active_runtime_projection(status: object) -> dict[str, object] | None:
     ):
         return None
     return {key: runtime[key] for key in expected | {"routeFingerprint"} if key in runtime}
-
-
