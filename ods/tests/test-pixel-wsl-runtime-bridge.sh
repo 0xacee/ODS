@@ -17,6 +17,9 @@ assert 'bridge /run/ods-pixel-preview "$base/preview"' in bridge
 assert 'mountpoint -q -- "$target"' in bridge
 assert '[[ "$source_inode" == "$target_inode" ]]' in bridge
 assert '[[ "$(findmnt -n -o PROPAGATION -T "$target")" == shared ]]' in bridge
+assert 'if ! mountpoint -q -- "$target"; then\n            install -d -o root -g root -m 0755 -- "$target"' in bridge
+ingress = (Path(sys.argv[1]).parent / 'pixel-ingress.service').read_text()
+assert 'RuntimeDirectoryPreserve=yes' in ingress
 assert 'ConditionVirtualization=wsl' in unit
 assert 'BindsTo=pixel-ingress.service pixel-workspace-preview.service' in unit
 assert 'ExecStart=/usr/local/libexec/ods-pixel-wsl-runtime-bridge ensure' in unit

@@ -33,7 +33,15 @@ bridge() {
 base=/mnt/wsl/ods-portal-runtime
 [[ ! -L "$base" ]] || exit 1
 if [[ "$action" == ensure ]]; then
-    install -d -o root -g root -m 0755 -- "$base" "$base/ingress" "$base/preview"
+    install -d -o root -g root -m 0755 -- "$base"
+    for target in "$base/ingress" "$base/preview"; do
+        [[ ! -L "$target" ]] || exit 1
+        # A mounted target is the owner's runtime directory. Do not chown or
+        # chmod through the projection when ensure is called again.
+        if ! mountpoint -q -- "$target"; then
+            install -d -o root -g root -m 0755 -- "$target"
+        fi
+    done
 fi
 bridge /run/ods-pixel "$base/ingress"
 bridge /run/ods-pixel-preview "$base/preview"
