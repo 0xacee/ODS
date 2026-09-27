@@ -347,6 +347,9 @@ function Complete-ODSWslCommand($Identity,[string]$Token,[string]$Output,[int]$E
 }
 
 function ConvertTo-ODSWindowsArgument([string]$Value) {
+    # WSL parses its option prefix itself and can retain redundant quotes on
+    # simple tokens ("--list" becomes a Linux command). Quote only when needed.
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
     # CommandLineToArgvW quoting, including quotes and trailing backslashes.
     $quoted = [Text.StringBuilder]::new(); $null = $quoted.Append('"'); $slashes = 0
     foreach ($character in $Value.ToCharArray()) {

@@ -215,6 +215,11 @@ try {
     $disabled=Invoke-ODSWslLifecycle disable-startup $identity.distro $identity.installRoot
     Check ($disabled.state -eq 'disabled' -and $script:events.Count -eq 0) 'missing startup task remains idempotently disabled without registration'
     Check (-not (Get-ODSWslStartupArguments $identity).Contains($PSScriptRoot)) 'startup action is independent of temporary installer sources'
+    $listing=@('--list','--running','--quiet') | ForEach-Object { ConvertTo-ODSWindowsArgument $_ }
+    Check (($listing -join ' ') -ceq '--list --running --quiet') 'WSL option prefix contains no redundant quotes'
+    Check ((ConvertTo-ODSWindowsArgument 'Ubuntu-24.04') -ceq 'Ubuntu-24.04') 'simple distribution names remain unquoted'
+    Check ((ConvertTo-ODSWindowsArgument '') -ceq '""') 'empty executable arguments remain explicit'
+    Check ((ConvertTo-ODSWindowsArgument '/home/owner/ods') -ceq '/home/owner/ods') 'simple Linux paths remain unquoted'
     Check ((ConvertTo-ODSWindowsArgument 'C:\a b\') -ceq '"C:\a b\\"') 'Windows argv quoting preserves trailing separators'
     Check ((ConvertTo-ODSWindowsArgument 'a"b') -ceq '"a\"b"') 'Windows argv quoting preserves embedded quotes'
     Write-Host "Passed $count startup contracts; no WSL Docker Scheduler or service action ran."
