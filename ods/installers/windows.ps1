@@ -207,6 +207,9 @@ $wslCommand = New-ODSWslInstallerCommand $repoRootWsl $PassthroughArgs $lifetime
 # Help and dry-run retain their preview semantics: no persistent Windows task.
 $lifetimeRequired = -not (@($PassthroughArgs | Where-Object { $_ -cin @('--dry-run','--help','-h') }).Count -gt 0)
 if ($lifetimeRequired) {
+    # Secure an explicit state base before the per-instance initializer can
+    # create it as an ordinary inherited parent directory.
+    if ($StateRoot) { Initialize-ODSPrivateDirectory $script:ODSWslStateRoot }
     Initialize-ODSPrivateDirectory $lifetimeIdentity.directory
     $lifetimeLock = Open-ODSPrivateLock (Join-Path $lifetimeIdentity.directory 'command.lock')
     try { $null = Start-ODSWslLifetime $lifetimeIdentity } finally { $lifetimeLock.Dispose() }
