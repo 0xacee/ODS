@@ -10,6 +10,8 @@ param(
     [switch]$SkipDockerCheck,
     [string]$Distro = "",
     [string]$InstallRoot = "",
+    [string]$DockerDesktopPath = "",
+    [switch]$OpenPortal,
     [string]$StateRoot = "",
     [string]$ReportPath = "$env:TEMP\\ods-windows-preflight.json",
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -200,6 +202,7 @@ if ($requestedInstallRoot) {
     $linuxInstallRoot = (& wsl.exe --distribution $Distro --exec bash -lc $rootCommand | Select-Object -Last 1).Trim()
     if ($LASTEXITCODE -ne 0) { throw "Could not resolve the Linux installation directory" }
 }
+$Distro = Resolve-ODSWslRegisteredDistro $Distro
 $lifetimeIdentity = Get-ODSWslIdentity $Distro $linuxInstallRoot
 # Pin the resolver result into the actual installer invocation, even when a
 # later login shell would choose different environment defaults.
@@ -228,10 +231,33 @@ $installerExitCode = $LASTEXITCODE
 if ($installerExitCode -eq 0 -and $lifetimeRequired -and '--pixel' -cin $PassthroughArgs) {
     $verifyPath = Convert-ToWslPath (Join-Path $PSScriptRoot 'verify-wsl-portal.sh')
     $verifyCommand = 'bash ' + (ConvertTo-ODSBashArgument $verifyPath) + ' ' + (ConvertTo-ODSBashArgument $linuxInstallRoot)
-    & wsl.exe --distribution $Distro --exec bash -lc $verifyCommand
+    # Capture stdout only (stderr stays on the console) to read the Portal URL.
+    $verifyOutput = @(& wsl.exe --distribution $Distro --exec bash -lc $verifyCommand)
     $installerExitCode = $LASTEXITCODE
+    $verifyOutput | Where-Object { $_ -notmatch '^ODS_PORTAL_URL=' } | ForEach-Object { Write-Host $_ }
     if ($installerExitCode -ne 0) {
         Write-Warning 'Pixel/Portal verification failed. ODS is not ready; inspect the reported service or endpoint and rerun the same install command. No Hermes fallback was started.'
+    } else {
+        # Only a verified installation receives automatic sign-in recovery.
+        # A prior explicit stop preference is preserved across installer reruns.
+        if ($DockerDesktopPath -or (Test-Path -LiteralPath (Join-Path $lifetimeIdentity.directory 'startup-config.json'))) {
+            Enable-ODSWslStartup $lifetimeIdentity $DockerDesktopPath
+            Write-Host "Durable lifecycle: powershell -File `"$(Join-Path $lifetimeIdentity.directory 'startup.ps1')`" -Action status -Distro `"$Distro`" -InstallRoot `"$linuxInstallRoot`"$stateHint"
+        } else {
+            Write-Warning 'Use the Windows Portal setup entry point to enable verified sign-in recovery.'
+        }
+    }
+    if ($installerExitCode -eq 0 -and $OpenPortal) {
+        $portalUrl = @($verifyOutput | ForEach-Object { if ($_ -match '^ODS_PORTAL_URL=(http://localhost:[0-9]{1,5}/pixel)$') { $Matches[1] } } | Select-Object -Last 1)
+        if ($portalUrl.Count -eq 1) {
+            $desktopFolder = [Environment]::GetFolderPath('Desktop')
+            if ($desktopFolder) {
+                Set-Content -LiteralPath (Join-Path $desktopFolder 'ODS Portal.url') -Value @('[InternetShortcut]', "URL=$($portalUrl[0])") -Encoding ASCII
+                Write-Host "Created the desktop shortcut 'ODS Portal'."
+            }
+            Write-Host "Opening Portal: $($portalUrl[0])"
+            Start-Process $portalUrl[0]
+        }
     }
 }
 if ($installerExitCode -ne 0 -and $lifetimeRequired) {

@@ -1,10 +1,22 @@
 # Windows WSL2 GPU Guide for ODS
 
-Complete guide for running ODS on Windows with WSL2 and NVIDIA GPU
-passthrough. `install.ps1` installs ODS inside Ubuntu/WSL2; it no longer
-selects a native Windows inference path. A Lemonade server running on Windows
-(AMD) is not adopted automatically: use a GPU backend detected inside WSL, CPU,
-or an explicitly configured reachable model endpoint.
+`install.ps1` installs ODS and Pixel/Portal inside Ubuntu/WSL2. NVIDIA inference
+uses GPU passthrough through Docker Desktop. AMD inference uses Lemonade on
+Windows through the ODS scheduled task; it does not require ROCm inside WSL.
+
+For AMD, follow the [Windows Quickstart](WINDOWS-QUICKSTART.md#gpu-placement).
+The installer binds its Windows task and model store to one WSL distribution
+and ODS runtime directory. After ownership is verified, the Models page can
+download compatible catalog or Hugging Face GGUFs, activate them, change
+context, and unload/resume the runtime. Older unbound ODS tasks need a rerun of
+the current Windows installer for the same installation. Independent Lemonade
+services remain external; endpoint reachability or **Adopt loaded model** does
+not grant control of them.
+
+The checks and troubleshooting below apply to **NVIDIA passthrough**. For AMD,
+verify the Windows runtime and Portal route using the Quickstart instead of
+expecting `nvidia-smi` to succeed. Linux and macOS keep their existing inference
+and model-management paths.
 
 Before the Linux installer starts, `install.ps1` stops with instructions when
 Windows has an NVIDIA driver but it is older than 570, Ubuntu cannot see the
@@ -220,8 +232,7 @@ processors=8
 swap=4GB
 swapFile=C:\temp\wsl-swap.vhdx
 localhostForwarding=true
-# Disable Windows interoperability if not needed (slight performance gain)
-# interop.enabled=false
+# Keep Windows interoperability enabled for the AMD/Lemonade control path.
 ```
 
 After editing:
