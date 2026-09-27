@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import stat
 import unicodedata
@@ -46,7 +47,7 @@ def read_only_wsl_docker(binary, info):
     try:
         if (
             not os.statvfs(binary).f_flag & os.ST_RDONLY
-            or "microsoft" not in Path("/proc/sys/kernel/osrelease").read_text().lower()
+            or "microsoft" not in platform.release().lower()
         ):
             return False
         mounts = []
