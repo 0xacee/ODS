@@ -411,32 +411,12 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     ods_progress 39 "directories" "Copying source files"
     if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
         ai "Copying source files to $INSTALL_DIR..."
-        if command -v rsync &>/dev/null; then
-            rsync -a --no-owner --no-group \
-                --exclude='.git' \
-                --exclude='data/' \
-                --exclude='logs/' \
-                --exclude='models/' \
-                --exclude='.env' \
-                --exclude='node_modules/' \
-                --exclude='dist/' \
-                --exclude='*.log' \
-                --exclude='.current-mode' \
-                --exclude='.profiles' \
-                --exclude='.target-model' \
-                --exclude='.target-quantization' \
-                --exclude='.offline-mode' \
-                "$SCRIPT_DIR/" "$INSTALL_DIR/"
-        else
-            # Fallback: cp -r everything, then remove runtime artifacts
-            if ! cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR/" 2>>"$LOG_FILE"; then
-                warn "Source copy incomplete — some files may be missing"
-            fi
-            if ! cp "$SCRIPT_DIR"/.gitignore "$INSTALL_DIR/" 2>>"$LOG_FILE"; then
-                warn "Failed to copy .gitignore"
-            fi
-            rm -rf "$INSTALL_DIR/.git" 2>>"$LOG_FILE" || true
-        fi
+        # shellcheck source=../lib/source-copy.sh
+        source "$SCRIPT_DIR/installers/lib/source-copy.sh"
+        ods_copy_install_source "$SCRIPT_DIR" "$INSTALL_DIR" "$LOG_FILE" || {
+            error "Source upgrade failed; existing cloud provider configuration was preserved."
+            return 1
+        }
         # Ensure scripts are executable
         chmod +x "$INSTALL_DIR"/*.sh "$INSTALL_DIR"/scripts/*.sh "$INSTALL_DIR"/ods-cli 2>>"$LOG_FILE" || warn "Some scripts may not be executable — verify after install"
         ai_ok "Source files installed"

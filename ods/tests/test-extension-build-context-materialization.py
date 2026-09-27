@@ -529,9 +529,11 @@ def linux_bootstrap_rules() -> list[tuple[str, str]]:
 
 
 def linux_phase_rules() -> list[tuple[str, str]]:
-    source = LINUX_PHASE.read_text(encoding="utf-8")
-    match = re.search(r'(?s)rsync -a --no-owner --no-group \\\r?\n(.*?)"\$SCRIPT_DIR/" "\$INSTALL_DIR/"', source)
-    assert match, "installers/phases/06-directories.sh source rsync not found"
+    phase = LINUX_PHASE.read_text(encoding="utf-8")
+    assert 'ods_copy_install_source "$SCRIPT_DIR" "$INSTALL_DIR" "$LOG_FILE"' in phase
+    source = (LINUX_PHASE.parent.parent / "lib/source-copy.sh").read_text(encoding="utf-8")
+    match = re.search(r'(?s)rsync -a --no-owner --no-group \\\r?\n(.*?)"\$source_dir/" "\$install_dir/"', source)
+    assert match, "installers/lib/source-copy.sh source rsync not found"
     rules = _shell_filters(match.group(1))
     assert rules, "no rsync filters parsed from phase 06"
     return rules
