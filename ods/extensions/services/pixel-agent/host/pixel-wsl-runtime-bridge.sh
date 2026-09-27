@@ -51,6 +51,7 @@ bridge() {
 
 base=/mnt/wsl/ods-portal-runtime
 [[ ! -L "$base" ]] || fail "$base is a symlink"
+! mountpoint -q -- "$base" || fail "$base is mounted"
 if [[ "$action" == ensure ]]; then
     install -d -o root -g root -m 0755 -- "$base"
     for target in "$base/ingress" "$base/preview"; do
