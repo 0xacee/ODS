@@ -2672,7 +2672,27 @@ ods_pixel_prepare_runtime_identity() {
     if declare -f _phase11_env_set >/dev/null 2>&1; then
         _phase11_env_set PIXEL_INGRESS_GID "$gid"
     fi
+    if ! _ods_pixel_prepare_wsl_runtime_bridge "$owner"; then
+        ai_bad "Could not prepare Pixel's shared WSL runtime before container startup."
+        return 1
+    fi
     ai_ok "Prepared the unprivileged Pixel runtime identity"
+}
+
+# Docker Desktop translates bind sources from the WSL client's namespace.
+# Establish the shared projection before Compose starts Pixel Edge, including
+# on a fresh install where the persistent bridge unit is not installed yet.
+_ods_pixel_prepare_wsl_runtime_bridge() {
+    local owner="$1" env_file="${INSTALL_DIR:?}/.env"
+    grep -Fxq 'PIXEL_RUNTIME_BIND_PROPAGATION=rshared' "$env_file" || return 0
+    grep -Fxq 'PIXEL_INGRESS_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/ingress' "$env_file" || return 1
+    grep -Fxq 'PIXEL_PREVIEW_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/preview' "$env_file" || return 1
+    local bridge="$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-wsl-runtime-bridge.sh"
+    [[ -f "$bridge" && ! -L "$bridge" ]] || return 1
+    [[ ! -L /run/ods-pixel && ! -L /run/ods-pixel-preview ]] || return 1
+    ods_sudo install -d -o "$owner" -g ods-pixel -m 0710 /run/ods-pixel || return 1
+    ods_sudo install -d -o "$owner" -g ods-pixel -m 0750 /run/ods-pixel-preview || return 1
+    ods_sudo /bin/bash "$bridge" ensure
 }
 
 _ods_pixel_source_checkout() {
@@ -4075,8 +4095,8 @@ _ods_pixel_install_ingress() {
     local wsl_bridge_unit="$plugin_root/host/pixel-wsl-runtime-bridge.service"
     local ods_version="${VERSION:-3.0.0}"
     if grep -Fxq 'PIXEL_RUNTIME_BIND_PROPAGATION=rshared' "${INSTALL_DIR:?}/.env"; then
-        grep -Fxq 'PIXEL_INGRESS_RUNTIME_DIR=/mnt/host/wsl/ods-portal-runtime/ingress' "$INSTALL_DIR/.env" || return 1
-        grep -Fxq 'PIXEL_PREVIEW_RUNTIME_DIR=/mnt/host/wsl/ods-portal-runtime/preview' "$INSTALL_DIR/.env" || return 1
+        grep -Fxq 'PIXEL_INGRESS_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/ingress' "$INSTALL_DIR/.env" || return 1
+        grep -Fxq 'PIXEL_PREVIEW_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/preview' "$INSTALL_DIR/.env" || return 1
         grep -qi microsoft /proc/sys/kernel/osrelease || return 1
         wsl_bridge=true
     fi
