@@ -79,14 +79,15 @@ def retire(install_dir: Path, *, validate_only: bool = False) -> dict:
             raise ValueError('The registered Windows runtime no longer belongs to this installation')
     elif registered:
         raise ValueError('Restore the registered Windows runtime transport before uninstalling')
-    # All Windows ownership checks precede the first mutation. The uninstall
-    # invokes this once before Pixel retirement, then rechecks during apply.
+    # All Windows ownership checks precede the first mutation. Disable and
+    # settle sign-in startup before stopping Lemonade or retiring Pixel, so a
+    # boot coordinator cannot restart services during their removal.
     startup = wsl_lemonade.disable_startup(root, values, validate_only=True)
     if validate_only:
         return {'state': 'validated', 'startup': startup['state']}
+    startup = wsl_lemonade.disable_startup(root, values)
     if managed and managed['managed']:
         wsl_lemonade.stop(root, values, managed['planDigest'])
-    startup = wsl_lemonade.disable_startup(root, values)
     return {'state': 'retired', 'startup': startup['state']}
 
 
@@ -98,7 +99,8 @@ def main() -> int:
     try:
         print(json.dumps(retire(args.install_dir, validate_only=args.validate_only)))
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        print(f'Windows startup retirement failed; installation retained: {exc}', file=sys.stderr)
+        state = 'installation retained' if args.validate_only else 'installation files retained; startup may already be disabled'
+        print(f'Windows startup retirement failed; {state}: {exc}', file=sys.stderr)
         return 1
     return 0
 

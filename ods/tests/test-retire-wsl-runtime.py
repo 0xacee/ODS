@@ -39,13 +39,13 @@ class RetirementTests(unittest.TestCase):
         self.disable_startup.assert_called_once_with(self.root, ENV, validate_only=True)
         self.status.assert_called_once_with(self.root, ENV)
 
-    def test_apply_rechecks_before_stopping_then_disables_startup(self):
+    def test_apply_disables_and_settles_startup_before_stopping_lemonade(self):
         operations = []
         self.status.side_effect = lambda *_: operations.append('status') or {'managed': True, 'planDigest': 'a' * 64}
         self.disable_startup.side_effect = lambda *_, **kw: operations.append('check' if kw else 'disable') or {'state': 'disabled'}
         self.stop.side_effect = lambda *_: operations.append('stop')
         self.assertEqual(helper.retire(self.root)['state'], 'retired')
-        self.assertEqual(operations, ['status', 'check', 'stop', 'disable'])
+        self.assertEqual(operations, ['status', 'check', 'disable', 'stop'])
         self.stop.assert_called_once_with(self.root, ENV, 'a' * 64)
 
     def test_owner_failure_precedes_any_windows_probe(self):
@@ -67,7 +67,14 @@ class RetirementTests(unittest.TestCase):
         with self.assertRaises(OSError):
             helper.retire(self.root)
         self.assertEqual(self.stop.call_count, 1)
-        self.assertEqual(self.disable_startup.call_count, 1)
+        self.assertEqual(self.disable_startup.call_count, 2)
+        self.assertTrue((self.root / '.env').exists())
+
+    def test_startup_that_does_not_settle_blocks_lemonade_teardown(self):
+        self.disable_startup.side_effect = [{'state': 'validated'}, OSError('startup is still active')]
+        with self.assertRaises(OSError):
+            helper.retire(self.root)
+        self.stop.assert_not_called()
         self.assertTrue((self.root / '.env').exists())
 
     def test_generic_external_server_is_never_stopped(self):
@@ -179,15 +186,16 @@ class OwnerTests(unittest.TestCase):
 
 
 class HookOrderTests(unittest.TestCase):
-    def test_precheck_precedes_pixel_and_apply_precedes_host_agent_removal(self):
+    def test_windows_precheck_and_apply_precede_pixel_then_host_agent_removal(self):
         script = (SOURCE / 'ods-uninstall.sh').read_text(encoding='utf-8')
         precheck = script.index('! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR" --validate-only')
         pixel = script.index('if ! ods_pixel_uninstall_managed')
         apply = script.index('if ! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR";')
         host = script.index('if ! ods_uninstall_system_units')
-        self.assertLess(precheck, pixel)
-        self.assertLess(pixel, apply)
-        self.assertLess(apply, host)
+        self.assertLess(precheck, apply)
+        self.assertLess(apply, pixel)
+        self.assertLess(pixel, host)
+        self.assertIn('Windows startup changes already applied for this uninstall remain in effect.', script)
 
 
 if __name__ == '__main__':

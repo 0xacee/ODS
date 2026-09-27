@@ -103,12 +103,18 @@ jobs:
       - name: WSL Sign-in Recovery Contracts (PowerShell 7)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./tests/contracts/test-wsl-startup.ps1
+        run: |
+          ./tests/contracts/test-wsl-startup.ps1
+          ./tests/contracts/test-wsl-lifecycle.ps1
+          ./tests/contracts/test-wsl-lifecycle-output.ps1
 
       - name: WSL Sign-in Recovery Contracts (Windows PowerShell)
         if: runner.os == 'Windows'
         shell: powershell
-        run: ./tests/contracts/test-wsl-startup.ps1
+        run: |
+          ./tests/contracts/test-wsl-startup.ps1
+          ./tests/contracts/test-wsl-lifecycle.ps1
+          ./tests/contracts/test-wsl-lifecycle-output.ps1
 
       - name: Windows AMD Recovery and Model Control Contracts (PowerShell 7)
         if: runner.os == 'Windows'
