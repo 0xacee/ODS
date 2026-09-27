@@ -28,6 +28,10 @@ test: ## Run unit and contract tests
 	@python3 tests/test-model-library-pinned-urls.py
 	@bash tests/test-installer-context-parity.sh
 	@bash tests/test-hermes-context-floor.sh
+	@bash tests/test-install-menu-hermes-flag.sh
+	@bash tests/test-custom-menu-agent-flags.sh
+	@bash tests/test-lemonade-external-gpu.sh
+	@bash tests/test-preflight-external-gpu.sh
 	@echo ""
 	@echo "=== Hermes slash worker prune ==="
 	@bash tests/test-hermes-slash-worker-prune.sh
@@ -53,6 +57,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-linux-host-agent-stop.sh
 	@bash tests/test-preflight-dashboard-port.sh
 	@bash tests/test-wsl-broken-docker-shim.sh
+	@bash tests/test-wsl-nvidia-driver-guard.sh
 	@bash tests/test-ui-missing-container-fast-fail.sh
 	@echo ""
 	@echo "=== ods-doctor rootless subordinate IDs ==="
@@ -74,6 +79,13 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== AMD/Lemonade contracts ==="
 	@bash tests/contracts/test-amd-lemonade-contracts.sh
+	@bash tests/test-lemonade-host-transport.sh
+	@bash tests/test-wsl-agent-start.sh
+	@python3 tests/test-lemonade-container-transport.py
+	@python3 tests/test-wsl-lemonade-proof.py
+	@python3 tests/test-wsl-lemonade-control.py
+	@python3 tests/test-configure-wsl-model-store.py
+	@python3 tests/test-retire-wsl-runtime.py
 	@bash tests/test-litellm-amd-auth-enforced.sh
 	@bash tests/contracts/test-windows-strix-tier-map.sh
 	@bash tests/contracts/test-windows-llm-model-readiness.sh

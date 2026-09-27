@@ -771,7 +771,8 @@ export default function Dashboard({ status, loading, compact = false }) {
         icon: HardDrive,
         label: 'VRAM',
         value: hasLiveVramUsage ? `${status.gpu.vramUsed.toFixed(1)} GB` : '—',
-        subvalue: `of ${status.gpu.vramTotal} GB`,
+        subvalue: Number.isFinite(status.gpu.vramTotal) && status.gpu.vramTotal > 0
+          ? `of ${status.gpu.vramTotal} GB` : 'capacity unavailable',
         percent: hasLiveVramUsage && status.gpu.vramTotal > 0
           ? (status.gpu.vramUsed / status.gpu.vramTotal) * 100
           : undefined,
@@ -920,7 +921,7 @@ export default function Dashboard({ status, loading, compact = false }) {
                   Multi-GPU System · {status.gpu.gpu_count} GPUs
                 </p>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  {status.gpu.name} · {Number.isFinite(status.gpu.utilization) ? `${status.gpu.utilization}% avg util` : 'Utilization unavailable'} · {Number.isFinite(status.gpu.vramUsed) ? `${status.gpu.vramUsed.toFixed(1)}/${status.gpu.vramTotal} GB VRAM` : 'VRAM usage unavailable'}
+                  {status.gpu.name} · {Number.isFinite(status.gpu.utilization) ? `${status.gpu.utilization}% avg util` : 'Utilization unavailable'} · {Number.isFinite(status.gpu.vramUsed) ? `${status.gpu.vramUsed.toFixed(1)}${Number.isFinite(status.gpu.vramTotal) && status.gpu.vramTotal > 0 ? `/${status.gpu.vramTotal}` : ''} GB VRAM` : 'VRAM usage unavailable'}
                 </p>
               </div>
             </div>

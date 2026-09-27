@@ -66,6 +66,10 @@ def _isolate_opencode_config(monkeypatch, tmp_path):
         lambda: {"system": _mod.platform.system(), "active": False},
     )
     monkeypatch.setattr(_mod, "_opencode_installed", lambda: False)
+    # These fixtures describe synthetic containers. Never fingerprint a real
+    # developer's running gateway and accidentally converge it during a test.
+    # Live-input reuse is exercised separately in test_model_switch_speed.py.
+    monkeypatch.setattr(_mod, "_dependent_bind_inputs", lambda _container: None)
 
 
 @pytest.fixture(autouse=True)
@@ -375,6 +379,73 @@ def test_external_lemonade_observation_endpoint_is_authenticated_and_redacted(mo
             "contextLength": 65536,
             "backend": "vulkan",
         }
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_external_observation_transport_timeout_is_redacted_503(monkeypatch):
+    monkeypatch.setattr(_mod, "AGENT_API_KEY", "observation-test-key")
+    monkeypatch.setattr(_mod, "load_env", lambda _path: {"LEMONADE_EXTERNAL": "true"})
+    def timed_out(_env):
+        raise subprocess.TimeoutExpired("private-runtime-command", 5)
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", timed_out)
+    server = _mod.ThreadedHTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        connection.request("GET", "/v1/model/external-observation", headers={
+            "Authorization": "Bearer observation-test-key",
+        })
+        response = connection.getresponse()
+        assert response.status == 503
+        assert json.loads(response.read()) == {"error": "External Lemonade identity is unavailable"}
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_external_stats_observation_is_authenticated_bounded_and_redacted(monkeypatch, failed):
+    monkeypatch.setattr(_mod, "AGENT_API_KEY", "observation-test-key")
+    monkeypatch.setattr(_mod, "load_env", lambda _path: {"LEMONADE_EXTERNAL": "true"})
+    calls = []
+
+    def observe(_env, *, include_stats=False):
+        calls.append(include_stats)
+        if failed:
+            raise subprocess.TimeoutExpired("private-runtime-command", 5)
+        return {"modelId": "model", "checkpoint": "C:/private/checkpoint.gguf", "contextLength": 65536,
+                "backend": "vulkan", "stats": {"tokens_per_second": 24.5, "output_tokens": 163}}
+
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", observe)
+    server = _mod.ThreadedHTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        connection.request("GET", "/v1/model/external-observation?stats=1")
+        denied = connection.getresponse()
+        assert denied.status == 401
+        denied.read()
+        assert not calls
+        connection.request("GET", "/v1/model/external-observation?stats=1", headers={
+            "Authorization": "Bearer observation-test-key",
+        })
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == (503 if failed else 200)
+        assert "no-store" in response.getheader("Cache-Control")
+        assert "private" not in json.dumps(payload)
+        assert calls == [True]
+        if not failed:
+            assert payload["modelId"] == "model"
+            assert payload["stats"] == {"tokens_per_second": 24.5, "output_tokens": 163}
         connection.close()
     finally:
         server.shutdown()

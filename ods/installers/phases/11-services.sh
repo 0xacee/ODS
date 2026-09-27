@@ -152,6 +152,34 @@ _phase11_recreate_exited_services() {
         >> "$LOG_FILE" 2>&1
 }
 
+# Docker's daemon-wide Created inventory can include other projects. Capture
+# full IDs and prove this installation's labels before starting any of them.
+_phase11_start_created_owned() {
+    local ids id project root state
+    local -a owned=()
+    # DOCKER_CMD is intentionally either docker or the phase-05 sudo docker.
+    # shellcheck disable=SC2086
+    ids="$($DOCKER_CMD ps -a --no-trunc --filter status=created \
+        --filter label=com.docker.compose.project=ods --format '{{.ID}}' 2>>"$LOG_FILE")" || return 1
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        [[ "$id" =~ ^[0-9a-f]{64}$ ]] || return 1
+        # shellcheck disable=SC2086
+        project="$($DOCKER_CMD inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$id" 2>>"$LOG_FILE")" || return 1
+        # shellcheck disable=SC2086
+        root="$($DOCKER_CMD inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$id" 2>>"$LOG_FILE")" || return 1
+        # shellcheck disable=SC2086
+        state="$($DOCKER_CMD inspect -f '{{.State.Status}}' "$id" 2>>"$LOG_FILE")" || return 1
+        [[ "$project" == ods && "$root" == "$INSTALL_DIR" && "$state" == created ]] || continue
+        owned+=("$id")
+        (( ${#owned[@]} <= 64 )) || return 1
+    done <<< "$ids"
+    for id in "${owned[@]}"; do
+        # shellcheck disable=SC2086
+        $DOCKER_CMD start "$id" >>"$LOG_FILE" 2>&1 || return 1
+    done
+}
+
 _phase11_download_hf_artifact() {
     local url="$1" destination="$2" log_file="$3"
     local helper="$INSTALL_DIR/scripts/download-hf-artifact.py"
@@ -520,6 +548,20 @@ else
             exit 1
         fi
         _phase11_apply_cpu_fallback "$_amd_missing_devices"
+    fi
+
+    # An owned Windows Lemonade task serves its private Windows model store.
+    # Register that read-only API mount before resolving the Compose overlays.
+    if [[ "${LEMONADE_HOST_TRANSPORT:-$(_phase11_env_get LEMONADE_HOST_TRANSPORT direct)}" == "model-router" ]]; then
+        _wsl_store_python="${ODS_PYTHON_CMD:-}"
+        if [[ -z "$_wsl_store_python" ]]; then
+            _wsl_store_python="$(command -v python3 || command -v python)"
+        fi
+        if ! "$_wsl_store_python" "$INSTALL_DIR/scripts/configure-wsl-model-store.py" \
+            --install-dir "$INSTALL_DIR" >> "$LOG_FILE" 2>&1; then
+            error "The registered Windows Lemonade runtime could not be verified; stopping before service configuration."
+            return 1
+        fi
     fi
 
     # Re-resolve compose flags against the actual install directory.
@@ -1273,7 +1315,7 @@ MODELS_INI_EOF
     # starting other containers. Some end up in "Created", others never got
     # past "Creating" because their dependencies weren't ready yet.
     # Step 1: start any containers already in Created state
-    $DOCKER_CMD start $($DOCKER_CMD ps -a --filter status=created -q) 2>/dev/null || true
+    _phase11_start_created_owned || log "Owned Created-container recovery could not be completed."
     # Step 2: wait for services to stabilize, then compose pass
     sleep 10
     # Preserve the recovery result. A successful recovery must be allowed to
@@ -1287,7 +1329,7 @@ MODELS_INI_EOF
         compose_ok=true
     fi
     # Step 3: catch any stragglers from the second pass
-    $DOCKER_CMD start $($DOCKER_CMD ps -a --filter status=created -q) 2>/dev/null || true
+    _phase11_start_created_owned || log "Owned Created-container recovery could not be completed."
 
     # If ODS_AGENT_BIND is unset, the Linux host-agent binds to the ODS
     # Docker network gateway once that network exists. Phase 07 may have

@@ -1308,12 +1308,8 @@ async def huggingface_repository_details(
     return await _hf_repo_details(repo_id)
 
 
-@router.post("/api/models/huggingface/import")
-async def import_huggingface_model(
-    body: dict[str, Any] = Body(...),
-    api_key: str = Depends(verify_api_key),
-):
-    """Pin, register, and start one integrity-qualified Hub GGUF download."""
+async def _prepare_huggingface_import(body: dict[str, Any]):
+    """Prepare metadata without submitting a download to the host."""
     repo_id = str(body.get("repoId") or "").strip()
     artifact_id = str(body.get("artifactId") or "").strip()
     if not _HF_REPO_RE.fullmatch(repo_id) or not re.fullmatch(r"[0-9a-f]{20}", artifact_id):
@@ -1364,6 +1360,31 @@ async def import_huggingface_model(
         retained.append(record)
         _write_imported_library(retained)
 
+    return details, artifact, record
+
+
+@router.post("/api/models/huggingface/import")
+async def import_huggingface_model(
+    body: dict[str, Any] = Body(...),
+    api_key: str = Depends(verify_api_key),
+):
+    """Pin, register, and start one integrity-qualified Hub GGUF download."""
+    # A failure before dispatch is a definitive refusal, even if its status
+    # is 500. A transport failure after dispatch remains uncertain: never
+    # encourage the UI to replay a potentially accepted host operation.
+    try:
+        details, artifact, record = await _prepare_huggingface_import(body)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "X-ODS-Import-Started": "false"}
+        raise
+    except Exception as exc:
+        logger.exception("Hugging Face import preparation failed before dispatch")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not prepare the import. No download was started; you can retry.",
+            headers={"X-ODS-Import-Started": "false"},
+        ) from exc
+
     payload = {
         "gguf_file": record["gguf_file"],
         "gguf_url": record["gguf_url"],
@@ -1382,7 +1403,7 @@ async def import_huggingface_model(
     return {
         **result,
         "modelId": record["id"],
-        "repoId": repo_id,
+        "repoId": details["id"],
         "artifact": artifact["label"],
         "revision": details["sha"],
     }
@@ -1398,6 +1419,29 @@ def _newly_measured_tps(metrics: dict, loaded_model: str | None) -> float:
             or metrics.get("throughput_mode") == "live_output_interval"):
         return 0.0
     return float(metrics.get("tokens_per_second") or 0)
+
+
+def _model_management() -> dict:
+    """Project capability evidence; a network topology flag grants no control."""
+    if not _external_lemonade_runtime():
+        return {"managed": False, "canActivate": False, "canUnload": False, "running": False}
+    try:
+        value = request_agent_json("GET", "/v1/model/management", timeout=20)
+        if not isinstance(value, dict) or any(type(value.get(key)) is not bool for key in (
+            "managed", "canActivate", "canUnload", "running"
+        )):
+            raise ValueError("Invalid model management response")
+        if (not value['managed'] and any(value[key] for key in ('canActivate', 'canUnload', 'running'))
+                or value['canActivate'] and not value['running']):
+            raise ValueError("Inconsistent model management response")
+        result = {key: value[key] for key in ("managed", "canActivate", "canUnload", "running")}
+        if isinstance(value.get('reason'), str):
+            result['reason'] = value['reason'][:500]
+        return result
+    except (AgentClientError, ValueError):
+        # A failed proof is unknown, not evidence of an independently managed service.
+        return {"managed": None, "canActivate": False, "canUnload": False, "running": False,
+                "reason": "Runtime management could not be verified"}
 
 
 @router.get("/api/models", response_model=ModelLibraryResponse)
@@ -1487,6 +1531,8 @@ async def list_models(api_key: str = Depends(verify_api_key)):
     payload["configuredMode"] = _configured_ods_mode()
     payload["llmBackend"] = LLM_BACKEND or "unknown"
     payload["externalLemonade"] = _external_lemonade_runtime()
+    if payload["externalLemonade"]:
+        payload["modelManagement"] = await asyncio.to_thread(_model_management)
     payload["activationReadyModel"] = (
         payload.get("currentModel")
         if loaded_entry
@@ -2230,6 +2276,23 @@ def adopt_external_model(
     }, headers={'Cache-Control': 'no-store'})
 
 
+@router.post("/api/models/runtime/{operation}")
+def manage_model_runtime(operation: str, body: dict | None = Body(default=None),
+                         api_key: str = Depends(verify_api_key)):
+    if operation not in {"stop", "start"} or body not in (None, {}):
+        raise HTTPException(status_code=400, detail="A start or stop operation with an empty body is required")
+    if pixel_stream_active():
+        raise HTTPException(status_code=409, detail="Stop the active Portal response before changing its runtime")
+    try:
+        value = _call_agent_model(f"/v1/model/runtime/{operation}", {}, timeout=1200)
+    finally:
+        _invalidate_agent_model_status_cache()
+    expected = "started" if operation == "start" else "stopped"
+    if not isinstance(value, dict) or value.get("status") != expected:
+        raise HTTPException(status_code=502, detail="The runtime operation was not confirmed; refresh its status")
+    return JSONResponse({"status": expected}, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/models/{model_id}/load")
 def load_model(
     model_id: str,
@@ -2247,7 +2310,7 @@ def load_model(
             status_code=409,
             detail={**mode_denial, "requestedModelId": model_id},
         )
-    if _external_lemonade_runtime():
+    if _external_lemonade_runtime() and not _model_management().get("canActivate"):
         raise HTTPException(
             status_code=409,
             detail={

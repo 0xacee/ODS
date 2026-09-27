@@ -1394,6 +1394,30 @@ function canonicalRequestedUnittestParams(params, state) {
   return canonical;
 }
 
+function requestedUnittestCoachingParams(state) {
+  if (!state?.workspacePythonUnittestRequested) return undefined;
+  const tests = state.workspaceRequestedFiles.filter((file) =>
+    /^(?:test(?:_[A-Za-z0-9._-]+)?|[A-Za-z0-9._-]+_test)\.py$/i.test(file));
+  if (tests.length !== 1) return undefined;
+  const testFile = tests[0];
+  // Some owners name a folder without spelling /workspace. Bind guidance to
+  // the one directory in which every requested file was actually written.
+  const directories = new Set();
+  for (const written of state.successfulWritePaths) {
+    if (written === testFile) directories.add("");
+    else if (written.endsWith(`/${testFile}`)) directories.add(written.slice(0, -testFile.length - 1));
+  }
+  if (directories.size !== 1) return undefined;
+  const directory = [...directories][0];
+  if ((directory && directory.split("/").some((part) =>
+    ["", ".", ".."].includes(part) || !WORKSPACE_PATH_COMPONENT.test(part))) ||
+    (state.workspaceTaskDirectory && directory !== state.workspaceTaskDirectory) ||
+    state.workspaceRequestedFiles.some((file) =>
+      !state.successfulWritePaths.has(directory ? `${directory}/${file}` : file))) return undefined;
+  return {command: `python3 -m unittest -v ${testFile}`,
+    workdir: directory ? `/workspace/${directory}` : "/workspace"};
+}
+
 function verificationFingerprintIsPythonUnittest(fingerprint) {
   if (typeof fingerprint !== "string" || !fingerprint) return false;
   try {
@@ -11271,8 +11295,10 @@ export function createToolLoopGuard({
       validatedToolSearchEnvelope(message.details, WORKSPACE_PREVIEW_TOOL, "pixel-ods")?.result?.isError === true;
     const workspaceStageInstruction = (() => {
       if (failedToolResult) return undefined;
-      if (!compactCoreResult || !state?.workspaceTaskDirectory || state.progressBudget.laneExhausted('workspace')) return undefined;
-      const nextFile = state.workspaceMutationRequested
+      if (!compactCoreResult || !state || state.progressBudget.laneExhausted('workspace')) return undefined;
+      const unittest = requestedUnittestCoachingParams(state);
+      if (!state.workspaceTaskDirectory && !unittest) return undefined;
+      const nextFile = state.workspaceMutationRequested && state.workspaceTaskDirectory
         ? state.workspaceRequestedFiles.find((file) =>
           !state.successfulWritePaths.has(`${state.workspaceTaskDirectory}/${file}`)
         )
@@ -11305,6 +11331,12 @@ export function createToolLoopGuard({
         );
       }
       if (state.workspaceMutationRequested && state.workspaceRequestedFiles.length > 0) {
+        if (unittest) {
+          return "[ODS Pixel next step] All explicitly requested files are written. Run the " +
+            "owner-requested verification command now: call tool_call with id openclaw:core:exec " +
+            `and args ${JSON.stringify(unittest)}. Run this single command directly; keep ` +
+            "file readbacks in separate tool calls. Do not add shell chains, redirects, or a trailing echo.";
+        }
         return (
           "[ODS Pixel next step] All explicitly requested files are written. Run the " +
           "owner-requested verification command now; the project workdir is applied automatically."

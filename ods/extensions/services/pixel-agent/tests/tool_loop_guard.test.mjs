@@ -51,6 +51,45 @@ test('sandbox path guidance rejects native, unbound, successful and unrelated fa
 });
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+
+for (const explicit of [false, true]) {
+  test(`workspace file receipts coach a direct unittest command (explicit=${explicit})`, () => {
+    const guard=createToolLoopGuard();
+    const prompt=explicit
+      ? "Work autonomously in /workspace/audit-project. Inspect it, create math_helper.py and test_math_helper.py with unittest coverage, then run the tests."
+      : "Use your workspace tools. Create a new folder named audit-project. In it write math_helper.py and test_math_helper.py with unittest cases, then run the tests.";
+    guard.observeRun({agentId:"pixel",runId:"run-1",sessionId:"session-1"},"pixel",{prompt});
+    let persisted;
+    for (const [index,file] of ["math_helper.py","test_math_helper.py"].entries()) {
+      const toolCallId=`write-coaching-${index}`;
+      const content=index===0 ? "def multiply(a,b):\n    return a*b\n"
+        : "import unittest\nfrom math_helper import multiply\nclass TestMultiply(unittest.TestCase):\n    def test_value(self):\n        self.assertEqual(multiply(43,47),2021)\n";
+      const write=call(guard,"tool_call",{event:{toolCallId,params:{
+        id:"write",args:{path:`audit-project/${file}`,content},
+      }},context:{toolCallId}});
+      assert.notEqual(write?.block,true,write?.blockReason);
+      const result=wrappedCoreResult("write",{content:[{type:"text",text:"Successfully wrote 15 bytes"}]});
+      afterCall(guard,"tool_call",{event:{toolCallId,params:write?.params ?? {
+        id:"write",args:{path:`audit-project/${file}`,content},
+      },result},context:{toolCallId}});
+      persisted=persistToolResult(guard,"tool_call",toolCallId,result);
+      if(index===0) assert.doesNotMatch(JSON.stringify(persisted),/"command":"python3 -m unittest/);
+    }
+    const guidance=JSON.stringify(persisted);
+    assert.match(guidance,/python3 -m unittest -v test_math_helper\.py/);
+    assert.match(guidance,/workdir.*\/workspace\/audit-project/);
+    assert.match(guidance,/Do not add shell chains/);
+    const command=call(guard,"tool_call",{event:{toolCallId:"coached-test",params:{
+      id:"exec",args:{command:"python3 -m unittest -v test_math_helper.py",workdir:"/workspace/audit-project"},
+    }},context:{toolCallId:"coached-test"}});
+    assert.notEqual(command?.block,true);
+    // Masked exit evidence still cannot pass the verification audit gate.
+    const masked=call(guard,"tool_call",{event:{toolCallId:"masked-test",params:{
+      id:"exec",args:{command:'python3 -m unittest -v test_math_helper.py; echo "EXIT=$?"',workdir:"/workspace/audit-project"},
+    }},context:{toolCallId:"masked-test"}});
+    assert.equal(masked?.block,true);
+  });
+}
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";

@@ -727,6 +727,7 @@ def test_huggingface_import_retains_retry_state_after_agent_failure(
         json=request,
     )
     assert first.status_code == 503
+    assert "X-ODS-Import-Started" not in first.headers
     registry_path = tmp_path / "model-imports.json"
     first_registry = json.loads(registry_path.read_text(encoding="utf-8"))
     assert len(first_registry["models"]) == 1
@@ -773,6 +774,23 @@ def test_huggingface_restricted_import_requires_token_before_registry_write(
     assert response.status_code == 403
     assert response.json()["detail"] == "Private or gated repositories require HF_TOKEN"
     assert not (tmp_path / "model-imports.json").exists()
+
+
+def test_huggingface_preparation_failure_is_definitively_not_started(test_client, monkeypatch):
+    import routers.models as models_router
+
+    async def unavailable_metadata(_repo_id):
+        raise OSError("fixture storage failure")
+
+    monkeypatch.setattr(models_router, "_hf_repo_details", unavailable_metadata)
+    monkeypatch.setattr(models_router, "_call_agent_model", lambda *args, **kwargs: pytest.fail("not dispatched"))
+    response = test_client.post(
+        "/api/models/huggingface/import", headers=test_client.auth_headers,
+        json={"repoId": "org/repo", "artifactId": "d" * 20},
+    )
+    assert response.status_code == 500
+    assert response.headers["X-ODS-Import-Started"] == "false"
+    assert "No download was started" in response.json()["detail"]
 
 
 def test_huggingface_import_does_not_overwrite_corrupt_registry(
@@ -1821,6 +1839,9 @@ def test_api_models_returns_full_catalog_without_fake_tokens(test_client, monkey
 
 def test_api_models_reports_unmatched_external_runtime_without_fake_performance(test_client, monkeypatch, tmp_path):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "request_agent_json", lambda *_args, **_kwargs: {
+        "managed": False, "canActivate": False, "canUnload": False, "running": False,
+    })
     monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")
     monkeypatch.setattr(models_router, "read_live_env_values", lambda _keys: {
         "LLM_BACKEND": "lemonade",
@@ -1893,6 +1914,9 @@ def test_external_lemonade_runtime_flag(
 
 def test_load_model_rejects_external_lemonade_before_catalog_lookup(test_client, monkeypatch, tmp_path):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "request_agent_json", lambda *_args, **_kwargs: {
+        "managed": False, "canActivate": False, "canUnload": False, "running": False,
+    })
     (install_dir / ".env").write_text("ODS_MODE=lemonade\n", encoding="utf-8")
     monkeypatch.setattr(models_router, "ODS_MODE_EFFECTIVE", "lemonade")
     monkeypatch.setattr(models_router, "LLM_BACKEND", "lemonade")

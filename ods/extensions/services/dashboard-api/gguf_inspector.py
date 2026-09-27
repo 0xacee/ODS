@@ -51,14 +51,16 @@ _STRUCTS = {
 # RecursionError escape this parser's failure contract.
 _MAX_ARRAY_DEPTH = 64
 
+# general.file_type uses llama_ftype / LlamaFileType, not GGML tensor type IDs.
+# https://github.com/ggml-org/llama.cpp/blob/95887577ab5fead779581a7030a83c7752ff3234/include/llama.h#L106-L150
 _FILE_TYPE_LABELS = {
     0: "F32",
     1: "F16",
     2: "Q4_0",
     3: "Q4_1",
-    6: "Q5_0",
-    7: "Q5_1",
-    8: "Q8_0",
+    7: "Q8_0",
+    8: "Q5_0",
+    9: "Q5_1",
     10: "Q2_K",
     11: "Q3_K_S",
     12: "Q3_K_M",
@@ -82,8 +84,8 @@ _FILE_TYPE_LABELS = {
     30: "IQ4_XS",
     31: "IQ1_M",
     32: "BF16",
-    33: "TQ1_0",
-    34: "TQ2_0",
+    36: "TQ1_0",
+    37: "TQ2_0",
 }
 
 

@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Native Windows uninstall now verifies each container's Compose installation
+  directory before any mutation. A shared `ods` project label cannot authorize
+  removing another WSL/Windows installation or unattached volumes of unknown
+  origin. Docker listing failures preserve the installation for recovery.
 - Perplexica's internal `scrape_url` action is disabled at container start. It
   opened any URL its model named, without address validation, from the
   Perplexica container on the ODS network, and Perplexica offered it in every
@@ -33,6 +37,101 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rejects a llama.cpp image without a digest.
 
 ### Changed
+- Windows: `install.ps1` now installs ODS inside Ubuntu/WSL2 with Pixel
+  (`--pixel --no-hermes --no-openclaw`) instead of the native Windows stack.
+  It prepares WSL and Ubuntu 24.04 when needed, and stops with instructions,
+  before changing anything in Ubuntu, when WSL2, systemd, a non-root user,
+  Docker Desktop's WSL integration or, on NVIDIA machines, a Windows driver
+  >= 570 with GPU and `nvidia` runtime visible from Ubuntu is missing. An
+  existing Ubuntu older than 24.04 is never reused. Success now requires the
+  authenticated Portal status API to report the agent available. Existing
+  native Windows installs are detected and left untouched; `install.ps1`
+  refuses to run beside them. Keep managing them with their own `ods.ps1`, or
+  rerun `ods\installers\windows\install-windows.ps1`. AMD machines that used
+  the native Lemonade path now get a GPU backend detected inside WSL, CPU, or
+  an explicitly configured endpoint. The Linux installer runs on the same
+  console (download progress and UTF-8 output stay visible), and warnings WSL
+  prints on stderr no longer turn a passing check into a failure.
+- Windows: setup now needs only the pasted PowerShell command. It checks disk
+  space and BIOS virtualization first. It installs Docker Desktop with winget
+  when missing (one restart shared with WSL) and continues by itself after
+  that restart through a one-time per-user `RunOnce` entry. For a new Ubuntu
+  it asks for the Linux username and password in PowerShell instead of the
+  Ubuntu window. It starts Docker Desktop and, when Docker is not connected to
+  the selected Ubuntu, shows the WSL integration setting to turn on and waits
+  for it; it never edits Docker's settings or restarts Docker. It finally opens
+  Portal and adds an
+  **ODS Portal** desktop shortcut. `-NonInteractive` still installs nothing.
+  A leftover `ODS-WSL-*` scheduled task from another ODS version is named in
+  the error together with the command that removes it.
+- Linux on WSL: an NVIDIA driver older than 570 stops with Windows update
+  instructions instead of installing `nvidia-driver-*` inside the distro,
+  which breaks WSL GPU passthrough.
+- Linux on WSL with Docker Desktop: Pixel Edge now binds the runtime bridge
+  as `/mnt/wsl/ods-portal-runtime/*`, the distro path Docker Desktop's WSL
+  proxy translates, and the installer creates those empty targets before Pixel
+  Edge starts. The daemon-side `/mnt/host/wsl/...` path stopped every fresh
+  install with "is mounted on / but it is not a shared mount".
+- The WSL runtime bridge now stacks on the bind Docker Desktop's WSL proxy
+  places on each Pixel Edge bind source; it refused that bind, so every fresh
+  WSL install stopped at "Could not install and start the private Pixel
+  ingress". It also drops its own stale bind after systemd recreates a runtime
+  directory, names the check that refused in its journal, and the installer
+  prints that journal when the bridge does not start.
+- The installer menu presets (Full Stack, Core Only) no longer override an
+  explicit `--hermes` or `--no-hermes`. The Windows Pixel path passes
+  `--no-hermes`; choosing Full Stack downloaded and enabled Hermes anyway.
+- Windows (`install.ps1`) with an AMD GPU now runs the model on the GPU through
+  Lemonade Server on Windows instead of on the CPU in WSL. Setup detects the
+  GPU and its memory in Windows, picks the model as the native installer does,
+  installs the pinned Lemonade for the user after asking, downloads the model
+  with checksum verification, runs Lemonade on 127.0.0.1 from a sign-in
+  scheduled task (`ODSLemonadeRuntime`), loads the model, and passes the route
+  to the Linux installer. `install-core.sh` gains `--lemonade-model`,
+  `--lemonade-gpu-name` and `--lemonade-gpu-vram-mb`; the hardware scan shows
+  that GPU instead of "None". An existing Lemonade (including 10.7+) is reused,
+  and Lemonade moves to the next free port when another program holds 8080.
+- Windows/WSL AMD setup now selects `--lemonade-host-transport model-router`.
+  The WSL host agent verifies the Windows Lemonade model through the running
+  model-router container belonging to this installation, where
+  `host.docker.internal` reaches Windows. This avoids probing WSL's own
+  localhost while keeping Lemonade bound to Windows loopback. Model identity,
+  context and completion checks still decide readiness; this transport does
+  not enable LAN access or cloud inference. Other Lemonade installs keep the
+  default `direct` transport.
+- On WSL, the host agent identifies Docker Desktop before choosing its bind
+  address. A leftover native `docker0` bridge could have the same gateway IP
+  as Docker Desktop and make the agent listen where ODS containers could not
+  reach it. Docker Desktop now selects WSL loopback regardless of that stale
+  bridge, for GPU and CPU installations alike.
+- The Windows AMD startup task restores and verifies the selected Lemonade
+  model and context at each sign-in, including Lemonade 10.0. A healthy API
+  without a loaded model no longer counts as completed setup. The task keeps
+  its launcher and configuration in the user's ODS directory instead of a
+  temporary installer checkout.
+- Re-running Windows AMD setup stops only the verified ODS task and its
+  process descendants, including cached llama.cpp workers. Other Lemonade
+  instances are preserved. Both the former direct task and the Lemonade
+  10.7 task launcher migrate to the durable launcher.
+- Failed Windows AMD startup cleans up the verified process tree, including
+  workers that outlive their parent. Separate process ownership records allow
+  an interrupted cleanup to resume without treating a failed launch as ready.
+- Portal reads the loaded Windows/WSL Lemonade model from the Linux host
+  agent's verified external-model observation instead of calling the
+  Windows-only model-status endpoint on that Linux agent.
+- The Windows/WSL Dashboard reads Lemonade's measured last-completion speed
+  through the authenticated host agent and owned model-router transport.
+  Repeated samples remain the last measurement rather than becoming live
+  throughput or accumulating into an invented token total.
+- Models describes externally managed Lemonade model changes without
+  incorrectly reporting that the local runtime is unavailable. Adoption
+  remains available; model activation still follows the runtime's capabilities.
+- The Windows/WSL hardware scan no longer claims CPU inference immediately
+  after identifying the Windows GPU used by Lemonade. Linux services retain
+  their detected backend.
+- Explicit Hermes and OpenClaw flags now take precedence in the Custom
+  feature menu as well as presets. The Windows Pixel path no longer asks to
+  enable agents that its command line explicitly disabled.
 - Every curated catalog download URL now names a Hugging Face commit instead
   of `resolve/main`, so an upstream rewrite cannot change or remove a catalog
   file. The 48 other re-pinned models download the same bytes: each sha256 was
@@ -133,6 +232,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and put `<think>` blocks in replies.
 
 ### Fixed
+- Windows `ods.ps1 uninstall` no longer stops at "Docker cleanup is incomplete"
+  when a volume or network with the `ods` compose label is not in the saved
+  compose files (an older release or a since-disabled extension). It now removes
+  every labelled leftover after `compose down`, and a single leftover name is
+  passed to `docker` whole instead of one character per argument. If something
+  still cannot be removed, the message names it. Uninstall also removes the
+  `ODSNativeLlamaRuntime` scheduled task, and a helper task it cannot remove is
+  reported with the command to remove it instead of being skipped silently.
 - Gemma 4 26B-A4B (`gemma4-26b-a4b-q4`) and Gemma 4 31B (`gemma4-31b-q4`)
   download again. ggml-org deleted both Q4_K_M files from its repos on
   2026-07-16, so the catalog and the Gemma-profile tier maps (`NV_ULTRA`,
