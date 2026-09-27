@@ -4422,6 +4422,22 @@ PY
     return 1
 }
 
+_ods_pixel_prepare_wsl_runtime_targets() {
+    local base="${1:-/mnt/wsl/ods-portal-runtime}" target
+    for target in "$base" "$base/ingress" "$base/preview"; do
+        # Existing targets may be bind mounts of the live Pixel directories.
+        # install -d would chown/chmod the source through those mounts and
+        # prevent the unprivileged services from recreating their sockets.
+        if [[ -L "$target" || ( -e "$target" && ! -d "$target" ) ]]; then
+            ai_bad "Pixel runtime target is not a regular directory: $target"
+            return 1
+        fi
+        if [[ ! -d "$target" ]]; then
+            ods_sudo install -d -o root -g root -m 0755 -- "$target" || return 1
+        fi
+    done
+}
+
 ods_pixel_install_default_agent() {
     [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]] || return 0
     local owner home source_root pixel_root plugin_root answers operations_policy extension_catalog extension_manager_unit artifact_promoter_unit workspace_preview_unit openclaw_bin plugin_digest contract_sha256 runtime_budget_status gateway_alias pixel_log
@@ -4537,8 +4553,7 @@ ods_pixel_install_default_agent() {
         # Pixel Edge starts here, before the WSL runtime bridge is installed.
         # Create the fixed empty targets on WSL's shared tmpfs so its rshared
         # binds exist now and receive the bridge mounts when they arrive.
-        ods_sudo install -d -o root -g root -m 0755 -- /mnt/wsl/ods-portal-runtime \
-            /mnt/wsl/ods-portal-runtime/ingress /mnt/wsl/ods-portal-runtime/preview || return 1
+        _ods_pixel_prepare_wsl_runtime_targets || return 1
     fi
     ai "Starting the ODS model gateway, control API, and search prerequisites for Pixel review..."
     # The scoped extension manager validates its contract against dashboard-api

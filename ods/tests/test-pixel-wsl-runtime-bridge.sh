@@ -37,7 +37,7 @@ for text in (phase, installer):
     assert '/mnt/host/wsl' not in text
 # Pixel Edge starts with the prerequisites, before the bridge exists, so the
 # empty shared targets must be created before that Compose launch.
-precreate = installer.index('/mnt/wsl/ods-portal-runtime/ingress /mnt/wsl/ods-portal-runtime/preview')
+precreate = installer.index('_ods_pixel_prepare_wsl_runtime_targets || return 1')
 prerequisites_up = installer.index('"${pixel_prerequisites[@]}" >>"$LOG_FILE"')
 assert precreate < prerequisites_up, 'WSL runtime targets must exist before Pixel Edge starts'
 # A failed bridge must say why in the journal, and the installer must show it.
