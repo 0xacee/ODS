@@ -39,6 +39,30 @@ class RetirementTests(unittest.TestCase):
         self.disable_startup.assert_called_once_with(self.root, ENV, validate_only=True)
         self.status.assert_called_once_with(self.root, ENV)
 
+    def test_custom_state_root_is_loaded_and_forwarded_to_both_startup_checks(self):
+        state_root = r'D:\Private ODS $state'
+        with (self.root / '.env').open('a') as stream:
+            stream.write("ODS_WSL_STATE_ROOT='" + state_root + "'\n")
+        expected = {**ENV, 'ODS_WSL_STATE_ROOT': state_root}
+        helper.retire(self.root, validate_only=True)
+        self.disable_startup.assert_called_once_with(self.root, expected, validate_only=True)
+        self.stop.assert_not_called()
+        self.disable_startup.reset_mock()
+        helper.retire(self.root)
+        self.assertEqual(self.disable_startup.call_count, 2)
+        self.assertTrue(self.disable_startup.call_args_list[0].kwargs['validate_only'])
+        self.assertEqual(self.disable_startup.call_args_list[0].args, (self.root, expected))
+        self.disable_startup.assert_called_with(self.root, expected)
+
+    def test_state_root_alone_is_a_management_contract_even_without_model_metadata(self):
+        (self.root / '.env').write_text("ODS_WSL_STATE_ROOT='D:\\ODS state'\n")
+        self.candidate.return_value = False
+        helper.retire(self.root, validate_only=True)
+        self._owner.assert_called_once_with(self.root)
+        self.disable_startup.assert_called_once_with(self.root, {'ODS_WSL_STATE_ROOT': r'D:\ODS state'}, validate_only=True)
+        self.status.assert_not_called()
+        self.stop.assert_not_called()
+
     def test_apply_disables_and_settles_startup_before_stopping_lemonade(self):
         operations = []
         self.status.side_effect = lambda *_: operations.append('status') or {'managed': True, 'planDigest': 'a' * 64}

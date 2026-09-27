@@ -12,6 +12,7 @@ param(
     [string]$InstallRoot = "",
     [string]$DockerDesktopPath = "",
     [switch]$OpenPortal,
+    [string]$StateRoot = "",
     [string]$ReportPath = "$env:TEMP\\ods-windows-preflight.json",
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$PassthroughArgs
@@ -20,7 +21,7 @@ param(
 $ErrorActionPreference = "Stop"
 $checks = @()
 $requestedInstallRoot = $InstallRoot
-. (Join-Path $PSScriptRoot "wsl-lifecycle.ps1") -Distro $Distro
+. (Join-Path $PSScriptRoot "wsl-lifecycle.ps1") -Distro $Distro -StateRoot $StateRoot
 
 function Write-Section([string]$Message) {
     Write-Host ""
@@ -209,11 +210,15 @@ $wslCommand = New-ODSWslInstallerCommand $repoRootWsl $PassthroughArgs $lifetime
 # Help and dry-run retain their preview semantics: no persistent Windows task.
 $lifetimeRequired = -not (@($PassthroughArgs | Where-Object { $_ -cin @('--dry-run','--help','-h') }).Count -gt 0)
 if ($lifetimeRequired) {
+    # Secure an explicit state base before the per-instance initializer can
+    # create it as an ordinary inherited parent directory.
+    if ($StateRoot) { Initialize-ODSPrivateDirectory $script:ODSWslStateRoot }
     Initialize-ODSPrivateDirectory $lifetimeIdentity.directory
     $lifetimeLock = Open-ODSPrivateLock (Join-Path $lifetimeIdentity.directory 'command.lock')
     try { $null = Start-ODSWslLifetime $lifetimeIdentity } finally { $lifetimeLock.Dispose() }
     Write-Host "ODS WSL lifetime is active independently of this installer window."
-    Write-Host "Lifecycle: powershell -File `"$PSScriptRoot\wsl-lifecycle.ps1`" -Action status|stop|start|restart -Distro `"$Distro`" -InstallRoot `"$linuxInstallRoot`""
+    $stateHint = if ($StateRoot) { " -StateRoot `"$StateRoot`"" } else { '' }
+    Write-Host "Lifecycle: powershell -File `"$PSScriptRoot\wsl-lifecycle.ps1`" -Action status|stop|start|restart -Distro `"$Distro`" -InstallRoot `"$linuxInstallRoot`"$stateHint"
 }
 
 Write-Section "Running installer in WSL"
@@ -237,7 +242,7 @@ if ($installerExitCode -eq 0 -and $lifetimeRequired -and '--pixel' -cin $Passthr
         # A prior explicit stop preference is preserved across installer reruns.
         if ($DockerDesktopPath -or (Test-Path -LiteralPath (Join-Path $lifetimeIdentity.directory 'startup-config.json'))) {
             Enable-ODSWslStartup $lifetimeIdentity $DockerDesktopPath
-            Write-Host "Durable lifecycle: powershell -File `"$(Join-Path $lifetimeIdentity.directory 'startup.ps1')`" -Action status -Distro `"$Distro`" -InstallRoot `"$linuxInstallRoot`""
+            Write-Host "Durable lifecycle: powershell -File `"$(Join-Path $lifetimeIdentity.directory 'startup.ps1')`" -Action status -Distro `"$Distro`" -InstallRoot `"$linuxInstallRoot`"$stateHint"
         } else {
             Write-Warning 'Use the Windows Portal setup entry point to enable verified sign-in recovery.'
         }

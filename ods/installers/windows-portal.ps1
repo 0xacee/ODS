@@ -22,7 +22,8 @@ param(
     [switch]$NoBootstrap,
     [switch]$Lan,
     [string]$InstallDir = "",
-    [string]$SummaryJsonPath = ""
+    [string]$SummaryJsonPath = "",
+    [string]$StateRoot = ""
 )
 
 $ErrorActionPreference = 'Stop'

@@ -31,9 +31,9 @@ $null = New-Item -ItemType Directory -Path $delegateRoot
 try {
     $record = Join-Path $delegateRoot 'args.json'
     Set-Content -LiteralPath (Join-Path $delegateRoot 'windows.ps1') -Encoding UTF8 -Value @"
-param([string]`$Distro, [string]`$InstallRoot, [switch]`$OpenPortal, [string[]]`$PassthroughArgs, [string]`$DockerDesktopPath)
+param([string]`$Distro, [string]`$InstallRoot, [switch]`$OpenPortal, [string[]]`$PassthroughArgs, [string]`$DockerDesktopPath, [string]`$StateRoot)
 Write-Output 'delegate stdout'
-[IO.File]::WriteAllText('$record', (ConvertTo-Json -Compress @{ d = `$Distro; r = `$InstallRoot; o = [bool]`$OpenPortal; a = `$PassthroughArgs; docker = `$DockerDesktopPath }))
+[IO.File]::WriteAllText('$record', (ConvertTo-Json -Compress @{ d = `$Distro; r = `$InstallRoot; o = [bool]`$OpenPortal; a = `$PassthroughArgs; docker = `$DockerDesktopPath; s = `$StateRoot }))
 exit 23
 "@
     $returned = @(Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel', "it's `$(x)", 'two words') "/home/o'brien/ODS data" $true 'D:\Custom Docker\Docker Desktop.exe')
@@ -41,6 +41,13 @@ exit 23
     Check ($returned.Count -eq 1 -and $returned[0] -eq 23) 'delegate exit code is the only returned value'
     Check ($seen.docker -ceq 'D:\Custom Docker\Docker Desktop.exe') 'delegate preserves the installer-resolved Docker executable for durable startup'
     Check ($seen.d -eq 'Ubuntu-24.04' -and $seen.r -eq "/home/o'brien/ODS data" -and $seen.o -eq $true -and (@($seen.a) -join '|') -eq "--pixel|it's `$(x)|two words") 'delegate receives arguments intact'
+    $stateLocation="C:\ODS state\it's [private]"
+    $returned=Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel') '/home/user/ods' $false '' $stateLocation
+    $seen=Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
+    Check ($returned -eq 23 -and $seen.s -ceq $stateLocation -and (@($seen.a) -join ' ') -eq '--pixel') 'explicit state directory reaches the child as one literal Windows argument, separate from Linux flags'
+    $returned=Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel') '/home/user/ods' $true 'D:\Custom Docker\Docker Desktop.exe' $stateLocation
+    $seen=Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
+    Check ($returned -eq 23 -and $seen.s -ceq $stateLocation -and $seen.o -eq $true -and $seen.docker -ceq 'D:\Custom Docker\Docker Desktop.exe') 'state location, Docker location and Portal opening coexist in the delegated process'
     Set-Content -LiteralPath (Join-Path $delegateRoot 'windows.ps1') -Encoding UTF8 -Value "throw 'delegate failed'"
     Check ((Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @() '' $false) -ne 0) 'delegate that throws is a failure'
 } finally { Remove-Item -LiteralPath $delegateRoot -Recurse -Force }
@@ -53,6 +60,7 @@ function Reset-Scenario {
     $script:allowPreparation = $true
     $script:capturedArguments = @()
     $script:capturedRoot = ''
+    $script:capturedStateRoot = ''
     $script:downloadCode = 0
     $script:userSetupCode = 0
     $script:nvidiaDriver = $null
@@ -117,11 +125,12 @@ function Initialize-ODSPortalUbuntuUser([string]$Distro) {
     if ($script:scenario -eq 'resume-user') { $script:scenario='ready' }
     return $script:userSetupCode
 }
-function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal) {
+function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '', [string]$StateRoot = '') {
     $script:calls.Add('install:' + $Distro)
     $script:openPortal = $OpenPortal
     $script:capturedArguments = $LinuxArguments
     $script:capturedRoot = $InstallRoot
+    $script:capturedStateRoot = $StateRoot
     return $script:delegateCode
 }
 function Invoke-ODSPortalWsl([string[]]$Arguments) {
@@ -197,11 +206,20 @@ try {
     Check ((Invoke-ODSPortalSetup @{DryRun=$true} 'unused') -eq 0) 'dry run succeeds'
     Check ($script:calls.Count -eq 0) 'dry run performs no native calls'
     Reset-Scenario
-    $options = @{All=$true; NoLangfuse=$true; Tier='2'; InstallDir='/home/user/ODS data'; SummaryJsonPath='/home/user/result.json'}
+    $options = @{All=$true; NoLangfuse=$true; Tier='2'; InstallDir='/home/user/ODS data'; SummaryJsonPath='/home/user/result.json'; StateRoot='C:\ODS private\state'}
     Check ((Invoke-ODSPortalSetup $options 'unused') -eq 0) 'ready host delegates successfully'
     Check (($script:capturedArguments[-3..-1] -join ' ') -eq '--pixel --no-hermes --no-openclaw') 'mandatory Pixel policy wins after --all'
     Check (($script:capturedArguments -join ' ') -match '--all --no-langfuse') 'explicit disable follows all'
     Check ($script:capturedRoot -eq '/home/user/ODS data') 'Linux install path forwarded intact'
+    Check ($script:capturedStateRoot -ceq 'C:\ODS private\state' -and ($script:capturedArguments -join ' ') -notmatch 'StateRoot|ODS private') 'setup forwards Windows state location without injecting it into Linux flags'
+    foreach ($badState in @('relative\state','C:\','\\server\share','C:\a\..\state','C:\bad"state')) {
+        Reset-Scenario
+        $message=''
+        try { $null=Invoke-ODSPortalSetup @{StateRoot=$badState} 'unused' } catch { $message=$_.Exception.Message }
+        Check ($message -match '-StateRoot requires' -and $script:calls.Count -eq 0) 'unsafe state location fails before prerequisite or installation mutation'
+    }
+    Reset-Scenario
+    $null=Invoke-ODSPortalSetup $options 'unused'
     Check ($script:calls.Contains('--distribution Ubuntu-24.04 --exec docker compose version')) 'checks Compose inside selected distro'
     foreach ($failure in @('admin','native','wsl1','root','init-stuck','docker','compose','old-wsl','inbox-wsl')) {
         Reset-Scenario

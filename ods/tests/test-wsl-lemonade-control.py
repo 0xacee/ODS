@@ -477,8 +477,41 @@ class StartupRetirementTests(unittest.TestCase):
                 self.assertEqual(command[command.index('-Action') + 1], 'disable-startup')
                 self.assertEqual(command[command.index('-Distro') + 1], CONTEXT.distro)
                 self.assertEqual(command[command.index('-InstallRoot') + 1], CONTEXT.install_dir)
+                self.assertNotIn('-StateRoot', command)
                 self.assertEqual('-ValidateOnly' in command, readonly)
                 self.assertEqual(run.call_args.kwargs['timeout'], 45)
+
+    def test_custom_state_root_is_forwarded_literally_for_precheck_and_retirement(self):
+        for root in (r"D:\Owner's state $literal", r'\\server\private share\ODS state', 'E:/ODS/state/'):
+            for readonly, state in ((True, 'validated'), (False, 'disabled')):
+                with self.subTest(root=root, readonly=readonly), patch.object(bridge, '_run',
+                        return_value=completed(self.result(state))) as run:
+                    bridge.disable_startup(self.root, {**ENV, 'ODS_WSL_STATE_ROOT': root}, validate_only=readonly)
+                    command = run.call_args.args[0]
+                    self.assertEqual(command[command.index('-StateRoot') + 1], root)
+                    self.assertEqual(command[command.index('-InstallRoot') + 1], CONTEXT.install_dir)
+                    self.assertNotIn('-Command', command)
+                    self.assertEqual(run.call_count, 1)
+
+    def test_invalid_state_root_is_rejected_before_interop_or_dispatch(self):
+        for root in ('', None, True, 'relative', 'C:relative', 'C:\\', r'\\server\share',
+                     r'\\?\C:\state', r'\\.\state\directory', r'C:\state\..\other',
+                     r'C:\state\.\child', r'C:\state:stream', 'C:\\state"injected',
+                     'C:\\state\ninjected', '/mnt/c/state', 'x' * 4097):
+            with self.subTest(root=root), patch.object(bridge, '_run') as run:
+                with self.assertRaises(ValueError):
+                    bridge.disable_startup(self.root, {**ENV, 'ODS_WSL_STATE_ROOT': root})
+                run.assert_not_called()
+        bridge._context.assert_not_called()
+        bridge._select_socket.assert_not_called()
+
+    def test_custom_state_root_does_not_relax_installation_binding(self):
+        response = self.result('disabled')
+        response['identity']['installRoot'] = '/home/other/ods'
+        with patch.object(bridge, '_run', return_value=completed(response)) as run:
+            with self.assertRaises(bridge.BridgeError):
+                bridge.disable_startup(self.root, {**ENV, 'ODS_WSL_STATE_ROOT': r'D:\ODS state'})
+            self.assertEqual(run.call_count, 1)
 
     def test_unproved_retirement_and_replaced_socket_are_never_replayed(self):
         bad = self.result('disabled')

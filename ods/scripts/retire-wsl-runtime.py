@@ -19,7 +19,7 @@ from env_values import parse_env_value
 from model_switchboard import wsl_lemonade
 
 _KEYS = {'LEMONADE_HOST_TRANSPORT', 'LEMONADE_BASE_URL', 'LEMONADE_CONTAINER_BASE_URL',
-         'AMD_INFERENCE_PORT', 'ODS_WINDOWS_SYSTEM_DIRECTORY'}
+         'AMD_INFERENCE_PORT', 'ODS_WINDOWS_SYSTEM_DIRECTORY', 'ODS_WSL_STATE_ROOT'}
 
 
 def _owner(root: Path) -> None:
@@ -64,7 +64,7 @@ def retire(install_dir: Path, *, validate_only: bool = False) -> dict:
     values = _environment(root)
     metadata = root / 'data/wsl-lemonade-runtime.json'
     registered = metadata.exists() or metadata.is_symlink()
-    if 'ODS_WINDOWS_SYSTEM_DIRECTORY' not in values and not registered:
+    if not {'ODS_WINDOWS_SYSTEM_DIRECTORY', 'ODS_WSL_STATE_ROOT'}.intersection(values) and not registered:
         # Linux-origin and old WSL installations never registered Windows
         # startup. Do not require interop, strict new permissions or an owner
         # migration merely to uninstall those versions.

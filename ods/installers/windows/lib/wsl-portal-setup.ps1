@@ -73,7 +73,16 @@ function ConvertTo-ODSPortalLiteral([string]$Value) {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
-function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '') {
+function Assert-ODSPortalStateRoot([string]$StateRoot) {
+    if (-not $StateRoot) { return }
+    if ($StateRoot -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))' -or
+        $StateRoot -match '[\x00-\x1f"]' -or $StateRoot -match '(^|[\\/])\.\.?([\\/]|$)' -or
+        $StateRoot -match '^(?:[A-Za-z]:[\\/]*|\\\\[^\\/]+[\\/][^\\/]+[\\/]*)$') {
+        throw '-StateRoot requires an absolute Windows directory, not a filesystem root or traversal path.'
+    }
+}
+
+function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '', [string]$StateRoot = '') {
     # windows.ps1 runs in a child PowerShell that shares this console. Calling
     # it here would route wsl.exe output through this function's pipeline, so
     # the Linux installer would see no terminal: no progress during image
@@ -82,7 +91,8 @@ function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro,
     $openFlag = if ($OpenPortal) { '$true' } else { '$false' }
     $passthrough = @($LinuxArguments | ForEach-Object { ConvertTo-ODSPortalLiteral $_ }) -join ', '
     $desktopArgument = if ($DockerDesktopPath) { ' -DockerDesktopPath ' + (ConvertTo-ODSPortalLiteral $DockerDesktopPath) } else { '' }
-    $command = "`$global:LASTEXITCODE = 0; & $(ConvertTo-ODSPortalLiteral $delegate) -Distro $(ConvertTo-ODSPortalLiteral $Distro) -InstallRoot $(ConvertTo-ODSPortalLiteral $InstallRoot) -OpenPortal:$openFlag$desktopArgument -PassthroughArgs @($passthrough); " +
+    $stateArgument = if ($StateRoot) { ' -StateRoot ' + (ConvertTo-ODSPortalLiteral $StateRoot) } else { '' }
+    $command = "`$global:LASTEXITCODE = 0; & $(ConvertTo-ODSPortalLiteral $delegate) -Distro $(ConvertTo-ODSPortalLiteral $Distro) -InstallRoot $(ConvertTo-ODSPortalLiteral $InstallRoot) -OpenPortal:$openFlag$desktopArgument$stateArgument -PassthroughArgs @($passthrough); " +
         "`$ok = `$?; if (`$global:LASTEXITCODE -ne 0) { exit `$global:LASTEXITCODE }; if (-not `$ok) { exit 1 }; exit 0"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $shell = (Get-Process -Id $PID).Path
@@ -318,6 +328,7 @@ function Add-ODSPortalAmdArguments([string[]]$LinuxArgs, [System.Collections.IDi
 
 function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string]$InstallerRoot) {
     $linuxArgs = @(Get-ODSPortalLinuxArguments $Options)
+    Assert-ODSPortalStateRoot ([string]$Options['StateRoot'])
     $distro = if ($Options['Distro']) { [string]$Options['Distro'] } else { 'Ubuntu-24.04' }
     if ($distro -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' -or $distro -match '^docker-desktop') { throw 'Select a named Ubuntu WSL distribution, for example -Distro Ubuntu-24.04.' }
     $nonInteractive = [bool]$Options['NonInteractive']
@@ -382,5 +393,5 @@ function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string
     }
     Write-ODSPortalStage 4 'INSTALL PIXEL / PORTAL' "Prerequisites passed for $distro. Starting the Linux installer."
     Write-Host '         When Ubuntu asks for your [sudo] password, type your Ubuntu password and press Enter. Nothing appears while you type.'
-    return Invoke-ODSPortalLinuxInstaller $InstallerRoot $distro $linuxArgs ([string]$Options['InstallDir']) (-not $nonInteractive) (Get-ODSPortalDockerDesktop).Exe
+    return Invoke-ODSPortalLinuxInstaller $InstallerRoot $distro $linuxArgs ([string]$Options['InstallDir']) (-not $nonInteractive) (Get-ODSPortalDockerDesktop).Exe ([string]$Options['StateRoot'])
 }

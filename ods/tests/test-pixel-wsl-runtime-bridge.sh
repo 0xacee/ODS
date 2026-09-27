@@ -20,6 +20,9 @@ assert '[[ "$target_inode" == "$source_inode" ]]' in bridge
 # stacks on that bind (same /mnt/wsl device) and reads only the top mount.
 assert '[[ "${target_inode%%:*}" == "$wsl_device" ]]' in bridge
 assert '[[ "$(findmnt -n -o PROPAGATION -T "$target" | tail -n 1)" == shared ]]' in bridge
+assert 'if ! mountpoint -q -- "$target"; then\n            install -d -o root -g root -m 0755 -- "$target"' in bridge
+ingress = (Path(sys.argv[1]).parent / 'pixel-ingress.service').read_text()
+assert 'RuntimeDirectoryPreserve=yes' in ingress
 assert 'ConditionVirtualization=wsl' in unit
 assert 'BindsTo=pixel-ingress.service pixel-workspace-preview.service' in unit
 assert 'ExecStart=/usr/local/libexec/ods-pixel-wsl-runtime-bridge ensure' in unit

@@ -30,9 +30,70 @@ try {
     Check ((Get-ODSWslHolderArguments $a).StartsWith('--distribution Ubuntu-24.04 --exec ')) 'simple distribution name avoids WSL quote retention'
     $spaceDistro=Get-ODSWslIdentity 'Ubuntu Custom' '/home/ods/ods'
     Check ((Get-ODSWslHolderArguments $spaceDistro).StartsWith('--distribution "Ubuntu Custom" --exec ')) 'distribution whitespace remains within one argument'
+    $defaultTaskArguments=Get-ODSWslTaskArguments $a
+    $defaultStartupArguments=Get-ODSWslStartupArguments $a
+    $script:ODSWslStateRoot=Join-Path $PSScriptRoot 'fixture state root'
+    $explicitStateIdentity=Get-ODSWslIdentity 'Ubuntu-24.04' '/home/ods/ods'
+    Check ($explicitStateIdentity.id -ceq $a.id) 'state location does not change the owner and Linux installation identity'
+    Check ($explicitStateIdentity.directory -ceq (Join-Path $script:ODSWslStateRoot $a.id)) 'explicit state location selects the private instance directory'
+    Check ((Get-ODSWslTaskArguments $explicitStateIdentity).EndsWith((' -StateRoot "{0}"' -f $script:ODSWslStateRoot))) 'scheduled controller receives the same explicit state location'
+    Check ((Get-ODSWslStartupArguments $explicitStateIdentity).EndsWith((' -StateRoot "{0}"' -f $script:ODSWslStateRoot))) 'scheduled startup receives the same explicit state location'
+    $script:ODSWslStateRoot=''
+    Check ((Get-ODSWslTaskArguments $a) -ceq $defaultTaskArguments) 'default scheduler arguments remain compatible'
+    Check ((Get-ODSWslStartupArguments $a) -ceq $defaultStartupArguments) 'default startup arguments remain compatible'
+    $defaultInstallerCommand=New-ODSWslInstallerCommand '/mnt/c/source' @('--pixel') '/home/ods/ods'
+    Check ($defaultInstallerCommand -ceq "cd -- '/mnt/c/source' && env INSTALL_DIR='/home/ods/ods' bash install-core.sh '--pixel'") 'default installer command keeps the existing INSTALL_DIR contract without StateRoot'
+    $script:ODSWslStateRoot="C:\Owner's state root"
+    $expectedStateAssignment="ODS_WSL_STATE_ROOT='C:\Owner'\''s state root'"
+    Check ((New-ODSWslInstallerCommand '/mnt/c/source' @('--pixel') '/home/ods/ods') -ceq ("cd -- '/mnt/c/source' && env INSTALL_DIR='/home/ods/ods' " + $expectedStateAssignment + " bash install-core.sh '--pixel'")) 'installer preserves INSTALL_DIR while safely quoting StateRoot spaces and apostrophe'
+    Check ((New-ODSWslInstallerCommand '/mnt/c/source' @('--pixel') '') -ceq ("cd -- '/mnt/c/source' && env " + $expectedStateAssignment + " bash install-core.sh '--pixel'")) 'installer forwards StateRoot even before INSTALL_DIR is resolved'
+    $script:ODSWslStateRoot=''
+    Check ((New-ODSWslInstallerCommand '/mnt/c/source' @('--pixel') '') -ceq "cd -- '/mnt/c/source' && bash install-core.sh '--pixel'") 'installer without explicit roots adds no environment override'
+    foreach ($unsafeRoot in @('C:relative', '\relative', 'C:\', '\\server\share', 'C:\state"injected', ("C:\state"+[char]10+'injected'))) {
+        $validationError=$null
+        try { . (Join-Path $PSScriptRoot '../../installers/wsl-lifecycle.ps1') -StateRoot $unsafeRoot } catch { $validationError=$_.Exception.Message }
+        Check ($validationError -in @('An absolute Windows state directory is required','State directory cannot be a filesystem root')) "state root rejects unsafe path $($unsafeRoot.Replace([string][char]10,'<newline>')) before dispatch"
+    }
+    . (Join-Path $PSScriptRoot '../../installers/wsl-lifecycle.ps1') -Distro $Distro
     Initialize-ODSPrivateDirectory $fixture
     Assert-ODSPrivatePath $fixture -Directory
     Check $true 'actual Windows directory ACL is private'
+    & {
+        $customStateRoot=Join-Path $fixture 'custom state root'
+        . (Join-Path $PSScriptRoot '../../installers/wsl-lifecycle.ps1') -StateRoot $customStateRoot
+        Initialize-ODSPrivateDirectory $customStateRoot
+        $customIdentity=Get-ODSWslIdentity 'Ubuntu-24.04' '/home/ods/ods'
+        Initialize-ODSPrivateDirectory $customIdentity.directory
+        Write-ODSWslJson (Join-Path $customIdentity.directory 'instance.json') $customIdentity
+        Set-ODSWslStartupIntent $customIdentity $false
+        $uncreatedRoot=Join-Path $fixture 'cancelled state root'
+        $script:ODSWslStateRoot=$uncreatedRoot
+        $script:ODSWslStartupIdentity=$customIdentity
+        $script:ODSWslStartupGeneration=(Get-ODSWslStartupIntent $customIdentity).generation
+        $script:ODSWslStartupDeadline=[DateTime]::UtcNow.AddMinutes(1)
+        Reject {Start-ODSWslLifetime $customIdentity} 'cancelled startup refuses lifetime creation before initializing StateRoot'
+        Check (-not (Test-Path -LiteralPath $uncreatedRoot)) 'cancelled startup leaves its uninitialized StateRoot untouched'
+        $script:ODSWslStateRoot=$customStateRoot
+        $script:ODSWslStartupIdentity=$null;$script:ODSWslStartupGeneration=$null;$script:ODSWslStartupDeadline=$null
+        function Get-ScheduledTask { param($TaskName,$ErrorAction)
+            if($TaskName -cne ($customIdentity.taskName+'-Startup')){throw 'Unexpected custom-root task lookup'}
+            [pscustomobject]@{
+                Actions=@([pscustomobject]@{Execute=(Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe');Arguments=(Get-ODSWslStartupArguments $customIdentity)})
+                Principal=[pscustomobject]@{UserId=$customIdentity.ownerSid;RunLevel='Limited';LogonType='Interactive'}
+                Triggers=@([pscustomobject]@{UserId=$customIdentity.ownerSid;Delay='PT30S';CimClass=[pscustomobject]@{CimClassName='MSFT_TaskLogonTrigger'}})
+                Settings=[pscustomobject]@{ExecutionTimeLimit='PT25M';RestartCount=0}
+            }
+        }
+        function Start-ODSWslDockerDesktop { throw 'Custom-root stopped fixture must not start Docker' }
+        function Start-ODSWslLifetime { throw 'Custom-root stopped fixture must not start WSL' }
+        Invoke-ODSWslStartup $customIdentity.directory
+        Check ((Read-ODSWslJson (Join-Path $customIdentity.directory 'startup-status.json')).state -eq 'disabled') 'custom-root startup recomputes the real identity and reads its stopped preference'
+        Check ($customIdentity.directory -ceq (Join-Path $customStateRoot $a.id)) 'custom-root startup retains the owner and installation hash'
+    }
+    . (Join-Path $PSScriptRoot '../../installers/wsl-lifecycle.ps1') -Distro $Distro
+    # Re-sourcing the real identity/StateRoot code also restores this boundary;
+    # keep all later public lifecycle calls inside the registered-distro fixture.
+    function Resolve-ODSWslRegisteredDistro { param($Name); $Name }
     $a.directory=$fixture
     Write-ODSWslJson (Join-Path $fixture 'instance.json') $a
     $null=Assert-ODSWslManifest $a

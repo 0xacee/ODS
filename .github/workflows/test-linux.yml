@@ -338,6 +338,9 @@ jobs:
       - name: Windows CLI Enable/Disable Tests
         run: bash tests/test-windows-cli-enable-disable.sh
 
+      - name: Windows Uninstall Command Tests
+        run: bash tests/test-windows-uninstall-command.sh
+
       - name: CLI Enable Compose Reconciliation Tests
         run: bash tests/test-cli-enable-compose-reconciliation.sh
 
@@ -492,11 +495,15 @@ jobs:
         run: |
           bash tests/test-pixel-integration.sh
           bash tests/test-pixel-host-install.sh
+          bash tests/test-pixel-same-pin-upgrade.sh
           python3 -m unittest -v tests/test_pixel_model_transition.py
           python3 -m unittest -v tests/test_pixel_native_search.py
           bash tests/test-pixel-compose-wiring.sh
           bash tests/test-pixel-wsl-runtime-bridge.sh
           bash tests/test-pixel-wsl-runtime-targets.sh
+          bash tests/test-pixel-wsl-runtime-layout.sh
+          bash tests/test-pixel-wsl-runtime-prestart.sh
+          bash tests/test-installed-source-modes.sh
           python3 tests/test_pixel_timeout_contract.py
           python3 -m unittest -v tests/test_pixel_edge_buffered_content.py
           python3 -m unittest -v extensions/services/pixel-agent/tests/test_artifact_promoter.py

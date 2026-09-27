@@ -34,7 +34,8 @@ run_case() (
     shift 4
     unset LEMONADE_HOST_TRANSPORT LEMONADE_EXTERNAL LEMONADE_BASE_URL LEMONADE_API_KEY
     unset LEMONADE_MODEL LEMONADE_GPU_NAME LEMONADE_GPU_VRAM_MB
-    unset ODS_WINDOWS_SYSTEM_DIRECTORY
+    unset ODS_WINDOWS_SYSTEM_DIRECTORY ODS_WSL_STATE_ROOT
+    [[ -z "${INHERITED_STATE_ROOT:-}" ]] || ODS_WSL_STATE_ROOT="$INHERITED_STATE_ROOT"
     unset LEMONADE_CONTAINER_BASE_URL LEMONADE_API_BASE_PATH AMD_INFERENCE_PORT
     [[ "$inherited" == unset ]] || LEMONADE_HOST_TRANSPORT="$inherited"
     eval "$defaults"
@@ -55,6 +56,9 @@ run_case() (
         if [[ -n "${PERSISTED_WINDOWS_SYSTEM_DIRECTORY:-}" ]]; then
             printf 'ODS_WINDOWS_SYSTEM_DIRECTORY=%s\n' "$(dotenv_value "$PERSISTED_WINDOWS_SYSTEM_DIRECTORY")" >> "$_env_existing"
         fi
+        if [[ -n "${PERSISTED_STATE_ROOT:-}" ]]; then
+            printf 'ODS_WSL_STATE_ROOT=%s\n' "$(dotenv_value "$PERSISTED_STATE_ROOT")" >> "$_env_existing"
+        fi
     fi
     eval "$route_source"
     [[ "$LEMONADE_HOST_TRANSPORT" == "$expected" ]]
@@ -63,7 +67,7 @@ run_case() (
 '"$template"'
 ENV_EOF'
     unset LEMONADE_HOST_TRANSPORT LEMONADE_EXTERNAL LEMONADE_BASE_URL LEMONADE_CONTAINER_BASE_URL
-    unset ODS_WINDOWS_SYSTEM_DIRECTORY
+    unset ODS_WINDOWS_SYSTEM_DIRECTORY ODS_WSL_STATE_ROOT
     load_env_file "$INSTALL_DIR/.env"
     [[ "$LEMONADE_HOST_TRANSPORT" == "$expected" && "$LEMONADE_EXTERNAL" == true ]]
     [[ "$LEMONADE_BASE_URL" == http://localhost:13305 ]]
@@ -72,6 +76,10 @@ ENV_EOF'
     [[ "${ODS_WINDOWS_SYSTEM_DIRECTORY:-}" == "${EXPECTED_WINDOWS_SYSTEM_DIRECTORY:-}" ]]
     if [[ -z "${EXPECTED_WINDOWS_SYSTEM_DIRECTORY:-}" ]]; then
         ! grep -q '^ODS_WINDOWS_SYSTEM_DIRECTORY=' "$INSTALL_DIR/.env"
+    fi
+    [[ "${ODS_WSL_STATE_ROOT:-}" == "${EXPECTED_STATE_ROOT:-}" ]]
+    if [[ -z "${EXPECTED_STATE_ROOT:-}" ]]; then
+        ! grep -q '^ODS_WSL_STATE_ROOT=' "$INSTALL_DIR/.env"
     fi
     printf 'PASS: %s is exported and persists with the normalized route\n' "$label"
 )
@@ -94,6 +102,12 @@ EXPECTED_WINDOWS_SYSTEM_DIRECTORY='D:\Operating $ystem\System32' \
     --lemonade-host-transport model-router --windows-system-directory 'D:\Operating $ystem\System32'
 EXPECTED_WINDOWS_SYSTEM_DIRECTORY='E:\Windows\System32' PERSISTED_WINDOWS_SYSTEM_DIRECTORY='E:\Windows\System32' \
     run_case 'Rerun preserves Windows directory' unset model-router model-router
+INHERITED_STATE_ROOT="D:\ODS state\it's [private] \$(literal)" EXPECTED_STATE_ROOT="D:\ODS state\it's [private] \$(literal)" \
+    run_case 'Explicit Windows state location survives dotenv quoting' unset unset direct
+PERSISTED_STATE_ROOT='E:\ODS state\saved' EXPECTED_STATE_ROOT='E:\ODS state\saved' \
+    run_case 'Linux rerun preserves the existing Windows state location' unset model-router model-router
+INHERITED_STATE_ROOT='D:\ODS state\selected' PERSISTED_STATE_ROOT='E:\ODS state\saved' EXPECTED_STATE_ROOT='D:\ODS state\selected' \
+    run_case 'Windows selection wins over the persisted state location' unset model-router model-router
 
 reject() {
     local label="$1" rc=0

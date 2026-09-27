@@ -280,7 +280,26 @@ _ods_pixel_source_transition_required() {
     IFS='|' read -r state source_ref <<<"$transition"
     [[ "$state" =~ ^(ready|installing|deactivating)$ \
         && "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 2
-    [[ "$state" == deactivating || "$source_ref" != "$requested_ref" ]]
+    [[ "$state" == deactivating || "$source_ref" != "$requested_ref" ]] && return 0
+    # The Pixel pin alone does not identify the ODS host integration. Preserve
+    # its installed source until cleanup can validate privileged mirrors, even
+    # when an upgrade retains the same developer Pixel checkout.
+    local incoming_root="${4:-}" relative comparison
+    [[ -n "$incoming_root" ]] || return 1
+    for relative in installers/lib/pixel-host-install.sh bin \
+        extensions/services/pixel-agent/host extensions/services/pixel-agent/plugin; do
+        [[ -e "${INSTALL_DIR:?}/$relative" && ! -L "$INSTALL_DIR/$relative" \
+            && -e "$incoming_root/$relative" && ! -L "$incoming_root/$relative" ]] || return 2
+        comparison=0
+        diff -qr --exclude=__pycache__ -- "$INSTALL_DIR/$relative" \
+            "$incoming_root/$relative" >/dev/null 2>&1 || comparison=$?
+        case "$comparison" in
+            0) ;;
+            1) return 0 ;;
+            *) return 2 ;;
+        esac
+    done
+    return 1
 }
 
 # A failed test or operator cleanup can remove the ODS checkout while leaving
@@ -292,8 +311,7 @@ _ods_pixel_restore_transition_source() {
     transition="$(_ods_pixel_source_transition_state "$owner" "$home" "$requested_ref")" || return 1
     IFS='|' read -r state source_ref <<<"$transition"
     [[ "$state" =~ ^(ready|installing|deactivating)$ \
-        && "$source_ref" =~ ^[0-9a-f]{40}$ \
-        && ( "$state" == deactivating || "$source_ref" != "$requested_ref" ) ]] || return 1
+        && "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 1
     source_root="${INSTALL_DIR:?}/data/pixel/source-$source_ref"
     # Retirement must verify the source that actually installed the old
     # deployment. Prefer its existing checkout; never fetch a retired private
@@ -2672,7 +2690,27 @@ ods_pixel_prepare_runtime_identity() {
     if declare -f _phase11_env_set >/dev/null 2>&1; then
         _phase11_env_set PIXEL_INGRESS_GID "$gid"
     fi
+    if ! _ods_pixel_prepare_wsl_runtime_bridge "$owner"; then
+        ai_bad "Could not prepare Pixel's shared WSL runtime before container startup."
+        return 1
+    fi
     ai_ok "Prepared the unprivileged Pixel runtime identity"
+}
+
+# Docker Desktop translates bind sources from the WSL client's namespace.
+# Establish the shared projection before Compose starts Pixel Edge, including
+# on a fresh install where the persistent bridge unit is not installed yet.
+_ods_pixel_prepare_wsl_runtime_bridge() {
+    local owner="$1" env_file="${INSTALL_DIR:?}/.env"
+    grep -Fxq 'PIXEL_RUNTIME_BIND_PROPAGATION=rshared' "$env_file" || return 0
+    grep -Fxq 'PIXEL_INGRESS_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/ingress' "$env_file" || return 1
+    grep -Fxq 'PIXEL_PREVIEW_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/preview' "$env_file" || return 1
+    local bridge="$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-wsl-runtime-bridge.sh"
+    [[ -f "$bridge" && ! -L "$bridge" ]] || return 1
+    [[ ! -L /run/ods-pixel && ! -L /run/ods-pixel-preview ]] || return 1
+    ods_sudo install -d -o "$owner" -g ods-pixel -m 0710 /run/ods-pixel || return 1
+    ods_sudo install -d -o "$owner" -g ods-pixel -m 0750 /run/ods-pixel-preview || return 1
+    ods_sudo /bin/bash "$bridge" ensure
 }
 
 _ods_pixel_source_checkout() {

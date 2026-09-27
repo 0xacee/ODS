@@ -443,6 +443,17 @@ def start(install_dir: Path, env: dict, expected_plan_digest: str) -> dict:
 
 def disable_startup(install_dir: Path, env: dict, *, validate_only: bool = False) -> dict:
     """Retire only this installation's Windows login task, never its distro."""
+    state_root = env.get('ODS_WSL_STATE_ROOT')
+    if 'ODS_WSL_STATE_ROOT' in env:
+        if not _text(state_root) or any(character in state_root for character in '\"*?<>|'):
+            raise ValueError('ODS_WSL_STATE_ROOT must name an absolute Windows state directory')
+        path = PureWindowsPath(state_root)
+        local = bool(re.match(r'^[A-Za-z]:[\\/]', state_root))
+        unc = state_root.startswith('\\\\') and len(path.drive.split('\\')) == 4
+        if (not path.is_absolute() or not (local or unc) or path == PureWindowsPath(path.anchor)
+                or re.search(r'(^|[\\/])\.{1,2}([\\/]|$)', state_root)
+                or ':' in (state_root[2:] if local else state_root)):
+            raise ValueError('ODS_WSL_STATE_ROOT must not be a filesystem root, device or traversal path')
     context = _context(install_dir, env)
     program = _SOURCE / 'installers/wsl-lifecycle.ps1'
     if not program.is_file() or program.is_symlink() or program.resolve() != program:
@@ -455,6 +466,8 @@ def disable_startup(install_dir: Path, env: dict, *, validate_only: bool = False
                '-ExecutionPolicy', 'Bypass', '-File', controller,
                '-Action', 'disable-startup', '-Distro', context.distro,
                '-InstallRoot', context.install_dir]
+    if state_root is not None:
+        command.extend(['-StateRoot', state_root])
     if validate_only:
         command.append('-ValidateOnly')
     # Mutations are issued once, including an uncertain/expired interop call.

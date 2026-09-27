@@ -244,7 +244,7 @@ else
             return 1
         }
         _ods_pixel_source_transition_required \
-            "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_requested_pixel_ref" \
+            "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_requested_pixel_ref" "$SCRIPT_DIR" \
             || _phase06_pixel_source_transition=$?
         case "$_phase06_pixel_source_transition" in
             0)
@@ -456,11 +456,13 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     do
         [[ -d "$_installed_code_root" && ! -L "$_installed_code_root" ]] \
             || error "Missing or unsafe installed code tree: $_installed_code_root"
-        find -P "$_installed_code_root" \( -type d -o -type f \) -exec chmod go-w {} + \
+        find -P "$_installed_code_root" \( -type d -o -type f \) \
+            \( -perm -020 -o -perm -002 \) -exec chmod go-w {} + \
             || error "Could not secure installed code tree: $_installed_code_root"
     done
     find -P "$INSTALL_DIR" -maxdepth 1 -type f \
-        \( -name '*.sh' -o -name 'ods-cli' \) -exec chmod go-w {} + \
+        \( -name '*.sh' -o -name 'ods-cli' \) \
+        \( -perm -020 -o -perm -002 \) -exec chmod go-w {} + \
         || error "Could not secure installed root executables"
     unset _installed_code_root
 
@@ -685,6 +687,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     [[ "${LEMONADE_EXTERNAL_VALUE,,}" == "true" ]] && LEMONADE_EXTERNAL_VALUE="true" || LEMONADE_EXTERNAL_VALUE="false"
     LEMONADE_HOST_TRANSPORT="$(_env_get_explicit_first LEMONADE_HOST_TRANSPORT direct)"
     ODS_WINDOWS_SYSTEM_DIRECTORY="$(_env_get_explicit_first ODS_WINDOWS_SYSTEM_DIRECTORY '')"
+    ODS_WSL_STATE_ROOT="$(_env_get_explicit_first ODS_WSL_STATE_ROOT '')"
     case "$LEMONADE_HOST_TRANSPORT" in
         direct|model-router) ;;
         *) error "LEMONADE_HOST_TRANSPORT must be direct or model-router"; return 1 ;;
@@ -1263,6 +1266,7 @@ AMD_INFERENCE_MANAGED=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo "";
 LEMONADE_EXTERNAL=${LEMONADE_EXTERNAL_VALUE}
 LEMONADE_HOST_TRANSPORT=$(dotenv_value "${LEMONADE_HOST_TRANSPORT}")
 $(if [[ -n "${ODS_WINDOWS_SYSTEM_DIRECTORY}" ]]; then printf 'ODS_WINDOWS_SYSTEM_DIRECTORY=%s' "$(dotenv_value "$ODS_WINDOWS_SYSTEM_DIRECTORY")"; fi)
+$(if [[ -n "${ODS_WSL_STATE_ROOT}" ]]; then printf 'ODS_WSL_STATE_ROOT=%s' "$(dotenv_value "$ODS_WSL_STATE_ROOT")"; fi)
 LEMONADE_BASE_URL=$(dotenv_value "${LEMONADE_BASE_URL_VALUE}")
 LEMONADE_CONTAINER_BASE_URL=$(dotenv_value "${LEMONADE_CONTAINER_BASE_URL_VALUE}")
 LEMONADE_API_BASE_PATH=$(dotenv_value "${LEMONADE_API_BASE_PATH_VALUE}")
