@@ -32,6 +32,7 @@ bridge() {
 
 base=/mnt/wsl/ods-portal-runtime
 [[ ! -L "$base" ]] || exit 1
+! mountpoint -q -- "$base" || exit 1
 if [[ "$action" == ensure ]]; then
     install -d -o root -g root -m 0755 -- "$base"
     for target in "$base/ingress" "$base/preview"; do
