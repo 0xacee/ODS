@@ -7,7 +7,7 @@ $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "ods.ps1 does not parse: $($errors[0].Message)" }
-foreach ($name in @('Invoke-Uninstall', 'Remove-ODSDockerProjectByLabel', 'Get-ODSDockerProjectResourceNames', 'Test-ODSArgumentPresent', 'Assert-ODSDockerProjectOwnership', 'Test-ODSUninstallPathOwned', 'Test-ODSUninstallCommandOwned', 'Test-ODSUninstallTaskOwned', 'Stop-ODSUninstallOwnedHelpers')) {
+foreach ($name in @('Invoke-Uninstall', 'Remove-ODSDockerProjectByLabel', 'Get-ODSDockerProjectResourceNames', 'Test-ODSArgumentPresent', 'Assert-ODSDockerProjectOwnership', 'Test-ODSUninstallPathOwned', 'Resolve-ODSUninstallLiteral', 'Test-ODSUninstallCommandOwned', 'Test-ODSUninstallTaskOwned', 'Stop-ODSUninstallOwnedHelpers')) {
     $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     if (-not $definition) { throw "ods.ps1 no longer defines $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -129,11 +129,12 @@ try {
         [pscustomobject]@{ProcessId=$PID;ParentProcessId=912300;Name='pwsh.exe';ExecutablePath='C:\PowerShell\pwsh.exe';CommandLine=('pwsh -File "{0}/ods.ps1" uninstall' -f $InstallDir)},
         [pscustomobject]@{ProcessId=912300;ParentProcessId=0;Name='pwsh.exe';ExecutablePath='C:\PowerShell\pwsh.exe';CommandLine=('pwsh -Command "& ''{0}/ods.ps1'' uninstall"' -f $InstallDir)},
         [pscustomobject]@{ProcessId=912301;Name='python.exe';ExecutablePath='C:\Python\python.exe';CommandLine='python.exe C:\AnotherInstallation\ods\scripts\ods-host-agent.py --port 3003'},
-        [pscustomobject]@{ProcessId=912302;Name='python.exe';ExecutablePath='C:\Python\python.exe';CommandLine=('python.exe "{0}/scripts/ods-host-agent.py"' -f $InstallDir)}
+        [pscustomobject]@{ProcessId=912302;Name='python.exe';ExecutablePath='C:\Python\python.exe';CommandLine=('python.exe "{0}/scripts/ods-host-agent.py"' -f $InstallDir)},
+        [pscustomobject]@{ProcessId=912303;ParentProcessId=912302;Name='lemonade-server.exe';ExecutablePath='C:\Shared\lemonade-server.exe';CommandLine='lemonade-server --port 8080'}
     )
     Invoke-Uninstall -UninstallArgs @('--force')
     Check ($script:tasks.Count -eq 3 -and $script:tasks.ODSOpenCodeWeb -eq 'Running') 'foreign scheduled tasks are neither stopped nor unregistered'
-    Check ($script:stoppedProcesses.Count -eq 1 -and $script:stoppedProcesses[0] -eq 912302) 'foreign helpers and the launching shell ancestry are preserved'
+    Check ($script:stoppedProcesses.Count -eq 2 -and $script:stoppedProcesses[0] -eq 912303 -and $script:stoppedProcesses[1] -eq 912302) 'only the owned launcher and its captured runtime child stop, preserving foreign helpers and shell ancestry'
     Check (-not ($script:dockerCalls -match 'foreign-external-(data|network-id)')) 'external attachments never enter the deletion plan'
     Check (-not ($script:dockerCalls -match '^compose .*down')) 'saved compose flags cannot expand the deletion plan to another project'
 
@@ -143,6 +144,23 @@ try {
     Check (-not (Test-ODSUninstallCommandOwned ('"{0}-other/agent.py"' -f $InstallDir)) -and -not (Test-ODSUninstallCommandOwned ('"{0}/../other/agent.py"' -f $InstallDir))) 'sibling prefixes and path traversal cannot authorize helper deletion'
     Check (-not (Test-ODSUninstallCommandOwned ('python C:\Foreign\agent.py --log "{0}/logs/foreign.txt"' -f $InstallDir))) 'a data or log argument is insufficient helper ownership'
     Check (-not (Test-ODSUninstallCommandOwned 'powershell.exe -Command "Write-Host ''fixture|invalid-path''"')) 'non-path command literals do not abort ownership inspection'
+    Check (-not (Test-ODSUninstallCommandOwned ('powershell.exe -Command "Get-FileHash ''{0}/ods.ps1''"' -f $InstallDir))) 'reading an owned file does not authorize killing an unrelated shell'
+    Check (-not (Test-ODSUninstallCommandOwned ('python.exe -c "print(''{0}/agent.py'')"' -f $InstallDir))) 'Python inline data references do not establish script ownership'
+    Check (-not (Test-ODSUninstallCommandOwned ('python.exe ''{0}/agent.py''' -f $InstallDir))) 'single quotes do not invent Windows argument grouping'
+    $generated = ('$env:PATH=''C:/Docker;''+$env:PATH; $agentArgs=@(''-3'')+@(''{0}/scripts/ods-host-agent.py'',''--port'',''3003''); Set-Location ''{0}''; Start-Process -FilePath ''C:/Python/py.exe'' -ArgumentList $agentArgs -WindowStyle Hidden -Wait' -f $InstallDir)
+    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($generated))
+    Check (Test-ODSUninstallTaskOwned ([pscustomobject]@{Actions=@([pscustomobject]@{Execute='powershell.exe';Arguments="-NoProfile -EncodedCommand $encoded"})})) 'the generated array and py launcher is recognized without evaluation'
+    foreach ($snippet in @(
+        ('Write-Host ''{0}/agent.py''' -f $InstallDir),
+        ('function NeverCalled {{ Start-Process python.exe -ArgumentList @(''{0}/agent.py'') }}' -f $InstallDir),
+        ('if ($false) {{ Start-Process python.exe -ArgumentList @(''{0}/agent.py'') }}' -f $InstallDir),
+        ('Start-Process python.exe -ArgumentList @(''{0}/agent.py''); Start-Process python.exe -ArgumentList @(''C:/Foreign/agent.py'')' -f $InstallDir),
+        ('$args=''{0}''+''-foreign/agent.py''; Start-Process python.exe -ArgumentList $args' -f $InstallDir),
+        ('$unused=(Set-Alias Start-Process Get-FileHash); Start-Process python.exe -ArgumentList @(''{0}/agent.py'')' -f $InstallDir)
+    )) {
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($snippet))
+        Check (-not (Test-ODSUninstallTaskOwned ([pscustomobject]@{Actions=@([pscustomobject]@{Execute='powershell.exe';Arguments="-EncodedCommand $encoded"})}))) 'encoded data, deferred, mixed and ambiguous launchers remain untouched'
+    }
 
     Reset-Docker @('ods_old-wsl-data')
     $script:unattachedVolume = 'ods_old-wsl-data'

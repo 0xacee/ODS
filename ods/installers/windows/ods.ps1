@@ -514,31 +514,126 @@ function Test-ODSUninstallPathOwned {
     } catch { return $false }
 }
 
+function Resolve-ODSUninstallLiteral {
+    param($Node, $Assignments, [int]$Before, [int]$Depth=0)
+    if ($Depth -gt 12) { throw 'Unknown launcher expression' }
+    $next=$Depth+1
+    if ($Node -is [Management.Automation.Language.StringConstantExpressionAst]) { return [string]$Node.Value }
+    if ($Node -is [Management.Automation.Language.VariableExpressionAst]) {
+        $name=$Node.VariablePath.UserPath
+        if (-not $Assignments.ContainsKey($name)) { throw 'Unknown launcher variable' }
+        $assignment=$Assignments[$name]
+        if ($assignment.Right.Extent.EndOffset -ge $Before) { throw 'Ambiguous launcher assignment' }
+        return Resolve-ODSUninstallLiteral $assignment.Right $Assignments $assignment.Extent.StartOffset $next
+    }
+    if ($Node -is [Management.Automation.Language.CommandExpressionAst]) { return Resolve-ODSUninstallLiteral $Node.Expression $Assignments $Before $next }
+    if ($Node -is [Management.Automation.Language.ParenExpressionAst]) { return Resolve-ODSUninstallLiteral $Node.Pipeline $Assignments $Before $next }
+    if ($Node -is [Management.Automation.Language.ArrayExpressionAst]) { return Resolve-ODSUninstallLiteral $Node.SubExpression $Assignments $Before $next }
+    if ($Node -is [Management.Automation.Language.PipelineAst] -and $Node.PipelineElements.Count -eq 1) { return Resolve-ODSUninstallLiteral $Node.PipelineElements[0] $Assignments $Before $next }
+    if ($Node -is [Management.Automation.Language.StatementBlockAst]) {
+        foreach ($statement in $Node.Statements) { Resolve-ODSUninstallLiteral $statement $Assignments $Before $next }
+        return
+    }
+    if ($Node -is [Management.Automation.Language.ArrayLiteralAst]) {
+        foreach ($element in $Node.Elements) { Resolve-ODSUninstallLiteral $element $Assignments $Before $next }
+        return
+    }
+    if ($Node -is [Management.Automation.Language.BinaryExpressionAst] -and $Node.Operator -eq 'Plus' -and
+        $Node.Left -is [Management.Automation.Language.ArrayExpressionAst] -and
+        $Node.Right -is [Management.Automation.Language.ArrayExpressionAst]) {
+        Resolve-ODSUninstallLiteral $Node.Left $Assignments $Before $next
+        Resolve-ODSUninstallLiteral $Node.Right $Assignments $Before $next
+        return
+    }
+    throw 'Unknown launcher expression'
+}
+
 function Test-ODSUninstallCommandOwned {
-    param([string]$CommandLine, [int]$Depth = 0)
+    param([string]$CommandLine, [string]$Executable='', [switch]$ArgumentsOnly, [int]$Depth=0)
     if (-not $CommandLine -or $Depth -gt 2) { return $false }
-    # Inspect literals without executing launcher code. Canonicalize each path
-    # so sibling prefixes and '..' cannot establish ownership.
-    foreach ($match in [regex]::Matches($CommandLine, '"([^"\r\n]+)"|''([^''\r\n]+)''|(?:[a-zA-Z]:[\\/]|\\\\)[^\s"'',;|<>]+')) {
-        $literal = $match.Value.Trim('"', "'")
-        if ((Test-ODSUninstallPathOwned $literal) -and
-            [IO.Path]::GetExtension($literal) -in @('.ps1','.py','.vbs','.exe','.cmd','.bat','.sh')) { return $true }
+    $argv=@([regex]::Matches($CommandLine, '"([^"\r\n]*)"|[^\s"]+') | ForEach-Object { $_.Value.Trim('"') })
+    if (-not $ArgumentsOnly) {
+        if (-not $argv.Count) { return $false }
+        if (-not $Executable) { $Executable=$argv[0] }
+        $argv=@($argv | Select-Object -Skip 1)
     }
-    $encoded = [regex]::Match($CommandLine, '(?i)(?:^|\s)-EncodedCommand\s+["'']?([A-Za-z0-9+/=]+)')
-    if ($encoded.Success) {
-        try {
-            $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value))
-            if (Test-ODSUninstallCommandOwned $decoded ($Depth + 1)) { return $true }
-        } catch { }
-    }
-    # PowerShell wrappers can contain nested quotes/assignments. Parse literal
-    # strings in their AST as well; no expression is evaluated.
-    $parseErrors = $null; $parseTokens = $null
-    $commandAst = [Management.Automation.Language.Parser]::ParseInput($CommandLine, [ref]$parseTokens, [ref]$parseErrors)
-    foreach ($literalAst in $commandAst.FindAll({ param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] }, $true)) {
-        $literal = [string]$literalAst.Value
-        if ((Test-ODSUninstallPathOwned $literal) -and
-            [IO.Path]::GetExtension($literal) -in @('.ps1','.py','.vbs','.exe','.cmd','.bat','.sh')) { return $true }
+    $program=($Executable -split '[\\/]')[-1]
+    if ($program -match '^(powershell|pwsh)(\.exe)?$') {
+        for ($index=0; $index -lt $argv.Count; $index++) {
+            $arg=$argv[$index]
+            if ($arg -in @('-File','-f')) {
+                return ($index+1 -lt $argv.Count -and (Test-ODSUninstallPathOwned $argv[$index+1]))
+            }
+            if ($arg -in @('-EncodedCommand','-enc','-e')) {
+                if ($index+1 -ge $argv.Count) { return $false }
+                try {
+                    $text=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($argv[$index+1]))
+                    $errors=$null; $tokens=$null
+                    $ast=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors)
+                    if ($errors.Count) { return $false }
+                    if ($ast.ParamBlock -or $ast.BeginBlock -or $ast.ProcessBlock -or $ast.EndBlock.Traps.Count) { return $false }
+                    # Recognize the generated launcher without evaluating it.
+                    # Nested/deferred commands, aliases and mixed launchers do
+                    # not establish ownership of the scheduled task.
+                    $assignments=@{}; $launchers=@()
+                    foreach ($statement in $ast.EndBlock.Statements) {
+                        if ($statement -is [Management.Automation.Language.AssignmentStatementAst]) {
+                            if ($statement.Operator -ne 'Equals' -or $statement.Left -isnot [Management.Automation.Language.VariableExpressionAst]) { return $false }
+                            if (@($statement.Right.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst]},$true)).Count) { return $false }
+                            $name=$statement.Left.VariablePath.UserPath
+                            if ($assignments.ContainsKey($name)) { return $false }
+                            $assignments[$name]=$statement
+                            continue
+                        }
+                        if ($statement -isnot [Management.Automation.Language.PipelineAst] -or $statement.PipelineElements.Count -ne 1 -or
+                            $statement.PipelineElements[0] -isnot [Management.Automation.Language.CommandAst]) { return $false }
+                        $command=$statement.PipelineElements[0]
+                        if ($command.GetCommandName() -eq 'Set-Location') { continue }
+                        if ($command.GetCommandName() -ne 'Start-Process') { return $false }
+                        $launchers+=,$command
+                    }
+                    if ($launchers.Count -ne 1) { return $false }
+                    foreach ($command in $launchers) {
+                        $file=$null; $arguments=$null
+                        $elements=$command.CommandElements
+                        for ($i=1; $i -lt $elements.Count; $i++) {
+                            $element=$elements[$i]
+                            if ($element -is [Management.Automation.Language.CommandParameterAst]) {
+                                $value=$element.Argument
+                                if (-not $value -and $i+1 -lt $elements.Count -and $elements[$i+1] -isnot [Management.Automation.Language.CommandParameterAst]) { $value=$elements[$i+1] }
+                                if ($element.ParameterName -eq 'FilePath') { $file=$value }
+                                if ($element.ParameterName -eq 'ArgumentList') { $arguments=$value }
+                            } elseif ($i -eq 1) { $file=$element }
+                        }
+                        if (-not $file -or -not $arguments) { continue }
+                        $exe=@(Resolve-ODSUninstallLiteral $file $assignments $command.Extent.StartOffset)
+                        $values=@(Resolve-ODSUninstallLiteral $arguments $assignments $command.Extent.StartOffset)
+                        if ($exe.Count -ne 1) { continue }
+                        # Start-Process joins ArgumentList verbatim. Adding
+                        # quotes here would invent execution proof for paths
+                        # that the real launcher splits at spaces.
+                        $serialized=$values -join ' '
+                        if (Test-ODSUninstallCommandOwned $serialized $exe[0] -ArgumentsOnly -Depth ($Depth+1)) { return $true }
+                    }
+                } catch { return $false }
+                return $false
+            }
+            if ($arg -in @('-NoProfile','-NoLogo','-NonInteractive','-Sta','-Mta')) { continue }
+            if ($arg -in @('-ExecutionPolicy','-WindowStyle')) { $index++; continue }
+            # Inline commands and unknown switches cannot establish script execution.
+            return $false
+        }
+    } elseif ($program -match '^(python(?:3(?:\.\d+)?)?|pythonw|py)(\.exe)?$') {
+        foreach ($arg in $argv) {
+            if ($arg -in @('-u','-B','-E','-s','-S') -or $arg -match '^-[23](?:\.\d+)?$') { continue }
+            if ($arg.StartsWith('-')) { return $false }
+            return (Test-ODSUninstallPathOwned $arg)
+        }
+    } elseif ($program -match '^(wscript|cscript)(\.exe)?$') {
+        foreach ($arg in $argv) {
+            if ($arg.StartsWith('//')) { continue }
+            return (Test-ODSUninstallPathOwned $arg)
+        }
     }
     return $false
 }
@@ -548,7 +643,7 @@ function Test-ODSUninstallTaskOwned {
     if (-not $Task -or -not @($Task.Actions).Count) { return $false }
     foreach ($action in @($Task.Actions)) {
         if (-not (Test-ODSUninstallPathOwned ([string]$action.Execute)) -and
-            -not (Test-ODSUninstallCommandOwned ([string]$action.Arguments))) { return $false }
+            -not (Test-ODSUninstallCommandOwned ([string]$action.Arguments) ([string]$action.Execute) -ArgumentsOnly)) { return $false }
     }
     return $true
 }
@@ -565,21 +660,43 @@ function Stop-ODSUninstallOwnedHelpers {
         if (-not $byId.ContainsKey($ancestorId)) { break }
         $ancestorId = [int]$byId[$ancestorId].ParentProcessId
     }
+    $owned=@{}
     foreach ($process in $processes) {
         if ($ancestors.ContainsKey([int]$process.ProcessId)) { continue }
-        if ([string]$process.Name -notmatch '^(python(?:3(?:\.\d+)?)?|pythonw|powershell|pwsh|wscript|cscript|opencode|llama-server|lemonade-server)(\.exe)?$') { continue }
+        if ([string]$process.Name -notmatch '^(python(?:3(?:\.\d+)?)?|pythonw|py|powershell|pwsh|wscript|cscript|opencode|llama-server|lemonade-server)(\.exe)?$') { continue }
         if ((Test-ODSUninstallPathOwned ([string]$process.ExecutablePath)) -or
-            (Test-ODSUninstallCommandOwned ([string]$process.CommandLine))) {
-            try { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop }
-            catch { if (Get-Process -Id ([int]$process.ProcessId) -ErrorAction SilentlyContinue) { throw } }
+            (Test-ODSUninstallCommandOwned ([string]$process.CommandLine) ([string]$process.Name))) {
+            $owned[[int]$process.ProcessId]=$true
         }
+    }
+    # Native runtimes installed outside ODS can be children of an owned
+    # launcher. The captured parent chain, rather than a shared port or PID
+    # file, establishes their association with this installation.
+    $ordered=@($processes | Where-Object { $owned.ContainsKey([int]$_.ProcessId) })
+    do {
+        $added=$false
+        foreach ($process in $processes) {
+            $id=[int]$process.ProcessId
+            if ($owned.ContainsKey($id) -or $ancestors.ContainsKey($id)) { continue }
+            if ($owned.ContainsKey([int]$process.ParentProcessId)) {
+                $owned[$id]=$true; $ordered+=,$process; $added=$true
+            }
+        }
+    } while ($added)
+    [array]::Reverse($ordered)
+    foreach ($process in $ordered) {
+        try { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop }
+        catch { if (Get-Process -Id ([int]$process.ProcessId) -ErrorAction SilentlyContinue) { throw } }
     }
     $startup = [Environment]::GetFolderPath('Startup')
     if ($startup) {
         $entry = Join-Path $startup 'ods-host-agent.vbs'
-        if ((Test-Path -LiteralPath $entry) -and
-            (Test-ODSUninstallCommandOwned (Get-Content -LiteralPath $entry -Raw -ErrorAction Stop))) {
-            Remove-Item -LiteralPath $entry -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $entry) {
+            $content=Get-Content -LiteralPath $entry -Raw -ErrorAction Stop
+            $launcher=[regex]::Match($content.Trim(), '(?i)^Set WshShell = CreateObject\("WScript\.Shell"\)\r?\nWshShell\.Run "([^"\r\n]+)", 0, False$')
+            if ($launcher.Success -and (Test-ODSUninstallCommandOwned $launcher.Groups[1].Value)) {
+                Remove-Item -LiteralPath $entry -Force -ErrorAction Stop
+            }
         }
     }
 }
