@@ -123,7 +123,7 @@ cd $installDir
 .\ods.ps1 uninstall --force
 ```
 
-Windows recovery note: if the runtime folder is partial and `.\ods.ps1` is missing, run the same command from a source checkout as `.\ods\installers\windows\ods.ps1 uninstall --force`. It removes Docker resources labelled as the ODS compose project before removing the runtime directory.
+Windows recovery note: if the runtime folder is partial and `.\ods.ps1` is missing, run the same command from a source checkout as `.\ods\installers\windows\ods.ps1 uninstall --force`. It verifies the containers' Compose installation directory before removing resources. A shared `ods` project name does not authorize removing another Windows or WSL installation. Unattached volumes with no verifiable owner are preserved, with an error naming the resource; `--force` does not bypass this check.
 
 > **API endpoint:** Linux Docker installs expose llama-server on **http://localhost:11434** by default (`OLLAMA_PORT`) while containers use `llama-server:8080`. macOS native Metal and Windows native/Lemonade paths use **http://localhost:8080** unless overridden. Open WebUI stays on **http://localhost:3000**.
 

@@ -7,7 +7,7 @@ $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "ods.ps1 does not parse: $($errors[0].Message)" }
-foreach ($name in @('Invoke-Uninstall', 'Remove-ODSDockerProjectByLabel', 'Get-ODSDockerProjectResourceNames', 'Test-ODSArgumentPresent')) {
+foreach ($name in @('Invoke-Uninstall', 'Remove-ODSDockerProjectByLabel', 'Get-ODSDockerProjectResourceNames', 'Test-ODSArgumentPresent', 'Assert-ODSDockerProjectOwnership')) {
     $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     if (-not $definition) { throw "ods.ps1 no longer defines $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -49,7 +49,9 @@ function docker {
     $line = $args -join ' '
     $script:dockerCalls.Add($line)
     $global:LASTEXITCODE = 0
+    if ($script:listFailure -and $line -match '^ps -a ') { $global:LASTEXITCODE = 1; return }
     switch -Regex ($line) {
+        '^container inspect ' { return ConvertTo-Json -Depth 6 -InputObject @(@{ Config = @{ Labels = @{ 'com.docker.compose.project' = 'ods'; 'com.docker.compose.project.working_dir' = $script:containerRoot } }; Mounts = @($script:volumes | Where-Object { $_ -ne $script:unattachedVolume } | ForEach-Object { @{ Type = 'volume'; Name = $_ } }) }) }
         '^compose .*down' { foreach ($c in @($script:containers)) { if ($c -ne $script:composeDownKeeps) { $script:containers.Remove($c) | Out-Null } }; $script:networks.Remove('ods-network') | Out-Null; foreach ($v in @($script:composeVolumes)) { $script:volumes.Remove($v) | Out-Null }; return }
         '^ps -a --filter \S+ --format \{\{\.Names\}\}$' { return @($script:containers) }
         '^network ls --filter \S+ --format \{\{\.Name\}\}$' { return @($script:networks) }
@@ -86,12 +88,46 @@ function Reset-Docker([string[]]$ExtraVolumes, [string[]]$Busy = @(), [string[]]
     $script:dirRemoved = $false
     $script:tasks = @{ ODSHostAgent = 'Ready'; ODSOpenCodeWeb = 'Running'; ODSNativeLlamaRuntime = 'Ready' }
     $script:lockedTasks = @()
+    $script:containerRoot = $InstallDir
+    $script:listFailure = $false
+    $script:unattachedVolume = ''
 }
 
 $script:InstallDir = Join-Path ([IO.Path]::GetTempPath()) 'ods-uninstall-contract'
 $InstallDir = $script:InstallDir
 $null = New-Item -ItemType Directory -Path $InstallDir -Force
 try {
+    Reset-Docker @('ods_old-wsl-data')
+    $script:unattachedVolume = 'ods_old-wsl-data'
+    $message = ''
+    try { Invoke-Uninstall -UninstallArgs @('--force') } catch { $message = $_.Exception.Message }
+    Check ($message -like 'ODS_UNINSTALL_OWNERSHIP_UNKNOWN:*' -and $script:tasks.Count -eq 3 -and -not $script:dirRemoved) 'a native container does not authorize deleting unrelated orphan WSL volumes'
+
+    Reset-Docker @()
+    $script:listFailure = $true
+    $message = ''
+    try { Invoke-Uninstall -UninstallArgs @('--force') } catch { $message = $_.Exception.Message }
+    Check ($message -like 'Docker ownership query failed*' -and -not $script:dirRemoved -and $script:tasks.Count -eq 3) 'Docker query failure is not treated as an empty safe project'
+
+    Reset-Docker @('ods_important-data')
+    $script:containerRoot = '/home/another-user/ods'
+    $message = ''
+    try { Invoke-Uninstall -UninstallArgs @('--force') } catch { $message = $_.Exception.Message }
+    Check ($message -like 'ODS_UNINSTALL_OTHER_INSTALLATION:*') 'native uninstall rejects a WSL container using the same project name'
+    Check (-not $script:dirRemoved -and $script:tasks.Count -eq 3 -and -not ($script:dockerCalls -match '^(compose|rm|volume rm|network rm) ')) 'ownership rejection preserves files, tasks and all Docker data'
+
+    Reset-Docker @('ods_important-data')
+    $script:containerRoot = ''
+    $message = ''
+    try { Invoke-Uninstall -UninstallArgs @('--force') } catch { $message = $_.Exception.Message }
+    Check ($message -like 'ODS_UNINSTALL_OWNERSHIP_UNKNOWN:*' -and -not $script:dirRemoved) 'missing origin labels never authorize deletion'
+
+    Reset-Docker @('ods_important-data')
+    $script:containers.Clear()
+    $message = ''
+    try { Invoke-Uninstall -UninstallArgs @('--force') } catch { $message = $_.Exception.Message }
+    Check ($message -like 'ODS_UNINSTALL_OWNERSHIP_UNKNOWN:*' -and -not ($script:dockerCalls -match '^(compose|rm|volume rm|network rm) ')) 'orphan project labels alone cannot prove installation ownership'
+
     Reset-Docker @()
     Invoke-Uninstall -UninstallArgs @('--force')
     Check $script:dirRemoved 'clean compose down removes the runtime'

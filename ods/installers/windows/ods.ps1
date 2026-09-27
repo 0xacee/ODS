@@ -232,19 +232,21 @@ function Get-ODSDockerProjectResourceNames {
 
     $filter = "label=com.docker.compose.project=ods"
     try {
-        switch ($Kind) {
+        $names = switch ($Kind) {
             "container" {
-                return @(& docker ps -a --filter $filter --format '{{.Names}}' 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                @(& docker ps -a --filter $filter --format '{{.Names}}' 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             }
             "network" {
-                return @(& docker network ls --filter $filter --format '{{.Name}}' 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                @(& docker network ls --filter $filter --format '{{.Name}}' 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             }
             "volume" {
-                return @(& docker volume ls -q --filter $filter 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                @(& docker volume ls -q --filter $filter 2>$null | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             }
         }
+        if ($LASTEXITCODE -ne 0) { throw "Docker could not list $Kind resources." }
+        return @($names)
     } catch {
-        return @()
+        throw "Docker ownership query failed; runtime files were preserved: $_"
     }
 }
 
@@ -287,6 +289,48 @@ function Test-ODSComposeFlagsFilesAvailable {
     }
 
     return $hasComposeFile
+}
+
+function Assert-ODSDockerProjectOwnership {
+    param([switch]$RemoveVolumes)
+    # The project name alone is not ownership: native Windows and WSL can
+    # share the same Docker Desktop daemon and the same legacy "ods" name.
+    $containers = @(Get-ODSDockerProjectResourceNames -Kind 'container')
+    if (-not $containers.Count) {
+        $orphans = @(Get-ODSDockerProjectResourceNames -Kind 'network') + @(Get-ODSDockerProjectResourceNames -Kind 'volume')
+        if ($orphans.Count) {
+            throw 'ODS_UNINSTALL_OWNERSHIP_UNKNOWN: only orphaned Docker resources remain. Their project label cannot identify the original Windows or WSL installation; nothing was removed.'
+        }
+        return
+    }
+    $expected = [IO.Path]::GetFullPath($InstallDir).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $ownedVolumes = @{}
+    foreach ($name in $containers) {
+        $json = & docker container inspect $name 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "Cannot verify Docker container $name; uninstall stopped before any changes." }
+        $items = @($json | ConvertFrom-Json -ErrorAction Stop)
+        if ($items.Count -ne 1) { throw "Ambiguous Docker ownership for $name; nothing was removed." }
+        $labels = $items[0].Config.Labels
+        $workingDir = [string]$labels.'com.docker.compose.project.working_dir'
+        if ($labels.'com.docker.compose.project' -ne 'ods' -or [string]::IsNullOrWhiteSpace($workingDir) -or
+            -not [IO.Path]::IsPathRooted($workingDir)) {
+            throw "ODS_UNINSTALL_OWNERSHIP_UNKNOWN: $name has no verifiable Compose installation directory; nothing was removed."
+        }
+        $actual = [IO.Path]::GetFullPath($workingDir).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        if (-not [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "ODS_UNINSTALL_OTHER_INSTALLATION: $name belongs to '$workingDir', not '$InstallDir'. Use that installation's uninstaller; nothing was removed."
+        }
+        foreach ($mount in @($items[0].Mounts)) {
+            if ($mount.Type -eq 'volume' -and $mount.Name) { $ownedVolumes[[string]$mount.Name] = $true }
+        }
+    }
+    if ($RemoveVolumes) {
+        foreach ($volume in @(Get-ODSDockerProjectResourceNames -Kind 'volume')) {
+            if (-not $ownedVolumes.ContainsKey($volume)) {
+                throw "ODS_UNINSTALL_OWNERSHIP_UNKNOWN: volume '$volume' is not attached to a verified container of this installation. Its project label alone cannot authorize deleting its data; nothing was removed."
+            }
+        }
+    }
 }
 
 function Remove-ODSDockerProjectByLabel {
@@ -446,6 +490,9 @@ function Invoke-Uninstall {
     if ($hasInstallDir) {
         Assert-ODSInstallDirSafeForRemoval
     }
+
+    # Check before stopping helpers or compose down -v, not after data is gone.
+    Assert-ODSDockerProjectOwnership -RemoveVolumes:$removeVolumes
 
     if (-not $force) {
         Write-AIWarn "This will stop ODS and remove the Windows runtime at $InstallDir."

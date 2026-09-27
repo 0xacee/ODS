@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Native Windows uninstall now verifies each container's Compose installation
+  directory before any mutation. A shared `ods` project label cannot authorize
+  removing another WSL/Windows installation or unattached volumes of unknown
+  origin. Docker listing failures preserve the installation for recovery.
 - Perplexica's internal `scrape_url` action is disabled at container start. It
   opened any URL its model named, without address validation, from the
   Perplexica container on the ODS network, and Perplexica offered it in every
