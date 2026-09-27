@@ -1308,12 +1308,8 @@ async def huggingface_repository_details(
     return await _hf_repo_details(repo_id)
 
 
-@router.post("/api/models/huggingface/import")
-async def import_huggingface_model(
-    body: dict[str, Any] = Body(...),
-    api_key: str = Depends(verify_api_key),
-):
-    """Pin, register, and start one integrity-qualified Hub GGUF download."""
+async def _prepare_huggingface_import(body: dict[str, Any]):
+    """Prepare metadata without submitting a download to the host."""
     repo_id = str(body.get("repoId") or "").strip()
     artifact_id = str(body.get("artifactId") or "").strip()
     if not _HF_REPO_RE.fullmatch(repo_id) or not re.fullmatch(r"[0-9a-f]{20}", artifact_id):
@@ -1364,6 +1360,31 @@ async def import_huggingface_model(
         retained.append(record)
         _write_imported_library(retained)
 
+    return details, artifact, record
+
+
+@router.post("/api/models/huggingface/import")
+async def import_huggingface_model(
+    body: dict[str, Any] = Body(...),
+    api_key: str = Depends(verify_api_key),
+):
+    """Pin, register, and start one integrity-qualified Hub GGUF download."""
+    # A failure before dispatch is a definitive refusal, even if its status
+    # is 500. A transport failure after dispatch remains uncertain: never
+    # encourage the UI to replay a potentially accepted host operation.
+    try:
+        details, artifact, record = await _prepare_huggingface_import(body)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "X-ODS-Import-Started": "false"}
+        raise
+    except Exception as exc:
+        logger.exception("Hugging Face import preparation failed before dispatch")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not prepare the import. No download was started; you can retry.",
+            headers={"X-ODS-Import-Started": "false"},
+        ) from exc
+
     payload = {
         "gguf_file": record["gguf_file"],
         "gguf_url": record["gguf_url"],
@@ -1382,7 +1403,7 @@ async def import_huggingface_model(
     return {
         **result,
         "modelId": record["id"],
-        "repoId": repo_id,
+        "repoId": details["id"],
         "artifact": artifact["label"],
         "revision": details["sha"],
     }

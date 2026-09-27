@@ -86,3 +86,33 @@ test('a definitive refusal releases import controls and displays the server reas
   expect(screen.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled()
   expect(screen.queryByRole('button', { name: 'Check download status' })).toBeNull()
 })
+
+test('a preparation failure marked not dispatched permits retry even on HTTP 500', async () => {
+  post = async () => ({ ...response({ detail: 'No download was started; retry.' }, 500),
+    headers: { get: key => key === 'X-ODS-Import-Started' ? 'false' : null } })
+  await begin()
+  expect(screen.getByText('No download was started; retry.')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled()
+  expect(screen.queryByRole('button', { name: 'Check download status' })).toBeNull()
+  expect(posts()).toHaveLength(1)
+})
+
+test('an uncertain server error still requires readback rather than replaying a download', async () => {
+  post = async () => response({ detail: 'Upstream connection lost' }, 502)
+  await begin()
+  expect(screen.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Check download status' })).toBeEnabled()
+  expect(posts()).toHaveLength(1)
+})
+
+test.each(['failed', 'cancelled', 'canceled'])('resolves matching %s retained inside idle status', async status => {
+  await begin()
+  await act(async () => { await vi.advanceTimersByTimeAsync(45000) })
+  progress = { status: 'idle', lastTerminalStatus: {
+    status, model: 'hf-model.gguf', updatedAt: new Date().toISOString(),
+  } }
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check download status' })) })
+  expect(onImportStarted).toHaveBeenCalledWith({ modelId: artifact.importedModelId, status })
+  expect(screen.queryByRole('button', { name: 'Check download status' })).toBeNull()
+  expect(posts()).toHaveLength(1)
+})

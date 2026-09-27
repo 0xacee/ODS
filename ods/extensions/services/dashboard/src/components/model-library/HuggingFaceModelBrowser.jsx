@@ -32,7 +32,8 @@ async function boundedJsonRequest(url, options = {}, timeout = SEARCH_TIMEOUT_MS
         const body = await responseJson(response)
         if (!response.ok) {
           const error = new Error(errorMessage(body, 'Could not confirm the model operation.'))
-          error.rejected = response.status >= 400 && response.status < 500
+          error.rejected = (response.status >= 400 && response.status < 500) ||
+            response.headers?.get('X-ODS-Import-Started') === 'false'
           throw error
         }
         return body
@@ -178,16 +179,18 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
       ])
       const artifact = repository.id === pendingImport.repoId && Array.isArray(repository.artifacts) && repository.artifacts.find(item => item.id === pendingImport.artifactId)
       const model = artifact?.importedModelId && Array.isArray(catalog.models) && catalog.models.find(item => item.id === artifact.importedModelId)
-      const label = typeof progress.model === 'string' ? progress.model : ''
+      const observed = progress.status === 'idle' && progress.lastTerminalStatus
+        ? progress.lastTerminalStatus : progress
+      const label = typeof observed.model === 'string' ? observed.model : ''
       const matches = model && [model.id, model.gguf].some(value => typeof value === 'string' && value && (label === value || label.startsWith(value + ' (')))
-      const sampledAt = Date.parse(progress.updatedAt || '')
+      const sampledAt = Date.parse(observed.updatedAt || '')
       if (!matches || !Number.isFinite(sampledAt) || sampledAt < pendingImport.startedAt ||
-          !['downloading', 'verifying', 'complete', 'failed', 'error', 'cancelled'].includes(progress.status)) {
+          !['downloading', 'verifying', 'complete', 'failed', 'error', 'cancelled', 'canceled'].includes(observed.status)) {
         throw new Error('This import is not yet confirmed. Check status again before requesting another download.')
       }
       // A readback of this exact artifact resolves the uncertain POST. Never
       // replay it: accepted downloads continue through the shared progress UI.
-      Promise.resolve(onImportStarted?.({ modelId: model.id, status: progress.status }))
+      Promise.resolve(onImportStarted?.({ modelId: model.id, status: observed.status }))
         .catch(() => setImportNotice('Import found. Refresh Models to check download progress.'))
       setPendingImport(null)
       setImportNotice('')
