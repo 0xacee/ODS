@@ -241,7 +241,7 @@ else
             return 1
         }
         _ods_pixel_source_transition_required \
-            "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_requested_pixel_ref" \
+            "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_requested_pixel_ref" "$SCRIPT_DIR" \
             || _phase06_pixel_source_transition=$?
         case "$_phase06_pixel_source_transition" in
             0)
