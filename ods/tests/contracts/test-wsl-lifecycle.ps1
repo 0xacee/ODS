@@ -29,6 +29,20 @@ try {
     Check ((Get-ODSWslHolderArguments $a).StartsWith('--distribution Ubuntu-24.04 --exec ')) 'simple distribution name avoids WSL quote retention'
     $spaceDistro=Get-ODSWslIdentity 'Ubuntu Custom' '/home/ods/ods'
     Check ((Get-ODSWslHolderArguments $spaceDistro).StartsWith('--distribution "Ubuntu Custom" --exec ')) 'distribution whitespace remains within one argument'
+    $defaultTaskArguments=Get-ODSWslTaskArguments $a
+    $script:ODSWslStateRoot=Join-Path $PSScriptRoot 'fixture state root'
+    $explicitStateIdentity=Get-ODSWslIdentity 'Ubuntu-24.04' '/home/ods/ods'
+    Check ($explicitStateIdentity.id -ceq $a.id) 'state location does not change the owner and Linux installation identity'
+    Check ($explicitStateIdentity.directory -ceq (Join-Path $script:ODSWslStateRoot $a.id)) 'explicit state location selects the private instance directory'
+    Check ((Get-ODSWslTaskArguments $explicitStateIdentity).EndsWith((' -StateRoot "{0}"' -f $script:ODSWslStateRoot))) 'scheduled controller receives the same explicit state location'
+    $script:ODSWslStateRoot=''
+    Check ((Get-ODSWslTaskArguments $a) -ceq $defaultTaskArguments) 'default scheduler arguments remain compatible'
+    foreach ($unsafeRoot in @('C:relative', '\relative', 'C:\', '\\server\share', 'C:\state"injected', ("C:\state"+[char]10+'injected'))) {
+        $validationError=$null
+        try { . (Join-Path $PSScriptRoot '../../installers/wsl-lifecycle.ps1') -StateRoot $unsafeRoot } catch { $validationError=$_.Exception.Message }
+        Check ($validationError -in @('An absolute Windows state directory is required','State directory cannot be a filesystem root')) "state root rejects unsafe path $($unsafeRoot.Replace([string][char]10,'<newline>')) before dispatch"
+    }
+    . (Join-Path $PSScriptRoot '../../installers/wsl-lifecycle.ps1') -Distro $Distro
     Initialize-ODSPrivateDirectory $fixture
     Assert-ODSPrivatePath $fixture -Directory
     Check $true 'actual Windows directory ACL is private'
