@@ -142,6 +142,7 @@ try {
     Check (-not (Test-ODSUninstallTaskOwned ([pscustomobject]@{Actions=@([pscustomobject]@{Execute='python.exe';Arguments='C:\Unrelated\agent.py';WorkingDirectory=$InstallDir})}))) 'working directory alone cannot authorize task deletion'
     Check (-not (Test-ODSUninstallCommandOwned ('"{0}-other/agent.py"' -f $InstallDir)) -and -not (Test-ODSUninstallCommandOwned ('"{0}/../other/agent.py"' -f $InstallDir))) 'sibling prefixes and path traversal cannot authorize helper deletion'
     Check (-not (Test-ODSUninstallCommandOwned ('python C:\Foreign\agent.py --log "{0}/logs/foreign.txt"' -f $InstallDir))) 'a data or log argument is insufficient helper ownership'
+    Check (-not (Test-ODSUninstallCommandOwned 'powershell.exe -Command "Write-Host ''fixture|invalid-path''"')) 'non-path command literals do not abort ownership inspection'
 
     Reset-Docker @('ods_old-wsl-data')
     $script:unattachedVolume = 'ods_old-wsl-data'

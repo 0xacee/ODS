@@ -504,8 +504,9 @@ function Remove-ODSInstallDirectory {
 
 function Test-ODSUninstallPathOwned {
     param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
     try {
+        if (-not [IO.Path]::IsPathRooted($Path)) { return $false }
         $root = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\', '/')
         $actual = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
         return $actual.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
@@ -520,8 +521,8 @@ function Test-ODSUninstallCommandOwned {
     # so sibling prefixes and '..' cannot establish ownership.
     foreach ($match in [regex]::Matches($CommandLine, '"([^"\r\n]+)"|''([^''\r\n]+)''|(?:[a-zA-Z]:[\\/]|\\\\)[^\s"'',;|<>]+')) {
         $literal = $match.Value.Trim('"', "'")
-        if ([IO.Path]::GetExtension($literal) -in @('.ps1','.py','.vbs','.exe','.cmd','.bat','.sh') -and
-            (Test-ODSUninstallPathOwned $literal)) { return $true }
+        if ((Test-ODSUninstallPathOwned $literal) -and
+            [IO.Path]::GetExtension($literal) -in @('.ps1','.py','.vbs','.exe','.cmd','.bat','.sh')) { return $true }
     }
     $encoded = [regex]::Match($CommandLine, '(?i)(?:^|\s)-EncodedCommand\s+["'']?([A-Za-z0-9+/=]+)')
     if ($encoded.Success) {
@@ -536,8 +537,8 @@ function Test-ODSUninstallCommandOwned {
     $commandAst = [Management.Automation.Language.Parser]::ParseInput($CommandLine, [ref]$parseTokens, [ref]$parseErrors)
     foreach ($literalAst in $commandAst.FindAll({ param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] }, $true)) {
         $literal = [string]$literalAst.Value
-        if ([IO.Path]::GetExtension($literal) -in @('.ps1','.py','.vbs','.exe','.cmd','.bat','.sh') -and
-            (Test-ODSUninstallPathOwned $literal)) { return $true }
+        if ((Test-ODSUninstallPathOwned $literal) -and
+            [IO.Path]::GetExtension($literal) -in @('.ps1','.py','.vbs','.exe','.cmd','.bat','.sh')) { return $true }
     }
     return $false
 }
