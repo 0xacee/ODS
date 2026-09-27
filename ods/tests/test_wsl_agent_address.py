@@ -2,7 +2,6 @@ import importlib.util
 import json
 import os
 import stat
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -242,7 +241,6 @@ class TestAddress(Base):
 class TestConcurrency(Base):
     def test_concurrent_env_change_no_replacement(self):
         self.write_env('FOO=bar\n')
-        original_bytes = self.read_bytes()
         original_stat = self.stat_env()
 
         def detect():
