@@ -69,10 +69,14 @@ def test_read_only_wsl_desktop_cli_is_exact(monkeypatch, fault):
         return SimpleNamespace(f_flag=0 if fault == "writable-mount" else os.ST_RDONLY)
 
     monkeypatch.setattr(protocol.os, "statvfs", mount_info)
+    monkeypatch.setattr(
+        protocol.platform,
+        "release",
+        lambda: "linux" if fault == "kernel" else "microsoft-standard-WSL2",
+    )
 
     def text(path):
-        if str(path) == "/proc/sys/kernel/osrelease":
-            return "linux" if fault == "kernel" else "microsoft-standard-WSL2"
+        assert str(path) == "/proc/self/mountinfo"
         target = "/mnt/wsl/docker-desktop/cli-tools"
         if fault == "mount-target":
             target = "/mnt/wsl/docker-desktop"
@@ -100,6 +104,16 @@ def test_read_only_wsl_desktop_cli_is_exact(monkeypatch, fault):
 
     monkeypatch.setattr(protocol.Path, "lstat", parent_info)
     assert protocol.read_only_wsl_docker(binary, info) is (fault is None)
+
+
+def test_inspection_unit_supports_external_docker_daemon():
+    unit = (
+        ROOT / "extensions/services/pixel-agent/host/pixel-preview-inspection.service"
+    ).read_text()
+    assert "Requires=pixel-workspace-preview.service\n" in unit
+    assert "Wants=docker.service\n" in unit
+    assert "After=docker.service pixel-workspace-preview.service\n" in unit
+    assert "ProcSubset=pid\n" in unit
 
 
 def config():
