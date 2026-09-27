@@ -68,15 +68,6 @@ jobs:
           }
           if ($failed) { exit 1 }
 
-      - name: Windows Uninstall Leftover Contract (PowerShell 7)
-        shell: pwsh
-        run: ./tests/contracts/test-windows-uninstall-leftovers.ps1
-
-      - name: Windows Uninstall Leftover Contract (Windows PowerShell)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: ./tests/contracts/test-windows-uninstall-leftovers.ps1
-
       - name: Windows Lemonade Task Cleanup Contract
         shell: pwsh
         run: ./tests/contracts/test-windows-lemonade-task-cleanup.ps1
@@ -178,3 +169,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: bash tests/test-atomic-env-writes.sh
+
+      - name: Windows Uninstall Leftover Contract (PowerShell 7)
+        shell: pwsh
+        run: ./tests/contracts/test-windows-uninstall-leftovers.ps1
+
+      - name: Windows Uninstall Leftover Contract (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/contracts/test-windows-uninstall-leftovers.ps1
