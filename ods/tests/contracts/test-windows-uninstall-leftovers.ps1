@@ -217,6 +217,7 @@ try {
     Check ((Test-ODSDockerRunningQuiet) -and $ErrorActionPreference -eq 'Stop') 'a successful daemon warning is accepted and the caller error preference restored'
     $script:daemonExitCode=1
     Check (-not (Test-ODSDockerRunningQuiet)) 'a failed daemon exit remains unavailable despite stderr handling'
+    $global:LASTEXITCODE=0
 } finally {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 }
