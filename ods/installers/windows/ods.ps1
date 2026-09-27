@@ -215,11 +215,17 @@ function Test-ODSArgumentPresent {
 }
 
 function Test-ODSDockerRunningQuiet {
+    $previousPreference = $ErrorActionPreference
     try {
+        # PowerShell 5.1 turns native stderr warnings into terminating errors
+        # under Stop, even when docker info exits successfully.
+        $ErrorActionPreference = 'Continue'
         $null = & docker info 2>$null
         return ($LASTEXITCODE -eq 0)
     } catch {
         return $false
+    } finally {
+        $ErrorActionPreference = $previousPreference
     }
 }
 
@@ -503,7 +509,7 @@ function Test-ODSUninstallPathOwned {
         $root = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\', '/')
         $actual = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
         return $actual.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
-            $actual.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
+            $actual.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
     } catch { return $false }
 }
 

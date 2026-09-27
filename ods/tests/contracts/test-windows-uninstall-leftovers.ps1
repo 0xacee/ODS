@@ -33,7 +33,7 @@ function Get-NativeInferenceBackend { return 'none' }
 function Stop-NativeInferenceServer { }
 $script:ODS_AGENT_TASK_NAME = 'ODSHostAgent'; $script:ODS_MODEL_UPGRADE_TASK_NAME = 'ODSModelUpgrade'
 $script:LEMONADE_TASK_NAME = 'ODSLemonadeRuntime'; $script:OPENCODE_TASK_NAME = 'ODSOpenCodeWeb'; $script:NATIVE_LLAMA_TASK_NAME = 'ODSNativeLlamaRuntime'
-function Get-ScheduledTask { param($TaskName, $ErrorAction) if ($script:tasks.ContainsKey($TaskName)) { return [pscustomobject]@{ TaskName = $TaskName; State = $script:tasks[$TaskName]; Actions = @([pscustomobject]@{Execute='python.exe'; Arguments=('"{0}\scripts\ods-host-agent.py"' -f $script:taskRoot); WorkingDirectory=$script:taskRoot}) } } }
+function Get-ScheduledTask { param($TaskName, $ErrorAction) if ($script:tasks.ContainsKey($TaskName)) { return [pscustomobject]@{ TaskName = $TaskName; State = $script:tasks[$TaskName]; Actions = @([pscustomobject]@{Execute='python.exe'; Arguments=('"{0}/scripts/ods-host-agent.py"' -f $script:taskRoot); WorkingDirectory=$script:taskRoot}) } } }
 function Get-CimInstance { param($ClassName, $ErrorAction) return $script:processes }
 function Stop-Process { param($Id, [switch]$Force, $ErrorAction) $script:stoppedProcesses.Add([int]$Id) }
 function Stop-ScheduledTask { param($TaskName, $ErrorAction) $script:tasks[$TaskName] = 'Ready' }
@@ -126,10 +126,10 @@ try {
     Reset-Docker @()
     $script:taskRoot = 'C:\AnotherInstallation\ods'
     $script:processes = @(
-        [pscustomobject]@{ProcessId=$PID;ParentProcessId=912300;Name='pwsh.exe';ExecutablePath='C:\PowerShell\pwsh.exe';CommandLine=('pwsh -File "{0}\ods.ps1" uninstall' -f $InstallDir)},
-        [pscustomobject]@{ProcessId=912300;ParentProcessId=0;Name='pwsh.exe';ExecutablePath='C:\PowerShell\pwsh.exe';CommandLine=('pwsh -Command "& ''{0}\ods.ps1'' uninstall"' -f $InstallDir)},
+        [pscustomobject]@{ProcessId=$PID;ParentProcessId=912300;Name='pwsh.exe';ExecutablePath='C:\PowerShell\pwsh.exe';CommandLine=('pwsh -File "{0}/ods.ps1" uninstall' -f $InstallDir)},
+        [pscustomobject]@{ProcessId=912300;ParentProcessId=0;Name='pwsh.exe';ExecutablePath='C:\PowerShell\pwsh.exe';CommandLine=('pwsh -Command "& ''{0}/ods.ps1'' uninstall"' -f $InstallDir)},
         [pscustomobject]@{ProcessId=912301;Name='python.exe';ExecutablePath='C:\Python\python.exe';CommandLine='python.exe C:\AnotherInstallation\ods\scripts\ods-host-agent.py --port 3003'},
-        [pscustomobject]@{ProcessId=912302;Name='python.exe';ExecutablePath='C:\Python\python.exe';CommandLine=('python.exe "{0}\scripts\ods-host-agent.py"' -f $InstallDir)}
+        [pscustomobject]@{ProcessId=912302;Name='python.exe';ExecutablePath='C:\Python\python.exe';CommandLine=('python.exe "{0}/scripts/ods-host-agent.py"' -f $InstallDir)}
     )
     Invoke-Uninstall -UninstallArgs @('--force')
     Check ($script:tasks.Count -eq 3 -and $script:tasks.ODSOpenCodeWeb -eq 'Running') 'foreign scheduled tasks are neither stopped nor unregistered'
@@ -137,11 +137,11 @@ try {
     Check (-not ($script:dockerCalls -match 'foreign-external-(data|network-id)')) 'external attachments never enter the deletion plan'
     Check (-not ($script:dockerCalls -match '^compose .*down')) 'saved compose flags cannot expand the deletion plan to another project'
 
-    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(('Start-Process python.exe -ArgumentList @(''{0}\scripts\ods-host-agent.py'')' -f $InstallDir)))
+    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(('Start-Process python.exe -ArgumentList @(''{0}/scripts/ods-host-agent.py'')' -f $InstallDir)))
     Check (Test-ODSUninstallTaskOwned ([pscustomobject]@{Actions=@([pscustomobject]@{Execute='powershell.exe';Arguments="-NoProfile -EncodedCommand $encoded"})})) 'an encoded host-agent launcher is identified without executing it'
     Check (-not (Test-ODSUninstallTaskOwned ([pscustomobject]@{Actions=@([pscustomobject]@{Execute='python.exe';Arguments='C:\Unrelated\agent.py';WorkingDirectory=$InstallDir})}))) 'working directory alone cannot authorize task deletion'
-    Check (-not (Test-ODSUninstallCommandOwned ('"{0}-other\agent.py"' -f $InstallDir)) -and -not (Test-ODSUninstallCommandOwned ('"{0}\..\other\agent.py"' -f $InstallDir))) 'sibling prefixes and path traversal cannot authorize helper deletion'
-    Check (-not (Test-ODSUninstallCommandOwned ('python C:\Foreign\agent.py --log "{0}\logs\foreign.txt"' -f $InstallDir))) 'a data or log argument is insufficient helper ownership'
+    Check (-not (Test-ODSUninstallCommandOwned ('"{0}-other/agent.py"' -f $InstallDir)) -and -not (Test-ODSUninstallCommandOwned ('"{0}/../other/agent.py"' -f $InstallDir))) 'sibling prefixes and path traversal cannot authorize helper deletion'
+    Check (-not (Test-ODSUninstallCommandOwned ('python C:\Foreign\agent.py --log "{0}/logs/foreign.txt"' -f $InstallDir))) 'a data or log argument is insufficient helper ownership'
 
     Reset-Docker @('ods_old-wsl-data')
     $script:unattachedVolume = 'ods_old-wsl-data'
@@ -208,6 +208,14 @@ try {
     Invoke-Uninstall -UninstallArgs @('--force', '--keep-data')
     Check (($script:volumes -contains 'ods_open-webui-data') -and -not ($script:dockerCalls -match '^volume rm')) '--keep-data never removes volumes'
     Check $script:dirRemoved '--keep-data still completes'
+
+    $quietDefinition = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-ODSDockerRunningQuiet'}, $true)
+    . ([scriptblock]::Create($quietDefinition.Extent.Text))
+    function docker { Write-Error 'Successful daemon warning fixture'; $global:LASTEXITCODE = $script:daemonExitCode }
+    $script:daemonExitCode=0
+    Check ((Test-ODSDockerRunningQuiet) -and $ErrorActionPreference -eq 'Stop') 'a successful daemon warning is accepted and the caller error preference restored'
+    $script:daemonExitCode=1
+    Check (-not (Test-ODSDockerRunningQuiet)) 'a failed daemon exit remains unavailable despite stderr handling'
 } finally {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 }
