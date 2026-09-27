@@ -4317,11 +4317,15 @@ def _recover_pixel_model_transaction(config: dict) -> dict:
         if outcome is None:
             return pending
         expected=journal['target'] if outcome=='commit' else journal['previous']
-        if not _prove_pixel_model_contract(config,expected):
+        # A settings save may have changed model/context fields as well as
+        # unrelated values. Prove the current file instead of the caller's
+        # earlier snapshot before allowing the env-only drift exception.
+        proof_config=load_env(INSTALL_DIR / '.env') if env_only_drift else config
+        if not _prove_pixel_model_contract(proof_config,expected):
             return pending
         if _pixel_model_config_digests()!=current:
             return pending
-        transaction=_PixelModelTransaction(config)
+        transaction=_PixelModelTransaction(proof_config)
         transaction.id=journal['transactionId']
         transaction.previous=journal['previous']
         transaction.target=journal['target']
