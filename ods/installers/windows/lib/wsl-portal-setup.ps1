@@ -70,14 +70,24 @@ function ConvertTo-ODSPortalLiteral([string]$Value) {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
-function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot) {
+function Assert-ODSPortalStateRoot([string]$StateRoot) {
+    if (-not $StateRoot) { return }
+    if ($StateRoot -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))' -or
+        $StateRoot -match '[\x00-\x1f"]' -or $StateRoot -match '(^|[\\/])\.\.?([\\/]|$)' -or
+        $StateRoot -match '^(?:[A-Za-z]:[\\/]*|\\\\[^\\/]+[\\/][^\\/]+[\\/]*)$') {
+        throw '-StateRoot requires an absolute Windows directory, not a filesystem root or traversal path.'
+    }
+}
+
+function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [string]$StateRoot='') {
     # windows.ps1 runs in a child PowerShell that shares this console. Calling
     # it here would route wsl.exe output through this function's pipeline, so
     # the Linux installer would see no terminal: no progress during image
     # pulls, no cinematic UI and UTF-8 decoded with the OEM code page.
     $delegate = Join-Path $InstallerRoot 'windows.ps1'
     $passthrough = @($LinuxArguments | ForEach-Object { ConvertTo-ODSPortalLiteral $_ }) -join ', '
-    $command = "`$global:LASTEXITCODE = 0; & $(ConvertTo-ODSPortalLiteral $delegate) -Distro $(ConvertTo-ODSPortalLiteral $Distro) -InstallRoot $(ConvertTo-ODSPortalLiteral $InstallRoot) -PassthroughArgs @($passthrough); " +
+    $stateArgument = if ($StateRoot) { ' -StateRoot ' + (ConvertTo-ODSPortalLiteral $StateRoot) } else { '' }
+    $command = "`$global:LASTEXITCODE = 0; & $(ConvertTo-ODSPortalLiteral $delegate) -Distro $(ConvertTo-ODSPortalLiteral $Distro) -InstallRoot $(ConvertTo-ODSPortalLiteral $InstallRoot)$stateArgument -PassthroughArgs @($passthrough); " +
         "`$ok = `$?; if (`$global:LASTEXITCODE -ne 0) { exit `$global:LASTEXITCODE }; if (-not `$ok) { exit 1 }; exit 0"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $shell = (Get-Process -Id $PID).Path
@@ -192,6 +202,7 @@ function Assert-ODSPortalNvidiaReady([string]$Distro, $WindowsDriver) {
 
 function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string]$InstallerRoot) {
     $linuxArgs = @(Get-ODSPortalLinuxArguments $Options)
+    Assert-ODSPortalStateRoot ([string]$Options['StateRoot'])
     $distro = if ($Options['Distro']) { [string]$Options['Distro'] } else { 'Ubuntu-24.04' }
     if ($distro -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' -or $distro -match '^docker-desktop') { throw 'Select a named Ubuntu WSL distribution, for example -Distro Ubuntu-24.04.' }
     $nonInteractive = [bool]$Options['NonInteractive']
@@ -271,5 +282,5 @@ function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string
     if (-not $Options['Cloud']) { Assert-ODSPortalNvidiaReady $distro (Get-ODSPortalWindowsNvidiaDriver) }
     Write-ODSPortalStage 4 'INSTALL PIXEL / PORTAL' "Prerequisites passed for $distro. Starting the Linux installer."
     Write-Host '         Enter your Ubuntu sudo password there if requested.'
-    return Invoke-ODSPortalLinuxInstaller $InstallerRoot $distro $linuxArgs ([string]$Options['InstallDir'])
+    return Invoke-ODSPortalLinuxInstaller $InstallerRoot $distro $linuxArgs ([string]$Options['InstallDir']) ([string]$Options['StateRoot'])
 }

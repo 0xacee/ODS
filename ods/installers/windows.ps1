@@ -10,6 +10,7 @@ param(
     [switch]$SkipDockerCheck,
     [string]$Distro = "",
     [string]$InstallRoot = "",
+    [string]$StateRoot = "",
     [string]$ReportPath = "$env:TEMP\\ods-windows-preflight.json",
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$PassthroughArgs
@@ -18,7 +19,7 @@ param(
 $ErrorActionPreference = "Stop"
 $checks = @()
 $requestedInstallRoot = $InstallRoot
-. (Join-Path $PSScriptRoot "wsl-lifecycle.ps1") -Distro $Distro
+. (Join-Path $PSScriptRoot "wsl-lifecycle.ps1") -Distro $Distro -StateRoot $StateRoot
 
 function Write-Section([string]$Message) {
     Write-Host ""
@@ -210,7 +211,8 @@ if ($lifetimeRequired) {
     $lifetimeLock = Open-ODSPrivateLock (Join-Path $lifetimeIdentity.directory 'command.lock')
     try { $null = Start-ODSWslLifetime $lifetimeIdentity } finally { $lifetimeLock.Dispose() }
     Write-Host "ODS WSL lifetime is active independently of this installer window."
-    Write-Host "Lifecycle: powershell -File `"$PSScriptRoot\wsl-lifecycle.ps1`" -Action status|stop|start|restart -Distro `"$Distro`" -InstallRoot `"$linuxInstallRoot`""
+    $stateHint = if ($StateRoot) { " -StateRoot `"$StateRoot`"" } else { '' }
+    Write-Host "Lifecycle: powershell -File `"$PSScriptRoot\wsl-lifecycle.ps1`" -Action status|stop|start|restart -Distro `"$Distro`" -InstallRoot `"$linuxInstallRoot`"$stateHint"
 }
 
 Write-Section "Running installer in WSL"

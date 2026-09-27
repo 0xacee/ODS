@@ -53,6 +53,7 @@ This does not move Ubuntu's virtual disk or Docker storage. Windows drive paths 
 - `-All`, `-Comfyui`, `-NoComfyui`, `-Langfuse`, `-NoLangfuse`: optional services; explicit disables override `-All`.
 - `-NoBootstrap`, `-Force`, `-Lan`: corresponding Linux options.
 - `-SummaryJsonPath <Linux path>`: Linux summary output location.
+- `-StateRoot <Windows path>`: optional private directory for the Windows WSL lifetime controller. Keep the same value for setup reruns and lifecycle commands. ODS enforces its owner ACLs. If a packaged terminal's scheduled process cannot see the default AppData controller, use a directory in Documents, for example `-StateRoot "$env:USERPROFILE\Documents\ODS-wsl-state"`; do not move an active controller's state without releasing it first.
 - `-NoHermes`: accepted for compatibility; Hermes is always disabled. `-Hermes` and deprecated `-OpenClaw` are rejected, and `-All` cannot enable them.
 
 ## Already inside Ubuntu?
