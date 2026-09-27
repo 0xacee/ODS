@@ -19,7 +19,10 @@ from model_switchboard import wsl_lemonade as bridge
 
 ENV = {"LEMONADE_HOST_TRANSPORT": "model-router"}
 ROOT = Path(tempfile.gettempdir()) / "ods-wsl-control-fixture"
-CONTEXT = bridge._Context("Ubuntu", "/home/test/ods", r"\\wsl.localhost\Ubuntu\home\test\ods\installers\windows\portal-model-control.ps1")
+WINDOWS = bridge._WindowsTools('/drives/d/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',
+                              '/drives/d/Windows/System32/whoami.exe',
+                              r'D:\Windows\System32\WindowsPowerShell\v1.0\Modules')
+CONTEXT = bridge._Context("Ubuntu", "/home/test/ods", r"\\wsl.localhost\Ubuntu\home\test\ods\installers\windows\portal-model-control.ps1", WINDOWS)
 SOCKET = ("/run/WSL/123_interop", (1, 2))
 DIGEST = "a" * 64
 PLAN = {"ExecutablePath": r"C:\Lemonade\bin\lemonade-server.exe", "Port": 13305,
@@ -54,14 +57,14 @@ class ControlTests(unittest.TestCase):
             value = bridge.status(ROOT, ENV)
         self.assertTrue(value["managed"])
         command = run.call_args.args[0]
-        self.assertEqual(command[0], bridge._SHELL)
+        self.assertEqual(command[0], WINDOWS.shell)
         self.assertEqual(command[-2:], ["-File", CONTEXT.controller])
         self.assertNotIn("-Command", command)
         self.assertEqual(json.loads(run.call_args.kwargs["data"]),
                          {"action": "status", "distro": "Ubuntu", "installDir": "/home/test/ods"})
         self.assertEqual(run.call_args.kwargs["environ"]["WSL_INTEROP"], SOCKET[0])
         self.assertEqual(run.call_args.kwargs["environ"]["PSModulePath"],
-                         r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules")
+                         WINDOWS.module_path)
         self.assertIn("PSModulePath/w", run.call_args.kwargs["environ"]["WSLENV"].split(":"))
         self.assertEqual(run.call_args.kwargs["timeout"], 15)
 
@@ -139,6 +142,18 @@ class ControlTests(unittest.TestCase):
                     return_value=completed(response(plan={**PLAN, **changes}))):
                 with self.assertRaises(ValueError):
                     bridge.status(ROOT, ENV)
+
+    def test_distribution_case_is_equivalent_but_install_directory_case_is_not(self):
+        with patch.object(bridge, '_run', return_value=completed(response(plan={**PLAN, 'WslDistro': 'ubuntu'}))):
+            self.assertTrue(bridge.status(ROOT, ENV)['managed'])
+        with patch.object(bridge, '_run', return_value=completed(response(plan={**PLAN, 'WslInstallDir': '/home/Test/ods'}))):
+            with self.assertRaises(ValueError):
+                bridge.status(ROOT, ENV)
+
+    def test_restore_accepts_only_case_equivalent_distribution(self):
+        plan = {**PLAN, 'WslDistro': 'ubuntu'}
+        with patch.object(bridge, '_run', side_effect=[completed(response()), completed(response(plan=plan))]):
+            self.assertEqual(bridge.restore(ROOT, ENV, plan, DIGEST)['plan'], plan)
 
     def test_no_mutation_retry_on_timeout_or_controller_error(self):
         error = completed({"ok": False, "code": "load_failed", "error": "Model load failed",
@@ -329,26 +344,177 @@ class PlatformAndSocketTests(unittest.TestCase):
     def test_probe_is_fixed_readonly_and_checks_socket_identity(self):
         with patch.object(bridge, "_socket_identity", return_value=SOCKET[1]), \
                 patch.object(bridge, "_run", return_value=subprocess.CompletedProcess([], 0, b"user,sid", b"")) as run:
-            self.assertTrue(bridge._probe(SOCKET, 0.5))
-            self.assertEqual(run.call_args.args[0], [bridge._PROBE, "/user", "/fo", "csv", "/nh"])
+            self.assertTrue(bridge._probe(SOCKET, 2, WINDOWS))
+            self.assertEqual(run.call_args.args[0], [WINDOWS.probe, "/user", "/fo", "csv", "/nh"])
             self.assertNotIn("data", run.call_args.kwargs)
         with patch.object(bridge, "_socket_identity", side_effect=[SOCKET[1], (3, 4)]), \
                 patch.object(bridge, "_run", return_value=subprocess.CompletedProcess([], 0, b"user,sid", b"")):
-            self.assertFalse(bridge._probe(SOCKET, 0.5))
+            self.assertFalse(bridge._probe(SOCKET, 2, WINDOWS))
 
     def test_discovery_probes_beyond_three_and_has_a_global_deadline(self):
         sockets = [(f"/run/WSL/{index}_interop", (1, index)) for index in range(1, 7)]
         with patch.object(bridge, "_sockets", return_value=sockets), \
                 patch.object(bridge, "_probe", side_effect=[False, False, False, True]) as probe:
-            self.assertEqual(bridge._select_socket(), sockets[3])
+            self.assertEqual(bridge._select_socket(WINDOWS), sockets[3])
             self.assertEqual(probe.call_count, 4)
         with patch.object(bridge, "_sockets", return_value=sockets), \
                 patch.object(bridge.time, "monotonic", side_effect=[0, 0, 1, 2, 3]), \
                 patch.object(bridge, "_probe", side_effect=subprocess.TimeoutExpired("probe", 0.5)) as probe:
             with self.assertRaisesRegex(bridge.BridgeError, "No responsive"):
-                bridge._select_socket()
+                bridge._select_socket(WINDOWS)
             self.assertEqual(probe.call_count, 3)
-            self.assertTrue(all(call.args[1] <= 0.5 for call in probe.call_args_list))
+            self.assertTrue(all(call.args[1] <= 2 for call in probe.call_args_list))
+
+    def test_probe_allows_cold_start_without_extending_global_deadline(self):
+        def cold_probe(socket, timeout, windows):
+            self.assertEqual(socket, SOCKET)
+            self.assertEqual(windows, WINDOWS)
+            self.assertGreaterEqual(timeout, 1.5)
+            return True
+        with patch.object(bridge, '_sockets', return_value=[SOCKET]), \
+                patch.object(bridge, '_probe', side_effect=cold_probe):
+            self.assertEqual(bridge._select_socket(WINDOWS), SOCKET)
+
+
+class WindowsLocationTests(unittest.TestCase):
+    def test_authoritative_directory_supports_non_c_drive_and_custom_mount_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            drive = Path(temporary).resolve() / 'custom-drive'
+            system = drive / 'Operating System' / 'System32'
+            shell = system / 'WindowsPowerShell/v1.0/powershell.exe'
+            shell.parent.mkdir(parents=True)
+            shell.write_bytes(b'fixture; never executed')
+            probe = system / 'whoami.exe'
+            probe.write_bytes(b'fixture; never executed')
+            raw = r'D:\Operating System\System32'
+            with patch.object(bridge, '_path', side_effect=[str(drive), raw]) as translate, \
+                    patch.object(bridge, '_run', side_effect=AssertionError('must not execute Windows')):
+                tools = bridge._windows_tools({'ODS_WINDOWS_SYSTEM_DIRECTORY': raw})
+            self.assertEqual(tools.shell, str(shell))
+            self.assertEqual(tools.probe, str(probe))
+            self.assertEqual(tools.module_path, raw + r'\WindowsPowerShell\v1.0\Modules')
+            self.assertEqual(translate.call_args_list[0].args, ('D:\\', '-u'))
+
+    def test_invalid_directory_rejected_before_translation_or_execution(self):
+        for raw in (r'\\peer\share\System32', r'C:\Windows\..\System32', '/tmp/System32',
+                    r'C:\Other', r'C:\Windows\System32:stream', 'C:\\Windows\\System32\n'):
+            with self.subTest(raw=raw), patch.object(bridge, '_path') as translate:
+                with self.assertRaises(ValueError):
+                    bridge._windows_tools({'ODS_WINDOWS_SYSTEM_DIRECTORY': raw})
+                translate.assert_not_called()
+
+    def test_missing_legacy_windows_path_has_actionable_error_without_guessing_drive(self):
+        with patch.object(bridge.shutil, 'which', return_value=None), patch.object(bridge, '_run') as run:
+            with self.assertRaisesRegex(bridge.BridgeError, 'rerun the Windows installer'):
+                bridge._windows_tools({})
+            run.assert_not_called()
+
+    def test_legacy_path_cannot_supply_a_linux_or_non_system_executable(self):
+        for raw in (r'\\wsl.localhost\Ubuntu\tmp\powershell.exe', r'D:\user\powershell.exe'):
+            with self.subTest(raw=raw), patch.object(bridge.shutil, 'which', return_value='/tmp/powershell.exe'), \
+                    patch.object(bridge, '_path', return_value=raw), patch.object(bridge, '_run') as run:
+                with self.assertRaises(bridge.BridgeError):
+                    bridge._windows_tools({})
+                run.assert_not_called()
+
+    def test_legacy_system_path_is_translated_and_roundtrip_is_required(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            drive = Path(temporary).resolve()
+            system = drive / 'Windows/System32'
+            shell = system / 'WindowsPowerShell/v1.0/powershell.exe'
+            shell.parent.mkdir(parents=True)
+            shell.write_bytes(b'fixture')
+            (system / 'whoami.exe').write_bytes(b'fixture')
+            with patch.object(bridge.shutil, 'which', return_value=str(shell)), \
+                    patch.object(bridge, '_path', side_effect=[r'E:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe',
+                                                             str(drive), r'E:\Windows\System32']):
+                self.assertEqual(bridge._windows_tools({}).shell, str(shell))
+            with patch.object(bridge, '_path', side_effect=[str(drive), r'C:\unrelated\System32']):
+                with self.assertRaisesRegex(bridge.BridgeError, 'canonical WSL translation'):
+                    bridge._windows_tools({'ODS_WINDOWS_SYSTEM_DIRECTORY': r'E:\Windows\System32'})
+
+
+class StartupRetirementTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        program = self.root / 'installers/wsl-lifecycle.ps1'
+        program.parent.mkdir()
+        program.write_text('# fixture only; never executed')
+        source = patch.object(bridge, '_SOURCE', self.root)
+        source.start()
+        self.addCleanup(source.stop)
+        for name, value in (('_context', CONTEXT), ('_path', r'\\wsl.localhost\Ubuntu\startup.ps1'),
+                            ('_select_socket', SOCKET), ('_socket_identity', SOCKET[1])):
+            patcher = patch.object(bridge, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def result(self, state):
+        return {'scope': 'wsl-startup', 'state': state,
+                'identity': {'distro': 'ubuntu', 'installRoot': CONTEXT.install_dir}}
+
+    def test_candidate_lifecycle_does_not_need_script_in_the_older_target(self):
+        old = self.root / 'old-install-without-controllers'
+        old.mkdir()
+        with patch.object(bridge, '_run', return_value=completed(self.result('validated'))) as run:
+            bridge.disable_startup(old, ENV, validate_only=True)
+        self.assertFalse((old / 'installers').exists())
+        bridge._context.assert_called_once_with(old, ENV)
+        bridge._path.assert_called_once_with(str(self.root / 'installers/wsl-lifecycle.ps1'), '-w')
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index('-InstallRoot') + 1], CONTEXT.install_dir)
+
+    def test_fixed_retirement_command_and_readonly_precheck(self):
+        for readonly, state in ((True, 'validated'), (False, 'disabled'), (False, 'unmanaged')):
+            with self.subTest(readonly=readonly, state=state), patch.object(bridge, '_run',
+                    return_value=completed(self.result(state))) as run:
+                self.assertEqual(bridge.disable_startup(self.root, ENV, validate_only=readonly)['state'], state)
+                command = run.call_args.args[0]
+                self.assertEqual(command[0], WINDOWS.shell)
+                self.assertNotIn('-Command', command)
+                self.assertEqual(command[command.index('-Action') + 1], 'disable-startup')
+                self.assertEqual(command[command.index('-Distro') + 1], CONTEXT.distro)
+                self.assertEqual(command[command.index('-InstallRoot') + 1], CONTEXT.install_dir)
+                self.assertEqual('-ValidateOnly' in command, readonly)
+                self.assertEqual(run.call_args.kwargs['timeout'], 45)
+
+    def test_unproved_retirement_and_replaced_socket_are_never_replayed(self):
+        bad = self.result('disabled')
+        bad['identity']['installRoot'] = '/another/install'
+        for result in (completed(bad), completed(self.result('validated')),
+                       subprocess.CompletedProcess([], 1, b'', b'foreign task'),
+                       subprocess.CompletedProcess([], 0, b'not json', b''),
+                       subprocess.TimeoutExpired('fixture', 1)):
+            with self.subTest(result=result), patch.object(bridge, '_run', side_effect=[result]) as run:
+                with self.assertRaises((bridge.BridgeError, subprocess.TimeoutExpired)):
+                    bridge.disable_startup(self.root, ENV)
+                self.assertEqual(run.call_count, 1)
+        with patch.object(bridge, '_run', return_value=completed(self.result('disabled'))) as run, \
+                patch.object(bridge, '_socket_identity', side_effect=[SOCKET[1], (1, 99)]):
+            with self.assertRaises(bridge.BridgeError):
+                bridge.disable_startup(self.root, ENV)
+            self.assertEqual(run.call_count, 1)
+
+
+class ControllerSourceTests(unittest.TestCase):
+    def test_source_controller_keeps_the_target_installation_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            current = Path(directory).resolve() / 'candidate'
+            old = Path(directory).resolve() / 'old-install'
+            old.mkdir()
+            controller = current / bridge._CONTROLLER
+            controller.parent.mkdir(parents=True)
+            controller.write_text('# fixture only; never executed')
+            with patch.object(bridge, '_SOURCE', current), patch.object(bridge, '_windows_tools', return_value=WINDOWS), \
+                    patch.object(Path, 'as_posix', return_value='/home/owner/old-install'), \
+                    patch.object(bridge, '_path', side_effect=[r'\\wsl.localhost\Ubuntu', r'\\wsl.localhost\Ubuntu\candidate\controller.ps1']) as translate:
+                context = bridge._context(old, ENV)
+            self.assertEqual(context.install_dir, '/home/owner/old-install')
+            self.assertEqual(context.controller, r'\\wsl.localhost\Ubuntu\candidate\controller.ps1')
+            self.assertEqual(translate.call_args.args, (str(controller), '-w'))
+            self.assertFalse((old / bridge._CONTROLLER).exists())
 
 
 class BoundedProcessTests(unittest.TestCase):

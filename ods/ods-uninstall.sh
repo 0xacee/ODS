@@ -259,6 +259,17 @@ if [[ "$(uname -s)" == "Linux" && -f "$SCRIPT_DIR/lib/system-uninstall.sh" ]]; t
     fi
 fi
 
+# Verify the ordinary Linux owner and bound Windows tasks before removing
+# Pixel. Never borrow root's or another user's Windows interop authority.
+if [[ "$(uname -s)" == "Linux" && "$(uname -r)" == *[Mm]icrosoft* ]]; then
+    _ods_wsl_retire_helper="$SCRIPT_DIR/scripts/retire-wsl-runtime.py"
+    if [[ ! -f "$_ods_wsl_retire_helper" || -L "$_ods_wsl_retire_helper" ]] ||
+        ! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR" --validate-only; then
+        log_error "Windows startup validation failed; Pixel and installation retained"
+        exit 1
+    fi
+fi
+
 # Validate and remove Pixel before any broader uninstall mutation. The helper
 # is marker-bound to this exact install and fails closed on ambient or drifted
 # Pixel state.
@@ -293,6 +304,17 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
         exit 1
     fi
     unset _ods_native_pixel_helper
+fi
+
+# Pixel has retired; disable the bound Windows runtime and login startup
+# before deleting the host agent needed for their ownership checks. Windows
+# Lemonade itself and its model library remain installed.
+if [[ -n "${_ods_wsl_retire_helper:-}" ]]; then
+    if ! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR"; then
+        log_error "Windows startup retirement failed; remaining installation retained"
+        exit 1
+    fi
+    unset _ods_wsl_retire_helper
 fi
 
 # A pending Pixel transition must retain its host-agent and other recovery

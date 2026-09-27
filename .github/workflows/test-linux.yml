@@ -474,6 +474,13 @@ jobs:
           python3 tests/contracts/test-llama-spec-default.py
           python3 -m unittest -v tests/test_macos_runtime_llama_args.py tests/test_macos_checkpoint_args.py
 
+      - name: WSL Windows Runtime Ownership and Retirement Contracts
+        run: |
+          python3 tests/test-wsl-lemonade-control.py
+          python3 tests/test-configure-wsl-model-store.py
+          python3 tests/test-retire-wsl-runtime.py
+          bash tests/test-lemonade-host-transport.sh
+
       - name: Pixel Public Source and Local Bundle Contract
         run: |
           python3 scripts/verify-pixel-bundle.py

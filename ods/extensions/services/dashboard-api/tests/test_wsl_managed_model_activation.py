@@ -330,6 +330,26 @@ def test_delete_does_not_fall_back_to_default_for_missing_or_ambiguous_model(man
     assert managed["events"] == []
 
 
+def test_delete_allows_only_inactive_model_in_proven_windows_store(managed, monkeypatch):
+    target = managed['models'] / 'new-model.gguf'
+    monkeypatch.setattr(host, '_live_runtime_has_model', lambda *_args: False)
+    handler = fixtures._ResponseHandler(request_body={'gguf_file': target.name})
+    host.AgentHandler._handle_model_delete(handler)
+    assert handler.response_code == 200, handler.parse_response()
+    assert not target.exists()
+    assert (managed['models'] / 'old-model.gguf').exists()
+
+
+def test_delete_preserves_windows_model_when_runtime_ownership_is_lost(managed, monkeypatch):
+    target = managed['models'] / 'new-model.gguf'
+    managed['runtime']['managed'] = False
+    monkeypatch.setattr(host, '_live_runtime_has_model', lambda *_args: pytest.fail('ownership denied first'))
+    handler = fixtures._ResponseHandler(request_body={'gguf_file': target.name})
+    host.AgentHandler._handle_model_delete(handler)
+    assert handler.response_code != 200
+    assert target.exists()
+
+
 def test_model_store_and_plan_journal_are_bound_to_private_registration(managed):
     assert host._model_download_directory() == managed["models"]
     assert host._pixel_model_config_paths()["windows-runtime-plan"] == managed["plan_path"]

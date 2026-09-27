@@ -29,7 +29,7 @@ def _env(install_dir: Path) -> dict:
     for line in (install_dir / ".env").read_text(encoding="utf-8").splitlines():
         key, separator, value = line.partition("=")
         if separator and key.strip() in {"LEMONADE_HOST_TRANSPORT", "LEMONADE_BASE_URL",
-                                         "LEMONADE_CONTAINER_BASE_URL", "AMD_INFERENCE_PORT"}:
+                                         "LEMONADE_CONTAINER_BASE_URL", "AMD_INFERENCE_PORT", "ODS_WINDOWS_SYSTEM_DIRECTORY"}:
             values[key.strip()] = parse_env_value(value)
     return values
 

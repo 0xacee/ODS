@@ -84,6 +84,7 @@ test: ## Run unit and contract tests
 	@python3 tests/test-wsl-lemonade-proof.py
 	@python3 tests/test-wsl-lemonade-control.py
 	@python3 tests/test-configure-wsl-model-store.py
+	@python3 tests/test-retire-wsl-runtime.py
 	@bash tests/test-litellm-amd-auth-enforced.sh
 	@bash tests/contracts/test-windows-strix-tier-map.sh
 	@bash tests/contracts/test-windows-llm-model-readiness.sh

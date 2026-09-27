@@ -2025,7 +2025,7 @@ def _model_management_key(env: dict) -> tuple:
     with _model_lifecycle_state_lock:
         lifecycle = (_model_lifecycle_revision, _model_lifecycle_operation, _model_lifecycle_target)
     return (str(INSTALL_DIR), lifecycle,
-            tuple(env.get(key) for key in (*_SWITCHBOARD_ROUTE_ENV_KEYS, 'AMD_INFERENCE_PORT')))
+            tuple(env.get(key) for key in (*_SWITCHBOARD_ROUTE_ENV_KEYS, 'AMD_INFERENCE_PORT', 'ODS_WINDOWS_SYSTEM_DIRECTORY')))
 
 
 def _model_management_snapshot() -> tuple[int, dict]:
@@ -14079,6 +14079,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             deleted_names.add(gguf_file)
             env = load_env(INSTALL_DIR / ".env")
             managed = _managed_wsl_lemonade(env)
+            default_store = INSTALL_DIR.resolve() / 'data' / 'models'
+            owned_store = models_dir == default_store and default_store.resolve() == default_store
+            if not owned_store and managed.get('managed') is True:
+                owned_store = models_dir == _wsl_lemonade.model_store(INSTALL_DIR, env, managed)
+            if not owned_store:
+                # Registration permits discovery/loading, not deletion of a
+                # library shared with LM Studio or another external runtime.
+                json_response(self, 409, {
+                    'error': 'This model store is read-only in ODS; remove the model in its owning application',
+                    'code': 'model_store_read_only',
+                })
+                return
             if managed.get('managed') is True and managed['plan']['GgufFile'] in deleted_names:
                 json_response(self, 409, {'error': 'Cannot delete the model selected in the Windows startup plan'})
                 return
@@ -14110,6 +14122,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            # Reject shared hard links and changed/symlinked artifacts before
+            # removing any part. External stores are never touched above,
+            # even when only the ODS runtime reports their model inactive.
+            if any(_model_stores.safe_artifact(models_dir, pf.name) != pf
+                   or pf.stat().st_nlink != 1 for pf in parts_to_delete):
+                json_response(self, 409, {'error': 'Model artifacts are shared or changed; deletion was refused',
+                                          'code': 'model_artifact_shared'})
+                return
             for pf in parts_to_delete:
                 pf.unlink()
 

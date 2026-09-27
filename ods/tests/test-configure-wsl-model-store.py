@@ -49,6 +49,16 @@ class ConfigureTests(unittest.TestCase):
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(self.metadata.stat().st_mode), 0o600)
 
+    def test_system_directory_is_forwarded_literally_without_reading_secrets(self):
+        (self.root / '.env').write_text("LEMONADE_HOST_TRANSPORT=model-router\n"
+                                      "ODS_WINDOWS_SYSTEM_DIRECTORY='D:\\Operating $ystem\\System32'\n"
+                                      "HF_TOKEN=private\n", encoding='utf-8')
+        with patch.object(helper.wsl_lemonade, 'status', return_value={'managed': False}) as status:
+            helper.configure(self.root)
+            self.assertEqual(status.call_args.args[1], {
+                'LEMONADE_HOST_TRANSPORT': 'model-router',
+                'ODS_WINDOWS_SYSTEM_DIRECTORY': r'D:\Operating $ystem\System32'})
+
     def test_existing_directory_registration_keeps_its_id_and_profiles(self):
         helper.registration.register(self.root, "owner-store", self.models)
         registry = self.root / "data/model-stores.json"

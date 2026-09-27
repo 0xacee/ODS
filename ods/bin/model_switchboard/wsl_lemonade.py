@@ -13,6 +13,7 @@ import os
 from pathlib import Path, PureWindowsPath
 import platform
 import re
+import shutil
 import stat
 import subprocess
 import threading
@@ -22,10 +23,9 @@ from urllib.parse import urlsplit
 
 
 _LIMIT = 65536
-_SHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-_PROBE = "/mnt/c/Windows/System32/whoami.exe"
 _WSLPATH = "/usr/bin/wslpath"
 _CONTROLLER = "installers/windows/portal-model-control.ps1"
+_SOURCE = Path(__file__).resolve().parents[2]
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _PLAN_KEYS = {"ExecutablePath", "Port", "ModelsDir", "ContextSize", "GgufFile",
               "WslDistro", "WslInstallDir"}
@@ -42,10 +42,17 @@ class BridgeError(OSError):
         self.new_plan_digest = digest if isinstance(digest, str) and _DIGEST.fullmatch(digest) else None
 
 
+class _WindowsTools(NamedTuple):
+    shell: str
+    probe: str
+    module_path: str
+
+
 class _Context(NamedTuple):
     distro: str
     install_dir: str
     controller: str
+    windows: _WindowsTools
 
 
 def _run(command: list[str], *, data: bytes | None = None, timeout: float = 10,
@@ -175,26 +182,58 @@ def _path(path: str, direction: str) -> str:
     return value
 
 
-def _context(install_dir: Path) -> _Context:
+def _windows_tools(env: dict) -> _WindowsTools:
+    system = env.get('ODS_WINDOWS_SYSTEM_DIRECTORY', '')
+    if not system:
+        # Compatibility for an older interactive installation only. A Linux
+        # executable or UNC path cannot become a Windows control executable.
+        inherited = shutil.which('powershell.exe')
+        if not inherited:
+            raise BridgeError('Windows system directory is unknown; rerun the Windows installer')
+        windows_shell = _path(inherited, '-w')
+        if (not _windows_path(windows_shell)
+                or tuple(part.casefold() for part in PureWindowsPath(windows_shell).parts[-3:])
+                != ('windowspowershell', 'v1.0', 'powershell.exe')):
+            raise BridgeError('The inherited Windows PowerShell path is not a system executable')
+        system = str(PureWindowsPath(windows_shell).parents[2])
+    if not _windows_path(system) or PureWindowsPath(system).name.casefold() != 'system32':
+        raise ValueError('ODS_WINDOWS_SYSTEM_DIRECTORY must name a local Windows System32 directory')
+    windows = PureWindowsPath(system)
+    drive = Path(_path(windows.anchor, '-u'))
+    directory = drive.joinpath(*windows.parts[1:])
+    if (not directory.is_absolute() or directory.resolve() != directory
+            or PureWindowsPath(_path(str(directory), '-w')) != windows):
+        raise BridgeError('The Windows system directory did not survive canonical WSL translation')
+    shell = directory / 'WindowsPowerShell/v1.0/powershell.exe'
+    probe = directory / 'whoami.exe'
+    if any(not path.is_file() or path.is_symlink() or path.resolve() != path for path in (shell, probe)):
+        raise BridgeError('Windows system PowerShell interop is unavailable; rerun the Windows installer')
+    return _WindowsTools(str(shell), str(probe), str(windows / 'WindowsPowerShell/v1.0/Modules'))
+
+
+def _context(install_dir: Path, env: dict) -> _Context:
     root = Path(install_dir).resolve(strict=True)
     if not root.is_dir() or not root.as_posix().startswith("/"):
         raise ValueError("A canonical WSL installation directory is required")
-    controller = root / _CONTROLLER
+    # Execute the controller shipped with this trusted module. A candidate
+    # uninstaller can retire an older target whose tree lacks these scripts;
+    # the target root remains the exact Windows task/plan binding below.
+    controller = _SOURCE / _CONTROLLER
     if controller.is_symlink() or not controller.is_file() or controller.resolve().parent != controller.parent:
         raise BridgeError("The installed Windows model controller is unavailable")
-    if not Path(_SHELL).is_file():
-        raise BridgeError("Windows PowerShell interop is unavailable")
+    windows = _windows_tools(env)
     windows_root = _path("/", "-w")
     match = re.fullmatch(r"\\\\(?:wsl\.localhost|wsl\$)\\([^\\/]+)\\?", windows_root, re.IGNORECASE)
     if not match or not _text(match[1], 128) or match[1] in {".", ".."}:
         raise BridgeError("Cannot identify this WSL distribution")
-    return _Context(match[1], root.as_posix(), _path(str(controller), "-w"))
+    return _Context(match[1], root.as_posix(), _path(str(controller), "-w"), windows)
 
 
 def _plan(plan, context: _Context) -> None:
     if not isinstance(plan, dict) or set(plan) != _PLAN_KEYS:
         raise ValueError("Invalid Windows Lemonade plan schema")
-    if (plan["WslDistro"] != context.distro or plan["WslInstallDir"] != context.install_dir
+    if (not isinstance(plan["WslDistro"], str) or plan["WslDistro"].casefold() != context.distro.casefold()
+            or plan["WslInstallDir"] != context.install_dir
             or not _windows_path(plan["ExecutablePath"]) or not _windows_path(plan["ModelsDir"])
             or not _gguf(plan["GgufFile"]) or type(plan["Port"]) is not int
             or not 1 <= plan["Port"] <= 65535 or type(plan["ContextSize"]) is not int
@@ -224,30 +263,30 @@ def _response(value, context: _Context) -> dict:
     return value
 
 
-def _environment(socket: str) -> dict:
+def _environment(socket: str, windows: _WindowsTools) -> dict:
     environ = os.environ.copy()
     environ["WSL_INTEROP"] = socket
     # A WSL session started from PS7 otherwise gives Windows PowerShell 5.1
     # the PS7 module search path, breaking even Get-Acl. Scope this override
     # to this child; /w explicitly exports it from WSL to Windows.
-    environ["PSModulePath"] = r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+    environ["PSModulePath"] = windows.module_path
     exports = [entry for entry in environ.get("WSLENV", "").split(":")
                if entry and entry.split("/", 1)[0].casefold() != "psmodulepath"]
     environ["WSLENV"] = ":".join([*exports, "PSModulePath/w"])
     return environ
 
 
-def _probe(socket_info: tuple, timeout: float) -> bool:
+def _probe(socket_info: tuple, timeout: float, windows: _WindowsTools) -> bool:
     socket, identity = socket_info
     if _socket_identity(socket) != identity:
         return False
     # Fixed, read-only native executable: liveness only, never ownership.
-    result = _run([_PROBE, "/user", "/fo", "csv", "/nh"], timeout=timeout,
-                  environ=_environment(socket))
+    result = _run([windows.probe, "/user", "/fo", "csv", "/nh"], timeout=timeout,
+                  environ=_environment(socket, windows))
     return result.returncode == 0 and bool(result.stdout.strip()) and _socket_identity(socket) == identity
 
 
-def _select_socket(*, excluded: tuple = (), timeout: float = 3) -> tuple:
+def _select_socket(windows: _WindowsTools, *, excluded: tuple = (), timeout: float = 3) -> tuple:
     sockets = [socket for socket in _sockets() if socket not in excluded]
     if not sockets:
         raise BridgeError("No trusted WSL interop session is available")
@@ -257,7 +296,9 @@ def _select_socket(*, excluded: tuple = (), timeout: float = 3) -> tuple:
         if remaining <= 0:
             break
         try:
-            if _probe(socket, min(remaining, 0.5)):
+            # A cold Windows executable can take over 500 ms (antivirus and
+            # image loading); keep the global bound, not a warm-start cutoff.
+            if _probe(socket, min(remaining, 2), windows):
                 return socket
         except subprocess.TimeoutExpired:
             continue  # Only this native read-only liveness probe is retried.
@@ -270,8 +311,8 @@ def _call(context: _Context, socket_info: tuple, request: dict, timeout: float) 
         raise BridgeError("The trusted WSL interop session changed before dispatch", code="interop_changed")
     message = {"action": "status", "distro": context.distro, "installDir": context.install_dir, **request}
     data = json.dumps(message, allow_nan=False, separators=(",", ":")).encode("utf-8")
-    result = _run([_SHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                   "-File", context.controller], data=data, timeout=timeout, environ=_environment(socket))
+    result = _run([context.windows.shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                   "-File", context.controller], data=data, timeout=timeout, environ=_environment(socket, context.windows))
     if _socket_identity(socket) != identity:
         raise BridgeError("The WSL session changed during the operation; inspect status before retrying",
                           code="interop_changed")
@@ -323,14 +364,14 @@ def _endpoint_matches_plan(env: dict, value: dict) -> None:
 def _connected_status(install_dir: Path, env: dict):
     if not candidate(env):
         raise BridgeError("This installation does not use managed WSL Lemonade", code="unsupported_runtime")
-    context = _context(install_dir)
+    context = _context(install_dir, env)
     deadline = time.monotonic() + 18
     excluded = ()
     for attempt in range(2):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise BridgeError("Windows ownership verification exceeded its deadline")
-        socket = _select_socket(excluded=excluded, timeout=min(3, remaining))
+        socket = _select_socket(context.windows, excluded=excluded, timeout=min(3, remaining))
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise BridgeError("Windows ownership verification exceeded its deadline")
@@ -365,7 +406,7 @@ def _mutate(install_dir: Path, env: dict, action: str, expected_plan_digest: str
         raise BridgeError("The Windows Lemonade plan changed before activation", code="plan_changed")
     if action == "restore":
         _plan(values.get("plan"), context)
-        immutable = _PLAN_KEYS - {"GgufFile", "ContextSize"}
+        immutable = _PLAN_KEYS - {"GgufFile", "ContextSize", "WslDistro"}
         if any(values["plan"][key] != current["plan"][key] for key in immutable):
             raise ValueError("Restore cannot change runtime ownership or location")
     result = _call(context, socket, {"action": action, "expectedPlanDigest": expected_plan_digest, **values},
@@ -400,10 +441,47 @@ def start(install_dir: Path, env: dict, expected_plan_digest: str) -> dict:
     return _mutate(install_dir, env, "start", expected_plan_digest)
 
 
+def disable_startup(install_dir: Path, env: dict, *, validate_only: bool = False) -> dict:
+    """Retire only this installation's Windows login task, never its distro."""
+    context = _context(install_dir, env)
+    program = _SOURCE / 'installers/wsl-lifecycle.ps1'
+    if not program.is_file() or program.is_symlink() or program.resolve() != program:
+        raise BridgeError('The installed WSL startup controller is unavailable')
+    controller = _path(str(program), '-w')
+    socket, identity = _select_socket(context.windows)
+    if _socket_identity(socket) != identity:
+        raise BridgeError('The WSL session changed before startup retirement')
+    command = [context.windows.shell, '-NoLogo', '-NoProfile', '-NonInteractive',
+               '-ExecutionPolicy', 'Bypass', '-File', controller,
+               '-Action', 'disable-startup', '-Distro', context.distro,
+               '-InstallRoot', context.install_dir]
+    if validate_only:
+        command.append('-ValidateOnly')
+    # Mutations are issued once, including an uncertain/expired interop call.
+    result = _run(command, timeout=45, environ=_environment(socket, context.windows))
+    if _socket_identity(socket) != identity:
+        raise BridgeError('The WSL session changed during startup retirement; inspect before retrying')
+    if result.returncode:
+        raise BridgeError('Windows startup ownership could not be verified; installation retained')
+    try:
+        value = json.loads(result.stdout.decode('utf-8-sig'))
+    except (ValueError, UnicodeError) as exc:
+        raise BridgeError('Windows startup controller returned invalid JSON') from exc
+    expected = {'unmanaged', 'validated' if validate_only else 'disabled'}
+    owner = value.get('identity') if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or value.get('scope') != 'wsl-startup'
+            or value.get('state') not in expected or not isinstance(owner, dict)
+            or not isinstance(owner.get('distro'), str)
+            or owner['distro'].casefold() != context.distro.casefold()
+            or owner.get('installRoot') != context.install_dir):
+        raise BridgeError('Windows startup controller did not prove this installation was retired')
+    return value
+
+
 def _owned_path(install_dir: Path, env: dict, status_info: dict | None, field: str) -> Path:
     if not candidate(env):
         raise BridgeError("This installation does not use managed WSL Lemonade", code="unsupported_runtime")
-    context = _context(install_dir)
+    context = _context(install_dir, env)
     proof = _response(status_info, context) if status_info is not None else status(install_dir, env)
     if not proof["managed"]:
         raise BridgeError("The Windows model store is not owned by this installation")

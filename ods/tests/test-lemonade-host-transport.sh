@@ -34,14 +34,15 @@ run_case() (
     shift 4
     unset LEMONADE_HOST_TRANSPORT LEMONADE_EXTERNAL LEMONADE_BASE_URL LEMONADE_API_KEY
     unset LEMONADE_MODEL LEMONADE_GPU_NAME LEMONADE_GPU_VRAM_MB
+    unset ODS_WINDOWS_SYSTEM_DIRECTORY
     unset LEMONADE_CONTAINER_BASE_URL LEMONADE_API_BASE_PATH AMD_INFERENCE_PORT
     [[ "$inherited" == unset ]] || LEMONADE_HOST_TRANSPORT="$inherited"
     eval "$defaults"
     set -- --lemonade-url http://localhost:13305/api/v1 "$@"
     eval "$parser"
     eval "$exports"
-    exported="$(bash -c 'printf "%s|%s" "$LEMONADE_EXTERNAL" "$LEMONADE_HOST_TRANSPORT"')"
-    [[ "$exported" == "true|$LEMONADE_HOST_TRANSPORT" && "$ODS_MODE" == lemonade ]]
+    exported="$(bash -c 'printf "%s|%s|%s" "$LEMONADE_EXTERNAL" "$LEMONADE_HOST_TRANSPORT" "$ODS_WINDOWS_SYSTEM_DIRECTORY"')"
+    [[ "$exported" == "true|$LEMONADE_HOST_TRANSPORT|$ODS_WINDOWS_SYSTEM_DIRECTORY" && "$ODS_MODE" == lemonade ]]
 
     # Run the actual route normalization and .env template slice. This avoids
     # directory creation, secret generation and unrelated phase side effects.
@@ -51,6 +52,9 @@ run_case() (
     if [[ "$persisted" != unset ]]; then
         _env_existing="$tmp/existing-env"
         printf 'LEMONADE_HOST_TRANSPORT=%s\n' "$persisted" > "$_env_existing"
+        if [[ -n "${PERSISTED_WINDOWS_SYSTEM_DIRECTORY:-}" ]]; then
+            printf 'ODS_WINDOWS_SYSTEM_DIRECTORY=%s\n' "$(dotenv_value "$PERSISTED_WINDOWS_SYSTEM_DIRECTORY")" >> "$_env_existing"
+        fi
     fi
     eval "$route_source"
     [[ "$LEMONADE_HOST_TRANSPORT" == "$expected" ]]
@@ -59,11 +63,16 @@ run_case() (
 '"$template"'
 ENV_EOF'
     unset LEMONADE_HOST_TRANSPORT LEMONADE_EXTERNAL LEMONADE_BASE_URL LEMONADE_CONTAINER_BASE_URL
+    unset ODS_WINDOWS_SYSTEM_DIRECTORY
     load_env_file "$INSTALL_DIR/.env"
     [[ "$LEMONADE_HOST_TRANSPORT" == "$expected" && "$LEMONADE_EXTERNAL" == true ]]
     [[ "$LEMONADE_BASE_URL" == http://localhost:13305 ]]
     [[ "$LEMONADE_CONTAINER_BASE_URL" == http://host.docker.internal:13305 ]]
     [[ "$LEMONADE_API_BASE_PATH" == /api/v1 && "$LEMONADE_MODEL" == extra.Qwen3.5-9B-Q4_K_M.gguf ]]
+    [[ "${ODS_WINDOWS_SYSTEM_DIRECTORY:-}" == "${EXPECTED_WINDOWS_SYSTEM_DIRECTORY:-}" ]]
+    if [[ -z "${EXPECTED_WINDOWS_SYSTEM_DIRECTORY:-}" ]]; then
+        ! grep -q '^ODS_WINDOWS_SYSTEM_DIRECTORY=' "$INSTALL_DIR/.env"
+    fi
     printf 'PASS: %s is exported and persists with the normalized route\n' "$label"
 )
 
@@ -80,6 +89,11 @@ run_case 'Explicit direct overrides saved model-router' unset model-router direc
 run_case 'Inherited direct overrides saved model-router' direct model-router direct
 run_case 'Explicit model-router overrides saved direct' unset direct model-router --lemonade-host-transport model-router
 run_case 'Omitted transport preserves saved direct' unset direct direct
+EXPECTED_WINDOWS_SYSTEM_DIRECTORY='D:\Operating $ystem\System32' \
+    run_case 'Explicit Windows directory is preserved literally' unset unset model-router \
+    --lemonade-host-transport model-router --windows-system-directory 'D:\Operating $ystem\System32'
+EXPECTED_WINDOWS_SYSTEM_DIRECTORY='E:\Windows\System32' PERSISTED_WINDOWS_SYSTEM_DIRECTORY='E:\Windows\System32' \
+    run_case 'Rerun preserves Windows directory' unset model-router model-router
 
 reject() {
     local label="$1" rc=0
