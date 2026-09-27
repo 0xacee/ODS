@@ -4498,8 +4498,12 @@ def _render_remote_provider_cloud_config(route: dict, env: dict[str, str]) -> No
         raise RuntimeError("Could not render the remote-provider LiteLLM route")
 
 
-def _activate_remote_provider_route(route: dict, *, transaction=None) -> dict[str, object]:
+def _activate_remote_provider_route(
+    route: dict, *, transaction=None, defer_consumer_rollback: bool = False,
+) -> dict[str, object]:
     """Commit a proven egress route to LiteLLM and managed Pixel, or roll back."""
+    if defer_consumer_rollback and transaction is None:
+        raise RuntimeError("Deferred consumer rollback requires the lifecycle transaction")
     runtime = _remote_provider_runtime_contract(route)
     env_path = INSTALL_DIR / ".env"
     cloud_path = INSTALL_DIR / "config" / "litellm" / "cloud.yaml"
@@ -4596,7 +4600,9 @@ def _activate_remote_provider_route(route: dict, *, transaction=None) -> dict[st
             _restore_text_file(activation_public_path, activation_public_snapshot)
         except Exception as rollback_exc:
             rollback_errors.append(f"configuration: {rollback_exc}")
-        if litellm_attempted:
+        # The lifecycle owner must restore its route and credential snapshots
+        # before refreshing a consumer that reads those files at startup.
+        if litellm_attempted and not defer_consumer_rollback:
             try:
                 _restore_container_state("ods-litellm", container_state, recreate=True)
                 _wait_for_container_health("ods-litellm")
@@ -4981,6 +4987,7 @@ def _apply_remote_provider_lifecycle_operation(payload: dict, plan: dict) -> dic
     snapshots: dict[Path, dict] = {}
     mutation_started = False
     pixel_transaction = None
+    consumer_before = None
     try:
         snapshots = {path: _snapshot_text_file(path) for path in mutation_paths}
         transaction_env = load_env(INSTALL_DIR / '.env')
@@ -5009,8 +5016,13 @@ def _apply_remote_provider_lifecycle_operation(payload: dict, plan: dict) -> dic
             if ssh_configure:
                 result["staged"] = True
             else:
-                result["activation"] = _activate_remote_provider_route(route, transaction=pixel_transaction) \
-                    if pixel_transaction is not None else _activate_remote_provider_route(route)
+                if pixel_transaction is not None:
+                    consumer_before = _capture_container_state("ods-litellm")
+                    result["activation"] = _activate_remote_provider_route(
+                        route, transaction=pixel_transaction, defer_consumer_rollback=True,
+                    )
+                else:
+                    result["activation"] = _activate_remote_provider_route(route)
                 result["applied"] = True
         elif action == "enable":
             _write_remote_provider_route_state(
@@ -5022,8 +5034,13 @@ def _apply_remote_provider_lifecycle_operation(payload: dict, plan: dict) -> dic
             if ssh_enable:
                 result["staged"] = True
             else:
-                result["activation"] = _activate_remote_provider_route(route, transaction=pixel_transaction) \
-                    if pixel_transaction is not None else _activate_remote_provider_route(route)
+                if pixel_transaction is not None:
+                    consumer_before = _capture_container_state("ods-litellm")
+                    result["activation"] = _activate_remote_provider_route(
+                        route, transaction=pixel_transaction, defer_consumer_rollback=True,
+                    )
+                else:
+                    result["activation"] = _activate_remote_provider_route(route)
                 result["applied"] = True
         elif action == "disable":
             if isinstance(saved_state, dict) and saved_state.get("enabled") is True:
@@ -5105,6 +5122,15 @@ def _apply_remote_provider_lifecycle_operation(payload: dict, plan: dict) -> dic
                     rollback,
                 ) from exc
             rollback["ok"] = True
+        if consumer_before is not None:
+            try:
+                _restore_container_state("ods-litellm", consumer_before, recreate=True)
+                if consumer_before.get("running"):
+                    _wait_for_container_health("ods-litellm")
+            except Exception as rollback_exc:
+                raise _PixelModelTransactionUncertain(
+                    'Restored provider consumer could not be refreshed; managed model recovery is required'
+                ) from rollback_exc
         if pixel_transaction is not None:
             if not _prove_pixel_model_contract(load_env(INSTALL_DIR / '.env'), pixel_transaction.previous):
                 raise _PixelModelTransactionUncertain('Previous provider route could not be proved; managed model recovery is required') from exc
