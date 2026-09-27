@@ -7041,6 +7041,9 @@ def read_json_body(handler) -> dict | None:
         return None
     try:
         data = json.loads(handler.rfile.read(min(length, MAX_BODY)))
+    except (socket.timeout, TimeoutError):
+        json_response(handler, 408, {"error": "Request body read timed out"})
+        return None
     except (json.JSONDecodeError, UnicodeDecodeError):
         json_response(handler, 400, {"error": "Invalid JSON"})
         return None
@@ -17574,9 +17577,17 @@ def _write_model_status(path: Path, status: str, model: str, downloaded: int, to
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+    # Bound incomplete request bodies so a peer cannot pin one worker thread
+    # indefinitely by advertising a body and then sending it slowly.
+    request_socket_timeout = 30
     # Dashboard model discovery can issue bursts larger than HTTPServer's
     # default backlog of 5; keep action requests from being dropped behind polls.
     request_queue_size = 128
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(self.request_socket_timeout)
+        return request, client_address
 
 
 def _create_host_agent_server(env: dict, bind_addr: str, port: int):
