@@ -45,6 +45,14 @@ try {
     $tokens = $null; $parseErrors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $runtimeDir 'launch.ps1'), [ref]$tokens, [ref]$parseErrors)
     Assert-Restart ($parseErrors.Count -eq 0) 'generated durable launcher parses in this PowerShell version'
+    foreach ($name in @('launch.ps1', 'backend-contract.ps1', 'env-generator.ps1')) {
+        $bytes = [IO.File]::ReadAllBytes((Join-Path $runtimeDir $name))
+        foreach ($codepage in @(932, 936)) {
+            $decoded = [Text.Encoding]::GetEncoding($codepage).GetString($bytes)
+            $null = [Management.Automation.Language.Parser]::ParseInput($decoded, [ref]$tokens, [ref]$parseErrors)
+            Assert-Restart ($parseErrors.Count -eq 0) "durable $name parses under Windows codepage $codepage"
+        }
+    }
     $launcher = Get-Content -LiteralPath (Join-Path $runtimeDir 'launch.ps1') -Raw -Encoding UTF8
     Assert-Restart ($launcher.Contains("Join-Path `$PSScriptRoot 'backend-contract.ps1'") -and
         $launcher.Contains('Invoke-ODSPortalLemonadeRuntime $plan') -and -not $launcher.Contains($PSScriptRoot)) 'task dependencies resolve beside the durable launcher, independently of the checkout'

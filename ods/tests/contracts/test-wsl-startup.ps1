@@ -59,8 +59,18 @@ function Start-ODSWslDockerDesktop {
 function Invoke-ODSWslBoundedCommand { param($Identity,[string[]]$Arguments,[int]$Seconds,[switch]$AsRoot)
     if($Identity.id -cne $identity.id -or $AsRoot){throw 'Unexpected startup probe authority'}
     $script:events+=($Arguments -join ' ')
-    if($script:scenario -eq 'timeout'){throw 'fixture Docker offline'}
-    if($script:scenario -eq 'cold' -and @($script:events|Where-Object{$_ -eq '/usr/bin/env docker info'}).Count -lt 3){throw 'fixture Docker still starting'}
+    if($script:scenario -eq 'programming'){throw [InvalidOperationException]::new('fixture programming error')}
+    if($script:scenario -eq 'acl'){throw [UnauthorizedAccessException]::new('fixture ACL denied')}
+    if($script:scenario -eq 'identity'){throw 'fixture identity mismatch'}
+    if($script:scenario -eq 'timeout'){throw [IO.IOException]::new('fixture Docker offline')}
+    if($script:scenario -in @('cold','probe-timeout')){
+        $probes=@($script:events|Where-Object{$_ -eq '/usr/bin/env docker info'}).Count
+        if($probes -eq 2){$script:sawProbeDiagnostic=(Read-ODSWslJson (Join-Path $Identity.directory 'startup-status.json')).error -like 'fixture Docker*'}
+        if($probes -lt 3){
+            if($script:scenario -eq 'probe-timeout'){throw [TimeoutException]::new('fixture Docker probe timed out')}
+            throw [IO.IOException]::new('fixture Docker still starting')
+        }
+    }
     'fixture-ready'
 }
 function Start-ODSWslLifetime { param($Identity);$script:events+='hold';[pscustomobject]@{state='running'} }
@@ -98,17 +108,24 @@ try {
     $intent.distro='Other-Ubuntu';Write-ODSWslJson (Join-Path $fixture 'startup-intent.json') $intent
     Reject {Get-ODSWslStartupIntent $identity} 'startup preference cannot cross distro ownership'
     $intent.distro=$identity.distro;Write-ODSWslJson (Join-Path $fixture 'startup-intent.json') $intent
-    foreach($case in @('ready','cold','timeout','cancel','stack-failed')) {
+    foreach($case in @('ready','cold','probe-timeout','timeout','cancel','stack-failed','programming','acl','identity')) {
         $script:events=@();$script:scenario=$case;$script:now=[datetime]'2026-01-01T00:00:00Z'
+        $script:sawProbeDiagnostic=$false
         Set-ODSWslStartupIntent $identity $true
-        Invoke-ODSWslStartup $fixture
+        $failure=''
+        try{Invoke-ODSWslStartup $fixture}catch{$failure=$_.Exception.Message}
         $status=Read-ODSWslJson (Join-Path $fixture 'startup-status.json')
-        if($case -in @('ready','cold')){
-            Check ($status.state -eq 'started') "$case startup reports stack completion"
+        if($case -in @('ready','cold','probe-timeout')){
+            Check (-not $failure -and $status.state -eq 'started') "$case startup reports stack completion"
             Check (($script:events[-2..-1] -join ',') -eq 'hold,stack-start') "$case startup waits for Docker before holding and starting its stack"
+            if($case -ne 'ready'){Check $script:sawProbeDiagnostic "$case publishes the last readiness failure while waiting"}
         } else {
-            Check ($status.state -eq 'failed' -and $status.error) "$case startup leaves an actionable failure record"
+            Check ($failure -and $status.state -eq 'failed' -and $status.error -ceq $failure) "$case startup propagates failure and leaves an actionable record"
             if($case -ne 'stack-failed'){Check (-not ($script:events -contains 'hold')) "$case cannot start the stack"}
+            if($case -in @('programming','acl','identity')){
+                Check (@($script:events|Where-Object{$_ -eq '/usr/bin/env docker info'}).Count -eq 1 -and $script:now -eq [datetime]'2026-01-01T00:00:00Z') "$case aborts immediately instead of being treated as Docker readiness"
+            }
+            if($case -eq 'timeout'){Check ($status.error -like '*fixture Docker offline*') 'Docker readiness deadline retains the last probe diagnostic'}
         }
     }
     $script:events=@()

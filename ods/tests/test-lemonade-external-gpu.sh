@@ -16,6 +16,8 @@ check() {
 # Flag parsing: run only install-core's argument loop and exports.
 parse_source="$(sed -n '/^while \[\[ \$# -gt 0 \]\]; do$/,/^done$/p' "$ROOT/install-core.sh")"
 [[ -n "$parse_source" ]] || { echo "FAIL: argument loop not found" >&2; exit 1; }
+vram_source="$(sed -n '/^# Validate external Lemonade VRAM/,/^unset _lemonade_vram$/p' "$ROOT/install-core.sh")"
+[[ -n "$vram_source" ]] || { echo "FAIL: VRAM validation block not found" >&2; exit 1; }
 exports="$(sed -n '/^if \[\[ "\${LEMONADE_EXTERNAL,,}" == "true" \]\]; then$/,/^fi$/p' "$ROOT/install-core.sh")"
 [[ -n "$exports" ]] || { echo "FAIL: Lemonade export block not found" >&2; exit 1; }
 parsed="$(
@@ -23,6 +25,7 @@ parsed="$(
         --lemonade-gpu-name 'AMD Radeon RX 9070 XT' --lemonade-gpu-vram-mb 16304 --tier 2
     LEMONADE_EXTERNAL=false LEMONADE_MODEL='' LEMONADE_GPU_NAME='' LEMONADE_GPU_VRAM_MB=''
     eval "$parse_source"
+    eval "$vram_source"
     eval "$exports"
     bash -c 'printf "%s|%s|%s|%s|%s" "$LEMONADE_EXTERNAL" "$LEMONADE_BASE_URL" "$LEMONADE_MODEL" "$LEMONADE_GPU_NAME" "$LEMONADE_GPU_VRAM_MB"'
     printf '|%s|%s' "$ODS_MODE" "$TIER"
@@ -30,8 +33,29 @@ parsed="$(
 check '[[ "$parsed" == "true|http://localhost:8080|extra.Qwen3.5-9B-Q4_K_M.gguf|AMD Radeon RX 9070 XT|16304|lemonade|2" ]]' \
     "Lemonade route flags are parsed and exported ($parsed)"
 bad_vram_rc=0
-( set -- --lemonade-gpu-vram-mb 16GB; eval "$parse_source" ) >/dev/null 2>&1 || bad_vram_rc=$?
+( set -- --lemonade-gpu-vram-mb 16GB; eval "$parse_source"; eval "$vram_source" ) >/dev/null 2>&1 || bad_vram_rc=$?
 check '[[ "$bad_vram_rc" -ne 0 ]]' "non-numeric --lemonade-gpu-vram-mb is rejected"
+
+normalize_vram() (
+    LEMONADE_GPU_VRAM_MB="$1"
+    eval "$vram_source"
+    printf '%s' "$LEMONADE_GPU_VRAM_MB"
+)
+for bad in '16GB' '-1' '1+1' '1.5' 'a[0]' '9223372036854775296' '999999999999999999999999999999'; do
+    bad_vram_rc=0
+    normalize_vram "$bad" >/dev/null 2>&1 || bad_vram_rc=$?
+    check '[[ "$bad_vram_rc" -ne 0 ]]' "environment VRAM rejects $bad before arithmetic"
+done
+normalized="$(normalize_vram '')"
+check '[[ -z "$normalized" ]]' 'empty environment VRAM retains automatic detection'
+normalized="$(normalize_vram 00000)"
+check '[[ "$normalized" == 0 ]]' 'zero-filled VRAM normalizes to decimal zero'
+normalized="$(normalize_vram 016304)"
+check '[[ "$normalized" == 16304 ]]' 'environment VRAM uses decimal rather than octal'
+normalized="$(set -- --lemonade-gpu-vram-mb 08; LEMONADE_GPU_VRAM_MB=''; eval "$parse_source"; eval "$vram_source"; printf '%s' "$LEMONADE_GPU_VRAM_MB")"
+check '[[ "$normalized" == 8 && $(( (normalized + 512) / 1024 )) -eq 0 ]]' 'CLI VRAM with an octal-invalid leading zero safely normalizes'
+normalized="$(normalize_vram 9223372036854775295)"
+check '[[ $(( (normalized + 512) / 1024 )) -eq 9007199254740991 ]]' 'largest accepted VRAM remains inside display arithmetic range'
 
 # Hardware scan: the external GPU replaces the Linux probe's "None".
 card_source="$(sed -n '/# An external Lemonade (Windows under WSL) runs the model on a GPU this/,/^    fi$/p' \

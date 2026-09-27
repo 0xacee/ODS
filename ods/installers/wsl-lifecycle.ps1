@@ -320,7 +320,7 @@ function Wait-ODSWslCommandProcess($Process,[DateTime]$Deadline,[switch]$Mutatio
                 $cancelled=$_.Exception.Message
             }
         }
-        if ((Get-ODSWslUtcNow) -ge $Deadline) { throw 'Bounded WSL command timed out without confirmed Linux completion' }
+        if ((Get-ODSWslUtcNow) -ge $Deadline) { throw [TimeoutException]::new('Bounded WSL command timed out without confirmed Linux completion') }
     }
     $cancelled
 }
@@ -388,12 +388,12 @@ function Invoke-ODSWslBoundedCommand($Identity,[string[]]$Arguments,[int]$Second
         $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
         $deadline=(Get-ODSWslUtcNow).AddSeconds($Seconds + 30)
         $cancelled=Wait-ODSWslCommandProcess $process $deadline -Mutation:$Mutation
-        if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) { throw 'WSL command output did not close after the client exited' }
+        if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) { throw [TimeoutException]::new('WSL command output did not close after the client exited') }
         $output=$stdout.GetAwaiter().GetResult(); $errorOutput=$stderr.GetAwaiter().GetResult()
         if ($Mutation) {
             $output=Complete-ODSWslCommand $Identity $token $output $process.ExitCode
         }
-        if ($process.ExitCode -ne 0) { throw ('WSL startup command failed: ' + $errorOutput.Trim()) }
+        if ($process.ExitCode -ne 0) { throw [IO.IOException]::new('WSL startup command failed: ' + $errorOutput.Trim()) }
         if ($cancelled) { throw $cancelled }
         Assert-ODSWslStartupStillWanted
         $output
@@ -435,10 +435,14 @@ function Invoke-ODSWslStartup([string]$Directory) {
                 $null=Invoke-ODSWslBoundedCommand $identity @('/usr/bin/env','docker','info') 15
                 $null=Invoke-ODSWslBoundedCommand $identity @('/usr/bin/env','docker','compose','version') 15
                 $dockerReady=$true; break
-            } catch { Assert-ODSWslStartupStillWanted; $status.error=$_.Exception.Message }
+            } catch [IO.IOException], [TimeoutException] {
+                Assert-ODSWslStartupStillWanted
+                $status.error=$_.Exception.Message
+                Write-ODSWslJson (Join-Path $Directory 'startup-status.json') $status
+            }
             Start-Sleep -Seconds 3
         }
-        if (-not $dockerReady) { throw 'Docker did not become ready in this distribution within ten minutes; open Docker Desktop and run lifecycle start' }
+        if (-not $dockerReady) { throw "Docker did not become ready in this distribution within ten minutes; open Docker Desktop and run lifecycle start. Last probe error: $($status.error)" }
         $commandLock=Open-ODSPrivateLock (Join-Path $Directory 'command.lock')
         Assert-ODSWslCommandSettled $identity
         Assert-ODSWslStartupStillWanted
@@ -448,7 +452,7 @@ function Invoke-ODSWslStartup([string]$Directory) {
         Invoke-ODSWslStack $identity 'start' | ForEach-Object { [Console]::Error.WriteLine([string]$_) }
         Assert-ODSWslStartupStillWanted
         $status.state='started'
-    } catch { $status.state='failed'; $status.error=$_.Exception.Message }
+    } catch { $status.state='failed'; $status.error=$_.Exception.Message; throw }
     finally {
         $status.endedUtc=[DateTime]::UtcNow.ToString('o')
         Write-ODSWslJson (Join-Path $Directory 'startup-status.json') $status

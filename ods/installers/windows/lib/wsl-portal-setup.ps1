@@ -235,7 +235,14 @@ function Initialize-ODSPortalWindowsFoundation([System.Collections.IDictionary]$
 
 function Get-ODSPortalDistroNames {
     $list = Invoke-ODSPortalWsl -Arguments @('--list', '--quiet')
-    if ($list.Code -ne 0) { throw ('Cannot list WSL distributions: ' + $list.Output + ' ' + $list.Error) }
+    if ($list.Code -ne 0) {
+        # WSL versions can report an empty registration as an error. Match
+        # only its stable diagnostic code, never localized display text or
+        # an unrelated service/access failure, so setup can offer Ubuntu.
+        $diagnostic = $list.Output + ' ' + $list.Error
+        if ($diagnostic -cmatch '(?<![A-Za-z0-9_])WSL_E_DEFAULT_DISTRO_NOT_FOUND(?![A-Za-z0-9_])') { return @() }
+        throw ('Cannot list WSL distributions: ' + $diagnostic)
+    }
     return @($list.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 

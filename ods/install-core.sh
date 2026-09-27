@@ -277,7 +277,7 @@ while [[ $# -gt 0 ]]; do
         --lemonade-model) LEMONADE_MODEL="$2"; shift 2 ;;
         --lemonade-gpu-name) LEMONADE_GPU_NAME="$2"; shift 2 ;;
         --lemonade-gpu-vram-mb)
-            [[ "$2" =~ ^[0-9]+$ ]] || { echo "--lemonade-gpu-vram-mb needs a number of megabytes" >&2; exit 1; }
+            [[ -n "${2:-}" ]] || { echo "--lemonade-gpu-vram-mb needs a number of megabytes" >&2; exit 1; }
             LEMONADE_GPU_VRAM_MB="$2"; shift 2 ;;
         --external-llm-url) EXTERNAL_LLM_URL="$2"; shift 2 ;;
         --external-llm-provider) EXTERNAL_LLM_PROVIDER="$2"; shift 2 ;;
@@ -328,6 +328,27 @@ while [[ $# -gt 0 ]]; do
         *) printf '[ERROR] Unknown option: %s\n' "$1" >&2; exit 1 ;;
     esac
 done
+
+# Validate external Lemonade VRAM from either flags or the environment before
+# any phase can evaluate it as Bash arithmetic. Empty retains auto-detection.
+if [[ -n "$LEMONADE_GPU_VRAM_MB" ]]; then
+    [[ "$LEMONADE_GPU_VRAM_MB" =~ ^[0-9]+$ ]] || {
+        echo "LEMONADE_GPU_VRAM_MB must be a nonnegative decimal number of megabytes" >&2
+        exit 1
+    }
+    _lemonade_vram="${LEMONADE_GPU_VRAM_MB#"${LEMONADE_GPU_VRAM_MB%%[!0]*}"}"
+    _lemonade_vram="${_lemonade_vram:-0}"
+    # Phase 02 adds 512 before converting MiB to GiB; leave room in int64.
+    # Compare equal-length decimal strings without overflowing the validator.
+    # shellcheck disable=SC2071
+    if [[ ${#_lemonade_vram} -gt 19 ||
+        ( ${#_lemonade_vram} -eq 19 && "$_lemonade_vram" > 9223372036854775295 ) ]]; then
+        echo "LEMONADE_GPU_VRAM_MB exceeds the supported integer range" >&2
+        exit 1
+    fi
+    LEMONADE_GPU_VRAM_MB="$_lemonade_vram"
+fi
+unset _lemonade_vram
 
 # Help and malformed options exit without creating a log. Every remaining
 # path prepares a private diagnostic file before the first logging call.

@@ -613,7 +613,7 @@ function ConvertTo-ODSDotenvValue {
         # Bash and Compose disagree about \` inside double-quoted dotenv
         # values. Normalize it only in this apostrophe fallback so both readers
         # receive the same safe text.
-        $text = $text.Replace('`', 'ˋ')
+        $text = $text.Replace('`', [string][char]0x02CB)
         $escaped = $text.Replace('\', '\\').Replace('"', '\"').Replace('$', '\$')
         return '"' + $escaped + '"'
     }

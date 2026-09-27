@@ -71,6 +71,7 @@ function Reset-Scenario {
     $script:amdArgs = @()
     $script:linuxHome = '/home/user'
     $script:amdBinding = @()
+    $script:distroListFailure = $null
 }
 function Test-ODSPortalVirtualization { $script:calls.Add('virt-check'); return $script:virtualization }
 function Get-ODSPortalFreeSystemGB { return $script:freeGB }
@@ -128,11 +129,20 @@ function Invoke-ODSPortalWsl([string[]]$Arguments) {
     $script:calls.Add($key)
     $code = 0
     $output = ''
+    $stderr = ''
     switch -Regex ($key) {
         '^--distribution (Ubuntu|Ubuntu-24.04) --exec printenv HOME$' { $output = $script:linuxHome; break }
         '^--version$' { $output="Versao do WSL: 2.6.1.0`nVersao do kernel: 6.6.87.2"; if ($script:scenario -eq 'old-wsl') { $output="WSL version: 0.60.0`nKernel version: 6.6.87.2" }; if ($script:scenario -eq 'inbox-wsl') { $code=1; $output='Invalid command line option' }; break }
         '^--status$' { if ($script:scenario -eq 'features') { $code=1 }; break }
-        '^--list --quiet$' { if ($script:scenario -ne 'missing' -or ($script:downloaded -and -not $script:registerNeeded)) { $output='Ubuntu-24.04' }; if ($script:scenario -eq 'existing-ubuntu') { $output='Ubuntu' }; break }
+        '^--list --quiet$' {
+            if ($script:distroListFailure -and -not $script:downloaded) {
+                $code=$script:distroListFailure.Code; $output=$script:distroListFailure.Output; $stderr=$script:distroListFailure.Error
+                break
+            }
+            if ($script:scenario -ne 'missing' -or ($script:downloaded -and -not $script:registerNeeded)) { $output='Ubuntu-24.04' }
+            if ($script:scenario -eq 'existing-ubuntu') { $output='Ubuntu' }
+            break
+        }
         '^--install --distribution Ubuntu-24.04 --no-launch$' { $code=$script:downloadCode; if ($code -eq 0 -and -not $script:installNeedsRestart) { $script:downloaded = $true }; break }
         '^--list --verbose$' { $output='* Ubuntu-24.04    Em Execucao   2'; if ($script:scenario -eq 'wsl1') { $output=$output -replace '2$', '1' }; if ($script:scenario -eq 'existing-ubuntu') { $output='* Ubuntu    Stopped    2' }; break }
         '^--distribution Ubuntu --exec id -u$' { $output='1000'; break }
@@ -148,7 +158,7 @@ function Invoke-ODSPortalWsl([string[]]$Arguments) {
         '^--distribution Ubuntu-24.04 --exec docker info --format \{\{json \.Runtimes\}\}$' { $output='{"io.containerd.runc.v2":{"path":"runc"},"nvidia":{"path":"/usr/bin/nvidia-container-runtime"},"runc":{"path":"runc"}}'; if ($script:scenario -eq 'no-nvidia-runtime') { $output='{"io.containerd.runc.v2":{"path":"runc"},"runc":{"path":"runc"}}' }; break }
         default { throw "Unexpected native invocation: $key" }
     }
-    return [pscustomobject]@{ Code=$code; Output=$output }
+    return [pscustomobject]@{ Code=$code; Output=$output; Error=$stderr }
 }
 try {
     foreach ($file in @('wsl-portal-setup.ps1', 'wsl-portal-prereqs.ps1')) {
@@ -281,6 +291,28 @@ try {
     Check ($script:calls.Contains('account:Ubuntu-24.04:maria')) 'first Ubuntu account is created from PowerShell'
     Check (-not $script:calls.Contains('user:Ubuntu-24.04')) 'new Ubuntu never opens the interactive Ubuntu window'
     Check ([Array]::IndexOf($script:calls.ToArray(), 'account:Ubuntu-24.04:maria') -lt [Array]::IndexOf($script:calls.ToArray(), 'install:Ubuntu-24.04')) 'account exists before ODS installs'
+    foreach ($channel in @('Output', 'Error')) {
+        Reset-Scenario
+        $script:scenario='missing'
+        $script:distroListFailure=@{Code=-1; Output=''; Error=''}
+        $script:distroListFailure[$channel]=([string][char]0x65E5) + " localized diagnostic`nWsl/Service/WSL_E_DEFAULT_DISTRO_NOT_FOUND"
+        Check (@(Get-ODSPortalDistroNames).Count -eq 0) "known no-distribution code in $channel is an empty list"
+        $script:dockerInstalled=$false
+        Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 3010) "fresh WSL without a distro or Docker reaches the required restart ($channel diagnostic)"
+        Check ($script:calls.Contains('--install --distribution Ubuntu-24.04 --no-launch') -and $script:calls.Contains('docker-install') -and -not $script:calls.Contains('install:Ubuntu-24.04')) 'missing distro installs Ubuntu and Docker without premature delegation'
+        $script:engineUp=$false
+        Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'resuming after Docker installation reaches Pixel setup'
+        Check ($script:calls.Contains('docker-start') -and $script:calls.Contains('install:Ubuntu-24.04')) 'resumed setup starts Docker and delegates to Ubuntu'
+        Check ($script:capturedArguments -contains '--pixel' -and $script:capturedArguments -contains '--no-hermes') 'empty-host recovery retains Pixel and excludes Hermes'
+    }
+    foreach ($failure in @('Wsl/E_ACCESSDENIED', 'Wsl/WSL_E_SERVICE_NOT_AVAILABLE', 'Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND_OTHER', 'Wsl/NOT_WSL_E_DEFAULT_DISTRO_NOT_FOUND', '')) {
+        Reset-Scenario
+        $script:distroListFailure=@{Code=1; Output=''; Error=$failure}
+        $message=''
+        try { $null=Invoke-ODSPortalSetup @{} 'unused' } catch { $message=$_.Exception.Message }
+        Check ($message -like 'Cannot list WSL distributions:*') 'unknown listing failures stay visible'
+        Check (-not $script:calls.Contains('--install --distribution Ubuntu-24.04 --no-launch') -and -not $script:calls.Contains('docker-install') -and -not $script:calls.Contains('install:Ubuntu-24.04')) 'unknown listing failure never provisions or delegates'
+    }
     Reset-Scenario
     $script:scenario='resume-user'
     Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'resume completes Ubuntu account setup before ODS'
