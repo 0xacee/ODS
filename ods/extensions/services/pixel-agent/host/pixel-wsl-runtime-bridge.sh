@@ -55,7 +55,7 @@ base=/mnt/wsl/ods-portal-runtime
 if [[ "$action" == ensure ]]; then
     install -d -o root -g root -m 0755 -- "$base"
     for target in "$base/ingress" "$base/preview"; do
-        [[ ! -L "$target" ]] || exit 1
+        [[ ! -L "$target" ]] || fail "$target is a symlink"
         # A mounted target is the owner's runtime directory. Do not chown or
         # chmod through the projection when ensure is called again.
         if ! mountpoint -q -- "$target"; then
