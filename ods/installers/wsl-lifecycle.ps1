@@ -5,10 +5,17 @@ param(
     [ValidateSet('start','status','stop','restart','release','hold')][string]$Action = 'status',
     [string]$Distro,
     [string]$InstallRoot,
-    [string]$InstanceDirectory
+    [string]$InstanceDirectory,
+    [string]$StateRoot
 )
 $ErrorActionPreference = 'Stop'
 $script:ODSWslLifecycleSource = $PSCommandPath
+$script:ODSWslStateRoot = ''
+if ($StateRoot) {
+    if ($StateRoot -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))' -or $StateRoot -match '[\x00-\x1f"]') { throw 'An absolute Windows state directory is required' }
+    $script:ODSWslStateRoot = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    if ($script:ODSWslStateRoot -eq [IO.Path]::GetPathRoot($StateRoot).TrimEnd('\')) { throw 'State directory cannot be a filesystem root' }
+}
 
 function Get-ODSWslIdentity([string]$Distro, [string]$InstallRoot) {
     if ([string]::IsNullOrWhiteSpace($Distro) -or $Distro -match '[\x00-\x1f"\\]') { throw 'Invalid WSL distribution name' }
@@ -18,7 +25,8 @@ function Get-ODSWslIdentity([string]$Distro, [string]$InstallRoot) {
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $hash = [Security.Cryptography.SHA256]::Create()
     try { $id = -join ($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes("$sid`n$Distro`n$InstallRoot")) | ForEach-Object { $_.ToString('x2') }) } finally { $hash.Dispose() }
-    [pscustomobject]@{ schemaVersion=1; ownerSid=$sid; distro=$Distro; installRoot=$InstallRoot; id=$id; taskName="ODS-WSL-$($id.Substring(0,24))"; directory=(Join-Path $env:LOCALAPPDATA "ODS\wsl\$id") }
+    $stateBase = if ($script:ODSWslStateRoot) { $script:ODSWslStateRoot } else { Join-Path $env:LOCALAPPDATA 'ODS\wsl' }
+    [pscustomobject]@{ schemaVersion=1; ownerSid=$sid; distro=$Distro; installRoot=$InstallRoot; id=$id; taskName="ODS-WSL-$($id.Substring(0,24))"; directory=(Join-Path $stateBase $id) }
 }
 
 function Assert-ODSPrivatePath([string]$Path, [switch]$Directory) {
@@ -137,7 +145,9 @@ function Assert-ODSWslManifest($Identity) {
 }
 
 function Get-ODSWslTaskArguments($Identity) {
-    '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action hold -InstanceDirectory "{1}"' -f (Join-Path $Identity.directory 'controller.ps1'),$Identity.directory
+    $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action hold -InstanceDirectory "{1}"' -f (Join-Path $Identity.directory 'controller.ps1'),$Identity.directory
+    if ($script:ODSWslStateRoot) { $arguments += ' -StateRoot "{0}"' -f $script:ODSWslStateRoot }
+    $arguments
 }
 
 function Get-ODSWslHolderArguments($Identity) {
@@ -164,6 +174,7 @@ function Assert-ODSWslTask($Identity) {
 function Get-ODSWslLifetimeStatus($Identity) {
     $running = @(Get-ODSWslRunningDistributions) -contains $Identity.distro
     if (-not (Test-Path -LiteralPath $Identity.directory)) { return [pscustomobject]@{ scope='wsl-lifetime'; state='unmanaged'; distroRunning=$running; identity=$Identity; runtime=$null } }
+    if ($script:ODSWslStateRoot) { Assert-ODSPrivatePath $script:ODSWslStateRoot -Directory }
     $null = Assert-ODSWslManifest $Identity
     $runtime = Read-ODSWslJson (Join-Path $Identity.directory 'runtime.json')
     $owned = $runtime -and $runtime.state -eq 'running' -and (Test-ODSProcessIdentity $runtime.child (Get-ODSProcessIdentity $runtime.child.pid))
@@ -172,6 +183,7 @@ function Get-ODSWslLifetimeStatus($Identity) {
 }
 
 function Start-ODSWslLifetime($Identity) {
+    if ($script:ODSWslStateRoot) { Initialize-ODSPrivateDirectory $script:ODSWslStateRoot }
     Initialize-ODSPrivateDirectory $Identity.directory
     $manifestPath = Join-Path $Identity.directory 'instance.json'
     if (Test-Path -LiteralPath $manifestPath) { $null=Assert-ODSWslManifest $Identity } else { Write-ODSWslJson $manifestPath $Identity }
@@ -231,6 +243,7 @@ function Stop-ODSWslLifetime($Identity) {
 }
 
 function Invoke-ODSWslHolder([string]$Directory) {
+    if ($script:ODSWslStateRoot) { Assert-ODSPrivatePath $script:ODSWslStateRoot -Directory }
     Assert-ODSPrivatePath $Directory -Directory
     $manifest=Read-ODSWslJson (Join-Path $Directory 'instance.json')
     $identity=Get-ODSWslIdentity $manifest.distro $manifest.installRoot
@@ -354,6 +367,7 @@ function Invoke-ODSWslStack($Identity,[string]$Action) {
 function Invoke-ODSWslLifecycle([string]$Action,[string]$Distro,[string]$InstallRoot) {
     $identity=Get-ODSWslIdentity $Distro $InstallRoot
     if ($Action -eq 'status') { return (Get-ODSWslLifetimeStatus $identity) }
+    if ($script:ODSWslStateRoot) { Initialize-ODSPrivateDirectory $script:ODSWslStateRoot }
     Initialize-ODSPrivateDirectory $identity.directory
     $lock=Open-ODSPrivateLock (Join-Path $identity.directory 'command.lock')
     try {

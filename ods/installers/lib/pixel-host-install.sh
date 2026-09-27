@@ -280,7 +280,26 @@ _ods_pixel_source_transition_required() {
     IFS='|' read -r state source_ref <<<"$transition"
     [[ "$state" =~ ^(ready|installing|deactivating)$ \
         && "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 2
-    [[ "$state" == deactivating || "$source_ref" != "$requested_ref" ]]
+    [[ "$state" == deactivating || "$source_ref" != "$requested_ref" ]] && return 0
+    # The Pixel pin alone does not identify the ODS host integration. Preserve
+    # its installed source until cleanup can validate privileged mirrors, even
+    # when an upgrade retains the same developer Pixel checkout.
+    local incoming_root="${4:-}" relative comparison
+    [[ -n "$incoming_root" ]] || return 1
+    for relative in installers/lib/pixel-host-install.sh bin \
+        extensions/services/pixel-agent/host extensions/services/pixel-agent/plugin; do
+        [[ -e "${INSTALL_DIR:?}/$relative" && ! -L "$INSTALL_DIR/$relative" \
+            && -e "$incoming_root/$relative" && ! -L "$incoming_root/$relative" ]] || return 2
+        comparison=0
+        diff -qr --exclude=__pycache__ -- "$INSTALL_DIR/$relative" \
+            "$incoming_root/$relative" >/dev/null 2>&1 || comparison=$?
+        case "$comparison" in
+            0) ;;
+            1) return 0 ;;
+            *) return 2 ;;
+        esac
+    done
+    return 1
 }
 
 # A failed test or operator cleanup can remove the ODS checkout while leaving
@@ -292,8 +311,7 @@ _ods_pixel_restore_transition_source() {
     transition="$(_ods_pixel_source_transition_state "$owner" "$home" "$requested_ref")" || return 1
     IFS='|' read -r state source_ref <<<"$transition"
     [[ "$state" =~ ^(ready|installing|deactivating)$ \
-        && "$source_ref" =~ ^[0-9a-f]{40}$ \
-        && ( "$state" == deactivating || "$source_ref" != "$requested_ref" ) ]] || return 1
+        && "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 1
     source_root="${INSTALL_DIR:?}/data/pixel/source-$source_ref"
     # Retirement must verify the source that actually installed the old
     # deployment. Prefer its existing checkout; never fetch a retired private
@@ -4293,8 +4311,13 @@ PY
     ods_sudo systemctl restart pixel-ingress.service || return 1
     if "$wsl_bridge"; then
         ods_sudo systemctl enable ods-pixel-wsl-runtime-bridge.service || return 1
-        ods_sudo systemctl start ods-pixel-wsl-runtime-bridge.service || return 1
-        ods_sudo systemctl is-active --quiet ods-pixel-wsl-runtime-bridge.service || return 1
+        if ! ods_sudo systemctl start ods-pixel-wsl-runtime-bridge.service \
+            || ! ods_sudo systemctl is-active --quiet ods-pixel-wsl-runtime-bridge.service; then
+            ai_bad "The WSL runtime bridge for Pixel Edge did not start. Its journal:"
+            ods_sudo journalctl -u ods-pixel-wsl-runtime-bridge.service -n 20 --no-pager -o cat \
+                || ai_warn "journalctl could not read the bridge journal (non-fatal)"
+            return 1
+        fi
     fi
     ods_sudo systemctl is-active --quiet openclaw-gateway.service pixel-ingress.service \
         pixel-extension-manager.service pixel-artifact-promoter.service \
@@ -4437,6 +4460,22 @@ PY
     return 1
 }
 
+_ods_pixel_prepare_wsl_runtime_targets() {
+    local base="${1:-/mnt/wsl/ods-portal-runtime}" target
+    for target in "$base" "$base/ingress" "$base/preview"; do
+        # Existing targets may be bind mounts of the live Pixel directories.
+        # install -d would chown/chmod the source through those mounts and
+        # prevent the unprivileged services from recreating their sockets.
+        if [[ -L "$target" || ( -e "$target" && ! -d "$target" ) ]]; then
+            ai_bad "Pixel runtime target is not a regular directory: $target"
+            return 1
+        fi
+        if [[ ! -d "$target" ]]; then
+            ods_sudo install -d -o root -g root -m 0755 -- "$target" || return 1
+        fi
+    done
+}
+
 ods_pixel_install_default_agent() {
     [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]] || return 0
     local owner home source_root pixel_root plugin_root answers operations_policy extension_catalog extension_manager_unit artifact_promoter_unit workspace_preview_unit openclaw_bin plugin_digest contract_sha256 runtime_budget_status gateway_alias pixel_log
@@ -4548,6 +4587,12 @@ ods_pixel_install_default_agent() {
         searxng|parallel-free) ;;
         *) ai_bad "Pixel returned an invalid native search provider."; return 1 ;;
     esac
+    if grep -Fxq 'PIXEL_RUNTIME_BIND_PROPAGATION=rshared' "${INSTALL_DIR:?}/.env"; then
+        # Pixel Edge starts here, before the WSL runtime bridge is installed.
+        # Create the fixed empty targets on WSL's shared tmpfs so its rshared
+        # binds exist now and receive the bridge mounts when they arrive.
+        _ods_pixel_prepare_wsl_runtime_targets || return 1
+    fi
     ai "Starting the ODS model gateway, control API, and search prerequisites for Pixel review..."
     # The scoped extension manager validates its contract against dashboard-api
     # while Pixel is installed below. The access coordinator also requires the

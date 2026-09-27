@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Native Windows uninstall now verifies each container's Compose installation
+  directory before any mutation. A shared `ods` project label cannot authorize
+  removing another WSL/Windows installation or unattached volumes of unknown
+  origin. Docker listing failures preserve the installation for recovery.
 - Perplexica's internal `scrape_url` action is disabled at container start. It
   opened any URL its model named, without address validation, from the
   Perplexica container on the ODS network, and Perplexica offered it in every
@@ -33,6 +37,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rejects a llama.cpp image without a digest.
 
 ### Changed
+- Windows: `install.ps1` now installs ODS inside Ubuntu/WSL2 with Pixel
+  (`--pixel --no-hermes --no-openclaw`) instead of the native Windows stack.
+  It prepares WSL and Ubuntu 24.04 when needed, and stops with instructions,
+  before changing anything in Ubuntu, when WSL2, systemd, a non-root user,
+  Docker Desktop's WSL integration or, on NVIDIA machines, a Windows driver
+  >= 570 with GPU and `nvidia` runtime visible from Ubuntu is missing. An
+  existing Ubuntu older than 24.04 is never reused. Success now requires the
+  authenticated Portal status API to report the agent available. Existing
+  native Windows installs are detected and left untouched; `install.ps1`
+  refuses to run beside them. Keep managing them with their own `ods.ps1`, or
+  rerun `ods\installers\windows\install-windows.ps1`. AMD machines that used
+  the native Lemonade path now get a GPU backend detected inside WSL, CPU, or
+  an explicitly configured endpoint. The Linux installer runs on the same
+  console (download progress and UTF-8 output stay visible), and warnings WSL
+  prints on stderr no longer turn a passing check into a failure.
+- Linux on WSL: an NVIDIA driver older than 570 stops with Windows update
+  instructions instead of installing `nvidia-driver-*` inside the distro,
+  which breaks WSL GPU passthrough.
+- Linux on WSL with Docker Desktop: Pixel Edge now binds the runtime bridge
+  as `/mnt/wsl/ods-portal-runtime/*`, the distro path Docker Desktop's WSL
+  proxy translates, and the installer creates those empty targets before Pixel
+  Edge starts. The daemon-side `/mnt/host/wsl/...` path stopped every fresh
+  install with "is mounted on / but it is not a shared mount".
+- Linux on WSL with Docker Desktop: the Pixel runtime bridge accepts Docker's
+  bind of its own empty runtime targets and checks the top mount's propagation.
+  Bridge refusals now explain their cause, and the installer shows the service
+  journal when startup or its active-state check fails.
+- Installer: Full Stack, Core Only and Custom preserve explicit `--hermes`,
+  `--no-hermes`, `--openclaw` and `--no-openclaw` choices. Custom skips agent
+  questions already answered by those flags, including the Windows Pixel path.
 - Every curated catalog download URL now names a Hugging Face commit instead
   of `resolve/main`, so an upstream rewrite cannot change or remove a catalog
   file. The 48 other re-pinned models download the same bytes: each sha256 was
@@ -133,6 +167,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and put `<think>` blocks in replies.
 
 ### Fixed
+- Windows `ods.ps1 uninstall` no longer stops at "Docker cleanup is incomplete"
+  when a volume or network with the `ods` compose label is not in the saved
+  compose files (an older release or a since-disabled extension). It now removes
+  every labelled leftover after `compose down`, and a single leftover name is
+  passed to `docker` whole instead of one character per argument. If something
+  still cannot be removed, the message names it. Uninstall also removes the
+  `ODSNativeLlamaRuntime` scheduled task, and a helper task it cannot remove is
+  reported with the command to remove it instead of being skipped silently.
 - Gemma 4 26B-A4B (`gemma4-26b-a4b-q4`) and Gemma 4 31B (`gemma4-31b-q4`)
   download again. ggml-org deleted both Q4_K_M files from its repos on
   2026-07-16, so the catalog and the Gemma-profile tier maps (`NV_ULTRA`,
