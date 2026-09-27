@@ -40,6 +40,7 @@ from config import (
     AGENT_HOST, AGENT_PORT, AGENT_URL, ODS_AGENT_KEY,
     _detect_container_default_gateway, _running_inside_container,
     _read_env_from_file,
+    normalize_ods_mode, read_live_env_value,
 )
 from models import (
     GPUInfo, ServiceStatus, DiskUsage, ModelInfo, BootstrapStatus,
@@ -1510,15 +1511,24 @@ async def api_readiness(api_key: str = Depends(verify_api_key)):
 
 async def _get_dashboard_remote_runtime() -> dict[str, object] | None:
     """Read the active provider without claiming remote model residency."""
+    async def read_projection():
+        # The host starts a background readback on a cold/expired cache.
+        # Re-poll that transient gap within one absolute deadline.
+        for attempt in range(4):
+            status = await async_request_agent_json("GET", "/v1/model/status", timeout=2.0)
+            runtime = active_runtime_projection(status)
+            if runtime:
+                return runtime if runtime["source"] == "remote-provider" else None
+            if not isinstance(status, dict) or "activeRuntime" in status or status.get("status") not in {"idle", "complete"}:
+                return None
+            if attempt < 3:
+                await asyncio.sleep(0.25)
+        return None
+
     try:
-        status = await asyncio.wait_for(
-            async_request_agent_json("GET", "/v1/model/status", timeout=2.0),
-            timeout=2.0,
-        )
+        return await asyncio.wait_for(read_projection(), timeout=2.0)
     except (AgentClientError, asyncio.TimeoutError):
         return None
-    runtime = active_runtime_projection(status)
-    return runtime if runtime and runtime["source"] == "remote-provider" else None
 
 
 async def _build_api_status() -> dict:
@@ -1546,9 +1556,10 @@ async def _build_api_status() -> dict:
     )
 
     # Local residency/metrics say nothing about a selected remote provider.
-    if remote_runtime:
+    cloud_mode = normalize_ods_mode(read_live_env_value("ODS_MODE")) == "cloud"
+    if remote_runtime or cloud_mode:
         loaded_model, llama_metrics_data = None, {}
-        context_size = remote_runtime["contextLength"]
+        context_size = remote_runtime["contextLength"] if remote_runtime else None
     else:
         loaded_model = await get_loaded_model()
         llama_metrics_data, context_size = await asyncio.gather(
@@ -1570,7 +1581,7 @@ async def _build_api_status() -> dict:
             "tokensPerSecond": None,
             "contextLength": context_size,
         }
-    elif model_info:
+    elif model_info and not cloud_mode:
         runtime_model_name = loaded_model or model_info.name
         model_data = {
             "name": runtime_model_name,
@@ -1594,9 +1605,9 @@ async def _build_api_status() -> dict:
 
     tier = _infer_tier(gpu_info)
 
-    loaded_model_name = None if remote_runtime else loaded_model or (model_data["name"] if model_data else None)
+    loaded_model_name = None if remote_runtime or cloud_mode else loaded_model or (model_data["name"] if model_data else None)
     current_model_name = remote_runtime["model"] if remote_runtime else loaded_model_name
-    configured_model_name = model_data["configuredModel"] if model_data else None
+    configured_model_name = model_data["configuredModel"] if model_data else model_info.name if model_info else None
 
     result = {
         "gpu": gpu_data, "services": services_data, "model": model_data,

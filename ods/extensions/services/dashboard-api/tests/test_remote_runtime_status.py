@@ -77,6 +77,49 @@ async def test_remote_projection_uses_async_bounded_host_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cold_host_cache_is_repolled_without_using_stale_identity(monkeypatch):
+    rpc = AsyncMock(side_effect=[{"status": "complete", "model": "Old-Local"}, {"activeRuntime": REMOTE}])
+    monkeypatch.setattr(main, "async_request_agent_json", rpc)
+    assert await main._get_dashboard_remote_runtime() == REMOTE
+    assert rpc.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_cloud_route_does_not_inherit_local_or_configured_identity(monkeypatch, status_helpers):
+    monkeypatch.setattr(main, "read_live_env_value", lambda _key: "cloud")
+    monkeypatch.setattr(main, "async_request_agent_json", AsyncMock(return_value={"status": "complete"}))
+    result = await main._build_api_status()
+    assert result["model"] is result["currentModel"] is result["loadedModel"] is None
+    assert result["configuredModel"] == "Stale-Claude"
+    assert result["inference"]["contextSize"] is result["inference"]["tokensPerSecond"] is None
+    for mock in status_helpers.values():
+        mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_repoll_shares_the_absolute_deadline(monkeypatch):
+    cancelled = asyncio.Event()
+    calls = 0
+
+    async def rpc(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(1.5)
+            return {"status": "complete"}
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(main, "async_request_agent_json", rpc)
+    start = asyncio.get_running_loop().time()
+    assert await asyncio.wait_for(main._get_dashboard_remote_runtime(), timeout=2.5) is None
+    assert asyncio.get_running_loop().time() - start < 2.5
+    assert calls == 2 and cancelled.is_set()
+
+
+@pytest.mark.asyncio
 async def test_remote_probe_cancels_transport_that_exceeds_total_deadline(monkeypatch):
     cancelled = asyncio.Event()
 
