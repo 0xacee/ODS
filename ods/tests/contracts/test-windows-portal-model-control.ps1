@@ -48,7 +48,7 @@ try {
     $script:failStart = $false; $script:failReady = $false; $script:mutateDuringStop = $false
     $script:probeMutexDuringHealth = $false; $script:replacePlanDuringHealth = $false
     $script:events = [Collections.Generic.List[string]]::new()
-    function Get-ScheduledTask { param($TaskName, $ErrorAction, $ErrorVariable)
+    function Get-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction, $ErrorVariable)
         if (-not $script:taskMissing) { return $script:fixtureTask }
     }
     if (-not $onWindows) {
@@ -66,10 +66,18 @@ try {
         if ($script:mutateDuringStop) { [IO.File]::AppendAllText($planPath, ' ') }
     }
     function Start-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
-        Assert-Control ($TaskName -ceq 'ODSLemonadeRuntime' -and $TaskPath -ceq '\') 'only the existing owned task is started'
+        Assert-Control ($TaskName -ceq (Get-ODSPortalLemonadeTaskName) -and $TaskPath -ceq '\') 'only the existing owned task is started'
         $script:events.Add('start')
         if ($script:failStart) { throw 'fixture task start failed' }
         $script:running = $true
+    }
+    function Disable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
+        Assert-Control (-not (Test-ODSPortalLemonadeWanted (Join-Path (Split-Path -Parent $planPath) 'intent.json'))) 'stop intent is durable before retries are disabled'
+        $script:taskDisabled = $true
+    }
+    function Enable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
+        Assert-Control (Test-ODSPortalLemonadeWanted (Join-Path (Split-Path -Parent $planPath) 'intent.json')) 'explicit start publishes running intent before enabling the owned task'
+        $script:taskDisabled = $false
     }
     function Wait-ODSPortalLemonadeReady($Registration, [int]$Seconds = 1020) {
         if ($script:failReady) { throw 'fixture load failure' }
@@ -215,10 +223,15 @@ try {
     $beforeStart = $script:events.Count
     $null = Invoke-ODSPortalModelControl (New-ControlRequest 'start' $started.planDigest)
     Assert-Control ($script:events.Count -eq $beforeStart) 'start is idempotent only after live model proof'
-    $request = New-ControlRequest 'restore' $started.planDigest; $request.plan = $originalPlan
+    $request = New-ControlRequest 'restore' $started.planDigest; $request.plan = $originalPlan | ConvertTo-Json | ConvertFrom-Json
+    $request.plan.WslDistro = $originalPlan.WslDistro.ToLowerInvariant()
     $restored = Invoke-ODSPortalModelControl $request
     Assert-Control ($restored.running -and $restored.observation.modelId -ceq 'Original-9B' -and
         $restored.plan.GgufFile -ceq 'Original-9B.gguf') 'rollback restores and proves the exact previous startup model'
+    Assert-Control ($restored.plan.WslDistro -ceq $originalPlan.WslDistro) 'rollback accepts equivalent distro casing while retaining the registered spelling'
+    $request = New-ControlRequest 'restore' $restored.planDigest; $request.plan = $originalPlan | ConvertTo-Json | ConvertFrom-Json
+    $request.plan.WslInstallDir = $originalPlan.WslInstallDir.ToUpperInvariant()
+    $null = Assert-ControlError $request 'invalid_plan'
     $request = New-ControlRequest 'restore' $restored.planDigest; $request.plan = $originalPlan | ConvertTo-Json | ConvertFrom-Json
     $request.plan.ExecutablePath = 'C:\unrelated.exe'
     $null = Assert-ControlError $request 'invalid_plan'

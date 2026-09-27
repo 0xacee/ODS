@@ -12,7 +12,7 @@
 . (Join-Path $PSScriptRoot 'backend-contract.ps1')
 . (Join-Path $PSScriptRoot 'env-generator.ps1')
 
-$script:ODSPortalLemonadeTaskName = 'ODSLemonadeRuntime'
+$script:ODSPortalLemonadeLegacyTaskName = 'ODSLemonadeRuntime'
 $script:ODSPortalLemonadeHealthSeconds = 60
 # The first load also downloads Lemonade's llama.cpp Vulkan runtime.
 $script:ODSPortalLemonadeLoadSeconds = 900
@@ -37,8 +37,18 @@ function Get-ODSPortalAmdPlan([string]$SourceRoot) {
     }
     if (-not $env:MODEL_PROFILE) { $env:MODEL_PROFILE = 'qwen' }
     $config = Resolve-TierConfig -Tier $tier
-    $config = Resolve-CatalogModelRecommendation -TierConfig $config -Tier $tier -GpuInfo $gpu `
-        -SystemRamGB $ramGB -SourceRoot $SourceRoot -MinContext $script:HERMES_MIN_CONTEXT
+    try {
+        $config = Resolve-CatalogModelRecommendation -TierConfig $config -Tier $tier -GpuInfo $gpu `
+            -SystemRamGB $ramGB -SourceRoot $SourceRoot -MinContext $script:HERMES_MIN_CONTEXT
+    } catch {
+        # Low reported VRAM can mean a reserved UMA framebuffer or an older
+        # discrete card. Without a catalog fit, keep Pixel on the CPU route
+        # rather than infer usable GPU memory from an adapter name.
+        if ($_.Exception.Message -notlike 'No catalog model fits the detected memory*' -or
+            $gpu.VramMB -ge 4096) { throw }
+        Write-Host "         $($gpu.Name) has no verified model fit with its reported memory. Pixel will use the CPU route; no GPU capacity was assumed."
+        return $null
+    }
     if (-not $config.GgufFile -or -not $config.GgufUrl -or -not $config.MaxContext) {
         throw "No model is defined for AMD tier $tier."
     }
@@ -63,6 +73,7 @@ function Install-ODSPortalLemonade([string]$SourceRoot, [bool]$NonInteractive) {
     $runtime = Get-ODSAmdLemonadeRuntime -RootPath $SourceRoot
     $exe = Resolve-ODSLemonadeExe -ExecutableName $runtime.windows_executable
     if ($exe) {
+        Assert-ODSPortalLemonadeVersion (Get-ODSLemonadeExecutableVersion $exe)
         Write-Host "         Lemonade Server found: $exe"
         return $exe
     }
@@ -83,7 +94,14 @@ function Install-ODSPortalLemonade([string]$SourceRoot, [bool]$NonInteractive) {
     if ($process.ExitCode -notin @(0, 3010)) { throw "Lemonade Server setup failed (msiexec exit $($process.ExitCode)). Log: $log" }
     $exe = Resolve-ODSLemonadeExe -ExecutableName $runtime.windows_executable
     if (-not $exe) { throw "Lemonade Server setup finished but $($runtime.windows_executable) was not found under $installDir. Log: $log" }
+    Assert-ODSPortalLemonadeVersion (Get-ODSLemonadeExecutableVersion $exe)
     return $exe
+}
+
+function Assert-ODSPortalLemonadeVersion([version]$Version) {
+    if ($Version -lt [version]'10.0.0' -or $Version -ge [version]'11.0.0') {
+        throw "Lemonade $Version is outside the supported Portal runtime contract (10.x, minimum 10.0.0). Install a supported Lemonade version, then rerun; the existing runtime was not changed."
+    }
 }
 
 function Get-ODSPortalLemonadeModel($Plan) {
@@ -144,10 +162,41 @@ function Get-ODSPortalUserSid([string]$UserId) {
     return (New-Object Security.Principal.NTAccount($UserId)).Translate([Security.Principal.SecurityIdentifier]).Value
 }
 
-function Get-ODSPortalTaskEngineId {
+function Get-ODSPortalLemonadeTaskName {
+    return ('ODSLemonadeRuntime-' + (Get-ODSPortalUserSid))
+}
+
+function Get-ODSPortalLemonadeTask {
+    $currentName = Get-ODSPortalLemonadeTaskName
+    foreach ($name in @($currentName, $script:ODSPortalLemonadeLegacyTaskName)) {
+        $lookupErrors = @()
+        $tasks = @(Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue -ErrorVariable lookupErrors)
+        $unexpected = @($lookupErrors | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' })
+        if ($unexpected.Count) {
+            if ($name -eq $script:ODSPortalLemonadeLegacyTaskName -and
+                -not @($unexpected | Where-Object { $_.CategoryInfo.Category -notin @('PermissionDenied', 'SecurityError') }).Count) {
+                continue # An unreadable legacy task is not ours to adopt.
+            }
+            throw 'Cannot inspect the Portal Lemonade task; no process was changed.'
+        }
+        if (-not $tasks.Count) { continue }
+        if ($tasks.Count -ne 1 -or $tasks[0].TaskPath -ne '\' -or
+            [string]::IsNullOrWhiteSpace([string]$tasks[0].Principal.UserId)) {
+            throw 'The Portal Lemonade task identity is ambiguous.'
+        }
+        if ((Get-ODSPortalUserSid $tasks[0].Principal.UserId) -ne (Get-ODSPortalUserSid)) {
+            if ($name -eq $currentName) { throw 'The Portal Lemonade task belongs to a different Windows user.' }
+            continue # Another user's legacy task is never adopted or changed.
+        }
+        return $tasks[0]
+    }
+    return $null
+}
+
+function Get-ODSPortalTaskEngineId([string]$TaskName = (Get-ODSPortalLemonadeTaskName)) {
     $scheduler = New-Object -ComObject Schedule.Service
     $scheduler.Connect()
-    $instances = @($scheduler.GetFolder('\').GetTask($script:ODSPortalLemonadeTaskName).GetInstances(0))
+    $instances = @($scheduler.GetFolder('\').GetTask($TaskName).GetInstances(0))
     if ($instances.Count -gt 1) { throw 'More than one Portal Lemonade task instance is running; ownership is ambiguous.' }
     if ($instances.Count -eq 1) { return [int]$instances[0].EnginePID }
     return 0
@@ -224,11 +273,7 @@ function Write-ODSPortalProcessOwnership([string]$Path, $Plan, $Nodes) {
 function Stop-ODSPortalLemonade([string]$ExecutablePath) {
     # Capture the task's actual process tree before Task Scheduler removes its
     # root. Matching an installation directory does not prove process ownership.
-    $lookupErrors = @()
-    $tasks = @(Get-ScheduledTask -TaskName $script:ODSPortalLemonadeTaskName -ErrorAction SilentlyContinue -ErrorVariable lookupErrors)
-    if (@($lookupErrors | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }).Count) {
-        throw 'Cannot inspect the existing Portal Lemonade task; no process was stopped.'
-    }
+    $tasks = @(Get-ODSPortalLemonadeTask | Where-Object { $null -ne $_ })
     if ($tasks.Count -eq 0) { return } # First install preserves user-started servers.
     if ($tasks.Count -ne 1 -or $tasks[0].TaskPath -ne '\' -or
         [string]::IsNullOrWhiteSpace([string]$tasks[0].Principal.UserId) -or
@@ -236,6 +281,7 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
         throw 'The existing Portal Lemonade task is not uniquely owned by the current Windows user.'
     }
     $task = $tasks[0]
+    $taskName = if ($task.TaskName) { $task.TaskName } else { Get-ODSPortalLemonadeTaskName }
     $actions = @($task.Actions)
     if ($actions.Count -ne 1) { throw 'The Portal Lemonade task has an unrecognized action; no process was stopped.' }
     $action = $actions[0]
@@ -301,7 +347,12 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
     }
     if ($port -lt 1 -or $port -gt 65535) { throw 'The existing Portal Lemonade task has an invalid port.' }
 
-    $engineId = Get-ODSPortalTaskEngineId
+    # Every stop path, including uninstall, must disarm scheduled retries.
+    # Publish first so even an already queued durable launcher exits cleanly.
+    Set-ODSPortalLemonadeIntent 'stopped'
+    Disable-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop | Out-Null
+
+    $engineId = Get-ODSPortalTaskEngineId $taskName
     $nodes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
     $root = $null
     $recovered = @()
@@ -377,14 +428,14 @@ function Stop-ODSPortalLemonade([string]$ExecutablePath) {
     $roots = if ($root) { @($root) } else { $recovered }
     $owned = Get-ODSPortalOwnedProcessTree $roots $nodes
     try {
-        $currentTasks = @(Get-ScheduledTask -TaskName $script:ODSPortalLemonadeTaskName -ErrorAction Stop)
+        $currentTasks = @(Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop)
         if ($currentTasks.Count -ne 1 -or $currentTasks[0].TaskPath -ne $task.TaskPath -or
             $currentTasks[0].Principal.UserId -ne $task.Principal.UserId -or @($currentTasks[0].Actions).Count -ne 1 -or
             $currentTasks[0].Actions[0].Execute -ne $action.Execute -or $currentTasks[0].Actions[0].Arguments -cne $action.Arguments -or
-            $currentTasks[0].Actions[0].WorkingDirectory -ne $action.WorkingDirectory -or (Get-ODSPortalTaskEngineId) -ne $engineId) {
+            $currentTasks[0].Actions[0].WorkingDirectory -ne $action.WorkingDirectory -or (Get-ODSPortalTaskEngineId $taskName) -ne $engineId) {
             throw 'The Portal Lemonade task changed during ownership verification; no process was stopped.'
         }
-        if ($engineId -gt 0) { Stop-ScheduledTask -TaskName $script:ODSPortalLemonadeTaskName -TaskPath '\' -ErrorAction Stop }
+        if ($engineId -gt 0) { Stop-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop }
         Stop-ODSPortalOwnedProcesses $owned.Handles
         if ($durable -and (Test-Path -LiteralPath $ownershipPath)) { Remove-Item -LiteralPath $ownershipPath -Force }
     } finally {
@@ -404,15 +455,18 @@ function Get-ODSPortalPortOwner([int]$Port) {
 function Select-ODSPortalLemonadePort {
     if ($env:AMD_INFERENCE_PORT) {
         $port = [int]$env:AMD_INFERENCE_PORT
+        if ($port -lt 1 -or $port -gt 65535) { throw 'AMD_INFERENCE_PORT must be between 1 and 65535.' }
         $owner = Get-ODSPortalPortOwner $port
         if ($owner) { throw "AMD_INFERENCE_PORT $port is already used by '$owner'. Choose a free port or remove AMD_INFERENCE_PORT, then rerun." }
+        if (-not (Test-ODSPortalPortBindable $port)) { throw "AMD_INFERENCE_PORT $port cannot bind Windows loopback (it may be reserved). Choose a different port." }
         return $port
     }
     $taken = @()
     foreach ($port in $script:ODSPortalLemonadePortCandidates) {
         $owner = Get-ODSPortalPortOwner $port
-        if (-not $owner) { return $port }
-        $taken += "$port ($owner)"
+        if (-not $owner -and (Test-ODSPortalPortBindable $port)) { return $port }
+        $reason = if ($owner) { $owner } else { 'reserved or unavailable for binding' }
+        $taken += "$port ($reason)"
     }
     throw "No free port for Lemonade Server; all are in use: $($taken -join ', '). Set AMD_INFERENCE_PORT to a free port, then rerun."
 }
@@ -444,6 +498,31 @@ function Assert-ODSPortalLemonadeListener([int]$Port, [int]$ProcessId, [string]$
     throw "The Lemonade listener on port $Port is not an owned child of the launched process."
 }
 
+function Test-ODSPortalPortBindable([int]$Port) {
+    # Excluded Hyper-V ports have no listener, yet bind fails with AccessDenied.
+    # Probe the exact address Lemonade uses; the real launch remains authoritative.
+    $probe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+    $probe.ExclusiveAddressUse = $true
+    try { $probe.Start(); return $true }
+    catch [Net.Sockets.SocketException] {
+        if ($_.Exception.SocketErrorCode -notin @('AccessDenied', 'AddressAlreadyInUse')) { throw }
+        return $false
+    } finally { $probe.Stop() }
+}
+
+function Set-ODSPortalLemonadeIntent([ValidateSet('running', 'stopped')][string]$State) {
+    $path = Join-Path (Join-Path (Get-ODSPortalStateDir) 'portal-runtime') 'intent.json'
+    Write-ODSPrivateEnvFile -Path $path -Content (@{ State = $State } | ConvertTo-Json -Compress)
+}
+
+function Test-ODSPortalLemonadeWanted([string]$Path) {
+    # Legacy plans predate intent. New explicit stops always publish it first.
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $true }
+    $intent = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ($intent.State -cnotin @('running', 'stopped')) { throw 'The saved Lemonade run intent is invalid.' }
+    return $intent.State -ceq 'running'
+}
+
 function Invoke-ODSPortalLemonadeRuntime($Plan, [string]$ReadyPath) {
     # This function and its helpers are copied into the durable task launcher.
     # The task owns configuration/loading; the installer only awaits its proof.
@@ -456,6 +535,7 @@ function Invoke-ODSPortalLemonadeRuntime($Plan, [string]$ReadyPath) {
     }
     $contract = Get-ODSLemonadeLaunchContract -ExecutablePath $Plan.ExecutablePath `
         -Port $Plan.Port -ModelsDir $Plan.ModelsDir -ContextSize $Plan.ContextSize
+    Assert-ODSPortalLemonadeVersion $contract.Version
     if ($contract.BindAddress -ne '127.0.0.1') {
         throw 'The Portal runtime launcher requires Lemonade on loopback.'
     }
@@ -563,11 +643,12 @@ function New-ODSPortalLemonadeRuntimeAction($Contract, [string]$GgufFile, [strin
         $plan.WslInstallDir = $WslInstallDir
     }
     Write-ODSPrivateEnvFile -Path (Join-Path $runtimeDir 'runtime.json') -Content ($plan | ConvertTo-Json -Compress)
+    Set-ODSPortalLemonadeIntent 'running'
     $readyPath = Join-Path $runtimeDir 'ready.json'
     if (Test-Path -LiteralPath $readyPath) { Remove-Item -LiteralPath $readyPath -Force }
     $definitions = foreach ($name in @('Test-ODSPortalLemonadeHealth', 'Wait-ODSPortalLemonadeHealth',
             'Get-ODSPortalOwnedProcessTree', 'Stop-ODSPortalOwnedProcesses', 'Write-ODSPortalProcessOwnership',
-            'Assert-ODSPortalLemonadeListener', 'Invoke-ODSPortalLemonadeRuntime')) {
+            'Assert-ODSPortalLemonadeListener', 'Assert-ODSPortalLemonadeVersion', 'Test-ODSPortalLemonadeWanted', 'Invoke-ODSPortalLemonadeRuntime')) {
         "function $name {`n$((Get-Command $name -CommandType Function).Definition)`n}"
     }
     $launcher = @'
@@ -576,6 +657,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'env-generator.ps1')
 __PORTAL_FUNCTIONS__
 try {
+    if (-not (Test-ODSPortalLemonadeWanted (Join-Path $PSScriptRoot 'intent.json'))) { exit 0 }
     $plan = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'runtime.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $code = Invoke-ODSPortalLemonadeRuntime $plan (Join-Path $PSScriptRoot 'ready.json')
     exit $code
@@ -615,14 +697,26 @@ function Wait-ODSPortalLemonadeReady($Registration, [int]$Seconds = 1020) {
 function Register-ODSPortalLemonadeTask($Contract, [string]$GgufFile = '', [string]$WslDistro = '', [string]$WslInstallDir = '') {
     # One task for this Windows user: starts at sign-in (so the model survives a
     # restart) and now. It binds 127.0.0.1 only.
+    $previous = Get-ODSPortalLemonadeTask
+    $taskName = Get-ODSPortalLemonadeTaskName
+    if ($previous) {
+        # Stop validates the old action, plan and held process identities before
+        # replacing any file or adopting the same user's legacy task.
+        Stop-ODSPortalLemonade $Contract.ExecutablePath
+        $previousName = if ($previous.TaskName) { $previous.TaskName } else { $taskName }
+    }
     $registration = New-ODSPortalLemonadeRuntimeAction $Contract $GgufFile $WslDistro $WslInstallDir
     $action = $registration.Action
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-    Register-ScheduledTask -TaskName $script:ODSPortalLemonadeTaskName -Action $action -Trigger $trigger `
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User (Get-ODSPortalUserSid)
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Action $action -Trigger $trigger `
         -Settings $settings -Principal (New-ODSInteractiveScheduledTaskPrincipal -RunLevel Limited) `
         -Description 'ODS: Lemonade Server for the AMD GPU (127.0.0.1). Starts at sign-in.' -Force | Out-Null
-    Start-ScheduledTask -TaskName $script:ODSPortalLemonadeTaskName
+    if ($previous -and $previousName -ne $taskName) {
+        Unregister-ScheduledTask -TaskName $previousName -TaskPath '\' -Confirm:$false -ErrorAction Stop
+    }
+    Start-ScheduledTask -TaskName $taskName -TaskPath '\'
     return $registration
 }
 

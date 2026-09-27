@@ -1,6 +1,8 @@
 # Durable Lemonade task: mocked APIs plus fixture-owned Windows dummy trees.
+param([switch]$SkipProcessFixtures)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../../installers/windows/lib/wsl-portal-amd.ps1')
+function Test-ODSPortalPortBindable([int]$Port) { return $true }
 $script:restartChecks = 0
 function Assert-Restart([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -69,6 +71,11 @@ try {
     $readBack = [IO.File]::ReadAllText((Join-Path $runtimeDir 'read-plan-probe.json')) | ConvertFrom-Json
     Assert-Restart ($readBack.GgufFile -ceq $unicodeFile -and $readBack.ExecutablePath -ceq $contract.ExecutablePath -and
         $readBack.ModelsDir -ceq $contract.ModelsDir) 'durable startup preserves Unicode filenames and Windows user paths from UTF-8 JSON'
+    Set-ODSPortalLemonadeIntent 'stopped'
+    Remove-Item -LiteralPath (Join-Path $runtimeDir 'read-plan-probe.json')
+    & $testShell -NoProfile -ExecutionPolicy Bypass -File $probePath
+    Assert-Restart ($LASTEXITCODE -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $runtimeDir 'read-plan-probe.json'))) 'the generated launcher exits successfully before a runtime attempt when deliberately stopped'
+    Set-ODSPortalLemonadeIntent 'running'
     Write-ODSPrivateEnvFile -Path $planFile -Content $originalPlanJson
 
     # Simulate sign-in with a fresh process and empty server configuration.
@@ -278,6 +285,7 @@ try {
         if ($script:portTaken) { return [pscustomobject]@{ LocalAddress = '127.0.0.1'; OwningProcess = 9999 } }
     }
     function Stop-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) $script:stopCalls.Add('task') }
+    function Disable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) }
     function Get-Process { param($Id, $ErrorAction)
         $node = @($script:processNodes | Where-Object { $_.ProcessId -eq $Id })[0]
         if (-not $node) { throw 'Mock process no longer exists.' }
@@ -430,7 +438,7 @@ try {
         }
     }
 
-    if ($onWindows) {
+    if ($onWindows -and -not $SkipProcessFixtures) {
         # Real disposable process trees prove Windows handle semantics. Every
         # process is started by this fixture; no service, task or runtime runs.
         foreach ($name in @('Start-Process', 'Get-Process', 'Get-CimInstance', 'Get-Command')) {

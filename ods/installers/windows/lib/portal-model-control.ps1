@@ -65,11 +65,8 @@ function Assert-ODSPortalControlModel($Plan) {
 function Get-ODSPortalManagedConfiguration($Request) {
     $runtimeDir = Join-Path (Get-ODSPortalStateDir) 'portal-runtime'
     $path = Join-Path $runtimeDir 'runtime.json'
-    $taskErrors = @()
-    $tasks = @(Get-ScheduledTask -TaskName $script:ODSPortalLemonadeTaskName -ErrorAction SilentlyContinue -ErrorVariable taskErrors)
-    if (@($taskErrors | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }).Count) {
-        Throw-ODSPortalControlError 'unmanaged' 'The Portal Lemonade task cannot be inspected.'
-    }
+    try { $tasks = @(Get-ODSPortalLemonadeTask | Where-Object { $null -ne $_ }) }
+    catch { Throw-ODSPortalControlError 'unmanaged' $_.Exception.Message }
     if ($tasks.Count -ne 1 -or $tasks[0].TaskPath -ne '\' -or
         [string]::IsNullOrWhiteSpace([string]$tasks[0].Principal.UserId) -or
         (Get-ODSPortalUserSid $tasks[0].Principal.UserId) -ne (Get-ODSPortalUserSid) -or
@@ -86,6 +83,8 @@ function Get-ODSPortalManagedConfiguration($Request) {
     foreach ($name in @('runtime.json', 'launch.ps1', 'backend-contract.ps1', 'env-generator.ps1')) {
         Assert-ODSPortalPrivateControlFile (Join-Path $runtimeDir $name)
     }
+    $intentPath = Join-Path $runtimeDir 'intent.json'
+    if (Test-Path -LiteralPath $intentPath) { Assert-ODSPortalPrivateControlFile $intentPath }
     # Hash exactly the bytes parsed below, even if an installer replaces the
     # file concurrently. The mutation rechecks this digest before publication.
     $bytes = Read-ODSPortalPlanBytes $path
@@ -93,7 +92,7 @@ function Get-ODSPortalManagedConfiguration($Request) {
     try { $digest = -join ($hash.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) } finally { $hash.Dispose() }
     $saved = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) | ConvertFrom-Json -ErrorAction Stop
     if ($saved.WslDistro -isnot [string] -or $saved.WslInstallDir -isnot [string] -or
-        $saved.WslDistro -cne $Request.distro -or $saved.WslInstallDir -cne $Request.installDir) {
+        $saved.WslDistro -ine $Request.distro -or $saved.WslInstallDir -cne $Request.installDir) {
         Throw-ODSPortalControlError 'unmanaged' 'The Windows runtime is not bound to this WSL installation. Rerun Windows Portal setup to register it.'
     }
     if ($saved.ExecutablePath -isnot [string] -or -not [IO.Path]::IsPathRooted($saved.ExecutablePath) -or
@@ -107,7 +106,8 @@ function Get-ODSPortalManagedConfiguration($Request) {
     foreach ($name in @('ExecutablePath', 'Port', 'ModelsDir', 'ContextSize', 'GgufFile', 'WslDistro', 'WslInstallDir')) {
         $plan[$name] = $saved.$name
     }
-    return [pscustomobject]@{ Task = $tasks[0]; ShellPath = $shell[0].Source; Plan = $plan
+    $taskName = if ($tasks[0].TaskName) { $tasks[0].TaskName } else { Get-ODSPortalLemonadeTaskName }
+    return [pscustomobject]@{ Task = $tasks[0]; TaskName = $taskName; ShellPath = $shell[0].Source; Plan = $plan
         PlanPath = $path; PlanDigest = $digest; ReadyPath = Join-Path $runtimeDir 'ready.json' }
 }
 
@@ -214,7 +214,8 @@ function Invoke-ODSPortalModelControl($Request) {
                 Throw-ODSPortalControlError 'invalid_plan' 'Restore requires the previous verified plan.'
             }
             foreach ($key in @('ExecutablePath', 'Port', 'ModelsDir', 'WslDistro', 'WslInstallDir')) {
-                if ($Request.plan.$key -cne $plan[$key]) { Throw-ODSPortalControlError 'invalid_plan' 'Restore cannot change the runtime executable, endpoint, model store or WSL binding.' }
+                $different = if ($key -ceq 'WslDistro') { $Request.plan.$key -ine $plan[$key] } else { $Request.plan.$key -cne $plan[$key] }
+                if ($different) { Throw-ODSPortalControlError 'invalid_plan' 'Restore cannot change the runtime executable, endpoint, model store or WSL binding.' }
             }
             $next.GgufFile = $Request.plan.GgufFile
             $next.ContextSize = $Request.plan.ContextSize
@@ -222,12 +223,18 @@ function Invoke-ODSPortalModelControl($Request) {
         if ($Request.action -cne 'stop') { Assert-ODSPortalControlModel $next }
         if ($Request.action -ceq 'start') {
             $status = Get-ODSPortalControlStatus $configuration
-            if ($status.running) { return $status }
+            if ($status.running) {
+                Set-ODSPortalLemonadeIntent 'running'
+                Enable-ScheduledTask -TaskName $configuration.TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+                return $status
+            }
         }
         # Existing task ownership and held process handles prove every stop.
         # Its action is unchanged: the durable launcher reads runtime.json.
+        Set-ODSPortalLemonadeIntent 'stopped'
+        Disable-ScheduledTask -TaskName $configuration.TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
         Stop-ODSPortalLemonade $plan.ExecutablePath
-        if ((Get-ODSPortalTaskEngineId) -gt 0 -or
+        if ((Get-ODSPortalTaskEngineId $configuration.TaskName) -gt 0 -or
             @(Get-NetTCPConnection -LocalPort $plan.Port -State Listen -ErrorAction SilentlyContinue).Count) {
             Throw-ODSPortalControlError 'stop_unverified' 'The managed runtime did not stop; no replacement was started.'
         }
@@ -245,7 +252,9 @@ function Invoke-ODSPortalModelControl($Request) {
         try {
             $updated = Get-ODSPortalManagedConfiguration $Request
             if ($updated.PlanDigest -cne $publishedDigest) { Throw-ODSPortalControlError 'plan_conflict' 'The Windows startup plan changed before launch.' }
-            Start-ScheduledTask -TaskName $script:ODSPortalLemonadeTaskName -TaskPath '\' -ErrorAction Stop
+            Set-ODSPortalLemonadeIntent 'running'
+            Enable-ScheduledTask -TaskName $updated.TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+            Start-ScheduledTask -TaskName $updated.TaskName -TaskPath '\' -ErrorAction Stop
             $null = Wait-ODSPortalLemonadeReady $updated
             $status = Get-ODSPortalControlStatus $updated
             if (-not $status.running) { Throw-ODSPortalControlError 'start_unverified' ('The managed Windows model did not verify: ' + $status.runtimeError) }

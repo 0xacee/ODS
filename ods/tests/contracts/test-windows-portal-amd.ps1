@@ -1,5 +1,6 @@
 # AMD GPU route of the Windows Portal setup. No real GPU, download, MSI,
 # scheduled task or Lemonade server is used.
+param([switch]$SkipProcessFixtures)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../../installers/windows/lib/wsl-portal-setup.ps1')
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -29,6 +30,15 @@ $script:ramGB = 8
 $script:output = @()
 Check ($null -eq (Get-ODSPortalAmdPlan $sourceRoot)) 'AMD GPU with too little memory keeps the CPU route'
 Check (($script:output -join ' ') -match 'too little graphics memory') 'too-small AMD GPU says why it uses the CPU'
+foreach ($memory in @(12, 16, 24, 31)) {
+    $script:ramGB = $memory
+    $script:output = @()
+    Check ($null -eq (Get-ODSPortalAmdPlan $sourceRoot)) "512MB iGPU with ${memory}GB RAM takes CPU when the real catalog has no GPU fit"
+    Check (($script:output -join ' ') -match 'Pixel will use the CPU route') 'iGPU CPU route is explicit and preserves Pixel'
+}
+$script:gpu.Name = 'Unrecognized AMD adapter name'
+$script:ramGB = 16
+Check ($null -eq (Get-ODSPortalAmdPlan $sourceRoot)) 'CPU recovery for low-memory AMD does not depend on an adapter-name allowlist'
 $script:gpu = @{ Backend='amd'; Name='AMD Radeon RX 9070 XT'; VramMB=16304; Count=1; MemoryType='discrete'; SystemRamGB=47 }
 $script:ramGB = 47
 $plan = Get-ODSPortalAmdPlan $sourceRoot
@@ -76,10 +86,17 @@ try {
 
 # --- Lemonade install: found, declined ---------------------------------------
 function Resolve-ODSLemonadeExe([string]$ExecutableName) { return $script:foundExe }
+function Get-ODSLemonadeExecutableVersion([string]$ExecutablePath) { return [version]$script:foundVersion }
 function Confirm-ODSPortalPreparation([string]$Message, [bool]$NonInteractive) { $script:confirmed++; return $script:accept }
 $script:confirmed = 0
+$script:foundVersion = '10.0.0'
 $script:foundExe = 'C:\Users\u\AppData\Local\lemonade_server\bin\lemonade-server.exe'
 Check ((Install-ODSPortalLemonade $sourceRoot $false) -eq $script:foundExe -and $script:confirmed -eq 0) 'installed Lemonade is reused without asking'
+$script:foundVersion = '9.1.0'
+$message = ''
+try { $null = Install-ODSPortalLemonade $sourceRoot $false } catch { $message = $_.Exception.Message }
+Check ($message -match 'outside the supported Portal runtime contract' -and $script:confirmed -eq 0) 'an unsupported existing Lemonade stops before downloading, prompting or replacing it'
+$script:foundVersion = '10.0.0'
 $script:foundExe = $null
 $script:accept = $false
 Check ($null -eq (Install-ODSPortalLemonade $sourceRoot $false) -and $script:confirmed -eq 1) 'declining the Lemonade install changes nothing'
@@ -87,6 +104,7 @@ Check ($null -eq (Install-ODSPortalLemonade $sourceRoot $false) -and $script:con
 # --- Port: a busy 8080 moves to the next free port ----------------------------
 $script:busy = @{}
 function Get-ODSPortalPortOwner([int]$Port) { return $script:busy[$Port] }
+function Test-ODSPortalPortBindable([int]$Port) { return $true }
 $env:AMD_INFERENCE_PORT = ''
 Check ((Select-ODSPortalLemonadePort) -eq 8080) 'free machine uses the pinned Lemonade port 8080'
 $script:busy = @{ 8080 = 'AgentService' }
@@ -146,5 +164,6 @@ try { $null = Initialize-ODSPortalAmdLemonade $plan $sourceRoot $false } catch {
 Check ($message -match 'did not finish restoring') 'Lemonade that never proves its loaded model stops setup'
 
 Out-Pass "Passed $script:checks Windows Portal AMD contracts."
-& (Join-Path $PSScriptRoot 'test-windows-portal-lemonade-restart.ps1')
+& (Join-Path $PSScriptRoot 'test-windows-portal-lemonade-restart.ps1') -SkipProcessFixtures:$SkipProcessFixtures
 & (Join-Path $PSScriptRoot 'test-windows-portal-model-control.ps1')
+& (Join-Path $PSScriptRoot 'test-windows-portal-amd-recovery.ps1')
