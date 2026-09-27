@@ -105,9 +105,19 @@ def run(action, root):
     return {"state": "stopped" if operation == "stop" else "started", "installRoot": str(root)}
 
 
-if __name__ == "__main__":
+def main():
     try:
         print(json.dumps(run(sys.argv[1], sys.argv[2])))
+    except subprocess.TimeoutExpired as error:
+        # Match GNU timeout so the Windows lifecycle controller cannot mistake
+        # interrupted Compose descendants for a confirmed, retryable failure.
+        print(f"ODS WSL lifecycle timed out: {error}", file=sys.stderr)
+        return 124
     except Exception as error:
         print(f"ODS WSL lifecycle failed: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

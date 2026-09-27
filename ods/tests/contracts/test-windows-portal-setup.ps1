@@ -31,14 +31,15 @@ $null = New-Item -ItemType Directory -Path $delegateRoot
 try {
     $record = Join-Path $delegateRoot 'args.json'
     Set-Content -LiteralPath (Join-Path $delegateRoot 'windows.ps1') -Encoding UTF8 -Value @"
-param([string]`$Distro, [string]`$InstallRoot, [switch]`$OpenPortal, [string[]]`$PassthroughArgs)
+param([string]`$Distro, [string]`$InstallRoot, [switch]`$OpenPortal, [string[]]`$PassthroughArgs, [string]`$DockerDesktopPath)
 Write-Output 'delegate stdout'
-[IO.File]::WriteAllText('$record', (ConvertTo-Json -Compress @{ d = `$Distro; r = `$InstallRoot; o = [bool]`$OpenPortal; a = `$PassthroughArgs }))
+[IO.File]::WriteAllText('$record', (ConvertTo-Json -Compress @{ d = `$Distro; r = `$InstallRoot; o = [bool]`$OpenPortal; a = `$PassthroughArgs; docker = `$DockerDesktopPath }))
 exit 23
 "@
-    $returned = @(Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel', "it's `$(x)", 'two words') "/home/o'brien/ODS data" $true)
+    $returned = @(Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel', "it's `$(x)", 'two words') "/home/o'brien/ODS data" $true 'D:\Custom Docker\Docker Desktop.exe')
     $seen = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
     Check ($returned.Count -eq 1 -and $returned[0] -eq 23) 'delegate exit code is the only returned value'
+    Check ($seen.docker -ceq 'D:\Custom Docker\Docker Desktop.exe') 'delegate preserves the installer-resolved Docker executable for durable startup'
     Check ($seen.d -eq 'Ubuntu-24.04' -and $seen.r -eq "/home/o'brien/ODS data" -and $seen.o -eq $true -and (@($seen.a) -join '|') -eq "--pixel|it's `$(x)|two words") 'delegate receives arguments intact'
     Set-Content -LiteralPath (Join-Path $delegateRoot 'windows.ps1') -Encoding UTF8 -Value "throw 'delegate failed'"
     Check ((Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @() '' $false) -ne 0) 'delegate that throws is a failure'
@@ -161,6 +162,7 @@ try {
     Check ((Resolve-ODSPortalDistro '' @('Ubuntu', 'Ubuntu-20.04')) -eq 'Ubuntu') 'unqualified versioned names do not make selection ambiguous'
     Check ((Resolve-ODSPortalDistro '' @('docker-desktop')) -eq 'Ubuntu-24.04') 'Docker internal distro is never selected'
     Check ((Resolve-ODSPortalDistro 'Ubuntu' @('Ubuntu', 'Ubuntu-24.04')) -eq 'Ubuntu') 'explicit distribution wins'
+    Check ((Resolve-ODSPortalDistro 'ubuntu-24.04' @('Ubuntu-24.04')) -ceq 'Ubuntu-24.04') 'explicit distribution uses its registered casing for ownership'
     $ambiguous = $false
     try { $null = Resolve-ODSPortalDistro '' @('Ubuntu', 'Ubuntu-24.04') } catch { $ambiguous = $true }
     Check $ambiguous 'multiple Ubuntu environments require explicit selection'

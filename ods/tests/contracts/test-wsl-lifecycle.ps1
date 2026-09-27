@@ -1,6 +1,7 @@
 $ErrorActionPreference='Stop'
 $Distro='Ubuntu-Scope-Test'
 . (Join-Path $PSScriptRoot '../../installers/wsl-lifecycle.ps1') -Distro $Distro
+function Resolve-ODSWslRegisteredDistro { param($Name); $Name }
 $count=0
 function Check([bool]$Condition,[string]$Message) { if(-not $Condition){throw $Message}; $script:count++; Write-Host "PASS $Message" }
 function Reject([scriptblock]$Operation,[string]$Message) { $threw=$false; try { & $Operation } catch { $threw=$true }; Check $threw $Message }
@@ -181,6 +182,7 @@ try {
     function Get-ODSWslLifetimeStatus { param($Identity); [pscustomobject]@{state='stopped';distroRunning=$script:targetRunning} }
     function Stop-ODSWslLifetime { param($Identity); $script:events+='release'; [pscustomobject]@{state='stopped'} }
     function Start-ODSWslLifetime { param($Identity); $script:events+='hold'; [pscustomobject]@{state='running'} }
+    function Enable-ODSWslStartup { param($Identity) }
     function Invoke-ODSWslStack { param($Identity,$Action); $script:events+=$Action; if($script:stopFail){throw 'drain failed'} }
     $script:targetRunning=$false
     $null=Invoke-ODSWslLifecycle stop 'Ubuntu-24.04' '/home/ods/ods'

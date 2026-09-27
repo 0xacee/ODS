@@ -100,6 +100,32 @@ jobs:
         shell: bash
         run: python3 tests/test-wsl-portal-readiness.py -v
 
+      - name: WSL Sign-in Recovery Contracts (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/contracts/test-wsl-startup.ps1
+
+      - name: WSL Sign-in Recovery Contracts (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/contracts/test-wsl-startup.ps1
+
+      - name: Windows AMD Recovery and Model Control Contracts (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./tests/contracts/test-windows-portal-amd-recovery.ps1
+          ./tests/contracts/test-windows-portal-lemonade-restart.ps1
+          ./tests/contracts/test-windows-portal-model-control.ps1
+
+      - name: Windows AMD Recovery and Model Control Contracts (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          ./tests/contracts/test-windows-portal-amd-recovery.ps1
+          ./tests/contracts/test-windows-portal-lemonade-restart.ps1
+          ./tests/contracts/test-windows-portal-model-control.ps1
+
       - name: Windows Lemonade Task Cleanup Contract
         shell: pwsh
         run: ./tests/contracts/test-windows-lemonade-task-cleanup.ps1

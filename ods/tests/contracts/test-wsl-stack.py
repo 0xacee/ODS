@@ -1,5 +1,6 @@
 """Ownership/ordering tests; no system services or WSL distributions are changed."""
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -138,6 +139,14 @@ class StackContract(unittest.TestCase):
     def test_invalid_action_rejected(self):
         with self.assertRaises(ValueError):
             self.run_adapter('purge')
+
+    def test_entrypoint_distinguishes_timeout_from_retryable_failure(self):
+        for failure, expected in ((subprocess.TimeoutExpired('bash', 300), 124),
+                                  (subprocess.CalledProcessError(1, 'bash'), 1)):
+            with self.subTest(code=expected), patch.object(module, 'run', side_effect=failure), \
+                    patch.object(module.sys, 'argv', ['wsl_stack.py', 'compose-start', str(self.root)]), \
+                    patch.object(module.sys, 'stderr', io.StringIO()):
+                self.assertEqual(module.main(), expected)
 
 
 @unittest.skipUnless(os.name == 'posix', 'Linux file custody checks require POSIX descriptors')

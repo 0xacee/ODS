@@ -73,7 +73,7 @@ function ConvertTo-ODSPortalLiteral([string]$Value) {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
-function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal) {
+function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '') {
     # windows.ps1 runs in a child PowerShell that shares this console. Calling
     # it here would route wsl.exe output through this function's pipeline, so
     # the Linux installer would see no terminal: no progress during image
@@ -81,7 +81,8 @@ function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro,
     $delegate = Join-Path $InstallerRoot 'windows.ps1'
     $openFlag = if ($OpenPortal) { '$true' } else { '$false' }
     $passthrough = @($LinuxArguments | ForEach-Object { ConvertTo-ODSPortalLiteral $_ }) -join ', '
-    $command = "`$global:LASTEXITCODE = 0; & $(ConvertTo-ODSPortalLiteral $delegate) -Distro $(ConvertTo-ODSPortalLiteral $Distro) -InstallRoot $(ConvertTo-ODSPortalLiteral $InstallRoot) -OpenPortal:$openFlag -PassthroughArgs @($passthrough); " +
+    $desktopArgument = if ($DockerDesktopPath) { ' -DockerDesktopPath ' + (ConvertTo-ODSPortalLiteral $DockerDesktopPath) } else { '' }
+    $command = "`$global:LASTEXITCODE = 0; & $(ConvertTo-ODSPortalLiteral $delegate) -Distro $(ConvertTo-ODSPortalLiteral $Distro) -InstallRoot $(ConvertTo-ODSPortalLiteral $InstallRoot) -OpenPortal:$openFlag$desktopArgument -PassthroughArgs @($passthrough); " +
         "`$ok = `$?; if (`$global:LASTEXITCODE -ne 0) { exit `$global:LASTEXITCODE }; if (-not `$ok) { exit 1 }; exit 0"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $shell = (Get-Process -Id $PID).Path
@@ -118,12 +119,22 @@ function Get-ODSPortalLinuxArguments([System.Collections.IDictionary]$Options) {
         }
     }
     if ($Options['SummaryJsonPath']) { $linuxArgs += @('--summary-json', [string]$Options['SummaryJsonPath']) }
+    # Every WSL installation needs a durable Windows executable location for
+    # owner-scoped sign-in/uninstall control, including NVIDIA and CPU hosts.
+    $linuxArgs += @('--windows-system-directory', [Environment]::SystemDirectory)
     $linuxArgs += @('--pixel', '--no-hermes', '--no-openclaw')
     return $linuxArgs
 }
 
 function Resolve-ODSPortalDistro([string]$Requested, [string[]]$Names) {
-    if ($Requested) { return $Requested }
+    if ($Requested) {
+        # WSL accepts case-insensitive names, but ownership records must use
+        # the exact registered spelling consistently across reruns.
+        $registered = @($Names | Where-Object { $_ -ieq $Requested })
+        if ($registered.Count -eq 1) { return $registered[0] }
+        if ($registered.Count -gt 1) { throw 'The requested distribution name is ambiguous.' }
+        return $Requested
+    }
     # Reuse a single recognizable Ubuntu installation; never guess between
     # existing user environments or select Docker's internal distribution.
     # Versioned names outside Pixel's qualified releases (e.g. Ubuntu-22.04)
@@ -314,7 +325,7 @@ function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string
         return 0
     }
     if ($env:OS -ne 'Windows_NT') { throw 'Run install.ps1 in Windows PowerShell. Inside Ubuntu use bash install.sh --pixel --no-hermes.' }
-    if (Test-ODSPortalAdministrator) { throw 'This window is running as Administrator. Close it, open PowerShell normally (Start menu > type PowerShell > press Enter, without "Run as administrator"), and paste the install command again. Setup asks for administrator permission only when Windows needs it.' }
+    if (Test-ODSPortalAdministrator) { throw 'This window is running as Administrator. Setup requires a non-elevated user session. Open PowerShell without "Run as administrator" and rerun. If every window is elevated because UAC is disabled or this is the built-in Administrator account, use a standard Windows account or enable UAC and sign in again. UAC-disabled elevated sessions are not supported. Setup requests elevation separately only for Windows prerequisites.' }
     if (Test-ODSNativeWindowsInstall) { throw 'An existing native Windows ODS installation was found. It is not automatically migrated or deleted. Stop and migrate/remove that installation before creating a WSL stack, to avoid shared ports and Compose project conflicts. See ods/docs/WINDOWS-QUICKSTART.md.' }
     Write-ODSPortalStage 1 'WINDOWS FOUNDATION' 'Checking disk space, virtualization and WSL.'
     $stop = Initialize-ODSPortalWindowsFoundation $Options $InstallerRoot $nonInteractive
@@ -327,6 +338,7 @@ function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string
     if ($distro -notin $names) {
         $stop = Install-ODSPortalUbuntu $distro $Options $InstallerRoot $nonInteractive
         if ($null -ne $stop) { return $stop }
+        $distro = Resolve-ODSPortalDistro $distro (Get-ODSPortalDistroNames)
     }
     $version = Invoke-ODSPortalWsl -Arguments @('--list', '--verbose')
     $versionPattern = '(?m)^\s*\*?\s*' + [regex]::Escape($distro) + '\s+.+\s+2\s*$'
@@ -363,5 +375,5 @@ function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string
     }
     Write-ODSPortalStage 4 'INSTALL PIXEL / PORTAL' "Prerequisites passed for $distro. Starting the Linux installer."
     Write-Host '         When Ubuntu asks for your [sudo] password, type your Ubuntu password and press Enter. Nothing appears while you type.'
-    return Invoke-ODSPortalLinuxInstaller $InstallerRoot $distro $linuxArgs ([string]$Options['InstallDir']) (-not $nonInteractive)
+    return Invoke-ODSPortalLinuxInstaller $InstallerRoot $distro $linuxArgs ([string]$Options['InstallDir']) (-not $nonInteractive) (Get-ODSPortalDockerDesktop).Exe
 }
