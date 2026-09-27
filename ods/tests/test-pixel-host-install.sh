@@ -2987,7 +2987,7 @@ import pathlib,sys
 text=pathlib.Path(sys.argv[1]).read_text()
 assert "ProtectHome=true" in text
 assert "RestrictNamespaces=true" in text
-assert "RuntimeDirectoryPreserve=restart" in text
+assert "RuntimeDirectoryPreserve=yes" in text
 assert "Restart=on-failure" in text
 assert "RestartForceExitStatus=SIGHUP" in text
 assert "BindReadOnlyPaths=__PIXEL_GATEWAY_TOKEN_SOURCE__:__PIXEL_GATEWAY_TOKEN_FILE__" in text
