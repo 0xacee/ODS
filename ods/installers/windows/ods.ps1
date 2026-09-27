@@ -293,24 +293,25 @@ function Test-ODSComposeFlagsFilesAvailable {
 
 function Assert-ODSDockerProjectOwnership {
     param([switch]$RemoveVolumes)
-    # The project name alone is not ownership: native Windows and WSL can
-    # share the same Docker Desktop daemon and the same legacy "ods" name.
     $containers = @(Get-ODSDockerProjectResourceNames -Kind 'container')
     if (-not $containers.Count) {
         $orphans = @(Get-ODSDockerProjectResourceNames -Kind 'network') + @(Get-ODSDockerProjectResourceNames -Kind 'volume')
         if ($orphans.Count) {
             throw 'ODS_UNINSTALL_OWNERSHIP_UNKNOWN: only orphaned Docker resources remain. Their project label cannot identify the original Windows or WSL installation; nothing was removed.'
         }
-        return
+        return [pscustomobject]@{ Containers = @(); Networks = @(); Volumes = @() }
     }
     $expected = [IO.Path]::GetFullPath($InstallDir).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $ownedVolumes = @{}
+    $verifiedContainerIds = @{}
+    $verifiedNetworkIds = @{}
     foreach ($name in $containers) {
         $json = & docker container inspect $name 2>$null
         if ($LASTEXITCODE -ne 0) { throw "Cannot verify Docker container $name; uninstall stopped before any changes." }
         $items = @($json | ConvertFrom-Json -ErrorAction Stop)
         if ($items.Count -ne 1) { throw "Ambiguous Docker ownership for $name; nothing was removed." }
-        $labels = $items[0].Config.Labels
+        $c = $items[0]
+        $labels = $c.Config.Labels
         $workingDir = [string]$labels.'com.docker.compose.project.working_dir'
         if ($labels.'com.docker.compose.project' -ne 'ods' -or [string]::IsNullOrWhiteSpace($workingDir) -or
             -not [IO.Path]::IsPathRooted($workingDir)) {
@@ -320,25 +321,59 @@ function Assert-ODSDockerProjectOwnership {
         if (-not [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
             throw "ODS_UNINSTALL_OTHER_INSTALLATION: $name belongs to '$workingDir', not '$InstallDir'. Use that installation's uninstaller; nothing was removed."
         }
-        foreach ($mount in @($items[0].Mounts)) {
+        if (-not $c.Id) { throw "ODS_UNINSTALL_OWNERSHIP_UNKNOWN: container '$name' has no identity; nothing was removed." }
+        $verifiedContainerIds[[string]$c.Id] = $true
+        foreach ($mount in @($c.Mounts)) {
             if ($mount.Type -eq 'volume' -and $mount.Name) { $ownedVolumes[[string]$mount.Name] = $true }
         }
+        $nets = $c.NetworkSettings.Networks
+        if ($nets) {
+            foreach ($prop in $nets.PSObject.Properties) {
+                $netVal = $prop.Value
+                if ($netVal -and $netVal.NetworkID) { $verifiedNetworkIds[[string]$netVal.NetworkID] = $true }
+            }
+        }
     }
+    $projectNetworks = @(Get-ODSDockerProjectResourceNames -Kind 'network')
+    $projectNetworkIds = @()
+    foreach ($netName in $projectNetworks) {
+        $netJson = & docker network inspect $netName 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "ODS_UNINSTALL_OWNERSHIP_UNKNOWN: cannot inspect network '$netName'; nothing was removed."
+        }
+        $netItems = @($netJson | ConvertFrom-Json -ErrorAction Stop)
+        if ($netItems.Count -ne 1) {
+            throw "ODS_UNINSTALL_OWNERSHIP_UNKNOWN: ambiguous network ownership for '$netName'; nothing was removed."
+        }
+        $netId = [string]$netItems[0].Id
+        if ([string]::IsNullOrWhiteSpace($netId) -or -not $verifiedNetworkIds.ContainsKey($netId)) {
+            throw "ODS_UNINSTALL_OWNERSHIP_UNKNOWN: network '$netName' ($netId) is not attached to any verified container of this installation. Its project label alone cannot authorize removal; nothing was removed."
+        }
+        foreach ($attachment in @($netItems[0].Containers.PSObject.Properties)) {
+            if (-not $verifiedContainerIds.ContainsKey([string]$attachment.Name)) {
+                throw "ODS_UNINSTALL_OTHER_INSTALLATION: network '$netName' is also used by an unverified container; nothing was removed."
+            }
+        }
+        $projectNetworkIds += $netId
+    }
+    $projectVolumes = @()
     if ($RemoveVolumes) {
-        foreach ($volume in @(Get-ODSDockerProjectResourceNames -Kind 'volume')) {
+        $projectVolumes = @(Get-ODSDockerProjectResourceNames -Kind 'volume')
+        foreach ($volume in $projectVolumes) {
             if (-not $ownedVolumes.ContainsKey($volume)) {
                 throw "ODS_UNINSTALL_OWNERSHIP_UNKNOWN: volume '$volume' is not attached to a verified container of this installation. Its project label alone cannot authorize deleting its data; nothing was removed."
             }
         }
     }
+    return [pscustomobject]@{ Containers = @($verifiedContainerIds.Keys); Networks = $projectNetworkIds; Volumes = $projectVolumes }
 }
 
 function Remove-ODSDockerProjectByLabel {
-    param([switch]$RemoveVolumes)
+    param([switch]$RemoveVolumes, [Parameter(Mandatory=$true)]$Ownership)
 
     # @() keeps a single name an array; splatting a bare string would pass
     # each character to docker as a separate argument.
-    $containers = @(Get-ODSDockerProjectResourceNames -Kind "container")
+    $containers = @($Ownership.Containers)
     if ($containers.Count -gt 0) {
         Write-AI "Removing ODS containers by Docker label..."
         & docker rm -f @containers | Out-Host
@@ -347,7 +382,7 @@ function Remove-ODSDockerProjectByLabel {
         }
     }
 
-    $networks = @(Get-ODSDockerProjectResourceNames -Kind "network")
+    $networks = @($Ownership.Networks)
     if ($networks.Count -gt 0) {
         Write-AI "Removing ODS Docker networks by label..."
         & docker network rm @networks | Out-Host
@@ -357,7 +392,7 @@ function Remove-ODSDockerProjectByLabel {
     }
 
     if ($RemoveVolumes) {
-        $volumes = @(Get-ODSDockerProjectResourceNames -Kind "volume")
+        $volumes = @($Ownership.Volumes)
         if ($volumes.Count -gt 0) {
             Write-AI "Removing ODS Docker volumes by label..."
             & docker volume rm @volumes | Out-Host
@@ -461,8 +496,91 @@ function Remove-ODSInstallDirectory {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force
 }
 
+function Test-ODSUninstallPathOwned {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
+    try {
+        $root = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\', '/')
+        $actual = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+        return $actual.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+            $actual.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
+    } catch { return $false }
+}
+
+function Test-ODSUninstallCommandOwned {
+    param([string]$CommandLine, [int]$Depth = 0)
+    if (-not $CommandLine -or $Depth -gt 2) { return $false }
+    # Inspect literals without executing launcher code. Canonicalize each path
+    # so sibling prefixes and '..' cannot establish ownership.
+    foreach ($match in [regex]::Matches($CommandLine, '"([^"\r\n]+)"|''([^''\r\n]+)''|(?:[a-zA-Z]:[\\/]|\\\\)[^\s"'',;|<>]+')) {
+        $literal = $match.Value.Trim('"', "'")
+        if ([IO.Path]::GetExtension($literal) -in @('.ps1','.py','.vbs','.exe','.cmd','.bat','.sh') -and
+            (Test-ODSUninstallPathOwned $literal)) { return $true }
+    }
+    $encoded = [regex]::Match($CommandLine, '(?i)(?:^|\s)-EncodedCommand\s+["'']?([A-Za-z0-9+/=]+)')
+    if ($encoded.Success) {
+        try {
+            $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value))
+            if (Test-ODSUninstallCommandOwned $decoded ($Depth + 1)) { return $true }
+        } catch { }
+    }
+    # PowerShell wrappers can contain nested quotes/assignments. Parse literal
+    # strings in their AST as well; no expression is evaluated.
+    $parseErrors = $null; $parseTokens = $null
+    $commandAst = [Management.Automation.Language.Parser]::ParseInput($CommandLine, [ref]$parseTokens, [ref]$parseErrors)
+    foreach ($literalAst in $commandAst.FindAll({ param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] }, $true)) {
+        $literal = [string]$literalAst.Value
+        if ([IO.Path]::GetExtension($literal) -in @('.ps1','.py','.vbs','.exe','.cmd','.bat','.sh') -and
+            (Test-ODSUninstallPathOwned $literal)) { return $true }
+    }
+    return $false
+}
+
+function Test-ODSUninstallTaskOwned {
+    param($Task)
+    if (-not $Task -or -not @($Task.Actions).Count) { return $false }
+    foreach ($action in @($Task.Actions)) {
+        if (-not (Test-ODSUninstallPathOwned ([string]$action.Execute)) -and
+            -not (Test-ODSUninstallCommandOwned ([string]$action.Arguments))) { return $false }
+    }
+    return $true
+}
+
+function Stop-ODSUninstallOwnedHelpers {
+    # Shared executable locations, ports and stale PID files cannot identify
+    # an installation. Only a helper's executable/script path can do that.
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $byId = @{}; $ancestors = @{}
+    foreach ($process in $processes) { $byId[[int]$process.ProcessId] = $process }
+    $ancestorId = $PID
+    while ($ancestorId -gt 0 -and -not $ancestors.ContainsKey($ancestorId)) {
+        $ancestors[$ancestorId] = $true
+        if (-not $byId.ContainsKey($ancestorId)) { break }
+        $ancestorId = [int]$byId[$ancestorId].ParentProcessId
+    }
+    foreach ($process in $processes) {
+        if ($ancestors.ContainsKey([int]$process.ProcessId)) { continue }
+        if ([string]$process.Name -notmatch '^(python(?:3(?:\.\d+)?)?|pythonw|powershell|pwsh|wscript|cscript|opencode|llama-server|lemonade-server)(\.exe)?$') { continue }
+        if ((Test-ODSUninstallPathOwned ([string]$process.ExecutablePath)) -or
+            (Test-ODSUninstallCommandOwned ([string]$process.CommandLine))) {
+            try { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop }
+            catch { if (Get-Process -Id ([int]$process.ProcessId) -ErrorAction SilentlyContinue) { throw } }
+        }
+    }
+    $startup = [Environment]::GetFolderPath('Startup')
+    if ($startup) {
+        $entry = Join-Path $startup 'ods-host-agent.vbs'
+        if ((Test-Path -LiteralPath $entry) -and
+            (Test-ODSUninstallCommandOwned (Get-Content -LiteralPath $entry -Raw -ErrorAction Stop))) {
+            Remove-Item -LiteralPath $entry -Force -ErrorAction Stop
+        }
+    }
+}
+
 function Invoke-Uninstall {
     param([string[]]$UninstallArgs)
+
+    $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 
     $force = Test-ODSArgumentPresent -Arguments $UninstallArgs -Names @("-Force", "--force")
     $keepData = Test-ODSArgumentPresent -Arguments $UninstallArgs -Names @("-KeepData", "--keep-data")
@@ -482,17 +600,17 @@ function Invoke-Uninstall {
         throw "ODS_UNINSTALL_DOCKER_UNAVAILABLE"
     }
 
-    if (-not $hasInstallDir -and -not $hasProjectContainers) {
-        Write-AISuccess "No ODS install found at $InstallDir"
-        return
-    }
-
     if ($hasInstallDir) {
         Assert-ODSInstallDirSafeForRemoval
     }
 
     # Check before stopping helpers or compose down -v, not after data is gone.
-    Assert-ODSDockerProjectOwnership -RemoveVolumes:$removeVolumes
+    $ownership = Assert-ODSDockerProjectOwnership -RemoveVolumes:$removeVolumes
+
+    if (-not $hasInstallDir -and -not $hasProjectContainers) {
+        Write-AISuccess "No ODS install found at $InstallDir"
+        return
+    }
 
     if (-not $force) {
         Write-AIWarn "This will stop ODS and remove the Windows runtime at $InstallDir."
@@ -507,19 +625,15 @@ function Invoke-Uninstall {
     }
 
     Write-AI "Stopping ODS host-side helpers..."
-    try { Invoke-Agent -Action "stop" } catch { Write-AIWarn "Host agent stop skipped: $_" }
-    try { Stop-ODSOpenCodeRuntime } catch { Write-AIWarn "OpenCode stop skipped: $_" }
-    try {
-        if ((Get-NativeInferenceBackend) -ne "none") {
-            Stop-NativeInferenceServer
-        }
-    } catch {
-        Write-AIWarn "Native inference stop skipped: $_"
-    }
+    Stop-ODSUninstallOwnedHelpers
 
     foreach ($taskName in @($script:ODS_AGENT_TASK_NAME, $script:ODS_MODEL_UPGRADE_TASK_NAME, $script:LEMONADE_TASK_NAME, $script:OPENCODE_TASK_NAME, $script:NATIVE_LLAMA_TASK_NAME)) {
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if (-not $task) { continue }
+        if (-not (Test-ODSUninstallTaskOwned $task)) {
+            Write-AIWarn "Scheduled task $taskName has no verified installation ownership; preserving it."
+            continue
+        }
         # A task left behind keeps a helper running against a deleted runtime,
         # so a failed removal is reported with the command to finish it.
         try {
@@ -530,44 +644,11 @@ function Invoke-Uninstall {
         }
     }
 
-    $composeDownSucceeded = $false
-    if ($hasInstallDir) {
-        try {
-            Push-Location $InstallDir
-            $flags = Get-ComposeFlags
-            if (Test-ODSComposeFlagsFilesAvailable -ComposeFlags $flags) {
-                $downArgs = @("down", "--remove-orphans")
-                if ($removeVolumes) { $downArgs += "-v" }
-                Write-AI "Removing ODS Docker stack with saved compose flags..."
-                $composeArgs = $flags + $downArgs
-                & docker compose @composeArgs
-                $composeDownSucceeded = ($LASTEXITCODE -eq 0)
-                if (-not $composeDownSucceeded) {
-                    Write-AIWarn "docker compose down failed; falling back to label-based cleanup."
-                } else {
-                    Write-AISuccess "Removed ODS Docker stack"
-                }
-            } else {
-                Write-AIWarn "Compose files are unavailable; falling back to label-based cleanup."
-            }
-        } catch {
-            Write-AIWarn "docker compose cleanup failed: $_"
-        } finally {
-            try { Pop-Location } catch { }
-        }
-    }
-
-    # compose down only knows the services in the saved compose files. Volumes
-    # and networks created by an older release or a since-disabled extension
-    # still carry the ods project label, so sweep by label whenever anything
-    # labelled remains, not only when compose down failed.
-    $labelledLeftovers = @(Get-ODSDockerProjectResourceNames -Kind "container").Count +
-        @(Get-ODSDockerProjectResourceNames -Kind "network").Count
-    if ($removeVolumes) { $labelledLeftovers += @(Get-ODSDockerProjectResourceNames -Kind "volume").Count }
-    if (-not $composeDownSucceeded -or $labelledLeftovers -gt 0) {
-        Remove-ODSDockerProjectByLabel -RemoveVolumes:$removeVolumes
-    }
-
+    # Remove only the resources identified by the ownership preflight. Saved
+    # Compose flags/files can name another project or unrelated volumes, so
+    # they are not deletion authority. IDs also prevent a replacement container
+    # or network with the same name from being swept into this uninstall.
+    Remove-ODSDockerProjectByLabel -RemoveVolumes:$removeVolumes -Ownership $ownership
     $remainingContainers = @(Get-ODSDockerProjectResourceNames -Kind "container")
     $remainingNetworks = @(Get-ODSDockerProjectResourceNames -Kind "network")
     $remainingVolumes = if ($removeVolumes) {
