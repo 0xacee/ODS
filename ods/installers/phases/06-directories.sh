@@ -450,6 +450,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # any link where a regular file or directory is required.
     for _installed_code_root in \
         "$INSTALL_DIR/bin" \
+        "$INSTALL_DIR/lib" \
         "$INSTALL_DIR/scripts" \
         "$INSTALL_DIR/config" \
         "$INSTALL_DIR/extensions"
@@ -464,6 +465,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         \( -name '*.sh' -o -name 'ods-cli' \) \
         \( -perm -020 -o -perm -002 \) -exec chmod go-w {} + \
         || error "Could not secure installed root executables"
+    [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] || error "Unsafe installed root"
+    chmod go-w "$INSTALL_DIR" || error "Could not secure installed root"
     unset _installed_code_root
 
     # Windows-mounted WSL checkouts commonly present every copied file as
@@ -756,6 +759,9 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     LIVEKIT_API_KEY=$(_phase06_env_hex_secret LIVEKIT_API_KEY 16)
     DASHBOARD_API_KEY=$(_phase06_env_hex_secret DASHBOARD_API_KEY 32)
     ODS_AGENT_KEY=$(_phase06_env_hex_secret ODS_AGENT_KEY 32)
+    ODS_AGENT_BIND_VALUE="$(_env_get ODS_AGENT_BIND "${ODS_AGENT_BIND:-}")"
+    ODS_AGENT_HOST_VALUE="$(_env_get ODS_AGENT_HOST "${ODS_AGENT_HOST:-}")"
+    ODS_AGENT_ADDRESS_MODE_VALUE="$(_env_get ODS_AGENT_ADDRESS_MODE "${ODS_AGENT_ADDRESS_MODE:-}")"
     # HMAC key for signing ods-session cookies (magic-link redemption).
     # 32 random bytes hex-encoded. Rotating invalidates every issued cookie —
     # the only revocation mechanism we have today, so don't rotate casually.
@@ -1450,6 +1456,9 @@ ODS_AUTH_UPSTREAM=${ODS_AUTH_UPSTREAM:-ods-dashboard-api:3002}
 WEBUI_SECRET=$(dotenv_value "${WEBUI_SECRET}")
 DASHBOARD_API_KEY=$(dotenv_value "${DASHBOARD_API_KEY}")
 ODS_AGENT_KEY=$(dotenv_value "${ODS_AGENT_KEY}")
+ODS_AGENT_BIND=$(dotenv_value "${ODS_AGENT_BIND_VALUE}")
+ODS_AGENT_HOST=$(dotenv_value "${ODS_AGENT_HOST_VALUE}")
+ODS_AGENT_ADDRESS_MODE=$(dotenv_value "${ODS_AGENT_ADDRESS_MODE_VALUE}")
 ODS_SESSION_SECRET=$(dotenv_value "${ODS_SESSION_SECRET}")
 HERMES_DASHBOARD_SESSION_TOKEN=$(dotenv_value "${HERMES_DASHBOARD_SESSION_TOKEN}")
 $(if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" ]]; then cat << PIXEL_ENV
@@ -1564,6 +1573,12 @@ ENV_EOF
     )
 
     chmod 600 "$INSTALL_DIR/.env"  # Secure secrets file
+    # Docker Desktop's daemon is outside the installing WSL namespace.
+    # Prepare its authenticated control address before phase 07 starts the
+    # host agent and before Compose inherits dashboard-api's environment.
+    # shellcheck source=../../lib/wsl-agent-address.sh
+    . "$INSTALL_DIR/lib/wsl-agent-address.sh"
+    ods_prepare_wsl_agent_address "$INSTALL_DIR" || exit 1
     ai_ok "Created $INSTALL_DIR"
     ai_ok "Generated secure secrets in .env (permissions: 600)"
 
