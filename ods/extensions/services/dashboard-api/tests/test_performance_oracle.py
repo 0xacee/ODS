@@ -1,10 +1,12 @@
 import json
+import re
 from pathlib import Path
 
 from helpers import record_model_performance
 from models import GPUInfo, ModelLibraryResponse
 from performance_oracle import (
     build_models_payload,
+    collect_runtime_flags,
     current_model_matches,
     evaluate_performance,
     load_evidence,
@@ -12,6 +14,7 @@ from performance_oracle import (
     model_app_compatibility,
     model_publisher,
     normalize_catalog_entry,
+    planned_model_context,
     rank_pre_download_models,
     read_env_file_value,
     read_env_value,
@@ -78,6 +81,17 @@ def test_performance_env_readers_share_matching_quote_contract(monkeypatch, tmp_
     assert read_env_file_value("UNMATCHED", tmp_path) == "catalog-v2'"
     assert read_env_value("PROCESS_ONLY", tmp_path) == "runtime-v2"
     assert read_persisted_env_value("UNMATCHED", tmp_path) == "catalog-v2'"
+
+
+def test_runtime_flags_read_the_llama_cpp_checkpoint_env_name(tmp_path, monkeypatch):
+    for key in ("LLAMA_ARG_CHECKPOINT_EVERY_NT", "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS",
+                "LLAMA_CHECKPOINT_EVERY_N_TOKENS"):
+        monkeypatch.delenv(key, raising=False)
+    (tmp_path / ".env").write_text("LLAMA_ARG_CHECKPOINT_EVERY_NT=-1\n", encoding="utf-8")
+    assert collect_runtime_flags(tmp_path)["checkpoint_every_n_tokens"] == "-1"
+    # Evidence recorded under the former key name still matches.
+    (tmp_path / ".env").write_text("LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS=-1\n", encoding="utf-8")
+    assert collect_runtime_flags(tmp_path)["checkpoint_every_n_tokens"] == "-1"
 
 
 def _official_model_catalog():
@@ -418,6 +432,128 @@ def test_model_payload_projects_explicit_app_compatibility(data_dir, tmp_path):
     assert compatibility["perplexica"]["status"] == "unsupported_until_revalidated"
     assert compatibility["perplexica"]["reason"] == "Perplexica probe failed"
     assert compatibility["perplexica"]["evidence"] == "fleet-run/perplexica"
+    assert compatibility["perplexica"]["userMessage"] == (
+        "This model isn't supported in Perplexica yet. Switch to a recommended model to use Perplexica."
+    )
+
+
+TALK_NOT_SUPPORTED_COPY = (
+    "This model isn't supported in ODS Talk yet. Switch to a recommended model to use ODS Talk."
+)
+_INTERNAL_COPY_MARKERS = re.compile(
+    r"fleet|revalidat|release coverage|harness|cycle-\d|\d{4}-\d{2}-\d{2}T|tok/s|websocket|model-ui",
+    re.IGNORECASE,
+)
+
+
+def test_app_compatibility_user_message_is_generic_by_app_and_status():
+    internal = (
+        "Fleet model-UI run 2026-07-16T18-10Z on windows-laptop loaded this model; keep it out "
+        "of ODS Talk release coverage until revalidated."
+    )
+    compatibility = model_app_compatibility({
+        "app_compatibility": {
+            "hermes_talk": {"status": "unsupported_until_revalidated", "reason": internal},
+            "agent_viability": {"status": "not_agent_viable", "reason": internal},
+            "openai_chat": {"status": "verified", "reason": "direct chat passed"},
+            "perplexica": {"status": "unsupported_until_revalidated", "reason": internal},
+            "open_webui": {"status": "verified"},
+        },
+    })
+
+    assert compatibility["hermesTalk"]["userMessage"] == TALK_NOT_SUPPORTED_COPY
+    assert compatibility["agentViability"]["userMessage"] == (
+        "Not verified for agent tasks, so responses may fail. "
+        "Switch to a recommended model for agent features."
+    )
+    assert compatibility["openaiChat"]["userMessage"] == "Verified for chat."
+    assert compatibility["perplexica"]["userMessage"] == (
+        "This model isn't supported in Perplexica yet. Switch to a recommended model to use Perplexica."
+    )
+    assert compatibility["openWebui"]["userMessage"] == "Verified with Open WebUI."
+    assert compatibility["pixelAgent"]["userMessage"] == "Not yet tested for Portal agent tasks."
+    # The internal fleet note stays available to operators and tooling, unchanged.
+    assert compatibility["hermesTalk"]["reason"] == internal
+    assert compatibility["hermesTalk"]["status"] == "unsupported_until_revalidated"
+
+
+def test_app_compatibility_user_note_overrides_generic_copy():
+    compatibility = model_app_compatibility({
+        "app_compatibility": {
+            "hermes_talk": {
+                "status": "unsupported_until_revalidated",
+                "reason": "internal fleet note",
+                "userNote": "  Voice replies   work, but typed chat is not supported yet. ",
+            },
+            "perplexica": {"status": "unsupported_until_revalidated", "user_note": "x" * 281},
+        },
+    })
+
+    assert compatibility["hermesTalk"]["userMessage"] == (
+        "Voice replies work, but typed chat is not supported yet."
+    )
+    # An oversized note is ignored rather than truncated mid-sentence.
+    assert compatibility["perplexica"]["userMessage"].startswith(
+        "This model isn't supported in Perplexica yet."
+    )
+
+
+def test_out_of_scope_app_compatibility_reports_untested_copy():
+    compatibility = model_app_compatibility(
+        {
+            "app_compatibility": {
+                "hermes_talk": {
+                    "status": "unsupported_until_revalidated",
+                    "hostScope": ["tower2"],
+                    "reason": "internal fleet note",
+                },
+            },
+        },
+        runtime_context={"hosts": ["windows-laptop"]},
+    )
+
+    assert compatibility["hermesTalk"]["status"] == "unknown"
+    assert compatibility["hermesTalk"]["userMessage"] == "Not yet tested with ODS Talk."
+    assert compatibility["agentViability"]["userMessage"] == "Not yet tested for agent tasks."
+
+
+def test_real_granite_talk_block_projects_user_copy_and_keeps_internal_note():
+    model = next(
+        model for model in _official_model_catalog() if model["id"] == "granite3.3-2b-instruct-q4"
+    )
+
+    compatibility = model_app_compatibility(model, runtime_context={"hosts": ["tower1"]})
+
+    assert compatibility["hermesTalk"]["status"] == "unsupported_until_revalidated"
+    assert compatibility["agentViability"]["status"] == "not_agent_viable"
+    assert compatibility["hermesTalk"]["reason"].startswith("Fleet model-UI run")
+    assert compatibility["hermesTalk"]["userMessage"] == TALK_NOT_SUPPORTED_COPY
+    assert "Fleet" not in compatibility["agentViability"]["userMessage"]
+
+
+def test_real_catalog_user_messages_never_carry_internal_fleet_notes():
+    catalog = _official_model_catalog()
+    hosts = {"windows-laptop", "tower1"}
+    for model in catalog:
+        for entry in (model.get("app_compatibility") or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            for scoped in [entry, *(entry.get("scopedOverrides") or [])]:
+                scope = scoped.get("hostScope") if isinstance(scoped, dict) else None
+                hosts.update([scope] if isinstance(scope, str) else [str(host) for host in scope or []])
+
+    checked = 0
+    for model in catalog:
+        for host in sorted(hosts):
+            compatibility = model_app_compatibility(model, runtime_context={"hosts": [host]})
+            for key, entry in compatibility.items():
+                message = entry["userMessage"]
+                assert message, (model["id"], host, key)
+                assert not _INTERNAL_COPY_MARKERS.search(message), (model["id"], host, key, message)
+                if entry.get("reason"):
+                    assert entry["reason"] not in message, (model["id"], host, key)
+                checked += 1
+    assert checked > 100
 
 
 def test_scoped_app_compatibility_applies_only_to_matching_runtime():
@@ -511,6 +647,7 @@ def test_host_scoped_positive_override_preserves_global_negative_elsewhere():
         "status": "verified",
         "label": "Perplexica verified on Strixy",
         "reason": "Fresh exact Strixy proof",
+        "userMessage": "Verified with Perplexica.",
     }
     assert wrong_backend["perplexica"]["status"] == "unsupported_until_revalidated"
     assert tower2["perplexica"]["status"] == "unsupported_until_revalidated"
@@ -959,6 +1096,14 @@ def test_measured_local_too_slow_blocks_agent_compatibility(data_dir, tmp_path):
     assert compatibility["hermesTalk"]["status"] == "unsupported_until_revalidated"
     assert compatibility["agentViability"]["status"] == "not_agent_viable"
     assert "0.5 tok/s" in compatibility["agentViability"]["reason"]
+    assert compatibility["hermesTalk"]["userMessage"] == (
+        "This model is too slow on this machine for ODS Talk "
+        "(0.5 tokens/sec measured, 2+ needed). Switch to a smaller or faster model to use ODS Talk."
+    )
+    assert compatibility["agentViability"]["userMessage"] == (
+        "Too slow on this machine for agent tasks (0.5 tokens/sec measured, 2+ needed)."
+    )
+    assert "agent-required" not in compatibility["pixelAgent"]["userMessage"]
 
 
 def test_published_exact_too_slow_blocks_agent_compatibility(data_dir, tmp_path):
@@ -1316,6 +1461,34 @@ def test_installer_recommended_model_survives_bootstrap_env(data_dir, tmp_path):
     assert payload["recommendationAlternatives"][0]["id"] == "qwen3.5-9b-q4"
 
 
+def test_switch_plan_clamps_a_stale_context_to_the_declared_native_context():
+    """A switch or restore never asks llama.cpp for more than a declared native
+    context (it caps the slot there and the context proof fails, #6712).
+
+    phi-4 declares 16,384 and Qwen3-30B-A3B 40,960 in the catalog; a stale
+    CTX_SIZE / MODEL_RECOMMENDED_CONTEXT above that plans at the native value.
+    """
+    catalog = {raw["id"]: normalize_catalog_entry(raw) for raw in _official_model_catalog()}
+    phi4 = planned_model_context(catalog["phi4-q4"], _gpu(total_mb=24576), 64, preferred_context=65536)
+    assert phi4["context_length"] == 16384
+    assert phi4["meets_min_context"] is False
+    qwen3_30b = planned_model_context(
+        catalog["qwen3-30b-a3b-q4"], _gpu(total_mb=49140), 128, preferred_context=131072,
+    )
+    assert qwen3_30b["context_length"] == 40960
+
+
+def test_switch_plan_keeps_an_owner_context_when_no_native_context_is_declared():
+    # Normalization fills max_context_length from context_length for the
+    # context options when the catalog declares none; that fallback is not a
+    # native ceiling, so an owner's (or the installer's) larger context stays.
+    entry = normalize_catalog_entry(_model())
+    assert entry["max_context_length"] == 32768
+    assert entry["native_context_declared"] is False
+    plan = planned_model_context(entry, _gpu(total_mb=16384), 64, preferred_context=65536)
+    assert plan["context_length"] == 65536
+
+
 def test_context_options_separate_recommended_context_from_model_limit(data_dir, tmp_path):
     install_dir = tmp_path / "ods"
     (install_dir / "data" / "models").mkdir(parents=True)
@@ -1583,7 +1756,7 @@ def test_pre_download_ranker_accounts_for_long_context_kv_on_4gb_gpu(data_dir, t
     assert by_id["phi4-mini-q4"]["estimatedRequired"] > by_id["phi4-mini-q4"]["vramRequired"]
 
 
-def test_qwen35_2b_fits_4gb_but_is_not_recommended_after_fleet_failures(
+def test_qwen35_2b_is_the_4gb_recommendation_despite_fleet_failures(
     data_dir,
     tmp_path,
     monkeypatch,
@@ -1607,7 +1780,10 @@ def test_qwen35_2b_fits_4gb_but_is_not_recommended_after_fleet_failures(
     assert model["vramRequired"] == 3
     assert model["estimatedRequired"] <= 4
     assert model["fitsVram"] is True
-    assert model["recommended"] is False
+    # Nothing else installable fits a 4 GB card at the 64K Hermes floor
+    # (phi-4-mini only reaches 8K there), so the 2B is recommended; its
+    # fleet verdicts still say where it falls short.
+    assert model["recommended"] is True
     compatibility = model["appCompatibility"]
     assert compatibility["hermesTalk"]["status"] == "verified"
     assert compatibility["openaiChat"]["status"] == "unsupported_until_revalidated"
@@ -1672,7 +1848,7 @@ def test_windows_amd_host_runtime_uses_install_ram_when_gpu_probe_is_unavailable
         "AMD_INFERENCE_RUNTIME=lemonade\n"
         "AMD_INFERENCE_LOCATION=host\n"
         "SYSTEM_RAM_GB=128\n"
-        "MODEL_RECOMMENDATION_POLICY=context-aware-largest-capable-general-v1+unified-memory-coder-next-a3b-v1\n",
+        "MODEL_RECOMMENDATION_POLICY=context-aware-curated-fit-v2+unified-memory-coder-next-a3b-v1\n",
         encoding="utf-8",
     )
     catalog = [{
@@ -2061,3 +2237,149 @@ def test_published_exact_matches_gguf_stem_identity(data_dir):
     assert perf["source"] == "published_exact"
     assert perf["tokensPerSec"] == 43.7
     assert perf["sourceUrl"] == "https://example.test/stem-bench"
+
+
+def _selection_envelopes():
+    fixture = Path(__file__).resolve().parents[4] / "tests" / "fixtures" / "model-selection-envelopes.json"
+    return [
+        envelope for envelope in json.loads(fixture.read_text(encoding="utf-8"))["envelopes"]
+        if envelope["ceiling"] == 0
+    ]
+
+
+def _installer_selector():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[4] / "scripts" / "select-model.py"
+    spec = importlib.util.spec_from_file_location("ods_select_model_oracle_parity", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_dashboard_ranker_matches_the_installer_on_every_envelope(monkeypatch):
+    """The dashboard recommends what scripts/select-model.py ranks first.
+
+    Envelopes with a tier size ceiling are installer-only (the dashboard has
+    none), and the installer's architecture substitutions (Spark, Strix Halo,
+    unified-memory coder-next) are applied after this shared ranking.
+    """
+    import performance_oracle as oracle
+
+    selector = _installer_selector()
+    installer_catalog = selector.load_catalog(
+        Path(__file__).resolve().parents[4] / "config" / "model-library.json"
+    )
+    dashboard_catalog = [
+        entry for entry in (normalize_catalog_entry(raw) for raw in _official_model_catalog())
+        if entry is not None and str(entry.get("catalog_source") or "ods") in {"ods", "curated"}
+    ]
+    mismatches = []
+    for envelope in _selection_envelopes():
+        monkeypatch.setattr(oracle.platform, "machine", lambda arch=envelope["host_arch"]: arch)
+        capacity, _ = selector.usable_memory_gb(
+            envelope["backend"], envelope["memory_type"], envelope["vram_mb"], envelope["ram_gb"]
+        )
+        installer = selector.rank_models(
+            installer_catalog, capacity, "qwen", True, envelope["backend"],
+            envelope["memory_type"], envelope["vram_mb"], envelope["ram_gb"],
+            envelope["host_arch"], min_context=65536,
+        )
+        gpu = GPUInfo(
+            name="test", memory_used_mb=0,
+            memory_total_mb=envelope["vram_mb"] or envelope["ram_gb"] * 1024,
+            memory_percent=0, utilization_percent=0, temperature_c=30,
+            gpu_backend=envelope["backend"], memory_type=envelope["memory_type"],
+        )
+        if envelope["backend"] == "cpu":
+            gpu = GPUInfo(
+                name="cpu", memory_used_mb=0, memory_total_mb=0, memory_percent=0,
+                utilization_percent=0, temperature_c=30, gpu_backend="cpu",
+            )
+        dashboard = rank_pre_download_models(
+            dashboard_catalog, gpu, "qwen", True, limit=1, system_ram_gb=envelope["ram_gb"],
+        )
+        got = [
+            (model["id"], model["context_length"], (model.get("_runtime_profile") or {}).get("id"))
+            for model in dashboard[:1]
+        ]
+        want = [
+            (model["id"], model["context_length"], (model.get("_runtime_profile") or {}).get("id"))
+            for model in installer[:1]
+        ]
+        if got != want:
+            mismatches.append((envelope["id"], want, got))
+    assert not mismatches, mismatches
+
+
+def test_talk_verdict_follows_the_context_the_model_is_served_at():
+    model = {
+        "id": "qwen3.5-27b-q4", "context_length": 65536, "max_context_length": 262144,
+        "app_compatibility": {"hermes_talk": {"status": "verified"}},
+    }
+    assert model_app_compatibility(model, context_length=65536)["hermesTalk"]["status"] == "verified"
+    served_low = model_app_compatibility(model, context_length=32768)["hermesTalk"]
+    assert served_low["status"] == "unsupported"
+    assert served_low["code"] == "context_below_hermes_minimum"
+    assert "32K" in served_low["userMessage"] and "64K" in served_low["userMessage"]
+    # Without a known context the catalog verdict stands.
+    assert model_app_compatibility(model)["hermesTalk"]["status"] == "verified"
+
+
+def test_talk_verdict_names_a_native_context_limit():
+    native = model_app_compatibility({"id": "phi4-q4", "context_length": 16384, "max_context_length": 16384})
+    assert native["hermesTalk"]["status"] == "unsupported"
+    assert "supports only 16K" in native["hermesTalk"]["userMessage"]
+    # An unknown limit (a GGUF whose header was unreadable) is not guessed.
+    unknown = model_app_compatibility({
+        "id": "import", "context_length": 8192, "max_context_length": 8192, "context_limit_known": False,
+    })
+    assert unknown["hermesTalk"]["status"] == "unknown"
+
+
+def test_existing_blocking_verdict_keeps_its_own_copy():
+    model = {
+        "id": "granite", "context_length": 131072, "max_context_length": 131072,
+        "app_compatibility": {"hermes_talk": {
+            "status": "unsupported_until_revalidated", "userNote": "Granite can't keep up with Talk yet.",
+        }},
+    }
+    talk = model_app_compatibility(model, context_length=32768)["hermesTalk"]
+    assert talk["status"] == "unsupported_until_revalidated"
+    assert talk["userMessage"] == "Granite can't keep up with Talk yet."
+
+
+def test_model_list_plans_every_context_with_the_install_policy(data_dir, tmp_path):
+    """A pick recorded below the floor is listed (and loaded) at the floor."""
+    install_dir = tmp_path / "ods"
+    (install_dir / "data" / "models").mkdir(parents=True)
+    (install_dir / ".env").write_text(
+        "LLM_MODEL=qwen3.5-27b\n"
+        "GGUF_FILE=Qwen3.5-27B-Q4_K_M.gguf\n"
+        "SYSTEM_RAM_GB=61\n"
+        "MODEL_RECOMMENDED_MODEL=qwen3.5-27b\n"
+        "MODEL_RECOMMENDED_GGUF=Qwen3.5-27B-Q4_K_M.gguf\n"
+        "MODEL_RECOMMENDED_CONTEXT=32768\n",
+        encoding="utf-8",
+    )
+    catalog = [
+        raw for raw in _official_model_catalog()
+        if raw["id"] in {"qwen3.5-27b-q4", "gemma4-26b-a4b-q4", "phi4-q4"}
+    ]
+    payload = build_models_payload(
+        _gpu("NVIDIA GeForce RTX 5090", 32607), None, 0, install_dir, data_dir,
+        catalog=catalog, evidence=[], downloaded_files_override={},
+    )
+    by_id = {model["id"]: model for model in payload["models"]}
+    assert by_id["qwen3.5-27b-q4"]["contextLength"] == 65536
+    assert by_id["gemma4-26b-a4b-q4"]["contextLength"] == 65536
+    assert by_id["phi4-q4"]["contextLength"] == 16384
+    assert by_id["phi4-q4"]["appCompatibility"]["hermesTalk"]["status"] == "unsupported"
+    # On a 16 GB card the 27B cannot hold the floor: the list says why up front.
+    small = build_models_payload(
+        _gpu("NVIDIA GeForce RTX 4080", 16376), None, 0, install_dir, data_dir,
+        catalog=catalog, evidence=[], downloaded_files_override={},
+    )
+    small_27b = next(model for model in small["models"] if model["id"] == "qwen3.5-27b-q4")
+    assert small_27b["contextLength"] < 65536
+    assert small_27b["appCompatibility"]["hermesTalk"]["code"] == "context_below_hermes_minimum"

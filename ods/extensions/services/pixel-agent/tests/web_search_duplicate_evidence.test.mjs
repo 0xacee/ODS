@@ -29,8 +29,12 @@ test('only description-equal excerpt removal can delete the excerpts key',()=>{
  assert.equal(Object.hasOwn(JSON.parse(projected.content[0].text).results[0],'excerpts'),false);
  assert.equal(projected.details.results[0].excerpts[0],description);
 });
-test('no duplicates leave native result untouched',()=>{
- const p=payload();p.results[0].excerpts=['unique'];assert.equal(projectNativeWebSearchResult(message,result(p)),undefined);assert.equal(captureNativeWebSearchResult(result(p)),undefined);
+test('no duplicates preserve exact native evidence and add separate source guidance',()=>{
+ const p=payload();p.results[0].excerpts=['unique'];const input=result(p);const before=structuredClone(input);
+ const projected=projectNativeWebSearchResult(message,input);
+ assert.deepEqual(projected.content[0],input.content[0]);assert.deepEqual(projected.details,p);
+ assert.match(projected.content[1].text,/not source evidence/);assert.match(projected.content[1].text,/publisher identity/);
+ assert.deepEqual(captureNativeWebSearchResult(input),before);assert.deepEqual(input,before);
 });
 test('fetch projection does not reinterpret similarly shaped page evidence',()=>{
  const fetchTool={...tool,id:'openclaw:core:web_fetch',name:'web_fetch'};const inner=result();
@@ -103,11 +107,12 @@ function largeResult() {
  p.warning='Untrusted search evidence; no source has been independently verified.';
  return result(p);
 }
-test('exact native sanitizer prefix is reconstructed only from matching complete details and re-capped',()=>{
+test('exact native sanitizer prefix can recover complete leads within the same cap',()=>{
  const input=largeResult();const full=input.content[0].text;input.content[0].text=nativeSanitize(full);const original=structuredClone(input);
  const projected=projectNativeWebSearchResult(message,input);
- assert.equal(projected.content[0].text,nativeSanitize(JSON.stringify(expected(input.details),null,2)));
- assert.ok(projected.content[0].text.length<=8000+'\n…(truncated)…'.length);assert.ok(projected.content[0].text.endsWith('\n…(truncated)…'));
+ const evidence=JSON.parse(projected.content[0].text),wanted=expected(input.details);delete wanted.results[0].description;
+ assert.deepEqual(evidence,wanted);assert.ok(projected.content[0].text.length<=8000);
+ assert.match(projected.content[2].text,/Some descriptions or excerpts were omitted/);
  assert.deepEqual(projected.details,original.details);assert.deepEqual(input,original);
  assert.equal(projected.details.warning,input.details.warning);assert.equal(projected.details.results[0].excerpts[1],'unique late evidence');
 });
@@ -119,7 +124,8 @@ test('deduplication of a capped native result can expose unique evidence within 
 });
 test('native complete hook input is also capped after projection',()=>{
  const input=largeResult();const projected=projectNativeWebSearchResult(message,input);
- assert.equal(projected.content[0].text,nativeSanitize(JSON.stringify(expected(input.details),null,2)));
+ assert.ok(projected.content[0].text.length<=8000);
+ assert.deepEqual(JSON.parse(projected.content[0].text).results.map(r=>r.url),input.details.results.map(r=>r.url));
 });
 test('native projection preserves surrogate pairs at the exact sanitizer boundary',()=>{
  const p=payload();p.results[0].description='';p.results[0].excerpts=[''];
@@ -128,8 +134,8 @@ test('native projection preserves surrogate pairs at the exact sanitizer boundar
  const input=result(p);assert.equal(input.content[0].text.charCodeAt(7999),0xD83D);input.content[0].text=nativeSanitize(input.content[0].text);
  assert.equal(input.content[0].text.slice(0,-'\n…(truncated)…'.length).length,7999);
  const projected=projectNativeWebSearchResult(message,input);
- assert.equal(projected.content[0].text,nativeSanitize(JSON.stringify(expected(p),null,2)));
- assert.equal(projected.content[0].text.charCodeAt(7998),'x'.charCodeAt(0));assert.equal(projected.content[0].text.charCodeAt(7999),10);
+ assert.ok(projected.content[0].text.length<=8000);assert.doesNotThrow(()=>JSON.parse(projected.content[0].text));
+ assert.equal(projected.details.results[0].description,p.results[0].description);
 });
 for(const [name,change] of [
  ['wrong prefix',r=>{r.content[0].text='!'+r.content[0].text.slice(1);}],

@@ -15,6 +15,22 @@ if ! declare -F log_error >/dev/null 2>&1; then
     log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 fi
 
+_ods_pixel_inspection_cleanup() {
+    local install_dir="$1" owner_uid="$2" action="$3" helper_dir helper
+    [[ "$action" == validate-linux || "$action" == remove-linux ]] || return 1
+    # A fresh bootstrap runs this library from its reviewed candidate checkout.
+    # Use that candidate's cleanup logic, but validate the old installed bytes.
+    # Calling the installed helper here would reintroduce bugs fixed by upgrades.
+    helper_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../installers/lib" && pwd -P)" || return 1
+    helper="$helper_dir/pixel-preview-inspection.py"
+    [[ -f "$helper" && ! -L "$helper" ]] || {
+        log_error "Candidate Pixel inspection cleanup helper is missing or unsafe"
+        return 1
+    }
+    sudo /usr/bin/python3 -I -B "$helper" "$action" \
+        --source "$install_dir/extensions/services/pixel-agent/host" --owner-uid "$owner_uid"
+}
+
 _ods_pixel_validate_ingress_env() {
     local path="$1" root_uid="$2"
 
@@ -257,8 +273,13 @@ if config_present:
     base_keys = {"install_dir", "owner", "openclaw_bin", "gateway_port", "settings_data_dir"}
     relay_keys = base_keys | {"edge_owner_key_sha256"}
     legacy_relay_keys = (base_keys - {"gateway_port"}) | {"edge_owner_key_sha256"}
+    # Original ODS access deployments predate both gateway-port binding and
+    # the edge relay. Their exact private four-field config still binds the
+    # owner/install, and all source mirrors and state checks below still apply.
+    legacy_base_keys = base_keys - {"gateway_port"}
     allowed_keys = (base_keys, relay_keys, relay_keys | {"gateway_binding"},
-                    legacy_relay_keys, legacy_relay_keys | {"gateway_binding"})
+                    legacy_relay_keys, legacy_relay_keys | {"gateway_binding"},
+                    legacy_base_keys)
     if (not isinstance(value, dict)
             or set(value) not in allowed_keys
             or value.get("install_dir") != str(install.resolve())
@@ -1279,6 +1300,30 @@ if onboarding.exists():
                                             current_v10_digest = v10.hexdigest()
                                             accepted_contracts.add(current_v10_digest)
                                             system_observer_contract_present |= value.get("contract_sha256") == current_v10_digest
+                                            # The inspector installer extends the v10 payload
+                                            # with this complete fixed source inventory. Keep
+                                            # older v10 records valid, but never accept a
+                                            # partial, linked or writable inspection bundle.
+                                            inspection_names = (
+                                                "preview_inspection.py", "preview_inspection_protocol.py", "preview_inspection_capsule.py")
+                                            document_names = (
+                                                "preview_inspection_document.py", "preview_inspection_lease.py", "preview_inspection_leases.py")
+                                            if any(workspace_preview_source.with_name(name).exists()
+                                                   or workspace_preview_source.with_name(name).is_symlink() for name in document_names):
+                                                inspection_names += document_names
+                                            inspection_sources = tuple(workspace_preview_source.with_name(name) for name in (
+                                                *inspection_names, "Dockerfile.inspection", "preview-inspection.requirements.lock", "pixel-preview-inspection.service"))
+                                            if any(source.exists() or source.is_symlink() for source in inspection_sources):
+                                                for source in inspection_sources:
+                                                    info = regular(source, owner_uid, 2 * 1024 * 1024)
+                                                    if info.st_nlink != 1 or info.st_mode & 0o022:
+                                                        raise SystemExit("unsafe ODS Pixel inspection source")
+                                                    payload = source.read_bytes()
+                                                    v10.update(len(payload).to_bytes(8, "big"))
+                                                    v10.update(payload)
+                                                current_v10_digest = v10.hexdigest()
+                                                accepted_contracts.add(current_v10_digest)
+                                                system_observer_contract_present |= value.get("contract_sha256") == current_v10_digest
         # During an exact-source reinstall, _ods_pixel_mark_installing records
         # the requested source and contract but intentionally keeps the
         # previously verified contract until the replacement route completes
@@ -2124,6 +2169,15 @@ PY
     fi
 
     log_info "Removing the ODS-managed Pixel host deployment..."
+    # Inspection has a separate root-only Docker broker. Validate its fixed
+    # artifacts before stopping anything, and retire it before its publisher.
+    local inspection_present=false
+    if [[ -e /etc/systemd/system/pixel-preview-inspection.service || -L /etc/systemd/system/pixel-preview-inspection.service \
+        || -e /etc/ods-pixel-inspection.json || -L /etc/ods-pixel-inspection.json \
+        || -e /usr/local/libexec/ods-pixel-inspection || -L /usr/local/libexec/ods-pixel-inspection ]]; then
+        inspection_present=true
+        _ods_pixel_inspection_cleanup "$install_dir" "$owner_uid" validate-linux || return 1
+    fi
     if [[ -e "$gateway_unit" || -L "$gateway_unit" \
         || -e "$ingress_unit" || -L "$ingress_unit" \
         || -e "$ingress_env" || -L "$ingress_env" \
@@ -2139,7 +2193,7 @@ PY
         || -e "$unix_peer_program" || -L "$unix_peer_program" \
         || -e "$system_observer_program" || -L "$system_observer_program" \
         || -e "$workspace_preview_state" || -L "$workspace_preview_state" \
-        || "$ops_artifacts_present" == true || "$access_artifacts_present" == true ]]; then
+        || "$ops_artifacts_present" == true || "$access_artifacts_present" == true || "$inspection_present" == true ]]; then
         root_artifacts_present=true
         command -v sudo >/dev/null 2>&1 || {
             log_error "sudo is required to remove ODS-managed Pixel system artifacts"
@@ -2150,7 +2204,7 @@ PY
     if [[ -e "$gateway_unit" || -e "$ingress_unit" || -e "$extension_manager_unit" \
         || -e "$artifact_promoter_unit" || -e "$workspace_preview_unit" \
         || -e "$wsl_bridge_unit" \
-        || -e "$ops_unit" || -e "$access_unit" ]]; then
+        || -e "$ops_unit" || -e "$access_unit" || "$inspection_present" == true ]]; then
         # Stop the ingress before the gateway it proxies to. Keep these as
         # separate calls so the shutdown order is an enforced contract rather
         # than an argument-order hint to systemctl. An interrupted first install
@@ -2165,6 +2219,15 @@ PY
             && ! timeout 30s sudo systemctl disable --now ods-pixel-access.service; then
             log_error "Could not stop ODS-managed Pixel system services; no Pixel files were removed"
             return 1
+        fi
+        if "$inspection_present"; then
+            if [[ -e /etc/systemd/system/pixel-preview-inspection.service ]]; then
+                timeout 50s sudo systemctl disable --now pixel-preview-inspection.service || return 1
+            fi
+            if systemctl is-active --quiet pixel-preview-inspection.service; then
+                log_error "Preview inspection is still active; no Pixel files were removed"
+                return 1
+            fi
         fi
         if [[ -e "$ingress_unit" ]] \
             && ! timeout 30s sudo systemctl disable --now pixel-ingress.service; then
@@ -2538,6 +2601,9 @@ PY
     fi
 
     if [[ "$root_artifacts_present" == "true" ]]; then
+        if "$inspection_present"; then
+            _ods_pixel_inspection_cleanup "$install_dir" "$owner_uid" remove-linux || return 1
+        fi
         if [[ "$access_artifacts_present" == true ]]; then
             if [[ "$(_ods_pixel_access_validate_or_remove remove \
                 "$install_dir" "$marker_state" "$owner_name" "$owner_uid" "$owner_gid" \

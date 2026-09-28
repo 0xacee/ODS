@@ -958,6 +958,46 @@ else
     fail "fully bound Pixel cleanup rejected its exact image after preservation-tag pruning"
 fi
 
+# The installer binds its managed-runtime overlay before fallible runtime
+# repairs. An installing marker bound to that exact overlay is removable; an
+# overlay the marker does not bind remains unmanaged drift.
+write_active_fixture
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" "$HOME_DIR/.openclaw/openclaw.json" <<'PY'
+import json, pathlib, sys
+marker, config = map(pathlib.Path, sys.argv[1:])
+value = json.loads(marker.read_text(encoding="utf-8"))
+value["state"] = "installing"
+marker.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+overlay = json.loads(config.read_text(encoding="utf-8"))
+overlay["agents"] = {"defaults": {"timeoutSeconds": 1800}}
+config.write_text(json.dumps(overlay) + "\n", encoding="utf-8")
+PY
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "unbound managed-runtime overlay was accepted as ODS-owned configuration"
+else
+    [[ -e "$HOME_DIR/.config/ods/pixel-managed.json" && -L "$HOME_DIR/.local/share/pixel/current" \
+        && -e "$HOME_DIR/.openclaw/openclaw.json" && ! -s "$SYSTEMCTL_LOG" && ! -s "$DOCKER_LOG" ]] \
+        && pass "unbound managed-runtime overlay fails closed before mutation" \
+        || fail "unbound managed-runtime overlay caused partial mutation"
+fi
+python3 - "$HOME_DIR/.config/ods/pixel-managed.json" "$HOME_DIR/.openclaw/openclaw.json" <<'PY'
+import hashlib, json, pathlib, sys
+marker, config = map(pathlib.Path, sys.argv[1:])
+value = json.loads(marker.read_text(encoding="utf-8"))
+canonical = json.dumps(json.loads(config.read_text(encoding="utf-8")),
+                       sort_keys=True, separators=(",", ":")).encode()
+value["configuration_sha256"] = hashlib.sha256(b"ods-pixel-openclaw-v1\0" + canonical).hexdigest()
+marker.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    [[ ! -e "$HOME_DIR/.config/ods/pixel-managed.json" && ! -L "$HOME_DIR/.local/share/pixel/current" \
+        && ! -e "$HOME_DIR/.local/share/pixel/runtime-attestation.json" ]] \
+        && pass "installing marker bound to the overlaid config is safely deactivated" \
+        || fail "bound managed-runtime overlay cleanup was incomplete"
+else
+    fail "installing marker bound to the overlaid config was refused"
+fi
+
 write_ops_fixture
 if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
     if [[ ! -e "$SYSTEMD_DIR/pixel-ops-broker.service" \
@@ -994,6 +1034,118 @@ if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
 else
     fail "verified Operations Broker deployment could not be removed"
 fi
+
+write_inspection_contract_fixture() {
+    write_ops_fixture
+    local file digest
+    for file in preview_inspection.py preview_inspection_protocol.py preview_inspection_capsule.py \
+        Dockerfile.inspection preview-inspection.requirements.lock pixel-preview-inspection.service; do
+        cp "$ROOT_DIR/extensions/services/pixel-agent/host/$file" "$INSTALL_DIR/extensions/services/pixel-agent/host/$file"
+    done
+    # Generate the marker using the actual installer, not a parallel test hash.
+    digest="$(
+        source "$ROOT_DIR/installers/lib/pixel-host-install.sh"
+        ods_pixel_run_as_owner() { shift 2; "$@"; }
+        _ods_pixel_contract_sha256 "$(id -un)" "$HOME_DIR" "$INSTALL_DIR/data/pixel/onboarding.json"
+    )"
+    python3 - "$HOME_DIR/.config/ods/pixel-managed.json" "$digest" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value['contract_sha256'] = sys.argv[2]
+path.write_text(json.dumps(value) + '\n')
+PY
+}
+
+write_inspection_contract_fixture
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    pass "installer-produced inspection contract passes complete uninstall custody validation"
+else
+    fail "installer-produced inspection contract was rejected as onboarding drift"
+fi
+
+for fault in changed missing symlink writable hardlink; do
+    write_inspection_contract_fixture
+    inspection_source="$INSTALL_DIR/extensions/services/pixel-agent/host/preview_inspection.py"
+    case "$fault" in
+        changed) printf '\n# changed\n' >>"$inspection_source" ;;
+        missing) rm -- "$inspection_source" ;;
+        symlink) mv "$inspection_source" "$inspection_source.saved"; ln -s "$inspection_source.saved" "$inspection_source" ;;
+        writable) chmod 0666 "$inspection_source" ;;
+        hardlink) ln "$inspection_source" "$inspection_source.link" ;;
+    esac
+    if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+        fail "inspection contract accepted $fault source"
+    elif [[ ! -s "$SYSTEMCTL_LOG" && -e "$SYSTEMD_DIR/pixel-ingress.service" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" ]]; then
+        pass "inspection contract rejects $fault source before service or marker mutation"
+    else
+        fail "inspection contract $fault rejection changed installed state"
+    fi
+done
+
+# A later producer added three source helpers to the v10 contract. Freeze its
+# exact ordered inventory here so stable cleanup can retire it without enabling
+# that producer's runtime features. The ordinary fixture above covers old v10.
+write_document_inspection_contract_fixture() {
+    write_inspection_contract_fixture
+    python3 - "$INSTALL_DIR" "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import hashlib, json, pathlib, sys
+root, marker = map(pathlib.Path, sys.argv[1:])
+host = root / 'extensions/services/pixel-agent/host'
+documents = ('preview_inspection_document.py', 'preview_inspection_lease.py', 'preview_inspection_leases.py')
+for name in documents:
+    (host / name).write_text('# frozen later-generation fixture: ' + name + '\n')
+    (host / name).chmod(0o600)
+paths = [
+    root / 'data/pixel/onboarding.json', root / 'data/pixel/operations-policy.json',
+    root / 'data/pixel/extension-catalog.json', host / 'extension_search.py',
+    host / 'extension_manager.py', root / 'data/pixel/extension-manager.service',
+    root / 'bin/ods-pixel-approve', host / 'artifact_promoter.py',
+    root / 'data/pixel/artifact-promoter.service', host / 'pixel-ops-broker-ods.conf',
+    host / 'workspace_preview.py', root / 'data/pixel/workspace-preview.service',
+    host / 'system_observe.py', host / 'unix_peer.py',
+]
+paths += [host / name for name in (
+    'preview_inspection.py', 'preview_inspection_protocol.py', 'preview_inspection_capsule.py',
+    *documents, 'Dockerfile.inspection', 'preview-inspection.requirements.lock',
+    'pixel-preview-inspection.service')]
+digest = hashlib.sha256(b'ods-pixel-contract-v10\0')
+for path in paths:
+    body = path.read_bytes()
+    digest.update(len(body).to_bytes(8, 'big'))
+    digest.update(body)
+value = json.loads(marker.read_text())
+value['contract_sha256'] = digest.hexdigest()
+marker.write_text(json.dumps(value) + '\n')
+PY
+}
+
+write_document_inspection_contract_fixture
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    pass "complete later document generation remains removable by stable cleanup"
+else
+    fail "complete later document generation was stranded by stable cleanup"
+fi
+for fault in changed missing symlink writable hardlink; do
+    write_document_inspection_contract_fixture
+    document_source="$INSTALL_DIR/extensions/services/pixel-agent/host/preview_inspection_leases.py"
+    case "$fault" in
+        changed) printf '\n# changed\n' >>"$document_source" ;;
+        missing) rm -- "$document_source" ;;
+        symlink) mv "$document_source" "$document_source.saved"; ln -s "$document_source.saved" "$document_source" ;;
+        writable) chmod 0666 "$document_source" ;;
+        hardlink) ln "$document_source" "$document_source.link" ;;
+    esac
+    if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+        fail "later document generation accepted $fault source"
+    elif [[ ! -s "$SYSTEMCTL_LOG" && -e "$SYSTEMD_DIR/pixel-ingress.service" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" ]]; then
+        pass "later document generation rejects $fault source before mutation"
+    else
+        fail "later document generation $fault rejection mutated installed state"
+    fi
+done
 
 write_interrupted_ops_receipt_fixture
 if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
@@ -1826,6 +1978,32 @@ else
         && -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" ]] \
         && pass "Pixel access program drift fails before service mutation" \
         || fail "Pixel access program drift caused partial cleanup"
+fi
+
+write_access_fixture
+python3 - "$ETC_DIR/pixel-access.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value.pop("gateway_port")
+value.pop("edge_owner_key_sha256")
+path.write_text(json.dumps(value) + "\n")
+PY
+chmod 0600 "$ETC_DIR/pixel-access.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "legacy four-field config accepted an unbound relay credential"
+else
+    [[ -e "$ETC_DIR/pixel-access-relay.key" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "legacy config with an unbound relay fails before mutation" \
+        || fail "legacy relay refusal mutated managed state"
+fi
+rm -f -- "$ETC_DIR/pixel-access-relay.key"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$ETC_DIR/pixel-access.json" && ! -e "$ACCESS_STATE" \
+        && ! -e "$HOME_DIR/.config/ods/pixel-managed.json" ]]; then
+    pass "verified original four-field access configuration remains removable"
+else
+    fail "original access configuration was stranded by later gateway/relay fields"
 fi
 
 write_access_fixture

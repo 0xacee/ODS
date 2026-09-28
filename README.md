@@ -1,8 +1,10 @@
 <div align="center">
 
-# ODS
+# ODS V3 Pre-Release
 
 **Osmantic Deployment System**
+
+**Public testing and refinement ahead of the official V3 launch.**
 
 <p align="center">
   <a href="https://osmantic.com" target="_blank" rel="noopener noreferrer">
@@ -17,7 +19,8 @@ It should feel that way for everyone.
 
 [![License: Apache 2.0 + Pixel ODS-only](https://img.shields.io/badge/License-Apache%202.0%20%2B%20Pixel%20ODS--only-blue.svg)](ods/LICENSING.md)
 [![GitHub Stars](https://img.shields.io/github/stars/Osmantic/ODS)](https://github.com/Osmantic/ODS/stargazers)
-[![Release](https://img.shields.io/github/v/release/Osmantic/ODS)](https://github.com/Osmantic/ODS/releases)
+[![ODS V3 Pre-Release](https://img.shields.io/badge/ODS-V3%20Pre--Release-orange)](ods/docs/RELEASE_NOTES_3.0.0.md)
+[![Release](https://img.shields.io/badge/release-v3.0.0-blue)](https://github.com/Osmantic/ODS/releases/tag/v3.0.0)
 
 [![Watch the demo](https://img.shields.io/badge/Demo-Watch%20on%20YouTube-red?logo=youtube)](https://youtu.be/nO8xFNHX-HA)
 
@@ -41,8 +44,11 @@ full-model capabilities, lifecycle recovery, and the final User Green gate. See
 [Release Validation](ods/docs/RELEASE_VALIDATION.md) for what a green
 run proves.
 
-**September public-beta candidate:** The accumulated Portal and platform changes
-are being prepared for `main`. Full fleet qualification is incomplete; see the
+**ODS V3 Pre-Release:** V3 is in public testing and refinement ahead of its
+official launch. Try it, share feedback, and help us improve the experience.
+The [pinned source snapshot (`v3.0.0`)](https://github.com/Osmantic/ODS/releases/tag/v3.0.0)
+is available for reproducibility. Full fleet qualification is incomplete; see the
+[V3 Pre-Release notes](ods/docs/RELEASE_NOTES_3.0.0.md) and the
 [promotion record](ods/docs/PUBLIC_BETA_PROMOTION_2026-09.md) for known task
 limitations, available evidence, and remaining release gates.
 
@@ -51,14 +57,23 @@ security policy, GitHub workflows, and project coordination docs. The
 `ods/` directory is the product runtime: services, installer phases,
 compose overlays, dashboard, CLI, tests, and operator docs.
 
-**Stable consumption:** `v2.6.0` is the current stable release. `main` moves
-quickly; use it for active development and validation candidates. For forks,
-appliances, labs, or production-like installs, pin a tagged release or audited
-commit and keep your own validation receipt. Stable patch fixes land on
-`release/2.6.x` before being merged forward. See
+**Release consumption:** `v3.0.0` is the latest published source release,
+presented as V3 Pre-Release during public testing and refinement. Its
+GitHub Latest designation does not mark the official V3 launch or establish full
+fleet qualification. `main`
+continues receiving fixes; pin a tag or audited commit and retain its validation
+receipt when reproducibility matters. V3 fixes land on `main`; `release/2.6.x`
+is the older 2.6 maintenance lane. See
 [Release Channels](ods/docs/RELEASE_CHANNELS.md),
 [Installer Trust](ods/docs/INSTALLER_TRUST.md), and
 [Forkability](ods/docs/FORKABILITY.md).
+
+**September main update:** the quickstarts below follow development `main`,
+including the [September Portal/platform promotion](ods/docs/PUBLIC_BETA_PROMOTION_2026-09.md).
+That merge is not a new stable release or proof of complete fleet qualification.
+Native Pixel source-update and backup/recovery limits are documented in
+[Source Updates](ods/docs/SOURCE-UPDATES.md). Use a pinned release or audited
+commit when reproducibility is required.
 
 ## Get Started
 
@@ -70,7 +85,7 @@ Choose your system, copy the block, run it in a normal terminal. ODS installs th
 curl -fsSL https://install.osmantic.com/ods.sh | bash
 ```
 
-**Windows PowerShell**
+**Windows PowerShell** — guided Ubuntu/WSL2 setup with Pixel/Portal
 
 ```powershell
 $ProgressPreference = "SilentlyContinue"
@@ -84,23 +99,40 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install.ps1
 ```
 
-Prerequisites: Docker must be installed and running. On Windows, use Docker Desktop with the WSL2 backend enabled and run the block in a normal, non-Administrator PowerShell window.
+Linux and macOS: Docker must be installed and running.
+
+Windows: open a **normal PowerShell window** (not "Run as administrator"), paste the block, and answer the prompts. Nothing else needs to be installed first. The installer:
+
+1. Checks free disk space (40 GB) and that hardware virtualization is on.
+2. Offers to enable WSL2 and install Docker Desktop with winget. Windows asks for administrator permission, then **one restart**; setup continues by itself after you sign in again.
+3. Offers to download Ubuntu 24.04 and asks you, in PowerShell, for a new Ubuntu username and password.
+4. Starts Docker Desktop and checks that it is connected to Ubuntu. If not, it shows the one setting to turn on in Docker Desktop and continues as soon as it works.
+5. Installs ODS inside Ubuntu with **`--pixel --no-hermes --no-openclaw`**. When Ubuntu asks for your `[sudo] password`, type the Ubuntu password; nothing appears while you type.
+6. Verifies Pixel and Portal, then opens Portal in your browser and adds an **ODS Portal** shortcut to your desktop.
+
+Each step asks before changing anything and stops with instructions if it cannot finish; rerun the same command after fixing it. There is no fallback to Hermes or the native Windows installer. On NVIDIA machines, update the Windows driver to 570 or newer first. To use an existing distribution, add `-Distro <name>` (names from `wsl -l -v`).
+
+Existing native Windows installations are not automatically migrated or deleted; see [Windows Quickstart](ods/docs/WINDOWS-QUICKSTART.md#existing-native-windows-installations) before switching.
 
 The hosted Linux/macOS endpoint proxies the current bootstrap from repository `main`.
 Reviewed merges reach it automatically after edge-cache refresh. `ODS_REF` selects a compatible repository checkout. See
 [Installer Trust](ods/docs/INSTALLER_TRUST.md) to inspect the script or install
 a stable release or audited commit manually.
 
-Windows users should not run the `curl ... | bash` command from PowerShell. The PowerShell block above downloads the source ZIP and runs the same Windows installer used by the clone-based workflow. For more detail, see the [Windows Quickstart](ods/docs/WINDOWS-QUICKSTART.md).
+Windows users should not run the `curl ... | bash` command from PowerShell. The PowerShell block above downloads the public ODS source ZIP and delegates installation to Ubuntu/WSL2. For more detail, see the [Windows Quickstart](ods/docs/WINDOWS-QUICKSTART.md).
 
-After install, open **http://localhost:3000** and start chatting.
+After the installer completes successfully, Portal opens at **http://localhost:3001/pixel** (the Windows installer opens it for you and prints the exact URL). **http://localhost:3000** is Open WebUI, a separate interface. Verify that Portal is available and send a message; a loaded dashboard alone does not prove Pixel is ready. If installation fails or Portal is degraded, follow the [Windows Quickstart checks](ods/docs/WINDOWS-QUICKSTART.md#verify-portalpixel) before proceeding.
 
-Uninstall later with the matching platform command:
+WSL GPU access must be checked separately. NVIDIA needs a supported Windows driver and GPU access inside WSL/Docker. On AMD, Windows setup runs Lemonade through an ODS task bound to the selected WSL installation. Once that ownership is verified, Dashboard **Models** supports compatible GGUF downloads (including Hugging Face), activation, context changes, and unload/resume. An independently configured Lemonade service remains externally managed. Older ODS tasks without the installation binding require an installer rerun; see the [Windows Quickstart](ods/docs/WINDOWS-QUICKSTART.md#manage-amd-models-from-portal) and [WSL2 GPU guide](ods/docs/WINDOWS-WSL2-GPU-GUIDE.md).
+
+For Linux, macOS, or the recommended Windows/WSL installation, uninstall from the matching Linux/macOS terminal (open Ubuntu on Windows):
 
 ```bash
 cd ~/ods
 ./ods-uninstall.sh --force
 ```
+
+For a **native Windows** installation only:
 
 ```powershell
 $installDir = "$env:USERPROFILE\ods"
@@ -108,7 +140,7 @@ cd $installDir
 .\ods.ps1 uninstall --force
 ```
 
-Windows recovery note: if the runtime folder is partial and `.\ods.ps1` is missing, run the same command from a source checkout as `.\ods\installers\windows\ods.ps1 uninstall --force`. It removes Docker resources labelled as the ODS compose project before removing the runtime directory.
+Windows recovery note: if the runtime folder is partial and `.\ods.ps1` is missing, run the same command from a source checkout as `.\ods\installers\windows\ods.ps1 uninstall --force`. It verifies the containers' Compose installation directory before removing resources. A shared `ods` project name does not authorize removing another Windows or WSL installation. Unattached volumes with no verifiable owner are preserved, with an error naming the resource; `--force` does not bypass this check.
 
 > **API endpoint:** Linux Docker installs expose llama-server on **http://localhost:11434** by default (`OLLAMA_PORT`) while containers use `llama-server:8080`. macOS native Metal and Windows native/Lemonade paths use **http://localhost:8080** unless overridden. Open WebUI stays on **http://localhost:3000**.
 
@@ -149,7 +181,8 @@ Windows recovery note: if the runtime folder is partial and `.\ods.ps1` is missi
 >
 > | Platform | Status |
 > |----------|--------|
-> | **Linux** (NVIDIA + AMD + Intel Arc) | **Supported** — install and run today |
+> | **Linux** (NVIDIA + AMD Strix Halo) | **Supported** — see the hardware and distro limits in the support matrix |
+> | **Linux + Intel Arc** (SYCL) | **Experimental / Tier C** — validation is hardware-specific |
 > | **Windows** (NVIDIA + AMD) | **Supported** — install and run today |
 > | **macOS** (Apple Silicon) | **Supported** — install and run today |
 >
@@ -200,10 +233,9 @@ cd ODS/ods
 <details>
 <summary><b>Windows (PowerShell)</b></summary>
 
-Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) with WSL2 backend enabled.
-**Install Docker Desktop first and make sure it is running before you start.**
+The installer prepares WSL2, Ubuntu and [Docker Desktop](https://www.docker.com/products/docker-desktop/) when they are missing; nothing needs to be installed first.
 
-Open a normal **PowerShell** session and run:
+Open a normal **PowerShell** session (not "Run as administrator") and run:
 
 ```powershell
 $ProgressPreference = "SilentlyContinue"
@@ -220,7 +252,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 > The `Set-ExecutionPolicy` command allows the installer script to run in the current session. It does not change your system-wide policy.
 > Running as Administrator is not recommended for the installer because user-level paths such as `.opencode`, `data/`, and `.env` can be created with admin-owned permissions.
 
-The installer detects your GPU, picks the right model, generates credentials, starts all services, and creates a Desktop shortcut to the Dashboard. Manage from the runtime directory with `.\ods.ps1 status`; uninstall with `.\ods.ps1 uninstall --force`.
+This command guides WSL/Ubuntu preparation and checks systemd and Docker integration before installing Pixel. See [Windows Quickstart](ods/docs/WINDOWS-QUICKSTART.md). The runtime is normally `~/ods` inside Ubuntu; manage it there with `./ods status`. Open the Portal dashboard at the URL printed by the installer (normally http://localhost:3001). Native Windows `ods.ps1` commands do not manage this Linux runtime.
 
 </details>
 
@@ -258,7 +290,7 @@ See the [macOS Quickstart](ods/docs/MACOS-QUICKSTART.md) for details.
 
 ### Agents & Automation
 - **Portal** — bundled core conversational assistant on Apple Silicon macOS and qualified Ubuntu 24.04/26.04 or Debian 12 systemd hosts, including qualified WSL2 installations through the Linux installer. No private repository access or separate license flag is required; available in the Dashboard and through a compatible Open WebUI model route. The native PowerShell installer does not install the Portal host runtime.
-- **Hermes Agent** — independent general-purpose agent, available alongside Portal; includes memory, skills, and a magic-link-gated proxy
+- **Hermes Agent** — independent general-purpose agent, available alongside Portal; includes memory, skills, and a proxy with optional owner-card gating; direct access by default
 - **OpenClaw** — deprecated legacy autonomous agent, still opt-in during the migration window
 - **n8n** — workflow automation with 400+ integrations (Slack, email, databases, APIs)
 - **APE** — Agent Policy Engine for auditing and governing autonomous tool calls
@@ -470,7 +502,8 @@ Other tools get you part of the way. ODS gets you the whole way.
 | [Headless Setup](ods/docs/HEADLESS-SETUP.md) | QR onboarding, first-boot setup, AP mode, mDNS, and local agent access |
 | [Support Matrix](ods/docs/SUPPORT-MATRIX.md) | Current platform and GPU support status |
 | [Release Validation](ods/docs/RELEASE_VALIDATION.md) | User Green gates and the release-grade fleet/distro validation policy |
-| [2.6.0 Release Notes](ods/docs/RELEASE_NOTES_2.6.0.md) | Current stable release notes, validation receipt, and known validation boundaries |
+| [V3 Release Notes](ods/docs/RELEASE_NOTES_3.0.0.md) | Published V3 source identity and qualification boundaries |
+| [2.6.0 Release Notes](ods/docs/RELEASE_NOTES_2.6.0.md) | Historical 2.6 release notes, validation receipt, and known validation boundaries |
 | [Validation Matrix](ods/docs/VALIDATION-MATRIX.md) | Sanitized CI, distro lab, and real-hardware fleet release-readiness evidence |
 | [Validation Reproducibility](ods/docs/VALIDATION_REPRODUCIBILITY.md) | How forks and operators can reproduce the validation story on their own hardware |
 | [Offline And Mirroring](ods/docs/OFFLINE_AND_MIRRORING.md) | Pinning, mirroring, and preserving release artifacts for independent operation |

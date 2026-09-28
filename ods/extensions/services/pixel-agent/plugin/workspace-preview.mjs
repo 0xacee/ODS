@@ -3,6 +3,7 @@
 // validates and snapshots every byte before returning a browser-verifiable URL.
 
 import net from "node:net";
+import { DERIVED_ARTIFACT_CONTRACT, PREVIEW_RUNTIME_CONTRACT } from "./agent-skills.mjs";
 import { dockerWorkspacePreviewRequest } from "./workspace-preview-docker.mjs";
 
 const SOCKET_PATH = "/run/ods-pixel-preview/control.sock";
@@ -72,9 +73,13 @@ function validResponse(value, request) {
   ];
   const hasPaths = value && typeof value === "object" &&
     (Object.hasOwn(value, "publishedPaths") || Object.hasOwn(value, "publishedPathsOmitted"));
-  const receiptKeys = hasPaths
-    ? [...expectedKeys, "publishedPaths", "publishedPathsOmitted"].sort()
-    : expectedKeys;
+  const hasEmptyPaths = value && typeof value === "object" &&
+    (Object.hasOwn(value, "publishedEmptyPaths") || Object.hasOwn(value, "publishedEmptyPathsOmitted"));
+  const receiptKeys = [
+    ...expectedKeys,
+    ...(hasPaths ? ["publishedPaths", "publishedPathsOmitted"] : []),
+    ...(hasEmptyPaths ? ["publishedEmptyPaths", "publishedEmptyPathsOmitted"] : []),
+  ].sort();
   if (
     !value ||
     typeof value !== "object" ||
@@ -110,16 +115,30 @@ function validResponse(value, request) {
     throw new Error("invalid Pixel workspace preview response");
   }
   if (hasPaths && (
-    !Array.isArray(value.publishedPaths) || value.publishedPaths.length > 32 ||
-    value.publishedPaths.some((path) => typeof path !== "string" ||
-      path.length < 1 || path.split("/").some((part) => !PATH_COMPONENT.test(part))) ||
-    value.publishedPaths.reduce((size, path) => size + path.length, 0) > 2048 ||
-    value.publishedPaths.some((path, index, paths) => index > 0 && paths[index - 1] >= path) ||
-    !Number.isInteger(value.publishedPathsOmitted) || value.publishedPathsOmitted < 0 ||
+    !validPathList(value.publishedPaths, value.publishedPathsOmitted) ||
     value.publishedPaths.length + value.publishedPathsOmitted !== value.files ||
     (value.publishedPathsOmitted === 0 && !value.publishedPaths.includes(value.entryFile))
   )) throw new Error("invalid Pixel workspace preview file list");
+  // Zero-byte published files: a subset of the file list, never the entry.
+  if (hasEmptyPaths && (
+    !hasPaths ||
+    !validPathList(value.publishedEmptyPaths, value.publishedEmptyPathsOmitted) ||
+    value.publishedEmptyPaths.length + value.publishedEmptyPathsOmitted > value.files - 1 ||
+    value.publishedEmptyPaths.includes(value.entryFile) ||
+    (value.publishedPathsOmitted === 0 &&
+      value.publishedEmptyPaths.some((path) => !value.publishedPaths.includes(path)))
+  )) throw new Error("invalid Pixel workspace preview empty-file list");
   return value;
+}
+
+// Bounded, sorted, unique workspace-relative names as the host emits them.
+function validPathList(paths, omitted) {
+  return Array.isArray(paths) && paths.length <= 32 &&
+    paths.every((path) => typeof path === "string" &&
+      path.length >= 1 && path.split("/").every((part) => PATH_COMPONENT.test(part))) &&
+    paths.reduce((size, path) => size + path.length, 0) <= 2048 &&
+    paths.every((path, index) => index === 0 || paths[index - 1] < path) &&
+    Number.isInteger(omitted) && omitted >= 0;
 }
 
 function publishedPathFeedback(response) {
@@ -132,6 +151,17 @@ function publishedPathFeedback(response) {
       ? `${response.publishedPathsOmitted} additional published paths omitted from this bounded list. `
       : "This is the complete published file list. ") +
     "Compare the delivered files with the owner's request; this receipt does not determine whether requested files or checks are missing. ";
+}
+
+// Informational only: empty files can be legitimate, so publication stands.
+export const EMPTY_PUBLISHED_FILES_PREFIX = "Published files that are empty (0 bytes): ";
+
+function emptyPathFeedback(response) {
+  const shown = response.publishedEmptyPaths ?? [];
+  const omitted = response.publishedEmptyPathsOmitted ?? 0;
+  if (shown.length + omitted === 0) return "";
+  return EMPTY_PUBLISHED_FILES_PREFIX +
+    [...shown, ...(omitted > 0 ? [`${omitted} more`] : [])].join(", ") + ". ";
 }
 
 function socketRequest(payload, { socketPath = SOCKET_PATH, signal, timeoutMs = 30_000 } = {}) {
@@ -183,6 +213,7 @@ function socketRequest(payload, { socketPath = SOCKET_PATH, signal, timeoutMs = 
 }
 
 const FAILURE_MESSAGES = {
+  invalid_json_artifact: "A .json artifact is not valid unambiguous UTF-8 JSON. Generate serialized data from the actual final files using a JSON serializer, parse it back, and compare the decoded contents with those files before retrying. Do not hand-transcribe escaped source code or rename required files to bypass validation.",
   unsupported_file_type: "The project contains an unsupported preview file type. Inspect its file list and keep unrelated files outside the static site directory; CSV and TSV data files are supported.",
   missing_entry: "The selected directory needs a nonempty index.html at its root. Check the directory and entry file before retrying.",
   too_many_files: "The selected site exceeds 128 files. Keep dependencies, build caches, and unrelated files outside the published directory.",
@@ -191,10 +222,21 @@ const FAILURE_MESSAGES = {
   unsafe_directory: "The selected directory failed validation. Check its path, ownership, permissions, and symlinks; do not blindly relax permissions.",
 };
 
+function validArtifactError(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).sort().join(',') === 'column,line,path' &&
+    typeof value.path === 'string' && value.path.length <= 4096 &&
+    value.path.split('/').every(part=>/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(part) && part!=='.' && part!=='..') &&
+    (value.line===null && value.column===null ||
+      Number.isSafeInteger(value.line) && value.line>0 && value.line<=4*1024*1024+1 &&
+      Number.isSafeInteger(value.column) && value.column>0 && value.column<=4*1024*1024+1);
+}
+
 function validatedFailureCode(value) {
   if (
     value && typeof value === "object" && !Array.isArray(value) &&
-    Object.keys(value).sort().join("\n") === "boundary\nerror\nerrorCode\nkind\nschemaVersion\nstatus" &&
+    Object.keys(value).filter(key=>key!=='artifactError').sort().join("\n") === "boundary\nerror\nerrorCode\nkind\nschemaVersion\nstatus" &&
+    (!Object.hasOwn(value,'artifactError') || value.errorCode==='invalid_json_artifact' && validArtifactError(value.artifactError)) &&
     value.schemaVersion === 1 && value.kind === "ods-pixel-workspace-preview" &&
     value.status === "failed" && value.boundary === BOUNDARY &&
     value.error === "ODS workspace preview publication failed" &&
@@ -203,14 +245,15 @@ function validatedFailureCode(value) {
   return undefined;
 }
 
-function failedResult(code) {
+function failedResult(code, diagnostic) {
+  const location = diagnostic ? ` Artifact ${JSON.stringify(diagnostic.path)}${diagnostic.line===null ? '' : ` at line ${diagnostic.line}, column ${diagnostic.column}`}.` : '';
   return {
     content: [{
       type: "text",
       text: code === "cancelled"
         ? "Pixel stopped waiting for preview publication. A request already accepted by the host may still complete; no new verified preview receipt is returned."
         : code
-        ? `ODS could not publish the preview. ${FAILURE_MESSAGES[code]} Do not claim a localhost URL is live until publication succeeds.`
+        ? `ODS could not publish the preview.${location} ${FAILURE_MESSAGES[code]} Do not claim a localhost URL is live until publication succeeds.`
         : "ODS could not publish a verified browser preview. Keep the site files in the workspace, correct the reported file or entry-point problem if one was returned, and do not claim a localhost URL is live.",
     }],
     details: {
@@ -219,6 +262,7 @@ function failedResult(code) {
       status: "failed",
       errorCode: code ?? "unavailable",
       boundary: BOUNDARY,
+      ...(diagnostic ? {artifactError:diagnostic} : {}),
     },
     isError: true,
   };
@@ -230,7 +274,7 @@ export function createWorkspacePreviewTool({ request, transport = "unix" } = {})
   return {
     name: "pixel_ods_workspace_preview",
     description:
-      "Publish and verify a static visual artifact already created by the active model in Pixel's writable workspace. Pass only relativeDirectory after writing the complete site, app, SVG, game, or visualization with workspace tools. ODS never supplies creative starter bytes: it validates and snapshots the model-authored files, then returns the only localhost URL Pixel may claim is browser-accessible. Never start a sandbox server. Dashboard previews have opaque origins: localStorage/sessionStorage property getters, reads and writes may throw. Guard every storage access/operation with try/catch and keep an in-memory fallback; optional persistence must not block startup or controls. Do not claim durable storage or weaken isolation. HTTP readback does not prove startup or interactions.",
+      "Publish and verify a static visual artifact already created by the active model in Pixel's writable workspace. Pass only relativeDirectory after writing the complete site, app, SVG, game, or visualization with workspace tools. ODS never supplies creative starter bytes: it validates and snapshots the model-authored files, then returns the only localhost URL Pixel may claim is browser-accessible. Never start a sandbox server. " + PREVIEW_RUNTIME_CONTRACT + " " + DERIVED_ARTIFACT_CONTRACT,
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -239,7 +283,7 @@ export function createWorkspacePreviewTool({ request, transport = "unix" } = {})
         relativeDirectory: {
           type: "string",
           description:
-            "Static-site directory relative to the Pixel workspace; it must already contain model-authored index.html.",
+            "Static-site directory relative to the Pixel workspace; it must already contain model-authored index.html. Each path component must start with a letter or digit, followed by letters, digits, dots, underscores or hyphens; hidden directories are not publishable. Maximum 128 characters per component, 12 components and 512 characters total.",
         },
       },
     },
@@ -250,7 +294,7 @@ export function createWorkspacePreviewTool({ request, transport = "unix" } = {})
         const raw = await request(normalized, { signal });
         signal?.throwIfAborted();
         const failureCode = validatedFailureCode(raw);
-        if (failureCode) return failedResult(failureCode);
+        if (failureCode) return failedResult(failureCode, raw.artifactError);
         const response = validResponse(raw, normalized);
         return {
           content: [{
@@ -258,8 +302,13 @@ export function createWorkspacePreviewTool({ request, transport = "unix" } = {})
             text:
               `ODS independently published and read back ${response.files} workspace static files ` +
               `(${response.bytes} bytes). Verified browser URL: ${response.url}. ` +
+              `Inspection snapshot: ${JSON.stringify({siteId:response.siteId,sha256:response.sha256})}. ` +
+              'Use pixel_ods_workspace_preview_inspect for this owned preview, not public web_fetch or shell HTTP. Copy both identifiers exactly; sha256 is the full snapshot digest, not entrySha256 or the shortened site suffix. ' +
+              'Publication does not render the page; the inspection result also reports its rendered colors by area. Check them before claiming a visible color or style change. ' +
               publishedPathFeedback(response) +
-              "This receipt proves publication and HTTP readback only, not successful startup, interactions or durable browser storage. Verify requested behavior in the actual preview before claiming it works.",
+              emptyPathFeedback(response) +
+              "This receipt proves publication and HTTP readback only, not successful startup, interactions or durable browser storage. Verify requested behavior in the actual preview before claiming it works. " +
+              "If the owner requested derived source files or process logs, publication does not verify their correspondence to executed files or output. If that comparison is missing or fails, repair from the final executed bytes and republish before claiming completion.",
           }],
           details: response,
         };

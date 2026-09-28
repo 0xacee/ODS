@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createWorkspacePreviewTool,
+  EMPTY_PUBLISHED_FILES_PREFIX,
   normalizeWorkspacePreviewParams,
   testing,
 } from "../plugin/workspace-preview.mjs";
@@ -67,10 +68,12 @@ test("exposes a publish-only schema with no creative generator input", () => {
   assert.match(tool.description, /already created by the active model/);
   assert.match(tool.description, /never supplies creative starter bytes/i);
   assert.match(tool.description, /localStorage\/sessionStorage property getters, reads and writes may throw/);
-  assert.match(tool.description, /Guard every storage access\/operation with try\/catch and keep an in-memory fallback/);
-  assert.match(tool.description, /optional persistence must not block startup or controls/);
-  assert.match(tool.description, /Do not claim durable storage or weaken isolation/);
-  assert.match(tool.description, /HTTP readback does not prove startup or interactions/);
+  assert.match(tool.description, /Guard every storage access\/operation with try\/catch and an in-memory fallback/);
+  assert.match(tool.description, /Saving failure must not block startup, controls or continued work/);
+  assert.match(tool.description, /Never promise persistence or add allow-same-origin to bypass isolation/);
+  assert.match(tool.description, /blocks alert\(\), confirm\(\) and prompt\(\); use inline DOM controls, including date inputs/);
+  assert.match(tool.description, /remote scripts, styles, fonts, images and API requests are blocked/);
+  assert.match(tool.description, /HTTP readback proves publication, not startup or interactions/);
   assert.doesNotMatch(JSON.stringify(tool.parameters), /scaffold|template|title|tagline|theme/);
 });
 
@@ -85,8 +88,14 @@ test("publishes only the exact existing workspace directory", async () => {
   const result = await tool.execute("call-1", { relativeDirectory: "demo-site" });
   assert.equal(result.isError, undefined);
   assert.equal(result.details.readbackVerified, true);
+  const snapshot=JSON.parse(result.content[0].text.match(/Inspection snapshot: (\{[^}]+\})\./)[1]);
+  assert.deepEqual(snapshot,{siteId:result.details.siteId,sha256:result.details.sha256});
+  assert.notEqual(snapshot.sha256,result.details.entrySha256);
+  assert.match(result.content[0].text,/pixel_ods_workspace_preview_inspect/);
   assert.match(result.content[0].text, /independently published and read back/);
   assert.match(result.content[0].text, /publication and HTTP readback only, not successful startup, interactions or durable browser storage/);
+  // Publication renders nothing; the palette arrives with inspection.
+  assert.match(result.content[0].text, /Publication does not render the page; the inspection result also reports its rendered colors by area\. Check them before claiming a visible color or style change\. /);
   assert.deepEqual(calls, [{
     schemaVersion: 1,
     action: "publish",
@@ -184,6 +193,36 @@ test("receipt names only delivered files when requested source copies remain out
   assert.match(result.content[0].text, /does not determine whether requested files or checks are missing/);
 });
 
+test("invalid JSON publication requests repair from actual source bytes", async () => {
+  const tool = createWorkspacePreviewTool({request:async()=>({
+    schemaVersion:1,kind:'ods-pixel-workspace-preview',status:'failed',
+    boundary:testing.BOUNDARY,error:'ODS workspace preview publication failed',
+    errorCode:'invalid_json_artifact',artifactError:{path:'export.json',line:2,column:18},
+  })});
+  const result=await tool.execute('invalid-source-export',{relativeDirectory:'project/public'});
+  assert.equal(result.isError,true);
+  assert.equal(result.details.errorCode,'invalid_json_artifact');
+  assert.match(result.content[0].text,/actual final files.*JSON serializer.*parse it back/);
+  assert.match(result.content[0].text,/Do not hand-transcribe/);
+  assert.match(result.content[0].text,/export.json.*line 2, column 18/);
+  assert.deepEqual(result.details.artifactError,{path:'export.json',line:2,column:18});
+});
+
+test('invalid artifact diagnostics cannot reveal uncontracted host details',async()=>{
+  for(const artifactError of [
+    {path:'/etc/private.json',line:1,column:1},
+    {path:'../private.json',line:1,column:1},
+    {path:'export.json',line:1,column:1,content:'secret'},
+    {path:'export.json',line:-1,column:1},
+    {path:'export.json',line:null,column:1},
+  ]){
+    const tool=createWorkspacePreviewTool({request:async()=>({schemaVersion:1,kind:'ods-pixel-workspace-preview',status:'failed',boundary:testing.BOUNDARY,error:'ODS workspace preview publication failed',errorCode:'invalid_json_artifact',artifactError})});
+    const result=await tool.execute('invalid-diagnostic',{relativeDirectory:'project/public'});
+    assert.equal(result.details.errorCode,'unavailable');
+    assert.doesNotMatch(JSON.stringify(result),/private|secret/);
+  }
+});
+
 test("bounded lists explicitly report omitted paths and never claim completeness", async () => {
   const tool = createWorkspacePreviewTool({ request: async () => succeededResponse({
     publishedPaths: ["assets/app.js"], publishedPathsOmitted: 2,
@@ -225,6 +264,78 @@ test("rejects unsafe, unbounded, inconsistent or incomplete file-list receipts",
   ]) {
     const tool = createWorkspacePreviewTool({ request: async () => succeededResponse(fields) });
     const result = await tool.execute("bad-list", { relativeDirectory: "demo-site" });
+    assert.equal(result.isError, true, JSON.stringify(fields));
+    assert.equal(result.details.status, "failed");
+    assert.doesNotMatch(JSON.stringify(result), /private\.txt|secret\.txt/);
+  }
+});
+
+// tower1 7402eb38 coding journey: `2>&1 > public/test-results.txt` left the
+// published file empty and the final answer called it the unittest output.
+const FLEET_EMPTY_RECEIPT = {
+  relativeDirectory: "fleet-qualification-489210351f87-coding/public",
+  publishedPaths: ["index.html", "sources.json", "test-results.txt"], publishedPathsOmitted: 0,
+  publishedEmptyPaths: ["test-results.txt"], publishedEmptyPathsOmitted: 0,
+};
+
+test("receipt names zero-byte published files without failing publication", async () => {
+  const tool = createWorkspacePreviewTool({ request: async () => succeededResponse(FLEET_EMPTY_RECEIPT) });
+  const result = await tool.execute("fleet-empty", { relativeDirectory: FLEET_EMPTY_RECEIPT.relativeDirectory });
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.status, "succeeded");
+  assert.deepEqual(result.details.publishedEmptyPaths, ["test-results.txt"]);
+  const text = result.content[0].text;
+  assert.equal(EMPTY_PUBLISHED_FILES_PREFIX, "Published files that are empty (0 bytes): ");
+  assert.ok(text.includes("Published files that are empty (0 bytes): test-results.txt. "), text);
+  assert.equal(text.split(EMPTY_PUBLISHED_FILES_PREFIX).length, 2);
+  assert.match(text, /Verified browser URL: http:\/\/site-/);
+});
+
+test("empty-file note lists every shown path and counts the omitted ones", async () => {
+  const tool = createWorkspacePreviewTool({ request: async () => succeededResponse({
+    files: 40, publishedPaths: ["app.js", "index.html"], publishedPathsOmitted: 38,
+    publishedEmptyPaths: ["app.js", "logs/run.txt"], publishedEmptyPathsOmitted: 3,
+  }) });
+  const result = await tool.execute("bounded-empty", { relativeDirectory: "demo-site" });
+  assert.equal(result.isError, undefined);
+  assert.ok(result.content[0].text.includes(`${EMPTY_PUBLISHED_FILES_PREFIX}app.js, logs/run.txt, 3 more. `));
+});
+
+test("no empty-file note when nothing is empty or the host sent no empty-file list", async () => {
+  for (const fields of [
+    { publishedPaths: ["index.html", "test-results.txt"], publishedPathsOmitted: 1,
+      publishedEmptyPaths: [], publishedEmptyPathsOmitted: 0 },
+    { publishedPaths: ["index.html", "test-results.txt"], publishedPathsOmitted: 1 },
+    {},
+  ]) {
+    const tool = createWorkspacePreviewTool({ request: async () => succeededResponse(fields) });
+    const result = await tool.execute("no-empty", { relativeDirectory: "demo-site" });
+    assert.equal(result.isError, undefined, JSON.stringify(fields));
+    assert.doesNotMatch(result.content[0].text, /empty \(0 bytes\)/);
+  }
+});
+
+test("rejects empty-file lists that are unsafe, unbounded or inconsistent with the file list", async () => {
+  const paths = { publishedPaths: ["index.html", "sources.json", "test-results.txt"], publishedPathsOmitted: 0 };
+  for (const fields of [
+    { publishedEmptyPaths: ["test-results.txt"], publishedEmptyPathsOmitted: 0 },
+    { ...paths, publishedEmptyPaths: ["test-results.txt"] },
+    { ...paths, publishedEmptyPathsOmitted: 0 },
+    { ...paths, publishedEmptyPaths: ["index.html"], publishedEmptyPathsOmitted: 0 },
+    { ...paths, publishedEmptyPaths: ["other.txt"], publishedEmptyPathsOmitted: 0 },
+    { ...paths, publishedEmptyPaths: ["test-results.txt", "sources.json"], publishedEmptyPathsOmitted: 0 },
+    { ...paths, publishedEmptyPaths: ["sources.json", "sources.json"], publishedEmptyPathsOmitted: 0 },
+    { ...paths, publishedEmptyPaths: ["sources.json", "test-results.txt"], publishedEmptyPathsOmitted: 1 },
+    { ...paths, publishedEmptyPaths: ["test-results.txt"], publishedEmptyPathsOmitted: -1 },
+    { ...paths, publishedEmptyPaths: ["test-results.txt"], publishedEmptyPathsOmitted: 0.5 },
+    { ...paths, publishedEmptyPaths: "test-results.txt", publishedEmptyPathsOmitted: 0 },
+    { ...paths, publishedEmptyPaths: ["../private.txt"], publishedEmptyPathsOmitted: 0 },
+    { ...paths, publishedEmptyPaths: ["a\nsecret.txt"], publishedEmptyPathsOmitted: 0 },
+    { files: 40, publishedPaths: ["index.html"], publishedPathsOmitted: 39,
+      publishedEmptyPaths: Array.from({ length: 33 }, (_, i) => `e${String(i).padStart(2, "0")}.txt`), publishedEmptyPathsOmitted: 0 },
+  ]) {
+    const tool = createWorkspacePreviewTool({ request: async () => succeededResponse(fields) });
+    const result = await tool.execute("bad-empty-list", { relativeDirectory: "demo-site" });
     assert.equal(result.isError, true, JSON.stringify(fields));
     assert.equal(result.details.status, "failed");
     assert.doesNotMatch(JSON.stringify(result), /private\.txt|secret\.txt/);

@@ -89,6 +89,7 @@ describe('Pixel', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('formats short and long owner-agent turn durations', () => {
@@ -211,6 +212,12 @@ describe('Pixel', () => {
   })
 
   it('restores the verified preview after reload and preserves an explicit close', async () => {
+    // Persistence and navigation do not depend on reveal animation timing.
+    // PortalStreamingText.test.jsx exercises the animated response lifecycle.
+    const matchMedia = globalThis.matchMedia
+    vi.stubGlobal('matchMedia', query => query === '(prefers-reduced-motion: reduce)'
+      ? { matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }
+      : matchMedia(query))
     const sha256 = 'a'.repeat(64)
     const siteId = `site-${sha256.slice(0, 24)}`
     const preview = {
@@ -1882,7 +1889,7 @@ describe('Pixel', () => {
       method: 'POST',
     }))
     expect(stopped.parentElement).toHaveClass('pixel-stopped-response', 'bg-transparent')
-    expect(stopped.parentElement).not.toHaveClass('bg-amber-500/10', 'border-amber-500/30')
+    expect(stopped.parentElement).not.toHaveClass('bg-theme-text-secondary/10', 'border-theme-border')
     expect(stopped.parentElement).not.toHaveClass('bg-red-500/10')
     expect(screen.getByText('Stopped by you. Workspace changes completed before cancellation were preserved.')).toBeInTheDocument()
     expect(screen.getByText('Available')).toBeInTheDocument()

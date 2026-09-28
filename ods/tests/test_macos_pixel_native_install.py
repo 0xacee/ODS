@@ -50,7 +50,7 @@ def test_preflight_retained_identity_requires_root_proof(tmp_path, monkeypatch, 
     else:
         with pytest.raises(ValueError, match='existing-native-pixel'):
             module.preflight(tmp_path / 'fresh-ods')
-    assert calls == [{'empty_home': False}]
+    assert calls == [{'empty_home': False, 'prompt_for_sudo': False}]
     assert not list(tmp_path.iterdir())
 
 
@@ -86,7 +86,7 @@ def test_preflight_allows_only_root_verified_empty_retained_home(
     else:
         with pytest.raises(ValueError, match='existing-native-pixel'):
             module.preflight(tmp_path / 'fresh-ods')
-    assert calls == ([{'empty_home': True}] if receipt else [])
+    assert calls == ([{'empty_home': True, 'prompt_for_sudo': False}] if receipt else [])
 
 
 def test_retained_identity_proof_is_read_only_and_fails_closed(monkeypatch):
@@ -104,8 +104,63 @@ def test_retained_identity_proof_is_read_only_and_fails_closed(monkeypatch):
     assert module.retained_identity_only(empty_home=True) is True
     assert calls[1][0][-1] == '--verify-empty-home-only'
     monkeypatch.setattr(module.subprocess, 'run',
-        lambda *args, **kwargs: SimpleNamespace(returncode=1))
+        lambda *args, **kwargs: SimpleNamespace(returncode=os.EX_DATAERR))
     assert module.retained_identity_only() is False
+
+
+@pytest.mark.parametrize('prompt,stdin_tty,stderr_tty,interactive', [
+    (False, True, True, False), (True, False, True, False),
+    (True, True, False, False), (True, True, True, True)])
+def test_identity_prompt_requires_explicit_opt_in_and_terminal(
+        monkeypatch, prompt, stdin_tty, stderr_tty, interactive):
+    monkeypatch.setattr(module.sys.stdin, 'isatty', lambda: stdin_tty)
+    monkeypatch.setattr(module.sys.stderr, 'isatty', lambda: stderr_tty)
+    calls = []
+    monkeypatch.setattr(module.subprocess, 'run', lambda argv, **kw:
+        calls.append((argv, kw)) or SimpleNamespace(returncode=0))
+    assert module.retained_identity_only(prompt_for_sudo=prompt)
+    argv, kw = calls[0]
+    assert ('-n' not in argv) == interactive
+    assert kw['stdin'] == (None if interactive else subprocess.DEVNULL)
+    assert kw['stderr'] == (None if interactive else subprocess.PIPE)
+    assert argv[-1] == '--verify-identity-only'
+
+
+@pytest.mark.parametrize('result', [1, 127, -9])
+def test_sudo_failure_is_not_reported_as_invalid_existing_state(monkeypatch, result):
+    monkeypatch.setattr(module.subprocess, 'run',
+        lambda *args, **kw: SimpleNamespace(returncode=result))
+    with pytest.raises(ValueError, match='native-identity-authorization-required'):
+        module.retained_identity_only()
+    guidance = module.ERROR_GUIDANCE['native-identity-authorization-required']
+    assert 'sudo -v' in guidance and 'same terminal' in guidance
+
+
+@pytest.mark.parametrize('error', [OSError('missing'), subprocess.TimeoutExpired('sudo', 60)])
+def test_identity_verifier_unavailable_fails_closed(monkeypatch, error):
+    def run(*args, **kw):
+        raise error
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    with pytest.raises(ValueError, match='native-identity-verification-unavailable'):
+        module.retained_identity_only()
+
+
+@pytest.mark.parametrize('noninteractive,dryrun,prompt', [
+    ('false', 'false', True), ('true', 'false', False),
+    ('false', 'true', False), ('true', 'true', False)])
+def test_shell_preflight_prompt_policy(noninteractive, dryrun, prompt):
+    source = (ROOT / 'installers/macos/install-macos.sh').read_text()
+    start = source.index('    _pixel_install_args=(--install-dir')
+    stop = source.index('    ENABLE_HERMES=false', start)
+    block = source[start:stop].replace('/usr/bin/python3', 'fixture_python')
+    script = '''
+set -eu
+LIB_DIR=/fixture; INSTALL_DIR=/fixture/ods
+fixture_python() { printf '%s\n' "$@"; }
+''' + f'NON_INTERACTIVE={noninteractive}; DRY_RUN={dryrun}\n' + block
+    result = subprocess.run(['bash'], input=script, text=True, capture_output=True, check=True)
+    assert ('--prompt-for-sudo' in result.stdout.splitlines()) == prompt
+    assert '--preflight-only' in result.stdout.splitlines()
 
 
 @pytest.mark.parametrize('fault', [None, 'ref', 'compose', 'remote', 'project', 'services', 'image', 'probe', 'prepare', 'activate'])
@@ -259,19 +314,41 @@ def test_base_reinstall_stops_before_changing_a_native_installation(tmp_path, st
     elif state == 'broken-link':
         native.symlink_to(tmp_path / 'missing')
     script = (ROOT / 'installers/macos/install-macos.sh').read_text()
-    start = script.index('if ! $ENABLE_PIXEL && [[ -e "${INSTALL_DIR}/data/pixel-native"')
-    stop = script.index('\nif $ENABLE_PIXEL; then', start)
+    start = script.index('if ! $PREFLIGHT_ONLY && ! $ENABLE_PIXEL && [[ -e "${INSTALL_DIR}/data/pixel-native"')
+    stop = script.index('\nif $ENABLE_PIXEL && ! $PREFLIGHT_ONLY; then', start)
     assert stop < script.index('ods_prepare_install_log "$ODS_LOG_FILE" || exit 1')
     shell = 'set -euo pipefail\nai_err() { echo "$*" >&2; }\nai() { echo "$*"; }\n' + script[start:stop] + '\nprintf reached-base-install\n'
-    result = subprocess.run(['bash'], input=shell, text=True, capture_output=True,
-        env={**os.environ, 'ENABLE_PIXEL': 'false', 'INSTALL_DIR': str(tmp_path)})
+
+    def run(preflight_only):
+        return subprocess.run(['bash'], input=shell, text=True, capture_output=True,
+            env={**os.environ, 'ENABLE_PIXEL': 'false', 'PREFLIGHT_ONLY': preflight_only,
+                 'INSTALL_DIR': str(tmp_path)})
+
+    def assert_native_unchanged():
+        if state == 'existing': assert (native / 'owner-data').read_text() == 'keep exactly'
+        elif state == 'broken-link': assert native.is_symlink()
+        else: assert not os.path.lexists(native)
+
+    result = run('false')
     if state == 'absent':
         assert result.returncode == 0 and result.stdout == 'reached-base-install'
     else:
         assert result.returncode != 0 and 'reached-base-install' not in result.stdout
         assert 'Existing native Pixel installation detected' in result.stderr
-        if state == 'existing': assert (native / 'owner-data').read_text() == 'keep exactly'
-        else: assert native.is_symlink()
+    assert_native_unchanged()
+
+    # get-ods.sh --force runs --preflight-only while the installation it will
+    # replace, including native Pixel state its candidate uninstaller retires,
+    # is still on disk, so that mode skips this tree-state guard. It must still
+    # change nothing: it exits after Phase 1, before hardware detection and
+    # before the native Pixel installer can run.
+    result = run('true')
+    assert result.returncode == 0 and result.stdout == 'reached-base-install'
+    assert_native_unchanged()
+    preflight_exit = script.index(
+        'if $PREFLIGHT_ONLY; then\n    ai_ok "Preflight passed; no changes were made."\n    exit 0\nfi\n')
+    assert preflight_exit < script.index('# PHASE 2 -- HARDWARE DETECTION')
+    assert preflight_exit < script.index('if ! /usr/bin/python3 "$LIB_DIR/pixel-native-install.py"')
 
 
 # Run native retirement contracts in the existing cross-platform lifecycle CI
@@ -281,3 +358,17 @@ _retirement_spec = importlib.util.spec_from_file_location('native_retirement_con
 _retirement_tests = importlib.util.module_from_spec(_retirement_spec)
 _retirement_spec.loader.exec_module(_retirement_tests)
 RetirementSelection = _retirement_tests.RetirementSelection
+
+
+# Collect polling regressions in the existing macOS installer CI entrypoint.
+# The standalone file remains available for focused operator validation.
+_health_poll_spec = importlib.util.spec_from_file_location('native_health_poll_contracts',
+    ROOT / 'tests/test_macos_pixel_health_poll.py')
+_health_poll_contracts = importlib.util.module_from_spec(_health_poll_spec)
+_health_poll_spec.loader.exec_module(_health_poll_contracts)
+test_transient_timeout_then_healthy = _health_poll_contracts.test_transient_timeout_then_healthy
+test_persistent_timeout_stops_at_90 = _health_poll_contracts.test_persistent_timeout_stops_at_90
+test_late_healthy_response_rejected = _health_poll_contracts.test_late_healthy_response_rejected
+test_valid_ndjson = _health_poll_contracts.test_valid_ndjson
+test_rejected_outputs = _health_poll_contracts.test_rejected_outputs
+test_nonzero_returncode_rejected = _health_poll_contracts.test_nonzero_returncode_rejected

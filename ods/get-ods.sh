@@ -26,12 +26,20 @@ fi
 BOOTSTRAP_FORCE=false
 BOOTSTRAP_NON_INTERACTIVE=false
 BOOTSTRAP_REINSTALL=false
+BOOTSTRAP_RECOVER_STRANDED=false
+BOOTSTRAP_KEEP_MODELS=false
+BOOTSTRAP_HELP=false
+BOOTSTRAP_INSTALL_ARGS=()
 for _arg in "$@"; do
     case "$_arg" in
+        --keep-models) BOOTSTRAP_KEEP_MODELS=true; continue ;;
+        -h|--help) BOOTSTRAP_HELP=true ;;
         --force) BOOTSTRAP_FORCE=true ;;
         --non-interactive) BOOTSTRAP_NON_INTERACTIVE=true ;;
     esac
+    BOOTSTRAP_INSTALL_ARGS+=("$_arg")
 done
+set -- "${BOOTSTRAP_INSTALL_ARGS[@]}"
 
 # Colors
 RED='\033[0;31m'
@@ -60,6 +68,54 @@ log()     { echo -e "${CYAN}[ods]${NC} $1"; }
 success() { echo -e "${GREEN}[  ok ]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[warn ]${NC} $1"; }
 error()   { echo -e "${RED}[error]${NC} $1"; exit 1; }
+
+# This bootstrap-only option is consumed before the platform installer sees it.
+if [[ "$BOOTSTRAP_HELP" == true ]]; then
+    cat <<'HELP'
+ODS Bootstrap Installer
+Usage: get-ods.sh [--force [--keep-models]] [INSTALLER OPTIONS]
+  --force         Replace an existing, identified ODS installation. The requested
+                  installer's preflight checks this host before anything is removed.
+  --keep-models   With --force, retain data/models and restore it before install.
+                  Uses an install-adjacent .models-backup on the same filesystem.
+                  Existing adjacent or legacy ~/.ods-models-backup needs recovery.
+                  Source, runtime, configuration and other user data are replaced.
+                  Restored models still use the ordinary installer validation.
+                  Also resumes a tree an interrupted --keep-models run left
+                  with its models but without .env.
+  --non-interactive  Run without interactive prompts.
+  -h, --help      Show this bootstrap help without cloning or installing.
+Other options are passed unchanged to install.sh (see install.sh --help).
+HELP
+    exit 0
+fi
+if [[ "$BOOTSTRAP_KEEP_MODELS" == true && "$BOOTSTRAP_FORCE" != true ]]; then
+    error "--keep-models requires --force and an existing ODS installation."
+fi
+
+validate_bootstrap_model_preservation() {
+    [[ "$BOOTSTRAP_KEEP_MODELS" == true ]] || return 0
+    command -v python3 >/dev/null 2>&1 || {
+        warn "Python 3 is required for safe same-filesystem model preservation."
+        return 1
+    }
+    validate_force_reinstall_target "$INSTALL_DIR" \
+        || validate_force_reinstall_target "$INSTALL_DIR" stranded \
+        || return 1
+    [[ -n "${HOME:-}" && "$HOME" == /* ]] || return 1
+    [[ ! -e "$HOME/.ods-models-backup" && ! -L "$HOME/.ods-models-backup" ]] || return 1
+    [[ ! -e "${INSTALL_DIR%/}.models-backup" && ! -L "${INSTALL_DIR%/}.models-backup" ]] || return 1
+    [[ ! -L "$INSTALL_DIR/data" && ! -L "$INSTALL_DIR/data/models" ]] || return 1
+    [[ ! -e "$INSTALL_DIR/data/models" || -d "$INSTALL_DIR/data/models" ]]
+}
+
+restore_bootstrap_models() {
+    [[ "$BOOTSTRAP_KEEP_MODELS" == true ]] || return 0
+    # Run the exact candidate helper used to preserve the directory. Older
+    # candidates cannot silently fall back to copying a large cache into HOME.
+    python3 "$BOOTSTRAP_MODEL_HELPER" restore "$INSTALL_DIR" || return 1
+    success "Restored retained model cache; normal installer validation still applies"
+}
 
 secure_pixel_catalog_sources() {
     local install_dir="$1" source
@@ -114,15 +170,32 @@ remove_install_dir() {
     return 1
 }
 
+# Fingerprint an ODS tree that --force may replace. The default kind is a
+# configured installation, identified by its .env. The "stranded" kind is what
+# an interrupted --keep-models reinstall leaves behind: the candidate
+# uninstaller removed the old installation, fresh source was laid down and the
+# retained models restored, and then the installer stopped before writing
+# .env. It must carry the same source fingerprint, no .env at all (not even a
+# dangling link) and a real data/models directory.
 validate_force_reinstall_target() {
-    local target_dir="$1" target_real bootstrap_real
+    local target_dir="$1" target_kind="${2:-installed}" target_real bootstrap_real
 
     [[ "$target_dir" == /* ]] || return 1
     [[ -d "$target_dir" && ! -L "$target_dir" ]] || return 1
     target_real="$(cd -P -- "$target_dir" 2>/dev/null && pwd -P)" || return 1
     bootstrap_real="$(cd -P -- "$ODS_BOOTSTRAP_ROOT" 2>/dev/null && pwd -P)" || return 1
     [[ "$target_real" != / && "$target_real" != "$bootstrap_real" ]] || return 1
-    [[ -f "$target_dir/.env" && ! -L "$target_dir/.env" ]] || return 1
+    case "$target_kind" in
+        installed)
+            [[ -f "$target_dir/.env" && ! -L "$target_dir/.env" ]] || return 1
+            ;;
+        stranded)
+            [[ ! -e "$target_dir/.env" && ! -L "$target_dir/.env" ]] || return 1
+            [[ -d "$target_dir/data" && ! -L "$target_dir/data" ]] || return 1
+            [[ -d "$target_dir/data/models" && ! -L "$target_dir/data/models" ]] || return 1
+            ;;
+        *) return 1 ;;
+    esac
     [[ -f "$target_dir/ods-cli" && ! -L "$target_dir/ods-cli" ]] || return 1
     [[ -f "$target_dir/ods-uninstall.sh" && ! -L "$target_dir/ods-uninstall.sh" ]] || return 1
     if [[ -f "$target_dir/docker-compose.base.yml" && ! -L "$target_dir/docker-compose.base.yml" ]]; then
@@ -308,6 +381,10 @@ detect_os() {
 OS=$(detect_os)
 log "Detected OS: $OS"
 
+if ! validate_bootstrap_model_preservation; then
+    error "Cannot preserve models: --keep-models requires a recognized existing install, a real data/models directory, and no existing adjacent or legacy model backup. Resolve any backup or symlink conflict before retrying."
+fi
+
 case "$OS" in
     linux|wsl)
         success "Linux/WSL detected — full support"
@@ -446,6 +523,13 @@ if [[ -d "$INSTALL_DIR" ]]; then
             echo ""
             exit 0
         fi
+    elif [[ "$BOOTSTRAP_FORCE" == "true" && "$BOOTSTRAP_KEEP_MODELS" == "true" ]] \
+        && validate_force_reinstall_target "$INSTALL_DIR" stranded; then
+        # Nothing configured is left to protect, but the retained models are.
+        # They stay in place until the requested candidate's preflight passes.
+        BOOTSTRAP_RECOVER_STRANDED=true
+        warn "ODS source with retained models but no .env found at $INSTALL_DIR (an earlier --keep-models reinstall stopped before configuring it)."
+        warn "Resuming that reinstall: models are kept, and the tree is replaced only after the requested candidate's preflight passes."
     else
         warn "Directory exists but incomplete install at $INSTALL_DIR"
         echo ""
@@ -517,42 +601,99 @@ git sparse-checkout set ods 2>/dev/null || {
 # previously interrupted, marker-bound Pixel activation before replacing the
 # product tree. The old install remains untouched until the requested source is
 # cloned and an exact SHA (when supplied) is checked out.
-if [[ "$BOOTSTRAP_REINSTALL" == "true" ]]; then
+#
+# Removal is irreversible, so the requested candidate's installer checks this
+# host first (disk space, OS/architecture, container engine and the rest of its
+# environment preflight). Running those checks only after the uninstaller left
+# hosts that could never take the new install with no working ODS and no .env.
+if [[ "$BOOTSTRAP_REINSTALL" == "true" || "$BOOTSTRAP_RECOVER_STRANDED" == "true" ]]; then
     candidate_uninstaller="$TEMP_DIR/repo/ods/ods-uninstall.sh"
     [[ -f "$candidate_uninstaller" && ! -L "$candidate_uninstaller" ]] \
         || error "Requested ODS source does not contain a safe candidate uninstaller. Existing installation was not replaced."
-    log "Removing the existing installation with the requested candidate uninstaller..."
-    candidate_uninstall_args=(--install-dir "$INSTALL_DIR" --force)
-    if [[ "$BOOTSTRAP_NON_INTERACTIVE" == "true" ]]; then
-        candidate_uninstall_args+=(--non-interactive)
+    if [[ "$BOOTSTRAP_KEEP_MODELS" == true ]]; then
+        BOOTSTRAP_MODEL_HELPER="$TEMP_DIR/repo/ods/lib/model-cache-custody.py"
+        [[ -f "$BOOTSTRAP_MODEL_HELPER" && ! -L "$BOOTSTRAP_MODEL_HELPER" ]] \
+            || error "Requested candidate predates same-filesystem model preservation; use a newer candidate or recover models explicitly. Existing installation was not replaced."
+        python3 "$BOOTSTRAP_MODEL_HELPER" preflight "$INSTALL_DIR" \
+            || error "Model preservation preflight failed. Existing installation was not replaced."
     fi
-    if ! bash "$candidate_uninstaller" "${candidate_uninstall_args[@]}"; then
-        error "Candidate uninstall failed. Existing installation was not replaced."
+    candidate_preflight="$TEMP_DIR/repo/ods/installers/reinstall-preflight.sh"
+    [[ -f "$candidate_preflight" && ! -L "$candidate_preflight" ]] \
+        || error "Requested candidate predates the forced-reinstall preflight, so it cannot check this host before removing the existing installation. Use a newer candidate, or run the installed ods-uninstall.sh yourself before installing this one. Existing installation was not replaced."
+    log "Checking this host with the requested candidate's installer preflight before replacing $INSTALL_DIR..."
+    candidate_preflight_args=(--install-dir "$INSTALL_DIR")
+    if [[ "$BOOTSTRAP_KEEP_MODELS" == true ]]; then
+        candidate_preflight_args+=(--keep-models)
     fi
-    [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] \
-        || error "Candidate uninstall returned success but left the existing install path behind; refusing to overlay it."
-    success "Existing installation removed by the requested candidate"
+    if ! bash "$candidate_preflight" "${candidate_preflight_args[@]}" -- "$@"; then
+        error "The requested candidate's installer preflight failed on this host. Existing installation was not replaced; resolve the problem above and re-run the same command."
+    fi
+    success "Requested candidate's installer preflight passed"
+
+    if [[ "$BOOTSTRAP_REINSTALL" == "true" ]]; then
+        log "Removing the existing installation with the requested candidate uninstaller..."
+        candidate_uninstall_args=(--install-dir "$INSTALL_DIR" --force)
+        if [[ "$BOOTSTRAP_KEEP_MODELS" == true ]]; then
+            candidate_uninstall_args+=(--keep-models)
+        fi
+        if [[ "$BOOTSTRAP_NON_INTERACTIVE" == "true" ]]; then
+            candidate_uninstall_args+=(--non-interactive)
+        fi
+        if ! bash "$candidate_uninstaller" "${candidate_uninstall_args[@]}"; then
+            error "Candidate uninstall failed. Existing installation was not replaced."
+        fi
+        [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] \
+            || error "Candidate uninstall returned success but left the existing install path behind; refusing to overlay it."
+        success "Existing installation removed by the requested candidate"
+    else
+        # The earlier run's uninstaller already removed services, volumes and
+        # configuration, and an installer that stops before writing .env has
+        # not created new ones. Like any incomplete tree under --force, this
+        # one is replaced, but its models first move into the same custody
+        # the uninstaller uses so the normal restore below brings them back.
+        validate_force_reinstall_target "$INSTALL_DIR" stranded \
+            || error "$INSTALL_DIR changed during the preflight; nothing was removed."
+        python3 "$BOOTSTRAP_MODEL_HELPER" preserve "$INSTALL_DIR" >/dev/null \
+            || error "Could not retain models from $INSTALL_DIR, so it was not removed. If ${INSTALL_DIR%/}.models-backup now exists, recover it before retrying."
+        remove_install_dir "$INSTALL_DIR" \
+            || error "Could not remove the incomplete tree at $INSTALL_DIR. Retained models are in ${INSTALL_DIR%/}.models-backup; keep its custody.json for recovery."
+        [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] \
+            || error "The incomplete tree at $INSTALL_DIR was not fully removed. Retained models are in ${INSTALL_DIR%/}.models-backup; keep its custody.json for recovery."
+        success "Incomplete tree replaced; retained models will be restored"
+    fi
 fi
 
 # Move ods to install location (exclude dev-only files)
 if [[ -d "$TEMP_DIR/repo/ods" ]]; then
-    # Use rsync to exclude development files not needed at runtime
+    # Use rsync to exclude development files not needed at runtime.
+    # Development-only paths are anchored to the product root ('/tests/', not
+    # 'tests/'): an unanchored rsync pattern matches a basename at any depth.
+    # That stripped every nested *.md, tests/, docs/ and examples/ path,
+    # including files extension recipes COPY at build time (mapshaper and
+    # blockbench ship their README.md in the image), so their one-click
+    # installs failed with '"/README.md": not found'. This bootstrap tree is
+    # also the extension library source for bootstrap installs (phase 06).
+    # The macOS and Windows installers anchor the same way.
+    # tests/test-extension-build-context-materialization.py replays this list
+    # against every extension build context.
+    _ods_bootstrap_copy_filters=(
+        --exclude='/tests/'
+        --exclude='/docs/'
+        --exclude='/examples/'
+        --exclude='/.github/'
+        --exclude='/*.md'
+        --exclude='/.shellcheckrc'
+        --exclude='/PSScriptAnalyzerSettings.psd1'
+        --exclude='/test-stack.sh'
+        --exclude='/.gitignore'
+        --exclude='__pycache__/'
+        --exclude='*.pyc'
+        --exclude='.pytest_cache/'
+        --exclude='node_modules/'
+        --include='LICENSE'
+    )
     if command -v rsync >/dev/null 2>&1; then
-        rsync -a \
-            --exclude='tests/' \
-            --exclude='docs/' \
-            --exclude='examples/' \
-            --exclude='.github/' \
-            --exclude='*.md' \
-            --exclude='.shellcheckrc' \
-            --exclude='PSScriptAnalyzerSettings.psd1' \
-            --exclude='test-stack.sh' \
-            --exclude='.gitignore' \
-            --exclude='__pycache__/' \
-            --exclude='*.pyc' \
-            --exclude='.pytest_cache/' \
-            --exclude='node_modules/' \
-            --include='LICENSE' \
+        rsync -a "${_ods_bootstrap_copy_filters[@]}" \
             "$TEMP_DIR/repo/ods/" "$INSTALL_DIR/"
     else
         # Fallback to cp if rsync not available
@@ -565,6 +706,10 @@ if [[ -d "$TEMP_DIR/repo/ods" ]]; then
     fi
 else
     error "ods directory not found in repository."
+fi
+
+if ! restore_bootstrap_models; then
+    error "Could not restore retained models. Any remaining cache is at ${INSTALL_DIR%/}.models-backup (or a legacy $HOME/.ods-models-backup); it was not deliberately purged. Resolve the restore conflict before retrying."
 fi
 
 # Pixel refuses group- or world-writable catalog inputs. Git and rsync preserve

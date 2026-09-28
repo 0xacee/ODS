@@ -47,6 +47,12 @@ jobs:
           node-version: '24'
       - run: node --test ods/extensions/services/pixel-agent/tests/compaction_lock.test.mjs
       - run: node --test ods/extensions/services/pixel-agent/tests/read_range.test.mjs
+      - run: node --test ods/extensions/services/pixel-agent/tests/tool_result_projection.test.mjs
+      - run: node --test ods/extensions/services/pixel-agent/tests/persisted_tool_model_projection.test.mjs ods/extensions/services/pixel-agent/tests/exec_completion_feedback.test.mjs
+      - name: Verify bounded preview delivery across platforms
+        run: |
+          node --test ods/extensions/services/pixel-agent/tests/preview_delivery_recovery.test.mjs
+          node --test --test-name-pattern="saved project|automatic preview|publication .*not retried|concurrent finalizers" ods/extensions/services/pixel-agent/tests/tool_loop_guard.test.mjs
       - name: Install pinned read-tool runtime for integration
         shell: bash
         run: npm install --prefix "$RUNNER_TEMP/read-runtime" --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org openclaw@2026.6.33
@@ -55,6 +61,72 @@ jobs:
         env:
           OPENCLAW_PACKAGE_DIR: ${{ runner.temp }}/read-runtime/node_modules/openclaw
         run: node --test ods/extensions/services/pixel-agent/tests/runtime_read_range.integration.mjs
+      - name: Verify every tool result reaches the model with the pinned projection
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE_DIR: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_tool_result_projection.integration.mjs
+      - name: Verify native compaction lock and abort ownership
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE_DIR: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_compaction_abort.integration.mjs ods/extensions/services/pixel-agent/tests/runtime_compaction_lock.integration.mjs
+      - name: Verify capability bootstrap with the actual pinned runtime
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE_DIR: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node ods/extensions/services/pixel-agent/tests/runtime_bootstrap_capabilities.integration.mjs
+      - name: Verify premature completion with real Pixel runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_preview_delivery.integration.mjs
+      - name: Verify tool feedback reaches the next real provider request
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_exec_completion.integration.mjs
+      - name: Verify every Pixel chat reaches the real provider with one system prompt
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_line_stable.integration.mjs
+      - name: Verify tool results reach real provider requests past the aggregate budget
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_tool_result_delivery.integration.mjs
+      - name: Verify an owner cancel leaves the next message clean with the real runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_cancel_recovery.integration.mjs
+      - name: Verify tool-call arguments reach the tool unchanged in the native macOS stream order
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_diagnostic_stream_writes.integration.mjs
+      - name: Verify tool-limit finalization, stop synthesis and silent-reply recovery with real Pixel runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        # The compaction variant needs the completion-recovery repair that the ODS
+        # installer applies; upstream discards a response followed by a post-turn
+        # compaction. This is the job's last step, so earlier steps keep upstream.
+        run: |
+          set -euo pipefail
+          python3 ods/extensions/services/pixel-agent/host/openclaw_tool_recovery.py \
+            --openclaw-bin "$OPENCLAW_PACKAGE/openclaw.mjs" --state-dir "$RUNNER_TEMP/pixel-completion-repair" --completion-recovery
+          node --test ods/extensions/services/pixel-agent/tests/runtime_progress_finalization.integration.mjs \
+            ods/extensions/services/pixel-agent/tests/runtime_stop_synthesis.integration.mjs \
+            ods/extensions/services/pixel-agent/tests/runtime_owner_visible_reply.integration.mjs
   runtime:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

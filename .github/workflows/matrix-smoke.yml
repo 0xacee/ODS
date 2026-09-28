@@ -31,8 +31,14 @@ jobs:
       - name: WSL Logic Smoke
         run: bash tests/smoke/wsl-logic.sh
 
+      - name: Package-manager CI helper contracts
+        run: python3 -m unittest discover -s tests -p 'test_matrix_*.py' -v
+
       - name: Pixel Execution Cancellation
         run: python3 tests/test_pixel_cancellable_exec.py
+
+      - name: Checkout package retry contract
+        run: python3 tests/test_matrix_checkout_retry.py
 
       - name: Mobile Dispatch Smoke
         run: bash tests/smoke/mobile-dispatch.sh
@@ -136,6 +142,16 @@ jobs:
             done
           }
 
+          configure_zypper_ci_repository_transport() {
+            # The HTTP mirror route can reference files missing on its selected
+            # mirror. Keep official paths and signature checks; use HTTPS.
+            local repository
+            for repository in "${1:-/etc/zypp/repos.d}"/*.repo; do
+              [ -f "$repository" ] || continue
+              sed -i -E 's#^([[:space:]]*(baseurl|gpgkey)[[:space:]]*=[[:space:]]*)http://download\.opensuse\.org/#\1https://download.opensuse.org/#' "$repository"
+            done
+          }
+
           configure_zypper_ci_network() {
             mkdir -p /etc/zypp/zypp.conf.d
             {
@@ -148,14 +164,24 @@ jobs:
             } >/etc/zypp/zypp.conf.d/99-ods-ci-network.conf
           }
 
+          install_apt_checkout_prerequisites() {
+            # Refresh indexes again after a mirror changes during package download.
+            # Avoid stale proxy responses while retaining repository signatures.
+            bounded 180 apt-get -o Acquire::http::No-Cache=true \
+              -o Acquire::https::No-Cache=true -o APT::Update::Error-Mode=any update -qq &&
+              bounded 180 apt-get -o Acquire::http::No-Cache=true \
+                -o Acquire::https::No-Cache=true install -y -qq ca-certificates git curl
+          }
+
           if command -v apt-get &>/dev/null; then
-            apt-get update -qq && apt-get install -y -qq ca-certificates git curl
+            retry install_apt_checkout_prerequisites
           elif command -v dnf &>/dev/null; then
             dnf install -y -q ca-certificates git curl-minimal
           elif command -v pacman &>/dev/null; then
             prepare_pacman_keyrings
             retry pacman -Syyu --noconfirm --needed ca-certificates git curl
           elif command -v zypper &>/dev/null; then
+            configure_zypper_ci_repository_transport
             configure_zypper_ci_network
             echo "Skipping zypper checkout prerequisites; packaging.sh install behavior is tested after checkout."
           fi

@@ -9,11 +9,11 @@ REPO_ROOT="$(cd "$ROOT_DIR/.." && pwd)"
 CANONICAL_ENDPOINT="https://install.osmantic.com/ods.sh"
 CANONICAL_REPO_URL="https://github.com/Osmantic/ODS.git"
 WINDOWS_SOURCE_ZIP_URL="https://github.com/Osmantic/ODS/archive/refs/heads/main.zip"
-STABLE_VERSION="$(
-    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["version"])' \
+PUBLISHED_VERSION="$(
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["stable_version"])' \
         "$ROOT_DIR/manifest.json"
 )"
-STABLE_TAG="v$STABLE_VERSION"
+PUBLISHED_TAG="v$PUBLISHED_VERSION"
 
 fail() {
     echo "[FAIL] $*"
@@ -169,6 +169,13 @@ for relative_path in tracked_files:
 
     text = data.decode("utf-8", errors="ignore")
     for line_number, line in enumerate(text.splitlines(), start=1):
+        # Secret-scan fingerprints must use the path at the historical commit.
+        # Only exact fingerprints in this dedicated file qualify; comments,
+        # current source paths and arbitrary prose remain subject to the guard.
+        if relative_path == ".gitleaksignore" and re.fullmatch(
+            r"[0-9a-f]{40}:[^\s:]+:[a-z0-9-]+:[1-9][0-9]*", line
+        ):
+            continue
         if has_retired_reference(line, allow_fleet=allow_fleet):
             matches.append(f"{relative_path}:{line_number}:{line}")
 
@@ -230,7 +237,11 @@ for file in "${windows_copy_paste_docs[@]}"; do
     require_literal "$file" "$WINDOWS_SOURCE_ZIP_URL" "Windows no-Git source ZIP install"
     require_literal "$file" '[guid]::NewGuid().ToString("N")' "Windows collision-free temporary source directory"
     require_literal "$file" 'Expand-Archive -LiteralPath $odsZip -DestinationPath $odsSrc -Force' "Windows source ZIP expansion"
-    require_literal "$file" '.\install.ps1' "Windows installer invocation"
+    if [[ "$file" == "$ROOT_DIR/docs/WINDOWS-INSTALL-WALKTHROUGH.md" ]]; then
+        require_literal "$file" '.\ods\installers\windows\install-windows.ps1' "Legacy native installer invocation"
+    else
+        require_literal "$file" '.\install.ps1' "Windows installer invocation"
+    fi
     if grep -qF 'Remove-Item -LiteralPath $odsSrc -Recurse' "$file"; then
         fail "Windows copy/paste install must not recursively delete a reusable temporary path in ${file#"$REPO_ROOT"/}"
     fi
@@ -263,13 +274,14 @@ require_literal "$trust_doc" 'five minutes' "Hosted cache freshness guidance"
 require_literal "$trust_doc" 'AUDITED_COMMIT_SHA/ods/get-ods.sh' "Immutable bootstrap URL guidance"
 require_literal "$trust_doc" 'ods/main.sh' "Hosted main-channel guidance"
 require_literal "$trust_doc" 'verify-hosted-bootstrap.sh' "Hosted bootstrap deployment verification"
-require_literal "$REPO_ROOT/README.md" "\`$STABLE_TAG\` is the current stable release" "README stable release"
-require_literal "$release_doc" "current stable release is \`$STABLE_TAG\`" "Release channel stable release"
-require_literal "$trust_doc" "--branch $STABLE_TAG $CANONICAL_REPO_URL" "Manual stable clone"
-require_literal "$trust_doc" "ODS_REF=$STABLE_TAG" "Stable bootstrap ref guidance"
+require_literal "$REPO_ROOT/README.md" "\`$PUBLISHED_TAG\` is the latest published source release" "README published release"
+require_literal "$REPO_ROOT/README.md" "[![Release](https://img.shields.io/badge/release-$PUBLISHED_TAG-blue)](https://github.com/Osmantic/ODS/releases/tag/$PUBLISHED_TAG)" "README published-version badge and tag link"
+require_literal "$release_doc" "latest published source release is \`$PUBLISHED_TAG\`" "Release channel published release"
+require_literal "$trust_doc" "--branch $PUBLISHED_TAG $CANONICAL_REPO_URL" "Manual published-tag clone"
+require_literal "$trust_doc" "ODS_REF=$PUBLISHED_TAG" "Published bootstrap ref guidance"
 
-if grep -qF "Do not pass \`$STABLE_TAG\` through \`ODS_REF\`" "$trust_doc"; then
-    fail "$STABLE_TAG must be documented as compatible with the sparse-checkout bootstrap"
+if grep -qF "Do not pass \`$PUBLISHED_TAG\` through \`ODS_REF\`" "$trust_doc"; then
+    fail "$PUBLISHED_TAG must be documented as compatible with the sparse-checkout bootstrap"
 fi
 
 hosted_verifier="$ROOT_DIR/scripts/verify-hosted-bootstrap.sh"

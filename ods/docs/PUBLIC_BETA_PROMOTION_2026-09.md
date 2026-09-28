@@ -1,11 +1,17 @@
 # September 2026 public-beta promotion record
 
-Status: preparation in progress; full release qualification is not established.
+Status: merged into development `main` on 2026-09-24 at 00:47:24 UTC through
+[PR #6515](https://github.com/Osmantic/ODS/pull/6515), merge commit
+[`1bc5e1cbb24864f1c9efd551e0613202af324e3f`](https://github.com/Osmantic/ODS/commit/1bc5e1cbb24864f1c9efd551e0613202af324e3f).
+The final public-beta parent was `99feff29edb453d9bd9db4f99104c7142904aab5`.
+The merge does not establish full release qualification or close the missing
+acceptance below. This record does not assert a new physical-fleet result.
 
 This record accompanies [promotion PR #6515](https://github.com/Osmantic/ODS/pull/6515).
 It describes a move into the development `main` branch, not a stable release,
-new version number, or change to `release/2.6.x`. The current stable tag remains
-`v2.6.0`; see [Release Channels](RELEASE_CHANNELS.md).
+new version number, or change to `release/2.6.x`. At promotion, the published
+stable tag was `v2.6.0`. The subsequent [V3 publication](RELEASE_NOTES_3.0.0.md)
+is a separate event; see [Release Channels](RELEASE_CHANNELS.md).
 
 ## Candidate and user impact
 
@@ -17,7 +23,7 @@ Evidence from the initial candidate must not be relabeled as a later-head pass.
 
 The promotion includes the bundled Portal assistant and its Pixel runtime,
 dashboard and model-routing changes, expanded native platform handling, and
-installer/lifecycle fixes. See [Unreleased](../CHANGELOG.md#unreleased).
+installer/lifecycle fixes. See [V3 changelog](../CHANGELOG.md#300---2026-09-24).
 Native Windows does not install the Portal host runtime; qualifying WSL
 installations use the Linux path. Platform eligibility is not a guarantee of
 agent task quality.
@@ -61,8 +67,10 @@ deployments should use a pinned release or audited commit.
 
 These restrictions expose unsupported operations rather than claiming a
 successful upgrade or complete backup. Native update and disaster recovery
-remain release acceptance gaps. The version remains `2.6.0`, so the stable
-release checker does not advertise this branch promotion as a version upgrade.
+remain release acceptance gaps. At promotion, the version remained `2.6.0`, so the stable
+release checker did not advertise this branch promotion as a version upgrade.
+The subsequent [V3 publication](RELEASE_NOTES_3.0.0.md) is a separate
+change and does not retroactively qualify this promotion.
 
 ## Evidence available
 
@@ -80,8 +88,9 @@ release checker does not advertise this branch promotion as a version upgrade.
   `bbc9139863f465d6cff43fe6b201f3310e4ead0afcb3c4178c961576622db70d`.
   The later promotion audit reproduced Windows credential protection,
   quoted Compose path, native backup coverage, and source update limitations.
-  Fixes and their final-head validation must be recorded on PR #6515 before
-  considering promotion; the earlier gate did not cover those defects.
+  Subsequent fixes landed through PRs #6531 and #6535 before promotion.
+  Consult PR #6515 for the final-head CI/review record; the earlier gate did not
+  cover those defects and is not being relabeled as a final-head pass.
 - Prior installed tests span several revisions. They provide useful failure
   evidence but do not establish acceptance of this exact candidate on all six
   target machines.
@@ -115,8 +124,10 @@ tests each prove less than the complete required user journeys.
 
 ## Promotion and recovery requirements
 
-Before merge, record the final source identity, resolve blocking CI and reviewed
-installer defects, and obtain the repository's required maintainer approvals.
+The promotion is merged. Keep the final source identity above and the PR's CI
+and review history together; do not retroactively describe earlier-candidate
+evidence as a final-head pass. Later release claims still require the missing
+acceptance below and any required maintainer approvals.
 Apply [Release Validation](RELEASE_VALIDATION.md) and the
 [High-Risk Change Map](HIGH_RISK_CHANGE_MAP.md): if a scoped alternative is
 accepted, record its exact scope, evidence, and remaining gaps. This document

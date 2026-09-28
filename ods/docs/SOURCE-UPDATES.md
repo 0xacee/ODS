@@ -27,8 +27,11 @@ These checks protect this updater version and later versions. An already
 installed older updater continues executing its old code while pulling new
 source; merging this change cannot retrofit its preflight. Main-to-candidate
 installed migration remains unqualified. Release notifications compare version
-tags, not branch commits or image digests; a main merge with unchanged `2.6.0`
-does not announce a new stable release.
+tags, not branch commits or image digests. The published `v3.0.0` release may
+advertise an update to older installations, but it does not install one or
+qualify an upgrade. Source updates still pull the selected branch; they do not
+automatically select the latest release tag. The published V3 source snapshot
+and qualification boundaries are recorded in [V3 release notes](RELEASE_NOTES_3.0.0.md).
 
 `ods rollback` delegates to the same configuration rollback path. Manual and
 automatic rollback now check both the current native identity and the selected

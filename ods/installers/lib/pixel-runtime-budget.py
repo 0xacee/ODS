@@ -321,8 +321,10 @@ updated_tools["loopDetection"] = {
         "pingPong": True,
     },
 }
-# Search stays private through loopback-only SearXNG. Page retrieval uses
-# OpenClaw public-network SSRF guard with deliberately tighter ODS bounds;
+# Search goes to the selected provider: the external parallel-free service by
+# default for new installations (see pixel-agent/NATIVE-SEARCH.md), or an
+# owner-kept SearXNG. Page retrieval runs locally through OpenClaw's
+# public-network SSRF guard with deliberately tighter ODS bounds;
 # private/link-local targets and trusted environment proxies remain disabled.
 updated_fetch.update({
     "enabled": True,
@@ -344,7 +346,7 @@ updated_agent_tools["deny"] = [
     if item not in {
         "web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
         "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-        "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry",
+        "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_workspace_bundle", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry",
         "pixel_web_extract"
     }
 ]
@@ -354,7 +356,7 @@ for extension_tool in (
     "cron", "create_goal", "get_goal", "update_goal", "update_plan",
     "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
     "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"
+    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_workspace_bundle", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"
 ):
     if extension_tool not in updated_also_allow:
         updated_also_allow.append(extension_tool)
@@ -362,12 +364,27 @@ for permitted_tool in (
     "cron", "create_goal", "get_goal", "update_goal", "update_plan",
     "web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
     "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"
+    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_workspace_bundle", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"
 ):
     if permitted_tool not in updated_sandbox_allow:
         updated_sandbox_allow.append(permitted_tool)
 updated_tools["alsoAllow"] = sorted(set(updated_also_allow))
 updated_sandbox_tools["allow"] = sorted(set(updated_sandbox_allow))
+inspection_transport = sys.argv[5] if len(sys.argv) > 5 else ''
+if inspection_transport:
+    if inspection_transport not in ('unix', 'native'):
+        raise SystemExit('invalid preview inspection transport')
+    updated_pixel_config['workspacePreviewInspectionTransport'] = inspection_transport
+inspection_enabled = updated_pixel_config.get('workspacePreviewInspectionTransport') in ('unix', 'native')
+inspection_tool = 'pixel_ods_workspace_preview_inspect'
+for tools in (updated_tools['alsoAllow'], updated_sandbox_tools['allow']):
+    if inspection_enabled and inspection_tool not in tools:
+        tools.append(inspection_tool)
+        tools.sort()
+    elif not inspection_enabled and inspection_tool in tools:
+        tools.remove(inspection_tool)
+if inspection_enabled:
+    updated_agent_tools['deny'] = [tool for tool in updated_agent_tools['deny'] if tool != inspection_tool]
 if updated == value:
     print("unchanged")
     raise SystemExit(0)

@@ -196,7 +196,7 @@ class TransitionGate:
                         "streams": len(self.active), "host_runtime_verified": False}
             return self._status()
 
-    async def acquire(self, token, revision, *, recover=False):
+    async def acquire(self, token, revision, *, recover=False, drain=False):
         token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
         async with self.mutex:
             self._check()
@@ -208,8 +208,13 @@ class TransitionGate:
                 if hmac.compare_digest(token_hash, self.state["token_hash"]):
                     return self._status()
                 raise GateError("transition_already_held", 409)
-            if self.active or self.state["phase"] == "busy":
+            if (self.active or self.state["phase"] == "busy") and not drain:
                 raise GateError("active_turns", 409)
+            # The separate drain endpoint closes new admission atomically with
+            # the durable hold. Existing stream owners remain registered and
+            # finish normally; held+streams>0 is not permission to mutate.
+            # The coordinator must observe zero streams and native activity.
+
             if self.state["phase"] == "interrupted" and not recover:
                 raise GateError("interrupted_turn_requires_recovery", 409)
             if recover and self.state["phase"] != "interrupted":

@@ -1089,6 +1089,40 @@ class TestEnableExtension:
         assert resp.status_code == 400
         assert "local build" in resp.json()["detail"]
 
+    @pytest.mark.parametrize('enabled', [False, True], ids=['activate', 'stopped'])
+    @pytest.mark.parametrize('marker, allowed', [
+        (None, True),
+        ('{"repository": "https://github.com/owner/project"}', True),
+        ('{"origin": "github-proposal"}', False),
+        ('{"origin": ', False),
+    ], ids=['curated-no-marker', 'curated-marker', 'imported', 'invalid-marker'])
+    def test_enable_applies_the_imported_bind_namespace(self, test_client, monkeypatch, tmp_path,
+                                                        enabled, marker, allowed):
+        """The enable/activate re-scan refuses what the compose resolver would
+        drop: an imported recipe binding outside ./data/<id> and ./config/<id>.
+        Curated recipes keep their reviewed binds (label-studio's ./upload)."""
+        compose = ("services:\n  fx-upload:\n    image: test\n    volumes:\n"
+                   "      - ./data/fx-upload/state:/ok\n      - ./upload:/app/upload\n")
+        user_dir = tmp_path / "user"
+        ext_dir = user_dir / "fx-upload"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / ("compose.yaml" if enabled else "compose.yaml.disabled")).write_text(compose)
+        (ext_dir / "manifest.yaml").write_text(
+            "schema_version: ods.services.v1\nservice:\n  id: fx-upload\n  name: fx-upload\n")
+        if marker is not None:
+            (ext_dir / "upstream.json").write_text(marker)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+
+        resp = test_client.post(
+            "/api/extensions/fx-upload/enable",
+            headers=test_client.auth_headers,
+        )
+        if allowed:
+            assert resp.status_code == 200, resp.json()
+        else:
+            assert resp.status_code == 400
+            assert "outside its own ./data/fx-upload and ./config/fx-upload" in resp.json()["detail"]
+
 
 class TestEnableExtensionHookReturnHandling:
     """pre_start failures must block start; post_start failures surface as warnings."""
@@ -1585,6 +1619,214 @@ class TestUninstallExtension:
         )
         assert resp.status_code == 400
         assert "Disable extension before uninstalling" in resp.json()["detail"]
+
+    # A failed install leaves compose.yaml in place with an `error` progress
+    # record. The dashboard offers Remove there, so DELETE must be able to
+    # finish the job itself; every other enabled state keeps the explicit
+    # disable prerequisite.
+
+    @staticmethod
+    def _write_progress(tmp_path, service_id, status, **extra):
+        progress_file = tmp_path / "extension-progress" / f"{service_id}.json"
+        progress_file.parent.mkdir(parents=True, exist_ok=True)
+        now = "2026-09-25T00:00:00+00:00"
+        progress_file.write_text(json.dumps({
+            "service_id": service_id, "status": status, "phase_label": "",
+            "error": None, "started_at": now, "updated_at": now, **extra,
+        }))
+        return progress_file
+
+    @staticmethod
+    def _record_agent(monkeypatch, user_dir, service_id, ok=True):
+        calls = []
+
+        def _agent(action, sid):
+            ext_dir = user_dir / service_id
+            calls.append((action, sid, (ext_dir / "compose.yaml").exists()))
+            return ok
+
+        monkeypatch.setattr("routers.extensions._call_agent", _agent)
+        return calls
+
+    @pytest.mark.parametrize("progress_status", [None, "started", "pulling", "setup_hook"])
+    def test_uninstall_running_extension_unchanged(
+        self, test_client, monkeypatch, tmp_path, progress_status,
+    ):
+        """An enabled extension that did not fail keeps the disable prerequisite.
+
+        DELETE must not stop or remove a running, starting or stopped service.
+        """
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        calls = self._record_agent(monkeypatch, user_dir, "my-ext")
+        if progress_status:
+            self._write_progress(tmp_path, "my-ext", progress_status)
+
+        resp = test_client.delete(
+            "/api/extensions/my-ext",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 400
+        assert "Disable extension before uninstalling" in resp.json()["detail"]
+        assert calls == []
+        assert (user_dir / "my-ext" / "compose.yaml").exists()
+
+    def test_uninstall_error_state_stops_then_removes(
+        self, test_client, monkeypatch, tmp_path,
+    ):
+        """Remove on a failed install stops it, then uninstalls, in one request."""
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        calls = self._record_agent(monkeypatch, user_dir, "my-ext")
+        progress_file = self._write_progress(
+            tmp_path, "my-ext", "error", error="Container did not reach running state",
+        )
+        data_dir = tmp_path / "my-ext"
+        data_dir.mkdir()
+        (data_dir / "state.db").write_text("owner data")
+
+        resp = test_client.delete(
+            "/api/extensions/my-ext",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["action"] == "uninstalled"
+        assert body["stopped_before_removal"] is True
+        assert "stopped" in body["message"]
+        # The stop ran while the definition still existed, so the host agent
+        # could resolve every container the extension owns.
+        assert calls == [("stop", "my-ext", True)]
+        assert not (user_dir / "my-ext").exists()
+        assert not progress_file.exists()
+        # Uninstall never purges service data.
+        assert (data_dir / "state.db").read_text() == "owner data"
+        assert body["data_info"] is not None
+
+    def test_uninstall_error_state_invalidates_compose_cache_once(
+        self, test_client, monkeypatch, tmp_path,
+    ):
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        self._write_progress(tmp_path, "my-ext", "error", error="boom")
+        order = []
+        monkeypatch.setattr(
+            "routers.extensions._call_agent",
+            lambda action, sid: order.append(f"agent:{action}") or True,
+        )
+        monkeypatch.setattr(
+            "routers.extensions._call_agent_invalidate_compose_cache",
+            lambda: order.append("invalidate"),
+        )
+
+        resp = test_client.delete(
+            "/api/extensions/my-ext",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 200
+        assert order == ["agent:stop", "invalidate"]
+
+    def test_uninstall_error_state_stop_failure_keeps_extension(
+        self, test_client, monkeypatch, tmp_path,
+    ):
+        """A failed stop must not delete a definition whose container may run."""
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        calls = self._record_agent(monkeypatch, user_dir, "my-ext", ok=False)
+        progress_file = self._write_progress(tmp_path, "my-ext", "error", error="boom")
+
+        resp = test_client.delete(
+            "/api/extensions/my-ext",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 502
+        assert "was not removed" in resp.json()["detail"]
+        assert calls == [("stop", "my-ext", True)]
+        assert (user_dir / "my-ext" / "compose.yaml").exists()
+        assert not (user_dir / "my-ext" / "compose.yaml.disabled").exists()
+        assert progress_file.exists()
+
+    def test_uninstall_error_state_refuses_with_enabled_dependents(
+        self, test_client, monkeypatch, tmp_path,
+    ):
+        """Implicit removal must not break enabled extensions that depend on it."""
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
+        dep_dir = user_dir / "dependent-ext"
+        dep_dir.mkdir()
+        (dep_dir / "compose.yaml").write_text(_SAFE_COMPOSE)
+        (dep_dir / "manifest.yaml").write_text(
+            yaml.dump({"service": {"depends_on": ["my-ext"]}}),
+        )
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        calls = self._record_agent(monkeypatch, user_dir, "my-ext")
+        self._write_progress(tmp_path, "my-ext", "error", error="boom")
+
+        resp = test_client.delete(
+            "/api/extensions/my-ext",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "dependent-ext" in detail
+        assert "Disable extension before" not in detail
+        assert calls == []
+        assert (user_dir / "my-ext" / "compose.yaml").exists()
+
+    def test_uninstall_error_state_partial_removal_leaves_disabled_definition(
+        self, test_client, monkeypatch, tmp_path,
+    ):
+        """If file removal fails after the stop, a retry takes the disabled path."""
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        self._write_progress(tmp_path, "my-ext", "error", error="boom")
+        invalidations = []
+        monkeypatch.setattr(
+            "routers.extensions._call_agent_invalidate_compose_cache",
+            lambda: invalidations.append(1),
+        )
+
+        def _failing_rmtree(path, *args, **kwargs):
+            raise OSError("device busy")
+
+        monkeypatch.setattr("routers.extensions.shutil.rmtree", _failing_rmtree)
+
+        resp = test_client.delete(
+            "/api/extensions/my-ext",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 500
+        assert not (user_dir / "my-ext" / "compose.yaml").exists()
+        assert (user_dir / "my-ext" / "compose.yaml.disabled").exists()
+        assert invalidations == [1]
+
+    @pytest.mark.parametrize("progress_status", [None, "error"])
+    def test_uninstall_disabled_extension_does_not_stop(
+        self, test_client, monkeypatch, tmp_path, progress_status,
+    ):
+        """A disabled extension is already stopped: removal needs no agent call."""
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=False)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        calls = self._record_agent(monkeypatch, user_dir, "my-ext")
+        if progress_status:
+            self._write_progress(tmp_path, "my-ext", progress_status, error="boom")
+
+        resp = test_client.delete(
+            "/api/extensions/my-ext",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["action"] == "uninstalled"
+        assert body["stopped_before_removal"] is False
+        assert calls == []
+        assert not (user_dir / "my-ext").exists()
 
     def test_uninstall_core_service_403(self, test_client, monkeypatch, tmp_path):
         """403 when trying to uninstall a core service."""
@@ -2443,12 +2685,26 @@ class TestScanComposeVolumeBypass:
         )
 
     def test_allows_project_relative_subdir_bind(self, tmp_path):
-        # A ./subdir bind stays inside the extension's own directory.
+        # Compose resolves a relative bind against the project directory,
+        # which is the ODS install directory (the first -f file), so
+        # ./data/<extension> is that extension's own data directory.
         self._scan(
             tmp_path,
             "services:\n  svc:\n    image: test\n"
-            "    volumes:\n      - ./data:/data\n",
+            "    volumes:\n      - ./data/svc:/data\n",
         )
+
+    @pytest.mark.parametrize("source", [".", "./", "./.env", "./data", "./config", "./.git/config"])
+    def test_rejects_the_install_directory_its_secrets_and_all_data(self, tmp_path, source):
+        # ./.env is the owner's secrets and ./data holds every service's state.
+        with pytest.raises(HTTPException) as exc:
+            self._scan(
+                tmp_path,
+                "services:\n  svc:\n    image: test\n"
+                f"    volumes:\n      - '{source}:/mnt'\n",
+            )
+        assert exc.value.status_code == 400
+        assert "ODS install directory" in exc.value.detail
 
 
 # --- skip_gpu_passthrough_check flag isolation ---

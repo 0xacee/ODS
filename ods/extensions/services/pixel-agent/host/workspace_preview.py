@@ -66,6 +66,11 @@ VC_METADATA_NAMES = frozenset(
         ".gitignore", ".gitattributes", ".gitmodules",
     }
 )
+# Bytecode and test-runner caches appear whenever project code or its tests run
+# in the directory. They are never site content, so prune them by exact
+# directory name like VC metadata: never entered, read, copied or published.
+# Files with these names are still validated normally.
+GENERATED_CACHE_DIRECTORY_NAMES = frozenset({"__pycache__", ".pytest_cache"})
 
 BOUNDARY = (
     "Create-only static-site snapshot from the configured Pixel workspace to a "
@@ -82,6 +87,12 @@ CSP = (
 
 class PreviewError(Exception):
     """A generic fail-closed preview error."""
+
+
+class JsonArtifactError(PreviewError):
+    def __init__(self, relative: str, line: int | None, column: int | None):
+        super().__init__("invalid preview JSON artifact")
+        self.diagnostic = {"path": relative, "line": line, "column": column}
 
 
 def configure_portal(profile_id: str) -> None:
@@ -106,6 +117,7 @@ def _profile_fields() -> dict[str, str]:
 
 
 PREVIEW_FAILURE_CODES = {
+    "invalid preview JSON artifact": "invalid_json_artifact",
     "unsupported preview file type": "unsupported_file_type",
     "preview requires index.html": "missing_entry",
     "preview contains too many files": "too_many_files",
@@ -227,7 +239,8 @@ def _source_files(
         ):
             raise PreviewError("unsafe preview directory")
         # Exclude metadata by its own name; ordinary symlinks stay rejected.
-        pruned = [d for d in directories if d not in VC_METADATA_NAMES]
+        pruned = [d for d in directories
+                  if d not in VC_METADATA_NAMES and d not in GENERATED_CACHE_DIRECTORY_NAMES]
         for directory in pruned:
             info = (root_path / directory).lstat()
             if (
@@ -300,6 +313,26 @@ def _read_stable(source: pathlib.Path, expected: os.stat_result) -> bytes:
         os.close(descriptor)
 
 
+def _validate_json_artifact(data: bytes, relative: str) -> None:
+    """Validate captured JSON bytes without rewriting the owner's artifact."""
+    def invalid_constant(_value):
+        raise ValueError("non-JSON numeric constant")
+
+    try:
+        json.loads(data.decode("utf-8"), object_pairs_hook=_json_object,
+                   parse_constant=invalid_constant)
+    except json.JSONDecodeError as error:
+        raise JsonArtifactError(relative, error.lineno, error.colno) from error
+    except UnicodeDecodeError as error:
+        prefix = data[:error.start].decode("utf-8")
+        raise JsonArtifactError(relative, prefix.count("\n") + 1,
+                                len(prefix.rsplit("\n", 1)[-1]) + 1) from error
+    except (ValueError, RecursionError, PreviewError) as error:
+        # The decoder does not supply offsets for duplicate keys, nonstandard
+        # constants or excessive nesting. Do not invent a source location.
+        raise JsonArtifactError(relative, None, None) from error
+
+
 def publish_snapshot(
     workspace: pathlib.Path,
     previews: pathlib.Path,
@@ -313,6 +346,8 @@ def publish_snapshot(
     total = 0
     for relative, source, info in sources:
         data = _read_stable(source, info)
+        if pathlib.PurePosixPath(relative).suffix.lower() == ".json":
+            _validate_json_artifact(data, relative)
         total += len(data)
         if total > MAX_TOTAL_BYTES:
             raise PreviewError("preview is too large")
@@ -411,7 +446,8 @@ def publish_snapshot(
         "relativeDirectory": relative_directory,
         "siteId": site_id,
         "files": len(captured),
-        **(_published_path_feedback(observed) if PROFILE_ID is None else {}),
+        **(_published_path_feedback(observed, [relative for relative, data in captured if not data])
+           if PROFILE_ID is None else {}),
         "bytes": total,
         "sha256": full_digest,
         "entryFile": "index.html",
@@ -456,8 +492,7 @@ def verify_current_snapshot(workspace, previews, request, owner_uid):
             "boundary": BOUNDARY, **_profile_fields()}
 
 
-def _published_path_feedback(paths):
-    """Bounded names from the verified snapshot; never infer requested files."""
+def _bounded_paths(paths):
     ordered = sorted(paths)
     shown = []
     total = 0
@@ -466,7 +501,19 @@ def _published_path_feedback(paths):
             break
         shown.append(relative)
         total += len(relative)
-    return {"publishedPaths": shown, "publishedPathsOmitted": len(ordered) - len(shown)}
+    return shown, len(ordered) - len(shown)
+
+
+def _published_path_feedback(paths, empty_paths=()):
+    """Bounded names from the verified snapshot; never infer requested files.
+
+    Zero-byte files are listed separately. They are legitimate (for example an
+    empty stylesheet), so this is information for the model, not a failure.
+    """
+    shown, omitted = _bounded_paths(paths)
+    empty, empty_omitted = _bounded_paths(empty_paths)
+    return {"publishedPaths": shown, "publishedPathsOmitted": omitted,
+            "publishedEmptyPaths": empty, "publishedEmptyPathsOmitted": empty_omitted}
 
 
 def snapshot_manifest(previews: pathlib.Path, site_id: str) -> bytes:
@@ -751,7 +798,7 @@ def _verify_http(port: int, site_id: str, entry_sha256: str) -> None:
         connection.close()
 
 
-def _error_result(code: str = "unavailable") -> dict[str, Any]:
+def _error_result(code: str = "unavailable", diagnostic=None) -> dict[str, Any]:
     return {
         "schemaVersion": SCHEMA_VERSION,
         "kind": KIND,
@@ -760,6 +807,7 @@ def _error_result(code: str = "unavailable") -> dict[str, Any]:
         "error": "ODS workspace preview publication failed",
         "errorCode": code if code in PREVIEW_FAILURE_CODES.values() else "unavailable",
         "boundary": BOUNDARY,
+        **({"artifactError": diagnostic} if code == "invalid_json_artifact" and diagnostic else {}),
     }
 
 
@@ -821,9 +869,10 @@ def _serve_connection(
                     }
                 )
     except PreviewError as error:
-        # Only fixed categories cross the socket, never arbitrary exception
-        # text, paths, file contents, or operating-system error details.
-        response = _error_result(PREVIEW_FAILURE_CODES.get(str(error), "unavailable"))
+        # Only fixed categories and captured JSON artifact-relative locations
+        # cross the socket; no source excerpts, absolute paths or OS details.
+        response = _error_result(PREVIEW_FAILURE_CODES.get(str(error), "unavailable"),
+                                 error.diagnostic if isinstance(error, JsonArtifactError) else None)
     except (OSError, ValueError, TypeError, KeyError):
         response = _error_result()
     encoded = (json.dumps(response, sort_keys=True, separators=(",", ":")) + "\n").encode()

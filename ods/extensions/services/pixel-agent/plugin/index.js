@@ -1,7 +1,10 @@
 import {createAgentSkillTool} from './agent-skills.mjs';
+import {registerBootstrapCapabilities} from './bootstrap-capabilities.mjs';
+import {registerStableRuntimeLine} from './runtime-line.mjs';
 import {createRuntimeIdentity} from './runtime-identity.mjs';
 import {fileURLToPath} from 'node:url';
 import {createActivityTool, ACTIVITY_CONTRACT} from './activity-display.mjs';
+import {previewRecoveryAllowed} from './preview-delivery-recovery.mjs';
 import {compactToolResultEnvelope} from './tool-result-envelope.mjs';
 import {withPiToolErrorContract} from './pi-tool-result.mjs';
 import {createGoalProgress, createGoalProgressTool, GOAL_CONTRACT} from './goal-progress.mjs';
@@ -47,7 +50,9 @@ import {
   privateBrowserAccessForAgent,
 } from "./tool-loop-guard.mjs";
 import { withPixelCronDeliveryDefault } from "./cron-delivery-default.mjs";
-import { createPublicWebExtractTool } from "./web-extract.mjs";
+import { createPublicPageReader, createPublicWebExtractTool } from "./web-extract.mjs";
+import { citationPageReadsAllowed, createHostCitationVerifier } from "./citation-verification.mjs";
+import { createStopSynthesisClient } from "./stop-synthesis.mjs";
 import { createExtensionRepositoryContext } from './extension-repository-context.mjs';
 
 const extensionRepositoryContext = createExtensionRepositoryContext({
@@ -55,7 +60,8 @@ const extensionRepositoryContext = createExtensionRepositoryContext({
     guardedFetch: fetchWithWebToolsNetworkGuard, readResponseText, extractBasicHtmlContent,
   }),
 });
-import { createPerplexicaResearchTool } from "./perplexica-research.mjs";
+import { createPerplexicaAvailability, createPerplexicaResearchTool, researchOutputChars,
+  researchToolWhenAvailable } from "./perplexica-research.mjs";
 import { createDownloadPromoteTool } from "./download-promote.mjs";
 import {
   createExtensionReadTool,
@@ -64,6 +70,9 @@ import {
 } from "./host-observe.mjs";
 import { createEvidenceArtifactWriter } from "./evidence-artifact.mjs";
 import { createWorkspacePreviewTool, createWorkspacePreviewVerifier } from "./workspace-preview.mjs";
+import { createWorkspacePreviewInspectTool } from "./workspace-preview-inspect.mjs";
+import {createWorkspaceBundleAdmission, createWorkspaceBundleService, createWorkspaceBundleTool} from './workspace-bundle.mjs';
+import {createWorkspaceBundleExecution} from './workspace-bundle-execution.mjs';
 import { createTaskActivity } from "./task-activity.mjs";
 import { createWorkspaceProjects } from "./workspace-projects.mjs";
 import { createAccessRuntime, executionHostForAgent } from "./access-runtime.mjs";
@@ -87,6 +96,8 @@ let contextCompaction;
 let currentManagedRuntime;
 const managedRuntimeRegistry = createManagedRuntimeRegistry();
 const evidenceArtifactWriter = createEvidenceArtifactWriter();
+let perplexicaAvailability;
+const bundleAdmission = createWorkspaceBundleAdmission();
 
 // Restrict tool registration to the Pixel agent. Tools are only offered to the
 // agent id declared by this plugin (see openclaw.plugin.json); this guards the
@@ -255,6 +266,7 @@ export default definePluginEntry({
       createTools: createOpenClawCodingTools, resolveSandbox: resolveSandboxContext,
       execControl: () => execCancellationControl, runtimeVersion: OPENCLAW_VERSION,
       hooksAllowed: api.config?.plugins?.entries?.["pixel-ods"]?.hooks?.allowConversationAccess === true});
+    registerBootstrapCapabilities(api);
     const managedRuntime = managedRuntimeRegistry.register(api, accessRuntime);
     if (managedRuntime) currentManagedRuntime = managedRuntime;
     contextCompaction ??= createContextCompaction({agentId:AGENT_ID,
@@ -278,6 +290,8 @@ export default definePluginEntry({
         release:token => accessRuntime.release(token), owns:token => accessRuntime.owns(token)},
     });
     registerHistoryIntegration(api,{compactor:contextCompaction,getSessionEntry,patchSessionEntry,resolveStorePath,withSessionTranscriptWriteLock});
+    // One system prompt for every Pixel chat: no per-chat session key or id.
+    registerStableRuntimeLine(api);
     const statusFile = statusFileFromEnv();
     const configuredContextWindow = api.pluginConfig?.modelContextWindow;
     const configuredLeanPrompt = api.pluginConfig?.leanPrompt === true;
@@ -299,8 +313,35 @@ export default definePluginEntry({
       evidenceArtifactWriter,
       onWorkspaceMutation:mutation=>workspaceProjects.record(mutation),
       verifyWorkspacePreview:createWorkspacePreviewVerifier({transport:api.pluginConfig?.workspacePreviewTransport}),
+      workspacePreviewInspectionAvailable: ["unix", "native"].includes(api.pluginConfig?.workspacePreviewInspectionTransport),
+      publishWorkspacePreview: previewRecoveryAllowed(api.config) ? (params, {signal}) =>
+        createWorkspacePreviewTool({transport:api.pluginConfig?.workspacePreviewTransport})
+          .execute('ods-preview-delivery', params, signal) : undefined,
+      // Cited pages the model never opened are read once by the host through
+      // the same strict guard as pixel_ods_web_extract, only where the
+      // operator's configuration permits page reads.
+      hostCitationVerifier: createHostCitationVerifier({
+        readPage: createPublicPageReader({
+          guardedFetch: fetchWithWebToolsNetworkGuard, readResponseText, extractBasicHtmlContent,
+        }),
+        allowed: () => citationPageReadsAllowed(api.runtime?.config?.current?.() ?? api.config, AGENT_ID),
+      }),
+      // After a tool-limit stop without an answer: one tool-free completion by
+      // the same configured model, from the pages the run read.
+      stopSynthesis: createStopSynthesisClient({runtime: api.runtime, agentId: AGENT_ID}),
       warn: (message) => api.logger.warn(message),
+      info: (message) => api.logger.info?.(message),
     });
+    const bundleExecution = createWorkspaceBundleExecution({
+      readConfig: () => api.runtime?.config?.current?.() ?? api.config,
+      createTools: createOpenClawCodingTools, resolveSandbox: resolveSandboxContext,
+      execControl: () => execCancellationControl,
+    });
+    const executeBundle = createWorkspaceBundleService({runHelper: bundleExecution.runHelper,
+      invalidatePreview: scope => toolLoopGuard.invalidateWorkspaceBundle(scope)});
+    api.registerTool(onlyPixel(context => createWorkspaceBundleTool(context, {
+      admission: bundleAdmission, execute: executeBundle, scopeForContext: bundleExecution.scopeForContext,
+    })), {names: ['pixel_ods_workspace_bundle']});
 
     // OpenClaw does not replay arbitrary plugin tools after an empty model
     // continuation. Give the Pixel agent an explicit, trusted prompt contract
@@ -321,13 +362,23 @@ export default definePluginEntry({
       });
       const repositoryEvidence = contract ? await extensionRepositoryContext(event,
         result => toolLoopGuard.observeRepositorySource(context?.runId ?? event?.runId, result)) : '';
-      return contract ? { ...contract, ...(goalProgress.active(context?.runId ?? event?.runId) ? {appendContext:GOAL_CONTRACT} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : undefined;
+      // Per-attempt, model-only context: not part of the cached system prompt.
+      const cancelContext = toolLoopGuard.promptContextForRun(context?.runId ?? event?.runId);
+      return contract ? { ...contract, ...(cancelContext ? {prependContext:cancelContext} : {}), ...(goalProgress.active(context?.runId ?? event?.runId) ? {appendContext:GOAL_CONTRACT} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : undefined;
     });
     api.on("model_call_started", (event, context) =>
       toolLoopGuard.observeModelCall(event, context, AGENT_ID)
     );
     api.on("model_call_ended", (event, context) =>
       toolLoopGuard.observeModelEnd(event, context, AGENT_ID)
+    );
+    // In-session auto-compaction summarizes through the run's model stream;
+    // its model calls are not agent turns (see observeCompaction).
+    api.on("before_compaction", (_event, context) =>
+      toolLoopGuard.observeCompaction(context, "start")
+    );
+    api.on("after_compaction", (_event, context) =>
+      toolLoopGuard.observeCompaction(context, "end")
     );
     api.on("llm_input", (event, context) => {
       if (!accessRuntime.isProbe(context)) contextCompaction.observeModelInput(event, context);
@@ -343,6 +394,7 @@ export default definePluginEntry({
     }
     api.on("agent_end", (event, context) => {
       toolLoopGuard.endPreviewRevalidation(event, context);
+      toolLoopGuard.observeAgentEnd(event, context);
       if (!accessRuntime.isProbe(context)) { goalProgress.finish(event, context); taskActivity.finish(event, context); }
       if (!managedRuntime) return accessRuntime.finish({runId: event.runId}, context);
     });
@@ -353,10 +405,12 @@ export default definePluginEntry({
         event, context, AGENT_ID,
       );
       const decision = guard?.block ? guard : goalProgress.before(event, context) ?? accessRuntime.beforeTool(event, context) ?? guard;
+      bundleAdmission.before(event, context, decision);
       taskActivity.before(event, context, decision?.block === true);
       return decision;
     });
     api.on("after_tool_call", (event, context) => {
+      bundleAdmission.after(event, context);
       accessRuntime.afterTool(event, context);
       if (!accessRuntime.isProbe(context)) {
         goalProgress.update(event, context);
@@ -435,8 +489,15 @@ export default definePluginEntry({
       const message = compactToolResultEnvelope(original);
       return message !== original ? {...decision, message} : decision;
     });
+    // Observation only (never blocks or rewrites): after a tool-limit stop the
+    // answer turn's message can carry partial-answer text with its tool calls.
+    api.on("before_message_write", (event, context) => {
+      toolLoopGuard.observeAssistantMessage(event, context, AGENT_ID);
+    });
     api.on("before_agent_finalize", async (event, context) => {
       await toolLoopGuard.revalidateWorkspacePreview(event, context, AGENT_ID);
+      await toolLoopGuard.recoverWorkspacePreview(event, context, AGENT_ID);
+      await toolLoopGuard.verifyCitedPages(event, context, AGENT_ID);
       const guardDecision = toolLoopGuard.beforeAgentFinalize(event, context, AGENT_ID);
       const verification = toolLoopGuard.deliveryVerificationForRun(context?.runId ?? event?.runId);
       return goalProgress.finalize(event, context, {guardDecision,
@@ -495,6 +556,7 @@ export default definePluginEntry({
           sendJson(res, parsed.status, { error: "invalid verification request" });
           return true;
         }
+        await toolLoopGuard.settleDelivery(parsed.runId);
         const task = taskActivity.projection(parsed.runId);
         sendJson(res, 200, {...toolLoopGuard.deliveryVerificationForRun(parsed.runId), ...(task ? {task} : {})});
         return true;
@@ -655,9 +717,22 @@ export default definePluginEntry({
       { names: ["pixel_ods_web_extract"] }
     );
 
-    registerTool(api, createPerplexicaResearchTool({ port: api.pluginConfig?.perplexicaPort }), {
-      names: ["pixel_ods_research"],
-    });
+    // Offered only while the owner's Perplexica answers /api/config with chat
+    // and embedding defaults (OpenClaw keeps listing it from its descriptor
+    // cache once every manifest tool was offered; COMPLETION-RELIABILITY.md).
+    // The tool is deferred behind Tool Search, so its presence changes the
+    // server-side catalog, not the prompt bytes. Schema discovery always sees
+    // it and never probes the host.
+    const discovery = api.registrationMode === 'discovery';
+    if (!discovery) {
+      perplexicaAvailability ??= createPerplexicaAvailability({ port: api.pluginConfig?.perplexicaPort });
+      perplexicaAvailability.refreshIfStale();
+    }
+    const researchTool = createPerplexicaResearchTool({ port: api.pluginConfig?.perplexicaPort,
+      availability: discovery ? undefined : perplexicaAvailability,
+      outputChars: () => researchOutputChars(api.runtime?.config?.current?.() ?? api.config, AGENT_ID) });
+    api.registerTool(onlyPixel(discovery ? () => researchTool
+      : researchToolWhenAvailable(perplexicaAvailability, researchTool)), { names: ["pixel_ods_research"] });
     registerTool(api, createAgentSkillTool(), {names:['pixel_ods_skill']});
     registerTool(api, createAskUserTool(), {names:['pixel_ods_ask_user']});
     registerTool(api, createGoalProgressTool(), {names:['pixel_ods_goal']});
@@ -677,6 +752,15 @@ export default definePluginEntry({
     registerTool(api, createWorkspacePreviewTool({ transport: api.pluginConfig?.workspacePreviewTransport }), {
       names: ["pixel_ods_workspace_preview"],
     });
+
+    if (["unix", "native"].includes(api.pluginConfig?.workspacePreviewInspectionTransport)) {
+      registerTool(api, createWorkspacePreviewInspectTool({
+        transport: api.pluginConfig.workspacePreviewInspectionTransport,
+        // Finalize-time revisions do not reach the model after a plugin tool
+        // call; an untested requested show/hide change is reported here.
+        transitionRequirement: (toolCallId, params) => toolLoopGuard.previewInspectionTransition(toolCallId, params),
+      }), { names: ["pixel_ods_workspace_preview_inspect"] });
+    }
 
   },
 });

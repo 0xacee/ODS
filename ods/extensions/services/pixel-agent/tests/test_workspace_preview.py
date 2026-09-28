@@ -583,7 +583,7 @@ def test_published_path_receipt_excludes_unpublished_sibling_source_copies(tmp_p
     for folder, names in ((project, ["report.py.txt", "totals.py.txt", "test_totals.py.txt"]),
                           (public, ["index.html", "sources.json", "test-results.txt"])):
         for name in names:
-            (folder / name).write_text("actual bytes")
+            (folder / name).write_text('{}' if name.endswith('.json') else "actual bytes")
             (folder / name).chmod(0o600)
     result = MODULE.publish_snapshot(workspace, previews, "public", os.getuid())
     assert result["publishedPaths"] == ["index.html", "sources.json", "test-results.txt"]
@@ -610,6 +610,27 @@ def test_published_path_feedback_caps_count_and_total_characters():
     assert result["publishedPaths"] == sorted(names)[:len(result["publishedPaths"])]
     assert len(result["publishedPaths"]) + result["publishedPathsOmitted"] == len(names)
     assert len(json.dumps(result).encode()) < 4096
+
+
+def test_empty_path_feedback_is_bounded_and_fits_the_socket_response(tmp_path):
+    names = [f"{n:03}" + "x" * 57 + ".txt" for n in range(127)] + ["index.html"]
+    feedback = MODULE._published_path_feedback(names, names[:-1])
+    assert len(feedback["publishedEmptyPaths"]) == 32
+    assert feedback["publishedEmptyPaths"] == sorted(names[:-1])[:32]
+    assert feedback["publishedEmptyPathsOmitted"] == 95
+    assert sum(map(len, feedback["publishedEmptyPaths"])) <= 2048
+    workspace, previews = tmp_path / "workspace", tmp_path / "previews"
+    workspace.mkdir(mode=0o700)
+    previews.mkdir(mode=0o700)
+    (workspace / "site").mkdir(mode=0o700)
+    (workspace / "site" / "index.html").write_text("<h1>x</h1>")
+    (workspace / "site" / "index.html").chmod(0o600)
+    response = MODULE.publish_snapshot(workspace, previews, "site", os.getuid())
+    response.update(feedback, relativeDirectory="/".join(["d" * 41] * 12), port=65535,
+                    url=f"http://{response['siteId']}.localhost:65535/{response['siteId']}/",
+                    httpStatus=200, readbackVerified=True)
+    encoded = (json.dumps(response, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    assert len(encoded) <= MODULE.MAX_RESPONSE_BYTES
 
 
 def test_configured_portal_profile_keeps_its_existing_receipt_schema(tmp_path):

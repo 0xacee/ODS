@@ -38,6 +38,22 @@ authenticated LiteLLM gateway used by other ODS consumers. Gateway readiness
 proves that the route is callable; it does not claim that every underlying
 model has equal intelligence or tool-use skill.
 
+## Capability-aware bootstrap defaults
+
+ODS scopes the exact shipped `AGENTS.md` and `TOOLS.md` bootstrap defaults in
+memory before each Pixel run. Detailed Calendar and Frontier guidance is omitted
+only when their provider is explicitly disabled or every corresponding tool is
+explicitly denied. A tool deferred behind Tool Search remains enabled; Operations
+guidance and general authority, privacy, research and verification rules remain.
+The personal development contract in the known vendor default is
+replaced with instructions to use this installation's configured model and tools.
+
+This does not edit workspace files or alter available tools. Owner-customized
+files, unknown template revisions, other agents, mismatched workspaces and disabled
+prompt hooks retain their original text. Capability changes are evaluated on the
+next bootstrap, so enabling Calendar or Frontier restores its detailed guidance.
+Reduced bootstrap text is not evidence of task quality or a measured speedup.
+
 ## Availability and runtime readiness
 
 The authenticated `/api/pixel/status` response keeps model-route `available`
@@ -487,7 +503,11 @@ act as a capability gate:
   one evidence window. The tool returns only that bounded, explicitly untrusted
   window. It is the targeted fallback when the normal `web_fetch` prefix is
   truncated before the requested detail; local, private, single-label,
-  credentialed, and raw-IP destinations remain blocked.
+  credentialed, and raw-IP destinations remain blocked. It requests a page as
+  a browser-compatible navigation that names `ODS-Pixel/1.0`, and only after a
+  plain 403 or 406 repeats the plain request once. Script and style text is
+  removed before extraction. A bot challenge or block is reported as not read;
+  ODS never solves, waits out or retries one, and runs no JavaScript.
 - `pixel_ods_download_promote` can publish one already-successful, exact broker
   download into one new relative path in Pixel's workspace. It cannot fetch,
   transform, overwrite, execute, or select an arbitrary host file.

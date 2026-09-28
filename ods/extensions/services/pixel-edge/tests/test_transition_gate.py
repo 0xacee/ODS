@@ -226,6 +226,30 @@ class TestTransitionGate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(idle["streams"], 0)
         self.assertEqual((await self.operation("acquire", idle["revision"]))[0], 200)
 
+    async def test_model_drain_holds_new_admission_without_cancelling_existing_stream(self):
+        response = await self.chat(hold=True)
+        await asyncio.wait_for(self.up_runner.app["stream_started"].wait(), 2)
+        busy = await self.status()
+        code, held = await self.operation("drain", busy["revision"])
+        self.assertEqual(code, 200)
+        self.assertEqual((held["phase"], held["streams"], held["admission_blocked"]), ("held", 1, True))
+        # New user turns cannot slip in between router drain and model swap.
+        denied = await self.chat()
+        self.assertEqual(denied.status, 409)
+        await denied.read()
+        self.assertEqual(len(self.up_runner.app["chat_requests"]), 1)
+        # Current user work completes on its original runtime with no abort.
+        self.up_runner.app["release_stream"].set()
+        self.assertTrue(await response.read())
+        for _ in range(20):
+            settled = await self.status()
+            if settled["streams"] == 0:
+                break
+            await asyncio.sleep(0)
+        self.assertEqual((settled["phase"], settled["streams"]), ("held", 0))
+        self.assertEqual((await self.operation("release", settled["revision"]))[0], 200)
+        self.assertFalse((await self.status())["admission_blocked"])
+
     async def test_simultaneous_acquisition_and_actual_chat_admission_are_exclusive(self):
         for chat_first in (False, True):
             revision = (await self.status())["revision"]

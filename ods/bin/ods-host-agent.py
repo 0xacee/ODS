@@ -49,6 +49,9 @@ from urllib.parse import parse_qs, unquote, urlparse
 _SWITCHBOARD_BIN_DIR = str(Path(__file__).resolve().parent)
 if _SWITCHBOARD_BIN_DIR not in sys.path:
     sys.path.insert(0, _SWITCHBOARD_BIN_DIR)
+from model_switchboard.lemonade_transport import request as _container_lemonade_request
+from model_switchboard import wsl_lemonade as _wsl_lemonade
+
 try:
     from model_switchboard import state as _switchboard_state
 except Exception:  # pragma: no cover - import environment dependent
@@ -142,8 +145,9 @@ def _lemonade_recipe_options_path() -> Path:
         cache = str(Path(os.environ.get("USERPROFILE") or str(Path.home())) / ".cache" / "lemonade")
     return Path(cache) / "recipe_options.json"
 
+# Host Agent component version is independent of the installed ODS product.
 VERSION = "1.0.0"
-ODS_VERSION = VERSION
+ODS_VERSION = "3.0.0"
 SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 PIXEL_OPS_JOB_ID_RE = re.compile(r"^ops-[0-9]{13}-[a-f0-9]{12}$")
 PIXEL_OPS_PLAN_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -165,6 +169,11 @@ MODEL_ACTIVATION_HEALTH_ATTEMPTS = 60
 # two additional health intervals during model activation while preserving the
 # same bounded, fail-closed health contract.
 HERMES_MODEL_ACTIVATION_HEALTH_ATTEMPTS = 90
+# A replaced llama-server container usually serves a small or mid-size model
+# within a few seconds. Probe densely for this window instead of sleeping a
+# fixed initial delay, then fall back to the regular 5-second schedule.
+_MODEL_READINESS_FAST_POLL_SECONDS = 30.0
+_MODEL_READINESS_FAST_POLL_INTERVAL_SECONDS = 0.5
 VALID_HOOK_NAMES = frozenset({
     "pre_install", "post_install", "pre_start", "post_start",
     "pre_uninstall", "post_uninstall",
@@ -518,6 +527,9 @@ _model_activate_lock = _model_lifecycle_lock
 _model_lifecycle_state_lock = threading.Lock()
 _model_lifecycle_operation: str | None = None
 _model_lifecycle_target: str | None = None
+_model_lifecycle_revision = 0
+_model_management_lock = threading.Lock()
+_model_management_cache: tuple | None = None
 _model_activation_target: str | None = None
 _model_status_verify_thread: threading.Thread | None = None
 _switchboard_initial_verify_lock = threading.Lock()
@@ -539,7 +551,7 @@ def _model_download_thread_alive() -> bool:
 
 def _begin_model_lifecycle(operation: str, target: str = "") -> tuple[bool, dict]:
     """Claim the process-wide model lifecycle boundary without waiting."""
-    global _model_lifecycle_operation, _model_lifecycle_target
+    global _model_lifecycle_operation, _model_lifecycle_target, _model_lifecycle_revision
     with _model_lifecycle_state_lock:
         if not _model_lifecycle_lock.acquire(blocking=False):
             return False, {
@@ -548,12 +560,13 @@ def _begin_model_lifecycle(operation: str, target: str = "") -> tuple[bool, dict
             }
         _model_lifecycle_operation = operation
         _model_lifecycle_target = target or None
+        _model_lifecycle_revision += 1
         return True, {"operation": operation, "target": target or None}
 
 
 def _end_model_lifecycle(operation: str) -> None:
     """Release lifecycle ownership held by ``operation``."""
-    global _model_lifecycle_operation, _model_lifecycle_target
+    global _model_lifecycle_operation, _model_lifecycle_target, _model_lifecycle_revision
     with _model_lifecycle_state_lock:
         if _model_lifecycle_operation != operation:
             logger.error(
@@ -563,6 +576,7 @@ def _end_model_lifecycle(operation: str) -> None:
             )
         _model_lifecycle_operation = None
         _model_lifecycle_target = None
+        _model_lifecycle_revision += 1
         _model_lifecycle_lock.release()
 
 
@@ -597,6 +611,25 @@ def _model_lifecycle_status() -> dict:
     else:
         payload["activeModelId"] = None
     return payload
+
+
+_SWITCHBOARD_ROUTE_ENV_KEYS = (
+    "GPU_BACKEND",
+    "GGUF_FILE",
+    "LLM_MODEL",
+    "LEMONADE_MODEL",
+    "LEMONADE_BASE_URL",
+    "LEMONADE_CONTAINER_BASE_URL",
+    "LEMONADE_HOST_TRANSPORT",
+    "LEMONADE_API_BASE_PATH",
+    "LEMONADE_EXTERNAL",
+    "LLM_BACKEND",
+    "AMD_INFERENCE_RUNTIME",
+    "AMD_INFERENCE_RUNTIME_MODE",
+    "AMD_INFERENCE_MANAGED",
+    "CTX_SIZE",
+    "MAX_CONTEXT",
+)
 
 
 def _prepare_initial_switchboard_verification() -> bool:
@@ -1449,9 +1482,12 @@ def _plan_nvidia_model_gpu_assignment(
     )
 
     mode = str((planned_llama.get("parallelism") or {}).get("mode") or "none")
+    # CUDA row split is not fleet-qualified and fails at model load from
+    # llama.cpp b9890 ("does not support split buffers"), so NVIDIA uses
+    # layer split for every multi-GPU mode.
     split_mode = {
-        "tensor": "row",
-        "hybrid": "row",
+        "tensor": "layer",
+        "hybrid": "layer",
         "pipeline": "layer",
     }.get(mode, "none")
     tensor_split = (planned_llama.get("parallelism") or {}).get("tensor_split")
@@ -1935,6 +1971,95 @@ def _read_model_status(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _wsl_runtime_registration() -> dict | None:
+    path = INSTALL_DIR / 'data/wsl-lemonade-runtime.json'
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat_mod.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096
+            or (os.name != 'nt' and (info.st_uid != os.geteuid() or stat_mod.S_IMODE(info.st_mode) & 0o077))):
+        raise RuntimeError('Unsafe Windows runtime registration')
+    value = json.loads(path.read_text(encoding='utf-8'))
+    if (not isinstance(value, dict) or set(value) != {'schemaVersion', 'planPath', 'modelStoreId'}
+            or type(value['schemaVersion']) is not int or value['schemaVersion'] != 1
+            or not isinstance(value['planPath'], str) or not Path(value['planPath']).is_absolute()
+            or Path(value['planPath']).name != 'runtime.json'
+            or Path(value['planPath']).parent.name != 'portal-runtime'
+            or not isinstance(value['modelStoreId'], str)
+            or not re.fullmatch(r'[a-z][a-z0-9-]{0,47}', value['modelStoreId'])):
+        raise RuntimeError('Invalid Windows runtime registration')
+    return value
+
+
+def _managed_wsl_lemonade(env: dict) -> dict:
+    """Prove Windows ownership and the installer's exact model-store binding."""
+    if not _wsl_lemonade.candidate(env):
+        return {'managed': False, 'running': False}
+    value = _wsl_lemonade.status(INSTALL_DIR, env)
+    registration = _wsl_runtime_registration()
+    if value.get('managed') is not True:
+        if registration is not None:
+            raise RuntimeError('The registered Windows runtime is no longer owned by this installation')
+        return value
+    if registration is None:
+        raise RuntimeError('Re-run the Windows installer to register its managed model store')
+    store = _wsl_lemonade.model_store(INSTALL_DIR, env, value)
+    plan_path = _wsl_lemonade.plan_path(INSTALL_DIR, env, value)
+    stores = _model_stores.registered_stores(INSTALL_DIR / 'data')
+    if (str(plan_path) != registration['planPath']
+            or not any(item['id'] == registration['modelStoreId'] and item['path'] == store for item in stores)):
+        raise RuntimeError('Windows runtime model-store ownership changed; re-run the installer')
+    return value
+
+
+def _model_download_directory() -> Path:
+    env = load_env(INSTALL_DIR / '.env')
+    managed = _managed_wsl_lemonade(env)
+    if managed.get('managed') is True:
+        return _wsl_lemonade.model_store(INSTALL_DIR, env, managed)
+    return INSTALL_DIR / 'data/models'
+
+
+def _model_management_key(env: dict) -> tuple:
+    with _model_lifecycle_state_lock:
+        lifecycle = (_model_lifecycle_revision, _model_lifecycle_operation, _model_lifecycle_target)
+    return (str(INSTALL_DIR), lifecycle,
+            tuple(env.get(key) for key in (*_SWITCHBOARD_ROUTE_ENV_KEYS, 'AMD_INFERENCE_PORT', 'ODS_WINDOWS_SYSTEM_DIRECTORY')))
+
+
+def _model_management_snapshot() -> tuple[int, dict]:
+    """Coalesce dashboard polling only; mutations always prove ownership fresh."""
+    global _model_management_cache
+    unavailable = (503, {'error': 'Windows runtime management could not be verified'})
+    if not _model_management_lock.acquire(timeout=19):
+        return unavailable
+    try:
+        env = load_env(INSTALL_DIR / '.env')
+        key = _model_management_key(env)
+        cached = _model_management_cache
+        if cached is not None and cached[0] == key and time.monotonic() < cached[1]:
+            return cached[2], dict(cached[3])
+        try:
+            value = _managed_wsl_lemonade(env)
+            managed = value.get('managed') is True
+            running = managed and value.get('running') is True
+            result = (200, {'managed': managed, 'canActivate': running,
+                            'canUnload': managed, 'running': running})
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            logger.warning('Windows runtime management verification failed: %s', exc)
+            result = unavailable
+        if _model_management_key(load_env(INSTALL_DIR / '.env')) != key:
+            _model_management_cache = None
+            return unavailable  # A completed lifecycle cannot reuse its earlier proof.
+        # Cache failures as failures too, preventing a burst of polls from
+        # launching another expensive controller for each waiting request.
+        _model_management_cache = (key, time.monotonic() + 1, *result)
+        return result[0], dict(result[1])
+    finally:
+        _model_management_lock.release()
+
+
 def _normalize_model_download_status(status_path: Path, data: dict) -> dict:
     """Schedule single-flight verification for status left by a dead worker."""
     global _model_status_verify_thread
@@ -1971,7 +2096,7 @@ def _normalize_model_download_status(status_path: Path, data: dict) -> dict:
 
         def _verify_stale_manifest() -> None:
             try:
-                models_dir = INSTALL_DIR / "data" / "models"
+                models_dir = _model_download_directory()
                 manifest_valid, integrity_error = _verify_model_manifest(
                     models_dir,
                     manifest,
@@ -2431,6 +2556,15 @@ def _initial_switchboard_backend(env: dict) -> tuple[str, str, str | None]:
     return "llama-server", "llama-server-default", None
 
 
+def _initial_switchboard_route_env_matches(expected_env: dict) -> bool:
+    """Abandon observational proof when the installer selects another route."""
+    current_env = load_env(INSTALL_DIR / ".env")
+    return all(
+        str(current_env.get(key) or "") == str(expected_env.get(key) or "")
+        for key in _SWITCHBOARD_ROUTE_ENV_KEYS
+    )
+
+
 def _publish_verified_initial_switchboard_route(
     *,
     reason: str,
@@ -2452,6 +2586,7 @@ def _publish_verified_initial_switchboard_route(
     if not _switchboard_state_needs_current_env_verification(state_path, env):
         return False
 
+    route_env_keys = _SWITCHBOARD_ROUTE_ENV_KEYS
     identity = _switchboard_state.migrate_env_identity(env)
     if not identity:
         return False
@@ -2473,25 +2608,13 @@ def _publish_verified_initial_switchboard_route(
         interval=interval,
         return_proof=True,
         cancel_event=_switchboard_initial_verify_cancel,
+        env_still_current=lambda: _initial_switchboard_route_env_matches(env),
     )
     if not isinstance(proof, dict) or not proof.get("identity"):
         logger.info("switchboard initial route proof deferred (%s)", reason)
         return False
 
     fresh_env = load_env(INSTALL_DIR / ".env")
-    route_env_keys = (
-        "GPU_BACKEND",
-        "GGUF_FILE",
-        "LLM_MODEL",
-        "LEMONADE_MODEL",
-        "LEMONADE_BASE_URL",
-        "LEMONADE_API_BASE_PATH",
-        "LEMONADE_EXTERNAL",
-        "LLM_BACKEND",
-        "AMD_INFERENCE_RUNTIME",
-        "AMD_INFERENCE_RUNTIME_MODE",
-        "AMD_INFERENCE_MANAGED",
-    )
     if any(
         str(fresh_env.get(key) or "") != str(env.get(key) or "")
         for key in route_env_keys
@@ -2585,7 +2708,10 @@ def _bootstrap_status_allows_route_proof() -> bool:
 
 def _model_status_allows_route_proof(data: dict) -> bool:
     status = str(data.get("status") or "").strip().casefold()
-    if status in {"already_downloaded", "complete"}:
+    # A fresh install can already be serving its bootstrap model without a
+    # download receipt. Status may schedule proof, never grant readiness; the
+    # worker still verifies the current runtime and discards changed env inputs.
+    if status in {"idle", "already_downloaded", "complete"}:
         return True
     return _bootstrap_status_allows_route_proof()
 
@@ -3086,7 +3212,7 @@ def _reconcile_ods_managed_pixel_model(
     owner, home = identity
     env_values = load_env(INSTALL_DIR / ".env")
     configured_ref = str(env_values.get("PIXEL_SOURCE_REF") or "")
-    bundled_ref = "c3b573f9741fd402878176ac1d534201a904732a"
+    bundled_ref = "6e82d4c974be8c7b5aebe3a4ffd5374e20ad0ac5"
     source_url = str(env_values.get("PIXEL_SOURCE_URL") or "bundled")
     if any(character in source_url for character in "\r\n\x00"):
         raise RuntimeError("The configured Pixel source URL is invalid")
@@ -3850,6 +3976,9 @@ def _pixel_model_config_paths() -> dict:
                   'remote-public':_remote_provider_activation_public_path()})
     paths.update({f'opencode-{i}': value for i,value in enumerate(_opencode_config_paths())})
     paths['lemonade-recipe'] = _lemonade_recipe_options_path()
+    registration = _wsl_runtime_registration()
+    if registration is not None:
+        paths['windows-runtime-plan'] = Path(registration['planPath'])
     return paths
 
 
@@ -3892,7 +4021,8 @@ def _read_pixel_model_journal() -> dict | None:
         if key=='after' and items is None:continue
         if (not isinstance(items,dict) or not (set(items)==names or (
                 value['phase']=='completed' and value['outcome'] in {'commit','rollback'}
-                and set(items)==names-{'data/model-state.json'}))
+                and set(items) in (names-{'data/model-state.json'}, names-{'windows-runtime-plan'},
+                                   names-{'data/model-state.json','windows-runtime-plan'})))
                 or any(item is not None and item!='unavailable' and (not isinstance(item,str)
                     or not re.fullmatch('[a-f0-9]{64}',item)) for item in items.values())):
             raise RuntimeError('Managed model recovery evidence is invalid')
@@ -4057,6 +4187,21 @@ def _prove_pixel_model_contract(config: dict, contract: dict) -> bool:
         _verify_litellm_route(config, model='ods/current')
         return True
     if _external_lemonade_runtime(config):
+        managed = _managed_wsl_lemonade(config)
+        if managed.get('managed') is True and (
+                managed.get('running') is not True
+                or managed['plan']['GgufFile'] != config.get('GGUF_FILE')
+                or managed['plan']['ContextSize'] != contract['contextLength']):
+            return False
+        if managed.get('managed') is True:
+            proof = _wait_for_model_readiness(config, model_id=contract['model'],
+                gguf_file=managed['plan']['GgufFile'], llm_model_name=contract['model'],
+                lemonade_model_id=contract['model'], attempts=1, initial_delay=0, interval=0,
+                return_proof=True, require_exact_context=True, allow_model_warmup=False)
+            if (not isinstance(proof, dict) or proof.get('identity') != contract['model']
+                    or proof.get('contextVerified') is not True
+                    or proof.get('contextLength') != contract['contextLength']):
+                return False
         # An externally managed Lemonade process is the authority for its
         # loaded model. The local GGUF_FILE can be an unrelated installer
         # artifact, so it cannot prove either commit or rollback here.
@@ -4172,11 +4317,15 @@ def _recover_pixel_model_transaction(config: dict) -> dict:
         if outcome is None:
             return pending
         expected=journal['target'] if outcome=='commit' else journal['previous']
-        if not _prove_pixel_model_contract(config,expected):
+        # A settings save may have changed model/context fields as well as
+        # unrelated values. Prove the current file instead of the caller's
+        # earlier snapshot before allowing the env-only drift exception.
+        proof_config=load_env(INSTALL_DIR / '.env') if env_only_drift else config
+        if not _prove_pixel_model_contract(proof_config,expected):
             return pending
         if _pixel_model_config_digests()!=current:
             return pending
-        transaction=_PixelModelTransaction(config)
+        transaction=_PixelModelTransaction(proof_config)
         transaction.id=journal['transactionId']
         transaction.previous=journal['previous']
         transaction.target=journal['target']
@@ -4471,8 +4620,12 @@ def _render_remote_provider_cloud_config(route: dict, env: dict[str, str]) -> No
         raise RuntimeError("Could not render the remote-provider LiteLLM route")
 
 
-def _activate_remote_provider_route(route: dict, *, transaction=None) -> dict[str, object]:
+def _activate_remote_provider_route(
+    route: dict, *, transaction=None, defer_consumer_rollback: bool = False,
+) -> dict[str, object]:
     """Commit a proven egress route to LiteLLM and managed Pixel, or roll back."""
+    if defer_consumer_rollback and transaction is None:
+        raise RuntimeError("Deferred consumer rollback requires the lifecycle transaction")
     runtime = _remote_provider_runtime_contract(route)
     env_path = INSTALL_DIR / ".env"
     cloud_path = INSTALL_DIR / "config" / "litellm" / "cloud.yaml"
@@ -4569,7 +4722,9 @@ def _activate_remote_provider_route(route: dict, *, transaction=None) -> dict[st
             _restore_text_file(activation_public_path, activation_public_snapshot)
         except Exception as rollback_exc:
             rollback_errors.append(f"configuration: {rollback_exc}")
-        if litellm_attempted:
+        # The lifecycle owner must restore its route and credential snapshots
+        # before refreshing a consumer that reads those files at startup.
+        if litellm_attempted and not defer_consumer_rollback:
             try:
                 _restore_container_state("ods-litellm", container_state, recreate=True)
                 _wait_for_container_health("ods-litellm")
@@ -4954,6 +5109,7 @@ def _apply_remote_provider_lifecycle_operation(payload: dict, plan: dict) -> dic
     snapshots: dict[Path, dict] = {}
     mutation_started = False
     pixel_transaction = None
+    consumer_before = None
     try:
         snapshots = {path: _snapshot_text_file(path) for path in mutation_paths}
         transaction_env = load_env(INSTALL_DIR / '.env')
@@ -4982,8 +5138,13 @@ def _apply_remote_provider_lifecycle_operation(payload: dict, plan: dict) -> dic
             if ssh_configure:
                 result["staged"] = True
             else:
-                result["activation"] = _activate_remote_provider_route(route, transaction=pixel_transaction) \
-                    if pixel_transaction is not None else _activate_remote_provider_route(route)
+                if pixel_transaction is not None:
+                    consumer_before = _capture_container_state("ods-litellm")
+                    result["activation"] = _activate_remote_provider_route(
+                        route, transaction=pixel_transaction, defer_consumer_rollback=True,
+                    )
+                else:
+                    result["activation"] = _activate_remote_provider_route(route)
                 result["applied"] = True
         elif action == "enable":
             _write_remote_provider_route_state(
@@ -4995,8 +5156,13 @@ def _apply_remote_provider_lifecycle_operation(payload: dict, plan: dict) -> dic
             if ssh_enable:
                 result["staged"] = True
             else:
-                result["activation"] = _activate_remote_provider_route(route, transaction=pixel_transaction) \
-                    if pixel_transaction is not None else _activate_remote_provider_route(route)
+                if pixel_transaction is not None:
+                    consumer_before = _capture_container_state("ods-litellm")
+                    result["activation"] = _activate_remote_provider_route(
+                        route, transaction=pixel_transaction, defer_consumer_rollback=True,
+                    )
+                else:
+                    result["activation"] = _activate_remote_provider_route(route)
                 result["applied"] = True
         elif action == "disable":
             if isinstance(saved_state, dict) and saved_state.get("enabled") is True:
@@ -5078,6 +5244,15 @@ def _apply_remote_provider_lifecycle_operation(payload: dict, plan: dict) -> dic
                     rollback,
                 ) from exc
             rollback["ok"] = True
+        if consumer_before is not None:
+            try:
+                _restore_container_state("ods-litellm", consumer_before, recreate=True)
+                if consumer_before.get("running"):
+                    _wait_for_container_health("ods-litellm")
+            except Exception as rollback_exc:
+                raise _PixelModelTransactionUncertain(
+                    'Restored provider consumer could not be refreshed; managed model recovery is required'
+                ) from rollback_exc
         if pixel_transaction is not None:
             if not _prove_pixel_model_contract(load_env(INSTALL_DIR / '.env'), pixel_transaction.previous):
                 raise _PixelModelTransactionUncertain('Previous provider route could not be proved; managed model recovery is required') from exc
@@ -5354,12 +5529,24 @@ def _resolve_agent_bind_addr(
         return "127.0.0.1"
 
     if _running_under_wsl(system_name):
+        # A leftover native docker0 can have the same address as Desktop's
+        # bridge. Bindability alone does not identify the active daemon.
+        try:
+            result = subprocess.run(
+                ["docker", "info", "--format", "{{.OperatingSystem}}"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("Cannot identify the WSL Docker daemon for the host-agent route") from exc
+        if result.returncode != 0 or not result.stdout.strip():
+            raise RuntimeError("Cannot identify the WSL Docker daemon for the host-agent route")
+        if result.stdout.strip() == "Docker Desktop":
+            return "127.0.0.1"
         # A native Docker daemon inside WSL owns its default bridge locally,
         # and Compose's host-gateway mapping resolves to that address. Bind
         # only that scoped bridge so dashboard-api can reach the agent without
-        # exposing it on WSL's LAN-facing interface. Docker Desktop reports a
-        # bridge gateway from a different network namespace; the bindability
-        # check preserves its existing loopback-forwarding path.
+        # exposing it on WSL's LAN-facing interface. Desktop was identified
+        # above, before a leftover local interface can impersonate its bridge.
         bridge_gateway = _detect_docker_bridge_gateway()
         if _local_bind_address_available(bridge_gateway):
             return bridge_gateway
@@ -5933,7 +6120,17 @@ def _core_recreate_compose_flags(flags: list[str]) -> list[str]:
             if index not in excluded and index - 1 not in excluded]
 
 
-def docker_compose_recreate(service_ids: list[str]) -> tuple:
+def docker_compose_converge(service_ids: list[str]) -> tuple:
+    """Apply the current compose definition without forcing a recreate.
+
+    Compose replaces a container only when its resolved service definition
+    (interpolated environment, image, mounts) no longer matches the running
+    instance, and otherwise leaves it untouched.
+    """
+    return docker_compose_recreate(service_ids, force_recreate=False)
+
+
+def docker_compose_recreate(service_ids: list[str], *, force_recreate: bool = True) -> tuple:
     """Force-recreate a set of allowed core services using the current compose stack."""
     ok, error = validate_core_recreate_ids(service_ids)
     if not ok:
@@ -5943,7 +6140,11 @@ def docker_compose_recreate(service_ids: list[str]) -> tuple:
         flags = _core_recreate_compose_flags(resolve_compose_flags())
     except (OSError, ValueError) as exc:
         return False, f"Could not resolve core Compose fragments: {exc}"
-    cmd = ["docker", "compose"] + flags + ["up", "-d", "--no-deps", "--force-recreate"] + service_ids
+    cmd = (
+        ["docker", "compose"] + flags + ["up", "-d", "--no-deps"]
+        + (["--force-recreate"] if force_recreate else [])
+        + service_ids
+    )
     compose_env = os.environ.copy()
     for key in ("GGUF_FILE", "LLM_MODEL", "LEMONADE_MODEL", "MAX_CONTEXT", "CTX_SIZE"):
         compose_env.pop(key, None)
@@ -6517,7 +6718,6 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-_BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._\-=+/]+", re.IGNORECASE)
 _install_operation_context = threading.local()
 _install_operation_guard = threading.Lock()
 _install_operation_live = set()
@@ -6624,7 +6824,9 @@ def _write_progress(service_id: str, status: str, phase_label: str = "",
         except (json.JSONDecodeError, OSError):
             pass
 
-    sanitized_error = _BEARER_RE.sub("Bearer [REDACTED]", error) if error else None
+    # Install errors reach the dashboard and Pixel and can carry command or
+    # container output: use the one output redactor.
+    sanitized_error = _redact_credential_text(error) if error else None
 
     data = {
         "service_id": service_id,
@@ -6786,8 +6988,10 @@ def _run_post_install_hook(service_id: str, ext_dir: Path) -> tuple[bool, str]:
     - On success the helper writes nothing further; the caller proceeds.
 
     The 8-key env allowlist mirrors ``_execute_hook`` (L1488-1498) to
-    keep host-agent secrets out of extension scripts. Stderr is sliced
-    tail-500 so the actionable end of the output reaches the dashboard.
+    keep host-agent secrets out of extension scripts. Stderr is untrusted
+    extension output: credentials are redacted as in container start
+    diagnostics, then it is sliced tail-500 so the actionable end of the
+    output reaches the dashboard (and Pixel, as the install error).
     """
     hook_path = _resolve_hook(ext_dir, "post_install")
     if not hook_path:
@@ -6832,7 +7036,14 @@ def _run_post_install_hook(service_id: str, ext_dir: Path) -> tuple[bool, str]:
         return (False, msg)
 
     if result.returncode != 0:
-        msg = (result.stderr or "")[-500:]
+        try:
+            declared = _declared_secret_values(service_def, ext_dir)
+            redacted = _redact_untrusted_output(result.stderr or "", {}, declared)
+        except Exception:  # Diagnostics must not end the install worker.
+            logger.exception("Could not redact post_install hook output for %s", service_id)
+            redacted = None
+        msg = (redacted[-500:] if redacted is not None else
+               "Setup hook output withheld: credential redaction could not be completed.")
         _write_progress(service_id, "error", "Setup failed", error=msg)
         return (False, msg)
 
@@ -6858,9 +7069,24 @@ def _enable_retry_work(service_id: str) -> None:
         # expected to be idempotent (check-then-create for secrets,
         # env vars, data dirs) so re-running repopulates anything an
         # earlier failed install may have left unset.
-        ok, _ = _run_post_install_hook(service_id, ext_dir)
+        # A failed library install is disabled (see _disable_unprepared_install);
+        # enabling it again for this retry must not leave an unresolvable
+        # definition in the merged Compose project either. Built-ins are not
+        # renamed here and keep the existing start path.
+        library_install = ext_dir == USER_EXTENSIONS_DIR / service_id
+        ok, hook_error = _run_post_install_hook(service_id, ext_dir)
         if not ok:
+            if library_install:
+                note = _disable_unprepared_install(service_id)
+                _write_progress(service_id, "error", "Setup failed",
+                                error=(hook_error or "Setup failed") + note)
             return
+        if library_install:
+            resolved, error = _resolve_install_compose(resolve_compose_flags())
+            if resolved is None:
+                error += _disable_unprepared_install(service_id)
+                _write_progress(service_id, "error", "Retry failed", error=error)
+                return
 
         _write_progress(service_id, "starting", "Starting container...")
         ok, err = docker_compose_action(service_id, "start")
@@ -6901,6 +7127,7 @@ def _enable_retry_work(service_id: str) -> None:
                 msg = f"Container did not reach running state within {startup_timeout}s (state={state or 'unknown'})"
                 if state_error:
                     msg += f": {state_error}"
+                msg += _container_start_diagnostic(container_name, retry_service_def, ext_dir)
                 _write_progress(service_id, "error", "Start failed", error=msg)
                 return
 
@@ -7333,27 +7560,227 @@ def _build_install_sources(base, builds, services):
          *sorted(builds)], input=compiled.stdout, **options)
 
 
-def _install_build_diagnostic(result, services: dict) -> str:
-    """Bound untrusted build evidence and remove configured credential values.
+BUILD_DIAGNOSTIC_LIMIT = 7600
+BUILD_ERROR_LINE_LIMIT = 300
+STARTUP_LOG_TAIL_LINES = 12
+STARTUP_DIAGNOSTIC_LIMIT = 2000
 
-    Redact before truncating so a tail cannot expose part of a credential.
-    Never include the resolved Compose configuration or build plan.
+
+# One redactor for every piece of process output the agent hands back to the
+# dashboard or Pixel: build and Compose diagnostics, container start
+# diagnostics, setup hook output and every other install error (via
+# _write_progress), the llama-server log excerpt kept when an activation rolls
+# back, Windows Lemonade restart output and the container log viewer.
+_REDACTED = '[REDACTED]'
+# Terminal escapes: CSI (colors), OSC (titles) and the short ESC forms such as
+# the ESC ( B that tput sgr0 prints. They and other control characters are
+# removed before any matching, so none can sit between a name and its value.
+_OUTPUT_ANSI_RE = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|[ -/]*[0-~])')
+_OUTPUT_CONTROL_RE = re.compile(r'[\x00-\x08\x0b-\x1f]')
+# A name holds a credential when one of its words (split at _ - . and
+# camelCase) is one of these (HF_TOKEN, clientSecret, DB_PASSWORD, Cookie) ...
+_CREDENTIAL_NAME_WORDS = frozenset({
+    'token', 'secret', 'password', 'passwd', 'passphrase', 'credential', 'credentials',
+    'authorization', 'bearer', 'cookie', 'apikey', 'salt', 'pepper'})
+_CREDENTIAL_NAME_ENDINGS = ('token', 'secret', 'password', 'passwd', 'apikey', 'secretkey',
+                            'privatekey', 'accesskey', 'masterkey')
+_CREDENTIAL_NAME_STARTS = ('secret', 'password', 'passwd')
+# ... or one of these after a qualifying word (LITELLM_MASTER_KEY, api_key,
+# x-api-key, api_keys, DB_PASS, basic_auth); never a bare key/auth, sort_key or public_key.
+_QUALIFIED_CREDENTIAL_WORDS = frozenset({'key', 'keys', 'pass', 'pwd', 'auth'})
+_CREDENTIAL_QUALIFIERS = frozenset({
+    'api', 'master', 'secret', 'private', 'access', 'auth', 'encryption', 'encrypt', 'signing',
+    'client', 'admin', 'service', 'session', 'license', 'app', 'account', 'hmac', 'jwt', 'ssh',
+    'webhook', 'deploy', 'bot', 'root', 'shared', 'db', 'database', 'user', 'smtp', 'mail',
+    'proxy', 'basic', 'http'})
+_NON_CREDENTIAL_QUALIFIERS = frozenset({
+    'public', 'pub', 'sort', 'cache', 'primary', 'foreign', 'partition', 'unique', 'index',
+    'lookup', 'group', 'routing', 'hash', 'idempotency', 'translation', 'hot', 'short', 'row',
+    'column', 'field', 'map', 'object', 'first', 'second', 'last', 'next', 'test'})
+# A later word that makes the name describe a credential rather than hold one
+# (bos_token_id, TOKEN_SPY_PORT, api_key_file, token_count, secret.py:12).
+_CREDENTIAL_METADATA_WORDS = frozenset({
+    'id', 'ids', 'count', 'len', 'length', 'limit', 'size', 'max', 'min', 'type', 'kind',
+    'file', 'path', 'dir', 'url', 'uri', 'endpoint', 'port', 'host', 'name', 'ttl', 'expiry',
+    'expires', 'expiration', 'at', 'enabled', 'disabled', 'required', 'header', 'prefix',
+    'format', 'mode', 'timeout', 'env', 'var', 'usage', 'budget', 'total', 'index', 'field',
+    'hint', 'policy', 'version', 'source', 'status', 'set', 'present', 'configured', 'missing',
+    'py', 'rs', 'go', 'js', 'mjs', 'ts', 'jsx', 'tsx', 'rb', 'java', 'kt', 'c', 'h', 'cc',
+    'cpp', 'cs', 'php', 'sh', 'yaml', 'yml', 'json', 'toml', 'ini', 'conf', 'cfg', 'txt', 'log',
+    'md'})
+_NAME_WORD_RE = re.compile(r'[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+')
+_ENV_STYLE_NAME_RE = re.compile(r'[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+')
+# NAME=value, NAME: value, "name": "value", \"name\": \"value\" (escaped JSON),
+# Authorization: Bearer value, -Dproperty=value, --flag=value and --flag value.
+# The name is the whole run of name characters, leading - or . included
+# (-Dspring.datasource.password, model_list[0].litellm_params.api_key), and
+# _credential_name_kind drops that prefix. One start per run keeps this linear.
+# Only the name and separator are matched here, so a name that is not a
+# credential never hides the one after it: in "INFO: token = value" and
+# "INFO:root:token = value" the match for INFO or root ends before "token".
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r'''(?<![A-Za-z0-9_.-])(?P<name>[A-Za-z0-9_.-]+)'''
+    r'''(?:\\?["'])?[ \t]*[:=](?![:=])[ \t]*'''
+    r'''|(?<![A-Za-z0-9_-])-*--(?P<flag>[A-Za-z][A-Za-z0-9_-]*)(?:=|[ \t]+)(?!-)''')
+# The scheme word of "Authorization: Bearer value" or "Authorization: token
+# value", skipped only after a credential name. A word followed by its own
+# separator ("app.auth:token : value") is the next name, not a scheme.
+_AUTH_SCHEME_RE = re.compile(r'(?i:bearer|basic|token|digest)[ \t]+(?![ \t:=])')
+# A quoted value ("...", '...', \"...\" inside a JSON string, or the first
+# item of a JSON list); a bare value; or, when a value follows a quote that is
+# never closed, the whole non-space run.
+_CREDENTIAL_VALUE_RE = re.compile(
+    r'''\[?(?P<quote>\\?["'])(?P<quoted>[^\n]*?)(?P=quote)'''
+    r'''|(?!\[?\\?["'])[^\s"',;]+'''
+    r'''|(?=\[?\\?["'][^\s"'\\,;)\]}])\S+''')
+# A Cookie header (Cookie: a=1; b=2) carries several cookies: all of them.
+_COOKIE_HEADER_VALUE_RE = re.compile(r'''(?!\[)[^\s;,"'\\`]+(?:;[ \t]*[^\s;,"'\\`]+)*''')
+_CREDENTIAL_NAME_PREFIX_RE = re.compile(r'^[-.0-9]*(?:(?<=-)D(?=[a-z]))?')
+# A tokenizer's special token (<|im_end|>, </s>) as the value of a token name.
+_SPECIAL_TOKEN_RE = re.compile(r'<[^\s<>]{1,40}>')
+_PLACEHOLDER_VALUES = frozenset({
+    'none', 'null', 'nil', 'true', 'false', 'undefined', 'yes', 'no', 'on', 'off', 'unset',
+    'bearer', 'basic', 'digest', _REDACTED.lower()})
+# Bearer <token>, and bearer = <token> or bearer: <token> in a log line.
+_BEARER_VALUE_RE = re.compile(r'''(?i)\b(bearer(?:[ \t]*[:=][ \t]*|[ \t]+))([^\s"',;]+)''')
+# The scheme is bounded so a long run of letters and dots stays linear. It is
+# not anchored, so foo_postgres:// and 1postgres:// still match.
+_URL_USERINFO_RE = re.compile(r'''([a-zA-Z][a-zA-Z0-9+.-]{0,31}://)[^/\s@"'<>]+@''')
+# Credentials recognizable without a name: private key blocks, JWTs and
+# prefixed tokens (Hugging Face, OpenAI-style sk-, GitHub, Slack, Google).
+_BARE_CREDENTIAL_RE = re.compile(
+    r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY-----|.*\Z)'
+    r'|(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*'
+    r'|(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}(?![A-Za-z0-9])'
+    r'|(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}'
+    r'|(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})'
+    r'|(?<![A-Za-z0-9])xox[abposr]-[A-Za-z0-9-]{10,}'
+    r'|(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{35}',
+    re.DOTALL)
+
+
+def _credential_name_kind(name: str) -> str | None:
+    """``count`` for a plain token name, ``secret`` for another credential name, else None.
+
+    A plain token name can also hold a count, an id or a tokenizer's special
+    token (``EOS token = 151645``, ``max_token: 512``, ``eos_token: <|im_end|>``),
+    so those values are kept for it. A qualified one (``SECRET_TOKEN``,
+    ``API_TOKEN``) and every key, secret or password name is always redacted.
     """
-    output = '\n'.join(str(getattr(result, stream, '') or '')
-                       for stream in ('stdout', 'stderr'))
-    secrets = set()
+    name = _CREDENTIAL_NAME_PREFIX_RE.sub('', name)  # -D, --, a leading . or digit
+    words = [word.lower() for word in _NAME_WORD_RE.findall(name)]
+    env_style = _ENV_STYLE_NAME_RE.fullmatch(name) is not None
+    found = None
+    for index, word in enumerate(words):
+        previous = words[index - 1] if index else ''
+        if (word in _CREDENTIAL_NAME_WORDS or word.endswith(_CREDENTIAL_NAME_ENDINGS)
+                or word.startswith(_CREDENTIAL_NAME_STARTS)):
+            found = index
+        elif (word in _QUALIFIED_CREDENTIAL_WORDS and previous
+              and previous not in _NON_CREDENTIAL_QUALIFIERS
+              and (env_style or previous in _CREDENTIAL_QUALIFIERS)):
+            found = index
+    if found is None:
+        return None
+    later = words[found + 1:]
+    if words[found] == 'secret':
+        later = [word for word in later if word not in ('id', 'ids')]  # A Vault secret_id is a credential.
+    if any(word in _CREDENTIAL_METADATA_WORDS for word in later):
+        return None
+    plain_token = words[found] == 'token' and not any(
+        word in _CREDENTIAL_QUALIFIERS or word in _CREDENTIAL_NAME_WORDS for word in words[:found])
+    return 'count' if plain_token else 'secret'
+
+
+def _redact_credential_assignments(text: str) -> str:
+    parts, cursor = [], 0
+    for match in _CREDENTIAL_ASSIGNMENT_RE.finditer(text):
+        if match.end() < cursor:
+            continue  # Name and separator inside a value already redacted.
+        # A name that starts inside the value just redacted but whose separator
+        # comes after it still gets its value redacted: "app.auth:token : value"
+        # redacts "token" as the value of app.auth, then the value of token.
+        name = match.group('name') or match.group('flag')
+        kind = _credential_name_kind(name)
+        if not kind:
+            continue
+        scheme = _AUTH_SCHEME_RE.match(text, match.end())
+        start = scheme.end() if scheme else match.end()
+        value = _CREDENTIAL_VALUE_RE.match(text, start)
+        if value is None:
+            continue
+        quote = value.group('quote') or ''
+        if (not quote and (match.group('name') or '').lower() in ('cookie', 'set-cookie')
+                and ':' in text[match.end('name'):match.end()]):
+            value = _COOKIE_HEADER_VALUE_RE.match(text, start) or value
+        bare = value.group('quoted') if quote else value.group()
+        if (not bare.strip(' \t"\'\\') or bare.lower() in _PLACEHOLDER_VALUES
+                or re.fullmatch(r'\$\{?[A-Za-z_][A-Za-z0-9_]*\}?', bare)
+                or (kind == 'count' and (bare.isdigit() or _SPECIAL_TOKEN_RE.fullmatch(bare)))):
+            continue  # Nothing secret: an unset value, a ${REFERENCE}, a count, <|im_end|>.
+        parts += [text[cursor:value.start('quote') if quote else value.start()], quote + _REDACTED + quote]
+        cursor = value.end()
+    parts.append(text[cursor:])
+    return ''.join(parts)
+
+
+def _redact_bearer_value(match: re.Match) -> str:
+    value = match.group(2)
+    if value == _REDACTED or (value.isalpha() and len(value) <= 16):
+        return match.group(0)  # "bearer token", "Bearer authentication"
+    return match.group(1) + _REDACTED
+
+
+def _redact_credential_text(text, known_values=()) -> str:
+    """Remove credentials from untrusted process output before it is shown.
+
+    ``known_values`` are exact values to remove (configured credentials).
+    Then credential-shaped text: values of credential names (see
+    _credential_name_kind), credential flags, bearer tokens, URL user info,
+    JWTs, private keys and prefixed tokens such as ``hf_...``. Terminal
+    escapes and control characters are removed first; a carriage return
+    ends a line, as splitlines() reads it. Ordinary words, token counts,
+    digests and model names are kept.
+    """
+    text = _OUTPUT_ANSI_RE.sub('', str(text or ''))
+    text = _OUTPUT_CONTROL_RE.sub('', text.replace('\r\n', '\n').replace('\r', '\n'))
+    values = sorted({value for value in known_values if isinstance(value, str) and value},
+                    key=len, reverse=True)
+    if values:
+        text = re.sub('|'.join(re.escape(value) for value in values), _REDACTED, text)
+    text = _URL_USERINFO_RE.sub(r'\1' + _REDACTED + '@', text)
+    text = _redact_credential_assignments(text)
+    text = _BEARER_VALUE_RE.sub(_redact_bearer_value, text)
+    return _BARE_CREDENTIAL_RE.sub(_REDACTED, text)
+
+
+def _redact_untrusted_output(output: str, services: dict, extra_secrets=()) -> str | None:
+    """Remove configured credential values and credential-shaped text.
+
+    Collects the values of credential-named variables from the agent's
+    environment, the persisted .env and the given Compose service
+    definitions, plus ``extra_secrets`` (such as an extension's declared
+    secret settings, however they are named). Returns None when the .env
+    cannot be read, so callers disclose nothing they could not check.
+    """
+    secrets = {value for value in extra_secrets if isinstance(value, str) and value}
     sensitive = re.compile(r'(?i)(secret|token|password|passwd|credential|api.?key|private.?key|authorization)')
+    # Names that usually hold a credential (..._KEY, ...PASS..., salts,
+    # peppers, seeds, cookies, encryption keys) but also flags: only values
+    # long enough to be a credential, so "true" or "1" never blank the output.
+    likely = re.compile(r'(?i)(pass|salt|pepper|seed|cookie|encrypt|(^|_)key($|_))')
     def collect(values):
         if isinstance(values, dict):
             for key, value in values.items():
-                if sensitive.search(str(key)) and isinstance(value, str) and value:
+                if not isinstance(value, str) or not value:
+                    continue
+                if sensitive.search(str(key)) or (likely.search(str(key)) and len(value) >= 8):
                     secrets.add(value)
     collect(dict(os.environ))
     try:
         collect(load_env(INSTALL_DIR / '.env'))
     except (OSError, UnicodeError):
-        # Do not disclose output if persisted credentials cannot be checked.
-        return 'Build diagnostics unavailable: credential redaction could not be completed.'
+        return None
     for definition in services.values():
         if not isinstance(definition, dict):
             continue
@@ -7361,16 +7788,202 @@ def _install_build_diagnostic(result, services: dict) -> str:
         build = definition.get('build')
         if isinstance(build, dict):
             collect(build.get('args'))
-    output = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', output)
-    if secrets:
-        output = re.sub('|'.join(re.escape(value) for value in sorted(secrets, key=len, reverse=True)),
-                        '[REDACTED]', output)
-    output = re.sub(r'(?i)(bearer\s+)[^\s\x22\x27]+', r'\1[REDACTED]', output)
-    output = re.sub(r'([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@', r'\1[REDACTED]@', output)
-    output = re.sub(r'(?im)((?:[\w-]*(?:token|password|passwd|secret|api[_-]?key|credential)[\w-]*)[\x22\x27]?\s*[:=]\s*)(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s,;]+)',
-                    r'\1[REDACTED]', output)
-    output = ''.join(c for c in output if c in '\n\t' or ord(c) >= 32).strip()
-    return output[-7600:] or 'No build diagnostic output was returned.'
+    return _redact_credential_text(output, secrets)
+
+
+_COMPOSE_VARIABLE_RE = re.compile(r'\$\{?([A-Za-z_][A-Za-z0-9_]*)')
+
+
+def _declared_secret_values(service_def: dict, ext_dir: Path | None = None) -> list[str]:
+    """Current .env values an extension's container output must not show.
+
+    Every setting the extension declares secret, whatever it is named, and
+    every variable its Compose file interpolates (``${NAME}``), except
+    values too plain to be a credential (port-sized numbers, booleans).
+    """
+    declarations = service_def.get('env_vars') if isinstance(service_def, dict) else None
+    declarations = declarations if isinstance(declarations, list) else []
+    secret_keys = {item.get('key') for item in declarations if isinstance(item, dict) and item.get('secret') is True}
+    compose_keys: set[str] = set()
+    compose = ext_dir / 'compose.yaml' if ext_dir is not None else None
+    if compose is not None and compose.is_file() and not compose.is_symlink():
+        compose_keys.update(_COMPOSE_VARIABLE_RE.findall(compose.read_text(encoding='utf-8')))
+    env = load_env(INSTALL_DIR / '.env')
+    values = [env[key] for key in secret_keys if isinstance(key, str) and env.get(key)]
+    values += [env[key] for key in compose_keys if env.get(key)
+               and not re.fullmatch(r'[0-9]{1,5}|(?i:true|false|yes|no|on|off)', env[key])]
+    return values
+
+
+def _container_start_diagnostic(container_name: str, service_def: dict, ext_dir: Path | None = None) -> str:
+    """Why a container did not stay running: exit code, health check, log tail.
+
+    Appended to the install/retry error so the owner sees the service's own
+    reason (for example a rejected setting) instead of only its state. The
+    container's output is untrusted: configured credentials, the
+    extension's declared secret settings and the values its Compose file
+    interpolates are redacted before the tail is bounded, and the
+    container's environment is never read.
+
+    This only adds evidence to a failure already being recorded, so any
+    error here is logged and reported as unavailable diagnostics: it must
+    never end the install worker before it writes its terminal state.
+    """
+    try:
+        return _collect_container_start_diagnostic(container_name, service_def, ext_dir)
+    except Exception:
+        logger.exception("Container start diagnostics failed for %s", container_name)
+        return '\nContainer diagnostics unavailable.'
+
+
+def _collect_container_start_diagnostic(container_name: str, service_def: dict, ext_dir: Path | None) -> str:
+    try:
+        inspected = subprocess.run(['docker', 'inspect', '--format', '{{json .State}}', container_name],
+                                   capture_output=True, text=True, timeout=10)
+        state = json.loads(inspected.stdout) if inspected.returncode == 0 else {}
+    except (subprocess.SubprocessError, OSError, ValueError):
+        state = {}
+    state = state if isinstance(state, dict) else {}
+    health = state.get('Health') if isinstance(state.get('Health'), dict) else {}
+    probes = health.get('Log') if isinstance(health.get('Log'), list) else []
+    probe = probes[-1] if probes and isinstance(probes[-1], dict) else {}
+    health_output = probe.get('Output') if isinstance(probe.get('Output'), str) else ''
+    if health.get('Status') in (None, 'healthy'):
+        health_output = ''
+    try:
+        logged = subprocess.run(['docker', 'logs', '--tail', str(STARTUP_LOG_TAIL_LINES), container_name],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                errors='replace', timeout=10)
+        log_text = logged.stdout if logged.returncode == 0 and isinstance(logged.stdout, str) else ''
+    except (subprocess.SubprocessError, OSError):
+        log_text = ''
+
+    notes = []
+    exit_code = state.get('ExitCode')
+    if type(exit_code) is int and exit_code != 0:
+        notes.append(f'Last exit code: {exit_code}.')
+    if health_output.strip() or log_text.strip():
+        try:
+            declared = _declared_secret_values(service_def, ext_dir)
+        except (OSError, UnicodeError):
+            declared = None
+        # Redact each part before bounding it, so a cut never exposes part
+        # of a credential.
+        parts = [(f"Last health check ({str(health.get('Status'))[:20]}):", health_output, 600),
+                 ('Last container log lines:', log_text, STARTUP_DIAGNOSTIC_LIMIT)]
+        for title, output, limit in parts:
+            if not output.strip():
+                continue
+            redacted = None if declared is None else _redact_untrusted_output(output, {}, declared)
+            if redacted is None:
+                notes.append('Container output withheld: credential redaction could not be completed.')
+                break
+            lines = [line.rstrip()[:BUILD_ERROR_LINE_LIMIT] for line in redacted.splitlines() if line.strip()]
+            while len(lines) > 1 and len('\n'.join(lines)) > limit:
+                lines.pop(0)  # Keep the most recent lines, whole.
+            if lines:
+                notes.append(title + '\n' + '\n'.join(lines))
+    if not notes:
+        return ''
+    return '\nUntrusted container output, credentials redacted:\n' + '\n'.join(notes)
+
+
+def _install_build_diagnostic(result, services: dict, subject: str = 'build') -> str:
+    """Bound untrusted build evidence and remove configured credential values.
+
+    Redact before truncating so a tail cannot expose part of a credential.
+    Never include the resolved Compose configuration or build plan.
+
+    BuildKit prints its step log first and the decisive error last, while the
+    dashboard card and other bounded readers show the beginning of a message.
+    Lead with the final error line (keeping its end, where Go error chains put
+    the root cause), then the tail of the log, both within one bound.
+
+    ``subject`` names the failed step in the message (``build`` for source
+    builds, ``Compose`` when the configuration itself could not be resolved).
+    """
+    output = '\n'.join(str(getattr(result, stream, '') or '')
+                       for stream in ('stdout', 'stderr'))
+    output = _redact_untrusted_output(output, services)
+    if output is None:
+        # Do not disclose output if persisted credentials cannot be checked.
+        return f'{subject[:1].upper()}{subject[1:]} diagnostics unavailable: credential redaction could not be completed.'
+    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return f'No {subject} diagnostic output was returned.'
+    final = next((line.strip() for line in reversed(lines)
+                  if not re.fullmatch(r'\s*[-=]+', line)), lines[-1].strip())
+    if len(final) > BUILD_ERROR_LINE_LIMIT:
+        final = '…' + final[-(BUILD_ERROR_LINE_LIMIT - 1):]
+    header = f'Untrusted {subject} error: {final}\nUntrusted {subject} diagnostic (tail):\n'
+    budget = BUILD_DIAGNOSTIC_LIMIT - len(header)
+    tail = '\n'.join(lines)
+    if len(tail) > budget:
+        tail = tail[-budget:]
+        cut = tail.find('\n')
+        if 0 <= cut < len(tail) - 1:
+            tail = tail[cut + 1:]  # Do not start the tail mid-line.
+    return header + tail
+
+
+def _resolve_install_compose(flags: list[str]) -> tuple[str | None, str]:
+    """Resolve the Compose project for an install, or explain why it cannot be.
+
+    Returns ``(resolved_json, "")`` or ``(None, error)``. Compose's own error
+    names what to fix (for example ``required variable X is missing a
+    value``), so the error keeps its redacted, bounded stderr. Standard
+    output is never reported: on success it is the fully interpolated
+    configuration, including credential values.
+    """
+    command = ["docker", "compose", *flags, "config", "--format", "json"]
+    result = subprocess.run(command, cwd=str(INSTALL_DIR), capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        stderr_only = subprocess.CompletedProcess(command, result.returncode, '',
+                                                  getattr(result, 'stderr', '') or '')
+        diagnostic = _install_build_diagnostic(stderr_only, {}, 'Compose')
+        # Name unset `${NAME:?}` settings up front. The generic credential
+        # redaction rewrites the word after `..._PASSWORD:` in Compose's
+        # sentence, so read the names from Compose's fixed message format;
+        # only identifier characters are taken, never a value.
+        missing = list(dict.fromkeys(re.findall(
+            r'required variable ([A-Za-z_][A-Za-z0-9_]{0,127}) is missing a value', stderr_only.stderr)))
+        summary = (f"Missing required setting{'s' if len(missing) > 1 else ''}: "
+                   f"{', '.join(missing[:8])}. ") if missing else ""
+        return None, ("Could not resolve installation Compose configuration; containers were not started. "
+                      + summary + diagnostic)
+    return result.stdout, ""
+
+
+def _disable_unprepared_install(service_id: str) -> str:
+    """Take a library extension that failed before start out of the Compose project.
+
+    Every enabled extension is merged into one Compose project, so a
+    definition that cannot be resolved (a missing ``${NAME:?}`` setting) or
+    whose image could not be built fails model switches, other installs and
+    every ``ods`` stack command, not just this extension. Renaming
+    ``compose.yaml`` to ``compose.yaml.disabled`` restores the state before
+    the attempt without deleting its files, settings or data. The caller keeps
+    the failure visible in the progress record; this returns the sentence to
+    append to it ("" when there is nothing to disable, e.g. built-ins).
+    """
+    ext_dir = USER_EXTENSIONS_DIR / service_id
+    active = ext_dir / "compose.yaml"
+    inactive = ext_dir / "compose.yaml.disabled"
+    unable = ("\nODS could not turn this extension off automatically. Disable or remove it; "
+              "until then other ODS stack operations can fail with the same error.")
+    try:
+        if ext_dir.is_symlink() or not ext_dir.is_dir() or active.is_symlink() or not active.exists():
+            return ""
+        if not active.is_file() or inactive.exists() or inactive.is_symlink():
+            return unable
+        os.replace(active, inactive)
+    except OSError:
+        logger.exception("Could not disable failed installation of %s", service_id)
+        return unable
+    invalidate_compose_cache()
+    logger.warning("Disabled %s after it failed before start; files and data were kept", service_id)
+    return ("\nODS turned this extension off so the rest of the stack keeps working; its files, "
+            "settings and data were kept. Resolve the error above, then retry or remove it.")
 
 
 def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, str]:
@@ -7380,12 +7993,11 @@ def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, st
     manifest or pull a locally built image from an unrelated registry.
     """
     base = ["docker", "compose", *flags]
-    result = subprocess.run(base + ["config", "--format", "json"],
-                            cwd=str(INSTALL_DIR), capture_output=True, text=True, timeout=30)
-    if result.returncode:
-        return False, "Could not resolve installation Compose configuration"
+    resolved, error = _resolve_install_compose(flags)
+    if resolved is None:
+        return False, error
     try:
-        services = json.loads(result.stdout)['services']
+        services = json.loads(resolved)['services']
         if not isinstance(services, dict):
             raise ValueError()
         pending, seen, pulls, builds = [service_id], set(), [], []
@@ -7428,8 +8040,7 @@ def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, st
         _write_progress(service_id, "pulling", "Building images from source...")
         result = _build_install_sources(base, builds, services)
         if result.returncode:
-            return False, ("Source image build failed; containers were not started. "
-                           "Untrusted build diagnostic (tail):\n" +
+            return False, ("Source image build failed; containers were not started. " +
                            _install_build_diagnostic(result, services))
     return True, ""
 
@@ -7595,6 +8206,288 @@ def _run_update_script(action: str, *args: str, timeout: int | None) -> subproce
     )
 
 
+# This is fixed read-only sensor code, never interpolated with request input.
+_WSL_SENSOR_POWERSHELL = r"""$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class OdsSensorDxgi {
+  [StructLayout(LayoutKind.Sequential)] public struct Luid { public uint Low; public int High; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct Desc {
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string Name;
+    public uint Vendor, Device, SubSystem, Revision;
+    public UIntPtr Dedicated, DedicatedSystem, Shared;
+    public Luid Id; public uint Flags;
+  }
+  public class Adapter { public string Name, Prefix; public ulong DedicatedBytes, SharedBytes; public uint Vendor; }
+  [DllImport("dxgi.dll", ExactSpelling=true)] static extern int CreateDXGIFactory1(ref Guid id, out IntPtr factory);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int EnumAdapter(IntPtr self, uint index, out IntPtr adapter);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetDesc(IntPtr self, out Desc desc);
+  static T Method<T>(IntPtr self, int slot) { return (T)(object)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(Marshal.ReadIntPtr(self), slot*IntPtr.Size), typeof(T)); }
+  public static Adapter[] Read() {
+    var rows = new List<Adapter>(); IntPtr factory;
+    var id = new Guid("770AAE78-F26F-4DBA-A829-253C83D1B387");
+    if(CreateDXGIFactory1(ref id, out factory)<0) return rows.ToArray();
+    try {
+      for(uint i=0;i<32;i++) {
+        IntPtr adapter; if(Method<EnumAdapter>(factory,12)(factory,i,out adapter)<0) break;
+        try {
+          Desc d; if(Method<GetDesc>(adapter,10)(adapter,out d)>=0 && (d.Flags&2)==0)
+            rows.Add(new Adapter { Name=d.Name.Trim(), Prefix=String.Format("luid_0x{0:x8}_0x{1:x8}",unchecked((uint)d.Id.High),d.Id.Low), DedicatedBytes=d.Dedicated.ToUInt64(), SharedBytes=d.Shared.ToUInt64(), Vendor=d.Vendor });
+        } finally { Marshal.Release(adapter); }
+      }
+    } finally { Marshal.Release(factory); }
+    return rows.ToArray();
+  }
+}
+"@
+$cpu = $null; $total = $null; $used = $null
+try { $values=@(Get-CimInstance Win32_Processor -OperationTimeoutSec 2 | Where-Object {$null -ne $_.LoadPercentage}); if($values.Count){$cpu=($values|Measure-Object LoadPercentage -Average).Average} } catch {}
+try { $mem=Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 2; $total=[double]$mem.TotalVisibleMemorySize*1024; $used=([double]$mem.TotalVisibleMemorySize-[double]$mem.FreePhysicalMemory)*1024 } catch {}
+$engines=@(); $memory=@()
+try {$engines=@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -OperationTimeoutSec 2)} catch {}
+try {$memory=@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -OperationTimeoutSec 2)} catch {}
+$gpus=@()
+foreach($adapter in [OdsSensorDxgi]::Read()) {
+  $prefix=$adapter.Prefix; $totals=@{}; $util=$null; $dedicated=$null
+  foreach($row in $engines) {
+    if($row.Name -like "*${prefix}_phys_*" -and $row.Name -match '_phys_(\d+)_eng_(\d+)_engtype_(.+)$') {
+      $key="$($Matches[1])|$($Matches[2])|$($Matches[3])"
+      $totals[$key]=[double]($totals[$key]+$row.UtilizationPercentage)
+    }
+  }
+  if($totals.Count){$util=[Math]::Min(100,($totals.Values|Measure-Object -Maximum).Maximum)}
+  $rows=@($memory|Where-Object {$_.Name -like "${prefix}_phys_*"})
+  if($rows.Count){$dedicated=($rows|Measure-Object DedicatedUsage -Sum).Sum}
+  $gpus += [pscustomobject]@{name=$adapter.Name;luid=$prefix;vendor=$adapter.Vendor;dedicatedTotalBytes=$adapter.DedicatedBytes;sharedCapacityBytes=$adapter.SharedBytes;dedicatedUsedBytes=$dedicated;utilizationPercent=$util}
+}
+[pscustomobject]@{cpuPercent=$cpu;memoryTotalBytes=$total;memoryUsedBytes=$used;gpus=@($gpus)}|ConvertTo-Json -Depth 5 -Compress
+"""
+_wsl_metrics_lock = threading.Lock()
+_wsl_metrics_cached = (0.0, None)
+_wsl_metrics_interop = None
+
+
+def _wsl_interop_identity(value):
+    """Accept only WSL-created sockets inside its protected runtime directory."""
+    if not isinstance(value, str) or not re.fullmatch(r"/run/WSL/[1-9][0-9]*_interop", value):
+        return None
+    try:
+        # lstat deliberately rejects symlinks, including WSL's 1_interop alias.
+        # Socket permissions are normally 0777; trust comes from root ownership
+        # and root-only directory writes, not the socket's connect permissions.
+        for parent in (Path("/run"), Path("/run/WSL")):
+            row = parent.lstat()
+            if not stat_mod.S_ISDIR(row.st_mode) or row.st_uid != 0 or row.st_mode & 0o022:
+                return None
+        row = Path(value).lstat()
+        if not stat_mod.S_ISSOCK(row.st_mode) or row.st_uid != 0:
+            return None
+        return (row.st_dev, row.st_ino)
+    except OSError:
+        return None
+
+
+def _wsl_sensor_run(command):
+    """Use an existing WSL session from systemd; all attempts share eight seconds."""
+    global _wsl_metrics_interop
+    deadline = time.monotonic() + 8
+    candidates = []
+    if _wsl_metrics_interop:
+        value, identity = _wsl_metrics_interop
+        if _wsl_interop_identity(value) == identity:
+            candidates.append(value)
+        else:
+            _wsl_metrics_interop = None
+    inherited = os.environ.get("WSL_INTEROP")
+    if _wsl_interop_identity(inherited):
+        candidates.append(inherited)
+    try:
+        # Enumeration is bounded even if a privileged process fills the directory.
+        with os.scandir("/run/WSL") as entries:
+            discovered = []
+            for index, entry in enumerate(entries):
+                if index >= 64:
+                    break
+                if re.fullmatch(r"[1-9][0-9]*_interop", entry.name):
+                    discovered.append(entry.path)
+            candidates.extend(sorted(discovered, key=lambda value: int(Path(value).name.split("_")[0])))
+    except OSError:
+        pass
+    candidates = list(dict.fromkeys(value for value in candidates if _wsl_interop_identity(value)))[:3]
+    for index, value in enumerate(candidates):
+        identity = _wsl_interop_identity(value)
+        remaining = deadline - time.monotonic()
+        if not identity or remaining <= 0:
+            continue
+        env = os.environ.copy()
+        env["WSL_INTEROP"] = value
+        # Leave time for a replacement when an old session hangs. A sole known
+        # session retains the original eight-second maximum for the sensor call.
+        timeout = min(remaining, 4) if index < len(candidates) - 1 else remaining
+        try:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace", timeout=timeout, env=env)
+        except (OSError, subprocess.SubprocessError):
+            if _wsl_metrics_interop and _wsl_metrics_interop[0] == value:
+                _wsl_metrics_interop = None
+            continue
+        if result.returncode == 0:
+            # Recheck custody before reusing the session on the next sample.
+            if _wsl_interop_identity(value) == identity:
+                _wsl_metrics_interop = (value, identity)
+            return result
+        if _wsl_metrics_interop and _wsl_metrics_interop[0] == value:
+            _wsl_metrics_interop = None
+        # A failed PowerShell sensor is not an interop failure: do not repeatedly
+        # spawn Windows processes for script or provider errors.
+        if "invalid argument" not in getattr(result, "stderr", "").lower():
+            return result
+    raise OSError("No usable trusted WSL telemetry interop session")
+
+
+def _wsl_system_metrics():
+    """Read native Windows sensors through existing WSL interop, without setup."""
+    global _wsl_metrics_cached
+    if platform.system() != "Linux" or "microsoft" not in platform.release().lower():
+        return None
+    executable = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    if not Path(executable).is_file():
+        return None
+    with _wsl_metrics_lock:
+        if _wsl_metrics_cached[1] is not None and time.monotonic() - _wsl_metrics_cached[0] < 3:
+            return _wsl_metrics_cached[1]
+        payload = {"schema_version": "ods.host-system-metrics.v1", "platform": "Windows",
+                   "sampledAt": None, "cpu": {"percent": None, "temp_c": None,
+                   "scope": "host", "source": "windows-cim"},
+                   "ram": {"used_gb": None, "total_gb": None, "percent": None,
+                   "scope": "host", "source": "windows-cim"}, "gpus": []}
+        def number(value, maximum=None):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            if not math.isfinite(value) or value < 0 or (maximum is not None and value > maximum):
+                return None
+            return value
+        try:
+            result = _wsl_sensor_run(
+                [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                 base64.b64encode(_WSL_SENSOR_POWERSHELL.encode("utf-16-le")).decode("ascii")],
+            )
+            if result.returncode != 0 or len(result.stdout) > 65536:
+                raise ValueError("Native sensor response unavailable")
+            data = json.loads(result.stdout.lstrip("\ufeff"))
+            if not isinstance(data, dict):
+                raise ValueError("Native sensor response must be an object")
+            payload["sampledAt"] = _iso_now()
+            payload["cpu"]["percent"] = number(data.get("cpuPercent"), 100)
+            total = number(data.get("memoryTotalBytes"))
+            used = number(data.get("memoryUsedBytes"), total) if total else None
+            if total:
+                payload["ram"]["total_gb"] = round(total / 1024**3, 1)
+                if used is not None:
+                    payload["ram"].update(used_gb=round(used / 1024**3, 1), percent=round(used / total * 100, 1))
+            rows = data.get("gpus")
+            if isinstance(rows, list):
+                for row in rows[:32]:
+                    if not isinstance(row, dict):
+                        continue
+                    name, luid = row.get("name"), row.get("luid")
+                    capacity = number(row.get("dedicatedTotalBytes"))
+                    if (not isinstance(name, str) or not name.strip() or not isinstance(luid, str)
+                            or not re.fullmatch(r"luid_0x[0-9a-f]{8}_0x[0-9a-f]{8}", luid)
+                            or not capacity):
+                        continue
+                    # DXGI's dedicated allocation is real capacity. Shared capacity
+                    # is a borrowing limit, not additional physical VRAM.
+                    usage = number(row.get("dedicatedUsedBytes"), capacity)
+                    payload["gpus"].append({
+                        "name": name[:128], "uuid": luid,
+                        "memory_total_mb": int(capacity // 1024**2),
+                        "memory_used_mb": int(usage // 1024**2) if usage is not None else None,
+                        "memory_type": "unified" if _is_windows_amd_integrated_gpu_name(name) else "discrete",
+                        "memory_scope": "dedicated", "utilization_percent": number(row.get("utilizationPercent"), 100),
+                        "temperature_c": None, "source": "windows-dxgi-cim",
+                        "backend": "amd" if row.get("vendor") == 0x1002 else "nvidia" if row.get("vendor") == 0x10DE else "unknown",
+                    })
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+        _wsl_metrics_cached = (time.monotonic(), payload)
+        return payload
+
+
+# Native telemetry is sampled once for simultaneous dashboard CPU/RAM/GPU calls.
+_darwin_metrics_lock = threading.Lock()
+_darwin_metrics_cached = (0.0, None)
+
+
+def _darwin_system_metrics():
+    """Read physical Mac counters without sudo or privileged temperature probes."""
+    global _darwin_metrics_cached
+    if platform.system() != "Darwin":
+        return None
+    with _darwin_metrics_lock:
+        now = time.monotonic()
+        if _darwin_metrics_cached[1] is not None and now - _darwin_metrics_cached[0] < 3:
+            return _darwin_metrics_cached[1]
+
+        deadline = time.monotonic() + 4
+
+        def read(args):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return ""
+            try:
+                result = subprocess.run(args, capture_output=True, text=True, timeout=min(2, remaining))
+                return result.stdout if result.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                return ""
+
+        cpu = {"percent": None, "temp_c": None, "scope": "host", "source": "macos-top"}
+        ram = {"used_gb": None, "total_gb": None, "percent": None,
+               "scope": "host", "source": "macos-vm-stat"}
+        samples = re.findall(r"CPU usage:\s+([\d.]+)%\s+user.*?([\d.]+)%\s+sys",
+                             read(["/usr/bin/top", "-l", "2", "-s", "1", "-n", "0", "-stats", "cpu"]))
+        if samples:
+            value = sum(float(v) for v in samples[-1])
+            if math.isfinite(value) and 0 <= value <= 100:
+                cpu["percent"] = round(value, 1)
+        total_text = read(["/usr/sbin/sysctl", "-n", "hw.memsize"]).strip()
+        total = int(total_text) if total_text.isdigit() else 0
+        vm = read(["/usr/bin/vm_stat"])
+        size = re.search(r"page size of (\d+) bytes", vm)
+        pages = dict(re.findall(r"^([^:\n]+):\s+(\d+)", vm, re.M))
+        keys = ("Pages active", "Pages wired down", "Pages occupied by compressor")
+        if total > 0:
+            ram["total_gb"] = round(total / 1024**3, 1)
+            if size and all(key in pages for key in keys):
+                used = sum(int(pages[key]) for key in keys) * int(size.group(1))
+                if 0 <= used <= total:
+                    ram.update(used_gb=round(used / 1024**3, 1), percent=round(used / total * 100, 1))
+        chip = read(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"]).strip()
+        ioreg = read(["/usr/sbin/ioreg", "-r", "-c", "AGXAccelerator", "-l"])
+        # Only AGX's named device counters: driver allocations and renderer/tiler
+        # utilization are different measurements and must not be substituted.
+        def counter(name):
+            match = re.search(r'"' + re.escape(name) + r'"\s*=\s*(\d+)', ioreg)
+            return int(match.group(1)) if match else None
+        usage = counter("Device Utilization %")
+        memory = counter("In use system memory")
+        gpu = {"name": chip or "Apple Silicon", "memory_total_mb": total // 1024**2,
+               "memory_used_mb": None, "utilization_percent": None,
+               "temperature_c": None, "source": "macos-agx-ioreg"}
+        if usage is not None and 0 <= usage <= 100:
+            gpu["utilization_percent"] = usage
+        if memory is not None and total > 0 and 0 <= memory <= total:
+            gpu["memory_used_mb"] = memory // 1024**2
+        payload = {"schema_version": "ods.host-system-metrics.v1", "platform": "Darwin",
+                   "cpu": cpu, "ram": ram, "gpu": gpu}
+        _darwin_metrics_cached = (time.monotonic(), payload)
+        return payload
+
+
 class AgentHandler(BaseHTTPRequestHandler):
     # Dashboard API keeps a small connection pool to avoid exhausting macOS
     # ephemeral ports when requests traverse the private Colima TCP bridge.
@@ -7620,6 +8513,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                 return
             json_response(self, 200 if value is not None else 404,
                           {'operation': value} if value is not None else {'error': 'Operation not found'})
+        elif path == "/v1/system/metrics":
+            self._handle_system_metrics()
         elif path == "/v1/gpu/metrics":
             self._handle_gpu_metrics()
         elif path == "/v1/llm/status":
@@ -7632,6 +8527,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_model_list()
         elif path == "/v1/model/status":
             self._handle_model_status()
+        elif path == "/v1/model/management":
+            self._handle_model_management()
         elif path == "/v1/model/external-observation":
             self._handle_external_model_observation()
         elif path == "/v1/model/recovery":
@@ -8160,6 +9057,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         json_response(self, 200, status)
 
+    def _handle_system_metrics(self):
+        """Expose physical host counters to authenticated VM/container clients."""
+        if not check_auth(self):
+            return
+        metrics = _darwin_system_metrics()
+        if metrics is None:
+            metrics = _wsl_system_metrics()
+        if metrics is None:
+            json_response(self, 503, {"error": "Host system telemetry is unavailable"})
+            return
+        json_response(self, 200, metrics)
+
     def _handle_gpu_metrics(self):
         """Return host GPU counters that Docker Desktop cannot expose."""
         if not check_auth(self):
@@ -8210,6 +9119,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_model_download_cancel()
         elif self.path == "/v1/model/activate":
             self._handle_model_activate()
+        elif self.path in {"/v1/model/runtime/stop", "/v1/model/runtime/start"}:
+            self._handle_model_runtime(self.path.rsplit('/', 1)[-1])
         elif self.path == "/v1/model/external-adopt":
             self._handle_external_model_adopt()
         elif self.path == "/v1/model/recover":
@@ -9998,7 +10909,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             # Both container streams share one pipe, preserving their emitted order.
             json_response(self, 200, {
                 "service_id": service_id,
-                "logs": output[-50000:],
+                "logs": _redact_credential_text(output)[-50000:],
                 "lines": tail,
             })
         except subprocess.TimeoutExpired:
@@ -10046,12 +10957,12 @@ class AgentHandler(BaseHTTPRequestHandler):
                 })
                 return
             if result.returncode != 0:
-                json_response(self, 500, {"error": f"docker logs failed: {output[:500]}"})
+                json_response(self, 500, {"error": f"docker logs failed: {_redact_credential_text(output)[:500]}"})
                 return
             json_response(self, 200, {
                 "service_id": sid,
                 "container_name": container_name,
-                "logs": output[-50000:],
+                "logs": _redact_credential_text(output)[-50000:],
                 "lines": tail,
             })
         except subprocess.TimeoutExpired:
@@ -10374,9 +11285,17 @@ class AgentHandler(BaseHTTPRequestHandler):
                 # when no hook is declared — it does not pre-write any
                 # "Running setup..." progress, so extensions without a hook
                 # don't show a misleading setup phase in the dashboard.
+                #
+                # Until containers are requested, a failed step must not leave
+                # this definition enabled: its settings may be missing and
+                # Compose would then fail for the whole stack. Disable it
+                # first, then record the error the owner acts on.
                 if run_setup_hook:
-                    ok, _ = _run_post_install_hook(service_id, ext_dir)
+                    ok, hook_error = _run_post_install_hook(service_id, ext_dir)
                     if not ok:
+                        note = _disable_unprepared_install(service_id)
+                        _write_progress(service_id, "error", "Setup failed",
+                                        error=(hook_error or "Setup failed") + note)
                         return
 
                 # Step 2: Prepare images. Pulls may use a cached image on
@@ -10410,6 +11329,7 @@ class AgentHandler(BaseHTTPRequestHandler):
 
                 prepared, image_error = _prepare_install_images(pull_flags, service_id)
                 if not prepared:
+                    image_error += _disable_unprepared_install(service_id)
                     _write_progress(service_id, "error", "Installation failed", error=image_error)
                     return
 
@@ -10497,6 +11417,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                         msg = f"Container did not reach running state within {startup_timeout}s (state={state or 'unknown'})"
                         if state_error:
                             msg += f": {state_error}"
+                        # The generic state rarely says why; the service's own
+                        # last words (a rejected setting, a failed health check)
+                        # usually do.
+                        msg += _container_start_diagnostic(container_name, install_service_def, ext_dir)
                         _write_progress(service_id, "error", "Installation failed",
                                         error=msg)
                         return
@@ -10613,6 +11537,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         """Expose only a verified, nonsecret external runtime identity."""
         if not check_auth(self):
             return
+        include_stats = parse_qs(urlparse(self.path).query).get("stats") == ["1"]
         try:
             env = load_env(INSTALL_DIR / ".env")
             if not _external_lemonade_runtime(env):
@@ -10621,8 +11546,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                     no_store=True,
                 )
                 return
-            observed = _read_external_lemonade_observation(env)
-        except (OSError, ValueError, RuntimeError, urllib_error.URLError):
+            observed = (_read_external_lemonade_observation(env, include_stats=True)
+                        if include_stats else _read_external_lemonade_observation(env))
+        except (OSError, ValueError, RuntimeError, urllib_error.URLError, subprocess.TimeoutExpired):
             # Neither the configured origin nor upstream response is safe to
             # reflect into an authenticated browser-visible error.
             json_response(
@@ -10630,12 +11556,15 @@ class AgentHandler(BaseHTTPRequestHandler):
                 no_store=True,
             )
             return
-        json_response(self, 200, {
+        payload = {
             "status": "verified",
             "modelId": observed["modelId"],
             "contextLength": observed["contextLength"],
             "backend": observed["backend"],
-        }, no_store=True)
+        }
+        if include_stats:
+            payload["stats"] = observed["stats"]
+        json_response(self, 200, payload, no_store=True)
 
     def _handle_external_model_adopt(self):
         """Converge ODS consumers on the already loaded external model."""
@@ -10771,7 +11700,11 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 500, {"error": "Model catalog manifest is invalid"})
             return
 
-        models_dir = INSTALL_DIR / "data" / "models"
+        try:
+            models_dir = _model_download_directory()
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            json_response(self, 409, {'error': 'The managed model download directory could not be verified'})
+            return
         status_path = INSTALL_DIR / "data" / "model-download-status.json"
         artifact_by_file = {
             artifact["file"]: artifact
@@ -11191,6 +12124,77 @@ class AgentHandler(BaseHTTPRequestHandler):
                 pass
         json_response(self, 200, {"status": "cancelling"})
 
+    def _handle_model_management(self):
+        if not check_auth(self):
+            return
+        try:
+            code, value = _model_management_snapshot()
+            json_response(self, code, value, no_store=True)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            logger.warning('Windows runtime management verification failed: %s', exc)
+            json_response(self, 503, {'error': 'Windows runtime management could not be verified'}, no_store=True)
+
+    def _handle_model_runtime(self, operation):
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+        if body != {} or operation not in {'stop', 'start'}:
+            json_response(self, 400, {'error': 'Runtime control accepts only an empty request'})
+            return
+        acquired, _active = _begin_model_lifecycle('model_runtime')
+        if not acquired:
+            json_response(self, 409, {'error': 'Model lifecycle is busy'})
+            return
+        _switchboard_initial_verify_cancel.set()
+        try:
+            env = load_env(INSTALL_DIR / '.env')
+            value = _managed_wsl_lemonade(env)
+            if value.get('managed') is not True:
+                json_response(self, 409, {'error': 'This installation does not own the Windows runtime'})
+                return
+            journal = _read_pixel_model_journal()
+            pending = journal is not None and journal['phase'] != 'completed'
+            if pending and (journal['phase'] != 'held' or journal['target'] is not None
+                            or 'unavailable' in journal['before'].values()
+                            or _pixel_model_config_digests() != journal['before']):
+                json_response(self, 409, {'error': 'Recover the pending model transition before controlling the runtime'})
+                return
+            if operation == 'start' and (
+                    value['plan']['GgufFile'] != env.get('GGUF_FILE')
+                    or str(value['plan']['ContextSize']) != str(env.get('CTX_SIZE'))
+                    or str(value['plan']['ContextSize']) != str(env.get('MAX_CONTEXT'))):
+                json_response(self, 409, {'error': 'The Windows startup plan differs from the Portal route; recover the model transition first'})
+                return
+            transaction = None if pending else _begin_pixel_model_transaction(env)
+            if operation == 'stop':
+                stopped = _wsl_lemonade.stop(INSTALL_DIR, env, value['planDigest'])
+                if stopped.get('running') is not False or stopped.get('planDigest') != value['planDigest']:
+                    raise RuntimeError('Windows runtime stop is unconfirmed')
+                # Keep both Pixel admission gates held durably while inference
+                # is intentionally stopped. The unchanged plan permits resume.
+                json_response(self, 200, {'status': 'stopped'}, no_store=True)
+            else:
+                started = _wsl_lemonade.start(INSTALL_DIR, env, value['planDigest'])
+                if started.get('running') is not True or started.get('planDigest') != value['planDigest']:
+                    raise RuntimeError('Windows runtime start is unconfirmed')
+                if pending or transaction is not None:
+                    recovery = _recover_pixel_model_transaction(env)
+                    if recovery['pending']:
+                        raise RuntimeError('Inference started but the previous Portal route still requires recovery')
+                elif not _prove_pixel_model_contract(env, {'model': env.get('LEMONADE_MODEL'),
+                                                          'contextLength': value['plan']['ContextSize']}):
+                    raise RuntimeError('The resumed inference route did not pass completion verification')
+                json_response(self, 200, {'status': 'started'}, no_store=True)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            logger.warning('Managed Windows runtime %s failed: %s', operation, exc)
+            message = ('The Windows model runtime did not respond in time. Refresh its status before retrying.'
+                       if isinstance(exc, subprocess.TimeoutExpired) else str(exc))
+            json_response(self, 409, {'error': message, 'code': 'runtime_control_unconfirmed'}, no_store=True)
+        finally:
+            _end_model_lifecycle('model_runtime')
+
     def _handle_model_recovery_status(self):
         if not check_auth(self):return
         try:
@@ -11541,7 +12545,12 @@ class AgentHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if _external_lemonade_runtime(persisted_env):
+        try:
+            wsl_managed = _managed_wsl_lemonade(persisted_env)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            json_response(self, 409, {'error': 'Windows runtime ownership could not be verified'})
+            return
+        if _external_lemonade_runtime(persisted_env) and wsl_managed.get('managed') is not True:
             # Local GGUF activation owns the inference process and rolls back
             # by restoring the previous physical model. Neither assumption is
             # valid for a separately managed Lemonade service. Reject before
@@ -11637,6 +12646,14 @@ class AgentHandler(BaseHTTPRequestHandler):
         if target is None:
             json_response(self, 400, {"error": "Model file not downloaded or empty, ambiguous, or outside registered model stores"})
             return
+        if wsl_managed.get('managed') is True:
+            try:
+                windows_store = _wsl_lemonade.model_store(INSTALL_DIR, persisted_env, wsl_managed)
+                if target.parent != windows_store:
+                    raise ValueError('Download this model into the registered Windows runtime store before activating it')
+            except (OSError, ValueError):
+                json_response(self, 409, {'error': 'The model is outside the managed Windows runtime store'})
+                return
         models_dir = target.parent
         if not _model_file_ready(target):
             json_response(self, 400, {"error": f"Model file not downloaded or empty: {gguf_file}"})
@@ -11669,6 +12686,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         selected_store = _model_stores.store_for_model(INSTALL_DIR / "data", gguf_file, container=bool(os.environ.get("ODS_HOST_INSTALL_DIR")))
         try:
             local_runtime_profile = _model_stores.lemonade_profile(INSTALL_DIR / "data", gguf_file, container=bool(os.environ.get("ODS_HOST_INSTALL_DIR")))
+            if model_from_catalog and not local_runtime_profile:
+                runtime_block = _default_runtime_incompatibility(model, persisted_env)
+                if runtime_block:
+                    raise ValueError(runtime_block)
             if local_runtime_profile and _uses_lemonade_runtime(persisted_env) and not _is_windows_host_lemonade(persisted_env):
                 raise ValueError("This native runtime profile requires a host-managed runtime; configure the compatible binary inside the Lemonade container before activating it")
             if local_runtime_profile and not (_is_windows_host_lemonade(persisted_env) or _is_windows_host_llama_server(persisted_env) or persisted_env.get("GPU_BACKEND") == "apple"):
@@ -11778,11 +12799,14 @@ class AgentHandler(BaseHTTPRequestHandler):
         opencode_snapshot: dict | None = None
         perplexica_snapshot: dict | None = None
         container_states: dict[str, dict[str, bool]] = {}
+        litellm_inputs_before: dict | None = None
+        litellm_reuse: str | None = None
         opencode_runtime_state: dict | None = None
         committed = False
         mutation_started = False
         rollback_attempted = False
         runtime_restart_strategy: str | None = None
+        readiness_diagnosis: dict = {}
         opencode_restarted = False
         opencode_config_mutated = False
         litellm_restart_attempted = False
@@ -11802,6 +12826,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         previous_pixel_context: int | None = None
         router_target_published = False
         previous_router_active = {}
+        wsl_changed_digest = None
 
         def restore_backups():
             if env_snapshot is not None:
@@ -11849,7 +12874,17 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         def restore_previous_runtime():
             rollback_env = previous_runtime_env()
-            if runtime_restart_strategy == "windows-lemonade":
+            if runtime_restart_strategy == "wsl-managed-lemonade":
+                if wsl_changed_digest is None:
+                    # No response proved which plan was written. A read may
+                    # confirm an unchanged plan, but never adopt a new CAS token.
+                    observed = _managed_wsl_lemonade(rollback_env)
+                    if observed.get('planDigest') != wsl_managed['planDigest']:
+                        raise RuntimeError('Windows model transition outcome requires explicit recovery')
+                    _wsl_lemonade.start(INSTALL_DIR, rollback_env, wsl_managed['planDigest'])
+                else:
+                    _wsl_lemonade.restore(INSTALL_DIR, rollback_env, wsl_managed['plan'], wsl_changed_digest)
+            elif runtime_restart_strategy == "windows-lemonade":
                 _restart_windows_lemonade(rollback_env)
             elif runtime_restart_strategy == "windows-native-llama":
                 _restart_windows_native_llama_server(env_path, rollback_env)
@@ -11873,6 +12908,21 @@ class AgentHandler(BaseHTTPRequestHandler):
                 raise RuntimeError(
                     f"Unknown model activation restart strategy: {runtime_restart_strategy}"
                 )
+
+        def capture_runtime_failure() -> dict[str, str]:
+            """Keep why the staged runtime failed before rollback replaces it."""
+            captured: dict[str, str] = {}
+            reason = str(readiness_diagnosis.get("reason") or "")[:500]
+            if reason:
+                captured["runtime_diagnosis"] = reason
+            if runtime_restart_strategy in {"compose-llama", "container-llama"}:
+                excerpt = _failed_llama_server_log_excerpt()
+                if excerpt:
+                    logger.warning(
+                        "Failed llama-server log excerpt for %s:\n%s", gguf_file, excerpt
+                    )
+                    captured["runtime_log_excerpt"] = excerpt
+            return captured
 
         def rollback_and_prove() -> tuple[bool, str]:
             """Restore config/runtime/dependents and prove the prior route."""
@@ -12246,6 +13296,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                 env_pre,
                 container_states["ods-perplexica"],
             )
+            if container_states["ods-litellm"]["running"]:
+                # Fingerprint what the running gateway loaded before any write
+                # so a byte-identical re-render cannot force a no-op recreate.
+                litellm_inputs_before = _dependent_bind_inputs("ods-litellm")
             active_litellm_consumers = [
                 name
                 for name in ("ods-hermes", "ods-openclaw", "ods-perplexica")
@@ -12325,7 +13379,12 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "LLAMA_ARG_CACHE_TYPE_V",
                     "LLAMA_ARG_N_CPU_MOE",
                     "LLAMA_ARG_NO_CACHE_PROMPT",
-                    "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS",
+                    "LLAMA_ARG_CHECKPOINT_EVERY_NT",
+                    # Host-RAM caps of CPU runtime profiles. Like the memory
+                    # limit they are not removed on a switch: the next
+                    # profile sets its own, and an owner's tuning survives.
+                    "LLAMA_ARG_CTX_CHECKPOINTS",
+                    "LLAMA_ARG_CACHE_RAM",
                     "LLAMA_ARG_SPEC_TYPE",
                     "LLAMA_ARG_SPEC_DRAFT_N_MAX",
                 }
@@ -12343,6 +13402,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                 remove_keys = {
                     "LLAMA_ARG_N_CPU_MOE",
                     "LLAMA_ARG_NO_CACHE_PROMPT",
+                    "LLAMA_ARG_CHECKPOINT_EVERY_NT",
+                    # Former name; no llama.cpp build reads it. Drop stale lines.
                     "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS",
                     "LLAMA_ARG_SPEC_TYPE",
                     "LLAMA_ARG_SPEC_DRAFT_N_MAX",
@@ -12400,6 +13461,18 @@ class AgentHandler(BaseHTTPRequestHandler):
                 "agentViable": _model_agent_viable(model, int(context_length)),
             }
 
+            def _activation_readiness_cadence() -> dict:
+                # Both container restart helpers return only after Docker has
+                # replaced the previous llama-server, so no stale runtime can
+                # answer an early probe. Native and Lemonade runtimes keep the
+                # original fixed-delay cadence.
+                if (
+                    runtime_restart_strategy in {"compose-llama", "container-llama"}
+                    and not lemonade_runtime
+                ):
+                    return {"fast_poll_seconds": _MODEL_READINESS_FAST_POLL_SECONDS}
+                return {}
+
             def _sb_wait_ready(_env, _gguf, _ctx, lemonade_model_id=""):
                 return _wait_for_model_readiness(
                     _env,
@@ -12409,6 +13482,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                     lemonade_model_id=lemonade_model_id,
                     return_proof=True,
                     require_exact_context=requested_context_length is not None,
+                    diagnosis=readiness_diagnosis,
+                    **_activation_readiness_cadence(),
                 )
 
             # Restart llama-server with the new model.
@@ -12422,7 +13497,16 @@ class AgentHandler(BaseHTTPRequestHandler):
             env = load_env(env_path)
             _in_container = bool(os.environ.get("ODS_HOST_INSTALL_DIR"))
 
-            if windows_host_lemonade:
+            if wsl_managed.get('managed') is True:
+                runtime_restart_strategy = 'wsl-managed-lemonade'
+                try:
+                    switched = _wsl_lemonade.activate(INSTALL_DIR, env, gguf_file,
+                                                       int(context_length), wsl_managed['planDigest'])
+                    wsl_changed_digest = switched['planDigest']
+                except _wsl_lemonade.BridgeError as exc:
+                    wsl_changed_digest = exc.new_plan_digest
+                    raise
+            elif windows_host_lemonade:
                 if windows_lemonade_managed and not windows_lemonade_already_serving:
                     runtime_restart_strategy = "windows-lemonade"
                     _restart_windows_lemonade(env)
@@ -12475,7 +13559,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     llama_server_image
                     or env.get("LLAMA_SERVER_IMAGE")
                     or (
-                        "ghcr.io/ggml-org/llama.cpp:server-cuda-b9014"
+                        "ghcr.io/ggml-org/llama.cpp:server-cuda-b9014@sha256:fcf285820892e7ce3218379634e3590826fc697e8b6745b9392072462e355c4f"
                         if gpu_backend == "nvidia"
                         else ""
                     )
@@ -12562,6 +13646,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                     lemonade_model_id=lemonade_model_id,
                     return_identity=True,
                     require_exact_context=requested_context_length is not None,
+                    diagnosis=readiness_diagnosis,
+                    **_activation_readiness_cadence(),
                 )
                 healthy = bool(runtime_identity)
 
@@ -12659,12 +13745,26 @@ class AgentHandler(BaseHTTPRequestHandler):
 
                 # Recreate bind-configured dependents so Docker Desktop cannot
                 # retain stale inodes after the atomic config replacements.
+                # LiteLLM is the exception only when this activation provably
+                # changed nothing it loads (same healthy instance, identical
+                # bind-mounted bytes, unchanged Compose definition), as with
+                # the model-independent switchboard route. A recreate there
+                # reloads identical inputs yet costs a graceful stop, a full
+                # Python import, and a health cycle (~20s on the fleet).
                 litellm_restart_attempted = container_states["ods-litellm"]["running"]
-                litellm_restarted = _restart_existing_container(
-                    "ods-litellm",
-                    container_states["ods-litellm"],
-                    recreate=True,
-                )
+                if litellm_restart_attempted:
+                    litellm_reuse = _reuse_unchanged_dependent(
+                        "ods-litellm",
+                        litellm_inputs_before,
+                    )
+                if litellm_reuse is None:
+                    litellm_restarted = _restart_existing_container(
+                        "ods-litellm",
+                        container_states["ods-litellm"],
+                        recreate=True,
+                    )
+                else:
+                    litellm_restarted = litellm_reuse == "recreated"
                 if litellm_restarted:
                     # Recreated LiteLLM images can spend tens of seconds in
                     # dependency import/startup before accepting HTTP. Wait on
@@ -12672,6 +13772,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                     # refusals cannot exhaust the completion probe and roll
                     # back an otherwise healthy model swap.
                     _wait_for_container_health("ods-litellm")
+                if litellm_restarted or litellm_reuse == "reused":
+                    # Kept or recreated, the public route must still serve a
+                    # completion against the newly activated model.
                     _verify_litellm_route(env)
                 if hermes_patched:
                     hermes_restart_attempted = container_states["ods-hermes"]["running"]
@@ -12771,6 +13874,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "litellm": (
                         "restarted"
                         if litellm_restarted
+                        else "unchanged"
+                        if litellm_reuse == "reused"
                         else "stopped"
                         if container_states["ods-litellm"]["exists"]
                         else "not_installed"
@@ -12901,6 +14006,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     },
                 )
             else:
+                runtime_failure = capture_runtime_failure()
                 logger.warning("Model activation failed — rolling back")
                 rolled_back, rollback_error = rollback_and_prove()
                 error = (
@@ -12911,7 +14017,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                         f"{rollback_error}"
                     )
                 )
-                payload = {"error": error, "rolled_back": rolled_back}
+                if runtime_failure.get("runtime_diagnosis"):
+                    error += f". Cause: {runtime_failure['runtime_diagnosis']}"
+                payload = {"error": error, "rolled_back": rolled_back, **runtime_failure}
                 if pixel_transaction is not None and not pixel_transaction.completed:
                     payload.update(pending=True, code='managed_model_recovery_required')
                 if switchboard_run and not switchboard_run.get("ok"):
@@ -12926,13 +14034,17 @@ class AgentHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             rolled_back = False
             rollback_error = ""
+            runtime_failure: dict[str, str] = {}
             if not committed and mutation_started and not rollback_attempted:
+                runtime_failure = capture_runtime_failure()
                 rolled_back, rollback_error = rollback_and_prove()
             logger.exception("Model activation failed")
             error = f"Model activation failed: {exc}"
             if rollback_error:
                 error += f"; rollback could not be proved: {rollback_error}"
-            payload = {"error": error}
+            if runtime_failure.get("runtime_diagnosis"):
+                error += f". Cause: {runtime_failure['runtime_diagnosis']}"
+            payload = {"error": error, **runtime_failure}
             if ((pixel_transaction is None and isinstance(exc, _PixelModelTransactionUncertain))
                     or (pixel_transaction is not None and not pixel_transaction.completed)):
                 payload.update(pending=True, code='managed_model_recovery_required')
@@ -12956,7 +14068,14 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 400, {"error": "gguf_file is required"})
             return
 
-        models_dir = INSTALL_DIR / "data" / "models"
+        target = _installed_model_file(gguf_file)
+        if target is None:
+            json_response(self, 409, {
+                "error": "Model file is missing, empty, ambiguous, or outside registered model stores",
+                "code": "model_artifact_unavailable",
+            })
+            return
+        models_dir = target.parent
         target = _safe_model_artifact_path(models_dir, gguf_file)
         if target is None:
             json_response(self, 400, {"error": "Invalid file path"})
@@ -12992,6 +14111,22 @@ class AgentHandler(BaseHTTPRequestHandler):
             deleted_names = {path.name for path in parts_to_delete}
             deleted_names.add(gguf_file)
             env = load_env(INSTALL_DIR / ".env")
+            managed = _managed_wsl_lemonade(env)
+            default_store = INSTALL_DIR.resolve() / 'data' / 'models'
+            owned_store = models_dir == default_store and default_store.resolve() == default_store
+            if not owned_store and managed.get('managed') is True:
+                owned_store = models_dir == _wsl_lemonade.model_store(INSTALL_DIR, env, managed)
+            if not owned_store:
+                # Registration permits discovery/loading, not deletion of a
+                # library shared with LM Studio or another external runtime.
+                json_response(self, 409, {
+                    'error': 'This model store is read-only in ODS; remove the model in its owning application',
+                    'code': 'model_store_read_only',
+                })
+                return
+            if managed.get('managed') is True and managed['plan']['GgufFile'] in deleted_names:
+                json_response(self, 409, {'error': 'Cannot delete the model selected in the Windows startup plan'})
+                return
             if str(env.get("GGUF_FILE") or "") in deleted_names:
                 json_response(
                     self,
@@ -13020,6 +14155,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            # Reject shared hard links and changed/symlinked artifacts before
+            # removing any part. External stores are never touched above,
+            # even when only the ODS runtime reports their model inactive.
+            if any(_model_stores.safe_artifact(models_dir, pf.name) != pf
+                   or pf.stat().st_nlink != 1 for pf in parts_to_delete):
+                json_response(self, 409, {'error': 'Model artifacts are shared or changed; deletion was refused',
+                                          'code': 'model_artifact_shared'})
+                return
             for pf in parts_to_delete:
                 pf.unlink()
 
@@ -13034,7 +14177,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     if status_model in deleted_names:
                         _write_model_status(status_path, "idle", "", 0, 0)
             json_response(self, 200, {"status": "deleted", "gguf_file": gguf_file})
-        except OSError as exc:
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             json_response(self, 500, {"error": f"Failed to delete: {exc}"})
         finally:
             _end_model_lifecycle("model_delete")
@@ -13126,6 +14269,26 @@ def _lemonade_runtime_base_url(env: dict) -> str:
     if os.environ.get("ODS_HOST_INSTALL_DIR"):
         return "http://ods-llama-server:8080"
     return f"http://127.0.0.1:{str(env.get('OLLAMA_PORT') or '8080')}"
+
+
+def _lemonade_uses_container_transport(env: dict) -> bool:
+    """Use the installer's explicit network context, never a probe fallback."""
+    return (
+        _external_lemonade_runtime(env)
+        and env.get("LEMONADE_HOST_TRANSPORT", "direct") == "model-router"
+    )
+
+
+def _lemonade_container_body(env: dict, path: str, *, payload=None, timeout=5) -> str:
+    # WSL localhost is not Windows localhost. Probe from the same owned
+    # container and endpoint that will serve inference, retaining Windows'
+    # loopback-only listener and the normal identity/completion proof.
+    return _container_lemonade_request(
+        INSTALL_DIR, _runtime_lemonade_api_base(env), path,
+        payload=payload,
+        api_key=str(env.get("LITELLM_LEMONADE_API_KEY") or env.get("LEMONADE_API_KEY") or ""),
+        timeout=timeout,
+    )
 
 
 def _lemonade_catalog_values(value: object):
@@ -13228,26 +14391,25 @@ def _resolve_lemonade_model_id(
         return f"extra.{filename}"
     for path, timeout in (("/api/v1/models", 5), ("/api/v1/health", 5)):
         try:
-            result = subprocess.run(
-                [
-                    "curl", "-sf", "--max-time", str(timeout),
-                    f"{base_url}{path}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout + 5,
-            )
+            if _lemonade_uses_container_transport(env):
+                body = _lemonade_container_body(env, path.removeprefix("/api/v1"), timeout=timeout)
+            else:
+                result = subprocess.run(
+                    ["curl", "-sf", "--max-time", str(timeout), f"{base_url}{path}"],
+                    capture_output=True, text=True, timeout=timeout + 5,
+                )
+                if result.returncode != 0:
+                    continue
+                body = result.stdout
         except (OSError, subprocess.TimeoutExpired):
             continue
-        if result.returncode != 0:
-            continue
         if path.endswith("/models"):
-            live_id = _lemonade_catalog_model_id(result.stdout, filename)
+            live_id = _lemonade_catalog_model_id(body, filename)
             if live_id:
                 return live_id
             continue
         try:
-            health = json.loads(result.stdout or "{}")
+            health = json.loads(body or "{}")
         except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(health, dict):
@@ -13338,15 +14500,19 @@ def _live_runtime_has_model(env: dict, gguf_file: str) -> bool | None:
         else f"http://{host}:{port}/v1/models"
     )
     try:
-        result = subprocess.run(
-            ["curl", "-s", "--max-time", "5", url],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-        data = json.loads(result.stdout or "{}")
+        if is_lemonade and _lemonade_uses_container_transport(env):
+            body = _lemonade_container_body(env, "/health")
+        else:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "5", url],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return None
+            body = result.stdout
+        data = json.loads(body or "{}")
     except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
         return None
     body = json.dumps(data)
@@ -13597,10 +14763,12 @@ def _verified_external_lemonade_observation(health: object, catalog: object) -> 
     }
 
 
-def _read_external_lemonade_observation(env: dict) -> dict:
-    """Read bounded health/catalog/health observations from one fixed origin."""
+def _read_external_lemonade_observation(env: dict, *, include_stats: bool = False) -> dict:
+    """Read a stable runtime identity, optionally with its last completion stats."""
     if not _external_lemonade_runtime(env):
         raise ValueError("External Lemonade is not configured")
+    if include_stats and not _lemonade_uses_container_transport(env):
+        raise ValueError("External Lemonade telemetry requires the owned container transport")
     base_url = _lemonade_runtime_base_url(env)
     if not base_url:
         raise ValueError("External Lemonade origin is invalid")
@@ -13608,7 +14776,14 @@ def _read_external_lemonade_observation(env: dict) -> dict:
         urllib_request.ProxyHandler({}), _BackendHealthNoRedirect()
     )
     payloads = []
-    for path in ("/api/v1/health", "/api/v1/models", "/api/v1/health"):
+    paths = ["/api/v1/health", "/api/v1/models"]
+    if include_stats:
+        paths.append("/api/v1/stats")
+    paths.append("/api/v1/health")
+    for path in paths:
+        if _lemonade_uses_container_transport(env):
+            payloads.append(json.loads(_lemonade_container_body(env, path.removeprefix("/api/v1"))))
+            continue
         request = urllib_request.Request(
             f"{base_url}{path}", headers={"Accept": "application/json"}
         )
@@ -13618,8 +14793,27 @@ def _read_external_lemonade_observation(env: dict) -> dict:
             raise ValueError("External Lemonade response is too large")
         payloads.append(json.loads(raw.decode("utf-8")))
     observed = _verified_external_lemonade_observation(payloads[0], payloads[1])
-    if _verified_external_lemonade_observation(payloads[2], payloads[1]) != observed:
+    if _verified_external_lemonade_observation(payloads[-1], payloads[1]) != observed:
         raise ValueError("External Lemonade identity changed during observation")
+    if include_stats:
+        # Lemonade stats belong to its most recently accessed WrappedServer,
+        # as does health.model_loaded. Other loaded runtimes could race this
+        # sample; do not attribute their output to the observed LLM.
+        if any(len(health["all_models_loaded"]) != 1 for health in (payloads[0], payloads[-1])):
+            raise ValueError("External Lemonade telemetry model is ambiguous")
+        raw_stats = payloads[2]
+        if not isinstance(raw_stats, dict) or "error" in raw_stats:
+            raise ValueError("External Lemonade telemetry is unavailable")
+        stats = {}
+        for key in ("time_to_first_token", "tokens_per_second", "input_tokens", "output_tokens", "prompt_tokens"):
+            value = raw_stats.get(key)
+            valid = type(value) in (int, float) and 0 <= value <= 2**53 - 1 and math.isfinite(value)
+            if valid and key == "tokens_per_second":
+                valid = 0 < value <= 10_000
+            elif valid and key.endswith("_tokens"):
+                valid = int(value) == value
+            stats[key] = value if valid else None
+        observed["stats"] = stats
     return observed
 
 
@@ -13915,6 +15109,17 @@ def _query_lemonade_runtime_context_length(
     base_url = _lemonade_runtime_base_url(env)
     if not base_url:
         return None
+    if _lemonade_uses_container_transport(env):
+        try:
+            body = _lemonade_container_body(env, "/health")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("Lemonade context probe unavailable (%s)", type(exc).__name__)
+            return None
+        return _lemonade_loaded_context_length(
+            body,
+            expected_gguf_file=expected_gguf_file,
+            expected_model_id=expected_model_id,
+        )
     try:
         result = subprocess.run(
             [
@@ -13961,6 +15166,47 @@ def _llama_runtime_context_length(host: str, port: str) -> int:
         return _positive_int(settings.get("n_ctx")) or 0
     except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError, TypeError):
         return 0
+
+
+def _llama_training_context_length(body: str, runtime_identity: str) -> int:
+    """Return the GGUF training context llama.cpp reports for a loaded row."""
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return 0
+    rows = data.get("data") if isinstance(data, dict) else None
+    for row in rows if isinstance(rows, list) else ():
+        if isinstance(row, dict) and str(row.get("id") or "").strip() == runtime_identity:
+            meta = row.get("meta")
+            return (_positive_int(meta.get("n_ctx_train")) or 0) if isinstance(meta, dict) else 0
+    return 0
+
+
+def _llama_context_shortfall(
+    runtime_identity: str,
+    runtime_context: int,
+    expected_context: int,
+    training_context: int,
+) -> tuple[str, bool]:
+    """Explain a loaded llama.cpp model whose context misses the request.
+
+    Returns ``(reason, final)``. llama.cpp caps every slot at the GGUF
+    training context, so a request above it can never be proven by waiting;
+    that case is final. An unreadable context stays retryable and silent.
+    """
+    if runtime_context <= 0:
+        return "", False
+    reason = (
+        f"{runtime_identity} is loaded but serves a {runtime_context}-token "
+        f"context; {expected_context} was requested"
+    )
+    if 0 < training_context < expected_context and runtime_context <= training_context:
+        return (
+            f"{reason}, above the model's {training_context}-token training "
+            "context (llama.cpp caps the slot there)",
+            True,
+        )
+    return reason, False
 
 
 def _runtime_context_matches_request(
@@ -14044,6 +15290,7 @@ def _chat_completion_ready(
     base_url: str = "",
     disable_thinking: bool = False,
     require_visible_content: bool = False,
+    runtime_env: dict | None = None,
 ) -> bool:
     """Require a meaningful completion and, when requested, its model identity."""
     prefix = "/" + api_prefix.strip("/")
@@ -14077,16 +15324,21 @@ def _chat_completion_ready(
             command.extend(["-H", "@-"])
             header_input = f"Authorization: Bearer {api_key}\n"
         command.extend(["-d", payload])
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            input=header_input,
-            timeout=35,
-        )
-        if result.returncode != 0:
-            return False
-        response = json.loads(result.stdout or "{}")
+        if runtime_env and _lemonade_uses_container_transport(runtime_env):
+            body = _lemonade_container_body(
+                runtime_env, "/chat/completions", payload=payload_body, timeout=30)
+        else:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                input=header_input,
+                timeout=35,
+            )
+            if result.returncode != 0:
+                return False
+            body = result.stdout
+        response = json.loads(body or "{}")
         if not _meaningful_completion(
             response,
             include_reasoning=not require_visible_content,
@@ -14241,6 +15493,7 @@ def _send_lemonade_warmup(
     attempt: int,
     *,
     base_url: str = "",
+    runtime_env: dict | None = None,
 ) -> bool:
     """Send a warm-up chat completion to trigger Lemonade on-demand model load.
 
@@ -14257,6 +15510,9 @@ def _send_lemonade_warmup(
     })
     logger.info("Sending warm-up request for %s (attempt %d/60)", model_id, attempt + 1)
     try:
+        if runtime_env and _lemonade_uses_container_transport(runtime_env):
+            _lemonade_container_body(runtime_env, "/chat/completions", payload=json.loads(payload), timeout=30)
+            return True
         result = subprocess.run(
             ["curl", "-sf", "--max-time", "30", "-X", "POST", url,
              "-H", "Content-Type: application/json", "-d", payload],
@@ -14265,7 +15521,7 @@ def _send_lemonade_warmup(
         if result.returncode == 0:
             logger.info("Warm-up request accepted — model is loading")
             return True
-    except subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired):
         pass
     return False
 
@@ -14324,12 +15580,34 @@ def _wait_for_model_readiness(
     require_exact_context: bool = False,
     cancel_event: threading.Event | None = None,
     allow_model_warmup: bool = True,
+    fast_poll_seconds: float = 0.0,
+    fast_poll_interval: float = _MODEL_READINESS_FAST_POLL_INTERVAL_SECONDS,
+    diagnosis: dict | None = None,
+    env_still_current=None,
 ) -> bool | str | dict[str, object]:
     """Prove exact runtime identity and one matching meaningful completion.
 
     Legacy callers receive a boolean. Identity callers receive the concrete
     runtime identity. Adapters receive identity, actual context, and proof time.
+
+    ``fast_poll_seconds`` opts into dense probing (every
+    ``fast_poll_interval``) for that long *before* the regular schedule, for
+    callers whose restart already removed the previous runtime. Time spent
+    there counts toward ``initial_delay``, and the full ``attempts`` schedule
+    still follows, so a slow load never fails earlier than before. Lemonade
+    keeps the regular cadence because its probes can send warmup loads.
+
+    ``env_still_current`` is an optional zero-arg callable; when it returns
+    False the wait aborts immediately with the existing not-ready contract
+    ({} / "" / False) instead of probing a route whose .env inputs changed.
+
+    ``diagnosis`` (caller-owned) receives ``reason`` when the runtime serves
+    the model but cannot satisfy the request, and ``final`` when no further
+    probe can change that answer (llama.cpp capped the slot at the model's
+    training context), in which case the wait ends immediately.
     """
+    if diagnosis is None:
+        diagnosis = {}
     gpu_backend = str(env.get("GPU_BACKEND") or "nvidia").lower()
     windows_native_llama = _is_windows_host_llama_server(env)
     is_lemonade = _uses_lemonade_runtime(env)
@@ -14375,10 +15653,41 @@ def _wait_for_model_readiness(
         completion_prefix = str(env.get("LEMONADE_API_BASE_PATH") or "/api/v1")
     expected_context = _positive_int(env.get("CTX_SIZE") or env.get("MAX_CONTEXT"))
 
-    logger.info("Waiting for requested model identity %s at %s", gguf_file, identity_url)
+    if fast_poll_seconds > 0 and not is_lemonade:
+        fast_interval = max(0.05, float(fast_poll_interval))
+        fast_started = time.monotonic()
+        fast_result = _wait_for_model_readiness(
+            env,
+            model_id=model_id,
+            gguf_file=gguf_file,
+            llm_model_name=llm_model_name,
+            lemonade_model_id=lemonade_model_id,
+            attempts=max(1, math.ceil(float(fast_poll_seconds) / fast_interval)),
+            initial_delay=0,
+            interval=fast_interval,
+            return_identity=return_identity,
+            return_proof=return_proof,
+            require_exact_context=require_exact_context,
+            cancel_event=cancel_event,
+            allow_model_warmup=allow_model_warmup,
+            diagnosis=diagnosis,
+            env_still_current=env_still_current,
+        )
+        # Every success contract is truthy; every not-ready result is falsy
+        # and falls through to the unchanged regular schedule below.
+        if fast_result or diagnosis.get("final"):
+            return fast_result
+        initial_delay = max(0.0, float(initial_delay) - (time.monotonic() - fast_started))
+
+    probe_options = {"runtime_env": env} if is_lemonade and _lemonade_uses_container_transport(env) else {}
+    logger.info("Waiting for requested model identity %s via %s", gguf_file,
+                "the configured model-router transport" if probe_options else identity_url)
     warmup_sent = False
     if cancel_event is not None and cancel_event.is_set():
         logger.info("Model readiness cancelled before probing %s", gguf_file)
+        return {} if return_proof else "" if return_identity else False
+    if env_still_current is not None and not env_still_current():
+        logger.info("Model readiness aborted: route env changed before probing %s", gguf_file)
         return {} if return_proof else "" if return_identity else False
     if initial_delay > 0:
         if cancel_event is not None:
@@ -14391,17 +15700,28 @@ def _wait_for_model_readiness(
         if cancel_event is not None and cancel_event.is_set():
             logger.info("Model readiness cancelled while probing %s", gguf_file)
             return {} if return_proof else "" if return_identity else False
+        if env_still_current is not None and not env_still_current():
+            logger.info("Model readiness aborted: route env changed while probing %s", gguf_file)
+            return {} if return_proof else "" if return_identity else False
         runtime_identity = ""
         runtime_context = 0
         runtime_checkpoint_identity = ""
         try:
-            result = subprocess.run(
-                ["curl", "-s", "--max-time", "5", identity_url],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            body = result.stdout.strip()
+            if is_lemonade and _lemonade_uses_container_transport(env):
+                body = _lemonade_container_body(env, "/health")
+            else:
+                result = subprocess.run(
+                    ["curl", "-s", "--max-time", "5", identity_url],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                body = result.stdout.strip()
+            # The installer may select its bootstrap model during the HTTP
+            # probe. Do not warm or complete the superseded native route.
+            if env_still_current is not None and not env_still_current():
+                logger.info("Model readiness aborted: route env changed after probing %s", gguf_file)
+                return {} if return_proof else "" if return_identity else False
             if is_lemonade:
                 runtime_identity = _lemonade_loaded_model_identity(
                     body,
@@ -14431,6 +15751,7 @@ def _wait_for_model_readiness(
                         lemonade_model_id,
                         attempt,
                         base_url=runtime_base_url,
+                        **probe_options,
                     )
             else:
                 runtime_identity = _llama_loaded_model_identity(
@@ -14450,6 +15771,18 @@ def _wait_for_model_readiness(
                             allow_llama_alignment_padding=True,
                         )
                     ):
+                        reason, final = _llama_context_shortfall(
+                            runtime_identity,
+                            runtime_context,
+                            expected_context,
+                            _llama_training_context_length(body, runtime_identity),
+                        )
+                        if reason:
+                            diagnosis["reason"] = reason
+                        if final:
+                            diagnosis["final"] = True
+                            logger.warning("Model %s cannot become ready: %s", gguf_file, reason)
+                            break
                         runtime_identity = ""
             if (
                 runtime_identity
@@ -14480,6 +15813,7 @@ def _wait_for_model_readiness(
                 base_url=runtime_base_url if is_lemonade else "",
                 disable_thinking=is_lemonade,
                 require_visible_content=is_lemonade,
+                **probe_options,
             ):
                 logger.info("Model %s ready after %d attempts", gguf_file, attempt + 1)
                 if return_proof:
@@ -14495,11 +15829,21 @@ def _wait_for_model_readiness(
                 return runtime_identity if return_identity else True
             if attempt % 6 == 0:
                 logger.info(
-                    "Model %s readiness incomplete (attempt %d, identity=%s)",
+                    "Model %s readiness incomplete (attempt %d, identity=%s)%s",
                     gguf_file,
                     attempt + 1,
                     bool(runtime_identity),
+                    f": {diagnosis['reason']}" if diagnosis.get("reason") else "",
                 )
+        except ValueError:
+            diagnosis["reason"] = "The configured model proof transport is invalid"
+            diagnosis["final"] = True
+            logger.warning("Model proof transport configuration is invalid")
+            break
+        except OSError as error:
+            diagnosis["reason"] = str(error)
+            if attempt % 6 == 0:
+                logger.info("Model route probe unavailable: %s", error)
         except subprocess.TimeoutExpired:
             if attempt % 6 == 0:
                 logger.info("Model readiness attempt %d timed out", attempt + 1)
@@ -14923,17 +16267,7 @@ Set-Content -LiteralPath $pidPath -Value $proc.ProcessId
                 for part in (getattr(result, "stderr", ""), getattr(result, "stdout", ""))
                 if part and part.strip()
             )
-        output = "\n".join(parts).strip()
-        output = re.sub(
-            r"(?i)(Authorization\s*[:=]\s*Bearer\s+|Bearer\s+)[^\s'\";]+",
-            r"\1[redacted]",
-            output,
-        )
-        output = re.sub(
-            r"(?i)((?:LEMONADE_ADMIN_API_KEY|LITELLM_LEMONADE_API_KEY|api[-_]?key)\s*[=:]\s*)[^\s'\";]+",
-            r"\1[redacted]",
-            output,
-        )
+        output = _redact_credential_text("\n".join(parts)).strip()
         return output[-1200:] if output else "no PowerShell output captured"
 
     try:
@@ -15539,6 +16873,109 @@ def _restore_container_state(
             detail = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(f"Could not restore stopped state for {container}: {detail[:300]}")
     return False
+
+
+def _dependent_bind_inputs(container: str) -> dict | None:
+    """Fingerprint a running dependent instance and its bind-mounted host files.
+
+    Returns ``None`` whenever the view cannot be proved from this host, for
+    example when the agent runs inside Docker Desktop and the mount sources
+    are not host-readable paths, or when a bind source is a directory. Callers
+    then keep the unconditional recreate.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "docker", "inspect", "--type", "container", "--format",
+                "{{json .}}", container,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    state = data.get("State")
+    container_id = data.get("Id")
+    if (
+        not isinstance(state, dict)
+        or state.get("Running") is not True
+        or not isinstance(container_id, str)
+        or not container_id
+    ):
+        return None
+    health = state.get("Health")
+    health_status = (
+        str(health.get("Status") or "").strip().casefold()
+        if isinstance(health, dict)
+        else "none"
+    )
+    mounts = data.get("Mounts")
+    if mounts is None:
+        mounts = []
+    if not isinstance(mounts, list):
+        return None
+    files: dict[str, str] = {}
+    for mount in mounts:
+        if not isinstance(mount, dict):
+            return None
+        if mount.get("Type") != "bind":
+            continue
+        source = mount.get("Source")
+        if not isinstance(source, str) or not source:
+            return None
+        path = Path(source)
+        try:
+            if not stat_mod.S_ISREG(path.stat().st_mode):
+                return None
+            files[source] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+    return {"id": container_id, "health": health_status, "files": files}
+
+
+def _reuse_unchanged_dependent(container: str, before: dict | None) -> str | None:
+    """Keep a running dependent whose inputs this activation did not change.
+
+    ``before`` is :func:`_dependent_bind_inputs` captured before the
+    activation's first write. The instance is kept only when it is the same
+    healthy container, every bind-mounted host file is byte-identical to that
+    capture, and a non-forced Compose ``up`` confirms the service definition
+    (including ``.env`` interpolation) still matches. Recreating it would then
+    reload exactly what it already runs.
+
+    Returns ``"reused"`` for the untouched instance, ``"recreated"`` when
+    Compose itself replaced a drifted definition (the caller must wait for
+    health), or ``None`` when the caller must force-recreate as before.
+    """
+    if before is None:
+        return None
+    current = _capture_container_state(container)
+    if not current["exists"] or not current["running"]:
+        raise RuntimeError(f"{container} stopped during model activation")
+    now = _dependent_bind_inputs(container)
+    if (
+        now is None
+        or now["id"] != before["id"]
+        or now["files"] != before["files"]
+        or now["health"] not in {"healthy", "none"}
+    ):
+        return None
+    ok, error = docker_compose_converge([container.removeprefix("ods-")])
+    if not ok:
+        raise RuntimeError(f"Could not reconcile {container}: {error}")
+    after = _dependent_bind_inputs(container)
+    if after is not None and after["id"] == now["id"]:
+        return "reused"
+    return "recreated"
 
 
 def _opencode_config_paths() -> tuple[Path, ...]:
@@ -16681,11 +18118,44 @@ def _nvidia_vram_gb() -> float:
     return 0.0
 
 
+def _default_runtime_incompatibility(model: dict, env: dict) -> str | None:
+    """Return why ODS's default llama.cpp runtime cannot serve a catalog model.
+
+    ``default_runtime_compatibility`` records a model the pinned llama.cpp
+    build cannot load. Such a model can only be activated with a runtime of
+    its own: a catalog image on a Docker llama.cpp backend, or a registered
+    native runtime (checked by the caller).
+    """
+    verdict = model.get("default_runtime_compatibility")
+    if not isinstance(verdict, dict) or _normalize_key(verdict.get("status")) != "incompatible":
+        return None
+    own_image = bool(model.get("llama_server_image")) or any(
+        isinstance(profile, dict) and profile.get("llama_server_image")
+        for profile in model.get("runtime_profiles") or []
+    )
+    image_is_used = not (
+        _normalize_key(env.get("GPU_BACKEND")) == "apple"
+        or _uses_lemonade_runtime(env)
+        or _is_windows_host_lemonade(env)
+        or _is_windows_host_llama_server(env)
+    )
+    if own_image and image_is_used:
+        return None
+    note = str(verdict.get("userNote") or "").strip()
+    return note or "This model needs a newer llama.cpp runtime than ODS ships by default."
+
+
 def _select_runtime_profile(model: dict, env: dict) -> dict | None:
     profiles = model.get("runtime_profiles")
     if not isinstance(profiles, list):
         return None
     backend = _normalize_key(env.get("GPU_BACKEND", GPU_BACKEND or ""))
+    # Windows no-GPU installs (including Arc hosts that install as CPU) write
+    # GPU_BACKEND=none. The installer's selector treats none/unknown/empty as
+    # the cpu backend (model_selection.normalize_backend); match it so a
+    # switch or restore keeps the CPU runtime profile the install chose.
+    if backend in {"", "none", "unknown"}:
+        backend = "cpu"
     memory_type = _normalize_key(env.get("GPU_MEMORY_TYPE", "discrete"))
     host_arch = _normalize_host_arch(platform.machine())
     vram_gb = _nvidia_vram_gb() if backend == "nvidia" else 0.0
@@ -16735,6 +18205,15 @@ def _select_runtime_profile(model: dict, env: dict) -> dict | None:
             if profile.get("vram_min_gb") is not None and vram_gb < float(profile["vram_min_gb"]):
                 continue
             if profile.get("vram_max_gb") is not None and vram_gb > float(profile["vram_max_gb"]):
+                continue
+            # A RAM ceiling scopes the profile to a class of machines (as in
+            # model_selection.hardware_matching_profiles); above it the
+            # profile does not apply, and it is not an unmet requirement.
+            if (
+                ram_gb
+                and profile.get("system_ram_max_gb") is not None
+                and float(ram_gb) > float(profile["system_ram_max_gb"])
+            ):
                 continue
         except (TypeError, ValueError):
             continue
@@ -16825,26 +18304,70 @@ def _stop_macos_native_llama_server(pid_file: Path) -> None:
         pid_file.unlink(missing_ok=True)
 
 
-def _native_llama_tuning_arguments(env: dict, llama_bin: Path) -> list[str]:
-    """Qualify optional tuning before disrupting an existing listener."""
+# .env keys that the macOS native-checkpoint-args.py helper spells for the
+# selected runtime. llama.cpp b8210 only knows --draft-max and
+# --cache-type-{k,v}-draft; b9014 renamed them to --spec-draft-*.
+_MACOS_QUALIFIED_DRAFT_KEYS = (
+    ("LLAMA_ARG_SPEC_DRAFT_N_MAX", "--draft-n-max"),
+    ("LLAMA_ARG_SPEC_DRAFT_TYPE_K", "--draft-type-k"),
+    ("LLAMA_ARG_SPEC_DRAFT_TYPE_V", "--draft-type-v"),
+)
+
+
+def _native_llama_tuning_arguments(
+    env: dict,
+    llama_bin: Path,
+    *,
+    defaults: bool = True,
+    reasoning_format: str = "",
+) -> list[str]:
+    """Qualify optional tuning before disrupting an existing listener.
+
+    On macOS this also spells the speculative draft flags for the selected
+    runtime and, when ``defaults`` is true, adds the macOS defaults it
+    supports (``--ctx-checkpoints 32``; ``--spec-type ngram-mod`` unless
+    LLAMA_ARG_SPEC_TYPE is set or LLAMA_SPEC_TYPE=none). Registered model
+    profiles pass ``defaults=False`` and keep their own argument list.
+
+    With ``reasoning_format`` (the --reasoning-format mapped from
+    LLAMA_REASONING) the result also carries the reasoning flags, and the
+    caller must not pass --reasoning-format itself: ``--reasoning`` on
+    runtimes that have it (b9014, as Docker's LLAMA_ARG_REASONING), else that
+    ``--reasoning-format``.
+    """
+    if platform.system() != "Darwin":
+        return []
     tuning = INSTALL_DIR / "installers/macos/lib/native-checkpoint-args.py"
+    # Same .env keys as installers/macos/lib/native-model.sh, which are also
+    # llama.cpp's own env names for these flags.
     tuning_keys = (
-        ("LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS", "--interval"),
+        ("LLAMA_ARG_CHECKPOINT_EVERY_NT", "--interval"),
         ("LLAMA_ARG_CTX_CHECKPOINTS", "--checkpoints"),
         ("LLAMA_ARG_CACHE_RAM", "--cache-mib"),
         ("LLAMA_ARG_SLEEP_IDLE_SECONDS", "--idle-seconds"),
-        ("LLAMA_ARG_CHECKPOINT_MIN_STEP", "--min-spacing"),
-    )
-    if platform.system() == "Darwin" and any(env.get(key, "").strip() for key, _ in tuning_keys):
-        if not tuning.is_file():
+        ("LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT", "--min-spacing"),
+    ) + _MACOS_QUALIFIED_DRAFT_KEYS
+    explicit = any(env.get(key, "").strip() for key, _ in tuning_keys)
+    fallback = ["--reasoning-format", reasoning_format] if defaults and reasoning_format else []
+    if not explicit and not defaults:
+        return []
+    if not tuning.is_file():
+        if explicit:
             raise RuntimeError("Native runtime tuning validator is missing")
-        command = [sys.executable, str(tuning), "--binary", str(llama_bin)]
-        command.extend(option + "=" + env.get(key, "").strip() for key, option in tuning_keys)
-        result = subprocess.run(command, capture_output=True, timeout=20)
-        if result.returncode:
-            raise RuntimeError("Native runtime tuning was rejected")
-        return [part.decode("utf-8") for part in result.stdout.split(b"\0") if part]
-    return []
+        return fallback
+    command = [sys.executable, str(tuning), "--binary", str(llama_bin)]
+    command.extend(option + "=" + env.get(key, "").strip() for key, option in tuning_keys)
+    command.append("--explicit-spec-type=" + env.get("LLAMA_ARG_SPEC_TYPE", "").strip())
+    if defaults:
+        command.append("--spec-default=" + env.get("LLAMA_SPEC_TYPE", "").strip())
+        if reasoning_format:
+            command.append("--reasoning-mode=" + env.get("LLAMA_REASONING", "").strip())
+            command.append("--reasoning-format-fallback=" + reasoning_format)
+        command.append("--apply-defaults")
+    result = subprocess.run(command, capture_output=True, timeout=20)
+    if result.returncode:
+        raise RuntimeError("Native runtime tuning was rejected")
+    return [part.decode("utf-8") for part in result.stdout.split(b"\0") if part]
 
 
 def _restart_macos_native_llama_server(
@@ -16861,10 +18384,51 @@ def _restart_macos_native_llama_server(
     env = load_env(env_path)
     profile = _model_stores.lemonade_profile(INSTALL_DIR / "data", env.get("GGUF_FILE", ""))
     selected_binary = Path(profile["executable"]) if profile else llama_bin
-    _native_llama_tuning_arguments(env, selected_binary)
+    _native_llama_tuning_arguments(env, selected_binary, defaults=profile is None)
     _stop_macos_native_llama_server(pid_file)
     _configure_macos_llm_bridge(env_path)
     _launch_native_llama_server(env_path, llama_bin, llama_log, pid_file)
+
+
+def _windows_llama_reasoning_arguments(llama_bin: Path, reasoning: str, reasoning_fmt: str) -> list[str]:
+    """--reasoning on Windows runtimes that have it, else --reasoning-format.
+
+    Same rule as installers/windows/lib/native-llama-args.ps1 and the macOS
+    helper: llama.cpp b9014 defaults --reasoning to auto, which turns Qwen3.5
+    thinking on, and with --reasoning-format none the reasoning comes back
+    inside the reply. b8248 has no --reasoning and keeps the format mapping;
+    for off it also gets --reasoning-budget 0, which disables thinking there
+    (its default, -1, leaves thinking on).
+    """
+    mode = str(reasoning or "").strip().strip("\"'") or "off"
+    help_text = ""
+    if mode in {"off", "on", "auto"}:
+        try:
+            result = subprocess.run(
+                [str(llama_bin), "--help"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            result = None
+        if result is not None and result.returncode == 0:
+            help_text = (result.stdout or "") + (result.stderr or "")
+
+    def listed(flag: str) -> bool:
+        pattern = re.compile(r"(?<![\w-])" + re.escape(flag) + r"(?![\w-])")
+        return any(pattern.search(line) and "has been removed" not in line.lower()
+                   for line in help_text.splitlines())
+
+    if listed("--reasoning"):
+        return ["--reasoning", mode]
+    arguments = ["--reasoning-format", reasoning_fmt]
+    if mode == "off" and listed("--reasoning-budget"):
+        arguments += ["--reasoning-budget", "0"]
+    return arguments
 
 
 def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path, pid_file: Path):
@@ -16900,9 +18464,16 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         "--ctx-size", ctx_size,
         "--n-gpu-layers", gpu_layers,
         "--parallel", env.get("LLAMA_PARALLEL", "1"),
-        "--reasoning-format", reasoning_fmt,
-        "--metrics",
     ]
+    # On macOS the default runtime gets its reasoning flags from the tuning
+    # helper below (--reasoning on b9014, where --reasoning-format none put an
+    # empty think block into every reply). Everything else passes the format.
+    helper_reasoning = platform.system() == "Darwin" and profile is None
+    if not helper_reasoning and platform.system() == "Windows" and profile is None:
+        args.extend(_windows_llama_reasoning_arguments(llama_bin, reasoning, reasoning_fmt))
+    elif not helper_reasoning:
+        args.extend(["--reasoning-format", reasoning_fmt])
+    args.append("--metrics")
     optional_args = {
         "LLAMA_ARG_FLASH_ATTN": "--flash-attn",
         "LLAMA_ARG_CACHE_TYPE_K": "--cache-type-k",
@@ -16913,11 +18484,20 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         "LLAMA_ARG_SPEC_DRAFT_TYPE_K": "--spec-draft-type-k",
         "LLAMA_ARG_SPEC_DRAFT_TYPE_V": "--spec-draft-type-v",
     }
+    if platform.system() == "Darwin":
+        # The macOS helper spells these for the selected runtime instead.
+        for env_key, _ in _MACOS_QUALIFIED_DRAFT_KEYS:
+            optional_args.pop(env_key, None)
     for env_key, flag in optional_args.items():
         value = env.get(env_key, "").strip()
         if value:
             args.extend([flag, value])
-    args.extend(_native_llama_tuning_arguments(env, llama_bin))
+    args.extend(_native_llama_tuning_arguments(
+        env,
+        llama_bin,
+        defaults=profile is None,
+        reasoning_format=reasoning_fmt if helper_reasoning else "",
+    ))
     if _normalize_key(env.get("LLAMA_ARG_NO_CACHE_PROMPT")) not in {"", "0", "false", "off", "no"}:
         args.append("--no-cache-prompt")
     llama_log.parent.mkdir(parents=True, exist_ok=True)
@@ -16965,6 +18545,42 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         )
     pid_file.write_text(str(proc.pid), encoding="utf-8")
     logger.info("Native llama-server launched (pid %d, model %s)", proc.pid, gguf_file)
+
+
+_RUNTIME_LOG_EXCERPT_MAX_LINES = 12
+_RUNTIME_LOG_EXCERPT_MAX_CHARS = 2000
+_RUNTIME_LOG_SIGNAL_RE = re.compile(
+    r"error|fail|warn|exceed|capping|overflow|out of memory|unable|invalid|abort|exception|n_ctx",
+    re.IGNORECASE,
+)
+
+
+def _runtime_log_excerpt(text: object) -> str:
+    """Bound a runtime log to the redacted lines that explain a failed start."""
+    # Redact the whole log before choosing and cutting lines, so a cut never
+    # exposes part of a credential.
+    lines = [line.rstrip() for line in _redact_credential_text(text).splitlines()]
+    lines = [line for line in lines if line.strip()]
+    selected = [line for line in lines if _RUNTIME_LOG_SIGNAL_RE.search(line)] or lines
+    excerpt = [line[:240] for line in selected[-_RUNTIME_LOG_EXCERPT_MAX_LINES:]]
+    return "\n".join(excerpt)[-_RUNTIME_LOG_EXCERPT_MAX_CHARS:]
+
+
+def _failed_llama_server_log_excerpt(container: str = "ods-llama-server") -> str:
+    """Read the staged llama-server log before rollback recreates the container."""
+    try:
+        result = subprocess.run(
+            ["docker", "logs", "--tail", "400", container],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return ""
+        return _runtime_log_excerpt(result.stdout)
+    except Exception:  # diagnostics must never block the rollback
+        return ""
 
 
 def _compose_restart_llama_server(env: dict):
@@ -17176,6 +18792,25 @@ def _append_network_settings(
         argv.extend(["--network-alias", str(alias)])
 
 
+# GPU_BACKEND values that scripts/resolve-compose-stack.sh serves with
+# docker-compose.nvidia.yml or docker-compose.cpu.yml. Both pin a llama.cpp
+# b9014 image and default LLAMA_ARG_SPEC_TYPE there.
+_LLAMA_SPEC_DEFAULT_BACKENDS = frozenset({"nvidia", "jetson", "cpu"})
+
+
+def _llama_spec_type_default(env: dict) -> str:
+    """Return the speculative type the NVIDIA/CPU Compose overlays would set.
+
+    Mirrors ``LLAMA_ARG_SPEC_TYPE=${LLAMA_ARG_SPEC_TYPE:-${LLAMA_SPEC_TYPE:-ngram-mod}}``
+    so a recreate from inspected state serves the same way as ``docker compose
+    up``. Lemonade, Intel/Arc and Apple backends get no default.
+    """
+    backend = str(env.get("GPU_BACKEND") or "").strip().lower()
+    if backend not in _LLAMA_SPEC_DEFAULT_BACKENDS or _uses_lemonade_runtime(env):
+        return ""
+    return str(env.get("LLAMA_SPEC_TYPE") or "").strip() or "ngram-mod"
+
+
 def _llama_recreate_argv(
     inspect_config: dict,
     env: dict,
@@ -17277,6 +18912,12 @@ def _llama_recreate_argv(
         ):
             if key in env:
                 replacement_env[key] = str(env.get(key) or "")
+    # Inspected LLAMA_ARG_* values that .env does not name are dropped below,
+    # so re-derive the overlay's speculative default instead of losing it.
+    if not str(replacement_env.get("LLAMA_ARG_SPEC_TYPE") or "").strip():
+        spec_type = _llama_spec_type_default(env)
+        if spec_type:
+            replacement_env["LLAMA_ARG_SPEC_TYPE"] = spec_type
     seen_env_keys = set()
     for entry in container_config.get("Env") or []:
         key = str(entry).split("=", 1)[0]
@@ -17643,8 +19284,9 @@ def _reconcile_native_pixel_startup():
     except (OSError, ValueError, SyntaxError):
         logger.warning('Pixel startup reproof refused: helper custody')
         return
+    unavailable = None
     for attempt in range(12):
-        acquired, _active = _begin_model_lifecycle('pixel_startup_reproof')
+        acquired, active = _begin_model_lifecycle('pixel_startup_reproof')
         if acquired:
             try:
                 result = subprocess.run(
@@ -17677,6 +19319,7 @@ def _reconcile_native_pixel_startup():
                 if not retry:
                     logger.warning('Pixel startup reproof requires attention')
                     return
+                unavailable = (diagnostic.get('stage'), projection.get('reason'))
             except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
                 logger.warning('Pixel startup reproof failed; no automatic mutation retry')
                 return
@@ -17684,9 +19327,17 @@ def _reconcile_native_pixel_startup():
                 _end_model_lifecycle('pixel_startup_reproof')
         if attempt < 11:
             time.sleep(5)
-    logger.warning('Pixel startup reproof readiness window exhausted')
     # Every exhausted attempt was either lock contention or read-only
     # unavailability. No uncertain change is eligible for another cycle.
+    if unavailable is None:
+        # The helper never ran: another model lifecycle operation (usually a
+        # multi-minute model download) owned the lock for the whole window.
+        # The check was deferred, not failed; the next cycle retries it.
+        logger.info('Pixel access reproof deferred while %s is in progress',
+                    active.get('operation') or 'another model lifecycle operation')
+    else:
+        logger.warning('Pixel startup reproof readiness window exhausted '
+                       '(last stage=%s reason=%s)', *unavailable)
     return True
 
 
@@ -17758,7 +19409,7 @@ def main():
         str(DATA_DIR / "user-extensions"),
     ))
     EXTENSIONS_DIR = INSTALL_DIR / "extensions" / "services"
-    ODS_VERSION = env.get("ODS_VERSION", VERSION)
+    ODS_VERSION = env.get("ODS_VERSION", ODS_VERSION)
 
     port = args.port
     env_port = env.get("ODS_AGENT_PORT", "")
@@ -17779,7 +19430,7 @@ def main():
     # default. Native Linux prefers the ods-network gateway so dashboard-api
     # containers can reach the agent without exposing it to the LAN. Native
     # Docker inside WSL binds its locally owned default bridge; Docker Desktop
-    # keeps the loopback path because its reported bridge is not locally bindable.
+    # is identified before interface probing and uses WSL loopback forwarding.
     # The bridge gateway fallback keeps partial/older native-Linux installs
     # reachable until phase 11 can restart the service after ods-network exists.
     try:

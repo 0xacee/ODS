@@ -102,6 +102,12 @@ resolve_compose_flags() {
     printf '%s\n' "$flags"
 }
 
+preserve_model_cache() {
+    MODELS_BACKUP="${INSTALL_DIR%/}.models-backup"
+    python3 "$SCRIPT_DIR/lib/model-cache-custody.py" preserve "$INSTALL_DIR" || return 1
+    log_info "Models preserved at: $MODELS_BACKUP"
+}
+
 KEEP_MODELS=false
 KEEP_DATA=false
 FORCE=false
@@ -150,7 +156,7 @@ ODS Uninstaller
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-    --keep-models   Keep downloaded AI models (saves re-download time)
+    --keep-models   Keep models beside the install in <install>.models-backup
     --keep-data     Keep user data (chat history, n8n workflows, etc.)
     --force         Skip confirmation prompts
     --non-interactive  Never prompt for sudo; require cached or passwordless sudo
@@ -158,7 +164,8 @@ Options:
     -h, --help      Show this help
 
 This will remove:
-    - Docker containers, images, and volumes for ODS
+    - ODS service containers
+    - ODS Docker volumes (unless --keep-data)
     - Installation directory ($INSTALL_DIR)
     - ODS-managed Pixel host services and private configuration
     - Systemd user services (opencode-web, openclaw timers)
@@ -166,6 +173,11 @@ This will remove:
     - macOS LaunchAgents (com.ods.host-agent, com.ods.opencode-web, legacy agents)
     - CLI symlinks (/usr/local/bin/ods, ~/.local/bin/ods, legacy /usr/local/bin/ods-cli)
     - Backup directory (~/.ods)
+
+Preserved:
+    - Docker images and shared build cache
+    - On macOS, native Pixel recovery archives and stopped, renamed sandboxes
+    - The dedicated macOS Pixel Operations identity, verified before reinstall
 
 EOF
             exit 0
@@ -219,6 +231,14 @@ if [[ "$FORCE" != "true" ]]; then
     echo ""
 fi
 
+# Fail before stopping/removing services if models cannot be retained without
+# crossing filesystems. Recheck immediately before the actual atomic rename.
+if $KEEP_MODELS; then
+    command -v python3 >/dev/null 2>&1 \
+        || { log_error "Python 3 is required for safe model preservation; installation untouched."; exit 1; }
+    python3 "$SCRIPT_DIR/lib/model-cache-custody.py" preflight "$INSTALL_DIR" || exit 1
+fi
+
 # A non-interactive purge must prove that privileged cleanup can run before
 # removing Pixel, stopping containers, or otherwise mutating the installation.
 # Candidate-driven reinstalls rely on this path and must fail promptly instead
@@ -239,16 +259,40 @@ if [[ "$(uname -s)" == "Linux" && -f "$SCRIPT_DIR/lib/system-uninstall.sh" ]]; t
     fi
 fi
 
-# Validate and remove Pixel before any broader uninstall mutation. The helper
-# is marker-bound to this exact install and fails closed on ambient or drifted
-# Pixel state.
+# Verify the ordinary Linux owner and bound Windows tasks before removing
+# Pixel. Never borrow root's or another user's Windows interop authority.
+if [[ "$(uname -s)" == "Linux" && "$(uname -r)" == *[Mm]icrosoft* ]]; then
+    _ods_wsl_retire_helper="$SCRIPT_DIR/scripts/retire-wsl-runtime.py"
+    if [[ ! -f "$_ods_wsl_retire_helper" || -L "$_ods_wsl_retire_helper" ]] ||
+        ! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR" --validate-only; then
+        log_error "Windows startup validation failed; Pixel and installation retained"
+        exit 1
+    fi
+fi
+
+# Disable and settle the bound Windows login startup before removing Pixel:
+# a sign-in coordinator must not restart services during their retirement.
+# Lemonade itself and its model library remain installed.
+if [[ -n "${_ods_wsl_retire_helper:-}" ]]; then
+    if ! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR"; then
+        log_error "Windows startup retirement failed; installation files retained; startup may already be disabled"
+        exit 1
+    fi
+fi
+
+# Validate and remove Pixel before stopping its recovery host-agent or deleting
+# installation files. The helper is bound to this exact installation and fails
+# closed on ambient or drifted Pixel state.
 if [[ "$(uname -s)" == "Linux" ]]; then
     _ods_pixel_marker="$HOME/.config/ods/pixel-managed.json"
     if [[ -f "$SCRIPT_DIR/lib/pixel-uninstall.sh" ]]; then
         # shellcheck source=lib/pixel-uninstall.sh
         . "$SCRIPT_DIR/lib/pixel-uninstall.sh"
         if ! ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME"; then
-            log_error "Pixel cleanup failed before ODS uninstall mutation"
+            log_error "Pixel cleanup failed; remaining installation retained"
+            if [[ -n "${_ods_wsl_retire_helper:-}" ]]; then
+                log_warn "Windows startup changes already applied for this uninstall remain in effect."
+            fi
             exit 1
         fi
     elif [[ -e "$_ods_pixel_marker" || -L "$_ods_pixel_marker" ]]; then
@@ -257,6 +301,7 @@ if [[ "$(uname -s)" == "Linux" ]]; then
     fi
     unset _ods_pixel_marker
 fi
+unset _ods_wsl_retire_helper
 
 # Native Pixel owns protected launchd services outside the ODS install tree.
 # Retire those receipt-bound resources before removing that tree; otherwise a
@@ -343,6 +388,7 @@ if command -v docker &>/dev/null; then
     fi
 
     log_ok "Docker cleanup complete"
+    log_info "Docker images and shared build cache retained"
 else
     log_warn "Docker not found — skipping container cleanup"
 fi
@@ -493,11 +539,9 @@ fi
 # 5. Remove install directory (with optional data/model preservation)
 log_info "Removing installation directory..."
 INSTALL_DIR_CLEANED=true
-if $KEEP_MODELS && [[ -d "$INSTALL_DIR/data/models" ]]; then
-    MODELS_BACKUP="$HOME/.ods-models-backup"
-    mkdir -p "$MODELS_BACKUP"
-    mv "$INSTALL_DIR/data/models"/* "$MODELS_BACKUP/" 2>/dev/null || true
-    log_info "Models preserved at: $MODELS_BACKUP"
+if $KEEP_MODELS && ! preserve_model_cache; then
+    log_error "Model preservation failed; installation deletion stopped. Keep remaining files in $INSTALL_DIR/data/models and ${INSTALL_DIR%/}.models-backup for recovery."
+    exit 1
 fi
 
 if $KEEP_DATA; then
@@ -561,8 +605,9 @@ echo -e "${GREEN}║     ODS has been uninstalled.           ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
 if $KEEP_MODELS; then
-    echo "Your models were saved to: $HOME/.ods-models-backup"
-    echo "To reuse them on reinstall, move them back to ~/ods/data/models/"
+    echo "Retained model files: ${INSTALL_DIR%/}.models-backup/models"
+    echo "Restore destination: $INSTALL_DIR/data/models"
+    echo "Keep custody.json beside the retained models for validated recovery; do not overwrite an existing destination."
 fi
 if $KEEP_DATA; then
     echo "Your user data was preserved at: $INSTALL_DIR/data/"

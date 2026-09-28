@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import types
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -109,7 +110,10 @@ def test_install_prepares_only_dependency_images_and_surfaces_build_failure(monk
     assert ok is (build_exit == 0)
     assert 'private' not in error
     if build_exit:
-        assert '[REDACTED] build output' in error
+        assert error.splitlines()[0] == ('Source image build failed; containers were not started. '
+                                         'Untrusted build error: [REDACTED] build output')
+        assert error.splitlines()[1] == 'Untrusted build diagnostic (tail):'
+        assert error.endswith('\n[REDACTED] build output')
     base = ['docker', 'compose', '-p', 'ods']
     assert calls == [base + ['config', '--format', 'json'], base + ['pull', 'demo-db'],
                      base + ['build', '--build-arg', 'BUILDKIT_CONTEXT_KEEP_GIT_DIR=1', 'demo', 'demo-worker']]
@@ -126,6 +130,7 @@ def test_build_diagnostic_preserves_actual_pip_failure_and_redacts_before_tail(t
     output = ('x' * 16000 + '\nprocess-value persisted-value compose-value build-value\n'
               'https://user:pass@example.org/repo?token=query-value\nBearer bearer-value\n' + failure)
     actual = _mod._install_build_diagnostic(types.SimpleNamespace(stderr=output), services)
+    assert actual.startswith(f'Untrusted build error: {failure}\nUntrusted build diagnostic (tail):\n')
     assert actual.endswith(failure)
     assert len(actual) <= 7600
     for secret in ['process-value', 'persisted-value', 'compose-value', 'build-value',
@@ -133,10 +138,95 @@ def test_build_diagnostic_preserves_actual_pip_failure_and_redacts_before_tail(t
         assert secret not in actual
 
 
+# Verbatim `docker compose build swagger-ui` output from tower2 (Compose 5.1.0,
+# buildx 0.31.1, 2026-09-25). The whole log fit the old 7600-character "tail",
+# so the message began at BuildKit step #1 and a 400-character excerpt of it
+# ended inside the FROM digest, 35 characters before the first error line.
+SWAGGER_UI_BUILD_LOG = '\n'.join([
+    '#1 [internal] load local bake definitions',
+    '#1 reading from stdin 620B done',
+    '#1 DONE 0.0s',
+    '',
+    '#2 [internal] load build definition from Dockerfile',
+    '#2 transferring dockerfile: 273B done',
+    '#2 DONE 0.0s',
+    '',
+    '#3 [internal] load metadata for docker.swagger.io/swaggerapi/swagger-ui:v5.33.0@sha256:f9b8432be04e320406157e26c3ff52a7e9a4bea7eabe5477e9636791737eb119',
+    '#3 ERROR: failed to copy: httpReadSeeker: failed open: unexpected status from GET request to https://docker.swagger.io/v2/swaggerapi/swagger-ui/manifests/sha256:f9b8432be04e320406157e26c3ff52a7e9a4bea7eabe5477e9636791737eb119: 429 Too Many Requests',
+    'toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit',
+    '------',
+    ' > [internal] load metadata for docker.swagger.io/swaggerapi/swagger-ui:v5.33.0@sha256:f9b8432be04e320406157e26c3ff52a7e9a4bea7eabe5477e9636791737eb119:',
+    '------',
+    '',
+    ' Image ods/swagger-ui:5.33.0-local-v1 Building ',
+    'Dockerfile:1',
+    '',
+    '--------------------',
+    '',
+    '   1 | >>> FROM docker.swagger.io/swaggerapi/swagger-ui:v5.33.0@sha256:f9b8432be04e320406157e26c3ff52a7e9a4bea7eabe5477e9636791737eb119',
+    '',
+    '   2 |     COPY nginx.conf /etc/nginx/nginx.conf',
+    '',
+    '   3 |     COPY index.html ods-initializer.js /usr/share/nginx/html/',
+    '',
+    '--------------------',
+    '',
+    'failed to solve: docker.swagger.io/swaggerapi/swagger-ui:v5.33.0@sha256:f9b8432be04e320406157e26c3ff52a7e9a4bea7eabe5477e9636791737eb119: failed to resolve source metadata for docker.swagger.io/swaggerapi/swagger-ui:v5.33.0@sha256:f9b8432be04e320406157e26c3ff52a7e9a4bea7eabe5477e9636791737eb119: failed to copy: httpReadSeeker: failed open: unexpected status from GET request to https://docker.swagger.io/v2/swaggerapi/swagger-ui/manifests/sha256:f9b8432be04e320406157e26c3ff52a7e9a4bea7eabe5477e9636791737eb119: 429 Too Many Requests',
+    '',
+    'toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit',
+    '',
+])
+
+
+def test_build_failure_message_leads_with_the_final_error_not_the_first_build_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
+    monkeypatch.setattr(_mod.platform, 'system', lambda: 'Linux')
+    services = {'swagger-ui': {'image': 'ods/swagger-ui:5.33.0-local-v1',
+                               'build': {'context': str(tmp_path), 'dockerfile': 'Dockerfile'}}}
+    def run(command, **kwargs):
+        if command[-3:] == ['config', '--format', 'json']:
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({'services': services}), stderr='')
+        assert command == ['docker', 'compose', '-p', 'ods', 'build', 'swagger-ui']
+        return types.SimpleNamespace(returncode=1, stdout='', stderr=SWAGGER_UI_BUILD_LOG)
+    monkeypatch.setattr(_mod.subprocess, 'run', run)
+    monkeypatch.setattr(_mod, '_write_progress', lambda *args: None)
+
+    ok, error = _mod._prepare_install_images(['-p', 'ods'], 'swagger-ui')
+
+    assert ok is False
+    first = error.splitlines()[0]  # The dashboard card's collapsed summary.
+    assert first == ('Source image build failed; containers were not started. Untrusted build error: '
+                     'toomanyrequests: You have reached your unauthenticated pull rate limit. '
+                     'https://www.docker.com/increase-rate-limit')
+    assert 'unauthenticated pull rate limit' in error[:400]
+    assert error.splitlines()[1] == 'Untrusted build diagnostic (tail):'
+    tail = error.splitlines()[2:]
+    assert tail[0] == '#1 [internal] load local bake definitions'  # Whole log fits the bound.
+    assert tail[-2].endswith('429 Too Many Requests') and tail[-2].startswith('failed to solve: ')
+    assert tail[-1].startswith('toomanyrequests: ')
+    assert '' not in tail
+
+
+def test_build_diagnostic_tail_is_bounded_and_keeps_end_of_long_error_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
+    steps = '\n'.join(f'#{n} [stage {n}] RUN step {n} ' + 'o' * 80 for n in range(400))
+    chain = 'failed to solve: ' + 'wrapped: ' * 200 + 'exit code: 137'
+    actual = _mod._install_build_diagnostic(types.SimpleNamespace(stderr=steps + '\n' + chain), {})
+    first, label, *tail = actual.splitlines()
+    assert first.startswith('Untrusted build error: …') and first.endswith('wrapped: exit code: 137')
+    assert len(first) == len('Untrusted build error: ') + _mod.BUILD_ERROR_LINE_LIMIT
+    assert label == 'Untrusted build diagnostic (tail):'
+    assert len(actual) <= _mod.BUILD_DIAGNOSTIC_LIMIT
+    assert tail[0].startswith('#') and tail[0].endswith('o' * 80)  # No partial first line.
+    assert tail[-1] == chain and tail[-2].startswith('#399 ')
+
+
 def test_build_diagnostic_supports_stdout_and_absent_output(tmp_path, monkeypatch):
     monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
-    assert _mod._install_build_diagnostic(types.SimpleNamespace(stderr='', stdout='failed step'), {}) == 'failed step'
+    assert _mod._install_build_diagnostic(types.SimpleNamespace(stderr='', stdout='failed step'), {}) == (
+        'Untrusted build error: failed step\nUntrusted build diagnostic (tail):\nfailed step')
     assert 'No build diagnostic' in _mod._install_build_diagnostic(types.SimpleNamespace(), {})
+    assert 'No build diagnostic' in _mod._install_build_diagnostic(types.SimpleNamespace(stderr='\n \n'), {})
 
 
 @pytest.mark.parametrize('build_exit', [0, 1])
@@ -556,6 +646,13 @@ class TestProgressWrites:
 
 class TestResolveAgentBindAddr:
 
+    @pytest.fixture(autouse=True)
+    def native_daemon_info(self, monkeypatch):
+        monkeypatch.setattr(
+            _mod.subprocess, "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "Ubuntu 24.04 LTS\n", ""),
+        )
+
     def test_explicit_bind_wins(self):
         assert _resolve_agent_bind_addr({"ODS_AGENT_BIND": "0.0.0.0"}, "Linux") == "0.0.0.0"
         assert _resolve_agent_bind_addr({"ODS_AGENT_BIND": "192.168.1.10"}, "Linux") == "192.168.1.10"
@@ -608,6 +705,23 @@ class TestResolveAgentBindAddr:
         )
         assert "--require-ods-network" in unit
         assert "StartLimitIntervalSec=0" in unit
+        assert "Restart=on-failure" in unit
+        assert "RestartSec=5" in unit
+
+    @pytest.mark.parametrize('gpu_backend', ['nvidia', 'amd', 'cpu'])
+    def test_wsl_boot_recovers_after_docker_starts_without_guessing_route(self, monkeypatch, gpu_backend):
+        results = iter([subprocess.CompletedProcess([], 1, '', 'daemon starting'),
+                        subprocess.CompletedProcess([], 0, 'Docker Desktop\n', '')])
+        monkeypatch.setattr(_mod, '_running_under_wsl', lambda *_args: True)
+        monkeypatch.setattr(_mod.subprocess, 'run', lambda *_args, **_kwargs: next(results))
+        monkeypatch.setattr(_mod, '_detect_docker_bridge_gateway',
+                            lambda: pytest.fail('unknown/Desktop daemon must not guess a native bridge'))
+        env = {'GPU_BACKEND': gpu_backend}
+        with pytest.raises(RuntimeError, match='Cannot identify'):
+            _resolve_agent_bind_addr(env, 'Linux', require_ods_network=True)
+        # The installed service retries the same entry point, without a
+        # sticky failure or fallback address surviving the previous attempt.
+        assert _resolve_agent_bind_addr(env, 'Linux', require_ods_network=True) == '127.0.0.1'
 
     def test_wsl_native_docker_uses_locally_owned_bridge_gateway(self, monkeypatch):
         monkeypatch.setattr(_mod, "_running_under_wsl", lambda *_args, **_kwargs: True)
@@ -626,6 +740,35 @@ class TestResolveAgentBindAddr:
         monkeypatch.setattr(_mod, "_local_bind_address_available", lambda _address: False)
 
         assert _resolve_agent_bind_addr({}, "Linux") == "127.0.0.1"
+
+    def test_wsl_desktop_ignores_leftover_bindable_native_bridge(self, monkeypatch):
+        monkeypatch.setattr(_mod, "_running_under_wsl", lambda *_args: True)
+        monkeypatch.setattr(_mod, "_detect_docker_bridge_gateway", lambda: "172.17.0.1")
+        monkeypatch.setattr(_mod, "_local_bind_address_available", lambda _address: True)
+        monkeypatch.setattr(
+            _mod.subprocess, "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "Docker Desktop\n", ""),
+        )
+        assert _resolve_agent_bind_addr({}, "Linux", require_ods_network=True) == "127.0.0.1"
+
+    @pytest.mark.parametrize("returncode,output", [(1, ""), (0, "")])
+    def test_wsl_refuses_unknown_daemon_route(self, monkeypatch, returncode, output):
+        monkeypatch.setattr(_mod, "_running_under_wsl", lambda *_args: True)
+        monkeypatch.setattr(
+            _mod.subprocess, "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], returncode, output, ""),
+        )
+        with pytest.raises(RuntimeError, match="Cannot identify the WSL Docker daemon"):
+            _resolve_agent_bind_addr({}, "Linux", require_ods_network=True)
+
+    @pytest.mark.parametrize("error", [OSError("missing docker"), subprocess.TimeoutExpired("docker", 10)])
+    def test_wsl_daemon_io_failure_is_actionable(self, monkeypatch, error):
+        monkeypatch.setattr(_mod, "_running_under_wsl", lambda *_args: True)
+        def fail(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(_mod.subprocess, "run", fail)
+        with pytest.raises(RuntimeError, match="Cannot identify the WSL Docker daemon"):
+            _resolve_agent_bind_addr({}, "Linux", require_ods_network=True)
 
     def test_linux_falls_back_to_bridge_gateway(self, monkeypatch):
         monkeypatch.setattr(_mod, "_running_under_wsl", lambda *_args, **_kwargs: False)
@@ -5585,9 +5728,11 @@ class TestModelActivationModeAndMacosBridge:
             "auto",
             "--parallel",
             "1",
+            "--metrics",
+            # No tuning helper in this install: the reasoning format arrives
+            # through its fallback instead of --reasoning (b9014).
             "--reasoning-format",
             "none",
-            "--metrics",
         ]
         assert pid_file.read_text(encoding="utf-8").strip() == "4321"
 
@@ -6864,6 +7009,12 @@ class TestInstallStatePollBehavior:
         def fake_run(argv, **kwargs):
             calls.append({"argv": list(argv), "kwargs": dict(kwargs)})
 
+            # The failure diagnostic's state and log reads: nothing to add.
+            if list(argv[:3]) == ["docker", "inspect", "--format"] and argv[3] == "{{json .State}}":
+                return _CP(0, "{}", "")
+            if list(argv[:2]) == ["docker", "logs"]:
+                return _CP(0, "", "")
+
             # docker inspect ... -> consume next scripted response
             if (len(argv) >= 2 and argv[0] == "docker" and argv[1] == "inspect"):
                 if not responses:
@@ -7344,6 +7495,39 @@ class TestModelDeleteSafety:
         monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
         monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
         return install_dir, models_dir
+
+    @pytest.mark.parametrize('managed', [False, True])
+    def test_registered_external_store_does_not_grant_deletion(self, tmp_path, monkeypatch, managed):
+        install, _ = self._setup(tmp_path, monkeypatch)
+        external = tmp_path / 'LM Studio models'
+        external.mkdir()
+        target = external / 'external.gguf'
+        target.write_bytes(b'external model')
+        (install / 'data/model-stores.json').write_text(json.dumps({'schemaVersion': 1, 'stores': [
+            {'id': 'lm-studio', 'hostPath': str(external), 'containerPath': '/model-stores/lm-studio'}]}))
+        monkeypatch.setattr(_mod, '_managed_wsl_lemonade', lambda _env:
+                            {'managed': managed, 'plan': {'GgufFile': 'other.gguf'}})
+        monkeypatch.setattr(_mod._wsl_lemonade, 'model_store', lambda *_args: tmp_path / 'owned-windows-store')
+        monkeypatch.setattr(_mod, '_live_runtime_has_model',
+                            lambda *_args: pytest.fail('ODS inactivity cannot authorize deleting an external library'))
+        handler = _FakeHandler(json.dumps({'gguf_file': target.name}).encode())
+        _mod.AgentHandler._handle_model_delete(handler)
+        assert handler.response_code == 409
+        assert handler.parse_response()['code'] == 'model_store_read_only'
+        assert target.read_bytes() == b'external model'
+
+    def test_default_model_hardlinked_to_another_library_is_preserved(self, tmp_path, monkeypatch):
+        _install, models = self._setup(tmp_path, monkeypatch)
+        target = models / 'shared.gguf'
+        target.write_bytes(b'shared model')
+        external = tmp_path / 'external.gguf'
+        os.link(target, external)
+        monkeypatch.setattr(_mod, '_live_runtime_has_model', lambda *_args: False)
+        handler = _FakeHandler(json.dumps({'gguf_file': target.name}).encode())
+        _mod.AgentHandler._handle_model_delete(handler)
+        assert handler.response_code == 409
+        assert handler.parse_response()['code'] == 'model_artifact_shared'
+        assert target.read_bytes() == external.read_bytes() == b'shared model'
 
     def test_split_delete_clears_status_naming_deleted_part(self, tmp_path, monkeypatch):
         install_dir, models_dir = self._setup(tmp_path, monkeypatch)
@@ -8680,6 +8864,9 @@ class TestObservabilityWire:
         monkeypatch.setattr(_mod, "_windows_gpu_metrics", lambda: {
             "schema_version": "ods.host-gpu-metrics.v1", "name": "GPU",
         })
+        monkeypatch.setattr(_mod, "_darwin_system_metrics", lambda: {
+            "schema_version": "ods.host-system-metrics.v1", "platform": "Darwin",
+        })
         monkeypatch.setattr(_mod, "_windows_llm_status", lambda: {
             "schema_version": "ods.host-llm-status.v1", "health": {"status": "ok"},
         })
@@ -8698,6 +8885,7 @@ class TestObservabilityWire:
 
             expected = {
                 "/v1/gpu/metrics": "ods.host-gpu-metrics.v1",
+                "/v1/system/metrics": "ods.host-system-metrics.v1",
                 "/v1/llm/status": "ods.host-llm-status.v1",
                 "/v1/service/health": "ods.host-service-health.v1",
             }
@@ -8849,3 +9037,255 @@ def test_install_operation_http_observation_is_authenticated_and_bound(tmp_path,
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+class TestDarwinSystemMetrics:
+    def test_native_sample_and_missing_sensors(self, monkeypatch):
+        fixture = json.loads((Path(__file__).parent / "fixtures/mac-native-telemetry.json").read_text())
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(_mod, "_darwin_metrics_cached", (0, None))
+        commands = []
+        def run(args, **kwargs):
+            commands.append(args)
+            assert 0 < kwargs["timeout"] <= 2
+            name = Path(args[0]).name
+            key = {"top": "top", "vm_stat": "vm_stat", "ioreg": "ioreg"}.get(name)
+            if name == "sysctl": key = "memory" if args[-1] == "hw.memsize" else "chip"
+            return types.SimpleNamespace(returncode=0, stdout=fixture[key])
+        monkeypatch.setattr(_mod.subprocess, "run", run)
+        data = _mod._darwin_system_metrics()
+        assert data["cpu"] == {"percent": 7.6, "temp_c": None, "scope": "host", "source": "macos-top"}
+        assert data["ram"]["total_gb"] == 16
+        assert data["ram"]["used_gb"] == 13.1
+        assert data["gpu"]["utilization_percent"] == 99
+        assert data["gpu"]["memory_used_mb"] == 8428
+        assert data["gpu"]["temperature_c"] is None
+        assert _mod._darwin_system_metrics() is data
+        assert len(commands) == 5
+        # Failure is not zero usage, nor a fabricated thermal reading.
+        monkeypatch.setattr(_mod, "_darwin_metrics_cached", (0, None))
+        monkeypatch.setattr(_mod.subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(a[0], 4)))
+        failed = _mod._darwin_system_metrics()
+        assert failed["cpu"]["percent"] is None
+        assert failed["ram"]["used_gb"] is None
+        assert failed["gpu"]["utilization_percent"] is None
+
+    def test_other_hosts_and_auth_do_not_probe(self, monkeypatch):
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(_mod.subprocess, "run", lambda *a, **kw: pytest.fail("must not execute"))
+        assert _mod._darwin_system_metrics() is None
+        monkeypatch.setattr(_mod, "check_auth", lambda h: False)
+        monkeypatch.setattr(_mod, "_darwin_system_metrics", lambda: pytest.fail("unauthorized probe"))
+        _mod.AgentHandler._handle_system_metrics(object())
+
+    def test_system_endpoint_unavailable(self, monkeypatch):
+        responses = []
+        monkeypatch.setattr(_mod, "check_auth", lambda h: True)
+        monkeypatch.setattr(_mod, "_darwin_system_metrics", lambda: None)
+        monkeypatch.setattr(_mod, "json_response", lambda h, status, data: responses.append(status))
+        _mod.AgentHandler._handle_system_metrics(object())
+        assert responses == [503]
+
+
+def test_darwin_system_metrics_has_one_total_command_budget(monkeypatch):
+    monkeypatch.setattr(_mod.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(_mod, "_darwin_metrics_cached", (0, None))
+    now = [100.0]
+    monkeypatch.setattr(_mod.time, "monotonic", lambda: now[0])
+    calls = []
+    def run(args, **kwargs):
+        calls.append(args)
+        now[0] += kwargs["timeout"]
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+    monkeypatch.setattr(_mod.subprocess, "run", run)
+    data = _mod._darwin_system_metrics()
+    assert len(calls) == 2
+    assert now[0] == 104
+    assert data["cpu"]["percent"] is None
+    assert data["ram"]["used_gb"] is None
+
+
+class TestWslNativeSystemMetrics:
+    @pytest.fixture
+    def native(self, monkeypatch):
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(_mod.platform, "release", lambda: "6.6.114-microsoft-standard-WSL2")
+        monkeypatch.setattr(_mod, "_wsl_metrics_cached", (0, None))
+        monkeypatch.setattr(_mod, "_wsl_metrics_interop", None)
+        monkeypatch.setattr(_mod, "_wsl_interop_identity", lambda p: (1, 42) if p == "/run/WSL/42_interop" else None)
+        monkeypatch.setenv("WSL_INTEROP", "/run/WSL/42_interop")
+        monkeypatch.setattr(_mod.os, "scandir", lambda p: nullcontext(iter([])))
+        monkeypatch.setattr(_mod.Path, "is_file", lambda p: True)
+        return json.loads((Path(__file__).parent / "fixtures/wsl-windows-native-telemetry.json").read_text())
+
+    def test_real_bound_adapter_and_one_shared_snapshot(self, monkeypatch, native):
+        calls = []
+        def run(args, **kwargs):
+            calls.append(args)
+            assert args[0] == "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+            assert args[1:5] == ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand"]
+            assert 0 < kwargs["timeout"] <= 8
+            assert kwargs["env"]["WSL_INTEROP"] == "/run/WSL/42_interop"
+            assert "shell" not in kwargs
+            assert _mod.base64.b64decode(args[5]).decode("utf-16-le") == _mod._WSL_SENSOR_POWERSHELL
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(native))
+        monkeypatch.setattr(_mod.subprocess, "run", run)
+        result = _mod._wsl_system_metrics()
+        assert result["cpu"]["percent"] == 86 and result["cpu"]["scope"] == "host"
+        assert result["ram"]["total_gb"] == 95.8
+        row = result["gpus"][0]
+        assert row["name"] == "AMD Radeon(TM) 8060S Graphics"
+        assert row["memory_total_mb"] == 32768 and row["memory_used_mb"] == 25566
+        assert row["utilization_percent"] == 24 and row["temperature_c"] is None
+        assert row["memory_scope"] == "dedicated"
+        assert result["sampledAt"]
+        assert _mod._wsl_system_metrics() is result and len(calls) == 1
+
+    @pytest.mark.parametrize("response", ["null", "[]", "not-json", '{"gpus":false}'])
+    def test_malformed_output_is_unavailable(self, monkeypatch, native, response):
+        monkeypatch.setattr(_mod.subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=response))
+        result = _mod._wsl_system_metrics()
+        assert result["cpu"]["percent"] is None and result["gpus"] == []
+
+    def test_timeout_is_bounded_and_cached(self, monkeypatch, native):
+        calls = []
+        def run(args, **kwargs):
+            calls.append(args)
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        monkeypatch.setattr(_mod.subprocess, "run", run)
+        result = _mod._wsl_system_metrics()
+        assert result["sampledAt"] is None
+        assert result["cpu"]["percent"] is None
+        assert _mod._wsl_system_metrics() is result and len(calls) == 1
+
+    def test_interop_absent_does_not_install_or_launch_anything(self, monkeypatch, native):
+        monkeypatch.setattr(_mod.Path, "is_file", lambda p: False)
+        monkeypatch.setattr(_mod.subprocess, "run", lambda *a, **kw: pytest.fail("must not launch"))
+        assert _mod._wsl_system_metrics() is None
+
+
+class TestWslServiceInterop:
+    @pytest.fixture
+    def sockets(self, monkeypatch):
+        monkeypatch.setattr(_mod, "_wsl_metrics_interop", None)
+        monkeypatch.delenv("WSL_INTEROP", raising=False)
+        rows = {
+            "/run": types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0),
+            "/run/WSL": types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0),
+            "/run/WSL/2_interop": types.SimpleNamespace(st_mode=stat.S_IFSOCK | 0o777, st_uid=0, st_dev=1, st_ino=2),
+            "/run/WSL/1973_interop": types.SimpleNamespace(st_mode=stat.S_IFSOCK | 0o777, st_uid=0, st_dev=1, st_ino=1973),
+        }
+        def lstat(path):
+            try:
+                return rows[str(path).replace('\\', '/')]
+            except KeyError:
+                raise FileNotFoundError(str(path))
+        monkeypatch.setattr(_mod.Path, "lstat", lstat)
+        def entries(path):
+            assert path == "/run/WSL"
+            return nullcontext(iter(types.SimpleNamespace(path=name, name=name.rsplit('/', 1)[-1])
+                                    for name in rows if name.endswith('_interop')))
+        monkeypatch.setattr(_mod.os, "scandir", entries)
+        return rows
+
+    @pytest.mark.parametrize("path", [None, "", "/tmp/1973_interop", "/run/WSL/../1973_interop", "/run/WSL/01_interop", "/run/WSL/1973_interop/other"])
+    def test_rejects_noncanonical_socket_paths(self, sockets, path):
+        assert _mod._wsl_interop_identity(path) is None
+
+    @pytest.mark.parametrize("path,change", [
+        ("/run", {"st_mode": stat.S_IFLNK | 0o777}),
+        ("/run/WSL", {"st_mode": stat.S_IFDIR | 0o775}),
+        ("/run/WSL", {"st_uid": 1000}),
+        ("/run/WSL/1973_interop", {"st_mode": stat.S_IFLNK | 0o777}),
+        ("/run/WSL/1973_interop", {"st_mode": stat.S_IFREG | 0o600}),
+        ("/run/WSL/1973_interop", {"st_uid": 1000}),
+    ])
+    def test_rejects_untrusted_custody(self, sockets, path, change):
+        for key, value in change.items():
+            setattr(sockets[path], key, value)
+        assert _mod._wsl_interop_identity("/run/WSL/1973_interop") is None
+
+    def test_service_discovers_working_root_socket_and_reuses_it(self, monkeypatch, sockets):
+        calls = []
+        def run(command, **kwargs):
+            calls.append(kwargs)
+            okay = kwargs['env']['WSL_INTEROP'].endswith('/1973_interop')
+            return types.SimpleNamespace(returncode=0 if okay else 1, stdout='{}', stderr='' if okay else 'Invalid argument')
+        monkeypatch.setattr(_mod.subprocess, 'run', run)
+        assert _mod._wsl_sensor_run(['powershell.exe']).returncode == 0
+        assert [row['env']['WSL_INTEROP'] for row in calls] == ['/run/WSL/2_interop', '/run/WSL/1973_interop']
+        assert _mod._wsl_sensor_run(['powershell.exe']).returncode == 0
+        assert calls[-1]['env']['WSL_INTEROP'] == '/run/WSL/1973_interop'
+        assert len(calls) == 3
+        assert 'WSL_INTEROP' not in os.environ
+
+    def test_stale_cached_socket_is_revalidated(self, monkeypatch, sockets):
+        monkeypatch.setattr(_mod, '_wsl_metrics_interop', ('/run/WSL/1973_interop', (1, 1973)))
+        sockets['/run/WSL/1973_interop'].st_mode = stat.S_IFLNK | 0o777
+        calls = []
+        monkeypatch.setattr(_mod.subprocess, 'run', lambda command, **kw: (calls.append(kw['env']['WSL_INTEROP']) or types.SimpleNamespace(returncode=0)))
+        _mod._wsl_sensor_run(['powershell.exe'])
+        assert calls == ['/run/WSL/2_interop']
+
+    def test_failed_sensors_do_not_trigger_more_windows_processes(self, monkeypatch, sockets):
+        calls = []
+        monkeypatch.setattr(_mod.subprocess, 'run', lambda command, **kw: (calls.append(command) or types.SimpleNamespace(returncode=1, stderr='CIM provider unavailable')))
+        assert _mod._wsl_sensor_run(['powershell.exe']).returncode == 1
+        assert len(calls) == 1
+
+    def test_hung_sessions_share_eight_second_budget(self, monkeypatch, sockets):
+        now = [100.0]
+        monkeypatch.setattr(_mod.time, 'monotonic', lambda: now[0])
+        calls = []
+        def run(command, **kwargs):
+            calls.append(kwargs['timeout'])
+            now[0] += kwargs['timeout']
+            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+        monkeypatch.setattr(_mod.subprocess, 'run', run)
+        with pytest.raises(OSError, match='No usable trusted'):
+            _mod._wsl_sensor_run(['powershell.exe'])
+        assert calls == [4, 4]
+        assert now[0] == 108
+
+    def test_no_trusted_socket_never_executes(self, monkeypatch, sockets):
+        sockets['/run/WSL'].st_mode = stat.S_IFDIR | 0o777
+        monkeypatch.setenv('WSL_INTEROP', '/tmp/untrusted_interop')
+        monkeypatch.setattr(_mod.subprocess, 'run', lambda *a, **kw: pytest.fail('must not execute'))
+        with pytest.raises(OSError, match='No usable trusted'):
+            _mod._wsl_sensor_run(['powershell.exe'])
+
+    def test_failed_launches_are_limited_to_three_sessions(self, monkeypatch, sockets):
+        for number in range(3, 12):
+            sockets[f'/run/WSL/{number}_interop'] = types.SimpleNamespace(
+                st_mode=stat.S_IFSOCK | 0o777, st_uid=0, st_dev=1, st_ino=number)
+        calls = []
+        monkeypatch.setattr(_mod.subprocess, 'run', lambda command, **kw: (
+            calls.append(kw['env']['WSL_INTEROP']) or types.SimpleNamespace(returncode=1, stderr='Invalid argument')))
+        with pytest.raises(OSError, match='No usable trusted'):
+            _mod._wsl_sensor_run(['powershell.exe'])
+        assert calls == ['/run/WSL/2_interop', '/run/WSL/3_interop', '/run/WSL/4_interop']
+
+    def test_replaced_cached_inode_is_not_preferred(self, monkeypatch, sockets):
+        monkeypatch.setattr(_mod, '_wsl_metrics_interop', ('/run/WSL/1973_interop', (1, 999)))
+        calls = []
+        monkeypatch.setattr(_mod.subprocess, 'run', lambda command, **kw: (
+            calls.append(kw['env']['WSL_INTEROP']) or types.SimpleNamespace(returncode=0)))
+        _mod._wsl_sensor_run(['powershell.exe'])
+        assert calls == ['/run/WSL/2_interop']
+
+    def test_hung_cached_socket_clears_cache_and_uses_alternate(self, monkeypatch, sockets):
+        monkeypatch.setattr(_mod, '_wsl_metrics_interop', ('/run/WSL/1973_interop', (1, 1973)))
+        now = [100.0]
+        monkeypatch.setattr(_mod.time, 'monotonic', lambda: now[0])
+        calls = []
+        def run(command, **kwargs):
+            calls.append(kwargs['env']['WSL_INTEROP'])
+            if len(calls) == 1:
+                now[0] += kwargs['timeout']
+                raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+            assert kwargs['timeout'] == 4
+            return types.SimpleNamespace(returncode=0)
+        monkeypatch.setattr(_mod.subprocess, 'run', run)
+        _mod._wsl_sensor_run(['powershell.exe'])
+        assert calls == ['/run/WSL/1973_interop', '/run/WSL/2_interop']
+        assert _mod._wsl_metrics_interop == ('/run/WSL/2_interop', (1, 2))

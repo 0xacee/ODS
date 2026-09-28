@@ -6,7 +6,7 @@ Routes:
   GET  /v1/models             — bearer-auth, synthetic listing only
   GET  /v1/activity           — bearer-auth, content-free active-turn count
   GET  /v1/transition         — owner-service-auth, durable gate capability/status
-  POST /v1/transition/{acquire,release,recover} — owner-service-auth, bound gate control
+  POST /v1/transition/{acquire,drain,release,recover} — owner-service-auth, bound gate control
   POST /v1/chat/completions   — bearer-auth, model rewrite, SSE passthrough
 
 All other paths/methods return 404 (catch-all).
@@ -286,10 +286,12 @@ _EXACT_SINGLE_LINE_FILE = re.compile(
 _WORKSPACE_MUTATION_ROUTE = (
     "\n[ODS Portal workspace task route: Perform the requested workspace mutation "
     "before verification. When tool_call is visible, use it with id write and normal "
-    "write args for every new file. edit cannot create a file and requires a non-empty "
+    "write args for every new file you author. edit cannot create a file and requires a non-empty "
     "oldText copied from an existing file. Use edit or apply_patch only after reading "
     "an existing file. Then use exec only for "
-    "readback, tests, or the requested digest. Do not repeatedly list directories "
+    "readback, tests, the requested digest, or copies of existing files: make copies and "
+    "JSON maps of file contents with one short command that reads the real files, such as "
+    "cp or python3 with json.dump, never by re-typing them. Do not repeatedly list directories "
     "or hash proposed text instead of the created file.]"
 )
 _RUN_COMMAND_AND_WAIT_ROUTE = (
@@ -1078,7 +1080,7 @@ async def handle_transition(request: web.Request):
         if operation == "release":
             result = await gate.release(data["token"], data["revision"])
         else:
-            result = await gate.acquire(data["token"], data["revision"], recover=operation == "recover")
+            result = await gate.acquire(data["token"], data["revision"], recover=operation == "recover", drain=operation == "drain")
     except GateError as exc:
         return web.json_response({"error": exc.reason}, status=exc.status,
                                  headers={"Cache-Control": "no-store"})
@@ -1576,7 +1578,7 @@ def create_app() -> web.Application:
     app.router.add_post('/v1/access-mode', handle_access_mode)
     app.router.add_post('/v1/model-control', handle_model_control)
     app.router.add_get("/v1/transition", handle_transition)
-    app.router.add_post("/v1/transition/{operation:acquire|release|recover}", handle_transition)
+    app.router.add_post("/v1/transition/{operation:acquire|drain|release|recover}", handle_transition)
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_post("/v1/chat/cancel", handle_chat_cancel)
     app.router.add_post("/v1/chat/activity", handle_chat_activity)

@@ -51,7 +51,7 @@ grep -qF 'consecutive_idle >= 2' <<<"$gate_acquire_block" \
     || fail "model swap admission must prove a stable drained boundary"
 grep -qF 'model_router_swap_gate_call end "$token" 30' <<<"$gate_release_block" \
     || fail "model swap admission must explicitly reopen after the transaction"
-grep -qF "trap 'release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock' EXIT" <<<"$active_code" \
+grep -qF "trap 'cleanup_bootstrap_pixel_model_transaction; release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock' EXIT" <<<"$active_code" \
     || fail "model swap admission must reopen on every normal or failed exit"
 top_level_swap="$(awk '
     /acquire_model_lifecycle_lock \|\| fail "Could not serialize background full-model activation/ { in_block=1 }
@@ -60,8 +60,9 @@ top_level_swap="$(awk '
 ' "$TARGET" | grep -v '^[[:space:]]*#')"
 assert_in_order "$top_level_swap" "bootstrap swap drain boundary" \
     'acquire_model_lifecycle_lock ||' \
+    'acquire_bootstrap_pixel_model_transaction' \
+    'Could not safely drain Portal work before full-model activation.' \
     'acquire_model_router_swap_gate' \
-    'write_status "failed" 100 "$TOTAL_BYTES" "$TOTAL_BYTES"' \
     'Could not safely drain model traffic before full-model activation.' \
     'Snapshotting active model config before full-model swap'
 pass "bootstrap promotion closes, drains, reports gate failure, and releases router admission"

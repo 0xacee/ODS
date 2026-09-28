@@ -144,6 +144,13 @@ upstream default. Other agents and existing jobs are unaffected.
   visual request use the same model-authored workspace-file path. The preview
   adapter can publish only an existing directory containing `index.html`; it
   has no template, scaffold, HTML, title, theme, or content input.
+  Published `.json` assets must parse as UTF-8 JSON without duplicate keys or
+  nonstandard numeric constants. Validation uses the captured bytes and never
+  rewrites them. Rejections report the artifact-relative filename and decoder
+  line/column when available, without quoting its contents. Intentionally
+  malformed examples can be displayed as `.txt`; required JSON exports must be
+  repaired. Syntax validation does not establish application semantics or that
+  exported source matches executed source; those checks remain necessary.
 
 ## Configuration (nonsecret)
 
