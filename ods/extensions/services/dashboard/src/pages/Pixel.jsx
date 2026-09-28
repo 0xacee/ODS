@@ -31,6 +31,7 @@ import PortalAgentActivity from '../components/PortalAgentActivity'
 import PortalExtensionSetup from '../components/PortalExtensionSetup'
 import PortalExtensionProgress from '../components/PortalExtensionProgress'
 import useExtensionInstallation from '../hooks/useExtensionInstallation'
+import { useComposerFocus } from '../hooks/useComposerFocus'
 import useGithubExtensionRequest from '../hooks/useGithubExtensionRequest'
 import useExtensionProjectIntegration from '../hooks/useExtensionProjectIntegration'
 import { conversationProject } from '../lib/conversationProjects'
@@ -1371,6 +1372,21 @@ export default function Pixel({ systemStatus = null }) {
   const inputOver = input.length > MAX_INPUT_LEN
   const inputEmpty = !(command?.task ?? goalDraft?.task ?? input).trim()
   const isDisabled = sending || modelSwitching || restoredActive || restoredChecking || stopping || teams.busy || contextControl.busy || contextControl.historyUnknown || status !== 'available'
+  const composerVisible = !(workspaceExpanded && workspaceOpen && !previewCollapsed)
+  const typeIntoComposer = useCallback((character, start, end) => setInput(value => {
+    const agent = agentCommand(value)
+    const goal = goalCommand(value)
+    const text = (agent || goal)?.task ?? value
+    const from = Math.max(0, Math.min(start ?? text.length, text.length))
+    const to = Math.max(from, Math.min(end ?? from, text.length))
+    const next = text.slice(0, from) + character + text.slice(to)
+    return agent ? `/agents ${next}` : goal ? `/goal ${next}` : next
+  }), [])
+  const prepareComposerSend = useComposerFocus({ inputRef, disabled: isDisabled, visible: composerVisible, onType: typeIntoComposer })
+  const sendFromComposer = () => {
+    prepareComposerSend()
+    void sendMessage()
+  }
   const integrationCommand = [...messages].reverse().find(message => message.role === 'user')?.content
   const {recovery: integrationRecovery, resume: resumeProjectIntegration} = useExtensionProjectIntegration({
     chatId: chatIdRef.current,
@@ -1404,7 +1420,7 @@ export default function Pixel({ systemStatus = null }) {
 
   return (
     <div className="pixel-chat flex flex-col overflow-hidden text-theme-text">
-      <div className={`pixel-chat-preview-layout flex min-h-0 flex-1 flex-col lg:flex-row ${workspaceExpanded && workspaceOpen && !previewCollapsed ? 'is-workspace-expanded' : ''}`}>
+      <div className={`pixel-chat-preview-layout flex min-h-0 flex-1 flex-col lg:flex-row ${!composerVisible ? 'is-workspace-expanded' : ''}`}>
         <div className="pixel-chat-column flex min-h-0 min-w-0 flex-1 flex-col">
       {persistenceError && <PixelConversationRecovery error={persistenceError} chatId={chatIdRef.current} messages={messages} draft={input}/>}
       <header className="pixel-chat-header">
@@ -1627,7 +1643,7 @@ export default function Pixel({ systemStatus = null }) {
             onKeyDown={(event) => {
               if (shouldSendMessage(event, sendKey.mode)) {
                 event.preventDefault()
-                sendMessage()
+                sendFromComposer()
               }
             }}
             placeholder={modelSwitching ? 'Switching model…' : status === 'available'
@@ -1654,7 +1670,7 @@ export default function Pixel({ systemStatus = null }) {
             </button>
           ) : (
             <button
-              onClick={sendMessage}
+              onClick={sendFromComposer}
               disabled={isDisabled || inputOver || inputEmpty}
               className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-theme-accent text-white transition hover:bg-theme-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
               title="Send"
