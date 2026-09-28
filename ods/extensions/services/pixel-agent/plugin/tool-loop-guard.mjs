@@ -344,6 +344,9 @@ export const OPERATIONS_REQUIRES_BROKER_REASON =
 export const OPERATIONS_NOT_REQUESTED_REASON =
   "Pixel blocked this Operations tool because the owner's current request did not ask for host or ODS Operations work. Continue only the owner's original authorized task. For requested sandbox workspace work, use read, write, edit, apply_patch, exec, or process; do not submit an Operations job or broaden the task.";
 
+export const WORKSPACE_DOWNLOAD_TRANSFER_CORRECTION_REASON =
+  "A dedicated-runner artifact transfer does not publish a file into the Pixel workspace. Use the existing staged-download job: wait for its terminal receipt with pixel_ops_job_wait, then publish those verified bytes with pixel_ods_download_promote. If no download has been submitted, use pixel_ops_download_stage for the correct public source first. Continue the owner's authorized extraction and analysis with workspace tools; do not ask for the same authorization again or start another download for an existing job.";
+
 export const UNREQUESTED_OPERATIONS_TERMINAL_REASON =
   "Pixel blocked another unrequested Operations attempt after a routing correction. Do not call another tool in this response or submit an Operations job. Give the owner a final answer explaining what was verified and what remains incomplete; existing work is preserved.";
 
@@ -438,6 +441,7 @@ const FILE_PATH_TOOLS = new Set(["read", "write", "edit"]);
 const WORKSPACE_CONTINUATION_TOOLS = new Set([
   "read", "write", "edit", "apply_patch", "exec", "process",
   "pixel_ods_evidence_report", "pixel_ods_evidence_readback", WORKSPACE_BUNDLE_TOOL,
+  "pixel_ods_download_promote",
 ]);
 const FAILED_TEST_READ_REPAIR_REASON =
   "The verification command failed. Preserve the owner's explicit behavior contract: correct a test only when its expectation contradicts the owner; otherwise repair the implementation, and never weaken an assertion merely to match broken output. A blank label such as `Invalid integer:` is not a helpful empty-input message. When the failure already contains actual and expected evidence, apply one focused edit to the file implicated by the failure (test or implementation), then rerun the same verification command. If the failure is a missing-file error for a file you previously wrote, recreate it before rerunning. If evidence is insufficient, read the relevant file or run a focused diagnostic, then repair and rerun verification. Report an unresolved blocker honestly when the available tools cannot resolve it.";
@@ -1951,7 +1955,10 @@ function operationsSubmission(event, toolName) {
       actions.push({ target: step.target, action: step.action, parameters: step.parameters });
     }
   } else if (toolName === "pixel_ops_download_stage" && details.kind === "download") {
+    const download = exactDownloadSubmission(event, event?.params);
+    if (!download) return undefined;
     actions.push({ target: "broker", action: "download.stage" });
+    return { jobId: details.jobId, actions, download };
   } else if (
     toolName === "pixel_ops_artifact_transfer" &&
     details.kind === "transfer" &&
@@ -2005,6 +2012,23 @@ function operationsTerminalOutcome(event, submittedJobs) {
       approvalRequired: details.approvalRequired,
       actions: submission.actions,
       steps: [],
+    };
+  }
+  // Canonical download receipts carry artifact metadata, not shell output.
+  // Reuse the exact-byte validator and retain the stricter command contract
+  // below for action, workflow, transfer, and shell submissions.
+  if (submission.download) {
+    const artifact = exactDownloadTerminalArtifact(event,
+      new Map([[requestedJobId, submission.download]]));
+    if (!artifact) return undefined;
+    return {
+      jobId: requestedJobId,
+      status: details.status,
+      planHash: details.planHash,
+      approvalRequired: details.approvalRequired,
+      actions: submission.actions,
+      steps: details.steps,
+      artifact,
     };
   }
   if (!Array.isArray(details.steps) || details.steps.length !== submission.actions.length) {
@@ -5265,7 +5289,7 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   const hostText = networkPeer ? localInspectionTextBesidePeer(text) : text;
   const explicitOperations =
     /\b(?:use|using|via|through|with)\b.{0,48}\b(?:Pixel\s+)?Operations(?:\s+(?:Broker|capabilit(?:y|ies)|tools?))?\b/i.test(
-      text
+      positiveOperationsIntentText(text)
     );
   const capabilityInventory = userMessageRequestsOperationsCapabilityInventory(
     messages,
@@ -5313,6 +5337,15 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   );
   const artifactOrExplanation = /\b(?:explain|tutorial|example|hypothetical|fictional|pretend|build|create|design|implement|write|preview)\b/i;
   const negatedObservationClause = (clause) => /^\s*(?:but\s+)?(?:please\s+)?(?:do\s+not|don['’]t|never|avoid|skip|omit|exclude)\b/i.test(clause);
+  // "This interface can establish ..." describes a software capability.
+  // Bind bare interface observations to their request object, while keeping
+  // independent, explicit network-interface requests in the same turn.
+  const networkInterfaceObservation = hostIntentClauses.some((clause) =>
+    !artifactOrExplanation.test(clause) && !negatedObservationClause(clause) && (
+      /\bnetwork\s+interfaces?\b(?!\s+(?:can|cannot|can['’]t|supports?|establishes?)\b)/i.test(clause) ||
+      /\b(?:show|report|list|check|inspect|name|identify|enumerate|display|read|measure|tell\s+me)\s+(?:me\s+)?(?:(?:the|this|that|my|our|all|any|available|active|host|machine|computer|system|local)\s+)*interfaces?\b(?!\s+(?:can|cannot|can['’]t|supports?|establishes?)\b)/i.test(clause) ||
+      /\b(?:what|which|how\s+many)\s+(?:(?:the|this|that|my|our|available|active|host|machine|computer|system|local)\s+)*interfaces?\b(?!\s+(?:can|cannot|can['’]t|supports?|establishes?)\b)/i.test(clause)
+    ));
   const networkDiscoveryClause = (clause) =>
     /\b(?:LAN|local\s+network)\b/i.test(clause) &&
     /\b(?:computers|machines|hosts|devices|peers)\b/i.test(clause) &&
@@ -5424,7 +5457,7 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   if (broadHostExploration || (hostContext && /\b(?:process|processes|process inventory)\b/i.test(hostText))) {
     actions.push("host.processes");
   }
-  if (broadHostExploration || (hostContext && /\b(?:systemd|(?:system\s+)?services?|service inventory)\b/i.test(hostText))) {
+  if (broadHostExploration || (hostContext && /\b(?:systemd|(?:system\s+)?services?|service inventory)\b/i.test(localHostFacetText))) {
     actions.push("host.services");
   }
   if (broadHostExploration || hardwareOverviewIntent || (hostContext && /\b(?:cpu|processor|hardware)\b/i.test(hostText))) {
@@ -5439,7 +5472,7 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   if (broadHostExploration || hardwareOverviewIntent || (hostContext && /\b(?:disk|filesystem|storage|mounts?)\b/i.test(hostText))) {
     actions.push("host.storage");
   }
-  if (broadHostExploration || networkDiscoveryRequested || localNetworkOverview || (hostContext && /\b(?:network interfaces?|interfaces?|addresses?|ip addresses?)\b/i.test(hostText))) {
+  if (broadHostExploration || networkDiscoveryRequested || localNetworkOverview || (hostContext && (networkInterfaceObservation || /\b(?:addresses?|ip addresses?)\b/i.test(hostText)))) {
     actions.push("host.network-addresses");
   }
   if (broadHostExploration || networkDiscoveryRequested || localNetworkOverview || (hostContext && /\b(?:routes?|routing)\b/i.test(hostText))) {
@@ -5578,8 +5611,18 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
     });
 }
 
+function positiveOperationsIntentText(text) {
+  // A prohibition on host Operations cannot turn a workspace task and a
+  // software-capability explanation into an exclusive Operations inventory.
+  return ownerLaneText(text)
+    .split(/[!?;\n]+|\.(?=\s|$)/)
+    .map((clause) => clause.trim().replace(/^without\b[^,!?;\n]{1,160},\s*/i, ""))
+    .filter((clause) => !/^\s*(?:but\s+)?(?:please[,\s]+)?(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|omit|exclude|without|no)\b/i.test(clause))
+    .join(" ");
+}
+
 export function userMessageRequestsOperationsCapabilityInventory(messages, prompt = undefined) {
-  const text = currentOwnerIntentText(messages, prompt);
+  const text = positiveOperationsIntentText(currentOwnerIntentText(messages, prompt));
   if (!text || !/\b(?:Pixel\s+)?Operations\b/i.test(text)) return false;
   const inventoryScope =
     /\b(?:capabilit(?:y|ies)|inventory|named\s+(?:actions?|operations?)|action\s+IDs?|enabled\s+targets?)\b/i.test(
@@ -6547,6 +6590,39 @@ export function privateBrowserAccessForAgent(config, agentId = "pixel") {
     (sandbox.browser?.allowHostControl ?? defaults.browser?.allowHostControl) === true;
 }
 
+// This supplies acquisition guidance, never host or runner authority. Online
+// repository questions and instructions to write a cloning script stay ordinary
+// research/coding requests; only actual acquisition or local analysis uses it.
+function ownerAcquisitionIntentClauses(messages, prompt) {
+  return ownerLaneText(currentOwnerIntentText(messages, prompt))
+    // Preserve URL, filename, and version dots when separating owner clauses.
+    .split(/[!?;\n]+|\.(?=\s|$)/)
+    .map((clause) => clause.trim()
+      .replace(/^without\b[^,!?;\n]{1,160},\s*/i, "")
+      .replace(/^(?:(?:also|now|please)[,\s]+)+/i, ""))
+    .filter((clause) => clause &&
+      !/^(?:but\s+)?(?:do\s+not|don['’]t|never|avoid|skip|omit|exclude|without)\b/i.test(clause) &&
+      !/^(?:explain|describe|document|tutorial|example|hypothetical|fictional|pretend)\b/i.test(clause));
+}
+
+export function userMessageRequestsRepositoryAcquisition(messages, prompt = undefined) {
+  // Multiword quoted instructions are already masked; quoted URL operands
+  // remain usable without changing the shared repository URL classifier.
+  const sourceText = ownerLaneText(currentOwnerIntentText(messages, prompt)).replace(/["'`“”]/g, " ");
+  if (!userMessageGitHubRepositoryUrl([], sourceText)) return false;
+  return ownerAcquisitionIntentClauses(messages, prompt).some((clause) =>
+    !/\b(?:explain|describe|write|create|design|implement)\b[^.!?;\n]{0,80}\b(?:how\s+to|script|function|example|instructions?)\b/i.test(clause) &&
+    (/\b(?:clone|checkout|check\s+out|fetch|download|retrieve|acquire|obtain)\b/i.test(clause) ||
+      (/\b(?:audit|inspect|review|read|extract|unpack)\b/i.test(clause) &&
+        /\b(?:locally|local\s+(?:copy|source|checkout|audit)|workspace)\b/i.test(clause))));
+}
+
+export function userMessageRequestsWorkspaceDownloadContinuation(messages, prompt = undefined) {
+  return ownerAcquisitionIntentClauses(messages, prompt).some((clause) =>
+    /\b(?:extract|unpack|untar|unzip)\b[^.!?;\n]{0,80}\bworkspace\b/i.test(clause) ||
+    /\b(?:continue|resume|finish)\s+(?:with\s+)?(?:(?:the|this|that|my|our|existing|previous|staged)\s+)*(?:download|artifact|archive|tarball)\b/i.test(clause));
+}
+
 export function userMessageRequestsExactByteDownload(messages, prompt = undefined) {
   const text = currentOwnerIntentText(messages, prompt);
   if (!text) return false;
@@ -6671,7 +6747,9 @@ function validGitHubRepository(owner, repository) {
 }
 
 export function userMessageGitHubRepositoryUrl(messages, prompt = undefined) {
-  const text = currentUserText(messages, prompt);
+  // Embedded instruction examples are not current repository targets. Keep
+  // quoted URL operands usable after masking multiword quoted instructions.
+  const text = ownerLaneText(currentOwnerIntentText(messages, prompt)).replace(/["'`“”]/g, " ");
   if (!text) return undefined;
   const explicit = text.match(
     /https?:\/\/github\.com\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})(?=[\s/?#),.;\]}]|$)/i
@@ -7162,6 +7240,8 @@ export function createToolLoopGuard({
         odsExcludedTools: new Set(),
         odsRequiredTools: new Set(),
         exactDownloadRequested: false,
+        ownerRepositoryAcquisition: false,
+        workspaceDownloadTransferCorrected: false,
         researchDownloadSubmissions: new Map(),
         exactDownloadRequest: undefined,
         exactDownloadSubmissions: new Map(),
@@ -8112,8 +8192,8 @@ export function createToolLoopGuard({
         (selectedToolName === EXTENSION_READ_TOOL || extensionReadSubmission(selectedToolName, selectedParams))) {
       // Read-only discovery is a tool capability, not a prompt-derived plan.
       // Keep actual target/query/ID intact; the broker validates their policy.
+      // Record incidental evidence without replacing the owner's task mode.
       state.extensionDiscoveryUsed = true;
-      state.operationsRequired = true;
     }
     if (state?.workspaceVisualContinuationRequested) {
       const continuationDirectory = state.workspaceTaskDirectory;
@@ -8478,6 +8558,20 @@ export function createToolLoopGuard({
       [...state.operationsSubmittedJobs.keys()].every((jobId) =>
         state.operationsTerminalJobs.has(jobId)
       );
+    const selectedDownloadJobId = (toolName === "tool_call"
+      ? wrappedToolParams?.args : normalizedParams ?? event?.params)?.jobId;
+    const ownsSelectedDownload = state?.researchDownloadSubmissions.has(selectedDownloadJobId) ||
+      sessionDownloadJobs.get(state?.currentSessionId)?.has(selectedDownloadJobId);
+    if (state?.ownerIntentObserved && !state.operationsRequired && !state.exactDownloadRequested &&
+        effectiveToolName === "pixel_ops_artifact_transfer" &&
+        !state.workspaceDownloadTransferCorrected &&
+        (state.ownerRepositoryAcquisition || ownsSelectedDownload)) {
+      // Correct the wrong handoff once without consuming the denial budget for
+      // unrelated host actions. The transfer remains blocked. A repeated wrong
+      // selection reaches the normal bounded unrequested-Operations checks.
+      state.workspaceDownloadTransferCorrected = true;
+      return { block: true, blockReason: WORKSPACE_DOWNLOAD_TRANSFER_CORRECTION_REASON };
+    }
     if (
       state?.ownerIntentObserved &&
       !state.operationsRequired &&
@@ -8486,6 +8580,10 @@ export function createToolLoopGuard({
       // Capability metadata is read-only and grants no action authority.
       effectiveToolName !== "pixel_ops_inventory" &&
       !(state.workspaceExtensionIsolated && effectiveToolName === EXTENSION_READ_TOOL) &&
+      !(extensionDiscoveryActive(state) &&
+        (effectiveToolName === EXTENSION_READ_TOOL ||
+          extensionReadSubmission(effectiveToolName, toolName === "tool_call"
+            ? wrappedToolParams?.args : normalizedParams ?? event?.params))) &&
       // Public downloads are a normal research/development capability. The
       // broker enforces network, size, redirect, and quarantine policy; the
       // promoter independently verifies bytes and a create-only destination.
@@ -8687,7 +8785,8 @@ export function createToolLoopGuard({
       return { block: true, blockReason: OPERATIONS_LOOP_ABORT_REASON };
     }
 
-    if (extensionDiscoveryActive(state) && OPERATIONS_SUBMISSION_TOOLS.has(toolName)) {
+    if (state?.operationsRequired && extensionDiscoveryActive(state) &&
+        OPERATIONS_SUBMISSION_TOOLS.has(toolName)) {
       const params = normalizedParams ?? event?.params;
       if (!extensionReadSubmission(toolName, params)) {
         return { block: true, blockReason: OPERATIONS_WRONG_ACTION_REASON };
@@ -9557,6 +9656,8 @@ export function createToolLoopGuard({
           event?.prompt
         );
         state.exactDownloadRequested = Boolean(state.exactDownloadRequest?.exact);
+        state.ownerRepositoryAcquisition = !state.exactDownloadRequested &&
+          userMessageRequestsRepositoryAcquisition(event?.messages, event?.prompt);
         const operations = userMessageOperationsRequirements(
           event?.messages,
           event?.prompt
@@ -10333,7 +10434,7 @@ export function createToolLoopGuard({
         rememberSessionPreview(state.currentSessionId, preview, state);
       }
     }
-    if (state.operationsRequired || state.hostObservationUsed) {
+    if (state.operationsRequired || state.hostObservationUsed || extensionDiscoveryActive(state)) {
       if (state.operationsInventoryOnly) {
         const wrappedInventory =
           toolName === "tool_call"
@@ -12122,8 +12223,9 @@ export function createToolLoopGuard({
         text: exactDownloadPublishedText(state.exactDownloadPromotion),
       };
     }
+    // Evidence truth remains independent of the owner's routing mode.
+    if (extensionDiscoveryActive(state)) return extensionDiscoveryVerification(state);
     if (state.operationsRequired) {
-      if (extensionDiscoveryActive(state)) return extensionDiscoveryVerification(state);
       if (state.operationsInventoryOnly) {
         const inventoryText = operationsInventoryEvidenceText(state.operationsInventory);
         return inventoryText
@@ -12362,11 +12464,11 @@ export function createToolLoopGuard({
     if (state?.webLoopAborted && verification.status === "none") {
       return { status: "failed", text: WEB_LOOP_DELIVERY_REASON };
     }
-    const readOnlyOperations = state?.operationsRequired &&
-      (extensionDiscoveryActive(state) || state.operationsInventoryOnly ||
+    const readOnlyOperations = extensionDiscoveryActive(state) || (state?.operationsRequired &&
+      (state.operationsInventoryOnly ||
         (state.operationsRequiredActions.size > 0 &&
           [...state.operationsRequiredActions].every((action) =>
-            action.startsWith("host.") || action === "ods.extensions.list" || action === "ods.extensions.search")));
+            action.startsWith("host.") || action === "ods.extensions.list" || action === "ods.extensions.search"))));
     return verification.status === "passed" && verification.text &&
       (readOnlyOperations || verification.preview || state?.exactDownloadPromotion)
       ? { ...verification, deliveryMode: "append" }
