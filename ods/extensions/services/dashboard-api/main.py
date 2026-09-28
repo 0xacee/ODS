@@ -1458,10 +1458,15 @@ async def api_status(api_key: str = Depends(verify_api_key)):
     except (asyncio.TimeoutError, OSError):
         logger.exception("/api/status handler failed — returning safe fallback")
         last_inference = get_cached_llama_metrics()
+        cloud_mode = normalize_ods_mode(read_live_env_value("ODS_MODE")) == "cloud"
+        if cloud_mode:
+            last_inference = {}
         return {
             "gpu": None, "services": [], "model": None,
             "bootstrap": None, "uptime": 0,
-            "version": app.version, "tier": "Unknown",
+            "version": app.version, "tier": "Cloud" if cloud_mode else "Unknown",
+            "inferenceMode": "cloud" if cloud_mode else "local",
+            "inferenceSource": "cloud-mode" if cloud_mode else "unknown",
             "cpu": {"percent": None, "temp_c": None, "scope": "unknown", "source": "unavailable"},
             "ram": {"used_gb": None, "total_gb": None, "percent": None, "scope": "unknown", "source": "unavailable"},
             "disk": {"used_gb": 0, "total_gb": 0, "percent": 0},
@@ -1567,7 +1572,20 @@ async def _build_api_status() -> dict:
             get_llama_context_size(model_hint=loaded_model),
         )
 
-    gpu_data = _serialize_gpu(gpu_info)
+    # Remote/cloud inference does not use the local GPU for primary inference.
+    # Suppress local GPU/tier reporting so the UI cannot present local hardware
+    # as the inference device. Local mode is unchanged.
+    remote_inference = bool(remote_runtime) or cloud_mode
+    if remote_inference:
+        gpu_data = None
+        tier = "Cloud"
+        inference_mode_value = "remote" if remote_runtime else "cloud"
+        inference_source_value = "remote-provider" if remote_runtime else "cloud-mode"
+    else:
+        gpu_data = _serialize_gpu(gpu_info)
+        tier = _infer_tier(gpu_info)
+        inference_mode_value = "local"
+        inference_source_value = "local-runtime"
 
     services_data = _serialize_services(service_statuses, uptime)
 
@@ -1603,8 +1621,6 @@ async def _build_api_status() -> dict:
             "eta": bootstrap_info.eta_seconds, "speedMbps": bootstrap_info.speed_mbps
         }
 
-    tier = _infer_tier(gpu_info)
-
     loaded_model_name = None if remote_runtime or cloud_mode else loaded_model or (model_data["name"] if model_data else None)
     current_model_name = remote_runtime["model"] if remote_runtime else loaded_model_name
     configured_model_name = model_data["configuredModel"] if model_data else model_info.name if model_info else None
@@ -1613,6 +1629,8 @@ async def _build_api_status() -> dict:
         "gpu": gpu_data, "services": services_data, "model": model_data,
         "bootstrap": bootstrap_data, "uptime": uptime,
         "version": app.version, "tier": tier,
+        "inferenceMode": inference_mode_value,
+        "inferenceSource": inference_source_value,
         "currentModel": current_model_name,
         "loadedModel": loaded_model_name,
         "configuredModel": configured_model_name,
