@@ -3573,7 +3573,8 @@ test("post-download analysis still enforces normal destructive-command boundarie
   assert.equal(call(guard, "exec", {
     event: { params: { command: "rm -rf /workspace/project" } },
   }).blockReason, RECURSIVE_DELETE_REQUIRES_OWNER_REASON);
-  assert.equal(reply(guard).payload.text, RECURSIVE_DELETE_REQUIRES_OWNER_REASON);
+  assert.match(reply(guard).payload.text, /^Portal blocked an unapproved recursive deletion/);
+  assert.doesNotMatch(reply(guard).payload.text, /Do not retry|Explain what was attempted|\bPixel\b/);
 });
 
 test("rejects mismatched or malformed staged-download terminal evidence", () => {
@@ -12234,9 +12235,11 @@ test("deletion refusal stops alternate commands and tools in the same run", () =
   assert.deepEqual(signalled, ["run-1"]);
   assert.deepEqual(aborted, ["session-1"]);
   assert.equal(guard.beforeAgentFinalize({}, { agentId: "pixel", runId: "run-1" }), undefined);
-  assert.deepEqual(guard.deliveryVerificationForRun("run-1"), {
-    status: "failed", text: RECURSIVE_DELETE_REQUIRES_OWNER_REASON,
-  });
+  const delivered = guard.deliveryVerificationForRun("run-1");
+  assert.equal(delivered.status, "failed");
+  assert.equal(delivered.preview, undefined);
+  assert.match(delivered.text, /^Portal blocked an unapproved recursive deletion/);
+  assert.doesNotMatch(delivered.text, /Do not retry|Explain what was attempted|\bPixel\b/);
   // Another owner's ordinary run and a later actual run are not locked.
   assert.notEqual(call(guard, "read", { event: { runId: "run-2", params: { path: "notes.txt" } },
     context: { runId: "run-2", sessionId: "session-2" } })?.block, true);
@@ -15966,7 +15969,7 @@ test("historical preview cannot hide a later coding stop from the final reply", 
     }, context, "pixel");
     assert.equal(invoke("exec", params).blockReason, CODING_RETRY_EXHAUSTED_REASON);
     const delivered = reply(guard, {event: {runId: "coding-run", payload: {text: ""}}});
-    assert.match(delivered.payload.text, /stopped the coding loop/);
+    assert.match(delivered.payload.text, /stopped before the requested work was complete/);
     assert.ok(delivered.payload.text.includes(VERIFICATION_FAILED_DELIVERY_PREFIX));
     assert.ok(delivered.payload.text.includes(details.url));
     assert.match(delivered.payload.text, /last published preview/);
