@@ -7,7 +7,6 @@ from pathlib import Path
 import socket
 import sys
 import threading
-import time
 
 import pytest
 
@@ -72,10 +71,21 @@ def test_host_agent_bounds_incomplete_request_socket():
         sys.modules.pop(spec.name, None)
 
 
-def test_partial_body_times_out_and_server_recovers(server, tmp_path):
+def test_partial_body_times_out_and_server_recovers(server, tmp_path, monkeypatch):
     agent, listener = server
     agent.DATA_DIR = tmp_path
     listener.request_socket_timeout = 0.1
+    listener.request_body_timeout = 0.1
+    reader_exited = threading.Event()
+    original = agent._read_request_body_bytes
+
+    def watched(handler, length):
+        try:
+            return original(handler, length)
+        finally:
+            reader_exited.set()
+
+    monkeypatch.setattr(agent, "_read_request_body_bytes", watched)
     client = socket.create_connection(listener.server_address, timeout=2)
     client.settimeout(2)
     client.sendall(
@@ -84,10 +94,13 @@ def test_partial_body_times_out_and_server_recovers(server, tmp_path):
         b"Authorization: Bearer synthetic-settings-key\r\n"
         b"Content-Length: 100\r\n\r\n{\"partial\":"
     )
-    # The handler may close the timed-out request without a response; the
-    # important invariant is that it does not pin the listener thread.
-    time.sleep(0.25)
-    time.sleep(0.05)
+    # Observe this reader exiting. A second connection alone would only prove
+    # ThreadingMixIn can start another worker, even if this one were stuck.
+    assert reader_exited.wait(2)
+    response = bytearray()
+    while chunk := client.recv(4096):
+        response.extend(chunk)
+    assert b"503" in response.split(b"\r\n", 1)[0]
     listener.request_socket_timeout = 30
     connection = http.client.HTTPConnection(*listener.server_address, timeout=2)
     try:
