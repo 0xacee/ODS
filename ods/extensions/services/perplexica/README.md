@@ -13,17 +13,21 @@ port and volume names, so settings and chat history carry over.
 
 ## Image pin
 
-ODS pins the upstream **slim** image for release `v1.12.2`:
-`itzcrazykns1337/vane:slim-v1.12.2@sha256:d2878cf9…` (full identity, per-platform
+ODS pins the upstream **full** image for release `v1.12.2`:
+`itzcrazykns1337/vane:v1.12.2@sha256:61f2bbf3…` (full identity, per-platform
 digests and provenance in `config/perplexica-release.json`).
 
-- **slim** contains only the Next.js app and uses ODS's own `searxng` service.
-  The **full** image also bundles a SearXNG instance, which ODS does not need.
+- **full** bundles a SearXNG instance that ODS does not use; ODS routes
+  Perplexica to its own `searxng` service via `SEARXNG_API_URL` and
+  `PERPLEXICA_SEARXNG_API_URL`. The **slim** image omits the bundled SearXNG
+  but also omits the Playwright Chromium browser.
 - Vane 1.12.2 added a Chromium (Playwright) page scraper. The `slim-v1.12.2`
   release image ships the Playwright package but not the browser (upstream
-  added it to `Dockerfile.slim` only after the release). Speed and Balanced
-  modes use SearXNG results and do not scrape, so they are unaffected. Quality
-  mode cannot read pages with this image.
+  added it to `Dockerfile.slim` only after the release), so Quality mode could
+  not read pages. The **full** image installs Playwright Chromium
+  (`--only-shell --with-deps`), so Quality mode reads the pages of its own
+  search results. Speed and Balanced modes use SearXNG results and do not
+  scrape.
 - **`scrape_url` is disabled.** Vane's researcher offers its model a
   `scrape_url` action in every mode, which opens any URL the model names, with
   no address validation, from this container on the ODS network. Anyone who
@@ -41,7 +45,7 @@ digests and provenance in `config/perplexica-release.json`).
   container on first use (again after each recreate); without Internet access
   ranking is skipped and results are used unranked.
 
-To bump: pick a versioned `slim-vX.Y.Z` tag on Docker Hub, verify the manifest
+To bump: pick a versioned `vX.Y.Z` tag on Docker Hub, verify the manifest
 list with `docker buildx imagetools inspect`, review the upstream compare for
 Dockerfile, data-path, `/api/config`, `/api/search` and `/api/chat` changes, then
 update `compose.yaml`, `config/dependency-lock.json`,
@@ -54,7 +58,7 @@ update `compose.yaml`, `config/dependency-lock.json`,
 - **Citation-backed answers**: Every answer includes source links for verification
 - **Conversational follow-up**: Ask follow-up questions within a research session
 - **Multiple focus modes**: General, academic, writing, YouTube, Reddit, and news search modes
-- **Fully local**: Routes through your local LLM (llama-server) — no data sent to external AI services
+- **ODS model integration**: Uses your configured ODS model, including local inference and authenticated remote APIs
 - **File uploads**: Upload documents to include in research context
 
 ## Dependencies
