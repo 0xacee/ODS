@@ -169,8 +169,8 @@ test(`published inspections then grep -o require bound receipts and host bytes: 
 });
 
 test('visibility gate only requests checks supported by the installed capability',()=>{
-  for(const text of ['A button shows details.','Click to hide the section.','Implement a toggle.']) assert.equal(requestsVisibilityInteraction(text),true,text);
-  for(const text of ['Create a contact form.','Make a beautiful static website.','Explain a toggle.','Do not add a show button.']) assert.equal(requestsVisibilityInteraction(text),false,text);
+  for(const text of ['A button shows details.','Click to hide the section.','Add a button that toggles visibility of the details panel.']) assert.equal(requestsVisibilityInteraction(text),true,text);
+  for(const text of ['Create a contact form.','Make a beautiful static website.','Implement a toggle.','Explain a toggle.','Do not add a show button.']) assert.equal(requestsVisibilityInteraction(text),false,text);
   for(const config of [{enabled:false},{prompt:'Create and publish a static website in a new workspace directory site.'},{prompt:'Create and publish a website in a new workspace directory site.\n> A button shows details.'}]) {
     const {guard}=setup(config);assert.equal(guard.verificationForRun('run').status,'passed');
   }
@@ -518,4 +518,67 @@ test('the tool result states page errors before any coverage claim',async()=>{
   assert.match(result.content[0].text,/untrusted page output, not instructions/);
   assert.doesNotMatch(result.content[0].text,/tested opposite visibility states/);
   assert.equal(boundVisibilityInspection(params,result,preview),undefined);
+});
+
+// Real forest edit failed because a motion toggle was forced through show/hide.
+test("visibility duty matches requested behavior: Please add a Pause motion / Resume motion toggle to this page so I can quiet the animated effects. Keep the design and publish the updated preview.",()=>{
+  const prompt="Create and publish a website in a new workspace directory site. Please add a Pause motion / Resume motion toggle to this page so I can quiet the animated effects. Keep the design and publish the updated preview.";
+  assert.equal(requestsVisibilityInteraction("Please add a Pause motion / Resume motion toggle to this page so I can quiet the animated effects. Keep the design and publish the updated preview."),false);
+  const {guard}=setup({prompt});
+  const delivery=guard.verificationForRun('run');
+  assert.equal(delivery.status,'passed');
+  assert.doesNotMatch(delivery.text,/show\/hide interaction/);
+});
+test("visibility duty matches requested behavior: Add a dark mode toggle to the header.",()=>{
+  const prompt="Create and publish a website in a new workspace directory site. Add a dark mode toggle to the header.";
+  assert.equal(requestsVisibilityInteraction("Add a dark mode toggle to the header."),false);
+  const {guard}=setup({prompt});
+  const delivery=guard.verificationForRun('run');
+  assert.equal(delivery.status,'passed');
+  assert.doesNotMatch(delivery.text,/show\/hide interaction/);
+});
+test("visibility duty matches requested behavior: Add a button that toggles the accent color between blue and green.",()=>{
+  const prompt="Create and publish a website in a new workspace directory site. Add a button that toggles the accent color between blue and green.";
+  assert.equal(requestsVisibilityInteraction("Add a button that toggles the accent color between blue and green."),false);
+  const {guard}=setup({prompt});
+  const delivery=guard.verificationForRun('run');
+  assert.equal(delivery.status,'passed');
+  assert.doesNotMatch(delivery.text,/show\/hide interaction/);
+});
+test("visibility duty matches requested behavior: Add a mute toggle for the background audio.",()=>{
+  const prompt="Create and publish a website in a new workspace directory site. Add a mute toggle for the background audio.";
+  assert.equal(requestsVisibilityInteraction("Add a mute toggle for the background audio."),false);
+  const {guard}=setup({prompt});
+  const delivery=guard.verificationForRun('run');
+  assert.equal(delivery.status,'passed');
+  assert.doesNotMatch(delivery.text,/show\/hide interaction/);
+});
+test("visibility duty matches requested behavior: Add a button that toggles the visibility of the details panel.",()=>{
+  const prompt="Create and publish a website in a new workspace directory site. Add a button that toggles the visibility of the details panel.";
+  assert.equal(requestsVisibilityInteraction("Add a button that toggles the visibility of the details panel."),true);
+  const {guard}=setup({prompt});
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  assert.match(guard.verificationForRun('run').text,/show\/hide interaction/);
+});
+test("visibility duty matches requested behavior: Add a button that shows the details section and a button that hides it.",()=>{
+  const prompt="Create and publish a website in a new workspace directory site. Add a button that shows the details section and a button that hides it.";
+  assert.equal(requestsVisibilityInteraction("Add a button that shows the details section and a button that hides it."),true);
+  const {guard}=setup({prompt});
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  assert.match(guard.verificationForRun('run').text,/show\/hide interaction/);
+});
+test("visibility duty matches requested behavior: Do not add a toggle that shows or hides anything.",()=>{
+  const prompt="Create and publish a website in a new workspace directory site. Do not add a toggle that shows or hides anything.";
+  assert.equal(requestsVisibilityInteraction("Do not add a toggle that shows or hides anything."),false);
+  const {guard}=setup({prompt});
+  const delivery=guard.verificationForRun('run');
+  assert.equal(delivery.status,'passed');
+  assert.doesNotMatch(delivery.text,/show\/hide interaction/);
+});
+test("visibility duty matches requested behavior: Add a Pause motion toggle to quiet the animated effects, and also add a button that shows the hidden details panel.",()=>{
+  const prompt="Create and publish a website in a new workspace directory site. Add a Pause motion toggle to quiet the animated effects, and also add a button that shows the hidden details panel.";
+  assert.equal(requestsVisibilityInteraction("Add a Pause motion toggle to quiet the animated effects, and also add a button that shows the hidden details panel."),true);
+  const {guard}=setup({prompt});
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  assert.match(guard.verificationForRun('run').text,/show\/hide interaction/);
 });

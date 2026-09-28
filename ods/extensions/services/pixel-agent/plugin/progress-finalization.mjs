@@ -26,7 +26,7 @@ export const PROGRESS_FINALIZATION_INSTRUCTION =
   'Do not claim a publication, preview URL, passing test or saved file that a tool result above did not confirm.';
 
 export const PROGRESS_FINALIZATION_NOTE =
-  '**Partial answer: Pixel reached its tool limit.** This response was stopped after repeated tool failures ' +
+  '**Partial answer: Portal reached its tool limit.** This response was stopped after repeated tool failures ' +
   'or attempts without progress. The answer above was written from evidence gathered before the stop and may be ' +
   'incomplete; items it marks as missing or unverified were not completed. ' +
   'Saved files and previously verified publications were preserved.';
@@ -37,7 +37,7 @@ export const PROGRESS_FINALIZATION_REFUSED_CALLS_NOTE =
 // Host-built from this response's successful page-read receipts; only the
 // list varies. Titles are page-provided text, reduced to plain words.
 export const PROGRESS_READ_PAGES_HEADING =
-  'Pages Pixel read successfully in this response before the stop (listed by ODS from its read receipts; ' +
+  'Pages Portal read successfully in this response before the stop (listed by ODS from its read receipts; ' +
   'titles are as each page reported them):';
 export const MAX_READ_PAGES_LISTED = 8;
 
