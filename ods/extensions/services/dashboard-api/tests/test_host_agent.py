@@ -6674,14 +6674,19 @@ class TestEnableRetry:
 
         monkeypatch.setattr(_mod, "docker_compose_action",
                             lambda sid, act: (True, ""))
-        ticks = iter([0, 0, 2])
-        monkeypatch.setattr(_mod.time, "monotonic", lambda: next(ticks, 2))
+        # Body and startup deadlines observe the same monotonic clock. Keep
+        # reads side-effect free and advance time with the container probe,
+        # so adding deadline observations cannot exhaust a finite tick list.
+        now = [0.0]
+        monkeypatch.setattr(_mod.time, "monotonic", lambda: now[0])
         monkeypatch.setattr(_mod.time, "sleep", lambda *_args: None)
 
         inspect_calls = []
 
         def fake_run(cmd, *args, **kwargs):
             inspect_calls.append(cmd)
+            if cmd[:3] == ["docker", "inspect", "--format"]:
+                now[0] += 2.0
             return subprocess.CompletedProcess(args=cmd, returncode=0,
                                                stdout="exited|boom", stderr="")
 
