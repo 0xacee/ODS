@@ -820,21 +820,27 @@ def capture_palette(browser, origin, prefix):
         context.close()
 
 
-def observe_until_stable(once, wait):
+def observe_until_stable(once, wait, expected=None):
     # Keep the 100ms fast path. A finite transition may need more samples,
     # but changing observations never become a passing assertion on timeout.
     # The broker's independent 45s capsule deadline still bounds all steps.
     deadline = time.monotonic() + 1.5
     previous = once()
+    stable = False
     while True:
         remaining = deadline - time.monotonic()
         if remaining < 0.1:
-            return previous, False
+            return previous, stable
         wait(100)
         current = once()
         if time.monotonic() > deadline:
             return current, False
-        if current == previous:
+        stable = current == previous
+        # A delayed entrance can remain hidden for two identical samples.
+        # Assertions wait for their expected state within the SAME deadline;
+        # an unchanged opposite state still fails the caller's assertion.
+        if stable and (expected is None or current.get("count") != 1
+                       or current.get("visible") is expected):
             return current, True
         previous = current
 
@@ -1079,9 +1085,9 @@ def run_browser(bundle, playwright_factory=None):
                     raise Invalid("inspection failed")
                 return result["result"]["value"]
 
-            def observe(locator, include_hidden=False):
+            def observe(locator, include_hidden=False, expected=None):
                 return observe_until_stable(
-                    lambda: once(locator, include_hidden), page.wait_for_timeout
+                    lambda: once(locator, include_hidden), page.wait_for_timeout, expected
                 )
 
             page.wait_for_timeout(100)
@@ -1099,7 +1105,8 @@ def run_browser(bundle, playwright_factory=None):
                     # role/name; assert-visible and click stay rendered-only,
                     # and they match Playwright's source-text names too.
                     before, stable = observe(
-                        step["locator"], step["action"] == "assert-hidden"
+                        step["locator"], step["action"] == "assert-hidden",
+                        None if step["action"] == "click" else step["action"] == "assert-visible",
                     )
                 except InvalidSelector:
                     # No DOM observation exists for invalid syntax. Preserve

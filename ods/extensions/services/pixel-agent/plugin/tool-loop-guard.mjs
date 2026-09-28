@@ -11370,7 +11370,7 @@ export function createToolLoopGuard({
         const hostRejected = state.workspacePreviewFailureCode !== undefined &&
           directory === state.workspacePreviewDirectory;
         return "[ODS Pixel next step] This visual project must be delivered in Workbench. " +
-          "Finish all requested files, edits and checks first, then publish BEFORE your final answer. Write one complete file per tool call and keep each write within the output budget. Keep temporary probes outside the artifact; do not delete or clean up directories as part of publication. " +
+          "Finish all requested files, edits and checks first, then publish BEFORE your final answer. Honor the requested project scope: a new project uses a new directory, not prior work. Write one complete file per tool call and keep each write within the output budget. Keep decorative layers behind text and controls. CSS visibility and color observations do not verify readability or overall appearance. Keep temporary probes outside the artifact; do not delete or clean up directories as part of publication. " +
           (directory && !hostRejected ? `Call tool_call with id ${WORKSPACE_PREVIEW_TOOL} and args ${JSON.stringify({relativeDirectory:directory})}. ` :
             "Prepare a browser-ready directory with index.html and local assets, preserve the source files, then call pixel_ods_workspace_preview with that relativeDirectory. ") +
           "A sandbox server, saved file or previous snapshot is not a verified current preview.";
