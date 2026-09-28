@@ -334,10 +334,10 @@ def test_release_pin_is_consistent_across_surfaces() -> None:
     release = json.loads(RELEASE.read_text(encoding="utf-8"))
     image = release["image"]
     assert re.fullmatch(
-        r"itzcrazykns1337/vane:slim-v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}", image
+        r"itzcrazykns1337/vane:v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}", image
     ), image
     assert release["tag"] == f"v{release['version']}"
-    assert f"slim-{release['tag']}@" in image
+    assert f"{release['tag']}@" in image
     assert re.fullmatch(r"[0-9a-f]{40}", release["sourceCommit"])
     assert set(release["platformManifests"]) == {"linux/amd64", "linux/arm64"}
     for digest in release["platformManifests"].values():
