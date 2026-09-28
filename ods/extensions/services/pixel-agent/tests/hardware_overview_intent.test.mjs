@@ -48,6 +48,18 @@ test('a basic overview respects an explicitly excluded GPU observation', () => {
     ['host.cpu', 'host.memory', 'host.storage']);
 });
 
+for (const question of [
+  'What hardware does this computer have? Do not inspect the CPU, GPU, memory or storage.',
+  'What hardware does this computer have? Do not inspect the CPU. Do not inspect the GPU. Do not inspect memory. Do not inspect storage.',
+]) {
+  test(`excluding every basic facet does not require an impossible receipt: ${question}`, () => {
+    assert.deepEqual(api.userMessageOperationsRequirements([], question), {
+      required: false,
+      actions: [],
+    });
+  });
+}
+
 test('general hardware scope retains explicit observation exclusions', () => {
   const guard = api.createToolLoopGuard();
   const ctx = {agentId:'pixel', runId:'basic-hardware', sessionId:'basic-hardware-session'};

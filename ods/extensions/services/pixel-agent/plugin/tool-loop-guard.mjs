@@ -5489,7 +5489,9 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   });
   return {
     required:
-      capabilityInventory || explicitOperations || hostEvidence || broadHostExploration || hardwareOverviewIntent ||
+      capabilityInventory || explicitOperations || hostEvidence || broadHostExploration ||
+      (hardwareOverviewIntent && requestedActions.some((action) =>
+        ["host.cpu", "host.gpu", "host.memory", "host.storage"].includes(action))) ||
       ((localNetworkOverview || networkDiscoveryRequested || (hostContext && (hostExplorationIntent || directHostObservation))) &&
         requestedActions.some((action) => action.startsWith("host."))) ||
       extensionInventory || extensionCatalog || Boolean(extensionLifecycle) || hostCommand || Boolean(networkPeer),
