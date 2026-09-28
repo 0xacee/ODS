@@ -17,7 +17,7 @@ export function requestsVisibilityInteraction(text) {
   return String(text ?? '').split(/[!?;\n]+|\.(?=\s|$)/).some(clause =>
     !/^\s*(?:please\s+)?(?:do\s+not|don['’]t|never|avoid|skip|explain|describe|example)\b/i.test(clause) &&
     /\b(?:clicks?|buttons?|toggles?|expands?|collapses?)\b/i.test(clause) &&
-    /\b(?:shows?|hides?|hidden|reveals?|toggles?|expands?|collapses?|visible)\b/i.test(clause));
+    /\b(?:shows?|hides?|hidden|reveals?|expands?|collapses?|visible|visibility)\b/i.test(clause));
 }
 
 // The owner's own wording of a requested show/hide change, used only to name
