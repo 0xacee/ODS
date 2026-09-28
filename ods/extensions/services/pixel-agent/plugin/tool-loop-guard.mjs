@@ -5371,6 +5371,18 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   const broadHostExploration = hostContext && (hostExplorationIntent || naturalHostOverview) &&
     (broadScopeIntent || (!hostHealthInspection &&
       !hostScopeFacetPatterns.some((pattern) => pattern.test(localHostFacetText))));
+  // A general device hardware question covers the four basic facets together.
+  // Explicit facet refinements stay narrow; negated and artifact clauses do
+  // not add observations. The existing per-action exclusions still apply.
+  const hardwareRequestClauses = hostIntentClauses.filter((clause) =>
+    !networkDiscoveryClause(clause) && !artifactOrExplanation.test(clause) &&
+    !negatedObservationClause(clause) && !/^\s*(?:but\s+)?no\b/i.test(clause));
+  const hardwareOverviewIntent = hostContext &&
+    !/\b(?:cpu|processor|gpu|graphics|video\s+card|memory|ram|swap|disk|filesystem|storage|mounts?)\b/i.test(hardwareRequestClauses.join(" ")) &&
+    hardwareRequestClauses.some((clause) =>
+      /\b(?:hardware|specs?|specifications?|components?)\b/i.test(clause) &&
+      /\b(?:what|which|tell|show|report|describe|list|give|get|check|inspect)\b/i.test(clause) &&
+      !/\b(?:remote|peer|inference\s+server)\b/i.test(clause));
   const extensionCatalog = userMessageRequestsExtensionCatalog(messages, prompt);
   const extensionInventory = userMessageRequestsExtensionInventory(messages, prompt);
   const extensionLifecycle = userMessageExtensionLifecycleIntent(messages, prompt);
@@ -5415,16 +5427,16 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   if (broadHostExploration || (hostContext && /\b(?:systemd|(?:system\s+)?services?|service inventory)\b/i.test(hostText))) {
     actions.push("host.services");
   }
-  if (broadHostExploration || (hostContext && /\b(?:cpu|processor|hardware)\b/i.test(hostText))) {
+  if (broadHostExploration || hardwareOverviewIntent || (hostContext && /\b(?:cpu|processor|hardware)\b/i.test(hostText))) {
     actions.push("host.cpu");
   }
-  if (broadHostExploration || (hostContext && /\b(?:gpu|graphics(?:\s+(?:card|processor))?|video\s+card)\b/i.test(hostText))) {
+  if (broadHostExploration || hardwareOverviewIntent || (hostContext && /\b(?:gpu|graphics(?:\s+(?:card|processor))?|video\s+card)\b/i.test(hostText))) {
     actions.push("host.gpu");
   }
-  if (broadHostExploration || (hostContext && /\b(?:memory|ram|swap)\b/i.test(hostText))) {
+  if (broadHostExploration || hardwareOverviewIntent || (hostContext && /\b(?:memory|ram|swap)\b/i.test(hostText))) {
     actions.push("host.memory");
   }
-  if (broadHostExploration || (hostContext && /\b(?:disk|filesystem|storage|mounts?)\b/i.test(hostText))) {
+  if (broadHostExploration || hardwareOverviewIntent || (hostContext && /\b(?:disk|filesystem|storage|mounts?)\b/i.test(hostText))) {
     actions.push("host.storage");
   }
   if (broadHostExploration || networkDiscoveryRequested || localNetworkOverview || (hostContext && /\b(?:network interfaces?|interfaces?|addresses?|ip addresses?)\b/i.test(hostText))) {
@@ -5477,7 +5489,7 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   });
   return {
     required:
-      capabilityInventory || explicitOperations || hostEvidence || broadHostExploration ||
+      capabilityInventory || explicitOperations || hostEvidence || broadHostExploration || hardwareOverviewIntent ||
       ((localNetworkOverview || networkDiscoveryRequested || (hostContext && (hostExplorationIntent || directHostObservation))) &&
         requestedActions.some((action) => action.startsWith("host."))) ||
       extensionInventory || extensionCatalog || Boolean(extensionLifecycle) || hostCommand || Boolean(networkPeer),
