@@ -7257,6 +7257,53 @@ def check_auth(handler) -> bool:
     return True
 
 
+def _read_request_body_bytes(handler, length: int) -> bytes:
+    """Preserve buffered HTTP bytes while bounding total body read time.
+
+    read1 performs at most one raw read, unlike BufferedReader.read's internal
+    receive loop. Recompute the remaining budget for every raw read. Repeated
+    body reads share one deadline, reset by handle_one_request. This does not
+    impose a deadline on header reads or the host operation after parsing.
+    """
+    if length <= 0:
+        return b""
+    connection = getattr(handler, "connection", None)
+    previous_timeout = connection.gettimeout() if connection is not None else None
+    deadline = getattr(handler, "_body_deadline", None)
+    if deadline is None:
+        body_timeout = getattr(getattr(handler, "server", None), "request_body_timeout", 30)
+        if previous_timeout is not None and previous_timeout > 0:
+            body_timeout = min(body_timeout, previous_timeout)
+        deadline = time.monotonic() + body_timeout
+        handler._body_deadline = deadline
+    reader = getattr(handler.rfile, "read1", None)
+    if not callable(reader):
+        reader = handler.rfile.read  # Synthetic/nonbuffered readers.
+    chunks = []
+    remaining = length
+    try:
+        while remaining:
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                raise socket.timeout("Request body deadline exceeded")
+            if connection is not None:
+                connection.settimeout(budget)
+            chunk = reader(min(remaining, 65536))
+            if time.monotonic() >= deadline:
+                raise socket.timeout("Request body deadline exceeded")
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        if connection is not None:
+            try:
+                connection.settimeout(previous_timeout)
+            except OSError:
+                pass  # A disconnected client cannot reuse this socket.
+
+
 def read_json_body(handler) -> dict | None:
     try:
         length = int(handler.headers.get("Content-Length", 0))
@@ -7266,8 +7313,20 @@ def read_json_body(handler) -> dict | None:
     if length <= 0:
         json_response(handler, 400, {"error": "Request body required"})
         return None
+    if length > MAX_BODY:
+        handler.close_connection = True
+        json_response(handler, 413, {"error": "Request body exceeds size limit"})
+        return None
     try:
-        data = json.loads(handler.rfile.read(min(length, MAX_BODY)))
+        raw = _read_request_body_bytes(handler, length)
+        if len(raw) != length:
+            json_response(handler, 400, {"error": "Incomplete request body"})
+            return None
+        data = json.loads(raw)
+    except (socket.timeout, TimeoutError):
+        handler.close_connection = True
+        json_response(handler, 408, {"error": "Request body read timed out"})
+        return None
     except (json.JSONDecodeError, UnicodeDecodeError):
         json_response(handler, 400, {"error": "Invalid JSON"})
         return None
@@ -7284,7 +7343,7 @@ def discard_request_body(handler) -> None:
         return
     remaining = max(0, length)
     while remaining:
-        chunk = handler.rfile.read(min(remaining, MAX_BODY))
+        chunk = _read_request_body_bytes(handler, min(remaining, MAX_BODY))
         if not chunk:
             break
         remaining -= len(chunk)
@@ -7298,8 +7357,20 @@ def read_optional_json_body(handler) -> dict | None:
         return None
     if length <= 0:
         return {}
+    if length > MAX_BODY:
+        handler.close_connection = True
+        json_response(handler, 413, {"error": "Request body exceeds size limit"})
+        return None
     try:
-        data = json.loads(handler.rfile.read(min(length, MAX_BODY)))
+        raw = _read_request_body_bytes(handler, length)
+        if len(raw) != length:
+            json_response(handler, 400, {"error": "Incomplete request body"})
+            return None
+        data = json.loads(raw)
+    except (socket.timeout, TimeoutError):
+        handler.close_connection = True
+        json_response(handler, 408, {"error": "Request body read timed out"})
+        return None
     except (json.JSONDecodeError, UnicodeDecodeError):
         json_response(handler, 400, {"error": "Invalid JSON"})
         return None
@@ -8490,6 +8561,10 @@ class AgentHandler(BaseHTTPRequestHandler):
     # ephemeral ports when requests traverse the private Colima TCP bridge.
     protocol_version = "HTTP/1.1"
 
+    def handle_one_request(self):
+        self._body_deadline = None
+        super().handle_one_request()
+
     def log_message(self, fmt, *args):
         logger.info(fmt, *args)
 
@@ -9194,7 +9269,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 old_timeout = self.connection.gettimeout()
                 try:
                     self.connection.settimeout(10)
-                    raw = self.rfile.read(length)
+                    raw = _read_request_body_bytes(self, length)
                 finally:
                     self.connection.settimeout(old_timeout)
                 if len(raw) != length:
@@ -9244,7 +9319,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 previous = self.connection.gettimeout()
                 try:
                     self.connection.settimeout(10)
-                    raw = self.rfile.read(int(lengths[0]))
+                    raw = _read_request_body_bytes(self, int(lengths[0]))
                 finally:
                     self.connection.settimeout(previous)
                 if len(raw) != int(lengths[0]):
@@ -9282,7 +9357,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             previous = self.connection.gettimeout()
             try:
                 self.connection.settimeout(10)
-                raw = self.rfile.read(length)
+                raw = _read_request_body_bytes(self, length)
             finally:
                 self.connection.settimeout(previous)
             if len(raw) != length:
@@ -9315,7 +9390,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             previous = self.connection.gettimeout()
             try:
                 self.connection.settimeout(10)
-                raw = self.rfile.read(length)
+                raw = _read_request_body_bytes(self, length)
             finally:
                 self.connection.settimeout(previous)
             if len(raw) != length:
@@ -9356,7 +9431,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             previous = self.connection.gettimeout()
             try:
                 self.connection.settimeout(10)
-                raw = self.rfile.read(length)
+                raw = _read_request_body_bytes(self, length)
             finally:
                 self.connection.settimeout(previous)
             if len(raw) != length:
@@ -9411,7 +9486,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 before = self.connection.gettimeout()
                 try:
                     self.connection.settimeout(10)
-                    raw = self.rfile.read(length)
+                    raw = _read_request_body_bytes(self, length)
                 finally: self.connection.settimeout(before)
                 if len(raw) != length: raise StoreError("malformed-json")
                 try: body = normalize_change(decode_document(raw))
@@ -9460,7 +9535,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 before = self.connection.gettimeout()
                 try:
                     self.connection.settimeout(10)
-                    raw = self.rfile.read(length)
+                    raw = _read_request_body_bytes(self, length)
                 finally: self.connection.settimeout(before)
                 if len(raw) != length: raise StoreError("malformed-json")
                 try: body = normalize_change(decode_document(raw))
@@ -9508,7 +9583,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 old_timeout = self.connection.gettimeout()
                 try:
                     self.connection.settimeout(10)
-                    raw = self.rfile.read(length)
+                    raw = _read_request_body_bytes(self, length)
                 finally:
                     self.connection.settimeout(old_timeout)
                 if len(raw) != length:
@@ -9552,7 +9627,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 old_timeout = self.connection.gettimeout()
                 try:
                     self.connection.settimeout(10)
-                    raw = self.rfile.read(length)
+                    raw = _read_request_body_bytes(self, length)
                 finally:
                     self.connection.settimeout(old_timeout)
                 if len(raw) != length:
@@ -9599,7 +9674,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             old_timeout = self.connection.gettimeout()
             try:
                 self.connection.settimeout(10)
-                raw = self.rfile.read(length)
+                raw = _read_request_body_bytes(self, length)
             finally:
                 self.connection.settimeout(old_timeout)
             if len(raw) != length:
@@ -9644,7 +9719,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 old_timeout = self.connection.gettimeout()
                 try:
                     self.connection.settimeout(10)
-                    raw = self.rfile.read(length)
+                    raw = _read_request_body_bytes(self, length)
                 finally:
                     self.connection.settimeout(old_timeout)
                 if len(raw) != length:
@@ -10427,7 +10502,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 413, {"error": f"Body too large: {length} > {MAX_ENV_BODY}"})
             return
         try:
-            raw = self.rfile.read(length)
+            raw = _read_request_body_bytes(self, length)
             body = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             logger.warning("env_update rejected: invalid JSON from %s: %s", client_ip, exc)
@@ -19215,9 +19290,42 @@ def _write_model_status(path: Path, status: str, model: str, downloaded: int, to
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+    # Bound idle socket reads. Body reads have a separate total deadline;
+    # header trickling is outside the body deadline's scope.
+    request_socket_timeout = 30
+    request_body_timeout = 30
+    request_close_grace = 0.1
     # Dashboard model discovery can issue bursts larger than HTTPServer's
     # default backlog of 5; keep action requests from being dropped behind polls.
     request_queue_size = 128
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(self.request_socket_timeout)
+        return request, client_address
+
+    def shutdown_request(self, request):
+        # A close with unread input can reset the connection on Windows,
+        # discarding a timeout/size-limit response already sent. Signal EOF
+        # for the response, then drain only within a separate bounded grace.
+        # The handler has finished: no buffered bytes will be reused.
+        try:
+            request.shutdown(socket.SHUT_WR)
+            deadline = time.monotonic() + self.request_close_grace
+            remaining_bytes = 16 * MAX_BODY
+            while remaining_bytes:
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    break
+                request.settimeout(budget)
+                chunk = request.recv(min(65536, remaining_bytes))
+                if not chunk:
+                    break
+                remaining_bytes -= len(chunk)
+        except OSError:
+            pass
+        finally:
+            self.close_request(request)
 
 
 def _create_host_agent_server(env: dict, bind_addr: str, port: int):
