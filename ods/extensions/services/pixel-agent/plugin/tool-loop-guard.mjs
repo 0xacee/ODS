@@ -4545,8 +4545,11 @@ export function managedTeamRole(event) {
 
 function currentOwnerIntentText(messages, prompt = undefined) {
   const currentText = currentUserText(messages, prompt);
-  const deliveryContractIndex = currentText.lastIndexOf(
-    "\n\n[ODS Pixel delivery requirement:"
+  // Both current and legacy ingress guidance are routing instructions,
+  // never owner requests for host observations or workspace artifacts.
+  const deliveryContractIndex = Math.max(
+    currentText.lastIndexOf("\n\n[ODS Portal delivery requirement:"),
+    currentText.lastIndexOf("\n\n[ODS Pixel delivery requirement:")
   );
   return deliveryContractIndex >= 0
     ? currentText.slice(0, deliveryContractIndex)
