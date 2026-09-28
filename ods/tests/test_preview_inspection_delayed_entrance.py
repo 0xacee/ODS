@@ -93,7 +93,7 @@ class ObserveUntilStableExpectedTests(unittest.TestCase):
 
     def test_expected_true_late_match_after_deadline_does_not_pass(self):
         # A single late matching sample must not be accepted after the deadline.
-        result, _, elapsed = self.sample([{"count": 1, "visible": False}] * 2, expected=True,
+        result, _, elapsed = self.sample([{"count": 1, "visible": False}, {"count": 1, "visible": True}], expected=True,
                                          evaluation_cost=.8)
         self.assertGreater(elapsed, 1.5)
         self.assertFalse(result[1])
@@ -176,6 +176,12 @@ class DelayedEntranceBrowserTests(unittest.TestCase):
         result = self.check(DELAYED_ENTRANCE_HTML, [step("assert-hidden", "#windBtn")])
         self.assertEqual(result["status"], "passed", result)
         self.assertFalse(result["steps"][0]["before"]["visible"])
+
+    def test_entrance_after_observation_deadline_does_not_pass(self):
+        html = DELAYED_ENTRANCE_HTML.replace(".65s forwards", "3s forwards")
+        result = self.check(html, [step("assert-visible", "#windBtn")])
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["steps"][0]["errorCode"], "visibility_mismatch")
 
 
 if __name__ == "__main__":
