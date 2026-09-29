@@ -38,6 +38,7 @@ import { conversationProject } from '../lib/conversationProjects'
 import PortalStreamingText from '../components/PortalStreamingText'
 import PortalResponseActions from '../components/PortalResponseActions'
 import PortalResponseError from '../components/PortalResponseError'
+import {isProviderRateLimit, portalResponseFailure} from '../lib/portalResponseFailure'
 import {publicationDisplayText} from '../lib/publicationDisplay'
 import {isQuestionAnswer, parseQuestionsFrame, questionMetadata} from '../lib/pixelQuestions'
 import PixelTurnNavigation from '../components/PixelTurnNavigation'
@@ -444,14 +445,21 @@ function retainedResult(events) {
   let questions = null
   let done = false
   let failed = false
+  let failureMessage = ''
   for (const line of events.split('\n')) {
     if (!line.startsWith('data:')) continue
     const payload = line.slice(5).trim()
     if (payload === '[DONE]') { done = true; break }
     try {
       const frame = JSON.parse(payload)
-      if (frame?.error) { failed = true; continue }
       if (failed) continue
+      if (frame?.error) {
+        failed = true
+        // Only a known public code changes the recovered text; any other
+        // failure keeps the wording it had before.
+        if (isProviderRateLimit(frame.error)) failureMessage = portalResponseFailure(frame.error)
+        continue
+      }
       if (isCleanContextRecoveryFrame(frame)) {
         content = 'Portal did not start this attempt. Send your message again to continue.'
         failed = true
@@ -467,6 +475,7 @@ function retainedResult(events) {
       if (typeof text === 'string') content += text
     } catch { /* The same bounded SSE boundary applies to retained results. */ }
   }
+  if (failureMessage) content = content ? `${content}\n\n_${failureMessage}_` : failureMessage
   return { content, preview: done && !failed ? preview : null, task, questions: done && !failed ? questions : null, done, failed }
 }
 
@@ -1075,17 +1084,18 @@ export default function Pixel({ systemStatus = null }) {
 
             try {
               const frame = JSON.parse(payload)
+              // Error is terminal for this reply. Late deltas must not turn a
+              // failed response back into an apparently running/successful one.
+              if (receivedError) continue
               if (frame?.error) {
                 receivedError = true
+                const failureMessage = portalResponseFailure(frame.error)
                 setMessages(previous => replaceLastAssistant(previous, {
-                  content: assistantText ? `${assistantText}\n\n_Portal could not complete the response._` : 'Portal could not complete the response.',
+                  content: assistantText ? `${assistantText}\n\n_${failureMessage}_` : failureMessage,
                   status: 'error',
                 }))
                 continue
               }
-              // Error is terminal for this reply. Late deltas must not turn a
-              // failed response back into an apparently running/successful one.
-              if (receivedError) continue
               if (isCleanContextRecoveryFrame(frame)) recoveryEligible = true
               const candidatePreview = parseVerifiedPreviewFrame(frame)
               if (candidatePreview) verifiedPreview = candidatePreview
