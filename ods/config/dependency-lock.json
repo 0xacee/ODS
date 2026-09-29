@@ -1,7 +1,7 @@
 {
   "version": 1,
   "policy": {
-    "description": "Runtime container images must be pinned by tag or digest, recorded here, and intentionally allowlisted when a local build or placeholder needs a mutable tag.",
+    "description": "External runtime container images must carry a complete sha256 digest and be recorded here. Local builds require an explicit path/image allowlist entry.",
     "latest_tags": "forbidden unless listed in allow_latest",
     "variable_image_refs": "allowed only when the default image resolves to a locked entry and the variable ref is documented in allow_variable_refs",
     "local_images": "allowed only when listed in allow_local_images"
@@ -17,7 +17,7 @@
       "id": "base.open-webui",
       "type": "image",
       "path": "docker-compose.base.yml",
-      "value": "ghcr.io/open-webui/open-webui:v0.7.2"
+      "value": "ghcr.io/open-webui/open-webui:v0.7.2@sha256:16d9a3615b45f14a0c89f7ad7a3bf151f923ed32c2e68f9204eb17d1ce40774b"
     },
     {
       "id": "apple.llama-server",
@@ -47,73 +47,73 @@
       "id": "ape.python",
       "type": "image",
       "path": "extensions/services/ape/Dockerfile",
-      "value": "python:3.12-slim"
+      "value": "python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f"
     },
     {
       "id": "brave-search.node",
       "type": "image",
       "path": "extensions/services/brave-search/Dockerfile",
-      "value": "node:20-alpine"
+      "value": "node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293"
     },
     {
       "id": "comfyui.amd",
       "type": "image",
       "path": "extensions/services/comfyui/compose.amd.yaml",
-      "value": "ignatberesnev/comfyui-gfx1151:v0.2"
+      "value": "ignatberesnev/comfyui-gfx1151:v0.2@sha256:a38260b56a94fdf5aa9f951a96a73ef1987b70ebcbd4757447708a756a67abc0"
     },
     {
       "id": "comfyui.nvidia-runtime",
       "type": "image",
       "path": "extensions/services/comfyui/Dockerfile",
-      "value": "nvidia/cuda:12.8.0-runtime-ubuntu22.04"
+      "value": "nvidia/cuda:12.8.0-runtime-ubuntu22.04@sha256:b0e5afeabc356a9c41148c50f219d3117d46cb6ec23c590e3a0ebaa1db0ff946"
     },
     {
       "id": "dashboard.node",
       "type": "image",
       "path": "extensions/services/dashboard/Dockerfile",
-      "value": "node:20.19-alpine"
+      "value": "node:20.19-alpine@sha256:658d0f63e501824d6c23e06d4bb95c71e7d704537c9d9272f488ac03a370d448"
     },
     {
       "id": "dashboard.nginx",
       "type": "image",
       "path": "extensions/services/dashboard/Dockerfile",
-      "value": "nginx:alpine"
+      "value": "nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2"
     },
     {
       "id": "dashboard-api.python",
       "type": "image",
       "path": "extensions/services/dashboard-api/Dockerfile",
-      "value": "python:3.11-slim"
+      "value": "python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e"
     },
     {
       "id": "model-router.python",
       "type": "image",
       "path": "extensions/services/model-router/Dockerfile",
-      "value": "python:3.11-slim"
+      "value": "python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e"
     },
     {
       "id": "pixel-inference.python",
       "type": "image",
       "path": "extensions/services/pixel-inference/Dockerfile",
-      "value": "python:3.11-slim"
+      "value": "python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e"
     },
     {
       "id": "pixel-edge.python",
       "type": "image",
       "path": "extensions/services/pixel-edge/Dockerfile",
-      "value": "python:3.11-slim"
+      "value": "python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e"
     },
     {
       "id": "pixel-model-relay.python",
       "type": "image",
       "path": "extensions/services/pixel-model-relay/Dockerfile",
-      "value": "python:3.11-slim"
+      "value": "python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e"
     },
     {
       "id": "pixel-workspace-preview.python",
       "type": "image",
       "path": "extensions/services/pixel-agent/host/Dockerfile.preview",
-      "value": "python:3.11-slim"
+      "value": "python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e"
     },
     {
       "id": "pixel-preview-inspection.python",
@@ -125,25 +125,25 @@
       "id": "remote-provider-egress.python",
       "type": "image",
       "path": "extensions/services/remote-provider-egress/Dockerfile",
-      "value": "python:3.11-slim"
+      "value": "python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e"
     },
     {
       "id": "remote-provider-ssh-tunnel.python",
       "type": "image",
       "path": "extensions/services/remote-provider-ssh-tunnel/Dockerfile",
-      "value": "python:3.11-slim"
+      "value": "python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e"
     },
     {
       "id": "ods-proxy.caddy",
       "type": "image",
       "path": "extensions/services/ods-proxy/compose.yaml",
-      "value": "caddy:2.11.3-alpine"
+      "value": "caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794"
     },
     {
       "id": "embeddings.tei",
       "type": "image",
       "path": "extensions/services/embeddings/compose.yaml",
-      "value": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.1"
+      "value": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.1@sha256:b7772cdd9dcbced147b16a7dff17d4aed1ab36333f8d3e686c50d2175e1d2126"
     },
     {
       "id": "hermes.agent",
@@ -155,37 +155,37 @@
       "id": "hermes-proxy.caddy",
       "type": "image",
       "path": "extensions/services/hermes-proxy/compose.yaml",
-      "value": "caddy:2.11.3-alpine"
+      "value": "caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794"
     },
     {
       "id": "langfuse.web",
       "type": "image",
       "path": "extensions/services/langfuse/compose.yaml.disabled",
-      "value": "langfuse/langfuse:3.159.0"
+      "value": "langfuse/langfuse:3.159.0@sha256:50fcca2e82289d1eeafb3edc16af4da0c30e04ecf12d106eb707165057f1c8b3"
     },
     {
       "id": "langfuse.worker",
       "type": "image",
       "path": "extensions/services/langfuse/compose.yaml.disabled",
-      "value": "langfuse/langfuse-worker:3.159.0"
+      "value": "langfuse/langfuse-worker:3.159.0@sha256:53a0828a63e71dce6b700ffd784d871ad7e64c4dd7d2614606f6683b70d62962"
     },
     {
       "id": "langfuse.postgres",
       "type": "image",
       "path": "extensions/services/langfuse/compose.yaml.disabled",
-      "value": "postgres:17.9-alpine"
+      "value": "postgres:17.9-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609"
     },
     {
       "id": "langfuse.clickhouse",
       "type": "image",
       "path": "extensions/services/langfuse/compose.yaml.disabled",
-      "value": "clickhouse/clickhouse-server:26.2.4.23"
+      "value": "clickhouse/clickhouse-server:26.2.4.23@sha256:51beb66e790213a53ddacacf133d3067106f5aa0c446c5b40b9b0c3ae0cd39fc"
     },
     {
       "id": "langfuse.redis",
       "type": "image",
       "path": "extensions/services/langfuse/compose.yaml.disabled",
-      "value": "redis:7.4.8-alpine"
+      "value": "redis:7.4.8-alpine@sha256:7aec734b2bb298a1d769fd8729f13b8514a41bf90fcdd1f38ec52267fbaa8ee6"
     },
     {
       "id": "langfuse.minio",
@@ -219,27 +219,27 @@
       "id": "llama-server.rocm-build",
       "type": "image",
       "path": "extensions/services/llama-server/Dockerfile.amd",
-      "raw": "rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete",
-      "value": "rocm/dev-ubuntu-24.04:7.2-complete"
+      "raw": "rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete@${ROCM_IMAGE_DIGEST}",
+      "value": "rocm/dev-ubuntu-24.04:7.2-complete@sha256:86e11093b4a7ec2a79b1b6701d10e840a6994f21c7e05929b51eb9be361c683a"
     },
     {
       "id": "llama-server.lemonade-runtime",
       "type": "image",
       "path": "extensions/services/llama-server/Dockerfile.amd",
       "raw": "${LEMONADE_SERVER_IMAGE}",
-      "value": "ghcr.io/lemonade-sdk/lemonade-server:v10.2.0"
+      "value": "ghcr.io/lemonade-sdk/lemonade-server:v10.2.0@sha256:08edbf1128a7fd82b39f1de72c2f70c013f2ecfefac6a99c52bcf58eba532a3a"
     },
     {
       "id": "n8n.app",
       "type": "image",
       "path": "extensions/services/n8n/compose.yaml",
-      "value": "n8nio/n8n:2.6.4"
+      "value": "n8nio/n8n:2.6.4@sha256:b962d7f8ba9e990a0c530256d841fdc52312dce32173f29808e29a9430811ad3"
     },
     {
       "id": "openclaw.app",
       "type": "image",
       "path": "extensions/services/openclaw/compose.yaml",
-      "value": "ghcr.io/openclaw/openclaw:2026.3.8"
+      "value": "ghcr.io/openclaw/openclaw:2026.3.8@sha256:7b1294f6aa2eb05b2070cc614743f79212313fc294e5de221ada8a2969ea52f6"
     },
     {
       "id": "perplexica.app",
@@ -251,13 +251,13 @@
       "id": "privacy-shield.python",
       "type": "image",
       "path": "extensions/services/privacy-shield/Dockerfile",
-      "value": "python:3.11-slim"
+      "value": "python:3.11-slim@sha256:e41613d42d4891e4930f79523f93f81bbc7632584ec65e36ab055f41a800b41e"
     },
     {
       "id": "qdrant.vector-db",
       "type": "image",
       "path": "extensions/services/qdrant/compose.yaml",
-      "value": "qdrant/qdrant:v1.16.3"
+      "value": "qdrant/qdrant:v1.16.3@sha256:0425e3e03e7fd9b3dc95c4214546afe19de2eb2e28ca621441a56663ac6e1f46"
     },
     {
       "id": "searxng.search",
@@ -269,45 +269,45 @@
       "id": "tailscale.sidecar",
       "type": "image",
       "path": "extensions/services/tailscale/compose.yaml",
-      "value": "tailscale/tailscale:v1.96.5"
+      "value": "tailscale/tailscale:v1.96.5@sha256:dbeff02d2337344b351afac203427218c4d0a06c43fc10a865184063498472a6"
     },
     {
       "id": "token-spy.python",
       "type": "image",
       "path": "extensions/services/token-spy/Dockerfile",
-      "value": "python:3.12-slim"
+      "value": "python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f"
     },
     {
       "id": "tts.kokoro",
       "type": "image",
       "path": "extensions/services/tts/compose.yaml",
-      "value": "ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.4"
+      "value": "ghcr.io/remsky/kokoro-fastapi-cpu:v0.2.4@sha256:c8812546d358cbfd6a5c4087a28795b2b001d8e32d7a322eedd246e6bc13cb55"
     },
     {
       "id": "whisper.cpu",
       "type": "image",
       "path": "extensions/services/whisper/compose.yaml",
-      "raw": "${WHISPER_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu}",
-      "value": "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu"
+      "raw": "${WHISPER_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu@sha256:2163775b6df5e451a71200e8f675fed68dbd8ab184fc604453d549e486f22fd2}",
+      "value": "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu@sha256:2163775b6df5e451a71200e8f675fed68dbd8ab184fc604453d549e486f22fd2"
     },
     {
       "id": "whisper.nvidia",
       "type": "image",
       "path": "extensions/services/whisper/compose.nvidia.yaml",
-      "raw": "${WHISPER_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda}",
-      "value": "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda"
+      "raw": "${WHISPER_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda@sha256:f4eb14d1c53b19c5bd1f76d10ea9fc10288ceaf82dca09506d3f0ef92ee943de}",
+      "value": "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda@sha256:f4eb14d1c53b19c5bd1f76d10ea9fc10288ceaf82dca09506d3f0ef92ee943de"
     },
     {
       "id": "macos.placeholder-api",
       "type": "image",
       "path": "installers/macos/docker-compose.macos.yml",
-      "value": "busybox:1.36.1"
+      "value": "busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
     },
     {
       "id": "windows-amd-local.placeholder-api",
       "type": "image",
       "path": "installers/windows/docker-compose.windows-amd.local.yml",
-      "value": "busybox:1.36.1"
+      "value": "busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
     },
     {
       "id": "fooocus.runtime",
@@ -343,7 +343,7 @@
   "allow_latest": [
     {
       "path": "installers/windows/docker-compose.windows-amd.yml",
-      "value": "hello-world:latest",
+      "value": "hello-world:latest@sha256:5e23090353324d887c48ad5e5c56d294eab81588df9605b07d1afe895f9cc8f8",
       "reason": "Windows AMD placeholder service has replicas: 0 and never pulls or runs the image during normal operation."
     }
   ],
@@ -438,28 +438,28 @@
     },
     {
       "path": "extensions/services/llama-server/Dockerfile.amd",
-      "value": "rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete",
+      "value": "rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete@${ROCM_IMAGE_DIGEST}",
       "arg": "ROCM_VERSION",
       "default": "7.2",
-      "reason": "ROCm builder image follows the Dockerfile ARG default unless an operator intentionally overrides it."
+      "reason": "ROCm builder defaults to a verified digest. Custom versions require a corresponding explicit ROCM_IMAGE_DIGEST build argument."
     },
     {
       "path": "extensions/services/llama-server/Dockerfile.amd",
       "value": "${LEMONADE_SERVER_IMAGE}",
       "arg": "LEMONADE_SERVER_IMAGE",
-      "default": "ghcr.io/lemonade-sdk/lemonade-server:v10.2.0",
+      "default": "ghcr.io/lemonade-sdk/lemonade-server:v10.2.0@sha256:08edbf1128a7fd82b39f1de72c2f70c013f2ecfefac6a99c52bcf58eba532a3a",
       "reason": "AMD runtime image is overrideable for hotfix testing while the default stays locked."
     },
     {
       "path": "extensions/services/whisper/compose.yaml",
-      "value": "${WHISPER_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu}",
-      "default": "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu",
+      "value": "${WHISPER_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu@sha256:2163775b6df5e451a71200e8f675fed68dbd8ab184fc604453d549e486f22fd2}",
+      "default": "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu@sha256:2163775b6df5e451a71200e8f675fed68dbd8ab184fc604453d549e486f22fd2",
       "reason": "Whisper CPU image can be overridden by operators, but the shipped default is locked."
     },
     {
       "path": "extensions/services/whisper/compose.nvidia.yaml",
-      "value": "${WHISPER_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda}",
-      "default": "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda",
+      "value": "${WHISPER_IMAGE:-ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda@sha256:f4eb14d1c53b19c5bd1f76d10ea9fc10288ceaf82dca09506d3f0ef92ee943de}",
+      "default": "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cuda@sha256:f4eb14d1c53b19c5bd1f76d10ea9fc10288ceaf82dca09506d3f0ef92ee943de",
       "reason": "Whisper CUDA image can be overridden by operators, but the shipped default is locked."
     }
   ]

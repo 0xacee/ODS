@@ -1,6 +1,7 @@
 services:
   rest-server:
     image: ods/rest-server:0.14.0-local-v1
+    pull_policy: build
     container_name: ods-rest-server
     build:
       context: .
@@ -9,7 +10,7 @@ services:
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${REST_SERVER_PORT:-11144}:8000"
+    - "127.0.0.1:${REST_SERVER_PORT:-11144}:8000"
     healthcheck:
       test:
       - CMD

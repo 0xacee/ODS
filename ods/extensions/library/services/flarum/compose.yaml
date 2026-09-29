@@ -1,6 +1,7 @@
 services:
   flarum:
     image: ods/flarum:1.8.19-local-v1
+    pull_policy: build
     container_name: ods-flarum
     build:
       context: .
@@ -9,7 +10,7 @@ services:
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${FLARUM_PORT:-11133}:8000"
+    - "127.0.0.1:${FLARUM_PORT:-11133}:8000"
     environment:
       PUID: '1000'
       PGID: '1000'
@@ -94,6 +95,7 @@ services:
         max-file: '3'
   flarum-cron:
     image: ods/flarum:1.8.19-local-v1
+    pull_policy: build
     container_name: ods-flarum-cron
     build:
       context: .

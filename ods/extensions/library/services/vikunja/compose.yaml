@@ -1,12 +1,13 @@
 services:
   vikunja:
     image: ods/vikunja:2.6.0-storage-v1
+    pull_policy: build
     container_name: ods-vikunja
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${VIKUNJA_PORT:-11031}:3456"
+    - "127.0.0.1:${VIKUNJA_PORT:-11031}:3456"
     healthcheck:
       test:
       - CMD

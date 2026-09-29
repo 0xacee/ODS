@@ -1,12 +1,13 @@
 services:
   valkey:
     image: ods/valkey:9.1.2-local-v1
+    pull_policy: build
     container_name: ods-valkey
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${VALKEY_PORT:-11091}:6379"
+    - "127.0.0.1:${VALKEY_PORT:-11091}:6379"
     healthcheck:
       test:
       - CMD

@@ -1,5 +1,7 @@
 # ODS FAQ
 
+> **Release channel:** the install commands on this page fetch development `main`, which is not signed. A signed-source path is staged in [Verified Install Preview](VERIFIED_INSTALL_PREVIEW.md); it is not active until the first eligible immutable release is published, and historical `v3.0.0` is not eligible.
+
 Quick answers to common questions.
 
 > **Looking for install/runtime troubleshooting?** See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and [INSTALL-TROUBLESHOOTING.md](INSTALL-TROUBLESHOOTING.md).

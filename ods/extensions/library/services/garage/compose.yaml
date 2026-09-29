@@ -1,12 +1,13 @@
 services:
   garage:
     image: ods/garage:2.3.0-local-v1
+    pull_policy: build
     container_name: ods-garage
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${GARAGE_PORT:-11116}:3900"
+    - "127.0.0.1:${GARAGE_PORT:-11116}:3900"
     healthcheck:
       test:
       - CMD

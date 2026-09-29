@@ -1,12 +1,13 @@
 services:
   localrecall:
     image: ods/localrecall-access:v1
+    pull_policy: build
     container_name: ods-localrecall
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - ${BIND_ADDRESS:-127.0.0.1}:${LOCALRECALL_PORT:-11024}:8080
+    - 127.0.0.1:${LOCALRECALL_PORT:-11024}:8080
     healthcheck:
       test:
       - CMD

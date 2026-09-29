@@ -127,6 +127,13 @@ export function compileSourceRecipe(source) {
     'WORKDIR /opt/ods',
     '',
   ].join('\n') : source.dockerfileInline;
+  // The source sandbox network is internal, and Docker does not publish ports
+  // from an internal network, so a web service would install, pass its
+  // in-container healthcheck and still be unreachable from the host. Refuse it
+  // here rather than ship an extension that cannot be used.
+  if (!cliOnly) {
+    throw Error('Web-service source extensions are not supported yet: the isolated source sandbox has no network path to the host, so the service would be unreachable. Only CLI tools and Python libraries can be installed from source (cliOnly=true, port=0). No proposal was submitted.');
+  }
   const portVariable = serviceId.replace(/-/g, '_').toUpperCase() + '_PORT';
   const service = {
     container_name: `ods-${serviceId}`,
@@ -134,6 +141,18 @@ export function compileSourceRecipe(source) {
     build: {context: `${canonicalRepository}.git#${commit}`,
       ...(hasFile ? {dockerfile: source.dockerfile} : {dockerfile_inline: escapeCompose(inline)})},
     pull_policy: 'never',
+    // Source repositories execute third-party code. Keep runtime privileges
+    // and connectivity independent of the trusted ODS service network.
+    user: '65532:65532',
+    cap_drop: ['ALL'],
+    security_opt: ['no-new-privileges:true'],
+    read_only: true,
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=64m,mode=1777'],
+    environment: {HOME: '/tmp', PYTHONDONTWRITEBYTECODE: '1'},
+    mem_limit: '2g',
+    cpus: 2,
+    pids_limit: 256,
+    networks: [`${serviceId}-sandbox`],
     ...(!cliOnly ? {healthcheck: {test: healthcheck.map(escapeCompose), interval: '30s', timeout: '10s', retries: 3}} : {}),
     ...(command ? {command: command.map(escapeCompose)} : {}),
     ...(!cliOnly ? {ports: [`127.0.0.1:\${${portVariable}:-${port}}:${port}`], restart: 'unless-stopped'} : {}),
@@ -143,6 +162,7 @@ export function compileSourceRecipe(source) {
       id: serviceId, name, ...(source.description?.trim() ? {description:source.description.trim()} : {}), type: 'docker', category: 'optional', compose_file: 'compose.yaml',
       port, health: healthPath, ...(cliOnly ? {startup_check: false, external_link: false}
         : {external_port_env: portVariable, external_port_default: port}),
-    }}, compose: {services: {[serviceId]: service}},
+    }}, compose: {services: {[serviceId]: service},
+      networks: {[`${serviceId}-sandbox`]: {internal: true}}},
   };
 }

@@ -1,12 +1,13 @@
 services:
   grafana:
     image: ods/grafana:13.2.2-local-v1
+    pull_policy: build
     container_name: ods-grafana
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${GRAFANA_PORT:-11100}:3000"
+    - "127.0.0.1:${GRAFANA_PORT:-11100}:3000"
     healthcheck:
       test:
       - CMD

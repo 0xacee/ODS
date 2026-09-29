@@ -1,6 +1,7 @@
 services:
   solr:
     image: ods/solr:10.0.0-local-v1
+    pull_policy: build
     container_name: ods-solr
     build:
       context: .
@@ -9,7 +10,7 @@ services:
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${SOLR_PORT:-11145}:8983"
+    - "127.0.0.1:${SOLR_PORT:-11145}:8983"
     healthcheck:
       test:
       - CMD

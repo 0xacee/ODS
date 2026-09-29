@@ -1,12 +1,13 @@
 services:
   jscad:
     image: ods/jscad:2.6.13-f245ea3-local-v1
+    pull_policy: build
     container_name: ods-jscad
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${JSCAD_PORT:-11083}:8080"
+    - "127.0.0.1:${JSCAD_PORT:-11083}:8080"
     healthcheck:
       test:
       - CMD

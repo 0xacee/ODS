@@ -1,12 +1,13 @@
 services:
   distribution:
     image: ods/distribution:3.1.1-local-v1
+    pull_policy: build
     container_name: ods-distribution
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${DISTRIBUTION_PORT:-11136}:5000"
+    - "127.0.0.1:${DISTRIBUTION_PORT:-11136}:5000"
     healthcheck:
       test:
       - CMD

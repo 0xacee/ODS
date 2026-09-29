@@ -1,5 +1,7 @@
 # ODS macOS Quickstart
 
+> **Release channel:** the install commands on this page fetch development `main`, which is not signed. A signed-source path is staged in [Verified Install Preview](VERIFIED_INSTALL_PREVIEW.md); it is not active until the first eligible immutable release is published, and historical `v3.0.0` is not eligible.
+
 > **Status: Supported**
 >
 > The macOS installer runs end-to-end on Apple Silicon. One command gives you a full local AI stack with Metal-accelerated inference.

@@ -1,12 +1,13 @@
 services:
   healthchecks:
     image: ods/healthchecks:4.4-local-v1
+    pull_policy: build
     container_name: ods-healthchecks
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${HEALTHCHECKS_PORT:-11123}:8000"
+    - "127.0.0.1:${HEALTHCHECKS_PORT:-11123}:8000"
     healthcheck:
       test:
       - CMD

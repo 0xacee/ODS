@@ -1,12 +1,13 @@
 services:
   weblate:
     image: ods/weblate:2026.9.1-local-v1
+    pull_policy: build
     container_name: ods-weblate
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${WEBLATE_PORT:-11138}:8080"
+    - "127.0.0.1:${WEBLATE_PORT:-11138}:8080"
     healthcheck:
       test:
       - CMD

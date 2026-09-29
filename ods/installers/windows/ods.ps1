@@ -119,7 +119,10 @@ function Resolve-ODSModelStoreComposeFlags {
     }
     $python = Resolve-ODSHostAgentPython
     if (-not $python) { throw 'Python 3 is required for registered model-store Compose mounts' }
-    $arguments = @($python.PrefixArgs) + @($helper, '--install-dir', $InstallDir, '--json-stdin')
+    # Windows PowerShell's pipeline encoding can be ASCII, UTF-16 or UTF-8
+    # with a BOM depending on the host/profile. This is a UTF-8 JSON protocol.
+    $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $arguments = @($python.PrefixArgs) + @('-X', 'utf8', $helper, '--install-dir', $InstallDir, '--json-stdin')
     $inputJson = ConvertTo-Json -InputObject @($Flags) -Compress
     $output = $inputJson | & $python.FilePath @arguments 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Registered model-store Compose configuration is unavailable: $(($output | Out-String).Trim())" }
@@ -138,7 +141,7 @@ function Get-ComposeFlags {
     $flagsFile = Join-Path $InstallDir ".compose-flags"
     if (Test-Path $flagsFile) {
         $raw = (Get-Content $flagsFile -Raw).Trim()
-        if ((Test-Path -LiteralPath (Join-Path $InstallDir '.model-stores.compose.json')) -or
+        if (($raw -match 'user-extensions') -or (Test-Path -LiteralPath (Join-Path $InstallDir 'data/user-extensions')) -or (Test-Path -LiteralPath (Join-Path $InstallDir '.model-stores.compose.json')) -or
             (Test-Path -LiteralPath (Join-Path $InstallDir 'data/model-stores.json'))) {
             return (Resolve-ODSModelStoreComposeFlags -Flags ($raw -split "\s+"))
         }
@@ -154,7 +157,7 @@ function Get-ComposeFlags {
             $raw = ($composeFlagsLine -replace "^compose_flags=", "").Trim()
             if (-not [string]::IsNullOrWhiteSpace($raw)) {
                 Write-AIWarn ".compose-flags is missing; using compose flags from logs\compose-launch.txt"
-                if ((Test-Path -LiteralPath (Join-Path $InstallDir '.model-stores.compose.json')) -or
+                if (($raw -match 'user-extensions') -or (Test-Path -LiteralPath (Join-Path $InstallDir 'data/user-extensions')) -or (Test-Path -LiteralPath (Join-Path $InstallDir '.model-stores.compose.json')) -or
                     (Test-Path -LiteralPath (Join-Path $InstallDir 'data/model-stores.json'))) {
                     return (Resolve-ODSModelStoreComposeFlags -Flags ($raw -split "\s+"))
                 }
@@ -192,7 +195,7 @@ function Get-ComposeFlags {
         }
     }
 
-    if ((Test-Path -LiteralPath (Join-Path $InstallDir '.model-stores.compose.json')) -or
+    if ((($flags -join ' ') -match 'user-extensions') -or (Test-Path -LiteralPath (Join-Path $InstallDir 'data/user-extensions')) -or (Test-Path -LiteralPath (Join-Path $InstallDir '.model-stores.compose.json')) -or
         (Test-Path -LiteralPath (Join-Path $InstallDir 'data/model-stores.json'))) {
         return (Resolve-ODSModelStoreComposeFlags -Flags $flags)
     }
@@ -2225,9 +2228,8 @@ function Start-NativeInferenceServer {
     $backend = Get-NativeInferenceBackend
     $envVars = Read-ODSEnv
 
-    # Honour the unified BIND_ADDRESS knob (PR #964); empty/missing → loopback.
-    $bindAddr = $envVars["BIND_ADDRESS"]
-    if ([string]::IsNullOrWhiteSpace($bindAddr)) { $bindAddr = "127.0.0.1" }
+    # Match the installer's private inference listener across restarts.
+    $bindAddr = "127.0.0.1"
 
     if ($backend -eq "lemonade") {
         if (Invoke-ODSHostAgentConfiguredModelActivation -EnvVars $envVars) {
@@ -2623,6 +2625,19 @@ function Invoke-Start {
     }
 }
 
+function Stop-ODSOwnedContainersForRecovery {
+    param([string]$Service)
+    $python = Resolve-ODSHostAgentPython
+    if (-not $python) { throw 'Python 3 is required to verify ODS container ownership before stopping' }
+    $helper = Join-Path $InstallDir 'scripts/stop-owned-containers.py'
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'ODS container recovery helper is missing' }
+    $arguments = @($python.PrefixArgs) + @('-X', 'utf8', $helper, '--install-dir', $InstallDir)
+    if ($Service) { $arguments += @('--service', $Service) }
+    Write-AIWarn 'Compose validation failed; stopping only existing containers verified as belonging to this installation.'
+    & $python.FilePath @arguments
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stop verified ODS containers' }
+}
+
 function Invoke-Stop {
     param([string]$Service)
 
@@ -2652,7 +2667,11 @@ function Invoke-Stop {
     Test-Install
     Push-Location $InstallDir
     try {
-        $flags = Get-ComposeFlags
+        try { $flags = Get-ComposeFlags }
+        catch {
+            Stop-ODSOwnedContainersForRecovery -Service $Service
+            return
+        }
         if ($Service) {
             if (-not (Test-ODSComposeServiceAvailable -ComposeFlags $flags -Service $Service)) {
                 Write-ODSMissingComposeServiceHint -ComposeFlags $flags -Service $Service
@@ -3820,12 +3839,18 @@ function Invoke-Disable {
     $dockerRunning = $false
     try { $null = docker info 2>$null; $dockerRunning = ($LASTEXITCODE -eq 0) } catch { }
     if ($dockerRunning) {
-        $flags = Get-ComposeFlags
-        Write-AI "Stopping $ServiceId..."
-        $prevEAP = $ErrorActionPreference
-        $ErrorActionPreference = "SilentlyContinue"
-        & docker compose @flags stop $ServiceId 2>$null
-        $ErrorActionPreference = $prevEAP
+        try { $flags = Get-ComposeFlags }
+        catch {
+            Stop-ODSOwnedContainersForRecovery -Service $ServiceId
+            $flags = $null
+        }
+        if ($flags) {
+            Write-AI "Stopping $ServiceId..."
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "SilentlyContinue"
+            & docker compose @flags stop $ServiceId 2>$null
+            $ErrorActionPreference = $prevEAP
+        }
     } else {
         Write-AIWarn "Docker Desktop is not running -- skipping container stop. $ServiceId will be excluded from the next 'ods start'."
     }

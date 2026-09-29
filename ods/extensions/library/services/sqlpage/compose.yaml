@@ -1,12 +1,13 @@
 services:
   sqlpage:
     image: ods/sqlpage:0.46.3-local-v1
+    pull_policy: build
     container_name: ods-sqlpage
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${SQLPAGE_PORT:-11126}:8080"
+    - "127.0.0.1:${SQLPAGE_PORT:-11126}:8080"
     healthcheck:
       test:
       - CMD

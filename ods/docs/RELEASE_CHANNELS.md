@@ -37,7 +37,11 @@ qualification campaign is incomplete.
 
 ## Default Guidance
 
-- New users can follow the README quickstart, which tracks `main`.
+- New users can follow the README quickstart, which tracks `main` and is not
+  signed. A signed-source path is staged in
+  [Verified Install Preview](VERIFIED_INSTALL_PREVIEW.md); it becomes the
+  default only after the first eligible immutable release is published and
+  validated. The historical `v3.0.0` release does not meet that contract.
 - Pin `v3.0.0` to reproduce the V3 Pre-Release source, or an audited later commit
   to include subsequent fixes. Do not relabel earlier tests as a later-head pass.
 - V3 fixes target `main`. No `release/3.x` branch is implied by the new tag.

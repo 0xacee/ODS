@@ -1,12 +1,13 @@
 services:
   openrefine:
     image: ods/openrefine:3.10.1-local-v1
+    pull_policy: build
     container_name: ods-openrefine
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${OPENREFINE_PORT:-11081}:3333"
+    - "127.0.0.1:${OPENREFINE_PORT:-11081}:3333"
     healthcheck:
       test:
       - CMD

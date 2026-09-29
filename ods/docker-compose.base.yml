@@ -32,7 +32,7 @@ services:
     volumes:
       - ./data/models:/models:z
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${OLLAMA_PORT:-11434}:8080"
+      - "127.0.0.1:${OLLAMA_PORT:-11434}:8080"
     command:
       - --model
       - /models/${GGUF_FILE:-Qwen3.5-9B-Q4_K_M.gguf}
@@ -102,7 +102,7 @@ services:
   # Chat UI
   # ============================================
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.7.2
+    image: ghcr.io/open-webui/open-webui:v0.7.2@sha256:16d9a3615b45f14a0c89f7ad7a3bf151f923ed32c2e68f9204eb17d1ce40774b
     container_name: ods-webui
     restart: unless-stopped
     logging: *default-logging
@@ -219,7 +219,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${DASHBOARD_API_PORT:-3002}:3002"
+      - "127.0.0.1:${DASHBOARD_API_PORT:-3002}:3002"
     security_opt:
       - no-new-privileges:true
     logging: *default-logging

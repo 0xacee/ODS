@@ -1,5 +1,7 @@
 # ODS V3 Pre-Release
 
+> **Release channel:** the install commands on this page fetch development `main`, which is not signed. A signed-source path is staged in [Verified Install Preview](docs/VERIFIED_INSTALL_PREVIEW.md); it is not active until the first eligible immutable release is published, and historical `v3.0.0` is not eligible.
+
 **Osmantic Deployment System**
 
 **Public testing and refinement ahead of the official V3 launch.**

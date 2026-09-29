@@ -1,12 +1,13 @@
 services:
   wikijs:
     image: ods/wikijs:2.5.314-local-v1
+    pull_policy: build
     container_name: ods-wikijs
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${WIKIJS_PORT:-11107}:3000"
+    - "127.0.0.1:${WIKIJS_PORT:-11107}:3000"
     healthcheck:
       test:
       - CMD

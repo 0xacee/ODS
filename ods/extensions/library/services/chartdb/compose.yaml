@@ -1,12 +1,13 @@
 services:
   chartdb:
     image: ods/chartdb:1.20.1-local-v1
+    pull_policy: build
     container_name: ods-chartdb
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${CHARTDB_PORT:-11042}:8080"
+    - "127.0.0.1:${CHARTDB_PORT:-11042}:8080"
     healthcheck:
       test:
       - CMD

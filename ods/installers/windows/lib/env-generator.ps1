@@ -1028,11 +1028,11 @@ function New-ODSEnv {
         $whisperAcceleration = $whisperAccelerationDefault
     }
 
-    $whisperImageDefault = $(if ($whisperAcceleration -eq "cuda") { "" } else { "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu" })
+    $whisperImageDefault = $(if ($whisperAcceleration -eq "cuda") { "" } else { "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu@sha256:2163775b6df5e451a71200e8f675fed68dbd8ab184fc604453d549e486f22fd2" })
     $whisperImage = Get-EnvOrNew "WHISPER_IMAGE" $whisperImageDefault
     if ($whisperAcceleration -eq "cpu" -and
         ([string]::IsNullOrWhiteSpace($whisperImage) -or $whisperImage -match "(?i)cuda")) {
-        $whisperImage = "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu"
+        $whisperImage = "ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu@sha256:2163775b6df5e451a71200e8f675fed68dbd8ab184fc604453d549e486f22fd2"
     }
 
     $audioSttModelDefault = $(if ($whisperAcceleration -eq "cuda") { "deepdml/faster-whisper-large-v3-turbo-ct2" } else { "Systran/faster-whisper-base" })
@@ -1130,7 +1130,7 @@ N_GPU_LAYERS=$nGpuLayers
 $(if ($LlamaServerImage) { "LLAMA_SERVER_IMAGE=$LlamaServerImage" } else { "#LLAMA_SERVER_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda-b9014@sha256:fcf285820892e7ce3218379634e3590826fc697e8b6745b9392072462e355c4f" })
 $(if ($llamaServerImageFallback) { "LLAMA_SERVER_IMAGE_FALLBACK=$llamaServerImageFallback" } else { "#LLAMA_SERVER_IMAGE_FALLBACK=ghcr.io/ggml-org/llama.cpp:server-cuda-b9014@sha256:fcf285820892e7ce3218379634e3590826fc697e8b6745b9392072462e355c4f" })
 $(if ($llamaServerMemoryLimit) { "LLAMA_SERVER_MEMORY_LIMIT=$llamaServerMemoryLimit" })
-$(if ($LemonadeServerImage) { "LEMONADE_SERVER_IMAGE=$LemonadeServerImage" } else { "#LEMONADE_SERVER_IMAGE=ghcr.io/lemonade-sdk/lemonade-server:v10.2.0" })
+$(if ($LemonadeServerImage) { "LEMONADE_SERVER_IMAGE=$LemonadeServerImage" } else { "#LEMONADE_SERVER_IMAGE=ghcr.io/lemonade-sdk/lemonade-server:v10.2.0@sha256:08edbf1128a7fd82b39f1de72c2f70c013f2ecfefac6a99c52bcf58eba532a3a" })
 #=== llama.cpp Runtime Tuning ===
 LLAMA_PARALLEL=$(Get-EnvOrNew "LLAMA_PARALLEL" "$(if ($TierConfig.LLAMA_PARALLEL) { $TierConfig.LLAMA_PARALLEL } else { "1" })")
 LLAMA_ARG_FLASH_ATTN=$(Get-EnvOrNew "LLAMA_ARG_FLASH_ATTN" "$(if ($TierConfig.LLAMA_ARG_FLASH_ATTN) { $TierConfig.LLAMA_ARG_FLASH_ATTN } else { "auto" })")
@@ -1208,7 +1208,7 @@ WHISPER_MODEL=base
 # Whisper STT runtime. Windows NVIDIA uses CUDA only when the driver supports
 # the bundled Speaches CUDA image; otherwise Whisper stays on the CPU image.
 WHISPER_ACCELERATION=$whisperAcceleration
-$(if ($whisperImage) { "WHISPER_IMAGE=$whisperImage" } else { "#WHISPER_IMAGE=ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu" })
+$(if ($whisperImage) { "WHISPER_IMAGE=$whisperImage" } else { "#WHISPER_IMAGE=ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu@sha256:2163775b6df5e451a71200e8f675fed68dbd8ab184fc604453d549e486f22fd2" })
 # Whisper STT model — CUDA uses the larger turbo model, CPU uses base.
 # Open WebUI reads this to request transcription; installer pre-downloads
 # the same model so the first transcription works.

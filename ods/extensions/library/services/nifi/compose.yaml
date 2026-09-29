@@ -1,6 +1,7 @@
 services:
   nifi:
     image: ods/nifi:6f7f2840-local-v1
+    pull_policy: build
     container_name: ods-nifi
     build:
       context: .
@@ -9,7 +10,7 @@ services:
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${NIFI_PORT:-11146}:8443"
+    - "127.0.0.1:${NIFI_PORT:-11146}:8443"
     healthcheck:
       test:
       - CMD

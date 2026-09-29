@@ -1,12 +1,13 @@
 services:
   swagger-ui:
     image: ods/swagger-ui:5.33.0-local-v1
+    pull_policy: build
     container_name: ods-swagger-ui
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${SWAGGER_UI_PORT:-11054}:8080"
+    - "127.0.0.1:${SWAGGER_UI_PORT:-11054}:8080"
     healthcheck:
       test:
       - CMD

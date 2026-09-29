@@ -1,13 +1,14 @@
 services:
   sftpgo:
     image: ods/sftpgo:2.7.6-local-v1
+    pull_policy: build
     container_name: ods-sftpgo
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${SFTPGO_PORT:-11113}:8080"
-    - "${BIND_ADDRESS:-127.0.0.1}:${SFTPGO_SFTP_PORT:-11114}:2022"
+    - "127.0.0.1:${SFTPGO_PORT:-11113}:8080"
+    - "127.0.0.1:${SFTPGO_SFTP_PORT:-11114}:2022"
     healthcheck:
       test:
       - CMD

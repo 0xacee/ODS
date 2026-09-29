@@ -75,6 +75,12 @@ Native Pixel source-update and backup/recovery limits are documented in
 [Source Updates](ods/docs/SOURCE-UPDATES.md). Use a pinned release or audited
 commit when reproducibility is required.
 
+**Release verification is being qualified:** the commands below still use
+development `main`; they do not provide signed-release provenance. The
+[verified installer preview](ods/docs/VERIFIED_INSTALL_PREVIEW.md) is kept
+separate until a signed immutable release passes end-to-end testing. This
+security update does not switch the public installation channel prematurely.
+
 ## Get Started
 
 Choose your system, copy the block, run it in a normal terminal. ODS installs the stack, picks a model for your hardware, starts the services, and gives you the local web UI.

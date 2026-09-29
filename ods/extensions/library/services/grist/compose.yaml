@@ -1,12 +1,13 @@
 services:
   grist:
     image: ods/grist:1.7.19-local-v1
+    pull_policy: build
     container_name: ods-grist
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${GRIST_PORT:-11082}:8484"
+    - "127.0.0.1:${GRIST_PORT:-11082}:8484"
     healthcheck:
       test:
       - CMD

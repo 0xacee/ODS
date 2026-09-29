@@ -1,6 +1,7 @@
 services:
   swagger-editor:
     image: ods/swagger-editor:5-b56bd6a7-local-v1
+    pull_policy: build
     container_name: ods-swagger-editor
     build:
       context: .
@@ -9,7 +10,7 @@ services:
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${SWAGGER_EDITOR_PORT:-11137}:8080"
+    - "127.0.0.1:${SWAGGER_EDITOR_PORT:-11137}:8080"
     healthcheck:
       test:
       - CMD

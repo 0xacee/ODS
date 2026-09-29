@@ -3,7 +3,7 @@ services:
     # Pinned Caddy 2.x. Single static binary, ~50MB image, native
     # SSE/WebSocket support — much lighter than a custom FastAPI proxy
     # for what amounts to "check a cookie, forward, or 303 redirect."
-    image: caddy:2.11.3-alpine
+    image: caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
     container_name: ods-hermes-proxy
     restart: unless-stopped
     depends_on:
@@ -40,7 +40,7 @@ services:
       # BIND_ADDRESS gates LAN exposure (ODS convention). Default
       # 127.0.0.1 = localhost only. Set BIND_ADDRESS=0.0.0.0 in .env to
       # expose on the LAN at hermes.<device>.local:9120.
-      - "${BIND_ADDRESS:-127.0.0.1}:${HERMES_PROXY_PORT:-9120}:9120"
+      - "127.0.0.1:${HERMES_PROXY_PORT:-9120}:9120"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9120/health"]
       interval: 30s

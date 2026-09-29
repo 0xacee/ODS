@@ -1,12 +1,13 @@
 services:
   navidrome:
     image: ods/navidrome:0.64.0-local-v1
+    pull_policy: build
     container_name: ods-navidrome
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${NAVIDROME_PORT:-11048}:4533"
+    - "127.0.0.1:${NAVIDROME_PORT:-11048}:4533"
     healthcheck:
       test:
       - CMD

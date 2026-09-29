@@ -1,12 +1,13 @@
 services:
   kanboard:
     image: ods/kanboard:1.2.54-local-v1
+    pull_policy: build
     container_name: ods-kanboard
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${KANBOARD_PORT:-11063}:80"
+    - "127.0.0.1:${KANBOARD_PORT:-11063}:80"
     healthcheck:
       test:
       - CMD

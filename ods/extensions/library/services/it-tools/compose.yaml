@@ -1,12 +1,13 @@
 services:
   it-tools:
     image: ods/it-tools:2024.10.22-local-v1
+    pull_policy: build
     container_name: ods-it-tools
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${IT_TOOLS_PORT:-11059}:8080"
+    - "127.0.0.1:${IT_TOOLS_PORT:-11059}:8080"
     healthcheck:
       test:
       - CMD

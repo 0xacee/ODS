@@ -1,12 +1,13 @@
 services:
   threeui-community:
     image: ods/threeui-community:68802d5-local-v1
+    pull_policy: build
     container_name: ods-threeui-community
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${THREEUI_COMMUNITY_PORT:-11075}:8080"
+    - "127.0.0.1:${THREEUI_COMMUNITY_PORT:-11075}:8080"
     healthcheck:
       test:
       - CMD

@@ -1,12 +1,13 @@
 services:
   homepage:
     image: ods/homepage:2.4.0-config-v1
+    pull_policy: build
     container_name: ods-homepage
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${HOMEPAGE_PORT:-11038}:3000"
+    - "127.0.0.1:${HOMEPAGE_PORT:-11038}:3000"
     healthcheck:
       test:
       - CMD

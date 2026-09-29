@@ -1,12 +1,13 @@
 services:
   dufs:
     image: ods/dufs:0.46.0-local-v1
+    pull_policy: build
     container_name: ods-dufs
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${DUFS_HTTP_PORT:-11069}:5000"
+    - "127.0.0.1:${DUFS_HTTP_PORT:-11069}:5000"
     healthcheck:
       test:
       - CMD

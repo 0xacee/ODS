@@ -1,12 +1,13 @@
 services:
   pocketbase:
     image: ods/pocketbase:0.40.4-local-v1
+    pull_policy: build
     container_name: ods-pocketbase
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${POCKETBASE_PORT:-11068}:8090"
+    - "127.0.0.1:${POCKETBASE_PORT:-11068}:8090"
     healthcheck:
       test:
       - CMD

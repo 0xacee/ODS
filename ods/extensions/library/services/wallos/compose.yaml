@@ -1,12 +1,13 @@
 services:
   wallos:
     image: ods/wallos:5.8.1-local-v1
+    pull_policy: build
     container_name: ods-wallos
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${WALLOS_PORT:-11094}:80"
+    - "127.0.0.1:${WALLOS_PORT:-11094}:80"
     healthcheck:
       test:
       - CMD

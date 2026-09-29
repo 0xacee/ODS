@@ -1,12 +1,13 @@
 services:
   go-httpbin:
     image: ods/go-httpbin:2.25.0-health-v1
+    pull_policy: build
     container_name: ods-go-httpbin
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${GO_HTTPBIN_PORT:-11044}:8080"
+    - "127.0.0.1:${GO_HTTPBIN_PORT:-11044}:8080"
     healthcheck:
       test:
       - CMD

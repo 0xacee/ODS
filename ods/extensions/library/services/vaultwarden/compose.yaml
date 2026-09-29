@@ -1,12 +1,13 @@
 services:
   vaultwarden:
     image: ods/vaultwarden:1.37.3-local-v1
+    pull_policy: build
     container_name: ods-vaultwarden
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${VAULTWARDEN_PORT:-11124}:8000"
+    - "127.0.0.1:${VAULTWARDEN_PORT:-11124}:8000"
     healthcheck:
       test:
       - CMD

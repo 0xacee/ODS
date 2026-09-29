@@ -1,13 +1,14 @@
 services:
   mumble:
     image: ods/mumble:1.5.915-local-v1
+    pull_policy: build
     container_name: ods-mumble
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${MUMBLE_PORT:-11131}:64738/tcp"
-    - "${BIND_ADDRESS:-127.0.0.1}:${MUMBLE_PORT:-11131}:64738/udp"
+    - "127.0.0.1:${MUMBLE_PORT:-11131}:64738/tcp"
+    - "127.0.0.1:${MUMBLE_PORT:-11131}:64738/udp"
     healthcheck:
       test:
       - CMD

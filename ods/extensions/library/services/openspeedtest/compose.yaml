@@ -1,12 +1,13 @@
 services:
   openspeedtest:
     image: ods/openspeedtest:f4263546-local-v1
+    pull_policy: build
     container_name: ods-openspeedtest
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${OPENSPEEDTEST_PORT:-11127}:8080"
+    - "127.0.0.1:${OPENSPEEDTEST_PORT:-11127}:8080"
     healthcheck:
       test:
       - CMD

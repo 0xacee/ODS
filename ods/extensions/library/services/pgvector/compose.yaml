@@ -1,12 +1,13 @@
 services:
   pgvector:
     image: ods/pgvector:0.8.6-pg17-local-v1
+    pull_policy: build
     container_name: ods-pgvector
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${PGVECTOR_PORT:-11098}:5432"
+    - "127.0.0.1:${PGVECTOR_PORT:-11098}:5432"
     healthcheck:
       test:
       - CMD

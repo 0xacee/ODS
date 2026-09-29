@@ -1,12 +1,13 @@
 services:
   pairdrop:
     image: ods/pairdrop:1.11.2-local-v1
+    pull_policy: build
     container_name: ods-pairdrop
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${PAIRDROP_PORT:-11061}:3000"
+    - "127.0.0.1:${PAIRDROP_PORT:-11061}:3000"
     healthcheck:
       test:
       - CMD

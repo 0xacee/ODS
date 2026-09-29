@@ -1,12 +1,13 @@
 services:
   node-red:
     image: ods/node-red:5.0.7-local-v1
+    pull_policy: build
     container_name: ods-node-red
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${NODE_RED_PORT:-11088}:1880"
+    - "127.0.0.1:${NODE_RED_PORT:-11088}:1880"
     healthcheck:
       test:
       - CMD

@@ -5638,6 +5638,13 @@ def resolve_compose_flags() -> list:
         raw = flags_file.read_text(encoding="utf-8").strip()
         if raw:
             flags = raw.split()
+            # An approved file list does not authorize changed or legacy
+            # extension definitions. Validate the actual files on every use.
+            policy_path = Path(__file__).resolve().parent.parent / "scripts" / "compose-cache-policy.py"
+            policy_spec = importlib.util.spec_from_file_location("_ods_compose_cache_policy", policy_path)
+            policy = importlib.util.module_from_spec(policy_spec)
+            policy_spec.loader.exec_module(policy)
+            policy.validate_flags(INSTALL_DIR, flags)
             active_name = ".active-model-store.compose.json"
             flags = [value for index, value in enumerate(flags)
                      if not (Path(value).name == active_name or (value == "-f" and index+1 < len(flags) and Path(flags[index+1]).name == active_name))]
@@ -5928,7 +5935,23 @@ def _extension_stop_targets(service_id: str) -> list[str]:
 
 
 def docker_compose_action(service_id: str, action: str) -> tuple:
-    flags = resolve_compose_flags()
+    try:
+        flags = resolve_compose_flags()
+    except (OSError, ValueError, RuntimeError) as exc:
+        if action != "stop":
+            return False, str(exc)
+        # An old recipe may no longer qualify to start. Stopping must not
+        # evaluate its Compose lifecycle hooks or rely on its container names.
+        try:
+            targets = _extension_stop_targets(service_id)
+            helper_path = INSTALL_DIR / "scripts/stop-owned-containers.py"
+            spec = importlib.util.spec_from_file_location("_ods_stop_owned", helper_path)
+            recovery = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(recovery)
+            recovery.stop_owned_containers(INSTALL_DIR, targets)
+            return True, ""
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as recovery_error:
+            return False, f"Could not stop verified ODS containers: {recovery_error}"
     compose_env = os.environ.copy()
     if action == "start":
         if service_id == "ods-proxy":
@@ -7133,7 +7156,8 @@ def _enable_retry_work(service_id: str) -> None:
 
         _write_progress(service_id, "started", "Service started",
                         exit_verified=not startup_check and retry_service_def.get('port') == 0)
-    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+        # ValueError: a saved recipe rejected by the Compose policy.
         logger.exception("Enable-retry failed for %s", service_id)
         _write_progress(service_id, "error", "Retry failed",
                         error=str(exc)[:500])
@@ -11518,7 +11542,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                                                      'state': 'uncertain'}
                 _write_progress(service_id, "error", "Installation failed",
                                 error=f"timed out ({SUBPROCESS_TIMEOUT_START}s)")
-            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+                # ValueError: a saved recipe rejected by the Compose policy.
                 logger.exception("Install failed for %s", service_id)
                 _write_progress(service_id, "error", "Installation failed",
                                 error=str(exc)[:500])
@@ -15431,14 +15456,7 @@ def _chat_completion_ready(
 
 def _native_llama_health_host(env: dict) -> str:
     """Return a URL-safe host reachable through the native llama bind."""
-    bind_addr = str(env.get("BIND_ADDRESS") or "").strip() or "127.0.0.1"
-    if bind_addr == "0.0.0.0":
-        return "127.0.0.1"
-    if bind_addr == "::":
-        return "[::1]"
-    if ":" in bind_addr and not bind_addr.startswith("["):
-        return f"[{bind_addr}]"
-    return bind_addr
+    return "127.0.0.1"
 
 
 def _require_macos_bridge_manager(env_path: Path) -> tuple[Path, Path]:
@@ -16097,7 +16115,7 @@ def _restart_windows_lemonade(env: dict):
         "ODS_WIN_MODELS_DIR": str(_active_model_directory(env)),
         "ODS_WIN_PID_FILE": str(INSTALL_DIR / "data" / "llama-server.pid"),
         "ODS_WIN_LEMONADE_PORT": env.get("AMD_INFERENCE_PORT", "8080") or "8080",
-        "ODS_WIN_BIND_ADDR": env.get("BIND_ADDRESS", "127.0.0.1") or "127.0.0.1",
+        "ODS_WIN_BIND_ADDR": "127.0.0.1",
         "ODS_WIN_CONTEXT_SIZE": str(env.get("CTX_SIZE") or env.get("MAX_CONTEXT") or "0"),
     })
     registered_profile = _model_stores.lemonade_profile(INSTALL_DIR / "data", env.get("GGUF_FILE", ""))
@@ -18519,8 +18537,8 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
     model_path = _active_model_directory(env) / gguf_file
     reasoning = env.get("LLAMA_REASONING", "off")
     reasoning_fmt = {"off": "none", "on": "deepseek"}.get(reasoning, reasoning)
-    # Honour the unified BIND_ADDRESS knob (PR #964); empty/missing → loopback.
-    bind_addr = env.get("BIND_ADDRESS", "").strip() or "127.0.0.1"
+    # UI LAN access must not publish an unauthenticated inference endpoint.
+    bind_addr = "127.0.0.1"
     _disable_conflicting_macos_bridge(env, bind_addr, _MACOS_LLM_BRIDGE_LABEL)
     port = (
         env.get("ODS_NATIVE_LLAMA_PORT")

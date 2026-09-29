@@ -1,5 +1,7 @@
 # ODS Quick Start
 
+> **Release channel:** the install commands on this page fetch development `main`, which is not signed. A signed-source path is staged in [Verified Install Preview](docs/VERIFIED_INSTALL_PREVIEW.md); it is not active until the first eligible immutable release is published, and historical `v3.0.0` is not eligible.
+
 One command to a running local AI stack. The installer detects your hardware,
 chooses a model, writes the config, starts the services, and leaves you with a
 chat UI plus the `ods` management command.

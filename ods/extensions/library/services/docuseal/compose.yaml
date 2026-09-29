@@ -1,12 +1,13 @@
 services:
   docuseal:
     image: ods/docuseal:3.2.5-local-v1
+    pull_policy: build
     container_name: ods-docuseal
     restart: unless-stopped
     security_opt:
     - no-new-privileges:true
     ports:
-    - "${BIND_ADDRESS:-127.0.0.1}:${DOCUSEAL_PORT:-11084}:3000"
+    - "127.0.0.1:${DOCUSEAL_PORT:-11084}:3000"
     healthcheck:
       test:
       - CMD
