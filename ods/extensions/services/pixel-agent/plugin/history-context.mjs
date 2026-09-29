@@ -16,7 +16,7 @@ function archiveMessages(messages) {
   }
   return messages;
 }
-export function createHistoryHydrator({getSessionEntry,patchSessionEntry,resolveStorePath,withSessionTranscriptWriteLock,readConfig,now=Date.now}) {
+export function createHistoryHydrator({getSessionEntry,patchSessionEntry,resolveStorePath,withSessionTranscriptWriteLock,appendAssistantMirrorMessageByIdentity,readConfig,now=Date.now}) {
   return async function hydrate({user,messages}) {
     if(!USER.test(user)) throw failure('invalid-history-user');
     archiveMessages(messages);
@@ -51,7 +51,20 @@ export function createHistoryHydrator({getSessionEntry,patchSessionEntry,resolve
       }
       if(appended) await publishUpdate();
     });
+    // Record the changed transcript before sealing: a failed seal is retried,
+    // and the retry appends nothing, so it would never reach this update.
     if(appended) await patchSessionEntry({...scope,update:current=>current.sessionId===entry.sessionId?{updatedAt:now(),totalTokensFresh:false}:null});
+    if(messages.length) {
+      // The pinned runtime treats a transcript containing only user messages
+      // as an unfinished first turn and clears it when preparing a run. Use
+      // its public delivery-mirror API to seal the import. This zero-usage,
+      // transcript-only receipt is excluded from model context by the SDK;
+      // it does not impersonate a model answer or grant permission to act.
+      const sealed=await appendAssistantMirrorMessageByIdentity({...scope,sessionId:entry.sessionId,config,
+        idempotencyKey:`ods-history-seed:${revision}`,
+        text:'Portal imported historical reference. No task has been executed or verified.'});
+      if(sealed?.ok!==true) throw failure('history-seal-unconfirmed');
+    }
     return {schemaVersion:1,hydrated:true,revision,messages:messages.length,appended};
   };
 }
