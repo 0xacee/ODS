@@ -5954,6 +5954,10 @@ def _extension_stop_targets(service_id: str) -> list[str]:
 def docker_compose_action(service_id: str, action: str) -> tuple:
     try:
         flags = resolve_compose_flags()
+        if service_id == "hermes" and action == "start":
+            plan_error = _hermes_compose_plan_error(flags)
+            if plan_error:
+                return False, plan_error
     except (OSError, ValueError, RuntimeError) as exc:
         if action != "stop":
             return False, str(exc)
@@ -5980,6 +5984,13 @@ def docker_compose_action(service_id: str, action: str) -> tuple:
             if not ok:
                 return False, error
             compose_env["WEBUI_AUTH"] = "true"
+        elif service_id == "hermes":
+            ok, error = _prepare_hermes_route_for_start()
+            if not ok:
+                return False, error
+            ok, error = _prepare_hermes_persona_for_start()
+            if not ok:
+                return False, error
         _precreate_data_dirs(service_id)
         try:
             _repair_rootless_data_ownership(service_id)
@@ -11519,6 +11530,11 @@ class AgentHandler(BaseHTTPRequestHandler):
             _install_operation_context.value = operation
             try:
                 flags = resolve_compose_flags()
+                if service_id == "hermes":
+                    plan_error = _hermes_compose_plan_error(flags)
+                    if plan_error:
+                        _write_progress(service_id, "error", "Installation failed", error=plan_error)
+                        return
 
                 ext_dir = _find_ext_dir(service_id)
                 if ext_dir is None:
@@ -11583,6 +11599,15 @@ class AgentHandler(BaseHTTPRequestHandler):
                 flags = pull_flags
                 # Step 3: Start
                 _write_progress(service_id, "starting", "Starting container...")
+                if service_id == "hermes":
+                    route_ready, route_error = _prepare_hermes_route_for_start()
+                    if not route_ready:
+                        _write_progress(service_id, "error", "Installation failed", error=route_error)
+                        return
+                    persona_ready, persona_error = _prepare_hermes_persona_for_start()
+                    if not persona_ready:
+                        _write_progress(service_id, "error", "Installation failed", error=persona_error)
+                        return
                 _precreate_data_dirs(service_id)
                 try:
                     _repair_rootless_data_ownership(service_id)
@@ -16805,23 +16830,61 @@ def _patch_hermes_config_text(
     base_url: str | None = None,
     context_length: int | None = None,
     max_tokens: int = 1024,
+    api_key: str | None = None,
 ) -> tuple[str, bool]:
     """Return Hermes YAML with its routing fields updated line-for-line."""
     lines = text.splitlines()
+    model_section_pattern = r"^(?:model|\"model\"|'model')\s*:\s*(?:#.*)?$"
+
+    def direct_model_field(line: str, field: str) -> bool:
+        if not model_field_indent:
+            return False
+        indent = re.escape(model_field_indent)
+        return bool(re.match(rf"^{indent}(?:{field}|\"{field}\"|'{field}')\s*:", line))
+
+    if api_key:
+        # A retained owner file may use a quoted key or spaces before ':'.
+        # Count only direct model fields, not a nested owner's api_key.
+        # Refuse ambiguous duplicates rather than leave Hermes using a stale key.
+        model_section = False
+        field_indent = None
+        key_count = 0
+        for line in lines:
+            if re.match(model_section_pattern, line):
+                model_section = True
+                field_indent = None
+                key_count = 0
+            elif model_section and line and not line.startswith((" ", "\t", "#")):
+                model_section = False
+            elif model_section and line.strip() and not line.lstrip().startswith("#"):
+                indent = line[:len(line) - len(line.lstrip())]
+                if field_indent is None:
+                    field_indent = indent
+                if indent == field_indent and re.match(
+                    r"^\s+(?:api_key|['\"]api_key['\"])\s*:", line
+                ):
+                    key_count += 1
+                    if key_count > 1:
+                        raise ValueError("Hermes model config contains duplicate api_key fields")
     in_model_block = False
     model_block_found = False
     model_indent = "  "
+    model_field_indent = None
     model_fields = set()
     changed = False
     new_lines = []
+    yaml_key_path = []
 
     def add_missing_model_fields() -> None:
         nonlocal changed
         if "default" not in model_fields:
-            new_lines.append(f'{model_indent}default: "{model_name}"')
+            new_lines.append(f"{model_indent}default: {json.dumps(model_name)}")
             changed = True
         if base_url and "base_url" not in model_fields:
-            new_lines.append(f'{model_indent}base_url: "{base_url}"')
+            new_lines.append(f"{model_indent}base_url: {json.dumps(base_url)}")
+            changed = True
+        if api_key and "api_key" not in model_fields:
+            new_lines.append(f"{model_field_indent or model_indent}api_key: {json.dumps(api_key)}")
             changed = True
         if context_length and "context_length" not in model_fields:
             new_lines.append(f"{model_indent}context_length: {int(context_length)}")
@@ -16831,47 +16894,66 @@ def _patch_hermes_config_text(
             changed = True
 
     for line in lines:
-        if re.match(r"^model:\s*(?:#.*)?$", line):
+        # Track simple mapping paths so the separate auxiliary compression
+        # context follows the selected model without changing owner submaps.
+        key_match = re.match(r"^([ ]*)(['\"]?)([A-Za-z_][A-Za-z0-9_-]*)\2\s*:", line)
+        if key_match:
+            key_indent = len(key_match.group(1))
+            while yaml_key_path and yaml_key_path[-1][0] >= key_indent:
+                yaml_key_path.pop()
+            yaml_key_path.append((key_indent, key_match.group(3)))
+        current_key_path = tuple(key for _, key in yaml_key_path)
+        if re.match(model_section_pattern, line):
             in_model_block = True
             model_block_found = True
+            model_indent = "  "
+            model_field_indent = None
             model_fields = set()
             new_lines.append(line)
             continue
         if in_model_block and line and not line.startswith((" ", "\t", "#")):
             add_missing_model_fields()
             in_model_block = False
-        if in_model_block and re.match(r"^\s+default:\s*", line):
+        if in_model_block and line.strip() and not line.lstrip().startswith("#"):
+            indent = line[:len(line) - len(line.lstrip())]
+            if model_field_indent is None:
+                model_field_indent = indent
+                model_indent = indent
+        if in_model_block and direct_model_field(line, "default"):
             model_fields.add("default")
-            model_indent = line[:len(line) - len(line.lstrip())]
             indent = line[:len(line) - len(line.lstrip())]
-            new_line = f'{indent}default: "{model_name}"'
+            new_line = f"{indent}default: {json.dumps(model_name)}"
             new_lines.append(new_line)
             changed = changed or new_line != line
             continue
-        if base_url and in_model_block and re.match(r"^\s+base_url:\s*", line):
+        if base_url and in_model_block and direct_model_field(line, "base_url"):
             model_fields.add("base_url")
-            model_indent = line[:len(line) - len(line.lstrip())]
             indent = line[:len(line) - len(line.lstrip())]
-            new_line = f'{indent}base_url: "{base_url}"'
+            new_line = f"{indent}base_url: {json.dumps(base_url)}"
             new_lines.append(new_line)
             changed = changed or new_line != line
             continue
-        if context_length and in_model_block and re.match(r"^\s+context_length:\s*", line):
+        if api_key and in_model_block and direct_model_field(line, "api_key"):
+            model_fields.add("api_key")
+            indent = model_field_indent
+            new_line = f"{indent}api_key: {json.dumps(api_key)}"
+            new_lines.append(new_line)
+            changed = changed or new_line != line
+            continue
+        if context_length and in_model_block and direct_model_field(line, "context_length"):
             model_fields.add("context_length")
-            model_indent = line[:len(line) - len(line.lstrip())]
             indent = line[:len(line) - len(line.lstrip())]
             new_line = f"{indent}context_length: {int(context_length)}"
             new_lines.append(new_line)
             changed = changed or new_line != line
             continue
-        if in_model_block and re.match(r"^\s+max_tokens:\s*", line):
+        if in_model_block and direct_model_field(line, "max_tokens"):
             # Preserve an operator's explicit output cap. ODS only supplies
             # its bounded default when the field is absent.
             model_fields.add("max_tokens")
-            model_indent = line[:len(line) - len(line.lstrip())]
             new_lines.append(line)
             continue
-        if context_length and re.match(r"^\s+context_length:\s*", line):
+        if context_length and current_key_path == ("auxiliary", "compression", "context_length"):
             indent = line[:len(line) - len(line.lstrip())]
             new_line = f"{indent}context_length: {int(context_length)}"
             new_lines.append(new_line)
@@ -16886,10 +16968,12 @@ def _patch_hermes_config_text(
             new_lines.append("")
         new_lines.extend([
             "model:",
-            f'{model_indent}default: "{model_name}"',
+            f"{model_indent}default: {json.dumps(model_name)}",
         ])
         if base_url:
-            new_lines.append(f'{model_indent}base_url: "{base_url}"')
+            new_lines.append(f"{model_indent}base_url: {json.dumps(base_url)}")
+        if api_key:
+            new_lines.append(f"{model_indent}api_key: {json.dumps(api_key)}")
         if context_length:
             new_lines.append(f"{model_indent}context_length: {int(context_length)}")
         if max_tokens:
@@ -16897,6 +16981,137 @@ def _patch_hermes_config_text(
         changed = True
 
     return "\n".join(new_lines) + "\n", changed
+
+
+def _hermes_selected_model(env: dict) -> str:
+    """Use the model identity selected by the installer, not the template stub."""
+    if str(env.get("LLM_BACKEND") or "").lower() == "external":
+        return str(env.get("EXTERNAL_LLM_MODEL") or env.get("LLM_MODEL") or "").strip()
+    if str(env.get("ODS_MODEL_SWITCHBOARD") or "enabled").lower() == "enabled":
+        return "ods/current"
+    if str(env.get("ODS_MODE") or "").lower() == "cloud":
+        return str(env.get("LLM_MODEL") or "default").strip()
+    if str(env.get("GPU_BACKEND") or "").lower() == "amd" or str(env.get("LLM_BACKEND") or "").lower() == "lemonade":
+        selected = str(env.get("LEMONADE_MODEL") or "").strip()
+        if selected:
+            return selected
+        gguf = str(env.get("GGUF_FILE") or "").strip()
+        return f"extra.{gguf}" if gguf else ""
+    return str(env.get("GGUF_FILE") or env.get("LLM_MODEL") or "").strip()
+
+
+def _hermes_compose_plan_error(flags: list[str]) -> str:
+    """Fail closed if stale Compose flags could start managed llama externally."""
+    try:
+        env = load_env(INSTALL_DIR / ".env")
+    except (OSError, UnicodeError):
+        return "Could not read the selected Hermes model route"
+    if str(env.get("LLM_BACKEND") or "").lower() != "external":
+        return ""
+    if any(str(flag).replace("\\", "/").endswith("/hermes/compose.local.yaml") for flag in flags):
+        return "External Hermes route includes a managed llama dependency; refresh the Compose plan"
+    return ""
+
+
+def _prepare_hermes_route_for_start() -> tuple[bool, str]:
+    """Prepare private Hermes config before first start or external add-back.
+
+    Hermes copies its mounted template only if data/hermes/config.yaml does not
+    exist. Its YAML base_url overrides OPENAI_BASE_URL, so Compose environment
+    alone cannot make a later Library add-back use the selected gateway.
+    """
+    try:
+        env = load_env(INSTALL_DIR / ".env")
+        model_name = _hermes_selected_model(env)
+        base_url = str(env.get("HERMES_LLM_BASE_URL") or "").strip()
+        api_key = str(env.get("HERMES_LLM_API_KEY") or "")
+        raw_context = str(env.get("MAX_CONTEXT") or env.get("CTX_SIZE") or "65536").strip()
+        try:
+            context_length = int(raw_context)
+        except ValueError:
+            return False, "Hermes MAX_CONTEXT/CTX_SIZE must be an integer"
+        if not model_name or not base_url or context_length <= 0:
+            return False, "Hermes selected model route is incomplete"
+        if str(env.get("LLM_BACKEND") or "").lower() == "external" and not api_key.strip():
+            return False, "Hermes external gateway key is missing"
+
+        template = INSTALL_DIR / "extensions" / "services" / "hermes" / "cli-config.yaml.template"
+        live = INSTALL_DIR / "data" / "hermes" / "config.yaml"
+        if not template.is_file():
+            return False, "Hermes configuration template is missing"
+        if template.is_symlink() or not stat_mod.S_ISREG(template.lstat().st_mode):
+            return False, "Hermes route config path is not a regular file"
+        if live.is_symlink() or (live.exists() and not stat_mod.S_ISREG(live.lstat().st_mode)):
+            return False, "Hermes route config path is not a regular file"
+
+        def patch(path: Path, *, private_key: str | None = None) -> str:
+            original = path.read_text(encoding="utf-8")
+            updated, changed = _patch_hermes_config_text(
+                original, model_name, base_url=base_url,
+                context_length=context_length, api_key=private_key,
+            )
+            private_mode = private_key is not None and os.name != "nt"
+            mode_needs_repair = private_mode and stat_mod.S_IMODE(path.stat().st_mode) != 0o600
+            if changed or mode_needs_repair:
+                _atomic_write_text(path, updated, mode=0o600 if private_mode else None)
+            return updated
+
+        template_text = patch(template)  # Never put the private key in product source.
+        if not live.exists():
+            live.parent.mkdir(parents=True, exist_ok=True)
+            live_text, _ = _patch_hermes_config_text(
+                template_text, model_name, base_url=base_url,
+                context_length=context_length, api_key=api_key or None,
+            )
+            _atomic_write_text(live, live_text, mode=0o600)
+        elif str(env.get("LLM_BACKEND") or "").lower() == "external":
+            # External selection must replace a stale local route. Preserve
+            # unrelated owner settings, sessions, skills, and other data.
+            patch(live, private_key=api_key)
+        return True, ""
+    except ValueError as exc:
+        logger.warning("Hermes route configuration is ambiguous: %s", type(exc).__name__)
+        return False, "Hermes route configuration is invalid or has duplicate keys"
+    except (OSError, UnicodeError, RuntimeError) as exc:
+        logger.warning("Could not prepare Hermes selected model route: %s", type(exc).__name__)
+        return False, "Could not read or write Hermes route files; check installation permissions"
+
+
+def _prepare_hermes_persona_for_start() -> tuple[bool, str]:
+    """Make the Hermes file bind source regular before Compose can create a dir."""
+    output = INSTALL_DIR / "data" / "persona" / "SOUL.md"
+    builder = INSTALL_DIR / "scripts" / "build-installation-context.py"
+    template = INSTALL_DIR / "extensions" / "services" / "hermes" / "SOUL.md.template"
+    try:
+        if output.is_symlink():
+            return False, "Hermes persona path is a symlink; repair it before starting"
+        output.parent.resolve().relative_to(INSTALL_DIR.resolve())
+        if output.is_file():
+            return True, ""
+        if output.exists():
+            # An earlier Compose attempt may have made the absent file mount
+            # into an empty directory. Never remove owner data from it.
+            output.rmdir()
+        if not builder.is_file() or not template.is_file():
+            return False, "Hermes persona builder or template is missing"
+        env = load_env(INSTALL_DIR / ".env")
+        cmd = [sys.executable, str(builder), "--template", str(template),
+               "--env", str(INSTALL_DIR / ".env"), "--output", str(output)]
+        if (str(env.get("LLM_BACKEND") or "").lower() == "lemonade"
+                and str(env.get("AMD_INFERENCE_RUNTIME") or "").lower() == "lemonade"):
+            cmd.extend(["--profile", "local-lemonade"])
+        result = subprocess.run(
+            cmd, cwd=str(INSTALL_DIR), capture_output=True, text=True,
+            timeout=60,
+        )
+        if result.returncode != 0 or output.is_symlink() or not output.is_file():
+            return False, "Could not generate Hermes installation persona"
+        if os.name != "nt":
+            output.chmod(0o644)
+        return True, ""
+    except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Could not prepare Hermes persona: %s", type(exc).__name__)
+        return False, "Could not prepare Hermes persona; check installation data permissions"
 
 
 def _patch_hermes_model_config(
