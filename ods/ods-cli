@@ -2934,9 +2934,10 @@ cmd_enable() {
     done
     _ENABLE_VISITED+=("$service_id")
 
-    # Check built-in extensions first, then dashboard-installed user extensions
-    local ext_dir="$INSTALL_DIR/extensions/services/$service_id"
-    [[ ! -d "$ext_dir" ]] && ext_dir="$INSTALL_DIR/data/user-extensions/$service_id"
+    # Match Dashboard resolution: an installed user extension shadows a
+    # bundled definition with the same id, even when its Compose is disabled.
+    local ext_dir="$INSTALL_DIR/data/user-extensions/$service_id"
+    [[ ! -d "$ext_dir" ]] && ext_dir="$INSTALL_DIR/extensions/services/$service_id"
     [[ -d "$ext_dir" ]] || error "Unknown service: $input"
 
     local cf="$ext_dir/compose.yaml"
@@ -3053,9 +3054,9 @@ cmd_disable() {
 
     local service_id
     service_id=$(sr_resolve "$input")
-    # Check built-in extensions first, then dashboard-installed user extensions
-    local ext_dir="$INSTALL_DIR/extensions/services/$service_id"
-    [[ ! -d "$ext_dir" ]] && ext_dir="$INSTALL_DIR/data/user-extensions/$service_id"
+    # Match the Dashboard and selection helper's user-first shadowing.
+    local ext_dir="$INSTALL_DIR/data/user-extensions/$service_id"
+    [[ ! -d "$ext_dir" ]] && ext_dir="$INSTALL_DIR/extensions/services/$service_id"
     [[ -d "$ext_dir" ]] || error "Unknown service: $input"
     local cf="$ext_dir/compose.yaml"
 
@@ -3063,40 +3064,53 @@ cmd_disable() {
     local cat="${SERVICE_CATEGORIES[$service_id]:-optional}"
     [[ "$cat" == "core" ]] && error "Cannot disable core service: $service_id"
 
-    # Check for reverse dependents
-    local dependents=()
-    for sid in "${SERVICE_IDS[@]}"; do
-        [[ "$sid" == "$service_id" ]] && continue
-        # Check built-in extensions first, then dashboard-installed user extensions
-        local dep_cf="$INSTALL_DIR/extensions/services/$sid/compose.yaml"
-        [[ -f "$dep_cf" ]] || dep_cf="$INSTALL_DIR/data/user-extensions/$sid/compose.yaml"
-        [[ ! -f "$dep_cf" ]] && continue
-        local deps="${SERVICE_DEPENDS[$sid]:-}"
-        for dep in $deps; do
-            if [[ "$dep" == "$service_id" ]]; then
-                dependents+=("$sid")
-                break
-            fi
-        done
-    done
-    if [[ ${#dependents[@]} -gt 0 ]]; then
-        warn "These enabled extensions depend on $service_id: ${dependents[*]}"
-        read -p "  Continue anyway? [y/N] " -n 1 -r || REPLY=""
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && { log "Cancelled."; return 1; }
+    # A preliminary check avoids stopping a service with known dependents.
+    # The helper repeats this scan under Dashboard's shared file lock just
+    # before the rename; no confirmation can override an enabled dependent.
+    local selector="$INSTALL_DIR/scripts/extension-selection.py"
+    [[ -f "$selector" ]] || error "Extension selection guard missing: $selector"
+    local selector_python="${ODS_PYTHON_CMD:-python3}"
+    if [[ -f "$INSTALL_DIR/lib/python-cmd.sh" ]]; then
+        selector_python="$(. "$INSTALL_DIR/lib/python-cmd.sh"; ods_detect_python_cmd_with_module yaml)" || return 1
+    fi
+    local initial_state
+    initial_state=$("$selector_python" "$selector" check-disable \
+        --install-dir "$INSTALL_DIR" --service-id "$service_id") || return 1
+    if [[ "$initial_state" == "already-disabled" ]]; then
+        success "$service_id is already disabled. Data preserved."
+        return 0
     fi
 
     # Stop if running, then rename
-    local flags_str
+    local flags_str="" stopped=false
+    local -a flags=()
     if flags_str=$(get_compose_flags); then
-        local -a flags
         read -ra flags <<< "$flags_str"
-        docker compose "${flags[@]}" stop "$service_id" 2>/dev/null || true
+        if docker compose "${flags[@]}" stop "$service_id" 2>/dev/null; then
+            stopped=true
+        else
+            warn "Could not confirm Docker stop for $service_id; selection will still be disabled."
+        fi
     else
         _stop_owned_containers_for_recovery "$service_id" || return 1
+        stopped=true
     fi
-    [[ -f "$cf" ]] && mv "$cf" "${cf}.disabled"
-    _regenerate_compose_flags
+    local final_state
+    if ! final_state=$("$selector_python" "$selector" disable \
+        --install-dir "$INSTALL_DIR" --service-id "$service_id"); then
+        # A dependent may have appeared during Docker stop. The helper leaves
+        # the selected file intact on refusal; restore a stopped service when
+        # the saved Compose flags are still available.
+        if [[ "$stopped" == true && -f "$cf" && ${#flags[@]} -gt 0 ]]; then
+            docker compose "${flags[@]}" start "$service_id" 2>/dev/null || \
+                warn "$service_id remains selected but could not be restarted; run 'ods start $service_id'."
+        elif [[ "$stopped" == true && -f "$cf" ]]; then
+            warn "$service_id remains selected but was stopped during recovery; repair Compose validation, then run 'ods start $service_id'."
+        fi
+        return 1
+    fi
+    # The helper invalidates .compose-flags under the lock. The next Compose
+    # command resolves the current tree instead of writing a stale cache here.
     local _data_dir="$INSTALL_DIR/data/$service_id"
     if [[ -d "$_data_dir" ]]; then
         local _data_size

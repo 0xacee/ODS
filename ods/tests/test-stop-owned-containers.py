@@ -201,9 +201,12 @@ def test_disable_renames_recipe_only_after_safe_recovery(tmp_path, recovery_succ
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
     (scripts / HELPER.name).write_text('raise SystemExit(' + ('0' if recovery_succeeds else '1') + ')')
+    shutil.copyfile(ODS / 'scripts/extension-selection.py', scripts / 'extension-selection.py')
     recipe = tmp_path / 'data/user-extensions/example/compose.yaml'
     recipe.parent.mkdir(parents=True)
-    recipe.write_text('legacy unconfined source recipe')
+    recipe.write_text('services: {}\n')
+    cache = tmp_path / '.compose-flags'
+    cache.write_text('stale')
     common = ('set -eu\nINSTALL_DIR="$1"\nODS_PYTHON_CMD="$2"\n'
               'check_install() { :; }; load_env() { :; }; sr_load() { :; }\n'
               'get_compose_flags() { return 2; }; sr_resolve() { echo "$1"; }\n'
@@ -218,9 +221,9 @@ def test_disable_renames_recipe_only_after_safe_recovery(tmp_path, recovery_succ
     assert (result.returncode == 0) == recovery_succeeds, result.stderr
     assert 'UNEXPECTED_COMPOSE' not in result.stdout
     assert recipe.exists() is not recovery_succeeds
-    assert (tmp_path / 'flags').exists() is recovery_succeeds
+    assert cache.exists() is not recovery_succeeds
     surviving = recipe.with_suffix('.yaml.disabled') if recovery_succeeds else recipe
-    assert surviving.read_text() == 'legacy unconfined source recipe'
+    assert surviving.read_text() == 'services: {}\n'
 
 
 @pytest.mark.skipif(os.environ.get('ODS_RUN_DOCKER_SECURITY_TESTS') != '1',

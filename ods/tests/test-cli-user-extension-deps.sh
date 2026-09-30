@@ -38,9 +38,10 @@ trap 'rm -rf "$FIXTURE"' EXIT
 # ---------------------------------------------------------------------------
 # Fixture: minimal install dir the CLI accepts (check_install + sr_load)
 # ---------------------------------------------------------------------------
-mkdir -p "$FIXTURE/lib" "$FIXTURE/extensions/services" "$FIXTURE/data/user-extensions"
+mkdir -p "$FIXTURE/lib" "$FIXTURE/scripts" "$FIXTURE/extensions/services" "$FIXTURE/data/user-extensions"
 cp "$ROOT_DIR/ods-cli" "$FIXTURE/ods-cli"
 cp "$ROOT_DIR"/lib/*.sh "$FIXTURE/lib/"
+cp "$ROOT_DIR/scripts/extension-selection.py" "$FIXTURE/scripts/"
 : > "$FIXTURE/docker-compose.base.yml"
 echo "GPU_BACKEND=nvidia" > "$FIXTURE/.env"
 
@@ -111,7 +112,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. disable: an enabled user-extension dependent triggers the warning
+# 3. disable: an enabled user-extension dependent is refused
 # ---------------------------------------------------------------------------
 rm -rf "$BUILTIN" "$USEREXT"
 write_ext "$BUILTIN" bsvc "[]"
@@ -124,9 +125,25 @@ else
     fail "disable missed enabled user-extension dependent: $output"
 fi
 if [[ -f "$BUILTIN/compose.yaml" ]]; then
-    pass "disable was cancelled after the warning"
+    pass "disable preserved the selected dependency"
 else
     fail "disable proceeded despite user answering no"
+fi
+
+# A selected Compose-only dependency is just as binding, and answering yes
+# cannot override the safety check.
+write_ext "$USEREXT" usvc "[]"
+cat > "$USEREXT/compose.yaml" <<'YAML'
+services:
+  usvc:
+    image: example:latest
+    depends_on: [bsvc]
+YAML
+output=$(printf 'y\n' | run_cli disable bsvc)
+if echo "$output" | grep -q "depend on bsvc: usvc" && [[ -f "$BUILTIN/compose.yaml" ]]; then
+    pass "disable rejects a Compose-only dependent even after explicit yes"
+else
+    fail "disable allowed a selected Compose-only dependent: $output"
 fi
 
 # ---------------------------------------------------------------------------
