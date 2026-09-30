@@ -1367,6 +1367,7 @@ def _get_service_data_info(service_id: str) -> dict | None:
 # --- Host Agent Helpers ---
 
 _AGENT_TIMEOUT = 660  # seconds â€” exceed the host agent's 600s start allowance
+_AGENT_STOP_TIMEOUT = 150  # host agent bounds Docker Compose stop to 120 seconds
 _AGENT_LOG_TIMEOUT = 30  # seconds â€” log fetches should be fast
 
 
@@ -1396,7 +1397,7 @@ def _call_agent(action: str, service_id: str) -> bool:
             "POST",
             f"/v1/extension/{action}",
             payload={"service_id": service_id},
-            timeout=_AGENT_TIMEOUT,
+            timeout=_AGENT_STOP_TIMEOUT if action == "stop" else _AGENT_TIMEOUT,
         )
         return True
     except AgentClientError as exc:
