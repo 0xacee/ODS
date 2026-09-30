@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed, cross-process selection guard for ``ods enable/disable``.
 
-The Dashboard and this command lock the same file in the installed data bind
-mount.  This helper owns the final dependency check and Compose-file rename;
-the CLI may perform a preliminary check and stop Docker outside that lock.
+This helper owns the final dependency check and Compose-file rename. For CLI
+disable it also stops the service under that lock, so a dependent cannot be
+enabled between the stop and the rename.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import contextlib
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -356,11 +357,46 @@ def _refresh_compose_flags(
             print(line, file=sys.stderr)
 
 
+def _stop_for_disable(
+    install_dir: Path, service_id: str, mode: str, compose_flags: str,
+) -> None:
+    if mode == "compose":
+        try:
+            flags = shlex.split(compose_flags)
+        except ValueError as exc:
+            raise SelectionError("Invalid Compose flags; selection unchanged") from exc
+        if (not flags or len(flags) % 2 or any(flag != "-f" for flag in flags[::2])
+                or any(not path or path.startswith("-") for path in flags[1::2])):
+            raise SelectionError("Invalid Compose flags; selection unchanged")
+        command = ["docker", "compose", *flags, "stop", service_id]
+    elif mode == "owned":
+        helper = install_dir / "scripts" / "stop-owned-containers.py"
+        if not helper.is_file():
+            raise SelectionError(f"Owned-container stop helper missing: {helper}")
+        command = [sys.executable, str(helper), "--install-dir", str(install_dir),
+                   "--service", service_id]
+    else:
+        raise SelectionError("Invalid stop mode; selection unchanged")
+    try:
+        stopped = subprocess.run(
+            command, cwd=install_dir, capture_output=True, text=True,
+            timeout=360, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SelectionError(f"Could not confirm stop for {service_id}; selection unchanged") from exc
+    if stopped.returncode != 0:
+        raise SelectionError(
+            f"Could not confirm stop for {service_id}; selection unchanged: "
+            f"{stopped.stderr.strip()[:500]}"
+        )
+
+
 def run(
     action: str, install_dir: Path, service_id: str, timeout: float = 15.0,
     core_services: set[str] | None = None,
     tier: str = "1", gpu_backend: str = "nvidia", gpu_count: str = "1",
     ods_mode: str = "local",
+    stop_mode: str | None = None, compose_flags: str = "",
 ) -> str:
     if action not in ("check-disable", "disable", "enable"):
         raise SelectionError("Invalid selection action")
@@ -368,6 +404,10 @@ def run(
         raise SelectionError("Invalid service id")
     if timeout <= 0 or timeout > 120:
         raise SelectionError("Invalid lock timeout")
+    if stop_mode is not None and action != "disable":
+        raise SelectionError("Container stop is only supported for disable")
+    if compose_flags and stop_mode != "compose":
+        raise SelectionError("Compose flags require Compose stop mode")
     core_services = set(core_services or ())
     if any(SERVICE_ID.fullmatch(core) is None for core in core_services):
         raise SelectionError("Invalid core service id")
@@ -423,10 +463,29 @@ def run(
             raise SelectionError(f"No Compose selection file for {service_id}")
         if action == "check-disable":
             return "ready"
+        if stop_mode is not None:
+            _stop_for_disable(install_dir, service_id, stop_mode, compose_flags)
         try:
             cache.unlink(missing_ok=True)
             os.replace(enabled, disabled)
         except OSError as exc:
+            if stop_mode == "compose":
+                try:
+                    restarted = subprocess.run(
+                        ["docker", "compose", *shlex.split(compose_flags), "start", service_id],
+                        cwd=install_dir, capture_output=True, text=True, timeout=360,
+                        check=False,
+                    )
+                    if restarted.returncode != 0:
+                        print(f"WARNING: {service_id} remains selected but could not be "
+                              "restarted; run 'ods start' to recover.", file=sys.stderr)
+                except (OSError, subprocess.TimeoutExpired):
+                    print(f"WARNING: {service_id} remains selected but could not be "
+                          "restarted; run 'ods start' to recover.", file=sys.stderr)
+            elif stop_mode == "owned":
+                print(f"WARNING: {service_id} remains selected but was stopped during recovery; "
+                      "repair Compose validation, then run 'ods start' to recover.",
+                      file=sys.stderr)
             raise SelectionError(f"Could not disable {service_id}; selected file remains recoverable") from exc
         return "disabled"
 
@@ -442,11 +501,14 @@ def main() -> int:
     parser.add_argument("--gpu-backend", default="nvidia")
     parser.add_argument("--gpu-count", default="1")
     parser.add_argument("--ods-mode", default="local")
+    parser.add_argument("--stop-mode", choices=("compose", "owned"))
+    parser.add_argument("--compose-flags", default="")
     args = parser.parse_args()
     try:
         print(run(args.action, args.install_dir, args.service_id, args.lock_timeout,
                   set(args.core_service), args.tier, args.gpu_backend,
-                  args.gpu_count, args.ods_mode))
+                  args.gpu_count, args.ods_mode, args.stop_mode,
+                  args.compose_flags))
     except SelectionError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

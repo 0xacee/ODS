@@ -234,22 +234,29 @@ def test_disable_preserves_selection_when_compose_stop_fails(tmp_path):
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
     shutil.copyfile(ODS / 'scripts/extension-selection.py', scripts / 'extension-selection.py')
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    fake_docker = fake_bin / 'docker'
+    fake_docker.write_text('#!/bin/sh\n: > "$ODS_TEST_DOCKER_ATTEMPT"\nexit 71\n')
+    fake_docker.chmod(0o755)
     recipe = tmp_path / 'data/user-extensions/example/compose.yaml'
     recipe.parent.mkdir(parents=True)
     recipe.write_text('services: {}\n')
     cache = tmp_path / '.compose-flags'
     cache.write_text('unchanged')
     common = ('set -eu\nINSTALL_DIR="$1"\nODS_PYTHON_CMD="$2"\n'
+              'PATH="$INSTALL_DIR/bin:$PATH"; export PATH\n'
+              'ODS_TEST_DOCKER_ATTEMPT="$INSTALL_DIR/docker-attempt"; export ODS_TEST_DOCKER_ATTEMPT\n'
               'check_install() { :; }; load_env() { :; }; sr_load() { :; }\n'
               'get_compose_flags() { echo "-f docker-compose.base.yml"; }; sr_resolve() { echo "$1"; }\n'
               'declare -A SERVICE_CATEGORIES=([example]=optional); SERVICE_IDS=(example)\n'
-              'docker() { : > "$INSTALL_DIR/docker-attempt"; return 71; }\n'
               'warn() { echo "$*" >&2; }; success() { :; }; error() { echo "$*" >&2; exit 1; }\n')
     common += shell_function(ODS / 'ods-cli', 'cmd_disable')
     result = subprocess.run(['bash', '-s', '--', str(tmp_path), sys.executable],
-                            input=common + '\ncmd_disable example\n', text=True, capture_output=True, timeout=15)
+                            input=common + '\ncmd_disable example\n', text=True,
+                            capture_output=True, timeout=15, check=False)
     assert result.returncode != 0
-    assert 'selection was not disabled' in result.stderr
+    assert 'selection unchanged' in result.stderr
     assert (tmp_path / 'docker-attempt').exists()
     assert recipe.read_text() == 'services: {}\n'
     assert not recipe.with_suffix('.yaml.disabled').exists()

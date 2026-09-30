@@ -94,6 +94,47 @@ def test_state_change_between_preflight_and_commit_retains_selection_and_data(tm
     assert retained.read_text(encoding="utf-8") == "keep"
 
 
+def test_cli_stop_and_commit_hold_selection_lock_against_dependent_enable(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "search")
+    dependent = extension(tmp_path, "consumer", depends=("search",), enabled=False)
+    original_run = subprocess.run
+
+    def stop_with_concurrent_enable(args, **kwargs):
+        assert args[-2:] == ["stop", "search"]
+        assert (target / "compose.yaml").is_file()
+        contender = original_run(
+            [sys.executable, str(SCRIPT), "enable", "--install-dir", str(tmp_path),
+             "--service-id", "consumer", "--lock-timeout", "0.1"],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert contender.returncode == 1
+        assert "Timed out waiting for extensions lock" in contender.stderr
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(selection.subprocess, "run", stop_with_concurrent_enable)
+    assert selection.run("disable", tmp_path, "search", stop_mode="compose",
+                         compose_flags="-f docker-compose.base.yml") == "disabled"
+    assert (target / "compose.yaml.disabled").is_file()
+    assert (dependent / "compose.yaml.disabled").is_file()
+
+
+def test_cli_stop_failure_preserves_selection_and_cache(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "search")
+    cache = tmp_path / ".compose-flags"
+    cache.write_text("previous selection", encoding="utf-8")
+    monkeypatch.setattr(
+        selection.subprocess, "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "", "Docker failure"),
+    )
+    with pytest.raises(selection.SelectionError, match="selection unchanged"):
+        selection.run("disable", tmp_path, "search", stop_mode="compose",
+                      compose_flags="-f docker-compose.base.yml")
+    assert (target / "compose.yaml").is_file()
+    assert cache.read_text(encoding="utf-8") == "previous selection"
+
+
 def test_enable_rechecks_prerequisite_then_preserves_data(tmp_path):
     (tmp_path / "data" / "user-extensions").mkdir(parents=True)
     prerequisite = extension(tmp_path, "search", enabled=False)
