@@ -31,7 +31,16 @@ def installation(monkeypatch, tmp_path, request):
     monkeypatch.setattr(extensions, "DATA_DIR", str(tmp_path))
     start = Mock(return_value=True)
     monkeypatch.setattr(extensions, "_call_agent", start)
-    monkeypatch.setattr(extensions, "_call_agent_compose_rename", rename)
+    def select(action, service_ids):
+        assert action == "enable"
+        for name in service_ids:
+            if (bundled / name / "compose.yaml.disabled").exists():
+                rename("activate", name)
+        return {"action": "enabled", "service_ids": service_ids}
+
+    monkeypatch.setattr(extensions, "_select_extensions_on_host", select)
+    monkeypatch.setattr(extensions, "request_agent_json",
+                        lambda *args, **kwargs: pytest.fail("unexpected host-agent transport"))
     monkeypatch.setattr(extensions, "_call_agent_hook", Mock(return_value=True))
     monkeypatch.setattr(extensions, "_call_agent_invalidate_compose_cache", Mock())
     return bundled, start
@@ -193,6 +202,29 @@ def test_confirmed_enable_repairs_transitive_service_before_target(test_client, 
         ("start", "searxng"), ("start", "hermes-proxy"),
     ]
     assert (bundled / "hermes" / "compose.yaml").read_bytes() == hermes_before
+
+
+def test_host_rejects_stale_enable_plan_before_any_start(
+    test_client, installation, monkeypatch,
+):
+    from fastapi import HTTPException
+
+    bundled, start = installation
+    simulate_disabled_search(bundled, start)
+
+    def stale_plan(action, service_ids):
+        assert action == "enable"
+        assert "searxng" in service_ids
+        raise HTTPException(status_code=409, detail="Dependency selection changed")
+
+    monkeypatch.setattr(extensions, "_select_extensions_on_host", stale_plan)
+    response = test_client.post(
+        "/api/extensions/hermes-proxy/enable?auto_enable_deps=true",
+        headers=test_client.auth_headers,
+    )
+    assert response.status_code == 409
+    start.assert_not_called()
+    assert (bundled / "searxng/compose.yaml.disabled").is_file()
 
 
 def test_healthy_dependency_tree_does_not_require_confirmation(test_client, installation):

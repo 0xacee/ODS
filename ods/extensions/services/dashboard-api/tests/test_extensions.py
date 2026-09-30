@@ -592,7 +592,10 @@ def _patch_mutation_config(monkeypatch, tmp_path, lib_dir=None, user_dir=None):
                 )
             before = directory / ("compose.yaml.disabled" if action == "enable" else "compose.yaml")
             after = directory / ("compose.yaml" if action == "enable" else "compose.yaml.disabled")
-            before.rename(after)
+            if before.exists():
+                before.rename(after)
+            else:
+                assert action == "enable" and after.exists()
             ext_mod._call_agent_invalidate_compose_cache()
         return {"action": "enabled" if action == "enable" else "disabled"}
 
@@ -4574,14 +4577,12 @@ class TestWriteErrorProgress:
 
 
 class TestActivateServiceBuiltinBranch:
-    """_activate_service must resolve services from EXTENSIONS_DIR (built-in)
-    when not present under USER_EXTENSIONS_DIR — required so templates can
-    enable built-in extensions like n8n, tts, etc."""
+    """Activation planning resolves built-ins and user-installed shadows."""
 
     def test_activate_service_resolves_builtin_with_disabled_compose(
         self, monkeypatch, tmp_path,
     ):
-        """Built-in extension with compose.yaml.disabled is renamed to compose.yaml."""
+        """A disabled built-in is planned without moving its marker yet."""
         from routers.extensions import _activate_service
 
         builtin_root = tmp_path / "builtin"
@@ -4594,24 +4595,11 @@ class TestActivateServiceBuiltinBranch:
 
         monkeypatch.setattr("routers.extensions.EXTENSIONS_DIR", builtin_root)
         monkeypatch.setattr("routers.extensions.USER_EXTENSIONS_DIR", user_root)
-        calls = []
-
-        def _mock_compose_rename(action, service_id):
-            calls.append((action, service_id))
-            (ext_dir / "compose.yaml.disabled").rename(ext_dir / "compose.yaml")
-            return True
-
-        monkeypatch.setattr(
-            "routers.extensions._call_agent_compose_rename",
-            _mock_compose_rename,
-        )
-
         result = _activate_service("fakesvc")
 
         assert result == {"id": "fakesvc", "action": "enabled"}
-        assert calls == [("activate", "fakesvc")]
-        assert (ext_dir / "compose.yaml").exists()
-        assert not (ext_dir / "compose.yaml.disabled").exists()
+        assert not (ext_dir / "compose.yaml").exists()
+        assert (ext_dir / "compose.yaml.disabled").exists()
 
     def test_activate_service_resolves_builtin_already_enabled(
         self, monkeypatch, tmp_path,
@@ -4648,7 +4636,7 @@ class TestActivateServiceBuiltinBranch:
         builtin_root.mkdir()
         user_root.mkdir()
 
-        # User dir: disabled, expected to be activated
+        # User dir: disabled, expected to be selected in the host batch
         user_ext = user_root / "fakesvc"
         user_ext.mkdir()
         (user_ext / "compose.yaml.disabled").write_text(_SAFE_COMPOSE)
@@ -4665,8 +4653,8 @@ class TestActivateServiceBuiltinBranch:
         result = _activate_service("fakesvc")
 
         assert result == {"id": "fakesvc", "action": "enabled"}
-        assert (user_ext / "compose.yaml").exists()
-        assert not (user_ext / "compose.yaml.disabled").exists()
+        assert not (user_ext / "compose.yaml").exists()
+        assert (user_ext / "compose.yaml.disabled").exists()
         # Built-in untouched
         assert builtin_compose.exists()
 

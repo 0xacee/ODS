@@ -371,16 +371,32 @@ def test_preset_partial_rename_failure_reports_committed_prefix(tmp_path, monkey
     assert not cache.exists()
 
 
-def test_preset_refuses_invalid_starting_graph_without_mutation(tmp_path):
+def test_preset_repairs_invalid_starting_graph_before_enable_start(tmp_path):
     (tmp_path / "data" / "user-extensions").mkdir(parents=True)
     search = extension(tmp_path, "search", enabled=False)
     consumer = extension(tmp_path, "consumer", depends=("search",))
     preset = tmp_path / "extensions.list"
-    preset.write_text("enabled:search\n", encoding="utf-8")
+    preset.write_text("enabled:consumer\n", encoding="utf-8")
     with pytest.raises(selection.SelectionError, match="without prerequisites: search"):
         restore(tmp_path, preset)
     assert (search / "compose.yaml.disabled").is_file()
     assert (consumer / "compose.yaml").is_file()
+
+    preset.write_text("enabled:search\n", encoding="utf-8")
+    assert restore(tmp_path, preset) == (1, 0, [])
+    assert (search / "compose.yaml").is_file()
+    assert (consumer / "compose.yaml").is_file()
+
+
+def test_preset_noop_enable_invalidates_stale_compose_cache(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    extension(tmp_path, "search")
+    cache = tmp_path / ".compose-flags"
+    cache.write_text("stale flags", encoding="utf-8")
+    preset = tmp_path / "extensions.list"
+    preset.write_text("enabled:search\n", encoding="utf-8")
+    assert restore(tmp_path, preset) == (0, 0, [])
+    assert not cache.exists()
 
 
 def test_preset_rejects_symlink_and_directory_inputs(tmp_path):

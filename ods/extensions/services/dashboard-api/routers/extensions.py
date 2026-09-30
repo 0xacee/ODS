@@ -4366,7 +4366,7 @@ def _imported_extension_namespace(service_id: str, ext_dir: Path, is_builtin: bo
 
 
 def _activate_service(service_id: str) -> dict:
-    """Core enable logic â€” NO lock acquisition. Called inside _extensions_lock.
+    """Validate and plan one activation without moving its Compose marker.
 
     Checks both USER_EXTENSIONS_DIR (user-installed) and EXTENSIONS_DIR
     (built-in) so templates can enable built-in extensions like n8n, tts, etc.
@@ -4399,16 +4399,8 @@ def _activate_service(service_id: str) -> dict:
             status_code=400, detail="Compose file is a symlink",
         )
 
-    # Built-in extensions live on a :ro mount â€” delegate rename to host agent
-    if is_builtin:
-        if not _call_agent_compose_rename("activate", service_id):
-            raise HTTPException(
-                status_code=502,
-                detail=f"Host agent failed to activate extension: {service_id}",
-            )
-    else:
-        os.rename(str(disabled_compose), str(enabled_compose))
-    logger.info("Enabled extension (activate): %s", service_id)
+    # The caller sends the complete dependency chain to the host in one
+    # selection transaction. A direct rename here could race the host CLI.
     return {"id": service_id, "action": "enabled"}
 
 
@@ -4497,8 +4489,8 @@ def enable_extension(
 
     with _extensions_lock():
         # Dependency selection can change while this request waits for the
-        # global Compose mutation lock. Never enable a service from a stale
-        # preflight after a dependency was disabled.
+        # Dashboard lock. Reject a stale local plan; the host rechecks the
+        # desired graph under the CLI lock before moving any marker.
         if _get_missing_deps_transitive(service_id) != missing_deps:
             raise HTTPException(
                 status_code=409,
@@ -4518,9 +4510,11 @@ def enable_extension(
         if result.get("action") in ("enabled", "already_enabled"):
             enabled_services.append(service_id)
 
-        # Invalidate .compose-flags cache so ods-cli picks up the new enabled set
-        if enabled_services:
-            _call_agent_invalidate_compose_cache()
+    # The host validates the complete desired graph and commits all marker
+    # moves under the CLI's shared lock before any service is started.
+    # Avoid holding the Dashboard's container lock across this host RPC.
+    if enabled_services:
+        _select_extensions_on_host("enable", enabled_services)
 
     # Start all enabled services via agent (outside lock)
     agent_ok = True

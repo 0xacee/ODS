@@ -713,7 +713,10 @@ def restore_preset(
                         if service_id in directories})
         current_graph = _preset_graph(
             install_dir, directories, current, current, core_services,
-            require_dependencies=True,
+            # Observe a legacy or manually changed broken selection so an
+            # enable preset can repair it. The desired graph still has to be
+            # valid before any marker is moved.
+            require_dependencies=False,
         )
         desired_graph = _preset_graph(
             install_dir, directories, current, desired, core_services,
@@ -760,6 +763,11 @@ def restore_preset(
             raise SelectionError(f"Compose cache is a directory: {cache}")
         operations = [(service_id, False) for service_id in disable_order]
         operations.extend((service_id, True) for service_id in enable_order)
+        if not operations:
+            try:
+                cache.unlink(missing_ok=True)
+            except OSError as exc:
+                raise SelectionError("Cannot invalidate Compose cache; selection unchanged") from exc
         for service_id, enable in operations:
             directory = directories[service_id]
             source = directory / ("compose.yaml.disabled" if enable else "compose.yaml")
