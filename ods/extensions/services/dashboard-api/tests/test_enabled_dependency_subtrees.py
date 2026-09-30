@@ -54,6 +54,24 @@ def test_disable_search_blocks_enabled_hermes(test_client, installation):
     assert (bundled / "searxng/compose.yaml").is_file()
 
 
+def test_user_file_does_not_shadow_bundled_enabled_dependent(
+    test_client, installation,
+):
+    bundled, start = installation
+    extensions.USER_EXTENSIONS_DIR.mkdir()
+    (extensions.USER_EXTENSIONS_DIR / "hermes").write_text("not an extension directory")
+
+    response = test_client.post(
+        "/api/extensions/searxng/disable?include_data_info=false",
+        headers=test_client.auth_headers,
+    )
+
+    assert response.status_code == 409
+    assert "hermes" in response.json()["detail"]
+    start.assert_not_called()
+    assert (bundled / "searxng/compose.yaml").is_file()
+
+
 def test_disable_search_fails_closed_when_dependents_cannot_be_scanned(
     test_client, installation, monkeypatch,
 ):

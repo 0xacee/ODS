@@ -4635,7 +4635,6 @@ def _enabled_dependents(service_id: str) -> list[str]:
         for peer_dir in peer_dirs:
             if peer_dir.name == service_id or peer_dir.name in seen_peers:
                 continue
-            seen_peers.add(peer_dir.name)
             try:
                 peer_stat = peer_dir.lstat()
             except FileNotFoundError:
@@ -4653,6 +4652,9 @@ def _enabled_dependents(service_id: str) -> list[str]:
                 )
             if not stat.S_ISDIR(peer_stat.st_mode):
                 continue
+            # A user directory shadows a bundled definition even when its
+            # Compose file is disabled; a stray user file does not.
+            seen_peers.add(peer_dir.name)
             compose_path = peer_dir / "compose.yaml"
             try:
                 selected = compose_path.lstat()
