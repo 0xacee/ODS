@@ -30,6 +30,13 @@ def extension(root, service_id, *, depends=(), compose_depends=(), enabled=True)
     return directory
 
 
+def restore(root, preset, *, compose_flags="-f docker-compose.base.yml"):
+    base = root / "docker-compose.base.yml"
+    if not base.exists():
+        base.write_text("services: {}\n", encoding="utf-8")
+    return selection.restore_preset(root, preset, compose_flags=compose_flags)
+
+
 def test_selected_compose_and_user_shadowing(tmp_path):
     (tmp_path / "data" / "user-extensions").mkdir(parents=True)
     extension(tmp_path, "search")
@@ -296,12 +303,12 @@ def test_preset_restore_orders_dependents_and_prerequisites(tmp_path, monkeypatc
         original_replace(source, target)
 
     monkeypatch.setattr(selection.os, "replace", ordered_replace)
-    assert selection.restore_preset(tmp_path, preset) == (0, 2, [])
+    assert restore(tmp_path, preset) == (0, 2, [])
     assert moves == ["consumer", "search"]
 
     moves.clear()
     preset.write_text("enabled:consumer\nenabled:search\n", encoding="utf-8")
-    assert selection.restore_preset(tmp_path, preset) == (2, 0, [])
+    assert restore(tmp_path, preset) == (2, 0, [])
     assert moves == ["search", "consumer"]
 
 
@@ -315,7 +322,7 @@ def test_preset_rejects_invalid_final_graph_before_any_rename(tmp_path):
     retained.parent.mkdir()
     retained.write_text("keep", encoding="utf-8")
     with pytest.raises(selection.SelectionError, match="without prerequisites: search"):
-        selection.restore_preset(tmp_path, preset)
+        restore(tmp_path, preset)
     assert (search / "compose.yaml").is_file()
     assert (consumer / "compose.yaml").is_file()
     assert retained.read_text(encoding="utf-8") == "keep"
@@ -332,10 +339,10 @@ def test_preset_rejects_conflicting_entries_and_user_shadow(tmp_path):
     preset = tmp_path / "extensions.list"
     preset.write_text("enabled:consumer\ndisabled:consumer\n", encoding="utf-8")
     with pytest.raises(selection.SelectionError, match="Conflicting preset states"):
-        selection.restore_preset(tmp_path, preset)
+        restore(tmp_path, preset)
     preset.write_text("enabled:consumer\n", encoding="utf-8")
     with pytest.raises(selection.SelectionError, match="without prerequisites: search"):
-        selection.restore_preset(tmp_path, preset)
+        restore(tmp_path, preset)
     assert (consumer / "compose.yaml.disabled").is_file()
     assert (user_search / "compose.yaml.disabled").is_file()
 
@@ -358,7 +365,7 @@ def test_preset_partial_rename_failure_reports_committed_prefix(tmp_path, monkey
 
     monkeypatch.setattr(selection.os, "replace", fail_second)
     with pytest.raises(selection.SelectionError, match="after 0 enabled and 1 disabled"):
-        selection.restore_preset(tmp_path, preset)
+        restore(tmp_path, preset)
     assert (consumer / "compose.yaml.disabled").is_file()
     assert (search / "compose.yaml").is_file()
     assert not cache.exists()
@@ -371,7 +378,7 @@ def test_preset_refuses_invalid_starting_graph_without_mutation(tmp_path):
     preset = tmp_path / "extensions.list"
     preset.write_text("enabled:search\n", encoding="utf-8")
     with pytest.raises(selection.SelectionError, match="without prerequisites: search"):
-        selection.restore_preset(tmp_path, preset)
+        restore(tmp_path, preset)
     assert (search / "compose.yaml.disabled").is_file()
     assert (consumer / "compose.yaml").is_file()
 
@@ -388,11 +395,11 @@ def test_preset_rejects_symlink_and_directory_inputs(tmp_path):
         pass
     else:
         with pytest.raises(selection.SelectionError, match="Invalid preset extensions list"):
-            selection.restore_preset(tmp_path, linked)
+            restore(tmp_path, linked)
     cache = tmp_path / ".compose-flags"
     cache.mkdir()
     with pytest.raises(selection.SelectionError, match="Compose cache is a directory"):
-        selection.restore_preset(tmp_path, preset)
+        restore(tmp_path, preset)
     assert (target / "compose.yaml").is_file()
 
 
@@ -416,7 +423,7 @@ def test_preset_stops_every_owned_fragment_service_before_disabling(tmp_path, mo
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(selection.subprocess, "run", stopped_before_rename)
-    assert selection.restore_preset(tmp_path, preset) == (0, 1, [])
+    assert restore(tmp_path, preset) == (0, 1, [])
     assert calls == [[sys.executable, str(helper), "--install-dir", str(tmp_path),
                       "--preserve-restart-policy",
                       "--service", "search", "--service", "search-db"]]
@@ -444,10 +451,55 @@ def test_preset_does_not_stop_shared_core_service(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(selection.subprocess, "run", record)
-    assert selection.restore_preset(tmp_path, preset) == (0, 1, [])
+    assert restore(tmp_path, preset) == (0, 1, [])
     assert calls == [[sys.executable, str(helper), "--install-dir", str(tmp_path),
                       "--preserve-restart-policy",
                       "--service", "langfuse"]]
+
+
+def test_preset_stops_local_litellm_despite_inactive_external_overlay(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    (tmp_path / "docker-compose.base.yml").write_text(
+        "services:\n  dashboard-api: {}\n", encoding="utf-8",
+    )
+    (tmp_path / "docker-compose.external-llm.yml").write_text(
+        "services:\n  litellm: {}\n", encoding="utf-8",
+    )
+    extension(tmp_path, "litellm")
+    helper = tmp_path / "scripts" / "stop-owned-containers.py"
+    helper.parent.mkdir()
+    helper.write_text("", encoding="utf-8")
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:litellm\n", encoding="utf-8")
+    calls = []
+
+    def record(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(selection.subprocess, "run", record)
+    assert restore(tmp_path, preset) == (0, 1, [])
+    assert calls == [[sys.executable, str(helper), "--install-dir", str(tmp_path),
+                      "--preserve-restart-policy", "--service", "litellm"]]
+
+
+def test_preset_refuses_litellm_disable_with_selected_external_overlay(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    (tmp_path / "docker-compose.base.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "docker-compose.external-llm.yml").write_text(
+        "services:\n  litellm: {}\n", encoding="utf-8",
+    )
+    target = extension(tmp_path, "litellm")
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:litellm\n", encoding="utf-8")
+    monkeypatch.setattr(selection.subprocess, "run", lambda *args, **kwargs: pytest.fail(
+        "selected external gateway LiteLLM must not be stopped",
+    ))
+    with pytest.raises(selection.SelectionError, match="requires litellm"):
+        restore(tmp_path, preset, compose_flags=(
+            "-f docker-compose.base.yml -f docker-compose.external-llm.yml"
+        ))
+    assert (target / "compose.yaml").is_file()
 
 
 def test_preset_stops_shared_service_only_after_last_overlay_is_disabled(tmp_path, monkeypatch):
@@ -469,7 +521,7 @@ def test_preset_stops_shared_service_only_after_last_overlay_is_disabled(tmp_pat
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(selection.subprocess, "run", record)
-    assert selection.restore_preset(tmp_path, preset) == (0, 2, [])
+    assert restore(tmp_path, preset) == (0, 2, [])
     assert calls == [
         [sys.executable, str(helper), "--install-dir", str(tmp_path),
          "--preserve-restart-policy",
@@ -493,7 +545,7 @@ def test_preset_stop_failure_keeps_marker_enabled(tmp_path, monkeypatch):
         lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", "stop refused"),
     )
     with pytest.raises(selection.SelectionError, match="Could not confirm stop for search"):
-        selection.restore_preset(tmp_path, preset)
+        restore(tmp_path, preset)
     assert (target / "compose.yaml").is_file()
 
 
@@ -506,5 +558,5 @@ def test_preset_empty_fragment_never_issues_unfiltered_stop(tmp_path, monkeypatc
     monkeypatch.setattr(selection.subprocess, "run", lambda *args, **kwargs: pytest.fail(
         "empty fragment must not invoke an unfiltered owned-container stop",
     ))
-    assert selection.restore_preset(tmp_path, preset) == (0, 1, [])
+    assert restore(tmp_path, preset) == (0, 1, [])
     assert (target / "compose.yaml.disabled").is_file()

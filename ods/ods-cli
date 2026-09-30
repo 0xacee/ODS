@@ -3305,6 +3305,7 @@ validate_preset_compatibility() {
 cmd_preset() {
     check_install
     sr_load
+    load_env
 
     local action="${1:-list}"
     local name="${2:-}"
@@ -3393,9 +3394,15 @@ META
                 for sid in "${SERVICE_IDS[@]}"; do
                     [[ "${SERVICE_CATEGORIES[$sid]:-}" == "core" ]] && core_args+=(--core-service "$sid")
                 done
+                # Snapshot the current selected overlays before any marker move.
+                # Inactive external-LLM overlays must not shield an optional
+                # local LiteLLM container from the preset's stop operation.
+                local current_flags
+                current_flags=$(get_compose_flags) || error "Could not resolve the current Compose stack"
                 local counts enabled disabled
                 if ! counts=$("$selector_python" "$selector" restore-preset \
                     --install-dir "$INSTALL_DIR" --preset-file "$preset_dir/extensions.list" \
+                    --compose-flags "$current_flags" \
                     "${core_args[@]}"); then
                     warn "Preset extension selection was not fully restored. Resolve the reported issue, then retry 'ods preset load $name'."
                     return 1

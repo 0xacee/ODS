@@ -632,22 +632,54 @@ def _dependency_order(graph: dict[str, set[str]]) -> list[str]:
     return order
 
 
-def _base_compose_services(install_dir: Path) -> set[str]:
-    """Reserve services also declared by a base or platform Compose overlay."""
-    paths = list(install_dir.glob("docker-compose*.yml"))
-    paths.extend((install_dir / "installers").glob("*/docker-compose*.yml"))
+def _image_providers(path: Path) -> set[str]:
+    """Find services whose selected fragment supplies the runnable image."""
+    document = _read_yaml(path)
+    definitions = document.get("services") if isinstance(document, dict) else None
+    if not isinstance(definitions, dict):
+        raise SelectionError(f"Invalid selected Compose services: {path}")
+    return {name for name, definition in definitions.items()
+            if isinstance(definition, dict) and ("image" in definition or "build" in definition)}
+
+
+def _base_compose_services(install_dir: Path, compose_flags: str) -> tuple[set[str], set[str]]:
+    """Reserve services in the selected non-extension Compose overlays only."""
+    try:
+        flags = shlex.split(compose_flags)
+    except ValueError as exc:
+        raise SelectionError("Invalid current Compose flags") from exc
+    if (not flags or len(flags) % 2
+            or any(flag != "-f" for flag in flags[::2])):
+        raise SelectionError("Invalid current Compose flags")
     services: set[str] = set()
-    for path in sorted(paths):
+    providers: set[str] = set()
+    selected_base = False
+    root = install_dir.resolve(strict=True)
+    for name in flags[1::2]:
+        path = Path(name)
+        if not path.is_absolute():
+            path = root / path
         if path.is_symlink() or not path.is_file():
-            raise SelectionError(f"Invalid platform Compose file: {path}")
+            raise SelectionError(f"Invalid selected Compose file: {path}")
+        path = path.resolve(strict=True)
+        if not path.is_relative_to(root):
+            raise SelectionError(f"Selected Compose file is outside the install: {path}")
+        parts = path.relative_to(root).parts
+        if parts[:2] == ("extensions", "services") or parts[:2] == ("data", "user-extensions"):
+            continue
+        selected_base = True
         fragment_services, _ = _compose_details(path)
         services.update(fragment_services)
-    return services
+        providers.update(_image_providers(path))
+    if not selected_base:
+        raise SelectionError("Current Compose flags contain no base overlay")
+    return services, services - providers
 
 
 def restore_preset(
     install_dir: Path, preset_file: Path, timeout: float = 15.0,
     core_services: set[str] | None = None,
+    compose_flags: str | None = None,
 ) -> tuple[int, int, list[str]]:
     """Restore markers from a valid selection, keeping dependencies valid per move."""
     if timeout <= 0 or timeout > 120:
@@ -685,9 +717,15 @@ def restore_preset(
         # Compose overlays can contribute to an existing service (Langfuse
         # also declares litellm). Stopping that shared service when only the
         # extension is removed would interrupt Core.
-        base_services = _base_compose_services(install_dir)
+        if compose_flags is None:
+            raise SelectionError("Preset restore requires current Compose flags")
+        base_services, base_needs_provider = _base_compose_services(install_dir, compose_flags)
         selected_fragments = {
             service_id: _compose_details(directories[service_id] / "compose.yaml")[0]
+            for service_id in current_graph
+        }
+        selected_providers = {
+            service_id: _image_providers(directories[service_id] / "compose.yaml")
             for service_id in current_graph
         }
         disable_order = [service_id for service_id in reversed(_dependency_order(current_graph))
@@ -707,6 +745,12 @@ def restore_preset(
             target = directory / ("compose.yaml" if enable else "compose.yaml.disabled")
             try:
                 if not enable:
+                    for name in selected_providers[service_id] & base_needs_provider:
+                        if not any(name in providers for other_id, providers in selected_providers.items()
+                                   if other_id != service_id):
+                            raise SelectionError(
+                                f"Selected base overlay requires {name}; selection unchanged"
+                            )
                     shared_services = base_services.copy()
                     for other_id, names in selected_fragments.items():
                         if other_id != service_id:
@@ -733,6 +777,7 @@ def restore_preset(
                 enabled_count += 1
             else:
                 selected_fragments.pop(service_id)
+                selected_providers.pop(service_id)
                 disabled_count += 1
         return enabled_count, disabled_count, skipped
 
@@ -758,7 +803,7 @@ def main() -> int:
                 raise SelectionError("Preset restore requires only --preset-file")
             enabled, disabled, skipped = restore_preset(
                 args.install_dir, args.preset_file, args.lock_timeout,
-                set(args.core_service),
+                set(args.core_service), args.compose_flags or None,
             )
             for service_id in skipped:
                 print(f"WARNING: Preset skipped unavailable extension {service_id}",
