@@ -732,6 +732,22 @@ def restore_preset(
                          if current[service_id] and not desired[service_id]]
         enable_order = [service_id for service_id in _dependency_order(desired_graph)
                         if not current[service_id] and desired[service_id]]
+        # A selected base overlay can augment a service whose runnable image
+        # lives in an extension (the external LiteLLM overlays do this). Check
+        # the whole requested selection before stopping or moving any marker.
+        # A newly enabled provider is not counted: disable-first ordering would
+        # otherwise leave an invalid intermediate stack.
+        retained_providers = set().union(*(
+            providers for service_id, providers in selected_providers.items()
+            if desired[service_id]
+        ))
+        for service_id in disable_order:
+            missing = (selected_providers[service_id] & base_needs_provider) - retained_providers
+            if missing:
+                raise SelectionError(
+                    f"Selected base overlay requires {', '.join(sorted(missing))}; "
+                    "selection unchanged"
+                )
         enabled_count = 0
         disabled_count = 0
         cache = install_dir / ".compose-flags"
@@ -745,12 +761,6 @@ def restore_preset(
             target = directory / ("compose.yaml" if enable else "compose.yaml.disabled")
             try:
                 if not enable:
-                    for name in selected_providers[service_id] & base_needs_provider:
-                        if not any(name in providers for other_id, providers in selected_providers.items()
-                                   if other_id != service_id):
-                            raise SelectionError(
-                                f"Selected base overlay requires {name}; selection unchanged"
-                            )
                     shared_services = base_services.copy()
                     for other_id, names in selected_fragments.items():
                         if other_id != service_id:

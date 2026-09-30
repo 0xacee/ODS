@@ -3305,7 +3305,6 @@ validate_preset_compatibility() {
 cmd_preset() {
     check_install
     sr_load
-    load_env
 
     local action="${1:-list}"
     local name="${2:-}"
@@ -3398,6 +3397,7 @@ META
                 # Inactive external-LLM overlays must not shield an optional
                 # local LiteLLM container from the preset's stop operation.
                 local current_flags
+                load_env
                 current_flags=$(get_compose_flags) || error "Could not resolve the current Compose stack"
                 local counts enabled disabled
                 if ! counts=$("$selector_python" "$selector" restore-preset \

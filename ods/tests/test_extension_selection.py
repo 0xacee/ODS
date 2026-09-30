@@ -490,8 +490,9 @@ def test_preset_refuses_litellm_disable_with_selected_external_overlay(tmp_path,
         "services:\n  litellm: {}\n", encoding="utf-8",
     )
     target = extension(tmp_path, "litellm")
+    unrelated = extension(tmp_path, "zz-unrelated")
     preset = tmp_path / "extensions.list"
-    preset.write_text("disabled:litellm\n", encoding="utf-8")
+    preset.write_text("disabled:litellm\ndisabled:zz-unrelated\n", encoding="utf-8")
     monkeypatch.setattr(selection.subprocess, "run", lambda *args, **kwargs: pytest.fail(
         "selected external gateway LiteLLM must not be stopped",
     ))
@@ -500,6 +501,7 @@ def test_preset_refuses_litellm_disable_with_selected_external_overlay(tmp_path,
             "-f docker-compose.base.yml -f docker-compose.external-llm.yml"
         ))
     assert (target / "compose.yaml").is_file()
+    assert (unrelated / "compose.yaml").is_file()
 
 
 def test_preset_stops_shared_service_only_after_last_overlay_is_disabled(tmp_path, monkeypatch):
