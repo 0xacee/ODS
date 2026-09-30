@@ -38,10 +38,15 @@ trap 'rm -rf "$FIXTURE"' EXIT
 # ---------------------------------------------------------------------------
 # Fixture: minimal install dir the CLI accepts (check_install + sr_load)
 # ---------------------------------------------------------------------------
-mkdir -p "$FIXTURE/lib" "$FIXTURE/scripts" "$FIXTURE/extensions/services" "$FIXTURE/data/user-extensions"
+mkdir -p "$FIXTURE/bin" "$FIXTURE/lib" "$FIXTURE/scripts" "$FIXTURE/extensions/services" "$FIXTURE/data/user-extensions"
 cp "$ROOT_DIR/ods-cli" "$FIXTURE/ods-cli"
 cp "$ROOT_DIR"/lib/*.sh "$FIXTURE/lib/"
 cp "$ROOT_DIR/scripts/extension-selection.py" "$FIXTURE/scripts/"
+cat > "$FIXTURE/bin/docker" <<'SH'
+#!/bin/sh
+exit 0
+SH
+chmod +x "$FIXTURE/bin/docker"
 : > "$FIXTURE/docker-compose.base.yml"
 echo "GPU_BACKEND=nvidia" > "$FIXTURE/.env"
 
@@ -70,7 +75,7 @@ USEREXT="$FIXTURE/data/user-extensions/usvc"
 
 run_cli() {
     # Never let a non-zero CLI exit kill the test; callers assert on output/state
-    ODS_HOME="$FIXTURE" bash "$FIXTURE/ods-cli" "$@" 2>&1 || true
+    ODS_HOME="$FIXTURE" PATH="$FIXTURE/bin:$PATH" bash "$FIXTURE/ods-cli" "$@" 2>&1 || true
 }
 
 echo ""

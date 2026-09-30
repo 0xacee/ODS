@@ -3089,7 +3089,8 @@ cmd_disable() {
         if docker compose "${flags[@]}" stop "$service_id" 2>/dev/null; then
             stopped=true
         else
-            warn "Could not confirm Docker stop for $service_id; selection will still be disabled."
+            warn "Could not confirm Docker stop for $service_id; selection was not disabled."
+            return 1
         fi
     else
         _stop_owned_containers_for_recovery "$service_id" || return 1

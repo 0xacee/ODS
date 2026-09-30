@@ -63,6 +63,16 @@ def test_bad_selected_compose_fails_closed(tmp_path):
         selection._enabled_dependents(tmp_path, "search")
 
 
+def test_missing_yaml_module_fails_closed_for_selected_peer(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    extension(tmp_path, "search")
+    extension(tmp_path, "consumer", compose_depends=("search",))
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    with pytest.raises(selection.SelectionError, match="PyYAML is required"):
+        selection.run("disable", tmp_path, "search")
+    assert (tmp_path / "extensions" / "services" / "search" / "compose.yaml").is_file()
+
+
 def test_state_change_between_preflight_and_commit_retains_selection_and_data(tmp_path):
     (tmp_path / "data" / "user-extensions").mkdir(parents=True)
     target = extension(tmp_path, "search")

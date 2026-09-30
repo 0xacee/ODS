@@ -27,12 +27,6 @@ try:
 except ImportError:  # pragma: no cover - exercised by POSIX CI
     msvcrt = None
 
-try:
-    import yaml
-except ImportError as exc:  # pragma: no cover - installer requires PyYAML
-    raise SystemExit("PyYAML is required for extension selection") from exc
-
-
 MAX_YAML_BYTES = 1024 * 1024
 SERVICE_ID = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 
@@ -43,6 +37,10 @@ class SelectionError(Exception):
 
 def _read_yaml(path: Path) -> object:
     """Read a bounded regular YAML file without following its final symlink."""
+    try:
+        import yaml
+    except ImportError as exc:
+        raise SelectionError("PyYAML is required to inspect extension dependencies") from exc
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)

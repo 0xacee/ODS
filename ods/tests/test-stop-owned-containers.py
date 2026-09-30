@@ -226,6 +226,36 @@ def test_disable_renames_recipe_only_after_safe_recovery(tmp_path, recovery_succ
     assert surviving.read_text() == 'services: {}\n'
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX Linux CLI execution')
+def test_disable_preserves_selection_when_compose_stop_fails(tmp_path):
+    version = subprocess.run(['bash', '-c', 'echo "${BASH_VERSINFO[0]}"'], capture_output=True, text=True)
+    if version.returncode != 0 or int(version.stdout.strip()) < 4:
+        pytest.skip('Linux CLI requires Bash 4+')
+    scripts = tmp_path / 'scripts'
+    scripts.mkdir()
+    shutil.copyfile(ODS / 'scripts/extension-selection.py', scripts / 'extension-selection.py')
+    recipe = tmp_path / 'data/user-extensions/example/compose.yaml'
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text('services: {}\n')
+    cache = tmp_path / '.compose-flags'
+    cache.write_text('unchanged')
+    common = ('set -eu\nINSTALL_DIR="$1"\nODS_PYTHON_CMD="$2"\n'
+              'check_install() { :; }; load_env() { :; }; sr_load() { :; }\n'
+              'get_compose_flags() { echo "-f docker-compose.base.yml"; }; sr_resolve() { echo "$1"; }\n'
+              'declare -A SERVICE_CATEGORIES=([example]=optional); SERVICE_IDS=(example)\n'
+              'docker() { : > "$INSTALL_DIR/docker-attempt"; return 71; }\n'
+              'warn() { echo "$*" >&2; }; success() { :; }; error() { echo "$*" >&2; exit 1; }\n')
+    common += shell_function(ODS / 'ods-cli', 'cmd_disable')
+    result = subprocess.run(['bash', '-s', '--', str(tmp_path), sys.executable],
+                            input=common + '\ncmd_disable example\n', text=True, capture_output=True, timeout=15)
+    assert result.returncode != 0
+    assert 'selection was not disabled' in result.stderr
+    assert (tmp_path / 'docker-attempt').exists()
+    assert recipe.read_text() == 'services: {}\n'
+    assert not recipe.with_suffix('.yaml.disabled').exists()
+    assert cache.read_text() == 'unchanged'
+
+
 @pytest.mark.skipif(os.environ.get('ODS_RUN_DOCKER_SECURITY_TESTS') != '1',
                     reason='Requires an explicitly selected disposable Docker test host')
 def test_real_docker_recovery_stops_only_the_owned_installation(tmp_path):
