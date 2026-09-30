@@ -41,7 +41,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path, PureWindowsPath
 from socketserver import ThreadingMixIn
 from urllib import error as urllib_error, request as urllib_request
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 # Model Switchboard (PR 1, observe mode): stdlib-only sibling package. The
 # import is fail-open — a missing/broken package disables state recording but
@@ -5885,7 +5885,7 @@ _ROOTLESS_BIND_OWNERSHIP_SERVICES = {
 
 
 def _repair_rootless_data_ownership(service_id: str) -> None:
-    """Apply the built-in rootless bind-mount ownership contract before start."""
+    """Prepare built-in bind mounts before a container starts."""
     if platform.system() != "Linux" or service_id not in _ROOTLESS_BIND_OWNERSHIP_SERVICES:
         return
 
@@ -5896,9 +5896,17 @@ def _repair_rootless_data_ownership(service_id: str) -> None:
     if not bash:
         raise RuntimeError("Bash is required for Docker rootless ownership repair")
 
+    command = [bash, str(helper), str(INSTALL_DIR), service_id]
+    if service_id == "whisper":
+        # A lean install skips Phase 11's UID 1000 cache preparation. The
+        # Library add-back must prepare it for rootful as well as rootless Docker.
+        command = [
+            bash, "-c", 'source "$1"; ods_prepare_whisper_cache_ownership "$2"',
+            "ods-whisper-cache", str(helper), str(INSTALL_DIR),
+        ]
     try:
         result = subprocess.run(
-            [bash, str(helper), str(INSTALL_DIR), service_id],
+            command,
             cwd=str(INSTALL_DIR),
             env=os.environ.copy(),
             capture_output=True,
@@ -5951,6 +5959,82 @@ def _extension_stop_targets(service_id: str) -> list[str]:
     return targets
 
 
+def _whisper_model_ready_after_start(
+    max_wait_seconds: float = 480, compose_env: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Make a Library-started Whisper usable, as installer Phase 12 does."""
+    try:
+        env = load_env(INSTALL_DIR / ".env")
+    except (OSError, UnicodeError, ValueError):
+        return False, "Whisper started, but its selected model could not be read; run ods repair voice"
+    # Compose process environment overrides .env interpolation. Probe the same
+    # model and published port that the just-started container received.
+    if compose_env is not None:
+        for key in ("AUDIO_STT_MODEL", "WHISPER_PORT", "GPU_BACKEND", "WHISPER_ACCELERATION"):
+            if key in compose_env:
+                env[key] = compose_env[key]
+    fallback_model = (
+        "deepdml/faster-whisper-large-v3-turbo-ct2"
+        if env.get("GPU_BACKEND") == "nvidia" and env.get("WHISPER_ACCELERATION", "cuda") == "cuda"
+        else "Systran/faster-whisper-base"
+    )
+    model = str(env.get("AUDIO_STT_MODEL") or fallback_model).strip()
+    raw_port = str(env.get("WHISPER_PORT") or "9000").strip()
+    if (not model or len(model) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in model)
+            or not raw_port.isascii() or not raw_port.isdecimal() or len(raw_port) > 5
+            or not 1 <= int(raw_port) <= 65535):
+        return False, "Whisper started, but its selected model or port is invalid; run ods repair voice"
+
+    base_url = f"http://127.0.0.1:{int(raw_port)}/v1/models"
+    model_url = f"{base_url}/{quote(model, safe='')}"
+    deadline = time.monotonic() + max(0.0, max_wait_seconds)
+
+    def probe(url: str) -> bool:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            with urllib_request.urlopen(url, timeout=min(5, remaining)) as response:
+                return response.status == 200
+        except (urllib_error.URLError, TimeoutError, OSError):
+            return False
+
+    ready_deadline = min(deadline, time.monotonic() + 30)
+    while time.monotonic() < ready_deadline:
+        if probe(base_url):
+            break
+        time.sleep(min(1, max(0, ready_deadline - time.monotonic())))
+    else:
+        return False, "Whisper started, but its models API is not ready; run ods repair voice"
+
+    if probe(model_url):
+        return True, ""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False, "Whisper started, but its model is not cached; run ods repair voice"
+    try:
+        request = urllib_request.Request(model_url, data=b"", method="POST")
+        with urllib_request.urlopen(request, timeout=min(30, remaining)) as response:
+            if not 200 <= response.status < 300:
+                return False, "Whisper started, but its model download was rejected; run ods repair voice"
+    except urllib_error.HTTPError as exc:
+        if 400 <= exc.code < 500 and exc.code not in (408, 409, 429):
+            return False, (
+                f"Whisper model download was rejected (HTTP {exc.code}); "
+                "check AUDIO_STT_MODEL or run ods repair voice"
+            )
+        # A concurrent download or transient failure can still populate the cache.
+    except (urllib_error.URLError, TimeoutError, OSError):
+        # Speaches can continue downloading after the trigger times out.
+        pass
+
+    while time.monotonic() < deadline:
+        if probe(model_url):
+            return True, ""
+        time.sleep(min(5, max(0, deadline - time.monotonic())))
+    return False, "Whisper started, but its model is not cached; run ods repair voice"
+
+
 def docker_compose_action(service_id: str, action: str) -> tuple:
     try:
         flags = resolve_compose_flags()
@@ -5973,6 +6057,7 @@ def docker_compose_action(service_id: str, action: str) -> tuple:
             return True, ""
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as recovery_error:
             return False, f"Could not stop verified ODS containers: {recovery_error}"
+    action_deadline = time.monotonic() + 630
     compose_env = os.environ.copy()
     if action == "start":
         if service_id == "ods-proxy":
@@ -6020,6 +6105,11 @@ def docker_compose_action(service_id: str, action: str) -> tuple:
                 _write_progress(service_id, 'started' if ok else 'error', 'CLI verification complete' if ok else 'CLI verification failed',
                                 error=error or None, exit_verified=ok)
                 return ok, error
+        if result.returncode == 0 and action == "start" and service_id == "whisper":
+            return _whisper_model_ready_after_start(
+                max_wait_seconds=min(480, max(0, action_deadline - time.monotonic())),
+                compose_env=compose_env,
+            )
         return (True, "") if result.returncode == 0 else (False, result.stderr[:500])
     except subprocess.TimeoutExpired:
         return False, f"Docker compose operation timed out ({timeout}s)"
