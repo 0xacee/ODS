@@ -17,6 +17,23 @@
 # ============================================================================
 
 ods_progress 48 "images" "Downloading container images"
+if [[ "${ODS_GATEWAY_ONLY:-false}" == true && "${DRY_RUN:-false}" != true ]]; then
+    # Compose merges profile lists from overlays. A caller's inherited
+    # COMPOSE_PROFILES=local-inference can therefore re-enable a managed model
+    # even though the external route normally profiles it out. Fail before
+    # pulling an unnecessary image; Phase 11 rechecks before container launch.
+    [[ -n "${COMPOSE_FLAGS:-}" ]] || {
+        ai_bad "Gateway-only Compose selection is unavailable before image pulls."
+        exit 1
+    }
+    read -ra _gateway_compose_flags <<< "$COMPOSE_FLAGS"
+    if ! ods_gateway_assert_no_managed_inference "${_gateway_compose_flags[@]}" \
+        2>>"$LOG_FILE"; then
+        ai_bad "Gateway-only Compose could start ODS-managed inference; inspect $LOG_FILE and clear COMPOSE_PROFILES."
+        exit 1
+    fi
+    unset _gateway_compose_flags
+fi
 if [[ "$GPU_BACKEND" == "nvidia" && "${ENABLE_COMFYUI:-}" == "true" ]]; then
     show_phase 4 6 "Downloading Modules" "~5-10 min + ~30 min ComfyUI build"
 else
@@ -49,7 +66,7 @@ if [[ "${ODS_MODE:-local}" != "cloud" && "$_lemonade_external" != "true" && -z "
     fi
 fi
 [[ "$GPU_BACKEND" == "amd" && "${ENABLE_COMFYUI:-false}" == "true" ]] && PULL_LIST+=("ignatberesnev/comfyui-gfx1151:v0.2@sha256:a38260b56a94fdf5aa9f951a96a73ef1987b70ebcbd4757447708a756a67abc0|COMFYUI — image generation engine (gfx1151)")
-PULL_LIST+=("ghcr.io/open-webui/open-webui:v0.7.2@sha256:16d9a3615b45f14a0c89f7ad7a3bf151f923ed32c2e68f9204eb17d1ce40774b|OPEN WEBUI — interface module")
+[[ "${ENABLE_OPEN_WEBUI:-true}" != "true" ]] || PULL_LIST+=("ghcr.io/open-webui/open-webui:v0.7.2@sha256:16d9a3615b45f14a0c89f7ad7a3bf151f923ed32c2e68f9204eb17d1ce40774b|OPEN WEBUI — interface module")
 [[ "${ENABLE_PERPLEXICA:-false}" == "true" ]] && PULL_LIST+=("itzcrazykns1337/vane:v1.12.2@sha256:61f2bbf3386ff3df08911fb3de0e1893b04702a4d49ef13fbadbda937b47ab7c|PERPLEXICA — deep research engine")
 if [[ "$ENABLE_VOICE" == "true" ]]; then
     if [[ "$GPU_BACKEND" == "nvidia" && "${WHISPER_ACCELERATION:-cuda}" == "cuda" ]]; then
