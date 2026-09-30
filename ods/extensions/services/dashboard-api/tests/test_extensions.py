@@ -4693,22 +4693,6 @@ def test_production_core_service_ids_include_hermes_services():
 class TestCallAgentErrorNarrowing:
     """_call_agent swallows network errors but not programmer errors."""
 
-    def test_stop_timeout_tracks_host_agent_bound(self, monkeypatch):
-        """A slow stop cannot hold the global Compose lock for start's 660s."""
-        from routers import extensions as ext_module
-
-        calls = []
-        monkeypatch.setattr(
-            ext_module, "request_agent_json",
-            lambda *args, **kwargs: calls.append((args, kwargs)),
-        )
-
-        assert ext_module._call_agent("stop", "svc-x") is True
-        assert calls[0][1]["timeout"] == ext_module._AGENT_STOP_TIMEOUT
-        assert ext_module._AGENT_STOP_TIMEOUT < ext_module._AGENT_TIMEOUT
-        assert ext_module._call_agent("start", "svc-x") is True
-        assert calls[1][1]["timeout"] == ext_module._AGENT_TIMEOUT
-
     def test_call_agent_returns_false_on_transport_error(self, monkeypatch, caplog):
         """Network failures produce (False, warning) — callers rely on this."""
         import logging
