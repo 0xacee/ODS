@@ -1657,36 +1657,23 @@ def _serialize_extension_operation(func):
     return wrapped
 
 
-def _extensions_lock_candidates() -> list[Path]:
-    data_path = Path(DATA_DIR)
-    return [
-        data_path / ".extensions-lock",
-        data_path / "config" / ".extensions-lock",
-    ]
-
-
 def _extensions_lock_path() -> Path:
-    last_error: OSError | None = None
-    for lock_path in _extensions_lock_candidates():
-        try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            operation_lock_dir = lock_path.parent / ".extension-operation-locks"
-            if operation_lock_dir.is_symlink():
-                raise OSError("Extension operation lock directory is a symlink")
-            operation_lock_dir.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                dir=operation_lock_dir,
-                prefix=".write-probe-",
-            ):
-                pass
-            lock_path.touch(exist_ok=True)
-            if lock_path != Path(DATA_DIR) / ".extensions-lock":
-                logger.warning("extensions lock falling back to %s", lock_path)
-            return lock_path
-        except OSError as exc:
-            last_error = exc
-    assert last_error is not None
-    raise last_error
+    """Use the same canonical lock file as the host selection helper.
+
+    A fallback lock has a different inode, so it cannot serialize Dashboard
+    install/update/uninstall with host CLI selection. If /data is unwritable,
+    reject the mutation instead of proceeding under an unrelated lock.
+    """
+    lock_path = Path(DATA_DIR) / ".extensions-lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    operation_lock_dir = lock_path.parent / ".extension-operation-locks"
+    if operation_lock_dir.is_symlink():
+        raise OSError("Extension operation lock directory is a symlink")
+    operation_lock_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=operation_lock_dir, prefix=".write-probe-"):
+        pass
+    lock_path.touch(exist_ok=True)
+    return lock_path
 
 
 async def _inspect_non_http_user_services(configs: dict, statuses: dict) -> None:
@@ -4809,13 +4796,18 @@ def uninstall_extension(service_id: str, include_data_info: bool = Query(True), 
                     f"({', '.join(dependents)}). Disable them first, then remove {service_id}."
                 ),
             )
-        # Stop BEFORE touching the definition (prevents zombie containers).
-        if not _call_agent("stop", service_id):
-            logger.error("Could not stop failed extension %s via agent; refusing to uninstall", service_id)
-            raise HTTPException(
-                status_code=502,
-                detail=f"Host agent failed to stop extension: {service_id}; extension was not removed",
-            )
+        # The host checks dependents, stops owned containers, and disables the
+        # marker under its graph lock. An independent stop followed by a
+        # Dashboard-side rename could race a CLI selection.
+        try:
+            _select_extensions_on_host("disable", [service_id])
+        except HTTPException as exc:
+            if exc.status_code == 502:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"{exc.detail}; extension was not removed",
+                ) from exc
+            raise
         stopped_before_removal = True
 
     with _extensions_lock():
@@ -4826,19 +4818,13 @@ def uninstall_extension(service_id: str, include_data_info: bool = Query(True), 
                 status_code=400, detail="Extension directory is a symlink",
             )
 
-        if stopped_before_removal:
-            # Complete the disable step first, so a removal that fails part-way
-            # leaves a disabled definition that the ordinary path can remove.
-            try:
-                os.replace(enabled_compose, ext_dir / "compose.yaml.disabled")
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                logger.error("Failed to disable extension %s before removal: %s", service_id, e)
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Extension stopped, but its definition could not be disabled: {e}",
-                )
+        # Selection can change after the host RPC and before this lock. The
+        # host CLI uses the same lock, so this check protects the whole delete.
+        if enabled_compose.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Extension selection changed: {service_id}; disable it and retry removal",
+            )
 
         try:
             shutil.rmtree(ext_dir)

@@ -1804,7 +1804,7 @@ class TestUninstallExtension:
         assert (data_dir / "state.db").read_text() == "owner data"
         assert body["data_info"] is not None
 
-    def test_uninstall_error_state_invalidates_compose_cache_once(
+    def test_uninstall_error_state_invalidates_after_selection_and_removal(
         self, test_client, monkeypatch, tmp_path,
     ):
         user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=True)
@@ -1826,7 +1826,7 @@ class TestUninstallExtension:
         )
 
         assert resp.status_code == 200
-        assert order == ["agent:stop", "invalidate"]
+        assert order == ["agent:stop", "invalidate", "invalidate"]
 
     def test_uninstall_error_state_stop_failure_keeps_extension(
         self, test_client, monkeypatch, tmp_path,
@@ -1902,7 +1902,47 @@ class TestUninstallExtension:
         assert resp.status_code == 500
         assert not (user_dir / "my-ext" / "compose.yaml").exists()
         assert (user_dir / "my-ext" / "compose.yaml.disabled").exists()
-        assert invalidations == [1]
+        assert invalidations == [1, 1]
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_uninstall_refuses_reenabled_definition_before_removal(
+        self, test_client, monkeypatch, tmp_path, enabled,
+    ):
+        """A CLI re-enable between preflight and delete must retain files."""
+        from routers import extensions as ext_module
+
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=enabled)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        directory = user_dir / "my-ext"
+        if enabled:
+            self._write_progress(tmp_path, "my-ext", "error", error="boom")
+            host_selection = ext_module._select_extensions_on_host
+
+            def select_then_reenable(action, service_ids):
+                outcome = host_selection(action, service_ids)
+                (directory / "compose.yaml.disabled").rename(directory / "compose.yaml")
+                return outcome
+
+            monkeypatch.setattr(ext_module, "_select_extensions_on_host", select_then_reenable)
+        else:
+            # Simulate a host CLI enable just before Dashboard obtains its
+            # canonical graph lock for removal.
+            original_lock = ext_module._extensions_lock
+
+            @contextlib.contextmanager
+            def reenable_before_lock():
+                (directory / "compose.yaml.disabled").rename(directory / "compose.yaml")
+                with original_lock():
+                    yield
+
+            monkeypatch.setattr(ext_module, "_extensions_lock", reenable_before_lock)
+
+        response = test_client.delete(
+            "/api/extensions/my-ext", headers=test_client.auth_headers,
+        )
+        assert response.status_code == 409
+        assert directory.is_dir()
+        assert (directory / "compose.yaml").exists()
 
     @pytest.mark.parametrize("progress_status", [None, "error"])
     def test_uninstall_disabled_extension_does_not_stop(
@@ -4749,29 +4789,27 @@ class TestCallAgentErrorNarrowing:
         )
 
 
-def test_extensions_lock_falls_back_when_data_root_is_unwritable(
+def test_extensions_lock_fails_closed_when_data_root_is_unwritable(
     tmp_path, monkeypatch,
 ):
-    """Extension installs should still lock when /data itself is not writable."""
+    """Mutations must not use a lock invisible to the host selector."""
     from routers import extensions as ext_module
 
     blocked_parent = tmp_path / "blocked-parent"
     blocked_parent.write_text("not a directory", encoding="utf-8")
     fallback_lock = tmp_path / "config" / ".extensions-lock"
-    monkeypatch.setattr(
-        ext_module,
-        "_extensions_lock_candidates",
-        lambda: [blocked_parent / ".extensions-lock", fallback_lock],
-    )
+    monkeypatch.setattr(ext_module, "DATA_DIR", str(blocked_parent))
 
-    with ext_module._extensions_lock():
-        assert fallback_lock.exists()
+    with pytest.raises(OSError):
+        with ext_module._extensions_lock():
+            pass
+    assert not fallback_lock.exists()
 
 
-def test_extension_operation_lock_falls_back_when_primary_lock_parent_cannot_create(
+def test_extension_operation_lock_fails_closed_when_canonical_parent_is_unwritable(
     tmp_path, monkeypatch,
 ):
-    """A stale root lock must not select a parent that cannot hold service locks."""
+    """Service locks must share the canonical graph lock's parent."""
     from routers import extensions as ext_module
 
     data_dir = tmp_path / "data"
@@ -4787,20 +4825,17 @@ def test_extension_operation_lock_falls_back_when_primary_lock_parent_cannot_cre
             raise PermissionError("primary operation lock directory is not writable")
         return original_named_temporary_file(*args, **kwargs)
 
-    monkeypatch.setattr(
-        ext_module,
-        "_extensions_lock_candidates",
-        lambda: [primary_lock, fallback_lock],
-    )
+    monkeypatch.setattr(ext_module, "DATA_DIR", str(data_dir))
     monkeypatch.setattr(
         ext_module.tempfile,
         "NamedTemporaryFile",
         fail_primary_write_probe,
     )
 
-    with ext_module._extension_operation_lock("aider"):
-        assert fallback_lock.exists()
-        assert (fallback_lock.parent / ".extension-operation-locks").is_dir()
+    with pytest.raises(PermissionError):
+        with ext_module._extension_operation_lock("aider"):
+            pass
+    assert not fallback_lock.exists()
 
 
 class TestUpdateHardening(TestUpdateExtension):

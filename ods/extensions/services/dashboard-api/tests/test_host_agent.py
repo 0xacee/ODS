@@ -2308,12 +2308,14 @@ class TestUpdateWire:
 
 
 class TestComposeToggleWire:
-    """End-to-end HTTP test for built-in compose toggles via the host agent."""
+    """An old Dashboard must not bypass host selection while updating."""
 
-    def test_client_posts_to_host_agent_and_renames_builtin_compose(
+    def test_legacy_toggle_fails_closed_without_changing_compose(
         self, tmp_path, monkeypatch, host_agent_wire_client,
     ):
         import threading
+        import urllib.error
+        import urllib.request
         from http.server import HTTPServer
 
         from routers import extensions as ext_router
@@ -2339,14 +2341,24 @@ class TestComposeToggleWire:
         thread.start()
         try:
             host_agent_wire_client(port)
-
-            assert ext_router._call_agent_compose_rename("activate", "fakesvc") is True
-            assert (ext_dir / "compose.yaml").exists()
-            assert not (ext_dir / "compose.yaml.disabled").exists()
-
-            assert ext_router._call_agent_compose_rename("deactivate", "fakesvc") is True
+            assert ext_router._call_agent_compose_rename("activate", "fakesvc") is False
             assert (ext_dir / "compose.yaml.disabled").exists()
             assert not (ext_dir / "compose.yaml").exists()
+
+            for action in ("activate", "deactivate"):
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/v1/extension/{action}",
+                    data=json.dumps({"service_id": "fakesvc"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json",
+                             "Authorization": "Bearer wire-test-secret"},
+                    method="POST",
+                )
+                with pytest.raises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(request, timeout=2)
+                assert rejected.value.code == 410
+                assert "Finish updating ODS" in rejected.value.read().decode("utf-8")
+                assert (ext_dir / "compose.yaml.disabled").exists()
+                assert not (ext_dir / "compose.yaml").exists()
 
             host_agent_wire_client(port, key="wrong-secret")
             assert ext_router._call_agent_compose_rename("activate", "fakesvc") is False
