@@ -180,6 +180,37 @@ def test_enable_refuses_divergent_dual_markers_without_losing_data(tmp_path):
     assert cache.read_text(encoding="utf-8") == "previous selection"
 
 
+def test_enable_reports_committed_selection_when_cache_save_fails(tmp_path, monkeypatch, capsys):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "consumer", enabled=False)
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    resolver = scripts / "resolve-compose-stack.sh"
+    resolver.write_text("#!/bin/sh\n", encoding="utf-8")
+    resolver.chmod(0o755)
+    monkeypatch.setattr(selection.shutil, "which", lambda _: "bash")
+    monkeypatch.setattr(
+        selection.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="-f docker-compose.base.yml\n", stderr="",
+        ),
+    )
+    original_replace = selection.os.replace
+
+    def fail_cache_replace(source, destination):
+        if Path(destination).name == ".compose-flags":
+            raise OSError("simulated cache write failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(selection.os, "replace", fail_cache_replace)
+
+    assert selection.run("enable", tmp_path, "consumer") == "enabled"
+    assert (target / "compose.yaml").is_file()
+    assert not (target / "compose.yaml.disabled").exists()
+    assert not (tmp_path / ".compose-flags").exists()
+    assert "WARNING: Cannot save Compose cache" in capsys.readouterr().err
+
+
 def test_separate_process_lock_blocks_commit_then_releases(tmp_path):
     (tmp_path / "data" / "user-extensions").mkdir(parents=True)
     target = extension(tmp_path, "search")

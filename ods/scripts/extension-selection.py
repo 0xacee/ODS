@@ -308,7 +308,8 @@ def _refresh_compose_flags(
     try:
         cache.unlink(missing_ok=True)
     except OSError as exc:
-        raise SelectionError(f"Cannot invalidate Compose cache: {cache}") from exc
+        print(f"WARNING: Cannot invalidate Compose cache: {cache}: {exc}", file=sys.stderr)
+        return
     resolver = install_dir / "scripts" / "resolve-compose-stack.sh"
     if not resolver.is_file() or not os.access(resolver, os.X_OK):
         return
@@ -343,10 +344,13 @@ def _refresh_compose_flags(
             os.fsync(stream.fileno())
         os.replace(temporary, cache)
     except OSError as exc:
-        raise SelectionError(f"Cannot save Compose cache: {cache}") from exc
+        print(f"WARNING: Cannot save Compose cache: {cache}: {exc}", file=sys.stderr)
     finally:
         if temporary is not None:
-            Path(temporary).unlink(missing_ok=True)
+            try:
+                Path(temporary).unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"WARNING: Cannot remove temporary Compose cache: {exc}", file=sys.stderr)
     for line in result.stderr.splitlines():
         if line.startswith("WARNING:"):
             print(line, file=sys.stderr)

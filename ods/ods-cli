@@ -3012,7 +3012,8 @@ cmd_enable() {
                     cmd_enable "$dep"
                 done
             else
-                warn "Proceeding without dependencies — $service_id may not start correctly."
+                warn "Cancelled enabling $service_id; enable its dependencies first."
+                return 1
             fi
         fi
     fi

@@ -115,6 +115,12 @@ if echo "$output" | grep -q "depends on disabled services: usvc"; then
 else
     fail "enable missed disabled user-extension dependency: $output"
 fi
+if [[ -f "$BUILTIN/compose.yaml.disabled" ]] && \
+   echo "$output" | grep -q "Cancelled enabling bsvc"; then
+    pass "declining dependency enable leaves the target disabled"
+else
+    fail "declining dependency enable changed selection or misreported result: $output"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. disable: an enabled user-extension dependent is refused
