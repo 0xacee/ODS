@@ -46,7 +46,7 @@ cp "$ROOT_DIR/scripts/stop-owned-containers.py" "$FIXTURE/scripts/"
 printf '#!/bin/sh\n[ "$1" = ps ]\n' > "$FIXTURE/bin/docker"
 chmod +x "$FIXTURE/bin/docker"
 export PATH="$FIXTURE/bin:$PATH"
-: > "$FIXTURE/docker-compose.base.yml"
+printf 'services: {}\n' > "$FIXTURE/docker-compose.base.yml"
 echo "GPU_BACKEND=nvidia" > "$FIXTURE/.env"
 
 # write_ext <dir> <id>

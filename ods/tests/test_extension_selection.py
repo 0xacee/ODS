@@ -285,7 +285,7 @@ def test_preset_restore_orders_dependents_and_prerequisites(tmp_path, monkeypatc
     preset.write_text("disabled:search\ndisabled:consumer\n", encoding="utf-8")
     original_replace = selection.os.replace
     moves = []
-    monkeypatch.setattr(selection, "_stop_for_disable", lambda *args: None)
+    monkeypatch.setattr(selection, "_stop_for_disable", lambda *args, **kwargs: None)
 
     def ordered_replace(source, target):
         moves.append(Path(source).parent.name)
@@ -349,7 +349,7 @@ def test_preset_partial_rename_failure_reports_committed_prefix(tmp_path, monkey
     cache = tmp_path / ".compose-flags"
     cache.write_text("stale", encoding="utf-8")
     original_replace = selection.os.replace
-    monkeypatch.setattr(selection, "_stop_for_disable", lambda *args: None)
+    monkeypatch.setattr(selection, "_stop_for_disable", lambda *args, **kwargs: None)
 
     def fail_second(source, target):
         if Path(source).parent.name == "search":
@@ -418,8 +418,66 @@ def test_preset_stops_every_owned_fragment_service_before_disabling(tmp_path, mo
     monkeypatch.setattr(selection.subprocess, "run", stopped_before_rename)
     assert selection.restore_preset(tmp_path, preset) == (0, 1, [])
     assert calls == [[sys.executable, str(helper), "--install-dir", str(tmp_path),
+                      "--preserve-restart-policy",
                       "--service", "search", "--service", "search-db"]]
     assert (target / "compose.yaml.disabled").is_file()
+
+
+def test_preset_does_not_stop_shared_core_service(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    (tmp_path / "docker-compose.base.yml").write_text(
+        "services:\n  litellm: {}\n", encoding="utf-8",
+    )
+    target = extension(tmp_path, "langfuse")
+    (target / "compose.yaml").write_text(
+        "services:\n  langfuse: {}\n  litellm: {}\n", encoding="utf-8",
+    )
+    helper = tmp_path / "scripts" / "stop-owned-containers.py"
+    helper.parent.mkdir()
+    helper.write_text("", encoding="utf-8")
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:langfuse\n", encoding="utf-8")
+    calls = []
+
+    def record(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(selection.subprocess, "run", record)
+    assert selection.restore_preset(tmp_path, preset) == (0, 1, [])
+    assert calls == [[sys.executable, str(helper), "--install-dir", str(tmp_path),
+                      "--preserve-restart-policy",
+                      "--service", "langfuse"]]
+
+
+def test_preset_stops_shared_service_only_after_last_overlay_is_disabled(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    for service_id in ("first", "second"):
+        target = extension(tmp_path, service_id)
+        (target / "compose.yaml").write_text(
+            f"services:\n  {service_id}: {{}}\n  shared: {{}}\n", encoding="utf-8",
+        )
+    helper = tmp_path / "scripts" / "stop-owned-containers.py"
+    helper.parent.mkdir()
+    helper.write_text("", encoding="utf-8")
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:first\ndisabled:second\n", encoding="utf-8")
+    calls = []
+
+    def record(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(selection.subprocess, "run", record)
+    assert selection.restore_preset(tmp_path, preset) == (0, 2, [])
+    assert calls == [
+        [sys.executable, str(helper), "--install-dir", str(tmp_path),
+         "--preserve-restart-policy",
+         "--service", "second"],
+        [sys.executable, str(helper), "--install-dir", str(tmp_path),
+         "--preserve-restart-policy",
+         "--service", "first", "--service", "shared"],
+    ]
 
 
 def test_preset_stop_failure_keeps_marker_enabled(tmp_path, monkeypatch):

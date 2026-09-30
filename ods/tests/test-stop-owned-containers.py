@@ -35,7 +35,8 @@ def test_docker_metadata_uses_utf8_independently_of_windows_codepage(monkeypatch
 
 
 def container(root, ident='a', service='example', project='ods'):
-    return {'Id': ident * 64, 'Config': {'Labels': {
+    return {'Id': ident * 64, 'HostConfig': {'RestartPolicy': {'Name': 'unless-stopped'}},
+            'Config': {'Labels': {
         'com.docker.compose.project': project,
         'com.docker.compose.project.working_dir': str(root),
         'com.docker.compose.project.config_files': str(root / 'docker-compose.base.yml'),
@@ -77,6 +78,22 @@ def test_service_recovery_preserves_other_installations_core_and_data(fixture):
 def test_extension_companions_need_explicit_service_targets(fixture):
     module, root, _, _ = fixture
     assert module.stop_owned_containers(root, ['example', 'example-db']) == ['a' * 64, 'b' * 64]
+
+
+def test_preset_stop_preserves_restart_policy_and_owner_data(fixture):
+    module, root, _, calls = fixture
+    assert module.stop_owned_containers(root, ['example'], preserve_restart_policy=True) == ['a' * 64]
+    assert calls[-1] == ['stop', 'a' * 64]
+    assert not any(call[0] == 'update' for call in calls)
+    assert (root / 'data.txt').read_text() == 'preserve owner data'
+
+
+def test_preset_stop_refuses_always_policy_before_any_stop(fixture):
+    module, root, rows, calls = fixture
+    rows[0]['HostConfig']['RestartPolicy']['Name'] = 'always'
+    with pytest.raises(ValueError, match='Unsupported restart policy'):
+        module.stop_owned_containers(root, ['example'], preserve_restart_policy=True)
+    assert not any(call[0] in ('update', 'stop') for call in calls)
 
 
 def test_whole_install_recovery_does_not_trust_shared_project_name(fixture):

@@ -360,6 +360,7 @@ def _refresh_compose_flags(
 def _stop_for_disable(
     install_dir: Path, service_id: str, mode: str, compose_flags: str,
     service_names: set[str] | None = None,
+    preserve_restart_policy: bool = False,
 ) -> None:
     if mode == "compose":
         try:
@@ -382,6 +383,8 @@ def _stop_for_disable(
         if not helper.is_file():
             raise SelectionError(f"Owned-container stop helper missing: {helper}")
         command = [sys.executable, str(helper), "--install-dir", str(install_dir)]
+        if preserve_restart_policy:
+            command.append("--preserve-restart-policy")
         for name in names:
             command.extend(("--service", name))
     else:
@@ -629,6 +632,19 @@ def _dependency_order(graph: dict[str, set[str]]) -> list[str]:
     return order
 
 
+def _base_compose_services(install_dir: Path) -> set[str]:
+    """Reserve services also declared by a base or platform Compose overlay."""
+    paths = list(install_dir.glob("docker-compose*.yml"))
+    paths.extend((install_dir / "installers").glob("*/docker-compose*.yml"))
+    services: set[str] = set()
+    for path in sorted(paths):
+        if path.is_symlink() or not path.is_file():
+            raise SelectionError(f"Invalid platform Compose file: {path}")
+        fragment_services, _ = _compose_details(path)
+        services.update(fragment_services)
+    return services
+
+
 def restore_preset(
     install_dir: Path, preset_file: Path, timeout: float = 15.0,
     core_services: set[str] | None = None,
@@ -666,6 +682,14 @@ def restore_preset(
             install_dir, directories, current, desired, core_services,
             require_dependencies=True,
         )
+        # Compose overlays can contribute to an existing service (Langfuse
+        # also declares litellm). Stopping that shared service when only the
+        # extension is removed would interrupt Core.
+        base_services = _base_compose_services(install_dir)
+        selected_fragments = {
+            service_id: _compose_details(directories[service_id] / "compose.yaml")[0]
+            for service_id in current_graph
+        }
         disable_order = [service_id for service_id in reversed(_dependency_order(current_graph))
                          if current[service_id] and not desired[service_id]]
         enable_order = [service_id for service_id in _dependency_order(desired_graph)
@@ -683,9 +707,14 @@ def restore_preset(
             target = directory / ("compose.yaml" if enable else "compose.yaml.disabled")
             try:
                 if not enable:
-                    fragment_services, _ = _compose_details(source)
+                    shared_services = base_services.copy()
+                    for other_id, names in selected_fragments.items():
+                        if other_id != service_id:
+                            shared_services.update(names)
+                    exclusive_services = selected_fragments[service_id] - shared_services
                     _stop_for_disable(
-                        install_dir, service_id, "owned", "", fragment_services,
+                        install_dir, service_id, "owned", "", exclusive_services,
+                        preserve_restart_policy=True,
                     )
                 cache.unlink(missing_ok=True)
                 os.replace(source, target)
@@ -703,6 +732,7 @@ def restore_preset(
             if enable:
                 enabled_count += 1
             else:
+                selected_fragments.pop(service_id)
                 disabled_count += 1
         return enabled_count, disabled_count, skipped
 
