@@ -4558,6 +4558,57 @@ def enable_extension(
     }
 
 
+_DEPENDENCY_COMPOSE_MAX_BYTES = 1024 * 1024
+
+
+def _selected_compose_dependencies(compose_path: Path) -> set[str]:
+    """Read active Compose dependencies without trusting manifest completeness."""
+    try:
+        if compose_path.is_symlink():
+            raise ValueError("symlink")
+        descriptor = os.open(
+            compose_path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            selected = os.fstat(stream.fileno())
+            if not stat.S_ISREG(selected.st_mode) or selected.st_size > _DEPENDENCY_COMPOSE_MAX_BYTES:
+                raise ValueError("invalid active Compose file")
+            raw = stream.read(_DEPENDENCY_COMPOSE_MAX_BYTES + 1)
+        if len(raw) > _DEPENDENCY_COMPOSE_MAX_BYTES:
+            raise ValueError("oversize active Compose file")
+        document = _compose_policy_load(raw.decode("utf-8"))
+        services = document.get("services") if isinstance(document, dict) else None
+        if not isinstance(services, dict):
+            raise ValueError("missing Compose services")
+        dependencies: set[str] = set()
+        for definition in services.values():
+            if not isinstance(definition, dict):
+                raise ValueError("invalid Compose service")
+            declared = definition.get("depends_on", [])
+            if isinstance(declared, list):
+                names = declared
+            elif isinstance(declared, dict):
+                if any(not isinstance(value, dict) for value in declared.values()):
+                    raise ValueError("invalid Compose dependency mapping")
+                names = declared.keys()
+            else:
+                raise ValueError("invalid Compose dependencies")
+            for name in names:
+                if not isinstance(name, str) or not name or "$" in name:
+                    raise ValueError("invalid Compose dependency name")
+                dependencies.add(name)
+        return dependencies
+    except (OSError, UnicodeError, ValueError) as exc:
+        logger.warning("Cannot inspect selected Compose dependencies for %s: %s",
+                       compose_path.parent.name, type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail=(f"Cannot inspect enabled dependencies for {compose_path.parent.name}; "
+                    "no service was disabled"),
+        ) from exc
+
+
 def _enabled_dependents(service_id: str) -> list[str]:
     """Return currently-enabled extensions that declare a dependency on service_id.
 
@@ -4570,23 +4621,58 @@ def _enabled_dependents(service_id: str) -> list[str]:
     seen_peers: set[str] = set()
     for base in (USER_EXTENSIONS_DIR, EXTENSIONS_DIR):
         try:
+            if not stat.S_ISDIR(base.lstat().st_mode):
+                raise ValueError("extension root is not a directory")
             peer_dirs = list(base.iterdir())
         except FileNotFoundError:
             continue
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             logger.warning("Cannot inspect enabled extension dependencies under %s: %s", base, type(exc).__name__)
             raise HTTPException(
                 status_code=503,
                 detail="Cannot inspect enabled extension dependencies; no service was disabled",
             ) from exc
         for peer_dir in peer_dirs:
-            if (not peer_dir.is_dir() or peer_dir.name == service_id
-                    or peer_dir.name in seen_peers):
+            if peer_dir.name == service_id or peer_dir.name in seen_peers:
                 continue
             seen_peers.add(peer_dir.name)
-            if not (peer_dir / "compose.yaml").exists():
+            try:
+                peer_stat = peer_dir.lstat()
+            except FileNotFoundError:
                 continue
-            if service_id in _read_direct_deps(peer_dir.name):
+            except OSError as exc:
+                logger.warning("Cannot inspect extension peer %s: %s", peer_dir.name, type(exc).__name__)
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Cannot inspect enabled dependencies for {peer_dir.name}; no service was disabled",
+                ) from exc
+            if stat.S_ISLNK(peer_stat.st_mode):
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Cannot inspect enabled dependencies for {peer_dir.name}; no service was disabled",
+                )
+            if not stat.S_ISDIR(peer_stat.st_mode):
+                continue
+            compose_path = peer_dir / "compose.yaml"
+            try:
+                selected = compose_path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.warning("Cannot inspect selected Compose file for %s: %s",
+                               peer_dir.name, type(exc).__name__)
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Cannot inspect enabled dependencies for {peer_dir.name}; no service was disabled",
+                ) from exc
+            if not stat.S_ISREG(selected.st_mode):
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Cannot inspect enabled dependencies for {peer_dir.name}; no service was disabled",
+                )
+            declared = set(_read_direct_deps(peer_dir.name))
+            declared.update(_selected_compose_dependencies(compose_path))
+            if service_id in declared:
                 dependents.append(peer_dir.name)
     return dependents
 

@@ -58,6 +58,7 @@ def test_disable_search_fails_closed_when_dependents_cannot_be_scanned(
     test_client, installation, monkeypatch,
 ):
     bundled, start = installation
+    extensions.USER_EXTENSIONS_DIR.mkdir()
     original_iterdir = Path.iterdir
 
     def unreadable_user_extensions(path):
@@ -76,6 +77,71 @@ def test_disable_search_fails_closed_when_dependents_cannot_be_scanned(
     start.assert_not_called()
     assert (bundled / "searxng/compose.yaml").is_file()
     assert not (bundled / "searxng/compose.yaml.disabled").exists()
+
+
+@pytest.mark.parametrize("compose_depends_on", [
+    "depends_on: [n8n]",
+    "depends_on:\n      n8n:\n        condition: service_started",
+])
+def test_disable_reads_compose_deps_missing_from_manifest(
+    test_client, installation, compose_depends_on,
+):
+    bundled, start = installation
+    n8n = bundled / "n8n"
+    n8n.mkdir()
+    (n8n / "manifest.yaml").write_text("service:\n  id: n8n\n", encoding="utf-8")
+    (n8n / "compose.yaml").write_text(
+        "services:\n  n8n:\n    image: alpine:3.22\n", encoding="utf-8",
+    )
+    consumer = extensions.USER_EXTENSIONS_DIR / "n8n-consumer"
+    consumer.mkdir(parents=True)
+    (consumer / "manifest.yaml").write_text(
+        "service:\n  id: n8n-consumer\n  depends_on: []\n", encoding="utf-8",
+    )
+    (consumer / "compose.yaml").write_text(
+        "services:\n  n8n-consumer:\n    image: alpine:3.22\n"
+        f"    {compose_depends_on}\n",
+        encoding="utf-8",
+    )
+
+    response = test_client.post(
+        "/api/extensions/n8n/disable?include_data_info=false",
+        headers=test_client.auth_headers,
+    )
+
+    assert response.status_code == 409
+    assert "n8n-consumer" in response.json()["detail"]
+    start.assert_not_called()
+    assert (n8n / "compose.yaml").is_file()
+
+
+def test_disable_refuses_unresolved_compose_dependency(
+    test_client, installation,
+):
+    bundled, start = installation
+    n8n = bundled / "n8n"
+    n8n.mkdir()
+    (n8n / "manifest.yaml").write_text("service:\n  id: n8n\n", encoding="utf-8")
+    (n8n / "compose.yaml").write_text(
+        "services:\n  n8n:\n    image: alpine:3.22\n", encoding="utf-8",
+    )
+    consumer = extensions.USER_EXTENSIONS_DIR / "n8n-consumer"
+    consumer.mkdir(parents=True)
+    (consumer / "compose.yaml").write_text(
+        "services:\n  n8n-consumer:\n    image: alpine:3.22\n"
+        "    depends_on: [\"${UNRESOLVED_SERVICE}\"]\n",
+        encoding="utf-8",
+    )
+
+    response = test_client.post(
+        "/api/extensions/n8n/disable?include_data_info=false",
+        headers=test_client.auth_headers,
+    )
+
+    assert response.status_code == 503
+    assert "no service was disabled" in response.json()["detail"]
+    start.assert_not_called()
+    assert (n8n / "compose.yaml").is_file()
 
 
 def test_enable_requires_confirmation_for_disabled_transitive_service(test_client, installation):
