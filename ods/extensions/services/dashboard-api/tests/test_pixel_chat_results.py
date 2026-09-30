@@ -87,11 +87,18 @@ def test_stop_during_preflight_does_not_cancel_an_unrelated_native_run(store, mo
             raise AgentUnavailable("relay offline")
         async def forbidden_cancel(*_args):
             raise AssertionError("No native cancellation before submission")
+        async def forbidden_activity(*_args):
+            raise AssertionError("A live preflight is not an unresolved native run")
         monkeypatch.setattr(pixel_chat_identity, "async_request_json", identity)
         monkeypatch.setattr(pixel, "_cancel_edge_run", forbidden_cancel)
+        monkeypatch.setattr(pixel, "pixel_chat_activity", forbidden_activity)
         attempt = asyncio.create_task(pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER))
         await entered.wait()
         assert IDENTITY in pixel._result_preflights
+        lookup = pixel.ChatResultRequest(chat_id="chat-test", request_id="attempt-one")
+        assert await pixel.pixel_chat_result(lookup, OWNER) == {"state": "active", "events": ""}
+        duplicate = await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
+        assert await pixel.pixel_chat_result(lookup, OWNER) == {"state": "active", "events": ""}
         assert await pixel.pixel_chat_cancel(
             pixel.ChatCancelRequest(chat_id="chat-test", request_id="attempt-one"), OWNER
         ) == {"aborted": False}
@@ -102,6 +109,8 @@ def test_stop_during_preflight_does_not_cancel_an_unrelated_native_run(store, mo
         assert store.get(IDENTITY)["state"] == "interrupted"
         assert IDENTITY not in pixel._result_preflights
         assert not pixel._result_tasks
+        assert b"Portal did not start this attempt." in await stream_body(duplicate)
+        assert (await pixel.pixel_chat_result(lookup, OWNER))["state"] == "interrupted"
     asyncio.run(run())
 
 

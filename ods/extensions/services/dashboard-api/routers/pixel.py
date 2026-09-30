@@ -196,7 +196,8 @@ def _chat_results() -> ChatResultStore:
 def _result_state(store, identity):
     row = store.get(identity)
     task = _result_tasks.get(identity)
-    if row is not None and row["state"] == "active" and (task is None or task.done()):
+    if (row is not None and row["state"] == "active" and identity not in _result_preflights
+            and (task is None or task.done())):
         # A producer may fail while committing its last bytes. The API process
         # being alive does not prove that this particular task is still running.
         row["state"] = "unresolved"
