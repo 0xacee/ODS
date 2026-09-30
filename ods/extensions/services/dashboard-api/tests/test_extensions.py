@@ -576,6 +576,27 @@ def _patch_mutation_config(monkeypatch, tmp_path, lib_dir=None, user_dir=None):
                         lambda sid, hook: True)
     monkeypatch.setattr("routers.extensions._call_agent_invalidate_compose_cache",
                         lambda: None)
+    # Endpoint tests own a local stand-in for the host's selection RPC. The
+    # real graph lock, stop and marker ordering are exercised in the host
+    # selector tests; this stub keeps the Dashboard response contract local.
+    def select_on_host(action, service_ids):
+        from routers import extensions as ext_mod
+
+        for sid in service_ids:
+            directory = user_dir / sid
+            if not directory.is_dir():
+                directory = tmp_path / "builtin" / sid
+            if action == "disable" and not ext_mod._call_agent("stop", sid):
+                raise HTTPException(
+                    status_code=502, detail=f"Host agent failed to stop extension: {sid}",
+                )
+            before = directory / ("compose.yaml.disabled" if action == "enable" else "compose.yaml")
+            after = directory / ("compose.yaml" if action == "enable" else "compose.yaml.disabled")
+            before.rename(after)
+            ext_mod._call_agent_invalidate_compose_cache()
+        return {"action": "enabled" if action == "enable" else "disabled"}
+
+    monkeypatch.setattr("routers.extensions._select_extensions_on_host", select_on_host)
     # A fixture-backed endpoint test must fail closed if a new code path tries
     # to reach the machine's real host agent instead of a test stub.
     monkeypatch.setattr("routers.extensions.request_agent_json",
@@ -1479,19 +1500,9 @@ class TestDisableExtension:
         (ext_dir / "compose.yaml").write_text(_SAFE_COMPOSE)
         _patch_mutation_config(monkeypatch, tmp_path)
         monkeypatch.setattr("routers.extensions.EXTENSIONS_DIR", builtin_root)
-        monkeypatch.setattr("routers.extensions._call_agent", lambda action, sid: True)
-
-        calls = []
-
-        def _mock_compose_rename(action, service_id):
-            calls.append((action, service_id))
-            (ext_dir / "compose.yaml").rename(ext_dir / "compose.yaml.disabled")
-            return True
-
-        monkeypatch.setattr(
-            "routers.extensions._call_agent_compose_rename",
-            _mock_compose_rename,
-        )
+        from routers import extensions as ext_mod
+        select = Mock(wraps=ext_mod._select_extensions_on_host)
+        monkeypatch.setattr(ext_mod, "_select_extensions_on_host", select)
 
         resp = test_client.post(
             "/api/extensions/my-ext/disable",
@@ -1500,7 +1511,7 @@ class TestDisableExtension:
 
         assert resp.status_code == 200
         assert resp.json()["action"] == "disabled"
-        assert calls == [("deactivate", "my-ext")]
+        select.assert_called_once_with("disable", ["my-ext"])
         assert (ext_dir / "compose.yaml.disabled").exists()
         assert not (ext_dir / "compose.yaml").exists()
 

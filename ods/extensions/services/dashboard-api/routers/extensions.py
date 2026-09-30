@@ -1550,6 +1550,32 @@ def _call_agent_compose_rename(action: str, service_id: str) -> bool:
         return False
 
 
+def _select_extensions_on_host(action: str, service_ids: list[str]) -> dict:
+    """Ask the host to validate and commit one dependency-safe selection plan."""
+    try:
+        result = request_agent_json(
+            "POST", "/v1/extension/select",
+            payload={"action": action, "service_ids": service_ids},
+            timeout=_AGENT_TIMEOUT,
+        )
+    except AgentHTTPError as exc:
+        if exc.status_code in (400, 409):
+            raise HTTPException(status_code=409, detail=exc.detail) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"Host agent could not {action} extension selection: {exc.detail}",
+        ) from exc
+    except AgentClientError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Host agent could not {action} extension selection; check extension status before retrying",
+        ) from exc
+    expected = {"enabled", "already_enabled"} if action == "enable" else {"disabled"}
+    if result.get("action") not in expected or result.get("service_ids") != service_ids:
+        raise HTTPException(status_code=502, detail="Host agent returned an invalid selection result")
+    return result
+
+
 _agent_cache_lock = threading.Lock()
 _agent_cache = {"available": False, "checked_at": 0.0}
 
@@ -4689,7 +4715,6 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
     ext_dir = _resolve_extension_dir(service_id)
 
     enabled_compose = ext_dir / "compose.yaml"
-    disabled_compose = ext_dir / "compose.yaml.disabled"
 
     if not enabled_compose.exists():
         raise HTTPException(
@@ -4702,63 +4727,38 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
     # present) are reported: a disabled dependent is unaffected, while an
     # enabled one is left pointing at a service the merged compose project
     # no longer defines, which fails compose config for the whole stack.
-    with _extensions_lock():
-        # Enable commits its selected Compose state under this same lock.
-        # Keep it held through stop and rename so a dependent cannot appear
-        # between the check and deactivation.
-        dependents = _enabled_dependents(service_id)
-        if dependents:
-            raise HTTPException(
-                status_code=409,
-                detail=(f"Cannot disable {service_id}: enabled extensions "
-                        f"{', '.join(dependents)} depend on it. Disable them first."),
-            )
-
-        # lstat check inside lock (TOCTOU prevention)
+    # The host CLI owns the graph-wide lock. Keep this preflight for a useful
+    # error, then let the host recheck it under that lock through stop and
+    # marker change. No container lock is held across the host request.
+    dependents = _enabled_dependents(service_id)
+    if dependents:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Cannot disable {service_id}: enabled extensions "
+                    f"{', '.join(dependents)} depend on it. Disable them first."),
+        )
+    try:
         st = os.lstat(enabled_compose)
-        if stat.S_ISLNK(st.st_mode):
-            raise HTTPException(
-                status_code=400, detail="Compose file is a symlink",
-            )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"Extension selection changed: {service_id}; retry",
+        ) from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise HTTPException(status_code=400, detail="Compose file is a symlink")
 
-        # Stop before renaming (avoids zombie containers). On stop failure the
-        # selected definition and service data remain untouched.
-        agent_ok = _call_agent("stop", service_id)
-        if not agent_ok:
-            logger.error("Could not stop %s via agent; refusing to disable", service_id)
-            raise HTTPException(
-                status_code=502,
-                detail=f"Host agent failed to stop extension: {service_id}; extension was not disabled",
-            )
-
-        # Built-in extensions live on a :ro mount â€” delegate rename to host agent
-        is_builtin = ext_dir.is_relative_to(EXTENSIONS_DIR.resolve())
-        if is_builtin:
-            if not _call_agent_compose_rename("deactivate", service_id):
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Host agent failed to deactivate extension: {service_id}",
-                )
-        else:
-            os.rename(str(enabled_compose), str(disabled_compose))
-        _call_agent_invalidate_compose_cache()
-
-        progress_file = Path(DATA_DIR) / "extension-progress" / f"{service_id}.json"
-        progress_file.unlink(missing_ok=True)
+    _select_extensions_on_host("disable", [service_id])
+    progress_file = Path(DATA_DIR) / "extension-progress" / f"{service_id}.json"
+    progress_file.unlink(missing_ok=True)
 
     logger.info("Disabled extension: %s", service_id)
 
-    message = (
-        "Extension disabled and stopped." if agent_ok
-        else "Extension disabled. Run 'ods restart' to apply changes."
-    )
     return {
         "id": service_id,
         "action": "disabled",
-        "restart_required": not agent_ok,
+        "restart_required": False,
         "dependents_warning": [],
         "data_info": _get_service_data_info(service_id) if include_data_info else None,
-        "message": message,
+        "message": "Extension disabled and stopped.",
     }
 
 

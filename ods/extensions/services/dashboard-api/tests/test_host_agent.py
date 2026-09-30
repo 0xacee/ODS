@@ -66,11 +66,15 @@ def test_host_selection_serializes_dependency_decisions_with_cli_helper(tmp_path
     assert not list((tmp_path / "data").glob(".extension-selection-*"))
 
 
-def test_host_selection_endpoint_requires_auth_and_preserves_batch(tmp_path, monkeypatch):
+def test_host_selection_endpoint_requires_auth_and_preserves_batch(
+    monkeypatch, host_agent_wire_client,
+):
     import threading
     import urllib.error
     import urllib.request
     from http.server import HTTPServer
+
+    from routers import extensions as ext_router
 
     calls = []
     monkeypatch.setattr(_mod, "AGENT_API_KEY", "selection-wire-secret")
@@ -99,8 +103,8 @@ def test_host_selection_endpoint_requires_auth_and_preserves_batch(tmp_path, mon
         assert rejected.value.code == 401
         assert calls == []
 
-        with post(body, "selection-wire-secret") as response:
-            result = json.load(response)
+        host_agent_wire_client(server.server_address[1], key="selection-wire-secret")
+        result = ext_router._select_extensions_on_host("enable", ["search", "consumer"])
         assert result["action"] == "enabled"
         assert result["service_ids"] == ["search", "consumer"]
         assert calls == [(["search", "consumer"], True)]
@@ -110,6 +114,17 @@ def test_host_selection_endpoint_requires_auth_and_preserves_batch(tmp_path, mon
                  "selection-wire-secret")
         assert rejected.value.code == 400
         assert calls == [(["search", "consumer"], True)]
+
+        from fastapi import HTTPException
+
+        def blocked_by_late_dependent(service_ids, activate):
+            raise ValueError("enabled consumer depends on search")
+
+        monkeypatch.setattr(_mod, "_apply_extension_selection", blocked_by_late_dependent)
+        with pytest.raises(HTTPException) as blocked:
+            ext_router._select_extensions_on_host("disable", ["search"])
+        assert blocked.value.status_code == 409
+        assert "consumer" in blocked.value.detail
     finally:
         server.shutdown()
         server.server_close()
