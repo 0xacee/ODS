@@ -4820,7 +4820,7 @@ def uninstall_extension(service_id: str, include_data_info: bool = Query(True), 
 
         # Selection can change after the host RPC and before this lock. The
         # host CLI uses the same lock, so this check protects the whole delete.
-        if enabled_compose.exists():
+        if enabled_compose.exists() or enabled_compose.is_symlink():
             raise HTTPException(
                 status_code=409,
                 detail=f"Extension selection changed: {service_id}; disable it and retry removal",
