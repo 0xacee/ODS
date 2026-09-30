@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed, cross-process selection guard for ``ods disable``.
+"""Fail-closed, cross-process selection guard for ``ods enable/disable``.
 
 The Dashboard and this command lock the same file in the installed data bind
 mount.  This helper owns the final dependency check and Compose-file rename;
@@ -13,8 +13,11 @@ import contextlib
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 import time
 
 try:
@@ -35,12 +38,8 @@ class SelectionError(Exception):
     """A selection cannot be committed without risking the installed stack."""
 
 
-def _read_yaml(path: Path) -> object:
-    """Read a bounded regular YAML file without following its final symlink."""
-    try:
-        import yaml
-    except ImportError as exc:
-        raise SelectionError("PyYAML is required to inspect extension dependencies") from exc
+def _read_bounded_file(path: Path) -> bytes:
+    """Read a bounded regular file without following its final symlink."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)
@@ -51,8 +50,19 @@ def _read_yaml(path: Path) -> object:
             raw = stream.read(MAX_YAML_BYTES + 1)
         if len(raw) > MAX_YAML_BYTES:
             raise SelectionError(f"Selected file is too large: {path}")
-        return yaml.safe_load(raw.decode("utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return raw
+    except OSError as exc:
+        raise SelectionError(f"Cannot inspect selected file: {path}") from exc
+
+
+def _read_yaml(path: Path) -> object:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise SelectionError("PyYAML is required to inspect extension dependencies") from exc
+    try:
+        return yaml.safe_load(_read_bounded_file(path).decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError) as exc:
         raise SelectionError(f"Cannot inspect selected file: {path}") from exc
 
 
@@ -80,11 +90,14 @@ def _manifest_dependencies(directory: Path) -> set[str]:
     return set()
 
 
-def _compose_dependencies(path: Path) -> set[str]:
+def _compose_details(path: Path) -> tuple[set[str], set[str]]:
     document = _read_yaml(path)
     services = document.get("services") if isinstance(document, dict) else None
     if not isinstance(services, dict):
         raise SelectionError(f"Invalid selected Compose services: {path}")
+    service_names = set(services)
+    if any(not isinstance(name, str) or not name for name in service_names):
+        raise SelectionError(f"Invalid selected Compose service name: {path}")
     dependencies: set[str] = set()
     for definition in services.values():
         if not isinstance(definition, dict):
@@ -100,7 +113,11 @@ def _compose_dependencies(path: Path) -> set[str]:
             if not isinstance(name, str) or not name or "$" in name:
                 raise SelectionError(f"Invalid selected Compose dependency: {path}")
             dependencies.add(name)
-    return dependencies
+    return service_names, dependencies
+
+
+def _compose_dependencies(path: Path) -> set[str]:
+    return _compose_details(path)[1]
 
 
 def _enabled_dependents(install_dir: Path, service_id: str) -> list[str]:
@@ -151,7 +168,7 @@ def _enabled_dependents(install_dir: Path, service_id: str) -> list[str]:
     return dependents
 
 
-def _target_dir(install_dir: Path, service_id: str) -> Path:
+def _find_target_dir(install_dir: Path, service_id: str) -> Path | None:
     for root in (install_dir / "data" / "user-extensions", install_dir / "extensions" / "services"):
         directory = root / service_id
         try:
@@ -162,6 +179,13 @@ def _target_dir(install_dir: Path, service_id: str) -> Path:
             raise SelectionError(f"Cannot inspect extension: {service_id}") from exc
         if not stat.S_ISDIR(selected.st_mode):
             raise SelectionError(f"Invalid extension directory: {service_id}")
+        return directory
+    return None
+
+
+def _target_dir(install_dir: Path, service_id: str) -> Path:
+    directory = _find_target_dir(install_dir, service_id)
+    if directory is not None:
         return directory
     raise SelectionError(f"Unknown extension: {service_id}")
 
@@ -221,14 +245,132 @@ def _assert_no_dependents(install_dir: Path, service_id: str) -> None:
         )
 
 
-def run(action: str, install_dir: Path, service_id: str, timeout: float = 15.0) -> str:
+def _selection_enabled(directory: Path) -> bool:
+    enabled = directory / "compose.yaml"
+    disabled = directory / "compose.yaml.disabled"
+    try:
+        enabled_stat = enabled.lstat()
+    except FileNotFoundError:
+        enabled_stat = None
+    try:
+        disabled_stat = disabled.lstat()
+    except FileNotFoundError:
+        disabled_stat = None
+    if enabled_stat is not None and not stat.S_ISREG(enabled_stat.st_mode):
+        raise SelectionError(f"Invalid selected Compose file: {enabled}")
+    if disabled_stat is not None and not stat.S_ISREG(disabled_stat.st_mode):
+        raise SelectionError(f"Invalid disabled Compose file: {disabled}")
+    if enabled_stat is not None and disabled_stat is not None:
+        raise SelectionError(f"Conflicting Compose selection files: {directory.name}")
+    return enabled_stat is not None
+
+
+def _assert_prerequisites_enabled(
+    install_dir: Path, service_id: str, directory: Path, compose_path: Path,
+    core_services: set[str],
+) -> None:
+    manifest_deps = _manifest_dependencies(directory)
+    fragment_services, compose_deps = _compose_details(compose_path)
+    missing: list[str] = []
+    for dep in sorted(manifest_deps | (compose_deps - fragment_services)):
+        if dep == service_id:
+            raise SelectionError(f"Circular dependency for {service_id}")
+        if dep in fragment_services:
+            continue
+        # Core services can be profiled out in gateway-only mode; their
+        # manifest category is a CLI policy. A user shadow must not inherit it.
+        if dep in core_services:
+            try:
+                (install_dir / "data" / "user-extensions" / dep).lstat()
+            except FileNotFoundError:
+                continue
+        dep_dir = _find_target_dir(install_dir, dep)
+        if dep_dir is None:
+            # Compose can refer to a base service outside the extension tree;
+            # the Compose resolver validates that graph. Manifest deps name
+            # extensions and must resolve here.
+            if dep in manifest_deps:
+                missing.append(dep)
+            continue
+        if not _selection_enabled(dep_dir):
+            missing.append(dep)
+    if missing:
+        raise SelectionError(
+            f"Cannot enable {service_id}; disabled prerequisites: {', '.join(missing)}"
+        )
+
+
+def _refresh_compose_flags(
+    install_dir: Path, tier: str, gpu_backend: str, gpu_count: str, ods_mode: str,
+) -> None:
+    """Rebuild the persisted stack while the shared selection lock is held."""
+    cache = install_dir / ".compose-flags"
+    try:
+        cache.unlink(missing_ok=True)
+    except OSError as exc:
+        raise SelectionError(f"Cannot invalidate Compose cache: {cache}") from exc
+    resolver = install_dir / "scripts" / "resolve-compose-stack.sh"
+    if not resolver.is_file() or not os.access(resolver, os.X_OK):
+        return
+    bash = shutil.which("bash")
+    if bash is None:
+        print("WARNING: Could not regenerate the compose stack cache: bash is missing", file=sys.stderr)
+        return
+    try:
+        result = subprocess.run(
+            [bash, str(resolver), "--script-dir", str(install_dir),
+             "--tier", tier, "--gpu-backend", gpu_backend,
+             "--gpu-count", gpu_count, "--ods-mode", ods_mode],
+            cwd=install_dir, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"WARNING: Could not regenerate the compose stack cache: {exc}", file=sys.stderr)
+        return
+    if result.returncode != 0 or not result.stdout.strip().startswith("-f "):
+        print("WARNING: Could not regenerate the compose stack cache; 'ods start' may fail until this is resolved.", file=sys.stderr)
+        if result.stderr.strip():
+            print(result.stderr.rstrip(), file=sys.stderr)
+        return
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\n", prefix=".compose-flags-",
+            dir=install_dir, delete=False,
+        ) as stream:
+            temporary = stream.name
+            stream.write(result.stdout)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, cache)
+    except OSError as exc:
+        raise SelectionError(f"Cannot save Compose cache: {cache}") from exc
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
+    for line in result.stderr.splitlines():
+        if line.startswith("WARNING:"):
+            print(line, file=sys.stderr)
+
+
+def run(
+    action: str, install_dir: Path, service_id: str, timeout: float = 15.0,
+    core_services: set[str] | None = None,
+    tier: str = "1", gpu_backend: str = "nvidia", gpu_count: str = "1",
+    ods_mode: str = "local",
+) -> str:
+    if action not in ("check-disable", "disable", "enable"):
+        raise SelectionError("Invalid selection action")
     if SERVICE_ID.fullmatch(service_id) is None:
         raise SelectionError("Invalid service id")
     if timeout <= 0 or timeout > 120:
         raise SelectionError("Invalid lock timeout")
+    core_services = set(core_services or ())
+    if any(SERVICE_ID.fullmatch(core) is None for core in core_services):
+        raise SelectionError("Invalid core service id")
     with _selection_lock(install_dir, timeout):
         directory = _target_dir(install_dir, service_id)
-        _assert_no_dependents(install_dir, service_id)
+        if action != "enable":
+            _assert_no_dependents(install_dir, service_id)
         enabled = directory / "compose.yaml"
         disabled = directory / "compose.yaml.disabled"
         try:
@@ -244,14 +386,39 @@ def run(action: str, install_dir: Path, service_id: str, timeout: float = 15.0) 
         if disabled_stat is not None and not stat.S_ISREG(disabled_stat.st_mode):
             raise SelectionError(f"Invalid disabled Compose file: {disabled}")
         if enabled_stat is not None and disabled_stat is not None:
-            raise SelectionError(f"Conflicting Compose selection files for {service_id}")
+            if action != "enable" or _read_bounded_file(enabled) != _read_bounded_file(disabled):
+                raise SelectionError(f"Conflicting Compose selection files for {service_id}")
+            _assert_prerequisites_enabled(install_dir, service_id, directory, enabled,
+                                          core_services)
+            try:
+                disabled.unlink()
+            except OSError as exc:
+                raise SelectionError(f"Could not remove stale disabled marker for {service_id}") from exc
+            disabled_stat = None
+        cache = install_dir / ".compose-flags"
+        if action == "enable":
+            if enabled_stat is not None:
+                _assert_prerequisites_enabled(install_dir, service_id, directory, enabled,
+                                              core_services)
+                _refresh_compose_flags(install_dir, tier, gpu_backend, gpu_count, ods_mode)
+                return "already-enabled"
+            if disabled_stat is None:
+                raise SelectionError(f"No Compose selection file for {service_id}")
+            _assert_prerequisites_enabled(install_dir, service_id, directory, disabled,
+                                          core_services)
+            try:
+                cache.unlink(missing_ok=True)
+                os.replace(disabled, enabled)
+            except OSError as exc:
+                raise SelectionError(f"Could not enable {service_id}; disabled file remains recoverable") from exc
+            _refresh_compose_flags(install_dir, tier, gpu_backend, gpu_count, ods_mode)
+            return "enabled"
         if enabled_stat is None:
             if disabled_stat is not None:
                 return "already-disabled"
             raise SelectionError(f"No Compose selection file for {service_id}")
         if action == "check-disable":
             return "ready"
-        cache = install_dir / ".compose-flags"
         try:
             cache.unlink(missing_ok=True)
             os.replace(enabled, disabled)
@@ -262,13 +429,20 @@ def run(action: str, install_dir: Path, service_id: str, timeout: float = 15.0) 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("check-disable", "disable"))
+    parser.add_argument("action", choices=("check-disable", "disable", "enable"))
     parser.add_argument("--install-dir", type=Path, required=True)
     parser.add_argument("--service-id", required=True)
     parser.add_argument("--lock-timeout", type=float, default=15.0)
+    parser.add_argument("--core-service", action="append", default=[])
+    parser.add_argument("--tier", default="1")
+    parser.add_argument("--gpu-backend", default="nvidia")
+    parser.add_argument("--gpu-count", default="1")
+    parser.add_argument("--ods-mode", default="local")
     args = parser.parse_args()
     try:
-        print(run(args.action, args.install_dir, args.service_id, args.lock_timeout))
+        print(run(args.action, args.install_dir, args.service_id, args.lock_timeout,
+                  set(args.core_service), args.tier, args.gpu_backend,
+                  args.gpu_count, args.ods_mode))
     except SelectionError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

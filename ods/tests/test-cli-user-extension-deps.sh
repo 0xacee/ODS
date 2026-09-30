@@ -200,6 +200,22 @@ else
     fail "purge left data of disabled user extension: $output"
 fi
 
+# ---------------------------------------------------------------------------
+# 7. enable: a profiled-out core dependency does not force managed inference
+# ---------------------------------------------------------------------------
+rm -rf "$BUILTIN" "$USEREXT"
+write_ext "$BUILTIN" bsvc "[]"
+sed -i 's/category: optional/category: core/' "$BUILTIN/manifest.yaml"
+mv "$BUILTIN/compose.yaml" "$BUILTIN/compose.yaml.disabled"
+write_ext "$USEREXT" usvc "[bsvc]"
+mv "$USEREXT/compose.yaml" "$USEREXT/compose.yaml.disabled"
+output=$(run_cli enable usvc)
+if [[ -f "$USEREXT/compose.yaml" && -f "$BUILTIN/compose.yaml.disabled" ]]; then
+    pass "enable keeps a profiled-out core dependency disabled"
+else
+    fail "enable forced a profiled-out core dependency: $output"
+fi
+
 echo ""
 echo "Results: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]] || exit 1

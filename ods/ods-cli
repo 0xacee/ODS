@@ -2993,9 +2993,10 @@ cmd_enable() {
     if [[ -n "$deps" ]]; then
         local missing=()
         for dep in $deps; do
-            # Check built-in extensions first, then dashboard-installed user extensions
-            local dep_cf="$INSTALL_DIR/extensions/services/$dep/compose.yaml"
-            [[ -f "$dep_cf" ]] || dep_cf="$INSTALL_DIR/data/user-extensions/$dep/compose.yaml"
+            # An installed user extension shadows the bundled definition.
+            local dep_cf="$INSTALL_DIR/data/user-extensions/$dep/compose.yaml"
+            [[ -d "$INSTALL_DIR/data/user-extensions/$dep" ]] || \
+                dep_cf="$INSTALL_DIR/extensions/services/$dep/compose.yaml"
             local dep_cat="${SERVICE_CATEGORIES[$dep]:-optional}"
             # Core services are always available; check extension deps
             if [[ "$dep_cat" != "core" && ! -f "$dep_cf" ]]; then
@@ -3016,19 +3017,30 @@ cmd_enable() {
         fi
     fi
 
-    if [[ -f "$cf" ]]; then
-        # An interrupted update can leave the compose fragment active while
-        # the persisted stack still omits it. Treat enable as an idempotent
-        # reconciliation operation on every platform.
-        _regenerate_compose_flags
-        if [[ -f "$disabled" ]]; then
-            rm -f "$disabled"
-            warn "Removed stale disabled marker for $service_id."
-        fi
+    # The helper rechecks on-disk prerequisites and commits selection under
+    # the same cross-process lock as CLI disable and Dashboard selection.
+    # It rebuilds saved flags inside that lock so concurrent writers cannot
+    # repopulate the cache from an outdated selection.
+    local selector="$INSTALL_DIR/scripts/extension-selection.py"
+    [[ -f "$selector" ]] || error "Extension selection guard missing: $selector"
+    local selector_python="${ODS_PYTHON_CMD:-python3}"
+    if [[ -f "$INSTALL_DIR/lib/python-cmd.sh" ]]; then
+        selector_python="$(. "$INSTALL_DIR/lib/python-cmd.sh"; ods_detect_python_cmd_with_module yaml)" || return 1
+    fi
+    local -a core_args=()
+    local sid
+    for sid in "${SERVICE_IDS[@]}"; do
+        [[ "${SERVICE_CATEGORIES[$sid]:-}" == "core" ]] && core_args+=(--core-service "$sid")
+    done
+    local final_state
+    final_state=$("$selector_python" "$selector" enable \
+        --install-dir "$INSTALL_DIR" --service-id "$service_id" \
+        --tier "${TIER:-1}" --gpu-backend "${GPU_BACKEND:-nvidia}" \
+        --gpu-count "${GPU_COUNT:-1}" --ods-mode "${ODS_MODE:-local}" \
+        "${core_args[@]}") || return 1
+    if [[ "$final_state" == "already-enabled" ]]; then
         success "$service_id is already enabled."
-    elif [[ -f "$disabled" ]]; then
-        mv "$disabled" "$cf"
-        _regenerate_compose_flags
+    elif [[ "$final_state" == "enabled" ]]; then
         # Check if service needs a Docker build (has Dockerfile but no image)
         if { [[ -f "$ext_dir/Dockerfile" ]] || [[ -f "$ext_dir/Dockerfile.rust" ]]; } && \
            ! docker image inspect "ods-${service_id}:latest" &>/dev/null; then
@@ -3038,7 +3050,7 @@ cmd_enable() {
             success "$service_id enabled. Run 'ods start $service_id' to launch."
         fi
     else
-        error "$service_id has no compose fragment (core service? already enabled?)"
+        error "Unexpected extension selection result for $service_id: $final_state"
     fi
 }
 

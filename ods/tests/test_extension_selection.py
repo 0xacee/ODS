@@ -94,6 +94,92 @@ def test_state_change_between_preflight_and_commit_retains_selection_and_data(tm
     assert retained.read_text(encoding="utf-8") == "keep"
 
 
+def test_enable_rechecks_prerequisite_then_preserves_data(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    prerequisite = extension(tmp_path, "search", enabled=False)
+    target = extension(tmp_path, "consumer", depends=("search",), enabled=False)
+    retained = tmp_path / "data" / "consumer" / "settings.json"
+    retained.parent.mkdir()
+    retained.write_text("keep", encoding="utf-8")
+    cache = tmp_path / ".compose-flags"
+    cache.write_text("stale", encoding="utf-8")
+    with pytest.raises(selection.SelectionError, match="disabled prerequisites: search"):
+        selection.run("enable", tmp_path, "consumer")
+    assert (target / "compose.yaml.disabled").is_file()
+    assert cache.is_file()
+    assert selection.run("enable", tmp_path, "search") == "enabled"
+    assert (prerequisite / "compose.yaml").is_file()
+    assert not cache.exists()
+    assert selection.run("enable", tmp_path, "consumer") == "enabled"
+    assert (target / "compose.yaml").is_file()
+    assert retained.read_text(encoding="utf-8") == "keep"
+
+
+def test_enable_accepts_same_fragment_and_base_services(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "consumer", enabled=False)
+    (target / "compose.yaml.disabled").write_text(
+        "services:\n  consumer:\n    image: example:latest\n"
+        "    depends_on: [consumer-db, postgres]\n"
+        "  consumer-db:\n    image: example:latest\n", encoding="utf-8"
+    )
+    assert selection.run("enable", tmp_path, "consumer") == "enabled"
+
+
+def test_enable_core_bypass_does_not_trust_disabled_user_shadow(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "gateway", depends=("llama-server",), enabled=False)
+    assert selection.run("enable", tmp_path, "gateway", core_services={"llama-server"}) == "enabled"
+    (target / "compose.yaml").rename(target / "compose.yaml.disabled")
+    user = tmp_path / "data" / "user-extensions" / "llama-server"
+    user.mkdir()
+    (user / "compose.yaml.disabled").write_text("services: {}\n", encoding="utf-8")
+    with pytest.raises(selection.SelectionError, match="disabled prerequisites: llama-server"):
+        selection.run("enable", tmp_path, "gateway", core_services={"llama-server"})
+    assert (target / "compose.yaml.disabled").is_file()
+
+
+def test_enable_refuses_disabled_known_compose_dependency(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    extension(tmp_path, "search", enabled=False)
+    target = extension(tmp_path, "consumer", compose_depends=("search",), enabled=False)
+    with pytest.raises(selection.SelectionError, match="disabled prerequisites: search"):
+        selection.run("enable", tmp_path, "consumer")
+    assert (target / "compose.yaml.disabled").is_file()
+
+
+def test_enable_existing_selection_revalidates_and_invalidates_cache(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "consumer", enabled=True)
+    cache = tmp_path / ".compose-flags"
+    cache.write_text("stale", encoding="utf-8")
+    assert selection.run("enable", tmp_path, "consumer") == "already-enabled"
+    assert not cache.exists()
+    (target / "manifest.yaml").write_text(
+        "service:\n  id: consumer\n  depends_on: [search]\n", encoding="utf-8"
+    )
+    with pytest.raises(selection.SelectionError, match="disabled prerequisites: search"):
+        selection.run("enable", tmp_path, "consumer")
+    assert (target / "compose.yaml").is_file()
+
+
+def test_enable_refuses_divergent_dual_markers_without_losing_data(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "consumer")
+    enabled = target / "compose.yaml"
+    disabled = target / "compose.yaml.disabled"
+    disabled.write_text("services:\n  other:\n    image: example:latest\n", encoding="utf-8")
+    cache = tmp_path / ".compose-flags"
+    cache.write_text("previous selection", encoding="utf-8")
+
+    with pytest.raises(selection.SelectionError, match="Conflicting Compose selection files"):
+        selection.run("enable", tmp_path, "consumer")
+
+    assert enabled.is_file()
+    assert disabled.is_file()
+    assert cache.read_text(encoding="utf-8") == "previous selection"
+
+
 def test_separate_process_lock_blocks_commit_then_releases(tmp_path):
     (tmp_path / "data" / "user-extensions").mkdir(parents=True)
     target = extension(tmp_path, "search")
