@@ -37,18 +37,27 @@ def installation(monkeypatch, tmp_path, request):
     return bundled, start
 
 
-def disable_search(client, start):
-    response = client.post("/api/extensions/searxng/disable?include_data_info=false",
-                           headers=client.auth_headers)
-    assert response.status_code == 200
-    assert "hermes" in response.json()["dependents_warning"]
+def simulate_disabled_search(bundled, start):
+    """Retain coverage for an older or manually edited inconsistent install."""
+    (bundled / "searxng/compose.yaml").rename(
+        bundled / "searxng/compose.yaml.disabled")
     start.reset_mock()
+
+
+def test_disable_search_blocks_enabled_hermes(test_client, installation):
+    bundled, start = installation
+    response = test_client.post("/api/extensions/searxng/disable?include_data_info=false",
+                                headers=test_client.auth_headers)
+    assert response.status_code == 409
+    assert "hermes" in response.json()["detail"]
+    start.assert_not_called()
+    assert (bundled / "searxng/compose.yaml").is_file()
 
 
 def test_enable_requires_confirmation_for_disabled_transitive_service(test_client, installation):
     bundled, start = installation
     target_enabled = (bundled / "hermes-proxy" / "compose.yaml").exists()
-    disable_search(test_client, start)
+    simulate_disabled_search(bundled, start)
 
     response = test_client.post("/api/extensions/hermes-proxy/enable",
                                 headers=test_client.auth_headers)
@@ -62,7 +71,7 @@ def test_enable_requires_confirmation_for_disabled_transitive_service(test_clien
 
 def test_confirmed_enable_repairs_transitive_service_before_target(test_client, installation):
     bundled, start = installation
-    disable_search(test_client, start)
+    simulate_disabled_search(bundled, start)
     hermes_before = (bundled / "hermes" / "compose.yaml").read_bytes()
 
     response = test_client.post("/api/extensions/hermes-proxy/enable?auto_enable_deps=true",

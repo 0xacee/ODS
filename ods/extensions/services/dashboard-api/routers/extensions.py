@@ -1599,7 +1599,7 @@ def _exclusive_file_lock(lock_path: Path):
 
 @contextlib.contextmanager
 def _extensions_lock():
-    """Acquire the global lock for short extension filesystem mutations."""
+    """Serialize extension selection and its dependent lifecycle transitions."""
     with _exclusive_file_lock(_extensions_lock_path()):
         yield
 
@@ -4311,9 +4311,9 @@ def _get_missing_deps_transitive(
     for dep in _read_direct_deps(service_id):
         if dep in _order:
             continue  # already queued from another branch
-        # An enabled service can still have a disabled dependency: disable
-        # warns about dependents but permits the operation. Walk its subtree
-        # before deciding whether this service itself needs activation.
+        # An enabled service can still have a disabled dependency after an
+        # older install or an out-of-band change. Walk its subtree before
+        # deciding whether this service itself needs activation.
         _get_missing_deps_transitive(
             dep, _visiting=_visiting, _order=_order, _visited=_visited,
         )
@@ -4470,6 +4470,15 @@ def enable_extension(
     enabled_services: list[str] = []
 
     with _extensions_lock():
+        # Dependency selection can change while this request waits for the
+        # global Compose mutation lock. Never enable a service from a stale
+        # preflight after a dependency was disabled.
+        if _get_missing_deps_transitive(service_id) != missing_deps:
+            raise HTTPException(
+                status_code=409,
+                detail="Dependency selection changed; retry enabling this extension.",
+            )
+
         # Auto-enable missing deps first (already in dependency order â€” leaves first)
         if missing_deps and auto_enable_deps:
             for dep in missing_deps:
@@ -4593,32 +4602,39 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
             status_code=409, detail=f"Extension already disabled: {service_id}",
         )
 
-    # Check reverse dependents (warn, don't block). Scan user and built-in
+    # Reject reverse dependents. Scan user and built-in
     # extensions â€” user dirs shadow built-ins of the same id, mirroring
     # _resolve_extension_dir. Only currently-enabled peers (compose.yaml
     # present) are reported: a disabled dependent is unaffected, while an
     # enabled one is left pointing at a service the merged compose project
     # no longer defines, which fails compose config for the whole stack.
-    dependents_warning = _enabled_dependents(service_id)
-
-    # Call agent to stop BEFORE renaming (prevents zombie containers)
-    agent_ok = _call_agent("stop", service_id)
-    if not agent_ok:
-        # Do not rename an extension after a failed stop: uninstall only
-        # accepts disabled definitions, so continuing would make it possible
-        # to delete the definition while its container still serves traffic.
-        logger.error("Could not stop %s via agent; refusing to disable", service_id)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Host agent failed to stop extension: {service_id}; extension was not disabled",
-        )
-
     with _extensions_lock():
+        # Enable commits its selected Compose state under this same lock.
+        # Keep it held through stop and rename so a dependent cannot appear
+        # between the check and deactivation.
+        dependents = _enabled_dependents(service_id)
+        if dependents:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Cannot disable {service_id}: enabled extensions "
+                        f"{', '.join(dependents)} depend on it. Disable them first."),
+            )
+
         # lstat check inside lock (TOCTOU prevention)
         st = os.lstat(enabled_compose)
         if stat.S_ISLNK(st.st_mode):
             raise HTTPException(
                 status_code=400, detail="Compose file is a symlink",
+            )
+
+        # Stop before renaming (avoids zombie containers). On stop failure the
+        # selected definition and service data remain untouched.
+        agent_ok = _call_agent("stop", service_id)
+        if not agent_ok:
+            logger.error("Could not stop %s via agent; refusing to disable", service_id)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Host agent failed to stop extension: {service_id}; extension was not disabled",
             )
 
         # Built-in extensions live on a :ro mount â€” delegate rename to host agent
@@ -4642,17 +4658,11 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
         "Extension disabled and stopped." if agent_ok
         else "Extension disabled. Run 'ods restart' to apply changes."
     )
-    if dependents_warning:
-        message = (
-            f"Warning: {', '.join(dependents_warning)} depend on {service_id}. "
-            + message
-        )
-
     return {
         "id": service_id,
         "action": "disabled",
         "restart_required": not agent_ok,
-        "dependents_warning": dependents_warning,
+        "dependents_warning": [],
         "data_info": _get_service_data_info(service_id) if include_data_info else None,
         "message": message,
     }

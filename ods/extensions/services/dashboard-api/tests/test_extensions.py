@@ -4,7 +4,7 @@ import contextlib
 import json
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import yaml
@@ -1107,6 +1107,31 @@ class TestEnableExtension:
         assert "missing-dep" in detail["missing_dependencies"]
         assert detail["auto_enable_available"] is True
 
+    def test_enable_rechecks_dependencies_under_compose_lock(
+        self, test_client, monkeypatch, tmp_path,
+    ):
+        """A dependency disabled after preflight cannot leave a broken selection."""
+        user_dir = _setup_user_ext(tmp_path, "my-ext", enabled=False)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        checks = iter(([], ["changed-dependency"]))
+        monkeypatch.setattr(
+            "routers.extensions._get_missing_deps_transitive",
+            lambda service_id: next(checks),
+        )
+        start = Mock(return_value=True)
+        monkeypatch.setattr("routers.extensions._call_agent", start)
+
+        resp = test_client.post(
+            "/api/extensions/my-ext/enable",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 409
+        assert "retry" in resp.json()["detail"].lower()
+        start.assert_not_called()
+        assert (user_dir / "my-ext" / "compose.yaml.disabled").is_file()
+        assert not (user_dir / "my-ext" / "compose.yaml").exists()
+
     def test_enable_core_service_403(self, test_client, monkeypatch, tmp_path):
         """403 when trying to enable a core service."""
         _patch_mutation_config(monkeypatch, tmp_path)
@@ -1516,8 +1541,8 @@ class TestDisableExtension:
         )
         assert resp.status_code == 403
 
-    def test_disable_warns_about_dependents(self, test_client, monkeypatch, tmp_path):
-        """Disable warns about extensions that depend on this one."""
+    def test_disable_blocks_enabled_dependents(self, test_client, monkeypatch, tmp_path):
+        """A dependent prevents stop and keeps the selected definition."""
         user_dir = tmp_path / "user"
         user_dir.mkdir()
         # Extension to disable
@@ -1532,20 +1557,25 @@ class TestDisableExtension:
             yaml.dump({"service": {"depends_on": ["my-ext"]}}),
         )
         _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+        stop = Mock(return_value=True)
+        monkeypatch.setattr("routers.extensions._call_agent", stop)
 
         resp = test_client.post(
             "/api/extensions/my-ext/disable",
             headers=test_client.auth_headers,
         )
 
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "dependent-ext" in data["dependents_warning"]
+        assert resp.status_code == 409
+        assert "dependent-ext" in resp.json()["detail"]
+        assert "Disable them first" in resp.json()["detail"]
+        stop.assert_not_called()
+        assert (ext_dir / "compose.yaml").is_file()
+        assert not (ext_dir / "compose.yaml.disabled").exists()
 
-    def test_disable_warns_about_builtin_dependents(
+    def test_disable_blocks_builtin_dependents(
         self, test_client, monkeypatch, tmp_path,
     ):
-        """Disable warns when an enabled built-in extension depends on the target.
+        """A bundled dependent blocks disabling the target.
 
         Mirrors the real hermes / hermes-proxy pair: both are built-ins, and
         disabling hermes while hermes-proxy stays enabled breaks the merged
@@ -1562,7 +1592,8 @@ class TestDisableExtension:
             yaml.dump({"service": {"depends_on": ["my-ext"]}}),
         )
         _patch_mutation_config(monkeypatch, tmp_path)
-        monkeypatch.setattr("routers.extensions._call_agent", lambda action, sid: True)
+        stop = Mock(return_value=True)
+        monkeypatch.setattr("routers.extensions._call_agent", stop)
 
         def _mock_compose_rename(action, service_id):
             (ext_dir / "compose.yaml").rename(ext_dir / "compose.yaml.disabled")
@@ -1578,8 +1609,10 @@ class TestDisableExtension:
             headers=test_client.auth_headers,
         )
 
-        assert resp.status_code == 200
-        assert "dependent-ext" in resp.json()["dependents_warning"]
+        assert resp.status_code == 409
+        assert "dependent-ext" in resp.json()["detail"]
+        stop.assert_not_called()
+        assert (ext_dir / "compose.yaml").is_file()
 
     def test_disable_skips_disabled_dependents(
         self, test_client, monkeypatch, tmp_path,
