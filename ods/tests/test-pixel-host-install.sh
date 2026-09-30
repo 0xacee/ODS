@@ -3395,5 +3395,7 @@ else
     fail "non-force reuse swallowed verifier failure"
 fi
 
+check python3 "$ROOT/tests/test_pixel_access_program_modes.py"
+
 printf '\nResults: %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
