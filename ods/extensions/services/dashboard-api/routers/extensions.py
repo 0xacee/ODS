@@ -4570,9 +4570,15 @@ def _enabled_dependents(service_id: str) -> list[str]:
     seen_peers: set[str] = set()
     for base in (USER_EXTENSIONS_DIR, EXTENSIONS_DIR):
         try:
-            peer_dirs = list(base.iterdir()) if base.is_dir() else []
-        except OSError:
+            peer_dirs = list(base.iterdir())
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            logger.warning("Cannot inspect enabled extension dependencies under %s: %s", base, type(exc).__name__)
+            raise HTTPException(
+                status_code=503,
+                detail="Cannot inspect enabled extension dependencies; no service was disabled",
+            ) from exc
         for peer_dir in peer_dirs:
             if (not peer_dir.is_dir() or peer_dir.name == service_id
                     or peer_dir.name in seen_peers):

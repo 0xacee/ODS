@@ -54,6 +54,30 @@ def test_disable_search_blocks_enabled_hermes(test_client, installation):
     assert (bundled / "searxng/compose.yaml").is_file()
 
 
+def test_disable_search_fails_closed_when_dependents_cannot_be_scanned(
+    test_client, installation, monkeypatch,
+):
+    bundled, start = installation
+    original_iterdir = Path.iterdir
+
+    def unreadable_user_extensions(path):
+        if path == extensions.USER_EXTENSIONS_DIR:
+            raise PermissionError("test: user extension directory is unreadable")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", unreadable_user_extensions)
+    response = test_client.post(
+        "/api/extensions/searxng/disable?include_data_info=false",
+        headers=test_client.auth_headers,
+    )
+
+    assert response.status_code == 503
+    assert "Cannot inspect enabled extension dependencies" in response.json()["detail"]
+    start.assert_not_called()
+    assert (bundled / "searxng/compose.yaml").is_file()
+    assert not (bundled / "searxng/compose.yaml.disabled").exists()
+
+
 def test_enable_requires_confirmation_for_disabled_transitive_service(test_client, installation):
     bundled, start = installation
     target_enabled = (bundled / "hermes-proxy" / "compose.yaml").exists()
