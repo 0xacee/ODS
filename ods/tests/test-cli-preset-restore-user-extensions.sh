@@ -38,9 +38,10 @@ trap 'rm -rf "$FIXTURE"' EXIT
 # ---------------------------------------------------------------------------
 # Fixture: minimal install dir the CLI accepts (check_install + sr_load)
 # ---------------------------------------------------------------------------
-mkdir -p "$FIXTURE/lib" "$FIXTURE/extensions/services" "$FIXTURE/data/user-extensions"
+mkdir -p "$FIXTURE/lib" "$FIXTURE/scripts" "$FIXTURE/extensions/services" "$FIXTURE/data/user-extensions"
 cp "$ROOT_DIR/ods-cli" "$FIXTURE/ods-cli"
 cp "$ROOT_DIR"/lib/*.sh "$FIXTURE/lib/"
+cp "$ROOT_DIR/scripts/extension-selection.py" "$FIXTURE/scripts/"
 : > "$FIXTURE/docker-compose.base.yml"
 echo "GPU_BACKEND=nvidia" > "$FIXTURE/.env"
 
@@ -137,6 +138,19 @@ if echo "$output" | grep -q "Extensions: 0 enabled, 2 disabled"; then
     pass "preset load reports disable counts"
 else
     fail "preset load aborted during disable pass: $output"
+fi
+
+# A contradictory imported preset must not change the active environment or
+# either selection marker before the owner can repair it.
+printf 'enabled:bsvc\ndisabled:bsvc\n' > "$FIXTURE/presets/both-on/extensions.list"
+printf 'LLM_MODEL=wrong\n' > "$FIXTURE/presets/both-on/env"
+output=$(printf 'y\n' | run_cli preset load both-on)
+if [[ -f "$BUILTIN/compose.yaml.disabled" && -f "$USEREXT/compose.yaml.disabled" ]] &&
+   grep -q '^GPU_BACKEND=nvidia$' "$FIXTURE/.env" &&
+   echo "$output" | grep -q "Conflicting preset states"; then
+    pass "invalid preset keeps selected services and active .env"
+else
+    fail "invalid preset changed selection or .env: $output"
 fi
 
 echo ""

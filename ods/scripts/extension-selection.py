@@ -490,11 +490,209 @@ def run(
         return "disabled"
 
 
+def _preset_entries(path: Path) -> dict[str, bool]:
+    try:
+        selected = path.lstat()
+    except OSError as exc:
+        raise SelectionError(f"Cannot inspect preset extensions list: {path}") from exc
+    if not stat.S_ISREG(selected.st_mode):
+        raise SelectionError(f"Invalid preset extensions list: {path}")
+    try:
+        raw = _read_bounded_file(path).decode("utf-8")
+    except UnicodeError as exc:
+        raise SelectionError("Preset extensions list is not UTF-8") from exc
+    entries: dict[str, bool] = {}
+    for number, line in enumerate(raw.splitlines(), 1):
+        if not line:
+            continue
+        state, separator, service_id = line.partition(":")
+        if (not separator or state not in ("enabled", "disabled")
+                or SERVICE_ID.fullmatch(service_id) is None):
+            raise SelectionError(f"Invalid preset extension entry on line {number}")
+        enabled = state == "enabled"
+        if service_id in entries and entries[service_id] != enabled:
+            raise SelectionError(f"Conflicting preset states for {service_id}")
+        entries[service_id] = enabled
+    return entries
+
+
+def _extension_directories(install_dir: Path) -> dict[str, Path]:
+    directories: dict[str, Path] = {}
+    for root in (install_dir / "data" / "user-extensions",
+                 install_dir / "extensions" / "services"):
+        try:
+            root_stat = root.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise SelectionError(f"Invalid extension root: {root}")
+        try:
+            peers = sorted(root.iterdir())
+        except OSError as exc:
+            raise SelectionError(f"Cannot inspect extension root: {root}") from exc
+        for peer in peers:
+            if peer.name in directories or SERVICE_ID.fullmatch(peer.name) is None:
+                continue
+            try:
+                peer_stat = peer.lstat()
+            except OSError as exc:
+                raise SelectionError(f"Cannot inspect extension peer: {peer}") from exc
+            if stat.S_ISLNK(peer_stat.st_mode):
+                raise SelectionError(f"Invalid extension peer: {peer}")
+            if stat.S_ISDIR(peer_stat.st_mode):
+                directories[peer.name] = peer
+    return directories
+
+
+def _preset_dependencies(
+    install_dir: Path, service_id: str, directory: Path,
+    compose_path: Path, directories: dict[str, Path], core_services: set[str],
+) -> set[str]:
+    manifest_deps = _manifest_dependencies(directory)
+    fragment_services, compose_deps = _compose_details(compose_path)
+    dependencies: set[str] = set()
+    for dep in manifest_deps | (compose_deps - fragment_services):
+        if dep == service_id:
+            raise SelectionError(f"Circular dependency for {service_id}")
+        if dep in fragment_services:
+            continue
+        if dep in core_services:
+            try:
+                (install_dir / "data" / "user-extensions" / dep).lstat()
+            except FileNotFoundError:
+                continue
+        if dep in directories:
+            dependencies.add(dep)
+        elif dep in manifest_deps:
+            raise SelectionError(f"Missing prerequisite {dep} for {service_id}")
+    return dependencies
+
+
+def _preset_graph(
+    install_dir: Path, directories: dict[str, Path], current: dict[str, bool],
+    states: dict[str, bool], core_services: set[str], *, require_dependencies: bool,
+) -> dict[str, set[str]]:
+    graph: dict[str, set[str]] = {}
+    for service_id, enabled in states.items():
+        if not enabled:
+            continue
+        directory = directories[service_id]
+        # A marker rename preserves file contents. Read the *current* source
+        # file even when the requested state is different.
+        compose_path = directory / ("compose.yaml" if current[service_id]
+                                    else "compose.yaml.disabled")
+        if not compose_path.is_file() or compose_path.is_symlink():
+            raise SelectionError(f"Missing selected Compose file for {service_id}")
+        dependencies = _preset_dependencies(
+            install_dir, service_id, directory, compose_path, directories, core_services,
+        )
+        if require_dependencies:
+            missing = sorted(dep for dep in dependencies if not states.get(dep, False))
+            if missing:
+                raise SelectionError(
+                    f"Preset would leave {service_id} without prerequisites: "
+                    f"{', '.join(missing)}"
+                )
+        graph[service_id] = dependencies
+    return graph
+
+
+def _dependency_order(graph: dict[str, set[str]]) -> list[str]:
+    order: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(service_id: str) -> None:
+        if service_id in visiting:
+            raise SelectionError(f"Circular preset dependencies involving {service_id}")
+        if service_id in visited:
+            return
+        visiting.add(service_id)
+        for dep in sorted(graph[service_id]):
+            if dep in graph:
+                visit(dep)
+        visiting.remove(service_id)
+        visited.add(service_id)
+        order.append(service_id)
+
+    for service_id in sorted(graph):
+        visit(service_id)
+    return order
+
+
+def restore_preset(
+    install_dir: Path, preset_file: Path, timeout: float = 15.0,
+    core_services: set[str] | None = None,
+) -> tuple[int, int, list[str]]:
+    """Restore markers from a valid selection, keeping dependencies valid per move."""
+    if timeout <= 0 or timeout > 120:
+        raise SelectionError("Invalid lock timeout")
+    core_services = set(core_services or ())
+    if any(SERVICE_ID.fullmatch(service_id) is None for service_id in core_services):
+        raise SelectionError("Invalid core service id")
+    entries = _preset_entries(preset_file)
+    if any(service_id in core_services for service_id in entries):
+        raise SelectionError("Presets cannot change core services")
+    with _selection_lock(install_dir, timeout):
+        directories = _extension_directories(install_dir)
+        skipped = sorted(service_id for service_id in entries if service_id not in directories)
+        current: dict[str, bool] = {}
+        for service_id, directory in directories.items():
+            current[service_id] = _selection_enabled(directory)
+        for service_id in entries:
+            if service_id not in directories:
+                continue
+            directory = directories[service_id]
+            if not ((directory / "compose.yaml").exists()
+                    or (directory / "compose.yaml.disabled").exists()):
+                raise SelectionError(f"No Compose selection file for {service_id}")
+        desired = current.copy()
+        desired.update({service_id: enabled for service_id, enabled in entries.items()
+                        if service_id in directories})
+        current_graph = _preset_graph(
+            install_dir, directories, current, current, core_services,
+            require_dependencies=True,
+        )
+        desired_graph = _preset_graph(
+            install_dir, directories, current, desired, core_services,
+            require_dependencies=True,
+        )
+        disable_order = [service_id for service_id in reversed(_dependency_order(current_graph))
+                         if current[service_id] and not desired[service_id]]
+        enable_order = [service_id for service_id in _dependency_order(desired_graph)
+                        if not current[service_id] and desired[service_id]]
+        enabled_count = 0
+        disabled_count = 0
+        cache = install_dir / ".compose-flags"
+        if cache.is_dir():
+            raise SelectionError(f"Compose cache is a directory: {cache}")
+        operations = [(service_id, False) for service_id in disable_order]
+        operations.extend((service_id, True) for service_id in enable_order)
+        for service_id, enable in operations:
+            directory = directories[service_id]
+            source = directory / ("compose.yaml.disabled" if enable else "compose.yaml")
+            target = directory / ("compose.yaml" if enable else "compose.yaml.disabled")
+            try:
+                cache.unlink(missing_ok=True)
+                os.replace(source, target)
+            except OSError as exc:
+                raise SelectionError(
+                    f"Preset restore stopped after {enabled_count} enabled and "
+                    f"{disabled_count} disabled; {service_id} was not changed: {exc}"
+                ) from exc
+            if enable:
+                enabled_count += 1
+            else:
+                disabled_count += 1
+        return enabled_count, disabled_count, skipped
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("check-disable", "disable", "enable"))
+    parser.add_argument("action", choices=("check-disable", "disable", "enable", "restore-preset"))
     parser.add_argument("--install-dir", type=Path, required=True)
-    parser.add_argument("--service-id", required=True)
+    parser.add_argument("--service-id")
+    parser.add_argument("--preset-file", type=Path)
     parser.add_argument("--lock-timeout", type=float, default=15.0)
     parser.add_argument("--core-service", action="append", default=[])
     parser.add_argument("--tier", default="1")
@@ -505,6 +703,20 @@ def main() -> int:
     parser.add_argument("--compose-flags", default="")
     args = parser.parse_args()
     try:
+        if args.action == "restore-preset":
+            if args.preset_file is None or args.service_id is not None:
+                raise SelectionError("Preset restore requires only --preset-file")
+            enabled, disabled, skipped = restore_preset(
+                args.install_dir, args.preset_file, args.lock_timeout,
+                set(args.core_service),
+            )
+            for service_id in skipped:
+                print(f"WARNING: Preset skipped unavailable extension {service_id}",
+                      file=sys.stderr)
+            print(f"{enabled} {disabled}")
+            return 0
+        if args.service_id is None or args.preset_file is not None:
+            raise SelectionError("Service selection requires only --service-id")
         print(run(args.action, args.install_dir, args.service_id, args.lock_timeout,
                   set(args.core_service), args.tier, args.gpu_backend,
                   args.gpu_count, args.ods_mode, args.stop_mode,

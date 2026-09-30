@@ -275,3 +275,120 @@ def test_separate_process_lock_blocks_commit_then_releases(tmp_path):
         stdout, stderr = holder.communicate(timeout=5)
         assert holder.returncode == 0, stderr or stdout
     assert selection.run("disable", tmp_path, "search") == "disabled"
+
+
+def test_preset_restore_orders_dependents_and_prerequisites(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    search = extension(tmp_path, "search")
+    consumer = extension(tmp_path, "consumer", depends=("search",))
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:search\ndisabled:consumer\n", encoding="utf-8")
+    original_replace = selection.os.replace
+    moves = []
+
+    def ordered_replace(source, target):
+        moves.append(Path(source).parent.name)
+        if Path(source).parent.name == "search" and Path(target).name.endswith("disabled"):
+            assert not (consumer / "compose.yaml").exists()
+        if Path(source).parent.name == "consumer" and Path(target).name == "compose.yaml":
+            assert (search / "compose.yaml").exists()
+        original_replace(source, target)
+
+    monkeypatch.setattr(selection.os, "replace", ordered_replace)
+    assert selection.restore_preset(tmp_path, preset) == (0, 2, [])
+    assert moves == ["consumer", "search"]
+
+    moves.clear()
+    preset.write_text("enabled:consumer\nenabled:search\n", encoding="utf-8")
+    assert selection.restore_preset(tmp_path, preset) == (2, 0, [])
+    assert moves == ["search", "consumer"]
+
+
+def test_preset_rejects_invalid_final_graph_before_any_rename(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    search = extension(tmp_path, "search")
+    consumer = extension(tmp_path, "consumer", compose_depends=("search",))
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:search\n", encoding="utf-8")
+    retained = tmp_path / "data" / "search" / "settings.json"
+    retained.parent.mkdir()
+    retained.write_text("keep", encoding="utf-8")
+    with pytest.raises(selection.SelectionError, match="without prerequisites: search"):
+        selection.restore_preset(tmp_path, preset)
+    assert (search / "compose.yaml").is_file()
+    assert (consumer / "compose.yaml").is_file()
+    assert retained.read_text(encoding="utf-8") == "keep"
+
+
+def test_preset_rejects_conflicting_entries_and_user_shadow(tmp_path):
+    user_root = tmp_path / "data" / "user-extensions"
+    user_root.mkdir(parents=True)
+    extension(tmp_path, "search")
+    user_search = user_root / "search"
+    user_search.mkdir()
+    (user_search / "compose.yaml.disabled").write_text("services: {}\n", encoding="utf-8")
+    consumer = extension(tmp_path, "consumer", depends=("search",), enabled=False)
+    preset = tmp_path / "extensions.list"
+    preset.write_text("enabled:consumer\ndisabled:consumer\n", encoding="utf-8")
+    with pytest.raises(selection.SelectionError, match="Conflicting preset states"):
+        selection.restore_preset(tmp_path, preset)
+    preset.write_text("enabled:consumer\n", encoding="utf-8")
+    with pytest.raises(selection.SelectionError, match="without prerequisites: search"):
+        selection.restore_preset(tmp_path, preset)
+    assert (consumer / "compose.yaml.disabled").is_file()
+    assert (user_search / "compose.yaml.disabled").is_file()
+
+
+def test_preset_partial_rename_failure_reports_committed_prefix(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    search = extension(tmp_path, "search")
+    consumer = extension(tmp_path, "consumer", depends=("search",))
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:search\ndisabled:consumer\n", encoding="utf-8")
+    cache = tmp_path / ".compose-flags"
+    cache.write_text("stale", encoding="utf-8")
+    original_replace = selection.os.replace
+
+    def fail_second(source, target):
+        if Path(source).parent.name == "search":
+            raise OSError("simulated rename failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(selection.os, "replace", fail_second)
+    with pytest.raises(selection.SelectionError, match="after 0 enabled and 1 disabled"):
+        selection.restore_preset(tmp_path, preset)
+    assert (consumer / "compose.yaml.disabled").is_file()
+    assert (search / "compose.yaml").is_file()
+    assert not cache.exists()
+
+
+def test_preset_refuses_invalid_starting_graph_without_mutation(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    search = extension(tmp_path, "search", enabled=False)
+    consumer = extension(tmp_path, "consumer", depends=("search",))
+    preset = tmp_path / "extensions.list"
+    preset.write_text("enabled:search\n", encoding="utf-8")
+    with pytest.raises(selection.SelectionError, match="without prerequisites: search"):
+        selection.restore_preset(tmp_path, preset)
+    assert (search / "compose.yaml.disabled").is_file()
+    assert (consumer / "compose.yaml").is_file()
+
+
+def test_preset_rejects_symlink_and_directory_inputs(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "search")
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:search\n", encoding="utf-8")
+    linked = tmp_path / "linked.list"
+    try:
+        linked.symlink_to(preset)
+    except (OSError, NotImplementedError):
+        pass
+    else:
+        with pytest.raises(selection.SelectionError, match="Invalid preset extensions list"):
+            selection.restore_preset(tmp_path, linked)
+    cache = tmp_path / ".compose-flags"
+    cache.mkdir()
+    with pytest.raises(selection.SelectionError, match="Compose cache is a directory"):
+        selection.restore_preset(tmp_path, preset)
+    assert (target / "compose.yaml").is_file()
