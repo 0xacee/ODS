@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -26,6 +27,93 @@ _spec = importlib.util.spec_from_file_location("ods_host_agent", _agent_path)
 _mod = importlib.util.module_from_spec(_spec)
 sys.modules["ods_host_agent"] = _mod
 _spec.loader.exec_module(_mod)
+
+
+def test_host_selection_serializes_dependency_decisions_with_cli_helper(tmp_path, monkeypatch):
+    """The agent uses the installed host selector, including ordered stops."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copyfile(_agent_path.parents[1] / "scripts" / "extension-selection.py",
+                    scripts / "extension-selection.py")
+    (scripts / "stop-owned-containers.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    (tmp_path / "docker-compose.base.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    for name, dependencies in (("search", ""), ("consumer", "search")):
+        directory = tmp_path / "extensions" / "services" / name
+        directory.mkdir(parents=True)
+        (directory / "manifest.yaml").write_text(
+            f"service:\n  id: {name}\n  depends_on: [{dependencies}]\n", encoding="utf-8",
+        )
+        (directory / "compose.yaml").write_text(
+            f"services:\n  {name}:\n    image: example:latest\n", encoding="utf-8",
+        )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+    monkeypatch.setattr(_mod, "resolve_compose_flags",
+                        lambda: ["-f", "docker-compose.base.yml"])
+    if sys.platform == "win32":
+        # Dashboard's test conftest stubs fcntl for its own imports; the host
+        # selector must take the real Windows msvcrt branch instead.
+        monkeypatch.delitem(sys.modules, "fcntl", raising=False)
+    with pytest.raises(ValueError, match="consumer"):
+        _mod._apply_extension_selection(["search"], activate=False)
+    assert (tmp_path / "extensions/services/search/compose.yaml").is_file()
+    assert _mod._apply_extension_selection(["consumer"], activate=False) == "disabled"
+    assert _mod._apply_extension_selection(["search"], activate=False) == "disabled"
+    with pytest.raises(ValueError, match="missing"):
+        _mod._apply_extension_selection(["search", "missing"], activate=True)
+    assert (tmp_path / "extensions/services/search/compose.yaml.disabled").is_file()
+    assert _mod._apply_extension_selection(["search", "consumer"], activate=True) == "enabled"
+    assert not list((tmp_path / "data").glob(".extension-selection-*"))
+
+
+def test_host_selection_endpoint_requires_auth_and_preserves_batch(tmp_path, monkeypatch):
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import HTTPServer
+
+    calls = []
+    monkeypatch.setattr(_mod, "AGENT_API_KEY", "selection-wire-secret")
+    monkeypatch.setattr(
+        _mod, "_apply_extension_selection",
+        lambda service_ids, activate: calls.append((service_ids, activate)) or "enabled",
+    )
+    server = HTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/v1/extension/select"
+
+        def post(body, token=None):
+            headers = {"Content-Type": "application/json"}
+            if token is not None:
+                headers["Authorization"] = f"Bearer {token}"
+            request = urllib.request.Request(
+                url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST",
+            )
+            return urllib.request.urlopen(request, timeout=2)
+
+        body = {"action": "enable", "service_ids": ["search", "consumer"]}
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            post(body)
+        assert rejected.value.code == 401
+        assert calls == []
+
+        with post(body, "selection-wire-secret") as response:
+            result = json.load(response)
+        assert result["action"] == "enabled"
+        assert result["service_ids"] == ["search", "consumer"]
+        assert calls == [(["search", "consumer"], True)]
+
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            post({"action": "disable", "service_ids": ["search", "consumer"]},
+                 "selection-wire-secret")
+        assert rejected.value.code == 400
+        assert calls == [(["search", "consumer"], True)]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 @pytest.mark.parametrize("model,settings,override", [

@@ -5959,6 +5959,66 @@ def _extension_stop_targets(service_id: str) -> list[str]:
     return targets
 
 
+def _apply_extension_selection(service_ids: list[str], activate: bool) -> str:
+    """Apply one selection plan on the host under the CLI's graph-wide lock.
+
+    Dashboard container locks are not an authority for a concurrent host CLI.
+    The installed selection helper checks the whole dependency graph, stops
+    exclusive owned containers on disable, then moves the marker under the
+    host-side data/.extensions-lock.
+    """
+    if (not isinstance(service_ids, list) or not service_ids or len(service_ids) > 64
+            or any(not isinstance(sid, str) or not SERVICE_ID_RE.fullmatch(sid)
+                   or sid in ALWAYS_ON_SERVICES
+                   for sid in service_ids)
+            or len(set(service_ids)) != len(service_ids)
+            or (not activate and len(service_ids) != 1)):
+        raise ValueError("Invalid optional extension selection")
+    helper_path = INSTALL_DIR / "scripts" / "extension-selection.py"
+    if not helper_path.is_file() or helper_path.is_symlink():
+        raise RuntimeError("Extension selection helper is unavailable")
+    spec = importlib.util.spec_from_file_location("_ods_extension_selection", helper_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Cannot load extension selection helper")
+    selector = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(selector)
+    flags = resolve_compose_flags()
+    # NamedTemporaryFile closes before the helper reads it, including on
+    # Windows. Its contents are only service IDs and their selection state.
+    preset_dir = INSTALL_DIR / "data"
+    if not preset_dir.is_dir() or preset_dir.is_symlink():
+        raise RuntimeError("Extension selection data directory is unavailable")
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", dir=preset_dir,
+        prefix=".extension-selection-", delete=False,
+    ) as stream:
+        for service_id in service_ids:
+            stream.write(f"{'enabled' if activate else 'disabled'}:{service_id}\n")
+        preset_path = Path(stream.name)
+    try:
+        try:
+            enabled, disabled, skipped = selector.restore_preset(
+                INSTALL_DIR, preset_path, core_services=set(ALWAYS_ON_SERVICES),
+                compose_flags=shlex.join(flags), strict=True,
+            )
+        except selector.SelectionError as exc:
+            message = str(exc)
+            if ("Could not confirm stop" in message or "Timed out waiting" in message
+                    or message.startswith("Preset restore stopped")):
+                raise RuntimeError(message) from exc
+            raise ValueError(message) from exc
+    finally:
+        try:
+            preset_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove temporary extension selection file")
+    if skipped:
+        raise RuntimeError("Strict extension selection unexpectedly skipped a service")
+    if enabled + disabled == 0:
+        return "already_enabled" if activate else "already_disabled"
+    return "enabled" if activate else "disabled"
+
+
 def _whisper_model_ready_after_start(
     max_wait_seconds: float = 480, compose_env: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
@@ -9461,6 +9521,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_extension_compose_toggle(activate=True)
         elif self.path == "/v1/extension/deactivate":
             self._handle_extension_compose_toggle(activate=False)
+        elif self.path == "/v1/extension/select":
+            self._handle_extension_selection()
         elif self.path == "/v1/extension/sync_config":
             self._handle_extension_sync_config()
         elif self.path == "/v1/service/logs":
@@ -11041,6 +11103,38 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         logger.info("%sd extension compose: %s", action, sid)
         json_response(self, 200, {"status": "ok", "service_id": sid, "action": action})
+
+    def _handle_extension_selection(self):
+        """Host-authoritative dependency-aware extension selection."""
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+        service_ids = body.get("service_ids")
+        action = body.get("action")
+        if (action not in ("enable", "disable")
+                or not isinstance(service_ids, list)
+                or not service_ids or len(service_ids) > 64
+                or any(not isinstance(sid, str) or not SERVICE_ID_RE.fullmatch(sid)
+                       or sid in ALWAYS_ON_SERVICES for sid in service_ids)
+                or len(set(service_ids)) != len(service_ids)
+                or (action == "disable" and len(service_ids) != 1)):
+            json_response(self, 400, {"error": "Invalid optional extension selection"})
+            return
+        try:
+            outcome = _apply_extension_selection(service_ids, activate=action == "enable")
+        except ValueError as exc:
+            json_response(self, 409, {"error": str(exc)})
+            return
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            logger.warning("Extension selection failed for %s: %s", service_ids, exc)
+            json_response(self, 502, {"error": f"Could not apply extension selection: {exc}"})
+            return
+        if outcome == "already_disabled":
+            json_response(self, 409, {"error": f"Extension already disabled: {service_ids[0]}"})
+            return
+        json_response(self, 200, {"status": "ok", "service_ids": service_ids, "action": outcome})
 
     def _handle_extension_sync_config(self):
         """Copy <ext_dir>/config/* into INSTALL_DIR/config/.

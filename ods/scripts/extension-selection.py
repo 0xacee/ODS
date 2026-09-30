@@ -680,6 +680,7 @@ def restore_preset(
     install_dir: Path, preset_file: Path, timeout: float = 15.0,
     core_services: set[str] | None = None,
     compose_flags: str | None = None,
+    strict: bool = False,
 ) -> tuple[int, int, list[str]]:
     """Restore markers from a valid selection, keeping dependencies valid per move."""
     if timeout <= 0 or timeout > 120:
@@ -693,6 +694,10 @@ def restore_preset(
     with _selection_lock(install_dir, timeout):
         directories = _extension_directories(install_dir)
         skipped = sorted(service_id for service_id in entries if service_id not in directories)
+        if strict and skipped:
+            raise SelectionError(
+                f"Extension is unavailable: {', '.join(skipped)}; selection unchanged"
+            )
         current: dict[str, bool] = {}
         for service_id, directory in directories.items():
             current[service_id] = _selection_enabled(directory)
