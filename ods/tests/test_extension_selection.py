@@ -285,6 +285,7 @@ def test_preset_restore_orders_dependents_and_prerequisites(tmp_path, monkeypatc
     preset.write_text("disabled:search\ndisabled:consumer\n", encoding="utf-8")
     original_replace = selection.os.replace
     moves = []
+    monkeypatch.setattr(selection, "_stop_for_disable", lambda *args: None)
 
     def ordered_replace(source, target):
         moves.append(Path(source).parent.name)
@@ -348,6 +349,7 @@ def test_preset_partial_rename_failure_reports_committed_prefix(tmp_path, monkey
     cache = tmp_path / ".compose-flags"
     cache.write_text("stale", encoding="utf-8")
     original_replace = selection.os.replace
+    monkeypatch.setattr(selection, "_stop_for_disable", lambda *args: None)
 
     def fail_second(source, target):
         if Path(source).parent.name == "search":
@@ -392,3 +394,59 @@ def test_preset_rejects_symlink_and_directory_inputs(tmp_path):
     with pytest.raises(selection.SelectionError, match="Compose cache is a directory"):
         selection.restore_preset(tmp_path, preset)
     assert (target / "compose.yaml").is_file()
+
+
+def test_preset_stops_every_owned_fragment_service_before_disabling(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "search")
+    (target / "compose.yaml").write_text(
+        "services:\n  search: {}\n  search-db: {}\n", encoding="utf-8",
+    )
+    helper = tmp_path / "scripts" / "stop-owned-containers.py"
+    helper.parent.mkdir()
+    helper.write_text("", encoding="utf-8")
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:search\n", encoding="utf-8")
+    calls = []
+
+    def stopped_before_rename(command, **kwargs):
+        calls.append(command)
+        assert (target / "compose.yaml").is_file()
+        assert not (target / "compose.yaml.disabled").exists()
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(selection.subprocess, "run", stopped_before_rename)
+    assert selection.restore_preset(tmp_path, preset) == (0, 1, [])
+    assert calls == [[sys.executable, str(helper), "--install-dir", str(tmp_path),
+                      "--service", "search", "--service", "search-db"]]
+    assert (target / "compose.yaml.disabled").is_file()
+
+
+def test_preset_stop_failure_keeps_marker_enabled(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "search")
+    helper = tmp_path / "scripts" / "stop-owned-containers.py"
+    helper.parent.mkdir()
+    helper.write_text("", encoding="utf-8")
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:search\n", encoding="utf-8")
+    monkeypatch.setattr(
+        selection.subprocess, "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", "stop refused"),
+    )
+    with pytest.raises(selection.SelectionError, match="Could not confirm stop for search"):
+        selection.restore_preset(tmp_path, preset)
+    assert (target / "compose.yaml").is_file()
+
+
+def test_preset_empty_fragment_never_issues_unfiltered_stop(tmp_path, monkeypatch):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "empty")
+    (target / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    preset = tmp_path / "extensions.list"
+    preset.write_text("disabled:empty\n", encoding="utf-8")
+    monkeypatch.setattr(selection.subprocess, "run", lambda *args, **kwargs: pytest.fail(
+        "empty fragment must not invoke an unfiltered owned-container stop",
+    ))
+    assert selection.restore_preset(tmp_path, preset) == (0, 1, [])
+    assert (target / "compose.yaml.disabled").is_file()

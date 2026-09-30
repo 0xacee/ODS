@@ -38,10 +38,14 @@ trap 'rm -rf "$FIXTURE"' EXIT
 # ---------------------------------------------------------------------------
 # Fixture: minimal install dir the CLI accepts (check_install + sr_load)
 # ---------------------------------------------------------------------------
-mkdir -p "$FIXTURE/lib" "$FIXTURE/scripts" "$FIXTURE/extensions/services" "$FIXTURE/data/user-extensions"
+mkdir -p "$FIXTURE/lib" "$FIXTURE/scripts" "$FIXTURE/bin" "$FIXTURE/extensions/services" "$FIXTURE/data/user-extensions"
 cp "$ROOT_DIR/ods-cli" "$FIXTURE/ods-cli"
 cp "$ROOT_DIR"/lib/*.sh "$FIXTURE/lib/"
 cp "$ROOT_DIR/scripts/extension-selection.py" "$FIXTURE/scripts/"
+cp "$ROOT_DIR/scripts/stop-owned-containers.py" "$FIXTURE/scripts/"
+printf '#!/bin/sh\n[ "$1" = ps ]\n' > "$FIXTURE/bin/docker"
+chmod +x "$FIXTURE/bin/docker"
+export PATH="$FIXTURE/bin:$PATH"
 : > "$FIXTURE/docker-compose.base.yml"
 echo "GPU_BACKEND=nvidia" > "$FIXTURE/.env"
 
@@ -151,6 +155,26 @@ if [[ -f "$BUILTIN/compose.yaml.disabled" && -f "$USEREXT/compose.yaml.disabled"
     pass "invalid preset keeps selected services and active .env"
 else
     fail "invalid preset changed selection or .env: $output"
+fi
+
+# Save and restore must choose the same user-owned shadow when a bundled
+# extension has the same ID. The bundled marker is left untouched.
+SHADOW="$FIXTURE/data/user-extensions/bsvc"
+write_ext "$SHADOW" bsvc
+mv "$SHADOW/compose.yaml" "$SHADOW/compose.yaml.disabled"
+mv "$BUILTIN/compose.yaml.disabled" "$BUILTIN/compose.yaml"
+output=$(run_cli preset save shadow)
+if grep -q '^disabled:bsvc$' "$FIXTURE/presets/shadow/extensions.list"; then
+    pass "preset save records the user-shadow selection"
+else
+    fail "preset save chose the bundled shadow: $output"
+fi
+mv "$SHADOW/compose.yaml.disabled" "$SHADOW/compose.yaml"
+output=$(printf 'y\n' | run_cli preset load shadow)
+if [[ -f "$SHADOW/compose.yaml.disabled" && -f "$BUILTIN/compose.yaml" ]]; then
+    pass "preset load restores the user shadow without changing the bundled marker"
+else
+    fail "preset load changed the wrong shadow: $output"
 fi
 
 echo ""

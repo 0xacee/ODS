@@ -359,6 +359,7 @@ def _refresh_compose_flags(
 
 def _stop_for_disable(
     install_dir: Path, service_id: str, mode: str, compose_flags: str,
+    service_names: set[str] | None = None,
 ) -> None:
     if mode == "compose":
         try:
@@ -370,11 +371,19 @@ def _stop_for_disable(
             raise SelectionError("Invalid Compose flags; selection unchanged")
         command = ["docker", "compose", *flags, "stop", service_id]
     elif mode == "owned":
+        names = sorted(service_names) if service_names is not None else [service_id]
+        # An unfiltered owned-stop request stops every ODS container. Never
+        # turn a fragment with no services into an installation-wide stop.
+        if not names:
+            return
+        if any(SERVICE_ID.fullmatch(name) is None for name in names):
+            raise SelectionError(f"Invalid Compose service for {service_id}; selection unchanged")
         helper = install_dir / "scripts" / "stop-owned-containers.py"
         if not helper.is_file():
             raise SelectionError(f"Owned-container stop helper missing: {helper}")
-        command = [sys.executable, str(helper), "--install-dir", str(install_dir),
-                   "--service", service_id]
+        command = [sys.executable, str(helper), "--install-dir", str(install_dir)]
+        for name in names:
+            command.extend(("--service", name))
     else:
         raise SelectionError("Invalid stop mode; selection unchanged")
     try:
@@ -673,12 +682,23 @@ def restore_preset(
             source = directory / ("compose.yaml.disabled" if enable else "compose.yaml")
             target = directory / ("compose.yaml" if enable else "compose.yaml.disabled")
             try:
+                if not enable:
+                    fragment_services, _ = _compose_details(source)
+                    _stop_for_disable(
+                        install_dir, service_id, "owned", "", fragment_services,
+                    )
                 cache.unlink(missing_ok=True)
                 os.replace(source, target)
+            except SelectionError as exc:
+                raise SelectionError(
+                    f"Preset restore stopped after {enabled_count} enabled and "
+                    f"{disabled_count} disabled; {service_id} marker was not changed: {exc}"
+                ) from exc
             except OSError as exc:
                 raise SelectionError(
                     f"Preset restore stopped after {enabled_count} enabled and "
-                    f"{disabled_count} disabled; {service_id} was not changed: {exc}"
+                    f"{disabled_count} disabled; {service_id} marker was not changed "
+                    f"(its container may have stopped): {exc}"
                 ) from exc
             if enable:
                 enabled_count += 1

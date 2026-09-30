@@ -3327,6 +3327,13 @@ cmd_preset() {
                 local cat="${SERVICE_CATEGORIES[$sid]}"
                 [[ "$cat" == "core" ]] && continue
                 local cf="${SERVICE_COMPOSE[$sid]}"
+                # Match restore and Dashboard: a user extension shadows the
+                # bundled extension with the same service ID.
+                local user_ext_dir="$INSTALL_DIR/data/user-extensions/$sid"
+                [[ -L "$user_ext_dir" ]] && error "Invalid user extension: $sid"
+                if [[ -d "$user_ext_dir" ]]; then
+                    cf="$user_ext_dir/compose.yaml"
+                fi
                 if [[ -n "$cf" && -f "$cf" ]]; then
                     echo "enabled:$sid" >> "$state_file"
                 else
