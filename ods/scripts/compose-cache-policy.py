@@ -34,7 +34,13 @@ def _files(flags):
             index += 1
 
 
-def validate_flags(install_dir, flags):
+def validate_flags(install_dir, flags, *, recovery_disable_service=None):
+    """Validate every cached recipe, allowing only one base recipe to be deselected.
+
+    The recovery exception does not skip path, manifest, other-recipe, or
+    cross-recipe checks. The selector must still verify and stop owned
+    containers before moving the target's marker.
+    """
     root = pathlib.Path(install_dir).resolve()
     user_root = root / 'data/user-extensions'
     canonical_user_root = user_root.resolve()
@@ -105,7 +111,8 @@ def validate_flags(install_dir, flags):
         accelerator = {'compose.nvidia.yaml': 'nvidia', 'compose.amd.yaml': 'amd'}.get(path.name)
         ok, problems = namespace['_scan_user_compose_content'](
             path, trusted, accelerator, extension_id=directory.name)
-        if not ok:
+        if not ok and not (directory.name == recovery_disable_service
+                           and path.name == 'compose.yaml'):
             raise ValueError(f'Cached extension {directory.name} requires review: ' + '; '.join(problems)
                              + f". To recover, run 'ods disable {directory.name}' (it stops the extension safely"
                              + ' and keeps its data), then reinstall it from the dashboard Extensions page.')

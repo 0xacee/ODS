@@ -5632,7 +5632,13 @@ def invalidate_compose_cache() -> None:
     (INSTALL_DIR / ".compose-flags").unlink(missing_ok=True)
 
 
-def resolve_compose_flags() -> list:
+def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> list:
+    """Resolve Compose flags; a target's rejected recipe may be used for safe disable.
+
+    Only the Dashboard disable path passes ``recovery_disable_service``. Its
+    selector reads the saved file list to identify shared base services, but
+    never runs Compose with these flags. Starts still require full policy.
+    """
     flags_file = INSTALL_DIR / ".compose-flags"
     if flags_file.exists():
         raw = flags_file.read_text(encoding="utf-8").strip()
@@ -5644,7 +5650,13 @@ def resolve_compose_flags() -> list:
             policy_spec = importlib.util.spec_from_file_location("_ods_compose_cache_policy", policy_path)
             policy = importlib.util.module_from_spec(policy_spec)
             policy_spec.loader.exec_module(policy)
-            policy.validate_flags(INSTALL_DIR, flags)
+            if recovery_disable_service is None:
+                policy.validate_flags(INSTALL_DIR, flags)
+            else:
+                policy.validate_flags(
+                    INSTALL_DIR, flags,
+                    recovery_disable_service=recovery_disable_service,
+                )
             active_name = ".active-model-store.compose.json"
             flags = [value for index, value in enumerate(flags)
                      if not (Path(value).name == active_name or (value == "-f" and index+1 < len(flags) and Path(flags[index+1]).name == active_name))]
@@ -5991,7 +6003,8 @@ def _apply_extension_selection(
             or (not activate and len(service_ids) != 1)):
         raise ValueError("Invalid optional extension selection")
     selector = _load_extension_selector()
-    flags = resolve_compose_flags()
+    flags = (resolve_compose_flags() if activate else
+             resolve_compose_flags(recovery_disable_service=service_ids[0]))
     # NamedTemporaryFile closes before the helper reads it, including on
     # Windows. Its contents are only service IDs and their selection state.
     preset_dir = INSTALL_DIR / "data"

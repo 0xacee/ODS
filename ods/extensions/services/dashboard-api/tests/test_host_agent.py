@@ -49,7 +49,7 @@ def test_host_selection_serializes_dependency_decisions_with_cli_helper(tmp_path
         )
     monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
     monkeypatch.setattr(_mod, "resolve_compose_flags",
-                        lambda: ["-f", "docker-compose.base.yml"])
+                        lambda **_kwargs: ["-f", "docker-compose.base.yml"])
     if sys.platform == "win32":
         # Dashboard's test conftest stubs fcntl for its own imports; the host
         # selector must take the real Windows msvcrt branch instead.
@@ -1942,6 +1942,110 @@ class TestResolveComposeFlagsCache:
         with pytest.raises(ValueError, match='requires review'):
             resolve_compose_flags()
         assert (tmp_path / '.compose-flags').read_text(encoding='utf-8') == saved
+
+    def test_dashboard_disable_recovers_policy_rejected_target_without_starting_it(
+        self, tmp_path, monkeypatch,
+    ):
+        scripts = tmp_path / 'scripts'
+        scripts.mkdir()
+        shutil.copyfile(_agent_path.parents[1] / 'scripts/extension-selection.py',
+                        scripts / 'extension-selection.py')
+        (scripts / 'stop-owned-containers.py').write_text(
+            'raise SystemExit(0)\n', encoding='utf-8',
+        )
+        (tmp_path / 'docker-compose.base.yml').write_text(
+            'services: {}\n', encoding='utf-8',
+        )
+        extension = tmp_path / 'data/user-extensions/example'
+        extension.mkdir(parents=True)
+        (extension / 'manifest.yaml').write_text(
+            'service:\n  id: example\n', encoding='utf-8',
+        )
+        (extension / 'compose.yaml').write_text(
+            'services:\n  example:\n    image: example/app:1\n    privileged: true\n',
+            encoding='utf-8',
+        )
+        (extension / 'owner-data.db').write_text('keep', encoding='utf-8')
+        (tmp_path / '.compose-flags').write_text(
+            '-f docker-compose.base.yml -f data/user-extensions/example/compose.yaml',
+            encoding='utf-8',
+        )
+        monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
+        monkeypatch.setattr(_mod._model_stores, 'active_compose_overlay',
+                            lambda *_args: None)
+        if sys.platform == 'win32':
+            monkeypatch.delitem(sys.modules, 'fcntl', raising=False)
+
+        with pytest.raises(ValueError, match='requires review'):
+            _mod._apply_extension_selection(['example'], activate=True)
+        assert (extension / 'compose.yaml').is_file()
+
+        assert _mod._apply_extension_selection(['example'], activate=False) == 'disabled'
+        assert (extension / 'compose.yaml.disabled').is_file()
+        assert (extension / 'owner-data.db').read_text(encoding='utf-8') == 'keep'
+        assert not (tmp_path / '.compose-flags').exists()
+
+    @pytest.mark.parametrize('order', [('other', 'example'), ('example', 'other')])
+    def test_dashboard_disable_does_not_bypass_another_rejected_recipe(
+        self, tmp_path, monkeypatch, order,
+    ):
+        user_root = tmp_path / 'data/user-extensions'
+        for service_id in ('other', 'example'):
+            extension = user_root / service_id
+            extension.mkdir(parents=True)
+            (extension / 'manifest.yaml').write_text(
+                f'service:\n  id: {service_id}\n', encoding='utf-8',
+            )
+            (extension / 'compose.yaml').write_text(
+                f'services:\n  {service_id}:\n    image: example/app:1\n'
+                '    privileged: true\n',
+                encoding='utf-8',
+            )
+        (tmp_path / '.compose-flags').write_text(
+            ' '.join(f'-f data/user-extensions/{service_id}/compose.yaml'
+                     for service_id in order), encoding='utf-8',
+        )
+        monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
+        with pytest.raises(ValueError, match='Cached extension other requires review'):
+            _mod.resolve_compose_flags(recovery_disable_service='example')
+        assert (user_root / 'example/compose.yaml').is_file()
+
+    def test_dashboard_recovery_keeps_base_overlay_provider_selected(
+        self, tmp_path, monkeypatch,
+    ):
+        scripts = tmp_path / 'scripts'
+        scripts.mkdir()
+        shutil.copyfile(_agent_path.parents[1] / 'scripts/extension-selection.py',
+                        scripts / 'extension-selection.py')
+        (scripts / 'stop-owned-containers.py').write_text(
+            'raise AssertionError("base provider must not be stopped")\n',
+            encoding='utf-8',
+        )
+        (tmp_path / 'docker-compose.external-llm.yml').write_text(
+            'services:\n  litellm: {}\n', encoding='utf-8',
+        )
+        extension = tmp_path / 'data/user-extensions/litellm'
+        extension.mkdir(parents=True)
+        (extension / 'manifest.yaml').write_text(
+            'service:\n  id: litellm\n', encoding='utf-8',
+        )
+        (extension / 'compose.yaml').write_text(
+            'services:\n  litellm:\n    image: example/litellm:1\n'
+            '    privileged: true\n', encoding='utf-8',
+        )
+        (tmp_path / '.compose-flags').write_text(
+            '-f docker-compose.external-llm.yml '
+            '-f data/user-extensions/litellm/compose.yaml', encoding='utf-8',
+        )
+        monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
+        monkeypatch.setattr(_mod._model_stores, 'active_compose_overlay',
+                            lambda *_args: None)
+        if sys.platform == 'win32':
+            monkeypatch.delitem(sys.modules, 'fcntl', raising=False)
+
+        with pytest.raises(ValueError, match='requires litellm'):
+            _mod._apply_extension_selection(['litellm'], activate=False)
+        assert (extension / 'compose.yaml').is_file()
 
     def test_prefers_saved_compose_flags_file(self, tmp_path, monkeypatch):
         install_dir = tmp_path / "ods"
