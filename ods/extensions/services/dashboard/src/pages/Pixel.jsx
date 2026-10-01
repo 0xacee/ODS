@@ -44,6 +44,8 @@ import {publicationDisplayText} from '../lib/publicationDisplay'
 import {isQuestionAnswer, parseQuestionsFrame, questionMetadata} from '../lib/pixelQuestions'
 import PixelTurnNavigation from '../components/PixelTurnNavigation'
 import PixelSnapshotChanges from '../components/PixelSnapshotChanges'
+import PortalDeliveredArtifacts from '../components/PortalDeliveredArtifacts'
+import { deliveredArtifactMetadata, parseDeliveredArtifactsFrame } from '../lib/pixelDeliveredArtifacts'
 import PortalWorkspace from '../components/PortalWorkspace'
 import { parseTaskActivity, parseTaskActivityFrame } from '../lib/pixelTaskActivity'
 import MetalMetricIcon from '../components/MetalMetricIcon'
@@ -443,6 +445,7 @@ function messageOutcome(message) {
 function retainedResult(events) {
   let content = ''
   let preview = null
+  let artifacts = null
   let task = null
   let questions = null
   let done = false
@@ -469,6 +472,8 @@ function retainedResult(events) {
       }
       const candidate = parseVerifiedPreviewFrame(frame)
       if (candidate) preview = candidate
+      const candidateArtifacts = parseDeliveredArtifactsFrame(frame)
+      if (candidateArtifacts) artifacts = candidateArtifacts
       const candidateTask = parseTaskActivityFrame(frame)
       if (candidateTask) task = candidateTask
       const candidateQuestions = parseQuestionsFrame(frame)
@@ -478,7 +483,7 @@ function retainedResult(events) {
     } catch { /* The same bounded SSE boundary applies to retained results. */ }
   }
   if (failureMessage) content = content ? `${content}\n\n_${failureMessage}_` : failureMessage
-  return { content, preview: done && !failed ? preview : null, task, questions: done && !failed ? questions : null, done, failed }
+  return { content, preview: done && !failed ? preview : null, artifacts: done && !failed ? artifacts : null, task, questions: done && !failed ? questions : null, done, failed }
 }
 
 function loadStoredChat(selected) {
@@ -508,7 +513,7 @@ function loadStoredChat(selected) {
       totalBytes += new TextEncoder().encode(message.content).byteLength
       if (totalBytes > MAX_STORED_MESSAGE_BYTES) throw new Error('stored Portal chat is too large')
       const task = message.role === 'assistant' && parseTaskActivity(message.task, message.task?.runId)
-      return { role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...questionMetadata(message), ...teamMetadata(message) }
+      return { role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...deliveredArtifactMetadata(message), ...questionMetadata(message), ...teamMetadata(message) }
     })
     // Reuse the terminal marker validator for persisted metadata. Never infer
     // an iframe URL from conversation text, and always use the authenticated
@@ -744,6 +749,7 @@ export default function Pixel({ systemStatus = null }) {
                 status: result.state === 'cancelled' ? 'stopped' : successful ? 'done' : 'error',
                 ...(recovered.task ? {task:recovered.task} : {}),
                 ...(successful && recovered.questions ? {questions:recovered.questions} : {}),
+                ...(successful && recovered.artifacts ? {artifacts:recovered.artifacts} : {}),
                 ...(publication ? {publication,beforePublication:before} : {}),
               })})
               if (successful && recovered.preview) {
@@ -923,7 +929,7 @@ export default function Pixel({ systemStatus = null }) {
     try {
       const storedMessages = messages.map(message => {
         const task = message.role === 'assistant' && parseTaskActivity(message.task, message.task?.runId)
-        return {role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...questionMetadata(message), ...teamMetadata(message)}
+        return {role: message.role, content: message.content, ...messageOutcome(message), ...(task ? {task} : {}), ...messagePublication(message), ...deliveredArtifactMetadata(message), ...questionMetadata(message), ...teamMetadata(message)}
       })
       // Report storage limits without silently trimming previous turns.
       if (storedMessages.length > MAX_STORED_MESSAGES || storedMessages.reduce((total, message) => total + new TextEncoder().encode(message.content).byteLength, 0) > MAX_STORED_MESSAGE_BYTES) throw new Error('stored Portal chat is too large')
@@ -1017,6 +1023,7 @@ export default function Pixel({ systemStatus = null }) {
       let receivedError = false
       let recoveryEligible = false
       let verifiedPreview = null
+      let verifiedArtifacts = null
       let taskActivity = null
       let questions = null
 
@@ -1121,6 +1128,8 @@ export default function Pixel({ systemStatus = null }) {
               if (isCleanContextRecoveryFrame(frame)) recoveryEligible = true
               const candidatePreview = parseVerifiedPreviewFrame(frame)
               if (candidatePreview) verifiedPreview = candidatePreview
+              const candidateArtifacts = parseDeliveredArtifactsFrame(frame)
+              if (candidateArtifacts) verifiedArtifacts = candidateArtifacts
               const candidateQuestions = parseQuestionsFrame(frame)
               if (candidateQuestions) questions = candidateQuestions
               const candidateTask = parseTaskActivityFrame(frame)
@@ -1150,6 +1159,7 @@ export default function Pixel({ systemStatus = null }) {
           receivedError,
           recoveryEligible,
           verifiedPreview,
+          verifiedArtifacts,
           taskActivity,
           questions,
         }
@@ -1175,6 +1185,7 @@ export default function Pixel({ systemStatus = null }) {
         setMessages(previous => replaceLastAssistant(previous, {
           status: 'done',
           ...(attempt.taskActivity ? {task: attempt.taskActivity} : {}),
+          ...(attempt.verifiedArtifacts ? {artifacts:attempt.verifiedArtifacts} : {}),
           ...(attempt.questions && attempt.receivedDone && !attempt.receivedError ? {questions:attempt.questions} : {}),
           ...(attempt.verifiedPreview ? {publication:attempt.verifiedPreview, beforePublication:previousPublication?.relativeDirectory === attempt.verifiedPreview.relativeDirectory ? previousPublication : null} : {}),
           ...(recovered ? { recovered: true } : {}),
@@ -1677,6 +1688,7 @@ export default function Pixel({ systemStatus = null }) {
                   installation={githubExtensionInstallation}
                   onConfigured={() => githubExtensionInstallation
                     ? resumeGithubExtensionInstallation() : sendMessage(messages[index - 1].content)}/>}
+              {message.role === 'assistant' && message.status === 'done' && <PortalDeliveredArtifacts key={`delivered-files/${chatIdRef.current}/${index}`} artifacts={message.artifacts} />}
               {message.role === 'assistant' && message.content ? (
                 <>
                   {message.publication && <PixelSnapshotChanges preview={message.publication} before={message.beforePublication} variant="summary" onPreview={()=>openPublication(message.publication,'preview')} onReview={path=>openPublication(message.publication,'review',path)}/>}
