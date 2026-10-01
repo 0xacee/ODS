@@ -509,10 +509,10 @@ describe('Pixel', () => {
     expect(frame).toBeInTheDocument()
     fireEvent.click(screen.getByTitle('Collapse preview'))
     expect(frame).not.toBeVisible()
-    expect(screen.getByTitle('Interactive Portal preview')).toBe(frame)
+    expect(await screen.findByTitle('Interactive Portal preview')).toBe(frame)
     fireEvent.click(screen.getByTitle('Expand preview'))
     expect(frame).toBeVisible()
-    expect(screen.getByTitle('Interactive Portal preview')).toBe(frame)
+    expect(await screen.findByTitle('Interactive Portal preview')).toBe(frame)
     fireEvent.click(screen.getByTitle('Start a new chat'))
     await waitFor(() => {
       const stored = JSON.parse(globalThis.localStorage.getItem('ods.pixel.chat.v1'))
