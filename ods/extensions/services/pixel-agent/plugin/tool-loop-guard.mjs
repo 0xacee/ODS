@@ -5738,6 +5738,39 @@ function localPreviewPolicyText(text) {
     .replace(/\b(?:n[aã]o|nunca)\s+(?:publique|publicar|publique novamente)\s+fora\s+do\s+ODS\b(?=\s*(?:[.!?;]|$))/gi, ' ');
 }
 
+// Owner phrasings that make delivery optional. The preparation verbs are a
+// closed list on purpose: "No need to explain, publish it" must stay a
+// publication request, so an arbitrary verb never joins the declined list.
+const OPTIONAL_DELIVERY_PATTERNS = (() => {
+  const negator = String.raw`(?:no\s+need\s+to|(?:do\s+not|don['’]t)\s+(?:need|have)\s+to|need\s+not|needn['’]t)`;
+  const preparation = String.raw`(?:(?:build|compile|run|test|install|bundle|package|lint)\s*(?:,\s*(?:(?:and|or)\s+)?|(?:and|or)\s+))*`;
+  const delivery = String.raw`(?:publish|republish|preview|display|serve|deploy)`;
+  const ptNegator = String.raw`nao\s+(?:precisa|precisamos|e\s+necessario|ha\s+necessidade\s+de)`;
+  const ptPreparation = String.raw`(?:(?:compilar|construir|executar|testar|instalar)\s*(?:,\s*(?:(?:e|ou)\s+)?|(?:e|ou)\s+))*`;
+  const ptDelivery = String.raw`(?:publicar|republicar|mostrar|abrir\s+(?:uma?\s+)?previa)`;
+  const gerund = String.raw`(?:publish(?:ing)?|republish(?:ing)?|preview(?:ing)?|display(?:ing)?|serving|deploy(?:ing|ment)?|publication)`;
+  return [
+    new RegExp(String.raw`\b${negator}\s+${preparation}${delivery}\b`, 'i'),
+    new RegExp(String.raw`\bno\s+need\s+for\s+(?:an?\s+)?(?:preview|publication|publishing|deployment)\b`, 'i'),
+    new RegExp(String.raw`\b${gerund}\s+(?:is\s+not|isn['’]t)\s+(?:necessary|required|needed)\b`, 'i'),
+    new RegExp(String.raw`\b${ptNegator}\s+${ptPreparation}${ptDelivery}\b`, 'i'),
+  ];
+})();
+
+function ownerDeclinesPreviewDelivery(text) {
+  // Optional build work must not become mandatory publication after a JSX/HTML
+  // write. Match only a coordinated delivery verb, not another clause's task.
+  const prose = workspacePreviewInstructionText(text).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  let optional = false;
+  for (const clause of prose.split(/[!?;\n]+|\.(?=\s|$)|\b(?:but|however|instead|then|mas|porem)\b/i)) {
+    if (OPTIONAL_DELIVERY_PATTERNS.some(pattern => pattern.test(clause))) optional = true;
+    // A later independent, explicit publication command still has to be
+    // verified. This is not permission to override an actual "do not publish".
+    else if (hasExplicitWorkspacePreviewDirective(clause)) optional = false;
+  }
+  return optional;
+}
+
 function ownerForbidsWorkspacePreview(messages, prompt) {
   const text = localPreviewPolicyText(currentOwnerIntentText(messages, prompt))
     .replace(/(?:\x60{3}|~{3})[\s\S]*?(?:\x60{3}|~{3})/g, " ")
@@ -5752,7 +5785,7 @@ function ownerForbidsWorkspacePreview(messages, prompt) {
   const coordinatedProhibition = text
     .split(/[!?;\n]+|\.(?=\s|$)|\b(?:but|however|instead|then)\b/i)
     .some((clause) => /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\b[^.!?;\n]{0,160}\b(?:and|or)\s+(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(clause));
-  if (coordinatedProhibition) return true;
+  if (coordinatedProhibition || ownerDeclinesPreviewDelivery(text)) return true;
   return portuguesePreviewForbidden(text) || /\b(?:only|just)\s+(?:the\s+)?(?:code|source(?:\s+code)?)\b/i.test(text) || /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|avoid|skip|without)\s+(?:(?:try|attempt)\s+to\s+)?(?:(?:create|build|edit|write|run|execute)\s*(?:,\s*|and\s+|or\s+))*(?:show(?:ing)?|preview(?:ing)?|view(?:ing)?|open(?:ing)?|serv(?:e|ing)|publish(?:ing)?|republish(?:ing)?|display(?:ing)?)\b/i.test(text);
 }
 
@@ -6006,7 +6039,7 @@ function clauseRequestsVisualArtifact(clause, actionPattern, targetPattern) {
 export function userMessageRequestsWorkspacePreview(messages, prompt = undefined) {
   const text = workspacePreviewInstructionText(currentOwnerIntentText(messages, prompt));
   if (!text) return false;
-  if (portuguesePreviewForbidden(text)) return false;
+  if (portuguesePreviewForbidden(text) || ownerDeclinesPreviewDelivery(text)) return false;
   // Classify visual targets and actions from the same positive request text.
   // A no-website constraint on a Python task is not a website request. Keep
   // independent actions after "but", "instead", "then", or a sentence boundary.
