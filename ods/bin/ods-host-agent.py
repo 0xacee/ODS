@@ -5716,6 +5716,33 @@ def invalidate_compose_cache() -> None:
     (INSTALL_DIR / ".compose-flags").unlink(missing_ok=True)
 
 
+def _macos_native_pixel_compose_flags(flags: list[str]) -> list[str]:
+    """Keep host-agent Compose selection aligned with the installed Mac CLI."""
+    if platform.system() != "Darwin":
+        return flags
+    preparation = INSTALL_DIR / "data/pixel-native/preparation"
+    if not any(os.path.lexists(preparation / name) for name in
+               ("activation.json", "selection-update.json")):
+        return flags
+    helper = INSTALL_DIR / "installers/macos/lib/pixel-native-stack.py"
+    if not helper.is_file() or helper.is_symlink():
+        raise RuntimeError("Mac native Pixel Compose selector is unavailable")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(helper), "--install-dir", str(INSTALL_DIR),
+             "--flags", " ".join(flags)],
+            cwd=str(INSTALL_DIR), capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("Mac native Pixel Compose selection needs recovery") from exc
+    if result.returncode != 0:
+        raise RuntimeError("Mac native Pixel Compose selection needs recovery")
+    selected = result.stdout.strip().split()
+    if not selected or len(selected) % 2 or any(value != "-f" for value in selected[::2]):
+        raise RuntimeError("Mac native Pixel Compose selector returned invalid flags")
+    return selected
+
+
 def resolve_compose_flags() -> list:
     flags_file = INSTALL_DIR / ".compose-flags"
     if flags_file.exists():
@@ -5740,7 +5767,7 @@ def resolve_compose_flags() -> list:
             active_mount = _model_stores.active_compose_overlay(INSTALL_DIR, load_env(INSTALL_DIR / ".env").get("ODS_ACTIVE_MODEL_STORE", "default"))
             if active_mount:
                 flags.extend(["-f", str(active_mount)])
-            return flags
+            return _macos_native_pixel_compose_flags(flags)
 
     script = INSTALL_DIR / "scripts" / "resolve-compose-stack.sh"
     # Contract note: every resolver launch below must include --gpu-count and
@@ -5800,7 +5827,7 @@ def resolve_compose_flags() -> list:
         raise RuntimeError(
             f"compose resolver failed: {detail[:1000]}",
         ) from exc
-    return result.stdout.strip().split()
+    return _macos_native_pixel_compose_flags(result.stdout.strip().split())
 
 
 # Filesystem types that silently ignore POSIX ownership/permissions.
@@ -6207,18 +6234,18 @@ def _webui_selection_state() -> dict:
     selected = load_env(env_path).get("ENABLE_OPEN_WEBUI", "true").strip().lower() == "true"
     return {
         "enabled": selected,
-        "supported": platform.system() == "Linux",
+        "supported": platform.system() in {"Linux", "Darwin"},
     }
 
 
 def _enable_webui_selection() -> tuple[int, dict]:
-    """Add the base WebUI service to a Linux install without touching its data.
+    """Add the base WebUI service without touching its retained data.
 
     The existing .env choice and Compose resolver remain authoritative. Keep
     the bind-mounted .env inode, and restore its exact bytes if startup fails.
     """
-    if platform.system() != "Linux":
-        return 501, {"code": "unsupported_platform", "error": "WebUI add-back is available on Linux only"}
+    if platform.system() not in {"Linux", "Darwin"}:
+        return 501, {"code": "unsupported_platform", "error": "WebUI add-back is unavailable on this platform"}
     service_lock = _service_locks["open-webui"]
     if not service_lock.acquire(blocking=False):
         return 409, {"code": "operation_in_progress", "error": "Open WebUI is being changed"}
@@ -6243,8 +6270,21 @@ def _enable_webui_selection() -> tuple[int, dict]:
                 return 503, {"code": "selected_but_stopped", "error": "Open WebUI is selected but not running; inspect its service state"}
             return 200, {"enabled": True, "action": "already_selected"}
 
+        # A lean Mac install may have saved WEBUI_AUTH=false for loopback use.
+        # If the owner later exposes the bind or selects the proxy, enforce
+        # sign-in in the same bound-file write that selects WebUI. Compose must
+        # also use these installed values, not stale host-agent process env.
+        bind = installed.get("BIND_ADDRESS", "127.0.0.1").strip().lower() or "127.0.0.1"
+        auth_required = (
+            bind not in {"127.0.0.1", "::1", "localhost"}
+            or installed.get("ENABLE_ODS_PROXY", "false").strip().lower() == "true"
+            or _proxy_compose_enabled()
+        )
+        next_env_text = _upsert_env_text(env_text, "ENABLE_OPEN_WEBUI", "true")
+        if auth_required:
+            next_env_text = _upsert_env_text(next_env_text, "WEBUI_AUTH", "true")
         changed = True  # A failed in-place write may have written a prefix.
-        _write_bound_env_text(env_path, _upsert_env_text(env_text, "ENABLE_OPEN_WEBUI", "true"))
+        _write_bound_env_text(env_path, next_env_text)
         invalidate_compose_cache()
         flags = resolve_compose_flags()
         compose_env = os.environ.copy()
@@ -6253,12 +6293,14 @@ def _enable_webui_selection() -> tuple[int, dict]:
             "ENABLE_OPEN_WEBUI", "ODS_GATEWAY_ONLY", "EXTERNAL_LLM_URL",
             "LEMONADE_EXTERNAL", "AMD_INFERENCE_RUNTIME",
             "AMD_INFERENCE_MANAGED", "WHISPER_ACCELERATION",
-            "ODS_SKIP_GPU_OVERLAYS",
+            "ODS_SKIP_GPU_OVERLAYS", "BIND_ADDRESS", "WEBUI_AUTH", "ENABLE_ODS_PROXY",
         ):
             compose_env.pop(selector, None)
             if selector in installed:
                 compose_env[selector] = installed[selector]
         compose_env["ENABLE_OPEN_WEBUI"] = "true"
+        if auth_required:
+            compose_env["WEBUI_AUTH"] = "true"
 
         def compose(*arguments: str):
             return subprocess.run(
