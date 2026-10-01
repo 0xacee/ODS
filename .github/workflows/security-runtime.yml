@@ -51,11 +51,31 @@ jobs:
           case "$SERVICE" in
             pixel-inference|remote-provider-egress) context=ods ;;
           esac
+          # Reproduce source staged by a privacy-preserving umask. Docker COPY
+          # keeps these modes, while each image runs its Python code as non-root.
+          case "$SERVICE" in
+            dashboard-api|model-router|pixel-model-relay)
+              chmod -R go-rwx "$context"
+              test "$(stat -c %a "$context/Dockerfile")" = 600
+              test "$(stat -c %a "$context")" = 700 ;;
+          esac
           docker build --pull --tag "ods-security-$SERVICE:ci" \
             --file "ods/extensions/services/$SERVICE/Dockerfile" "$context"
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --entrypoint python \
             "ods-security-$SERVICE:ci" -m pip check
+          case "$SERVICE" in
+            dashboard-api) entry=/app/main.py; uid=1000 ;;
+            model-router) entry=/srv/model-router/app/main.py; uid=10777 ;;
+            pixel-model-relay) entry=/app/relay.py; uid=1000 ;;
+            *) entry= ;;
+          esac
+          if [ -n "$entry" ]; then
+            docker run --rm --network none --read-only --cap-drop ALL \
+              --security-opt no-new-privileges --entrypoint sh \
+              "ods-security-$SERVICE:ci" -c \
+              "test \"\$(id -u)\" -eq $uid && test -r '$entry' && test -x '${entry%/*}'"
+          fi
 
   policy:
     runs-on: ubuntu-latest
