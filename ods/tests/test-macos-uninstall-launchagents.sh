@@ -150,7 +150,12 @@ main() {
     make_home_with_plists "$home1" $CURRENT_LABELS $LEGACY_LABELS
     LAUNCHCTL_LOG="$TMP_DIR/launchctl1.log" LOADED_LABELS="$CURRENT_LABELS" \
         run_uninstall "$install1" "$home1" "$stub_dir" "$TMP_DIR/out1.log" \
-        || fail "normal macOS uninstall exited non-zero"
+        || {
+            cat "$TMP_DIR/out1.log" >&2
+            [[ ! -f "$TMP_DIR/out1.log.commands" ]] \
+                || cat "$TMP_DIR/out1.log.commands" >&2
+            fail "normal macOS uninstall exited non-zero"
+        }
 
     local label
     for label in $CURRENT_LABELS; do
