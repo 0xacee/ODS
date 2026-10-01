@@ -4252,8 +4252,8 @@ def _parse_manifest_deps(manifest_path: Path) -> list[str]:
     """Reject unreadable dependency declarations rather than silently dropping them."""
     error = f"Invalid dependency manifest for extension: {manifest_path.parent.name}"
     try:
-        if manifest_path.is_symlink():
-            raise ValueError("symlinked dependency manifest")
+        if not stat.S_ISREG(manifest_path.lstat().st_mode):
+            raise ValueError("invalid dependency manifest file")
         descriptor = os.open(
             manifest_path,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
@@ -4298,8 +4298,16 @@ def _read_direct_deps(service_id: str) -> list[str]:
             continue
         for name in ("manifest.yaml", "manifest.yml", "manifest.json"):
             candidate = ext_dir / name
-            if candidate.exists():
-                return _parse_manifest_deps(candidate)
+            try:
+                candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid dependency manifest for extension: {service_id}",
+                ) from exc
+            return _parse_manifest_deps(candidate)
         return []
     return []
 

@@ -119,6 +119,31 @@ def test_selected_json_manifest_blocks_or_fails_closed(
     assert not (bundled / "searxng/compose.yaml.disabled").exists()
 
 
+def test_dangling_yaml_manifest_does_not_fall_through_to_json(
+    test_client, installation,
+):
+    bundled, start = installation
+    consumer = extensions.USER_EXTENSIONS_DIR / "json-consumer"
+    consumer.mkdir(parents=True)
+    (consumer / "compose.yaml").write_text(
+        "services:\n  json-consumer:\n    image: alpine:3.22\n", encoding="utf-8",
+    )
+    (consumer / "manifest.json").write_text(json.dumps({
+        "schema_version": "ods.services.v1",
+        "service": {"id": "json-consumer", "depends_on": ["searxng"]},
+    }), encoding="utf-8")
+    try:
+        (consumer / "manifest.yaml").symlink_to(consumer / "missing.yaml")
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this host")
+
+    with pytest.raises(extensions.HTTPException) as exc:
+        extensions._read_direct_deps("json-consumer")
+    assert exc.value.status_code == 400
+    assert (bundled / "searxng/compose.yaml").is_file()
+    start.assert_not_called()
+
+
 @pytest.mark.parametrize("user_state", ["incomplete", "disabled", "enabled-without-dependency"])
 def test_user_directory_cannot_hide_bundled_enabled_dependent(
     test_client, installation, user_state,
