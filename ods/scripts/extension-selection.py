@@ -123,9 +123,8 @@ def _compose_dependencies(path: Path) -> set[str]:
 
 
 def _enabled_dependents(install_dir: Path, service_id: str) -> list[str]:
-    """Match Dashboard's user-first shadowing and selected-Compose scan."""
+    """Inspect every enabled fragment the Compose resolver can select."""
     dependents: list[str] = []
-    seen: set[str] = set()
     roots = (
         install_dir / "data" / "user-extensions",
         install_dir / "extensions" / "services",
@@ -141,7 +140,7 @@ def _enabled_dependents(install_dir: Path, service_id: str) -> list[str]:
         except OSError as exc:
             raise SelectionError(f"Cannot inspect extension root: {root}") from exc
         for peer in peers:
-            if peer.name == service_id or peer.name in seen:
+            if peer.name == service_id:
                 continue
             try:
                 peer_stat = peer.lstat()
@@ -153,7 +152,6 @@ def _enabled_dependents(install_dir: Path, service_id: str) -> list[str]:
                 raise SelectionError(f"Invalid extension peer: {peer}")
             if not stat.S_ISDIR(peer_stat.st_mode):
                 continue
-            seen.add(peer.name)
             compose = peer / "compose.yaml"
             try:
                 compose_stat = compose.lstat()
@@ -165,7 +163,7 @@ def _enabled_dependents(install_dir: Path, service_id: str) -> list[str]:
                 raise SelectionError(f"Invalid selected Compose file: {compose}")
             dependencies = _manifest_dependencies(peer)
             dependencies.update(_compose_dependencies(compose))
-            if service_id in dependencies:
+            if service_id in dependencies and peer.name not in dependents:
                 dependents.append(peer.name)
     return dependents
 

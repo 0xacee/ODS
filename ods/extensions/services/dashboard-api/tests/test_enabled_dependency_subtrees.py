@@ -82,6 +82,34 @@ def test_user_file_does_not_shadow_bundled_enabled_dependent(
     assert (bundled / "searxng/compose.yaml").is_file()
 
 
+@pytest.mark.parametrize("user_state", ["incomplete", "disabled", "enabled-without-dependency"])
+def test_user_directory_cannot_hide_bundled_enabled_dependent(
+    test_client, installation, user_state,
+):
+    bundled, start = installation
+    peer = extensions.USER_EXTENSIONS_DIR / "hermes"
+    peer.mkdir(parents=True)
+    if user_state == "disabled":
+        (peer / "compose.yaml.disabled").write_text("services: {}\n", encoding="utf-8")
+    elif user_state == "enabled-without-dependency":
+        (peer / "manifest.yaml").write_text(
+            "service:\n  id: hermes\n  depends_on: []\n", encoding="utf-8",
+        )
+        (peer / "compose.yaml").write_text(
+            "services:\n  hermes-user:\n    image: alpine:3.22\n", encoding="utf-8",
+        )
+
+    response = test_client.post(
+        "/api/extensions/searxng/disable?include_data_info=false",
+        headers=test_client.auth_headers,
+    )
+
+    assert response.status_code == 409
+    assert "hermes" in response.json()["detail"]
+    start.assert_not_called()
+    assert (bundled / "searxng/compose.yaml").is_file()
+
+
 def test_disable_search_fails_closed_when_dependents_cannot_be_scanned(
     test_client, installation, monkeypatch,
 ):

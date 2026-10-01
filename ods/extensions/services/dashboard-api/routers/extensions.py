@@ -4658,13 +4658,11 @@ def _selected_compose_dependencies(compose_path: Path) -> set[str]:
 def _enabled_dependents(service_id: str) -> list[str]:
     """Return currently-enabled extensions that declare a dependency on service_id.
 
-    Scans user and built-in extensions; user dirs shadow built-ins of the same
-    id, mirroring _resolve_extension_dir. Only enabled peers (compose.yaml
-    present) count: a disabled dependent is unaffected, while an enabled one is
-    left pointing at a service the merged compose project no longer defines.
+    Scan every enabled user and built-in fragment: the Compose resolver can
+    select a bundled fragment even when an incomplete or disabled same-name
+    user directory exists. Only enabled peers (compose.yaml present) count.
     """
     dependents: list[str] = []
-    seen_peers: set[str] = set()
     for base in (USER_EXTENSIONS_DIR, EXTENSIONS_DIR):
         try:
             if not stat.S_ISDIR(base.lstat().st_mode):
@@ -4679,7 +4677,7 @@ def _enabled_dependents(service_id: str) -> list[str]:
                 detail="Cannot inspect enabled extension dependencies; no service was disabled",
             ) from exc
         for peer_dir in peer_dirs:
-            if peer_dir.name == service_id or peer_dir.name in seen_peers:
+            if peer_dir.name == service_id:
                 continue
             try:
                 peer_stat = peer_dir.lstat()
@@ -4698,9 +4696,6 @@ def _enabled_dependents(service_id: str) -> list[str]:
                 )
             if not stat.S_ISDIR(peer_stat.st_mode):
                 continue
-            # A user directory shadows a bundled definition even when its
-            # Compose file is disabled; a stray user file does not.
-            seen_peers.add(peer_dir.name)
             compose_path = peer_dir / "compose.yaml"
             try:
                 selected = compose_path.lstat()
@@ -4718,9 +4713,33 @@ def _enabled_dependents(service_id: str) -> list[str]:
                     status_code=503,
                     detail=f"Cannot inspect enabled dependencies for {peer_dir.name}; no service was disabled",
                 )
-            declared = set(_read_direct_deps(peer_dir.name))
+            declared: set[str] = set()
+            for name in ("manifest.yaml", "manifest.yml"):
+                manifest_path = peer_dir / name
+                try:
+                    manifest_stat = manifest_path.lstat()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Cannot inspect enabled dependencies for {peer_dir.name}; no service was disabled",
+                    ) from exc
+                if not stat.S_ISREG(manifest_stat.st_mode):
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Cannot inspect enabled dependencies for {peer_dir.name}; no service was disabled",
+                    )
+                try:
+                    declared.update(_parse_manifest_deps(manifest_path))
+                except HTTPException as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Cannot inspect enabled dependencies for {peer_dir.name}; no service was disabled",
+                    ) from exc
+                break
             declared.update(_selected_compose_dependencies(compose_path))
-            if service_id in declared:
+            if service_id in declared and peer_dir.name not in dependents:
                 dependents.append(peer_dir.name)
     return dependents
 
@@ -4741,12 +4760,9 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
             status_code=409, detail=f"Extension already disabled: {service_id}",
         )
 
-    # Reject reverse dependents. Scan user and built-in
-    # extensions â€” user dirs shadow built-ins of the same id, mirroring
-    # _resolve_extension_dir. Only currently-enabled peers (compose.yaml
-    # present) are reported: a disabled dependent is unaffected, while an
-    # enabled one is left pointing at a service the merged compose project
-    # no longer defines, which fails compose config for the whole stack.
+    # Reject reverse dependents in every enabled Compose fragment. A
+    # same-name user directory does not remove the bundled fragment from the
+    # resolver's selected project.
     # The host CLI owns the graph-wide lock. Keep this preflight for a useful
     # error, then let the host recheck it under that lock through stop and
     # marker change. No container lock is held across the host request.

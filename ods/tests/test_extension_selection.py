@@ -44,11 +44,12 @@ def test_selected_compose_and_user_shadowing(tmp_path):
     extension(tmp_path, "compose-user", compose_depends=("search",))
     assert selection._enabled_dependents(tmp_path, "search") == ["compose-user", "manifest-user"]
 
-    # A disabled user definition shadows its bundled namesake.
+    # The Compose resolver still selects the enabled bundled fragment even
+    # when a same-name user definition is disabled.
     user = tmp_path / "data" / "user-extensions" / "manifest-user"
     user.mkdir()
     (user / "compose.yaml.disabled").write_text("services: {}\n", encoding="utf-8")
-    assert selection._enabled_dependents(tmp_path, "search") == ["compose-user"]
+    assert selection._enabled_dependents(tmp_path, "search") == ["compose-user", "manifest-user"]
 
     (user / "compose.yaml.disabled").rename(user / "compose.yaml")
     (user / "manifest.yaml").write_text(
@@ -58,7 +59,23 @@ def test_selected_compose_and_user_shadowing(tmp_path):
     (user / "manifest.yaml").write_text(
         "service:\n  id: manifest-user\n  depends_on: []\n", encoding="utf-8"
     )
-    assert selection._enabled_dependents(tmp_path, "search") == ["compose-user"]
+    assert selection._enabled_dependents(tmp_path, "search") == ["compose-user", "manifest-user"]
+
+
+def test_incomplete_user_directory_cannot_hide_enabled_bundled_dependent(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "search")
+    bundled = extension(tmp_path, "consumer", depends=("search",))
+    user = tmp_path / "data" / "user-extensions" / "consumer"
+    user.mkdir()
+
+    # The Compose resolver still selects the bundled fragment. An interrupted
+    # user install must not make its dependency disappear from disable checks.
+    assert (bundled / "compose.yaml").is_file()
+    assert selection._enabled_dependents(tmp_path, "search") == ["consumer"]
+    with pytest.raises(selection.SelectionError, match="enabled extensions depend on search"):
+        selection.run("disable", tmp_path, "search")
+    assert (target / "compose.yaml").is_file()
 
 
 def test_bad_selected_compose_fails_closed(tmp_path):
