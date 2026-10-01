@@ -5959,6 +5959,19 @@ def _extension_stop_targets(service_id: str) -> list[str]:
     return targets
 
 
+def _load_extension_selector():
+    """Load the installed CLI selector, the owner of the shared graph lock."""
+    helper_path = INSTALL_DIR / "scripts" / "extension-selection.py"
+    if not helper_path.is_file() or helper_path.is_symlink():
+        raise RuntimeError("Extension selection helper is unavailable")
+    spec = importlib.util.spec_from_file_location("_ods_extension_selection", helper_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Cannot load extension selection helper")
+    selector = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(selector)
+    return selector
+
+
 def _apply_extension_selection(service_ids: list[str], activate: bool) -> str:
     """Apply one selection plan on the host under the CLI's graph-wide lock.
 
@@ -5974,14 +5987,7 @@ def _apply_extension_selection(service_ids: list[str], activate: bool) -> str:
             or len(set(service_ids)) != len(service_ids)
             or (not activate and len(service_ids) != 1)):
         raise ValueError("Invalid optional extension selection")
-    helper_path = INSTALL_DIR / "scripts" / "extension-selection.py"
-    if not helper_path.is_file() or helper_path.is_symlink():
-        raise RuntimeError("Extension selection helper is unavailable")
-    spec = importlib.util.spec_from_file_location("_ods_extension_selection", helper_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Cannot load extension selection helper")
-    selector = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(selector)
+    selector = _load_extension_selector()
     flags = resolve_compose_flags()
     # NamedTemporaryFile closes before the helper reads it, including on
     # Windows. Its contents are only service IDs and their selection state.
@@ -8346,19 +8352,22 @@ def _disable_unprepared_install(service_id: str) -> str:
     """
     ext_dir = USER_EXTENSIONS_DIR / service_id
     active = ext_dir / "compose.yaml"
-    inactive = ext_dir / "compose.yaml.disabled"
     unable = ("\nODS could not turn this extension off automatically. Disable or remove it; "
               "until then other ODS stack operations can fail with the same error.")
     try:
-        if ext_dir.is_symlink() or not ext_dir.is_dir() or active.is_symlink() or not active.exists():
+        if (service_id in ALWAYS_ON_SERVICES or ext_dir.is_symlink()
+                or not ext_dir.is_dir() or active.is_symlink() or not active.exists()):
             return ""
-        if not active.is_file() or inactive.exists() or inactive.is_symlink():
-            return unable
-        os.replace(active, inactive)
-    except OSError:
+        # A failed setup/build can leave Compose unresolvable. The single-
+        # service CLI disable checks enabled dependents and moves the marker
+        # under data/.extensions-lock without resolving the broken stack.
+        # These callers have not started this attempt, so no stop is needed.
+        selector = _load_extension_selector()
+        selector.run("disable", INSTALL_DIR, service_id,
+                     core_services=set(ALWAYS_ON_SERVICES))
+    except Exception:
         logger.exception("Could not disable failed installation of %s", service_id)
         return unable
-    invalidate_compose_cache()
     logger.warning("Disabled %s after it failed before start; files and data were kept", service_id)
     return ("\nODS turned this extension off so the rest of the stack keeps working; its files, "
             "settings and data were kept. Resolve the error above, then retry or remove it.")

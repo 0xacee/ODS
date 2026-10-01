@@ -66,6 +66,57 @@ def test_host_selection_serializes_dependency_decisions_with_cli_helper(tmp_path
     assert not list((tmp_path / "data").glob(".extension-selection-*"))
 
 
+@pytest.mark.parametrize("has_dependent", [False, True])
+def test_failed_install_cleanup_uses_guarded_selector_without_compose_resolution(
+    tmp_path, monkeypatch, has_dependent,
+):
+    """A broken recipe is disabled only when no selected peer depends on it."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copyfile(_agent_path.parents[1] / "scripts" / "extension-selection.py",
+                    scripts / "extension-selection.py")
+    user_root = tmp_path / "data" / "user-extensions"
+    target = user_root / "my-ext"
+    target.mkdir(parents=True)
+    (target / "compose.yaml").write_text(
+        "services:\n  my-ext:\n    image: example:latest\n"
+        "    environment:\n      REQUIRED: ${MISSING_REQUIRED_SETTING:?}\n",
+        encoding="utf-8",
+    )
+    (target / "manifest.yaml").write_text(
+        "service:\n  id: my-ext\n", encoding="utf-8",
+    )
+    (target / "owner-data.db").write_text("keep", encoding="utf-8")
+    cache = tmp_path / ".compose-flags"
+    cache.write_text("stale", encoding="utf-8")
+    if has_dependent:
+        consumer = user_root / "consumer"
+        consumer.mkdir()
+        (consumer / "manifest.yaml").write_text(
+            "service:\n  id: consumer\n  depends_on: [my-ext]\n", encoding="utf-8",
+        )
+        (consumer / "compose.yaml").write_text(
+            "services:\n  consumer:\n    image: example:latest\n", encoding="utf-8",
+        )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+    monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
+    if sys.platform == "win32":
+        monkeypatch.delitem(sys.modules, "fcntl", raising=False)
+
+    note = _mod._disable_unprepared_install("my-ext")
+
+    assert (target / "owner-data.db").read_text(encoding="utf-8") == "keep"
+    if has_dependent:
+        assert "could not turn this extension off" in note
+        assert (target / "compose.yaml").is_file()
+        assert cache.is_file()
+    else:
+        assert "turned this extension off" in note
+        assert (target / "compose.yaml.disabled").is_file()
+        assert not (target / "compose.yaml").exists()
+        assert not cache.exists()
+
+
 def test_host_selection_endpoint_requires_auth_and_preserves_batch(
     monkeypatch, host_agent_wire_client,
 ):
