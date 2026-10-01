@@ -5972,7 +5972,10 @@ def _load_extension_selector():
     return selector
 
 
-def _apply_extension_selection(service_ids: list[str], activate: bool) -> str:
+def _apply_extension_selection(
+    service_ids: list[str], activate: bool,
+    expected_sha256: dict[str, str] | None = None,
+) -> str:
     """Apply one selection plan on the host under the CLI's graph-wide lock.
 
     Dashboard container locks are not an authority for a concurrent host CLI.
@@ -6006,6 +6009,7 @@ def _apply_extension_selection(service_ids: list[str], activate: bool) -> str:
             enabled, disabled, skipped = selector.restore_preset(
                 INSTALL_DIR, preset_path, core_services=set(ALWAYS_ON_SERVICES),
                 compose_flags=shlex.join(flags), strict=True,
+                expected_sha256=expected_sha256,
             )
         except selector.SelectionError as exc:
             message = str(exc)
@@ -11116,6 +11120,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         service_ids = body.get("service_ids")
         action = body.get("action")
+        expected_sha256 = body.get("expected_sha256")
         if (action not in ("enable", "disable")
                 or not isinstance(service_ids, list)
                 or not service_ids or len(service_ids) > 64
@@ -11125,8 +11130,20 @@ class AgentHandler(BaseHTTPRequestHandler):
                 or (action == "disable" and len(service_ids) != 1)):
             json_response(self, 400, {"error": "Invalid optional extension selection"})
             return
+        if (action == "enable" and (
+                not isinstance(expected_sha256, dict)
+                or set(expected_sha256) != set(service_ids)
+                or any(not isinstance(value, str)
+                       or re.fullmatch(r"[a-f0-9]{64}", value) is None
+                       for value in expected_sha256.values())
+        )) or (action == "disable" and expected_sha256 is not None):
+            json_response(self, 400, {"error": "Invalid expected Compose digests"})
+            return
         try:
-            outcome = _apply_extension_selection(service_ids, activate=action == "enable")
+            outcome = _apply_extension_selection(
+                service_ids, activate=action == "enable",
+                expected_sha256=expected_sha256,
+            )
         except ValueError as exc:
             json_response(self, 409, {"error": str(exc)})
             return

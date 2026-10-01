@@ -37,7 +37,9 @@ def installed_recipe(tmp_path, monkeypatch):
     monkeypatch.setattr(extensions, 'EXTENSIONS_DIR', ODS / 'extensions/services')
     monkeypatch.setattr(extensions, 'DATA_DIR', str(tmp_path / 'data'))
     monkeypatch.setattr(extensions, '_extensions_lock_path', lambda: tmp_path / '.lock')
-    def select_locally(action, service_ids):
+    def select_locally(action, service_ids, expected_sha256=None):
+        if action == 'enable':
+            assert set(expected_sha256) == set(service_ids)
         for service_id in service_ids:
             directory = user / service_id
             if action == 'disable':

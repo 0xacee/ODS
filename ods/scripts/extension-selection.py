@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -681,6 +682,7 @@ def restore_preset(
     core_services: set[str] | None = None,
     compose_flags: str | None = None,
     strict: bool = False,
+    expected_sha256: dict[str, str] | None = None,
 ) -> tuple[int, int, list[str]]:
     """Restore markers from a valid selection, keeping dependencies valid per move."""
     if timeout <= 0 or timeout > 120:
@@ -689,6 +691,14 @@ def restore_preset(
     if any(SERVICE_ID.fullmatch(service_id) is None for service_id in core_services):
         raise SelectionError("Invalid core service id")
     entries = _preset_entries(preset_file)
+    if expected_sha256 is not None and (
+        not isinstance(expected_sha256, dict)
+        or set(expected_sha256) != set(entries)
+        or any(not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{64}", value) is None
+               for value in expected_sha256.values())
+        or any(not enabled for enabled in entries.values())
+    ):
+        raise SelectionError("Invalid expected Compose digests")
     if any(service_id in core_services for service_id in entries):
         raise SelectionError("Presets cannot change core services")
     with _selection_lock(install_dir, timeout):
@@ -701,6 +711,22 @@ def restore_preset(
         current: dict[str, bool] = {}
         for service_id, directory in directories.items():
             current[service_id] = _selection_enabled(directory)
+        if expected_sha256 is not None:
+            # Dashboard policy validation happened before the host RPC. Bind
+            # that result to the exact selected bytes under this same lock,
+            # including services that a concurrent CLI already enabled.
+            for service_id, expected in expected_sha256.items():
+                directory = directories.get(service_id)
+                if directory is None:
+                    raise SelectionError(f"Extension is unavailable: {service_id}")
+                selected = directory / (
+                    "compose.yaml" if current[service_id] else "compose.yaml.disabled"
+                )
+                actual = hashlib.sha256(_read_bounded_file(selected)).hexdigest()
+                if actual != expected:
+                    raise SelectionError(
+                        f"Compose content changed since validation: {service_id}"
+                    )
         for service_id in entries:
             if service_id not in directories:
                 continue

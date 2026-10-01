@@ -39,11 +39,18 @@ GOTIFY_COMPOSE = (
 def host(tmp_path, monkeypatch):
     """A host agent with one enabled library extension and faked Docker."""
     install_root = tmp_path / "install"
-    data = tmp_path / "data"
+    data = install_root / "data"
     users = data / "user-extensions"
-    builtins = tmp_path / "extensions"
+    builtins = install_root / "extensions" / "services"
     for directory in (install_root, data, users, builtins):
         directory.mkdir(parents=True)
+    selector = install_root / "scripts" / "extension-selection.py"
+    selector.parent.mkdir()
+    selector.write_bytes((_agent_path.parent.parent / "scripts" / "extension-selection.py").read_bytes())
+    if sys.platform == "win32":
+        # Dashboard test setup can install a stub fcntl; the installed host
+        # helper must use its real Windows locking path in this fixture.
+        monkeypatch.delitem(sys.modules, "fcntl", raising=False)
     (install_root / ".env").write_text("SERVICE_API_KEY=persisted-credential\n", encoding="utf-8")
     (install_root / ".compose-flags").write_text("--env-file .env -f docker-compose.base.yml", encoding="utf-8")
     monkeypatch.setattr(_mod, "INSTALL_DIR", install_root)

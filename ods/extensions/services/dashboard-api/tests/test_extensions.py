@@ -1,6 +1,7 @@
 """Tests for extensions portal endpoints."""
 
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -579,13 +580,23 @@ def _patch_mutation_config(monkeypatch, tmp_path, lib_dir=None, user_dir=None):
     # Endpoint tests own a local stand-in for the host's selection RPC. The
     # real graph lock, stop and marker ordering are exercised in the host
     # selector tests; this stub keeps the Dashboard response contract local.
-    def select_on_host(action, service_ids):
+    def select_on_host(action, service_ids, expected_sha256=None):
         from routers import extensions as ext_mod
 
+        if action == "enable":
+            assert isinstance(expected_sha256, dict)
+            assert set(expected_sha256) == set(service_ids)
+        else:
+            assert expected_sha256 is None
         for sid in service_ids:
             directory = user_dir / sid
             if not directory.is_dir():
                 directory = tmp_path / "builtin" / sid
+            if action == "enable":
+                selected = directory / "compose.yaml"
+                if not selected.exists():
+                    selected = directory / "compose.yaml.disabled"
+                assert expected_sha256[sid] == hashlib.sha256(selected.read_bytes()).hexdigest()
             if action == "disable" and not ext_mod._call_agent("stop", sid):
                 raise HTTPException(
                     status_code=502, detail=f"Host agent failed to stop extension: {sid}",
@@ -1918,8 +1929,8 @@ class TestUninstallExtension:
             self._write_progress(tmp_path, "my-ext", "error", error="boom")
             host_selection = ext_module._select_extensions_on_host
 
-            def select_then_reenable(action, service_ids):
-                outcome = host_selection(action, service_ids)
+            def select_then_reenable(action, service_ids, expected_sha256=None):
+                outcome = host_selection(action, service_ids, expected_sha256)
                 (directory / "compose.yaml.disabled").rename(directory / "compose.yaml")
                 return outcome
 
@@ -4637,7 +4648,10 @@ class TestActivateServiceBuiltinBranch:
         monkeypatch.setattr("routers.extensions.USER_EXTENSIONS_DIR", user_root)
         result = _activate_service("fakesvc")
 
-        assert result == {"id": "fakesvc", "action": "enabled"}
+        assert result == {
+            "id": "fakesvc", "action": "enabled",
+            "sha256": hashlib.sha256((ext_dir / "compose.yaml.disabled").read_bytes()).hexdigest(),
+        }
         assert not (ext_dir / "compose.yaml").exists()
         assert (ext_dir / "compose.yaml.disabled").exists()
 
@@ -4661,7 +4675,10 @@ class TestActivateServiceBuiltinBranch:
 
         result = _activate_service("fakesvc")
 
-        assert result == {"id": "fakesvc", "action": "already_enabled"}
+        assert result == {
+            "id": "fakesvc", "action": "already_enabled",
+            "sha256": hashlib.sha256(enabled_compose.read_bytes()).hexdigest(),
+        }
         assert enabled_compose.exists()
         assert not (ext_dir / "compose.yaml.disabled").exists()
 
@@ -4692,7 +4709,10 @@ class TestActivateServiceBuiltinBranch:
 
         result = _activate_service("fakesvc")
 
-        assert result == {"id": "fakesvc", "action": "enabled"}
+        assert result == {
+            "id": "fakesvc", "action": "enabled",
+            "sha256": hashlib.sha256((user_ext / "compose.yaml.disabled").read_bytes()).hexdigest(),
+        }
         assert not (user_ext / "compose.yaml").exists()
         assert (user_ext / "compose.yaml.disabled").exists()
         # Built-in untouched

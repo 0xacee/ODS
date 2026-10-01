@@ -62,7 +62,25 @@ def test_host_selection_serializes_dependency_decisions_with_cli_helper(tmp_path
     with pytest.raises(ValueError, match="missing"):
         _mod._apply_extension_selection(["search", "missing"], activate=True)
     assert (tmp_path / "extensions/services/search/compose.yaml.disabled").is_file()
-    assert _mod._apply_extension_selection(["search", "consumer"], activate=True) == "enabled"
+    digests = {
+        name: hashlib.sha256((tmp_path / "extensions/services" / name
+                              / "compose.yaml.disabled").read_bytes()).hexdigest()
+        for name in ("search", "consumer")
+    }
+    with pytest.raises(ValueError, match="content changed"):
+        _mod._apply_extension_selection(
+            ["search", "consumer"], activate=True,
+            expected_sha256={**digests, "search": "0" * 64},
+        )
+    assert (tmp_path / "extensions/services/search/compose.yaml.disabled").is_file()
+    assert _mod._apply_extension_selection(
+        ["search", "consumer"], activate=True, expected_sha256=digests,
+    ) == "enabled"
+    with pytest.raises(ValueError, match="content changed"):
+        _mod._apply_extension_selection(
+            ["search", "consumer"], activate=True,
+            expected_sha256={**digests, "consumer": "0" * 64},
+        )
     assert not list((tmp_path / "data").glob(".extension-selection-*"))
 
 
@@ -181,7 +199,9 @@ def test_host_selection_endpoint_requires_auth_and_preserves_batch(
     monkeypatch.setattr(_mod, "AGENT_API_KEY", "selection-wire-secret")
     monkeypatch.setattr(
         _mod, "_apply_extension_selection",
-        lambda service_ids, activate: calls.append((service_ids, activate)) or "enabled",
+        lambda service_ids, activate, expected_sha256=None: calls.append(
+            (service_ids, activate, expected_sha256)
+        ) or ("enabled" if activate else "disabled"),
     )
     server = HTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -198,27 +218,36 @@ def test_host_selection_endpoint_requires_auth_and_preserves_batch(
             )
             return urllib.request.urlopen(request, timeout=2)
 
-        body = {"action": "enable", "service_ids": ["search", "consumer"]}
+        digests = {"search": "a" * 64, "consumer": "b" * 64}
+        body = {"action": "enable", "service_ids": ["search", "consumer"],
+                "expected_sha256": digests}
         with pytest.raises(urllib.error.HTTPError) as rejected:
             post(body)
         assert rejected.value.code == 401
         assert calls == []
 
         host_agent_wire_client(server.server_address[1], key="selection-wire-secret")
-        result = ext_router._select_extensions_on_host("enable", ["search", "consumer"])
+        result = ext_router._select_extensions_on_host(
+            "enable", ["search", "consumer"], expected_sha256=digests,
+        )
         assert result["action"] == "enabled"
         assert result["service_ids"] == ["search", "consumer"]
-        assert calls == [(["search", "consumer"], True)]
+        assert calls == [(["search", "consumer"], True, digests)]
+
+        with pytest.raises(urllib.error.HTTPError) as rejected:
+            post({"action": "enable", "service_ids": ["search", "consumer"]},
+                 "selection-wire-secret")
+        assert rejected.value.code == 400
 
         with pytest.raises(urllib.error.HTTPError) as rejected:
             post({"action": "disable", "service_ids": ["search", "consumer"]},
                  "selection-wire-secret")
         assert rejected.value.code == 400
-        assert calls == [(["search", "consumer"], True)]
+        assert calls == [(["search", "consumer"], True, digests)]
 
         from fastapi import HTTPException
 
-        def blocked_by_late_dependent(service_ids, activate):
+        def blocked_by_late_dependent(service_ids, activate, expected_sha256=None):
             raise ValueError("enabled consumer depends on search")
 
         monkeypatch.setattr(_mod, "_apply_extension_selection", blocked_by_late_dependent)

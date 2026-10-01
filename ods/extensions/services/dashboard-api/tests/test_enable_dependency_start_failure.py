@@ -33,8 +33,9 @@ def installation(monkeypatch, tmp_path):
     start, hook = Mock(return_value=True), Mock(return_value=True)
     monkeypatch.setattr(extensions, "_call_agent", start)
     monkeypatch.setattr(extensions, "_call_agent_hook", hook)
-    def select(action, service_ids):
+    def select(action, service_ids, expected_sha256=None):
         assert action == "enable"
+        assert set(expected_sha256) == set(service_ids)
         for name in service_ids:
             if (bundled / name / "compose.yaml.disabled").exists():
                 rename("activate", name)

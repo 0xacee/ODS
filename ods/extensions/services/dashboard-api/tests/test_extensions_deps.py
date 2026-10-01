@@ -13,8 +13,9 @@ def _local_selection_transport(monkeypatch):
     """Keep dependency endpoint tests off the live agent transport."""
     from routers import extensions
 
-    def select(action, service_ids):
+    def select(action, service_ids, expected_sha256=None):
         assert action == "enable"
+        assert set(expected_sha256) == set(service_ids)
         for service_id in service_ids:
             directory = extensions._resolve_extension_dir(service_id)
             disabled = directory / "compose.yaml.disabled"
@@ -311,9 +312,9 @@ class TestBuiltinExtensionDeps:
         selections = []
         select = extensions._select_extensions_on_host
 
-        def record_selection(action, service_ids):
+        def record_selection(action, service_ids, expected_sha256=None):
             selections.append((action, service_ids))
-            return select(action, service_ids)
+            return select(action, service_ids, expected_sha256)
 
         with patch("routers.extensions._call_agent", return_value=True), \
              patch("routers.extensions._call_agent_hook", return_value=True), \

@@ -1550,12 +1550,18 @@ def _call_agent_compose_rename(action: str, service_id: str) -> bool:
         return False
 
 
-def _select_extensions_on_host(action: str, service_ids: list[str]) -> dict:
+def _select_extensions_on_host(
+    action: str, service_ids: list[str],
+    expected_sha256: dict[str, str] | None = None,
+) -> dict:
     """Ask the host to validate and commit one dependency-safe selection plan."""
+    payload = {"action": action, "service_ids": service_ids}
+    if expected_sha256 is not None:
+        payload["expected_sha256"] = expected_sha256
     try:
         result = request_agent_json(
             "POST", "/v1/extension/select",
-            payload={"action": action, "service_ids": service_ids},
+            payload=payload,
             timeout=_AGENT_TIMEOUT,
         )
     except AgentHTTPError as exc:
@@ -4352,6 +4358,31 @@ def _imported_extension_namespace(service_id: str, ext_dir: Path, is_builtin: bo
     return service_id
 
 
+_SELECTION_COMPOSE_MAX_BYTES = 1024 * 1024
+
+
+def _selection_compose_sha256(path: Path) -> str:
+    """Hash bounded regular Compose bytes without following a final symlink."""
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _SELECTION_COMPOSE_MAX_BYTES:
+            raise ValueError("Invalid selected Compose file")
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(opened.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                raise ValueError("Compose file changed while opening")
+            raw = stream.read(_SELECTION_COMPOSE_MAX_BYTES + 1)
+        if len(raw) > _SELECTION_COMPOSE_MAX_BYTES:
+            raise ValueError("Compose file exceeds selection size limit")
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=f"Compose selection changed; retry: {exc}") from exc
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _activate_service(service_id: str) -> dict:
     """Validate and plan one activation without moving its Compose marker.
 
@@ -4367,28 +4398,29 @@ def _activate_service(service_id: str) -> dict:
     enabled_compose = ext_dir / "compose.yaml"
 
     # Already enabled â€” skip silently (idempotent for dep chains)
-    if enabled_compose.exists():
-        return {"id": service_id, "action": "already_enabled"}
-
-    if not disabled_compose.exists():
+    already_enabled = enabled_compose.exists() or enabled_compose.is_symlink()
+    compose_path = enabled_compose if already_enabled else disabled_compose
+    if not compose_path.exists() and not compose_path.is_symlink():
         raise HTTPException(
             status_code=404, detail=f"Extension has no compose file: {service_id}",
         )
 
-    # Re-scan compose content (TOCTOU prevention).
+    # Bind the policy scan to the same bytes that the host will check under
+    # its selection lock. This also covers an already-enabled dependency.
+    before_sha256 = _selection_compose_sha256(compose_path)
     is_builtin = ext_dir.is_relative_to(EXTENSIONS_DIR.resolve())
-    _scan_installed_compose(service_id, ext_dir, disabled_compose, is_builtin=is_builtin)
-
-    # Reject symlinks
-    st = os.lstat(disabled_compose)
-    if stat.S_ISLNK(st.st_mode):
-        raise HTTPException(
-            status_code=400, detail="Compose file is a symlink",
-        )
+    _scan_installed_compose(service_id, ext_dir, compose_path, is_builtin=is_builtin)
+    after_sha256 = _selection_compose_sha256(compose_path)
+    if before_sha256 != after_sha256:
+        raise HTTPException(status_code=409, detail="Compose file changed during validation; retry")
 
     # The caller sends the complete dependency chain to the host in one
     # selection transaction. A direct rename here could race the host CLI.
-    return {"id": service_id, "action": "enabled"}
+    return {
+        "id": service_id,
+        "action": "already_enabled" if already_enabled else "enabled",
+        "sha256": after_sha256,
+    }
 
 
 def _failed_dependency_starts(service_id: str, failed: set[str], seen=None) -> list[str]:
@@ -4473,6 +4505,7 @@ def enable_extension(
                     outcome="started")
 
     enabled_services: list[str] = []
+    expected_sha256: dict[str, str] = {}
 
     with _extensions_lock():
         # Dependency selection can change while this request waits for the
@@ -4489,19 +4522,23 @@ def enable_extension(
             for dep in missing_deps:
                 _validate_service_id(dep)
                 result = _activate_service(dep)
-                if result.get("action") == "enabled":
+                if result.get("action") in ("enabled", "already_enabled"):
                     enabled_services.append(dep)
+                    expected_sha256[dep] = result["sha256"]
 
         # Enable the target service
         result = _activate_service(service_id)
         if result.get("action") in ("enabled", "already_enabled"):
             enabled_services.append(service_id)
+            expected_sha256[service_id] = result["sha256"]
 
     # The host validates the complete desired graph and commits all marker
     # moves under the CLI's shared lock before any service is started.
     # Avoid holding the Dashboard's container lock across this host RPC.
     if enabled_services:
-        _select_extensions_on_host("enable", enabled_services)
+        _select_extensions_on_host(
+            "enable", enabled_services, expected_sha256=expected_sha256,
+        )
 
     # Start all enabled services via agent (outside lock)
     agent_ok = True

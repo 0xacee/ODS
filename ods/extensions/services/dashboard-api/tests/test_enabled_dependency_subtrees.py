@@ -31,8 +31,9 @@ def installation(monkeypatch, tmp_path, request):
     monkeypatch.setattr(extensions, "DATA_DIR", str(tmp_path))
     start = Mock(return_value=True)
     monkeypatch.setattr(extensions, "_call_agent", start)
-    def select(action, service_ids):
+    def select(action, service_ids, expected_sha256=None):
         assert action == "enable"
+        assert set(expected_sha256) == set(service_ids)
         for name in service_ids:
             if (bundled / name / "compose.yaml.disabled").exists():
                 rename("activate", name)
@@ -212,7 +213,7 @@ def test_host_rejects_stale_enable_plan_before_any_start(
     bundled, start = installation
     simulate_disabled_search(bundled, start)
 
-    def stale_plan(action, service_ids):
+    def stale_plan(action, service_ids, expected_sha256=None):
         assert action == "enable"
         assert "searxng" in service_ids
         raise HTTPException(status_code=409, detail="Dependency selection changed")
