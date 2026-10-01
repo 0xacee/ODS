@@ -4365,8 +4365,10 @@ def _selection_compose_sha256(path: Path) -> str:
     """Hash bounded regular Compose bytes without following a final symlink."""
     try:
         before = path.lstat()
+        if stat.S_ISLNK(before.st_mode):
+            raise HTTPException(status_code=400, detail="Compose file is a symlink")
         if not stat.S_ISREG(before.st_mode) or before.st_size > _SELECTION_COMPOSE_MAX_BYTES:
-            raise ValueError("Invalid selected Compose file")
+            raise HTTPException(status_code=400, detail="Invalid selected Compose file")
         descriptor = os.open(
             path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
         )
