@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -68,8 +69,15 @@ def _read_yaml(path: Path) -> object:
         raise SelectionError(f"Cannot inspect selected file: {path}") from exc
 
 
+def _read_json(path: Path) -> object:
+    try:
+        return json.loads(_read_bounded_file(path).decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise SelectionError(f"Cannot inspect selected file: {path}") from exc
+
+
 def _manifest_dependencies(directory: Path) -> set[str]:
-    for name in ("manifest.yaml", "manifest.yml"):
+    for name in ("manifest.yaml", "manifest.yml", "manifest.json"):
         manifest = directory / name
         try:
             selected = manifest.lstat()
@@ -79,7 +87,7 @@ def _manifest_dependencies(directory: Path) -> set[str]:
             raise SelectionError(f"Cannot inspect dependency manifest: {manifest}") from exc
         if not stat.S_ISREG(selected.st_mode):
             raise SelectionError(f"Invalid dependency manifest: {manifest}")
-        document = _read_yaml(manifest)
+        document = _read_json(manifest) if manifest.suffix == ".json" else _read_yaml(manifest)
         if not isinstance(document, dict) or not isinstance(document.get("service"), dict):
             raise SelectionError(f"Invalid dependency manifest: {manifest}")
         dependencies = document["service"].get("depends_on", [])

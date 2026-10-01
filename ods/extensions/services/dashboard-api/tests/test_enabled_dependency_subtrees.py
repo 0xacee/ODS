@@ -1,5 +1,6 @@
 """Exercise the shipped Hermes Proxy -> Hermes -> SearXNG dependency chain."""
 
+import json
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -80,6 +81,42 @@ def test_user_file_does_not_shadow_bundled_enabled_dependent(
     assert "hermes" in response.json()["detail"]
     start.assert_not_called()
     assert (bundled / "searxng/compose.yaml").is_file()
+
+
+@pytest.mark.parametrize("malformed", [False, True], ids=["dependent", "malformed"])
+def test_selected_json_manifest_blocks_or_fails_closed(
+    test_client, installation, malformed,
+):
+    bundled, start = installation
+    for name in ("hermes", "hermes-proxy"):
+        active = bundled / name / "compose.yaml"
+        if active.exists():
+            active.rename(bundled / name / "compose.yaml.disabled")
+    consumer = extensions.USER_EXTENSIONS_DIR / "json-consumer"
+    consumer.mkdir(parents=True)
+    (consumer / "compose.yaml").write_text(
+        "services:\n  json-consumer:\n    image: alpine:3.22\n", encoding="utf-8",
+    )
+    manifest = '{"service":' if malformed else json.dumps({
+        "schema_version": "ods.services.v1",
+        "service": {"id": "json-consumer", "depends_on": ["searxng"]},
+    })
+    (consumer / "manifest.json").write_text(manifest, encoding="utf-8")
+    if not malformed:
+        assert extensions._read_direct_deps("json-consumer") == ["searxng"]
+
+    response = test_client.post(
+        "/api/extensions/searxng/disable?include_data_info=false",
+        headers=test_client.auth_headers,
+    )
+    assert response.status_code == (503 if malformed else 409)
+    if malformed:
+        assert "no service was disabled" in response.json()["detail"]
+    else:
+        assert "json-consumer" in response.json()["detail"]
+    start.assert_not_called()
+    assert (bundled / "searxng/compose.yaml").is_file()
+    assert not (bundled / "searxng/compose.yaml.disabled").exists()
 
 
 @pytest.mark.parametrize("user_state", ["incomplete", "disabled", "enabled-without-dependency"])

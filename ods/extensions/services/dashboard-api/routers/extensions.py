@@ -4252,8 +4252,23 @@ def _parse_manifest_deps(manifest_path: Path) -> list[str]:
     """Reject unreadable dependency declarations rather than silently dropping them."""
     error = f"Invalid dependency manifest for extension: {manifest_path.parent.name}"
     try:
-        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-    except (yaml.YAMLError, OSError, UnicodeError) as exc:
+        if manifest_path.is_symlink():
+            raise ValueError("symlinked dependency manifest")
+        descriptor = os.open(
+            manifest_path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            selected = os.fstat(stream.fileno())
+            if not stat.S_ISREG(selected.st_mode) or selected.st_size > 1024 * 1024:
+                raise ValueError("invalid dependency manifest file")
+            raw = stream.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("oversize dependency manifest")
+        content = raw.decode("utf-8")
+        manifest = (json.loads(content) if manifest_path.suffix == ".json"
+                    else yaml.safe_load(content))
+    except (json.JSONDecodeError, yaml.YAMLError, OSError, UnicodeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=error) from exc
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=400, detail=error)
@@ -4281,7 +4296,7 @@ def _read_direct_deps(service_id: str) -> list[str]:
         ext_dir = base / service_id
         if not ext_dir.is_dir():
             continue
-        for name in ("manifest.yaml", "manifest.yml"):
+        for name in ("manifest.yaml", "manifest.yml", "manifest.json"):
             candidate = ext_dir / name
             if candidate.exists():
                 return _parse_manifest_deps(candidate)
@@ -4714,7 +4729,7 @@ def _enabled_dependents(service_id: str) -> list[str]:
                     detail=f"Cannot inspect enabled dependencies for {peer_dir.name}; no service was disabled",
                 )
             declared: set[str] = set()
-            for name in ("manifest.yaml", "manifest.yml"):
+            for name in ("manifest.yaml", "manifest.yml", "manifest.json"):
                 manifest_path = peer_dir / name
                 try:
                     manifest_stat = manifest_path.lstat()

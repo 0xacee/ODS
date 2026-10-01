@@ -1,6 +1,7 @@
 """Selection checks must survive state changes and contend on a real lock."""
 
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -75,6 +76,38 @@ def test_incomplete_user_directory_cannot_hide_enabled_bundled_dependent(tmp_pat
     assert selection._enabled_dependents(tmp_path, "search") == ["consumer"]
     with pytest.raises(selection.SelectionError, match="enabled extensions depend on search"):
         selection.run("disable", tmp_path, "search")
+    assert (target / "compose.yaml").is_file()
+
+
+def test_selected_json_manifest_dependent_blocks_disable(tmp_path):
+    user_root = tmp_path / "data" / "user-extensions"
+    user_root.mkdir(parents=True)
+    target = extension(tmp_path, "search")
+    consumer = user_root / "consumer"
+    consumer.mkdir()
+    (consumer / "compose.yaml").write_text(
+        "services:\n  consumer:\n    image: alpine:3.22\n", encoding="utf-8",
+    )
+    (consumer / "manifest.json").write_text(json.dumps({
+        "schema_version": "ods.services.v1",
+        "service": {"id": "consumer", "depends_on": ["search"]},
+    }), encoding="utf-8")
+
+    assert selection._enabled_dependents(tmp_path, "search") == ["consumer"]
+    with pytest.raises(selection.SelectionError, match="enabled extensions depend on search"):
+        selection.run("check-disable", tmp_path, "search")
+    assert (target / "compose.yaml").is_file()
+
+
+def test_malformed_selected_json_manifest_fails_closed(tmp_path):
+    (tmp_path / "data" / "user-extensions").mkdir(parents=True)
+    target = extension(tmp_path, "search")
+    consumer = extension(tmp_path, "consumer")
+    (consumer / "manifest.yaml").unlink()
+    (consumer / "manifest.json").write_text('{"service":', encoding="utf-8")
+
+    with pytest.raises(selection.SelectionError, match="Cannot inspect selected file"):
+        selection.run("check-disable", tmp_path, "search")
     assert (target / "compose.yaml").is_file()
 
 
