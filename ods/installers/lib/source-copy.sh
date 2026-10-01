@@ -46,7 +46,8 @@ ods_copy_install_source() {
         # DrvFS checkouts can report 0777 even for the source root. Keep
         # copied code and its parents safe before deferred reconciliation
         # checks the held source transaction; later hardening is too late.
-        rsync -a --no-owner --no-group --chmod=go-w \
+        rsync -a --no-owner --no-group \
+            --chmod=go-w \
             --exclude='.git' --exclude='data/' --exclude='logs/' \
             --exclude='models/' --exclude='.env' --exclude='node_modules/' \
             --exclude='dist/' --exclude='*.log' --exclude='.current-mode' \
