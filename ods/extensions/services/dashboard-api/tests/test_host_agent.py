@@ -84,11 +84,13 @@ def test_host_selection_serializes_dependency_decisions_with_cli_helper(tmp_path
     assert not list((tmp_path / "data").glob(".extension-selection-*"))
 
 
-@pytest.mark.parametrize("has_dependent", [False, True])
-def test_failed_install_cleanup_uses_guarded_selector_without_compose_resolution(
-    tmp_path, monkeypatch, has_dependent,
+@pytest.mark.parametrize(("has_dependent", "stop_fails"), [
+    (False, False), (True, False), (False, True),
+])
+def test_failed_install_cleanup_stops_prior_retry_before_disabling(
+    tmp_path, monkeypatch, has_dependent, stop_fails,
 ):
-    """A broken recipe is disabled only when no selected peer depends on it."""
+    """A prior retry's container is stopped under the marker's graph lock."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     shutil.copyfile(_agent_path.parents[1] / "scripts" / "extension-selection.py",
@@ -107,6 +109,9 @@ def test_failed_install_cleanup_uses_guarded_selector_without_compose_resolution
     (target / "owner-data.db").write_text("keep", encoding="utf-8")
     cache = tmp_path / ".compose-flags"
     cache.write_text("stale", encoding="utf-8")
+    (tmp_path / "docker-compose.base.yml").write_text(
+        "services:\n  dashboard-api:\n    image: example:latest\n", encoding="utf-8",
+    )
     if has_dependent:
         consumer = user_root / "consumer"
         consumer.mkdir()
@@ -118,21 +123,42 @@ def test_failed_install_cleanup_uses_guarded_selector_without_compose_resolution
         )
     monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
     monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
+    monkeypatch.setattr(
+        _mod, "resolve_compose_flags",
+        lambda **_kwargs: ["-f", "docker-compose.base.yml"],
+    )
     if sys.platform == "win32":
         monkeypatch.delitem(sys.modules, "fcntl", raising=False)
+    selector = _mod._load_extension_selector()
+    stops = []
+
+    def stop_owned(_install_dir, service_id, mode, _flags, service_names,
+                   preserve_restart_policy=False):
+        assert (target / "compose.yaml").is_file()
+        assert cache.is_file()
+        assert mode == "owned"
+        assert preserve_restart_policy
+        stops.append((service_id, service_names))
+        if stop_fails:
+            raise selector.SelectionError("Could not confirm stop; selection unchanged")
+
+    monkeypatch.setattr(selector, "_stop_for_disable", stop_owned)
+    monkeypatch.setattr(_mod, "_load_extension_selector", lambda: selector)
 
     note = _mod._disable_unprepared_install("my-ext")
 
     assert (target / "owner-data.db").read_text(encoding="utf-8") == "keep"
-    if has_dependent:
+    if has_dependent or stop_fails:
         assert "could not turn this extension off" in note
         assert (target / "compose.yaml").is_file()
         assert cache.is_file()
+        assert stops == ([] if has_dependent else [("my-ext", {"my-ext"})])
     else:
         assert "turned this extension off" in note
         assert (target / "compose.yaml.disabled").is_file()
         assert not (target / "compose.yaml").exists()
         assert not cache.exists()
+        assert stops == [("my-ext", {"my-ext"})]
 
 
 def test_extension_start_and_disable_share_host_graph_lock(tmp_path, monkeypatch):

@@ -8392,7 +8392,7 @@ def _resolve_install_compose(flags: list[str]) -> tuple[str | None, str]:
 
 
 def _disable_unprepared_install(service_id: str) -> str:
-    """Take a library extension that failed before start out of the Compose project.
+    """Take a library extension that failed before this start out of Compose.
 
     Every enabled extension is merged into one Compose project, so a
     definition that cannot be resolved (a missing ``${NAME:?}`` setting) or
@@ -8411,13 +8411,11 @@ def _disable_unprepared_install(service_id: str) -> str:
         if (service_id in ALWAYS_ON_SERVICES or ext_dir.is_symlink()
                 or not ext_dir.is_dir() or active.is_symlink() or not active.exists()):
             return ""
-        # A failed setup/build can leave Compose unresolvable. The single-
-        # service CLI disable checks enabled dependents and moves the marker
-        # under data/.extensions-lock without resolving the broken stack.
-        # These callers have not started this attempt, so no stop is needed.
-        selector = _load_extension_selector()
-        selector.run("disable", INSTALL_DIR, service_id,
-                     core_services=set(ALWAYS_ON_SERVICES))
+        # This attempt has not started a container, but an earlier failed
+        # retry may have left one running. The host selector checks dependents,
+        # stops exclusive owned containers, then moves the marker under one
+        # graph lock. Its recovery flag accepts a rejected target recipe.
+        _apply_extension_selection([service_id], activate=False)
     except Exception:
         logger.exception("Could not disable failed installation of %s", service_id)
         return unable
