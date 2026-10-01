@@ -6,8 +6,6 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../lib/pixel-uninstall.sh
-source "$ROOT_DIR/lib/pixel-uninstall.sh"
 
 PASS=0
 FAIL=0
@@ -42,6 +40,54 @@ OPS_IDENTITY_LOG="$TEST_ROOT/ops-identity.log"
 OPS_PASSWD_STATE="$TEST_ROOT/ops-passwd"
 OPS_GROUP_STATE="$TEST_ROOT/ops-group"
 mkdir -p "$MOCK_BIN" "$SYSTEMD_DIR" "$ETC_DIR" "$LIBEXEC_DIR" "$HOME_DIR"
+
+# Relocate the inspection service's fixed paths as well as the configurable
+# service paths below. Mocking cleanup alone still lets the presence checks
+# discover a live host unit and call systemctl before the cleanup callback.
+python3 - "$ROOT_DIR/lib/pixel-uninstall.sh" "$TEST_ROOT/pixel-uninstall.sh" "$TEST_ROOT" <<'PY'
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+for original, relative in {
+    '/etc/systemd/system/pixel-preview-inspection.service': 'systemd/pixel-preview-inspection.service',
+    '/etc/ods-pixel-inspection.json': 'etc/ods-pixel-inspection.json',
+    '/usr/local/libexec/ods-pixel-inspection': 'libexec/ods-pixel-inspection',
+}.items():
+    assert original in source, original
+    source = source.replace(original, str(pathlib.Path(sys.argv[3]) / relative))
+pathlib.Path(sys.argv[2]).write_text(source)
+PY
+# shellcheck source=/dev/null
+source "$TEST_ROOT/pixel-uninstall.sh"
+
+# The no-sudo fixture temporarily removes its sudo mock. Keep a refusing
+# fallback ahead of the host PATH so timeout/exec can never find real sudo.
+HOST_GUARD_BIN="$TEST_ROOT/host-guards"
+HOST_GUARD_LOG="$TEST_ROOT/host-guard.log"
+mkdir -p "$HOST_GUARD_BIN"
+cat >"$HOST_GUARD_BIN/sudo" <<'SH'
+#!/usr/bin/env bash
+printf 'refused host sudo: %s\n' "$*" >>"$HOST_GUARD_LOG"
+exit 127
+SH
+chmod +x "$HOST_GUARD_BIN/sudo"
+export HOST_GUARD_LOG
+# This suite models host services under TEST_ROOT. Never dispatch the real
+# inspector cleanup against /etc or /usr/local on the developer/CI machine.
+# Its real validation/removal behavior and candidate dispatch are covered by
+# test_preview_inspection_distribution.py and test_pixel_inspection_upgrade_dispatch.py.
+_ods_pixel_inspection_present() { [[ "${INSPECTION_PRESENT:-false}" == true ]]; }
+_ods_pixel_project_present() { [[ "${PROJECT_PRESENT:-false}" == true ]]; }
+_ods_pixel_project_cleanup() {
+    [[ "$1" == "$INSTALL_DIR" && "$2" == "$(id -u)" ]] || return 1
+    [[ "$3" == check-cleanup || "$3" == cleanup-linux ]] || return 1
+    [[ "${PROJECT_VALIDATE_FAIL:-false}" != true ]] || return 1
+    printf '%s\n' "$3" >>"$TEST_ROOT/project-cleanup.log"
+}
+_ods_pixel_inspection_cleanup() {
+    [[ "$1" == "$INSTALL_DIR" && "$2" == "$(id -u)" ]] || return 1
+    [[ "$3" == validate-linux || "$3" == remove-linux ]] || return 1
+    [[ "${INSPECTION_VALIDATE_FAIL:-false}" != true ]] || return 1
+}
 
 cat >"$MOCK_BIN/sudo" <<'SH'
 #!/usr/bin/env bash
@@ -121,7 +167,7 @@ rm -f -- "$OPS_GROUP_STATE"
 SH
 chmod +x "$MOCK_BIN/sudo" "$MOCK_BIN/systemctl" "$MOCK_BIN/docker" \
     "$MOCK_BIN/getent" "$MOCK_BIN/userdel" "$MOCK_BIN/groupdel"
-export PATH="$MOCK_BIN:$PATH" SYSTEMCTL_LOG DOCKER_LOG DOCKER_STATE
+export PATH="$MOCK_BIN:$HOST_GUARD_BIN:$PATH" SYSTEMCTL_LOG DOCKER_LOG DOCKER_STATE
 export OPS_IDENTITY_LOG OPS_PASSWD_STATE OPS_GROUP_STATE
 export ODS_PIXEL_UNINSTALL_SYSTEMD_DIR="$SYSTEMD_DIR"
 export ODS_PIXEL_UNINSTALL_ETC_DIR="$ETC_DIR"
@@ -169,13 +215,24 @@ assert hook in phase
 assert phase.index(hook) < phase.index('_phase06_step "copy-source"')
 assert '_ods_pixel_source_transition_required' in phase
 assert '_phase06_step "rebind-pixel-source"' in phase
-assert 'ods_pixel_uninstall_managed "$INSTALL_DIR" "$_phase06_pixel_home" source-transition' in phase
+assert 'ods_pixel_uninstall_managed "$INSTALL_DIR" "$_phase06_pixel_home" source-transition' not in phase
+upgrade_steps = [
+    '_ods_pixel_source_upgrade stage "$_phase06_pixel_owner"',
+    '_ods_pixel_install_access_service "$_phase06_pixel_owner"',
+    '_ods_pixel_source_upgrade hold "$_phase06_pixel_owner"',
+    '_ods_pixel_source_upgrade copy "$_phase06_pixel_owner"',
+    '_ods_pixel_source_upgrade downstream "$_phase06_pixel_owner"',
+    '_phase06_step "copy-source"',
+]
+positions = [phase.index(step) for step in upgrade_steps]
+assert positions == sorted(positions)
+assert 'export ODS_PIXEL_SOURCE_TRANSACTION' in phase
 assert phase.index('_phase06_step "rebind-pixel-source"') < phase.index('_phase06_step "copy-source"')
 PY
 then
-    pass "Pixel reruns retire disabled or superseded managed host runtimes before source replacement"
+    pass "Pixel reruns deactivate disabled runtimes and hold source upgrades before replacement"
 else
-    fail "Pixel rerun does not safely deactivate managed host runtime before source replacement"
+    fail "Pixel rerun does not safely deactivate or hold managed runtime before source replacement"
 fi
 
 if python3 - "$ROOT_DIR/lib/pixel-uninstall.sh" <<'PY'
@@ -318,6 +375,7 @@ write_access_fixture() {
         "extensions/services/pixel-agent/host/settings_transaction.py"
         "extensions/services/pixel-agent/host/provider_transaction.py"
         "extensions/services/pixel-agent/host/model_transaction.py"
+        "extensions/services/pixel-agent/host/access_release_transaction.py"
         "bin/pixel_access_bridge.py"
         "bin/pixel_gateway_service.py"
         "bin/pixel_access_client.py"
@@ -2057,6 +2115,53 @@ else
 fi
 
 write_access_fixture
+INSPECTION_PRESENT=true
+INSPECTION_VALIDATE_FAIL=true
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "inspection validation failure was ignored"
+else
+    [[ -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "inspection validation failure stops cleanup before services" \
+        || fail "inspection validation failure caused service mutation"
+fi
+unset INSPECTION_VALIDATE_FAIL INSPECTION_PRESENT
+
+write_access_fixture
+PROJECT_PRESENT=true
+PROJECT_VALIDATE_FAIL=true
+: >"$TEST_ROOT/project-cleanup.log"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "project validation failure was ignored"
+elif [[ -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" && ! -s "$TEST_ROOT/project-cleanup.log" ]]; then
+    pass "project validation failure stops cleanup before any service mutation"
+else
+    fail "project validation failure changed installed state"
+fi
+unset PROJECT_VALIDATE_FAIL
+
+write_access_fixture
+: >"$TEST_ROOT/project-cleanup.log"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ "$(cat "$TEST_ROOT/project-cleanup.log")" == $'check-cleanup\ncleanup-linux' ]] \
+    && grep -qx 'disable --now ods-pixel-project.service' "$SYSTEMCTL_LOG"; then
+    pass "project service validates, stops and performs exact cleanup"
+else
+    fail "project service cleanup lifecycle was incomplete"
+fi
+
+write_access_fixture
+: >"$TEST_ROOT/project-cleanup.log"
+export SYSTEMCTL_FAIL_DISABLE=true
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "project service stop failure was ignored"
+elif [[ "$(cat "$TEST_ROOT/project-cleanup.log")" == check-cleanup && -e "$ACCESS_STATE" ]]; then
+    pass "project service stop failure prevents file cleanup"
+else
+    fail "project service stop failure removed files"
+fi
+unset SYSTEMCTL_FAIL_DISABLE PROJECT_PRESENT
+
+write_access_fixture
 printf '%s\n' '# drifted' > "$LIBEXEC_DIR/ods-pixel-access/pixel_access_bridge.py"
 chmod 0644 "$LIBEXEC_DIR/ods-pixel-access/pixel_access_bridge.py"
 if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
@@ -2296,5 +2401,44 @@ for scenario in foreign modified_unit modified_program relay_key state_symlink p
     unset ACCESS_STOP_FAIL ACCESS_STILL_ACTIVE
 done
 
+write_access_fixture
+for receipt in release-intent release-prepared release-completed; do
+    printf '{}\n' > "$ACCESS_STATE/$receipt.json"
+    chmod 0600 "$ACCESS_STATE/$receipt.json"
+done
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$ACCESS_STATE" ]]; then
+    pass "completed release coordinator state permits verified cleanup"
+else
+    fail "completed release coordinator state stranded the installation"
+fi
+
+write_access_fixture
+printf '{}\n' > "$ACCESS_STATE/access-before.json"
+chmod 0600 "$ACCESS_STATE/access-before.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$ACCESS_STATE" ]]; then
+    pass "completed access transition snapshot permits verified cleanup"
+else
+    fail "completed access transition snapshot stranded the installation"
+fi
+
+write_access_fixture
+printf '{}\n' > "$ACCESS_STATE/access-before.json"
+chmod 0666 "$ACCESS_STATE/access-before.json"
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "writable access transition snapshot was accepted"
+else
+    [[ -e "$ACCESS_STATE/access-before.json" && ! -s "$SYSTEMCTL_LOG" ]] \
+        && pass "unsafe access snapshot fails before service mutation" \
+        || fail "unsafe access snapshot caused partial cleanup"
+fi
+
+
+if [[ -s "$HOST_GUARD_LOG" ]]; then
+    fail "fixture tried to invoke host sudo after its mock was removed"
+else
+    pass "all privileged commands remained inside the fixture"
+fi
 printf 'Results: %d passed, %d failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

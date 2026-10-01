@@ -4598,10 +4598,10 @@ class TestRemoteProviderLifecycle:
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
         runtime = {"model": "same-model", "contextLength": 32768, "maxTokens": 4096, "reasoning": False}
         assert _mod._reconcile_managed_pixel_contract({**runtime, "routeFingerprint": "a" * 64}) == "reconciled"
-        assert calls[-1][-1] == "a" * 64
+        assert calls[-1][-2:] == ["a" * 64, "unknown"]
         assert 'target_route_fingerprint="$8"' in calls[-1][2]
         assert _mod._reconcile_managed_pixel_contract(runtime) == "reconciled"
-        assert calls[-1][-1] == ""
+        assert calls[-1][-2:] == ["", "unknown"]
         with pytest.raises(RuntimeError, match="route identity"):
             _mod._reconcile_managed_pixel_contract({**runtime, "routeFingerprint": "a" * 64 + "\n"})
         assert len(calls) == 2
@@ -4656,6 +4656,12 @@ class TestRemoteProviderLifecycle:
         monkeypatch.setattr(_mod, "_managed_pixel_runtime_contract", lambda: runtime)
 
         assert _mod._active_remote_provider_pixel_runtime() == runtime
+
+        monkeypatch.setattr(_mod, "_managed_pixel_runtime_contract", lambda: {**runtime, "imageInput": "unknown"})
+        assert _mod._active_remote_provider_pixel_runtime() == runtime
+        monkeypatch.setattr(_mod, "_managed_pixel_runtime_contract", lambda: {**runtime, "imageInput": "supported"})
+        assert _mod._active_remote_provider_pixel_runtime() is None
+        monkeypatch.setattr(_mod, "_managed_pixel_runtime_contract", lambda: runtime)
 
         runtime["routeFingerprint"] = _mod._remote_provider_route_fingerprint(route)
         assert _mod._active_remote_provider_pixel_runtime() == runtime
@@ -4726,6 +4732,7 @@ class TestRemoteProviderLifecycle:
             "contextLength": 32768,
             "maxTokens": 4096,
             "reasoning": False,
+            "imageInput": "unknown",
         }
         current_pixel = {"value": local_pixel}
         reconciled = []

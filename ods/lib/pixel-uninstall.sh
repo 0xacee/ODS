@@ -15,6 +15,26 @@ if ! declare -F log_error >/dev/null 2>&1; then
     log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 fi
 
+_ods_pixel_project_present() {
+    [[ -e /etc/ods-pixel-project.json || -L /etc/ods-pixel-project.json \
+        || -e /etc/systemd/system/ods-pixel-project.service || -L /etc/systemd/system/ods-pixel-project.service \
+        || -e /usr/local/libexec/ods-pixel-project || -L /usr/local/libexec/ods-pixel-project ]]
+}
+
+_ods_pixel_project_cleanup() {
+    local install_dir="$1" owner_uid="$2" action="$3" helper_dir
+    [[ "$action" == check-cleanup || "$action" == cleanup-linux ]] || return 1
+    helper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../installers/lib" && pwd)" || return 1
+    sudo /usr/bin/python3 -B "$helper_dir/pixel-project-runtime.py" "$action" \
+        --source "$install_dir/extensions/services/pixel-agent/host" --owner-uid "$owner_uid"
+}
+
+_ods_pixel_inspection_present() {
+    [[ -e /etc/systemd/system/pixel-preview-inspection.service || -L /etc/systemd/system/pixel-preview-inspection.service \
+        || -e /etc/ods-pixel-inspection.json || -L /etc/ods-pixel-inspection.json \
+        || -e /usr/local/libexec/ods-pixel-inspection || -L /usr/local/libexec/ods-pixel-inspection ]]
+}
+
 _ods_pixel_inspection_cleanup() {
     local install_dir="$1" owner_uid="$2" action="$3" helper_dir helper
     [[ "$action" == validate-linux || "$action" == remove-linux ]] || return 1
@@ -85,6 +105,7 @@ _ods_pixel_access_validate_or_remove() {
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -170,7 +191,9 @@ sources = {
     "settings_transaction.py": install / "extensions/services/pixel-agent/host/settings_transaction.py",
     "provider_transaction.py": install / "extensions/services/pixel-agent/host/provider_transaction.py",
     "model_transaction.py": install / "extensions/services/pixel-agent/host/model_transaction.py",
+    "access_release_transaction.py": install / "extensions/services/pixel-agent/host/access_release_transaction.py",
     "pixel_access_bridge.py": install / "bin/pixel_access_bridge.py",
+    "pixel_source_upgrade.py": install / "bin/pixel_source_upgrade.py",
     "pixel_gateway_service.py": install / "bin/pixel_gateway_service.py",
     "pixel_access_client.py": install / "bin/pixel_access_client.py",
     "pixel_access_reconcile.py": install / "bin/pixel_access_reconcile.py",
@@ -195,10 +218,24 @@ for name in (
 # absence.  If either side exists, normal byte and completeness validation
 # remains mandatory, so a partial current bundle still fails closed.
 expected_sources = set(sources)
-legacy_gateway = "pixel_gateway_service.py"
-if (not present(sources[legacy_gateway])
-        and not present(program / legacy_gateway)):
-    expected_sources.remove(legacy_gateway)
+for later_module in ("pixel_gateway_service.py", "access_release_transaction.py", "pixel_source_upgrade.py"):
+    if (not present(sources[later_module])
+            and not present(program / later_module)):
+        expected_sources.remove(later_module)
+
+source_mirror = {}
+if present(state_root / 'source-upgrade'):
+    # The retained protected guard can legitimately be newer than a rolled-
+    # back source. Its completed, exact-byte root inventory is the authority;
+    # incomplete transactions and arbitrary extra state still refuse removal.
+    directory(program, root_uid, root_gid)
+    helper = program / 'pixel_source_upgrade.py'
+    regular(helper, root_uid, root_gid, 2 * 1024 * 1024)
+    spec = importlib.util.spec_from_file_location('ods_source_uninstall', helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    manager = module.SourceUpgrade(state_root / 'source-upgrade', install, owner_uid)
+    source_mirror = manager.uninstall_inventory()
 
 relay_key = config.parent / "pixel-access-relay.key"
 artifacts = (unit, program, config, relay_key, state_root, probe_owner, dropin,
@@ -209,8 +246,9 @@ if not any(present(path) for path in artifacts):
 
 if present(unit):
     regular(unit, root_uid, root_gid, 256 * 1024)
-    source_file(unit_source, 256 * 1024)
-    if unit.read_bytes() != unit_source.read_bytes():
+    if str(unit) not in source_mirror:
+        source_file(unit_source, 256 * 1024)
+    if str(unit) not in source_mirror and unit.read_bytes() != unit_source.read_bytes():
         raise SystemExit("installed Pixel access unit drifted from this ODS install")
 
 if present(program):
@@ -237,9 +275,10 @@ if present(program):
             relative = child.relative_to(program).as_posix()
             if relative in sources:
                 source = sources[relative]
-                source_file(source, 2 * 1024 * 1024)
                 regular(child, root_uid, root_gid, 2 * 1024 * 1024)
-                if child.read_bytes() != source.read_bytes():
+                if str(child) not in source_mirror:
+                    source_file(source, 2 * 1024 * 1024)
+                if str(child) not in source_mirror and child.read_bytes() != source.read_bytes():
                     raise SystemExit(f"installed Pixel access program drifted: {relative}")
                 seen.add(relative)
                 continue
@@ -325,6 +364,11 @@ state_limits = {
     "verified.json": 256 * 1024,
     "service-baseline.json": 64 * 1024,
     "model-before.json": 8 * 1024 * 1024,
+    "access-before.json": 8 * 1024 * 1024,
+    "release-intent.json": 8192,
+    "release-baseline.json": 8192,
+    "release-prepared.json": 8192,
+    "release-completed.json": 8192,
     "model-completed.json": 256 * 1024,
     "model-promotion-completed.json": 256 * 1024,
     "model-route-completed.json": 256 * 1024,
@@ -343,6 +387,8 @@ provider_managed = None
 if present(state_root):
     directory(state_root, root_uid, root_gid, exact_mode=0o700)
     for child in state_root.iterdir():
+        if child.name == 'source-upgrade' and source_mirror:
+            continue  # Completely validated by the protected helper above.
         if abandoned_state_temp.fullmatch(child.name):
             info = regular(child, root_uid, root_gid, 8 * 1024 * 1024, private=True)
             if stat.S_IMODE(info.st_mode) != 0o600:
@@ -2209,12 +2255,17 @@ PY
     log_info "Removing the ODS-managed Pixel host deployment..."
     # Inspection has a separate root-only Docker broker. Validate its fixed
     # artifacts before stopping anything, and retire it before its publisher.
-    local inspection_present=false
-    if [[ -e /etc/systemd/system/pixel-preview-inspection.service || -L /etc/systemd/system/pixel-preview-inspection.service \
-        || -e /etc/ods-pixel-inspection.json || -L /etc/ods-pixel-inspection.json \
-        || -e /usr/local/libexec/ods-pixel-inspection || -L /usr/local/libexec/ods-pixel-inspection ]]; then
+    local inspection_present=false project_present=false
+    if _ods_pixel_project_present; then
+        project_present=true
+        _ods_pixel_project_cleanup "$install_dir" "$owner_uid" check-cleanup || return 1
+    fi
+    if _ods_pixel_inspection_present; then
         inspection_present=true
         _ods_pixel_inspection_cleanup "$install_dir" "$owner_uid" validate-linux || return 1
+    fi
+    if "$project_present"; then
+        timeout 350s sudo systemctl disable --now ods-pixel-project.service || return 1
     fi
     if [[ -e "$gateway_unit" || -L "$gateway_unit" \
         || -e "$ingress_unit" || -L "$ingress_unit" \
@@ -2714,6 +2765,9 @@ PY
         fi
     fi
 
+    if "$project_present"; then
+        _ods_pixel_project_cleanup "$install_dir" "$owner_uid" cleanup-linux || return 1
+    fi
     if [[ "$root_artifacts_present" == "true" ]]; then
         if "$inspection_present"; then
             _ods_pixel_inspection_cleanup "$install_dir" "$owner_uid" remove-linux || return 1

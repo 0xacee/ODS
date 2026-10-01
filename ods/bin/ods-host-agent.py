@@ -151,6 +151,8 @@ ODS_VERSION = "3.0.0"
 SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 PIXEL_OPS_JOB_ID_RE = re.compile(r"^ops-[0-9]{13}-[a-f0-9]{12}$")
 PIXEL_OPS_PLAN_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
+_approval_terminals = None
+_approval_terminals_lock = threading.Lock()
 PIXEL_OPS_STATUS_HELPER = Path("/usr/local/libexec/ods-pixel-extension-manager.py")
 PIXEL_OPS_STATUS_SOCKET = "/run/ods-pixel-manager/extension-manager.sock"
 PIXEL_OPS_STATUS_KIND = "ods-pixel-operations-status"
@@ -3183,6 +3185,29 @@ def _pixel_max_tokens_for_context(context_length: int) -> int:
     return min(8192, max(1, context_length // 4))
 
 
+def _pixel_model_image_input(model_id: str) -> str:
+    """Read an explicit capability only from the exact public curated record.
+
+    Imported records and runtime advisory booleans can contain synthesized
+    defaults. Their false value is not evidence that image input is unsupported.
+    """
+    try:
+        path = INSTALL_DIR / "config" / "model-library.json"
+        if path.stat().st_size > 8 * 1024 * 1024:
+            return "unknown"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        records = document.get("models") if isinstance(document, dict) else None
+        if not isinstance(records, list):
+            return "unknown"
+        matches = [record for record in records if isinstance(record, dict)
+                   and model_id in [record.get(key) for key in ("id", "llm_model_name", "gguf_file")]]
+        if len(matches) != 1 or type(matches[0].get("vision")) is not bool:
+            return "unknown"
+        return "supported" if matches[0]["vision"] else "unsupported"
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "unknown"
+
+
 def _reconcile_ods_managed_pixel_model(
     model: str,
     context_length: int,
@@ -3190,6 +3215,7 @@ def _reconcile_ods_managed_pixel_model(
     max_tokens: int = 4096,
     reasoning: bool = False,
     route_fingerprint: str | None = None,
+    image_input: str | None = None,
 ) -> str:
     """Transactionally bind the managed Pixel gateway to an activated model."""
     identity = _ods_managed_pixel_identity()
@@ -3197,6 +3223,8 @@ def _reconcile_ods_managed_pixel_model(
         return "not_installed"
     if not _valid_pixel_model_name(model):
         raise RuntimeError("The promoted Pixel model identity is invalid")
+    if image_input is not None and image_input not in ("supported", "unsupported", "unknown"):
+        raise RuntimeError("The promoted Pixel image-input policy is invalid")
     if not isinstance(context_length, int) or isinstance(context_length, bool) \
             or not 4096 <= context_length <= 10_000_000:
         raise RuntimeError("Pixel requires a model context between 4096 and 10000000 tokens")
@@ -3212,7 +3240,7 @@ def _reconcile_ods_managed_pixel_model(
     owner, home = identity
     env_values = load_env(INSTALL_DIR / ".env")
     configured_ref = str(env_values.get("PIXEL_SOURCE_REF") or "")
-    bundled_ref = "6e82d4c974be8c7b5aebe3a4ffd5374e20ad0ac5"
+    bundled_ref = "9f3b6ecd25db3ab51bef4091473d88ee5824bc3b"
     source_url = str(env_values.get("PIXEL_SOURCE_URL") or "bundled")
     if any(character in source_url for character in "\r\n\x00"):
         raise RuntimeError("The configured Pixel source URL is invalid")
@@ -3245,6 +3273,7 @@ target_context="$5"
 target_max_tokens="$6"
 target_reasoning="$7"
 target_route_fingerprint="$8"
+target_image_input="$9"
 INTERACTIVE=false
 DRY_RUN=false
 log() { printf '%s\n' "$*" >&2; }
@@ -3263,7 +3292,7 @@ export INSTALL_DIR INTERACTIVE DRY_RUN ODS_SUDO_AVAILABLE
 . "$INSTALL_DIR/installers/lib/sudo.sh"
 . "$INSTALL_DIR/installers/lib/pixel-host-install.sh"
 ods_pixel_reconcile_promoted_model "$owner" "$home" "$target_model" ready \
-    "$target_context" "$target_max_tokens" "$target_reasoning" "$target_route_fingerprint"
+    "$target_context" "$target_max_tokens" "$target_reasoning" "$target_route_fingerprint" "" "$target_image_input"
 '''
     child_env = {
         "HOME": str(home),
@@ -3283,6 +3312,7 @@ ods_pixel_reconcile_promoted_model "$owner" "$home" "$target_model" ready \
                 str(context_length), str(max_tokens),
                 "true" if reasoning else "false",
                 route_fingerprint or "",
+                image_input or "unknown",
             ],
             env=child_env,
             capture_output=True,
@@ -3810,6 +3840,8 @@ def _remote_provider_runtime_contract(route: dict) -> dict[str, object]:
         "maxTokens": max_tokens,
         "reasoning": reasoning,
         "routeFingerprint": _remote_provider_route_fingerprint(route),
+        # This remote-route schema does not carry a verified vision capability.
+        "imageInput": "unknown",
     }
 
 
@@ -3869,6 +3901,7 @@ def _valid_managed_pixel_runtime_contract(value: object) -> bool:
         and type(max_tokens) is int
         and 1 <= max_tokens <= context_length
         and type(reasoning) is bool
+        and ("imageInput" not in value or value["imageInput"] in ("supported", "unsupported", "unknown"))
         and ("routeFingerprint" not in value or (
             isinstance(value["routeFingerprint"], str)
             and re.fullmatch(r"[a-f0-9]{64}", value["routeFingerprint"]) is not None
@@ -4182,7 +4215,13 @@ def _pixel_local_identity_matches(config: dict, identity: str, expected: str) ->
 def _prove_pixel_model_contract(config: dict, contract: dict) -> bool:
     if 'routeFingerprint' in contract:
         route = _read_remote_provider_route_state_for_update()
-        if _remote_provider_runtime_contract(route) != contract:
+        expected = _remote_provider_runtime_contract(route)
+        observed = dict(contract)
+        # This endpoint proves route identity, not image understanding. The
+        # native model transaction separately verifies the transport policy.
+        expected.pop('imageInput', None)
+        observed.pop('imageInput', None)
+        if not _valid_managed_pixel_runtime_contract(contract) or expected != observed:
             return False
         _verify_litellm_route(config, model='ods/current')
         return True
@@ -4417,6 +4456,11 @@ def _active_remote_provider_pixel_runtime() -> dict[str, object] | None:
             and "routeFingerprint" not in activation["remote"]
         if legacy:
             runtime.pop("routeFingerprint")
+        if (isinstance(activation, dict) and isinstance(activation.get("remote"), dict)
+                and "imageInput" not in activation["remote"]):
+            # Preserve legacy read-only status, without qualifying a new
+            # activation's exact-contract fast path or claiming image support.
+            runtime.pop("imageInput")
         if (
             not isinstance(activation, dict)
             or activation.get("phase") != "active"
@@ -4433,6 +4477,12 @@ def _active_remote_provider_pixel_runtime() -> dict[str, object] | None:
         ):
             return None
         observed = _cached_managed_pixel_runtime_contract() if env.get('PIXEL_OPENWEBUI_KEY') else _managed_pixel_runtime_contract()
+        if (isinstance(observed, dict) and "imageInput" not in runtime
+                and observed.get("imageInput") == "unknown"):
+            # An installer can explicitly migrate the previous implicit unknown
+            # without rewriting a remote activation receipt. Read-only status
+            # stays valid; the returned legacy contract still misses the field.
+            observed = {key: value for key, value in observed.items() if key != "imageInput"}
         if observed != runtime:
             return None
         return runtime
@@ -4474,31 +4524,62 @@ _pixel_model_read_cache = {}
 _pixel_model_read_lock = threading.Lock()
 
 
+def _managed_pixel_readback_key():
+    files=[]
+    for path in (INSTALL_DIR/'.env',_pixel_model_journal_path(),_remote_provider_route_state_path()):
+        try:
+            info=path.stat()
+            files.append((info.st_mtime_ns,info.st_size))
+        except FileNotFoundError:files.append(None)
+    return (str(INSTALL_DIR),tuple(files))
+
+
 def _cached_managed_pixel_runtime_contract() -> dict | None:
-    """A poll never waits for Docker; expired/unconfirmed identity is unknown."""
+    """Refresh before expiry without extending a proof's 15-second lifetime."""
     try:
-        files=[]
-        for path in (INSTALL_DIR/'.env',_pixel_model_journal_path(),_remote_provider_route_state_path()):
-            try:
-                info=path.stat()
-                files.append((info.st_mtime_ns,info.st_size))
-            except FileNotFoundError:files.append(None)
-        key=(str(INSTALL_DIR),tuple(files))
+        key=_managed_pixel_readback_key()
     except OSError:return None
     with _pixel_model_read_lock:
-        if _pixel_model_read_cache.get('key')==key and time.monotonic()-_pixel_model_read_cache.get('at',0)<15:
-            value=_pixel_model_read_cache.get('value')
-            return dict(value) if isinstance(value,dict) else None
-        if _pixel_model_read_cache.get('fetching'):
-            return None
-        _pixel_model_read_cache.update(key=key,fetching=True,at=0,value=None)
+        if _pixel_model_read_cache.get('key')!=key:
+            # Preserve the single in-flight worker, but revoke its generation.
+            _pixel_model_read_cache.update(key=key,generation=object(),at=None,value=None)
+        at=_pixel_model_read_cache.get('at')
+        age=time.monotonic()-at if at is not None else float('inf')
+        value=_pixel_model_read_cache.get('value')
+        current=dict(value) if age<15 and isinstance(value,dict) else None
+        # Leave up to ten seconds for native readback before the hard expiry.
+        if age<5 or _pixel_model_read_cache.get('fetching'):
+            return current
+        generation=_pixel_model_read_cache['generation']
+        _pixel_model_read_cache['fetching']=True
     def refresh():
         try:value=_managed_pixel_runtime_contract()
         except Exception:value=None
+        # Inputs may change without another poll while the native proof runs.
+        try:observed_key=_managed_pixel_readback_key()
+        except OSError:observed_key=None
         with _pixel_model_read_lock:
-            if _pixel_model_read_cache.get('key')==key:
-                _pixel_model_read_cache.update(value=value,at=time.monotonic(),fetching=False)
-    threading.Thread(target=refresh,name='ods-managed-model-readback',daemon=True).start()
+            if _pixel_model_read_cache.get('generation') is generation:
+                if observed_key==key:
+                    # A failed verification revokes even a still-fresh value.
+                    _pixel_model_read_cache.update(value=value,at=time.monotonic())
+                else:
+                    _pixel_model_read_cache.update(value=None,at=None)
+            _pixel_model_read_cache['fetching']=False
+    try:
+        threading.Thread(target=refresh,name='ods-managed-model-readback',daemon=True).start()
+    except RuntimeError:
+        # A worker that could not start must not suppress every later refresh.
+        with _pixel_model_read_lock:
+            _pixel_model_read_cache['fetching']=False
+        return None
+    with _pixel_model_read_lock:
+        # The worker can finish before start() returns; honor fresh failure.
+        at=_pixel_model_read_cache.get('at')
+        value=_pixel_model_read_cache.get('value')
+        if (_pixel_model_read_cache.get('generation') is generation and at is not None
+                and time.monotonic()-at<15 and isinstance(value,dict)):
+            return dict(value)
     return None
 
 
@@ -4545,6 +4626,8 @@ def _managed_pixel_runtime_contract() -> dict[str, object] | None:
     }
     if provider == "ods-gateway" and "modelRouteFingerprint" in value:
         contract["routeFingerprint"] = value["modelRouteFingerprint"]
+    if "modelImageInput" in value:
+        contract["imageInput"] = value["modelImageInput"]
     if not _valid_managed_pixel_runtime_contract(contract):
         raise RuntimeError("ODS-managed Pixel onboarding runtime contract is invalid")
     return contract
@@ -4559,6 +4642,7 @@ def _reconcile_managed_pixel_contract(contract: dict[str, object] | None) -> str
         max_tokens=int(contract["maxTokens"]),
         reasoning=bool(contract["reasoning"]),
         route_fingerprint=contract.get("routeFingerprint"),
+        image_input=contract.get("imageInput"),
     )
 
 
@@ -5632,6 +5716,33 @@ def invalidate_compose_cache() -> None:
     (INSTALL_DIR / ".compose-flags").unlink(missing_ok=True)
 
 
+def _macos_native_pixel_compose_flags(flags: list[str]) -> list[str]:
+    """Keep host-agent Compose selection aligned with the installed Mac CLI."""
+    if platform.system() != "Darwin":
+        return flags
+    preparation = INSTALL_DIR / "data/pixel-native/preparation"
+    if not any(os.path.lexists(preparation / name) for name in
+               ("activation.json", "selection-update.json")):
+        return flags
+    helper = INSTALL_DIR / "installers/macos/lib/pixel-native-stack.py"
+    if not helper.is_file() or helper.is_symlink():
+        raise RuntimeError("Mac native Pixel Compose selector is unavailable")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(helper), "--install-dir", str(INSTALL_DIR),
+             "--flags", " ".join(flags)],
+            cwd=str(INSTALL_DIR), capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("Mac native Pixel Compose selection needs recovery") from exc
+    if result.returncode != 0:
+        raise RuntimeError("Mac native Pixel Compose selection needs recovery")
+    selected = result.stdout.strip().split()
+    if not selected or len(selected) % 2 or any(value != "-f" for value in selected[::2]):
+        raise RuntimeError("Mac native Pixel Compose selector returned invalid flags")
+    return selected
+
+
 def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> list:
     """Resolve Compose flags; a target's rejected recipe may be used for safe disable.
 
@@ -5668,7 +5779,7 @@ def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> lis
             active_mount = _model_stores.active_compose_overlay(INSTALL_DIR, load_env(INSTALL_DIR / ".env").get("ODS_ACTIVE_MODEL_STORE", "default"))
             if active_mount:
                 flags.extend(["-f", str(active_mount)])
-            return flags
+            return _macos_native_pixel_compose_flags(flags)
 
     script = INSTALL_DIR / "scripts" / "resolve-compose-stack.sh"
     # Contract note: every resolver launch below must include --gpu-count and
@@ -5728,7 +5839,7 @@ def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> lis
         raise RuntimeError(
             f"compose resolver failed: {detail[:1000]}",
         ) from exc
-    return result.stdout.strip().split()
+    return _macos_native_pixel_compose_flags(result.stdout.strip().split())
 
 
 # Filesystem types that silently ignore POSIX ownership/permissions.
@@ -6242,18 +6353,18 @@ def _webui_selection_state() -> dict:
     selected = load_env(env_path).get("ENABLE_OPEN_WEBUI", "true").strip().lower() == "true"
     return {
         "enabled": selected,
-        "supported": platform.system() == "Linux",
+        "supported": platform.system() in {"Linux", "Darwin"},
     }
 
 
 def _enable_webui_selection() -> tuple[int, dict]:
-    """Add the base WebUI service to a Linux install without touching its data.
+    """Add the base WebUI service without touching its retained data.
 
     The existing .env choice and Compose resolver remain authoritative. Keep
     the bind-mounted .env inode, and restore its exact bytes if startup fails.
     """
-    if platform.system() != "Linux":
-        return 501, {"code": "unsupported_platform", "error": "WebUI add-back is available on Linux only"}
+    if platform.system() not in {"Linux", "Darwin"}:
+        return 501, {"code": "unsupported_platform", "error": "WebUI add-back is unavailable on this platform"}
     service_lock = _service_locks["open-webui"]
     if not service_lock.acquire(blocking=False):
         return 409, {"code": "operation_in_progress", "error": "Open WebUI is being changed"}
@@ -6278,8 +6389,21 @@ def _enable_webui_selection() -> tuple[int, dict]:
                 return 503, {"code": "selected_but_stopped", "error": "Open WebUI is selected but not running; inspect its service state"}
             return 200, {"enabled": True, "action": "already_selected"}
 
+        # A lean Mac install may have saved WEBUI_AUTH=false for loopback use.
+        # If the owner later exposes the bind or selects the proxy, enforce
+        # sign-in in the same bound-file write that selects WebUI. Compose must
+        # also use these installed values, not stale host-agent process env.
+        bind = installed.get("BIND_ADDRESS", "127.0.0.1").strip().lower() or "127.0.0.1"
+        auth_required = (
+            bind not in {"127.0.0.1", "::1", "localhost"}
+            or installed.get("ENABLE_ODS_PROXY", "false").strip().lower() == "true"
+            or _proxy_compose_enabled()
+        )
+        next_env_text = _upsert_env_text(env_text, "ENABLE_OPEN_WEBUI", "true")
+        if auth_required:
+            next_env_text = _upsert_env_text(next_env_text, "WEBUI_AUTH", "true")
         changed = True  # A failed in-place write may have written a prefix.
-        _write_bound_env_text(env_path, _upsert_env_text(env_text, "ENABLE_OPEN_WEBUI", "true"))
+        _write_bound_env_text(env_path, next_env_text)
         invalidate_compose_cache()
         flags = resolve_compose_flags()
         compose_env = os.environ.copy()
@@ -6288,12 +6412,14 @@ def _enable_webui_selection() -> tuple[int, dict]:
             "ENABLE_OPEN_WEBUI", "ODS_GATEWAY_ONLY", "EXTERNAL_LLM_URL",
             "LEMONADE_EXTERNAL", "AMD_INFERENCE_RUNTIME",
             "AMD_INFERENCE_MANAGED", "WHISPER_ACCELERATION",
-            "ODS_SKIP_GPU_OVERLAYS",
+            "ODS_SKIP_GPU_OVERLAYS", "BIND_ADDRESS", "WEBUI_AUTH", "ENABLE_ODS_PROXY",
         ):
             compose_env.pop(selector, None)
             if selector in installed:
                 compose_env[selector] = installed[selector]
         compose_env["ENABLE_OPEN_WEBUI"] = "true"
+        if auth_required:
+            compose_env["WEBUI_AUTH"] = "true"
 
         def compose(*arguments: str):
             return subprocess.run(
@@ -9551,6 +9677,46 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         json_response(self, 200, metrics)
 
+    def _handle_pixel_approval_terminal(self):
+        if not check_auth(self):
+            return
+        if platform.system() != "Linux":
+            json_response(self, 503, {"error": "approval-terminal-unsupported"})
+            return
+        try:
+            self.connection.settimeout(3)
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096:
+                raise ValueError()
+            body = json.loads(self.rfile.read(length))
+            global _approval_terminals
+            with _approval_terminals_lock:
+                if _approval_terminals is None:
+                    import importlib.util
+                    source = INSTALL_DIR / "extensions/services/pixel-agent/host/approval_terminal.py"
+                    spec = importlib.util.spec_from_file_location("ods_approval_terminal", source)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    def awaiting(job, plan):
+                        info = PIXEL_OPS_STATUS_HELPER.lstat()
+                        if (not stat_mod.S_ISREG(info.st_mode) or info.st_nlink != 1
+                                or info.st_uid != 0 or info.st_mode & 0o022):
+                            return False
+                        result = subprocess.run(["/usr/bin/python3", str(PIXEL_OPS_STATUS_HELPER), "status",
+                            PIXEL_OPS_STATUS_SOCKET, job, plan], cwd="/", env={"PATH":"/usr/bin:/bin"},
+                            capture_output=True, timeout=5, check=False)
+                        if result.returncode or len(result.stdout)>65536:
+                            return False
+                        value = json.loads(result.stdout)
+                        return (value.get("jobId")==job and value.get("planHash")==plan
+                            and value.get("status")=="awaiting-approval" and value.get("approvalRequired") is True)
+                    _approval_terminals = module.ApprovalTerminals(INSTALL_DIR, awaiting)
+            result = _approval_terminals.request(body)
+            json_response(self, 200, result)
+        except Exception:
+            # Never log request bodies, private terminal text or exception details.
+            json_response(self, 409, {"error": "approval-terminal-unavailable"})
+
     def do_POST(self):
         # Several legacy endpoints intentionally ignore an optional body, and
         # rejected requests may return before consuming one. Close POST
@@ -9558,7 +9724,9 @@ class AgentHandler(BaseHTTPRequestHandler):
         # parsed as the next request on an HTTP/1.1 keep-alive connection. GET
         # polling remains reusable, which is where connection churn matters.
         self.close_connection = True
-        if self.path == "/v1/pixel/access-mode":
+        if self.path == "/v1/pixel/approval-terminal":
+            self._handle_pixel_approval_terminal()
+        elif self.path == "/v1/pixel/access-mode":
             self._handle_pixel_access_mode(True)
         elif self.path == "/v1/pixel/apps/open":
             self._handle_pixel_open_app()
@@ -13336,6 +13504,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         final_runtime_proof: dict[str, object] | None = None
         gpu_assignment_plan: dict | None = None
         previous_pixel_context: int | None = None
+        previous_pixel_image_input = "unknown"
         router_target_published = False
         previous_router_active = {}
         wsl_changed_digest = None
@@ -13602,6 +13771,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                         previous_pixel_context,
                         max_tokens=_pixel_max_tokens_for_context(previous_pixel_context),
                         reasoning=previous_reasoning,
+                        image_input=previous_pixel_image_input,
                     )
                     if restored_pixel != "reconciled":
                         raise RuntimeError(
@@ -14362,6 +14532,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                         "Final runtime proof returned an invalid Pixel model identity; "
                         "rolling back to the previous model"
                     )
+                if pixel_transaction is None:
+                    previous_pixel_contract = _managed_pixel_runtime_contract()
+                    previous_pixel_image_input = (previous_pixel_contract or {}).get("imageInput", "unknown")
                 pixel_reconcile_attempted = True
                 if pixel_transaction is not None and (
                     final_runtime_proof.get('contextVerified') is not True
@@ -14373,11 +14546,13 @@ class AgentHandler(BaseHTTPRequestHandler):
                     'contextLength': int(context_length),
                     'maxTokens': _pixel_max_tokens_for_context(int(context_length)),
                     'reasoning': _pixel_model_reasoning_capable(str(llm_model_name), env),
+                    'imageInput': _pixel_model_image_input(model_id),
                 }
                 pixel_status = (pixel_transaction.apply(pixel_target) if pixel_transaction is not None
                     else _reconcile_ods_managed_pixel_model(
                         pixel_runtime_identity, int(context_length),
-                        max_tokens=pixel_target['maxTokens'], reasoning=pixel_target['reasoning']))
+                        max_tokens=pixel_target['maxTokens'], reasoning=pixel_target['reasoning'],
+                        image_input=pixel_target['imageInput']))
                 if pixel_status == "not_installed":
                     pixel_reconcile_attempted = False
                 consumers = {
@@ -15354,6 +15529,7 @@ def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
         "contextLength": context_length,
         "maxTokens": _pixel_max_tokens_for_context(context_length),
         "reasoning": _pixel_model_reasoning_capable(expected_model_id, env),
+        "imageInput": _pixel_model_image_input(expected_model_id),
     }
     original_env = _snapshot_text_file(env_path)
     hermes_path = INSTALL_DIR / "data" / "hermes" / "config.yaml"
