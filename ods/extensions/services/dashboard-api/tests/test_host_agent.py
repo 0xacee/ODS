@@ -117,6 +117,56 @@ def test_failed_install_cleanup_uses_guarded_selector_without_compose_resolution
         assert not cache.exists()
 
 
+def test_extension_start_and_disable_share_host_graph_lock(tmp_path, monkeypatch):
+    """The CLI cannot rename a marker during a selected Compose up."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copyfile(_agent_path.parents[1] / "scripts" / "extension-selection.py",
+                    scripts / "extension-selection.py")
+    target = tmp_path / "data" / "user-extensions" / "my-ext"
+    target.mkdir(parents=True)
+    (target / "compose.yaml").write_text(
+        "services:\n  my-ext:\n    image: example:latest\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+    monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", target.parent)
+    monkeypatch.setattr(_mod, "EXTENSIONS_DIR", tmp_path / "extensions" / "services")
+    if sys.platform == "win32":
+        monkeypatch.delitem(sys.modules, "fcntl", raising=False)
+
+    entered = threading.Event()
+    release = threading.Event()
+    results = []
+
+    def delayed_up(command, **_kwargs):
+        assert (target / "compose.yaml").is_file()
+        entered.set()
+        assert release.wait(timeout=5)
+        results.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(_mod.subprocess, "run", delayed_up)
+    worker = threading.Thread(
+        target=lambda: _mod._run_selected_extension_up("my-ext", ["-f", "base.yml"]),
+    )
+    worker.start()
+    try:
+        assert entered.wait(timeout=5)
+        selector = _mod._load_extension_selector()
+        with pytest.raises(selector.SelectionError, match="Timed out waiting"):
+            selector.run("disable", tmp_path, "my-ext", timeout=0.2)
+        assert (target / "compose.yaml").is_file()
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert results == [["docker", "compose", "-f", "base.yml", "up", "-d", "my-ext"]]
+    assert selector.run("disable", tmp_path, "my-ext") == "disabled"
+    with pytest.raises(RuntimeError, match="selection changed before start"):
+        _mod._run_selected_extension_up("my-ext", ["-f", "base.yml"])
+    assert len(results) == 1
+
+
 def test_host_selection_endpoint_requires_auth_and_preserves_batch(
     monkeypatch, host_agent_wire_client,
 ):
@@ -6719,6 +6769,17 @@ class TestProxyAuthStart:
     def test_auth_is_persisted_and_applied_before_proxy_start(
         self, tmp_path, monkeypatch,
     ):
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        shutil.copyfile(_agent_path.parents[1] / "scripts" / "extension-selection.py",
+                        scripts / "extension-selection.py")
+        (tmp_path / "data").mkdir()
+        extension_root = tmp_path / "extensions" / "services"
+        proxy_dir = extension_root / "ods-proxy"
+        proxy_dir.mkdir(parents=True)
+        (proxy_dir / "compose.yaml").write_text(
+            "services:\n  ods-proxy:\n    image: example:latest\n", encoding="utf-8",
+        )
         env_path = tmp_path / ".env"
         env_path.write_text(
             "BIND_ADDRESS=127.0.0.1\nWEBUI_AUTH=false\nWEBUI_AUTH=false\n",
@@ -6727,6 +6788,10 @@ class TestProxyAuthStart:
         calls = []
 
         monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", extension_root)
+        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", tmp_path / "data" / "user-extensions")
+        if sys.platform == "win32":
+            monkeypatch.delitem(sys.modules, "fcntl", raising=False)
         monkeypatch.setattr(
             _mod, "resolve_compose_flags", lambda: ["-f", "base.yml"],
         )
@@ -7288,6 +7353,13 @@ class TestInstallStatePollBehavior:
         user_root = tmp_path / "user-extensions"
         builtin_root = tmp_path / "builtin-empty"
         install_dir.mkdir()
+        scripts = install_dir / "scripts"
+        scripts.mkdir()
+        shutil.copyfile(_agent_path.parents[1] / "scripts" / "extension-selection.py",
+                        scripts / "extension-selection.py")
+        (install_dir / "data").mkdir()
+        if sys.platform == "win32":
+            monkeypatch.delitem(sys.modules, "fcntl", raising=False)
         data_dir.mkdir()
         user_root.mkdir()
         builtin_root.mkdir()
@@ -7303,6 +7375,12 @@ class TestInstallStatePollBehavior:
             startup_timeout=startup_timeout,
             container_name=container_name,
         )
+        # The start path now requires a selected regular marker while the
+        # host graph lock is held. Keep this suite focused on state polling.
+        (ext_dir / "compose.yaml").write_text(
+            f"services:\n  {sid}:\n    image: example:latest\n", encoding="utf-8",
+        )
+        monkeypatch.setattr(_mod, "_precreate_data_dirs", lambda _sid: None)
 
         monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
         monkeypatch.setattr(_mod, "DATA_DIR", data_dir)

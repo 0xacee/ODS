@@ -6101,6 +6101,39 @@ def _whisper_model_ready_after_start(
     return False, "Whisper started, but its model is not cached; run ods repair voice"
 
 
+def _run_selected_extension_up(
+    service_id: str, flags: list[str], *, env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Keep the final selected-marker check and Compose up under one graph lock.
+
+    Image preparation and readiness polling remain outside this critical
+    section. The CLI selector cannot disable and stop the service between
+    the marker check and the completion of ``docker compose up -d``.
+    """
+    selector = _load_extension_selector()
+    try:
+        with selector._selection_lock(INSTALL_DIR, 15.0):
+            ext_dir = _find_ext_dir(service_id)
+            if ext_dir is None or ext_dir.is_symlink():
+                raise RuntimeError(f"Extension is unavailable: {service_id}")
+            selected = ext_dir / "compose.yaml"
+            try:
+                selected_stat = selected.lstat()
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"Extension selection changed before start: {service_id}"
+                ) from exc
+            if not stat_mod.S_ISREG(selected_stat.st_mode):
+                raise RuntimeError(f"Invalid selected Compose file: {service_id}")
+            return subprocess.run(
+                ["docker", "compose", *flags, "up", "-d", service_id],
+                cwd=str(INSTALL_DIR), capture_output=True, text=True,
+                timeout=SUBPROCESS_TIMEOUT_START, env=env,
+            )
+    except selector.SelectionError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 def docker_compose_action(service_id: str, action: str) -> tuple:
     try:
         flags = resolve_compose_flags()
@@ -6158,10 +6191,13 @@ def docker_compose_action(service_id: str, action: str) -> tuple:
         return False, f"Unknown action: {action}"
     timeout = SUBPROCESS_TIMEOUT_START if action == "start" else SUBPROCESS_TIMEOUT_STOP
     try:
-        result = subprocess.run(
-            cmd, cwd=str(INSTALL_DIR),
-            capture_output=True, text=True, timeout=timeout, env=compose_env,
-        )
+        if action == "start" and service_id not in ALWAYS_ON_SERVICES:
+            result = _run_selected_extension_up(service_id, flags, env=compose_env)
+        else:
+            result = subprocess.run(
+                cmd, cwd=str(INSTALL_DIR),
+                capture_output=True, text=True, timeout=timeout, env=compose_env,
+            )
         if result.returncode == 0 and action == 'start':
             ext_dir = _find_ext_dir(service_id)
             manifest = _read_manifest(ext_dir) if ext_dir else {}
@@ -11800,11 +11836,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                         error=str(exc),
                     )
                     return
-                start_result = subprocess.run(
-                    ["docker", "compose"] + flags + ["up", "-d", service_id],
-                    cwd=str(INSTALL_DIR), capture_output=True, text=True,
-                    timeout=SUBPROCESS_TIMEOUT_START,
-                )
+                start_result = _run_selected_extension_up(service_id, flags)
                 if start_result.returncode != 0:
                     _write_progress(service_id, "error", "Installation failed",
                                     error=start_result.stderr[-500:])
