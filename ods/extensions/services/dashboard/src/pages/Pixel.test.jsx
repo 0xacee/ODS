@@ -1,9 +1,15 @@
+// Conversation/review state tests isolate the asynchronous origin handshake.
+// Its real transport, timeout and stale-receipt behavior is covered in previewOrigin.test.jsx.
+vi.mock('../lib/useVerifiedPreview',()=>({default:(_preview,access)=>access}))
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { render } from '../test/test-utils'
 import { act } from '@testing-library/react'
 import {saveProfile} from '../lib/localProfile'
 import {saveConversation,readConversations,DELETE_EVENT} from '../lib/pixelConversations'
 import { StrictMode } from 'react'
+import {previewManifestResponse} from '../test/previewFixtures'
+
+const previewManifests=new Map()
 
 // The repository's base ESLint profile does not mark JSX identifiers as uses.
 // eslint-disable-next-line no-unused-vars
@@ -71,11 +77,12 @@ const sseResponse = (frames, { status = 200, chunks } = {}) => {
 
 describe('Pixel', () => {
   beforeEach(() => {
+    previewManifests.clear()
     // Stream fixtures are independent of background context reads. The full
     // context lifecycle is exercised in PixelCompaction.test.jsx; retain all
     // network observations here without consuming the next SSE fixture.
     const responses=vi.fn()
-    const fetchMock=vi.fn((url,...args)=>url==='/api/pixel/chat/context'
+    const fetchMock=vi.fn((url,...args)=>previewManifests.has(url)?Promise.resolve(previewManifestResponse(previewManifests.get(url))):url==='/api/pixel/chat/context'
       ? Promise.resolve(response({schemaVersion:1,status:'missing',sessionRevision:null,context:null,model:null,
         compaction:{status:'idle',count:0},history:{revision:null,acknowledgedMessages:0}}))
       : responses(url,...args))
@@ -232,6 +239,7 @@ describe('Pixel', () => {
       sha256,
       entrySha256: 'b'.repeat(64),
     }
+    previewManifests.set(`/pixel-preview/${siteId}/__ods_manifest__.json`,preview)
     globalThis.fetch.mockResolvedValueOnce(
       response({ available: true, model: 'pixel/default', detail: 'local' })
     )
@@ -284,7 +292,7 @@ describe('Pixel', () => {
     expect(screen.queryByTitle('Interactive Portal preview')).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Open the verified preview' })).toHaveAttribute('href', `/pixel-preview/${siteId}/`)
     fireEvent.click(screen.getByRole('button',{name:'Workspace',exact:true}))
-    expect(screen.getByTitle('Interactive Portal preview')).toHaveAttribute('src', `/pixel-preview/${siteId}/__ods_view__.html`)
+    expect(await screen.findByTitle('Interactive Portal preview')).toHaveAttribute('src', `/pixel-preview/${siteId}/__ods_view__.html`)
   })
 
   it('opens the workspace without a preview and only drafts a publication request', async () => {
@@ -310,13 +318,13 @@ describe('Pixel', () => {
 
   it('deletes the selected idle chat and starts an empty one without resurrecting it', async () => {
     saveConversation({schema:1,chatId:'delete-current',messages:[{role:'user',content:'Disposable current chat'}]})
-    globalThis.fetch.mockResolvedValue(response({available:true,model:'pixel/default'}))
+    globalThis.fetch.mockImplementation(url=>Promise.resolve(response(url==='/api/pixel/images/delete-current'?{schemaVersion:1,deleted:true}:{available:true,model:'pixel/default'})))
     render(<Pixel/>)
     await waitFor(()=>expect(screen.getByText('Available')).toBeInTheDocument())
     expect(screen.getByText('Disposable current chat')).toBeVisible()
     const complete=vi.fn()
     act(()=>window.dispatchEvent(new CustomEvent(DELETE_EVENT,{detail:{chatId:'delete-current',complete}})))
-    expect(complete).toHaveBeenCalledWith('')
+    await waitFor(()=>expect(complete).toHaveBeenCalledWith(''))
     await waitFor(()=>expect(screen.queryByText('Disposable current chat')).not.toBeInTheDocument())
     expect(readConversations().some(chat=>chat.chatId==='delete-current')).toBe(false)
     expect(JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).chatId).not.toBe('delete-current')
@@ -494,16 +502,17 @@ describe('Pixel', () => {
         files: 1, bytes: 2048, sha256, entrySha256: 'b'.repeat(64),
       },
     }))
+    previewManifests.set(`/pixel-preview/${siteId}/__ods_manifest__.json`,JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).preview)
     globalThis.fetch.mockResolvedValue(response({ available: true }))
     const restored = render(<Pixel />)
     const frame = await screen.findByTitle('Interactive Portal preview')
     expect(frame).toBeInTheDocument()
     fireEvent.click(screen.getByTitle('Collapse preview'))
     expect(frame).not.toBeVisible()
-    expect(screen.getByTitle('Interactive Portal preview')).toBe(frame)
+    expect(await screen.findByTitle('Interactive Portal preview')).toBe(frame)
     fireEvent.click(screen.getByTitle('Expand preview'))
     expect(frame).toBeVisible()
-    expect(screen.getByTitle('Interactive Portal preview')).toBe(frame)
+    expect(await screen.findByTitle('Interactive Portal preview')).toBe(frame)
     fireEvent.click(screen.getByTitle('Start a new chat'))
     await waitFor(() => {
       const stored = JSON.parse(globalThis.localStorage.getItem('ods.pixel.chat.v1'))
@@ -1181,6 +1190,34 @@ describe('Pixel', () => {
     expect(screen.queryByText('Qwen3.5-9B-Q4_K_M.gguf')).not.toBeInTheDocument()
   })
 
+  it.each(['unknown', 'supported', 'unsupported'])('keeps the selected model label with %s image capability', async imageInput => {
+    globalThis.fetch.mockResolvedValue(response({
+      available: true, model: 'pixel/default',
+      runtime: {source: 'remote-provider', model: 'deepseek-v4.1-flash',
+        contextLength: 131072, maxTokens: 8192, reasoning: false,
+        routeFingerprint: 'a'.repeat(64), imageInput},
+    }))
+    render(<Pixel />)
+    await waitFor(() => expect(screen.getByRole('button', {name: /Choose model: deepseek/i})).toBeInTheDocument())
+    expect(screen.queryByText('Model unverified')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    {imageInput: true}, {imageInput: 'vision'}, {imageInput: 'unknown\n'},
+    {imageInput: 'unknown', endpoint: 'https://foreign.example'},
+    {imageInput: 'unknown', routeFingerprint: 'a'.repeat(64) + '\n'},
+  ])('does not confirm malformed extended model metadata %j', async invalid => {
+    globalThis.fetch.mockResolvedValue(response({
+      available: true, model: 'pixel/default',
+      runtime: {source: 'remote-provider', model: 'untrusted-runtime-name',
+        contextLength: 131072, maxTokens: 8192, reasoning: false,
+        routeFingerprint: 'a'.repeat(64), ...invalid},
+    }))
+    render(<Pixel />)
+    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
+    expect(screen.queryByRole('button', {name: /Choose model: untrusted/i})).not.toBeInTheDocument()
+  })
+
   it('shows a callable 8K remote model without imposing a larger context floor', async () => {
     globalThis.fetch.mockResolvedValue(
       response({
@@ -1713,6 +1750,7 @@ describe('Pixel', () => {
       schema:1, chatId:'durable-chat', requestId:'durable-attempt', inFlight:true,
       messages:[{role:'user',content:'Make my preview'},{role:'assistant',content:'Partial answer'}],
     }))
+    previewManifests.set(`/pixel-preview/${siteId}/__ods_manifest__.json`,preview)
     globalThis.fetch.mockImplementation(async (url, options) => {
       if (url === '/api/pixel/status') return response({available:true})
       if (url === '/api/pixel/chat/result') {
@@ -2365,7 +2403,13 @@ describe('Pixel', () => {
   it.each(['Files','Review'])('reloads the active %s inspector after a failed fetch',async tab=>{
     const sha256='a'.repeat(64),siteId=`site-${sha256.slice(0,24)}`
     localStorage.setItem('ods.pixel.chat.v1',JSON.stringify({schema:1,chatId:'reload_inspector',messages:[{role:'user',content:'Inspect project'}],preview:{schemaVersion:1,kind:'ods-pixel-workspace-preview',relativeDirectory:'demo',siteId,port:9437,url:`http://${siteId}.localhost:9437/${siteId}/`,files:1,bytes:100,sha256,entrySha256:'b'.repeat(64)}}))
-    globalThis.fetch.mockImplementation(async url=>url==='/api/pixel/status' ? response({available:true}) : {ok:false})
+    let failed=true
+    const preview=JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).preview
+    globalThis.fetch.mockImplementation(async url=>{
+      if(url==='/api/pixel/status')return response({available:true})
+      if(!failed && url.includes('__ods_manifest__'))return previewManifestResponse(preview)
+      return {ok:false}
+    })
     render(<Pixel />)
     await screen.findByText('Available')
     fireEvent.click(tab==='Files' ? screen.getByRole('button',{name:'Browse files'}) : screen.getByRole('tab',{name:'Review'}))
@@ -2377,10 +2421,13 @@ describe('Pixel', () => {
     await waitFor(()=>expect(requests()).toBe(before+1))
     if(tab==='Files') expect(screen.getByRole('button',{name:'Browse files'})).toHaveAttribute('aria-pressed','true')
     expect(screen.getByRole('tab',{name:tab==='Files'?'Preview':'Review'})).toHaveAttribute('aria-selected','true')
-    expect(screen.getAllByTitle('Interactive Portal preview')).toHaveLength(1)
+    expect(screen.queryByTitle('Interactive Portal preview')).toBeNull()
     if(tab==='Files') fireEvent.click(screen.getByRole('button',{name:'Browse files'}))
     else fireEvent.click(screen.getByRole('tab',{name:'Preview'}))
-    expect(screen.getAllByTitle('Interactive Portal preview')).toHaveLength(1)
+    expect(screen.queryByTitle('Interactive Portal preview')).toBeNull()
+    failed=false
+    fireEvent.click(screen.getByTitle('Reload preview'))
+    expect(await screen.findByTitle('Interactive Portal preview')).toBeVisible()
     expect(screen.getByRole('tabpanel',{name:'Preview'})).toBeVisible()
     expect(screen.queryByRole('tabpanel',{name:'Review'})).toBeNull()
     expect(screen.queryByText('Files unavailable.')).toBeNull()
