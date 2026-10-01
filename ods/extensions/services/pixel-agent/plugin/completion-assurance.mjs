@@ -115,15 +115,21 @@ function citationCodeRanges(text) {
   let offset = 0, fence, inline;
   for (const line of text.split('\n')) {
     const end = offset + line.length + 1;
-    const blockLine = line.replace(/^ {0,3}(?:> ?)+/, '');
+    // Fences may be nested inside list items and block quotes. Their container
+    // markers are not part of the fenced text, where emphasis stays literal.
+    const container = /^(?: {0,3}(?:> ?|(?:[-+*]|\d{1,9}[.)])[ \t]))+/.exec(line)?.[0] ?? '';
+    const quoted = /^(?: {0,3}> ?)+/.exec(line)?.[0] ?? '';
+    // A list marker inside an existing fence is literal text, not a new
+    // container. Likewise, an extra quote marker cannot close its parent fence.
+    const blockLine = line.slice(fence ? quoted.length : container.length);
     const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(blockLine);
     if (fence) {
-      if (marker && marker[1][0] === fence.character && marker[1].length >= fence.length && !marker[2].trim()) {
+      if (count(quoted, '>') === fence.quotes && marker && marker[1][0] === fence.character && marker[1].length >= fence.length && !marker[2].trim()) {
         ranges.push([fence.start, end]);
         fence = undefined;
       }
     } else if (!inline && marker && (marker[1][0] !== '`' || !marker[2].includes('`'))) {
-      fence = {start: offset, character: marker[1][0], length: marker[1].length};
+      fence = {start: offset, character: marker[1][0], length: marker[1].length, quotes: count(container, '>')};
     } else if (!inline && /^(?: {4}|\t)/.test(blockLine)) {
       ranges.push([offset, end]);
     } else {

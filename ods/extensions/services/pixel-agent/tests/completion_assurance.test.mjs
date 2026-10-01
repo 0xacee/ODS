@@ -367,8 +367,16 @@ test('citation formatting cannot grant custody of literal or unread URLs', () =>
     '```\n**' + url + '**\n```',
     '````\n```\n**' + url + '**\n````',
     '~~~text\n**' + url + '**\n~~~',
+    '- ~~~\n  **' + url + '**\n  ~~~',
+    '1. ~~~\n   **' + url + '**\n   ~~~',
+    '> - ~~~\n>   **' + url + '**\n>   ~~~',
+    '- > ~~~\n  > **' + url + '**\n  > ~~~',
+    '~~~text\n- ~~~\n**' + url + '**\n~~~',
+    '~~~text\n1. ~~~\n**' + url + '**\n~~~',
+    '~~~text\n> ~~~\n**' + url + '**\n~~~',
     '> ```\n> **' + url + '**\n> ```',
     '    **' + url + '**',
+    '-     **' + url + '**', '1.     **' + url + '**',
     `**${url}**/unread`, `**${url}?variant=unread**`,
     `**https://example.com/unread**`,
   ];
@@ -399,7 +407,8 @@ test('closed code spans and fences do not hide a later emphasized citation', () 
   const guard = createCompletionAssurance();
   guard.begin('Read sources before citing them.');
   guard.observe('web_fetch', {result:{details:{status:200, url, text:'Actual page evidence.'}}});
-  for (const prefix of ['`code` ', '``a ` b`` ', '```\ncode\n```\n', '~~~\ncode\n~~~\n']) {
+  for (const prefix of ['`code` ', '``a ` b`` ', '```\ncode\n```\n', '~~~\ncode\n~~~\n',
+    '- ~~~\n  code\n  ~~~\n', '1. ~~~\n   code\n   ~~~\n', '> ~~~\n> code\n> ~~~\n']) {
     assert.deepEqual(guard.unverifiedCitations(prefix + `**${url}**`), [], prefix);
   }
 });
