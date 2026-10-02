@@ -150,6 +150,19 @@ def test_usage_on_terminal_choice_is_preserved():
     assert out["usage"] == terminal["usage"]
 
 
+def test_usage_on_preterminal_choice_is_rejected():
+    premature = _chunk({"role": "assistant", "content": "partial"})
+    premature["usage"] = {"prompt_tokens": 999,
+                          "completion_tokens": 999, "total_tokens": 1998}
+    raw = b"".join([
+        _frame(premature),
+        _frame(_chunk({}, finish="stop")),
+        _done(),
+    ])
+    with pytest.raises(ValueError, match="invalid usage frame"):
+        assemble_chat_completion_sse(raw, MODEL)
+
+
 def test_truncated_stream_rejected():
     raw = b"".join([
         _frame(_chunk({"role": "assistant"})),

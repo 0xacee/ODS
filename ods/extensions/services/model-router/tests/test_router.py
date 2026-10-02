@@ -464,38 +464,29 @@ class TestForwarding:
         assert len(sent) == 1 and sent[0]["stream"] is True
         assert "unfinished" not in response.text
 
-    def test_thinking_json_tool_description_gets_compatibility_retry(self, router):
+    def test_explicit_thinking_uses_one_nonstream_compatibility_request(self, router):
         mod, client, write_state, _calls = router
         write_state()
         sent = []
 
         def handler(request):
             sent.append(json.loads(request.content))
-            if sent[-1]["stream"]:
-                frames = [
-                    {"model": "Concrete.gguf", "choices": [{"index": 0,
-                        "delta": {"role": "assistant", "reasoning_content": "choose tool"},
-                        "finish_reason": None}]},
-                    {"model": "Concrete.gguf", "choices": [{"index": 0,
-                        "delta": {"content": json.dumps({"name": "lookup",
-                            "arguments": {"key": "ok"}})}, "finish_reason": "stop"}]},
-                ]
-                sse = b"".join(b"data: " + json.dumps(item).encode() + b"\n\n"
-                               for item in frames) + b"data: [DONE]\n\n"
-                return httpx.Response(200, content=sse,
-                    headers={"content-type": "text/event-stream"})
             return httpx.Response(200, json={"model": "Concrete.gguf",
                 "choices": [{"index": 0, "message": {"role": "assistant",
                     "content": None, "tool_calls": [{"id": "call-1",
                         "type": "function", "function": {"name": "lookup",
                         "arguments": '{"key":"ok"}'}}]},
-                    "finish_reason": "tool_calls"}]})
+                    "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 5,
+                          "total_tokens": 25}})
 
         asyncio.run(mod.app.state.http.aclose())
         mod.app.state.http = httpx.AsyncClient(
             transport=httpx.MockTransport(handler))
         response = client.post("/v1/chat/completions", json={
             "model": "ods/current", "stream": True,
+            "stream_options": {"include_usage": True},
+            "chat_template_kwargs": {"enable_thinking": True},
             "messages": [{"role": "user", "content": "look up ok"}],
             "tools": [{"type": "function", "function": {
                 "name": "lookup", "parameters": {"type": "object",
@@ -503,32 +494,60 @@ class TestForwarding:
         })
 
         assert response.status_code == 200
-        assert [body["stream"] for body in sent] == [True, False]
-        assert response.headers["x-ods-tool-stream-fallback"] == "true"
+        assert len(sent) == 1 and sent[0]["stream"] is False
+        assert "stream_options" not in sent[0]
+        assert sent[0]["chat_template_kwargs"] == {"enable_thinking": True}
+        assert response.headers["x-ods-tool-stream-compatibility"] == "thinking-nonstream"
+        assert "x-ods-tool-stream-fallback" not in response.headers
+        assert response.headers["content-type"].startswith("text/event-stream")
         frames = [json.loads(item.removeprefix("data: "))
                   for item in response.text.split("\n\n")
                   if item and item != "data: [DONE]"]
+        assert all(frame["model"] == "ods/current" for frame in frames)
         assert frames[0]["choices"][0]["delta"]["tool_calls"][0][
             "function"]["name"] == "lookup"
+        assert frames[-1]["usage"] == {"prompt_tokens": 20,
+                                        "completion_tokens": 5,
+                                        "total_tokens": 25}
 
-    def test_thinking_json_fallback_requires_exact_offered_tool(self, router):
-        mod, _client, _write_state, _calls = router
-        payload = {"tools": [{"type": "function", "function": {
-            "name": "lookup", "parameters": {"type": "object"}}}]}
-        completion = {"choices": [{"finish_reason": "stop", "message": {
-            "role": "assistant", "reasoning_content": "thinking",
-            "content": '{"name":"lookup","arguments":{"key":"ok"}}'}}]}
-        assert mod._streamed_thinking_tool_json(completion, payload)
-        completion["choices"][0]["message"]["content"] = (
-            '{"name":"delete_files","arguments":{"key":"ok"}}')
-        assert not mod._streamed_thinking_tool_json(completion, payload)
-        completion["choices"][0]["message"]["content"] = (
-            '{"name":"lookup","arguments":{"key":"ok"},"extra":1}')
-        assert not mod._streamed_thinking_tool_json(completion, payload)
-        completion["choices"][0]["message"]["content"] = (
-            '{"name":"lookup","arguments":{"key":"ok"}}')
-        assert not mod._streamed_thinking_tool_json(
-            completion, {**payload, "tool_choice": "none"})
+    def test_unexpected_thinking_json_text_stays_inert(self, router):
+        mod, client, write_state, _calls = router
+        write_state()
+        sent = []
+        described = '{"name":"lookup","arguments":{"key":"ok"}}'
+
+        def handler(request):
+            sent.append(json.loads(request.content))
+            frames = [
+                {"model": "Concrete.gguf", "choices": [{"index": 0,
+                    "delta": {"role": "assistant", "reasoning_content": "thinking"},
+                    "finish_reason": None}]},
+                {"model": "Concrete.gguf", "choices": [{"index": 0,
+                    "delta": {"content": described}, "finish_reason": "stop"}]},
+            ]
+            return httpx.Response(200,
+                content=b"".join(b"data: " + json.dumps(item).encode() + b"\n\n"
+                                 for item in frames) + b"data: [DONE]\n\n",
+                headers={"content-type": "text/event-stream"})
+
+        asyncio.run(mod.app.state.http.aclose())
+        mod.app.state.http = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler))
+        response = client.post("/v1/chat/completions", json={
+            "model": "ods/current", "stream": True,
+            "messages": [{"role": "user", "content": "explain this JSON"}],
+            "tools": [{"type": "function", "function": {
+                "name": "lookup", "parameters": {"type": "object"}}}],
+        })
+
+        assert response.status_code == 200
+        assert len(sent) == 1 and sent[0]["stream"] is True
+        assert "x-ods-tool-stream-fallback" not in response.headers
+        frames = [json.loads(item.removeprefix("data: "))
+                  for item in response.text.split("\n\n")
+                  if item and item != "data: [DONE]"]
+        assert frames[0]["choices"][0]["delta"]["content"] == described
+        assert "tool_calls" not in frames[0]["choices"][0]["delta"]
 
     def test_tool_stream_disconnect_closes_upstream_before_decision(self, router):
         mod, _client, write_state, _calls = router

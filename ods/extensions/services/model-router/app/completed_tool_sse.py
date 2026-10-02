@@ -240,7 +240,7 @@ def assemble_chat_completion_sse(
                 raise _err("duplicate finish_reason")
             finish = fr
         if obj.get("usage") is not None:
-            if not isinstance(obj["usage"], dict):
+            if finish is None or not isinstance(obj["usage"], dict):
                 raise _err("invalid usage frame")
             usage = obj["usage"]
 

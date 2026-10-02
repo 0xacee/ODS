@@ -292,54 +292,6 @@ def _repaired_tool_decision_invalid(
     return False
 
 
-def _streamed_thinking_tool_json(
-    completion: dict[str, Any], request_payload: dict[str, Any],
-) -> bool:
-    """Recognize a live-observed streamed tool syntax mismatch for retry only.
-
-    Thinking-enabled llama.cpp can stream a JSON description of a function
-    instead of an API tool call, while its completed response uses tool_calls.
-    Never turn the streamed text into an executable call here.
-    """
-    if not _repairable_native_tool_request(request_payload):
-        return False
-    choices = completion.get("choices")
-    if not isinstance(choices, list) or len(choices) != 1:
-        return False
-    choice = choices[0]
-    if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
-        return False
-    message = choice.get("message")
-    if (not isinstance(message, dict) or message.get("role") != "assistant"
-            or not isinstance(message.get("reasoning_content"), str)
-            or not message["reasoning_content"]
-            or message.get("refusal") or message.get("tool_calls")):
-        return False
-    content = message.get("content")
-    if not isinstance(content, str) or len(content) > 8192:
-        return False
-    try:
-        described = json.loads(content)
-    except ValueError:
-        return False
-    if (not isinstance(described, dict)
-            or set(described) != {"name", "arguments"}
-            or not isinstance(described.get("name"), str)
-            or not isinstance(described.get("arguments"), dict)):
-        return False
-    choice = request_payload.get("tool_choice")
-    if (isinstance(choice, dict)
-            and choice["function"]["name"] != described["name"]):
-        return False
-    offered = request_payload.get("tools")
-    return isinstance(offered, list) and any(
-        isinstance(tool, dict)
-        and tool.get("type") == "function"
-        and isinstance(tool.get("function"), dict)
-        and tool["function"].get("name") == described["name"]
-        for tool in offered
-    )
-
 app = FastAPI(title="ODS Model Router", docs_url=None, redoc_url=None,
               openapi_url=None)
 
@@ -1752,7 +1704,20 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
         and isinstance(payload.get("tools"), list)
         and bool(payload["tools"])
     )
-    if completed_tool_stream:
+    thinking_options = payload.get("chat_template_kwargs")
+    thinking_tool_compat = (
+        completed_tool_stream
+        and isinstance(thinking_options, dict)
+        and thinking_options.get("enable_thinking") is True
+    )
+    if thinking_tool_compat:
+        # Live thinking-enabled llama.cpp emitted a JSON description of a
+        # function as text when streaming, but a structured API call when
+        # nonstreaming. Keep its prior single-request behavior. Stop remains
+        # limited by that backend's nonstream cancellation semantics.
+        payload["stream"] = False
+        payload.pop("stream_options", None)
+    elif completed_tool_stream:
         # Keep the upstream stream open while _while_connected watches Stop.
         # Buffer and verify its complete decision before sending any tool call
         # to the client; partial llama.cpp tool deltas are never exposed.
@@ -1774,6 +1739,8 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
         "X-ODS-Backend": route["backendKind"],
         "X-ODS-Route-Seq": str(route["routeSeq"]),
     }
+    if thinking_tool_compat:
+        ods_headers["X-ODS-Tool-Stream-Compatibility"] = "thinking-nonstream"
 
     url = route["baseUrl"] + path
     client: httpx.AsyncClient = app.state.http
@@ -1795,7 +1762,13 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
     try:
         forwarded_body = json.dumps(payload).encode("utf-8")
         attempt_handle = _begin_probe_attempt(probe_id, request_id, 1, forwarded_body, route)
-        if completed_tool_stream:
+        if thinking_tool_compat:
+            upstream = await client.post(
+                url, content=forwarded_body, headers=headers,
+                timeout=UPSTREAM_TIMEOUT_SECONDS,
+            )
+            _finish_probe_attempt(attempt_handle, "complete", upstream.status_code)
+        elif completed_tool_stream:
             upstream_request = client.build_request(
                 "POST", url, content=forwarded_body,
                 headers=headers, timeout=UPSTREAM_TIMEOUT_SECONDS,
@@ -1867,31 +1840,24 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                             headers=decoded_headers,
                         )
                     else:
-                        if _streamed_thinking_tool_json(complete, payload):
-                            # This exact thinking-mode mismatch was observed
-                            # live: stream text described an offered tool,
-                            # while nonstream produced the structured call.
-                            # Retry without ever executing that text.
-                            fallback = True
-                        else:
-                            invalid = _repaired_tool_decision_invalid(complete, payload)
-                            if invalid and _complete_native_envelope_names(complete) is None:
-                                _finish_probe_attempt(attempt_handle, "stream-error",
-                                                      streaming_upstream.status_code)
-                                return JSONResponse({"error": {
-                                    "message": "Backend returned an invalid tool decision",
-                                    "type": "tool_protocol_invalid", "code": "502",
-                                }}, status_code=502, headers=ods_headers), False
-                            if invalid:
-                                # Preserve the existing single native-markup
-                                # repair. This may use a nonstreaming retry.
-                                ods_headers["X-ODS-Tool-Stream-Repair"] = "true"
-                            decoded_headers["content-type"] = "application/json"
-                            upstream = httpx.Response(
-                                streaming_upstream.status_code,
-                                content=json.dumps(complete).encode("utf-8"),
-                                headers=decoded_headers,
-                            )
+                        invalid = _repaired_tool_decision_invalid(complete, payload)
+                        if invalid and _complete_native_envelope_names(complete) is None:
+                            _finish_probe_attempt(attempt_handle, "stream-error",
+                                                  streaming_upstream.status_code)
+                            return JSONResponse({"error": {
+                                "message": "Backend returned an invalid tool decision",
+                                "type": "tool_protocol_invalid", "code": "502",
+                            }}, status_code=502, headers=ods_headers), False
+                        if invalid:
+                            # Preserve the existing single native-markup
+                            # repair. This may use a nonstreaming retry.
+                            ods_headers["X-ODS-Tool-Stream-Repair"] = "true"
+                        decoded_headers["content-type"] = "application/json"
+                        upstream = httpx.Response(
+                            streaming_upstream.status_code,
+                            content=json.dumps(complete).encode("utf-8"),
+                            headers=decoded_headers,
+                        )
                 elif (streaming_upstream.status_code == 500
                         and b"Invalid diff: now finding less tool calls!" in raw_stream):
                     # Older llama.cpp builds cannot complete streamed tool
