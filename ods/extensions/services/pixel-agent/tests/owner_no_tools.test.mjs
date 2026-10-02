@@ -45,3 +45,25 @@ test('without using tools applies only to the current run', () => {
   guard.observeRun(context('second','read'),'pixel',{prompt:'Read sample.txt.'});
   assert.notEqual(guard.beforeToolCall({toolName:'read',params:{path:'sample.txt'}},context('second','read'))?.block,true);
 });
+
+test('restrictions on a subset of tools do not ban an expressly requested read', () => {
+  for (const [index,prompt] of [
+    'Do not use tools that change files. Read sample.txt and quote it.',
+    'Do not use any tool except read. Read sample.txt and quote it.',
+    'Do not use tools to modify files. Read sample.txt and quote it.',
+    'Do not use tool write; use read instead. Read sample.txt.',
+    'Explain why one should not use tools in that example. Read sample.txt.',
+  ].entries()) {
+    const guard=createToolLoopGuard();
+    const runId=`subset-${index}`;
+    guard.observeRun(context(runId,'read'),'pixel',{prompt});
+    assert.notEqual(guard.beforeToolCall({toolName:'read',params:{path:'sample.txt'}},context(runId,'read'))?.block,true,prompt);
+  }
+});
+
+test('a no-tools directive joined to another request still blocks tools', () => {
+  const guard=createToolLoopGuard();
+  const runId='joined-ban';
+  guard.observeRun(context(runId,'read'),'pixel',{prompt:'Reply with CHECK and do not use tools.'});
+  assert.equal(guard.beforeToolCall({toolName:'read',params:{path:'sample.txt'}},context(runId,'read'))?.block,true);
+});

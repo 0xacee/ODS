@@ -4610,8 +4610,20 @@ function ownerLaneText(text) {
 
 function ownerForbidsTools(text) {
   const instruction = ownerLaneText(text);
-  return /\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+(?:use|call|invoke|run)\s+(?:any\s+|the\s+)?tools?\b/i.test(instruction) ||
-    /\bwithout\s+(?:using|calling|invoking|running)\s+(?:any\s+|the\s+)?tools?\b/i.test(instruction);
+  const ban = /\b(?:(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+(?:use|call|invoke|run)|without\s+(?:using|calling|invoking|running))\s+(?:any\s+tools?|(?:the\s+)?tools)\b/gi;
+  for (const match of instruction.matchAll(ban)) {
+    const prefix = instruction.slice(0, match.index);
+    if (!/^without\b/i.test(match[0]) &&
+        !/(?:^|[.!?;,\n]\s*|\band\s+)(?:please\s+|you\s+)?$/i.test(prefix)) continue;
+    const qualifier = instruction.slice(match.index + match[0].length);
+    // A ban on a named subset of tools still permits other tools. The
+    // blanket boundary applies only to an unqualified no-tools directive.
+    if (/^\s+(?:that|which|except|besides|unless|other\s+than)\b/i.test(qualifier) ||
+        /^\s+to\s+(?:change|edit|write|modify|delete|create|remove|mutate)\b/i.test(qualifier) ||
+        /^\s+for\s+(?:file|writing|editing|modifying|changing|mutation)\b/i.test(qualifier)) continue;
+    return true;
+  }
+  return false;
 }
 
 function ownerWorkspaceLaneRequested(text, workspaceRequested) {
