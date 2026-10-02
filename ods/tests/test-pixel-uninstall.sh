@@ -666,6 +666,10 @@ ENV
     printf '%s\n' '<!doctype html><title>fixture</title>' \
         >"$PREVIEW_STATE/site-0123456789abcdef01234567/index.html"
     chmod 0400 "$PREVIEW_STATE/site-0123456789abcdef01234567/index.html"
+    # The real Review source publisher retains this private writable lock.
+    mkdir -m 0700 "$PREVIEW_STATE/.review-sources"
+    : >"$PREVIEW_STATE/.review-sources/.quota.lock"
+    chmod 0600 "$PREVIEW_STATE/.review-sources/.quota.lock"
 
     printf 'pixel-ops-broker:x:%s:%s:Pixel Operations Broker:%s:/usr/sbin/nologin\n' \
         "$uid" "$gid" "$OPS_STATE" >"$OPS_PASSWD_STATE"
@@ -1520,6 +1524,7 @@ for drift_target in program broker-source-mode public-state-file onboarding-sour
     extension-manager-program extension-manager-unit extension-manager-owner-unit approval-helper \
     artifact-promoter-program artifact-promoter-unit artifact-promoter-owner-unit \
     workspace-preview-program workspace-preview-unit workspace-preview-owner-unit workspace-preview-state \
+    preview-quota-readonly preview-quota-public preview-quota-symlink preview-quota-hardlink preview-quota-wrong-path \
     system-observer-program system-observer-source unix-peer-program unix-peer-ops unix-peer-source \
     unit dropin dropin-source environment policy; do
     write_ops_fixture
@@ -1550,6 +1555,17 @@ PY
         workspace-preview-unit) printf '%s\n' '# drift' >>"$SYSTEMD_DIR/pixel-workspace-preview.service" ;;
         workspace-preview-owner-unit) printf '%s\n' '# drift' >>"$INSTALL_DIR/data/pixel/workspace-preview.service" ;;
         workspace-preview-state) chmod 0600 "$PREVIEW_STATE/site-0123456789abcdef01234567/index.html" ;;
+        preview-quota-readonly) chmod 0400 "$PREVIEW_STATE/.review-sources/.quota.lock" ;;
+        preview-quota-public) chmod 0644 "$PREVIEW_STATE/.review-sources/.quota.lock" ;;
+        preview-quota-symlink)
+            rm "$PREVIEW_STATE/.review-sources/.quota.lock"
+            ln -s "$PREVIEW_STATE/site-0123456789abcdef01234567/index.html" "$PREVIEW_STATE/.review-sources/.quota.lock"
+            ;;
+        preview-quota-hardlink) ln "$PREVIEW_STATE/.review-sources/.quota.lock" "$PREVIEW_STATE/.review-sources/linked.lock" ;;
+        preview-quota-wrong-path)
+            : >"$PREVIEW_STATE/site-0123456789abcdef01234567/.quota.lock"
+            chmod 0600 "$PREVIEW_STATE/site-0123456789abcdef01234567/.quota.lock"
+            ;;
         system-observer-program) printf '%s\n' '# drift' >>"$LIBEXEC_DIR/ods-pixel-system-observe.py" ;;
         system-observer-source) printf '%s\n' '# drift' >>"$INSTALL_DIR/extensions/services/pixel-agent/host/system_observe.py" ;;
         unix-peer-program) printf '%s\n' '# drift' >>"$LIBEXEC_DIR/unix_peer.py" ;;

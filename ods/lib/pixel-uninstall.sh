@@ -1525,10 +1525,14 @@ if workspace_preview_state.exists() or workspace_preview_state.is_symlink():
                     or child.st_uid != owner_uid or stat.S_IMODE(child.st_mode) != 0o700):
                 raise SystemExit("unsafe Pixel workspace preview state")
         for name in names:
-            child = (root_path / name).lstat()
+            path = root_path / name
+            child = path.lstat()
+            # Source capture owns one writable quota lock; publication bytes
+            # remain read-only. Do not extend this exception to other paths.
+            expected_mode = 0o600 if path == workspace_preview_state / '.review-sources/.quota.lock' else 0o400
             if (not stat.S_ISREG(child.st_mode) or stat.S_ISLNK(child.st_mode)
                     or child.st_nlink != 1 or child.st_uid != owner_uid
-                    or stat.S_IMODE(child.st_mode) != 0o400):
+                    or stat.S_IMODE(child.st_mode) != expected_mode):
                 raise SystemExit("unsafe Pixel workspace preview state")
 
 if gateway_unit.exists():
@@ -2838,8 +2842,9 @@ for path in [root, *root.rglob("*")]:
         if stat.S_ISLNK(info.st_mode) or info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) != 0o700:
             raise SystemExit("unsafe Pixel workspace preview cleanup directory")
     elif stat.S_ISREG(info.st_mode):
+        expected_mode = 0o600 if path == root / '.review-sources/.quota.lock' else 0o400
         if (stat.S_ISLNK(info.st_mode) or info.st_nlink != 1
-                or info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) != 0o400):
+                or info.st_uid != owner_uid or stat.S_IMODE(info.st_mode) != expected_mode):
             raise SystemExit("unsafe Pixel workspace preview cleanup file")
     else:
         raise SystemExit("unsafe Pixel workspace preview cleanup artifact")
