@@ -356,6 +356,55 @@ class TestForwarding:
         assert chunks[1]["usage"] == {"prompt_tokens": 20,
                                       "completion_tokens": 8, "total_tokens": 28}
 
+    @pytest.mark.parametrize("wrong_wire_model", [False, True])
+    def test_strixy_lemonade_gguf_stream_respects_pinned_selected_route(
+            self, router, wrong_wire_model):
+        mod, client, write_state, _calls = router
+        selected = "Qwen3.6-35B-A3B-UD-Q4_K_M"
+        wire = selected + ".gguf"
+        write_state(runtime=selected, mutate=lambda state:
+                    state["active"]["backend"].update(kind="lemonade"))
+        raw = (Path(__file__).parent / "fixtures" /
+               "strixy_lemonade_gguf_tool_stream.sse").read_bytes()
+        if wrong_wire_model:
+            raw = raw.replace(wire.encode(), b"OtherModel.gguf")
+        sent = []
+
+        def handler(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(
+                200, content=raw,
+                headers={"content-type": "text/event-stream"})
+
+        asyncio.run(mod.app.state.http.aclose())
+        mod.app.state.http = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler))
+        response = client.post("/v1/chat/completions", headers={
+            "X-ODS-Expected-Catalog": "concrete",
+            "X-ODS-Expected-Model": selected,
+            "X-ODS-Expected-Route": "7",
+        }, json={
+            "model": "ods/current", "stream": True,
+            "messages": [{"role": "user", "content": "add 17 and 19"}],
+            "tools": [{"type": "function", "function": {
+                "name": "add_numbers", "parameters": {"type": "object"}}}],
+        })
+        assert len(sent) == 1 and sent[0]["model"] == selected
+        assert sent[0]["stream"] is True
+        if wrong_wire_model:
+            assert response.status_code == 502
+            assert response.json()["error"]["type"] == "response_identity_mismatch"
+            assert "add_numbers" not in response.text
+            return
+        assert response.status_code == 200
+        chunks = [json.loads(frame.removeprefix("data: "))
+                  for frame in response.text.split("\n\n")
+                  if frame and frame != "data: [DONE]"]
+        assert chunks[0]["model"] == "ods/current"
+        call = chunks[0]["choices"][0]["delta"]["tool_calls"][0]
+        assert json.loads(call["function"]["arguments"]) == {"a": 17, "b": 19}
+        assert chunks[1]["usage"]["total_tokens"] == 336
+
     def test_incomplete_tool_stream_fails_without_nonstream_retry(self, router):
         mod, client, write_state, _calls = router
         write_state()

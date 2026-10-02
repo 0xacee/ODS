@@ -1800,6 +1800,12 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                         complete = assemble_chat_completion_sse(
                             raw_stream, route["runtimeModelId"],
                             max_bytes=MAX_COMPLETED_TOOL_STREAM_BYTES,
+                            # Lemonade's GGUF stream names the loaded file;
+                            # the selected route names the same model without
+                            # its extension. Keep every other backend exact.
+                            allow_gguf_filename_alias=(
+                                route["backendKind"] == "lemonade"
+                            ),
                         )
                     except CompletionStreamIdentityError:
                         _finish_probe_attempt(attempt_handle, "stream-error",
