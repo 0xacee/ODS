@@ -80,6 +80,63 @@ def test_content_response():
     assert "tool_calls" not in ch["message"]
 
 
+def test_thinking_tool_call_preserves_reasoning_and_usage():
+    raw = b"".join([
+        _frame(_chunk({"role": "assistant", "reasoning_content": "First "})),
+        _frame(_chunk({"reasoning_content": "check."})),
+        _frame(_chunk({"tool_calls": [{"index": 0, "id": "call_1",
+            "type": "function", "function": {"name": "add_numbers",
+            "arguments": '{"a":17,"b":19}'}}]})),
+        _frame(_chunk({}, finish="tool_calls")),
+        _frame(_base(choices=[], usage={"prompt_tokens": 9,
+            "completion_tokens": 6, "total_tokens": 15})),
+        _done(),
+    ])
+    out = assemble_chat_completion_sse(raw, MODEL)
+    message = out["choices"][0]["message"]
+    assert message["reasoning_content"] == "First check."
+    assert message["tool_calls"][0]["function"]["name"] == "add_numbers"
+    assert out["usage"]["total_tokens"] == 15
+
+
+def test_thinking_length_preserved_for_caller_to_reject_as_tool_decision():
+    raw = b"".join([
+        _frame(_chunk({"role": "assistant", "reasoning_content": "unfinished"})),
+        _frame(_chunk({}, finish="length")),
+        _done(),
+    ])
+    out = assemble_chat_completion_sse(raw, MODEL)
+    assert out["choices"][0]["finish_reason"] == "length"
+    assert out["choices"][0]["message"]["reasoning_content"] == "unfinished"
+
+
+@pytest.mark.parametrize("delta,match", [
+    ({"reasoning_content": 1}, "reasoning_content not string"),
+    ({"refusal": "cannot comply"}, "unsupported delta field"),
+    ({"reasoning": "unverified key"}, "unsupported delta field"),
+])
+def test_unverified_or_invalid_thinking_fields_rejected(delta, match):
+    raw = b"".join([
+        _frame(_chunk({"role": "assistant"})),
+        _frame(_chunk(delta)),
+        _frame(_chunk({}, finish="stop")),
+        _done(),
+    ])
+    with pytest.raises(ValueError, match=match):
+        assemble_chat_completion_sse(raw, MODEL)
+
+
+def test_reasoning_after_finish_rejected():
+    raw = b"".join([
+        _frame(_chunk({"role": "assistant"})),
+        _frame(_chunk({}, finish="stop")),
+        _frame(_chunk({"reasoning_content": "late"})),
+        _done(),
+    ])
+    with pytest.raises(ValueError, match="reasoning delta after finish_reason"):
+        assemble_chat_completion_sse(raw, MODEL)
+
+
 def test_usage_on_terminal_choice_is_preserved():
     terminal = _chunk({}, finish="stop")
     terminal["usage"] = {"prompt_tokens": 3, "completion_tokens": 2,

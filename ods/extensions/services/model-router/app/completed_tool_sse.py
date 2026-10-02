@@ -107,6 +107,7 @@ def assemble_chat_completion_sse(
     top_sysfp: Any = None
     usage: Any = None
     content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tools: dict[int, dict[str, Any]] = {}
     role: str | None = None
     finish: str | None = None
@@ -195,15 +196,19 @@ def assemble_chat_completion_sse(
             if not isinstance(delta, dict):
                 raise _err("delta not object")
             if any(value is not None for key, value in delta.items()
-                   if key not in {"role", "content", "tool_calls"}):
-                # Preserve fields such as refusal through the existing
-                # completed-response fallback rather than silently dropping them.
+                   if key not in {"role", "content", "tool_calls",
+                                  "reasoning_content"}):
+                # A live thinking-enabled llama.cpp stream uses
+                # reasoning_content. Keep other fields fail-closed rather
+                # than silently dropping response semantics.
                 raise _err("unsupported delta field")
             if finish is not None:
                 if delta.get("content") is not None:
                     raise _err("content delta after finish_reason")
                 if delta.get("tool_calls") is not None:
                     raise _err("tool_calls delta after finish_reason")
+                if delta.get("reasoning_content") is not None:
+                    raise _err("reasoning delta after finish_reason")
             r = delta.get("role")
             if r is not None:
                 if r != "assistant":
@@ -216,6 +221,11 @@ def assemble_chat_completion_sse(
                 if not isinstance(c, str):
                     raise _err("content not string")
                 content_parts.append(c)
+            reasoning = delta.get("reasoning_content")
+            if reasoning is not None:
+                if not isinstance(reasoning, str):
+                    raise _err("reasoning_content not string")
+                reasoning_parts.append(reasoning)
             tcs = delta.get("tool_calls")
             if tcs is not None:
                 if not isinstance(tcs, list):
@@ -285,6 +295,9 @@ def assemble_chat_completion_sse(
         if finish not in ("stop", "length", "content_filter"):
             raise _err(f"invalid finish_reason for content: {finish}")
         message = {"role": role, "content": content}
+
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
 
     out: dict[str, Any] = {
         "object": "chat.completion",

@@ -291,6 +291,55 @@ def _repaired_tool_decision_invalid(
             return True
     return False
 
+
+def _streamed_thinking_tool_json(
+    completion: dict[str, Any], request_payload: dict[str, Any],
+) -> bool:
+    """Recognize a live-observed streamed tool syntax mismatch for retry only.
+
+    Thinking-enabled llama.cpp can stream a JSON description of a function
+    instead of an API tool call, while its completed response uses tool_calls.
+    Never turn the streamed text into an executable call here.
+    """
+    if not _repairable_native_tool_request(request_payload):
+        return False
+    choices = completion.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        return False
+    choice = choices[0]
+    if not isinstance(choice, dict) or choice.get("finish_reason") != "stop":
+        return False
+    message = choice.get("message")
+    if (not isinstance(message, dict) or message.get("role") != "assistant"
+            or not isinstance(message.get("reasoning_content"), str)
+            or not message["reasoning_content"]
+            or message.get("refusal") or message.get("tool_calls")):
+        return False
+    content = message.get("content")
+    if not isinstance(content, str) or len(content) > 8192:
+        return False
+    try:
+        described = json.loads(content)
+    except ValueError:
+        return False
+    if (not isinstance(described, dict)
+            or set(described) != {"name", "arguments"}
+            or not isinstance(described.get("name"), str)
+            or not isinstance(described.get("arguments"), dict)):
+        return False
+    choice = request_payload.get("tool_choice")
+    if (isinstance(choice, dict)
+            and choice["function"]["name"] != described["name"]):
+        return False
+    offered = request_payload.get("tools")
+    return isinstance(offered, list) and any(
+        isinstance(tool, dict)
+        and tool.get("type") == "function"
+        and isinstance(tool.get("function"), dict)
+        and tool["function"].get("name") == described["name"]
+        for tool in offered
+    )
+
 app = FastAPI(title="ODS Model Router", docs_url=None, redoc_url=None,
               openapi_url=None)
 
@@ -1767,6 +1816,12 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                     chunks.append(chunk)
                 raw_stream = b"".join(chunks)
                 fallback = False
+                decoded_headers = {
+                    name: value for name, value in streaming_upstream.headers.items()
+                    if name.lower() not in {
+                        "content-encoding", "content-length", "transfer-encoding",
+                    }
+                }
                 if 200 <= streaming_upstream.status_code < 300:
                     try:
                         complete = assemble_chat_completion_sse(
@@ -1781,19 +1836,61 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                             "type": "response_identity_mismatch", "code": "502",
                         }}, status_code=502, headers=ods_headers), False
                     except ValueError:
-                        fallback = True
+                        # Some backends ignore stream:true and return a
+                        # completed JSON response, including Lemonade's
+                        # HTTP-200 context error wrapper. Process that one
+                        # response without issuing a second inference.
+                        try:
+                            complete = json.loads(raw_stream.decode("utf-8"))
+                        except (ValueError, UnicodeDecodeError):
+                            complete = None
+                        if (not isinstance(complete, dict)
+                                or not isinstance(complete.get("choices"), list)
+                                and not isinstance(complete.get("error"), dict)):
+                            _finish_probe_attempt(attempt_handle, "stream-error",
+                                                  streaming_upstream.status_code)
+                            return JSONResponse({"error": {
+                                "message": "Backend returned an invalid completed tool stream",
+                                "type": "upstream_invalid_response", "code": "502",
+                            }}, status_code=502, headers=ods_headers), False
+                        if ("error" not in complete
+                                and complete.get("model") != route["runtimeModelId"]):
+                            _finish_probe_attempt(attempt_handle, "stream-error",
+                                                  streaming_upstream.status_code)
+                            return JSONResponse({"error": {
+                                "message": "Backend response identity changed",
+                                "type": "response_identity_mismatch", "code": "502",
+                            }}, status_code=502, headers=ods_headers), False
+                        decoded_headers["content-type"] = "application/json"
+                        upstream = httpx.Response(
+                            streaming_upstream.status_code, content=raw_stream,
+                            headers=decoded_headers,
+                        )
                     else:
-                        fallback = _repaired_tool_decision_invalid(complete, payload)
-                        if not fallback:
-                            completed_headers = {"content-type": "application/json"}
-                            lemonade_header = streaming_upstream.headers.get(
-                                "x-lemonade-route")
-                            if lemonade_header:
-                                completed_headers["x-lemonade-route"] = lemonade_header
+                        if _streamed_thinking_tool_json(complete, payload):
+                            # This exact thinking-mode mismatch was observed
+                            # live: stream text described an offered tool,
+                            # while nonstream produced the structured call.
+                            # Retry without ever executing that text.
+                            fallback = True
+                        else:
+                            invalid = _repaired_tool_decision_invalid(complete, payload)
+                            if invalid and _complete_native_envelope_names(complete) is None:
+                                _finish_probe_attempt(attempt_handle, "stream-error",
+                                                      streaming_upstream.status_code)
+                                return JSONResponse({"error": {
+                                    "message": "Backend returned an invalid tool decision",
+                                    "type": "tool_protocol_invalid", "code": "502",
+                                }}, status_code=502, headers=ods_headers), False
+                            if invalid:
+                                # Preserve the existing single native-markup
+                                # repair. This may use a nonstreaming retry.
+                                ods_headers["X-ODS-Tool-Stream-Repair"] = "true"
+                            decoded_headers["content-type"] = "application/json"
                             upstream = httpx.Response(
                                 streaming_upstream.status_code,
                                 content=json.dumps(complete).encode("utf-8"),
-                                headers=completed_headers,
+                                headers=decoded_headers,
                             )
                 elif (streaming_upstream.status_code == 500
                         and b"Invalid diff: now finding less tool calls!" in raw_stream):
@@ -1803,7 +1900,7 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                 else:
                     upstream = httpx.Response(
                         streaming_upstream.status_code, content=raw_stream,
-                        headers=streaming_upstream.headers,
+                        headers=decoded_headers,
                     )
 
                 _finish_probe_attempt(attempt_handle,
