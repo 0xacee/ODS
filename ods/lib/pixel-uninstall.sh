@@ -412,6 +412,7 @@ state_limits = {
     "model-completed.json": 256 * 1024,
     "model-promotion-completed.json": 256 * 1024,
     "model-route-completed.json": 256 * 1024,
+    "source-overlay-completed.json": 8192,
     "settings-verified.json": 256 * 1024,
     "provider-root-plan.json": 8 * 1024 * 1024,
     "provider-root-managed.json": 8 * 1024 * 1024,

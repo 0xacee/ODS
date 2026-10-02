@@ -15,6 +15,35 @@ log_info() { :; }
 log_ok() { :; }
 log_error() { :; }
 
+if python3 - "$ROOT_DIR" <<'PY'
+import ast
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+bridge = ast.parse((source / 'bin/pixel_access_bridge.py').read_text(encoding='utf-8'))
+completed = {
+    node.right.value
+    for node in ast.walk(bridge)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+    and isinstance(node.left, ast.Attribute) and node.left.attr == 'state'
+    and isinstance(node.left.value, ast.Name) and node.left.value.id == 'self'
+    and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)
+    and node.right.value.endswith('-completed.json')
+}
+consumer = (source / 'lib/pixel-uninstall.sh').read_text(encoding='utf-8')
+limits = ast.parse(re.search(r'^state_limits = (\{.*?^\})', consumer, re.M | re.S)[1], mode='eval').body
+allowed = {ast.literal_eval(key) for key in limits.keys}
+assert completed, 'No completion writers found'
+assert not completed - allowed, 'Uninstall omits bridge completions: ' + ', '.join(sorted(completed - allowed))
+PY
+then
+    pass "uninstall recognizes the bridge's durable completion records"
+else
+    fail "uninstall completion inventory diverged from its producer"
+fi
+
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 MOCK_BIN="$TEST_ROOT/bin"
@@ -2421,16 +2450,44 @@ for scenario in foreign modified_unit modified_program relay_key state_symlink p
 done
 
 write_access_fixture
-for receipt in release-intent release-prepared release-completed; do
+for receipt in release-intent release-prepared release-completed source-overlay-completed; do
     printf '{}\n' > "$ACCESS_STATE/$receipt.json"
     chmod 0600 "$ACCESS_STATE/$receipt.json"
 done
 if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
     && [[ ! -e "$ACCESS_STATE" ]]; then
-    pass "completed release coordinator state permits verified cleanup"
+    pass "completed release and source overlay coordinator state permits verified cleanup"
 else
     fail "completed release coordinator state stranded the installation"
 fi
+
+for scenario in public symlink hardlink oversized invalid-json non-object unknown-file pending; do
+    write_access_fixture
+    overlay="$ACCESS_STATE/source-overlay-completed.json"
+    printf '{"version":1}\n' > "$overlay"
+    chmod 0600 "$overlay"
+    case "$scenario" in
+        public) chmod 0644 "$overlay" ;;
+        symlink)
+            rm "$overlay"
+            ln -s "$ACCESS_STATE/access-before.json" "$overlay"
+            ;;
+        hardlink) ln "$overlay" "$TEST_ROOT/overlay-link" ;;
+        oversized) truncate -s 8193 "$overlay" ;;
+        invalid-json) printf '{\n' > "$overlay" ;;
+        non-object) printf '[]\n' > "$overlay" ;;
+        unknown-file) printf '{}\n' > "$ACCESS_STATE/unrecognized-completed.json" ;;
+        pending) printf '{}\n' > "$ACCESS_STATE/transition.json" ;;
+    esac
+    if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+        fail "unsafe source overlay completion accepted: $scenario"
+    else
+        [[ -e "$ACCESS_STATE" && ! -s "$SYSTEMCTL_LOG" && ! -s "$DOCKER_LOG" ]] \
+            && pass "source overlay completion refuses $scenario before mutation" \
+            || fail "source overlay completion lost recovery artifacts on $scenario"
+    fi
+    rm -f "$TEST_ROOT/overlay-link"
+done
 
 write_access_fixture
 printf '{}\n' > "$ACCESS_STATE/access-before.json"
