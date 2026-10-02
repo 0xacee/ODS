@@ -4614,7 +4614,7 @@ function ownerForbidsTools(text) {
   for (const match of instruction.matchAll(ban)) {
     const prefix = instruction.slice(0, match.index);
     if (!/^without\b/i.test(match[0]) &&
-        !/(?:^|[.!?;,\n]\s*|\band\s+)(?:please\s+|you\s+)?$/i.test(prefix)) continue;
+        !/(?:^|[.!?;,\n]\s*|\b(?:and|but|so|then)\s+)(?:please\s+|you\s+)?$/i.test(prefix)) continue;
     const qualifier = instruction.slice(match.index + match[0].length);
     // A ban on a named subset of tools still permits other tools. The
     // blanket boundary applies only to an unqualified no-tools directive.

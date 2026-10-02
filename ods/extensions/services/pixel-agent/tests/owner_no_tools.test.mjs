@@ -62,8 +62,14 @@ test('restrictions on a subset of tools do not ban an expressly requested read',
 });
 
 test('a no-tools directive joined to another request still blocks tools', () => {
-  const guard=createToolLoopGuard();
-  const runId='joined-ban';
-  guard.observeRun(context(runId,'read'),'pixel',{prompt:'Reply with CHECK and do not use tools.'});
-  assert.equal(guard.beforeToolCall({toolName:'read',params:{path:'sample.txt'}},context(runId,'read'))?.block,true);
+  for (const [index,prompt] of [
+    'Reply with CHECK and do not use tools.',
+    'Summarize the file but do not use tools.',
+    'Please do not use tools. Reply with CHECK.',
+  ].entries()) {
+    const guard=createToolLoopGuard();
+    const runId=`joined-ban-${index}`;
+    guard.observeRun(context(runId,'read'),'pixel',{prompt});
+    assert.equal(guard.beforeToolCall({toolName:'read',params:{path:'sample.txt'}},context(runId,'read'))?.block,true,prompt);
+  }
 });
