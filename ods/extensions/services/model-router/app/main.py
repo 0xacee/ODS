@@ -43,6 +43,9 @@ from jsonschema import validators as jsonschema_validators
 from jsonschema.exceptions import SchemaError, ValidationError
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from .completed_tool_sse import (
+    CompletionStreamIdentityError, assemble_chat_completion_sse,
+)
 from .probe_attempts import ProbeAttempts
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -87,6 +90,7 @@ EVIDENCE_LIMIT = 2048
 EVIDENCE_TTL_SECONDS = 15 * 60
 TOOL_EVIDENCE_MAX_COUNT = 256
 TOOL_EVIDENCE_MAX_BYTES = 256 * 1024
+MAX_COMPLETED_TOOL_STREAM_BYTES = 16 * 1024 * 1024
 
 FORWARD_PATHS = {
     "/v1/chat/completions": "POST",
@@ -1700,12 +1704,14 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
         and bool(payload["tools"])
     )
     if completed_tool_stream:
-        # llama.cpp may withdraw an incrementally parsed tool call, aborting
-        # its SSE stream. Ask this backend for its complete decision, then
-        # present that verified decision as SSE to the existing client.
-        # This is a transport adapter: tools and model selection are unchanged.
-        payload["stream"] = False
-        payload.pop("stream_options", None)
+        # Keep the upstream stream open while _while_connected watches Stop.
+        # Buffer and verify its complete decision before sending any tool call
+        # to the client; partial llama.cpp tool deltas are never exposed.
+        options = payload.get("stream_options")
+        payload["stream_options"] = {
+            **(options if isinstance(options, dict) else {}),
+            "include_usage": True,
+        }
 
     headers = _sanitize_headers(request)
     api_key = os.environ.get(route["apiKeyEnv"], "") if route["apiKeyEnv"] else ""
@@ -1736,10 +1742,95 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
     }
 
     attempt_handle = None
+    next_attempt = 2
     try:
         forwarded_body = json.dumps(payload).encode("utf-8")
         attempt_handle = _begin_probe_attempt(probe_id, request_id, 1, forwarded_body, route)
-        if is_stream and not completed_tool_stream:
+        if completed_tool_stream:
+            upstream_request = client.build_request(
+                "POST", url, content=forwarded_body,
+                headers=headers, timeout=UPSTREAM_TIMEOUT_SECONDS,
+            )
+            streaming_upstream = await client.send(upstream_request, stream=True)
+            try:
+                chunks: list[bytes] = []
+                byte_count = 0
+                async for chunk in streaming_upstream.aiter_bytes():
+                    byte_count += len(chunk)
+                    if byte_count > MAX_COMPLETED_TOOL_STREAM_BYTES:
+                        _finish_probe_attempt(attempt_handle, "stream-error",
+                                              streaming_upstream.status_code)
+                        return JSONResponse({"error": {
+                            "message": "Backend tool response exceeded the stream limit",
+                            "type": "upstream_invalid_response", "code": "502",
+                        }}, status_code=502, headers=ods_headers), False
+                    chunks.append(chunk)
+                raw_stream = b"".join(chunks)
+                fallback = False
+                if 200 <= streaming_upstream.status_code < 300:
+                    try:
+                        complete = assemble_chat_completion_sse(
+                            raw_stream, route["runtimeModelId"],
+                            max_bytes=MAX_COMPLETED_TOOL_STREAM_BYTES,
+                        )
+                    except CompletionStreamIdentityError:
+                        _finish_probe_attempt(attempt_handle, "stream-error",
+                                              streaming_upstream.status_code)
+                        return JSONResponse({"error": {
+                            "message": "Backend response identity changed",
+                            "type": "response_identity_mismatch", "code": "502",
+                        }}, status_code=502, headers=ods_headers), False
+                    except ValueError:
+                        fallback = True
+                    else:
+                        fallback = _repaired_tool_decision_invalid(complete, payload)
+                        if not fallback:
+                            completed_headers = {"content-type": "application/json"}
+                            lemonade_header = streaming_upstream.headers.get(
+                                "x-lemonade-route")
+                            if lemonade_header:
+                                completed_headers["x-lemonade-route"] = lemonade_header
+                            upstream = httpx.Response(
+                                streaming_upstream.status_code,
+                                content=json.dumps(complete).encode("utf-8"),
+                                headers=completed_headers,
+                            )
+                elif (streaming_upstream.status_code == 500
+                        and b"Invalid diff: now finding less tool calls!" in raw_stream):
+                    # Older llama.cpp builds cannot complete streamed tool
+                    # diffs. Retain their complete-response compatibility path.
+                    fallback = True
+                else:
+                    upstream = httpx.Response(
+                        streaming_upstream.status_code, content=raw_stream,
+                        headers=streaming_upstream.headers,
+                    )
+
+                _finish_probe_attempt(attempt_handle,
+                                      "stream-error" if fallback else "complete",
+                                      streaming_upstream.status_code)
+                if fallback:
+                    fallback_payload = {**payload, "stream": False}
+                    fallback_payload.pop("stream_options", None)
+                    fallback_body = json.dumps(fallback_payload).encode("utf-8")
+                    attempt_handle = _begin_probe_attempt(
+                        probe_id, request_id, next_attempt, fallback_body, route,
+                    )
+                    next_attempt += 1
+                    ods_headers["X-ODS-Tool-Stream-Fallback"] = "true"
+                    remaining = UPSTREAM_TIMEOUT_SECONDS - (
+                        time.monotonic() - telemetry_started
+                    )
+                    if remaining <= 0:
+                        raise httpx.ReadTimeout("tool stream fallback deadline expired")
+                    upstream = await client.post(
+                        url, content=fallback_body, headers=headers, timeout=remaining,
+                    )
+                    _finish_probe_attempt(attempt_handle, "complete",
+                                          upstream.status_code)
+            finally:
+                await streaming_upstream.aclose()
+        elif is_stream:
             upstream_request = client.build_request(
                 "POST", url, content=forwarded_body,
                 headers=headers, timeout=UPSTREAM_TIMEOUT_SECONDS,
@@ -1828,11 +1919,12 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                 media_type=media_type, headers=ods_headers, cleanup=cleanup_stream,
             ), True
 
-        upstream = await client.post(
-            url, content=forwarded_body, headers=headers,
-            timeout=UPSTREAM_TIMEOUT_SECONDS,
-        )
-        _finish_probe_attempt(attempt_handle, "complete", upstream.status_code)
+        else:
+            upstream = await client.post(
+                url, content=forwarded_body, headers=headers,
+                timeout=UPSTREAM_TIMEOUT_SECONDS,
+            )
+            _finish_probe_attempt(attempt_handle, "complete", upstream.status_code)
     except asyncio.CancelledError:
         _finish_probe_attempt(attempt_handle, "cancelled")
         raise
@@ -1886,7 +1978,9 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                 repair_handle = None
                 try:
                     repair_body = json.dumps(repair_payload).encode("utf-8")
-                    repair_handle = _begin_probe_attempt(probe_id, request_id, 2, repair_body, route)
+                    repair_handle = _begin_probe_attempt(
+                        probe_id, request_id, next_attempt, repair_body, route,
+                    )
                     upstream = await client.post(
                         url, content=repair_body,
                         headers=headers, timeout=remaining,
