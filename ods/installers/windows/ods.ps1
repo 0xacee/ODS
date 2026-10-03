@@ -651,6 +651,15 @@ function Test-ODSUninstallTaskOwned {
     return $true
 }
 
+function Test-ODSUninstallStartupLauncherOwned {
+    param([string]$Content)
+    if ([string]::IsNullOrWhiteSpace($Content)) { return $false }
+    # Both native installer paths write the exact comment before this VBS
+    # launcher. Older generated files omitted it. Reject any extra commands.
+    $launcher=[regex]::Match($Content.Trim(), '(?i)^(?:'' ODS Host Agent login startup launcher\r?\n)?Set WshShell = CreateObject\("WScript\.Shell"\)\r?\nWshShell\.Run "([^"\r\n]+)", 0, False$')
+    return ($launcher.Success -and (Test-ODSUninstallCommandOwned $launcher.Groups[1].Value))
+}
+
 function Stop-ODSUninstallOwnedHelpers {
     # Shared executable locations, ports and stale PID files cannot identify
     # an installation. Only a helper's executable/script path can do that.
@@ -696,8 +705,7 @@ function Stop-ODSUninstallOwnedHelpers {
         $entry = Join-Path $startup 'ods-host-agent.vbs'
         if (Test-Path -LiteralPath $entry) {
             $content=Get-Content -LiteralPath $entry -Raw -ErrorAction Stop
-            $launcher=[regex]::Match($content.Trim(), '(?i)^Set WshShell = CreateObject\("WScript\.Shell"\)\r?\nWshShell\.Run "([^"\r\n]+)", 0, False$')
-            if ($launcher.Success -and (Test-ODSUninstallCommandOwned $launcher.Groups[1].Value)) {
+            if (Test-ODSUninstallStartupLauncherOwned $content) {
                 Remove-Item -LiteralPath $entry -Force -ErrorAction Stop
             }
         }
