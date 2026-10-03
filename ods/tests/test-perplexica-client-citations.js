@@ -79,8 +79,30 @@ test("pinned Vane expression corrupts fenced code; patched embedded renderer pre
     assert.equal(spawnSync(process.execPath, ["--check", file]).status, 0);
     assert.equal(patchClientChunk(root, trusted).changed, false);
     assert.equal(fs.readFileSync(file, "utf8"), patched);
+    const previousPrelude = PRELUDE.replace("return prose(line, lineBase);", "return String(line);");
+    assert.notEqual(previousPrelude, PRELUDE);
+    fs.writeFileSync(file, patched.replace(PRELUDE, previousPrelude));
+    assert.equal(patchClientChunk(root, trusted).changed, true);
+    assert.equal(fs.readFileSync(file, "utf8"), patched);
     fs.appendFileSync(file, "/* partial or modified bundle */");
     assert.throws(() => patchClientChunk(root, trusted), /patched Vane client hash mismatch/);
+  });
+});
+
+test("patched Vane client rejects missing or duplicate prelude markers", () => {
+  withTemp((root) => {
+    const file = path.join(root, "sample.js");
+    const original = fixture();
+    fs.writeFileSync(file, original);
+    const trusted = fixtureTrust(original);
+    patchClientChunk(root, trusted);
+    const patched = fs.readFileSync(file, "utf8");
+    const marker = "/* ods-vane-citation-prelude-end:20261003 */\n";
+    assert.ok(patched.includes(marker));
+    fs.writeFileSync(file, patched.replace(marker, ""));
+    assert.throws(() => patchClientChunk(root, trusted), /unknown or partial shape/);
+    fs.writeFileSync(file, patched.replace(marker, marker + marker));
+    assert.throws(() => patchClientChunk(root, trusted), /unknown or partial shape/);
   });
 });
 

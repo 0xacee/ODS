@@ -41,9 +41,11 @@ digests and provenance in `config/perplexica-release.json`).
 - ODS patches the pinned Vane client citation renderer at container startup.
   The upstream renderer otherwise changes bracketed text inside Markdown code
   fences into citations. The patch preserves code, links, and escaped brackets
-  while retaining citations in prose. If the client bundle no longer matches
-  the pinned expression, startup stops with an explicit error; update the
-  patch and its tests when deliberately changing the image.
+  while retaining citations in prose. A restart with updated ODS renderer code
+  re-patches the audited client bytes even when Compose reuses the container.
+  If the client bundle no longer matches the pinned expression, startup stops
+  with an explicit error; update the patch and its tests when deliberately
+  changing the image.
 - The app root moved from `/home/perplexica` to `/home/vane`. ODS mounts the
   existing `perplexica-data` and `perplexica-uploads` volumes at the new paths.
 - Speed and Balanced rank SearXNG results with the configured embedding model.
