@@ -679,7 +679,10 @@ def _base_compose_services(install_dir: Path, compose_flags: str) -> tuple[set[s
     # Compose options here would make the base-service custody check ambiguous.
     root = install_dir.resolve(strict=True)
     if flags[:1] == ["--env-file"]:
-        if len(flags) < 2 or flags[1] != ".env":
+        # Inspect the saved spelling too: shlex turns `.\\env` into `.env`,
+        # while Docker would receive a different path.
+        if (len(flags) < 2 or flags[1] != ".env"
+                or re.match(r"\A--env-file[ \t]+\.env[ \t]+", compose_flags) is None):
             raise SelectionError("Invalid current Compose flags")
         env_file = root / ".env"
         if env_file.is_symlink() or not env_file.is_file():

@@ -63,7 +63,8 @@ def test_preset_accepts_native_windows_compose_flags_before_library_enable(tmp_p
 
 @pytest.mark.parametrize("prefix", [
     "--env-file", "--env-file ../.env", "--env-file /tmp/.env",
-    "--env-file .env.local", "--env-file .env --env-file .env",
+    "--env-file .env.local", r"--env-file .\env", '--env-file ".env"',
+    "--env-file .env --env-file .env",
     "--project-name other", "-f", "-f docker-compose.base.yml --env-file .env",
 ])
 def test_preset_rejects_untrusted_native_compose_flags_without_marker_moves(tmp_path, prefix):
