@@ -27,7 +27,11 @@ TIER_RANK="$(tier_rank "$TIER")"
 
 # Capability-aware preflight checks
 if [[ -x "$SCRIPT_DIR/scripts/preflight-engine.sh" ]]; then
-    PREFLIGHT_ENV="$("$SCRIPT_DIR/scripts/preflight-engine.sh" \
+    PREFLIGHT_ENV="$(LEMONADE_EXTERNAL="${LEMONADE_EXTERNAL:-false}" \
+        LEMONADE_BASE_URL="${LEMONADE_BASE_URL:-}" \
+        LEMONADE_GPU_NAME="${LEMONADE_GPU_NAME:-}" \
+        LEMONADE_GPU_VRAM_MB="${LEMONADE_GPU_VRAM_MB:-0}" \
+        "$SCRIPT_DIR/scripts/preflight-engine.sh" \
         --report "$PREFLIGHT_REPORT_FILE" \
         --tier "$TIER" \
         --ram-gb "$RAM_GB" \
@@ -339,7 +343,8 @@ if [[ "${ENABLE_VOICE:-false}" == "true" ]]; then
 fi
 
 # Port conflict detection with detailed process information
-PORTS_TO_CHECK="${SERVICE_PORTS[open-webui]:-3000}"
+PORTS_TO_CHECK=""
+[[ "${ENABLE_OPEN_WEBUI:-true}" != "true" ]] || PORTS_TO_CHECK="${SERVICE_PORTS[open-webui]:-3000}"
 [[ -z "${EXTERNAL_LLM_URL:-}" ]] && PORTS_TO_CHECK="${SERVICE_PORTS[llama-server]:-8080} ${PORTS_TO_CHECK}"
 [[ "$ENABLE_VOICE" == "true" ]] && PORTS_TO_CHECK="$PORTS_TO_CHECK ${SERVICE_PORTS[whisper]:-9000} ${SERVICE_PORTS[tts]:-8880}"
 [[ "$ENABLE_WORKFLOWS" == "true" ]] && PORTS_TO_CHECK="$PORTS_TO_CHECK ${SERVICE_PORTS[n8n]:-5678}"

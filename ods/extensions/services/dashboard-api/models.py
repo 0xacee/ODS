@@ -107,6 +107,7 @@ class VersionInfo(BaseModel):
     update_available: bool = False
     changelog_url: Optional[str] = None
     checked_at: Optional[str] = None
+    check_status: str = "unavailable"
 
 
 class UpdateAction(BaseModel):
@@ -182,11 +183,11 @@ class ModelLibraryEntry(BaseModel):
     downloadUrl: Optional[str] = None
     downloadSha256: Optional[str] = None
     llmModelName: Optional[str] = None
-    size: str
-    sizeGb: float
-    vramRequired: float
+    size: Optional[str]
+    sizeGb: Optional[float]
+    vramRequired: Optional[float]
     estimatedRequired: Optional[float] = None
-    contextLength: int
+    contextLength: Optional[int]
     maxContextLength: Optional[int] = None
     contextOptions: list[dict[str, Any]] = Field(default_factory=list)
     specialty: str
@@ -204,14 +205,16 @@ class ModelLibraryEntry(BaseModel):
     recommended: bool = False
     configured: bool = False
     recommendation: Optional[dict[str, Any]] = None
-    fitsVram: bool
-    fitsCurrentVram: bool
+    fitsVram: Optional[bool]
+    activationSupport: Optional[dict[str, Any]] = None
+    fitsCurrentVram: Optional[bool]
     performance: Optional[dict[str, Any]] = None
     performanceLabel: Optional[str] = None
 
 
 class ModelLibraryGpu(BaseModel):
     vramTotal: float
+    modelMemoryBudgetGb: Optional[float] = None
     vramUsed: float
     vramFree: float
 
@@ -232,3 +235,5 @@ class ModelLibraryResponse(BaseModel):
     odsMode: str = "unknown"
     configuredMode: str = "unknown"
     llmBackend: str = "unknown"
+    externalLemonade: bool = False
+    modelManagement: Optional[dict[str, Any]] = None

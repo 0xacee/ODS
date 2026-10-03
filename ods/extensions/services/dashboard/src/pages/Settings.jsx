@@ -128,7 +128,7 @@ const routeSeverityOrder = { down: 0, unhealthy: 1, degraded: 2, unknown: 3, hea
 const sortRoutesBySeverity = (items) => [...(items || [])].sort((a, b) => (routeSeverityOrder[a.status] ?? 9) - (routeSeverityOrder[b.status] ?? 9))
 const routeFilterDotClass = {
   online: 'bg-emerald-400',
-  degraded: 'bg-amber-400',
+  degraded: 'bg-theme-text-secondary',
   inactive: 'bg-red-400',
 }
 
@@ -138,7 +138,7 @@ const ROUTE_DESCRIPTIONS = {
   dashboard: 'Main dashboard and control center',
   'dashboard-api': 'System status and metrics API',
   hermes: 'Advanced agent console',
-  'hermes-proxy': 'Auth-gated Hermes LAN entry',
+  'hermes-proxy': 'Hermes entry with optional owner-card access',
   litellm: 'OpenAI-compatible model gateway',
   'llama-server': 'Local inference backend',
   'open-webui': 'Primary chat interface',
@@ -204,22 +204,26 @@ export default function Settings({ activeSection = 'all' }) {
 
   const fetchVersionInfo = async ({ announce = false } = {}) => {
     try {
-      const versionData = await fetchPayload('/api/version', 4000)
+      const versionData = await fetchPayload(announce ? '/api/version?force=true' : '/api/version', 7500)
+      const checkStatus = versionData.check_status || (versionData.latest ? 'checked' : 'unavailable')
+      const checked = checkStatus === 'checked'
       setVersion(prev => ({
         ...(prev || {}),
         current: versionData.current,
         version: versionData.current && versionData.current !== '0.0.0' ? versionData.current : (prev?.version || 'Unknown'),
         latest: versionData.latest || null,
-        update_available: Boolean(versionData.update_available && versionData.latest && versionData.current && versionData.current !== '0.0.0' && versionData.latest !== versionData.current),
+        update_available: Boolean(checked && versionData.update_available && versionData.latest && versionData.current && versionData.current !== '0.0.0' && versionData.latest !== versionData.current),
         changelog_url: versionData.changelog_url || null,
-        checked_at: versionData.checked_at || new Date().toISOString(),
-        update_check_ok: true,
+        checked_at: versionData.checked_at || null,
+        check_status: checkStatus,
+        update_check_ok: checked,
       }))
       if (announce) {
         setNotice({
-          type: versionData.update_available ? 'warn' : 'info',
-          text: versionData.update_available && versionData.latest ? `Update available: v${versionData.latest}` : 'You are already on the latest available release.',
+          type: !checked || versionData.update_available ? 'warn' : 'info',
+          text: !checked ? 'Could not confirm the latest release. Try checking again.' : versionData.update_available && versionData.latest ? `Update available: v${versionData.latest}` : 'You are on the latest available release or a newer development version.',
         })
+        window.dispatchEvent(new Event('ods-version-checked'))
       }
     } catch (err) {
       if (announce) setNotice({ type: 'warn', text: `Could not check updates right now: ${getErrorText(err)}` })
@@ -383,7 +387,7 @@ export default function Settings({ activeSection = 'all' }) {
   const routeCounts = useMemo(() => {
     const online = services.filter(service => service.status === 'healthy')
     const degraded = services.filter(service => service.status === 'degraded')
-    const inactive = services.filter(service => ['down', 'unhealthy', 'unknown'].includes(service.status))
+    const inactive = services.filter(service => !['healthy', 'degraded'].includes(service.status))
     return { online, degraded, inactive }
   }, [services])
 
@@ -415,7 +419,7 @@ export default function Settings({ activeSection = 'all' }) {
         <div hidden={!visible('connections')}><PixelProviderSettings showHeading={activeSection === 'all'} /></div>
         <div hidden={!visible('connections')}><details className="settings-agent-behavior"><summary>Agent behavior</summary><PixelRuntimeSettings /></details></div>
         <div hidden={!visible('sharing')}><PixelSharingSettings /></div>
-        <div hidden={!visible('access')}><PixelAccessCard showHeading={activeSection === 'all'} /></div>
+        <div hidden={!visible('access')}><PixelAccessCard active={visible('access')} showHeading={activeSection === 'all'} /></div>
         <div hidden={!visible('services')}><RoutingTableCard
           services={services}
           counts={routeCounts}
@@ -518,8 +522,8 @@ function AppearanceCard({ theme, themes, labels, onThemeChange, className = '', 
   const {wallpapers = WALLPAPERS} = useTheme()
   return (
     <PremiumCard className={`p-5 lg:p-6 ${className}`}>
-      {showHeading && <CardIntro icon={Palette} title="Appearance" description="Pixel’s minimal interface is shared across ODS." />}
-      <div className="wallpaper-intro"><h3>Make it yours</h3><p>Pixel by default. A different atmosphere when you want it.</p></div>
+      {showHeading && <CardIntro icon={Palette} title="Appearance" description="Portal’s minimal interface is shared across ODS." />}
+      <div className="wallpaper-intro"><h3>Make it yours</h3><p>Portal by default. A different atmosphere when you want it.</p></div>
       <div className="wallpaper-gallery" aria-label="Workspace themes">
         {themes.map(themeId => (
           <button
@@ -564,7 +568,7 @@ function AccountUsageCard({ usageReport, className = '' }) {
       </div>
       <div className="mt-4 flex items-center justify-between gap-4 text-sm">
         <span className="flex min-w-0 items-center gap-2 text-theme-text-muted">
-          <span className={`h-2 w-2 shrink-0 rounded-full ${usageReport?.source?.status === 'ok' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+          <span className={`h-2 w-2 shrink-0 rounded-full ${usageReport?.source?.status === 'ok' ? 'bg-emerald-400' : 'bg-theme-text-secondary'}`} />
           <span className="truncate">{usageSource}</span>
         </span>
         <span className="flex shrink-0 items-center gap-2 font-medium text-theme-accent-light">
@@ -588,7 +592,7 @@ function RemoteSetupCard({ setupStatus, className = '' }) {
       <div className="mt-6 flex flex-1 flex-col justify-between border-t border-theme-border pt-5">
         <div>
           <p className="flex items-center gap-2 text-sm font-semibold text-theme-text">
-            <span className={`h-2 w-2 rounded-full ${setupComplete ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+            <span className={`h-2 w-2 rounded-full ${setupComplete ? 'bg-emerald-400' : 'bg-theme-text-secondary'}`} />
             {setupLabel}
           </p>
           <p className="mt-3 text-sm leading-6 text-theme-text-muted">{personaLabel}. Owner and collaborator access is managed with invite links.</p>
@@ -646,7 +650,7 @@ function RoutingTableCard({ services, counts, routeFilter, onRouteFilterChange, 
         <div className="settings-route-summary">
           <RouteStatusCard tone="online" label="Online" count={counts.online.length} description="Healthy services in the current status cache" />
           <RouteStatusCard tone="degraded" label="Degraded" count={counts.degraded.length} description="Services reporting degraded health" />
-          <RouteStatusCard tone="inactive" label="Inactive" count={counts.inactive.length} description="Down, unhealthy, or unknown services" />
+          <RouteStatusCard tone="inactive" label="Inactive" count={counts.inactive.length} description="Stopped, undeployed, unhealthy, or unknown services" />
         </div>
 
         <div className="mt-5">
@@ -751,7 +755,7 @@ function UpdatesCard({ version, onCheckUpdates, showHeading = true }) {
   const checkedAt = formatCheckedAt(version?.checked_at)
   const updateText = version?.update_check_ok
     ? (version?.update_available ? 'Update available' : 'Current release')
-    : 'Not checked yet'
+    : ({ checking: 'Checking for updates…', stale: 'Check unavailable · showing last known release', unavailable: 'Update check unavailable', 'current-unknown': 'Installed version could not be verified' }[version?.check_status] || 'Not checked yet')
 
   return (
     <PremiumCard className="flex min-h-0 flex-col justify-between p-4">
@@ -764,6 +768,12 @@ function UpdatesCard({ version, onCheckUpdates, showHeading = true }) {
           </p>
         </div>
       </div>
+      {version?.update_available && <div className="mt-4 rounded-xl border border-theme-accent/25 bg-theme-accent/5 p-4" role="status">
+        <h3 className="text-base font-semibold text-theme-text">A new version of ODS is available</h3>
+        <p className="mt-2 text-sm text-theme-text-muted">Installed: v{version.current} · Available: v{version.latest}</p>
+        <p className="mt-2 text-xs text-theme-text-muted">Review the release notes before updating. Nothing is installed automatically.</p>
+        <a className="mt-3 inline-flex text-sm text-theme-accent-light underline underline-offset-4" href={`https://github.com/Osmantic/ODS/releases/tag/v${encodeURIComponent(version.latest)}`} target="_blank" rel="noopener noreferrer">Release notes</a>
+      </div>}
       <div className="mt-4 flex items-center justify-between gap-4 border-t border-theme-border pt-3">
         <div>
           <p className="text-base font-semibold text-theme-text">
@@ -832,7 +842,7 @@ function RouteStatusCard({ tone, label, count, description }) {
   return (
     <div className="settings-route-count" title={description}>
       <div className="flex items-center gap-2">
-        <span className={`h-2 w-2 rounded-full ${tone === 'online' ? 'bg-emerald-400' : tone === 'degraded' ? 'bg-amber-400' : 'bg-red-400'}`} />
+        <span className={`h-2 w-2 rounded-full ${tone === 'online' ? 'bg-emerald-400' : tone === 'degraded' ? 'bg-theme-text-secondary' : 'bg-red-400'}`} />
         <p className="text-sm font-semibold">{label}</p>
       </div>
       <p className="text-theme-text">{count}<span className="sr-only"> routes — {description}</span></p>
@@ -844,7 +854,7 @@ function RouteRow({ service }) {
   const href = serviceUrl(service)
   const healthy = service.status === 'healthy'
   const degraded = service.status === 'degraded'
-  const dot = healthy ? 'bg-emerald-400' : degraded ? 'bg-amber-400' : 'bg-red-400'
+  const dot = healthy ? 'bg-emerald-400' : degraded ? 'bg-theme-text-secondary' : 'bg-red-400'
   const description = getServiceDescription(service)
   const content = (
     <>
@@ -903,7 +913,7 @@ function formatStorageGb(value) {
 }
 
 function Banner({ tone = 'info', children, onClose }) {
-  const cls = tone === 'danger' ? 'border-red-500/20 bg-red-500/10 text-red-200' : tone === 'warn' ? 'border-yellow-500/20 bg-yellow-500/10 text-yellow-100' : 'border-theme-accent/20 bg-theme-accent/10 text-theme-text'
+  const cls = tone === 'danger' ? 'border-red-500/20 bg-red-500/10 text-red-200' : tone === 'warn' ? 'border-theme-border bg-theme-text-secondary/10 text-theme-text-secondary' : 'border-theme-accent/20 bg-theme-accent/10 text-theme-text'
   return (
     <div className={`mb-6 flex w-full items-center justify-between rounded-lg border p-4 text-sm ${cls}`}>
       <span>{children}</span>

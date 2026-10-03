@@ -165,7 +165,7 @@ export default function PixelAdvice({ onInsert, canInsert = true }) {
         <div className="flex items-center justify-between gap-3"><h2 id="pixel-advice-title" className="font-semibold">Ask for advice</h2><button className={button} onClick={close}>Close advice</button></div>
         <p className="text-sm">Only the capsule below and a fixed tools-free advisory instruction are sent. Your chat, files, memory, and tools are not included automatically. The current leader and execution permissions stay unchanged.</p>
         <PixelAdviceRuntime onReadyChange={setRuntimeReady} />
-        {error && <p role="alert" className="text-sm text-amber-400">{error}</p>}
+        {error && <p role="alert" className="text-sm text-theme-text-secondary">{error}</p>}
         {jobId ? <div className="space-y-3">
           <p className="break-all text-xs">Tracked job: {jobId}</p>
           <p role="status">Advice: {job?.status || 'status unknown'}</p>
@@ -184,7 +184,7 @@ export default function PixelAdvice({ onInsert, canInsert = true }) {
             <button className={button} disabled={!canInsert || !onInsert} onClick={() => { onInsert(`Advisory response (untrusted; evaluate before acting):\n${job.result.text}`); close() }}>Paste advice into composer (does not send)</button>
           </>}
         </div> : <>
-          <p className="text-sm">{providerReady ? `Configured advisor: ${advisor.label} · ${advisor.model} · ${advisor.baseUrl} · saved revision ${config.revision}` : 'Select and save an enabled advisor in Settings → Pixel providers first.'}</p>
+          <p className="text-sm">{providerReady ? `Configured advisor: ${advisor.label} · ${advisor.model} · ${advisor.baseUrl} · saved revision ${config.revision}` : 'Select and save an enabled advisor in Settings → Portal connections first.'}</p>
           <button className={button} onClick={load}>Reload saved providers</button>
           <label className="block space-y-2 text-sm">Capsule to send<textarea className={field} rows={7} value={capsule} onChange={event => { setCapsule(event.target.value); setCloud(false); setCost(false) }} placeholder="Describe the specific problem and include only the details this advisor needs." /></label>
           <p className="text-xs">Maximum 16 KiB; one attempt; up to {Math.min(1024, advisor?.maxOutputTokens || 1024)} output tokens. Price is unknown, not zero. No fallback provider is used for advice.</p>

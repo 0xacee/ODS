@@ -10,6 +10,22 @@ fail() {
     exit 1
 }
 
+# ods_bind_cli_command consults `command -v ods` to decide whether an existing
+# command already points at this install. On a machine that actually runs ODS
+# that ambient command answers instead of the fixture, the first binding
+# returns 1, and `set -e` ends the run with no output at all. Drop only the
+# PATH entries that carry an ods executable so the fixture decides.
+drop_ambient_ods_from_path() {
+    local cleaned="" entry
+    local IFS=:
+    for entry in $PATH; do
+        [[ -n "$entry" && -x "$entry/ods" ]] && continue
+        cleaned+="${cleaned:+:}$entry"
+    done
+    PATH="$cleaned"
+}
+drop_ambient_ods_from_path
+
 pass() {
     printf '[PASS] %s\n' "$1"
 }
@@ -35,7 +51,8 @@ printf '#!/usr/bin/env bash\n' >"$OLD_DIR/ods-cli"
 chmod 0755 "$INSTALL_DIR/ods-cli" "$OLD_DIR/ods-cli"
 
 ln -s "$OLD_DIR/ods-cli" "$SYSTEM_LINK"
-result="$(ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$OWNER_HOME")"
+result="$(ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$OWNER_HOME")" \
+    || fail "binding refused to refresh the stale system link"
 [[ "$result" == "system:$SYSTEM_LINK" ]] || fail "stale system link was not reported as refreshed"
 ods_cli_path_matches_install "$SYSTEM_LINK" "$INSTALL_DIR/ods-cli" \
     || fail "stale system link was not rebound to the current install"
@@ -45,7 +62,7 @@ rm "$SYSTEM_LINK"
 result="$(
     TEST_SUDO_AVAILABLE=false ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" \
         ods_bind_cli_command "$INSTALL_DIR" "$OWNER_HOME"
-)"
+)" || fail "binding refused the rootless fallback when sudo is unavailable"
 [[ "$result" == "user:$OWNER_HOME/.local/bin/ods" ]] \
     || fail "sudo-unavailable install did not use the rootless fallback"
 ods_cli_path_matches_install "$OWNER_HOME/.local/bin/ods" "$INSTALL_DIR/ods-cli" \
@@ -55,7 +72,8 @@ pass "sudo-unavailable install uses the exact rootless fallback"
 rm "$OWNER_HOME/.local/bin/ods"
 printf '#!/usr/bin/env bash\n' >"$SYSTEM_LINK"
 chmod 0755 "$SYSTEM_LINK"
-result="$(ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$OWNER_HOME")"
+result="$(ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$OWNER_HOME")" \
+    || fail "binding refused to fall back while a regular system command exists"
 [[ "$result" == "user:$OWNER_HOME/.local/bin/ods" ]] \
     || fail "regular system command did not use the rootless fallback"
 [[ -f "$SYSTEM_LINK" && ! -L "$SYSTEM_LINK" ]] \
@@ -94,9 +112,11 @@ pass "unmanaged regular command paths fail closed"
     }
     bsd_owner="$TMP_ROOT/bsd home"
     mkdir -p "$bsd_owner"
-    result="$(TEST_SUDO_AVAILABLE=false ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$bsd_owner")"
+    result="$(TEST_SUDO_AVAILABLE=false ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$bsd_owner")" \
+        || fail "BSD rootless creation refused to bind"
     [[ "$result" == "user:$bsd_owner/.local/bin/ods" ]] || fail "BSD rootless creation failed"
-    result="$(TEST_SUDO_AVAILABLE=false ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$bsd_owner")"
+    result="$(TEST_SUDO_AVAILABLE=false ODS_CLI_SYSTEM_LINK="$SYSTEM_LINK" ods_bind_cli_command "$INSTALL_DIR" "$bsd_owner")" \
+        || fail "BSD ownership fallback refused to bind"
     [[ "$result" == "user:$bsd_owner/.local/bin/ods" ]] || fail "BSD ownership fallback failed"
     realpath() { return 1; }
     ods_cli_path_matches_install "$bsd_owner/.local/bin/ods" "$INSTALL_DIR/ods-cli" || fail "readlink fallback failed"

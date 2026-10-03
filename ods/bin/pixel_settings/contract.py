@@ -86,6 +86,8 @@ def _capabilities(value):
         _integer(value["backendContextTokens"])
     if (value["providerMaxOutputTokens"] > value["providerContextTokens"]
             or value["activeMaxOutputTokens"] > value["activeContextTokens"]
+            or value["activeContextTokens"] > value["providerContextTokens"]
+            or value["activeMaxOutputTokens"] > value["providerMaxOutputTokens"]
             or value["capacitySource"] not in ("provider-declared", "owner-declared", "backend-observed")
             or value["capacitySource"] == "backend-observed" and value["backendContextTokens"] is None
             or type(value["samplingSupported"]) is not bool
@@ -120,7 +122,9 @@ def preview_preferences(preferences, capabilities):
     # Preserve the existing ODS OpenAI-compatible transport headroom (1.25 input
     # safety factor). Earlier compaction may reserve more, never less headroom.
     minimum_reserve = (context + 4 * output + 4) // 5
-    default_floor = context // 2 if 8192 <= context < 32768 else 0
+    # Do not override the computed headroom with a second half-window reserve.
+    # Explicit larger user reserves remain supported below.
+    default_floor = 0
     proposed = {
         "contextTokens": context, "maxOutputTokens": output,
         "compactionReserveTokens": minimum_reserve,

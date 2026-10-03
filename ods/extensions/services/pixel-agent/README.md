@@ -67,8 +67,9 @@ upstream default. Other agents and existing jobs are unaffected.
   `metadata.chat_id`, or `metadata.conversation_id`, the ingress writes
   `user = "ods-" + sha256(chosen)`. The raw identifier is never passed
   upstream.
-- **Upstream is fixed.** Requests go only to
-  `http://127.0.0.1:${PIXEL_GATEWAY_PORT:-18789}/v1/chat/completions` with
+- **Upstream is fixed.** By default, read-only health discovery selects IPv6
+  or IPv4 loopback on `${PIXEL_GATEWAY_PORT:-18789}`. Requests then go to that
+  gateway with
   `Authorization: Bearer <gateway token>`, `Content-Type: application/json`,
   and `Accept` matching the stream mode. Connect/header/body/stream behavior is
   bounded by `AbortController`/timeouts; the total request budget is 32 minutes
@@ -80,6 +81,15 @@ upstream default. Other agents and existing jobs are unaffected.
   capped at 2 MiB and each stream line at 1 MiB.
   Upstream bodies are never reflected to the caller; failures produce generic
   errors.
+- **Docker Desktop transport (native macOS qualification).** The explicit
+  `PIXEL_GATEWAY_TRANSPORT=docker-desktop-host` setting selects only
+  `host.docker.internal` on the configured gateway port. The default remains
+  `loopback`; arbitrary hosts/URLs are rejected. The transport does not fall
+  back to container loopback, follow redirects, or replay failed mutations.
+  The ingress still exposes only its restricted Unix socket. This setting is
+  one prerequisite, not a complete macOS installer or proof of host isolation.
+  Qualification containers mount only the required private token/config file
+  read-only, retain the euid ownership check, and receive no Docker socket.
 - **Status projection.** On startup and every `PIXEL_STATUS_INTERVAL_MS`
   (default 30000) the service atomically writes a sanitized projection to
   `PIXEL_STATUS_FILE` (default `/run/ods-pixel/ods-status.json`). It reports a
@@ -134,6 +144,13 @@ upstream default. Other agents and existing jobs are unaffected.
   visual request use the same model-authored workspace-file path. The preview
   adapter can publish only an existing directory containing `index.html`; it
   has no template, scaffold, HTML, title, theme, or content input.
+  Published `.json` assets must parse as UTF-8 JSON without duplicate keys or
+  nonstandard numeric constants. Validation uses the captured bytes and never
+  rewrites them. Rejections report the artifact-relative filename and decoder
+  line/column when available, without quoting its contents. Intentionally
+  malformed examples can be displayed as `.txt`; required JSON exports must be
+  repaired. Syntax validation does not establish application semantics or that
+  exported source matches executed source; those checks remain necessary.
 
 ## Configuration (nonsecret)
 
@@ -142,7 +159,7 @@ upstream default. Other agents and existing jobs are unaffected.
 | `PIXEL_INGRESS_SOCKET` | `/run/ods-pixel/pixel-ingress.sock` | Unix socket path (UDS only) |
 | `PIXEL_INGRESS_GID` | unset | Numeric GID allowed to connect to the socket |
 | `PIXEL_GATEWAY_TOKEN_FILE` | `/etc/pixel/openclaw.json` | Restricted owner-private OpenClaw config containing the gateway token |
-| `PIXEL_GATEWAY_PORT` | `18789` | Fixed loopback gateway port |
+| `PIXEL_GATEWAY_PORT` | `18789` | Validated fresh-install loopback gateway port; override when another trusted local Pixel owns the default, then retain that value on reinstall |
 | `PIXEL_STATUS_FILE` | `/run/ods-pixel/ods-status.json` | Status projection path |
 | `PIXEL_STATUS_INTERVAL_MS` | `30000` | Status write interval |
 | `PIXEL_ODS_VERSION` | `unknown` | Nonsecret ODS version exposed in the bounded status projection |

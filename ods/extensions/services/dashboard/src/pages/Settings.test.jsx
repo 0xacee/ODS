@@ -73,7 +73,7 @@ const payloadByUrl = (url) => {
     }
   }
   if (url === '/api/setup/status') return { first_run: false, persona: null }
-  if (url === '/api/version') {
+  if (url === '/api/version' || url === '/api/version?force=true') {
     return { current: '2.6.0', latest: '2.6.0', update_available: false, checked_at: '2026-07-23T12:00:00Z' }
   }
   throw new Error(`Unexpected request: ${url}`)
@@ -92,6 +92,43 @@ const renderSettings = (override = null) => {
 }
 
 describe('Settings', () => {
+  it('inspects permissions when its section opens, without polling a hidden mounted card', async () => {
+    const access = {available:true,surface:'wsl-systemd',configured_mode:'full-access',
+      effective_mode:'full-access',runtime_verified:true,revision:'a'.repeat(64),pending:false,busy:false}
+    const fetchMock = vi.fn(async url => response(url === '/api/pixel/access-mode' ? access : payloadByUrl(url)))
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(<Settings activeSection="general" />)
+    await act(async () => {})
+    const inspections = () => fetchMock.mock.calls.filter(([url]) => url === '/api/pixel/access-mode')
+    expect(inspections()).toHaveLength(0)
+    view.rerender(<Settings activeSection="access" />)
+    expect(await screen.findByText('WSL')).toBeVisible()
+    expect(inspections()).toHaveLength(1)
+    view.rerender(<Settings activeSection="general" />)
+    fireEvent.focus(window)
+    await act(async () => {})
+    expect(inspections()).toHaveLength(1)
+    view.rerender(<Settings activeSection="access" />)
+    await waitFor(() => expect(inspections()).toHaveLength(2))
+    expect(fetchMock.mock.calls.every(call => call[1]?.method !== 'POST')).toBe(true)
+  })
+
+  it('shows a confirmed release with notes and performs only a read when checking', async () => {
+    const { fetchMock } = renderSettings(url => String(url).startsWith('/api/version') ? response({ current:'2.6.0', latest:'2.7.0', update_available:true, check_status:'checked', checked_at:'2026-09-16T00:00:00Z' }) : null)
+    expect(await screen.findByText('A new version of ODS is available')).toBeVisible()
+    expect(screen.getByRole('link', {name:'Release notes'})).toHaveAttribute('href','https://github.com/Osmantic/ODS/releases/tag/v2.7.0')
+    fireEvent.click(screen.getByRole('button', {name:'Check', exact:true}))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === '/api/version?force=true')).toBe(true))
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/update')).toBe(false)
+  })
+
+  it('never labels a failed release check as up to date', async () => {
+    renderSettings(url => String(url).startsWith('/api/version') ? response({ current:'2.6.0', latest:null, update_available:false, check_status:'unavailable', checked_at:null }) : null)
+    expect(await screen.findByText('Update check unavailable')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', {name:'Check', exact:true}))
+    expect(await screen.findByText('Could not confirm the latest release. Try checking again.')).toBeVisible()
+    expect(screen.queryByText('Current release')).toBeNull()
+  })
   it('does not invent uptime or a live state when uptime is missing', async () => {
     renderSettings(url => url === '/api/settings/summary' ? response({...summary,uptime:undefined}) : null)
     const label = await screen.findByText('Uptime')
@@ -189,13 +226,13 @@ describe('Settings', () => {
     expect(screen.getAllByText('Empty')).toHaveLength(3)
   })
 
-  test('migrates a retired theme to the shared Pixel appearance', async () => {
+  test('migrates a retired theme to the shared Portal appearance', async () => {
     localStorage.setItem('ods-theme', 'light')
     const { container } = renderSettings()
     await screen.findByRole('heading', { name: 'System Identity' })
 
     expect(screen.queryByRole('button', { name: 'Light' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Pixel', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Portal', exact: true })).toHaveAttribute('aria-pressed', 'true')
 
     await waitFor(() => expect(document.documentElement).toHaveAttribute('data-theme', 'ods'))
     expect(localStorage.getItem('ods-theme')).toBe('ods')
@@ -225,6 +262,21 @@ describe('Settings', () => {
     fireEvent.click(within(filters).getByRole('button', { name: 'inactive', exact: true }))
     expect(screen.getByText('No routes match this filter.')).toBeInTheDocument()
     expect(within(filters).getByRole('button', { name: 'inactive', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  test('includes undeployed and stopped services in the inactive filter', async () => {
+    renderSettings(url => url === '/api/settings/summary' ? response({...summary,
+      services: [
+        {id:'absent',name:'Undeployed service',status:'not_deployed',port:8001},
+        {id:'stopped',name:'Stopped service',status:'stopped',port:8002},
+        {id:'ready',name:'Ready service',status:'healthy',port:8003},
+      ],
+    }) : null)
+    const filters = await screen.findByRole('group', {name:'Filter routes'})
+    fireEvent.click(within(filters).getByRole('button', {name:'inactive',exact:true}))
+    expect(screen.getByText('Undeployed service')).toBeInTheDocument()
+    expect(screen.getByText('Stopped service')).toBeInTheDocument()
+    expect(screen.queryByText('Ready service')).not.toBeInTheDocument()
   })
 
   test('preserves unsaved environment changes during a global refresh', async () => {

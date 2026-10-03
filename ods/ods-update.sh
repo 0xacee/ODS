@@ -493,6 +493,17 @@ wait_for_healthy() {
     return 1
 }
 
+# Shared native identity check also covers the prospective snapshot selection.
+# This is a refusal boundary, not a source/image/runtime rollback transaction.
+_native_rollback_preflight() {
+    local snapshot="$1" helper="${INSTALL_DIR}/scripts/source-update-preflight.py"
+    if [[ ! -f "$helper" ]] || ! command -v python3 >/dev/null 2>&1; then
+        log_error "Rollback safety helper or Python 3 is unavailable; no configuration or services were changed."
+        return 1
+    fi
+    python3 "$helper" rollback --install-dir "$INSTALL_DIR" --snapshot "$snapshot"
+}
+
 # _update_rollback <reason> <snap_dir> [compose_flags]
 #   Restores the given snapshot and restarts services.
 #   Called when cmd_update encounters a non-zero exit at any step.
@@ -502,6 +513,10 @@ _update_rollback() {
     local compose_flags_arg="${3:-}"
 
     log_error "${reason}"
+    if ! _native_rollback_preflight "$snap_dir_arg"; then
+        log_error "Automatic rollback refused before configuration or service changes; keep the retained snapshot for reviewed recovery."
+        return 1
+    fi
     log_warn "Auto-restoring rollback snapshot and restarting services..."
 
     if ! _restore_snapshot "$snap_dir_arg"; then
@@ -509,19 +524,25 @@ _update_rollback() {
         log_error "  Snapshot : ${snap_dir_arg}"
         log_error "  Steps    :"
         log_error "    1. cp \"${snap_dir_arg}/.env\" \"${INSTALL_DIR}/.env\""
-        log_error "    2. cd \"${INSTALL_DIR}\" && docker compose up -d"
+        log_error "    2. cd \"${INSTALL_DIR}\" && ./ods-cli start"
         return 1
     fi
 
+    local -a rollback_compose_args=()
+    if ! compose_flags_parse "$compose_flags_arg"; then
+        log_error "Cannot restart rollback with malformed compose flags."
+        return 1
+    fi
+    rollback_compose_args=("${COMPOSE_PARSED_ARGS[@]}")
     cd "$INSTALL_DIR"
     if [[ -n "${compose_flags_arg}" ]]; then
-        if ! docker compose ${compose_flags_arg} down --remove-orphans; then
+        if ! docker compose "${rollback_compose_args[@]}" down --remove-orphans; then
             log_warn "docker compose v2 down failed, trying v1..."
-            docker-compose ${compose_flags_arg} down --remove-orphans
+            docker-compose "${rollback_compose_args[@]}" down --remove-orphans
         fi
-        if ! docker compose ${compose_flags_arg} up -d; then
+        if ! docker compose "${rollback_compose_args[@]}" up -d; then
             log_warn "docker compose v2 up failed, trying v1..."
-            docker-compose ${compose_flags_arg} up -d
+            docker-compose "${rollback_compose_args[@]}" up -d
         fi
     else
         if ! docker compose down --remove-orphans; then
@@ -695,12 +716,32 @@ cmd_backup() {
         done
     done
 
+    # Cached compose flags — records which overlays were active, so rollback
+    # can bring the restored stack up with the same file selection (same set
+    # snapshot_pre_update captures).
+    if [[ -f "${INSTALL_DIR}/.compose-flags" ]]; then
+        cp "${INSTALL_DIR}/.compose-flags" "$backup_path/"
+        files_backed_up=$((files_backed_up + 1))
+    fi
+
+    # Per-extension config directories — the same set snapshot_pre_update
+    # captures. `ods update` delegates its pre-update snapshot to this
+    # command; without config-* entries a rollback cannot restore litellm,
+    # n8n, openclaw, or searxng configuration.
+    for ext_dir in litellm n8n openclaw searxng; do
+        local src="${INSTALL_DIR}/config/${ext_dir}"
+        if [[ -d "$src" ]]; then
+            cp -r "$src" "${backup_path}/config-${ext_dir}"
+            files_backed_up=$((files_backed_up + 1))
+        fi
+    done
+
     # Backup version file
     if [[ -f "$VERSION_FILE" ]]; then
         cp "$VERSION_FILE" "$backup_path/.version"
         files_backed_up=$((files_backed_up + 1))
     fi
-    
+
     # Generate metadata (use jq for safe JSON construction)
     jq -n \
         --arg bid "$backup_id" \
@@ -710,6 +751,18 @@ cmd_backup() {
         --arg dir "$INSTALL_DIR" \
         '{backup_id: $bid, timestamp: $ts, version: $ver, files_count: $fc, install_dir: $dir}' \
         > "$backup_path/metadata.json"
+
+    # snapshot.json routes restores through the transactional
+    # _restore_snapshot path, which knows how to put config-* directories
+    # back; the legacy flat-file restore used for metadata.json-only backups
+    # would silently drop them.
+    jq -n \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg ver "$(get_current_version)" \
+        --argjson fc "$files_backed_up" \
+        --arg dir "$INSTALL_DIR" \
+        '{type:"backup", timestamp:$ts, version:$ver, files_count:$fc, install_dir:$dir}' \
+        > "$backup_path/snapshot.json"
     
     log_ok "Backup created: ${backup_path}"
     log_info "Files backed up: ${files_backed_up}"
@@ -752,15 +805,39 @@ cmd_update() {
         return 1
     fi
 
+    # Verify the runtime/source transition before snapshots or git mutation.
+    # These guards do not affect the image-only `ods update` command.
+    local preflight="${INSTALL_DIR}/scripts/source-update-preflight.py"
+    if [[ ! -f "$preflight" ]] || ! command -v python3 >/dev/null 2>&1; then
+        log_error "Source update safety helper or Python 3 is unavailable; no files were changed."
+        return 1
+    fi
+    if ! python3 "$preflight" native --install-dir "$INSTALL_DIR"; then
+        return 1
+    fi
+    local compose_flags=""
+    compose_flags=$(resolve_compose_flags 2>/dev/null || true)
+    local -a compose_args=()
+    if ! compose_flags_parse "$compose_flags"; then
+        log_error "Cannot update with malformed compose flags."
+        return 1
+    fi
+    compose_args=("${COMPOSE_PARSED_ARGS[@]}")
+    if [[ ${#compose_args[@]} -gt 0 ]]; then
+        if ! (cd "$INSTALL_DIR" && docker compose "${compose_args[@]}" config --format json) | python3 "$preflight" compose; then
+            log_error "Source update requires a verified image-only Compose stack and Compose v2 JSON configuration; no files were changed."
+            return 1
+        fi
+    else
+        log_error "Cannot verify the active Compose stack for a source update; no files were changed."
+        return 1
+    fi
+
     # ── Step 1: rollback snapshot ─────────────────────────────────────────────
     local timestamp
     timestamp=$(date +%Y%m%d-%H%M%S)
     local snap_dir
     snap_dir=$(snapshot_pre_update "$timestamp")
-
-    # Resolve compose flags once — used in restart and rollback paths.
-    local compose_flags=""
-    compose_flags=$(resolve_compose_flags 2>/dev/null || true)
 
     # ── Step 2: pull latest changes ───────────────────────────────────────────
     log_info "Pulling latest changes..."
@@ -798,13 +875,13 @@ cmd_update() {
     log_info "Restarting services..."
     cd "$INSTALL_DIR"
     if [[ -n "${compose_flags}" ]]; then
-        if ! docker compose ${compose_flags} down --remove-orphans; then
+        if ! docker compose "${compose_args[@]}" down --remove-orphans; then
             log_warn "docker compose v2 down failed, trying v1..."
-            docker-compose ${compose_flags} down --remove-orphans
+            docker-compose "${compose_args[@]}" down --remove-orphans
         fi
-        if ! docker compose ${compose_flags} up -d; then
+        if ! docker compose "${compose_args[@]}" up -d; then
             log_warn "docker compose v2 up failed, trying v1..."
-            if ! docker-compose ${compose_flags} up -d; then
+            if ! docker-compose "${compose_args[@]}" up -d; then
                 _update_rollback "Both Docker Compose v2 and v1 failed to restart services." \
                     "$snap_dir" "$compose_flags"
                 return 1
@@ -914,6 +991,9 @@ cmd_rollback() {
         return 1
     fi
 
+    if ! _native_rollback_preflight "$backup_path"; then
+        return 1
+    fi
     log_info "Rolling back from: $(basename "$backup_path")"
 
     # Show metadata (snapshot.json or legacy metadata.json)

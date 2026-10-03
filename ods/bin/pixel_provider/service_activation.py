@@ -9,7 +9,7 @@ import re
 import time
 from pathlib import Path
 
-from pixel_access_bridge import UNIT, AccessError, atomic_json, digest, remaining
+from pixel_access_bridge import AccessError, atomic_json, digest, remaining
 from pixel_access_protocol import HEX
 from pixel_settings import coordinator as settings
 from pixel_settings.contract import SettingsError
@@ -19,11 +19,20 @@ from .service_environment import _snapshot
 
 
 def definition(bridge, owned_dropin):
+    service = bridge.gateway_service
+    if hasattr(service, 'definition'):
+        return service.definition(owned_dropin)
+    if hasattr(service, 'unit'):
+        return _systemd_definition(bridge, owned_dropin)
+    raise AccessError('provider-service-adapter-missing')
+
+
+def _systemd_definition(bridge, owned_dropin):
     # Provider environment changes must not replace a launcher, OS identity or
     # unrelated unit policy. The exact two managed files are checked separately.
-    fields = bridge.command(['systemctl', 'show', UNIT,
+    fields = bridge.command(['systemctl', 'show', bridge.gateway_service.unit,
         '--property=User,Group,DynamicUser,WorkingDirectory,RootDirectory,RootImage'])
-    sources = bridge.command(['systemctl', 'show', UNIT, '--property=FragmentPath,DropInPaths'])
+    sources = bridge.command(['systemctl', 'show', bridge.gateway_service.unit, '--property=FragmentPath,DropInPaths'])
     values = dict(line.split('=', 1) for line in sources.splitlines() if '=' in line)
     fragment, dropins = values.get('FragmentPath', ''), values.get('DropInPaths', '')
     paths = [fragment, *dropins.split()]
@@ -113,7 +122,7 @@ def stop_before_owner_change(bridge, journal, environment, *, qualify_runtime):
     before = settings._identity(bridge)
     journal.update(phase='invoking', restartIdentity=before)
     atomic_json(bridge.state / 'transition.json', journal)
-    bridge.command(['systemctl', 'stop', UNIT], timeout=60)
+    bridge.gateway_service.stop(timeout=60)
     if bridge.stopped_native(journal['token']).get('stopped') is not True:
         raise AccessError('provider-stop-unconfirmed')
     _unchanged(bridge, journal, environment, qualify_runtime)
@@ -132,11 +141,13 @@ def activate(bridge, journal, environment, *, qualify_runtime):
         return 'unavailable'
     try:
         before = settings._identity(bridge)
+        running = True
     except AccessError:
         if (journal.get('phase') not in ('invoking', 'restarting') or not settings._valid_identity(journal.get('restartIdentity'))
                 or bridge.stopped_native(journal['token']).get('stopped') is not True):
             return 'unavailable'
         before = journal['restartIdentity']
+        running = False
     # A late pipe reply/recovery callback must not replace an already verified
     # current process. Rollback selects a different side, so it cannot reuse it.
     record, side = environment.select(journal)
@@ -149,12 +160,18 @@ def activate(bridge, journal, environment, *, qualify_runtime):
     journal['phase'] = 'restarting'
     journal['restartIdentity'] = before
     atomic_json(bridge.state / 'transition.json', journal)
+    # A rollback callback may arrive after the replacement gateway started.
+    # launchd must unload that held instance before loading a different plist.
+    if running and getattr(bridge.gateway_service, 'is_launchd', False):
+        bridge.gateway_service.stop(timeout=60)
+        if bridge.stopped_native(journal['token']).get('stopped') is not True:
+            raise AccessError('provider-stop-unconfirmed')
     selection = environment.apply(journal)
     _unchanged(bridge, journal, environment, qualify_runtime)
-    bridge.command(['systemctl', 'daemon-reload'])
+    bridge.gateway_service.reload()
     _unchanged(bridge, journal, environment, qualify_runtime)
     environment.verify(journal, selection)
-    bridge.command(['systemctl', 'restart', UNIT], timeout=60)
+    bridge.gateway_service.restart(timeout=60)
     deadline = time.monotonic() + remaining(120)
     while time.monotonic() < deadline:
         try:

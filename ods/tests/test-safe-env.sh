@@ -95,11 +95,20 @@ load_env_from_output_allowlist ALLOWED < <(printf '%s\n' 'ALLOWED="yes"' 'NOT_AL
 pass "allowlist loader ignores unapproved keys"
 
 echo "Test 9: model selector loader only accepts approved selector keys"
-unset LLM_MODEL EVIL_SELECTOR_KEY 2>/dev/null || true
-load_model_selector_env_from_output < <(printf '%s\n' 'LLM_MODEL="qwen-test"' 'EVIL_SELECTOR_KEY="nope"')
+unset LLM_MODEL PIXEL_AGENT_MODEL_READY EVIL_SELECTOR_KEY 2>/dev/null || true
+load_model_selector_env_from_output < <(printf '%s\n' 'LLM_MODEL="qwen-test"' 'PIXEL_AGENT_MODEL_READY="false"' 'EVIL_SELECTOR_KEY="nope"')
 [[ "${LLM_MODEL:-}" == "qwen-test" ]] || fail "LLM_MODEL was not loaded"
+[[ "${PIXEL_AGENT_MODEL_READY:-}" == "false" ]] || fail "PIXEL_AGENT_MODEL_READY was not loaded"
 [[ -z "${EVIL_SELECTOR_KEY:-}" ]] || fail "EVIL_SELECTOR_KEY should not be loaded"
 pass "model selector loader is allowlisted"
+
+echo "Test 9b: model selector loader carries CPU profile host-RAM caps"
+unset LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM LLAMA_SERVER_MEMORY_LIMIT 2>/dev/null || true
+load_model_selector_env_from_output < <(printf '%s\n' 'LLAMA_ARG_CTX_CHECKPOINTS="4"' 'LLAMA_ARG_CACHE_RAM="1024"' 'LLAMA_SERVER_MEMORY_LIMIT="6G"')
+[[ "${LLAMA_ARG_CTX_CHECKPOINTS:-}" == "4" ]] || fail "LLAMA_ARG_CTX_CHECKPOINTS was not loaded"
+[[ "${LLAMA_ARG_CACHE_RAM:-}" == "1024" ]] || fail "LLAMA_ARG_CACHE_RAM was not loaded"
+[[ "${LLAMA_SERVER_MEMORY_LIMIT:-}" == "6G" ]] || fail "LLAMA_SERVER_MEMORY_LIMIT was not loaded"
+pass "model selector loader carries checkpoint and prompt-cache caps"
 
 echo "Test 10: load_env_file skips Bash readonly UID"
 cat > "$tmpdir/.env-readonly" << 'EOF'

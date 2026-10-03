@@ -179,7 +179,9 @@ OPTIONS:
 BACKUP TYPES:
     full        Backup everything (user data + config + cache)
     user-data   Backup only user data volumes (default)
-    config      Backup only configuration files
+    config      Backup only configuration files; native Pixel state is excluded
+
+Native Pixel full/user-data backup is unsupported and fails before creating an archive.
 
 EXAMPLES:
     $(basename "$0")                          # Backup (default: user-data)
@@ -311,6 +313,7 @@ create_manifest() {
         --argjson cfg "$has_config" \
         --argjson ca "$has_cache" \
         --argjson udp "$user_data_paths_json" \
+        --argjson npe "${4:-false}" \
         '{
           manifest_version: $mv,
           backup_date: $bd,
@@ -330,7 +333,7 @@ create_manifest() {
               | map({key: (gsub("[^A-Za-z0-9_]"; "_")), value: .})
               | from_entries)
           )
-        }' > "$backup_dir/manifest.json"
+        } + (if $npe then {native_pixel: {included: false, reason: "unsupported-native-state"}} else {} end)' > "$backup_dir/manifest.json"
     log_info "Created backup manifest"
 }
 
@@ -464,7 +467,14 @@ compress_backup() {
     local parent_dir
     parent_dir=$(dirname "$backup_dir")
 
-    tar czf "$parent_dir/$backup_name.tar.gz" -C "$parent_dir" "$backup_name"
+    # macOS `tar` (bsdtar) embeds AppleDouble `._*` metadata companions when the
+    # staged files carry extended attributes (e.g. com.apple.provenance, which the
+    # OS sets on ordinary files). The top-level `._<backup_id>` entry then fails
+    # backup-archive.py's member check on restore — its first path component is
+    # not the backup id — so the whole archive is rejected and macOS users cannot
+    # recover their own backups. COPYFILE_DISABLE tells bsdtar to omit that
+    # metadata; GNU tar on Linux ignores the variable, so this is a no-op there.
+    COPYFILE_DISABLE=1 tar czf "$parent_dir/$backup_name.tar.gz" -C "$parent_dir" "$backup_name"
     # The archive bundles the raw .env (DASHBOARD_API_KEY, session secret, service
     # passwords). Restrict it to the owner rather than leaving it world-readable
     # at the umask default, matching the 0600 the .env itself carries.
@@ -483,6 +493,12 @@ do_backup() {
     local backup_type="${1:-user-data}"
     local compress="${2:-false}"
     local description="${3:-}"
+    local native_scope native_excluded=false
+    if ! native_scope=$(python3 "$SCRIPT_DIR/scripts/backup-native-preflight.py" backup \
+        --install-dir "$ODS_DIR" --backup-type "$backup_type"); then
+        return 1
+    fi
+    [[ "$native_scope" == native-excluded ]] && native_excluded=true
 
     # Generate backup ID
     local backup_id
@@ -502,7 +518,7 @@ do_backup() {
     mkdir -p "$backup_dir"
 
     # Create manifest
-    create_manifest "$backup_dir" "$backup_type" "$description"
+    create_manifest "$backup_dir" "$backup_type" "$description" "$native_excluded"
 
     # Perform backup based on type
     case "$backup_type" in
@@ -538,8 +554,13 @@ do_backup() {
 
     log_success "Backup complete: $backup_id"
     echo ""
-    echo "To restore this backup, run:"
-    echo "  ods-restore.sh $backup_id"
+    if [[ "$native_excluded" == true ]]; then
+        echo "Configuration-only archive: native Pixel state is excluded."
+        echo "This archive is for inspection; automatic restore is unsupported. Retain the original state."
+    else
+        echo "To restore this backup, run:"
+        echo "  ods-restore.sh $backup_id"
+    fi
 }
 
 # Verify checksums for an existing backup directory or archive
@@ -708,9 +729,7 @@ main() {
         fi
     fi
 
-    # Create backup root
-    mkdir -p "$BACKUP_ROOT"
-
+    # do_backup checks native-state support before creating any backup files.
     # Perform backup
     do_backup "$backup_type" "$compress" "$description"
 }

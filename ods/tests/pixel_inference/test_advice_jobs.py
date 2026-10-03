@@ -1,11 +1,12 @@
 import asyncio
-import json
+import json as json
 import multiprocessing
 import os
 from pathlib import Path
 import sys
+import threading
 import time
-import uuid
+import uuid as uuid
 
 import pytest
 
@@ -47,14 +48,16 @@ def wait(manager,job_id):
 
 @pytest.fixture
 def manager(tmp_path):
-    root=tmp_path/'providers'; root.mkdir(mode=0o700)
+    root=tmp_path/'providers'
+    root.mkdir(mode=0o700)
     FakeCall.calls=0
     return AdvisoryJobs(root,call_factory=FakeCall)
 
 
 def test_idempotent_start_and_conflict_and_no_capsule_on_disk(manager):
     body=request()
-    manager.start(body); manager.start(body)
+    manager.start(body)
+    manager.start(body)
     with pytest.raises(StoreError,match='advice-request-conflict'):
         manager.start(dict(body,capsule='different'))
     result=wait(manager,body['requestId'])
@@ -69,7 +72,8 @@ def test_idempotent_start_and_conflict_and_no_capsule_on_disk(manager):
 def test_two_global_slots_across_independent_managers_and_cancel(manager):
     other=AdvisoryJobs(manager.providers,call_factory=FakeCall)
     a,b,c=request(),request(),request()
-    manager.start(a); other.start(b)
+    manager.start(a)
+    other.start(b)
     with pytest.raises(StoreError,match='advice-busy'):
         AdvisoryJobs(manager.providers,call_factory=FakeCall).start(c)
     other.cancel(a['requestId'])
@@ -81,30 +85,53 @@ def test_two_global_slots_across_independent_managers_and_cancel(manager):
 
 
 def test_status_does_not_leak_descriptors(manager):
-    body=request(); manager.start(body)
-    initial=len(os.listdir('/proc/self/fd'))
-    for _ in range(100):
-        manager.status(body['requestId'])
-    assert len(os.listdir('/proc/self/fd')) <= initial
-    manager.cancel(body['requestId']); wait(manager,body['requestId'])
+    class HeldCall(FakeCall):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def run(self, *, cancelled, lock_fds):
+            assert len(lock_fds) == 2
+            self.entered.set()
+            while not self.release.wait(.02):
+                if cancelled():
+                    raise asyncio.CancelledError()
+            return dict(text='Fictional advice', trusted=False)
+
+    active = AdvisoryJobs(manager.providers, call_factory=HeldCall)
+    body=request()
+    active.start(body)
+    descriptors = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    try:
+        assert HeldCall.entered.wait(3), 'advice worker did not reach the running state'
+        initial=len(os.listdir(descriptors))
+        for _ in range(100):
+            active.status(body['requestId'])
+        assert len(os.listdir(descriptors)) <= initial
+    finally:
+        HeldCall.release.set()
+        active.cancel(body['requestId'])
+        wait(active,body['requestId'])
 
 
 def child_job(root,body,ready):
     jobs=AdvisoryJobs(root,call_factory=FakeCall)
-    jobs.start(body); ready.set()
+    jobs.start(body)
+    ready.set()
     time.sleep(30)
 
 
 def test_process_loss_is_interrupted_never_automatic_replay(manager):
     context=multiprocessing.get_context('fork')
-    ready=context.Event(); body=request()
+    ready=context.Event()
+    body=request()
     child=context.Process(target=child_job,args=(manager.providers,body,ready))
     child.start()
     try:
         assert ready.wait(3)
         assert manager.status(body['requestId'])['status']=='running'
     finally:
-        child.terminate(); child.join(3)
+        child.terminate()
+        child.join(3)
     assert not child.is_alive()
     assert manager.status(body['requestId'])['status']=='interrupted'
     assert manager.start(body)['status']=='interrupted'
@@ -113,7 +140,9 @@ def test_process_loss_is_interrupted_never_automatic_replay(manager):
 
 def test_symlink_job_and_public_directory_fail_closed(manager,tmp_path):
     manager.root.mkdir(mode=0o700)
-    body=request(); target=tmp_path/'outside'; target.mkdir(mode=0o700)
+    body=request()
+    target=tmp_path/'outside'
+    target.mkdir(mode=0o700)
     (manager.root/body['requestId']).symlink_to(target,target_is_directory=True)
     with pytest.raises(StoreError):
         manager.start(body)

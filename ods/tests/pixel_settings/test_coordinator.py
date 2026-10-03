@@ -102,14 +102,17 @@ class SettingsBridge(FakeBridge):
         return value
 
 
-@pytest.fixture
-def adapter(tmp_path, monkeypatch):
+@pytest.fixture(params=['systemd', 'launchd'])
+def adapter(tmp_path, monkeypatch, request):
     tmp_path.chmod(0o700)
     original = access.private_json
     monkeypatch.setattr(access, "private_json", lambda path, _uid, maximum=1048576: original(path, os.getuid(), maximum))
     read = c._read
     monkeypatch.setattr(c, "_read", lambda path, uid, maximum=1048576: read(path, os.getuid() if uid == 0 else uid, maximum))
-    return SettingsBridge(tmp_path)
+    instance = SettingsBridge(tmp_path)
+    if request.param == 'launchd':
+        instance.use_launchd_fixture(monkeypatch)
+    return instance
 
 
 def request(adapter, operation="apply"):

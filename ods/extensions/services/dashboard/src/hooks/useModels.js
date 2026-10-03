@@ -81,6 +81,7 @@ const MODEL_ACTIVATION_POLL_MS = 5000
 // Delete allows 30s at the host; the 128-token benchmark allows 384s.
 const MODEL_DELETE_TIMEOUT_MS = 35000
 const MODEL_BENCHMARK_TIMEOUT_MS = 400000
+const MODEL_RUNTIME_TIMEOUT_MS = 1225000
 // Activation allows 2700s plus 120s of download-busy retry grace.
 // Keep the UI lock until that budget and a small response margin have elapsed.
 const MODEL_ACTIVATION_TIMEOUT_MS = 2825000
@@ -114,7 +115,7 @@ async function errorMessageFromResponse(response, fallback) {
   return errorMessageFromPayload(await responseJson(response), fallback)
 }
 
-async function modelActionRequest(url, options, budget, timeoutMessage, failureMessage) {
+async function modelActionRequest(url, options, budget, timeoutMessage, failureMessage, expectedStatus = null) {
   const controller = new AbortController()
   let timer
   const deadline = new Promise((_, reject) => {
@@ -128,6 +129,9 @@ async function modelActionRequest(url, options, budget, timeoutMessage, failureM
       (async () => {
         const response = await fetch(url, { ...options, signal: controller.signal })
         if (!response.ok) throw new Error(await errorMessageFromResponse(response, failureMessage))
+        if (expectedStatus && (await responseJson(response)).status !== expectedStatus) {
+          throw new Error('The runtime operation was not confirmed. Refresh its status before retrying.')
+        }
       })(),
       deadline,
     ])
@@ -172,9 +176,25 @@ function normalizeOdsMode(value) {
   return ODS_MODES.has(mode) ? mode : 'unknown'
 }
 
-function modelActivationModeError(effectiveMode, configuredMode, llmBackend) {
+function normalizeModelManagement(value) {
+  const managed = typeof value?.managed === 'boolean' ? value.managed : null
+  return {
+    managed,
+    canActivate: managed === true && value.canActivate === true,
+    canUnload: managed === true && value.canUnload === true,
+    running: managed === true && value.running === true,
+    reason: typeof value?.reason === 'string' ? value.reason : '',
+  }
+}
+
+function modelActivationModeError(effectiveMode, configuredMode, llmBackend, externalLemonade, management) {
   if (llmBackend === 'external') {
-    return 'ODS is using an external Ollama or LM Studio backend. Re-run the installer with --no-external-llm before activating a downloaded local model.'
+    return 'This install routes to a model service outside ODS. Downloading a model here does not switch the active model; reconnect ODS to its supported runtime integration to manage model changes.'
+  }
+  if (externalLemonade && !(management?.managed && management.canActivate)) {
+    return management?.managed === false
+      ? 'Change the loaded model in Lemonade, then use Adopt loaded model here to update ODS and Portal.'
+      : management?.reason || 'Model management is temporarily unavailable. Refresh the runtime status.'
   }
   if (effectiveMode === 'unknown' || configuredMode === 'unknown') {
     return 'ODS could not verify the active runtime mode. Repair or restart ODS before running a local model.'
@@ -188,7 +208,7 @@ function modelActivationModeError(effectiveMode, configuredMode, llmBackend) {
   return null
 }
 
-function waitForActivationPoll(delay, signal) {
+function waitForActivationPoll(delay, signal, wake = null) {
   if (signal.aborted) return Promise.resolve()
   return new Promise(resolve => {
     const finish = () => {
@@ -198,10 +218,13 @@ function waitForActivationPoll(delay, signal) {
     }
     const timer = setTimeout(finish, delay)
     signal.addEventListener('abort', finish, { once: true })
+    // A settled activation request ends the wait early so the confirming
+    // status read is not held behind the regular poll interval.
+    if (wake) wake.then(finish, finish)
   })
 }
 
-export function useModels() {
+export function useModels({observe=true} = {}) {
   const [models, setModels] = useState(USE_MOCK_DATA ? getMockModels() : [])
   const [gpu, setGpu] = useState(USE_MOCK_DATA ? MOCK_GPU : null)
   const [currentModel, setCurrentModel] = useState(USE_MOCK_DATA ? MOCK_CURRENT_MODEL : null)
@@ -212,17 +235,22 @@ export function useModels() {
   const [odsMode, setOdsMode] = useState(USE_MOCK_DATA ? MOCK_MODES.odsMode : 'unknown')
   const [configuredMode, setConfiguredMode] = useState(USE_MOCK_DATA ? MOCK_MODES.configuredMode : 'unknown')
   const [llmBackend, setLlmBackend] = useState(USE_MOCK_DATA ? 'llama-server' : 'unknown')
+  const [externalLemonade, setExternalLemonade] = useState(false)
+  const [modelManagement, setModelManagement] = useState(() => normalizeModelManagement(null))
+  const [runtimeActionLoading, setRuntimeActionLoading] = useState(null)
   const [recommendationAlternatives, setRecommendationAlternatives] = useState([])
   const [hermesMinimumContext, setHermesMinimumContext] = useState(DEFAULT_HERMES_MIN_CONTEXT)
   const [pixelMinimumContext, setPixelMinimumContext] = useState(DEFAULT_PIXEL_MIN_CONTEXT)
   const [loading, setLoading] = useState(USE_MOCK_DATA ? false : true)
   const [fetchError, setFetchError] = useState(null)
   const [mutationError, setMutationError] = useState(null)
+  const clearMutationError = useCallback(() => setMutationError(null), [])
   const [pendingActions, setPendingActionsState] = useState([])
   const pendingActionsRef = useRef([])
   const actionTokenRef = useRef(0)
   const modelsRequestRef = useRef(0)
   const latestSettledModelsRequestRef = useRef(0)
+  const latestModelsSnapshotRef = useRef(null)
   const pollInFlightRef = useRef(false)
   const loadActiveRef = useRef(false)
   const activationControllerRef = useRef(null)
@@ -289,9 +317,11 @@ export function useModels() {
       const data = await response.json()
       if (signal?.aborted) return null
 
-      // A slower, older request must not overwrite a newer snapshot.
-      if (requestId < latestSettledModelsRequestRef.current) return null
+      // Keep publishing ordered, but return valid readback to its caller.
+      // Faster background polls must not starve activation confirmation.
+      if (requestId < latestSettledModelsRequestRef.current) return data
       latestSettledModelsRequestRef.current = requestId
+      latestModelsSnapshotRef.current = data
 
       setModels(data.models)
       setGpu(data.gpu)
@@ -304,6 +334,8 @@ export function useModels() {
       setOdsMode(effectiveMode)
       setConfiguredMode(normalizeOdsMode(data.configuredMode ?? data.odsMode))
       setLlmBackend(typeof data.llmBackend === 'string' ? data.llmBackend.trim().toLowerCase() : 'unknown')
+      setExternalLemonade(data.externalLemonade === true)
+      setModelManagement(normalizeModelManagement(data.modelManagement))
       setRecommendationAlternatives(data.recommendationAlternatives ?? [])
       setHermesMinimumContext(Number(data.hermesMinimumContext || DEFAULT_HERMES_MIN_CONTEXT))
       setPixelMinimumContext(Number(data.pixelMinimumContext || DEFAULT_PIXEL_MIN_CONTEXT))
@@ -315,6 +347,7 @@ export function useModels() {
       if (requestId >= latestSettledModelsRequestRef.current) {
         latestSettledModelsRequestRef.current = requestId
         setFetchError(err.message)
+        setModelManagement(normalizeModelManagement(null))
       }
       // No silent fallback - let error propagate to UI
     } finally {
@@ -324,15 +357,18 @@ export function useModels() {
     }
   }, [reconcilePendingActions])
 
+  // A caller may hide the local catalog, but accepted mutations still need
+  // their own readback. Explicit activation confirmation also keeps fetching.
+  const observing = observe || pendingActions.length > 0 || Boolean(runtimeActionLoading)
   const pollModels = useCallback(async () => {
-    if (document.hidden || pollInFlightRef.current) return
+    if (!observing || document.hidden || pollInFlightRef.current) return
     pollInFlightRef.current = true
     try {
       await fetchModels()
     } finally {
       pollInFlightRef.current = false
     }
-  }, [fetchModels])
+  }, [fetchModels,observing])
 
   useEffect(() => {
     pollModels()
@@ -347,6 +383,7 @@ export function useModels() {
     : DEFAULT_POLL_MS
 
   useEffect(() => {
+    if (!observing) return
     // Poll promptly while a model mutation is pending, while keeping at most
     // one scheduled request in flight. Hidden tabs remain idle (#1490).
     const interval = setInterval(pollModels, pollInterval)
@@ -359,7 +396,7 @@ export function useModels() {
       clearInterval(interval)
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [pollInterval, pollModels])
+  }, [pollInterval, pollModels, observing])
 
   const downloadModel = async (modelId) => {
     const action = startAction(modelId, 'download')
@@ -377,7 +414,7 @@ export function useModels() {
   }
 
   const loadModel = async (modelId, options = {}) => {
-    const modeError = modelActivationModeError(odsMode, configuredMode, llmBackend)
+    const modeError = modelActivationModeError(odsMode, configuredMode, llmBackend, externalLemonade, modelManagement)
     if (modeError) {
       setMutationError(modeError)
       return
@@ -392,6 +429,9 @@ export function useModels() {
       return
     }
     loadActiveRef.current = true
+    // Invalidate catalog requests started before this mutation. Their replies
+    // describe the previous route even if no newer poll has settled yet.
+    latestSettledModelsRequestRef.current = ++modelsRequestRef.current
     const action = startAction(modelId, 'load')
     setMutationError(null)
 
@@ -404,7 +444,7 @@ export function useModels() {
     let activationError = null
     let targetLoaded = false
     const requestedContextLength = Number(options.contextLength || 0) || null
-    const activationMatches = (data) => {
+    const snapshotMatches = (data) => {
       if (
         data?.currentModel !== modelId ||
         data?.activationReadyModel !== modelId ||
@@ -414,6 +454,9 @@ export function useModels() {
       const activeModel = data?.models?.find(model => model.id === modelId)
       return Number(activeModel?.contextLength || 0) === requestedContextLength
     }
+    // A superseded response may confirm the operation when the newer published
+    // inventory agrees. A newer route/context or active lifecycle still blocks it.
+    const activationMatches = data => snapshotMatches(data) && snapshotMatches(latestModelsSnapshotRef.current)
 
     const activationRequestOptions = {
       method: 'POST',
@@ -425,16 +468,25 @@ export function useModels() {
         context_length: requestedContextLength,
       })
     }
+    // The server answers the POST only after the model and its consumers are
+    // committed. Confirm right away instead of waiting out the poll interval;
+    // a joined in-flight activation or a dropped connection keeps polling.
+    let activationAnswered = false
+    let wakeActivationPoll = () => {}
+    let activationWake = new Promise(resolve => { wakeActivationPoll = resolve })
     const activationRequest = fetch(`/api/models/${encodeURIComponent(modelId)}/load`, activationRequestOptions)
       .then(async (response) => {
-        if (response.ok) return
+        if (response.ok) {
+          activationAnswered = true
+          return
+        }
 
         const body = await responseJson(response)
         if (response.status === 409) {
           if (body?.detail?.code === 'pixel_chat_active') {
             activationError = errorMessageFromPayload(
               body,
-              'Pixel is working. Stop the active response before changing models.'
+              'Portal is working. Stop the active response before changing models.'
             )
             return
           }
@@ -453,11 +505,19 @@ export function useModels() {
       // A dropped request does not prove activation failed. Continue polling
       // until the requested model appears or the explicit UI deadline expires.
       .catch(() => {})
+      .then(() => {
+        if (activationAnswered || activationError) {
+          activationAnswered = true
+          wakeActivationPoll()
+        }
+      })
 
     try {
       while (!controller.signal.aborted && Date.now() - startedAt < MODEL_ACTIVATION_TIMEOUT_MS) {
         const remainingMs = MODEL_ACTIVATION_TIMEOUT_MS - (Date.now() - startedAt)
-        await waitForActivationPoll(Math.min(MODEL_ACTIVATION_POLL_MS, remainingMs), controller.signal)
+        await waitForActivationPoll(Math.min(MODEL_ACTIVATION_POLL_MS, remainingMs), controller.signal, activationWake)
+        // Only the first wait after the server answered is cut short.
+        if (activationAnswered) activationWake = null
         if (controller.signal.aborted) return
 
         if (activationError) break
@@ -486,7 +546,41 @@ export function useModels() {
       controller.abort()
       activationControllerRef.current = null
       void activationRequest
+      // A background poll started before final confirmation must not restore
+      // the old selection after the selector has released its switching state.
+      latestSettledModelsRequestRef.current = ++modelsRequestRef.current
       loadActiveRef.current = false
+    }
+  }
+
+  const changeRuntime = async (operation) => {
+    if (!modelManagement.managed || !modelManagement.canUnload) {
+      setMutationError(modelManagement.reason || 'Runtime controls are unavailable for this installation.')
+      return
+    }
+    if (loadActiveRef.current || backendLifecycleBusy || pendingActionsRef.current.length) {
+      setMutationError('Wait for the current model operation to finish before changing the runtime.')
+      return
+    }
+    loadActiveRef.current = true
+    setRuntimeActionLoading(operation)
+    setMutationError(null)
+    latestSettledModelsRequestRef.current = ++modelsRequestRef.current
+    try {
+      await modelActionRequest(
+        '/api/models/runtime/' + operation,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+        MODEL_RUNTIME_TIMEOUT_MS,
+        'The runtime operation timed out. The server may still be working; refresh before retrying.',
+        'Could not ' + operation + ' the model runtime.',
+        operation === 'stop' ? 'stopped' : 'started',
+      )
+    } catch (err) {
+      setMutationError(err.message)
+    } finally {
+      await fetchModels()
+      loadActiveRef.current = false
+      setRuntimeActionLoading(null)
     }
   }
 
@@ -541,7 +635,7 @@ export function useModels() {
     ].filter(Boolean)),
   ]
   const error = mutationError || fetchError
-  const activationModeError = modelActivationModeError(odsMode, configuredMode, llmBackend)
+  const activationModeError = modelActivationModeError(odsMode, configuredMode, llmBackend, externalLemonade, modelManagement)
 
   return {
     models,
@@ -554,7 +648,13 @@ export function useModels() {
     odsMode,
     configuredMode,
     llmBackend,
+    externalLemonade,
+    modelManagement,
+    runtimeActionLoading,
+    stopRuntime: () => changeRuntime('stop'),
+    startRuntime: () => changeRuntime('start'),
     canActivateModels: activationModeError === null,
+    clearMutationError,
     activationModeError,
     recommendationAlternatives,
     hermesMinimumContext,

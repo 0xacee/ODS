@@ -87,6 +87,8 @@ def _trusted_executable(candidates: Sequence[str]) -> str | None:
 
 
 def observe_gpu() -> dict:
+    if sys.platform == "darwin":
+        return observe_metal()
     executable = _trusted_executable([
         "/usr/lib/wsl/lib/nvidia-smi",
         "/usr/bin/nvidia-smi",
@@ -125,6 +127,37 @@ def observe_gpu() -> dict:
         "backend": "nvidia" if devices else "unavailable",
         "devices": devices,
     }
+
+
+def observe_metal() -> dict:
+    devices = []
+    executable = _trusted_executable(["/usr/sbin/system_profiler"])
+    result = _run([executable, "SPDisplaysDataType", "-json"]) if executable else None
+    if result and result.returncode == 0 and not result.stderr.strip():
+        try:
+            value = json.loads(result.stdout)
+            rows = value.get("SPDisplaysDataType") if isinstance(value, dict) else None
+            if not isinstance(rows, list) or len(rows) > 16:
+                raise ValueError()
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError()
+                name = row.get("sppci_model")
+                family = row.get("spdisplays_mtlgpufamilysupport", row.get("spdisplays_metal"))
+                if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
+                    raise ValueError()
+                if family == "spdisplays_supported":
+                    metal = "supported"
+                elif isinstance(family, str) and re.fullmatch(r"spdisplays_metal[1-9]", family):
+                    metal = "Metal " + family[-1]
+                else:
+                    continue
+                # Never forward display identifiers or mislabel shared RAM as VRAM.
+                devices.append({"name": name, "metal": metal})
+        except (ValueError, TypeError):
+            devices = []
+    return {"schemaVersion": 1, "kind": "ods-host-gpu", "available": bool(devices),
+            "backend": "metal" if devices else "unavailable", "devices": devices}
 
 
 def _native_tailscale_state() -> tuple[bool, str, bool] | None:
@@ -433,9 +466,51 @@ def observe_network_peer(target: str, ports: str = "") -> dict:
     }
 
 
+MACOS_OBSERVATIONS = {
+    'os-release': (('/usr/bin/sw_vers',),),
+    'cpu': (('/usr/sbin/sysctl', 'hw.model', 'hw.ncpu', 'hw.physicalcpu', 'hw.logicalcpu', 'machdep.cpu.brand_string'),),
+    'memory': (('/usr/sbin/sysctl', 'hw.memsize', 'vm.swapusage'), ('/usr/bin/vm_stat',)),
+    'processes': (('/bin/ps', '-axo', 'pid=,ppid=,user=,stat=,%cpu=,%mem=,ucomm=', '-r'),),
+    'services': (('/bin/launchctl', 'list'),),
+    'storage': (('/bin/df', '-kP'),),
+    'network-addresses': (('/sbin/ifconfig', '-a'),),
+    'network-routes': (('/usr/sbin/netstat', '-rn'),),
+    'listening-ports': (('/usr/sbin/netstat', '-an', '-p', 'tcp'),
+                        ('/usr/sbin/netstat', '-an', '-p', 'udp')),
+}
+
+
+def observe_macos(action: str) -> dict:
+    value = {'schemaVersion': 1, 'kind': 'ods-host-' + action,
+             'platform': 'macos', 'available': False, 'observations': []}
+    if sys.platform != 'darwin' or action not in MACOS_OBSERVATIONS:
+        return value
+    for arguments in MACOS_OBSERVATIONS[action]:
+        executable = _trusted_executable([arguments[0]])
+        if not executable:
+            return value
+        result = _run([executable, *arguments[1:]], timeout=4)
+        if result is None or result.returncode:
+            return value
+        lines = result.stdout.splitlines()
+        if action == 'listening-ports':
+            # Do not leak unrelated established TCP/UDP peer connections.
+            if arguments[-1] == 'tcp':
+                lines = [line for line in lines if line.split() and line.split()[-1] == 'LISTEN']
+            else:
+                lines = [line for line in lines if len(line.split()) >= 5
+                         and line.split()[0].startswith('udp') and line.split()[4] == '*.*']
+        value['observations'].append({'tool': Path(executable).name,
+                                      'lines': lines[:256], 'truncated': len(lines) > 256})
+    value['available'] = True
+    return value
+
+
 def main(argv: Sequence[str]) -> int:
     if len(argv) == 2 and argv[1] in {"gpu", "tailscale"}:
         value = observe_gpu() if argv[1] == "gpu" else observe_tailscale()
+    elif len(argv) == 2 and argv[1] in MACOS_OBSERVATIONS:
+        value = observe_macos(argv[1])
     elif len(argv) == 4 and argv[1] == "network-peer":
         try:
             value = observe_network_peer(argv[2], argv[3])

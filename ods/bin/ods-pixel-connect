@@ -27,7 +27,6 @@ def main():
     parser.add_argument('--confirm-provider-policy',action='store_true',help='Activate this policy for this explicit turn only')
     parser.add_argument('--allow-cloud-transfer',action='store_true',help='Authorize configured cloud recipients to receive this turn and its tool history')
     parser.add_argument('--directory',help='New, non-existing private client directory')
-    parser.add_argument('--pixel-repository',help='Local Osmantic/Pixel Git repository containing the ODS pinned commit')
     parser.add_argument('--openclaw-bin',help='Installed OpenClaw executable; no installation or upgrade is performed')
     parser.add_argument('--reasoning',choices=('on','off'),help='Explicit model reasoning capability; never guessed from its name')
     parser.add_argument('--sandbox-image',default='openclaw-sandbox:bookworm-slim')
@@ -41,8 +40,8 @@ def main():
         parser.error('tunnel requires --ssh-target')
     if args.action == 'run' and not all((args.directory,args.message_file)):
         parser.error('run requires --directory and --message-file')
-    if args.action == 'prepare' and not all((args.directory,args.pixel_repository,args.openclaw_bin,args.reasoning)):
-        parser.error('prepare requires --directory, --pixel-repository, --openclaw-bin and --reasoning')
+    if args.action == 'prepare' and not all((args.directory,args.openclaw_bin,args.reasoning)):
+        parser.error('prepare requires --directory, --openclaw-bin and --reasoning')
     try:
         if args.action == 'tunnel':
             run_tunnel(ssh_bin=args.ssh_bin,target=args.ssh_target,remote_port=args.remote_port,listen_port=args.listen_port)
@@ -63,7 +62,7 @@ def main():
             result = probe_connection(connection,confirmed_endpoint=args.confirm_endpoint)
         else:
             result = prepare_client(connection,args.directory,confirmed_endpoint=args.confirm_endpoint,
-                pixel_repository=args.pixel_repository,openclaw_bin=args.openclaw_bin,reasoning=args.reasoning=='on',
+                openclaw_bin=args.openclaw_bin,reasoning=args.reasoning=='on',
                 sandbox_image=args.sandbox_image)
         print(json.dumps(result,indent=2))
         return 0

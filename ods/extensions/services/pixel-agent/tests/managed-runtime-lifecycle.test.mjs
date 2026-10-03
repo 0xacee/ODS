@@ -147,11 +147,31 @@ function changeBinding(f) {
   f.replaceConfig(changed);
 }
 
+test('maintenance uses a distinct access API and cannot restore after owner invalidation',async()=>{
+  const f=fixture(), calls=[];
+  f.access.acquireMaintenance=()=>{calls.push('maintenance.acquire');f.hold();return f.access.status();};
+  f.access.releaseMaintenance=()=>{calls.push('maintenance.release');return f.access.status();};
+  const original=f.access.acquire;
+  f.access.acquire=(...args)=>{calls.push('transition.invalidate');return original(...args);};
+  const owner=f.register();
+  await owner.acquireMaintenance('a'.repeat(64),'synthetic-revision');
+  owner.releaseMaintenance('a'.repeat(64));
+  assert.deepEqual(calls,['maintenance.acquire','maintenance.release']);
+  changeBinding(f);
+  assert.throws(()=>owner.releaseMaintenance('a'.repeat(64)));
+  assert.equal(calls.at(-1),'transition.invalidate');
+  await assert.rejects(owner.acquireMaintenance('a'.repeat(64),'synthetic-revision'));
+  assert.equal(f.access.status().phase,'held');
+});
+
 test('existing held management channel survives drained config invalidation, not provider admission', async () => {
   const f = fixture(), owner = f.register(); f.hold(); changeBinding(f);
   assert.equal(owner.status().available, false);
   const status = await owner.readControlStatus();
   assert.equal(status.available, true); assert.equal(status.phase, 'held'); assert.equal(status.active, 0);
+  assert.equal((await owner.qualifyTransition('a'.repeat(64), status.revision)).phase, 'held');
+  await assert.rejects(owner.qualifyTransition('b'.repeat(64), status.revision));
+  await assert.rejects(owner.qualifyTransition('a'.repeat(64), 'b'.repeat(64)));
   assert.equal((await owner.acquireTransition('a'.repeat(64), status.revision)).phase, 'held');
   await assert.rejects(owner.acquireTransition('b'.repeat(64), status.revision));
   assert.throws(owner.assertTransition); assert.throws(() => owner.readRegistration());
@@ -160,11 +180,35 @@ test('existing held management channel survives drained config invalidation, not
   assert.equal(owner.beforeCommandRun({commandId: 'after-drift'}, {}).action, 'block');
 });
 
+test('managed proof qualification refuses active provider ownership', async () => {
+  const f = fixture(), owner = f.register(), ctx = context();
+  await owner.select({}, ctx); f.hold();
+  await assert.rejects(owner.qualifyTransition('a'.repeat(64), 'synthetic-revision'));
+  await owner.finish({}, ctx); await owner.shutdown();
+});
+
 test('invalid idle owner cannot gain a new management hold', async () => {
   const f = fixture(), owner = f.register(); changeBinding(f);
   assert.equal((await owner.readControlStatus()).available, false);
-  await assert.rejects(owner.acquireTransition('a'.repeat(64), 'b'.repeat(64)));
+  const failure = await owner.acquireTransition('a'.repeat(64), 'b'.repeat(64)).catch(error => error);
+  assert.equal(owner.classifyTransitionError(failure), 'managed-transition-invalid-owner');
   assert.equal(f.access.status().phase, 'idle'); await owner.shutdown();
+});
+
+test('only registry-created transition errors expose bounded classifications', async () => {
+  const f = fixture(), owner = f.register(); f.hold();
+  const failure = await owner.acquireTransition('b'.repeat(64), 'b'.repeat(64)).catch(error => error);
+  assert.equal(owner.classifyTransitionError(failure), 'managed-transition-access-owner-refused');
+  assert.equal(owner.classifyTransitionError(new Error('managed-transition-invalid-owner')), null);
+  await owner.shutdown();
+});
+
+test('asynchronous access-owner refusal retains its trusted classification', async () => {
+  const f = fixture(), owner = f.register(); f.hold();
+  f.access.acquire = async () => { throw new Error('asynchronous refusal'); };
+  const failure = await owner.acquireTransition('a'.repeat(64), 'b'.repeat(64)).catch(error => error);
+  assert.equal(owner.classifyTransitionError(failure), 'managed-transition-access-owner-refused');
+  await owner.shutdown();
 });
 
 test('held management recovery waits for the same routing shutdown to settle', async () => {
@@ -303,6 +347,14 @@ test('only the existing access owner can identify a probe; untrusted hints canno
   await owner.finish({}, forged); await owner.shutdown();
 });
 
+test('only the existing access owner can bypass command admission for its held proof', async () => {
+  const f = fixture(), owner = f.register(); f.hold();
+  assert.equal(owner.beforeCommandRun({commandId: 'proof-command'}, {runId: 'trusted-probe'}), undefined);
+  assert.deepEqual(owner.beforeCommandRun({commandId: 'forged-command'}, {runId: 'ordinary', probe: true}),
+    {action: 'block', reason: 'ods-command-admission-unavailable'});
+  assert.equal(f.runs.size, 0); await owner.shutdown();
+});
+
 test('foreign session or mutated original context cannot release a selected run', async () => {
   const f = fixture(), owner = f.register(), ctx = context(); await owner.select({}, ctx); await owner.admit({}, ctx);
   ctx.sessionId = randomUUID(); await assert.rejects(owner.finish({}, ctx));
@@ -344,4 +396,18 @@ test('production bootstrap and production command adapter compose through regist
   assert.equal(f.calls.filter(x => x === 'lease.acquire').length, 1);
   assert.equal(f.calls.filter(x => x === 'lease.release').length, 1);
   assert.equal(f.runs.size, 0); assert.doesNotThrow(owner.assertTransition); await owner.shutdown();
+});
+
+test('activity diagnostics distinguish pending selection without owner or provider data', async () => {
+  const pending=deferred(), f=fixture({select:()=>pending.promise}), owner=f.register(), ctx=context();
+  const work=owner.select({},ctx);
+  const snapshot=owner.status();
+  assert.deepEqual(snapshot.activity,{selected:1,selecting:1,commands:0,commandCleanupUnknown:false});
+  assert.equal(snapshot.active,2);assert.equal(snapshot.phase,'busy');
+  assert.equal(JSON.stringify(snapshot).includes(ctx.sessionKey),false);
+  assert.equal(JSON.stringify(snapshot).includes(ctx.runId),false);
+  pending.resolve({providerOverride:'ods-policy',modelOverride:'synthetic-route'});await work;
+  await owner.finish({},ctx);
+  assert.deepEqual(owner.status().activity,{selected:0,selecting:0,commands:0,commandCleanupUnknown:false});
+  await owner.shutdown();
 });

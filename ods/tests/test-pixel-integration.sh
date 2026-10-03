@@ -6,7 +6,7 @@
 #
 # Covers: host qualification (Ubuntu/Debian, WSL2+systemd, WSL no-systemd,
 #         Ubuntu 22.04, Fedora, macOS-like), os-release safety (malicious
-#         content, symlinks, duplicates), license exactness, true/false/auto
+#         content, symlinks, duplicates), true/false/auto
 #         state machine, source/ref rejection, key shape/uniqueness.
 # ============================================================================
 
@@ -102,6 +102,24 @@ else
     fail "Ubuntu 24.04 + systemd should be qualified"
 fi
 
+# Ubuntu 26.04 + systemd
+F_FIXTURE="$TMPDIR_TEST/ubuntu2604"
+mkdir -p "$F_FIXTURE"
+create_os_release "$F_FIXTURE/os-release" \
+    'NAME="Ubuntu"' \
+    'VERSION="26.04 LTS"' \
+    'ID=ubuntu' \
+    'ID_LIKE=debian' \
+    'VERSION_ID="26.04"' \
+    'PRETTY_NAME="Ubuntu 26.04 LTS"'
+create_proc1_comm "$F_FIXTURE/proc1" "systemd"
+create_proc_version "$F_FIXTURE/procver" "Linux version 7.0.0-29-generic (Ubuntu 7.0.0-29.29-generic)..."
+if ods_pixel_host_qualified "$F_FIXTURE/os-release" "$F_FIXTURE/proc1" "$F_FIXTURE/procver"; then
+    pass "Ubuntu 26.04 + systemd is qualified"
+else
+    fail "Ubuntu 26.04 + systemd should be qualified"
+fi
+
 # Debian 12 + systemd
 F_FIXTURE="$TMPDIR_TEST/debian12"
 mkdir -p "$F_FIXTURE"
@@ -137,6 +155,24 @@ if ods_pixel_host_qualified "$F_FIXTURE/os-release" "$F_FIXTURE/proc1" "$F_FIXTU
     pass "WSL2 + Ubuntu 24.04 + systemd is qualified"
 else
     fail "WSL2 + Ubuntu 24.04 + systemd should be qualified"
+fi
+
+# WSL2 + Ubuntu 26.04 + systemd (should be qualified)
+F_FIXTURE="$TMPDIR_TEST/wsl2-ubuntu2604-systemd"
+mkdir -p "$F_FIXTURE"
+create_os_release "$F_FIXTURE/os-release" \
+    'NAME="Ubuntu"' \
+    'VERSION="26.04 LTS"' \
+    'ID=ubuntu' \
+    'ID_LIKE=debian' \
+    'VERSION_ID="26.04"' \
+    'PRETTY_NAME="Ubuntu 26.04 LTS"'
+create_proc1_comm "$F_FIXTURE/proc1" "systemd"
+create_proc_version "$F_FIXTURE/procver" "Linux version 7.0.0-microsoft-standard-WSL2..."
+if ods_pixel_host_qualified "$F_FIXTURE/os-release" "$F_FIXTURE/proc1" "$F_FIXTURE/procver"; then
+    pass "WSL2 + Ubuntu 26.04 + systemd is qualified"
+else
+    fail "WSL2 + Ubuntu 26.04 + systemd should be qualified"
 fi
 
 # WSL1-like kernel string remains unqualified even if a fixture claims systemd.
@@ -284,58 +320,6 @@ else
     fail "Duplicate VERSION_ID key should be rejected"
 fi
 
-# ---- ods_pixel_license_accepted tests ----------------------------------------
-
-section "ods_pixel_license_accepted"
-
-# Exactly "true"
-export PIXEL_LICENSE_ACCEPTED="true"
-if ods_pixel_license_accepted; then
-    pass 'PIXEL_LICENSE_ACCEPTED="true" is accepted'
-else
-    fail 'PIXEL_LICENSE_ACCEPTED="true" should be accepted'
-fi
-
-# "True" (capital T) — must be rejected
-PIXEL_LICENSE_ACCEPTED="True"
-if ! ods_pixel_license_accepted; then
-    pass 'PIXEL_LICENSE_ACCEPTED="True" is rejected (case-sensitive)'
-else
-    fail 'PIXEL_LICENSE_ACCEPTED="True" should be rejected'
-fi
-
-# "yes"
-PIXEL_LICENSE_ACCEPTED="yes"
-if ! ods_pixel_license_accepted; then
-    pass 'PIXEL_LICENSE_ACCEPTED="yes" is rejected'
-else
-    fail 'PIXEL_LICENSE_ACCEPTED="yes" should be rejected'
-fi
-
-# "1"
-PIXEL_LICENSE_ACCEPTED="1"
-if ! ods_pixel_license_accepted; then
-    pass 'PIXEL_LICENSE_ACCEPTED="1" is rejected'
-else
-    fail 'PIXEL_LICENSE_ACCEPTED="1" should be rejected'
-fi
-
-# Empty
-PIXEL_LICENSE_ACCEPTED=""
-if ! ods_pixel_license_accepted; then
-    pass 'PIXEL_LICENSE_ACCEPTED="" is rejected'
-else
-    fail 'PIXEL_LICENSE_ACCEPTED="" should be rejected'
-fi
-
-# Unset
-unset PIXEL_LICENSE_ACCEPTED
-if ! ods_pixel_license_accepted; then
-    pass 'Unset PIXEL_LICENSE_ACCEPTED is rejected'
-else
-    fail 'Unset PIXEL_LICENSE_ACCEPTED should be rejected'
-fi
-
 # ---- ods_pixel_resolve_enablement tests --------------------------------------
 
 section "ods_pixel_resolve_enablement"
@@ -348,58 +332,54 @@ else
     fail "enablement false -> expected 'hermes', got '$result'"
 fi
 
-# true with no license -> error (nonzero)
-PIXEL_LICENSE_ACCEPTED=""
-unset PIXEL_LICENSE_ACCEPTED
+# Qualified hosts select Pixel without a separate acknowledgement flag.
 QUALIFIED_FIXTURE="$TMPDIR_TEST/ubuntu2404"
-if ! result="$(ods_pixel_resolve_enablement true "$QUALIFIED_FIXTURE/os-release" "$QUALIFIED_FIXTURE/proc1" "$QUALIFIED_FIXTURE/procver" 2>/dev/null)"; then
-    pass "enablement true without license fails"
+if result="$(ods_pixel_resolve_enablement true "$QUALIFIED_FIXTURE/os-release" "$QUALIFIED_FIXTURE/proc1" "$QUALIFIED_FIXTURE/procver" 2>/dev/null)" && [[ "$result" == pixel ]]; then
+    pass "enablement true on qualified host selects Pixel"
 else
-    fail "enablement true without license should fail"
+    fail "enablement true on qualified host should select Pixel"
 fi
 
-# auto with no license -> hermes
+# Auto also selects Pixel on a qualified host.
 result="$(ods_pixel_resolve_enablement auto "$QUALIFIED_FIXTURE/os-release" "$QUALIFIED_FIXTURE/proc1" "$QUALIFIED_FIXTURE/procver")"
-if [[ "$result" == "hermes" ]]; then
-    pass "enablement auto without license -> hermes"
+if [[ "$result" == "pixel" ]]; then
+    pass "enablement auto on qualified host -> pixel"
 else
-    fail "enablement auto without license -> expected 'hermes', got '$result'"
+    fail "enablement auto on qualified host -> expected 'pixel', got '$result'"
 fi
 
-# true with license but host not qualified (using fixture) -> error
-PIXEL_LICENSE_ACCEPTED="true"
+# An unqualified host still fails explicit Pixel mode.
 F_FIXTURE="$TMPDIR_TEST/fedora-en"
 mkdir -p "$F_FIXTURE"
 create_os_release "$F_FIXTURE/os-release" 'ID=fedora' 'VERSION_ID="39"'
 create_proc1_comm "$F_FIXTURE/proc1" "systemd"
 create_proc_version "$F_FIXTURE/procver" "Linux version 6.8.0"
 if ! ods_pixel_resolve_enablement true "$F_FIXTURE/os-release" "$F_FIXTURE/proc1" "$F_FIXTURE/procver" 2>/dev/null; then
-    pass "enablement true with license but unqualified host fails"
+    pass "enablement true on unqualified host fails"
 else
-    fail "enablement true with license but unqualified host should fail"
+    fail "enablement true on unqualified host should fail"
 fi
 
-# auto with license but host not qualified -> hermes
+# Auto falls back on an unqualified host.
 result="$(ods_pixel_resolve_enablement auto "$F_FIXTURE/os-release" "$F_FIXTURE/proc1" "$F_FIXTURE/procver")"
 if [[ "$result" == "hermes" ]]; then
-    pass "enablement auto with license but unqualified host -> hermes"
+    pass "enablement auto on unqualified host -> hermes"
 else
-    fail "enablement auto with license but unqualified host -> expected 'hermes', got '$result'"
+    fail "enablement auto on unqualified host -> expected 'hermes', got '$result'"
 fi
 
-# Explicit true/auto succeed only when both predicates pass.
-PIXEL_LICENSE_ACCEPTED="true"
+# Explicit true/auto succeed when host qualification passes.
 result="$(ods_pixel_resolve_enablement true "$QUALIFIED_FIXTURE/os-release" "$QUALIFIED_FIXTURE/proc1" "$QUALIFIED_FIXTURE/procver")"
 if [[ "$result" == "pixel" ]]; then
-    pass "enablement true with qualified host and license -> pixel"
+    pass "enablement true with qualified host -> pixel"
 else
-    fail "enablement true with qualified host and license should select pixel"
+    fail "enablement true with qualified host should select pixel"
 fi
 result="$(ods_pixel_resolve_enablement auto "$QUALIFIED_FIXTURE/os-release" "$QUALIFIED_FIXTURE/proc1" "$QUALIFIED_FIXTURE/procver")"
 if [[ "$result" == "pixel" ]]; then
-    pass "enablement auto with qualified host and license -> pixel"
+    pass "enablement auto with qualified host -> pixel"
 else
-    fail "enablement auto with qualified host and license should select pixel"
+    fail "enablement auto with qualified host should select pixel"
 fi
 
 # Invalid value
@@ -446,13 +426,30 @@ fi
 
 section "ods_pixel_validate_source"
 
-# Valid GitHub URL + valid ref
+# Public installations use the local bundle without GitHub credentials.
+INSTALL_DIR="$SCRIPT_DIR/.."
+PIXEL_SOURCE_URL=bundled
+PIXEL_SOURCE_REF="$ODS_PIXEL_BUNDLED_REF"
+if ods_pixel_validate_source; then
+    pass "ODS-bundled Pixel source and exact ref accepted"
+else
+    fail "ODS-bundled Pixel source should be accepted"
+fi
+PIXEL_SOURCE_REF="b33730436baf5d98bf58f7d57c090318fe19f433"
+if ! ods_pixel_validate_source 2>/dev/null; then
+    pass "Bundled Pixel source refuses the former private-repo ref"
+else
+    fail "Bundled Pixel source should refuse the former private-repo ref"
+fi
+unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF
+
+# The former private URL is rejected even with an immutable ref.
 PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
 PIXEL_SOURCE_REF="abcdef0123456789abcdef0123456789abcdef01"
-if ods_pixel_validate_source; then
-    pass "Valid GitHub URL + valid ref accepted"
+if ! ods_pixel_validate_source 2>/dev/null; then
+    pass "Former private GitHub source is rejected"
 else
-    fail "Valid GitHub URL + valid ref should be accepted"
+    fail "Former private GitHub source must be rejected"
 fi
 
 # URL with credentials
@@ -474,7 +471,7 @@ else
 fi
 
 # Short SHA ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="abcdef01"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Short SHA ref is rejected"
@@ -483,7 +480,7 @@ else
 fi
 
 # Uppercase hex ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Uppercase hex ref is rejected"
@@ -492,7 +489,7 @@ else
 fi
 
 # Branch name as ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 PIXEL_SOURCE_REF="main"
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Branch name ref is rejected"
@@ -510,7 +507,7 @@ else
 fi
 
 # Missing ref
-PIXEL_SOURCE_URL="https://github.com/Osmantic/Pixel.git"
+PIXEL_SOURCE_URL=bundled
 unset PIXEL_SOURCE_REF
 if ! ods_pixel_validate_source 2>/dev/null; then
     pass "Missing ref is rejected"
@@ -597,12 +594,12 @@ section "ods_pixel_activate_source_contract"
 
 if (
     unset PIXEL_SOURCE_URL PIXEL_SOURCE_REF PIXEL_SOURCE_DIR
+    INSTALL_DIR="$SCRIPT_DIR/.."
     ods_pixel_activate_source_contract \
-        "https://github.com/Osmantic/Pixel.git" \
-        "abcdef0123456789abcdef0123456789abcdef01" ""
+        bundled "$ODS_PIXEL_BUNDLED_REF" ""
     python3 -c 'import os
-assert os.environ["PIXEL_SOURCE_URL"] == "https://github.com/Osmantic/Pixel.git"
-assert os.environ["PIXEL_SOURCE_REF"] == "abcdef0123456789abcdef0123456789abcdef01"
+assert os.environ["PIXEL_SOURCE_URL"] == "bundled"
+assert os.environ["PIXEL_SOURCE_REF"] == "9f3b6ecd25db3ab51bef4091473d88ee5824bc3b"
 assert os.environ["PIXEL_SOURCE_DIR"] == ""'
 ); then
     pass "Validated Pixel source contract persists across installer phases"
@@ -612,11 +609,11 @@ fi
 
 if ! (
     ods_pixel_activate_source_contract \
-        "https://github.com/Osmantic/Pixel.git" "main" ""
+        "https://github.com/Osmantic/Pixel.git" "$ODS_PIXEL_BUNDLED_REF" ""
 ); then
-    pass "Invalid Pixel source contract is not activated"
+    pass "Remote Pixel source contract is not activated"
 else
-    fail "Invalid Pixel source contract should fail before Phase 11"
+    fail "Remote Pixel source contract should fail before Phase 11"
 fi
 
 # ---- ods_pixel_generate_key tests --------------------------------------------
@@ -706,7 +703,7 @@ import json, sys
 
 properties = json.load(open(sys.argv[1], encoding="utf-8"))["properties"]
 expected = {
-    "ENABLE_PIXEL", "PIXEL_AGENT_MODE", "PIXEL_LICENSE_ACCEPTED",
+    "ENABLE_PIXEL", "PIXEL_AGENT_MODE",
     "PIXEL_SOURCE_URL", "PIXEL_SOURCE_REF", "PIXEL_SOURCE_DIR",
     "PIXEL_OPENWEBUI_KEY", "PIXEL_INGRESS_RUNTIME_DIR",
     "PIXEL_PREVIEW_RUNTIME_DIR", "PIXEL_INGRESS_GID",
@@ -715,9 +712,11 @@ assert expected <= properties.keys()
 assert properties["PIXEL_SOURCE_REF"]["pattern"] == "^[0-9a-f]{40}$"
 assert properties["PIXEL_OPENWEBUI_KEY"]["minLength"] == 64
 assert properties["PIXEL_OPENWEBUI_KEY"]["maxLength"] == 64
-assert properties["PIXEL_PREVIEW_RUNTIME_DIR"]["enum"] == ["/run/ods-pixel-preview"]
+assert properties["PIXEL_PREVIEW_RUNTIME_DIR"]["enum"] == ["/run/ods-pixel-preview", "/mnt/wsl/ods-portal-runtime/preview"]
+assert properties["PIXEL_INGRESS_RUNTIME_DIR"]["enum"] == ["/run/ods-pixel", "/mnt/wsl/ods-portal-runtime/ingress"]
+assert properties["PIXEL_RUNTIME_BIND_PROPAGATION"]["enum"] == ["rprivate", "rshared"]
 assert properties["PIXEL_INGRESS_GID"]["minimum"] == 1
-assert properties["PIXEL_LICENSE_ACCEPTED"]["type"] == "boolean"
+assert "PIXEL_LICENSE_ACCEPTED" not in properties
 PY
 then
     pass "Pixel generated environment keys are defined by the strict schema"

@@ -2,6 +2,32 @@
 # Install and verify Pixel's host-side ODS integration. Importing this file has
 # no side effects. Callers must have already selected ENABLE_PIXEL_RUNTIME=true.
 
+# Model reconciliation also imports this library directly from ods-host-agent.
+# Keep the bundle pin and digest verifier available on that path.
+# shellcheck source=installers/lib/pixel-integration.sh
+source "$(dirname "${BASH_SOURCE[0]}")/pixel-integration.sh"
+
+_ods_pixel_reconcile_workspace_guidance() {
+    local owner="$1" home="$2" workspace="$3"
+    local -a guidance_options=(--workspace "$workspace")
+    [[ "${4:-live}" != generated ]] || guidance_options+=(--generated)
+    ods_pixel_run_as_owner "$owner" "$home" /usr/bin/python3 -B \
+        "${INSTALL_DIR:?}/installers/lib/pixel-workspace-guidance.py" "${guidance_options[@]}"
+}
+
+_ods_pixel_migrate_live_workspace_guidance() {
+    local owner="$1" home="$2" pixel_log="$3" workspace_guidance_status
+    if ! workspace_guidance_status="$(_ods_pixel_reconcile_workspace_guidance "$owner" "$home" "$home/.openclaw/workspace-pixel" 2>>"$pixel_log")"; then
+        # Guidance repair is optional for an existing owner workspace. Preserve
+        # unsafe/custom files and keep the verified runtime upgrade available.
+        workspace_guidance_status='{"status":"manual-review-required"}'
+    fi
+    printf '%s\n' "$workspace_guidance_status" >>"$pixel_log"
+    if [[ "$workspace_guidance_status" == *'"manual-review-required"'* ]]; then
+        ai_warn "Portal preserved custom or unverified workspace guidance. Review AGENTS.md or MEMORY.md against your selected model route."
+    fi
+}
+
 _ods_pixel_default_output_tokens() {
     # Shared usability default, not an assertion of provider output capacity.
     # Unknown model families remain usable; no model-name or reasoning policy.
@@ -12,6 +38,56 @@ _ods_pixel_default_output_tokens() {
     max_tokens="$((context / 4))"
     (( max_tokens > 8192 )) && max_tokens=8192
     printf '%s\n' "$max_tokens"
+}
+
+_ods_pixel_gateway_port() {
+    local port="${PIXEL_GATEWAY_PORT:-18789}"
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
+    (( 10#$port <= 65535 )) || return 1
+    printf '%s\n' "$port"
+}
+
+# Pixel 4.3.27 renders the gateway port into its privileged systemd unit.
+# Its same-release reconciliation transaction can update model/runtime JSON,
+# but it cannot safely replace that unit. Refuse a port change before the ODS
+# installer writes a new onboarding contract or marks the deployment installing.
+_ods_pixel_installed_gateway_port() {
+    local owner="$1" home="$2" installed_answers
+    installed_answers="$home/.config/pixel-deployment/onboarding.json"
+    if [[ ! -e "$installed_answers" && ! -L "$installed_answers" ]]; then
+        return 1
+    fi
+    ods_pixel_run_as_owner "$owner" "$home" python3 - \
+        "$installed_answers" <<'PY'
+import json, os, pathlib, stat, sys
+
+path = pathlib.Path(sys.argv[1])
+info = path.lstat()
+parent = path.parent.lstat()
+if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+        or info.st_nlink != 1 or info.st_uid != os.getuid()
+        or info.st_mode & 0o077 or info.st_size > 2 * 1024 * 1024
+        or not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != os.getuid() or parent.st_mode & 0o022):
+    raise SystemExit("unsafe installed Pixel onboarding contract")
+value = json.loads(path.read_text(encoding="utf-8"))
+port = value.get("gatewayPort") if isinstance(value, dict) else None
+if type(port) is not int or not 1 <= port <= 65535:
+    raise SystemExit("invalid installed Pixel gateway port")
+print(port)
+PY
+}
+
+_ods_pixel_existing_gateway_port_matches() {
+    local owner="$1" home="$2" requested="$3" installed_answers existing
+    [[ "$requested" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
+    (( 10#$requested <= 65535 )) || return 1
+    installed_answers="$home/.config/pixel-deployment/onboarding.json"
+    if [[ ! -e "$installed_answers" && ! -L "$installed_answers" ]]; then
+        return 0
+    fi
+    existing="$(_ods_pixel_installed_gateway_port "$owner" "$home")" || return 1
+    [[ "$existing" == "$requested" ]] || return 2
 }
 
 ods_pixel_install_owner() {
@@ -26,22 +102,96 @@ ods_pixel_install_owner() {
 
 ods_pixel_owner_home() {
     local owner="$1" home
-    home="$(getent passwd "$owner" 2>/dev/null | awk -F: 'NR == 1 { print $6 }')"
+    [[ "$owner" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || return 1
+    home="$(python3 - "$owner" <<'PY'
+import pwd, sys
+try:
+    print(pwd.getpwnam(sys.argv[1]).pw_dir)
+except KeyError:
+    sys.exit(1)
+PY
+    )" || return 1
     [[ "$home" == /* && "$home" != / && "$home" != *[[:space:]\\]* && -d "$home" && ! -L "$home" ]] || return 1
     printf '%s\n' "$home"
 }
 
 ods_pixel_run_as_owner() {
-    local owner="$1" home="$2"
+    local owner="$1" home="$2" current_groups account_groups argv_json group refresh_command
+    local -a refresh_groups=()
     shift 2
-    if ods_sudo_available && command -v sudo >/dev/null 2>&1; then
+    # A redundant sudo -u of the already-current owner can allocate a fresh
+    # pseudo-terminal (sudoers use_pty). Pixel's child installers then lose
+    # the authenticated parent tty and prompt for sudo mid-install/update.
+    if [[ "$(id -un)" == "$owner" ]]; then
+        current_groups=" $(id -nG) "
+        account_groups=" $(id -nG "$owner") "
+        for group in docker ods-pixel; do
+            if [[ "$current_groups" != *" $group "* && "$account_groups" == *" $group "* ]]; then
+                refresh_groups+=("$group")
+            fi
+        done
+        if (( ${#refresh_groups[@]} > 0 )); then
+            # A first install may have just granted Docker and Pixel socket
+            # access. sg adds only its requested group, so refresh each missing
+            # runtime group without creating another sudo pseudo-terminal.
+            # Caller arguments remain JSON in the environment, never shell code.
+            if ! command -v sg >/dev/null 2>&1 \
+                || ! command -v python3 >/dev/null 2>&1; then
+                printf '%s\n' 'error: runtime group refresh requires sg and python3' >&2
+                return 1
+            fi
+            argv_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")" || return 1
+            refresh_command="$(python3 - "${refresh_groups[@]:1}" <<'PY'
+import shlex, sys
+decoder = 'import json,os; argv=json.loads(os.environ.pop("ODS_PIXEL_OWNER_ARGV_JSON")); os.execvpe(argv[0],argv,os.environ)'
+command = 'exec python3 -c ' + shlex.quote(decoder)
+for group in reversed(sys.argv[1:]):
+    command = 'exec sg ' + shlex.quote(group) + ' -c ' + shlex.quote(command)
+print(command)
+PY
+            )" || return 1
+            HOME="$home" USER="$owner" LOGNAME="$owner" PATH="$PATH" \
+                ODS_PIXEL_OWNER_ARGV_JSON="$argv_json" sg "${refresh_groups[0]}" -c "$refresh_command"
+        else
+            env HOME="$home" USER="$owner" LOGNAME="$owner" PATH="$PATH" "$@"
+        fi
+    elif ods_sudo_available && command -v sudo >/dev/null 2>&1; then
         ods_sudo -u "$owner" -- env HOME="$home" USER="$owner" LOGNAME="$owner" PATH="$PATH" "$@"
-    elif [[ "$(id -un)" == "$owner" ]]; then
-        env HOME="$home" USER="$owner" LOGNAME="$owner" PATH="$PATH" "$@"
     else
         printf '%s\n' 'error: cannot enter the Pixel install owner identity' >&2
         return 1
     fi
+}
+
+# Resolve Pixel search before phase 03 chooses Compose services. Use the same
+# owner-private onboarding selector as phase 11, and the explicit > installed
+# .env precedence that phase 06 applies. Never source .env as shell code.
+ods_pixel_resolve_search_provider() {
+    local requested="${PIXEL_WEB_SEARCH_PROVIDER:-}" raw owner home answers helper resolved
+    [[ -n "${INSTALL_DIR:-}" && -n "${SCRIPT_DIR:-}" ]] || return 1
+    if [[ -z "$requested" && -f "$INSTALL_DIR/.env" ]]; then
+        if ! declare -F safe_env_decode_value >/dev/null 2>&1; then
+            # shellcheck source=../../lib/safe-env.sh
+            source "$SCRIPT_DIR/lib/safe-env.sh"
+        fi
+        raw="$(grep -m1 '^PIXEL_WEB_SEARCH_PROVIDER=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
+        requested="$(safe_env_decode_value "$raw")"
+    fi
+    case "$requested" in
+        ""|searxng|parallel-free) ;;
+        *) printf '%s\n' 'error: invalid Pixel web search provider' >&2; return 1 ;;
+    esac
+    owner="${PIXEL_SERVICE_USER:-$(ods_pixel_install_owner)}" || return 1
+    home="$(ods_pixel_owner_home "$owner")" || return 1
+    answers="$INSTALL_DIR/data/pixel/onboarding.json"
+    helper="$SCRIPT_DIR/extensions/services/pixel-agent/host/native_search.py"
+    [[ -f "$helper" ]] || return 1
+    resolved="$(ods_pixel_run_as_owner "$owner" "$home" python3 "$helper" \
+        --answers-file "$answers" --provider "$requested")" || return 1
+    case "$resolved" in
+        searxng|parallel-free) printf '%s\n' "$resolved" ;;
+        *) printf '%s\n' 'error: Pixel search selector returned an invalid provider' >&2; return 1 ;;
+    esac
 }
 
 ods_pixel_run_as_owner_with_umask() {
@@ -154,10 +304,7 @@ finally:
 PY
 }
 
-# Return 0 when an exact ODS-managed Pixel deployment must be retired before
-# the installer copies newer source over the installed ownership evidence.
-# Return 1 when no transition is needed, and 2 for unsafe or ambiguous state.
-_ods_pixel_source_transition_required() {
+_ods_pixel_source_transition_state() {
     local owner="$1" home="$2" requested_ref="$3" marker
     marker="$home/.config/ods/pixel-managed.json"
     [[ "$requested_ref" =~ ^[0-9a-f]{40}$ ]] || return 2
@@ -177,16 +324,98 @@ if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
 value = json.loads(path.read_text(encoding="utf-8"))
 source_ref = value.get("pixel_source_ref")
 requested_ref = sys.argv[3]
+state = value.get("state")
 if (value.get("schema_version") != 2 or value.get("manager") != "ods"
         or value.get("initial_active_state") != "absent"
         or value.get("install_dir") != sys.argv[2]
-        or value.get("state") not in {"ready", "installing", "deactivating"}
+        or state not in {"ready", "installing", "deactivating"}
         or not isinstance(source_ref, str)
         or not re.fullmatch(r"[0-9a-f]{40}", source_ref)
         or value.get("requested_source_ref") not in {None, source_ref, requested_ref}):
     raise SystemExit(2)
-raise SystemExit(0 if value.get("state") == "deactivating" or source_ref != requested_ref else 1)
+print(f"{state}|{source_ref}")
 PY
+}
+
+# Return 0 when an exact ODS-managed Pixel deployment needs a held transaction
+# before the installer copies source over its installed ownership evidence.
+# Return 1 when no transition is needed, and 2 for unsafe or ambiguous state.
+_ods_pixel_source_transition_required() {
+    local owner="$1" home="$2" requested_ref="$3" transition state source_ref
+    transition="$(_ods_pixel_source_transition_state "$owner" "$home" "$requested_ref")" || return 2
+    IFS='|' read -r state source_ref <<<"$transition"
+    [[ "$state" =~ ^(ready|installing|deactivating)$ \
+        && "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 2
+    [[ "$state" == deactivating || "$source_ref" != "$requested_ref" ]] && return 0
+    # The Pixel pin alone does not identify the ODS host integration. Preserve
+    # its installed source until cleanup can validate privileged mirrors, even
+    # when an upgrade retains the same developer Pixel checkout.
+    local incoming_root="${4:-}" relative comparison
+    [[ "${_ODS_PIXEL_FEATURE_SOURCE_CHANGED:-false}" == true ]] && return 0
+    [[ -n "$incoming_root" ]] || return 1
+    for relative in installers/lib/pixel-host-install.sh bin \
+        extensions/services/pixel-agent/host extensions/services/pixel-agent/plugin; do
+        [[ -e "${INSTALL_DIR:?}/$relative" && ! -L "$INSTALL_DIR/$relative" \
+            && -e "$incoming_root/$relative" && ! -L "$incoming_root/$relative" ]] || return 2
+        comparison=0
+        diff -qr --exclude=__pycache__ -- "$INSTALL_DIR/$relative" \
+            "$incoming_root/$relative" >/dev/null 2>&1 || comparison=$?
+        case "$comparison" in
+            0) ;;
+            1) return 0 ;;
+            *) return 2 ;;
+        esac
+    done
+    return 1
+}
+
+# Local installer-only custody operations. The root helper validates the real
+# install/owner and protected coordinator; the environment handle is merely a
+# convenience and never the authority to write files or release admission.
+_ods_pixel_source_upgrade() {
+    local action="$1" owner="$2"
+    shift 2
+    local helper="${SCRIPT_DIR:?}/bin/pixel_source_upgrade.py"
+    [[ -f "$helper" && ! -L "$helper" ]] || return 1
+    ods_sudo python3 -I "$helper" "$action" "${INSTALL_DIR:?}" "$owner" "$@"
+}
+
+_ods_pixel_check_source_transaction() {
+    local owner="$1" result
+    [[ "${ODS_PIXEL_SOURCE_TRANSACTION:-}" =~ ^[a-f0-9]{64}$ ]] || return 1
+    result="$(_ods_pixel_source_upgrade status "$owner")" || return 1
+    printf '%s' "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("pending") is True and d.get("transaction")==sys.argv[1] and d.get("phase")=="applied" and d.get("mode") in ("sandboxed","full-access") else 1)' "$ODS_PIXEL_SOURCE_TRANSACTION"
+}
+
+# A failed test or operator cleanup can remove the ODS checkout while leaving
+# an interrupted, marker-bound Pixel host deployment. Reconstruct only the
+# marker's exact prior commit from the currently authorized source repository
+# before the uninstaller uses those bytes to authenticate privileged artifacts.
+_ods_pixel_restore_transition_source() {
+    local owner="$1" home="$2" requested_ref="$3" transition state source_ref source_root source_url
+    transition="$(_ods_pixel_source_transition_state "$owner" "$home" "$requested_ref")" || return 1
+    IFS='|' read -r state source_ref <<<"$transition"
+    [[ "$state" =~ ^(ready|installing|deactivating)$ \
+        && "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 1
+    source_root="${INSTALL_DIR:?}/data/pixel/source-$source_ref"
+    # Retirement must verify the source that actually installed the old
+    # deployment. Prefer its existing checkout; never fetch a retired private
+    # source or try to obtain its ref from the new one-commit ODS bundle.
+    if [[ -d "$source_root/.git" && ! -L "$source_root" && ! -L "$source_root/.git" ]]; then
+        source_url="$source_root"
+    elif [[ "${PIXEL_SOURCE_URL:-}" == /* ]]; then
+        # Developer checkouts may still reconstruct an ancestor from a local
+        # repository. This path remains file-only inside _source_checkout.
+        source_url="$PIXEL_SOURCE_URL"
+    elif [[ "${PIXEL_SOURCE_URL:-}" == bundled && "$source_ref" == "$ODS_PIXEL_BUNDLED_REF" ]]; then
+        source_url=bundled
+    else
+        printf '%s\n' 'error: prior Pixel source checkout is missing; restore its local backup before retrying' >&2
+        return 1
+    fi
+    local PIXEL_SOURCE_URL="$source_url" PIXEL_SOURCE_REF="$source_ref"
+    _ods_pixel_source_checkout "$owner" "$home" "$source_root" >/dev/null || return 1
+    printf '%s\n' "$source_root"
 }
 
 _ods_pixel_record_verified_state() {
@@ -292,6 +521,7 @@ if not isinstance(sys.argv[8], str) or not isinstance(sys.argv[9], str):
 value["state"] = sys.argv[6]
 value["pixel_source_ref"] = sys.argv[4]
 value.pop("requested_source_ref", None)
+value.pop("requested_contract_sha256", None)
 value["contract_sha256"] = sys.argv[5]
 value["configuration_sha256"] = hashlib.sha256(b"ods-pixel-openclaw-v1\0" + canonical_config).hexdigest()
 value["active_release_version"] = version
@@ -363,7 +593,12 @@ if not isinstance(policy_value, str) or pathlib.Path(policy_value) != expected_p
 policy_payload = read_private_regular(expected_policy, "Operations policy")
 catalog_payload = read_private_regular(catalog_path, "extension catalog")
 helper_payloads = []
-for helper in (helper_path, manager_path, manager_unit_path, approval_path, promoter_path, promoter_unit_path, operations_service_dropin_path, preview_path, preview_unit_path, system_observer_path):
+inspection_sources = tuple(preview_path.with_name(name) for name in (
+    'preview_inspection.py', 'preview_inspection_protocol.py', 'preview_inspection_capsule.py',
+    'Dockerfile.inspection', 'preview-inspection.requirements.lock', 'pixel-preview-inspection.service'))
+if not any(source.exists() or source.is_symlink() for source in inspection_sources):
+    inspection_sources = ()  # Older complete deployments remain removable.
+for helper in (helper_path, manager_path, manager_unit_path, approval_path, promoter_path, promoter_unit_path, operations_service_dropin_path, preview_path, preview_unit_path, system_observer_path, preview_path.with_name("unix_peer.py"), *inspection_sources):
     helper_info = helper.lstat()
     if (not stat.S_ISREG(helper_info.st_mode) or stat.S_ISLNK(helper_info.st_mode)
             or helper_info.st_nlink != 1 or helper_info.st_uid != os.getuid()
@@ -371,7 +606,7 @@ for helper in (helper_path, manager_path, manager_unit_path, approval_path, prom
         raise SystemExit("invalid ODS Pixel extension helper")
     helper_payloads.append(helper.read_bytes())
 digest = hashlib.sha256()
-digest.update(b"ods-pixel-contract-v9\0")
+digest.update(b"ods-pixel-contract-v10\0")
 for payload in (answers_payload, policy_payload, catalog_payload, *helper_payloads):
     digest.update(len(payload).to_bytes(8, "big"))
     digest.update(payload)
@@ -589,14 +824,21 @@ PY
 _ods_pixel_stable_alias_matches_promoted_model() {
     local owner="$1" home="$2" answers="$3" promoted_model="$4"
     local promoted_context="${5:-}" promoted_max_tokens="${6:-}" promoted_reasoning="${7:-}" config
+    local route_fingerprint="${8:-}" image_input="${9:-unknown}"
     config="$home/.openclaw/openclaw.json"
     ods_pixel_run_as_owner "$owner" "$home" python3 - \
         "$answers" "$config" "$promoted_model" "$promoted_context" \
-        "$promoted_max_tokens" "$promoted_reasoning" <<'PY'
+        "$promoted_max_tokens" "$promoted_reasoning" "$route_fingerprint" "$image_input" <<'PY'
 import json, os, pathlib, re, stat, sys
 
 answers_path, config_path = map(pathlib.Path, sys.argv[1:3])
 promoted_model, context_raw, max_tokens_raw, reasoning_raw = sys.argv[3:7]
+route_fingerprint = sys.argv[7] or None
+image_input = sys.argv[8]
+if image_input not in ("supported", "unsupported", "unknown"):
+    raise SystemExit("invalid promoted Pixel image-input contract")
+if route_fingerprint is not None and not re.fullmatch(r"[a-f0-9]{64}", route_fingerprint):
+    raise SystemExit(1)
 if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+:/ @(),=-]{0,255}", promoted_model):
     raise SystemExit(1)
 documents = []
@@ -615,6 +857,12 @@ for path in (answers_path, config_path):
     documents.append(value)
 
 answers, config = documents
+if (answers.get("modelImageInput", "unknown") != image_input
+        or config.get("plugins", {}).get("entries", {}).get("pixel-ods", {}).get("config", {}).get("modelImageInput") != image_input):
+    raise SystemExit(1)
+if (answers.get("modelRouteFingerprint") != route_fingerprint
+        or config.get("plugins", {}).get("entries", {}).get("pixel-ods", {}).get("config", {}).get("modelRouteFingerprint") != route_fingerprint):
+    raise SystemExit(1)
 if answers.get("modelProvider") != "ods-gateway" or answers.get("modelId") != "ods/current":
     raise SystemExit(1)
 expected_name = f"ODS Current ({promoted_model})"
@@ -652,8 +900,66 @@ if not isinstance(models, list) or len(models) != 1 or not isinstance(models[0],
 model = models[0]
 if (model.get("id") != "ods/current" or model.get("name") != expected_name
         or model.get("contextWindow") != context or model.get("maxTokens") != max_tokens
-        or model.get("reasoning") is not reasoning):
+        or model.get("reasoning") is not reasoning
+        or model.get("input") != (["text"] if image_input == "unsupported" else ["text", "image"])):
     raise SystemExit(1)
+PY
+}
+
+_ods_pixel_search_provider_matches_contract() {
+    local owner="$1" home="$2" answers="$3" live
+    live="$home/.openclaw/openclaw.json"
+    ods_pixel_run_as_owner "$owner" "$home" python3 - "$live" "$answers" "${INSTALL_DIR:?}" <<'PY'
+import json, os, pathlib, re, stat, sys
+
+if len(sys.argv) != 4:
+    raise SystemExit(1)
+documents = []
+for raw in sys.argv[1:3]:
+    path = pathlib.Path(raw)
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_nlink != 1 or info.st_uid != os.getuid()
+            or info.st_mode & 0o077 or info.st_size > 2 * 1024 * 1024):
+        raise SystemExit(1)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise SystemExit(1)
+    documents.append(value)
+live, contract = documents
+selected = contract.get("webSearchProvider", "searxng")
+search = live.get("tools", {}).get("web", {}).get("search")
+plugins = live.get("plugins")
+if (selected not in {"searxng", "parallel-free"}
+        or search != {"provider": selected} or not isinstance(plugins, dict)):
+    raise SystemExit(1)
+allow = plugins.get("allow")
+entries = plugins.get("entries")
+load = plugins.get("load")
+paths = load.get("paths") if isinstance(load, dict) else None
+if (not isinstance(allow, list) or not isinstance(entries, dict)
+        or not isinstance(paths, list) or "pixel-ods" not in allow):
+    raise SystemExit(1)
+parallel_path = str(pathlib.Path(sys.argv[3]) / "data/pixel/native-search/parallel-2026.6.33")
+if selected == "searxng":
+    origin = contract.get("searxngBaseUrl")
+    if (not isinstance(origin, str)
+            or not re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]{0,4}", origin)
+            or int(origin.rsplit(":", 1)[1]) > 65535
+            or "searxng" not in allow or "parallel" in allow
+            or entries.get("searxng") != {"enabled": True, "config": {"webSearch": {"baseUrl": origin}}}
+            or "parallel" in entries or parallel_path in paths):
+        raise SystemExit(1)
+else:
+    extensions = contract.get("gatewayExtensions")
+    parallel = [item for item in extensions if isinstance(item, dict) and item.get("id") == "parallel"] if isinstance(extensions, list) else []
+    if (len(parallel) != 1 or parallel[0].get("path") != parallel_path
+            or not isinstance(parallel[0].get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", parallel[0]["sha256"])
+            or "parallel" not in allow or "searxng" in allow
+            or entries.get("parallel") != {"enabled": True}
+            or "searxng" in entries or parallel_path not in paths):
+        raise SystemExit(1)
 PY
 }
 
@@ -704,11 +1010,25 @@ if (not isinstance(models, list) or len(models) != 1 or not isinstance(models[0]
         or selected[0].get("model") != "ods-gateway/ods/current"):
     raise SystemExit("live stable-alias model binding is invalid")
 candidate = copy.deepcopy(live)
+route_fingerprint = contract.get("modelRouteFingerprint")
+if route_fingerprint is not None and (not isinstance(route_fingerprint, str)
+        or not re.fullmatch(r"[a-f0-9]{64}", route_fingerprint)):
+    raise SystemExit("invalid promoted Pixel route identity")
+plugin_config = candidate.setdefault("plugins", {}).setdefault("entries", {}).setdefault("pixel-ods", {}).setdefault("config", {})
+if route_fingerprint is None:
+    plugin_config.pop("modelRouteFingerprint", None)
+else:
+    plugin_config["modelRouteFingerprint"] = route_fingerprint
 model = candidate["models"]["providers"]["ods-gateway"]["models"][0]
 model["name"] = name
 model["contextWindow"] = context
 model["maxTokens"] = max_tokens
 model["reasoning"] = reasoning
+image_input = contract.get("modelImageInput", "unknown")
+if image_input not in ("supported", "unsupported", "unknown"):
+    raise SystemExit("invalid promoted Pixel image-input contract")
+plugin_config["modelImageInput"] = image_input
+model["input"] = ["text"] if image_input == "unsupported" else ["text", "image"]
 agent = next(
     item for item in candidate["agents"]["list"]
     if isinstance(item, dict) and item.get("id") == "pixel"
@@ -722,7 +1042,7 @@ compaction = defaults.setdefault("compaction", {}) if isinstance(defaults, dict)
 if not isinstance(compaction, dict):
     raise SystemExit("live stable-alias compaction policy is invalid")
 compaction["reserveTokens"] = (context + 4 * max_tokens + 4) // 5
-compaction["reserveTokensFloor"] = context // 2 if 8192 <= context < 32768 else 0
+compaction["reserveTokensFloor"] = 0
 compaction["keepRecentTokens"] = max(512, min(20000, context // 16))
 descriptor, temporary = tempfile.mkstemp(prefix=".ods-model-reconcile-", dir=live_path.parent)
 try:
@@ -910,6 +1230,22 @@ contract["modelApiKey"] = provider_value.get("apiKey")
 contract["modelContextWindow"] = context_window
 contract["modelMaxTokens"] = max_tokens
 contract["modelReasoning"] = reasoning
+image_input = live.get("plugins", {}).get("entries", {}).get("pixel-ods", {}).get("config", {}).get("modelImageInput")
+if image_input is not None:
+    if (image_input not in ("supported", "unsupported", "unknown")
+            or models[0].get("input") != (["text"] if image_input == "unsupported" else ["text", "image"])):
+        raise SystemExit("invalid live Pixel image-input contract")
+    contract["modelImageInput"] = image_input
+else:
+    contract.pop("modelImageInput", None)
+route_fingerprint = live.get("plugins", {}).get("entries", {}).get("pixel-ods", {}).get("config", {}).get("modelRouteFingerprint")
+if route_fingerprint is not None and (not isinstance(route_fingerprint, str)
+        or not re.fullmatch(r"[a-f0-9]{64}", route_fingerprint)):
+    raise SystemExit("invalid live Pixel route identity")
+if provider == "ods-gateway" and route_fingerprint is not None:
+    contract["modelRouteFingerprint"] = route_fingerprint
+else:
+    contract.pop("modelRouteFingerprint", None)
 rollback = backup / "rollback-onboarding.json"
 payload = json.dumps(contract, indent=2, sort_keys=True) + "\n"
 with rollback.open("x", encoding="utf-8", newline="\n") as handle:
@@ -924,13 +1260,20 @@ PY
 _ods_pixel_update_onboarding_model() {
     local owner="$1" home="$2" answers="$3" model="$4"
     local context="${5:-}" max_tokens="${6:-}" reasoning="${7:-}"
+    local route_fingerprint="${8:-}" image_input="${9:-unknown}"
     ods_pixel_run_as_owner "$owner" "$home" python3 - \
-        "$answers" "$model" "$context" "$max_tokens" "$reasoning" <<'PY'
+        "$answers" "$model" "$context" "$max_tokens" "$reasoning" "$route_fingerprint" "$image_input" <<'PY'
 import json, os, pathlib, re, stat, sys, tempfile
 
 path = pathlib.Path(sys.argv[1])
 model = sys.argv[2]
 context_raw, max_tokens_raw, reasoning_raw = sys.argv[3:6]
+route_fingerprint = sys.argv[6] or None
+image_input = sys.argv[7]
+if image_input not in ("supported", "unsupported", "unknown"):
+    raise SystemExit("invalid promoted Pixel image-input contract")
+if route_fingerprint is not None and not re.fullmatch(r"[a-f0-9]{64}", route_fingerprint):
+    raise SystemExit("invalid promoted Pixel route identity")
 if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+:/ @(),=-]{0,255}", model):
     raise SystemExit("invalid promoted Pixel model id")
 info = path.lstat()
@@ -1018,6 +1361,11 @@ else:
     # rolled forward, then persist only the canonical alias.
     value["modelId"] = "ods/current"
     value["modelName"] = f"ODS Current ({model})"
+value["modelImageInput"] = image_input
+if provider == "ods-gateway" and route_fingerprint is not None:
+    value["modelRouteFingerprint"] = route_fingerprint
+else:
+    value.pop("modelRouteFingerprint", None)
 payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
 fd, temporary = tempfile.mkstemp(prefix=".pixel-onboarding.", dir=path.parent)
 try:
@@ -1036,11 +1384,11 @@ PY
 _ods_pixel_candidate_is_managed_runtime_update() {
     local owner="$1" home="$2" candidate="$3" answers="$4" live
     live="$home/.openclaw/openclaw.json"
-    ods_pixel_run_as_owner "$owner" "$home" python3 - "$live" "$candidate" "$answers" <<'PY'
+    ods_pixel_run_as_owner "$owner" "$home" python3 - "$live" "$candidate" "$answers" "${INSTALL_DIR:?}" <<'PY'
 import copy, json, os, pathlib, re, stat, sys
 
 values = []
-for raw in sys.argv[1:]:
+for raw in sys.argv[1:4]:
     path = pathlib.Path(raw)
     info = path.lstat()
     if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_nlink != 1
@@ -1134,6 +1482,10 @@ expected_model = {
     "maxTokens": contract.get("modelMaxTokens"),
     "reasoning": contract.get("modelReasoning"),
 }
+image_input = contract.get("modelImageInput", "unknown")
+if image_input not in ("supported", "unsupported", "unknown"):
+    raise SystemExit("invalid candidate Pixel image-input contract")
+expected_model["input"] = ["text"] if image_input == "unsupported" else ["text", "image"]
 for key, expected in expected_model.items():
     if candidate_model.get(key) != expected:
         raise SystemExit(f"candidate model field does not match onboarding: {key}")
@@ -1167,6 +1519,7 @@ normalized_model["name"] = model_name
 normalized_model["contextWindow"] = contract.get("modelContextWindow")
 normalized_model["maxTokens"] = contract.get("modelMaxTokens")
 normalized_model["reasoning"] = contract.get("modelReasoning")
+normalized_model["input"] = expected_model["input"]
 normalized_agent["model"] = f"{provider}/{model_id}"
 normalized_defaults = normalized_agents.get("defaults") if isinstance(normalized_agents, dict) else None
 normalized_session = normalized.get("session")
@@ -1196,7 +1549,15 @@ normalized_parameter_markers = re.findall(
     r"(?<![a-z0-9.])(\d+(?:\.\d+)?)\s*b(?![a-z0-9])",
     model_label,
 )
-normalized_small_model = any(float(marker) <= 4 for marker in normalized_parameter_markers)
+# Some published small checkpoints use size classes (Mini, Micro, Tiny)
+# instead of a parameter count in their runtime name. Prefer any explicit
+# count, so a hypothetical "Micro 70B" cannot be silently compacted.
+normalized_small_model = (
+    any(float(marker) <= 4 for marker in normalized_parameter_markers)
+    or (not normalized_parameter_markers and re.search(
+        r"(?<![a-z0-9])(mini|micro|tiny)(?![a-z0-9])", model_label,
+    ) is not None)
+)
 normalized_lean_prompt = normalized_compact_context or normalized_small_model
 normalized_agent["bootstrapMaxChars"] = 2000 if normalized_lean_prompt else 14000
 normalized_agent["bootstrapTotalMaxChars"] = 6000 if normalized_lean_prompt else 36000
@@ -1247,7 +1608,16 @@ if (not isinstance(normalized_compaction, dict)
     raise SystemExit("live Pixel runtime policy is outside the ODS contract")
 normalized_agent_experimental["localModelLean"] = False
 normalized_pixel_config["modelContextWindow"] = normalized_context_window
+normalized_pixel_config["modelImageInput"] = image_input
 normalized_pixel_config["leanPrompt"] = normalized_lean_prompt
+route_fingerprint = contract.get("modelRouteFingerprint")
+if route_fingerprint is not None and (provider != "ods-gateway" or not isinstance(route_fingerprint, str)
+        or not re.fullmatch(r"[a-f0-9]{64}", route_fingerprint)):
+    raise SystemExit("invalid candidate Pixel route identity")
+if route_fingerprint is None:
+    normalized_pixel_config.pop("modelRouteFingerprint", None)
+else:
+    normalized_pixel_config["modelRouteFingerprint"] = route_fingerprint
 research_port = candidate.get("plugins", {}).get("entries", {}).get("pixel-ods", {}).get("config", {}).get("perplexicaPort", 3004)
 if type(research_port) is not int or not 1 <= research_port <= 65535:
     raise SystemExit("invalid Perplexica service port")
@@ -1269,6 +1639,19 @@ if existing_binds not in ([], [exec_control_bind]):
     raise SystemExit("live Pixel sandbox binds are outside the ODS contract")
 normalized_sandbox_docker["binds"] = [exec_control_bind]
 normalized_sandbox_docker["dangerouslyAllowExternalBindSources"] = True
+# Docker's nproc ulimit is accounted against the host UID, not only this
+# container. On a busy inference host it can therefore prevent even the fixed
+# sandbox proof from forking while the independent per-container pidsLimit is
+# still almost empty. Keep that cgroup limit and any other ulimits, but remove
+# the cross-service nproc ceiling from the ODS-managed Pixel sandbox.
+normalized_sandbox_docker["pidsLimit"] = 1024
+normalized_sandbox_ulimits = normalized_sandbox_docker.get("ulimits")
+if normalized_sandbox_ulimits is not None:
+    if not isinstance(normalized_sandbox_ulimits, dict):
+        raise SystemExit("live Pixel sandbox ulimits are outside the ODS contract")
+    normalized_sandbox_ulimits.pop("nproc", None)
+    if not normalized_sandbox_ulimits:
+        normalized_sandbox_docker.pop("ulimits", None)
 # OpenClaw's OpenAI-compatible transport adds a 1.25 character-based input
 # safety margin after its independent pre-prompt compaction estimate. Reserve
 # enough headroom that the precheck runs before that transport can silently
@@ -1277,10 +1660,7 @@ normalized_sandbox_docker["dangerouslyAllowExternalBindSources"] = True
 normalized_compaction["reserveTokens"] = (
     contract.get("modelContextWindow") + 4 * contract.get("modelMaxTokens") + 4
 ) // 5
-normalized_compaction["reserveTokensFloor"] = (
-    normalized_context_window // 2
-    if 8192 <= normalized_context_window < 32768 else 0
-)
+normalized_compaction["reserveTokensFloor"] = 0
 # OpenClaw otherwise retains its fixed 20K recent-token default. On compact
 # contexts that can select nothing to summarize, create a no-op compaction,
 # and then reject the useful retry as already compacted. Keep a context-scaled
@@ -1326,7 +1706,7 @@ normalized_agent_tools["deny"] = [
     if item not in {
         "web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
         "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-        "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview",
+        "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_workspace_bundle", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_image_read", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry",
         "pixel_web_extract"
     }
 ]
@@ -1336,7 +1716,7 @@ for extension_tool in (
     "cron", "create_goal", "get_goal", "update_goal", "update_plan",
     "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
     "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview"
+    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_workspace_bundle", "pixel_ods_workspace_artifact", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_image_read", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"
 ):
     if extension_tool not in normalized_also_allow:
         normalized_also_allow.append(extension_tool)
@@ -1344,12 +1724,34 @@ for permitted_tool in (
     "cron", "create_goal", "get_goal", "update_goal", "update_plan",
     "web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
     "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview"
+    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview", "pixel_ods_workspace_bundle", "pixel_ods_workspace_artifact", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_image_read", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"
 ):
     if permitted_tool not in normalized_sandbox_allow:
         normalized_sandbox_allow.append(permitted_tool)
 normalized_tools["alsoAllow"] = sorted(set(normalized_also_allow))
 normalized_sandbox_tools["allow"] = sorted(set(normalized_sandbox_allow))
+inspection_tool = 'pixel_ods_workspace_preview_inspect'
+inspection_enabled = normalized_pixel_config.get('workspacePreviewInspectionTransport') in ('unix', 'native')
+for tools in (normalized_tools['alsoAllow'], normalized_sandbox_tools['allow']):
+    if inspection_enabled and inspection_tool not in tools:
+        tools.append(inspection_tool)
+        tools.sort()
+    elif not inspection_enabled and inspection_tool in tools:
+        tools.remove(inspection_tool)
+if inspection_enabled:
+    normalized_agent_tools['deny'] = [tool for tool in normalized_agent_tools['deny'] if tool != inspection_tool]
+project_socket = normalized_pixel_config.get('projectBuildSocket')
+project_enabled = (isinstance(project_socket, str) and project_socket.startswith('/')
+                   and '\x00' not in project_socket and 2 <= len(project_socket) <= 100)
+project_tool = 'pixel_ods_project_build'
+for tools in (normalized_tools['alsoAllow'], normalized_sandbox_tools['allow']):
+    if project_enabled and project_tool not in tools:
+        tools.append(project_tool)
+        tools.sort()
+    elif not project_enabled and project_tool in tools:
+        tools.remove(project_tool)
+if project_enabled:
+    normalized_agent_tools['deny'] = [tool for tool in normalized_agent_tools['deny'] if tool != project_tool]
 if "qwen" in model_label and contract.get("modelReasoning") is True:
     normalized_model["compat"] = {"thinkingFormat": "qwen-chat-template"}
     normalized_agent["thinkingDefault"] = "low"
@@ -1386,6 +1788,88 @@ else:
         normalized_agent_params.pop(key, None)
 if not normalized_agent_params:
     normalized_agent.pop("params", None)
+selected_search = contract.get("webSearchProvider")
+if selected_search is not None:
+    if selected_search not in {"searxng", "parallel-free"}:
+        raise SystemExit("invalid selected Pixel search provider")
+    live_search = live.get("tools", {}).get("web", {}).get("search")
+    candidate_search = candidate.get("tools", {}).get("web", {}).get("search")
+    if candidate_search != {"provider": selected_search}:
+        raise SystemExit("candidate search provider differs from onboarding")
+    if live_search != candidate_search or normalized_plugins != candidate.get("plugins"):
+        if live_search not in ({"provider": "searxng"}, {"provider": "parallel-free"}):
+            raise SystemExit("live search provider is outside the ODS contract")
+        extensions = contract.get("gatewayExtensions")
+        if not isinstance(extensions, list):
+            raise SystemExit("invalid search extension contract")
+        parallel = [item for item in extensions if isinstance(item, dict) and item.get("id") == "parallel"]
+        parallel_path = str(pathlib.Path(sys.argv[4]) / "data/pixel/native-search/parallel-2026.6.33")
+        if selected_search == "parallel-free":
+            if (len(parallel) != 1 or parallel[0].get("path") != parallel_path
+                    or not isinstance(parallel[0].get("sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", parallel[0]["sha256"])):
+                raise SystemExit("parallel search extension is not bound to its pinned path and digest")
+        elif parallel:
+            raise SystemExit("SearXNG selection unexpectedly includes the parallel extension")
+        elif (not isinstance(contract.get("searxngBaseUrl"), str)
+                or not re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]{0,4}", contract["searxngBaseUrl"])
+                or int(contract["searxngBaseUrl"].rsplit(":", 1)[1]) > 65535):
+            raise SystemExit("SearXNG selection lacks a loopback search origin")
+
+        def without_search(values):
+            if (not isinstance(values, list)
+                    or any(not isinstance(item, str) for item in values)
+                    or len(values) != len(set(values))):
+                raise SystemExit("invalid search plugin list")
+            return [item for item in values if item not in {"parallel", "searxng"}]
+
+        before_allow = normalized_plugins.get("allow")
+        after_allow = candidate.get("plugins", {}).get("allow")
+        if without_search(before_allow) != without_search(after_allow):
+            raise SystemExit("candidate changes unrelated plugin allowlist")
+        expected_plugin = "parallel" if selected_search == "parallel-free" else "searxng"
+        if ([item for item in after_allow if item in {"parallel", "searxng"}]
+                != [expected_plugin]):
+            raise SystemExit("candidate search plugin allowlist is invalid")
+
+        candidate_entries = candidate.get("plugins", {}).get("entries")
+        if not isinstance(candidate_entries, dict):
+            raise SystemExit("invalid candidate plugin entries")
+        for plugin_id in ("parallel", "searxng"):
+            normalized_plugin_entries.pop(plugin_id, None)
+        unrelated_entries = {key: value for key, value in candidate_entries.items()
+                             if key not in {"parallel", "searxng"}}
+        if normalized_plugin_entries != unrelated_entries:
+            raise SystemExit("candidate changes unrelated plugin entries")
+        if selected_search == "parallel-free":
+            if candidate_entries.get("parallel") != {"enabled": True} or "searxng" in candidate_entries:
+                raise SystemExit("candidate parallel plugin registration is invalid")
+        else:
+            expected_entry = {"enabled": True, "config": {"webSearch": {
+                "baseUrl": contract.get("searxngBaseUrl")}}}
+            if (candidate_entries.get("searxng") != expected_entry
+                    or "parallel" in candidate_entries):
+                raise SystemExit("candidate SearXNG plugin registration is invalid")
+
+        before_load = normalized_plugins.get("load")
+        after_load = candidate.get("plugins", {}).get("load")
+        if not isinstance(before_load, dict) or not isinstance(after_load, dict):
+            raise SystemExit("invalid search plugin load policy")
+        before_paths, after_paths = before_load.get("paths"), after_load.get("paths")
+        if (not isinstance(before_paths, list) or not isinstance(after_paths, list)
+                or any(not isinstance(item, str) for item in before_paths + after_paths)
+                or len(before_paths) != len(set(before_paths))
+                or len(after_paths) != len(set(after_paths))
+                or [path for path in before_paths if path != parallel_path]
+                != [path for path in after_paths if path != parallel_path]):
+            raise SystemExit("candidate changes unrelated plugin load paths")
+        if (parallel_path in after_paths) != (selected_search == "parallel-free"):
+            raise SystemExit("candidate search plugin path selection is invalid")
+
+        normalized_web["search"] = copy.deepcopy(candidate_search)
+        normalized_plugins["allow"] = copy.deepcopy(after_allow)
+        normalized_plugin_entries[expected_plugin] = copy.deepcopy(candidate_entries[expected_plugin])
+        normalized_plugins["load"]["paths"] = copy.deepcopy(after_paths)
 if normalized != candidate:
     raise SystemExit("candidate changes more than the ODS managed model/runtime fields")
 PY
@@ -1485,7 +1969,7 @@ _ods_pixel_refresh_plugin_registry() {
     registry="$(ods_pixel_run_as_owner "$owner" "$home" "$openclaw_bin" \
         plugins registry --refresh --json 2>/dev/null)" || return 1
     jq -e --arg root "$plugin_root" '
-        (["pixel_ods_apps_list", "pixel_ods_download_promote", "pixel_ods_evidence_readback", "pixel_ods_evidence_report", "pixel_ods_extensions", "pixel_ods_host_command_propose", "pixel_ods_host_observe", "pixel_ods_status", "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_workspace_preview"] | sort) as $tools
+        (["pixel_ods_apps_list", "pixel_ods_download_promote", "pixel_ods_evidence_readback", "pixel_ods_evidence_report", "pixel_ods_extensions", "pixel_ods_host_command_propose", "pixel_ods_host_observe", "pixel_ods_status", "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_workspace_preview", "pixel_ods_project_build", "pixel_ods_workspace_artifact", "pixel_ods_workspace_bundle", "pixel_ods_workspace_preview_inspect", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_image_read", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"] | sort) as $tools
         | .refreshed == true
         and .registry.version == 1
         and .registry.refreshReason == "manual"
@@ -1505,7 +1989,7 @@ _ods_pixel_verify_plugin_loaded() {
     local owner="$1" home="$2" openclaw_bin="$3" plugin_root="$4"
     ods_pixel_run_as_owner "$owner" "$home" "$openclaw_bin" plugins list --json 2>/dev/null \
         | jq -e --arg root "$plugin_root" '
-            ["pixel_ods_apps_list", "pixel_ods_download_promote", "pixel_ods_evidence_readback", "pixel_ods_evidence_report", "pixel_ods_extensions", "pixel_ods_host_command_propose", "pixel_ods_host_observe", "pixel_ods_status", "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_workspace_preview"] as $tools
+            ["pixel_ods_apps_list", "pixel_ods_download_promote", "pixel_ods_evidence_readback", "pixel_ods_evidence_report", "pixel_ods_extensions", "pixel_ods_host_command_propose", "pixel_ods_host_observe", "pixel_ods_status", "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_workspace_preview", "pixel_ods_project_build", "pixel_ods_workspace_artifact", "pixel_ods_workspace_bundle", "pixel_ods_workspace_preview_inspect", "pixel_ods_ask_user", "pixel_ods_goal", "pixel_ods_activity", "pixel_ods_history", "pixel_ods_image_read", "pixel_ods_skill", "pixel_ods_extension_proposal", "pixel_ods_source_proposal", "pixel_ods_python_library_proposal", "pixel_ods_extension_request_status", "pixel_ods_extension_request_prepare", "pixel_ods_extension_request_advance", "pixel_ods_extension_request_retry"] as $tools
             | [
                 .plugins[]?
                 | select(
@@ -1519,15 +2003,30 @@ _ods_pixel_verify_plugin_loaded() {
             >/dev/null
 }
 
+_ods_pixel_exec_control_stat() {
+    local field="$1" path="$2" format
+    case "$(uname -s)" in
+        Darwin)
+            case "$field" in owner) format='%Su' ;; links) format='%l' ;; mode) format='%Lp' ;; *) return 1 ;; esac
+            /usr/bin/stat -f "$format" "$path"
+            ;;
+        Linux)
+            case "$field" in owner) format='%U' ;; links) format='%h' ;; mode) format='%a' ;; *) return 1 ;; esac
+            stat -c "$format" -- "$path"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 _ods_pixel_install_exec_control() {
     local owner="$1" home="$2" source="$3" sudo_source="$4"
     local parent="$home/.openclaw" root="$home/.openclaw/.ods-exec-control"
     local candidate
     for candidate in "$source" "$sudo_source"; do
         [[ -f "$candidate" && ! -L "$candidate" \
-            && "$(stat -c '%U' -- "$candidate")" == "$owner" \
-            && "$(stat -c '%h' -- "$candidate")" == 1 ]] || return 1
-        (( (8#$(stat -c '%a' -- "$candidate") & 0022) == 0 )) || return 1
+            && "$(_ods_pixel_exec_control_stat owner "$candidate")" == "$owner" \
+            && "$(_ods_pixel_exec_control_stat links "$candidate")" == 1 ]] || return 1
+        (( (8#$(_ods_pixel_exec_control_stat mode "$candidate") & 0022) == 0 )) || return 1
     done
     # A clean Pixel install has not run OpenClaw bootstrap yet, so its private
     # state directory legitimately does not exist. Create only that exact
@@ -1537,17 +2036,17 @@ _ods_pixel_install_exec_control() {
         ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "$parent" || return 1
     fi
     [[ -d "$parent" && ! -L "$parent" \
-        && "$(stat -c '%U' -- "$parent")" == "$owner" ]] || return 1
-    (( (8#$(stat -c '%a' -- "$parent") & 0022) == 0 )) || return 1
+        && "$(_ods_pixel_exec_control_stat owner "$parent")" == "$owner" ]] || return 1
+    (( (8#$(_ods_pixel_exec_control_stat mode "$parent") & 0022) == 0 )) || return 1
     if [[ -e "$root" || -L "$root" ]]; then
-        [[ -d "$root" && ! -L "$root" && "$(stat -c '%U' -- "$root")" == "$owner" \
-            && "$(stat -c '%a' -- "$root")" == 700 ]] || return 1
+        [[ -d "$root" && ! -L "$root" && "$(_ods_pixel_exec_control_stat owner "$root")" == "$owner" \
+            && "$(_ods_pixel_exec_control_stat mode "$root")" == 700 ]] || return 1
     fi
     for candidate in "$root/cancellable-exec.sh" "$root/sudo"; do
         if [[ -e "$candidate" || -L "$candidate" ]]; then
             [[ -f "$candidate" && ! -L "$candidate" \
-                && "$(stat -c '%U' -- "$candidate")" == "$owner" \
-                && "$(stat -c '%h' -- "$candidate")" == 1 ]] || return 1
+                && "$(_ods_pixel_exec_control_stat owner "$candidate")" == "$owner" \
+                && "$(_ods_pixel_exec_control_stat links "$candidate")" == 1 ]] || return 1
         fi
     done
     ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "$root" || return 1
@@ -1558,14 +2057,14 @@ _ods_pixel_install_exec_control() {
     [[ -d "$root" && ! -L "$root" \
         && -f "$root/cancellable-exec.sh" && ! -L "$root/cancellable-exec.sh" \
         && -f "$root/sudo" && ! -L "$root/sudo" \
-        && "$(stat -c '%U' -- "$root")" == "$owner" \
-        && "$(stat -c '%U' -- "$root/cancellable-exec.sh")" == "$owner" \
-        && "$(stat -c '%U' -- "$root/sudo")" == "$owner" \
-        && "$(stat -c '%a' -- "$root")" == 700 \
-        && "$(stat -c '%h' -- "$root/cancellable-exec.sh")" == 1 \
-        && "$(stat -c '%a' -- "$root/cancellable-exec.sh")" == 500 \
-        && "$(stat -c '%h' -- "$root/sudo")" == 1 \
-        && "$(stat -c '%a' -- "$root/sudo")" == 500 ]]
+        && "$(_ods_pixel_exec_control_stat owner "$root")" == "$owner" \
+        && "$(_ods_pixel_exec_control_stat owner "$root/cancellable-exec.sh")" == "$owner" \
+        && "$(_ods_pixel_exec_control_stat owner "$root/sudo")" == "$owner" \
+        && "$(_ods_pixel_exec_control_stat mode "$root")" == 700 \
+        && "$(_ods_pixel_exec_control_stat links "$root/cancellable-exec.sh")" == 1 \
+        && "$(_ods_pixel_exec_control_stat mode "$root/cancellable-exec.sh")" == 500 \
+        && "$(_ods_pixel_exec_control_stat links "$root/sudo")" == 1 \
+        && "$(_ods_pixel_exec_control_stat mode "$root/sudo")" == 500 ]]
 }
 
 _ods_pixel_recreate_agent_sandbox() {
@@ -1585,363 +2084,16 @@ _ods_pixel_recreate_agent_sandbox() {
 
 _ods_pixel_apply_runtime_budget() {
     local owner="$1" home="$2" config="$3" openclaw_bin="$4" staged
+    local answers="${5:-}" inspection_transport="${6:-}" project_socket="${7:-}"
     # ODS qualifies Pixel on CPU-only hosts. The first local 9B turn can spend
     # more than five minutes loading and prefilling its managed context, while
     # OpenClaw's default session watchdogs assume a responsive remote model.
     # Keep the larger CPU-only budgets deterministic and confined to this
     # ODS-owned Pixel route.
-    # macOS Bash 3.2 reparses this command-substitution heredoc; keep the
-    # embedded Python body free of literal apostrophe characters.
-    staged="$(ods_pixel_run_as_owner "$owner" "$home" python3 - "$config" "${PERPLEXICA_PORT:-3004}" <<'PY'
-import copy, json, os, pathlib, re, stat, sys, tempfile
-
-path = pathlib.Path(sys.argv[1])
-if not sys.argv[2].isdigit() or not 1 <= int(sys.argv[2]) <= 65535:
-    raise SystemExit("invalid Perplexica service port")
-research_port = int(sys.argv[2])
-info = path.lstat()
-if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_nlink != 1
-        or info.st_uid != os.getuid() or info.st_mode & 0o077
-        or info.st_size > 2 * 1024 * 1024):
-    raise SystemExit("unsafe ODS-managed OpenClaw configuration")
-parent_info = path.parent.lstat()
-if (not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode)
-        or parent_info.st_uid != os.getuid() or parent_info.st_mode & 0o022):
-    raise SystemExit("unsafe ODS-managed OpenClaw configuration directory")
-value = json.loads(path.read_text(encoding="utf-8"))
-if not isinstance(value, dict):
-    raise SystemExit("ODS-managed OpenClaw configuration must be an object")
-
-providers = value.get("models", {}).get("providers", {})
-agents = value.get("agents", {})
-agent_list = agents.get("list", []) if isinstance(agents, dict) else []
-selected = [item for item in agent_list if isinstance(item, dict) and item.get("id") == "pixel"]
-if (not isinstance(providers, dict) or len(providers) != 1
-        or next(iter(providers), None) not in {"ods-local", "ods-gateway"}
-        or len(selected) != 1):
-    raise SystemExit("OpenClaw configuration is outside the ODS Pixel runtime boundary")
-provider_id = next(iter(providers))
-provider = providers[provider_id]
-models = provider.get("models") if isinstance(provider, dict) else None
-defaults = agents.get("defaults") if isinstance(agents, dict) else None
-session = value.get("session")
-model_id = models[0].get("id") if isinstance(models, list) and len(models) == 1 and isinstance(models[0], dict) else None
-if (not isinstance(models, list) or len(models) != 1 or not isinstance(models[0], dict)
-        or not isinstance(defaults, dict) or not isinstance(session, dict)
-        or provider.get("api") != "openai-completions"
-        or selected[0].get("model") != f"{provider_id}/{model_id}"):
-    raise SystemExit("OpenClaw configuration is outside the ODS Pixel runtime contract")
-if provider_id == "ods-local":
-    if (provider.get("apiKey") != "local-no-auth"
-            or provider.get("baseUrl") != "http://127.0.0.1:11434/v1"
-            or not isinstance(model_id, str)
-            or models[0].get("name") != f"ODS Local {model_id}"):
-        raise SystemExit("OpenClaw local route is outside the ODS Pixel runtime contract")
-else:
-    gateway_key = provider.get("apiKey")
-    gateway_url = provider.get("baseUrl")
-    alias_label = "Current" if model_id == "ods/current" else "Default"
-    if (model_id not in {"default", "ods/current"}
-            or not isinstance(gateway_key, str) or not gateway_key or len(gateway_key) > 4096
-            or any(ord(character) < 32 or ord(character) == 127 for character in gateway_key)
-            or not isinstance(gateway_url, str)
-            or not re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]{0,4}/v1", gateway_url)
-            or int(gateway_url.rsplit(":", 1)[1].split("/", 1)[0]) > 65535
-            or not isinstance(models[0].get("name"), str)
-            or not re.fullmatch(
-                rf"ODS {alias_label} \([A-Za-z0-9][A-Za-z0-9._+:/ @(),=-]{{0,255}}\)",
-                models[0]["name"],
-            )):
-        raise SystemExit("OpenClaw gateway route is outside the ODS Pixel runtime contract")
-
-updated = copy.deepcopy(value)
-updated_provider = updated["models"]["providers"][provider_id]
-updated_defaults = updated["agents"]["defaults"]
-updated_agent = next(item for item in updated["agents"]["list"] if isinstance(item, dict) and item.get("id") == "pixel")
-updated_agent_experimental = updated_agent.setdefault("experimental", {})
-updated_model = updated_provider["models"][0]
-updated_session = updated["session"]
-updated_agent_sandbox = updated_defaults.setdefault("sandbox", {})
-updated_sandbox_docker = updated_agent_sandbox.setdefault("docker", {})
-updated_diagnostics = updated.setdefault("diagnostics", {})
-updated_compaction = updated_defaults.setdefault("compaction", {})
-write_lock = updated_session.setdefault("writeLock", {})
-updated_tools = updated.setdefault("tools", {})
-updated_also_allow = updated_tools.setdefault("alsoAllow", [])
-updated_web = updated_tools.setdefault("web", {})
-updated_fetch = updated_web.setdefault("fetch", {})
-updated_agent_tools = updated_agent.setdefault("tools", {})
-updated_agent_deny = updated_agent_tools.setdefault("deny", [])
-updated_sandbox = updated_tools.setdefault("sandbox", {})
-updated_sandbox_tools = updated_sandbox.setdefault("tools", {})
-updated_sandbox_allow = updated_sandbox_tools.setdefault("allow", [])
-updated_plugins = updated.setdefault("plugins", {})
-updated_plugin_entries = updated_plugins.setdefault("entries", {}) if isinstance(updated_plugins, dict) else None
-updated_pixel_plugin = updated_plugin_entries.setdefault("pixel-ods", {}) if isinstance(updated_plugin_entries, dict) else None
-updated_pixel_hooks = updated_pixel_plugin.setdefault("hooks", {}) if isinstance(updated_pixel_plugin, dict) else None
-updated_pixel_config = updated_pixel_plugin.setdefault("config", {}) if isinstance(updated_pixel_plugin, dict) else None
-if not isinstance(updated_compaction, dict):
-    raise SystemExit("OpenClaw compaction configuration must be an object")
-if not isinstance(write_lock, dict):
-    raise SystemExit("OpenClaw session write-lock configuration must be an object")
-if not isinstance(updated_diagnostics, dict):
-    raise SystemExit("OpenClaw diagnostics configuration must be an object")
-if not isinstance(updated_agent_sandbox, dict) or not isinstance(updated_sandbox_docker, dict):
-    raise SystemExit("OpenClaw sandbox configuration must be an object")
-if (not isinstance(updated_tools, dict)
-        or not isinstance(updated_also_allow, list)
-        or not all(isinstance(item, str) for item in updated_also_allow)
-        or not isinstance(updated_agent_tools, dict)
-        or not isinstance(updated_agent_experimental, dict)
-        or not isinstance(updated_agent_deny, list)
-        or not all(isinstance(item, str) for item in updated_agent_deny)
-        or not isinstance(updated_sandbox, dict)
-        or not isinstance(updated_sandbox_tools, dict)
-        or not isinstance(updated_sandbox_allow, list)
-        or not all(isinstance(item, str) for item in updated_sandbox_allow)
-        or not isinstance(updated_plugins, dict)
-        or not isinstance(updated_plugin_entries, dict)
-        or not isinstance(updated_pixel_plugin, dict)
-        or not isinstance(updated_pixel_hooks, dict)
-        or not isinstance(updated_pixel_config, dict)):
-    raise SystemExit("OpenClaw tool policy is outside the ODS Pixel runtime contract")
-if not isinstance(updated_web, dict) or not isinstance(updated_fetch, dict):
-    raise SystemExit("OpenClaw web tool policy is outside the ODS Pixel runtime contract")
-exec_control_bind = "{}:/run/pixel-ods-control:ro".format(
-    pathlib.Path.home() / ".openclaw" / ".ods-exec-control"
-)
-existing_binds = updated_sandbox_docker.get("binds", [])
-if existing_binds not in ([], [exec_control_bind]):
-    raise SystemExit("OpenClaw sandbox binds are outside the ODS Pixel runtime contract")
-# OpenClaw accepts this owner-private source only with its explicit external
-# bind opt-in. ODS still pins the sole source and destination above, validates
-# the host tree owner/mode, and exposes it read-only inside the sandbox.
-updated_sandbox_docker["binds"] = [exec_control_bind]
-updated_sandbox_docker["dangerouslyAllowExternalBindSources"] = True
-# Model budgets must preserve native web-search provider choices.
-# OpenClaw validates the complete candidate below; search provisioning and
-# readiness belong to bootstrap, not this context/sandbox budget overlay.
-updated_provider["timeoutSeconds"] = 1800
-updated_defaults["timeoutSeconds"] = 1800
-updated_defaults["bootstrapMaxChars"] = 32000
-updated_defaults["bootstrapTotalMaxChars"] = 96000
-updated_defaults["contextInjection"] = "continuation-skip"
-updated_agent_context_limits = updated_agent.setdefault("contextLimits", {})
-# Tool Search below keeps schemas compact for every model. The separate
-# upstream localModelLean switch removes cron and browser from the catalog,
-# even when policy otherwise permits them. Keep that capability filter off;
-# model size must not silently remove core agent features. Existing explicit
-# tool denials, sandbox policy, and ODS authority checks still apply.
-updated_agent_experimental["localModelLean"] = False
-updated_tools["toolSearch"] = {
-    "enabled": True,
-    "mode": "tools",
-    "searchDefaultLimit": 5,
-    "maxSearchLimit": 10,
-}
-# The finalization hook consumes only per-run structured guard state and
-# does not inspect or persist conversation text. OpenClaw nevertheless requires
-# this explicit trust bit before any installed plugin may register the hook.
-updated_pixel_hooks["allowConversationAccess"] = True
-context_window = updated_model.get("contextWindow")
-model_max_tokens = updated_model.get("maxTokens")
-if (type(context_window) is not int or type(model_max_tokens) is not int
-        or context_window < 4096 or not 1 <= model_max_tokens <= context_window):
-    raise SystemExit("OpenClaw model limits are outside the ODS Pixel runtime contract")
-# Preserve complete upstream workspace contracts when the selected route can
-# carry and follow them. Small checkpoints and compact contexts receive the
-# equivalent concise plugin core and on-demand capability contracts. This
-# generic size/context profile never rejects a model or hides a callable tool.
-compact_context = context_window < 32768
-model_label = "{} {}".format(updated_model.get("id", ""), updated_model.get("name", "")).casefold()
-parameter_markers = re.findall(
-    r"(?<![a-z0-9.])(\d+(?:\.\d+)?)\s*b(?![a-z0-9])",
-    model_label,
-)
-small_model = any(float(marker) <= 4 for marker in parameter_markers)
-lean_prompt = compact_context or small_model
-updated_pixel_config["modelContextWindow"] = context_window
-updated_pixel_config["leanPrompt"] = lean_prompt
-updated_pixel_config["perplexicaPort"] = research_port
-updated_agent["bootstrapMaxChars"] = 2000 if lean_prompt else 14000
-updated_agent["bootstrapTotalMaxChars"] = 6000 if lean_prompt else 36000
-updated_agent["contextInjection"] = "never" if lean_prompt else "continuation-skip"
-# Bound each live tool result by the real context capacity of the selected model.
-# This is capability-based prompt shaping, never a model allowlist: failures
-# retain OpenClaw diagnostic head/tail projection and every tool remains
-# callable, while one large read or verbose suite cannot crowd out the next
-# model continuation on compact local contexts.
-updated_agent_context_limits["toolResultMaxChars"] = max(
-    4000,
-    min(16000, context_window // 4),
-)
-# The OpenClaw OpenAI-compatible transport applies a 1.25 input estimate after
-# the pre-prompt compaction check. Leave enough precheck headroom for the real
-# model output ceiling before that later transport clamp can reduce a
-# continuation to one token. This remains context-derived for every model and
-# does not change its tools or authority.
-updated_compaction["reserveTokens"] = (
-    context_window + 4 * model_max_tokens + 4
-) // 5
-# The OpenClaw LLM-boundary estimate is character based and can undercount dense
-# tool transcripts. Its context-aware floor is intentionally capped to half of
-# a compact window; enable that same bound for the 8K-31K adaptive profiles so
-# compaction begins before a provider can end the continuation at length. A 4K
-# best-effort profile keeps the formula above because half the window may be
-# smaller than its first useful prompt.
-updated_compaction["reserveTokensFloor"] = (
-    context_window // 2 if 8192 <= context_window < 32768 else 0
-)
-# The fixed OpenClaw 20K keep-recent default is larger than every compact ODS
-# profile. Scale it for all contexts so compaction always drops real history
-# instead of writing an empty no-op summary and blocking the recovery retry.
-updated_compaction["keepRecentTokens"] = max(
-    512,
-    min(20000, context_window // 16),
-)
-# The legacy OpenAI-completions transport in OpenClaw 2026.6.33 coerces the literal
-# reasoning effort "off" with Boolean("off"), which wrongly sends
-# chat_template_kwargs.enable_thinking=true. With the llama.cpp Qwen template
-# that can spend the complete output budget in hidden reasoning after a tool
-# call and leave no user-visible answer. When ODS reasoning is disabled, keep
-# the model non-reasoning and omit the Qwen compatibility knob so the llama.cpp
-# independently pinned no-think default remains authoritative. When the owner
-# explicitly enables reasoning, advertise the capability and use a real
-# non-off effort so both affected and corrected OpenClaw transports agree.
-model_reasoning = updated_model.get("reasoning", False)
-if type(model_reasoning) is not bool:
-    raise SystemExit("OpenClaw model reasoning configuration must be boolean")
-updated_model["reasoning"] = model_reasoning
-if "qwen" in model_label and model_reasoning:
-    model_compat = updated_model.setdefault("compat", {})
-    if not isinstance(model_compat, dict):
-        raise SystemExit("OpenClaw Qwen compatibility configuration must be an object")
-    model_compat["thinkingFormat"] = "qwen-chat-template"
-    updated_agent["thinkingDefault"] = "low"
-else:
-    updated_model.pop("compat", None)
-    updated_agent.pop("thinkingDefault", None)
-updated_agent_params = updated_agent.setdefault("params", {})
-if not isinstance(updated_agent_params, dict):
-    raise SystemExit("OpenClaw Pixel agent parameters must be an object")
-if "qwen" in model_label:
-    template_kwargs = updated_agent_params.setdefault("chat_template_kwargs", {})
-    if not isinstance(template_kwargs, dict):
-        raise SystemExit("OpenClaw Pixel chat-template parameters must be an object")
-    template_kwargs["enable_thinking"] = model_reasoning
-else:
-    template_kwargs = updated_agent_params.get("chat_template_kwargs")
-    if isinstance(template_kwargs, dict):
-        template_kwargs.pop("enable_thinking", None)
-        if not template_kwargs:
-            updated_agent_params.pop("chat_template_kwargs", None)
-    if not updated_agent_params:
-        updated_agent.pop("params", None)
-# Small or compact local checkpoints can get trapped repeating a valid prefix inside a
-# JSON tool argument even though their plain-text generation is healthy. The
-# standard OpenAI sampling controls below made the same 2B route terminate its
-# minimal write call in 81 tokens instead of exhausting 1024. Apply the profile
-# by generic size/context capability rather than an allowlist or readiness
-# gate, and remove it transactionally when a larger route is promoted.
-compact_sampling = {
-    "temperature": 0.7,
-    "topP": 0.8,
-    "frequencyPenalty": 0.6,
-    "presencePenalty": 0.2,
-}
-if lean_prompt:
-    updated_agent["params"] = updated_agent_params
-    updated_agent_params.update(compact_sampling)
-else:
-    for key in compact_sampling:
-        updated_agent_params.pop(key, None)
-if not updated_agent_params:
-    updated_agent.pop("params", None)
-# A CPU-only model call can emit no progress while evaluating a long prompt.
-# Let the 30-minute provider own its terminal timeout, then retain one minute
-# for the OpenClaw stalled-session recovery before the 32-minute host ingress.
-updated_diagnostics["stuckSessionAbortMs"] = 1860000
-write_lock["maxHoldMs"] = 1920000
-write_lock["staleMs"] = 3600000
-updated_tools["loopDetection"] = {
-    "enabled": True,
-    "historySize": 12,
-    "warningThreshold": 2,
-    "unknownToolThreshold": 2,
-    "criticalThreshold": 4,
-    "globalCircuitBreakerThreshold": 6,
-    "detectors": {
-        "genericRepeat": True,
-        "knownPollNoProgress": True,
-        "pingPong": True,
-    },
-}
-# Search stays private through loopback-only SearXNG. Page retrieval uses
-# OpenClaw public-network SSRF guard with deliberately tighter ODS bounds;
-# private/link-local targets and trusted environment proxies remain disabled.
-updated_fetch.update({
-    "enabled": True,
-    "maxChars": 12000,
-    "maxCharsCap": 20000,
-    "maxResponseBytes": 1000000,
-    "timeoutSeconds": 20,
-    "cacheTtlMinutes": 15,
-    "maxRedirects": 3,
-    "readability": True,
-    "useTrustedEnvProxy": False,
-    "ssrfPolicy": {
-        "allowRfc2544BenchmarkRange": False,
-        "allowIpv6UniqueLocalRange": False,
-    },
-})
-updated_agent_tools["deny"] = [
-    item for item in updated_agent_deny
-    if item not in {
-        "web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
-        "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-        "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview",
-        "pixel_web_extract"
-    }
-]
-updated_also_allow = [item for item in updated_also_allow if item != "pixel_web_extract"]
-updated_sandbox_allow = [item for item in updated_sandbox_allow if item != "pixel_web_extract"]
-for extension_tool in (
-    "cron", "create_goal", "get_goal", "update_goal", "update_plan",
-    "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
-    "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview"
-):
-    if extension_tool not in updated_also_allow:
-        updated_also_allow.append(extension_tool)
-for permitted_tool in (
-    "cron", "create_goal", "get_goal", "update_goal", "update_plan",
-    "web_search", "web_fetch", "pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose",
-    "pixel_ods_evidence_report", "pixel_ods_evidence_readback",
-    "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview"
-):
-    if permitted_tool not in updated_sandbox_allow:
-        updated_sandbox_allow.append(permitted_tool)
-updated_tools["alsoAllow"] = sorted(set(updated_also_allow))
-updated_sandbox_tools["allow"] = sorted(set(updated_sandbox_allow))
-if updated == value:
-    print("unchanged")
-    raise SystemExit(0)
-
-fd, temporary = tempfile.mkstemp(prefix=".ods-pixel-runtime-budget.", dir=path.parent)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(updated, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, 0o600)
-    print(temporary)
-except BaseException:
-    if os.path.exists(temporary):
-        os.unlink(temporary)
-    raise
-PY
-)" || return 1
+    local budget_writer
+    budget_writer="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pixel-runtime-budget.py"
+    staged="$(ods_pixel_run_as_owner "$owner" "$home" python3 "$budget_writer" \
+        "$config" "${PERPLEXICA_PORT:-3004}" "$answers" "$home/.openclaw" "$inspection_transport" "$project_socket")" || return 1
     if [[ "$staged" == unchanged ]]; then
         printf '%s\n' unchanged
         return 0
@@ -1960,8 +2112,171 @@ PY
     printf '%s\n' changed
 }
 
+_ods_pixel_verify_current_runtime() {
+    local owner="$1" home="$2" pixel_root="$3" transaction_id="${4:-}"
+    local verify_attempt owns_transaction=false openclaw_bin
+    local -a verify_arguments=()
+    if [[ -z "$transaction_id" && -n "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+        _ods_pixel_check_source_transaction "$owner" || return 1
+        transaction_id="$ODS_PIXEL_SOURCE_TRANSACTION"
+    fi
+    if [[ -z "$transaction_id" ]]; then
+        # Standalone sandboxed installations retain Pixel's strict verifier.
+        # A relaxed boundary is never inferred to be authorized from systemd:
+        # acquire a protected transaction and let its fresh runtime proof
+        # establish the configured mode before verifying this exact process.
+        if [[ "$(systemctl show openclaw-gateway.service -p ProtectHome --value)" != tmpfs \
+            || "$(systemctl show openclaw-gateway.service -p ProtectSystem --value)" != strict ]]; then
+            openclaw_bin="$(_ods_pixel_openclaw_bin "$owner" "$home")" || return 1
+            _ods_pixel_install_access_service "$owner" "$openclaw_bin" || return 1
+            transaction_id="$(_ods_pixel_model_transition begin "$owner" "$home")" || return 1
+            [[ "$transaction_id" =~ ^[a-f0-9]{64}$ ]] || return 1
+            owns_transaction=true
+        fi
+    fi
+    if [[ -n "$transaction_id" ]]; then
+        [[ "$transaction_id" =~ ^[a-f0-9]{64}$ ]] || return 1
+        verify_arguments=(--ods-model-transaction "$transaction_id")
+    fi
+    for verify_attempt in 1 2 3; do
+        if ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" verify "${verify_arguments[@]}"; then
+            if [[ "$owns_transaction" == true ]]; then
+                _ods_pixel_model_transition finish "$owner" "$home" "$transaction_id" applied || return 1
+            fi
+            return 0
+        fi
+        if (( verify_attempt < 3 )); then
+            printf '%s\n' "Pixel verification did not settle after gateway restart (attempt ${verify_attempt}/3); retrying..." >&2
+            sleep 2
+        fi
+    done
+    if [[ "$owns_transaction" == true ]]; then
+        printf 'Pixel verification failed; admission remains held for transaction %s. Repair the reported verification failure before recovery.\n' "$transaction_id" >&2
+    fi
+    return 1
+}
+
+_ods_pixel_resume_completed_release() {
+    local owner="$1" home="$2" pixel_root="$3" contract_sha="$4"
+    local status resume transaction_id outcome config_sha observed
+    local helper=/usr/local/libexec/ods-pixel-access/pixel_model_transition.py
+    [[ -f "$helper" && ! -L "$helper" ]] || return 0
+    status="$(_ods_pixel_model_transition status "$owner" "$home")" || return 1
+    if [[ -n "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+        _ods_pixel_check_source_transaction "$owner" || return 1
+        if printf '%s' "$status" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("transaction_id")==sys.argv[1] and "release_completion" not in d else 1)' "$ODS_PIXEL_SOURCE_TRANSACTION"; then
+            # This exact source update acquired admission before Phase06 copy.
+            # No release has been applied yet; continue the same staged plan.
+            return 0
+        fi
+    fi
+    resume="$(printf '%s' "$status" | python3 -c '
+import json,re,sys
+d=json.load(sys.stdin)
+if d == {"pending":False}:
+    raise SystemExit(0)
+c=d.get("release_completion")
+if (d.get("pending") is not True or d.get("kind")!="model"
+    or not isinstance(c,dict) or set(c)!={"outcome","config_sha256"}
+    or c["outcome"] not in ("apply","rollback")
+    or not all(isinstance(v,str) and re.fullmatch("[a-f0-9]{64}",v)
+               for v in (d.get("transaction_id"),c["config_sha256"]))):
+    raise SystemExit("Pixel has an unfinished transaction without a verified release completion; explicit recovery is required")
+print(d["transaction_id"],c["outcome"],c["config_sha256"])
+')" || return 1
+    [[ -n "$resume" ]] || return 0
+    read -r transaction_id outcome config_sha <<< "$resume"
+    observed="$(ods_pixel_run_as_owner "$owner" "$home" sha256sum "$home/.openclaw/openclaw.json")" || return 1
+    [[ "${observed%% *}" == "$config_sha" ]] || return 1
+    # Root finish independently requires the durable release completion and
+    # re-proves the process before releasing either admission gate. This also
+    # handles a lost reply after native/edge release without applying again.
+    if [[ "$outcome" == apply ]]; then
+        _ods_pixel_model_transition finish "$owner" "$home" "$transaction_id" applied || return 1
+    else
+        _ods_pixel_model_transition finish "$owner" "$home" "$transaction_id" rolled-back || return 1
+        return 0
+    fi
+    # Bind this source only after the full vendor verifier accepts it. A later
+    # install of different source cannot turn an old receipt into a new pin.
+    _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" || return 1
+    _ods_pixel_mark_verified_installing "$owner" "$home" "$contract_sha" "$pixel_root"
+}
+
+_ods_pixel_begin_release_transition() {
+    local owner="$1" home="$2" openclaw_bin transaction_id
+    if [[ -n "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+        _ods_pixel_check_source_transaction "$owner" || return 1
+        printf '%s\n' "$ODS_PIXEL_SOURCE_TRANSACTION"
+        return 0
+    fi
+    # First installation and the ordinary sandboxed boundary need no access
+    # migration. A relaxed boundary merely selects the coordinator: only its
+    # authenticated begin/verification establishes the actual permission mode.
+    [[ -f "$home/.openclaw/openclaw.json" ]] || return 0
+    # configure may generate the initial native config before apply installs
+    # any gateway. There is no previous access boundary to migrate in that case.
+    if [[ ! -e "$home/.local/share/pixel/current" && ! -L "$home/.local/share/pixel/current" \
+        && ! -e "$home/.local/share/pixel/runtime-attestation.json" \
+        && ! -L "$home/.local/share/pixel/runtime-attestation.json" \
+        && "$(systemctl show openclaw-gateway.service -p LoadState --value)" == not-found ]]; then
+        return 0
+    fi
+    if [[ "$(systemctl show openclaw-gateway.service -p ProtectHome --value)" == tmpfs \
+        && "$(systemctl show openclaw-gateway.service -p ProtectSystem --value)" == strict ]]; then
+        return 0
+    fi
+    openclaw_bin="$(_ods_pixel_openclaw_bin "$owner" "$home")" || return 1
+    _ods_pixel_install_access_service "$owner" "$openclaw_bin" >&2 || return 1
+    transaction_id="$(_ods_pixel_model_transition begin "$owner" "$home")" || return 1
+    [[ "$transaction_id" =~ ^[a-f0-9]{64}$ ]] || return 1
+    printf '%s\n' "$transaction_id"
+}
+
+_ods_pixel_finish_release_transition() {
+    local owner="$1" home="$2" pixel_root="$3" transaction_id="$4" config_sha attempt proved=false
+    [[ "$transaction_id" =~ ^[a-f0-9]{64}$ ]] || return 1
+    if [[ "$transaction_id" == "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+        _ods_pixel_check_source_transaction "$owner" || return 1
+        if _ods_pixel_source_upgrade status "$owner" | jq -e '.mode == "sandboxed"' >/dev/null; then
+            # Sandbox has no enabled receipt to migrate. Keep the same hold
+            # through the ODS overlay and final runtime verification.
+            return 0
+        fi
+    fi
+    config_sha="$(ods_pixel_run_as_owner "$owner" "$home" sha256sum "$home/.openclaw/openclaw.json")" || return 1
+    config_sha=${config_sha%% *}
+    [[ "$config_sha" =~ ^[a-f0-9]{64}$ ]] || return 1
+    # Retirement of the owner journal requires a fresh root runtime proof.
+    # If the reply is lost, replay this finish; never start another migration
+    # or restore only the JSON file over its associated permission receipt.
+    for attempt in 1 2 3; do
+        if ods_pixel_run_as_owner "$owner" "$home" python3 -I \
+            "$pixel_root/scripts/lib/ods-release-access.py" finish \
+            "$transaction_id" "$config_sha" apply >/dev/null; then
+            proved=true
+            break
+        fi
+        (( attempt == 3 )) || sleep 2
+    done
+    [[ "$proved" == true ]] || return 1
+    for attempt in 1 2 3; do
+        if _ods_pixel_model_transition finish "$owner" "$home" "$transaction_id" applied; then
+            return 0
+        fi
+        (( attempt == 3 )) || sleep 2
+    done
+    return 1
+}
+
 _ods_pixel_restart_gateway_and_verify() {
-    local owner="$1" home="$2" pixel_root="$3" attempt ready=false previous_pid current_pid
+    local owner="$1" home="$2" pixel_root="$3" attempt ready=false previous_pid current_pid gateway_port
+    local transaction_id="${4:-}"
+    [[ -z "$transaction_id" || "$transaction_id" =~ ^[a-f0-9]{64}$ ]] || return 1
+    # Background model promotion does not inherit Phase 06's gateway-port
+    # environment. Verify the installed, owner-validated endpoint rather than
+    # probing the default port and leaving the model hold unreleased.
+    gateway_port="$(_ods_pixel_installed_gateway_port "$owner" "$home")" || return 1
     previous_pid="$(systemctl show openclaw-gateway.service -p MainPID --value 2>/dev/null || true)"
     if ods_sudo_available; then
         # Writing the final ODS runtime overlay can make OpenClaw begin its own
@@ -2004,29 +2319,107 @@ _ods_pixel_restart_gateway_and_verify() {
     [[ "$current_pid" =~ ^[1-9][0-9]*$ \
         && ( ! "$previous_pid" =~ ^[1-9][0-9]*$ || "$current_pid" != "$previous_pid" ) ]] || return 1
     for attempt in {1..60}; do
-        if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:18789/health 2>/dev/null \
-            | jq -e '.ok == true and .status == "live"' >/dev/null 2>&1; then
+        if _ods_pixel_gateway_health "$gateway_port"; then
             ready=true
             break
         fi
         (( attempt < 60 )) && sleep 2
     done
     [[ "$ready" == true ]] || return 1
-    ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" verify
+    # A fresh install can finish the gateway HTTP listener while OpenClaw's
+    # separate CLI process is still settling its newly-created plugin registry
+    # under first-boot memory and I/O pressure. The gateway itself already
+    # reports every required plugin loaded, but the first strict `pixel verify`
+    # can transiently fail its independent registry read. Retry only the same
+    # complete verification command; every attempt remains fail closed and a
+    # persistent version, root, policy, or endpoint mismatch still aborts the
+    # model transaction and triggers rollback.
+    _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$transaction_id"
+}
+
+_ods_pixel_wait_access_reconcile() {
+    local owner="$1" home="$2" helper="$3" attempts="$4" delay="$5" attempt
+    [[ "$attempts" =~ ^[1-9][0-9]*$ && "$delay" =~ ^[0-9]+$ ]] || return 1
+    for (( attempt=1; attempt<=attempts; attempt++ )); do
+        if ods_pixel_run_as_owner "$owner" "$home" python3 -I "$helper"; then
+            return 0
+        fi
+        (( attempt < attempts )) && sleep "$delay"
+    done
+    return 1
+}
+
+_ods_pixel_reverify_access_after_gateway_restart() {
+    local owner="$1" home="$2" required="${3:-false}" attempts=1
+    local helper=/usr/local/libexec/ods-pixel-access/pixel_access_reconcile.py
+    if [[ ! -f "$helper" || -L "$helper" ]]; then
+        # Upgrades from an older access coordinator reach model reconciliation
+        # before the new protected bundle is installed. The mandatory final
+        # reproof below covers that one compatibility window.
+        [[ "$required" == false ]]
+        return
+    fi
+    # systemctl restart is asynchronous. A fresh coordinator can be active
+    # before its owner socket and runtime dependencies are simultaneously
+    # ready, so the first fail-closed status call can legitimately lose that
+    # activation race. Only the mandatory fresh-install proof waits and
+    # retries; the protected helper still refuses busy, pending, ambiguous, or
+    # mismatched state on every attempt.
+    [[ "$required" == true ]] && attempts=30
+    _ods_pixel_wait_access_reconcile "$owner" "$home" "$helper" "$attempts" 1
+}
+
+_ods_pixel_model_transition() {
+    local action="$1" owner="$2" home="$3" transaction_id="${4:-}" outcome="${5:-}"
+    local helper=/usr/local/libexec/ods-pixel-access/pixel_model_transition.py
+    [[ -f "$helper" && ! -L "$helper" ]] || return 1
+    case "$action" in
+        begin)
+            [[ -z "$transaction_id" && -z "$outcome" ]] || return 1
+            ods_pixel_run_as_owner "$owner" "$home" python3 -I "$helper" begin
+            ;;
+        status)
+            [[ -z "$transaction_id" && -z "$outcome" ]] || return 1
+            ods_pixel_run_as_owner "$owner" "$home" python3 -I "$helper" status
+            ;;
+        finish)
+            [[ "$transaction_id" =~ ^[0-9a-f]{64}$
+                && ( "$outcome" == applied || "$outcome" == rolled-back ) ]] || return 1
+            if [[ "$transaction_id" == "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+                [[ "$outcome" == applied ]] || return 1
+                _ods_pixel_check_source_transaction "$owner"
+                return
+            fi
+            ods_pixel_run_as_owner "$owner" "$home" python3 -I "$helper" \
+                finish --transaction "$transaction_id" "$outcome"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+_ods_pixel_reverify_unless_model_held() {
+    local owner="$1" home="$2" transaction_id="${3:-}"
+    if [[ -n "$transaction_id" ]]; then
+        [[ "$transaction_id" =~ ^[0-9a-f]{64}$ ]]
+        return
+    fi
+    _ods_pixel_reverify_access_after_gateway_restart "$owner" "$home"
 }
 
 _ods_pixel_restore_model_reconciliation() {
     local owner="$1" home="$2" pixel_root="$3" answers="$4" backup="$5"
-    local old_contract openclaw_bin
+    local transaction_id="${6:-}" old_contract openclaw_bin
     openclaw_bin="$(_ods_pixel_openclaw_bin "$owner" "$home")" || return 1
     _ods_pixel_atomic_replace_managed_file "$owner" "$home" "$backup/openclaw.json" "$home/.openclaw/openclaw.json" || return 1
     _ods_pixel_atomic_replace_managed_file "$owner" "$home" "$backup/rollback-onboarding.json" "$answers" || return 1
     _ods_pixel_atomic_replace_managed_file "$owner" "$home" "$backup/pixel-managed.json" "$home/.config/ods/pixel-managed.json" || return 1
     if ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" configure --answers "$answers" --force \
+        || ! _ods_pixel_reconcile_workspace_guidance "$owner" "$home" "$pixel_root/.generated/workspace" generated \
         || ! _ods_pixel_install_onboarding_mirror "$owner" "$home" "$answers" \
         || ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" plan \
         || ! _ods_pixel_recreate_agent_sandbox "$owner" "$home" "$openclaw_bin" \
-        || ! _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$pixel_root" \
+        || ! _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$pixel_root" "$transaction_id" \
+        || ! _ods_pixel_reverify_unless_model_held "$owner" "$home" "$transaction_id" \
         || ! _ods_pixel_restart_ingress_and_verify "$owner" "$home" "$answers"; then
         if [[ -f "$backup/runtime-attestation.json" && ! -L "$backup/runtime-attestation.json" ]]; then
             _ods_pixel_atomic_replace_managed_file "$owner" "$home" "$backup/runtime-attestation.json" \
@@ -2041,16 +2434,48 @@ _ods_pixel_restore_model_reconciliation() {
     _ods_pixel_mark_ready "$owner" "$home" "$old_contract" "$pixel_root"
 }
 
+_ods_pixel_reconciliation_source_url() {
+    local source_ref="$1"
+    [[ "$source_ref" =~ ^[0-9a-f]{40}$ ]] || return 1
+    if [[ -n "${PIXEL_SOURCE_URL:-}" ]]; then
+        if [[ "$PIXEL_SOURCE_URL" == bundled ]]; then
+            if [[ "$source_ref" != "$ODS_PIXEL_BUNDLED_REF" ]]; then
+                printf '%s\n' 'error: The installed Pixel source pin differs from the public bundle. Reinstall the managed Pixel runtime before changing models.' >&2
+                return 1
+            fi
+        elif [[ "$PIXEL_SOURCE_URL" != /* || "$PIXEL_SOURCE_URL" == / ]]; then
+            printf '%s\n' 'error: Pixel model reconciliation requires the verified ODS bundle or an explicit absolute local source checkout' >&2
+            return 1
+        fi
+        printf '%s\n' "$PIXEL_SOURCE_URL"
+    elif [[ "$source_ref" == "$ODS_PIXEL_BUNDLED_REF" ]]; then
+        printf '%s\n' bundled
+    else
+        printf '%s\n' 'error: The installed Pixel source pin is not in the public bundle. Reinstall the managed runtime or configure its exact absolute local source before changing models.' >&2
+        return 1
+    fi
+}
+
 ods_pixel_reconcile_promoted_model() {
     local owner="$1" home="$2" promoted_model="$3" final_state="${4:-ready}"
     local promoted_context="${5:-}" promoted_max_tokens="${6:-}" promoted_reasoning="${7:-}"
-    local source_ref source_root pixel_root answers candidate backup contract_sha256 openclaw_bin failed=false
+    local route_fingerprint="${8:-}" borrowed_transaction="${9:-}" image_input="${10:-unknown}"
+    local source_ref source_root source_url pixel_root answers candidate backup contract_sha256 openclaw_bin failed=false
+    local model_transaction="" release_failed=false
     local stable_alias=false staged_alias_candidate=""
     local failure_phase="unknown"
     [[ "$final_state" == ready || "$final_state" == installing ]] || return 1
+    if [[ -n "$borrowed_transaction" ]]; then
+        [[ "$borrowed_transaction" =~ ^[0-9a-f]{64}$ ]] || return 1
+        local held_status
+        held_status="$(_ods_pixel_model_transition status "$owner" "$home")" || return 1
+        printf '%s' "$held_status" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("pending") is True and d.get("kind")=="model" and d.get("phase")=="held" and d.get("transaction_id")==sys.argv[1] else 1)' "$borrowed_transaction" || return 1
+        model_transaction="$borrowed_transaction"
+    fi
     source_ref="$(_ods_pixel_managed_source_ref "$owner" "$home")" || return 1
+    source_url="$(_ods_pixel_reconciliation_source_url "$source_ref")" || return 1
     local PIXEL_SOURCE_REF="$source_ref"
-    local PIXEL_SOURCE_URL="${PIXEL_SOURCE_URL:-https://github.com/Osmantic/Pixel.git}"
+    local PIXEL_SOURCE_URL="$source_url"
     source_root="${INSTALL_DIR:?}/data/pixel/source-$source_ref"
     pixel_root="$(_ods_pixel_source_checkout "$owner" "$home" "$source_root")" || return 1
     answers="$INSTALL_DIR/data/pixel/onboarding.json"
@@ -2068,7 +2493,7 @@ ods_pixel_reconcile_promoted_model() {
     if _ods_pixel_uses_stable_model_alias "$owner" "$home" "$answers"; then
         if _ods_pixel_stable_alias_matches_promoted_model "$owner" "$home" "$answers" \
             "$promoted_model" "$promoted_context" "$promoted_max_tokens" \
-            "$promoted_reasoning"; then
+            "$promoted_reasoning" "$route_fingerprint" "$image_input"; then
             contract_sha256="$(_ods_pixel_contract_sha256 "$owner" "$home" "$answers")" || return 1
             # This is a no-op model reconciliation only when the complete
             # ODS-managed contract is already active. A same-model installer
@@ -2094,13 +2519,25 @@ ods_pixel_reconcile_promoted_model() {
                 fi
             fi
         fi
-        stable_alias=true
+        # The stable-alias shortcut copies the live config and only changes
+        # model fields. A new search choice needs the same-source renderer so
+        # its selected plugin registration can be validated and applied.
+        if _ods_pixel_search_provider_matches_contract "$owner" "$home" "$answers"; then
+            stable_alias=true
+        fi
     fi
 
     backup="$(_ods_pixel_model_reconciliation_snapshot "$owner" "$home" "$answers")" || return 1
+    # Update the root-custodied controller before taking the model hold. This
+    # restarts only the access coordinator, not the active Pixel gateway.
+    if [[ -z "$borrowed_transaction" ]]; then
+        _ods_pixel_install_access_service "$owner" "$openclaw_bin" || return 1
+        model_transaction="$(_ods_pixel_model_transition begin "$owner" "$home")" || return 1
+        [[ "$model_transaction" =~ ^[0-9a-f]{64}$ ]] || return 1
+    fi
 
     if ! _ods_pixel_update_onboarding_model "$owner" "$home" "$answers" "$promoted_model" \
-        "$promoted_context" "$promoted_max_tokens" "$promoted_reasoning"; then
+        "$promoted_context" "$promoted_max_tokens" "$promoted_reasoning" "$route_fingerprint" "$image_input"; then
         failed=true
         failure_phase="onboarding-update"
     fi
@@ -2119,13 +2556,18 @@ ods_pixel_reconcile_promoted_model() {
             failure_phase="pixel-configure"
         fi
         if [[ "$failed" == false ]] \
+            && ! _ods_pixel_reconcile_workspace_guidance "$owner" "$home" "$pixel_root/.generated/workspace" generated; then
+            failed=true
+            failure_phase="workspace-guidance"
+        fi
+        if [[ "$failed" == false ]] \
             && ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" plan; then
             failed=true
             failure_phase="pixel-plan"
         fi
     fi
     if [[ "$failed" == false ]] \
-        && ! _ods_pixel_apply_runtime_budget "$owner" "$home" "$candidate" "$openclaw_bin" >/dev/null; then
+        && ! _ods_pixel_apply_runtime_budget "$owner" "$home" "$candidate" "$openclaw_bin" "$answers" >/dev/null; then
         failed=true
         failure_phase="runtime-budget"
     fi
@@ -2151,9 +2593,14 @@ ods_pixel_reconcile_promoted_model() {
         failure_phase="sandbox-recreate"
     fi
     if [[ "$failed" == false ]] \
-        && ! _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$pixel_root"; then
+        && ! _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$pixel_root" "$model_transaction"; then
         failed=true
         failure_phase="gateway-restart-verify"
+    fi
+    if [[ "$failed" == false ]] \
+        && ! _ods_pixel_reverify_unless_model_held "$owner" "$home" "$model_transaction"; then
+        failed=true
+        failure_phase="access-runtime-reproof"
     fi
     if [[ "$failed" == false ]] \
         && ! _ods_pixel_restart_ingress_and_verify "$owner" "$home" "$answers"; then
@@ -2179,6 +2626,13 @@ ods_pixel_reconcile_promoted_model() {
             fi
         fi
     fi
+    if [[ "$failed" == false && -z "$borrowed_transaction" ]] \
+        && ! _ods_pixel_model_transition finish "$owner" "$home" \
+            "$model_transaction" applied; then
+        failed=true
+        release_failed=true
+        failure_phase="model-transition-finish"
+    fi
     if [[ "$failed" == false ]]; then
         if [[ -n "$staged_alias_candidate" ]]; then
             ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$staged_alias_candidate" || true
@@ -2190,9 +2644,19 @@ ods_pixel_reconcile_promoted_model() {
     if [[ -n "$staged_alias_candidate" ]]; then
         ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$staged_alias_candidate" || true
     fi
+    if [[ "$release_failed" == true ]]; then
+        # Finish can fail after one gate has released. Never mutate the route
+        # again under an uncertain admission boundary; the root journal blocks
+        # later transitions until the same transaction is explicitly recovered.
+        printf '%s\n' 'error: Pixel model route was verified but transition release failed; recovery-required and automatic rollback suppressed' >&2
+        return 1
+    fi
     printf 'warning: Pixel model reconciliation failed during phase=%s; restoring the previous verified route\n' \
         "$failure_phase" >&2
-    if _ods_pixel_restore_model_reconciliation "$owner" "$home" "$pixel_root" "$answers" "$backup"; then
+    if _ods_pixel_restore_model_reconciliation "$owner" "$home" "$pixel_root" "$answers" "$backup" \
+        "$model_transaction" \
+        && { [[ -n "$borrowed_transaction" ]] || _ods_pixel_model_transition finish "$owner" "$home" \
+            "$model_transaction" rolled-back; }; then
         printf '%s\n' 'warning: previous Pixel model route restored and verified; rollback=verified' >&2
     else
         printf '%s\n' "error: Pixel model reconciliation and verified rollback both failed; rollback=failed evidence=$backup" >&2
@@ -2200,13 +2664,94 @@ ods_pixel_reconcile_promoted_model() {
     return 1
 }
 
+_ods_pixel_initial_unconfigured_marker() {
+    local owner="$1" home="$2"
+    [[ -f "$home/.config/ods/pixel-managed.json" && ! -L "$home/.config/ods/pixel-managed.json" ]] || return 1
+    ods_pixel_run_as_owner "$owner" "$home" python3 - \
+        "$home/.config/ods/pixel-managed.json" "$home/.openclaw/openclaw.json" \
+        "${INSTALL_DIR:?}" "$home" "${PIXEL_SOURCE_REF:?}" <<'PY'
+import json, os, pathlib, re, sys
+marker = json.load(open(sys.argv[1]))
+initial = (
+    set(marker) == {"schema_version", "manager", "state", "initial_active_state",
+                    "install_dir", "pixel_source_ref"}
+    and marker.get("schema_version") == 2 and marker.get("manager") == "ods"
+    and marker.get("state") == "installing" and marker.get("initial_active_state") == "absent"
+    and marker.get("install_dir") == sys.argv[3]
+    and isinstance(marker.get("pixel_source_ref"), str)
+    and re.fullmatch(r"[0-9a-f]{40}", marker["pixel_source_ref"])
+    and marker["pixel_source_ref"] == sys.argv[5]
+)
+raise SystemExit(0 if initial and not os.path.lexists(sys.argv[2]) and not any(
+    os.path.lexists(pathlib.Path(sys.argv[4]) / ".local/share/pixel" / name)
+    for name in ("current", "runtime-attestation.json", ".ods-uninstall-current",
+                 ".ods-uninstall-runtime-attestation")
+) else 1)
+PY
+}
+
+_ods_pixel_reprove_access_marker_if_needed() {
+    if [[ -n "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+        _ods_pixel_check_source_transaction "$1"
+        return
+    fi
+    local owner="$1" home="$2" openclaw_bin="$3" check
+    [[ -e "$home/.config/ods/pixel-managed.json" ]] || return 0
+    if ods_pixel_run_as_owner "$owner" "$home" python3 - \
+        "$home/.config/ods/pixel-managed.json" "$home/.openclaw/openclaw.json" "${INSTALL_DIR:?}" "$home" <<'PY'
+import hashlib, json, os, pathlib, re, sys
+marker = json.load(open(sys.argv[1]))
+# A new bootstrap has no access mode to reprove. Do not treat a missing config
+# on an active/partial release as a fresh install.
+initial = (
+    set(marker) == {"schema_version", "manager", "state", "initial_active_state",
+                    "install_dir", "pixel_source_ref"}
+    and marker.get("schema_version") == 2 and marker.get("manager") == "ods"
+    and marker.get("state") == "installing" and marker.get("initial_active_state") == "absent"
+    and marker.get("install_dir") == sys.argv[3]
+    and isinstance(marker.get("pixel_source_ref"), str)
+    and re.fullmatch(r"[0-9a-f]{40}", marker["pixel_source_ref"])
+)
+if initial and not os.path.lexists(sys.argv[2]) and not any(
+    os.path.lexists(pathlib.Path(sys.argv[4]) / ".local/share/pixel" / name)
+    for name in ("current", "runtime-attestation.json", ".ods-uninstall-current",
+                 ".ods-uninstall-runtime-attestation")
+):
+    raise SystemExit(0)
+config = json.load(open(sys.argv[2]))
+observed = hashlib.sha256(b"ods-pixel-openclaw-v1\0" + json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+raise SystemExit(0 if marker.get("configuration_sha256") == observed else 3)
+PY
+    then
+        return 0
+    else
+        check=$?
+    fi
+    [[ "$check" == 3 ]] || return 1
+    # The protected coordinator distinguishes the exact legacy access change
+    # from unrelated drift, obtains fresh runtime proof and retains install state.
+    _ods_pixel_install_access_service "$owner" "$openclaw_bin" || return 1
+    ods_sudo python3 -I /usr/local/libexec/ods-pixel-access/access_mode_server.py \
+        --reprove-installer-access
+}
+
 _ods_pixel_install_access_service() {
-    local owner="$1" openclaw_bin="$2"
+    local owner="$1" openclaw_bin="$2" adopt_existing="${3:-false}" activate="${4:-true}" home gateway_port
+    local code_source="${5:-${INSTALL_DIR:?}}"
+    [[ "$adopt_existing" == true || "$adopt_existing" == false ]] || return 1
+    [[ "$activate" == true || "$activate" == false ]] || return 1
+    home="$(ods_pixel_owner_home "$owner")" || return 1
+    # Phase 06 exports PIXEL_GATEWAY_PORT only in its own installer process.
+    # Model promotion may run later without that environment. The installed
+    # owner's verified onboarding contract is the gateway unit's actual port.
+    gateway_port="$(_ods_pixel_installed_gateway_port "$owner" "$home")" || return 1
     # This coordinator is privileged. Never run or import its implementation
     # from the owner's mutable checkout, even when the host agent is unprivileged.
-    ods_sudo python3 - "${INSTALL_DIR:?}" "$owner" "$openclaw_bin" <<'PY'
-import fcntl, json, os, pathlib, pwd, stat, subprocess, sys, tempfile
+    ods_sudo python3 - "${INSTALL_DIR:?}" "$owner" "$openclaw_bin" "$gateway_port" "$adopt_existing" "$activate" "$code_source" <<'PY'
+import fcntl, hashlib, json, os, pathlib, pwd, re, shlex, socket, stat, subprocess, sys, tempfile, time, types
+sys.dont_write_bytecode = True
 source = pathlib.Path(sys.argv[1])
+code_source = pathlib.Path(sys.argv[7])
 owner = pwd.getpwnam(sys.argv[2])
 if owner.pw_uid == 0:
     raise SystemExit("Pixel access requires a non-root gateway owner")
@@ -2220,7 +2765,60 @@ info = os.fstat(lock)
 if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o077:
     raise SystemExit("Pixel access state lock is unsafe")
 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-if (state / 'transition.json').exists():
+source_upgrade = None
+completed_source_upgrade = None
+if os.path.lexists(state / 'source-upgrade/source-upgrade.json'):
+    # The installer itself is already the operator's privileged entry point.
+    # Load the exact staged helper, then bind every protected write to that
+    # root-custodied plan; no owner socket can select code or paths.
+    snapshot_root = state / 'source-upgrade'
+    snapshot_info = snapshot_root.lstat()
+    if not stat.S_ISDIR(snapshot_info.st_mode) or snapshot_info.st_uid != 0 or snapshot_info.st_mode & 0o077:
+        raise SystemExit('Source upgrade snapshot custody changed')
+    def snapshot_bytes(name):
+        fd = os.open(snapshot_root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as handle:
+            info = os.fstat(handle.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+                    or info.st_mode & 0o077 or info.st_size > 64 * 1024 * 1024):
+                raise SystemExit('Source upgrade snapshot custody changed')
+            value = handle.read(64 * 1024 * 1024 + 1)
+            if len(value) > 64 * 1024 * 1024:
+                raise SystemExit('Source upgrade snapshot is too large')
+            return value
+    staged = json.loads(snapshot_bytes('source-upgrade.json'))
+    helper_hash = staged['candidate']['bin/pixel_source_upgrade.py']['sha256']
+    if not isinstance(helper_hash, str) or not re.fullmatch(r'[a-f0-9]{64}', helper_hash):
+        raise SystemExit('Source upgrade helper identity is invalid')
+    helper_bytes = snapshot_bytes(helper_hash)
+    if hashlib.sha256(helper_bytes).hexdigest() != helper_hash:
+        raise SystemExit('Source upgrade helper snapshot changed')
+    module = types.ModuleType('ods_source_upgrade')
+    # Execute only the previously staged root-private helper, never code read
+    # anew from the owner's mutable incoming checkout during bootstrap.
+    exec(compile(helper_bytes, str(snapshot_root / helper_hash), 'exec'), module.__dict__)
+    source_upgrade = module.SourceUpgrade(state / 'source-upgrade', source, owner.pw_uid)
+    plan = source_upgrade.journal()
+    if plan['phase'] == 'complete':
+        if os.path.lexists(state / 'transition.json'):
+            raise SystemExit('Recover the existing Pixel access transition before upgrading its coordinator')
+        if code_source != source:
+            raise SystemExit('Stage the new source before upgrading its coordinator')
+        # A released update does not freeze owner-managed extensions. The
+        # retained protected mirror remains authoritative for coordinator
+        # rewrites; changes to that code/config require a new staged update.
+        source_upgrade.verify_mirror()
+        completed_source_upgrade = source_upgrade
+        source_upgrade = None
+    else:
+        expected_source = plan['after'] if code_source == source else plan['candidate']
+        if module.inventory(code_source, owner.pw_uid, candidate=code_source != source) != expected_source:
+            raise SystemExit('Source upgrade candidate changed before coordinator handoff')
+        if os.path.lexists(state / 'transition.json'):
+            module._pending(state, plan['hold'])
+            if plan['phase'] != 'applied':
+                raise SystemExit('Source upgrade code is not fully installed')
+elif (state / 'transition.json').exists():
     raise SystemExit("Recover the existing Pixel access transition before upgrading its coordinator")
 target = pathlib.Path('/usr/local/libexec/ods-pixel-access')
 target.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -2228,42 +2826,64 @@ for path in (target, *target.parents):
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
         raise SystemExit("Pixel access program directory is not root protected")
+# These are public programs executed by the unprivileged gateway owner.
+# mkdir's requested mode is masked by sudo/the caller's umask, including 0077.
+# Normalize only this owned directory after validating its protected custody.
+os.chmod(target, 0o755, follow_symlinks=False)
 
-def write(path, content, mode):
+def write(path, content, mode, uid=0, gid=0):
+    if completed_source_upgrade is not None:
+        completed_source_upgrade.verify_mirror()
+        expected = completed_source_upgrade._mirror_record()['after'].get(str(path))
+        wanted = dict(sha256=hashlib.sha256(content).hexdigest(), mode=mode, uid=uid, gid=gid)
+        if expected != wanted:
+            raise SystemExit('Stage a source upgrade before changing its protected coordinator')
     if path.exists() or path.is_symlink():
         info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1 or info.st_mode & 0o022:
             raise SystemExit("Refusing an unsafe Pixel access program/configuration path")
+    if source_upgrade is not None:
+        source_upgrade.record_mirror_write(path, content, mode, uid, gid)
     fd, temporary = tempfile.mkstemp(prefix='.ods-access-install-', dir=path.parent)
     try:
         os.fchmod(fd, mode)
+        os.fchown(fd, uid, gid)
         with os.fdopen(fd, 'wb') as handle:
             handle.write(content); handle.flush(); os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary): os.unlink(temporary)
 
-host = source / 'extensions/services/pixel-agent/host'
-for name in ('access_mode_server.py', 'access_mode_worker.py', 'pixel_access_mode.py', 'access_mode_config.py', 'settings_transaction.py', 'provider_transaction.py'):
+host = code_source / 'extensions/services/pixel-agent/host'
+for name in ('access_mode_server.py', 'unix_peer.py', 'access_mode_worker.py', 'pixel_access_mode.py', 'access_mode_config.py', 'settings_transaction.py', 'provider_transaction.py', 'model_transaction.py', 'access_release_transaction.py'):
     write(target / name, (host / name).read_bytes(), 0o644)
-write(target / 'pixel_access_bridge.py', (source / 'bin/pixel_access_bridge.py').read_bytes(), 0o644)
-write(target / 'pixel_access_protocol.py', (source / 'bin/pixel_access_protocol.py').read_bytes(), 0o644)
+write(target / 'pixel_access_bridge.py', (code_source / 'bin/pixel_access_bridge.py').read_bytes(), 0o644)
+write(target / 'pixel_gateway_service.py', (code_source / 'bin/pixel_gateway_service.py').read_bytes(), 0o644)
+write(target / 'pixel_access_client.py', (code_source / 'bin/pixel_access_client.py').read_bytes(), 0o644)
+write(target / 'pixel_access_reconcile.py', (code_source / 'bin/pixel_access_reconcile.py').read_bytes(), 0o644)
+write(target / 'pixel_model_transition.py', (code_source / 'bin/pixel_model_transition.py').read_bytes(), 0o644)
+write(target / 'pixel_source_upgrade.py', (code_source / 'bin/pixel_source_upgrade.py').read_bytes(), 0o644)
+write(target / 'pixel_access_protocol.py', (code_source / 'bin/pixel_access_protocol.py').read_bytes(), 0o644)
+for name in ('pixel_model_contract.py', 'pixel_model_coordinator.py'):
+    write(target / name, (code_source / 'bin' / name).read_bytes(), 0o644)
 settings_package = target / 'pixel_settings'
 settings_package.mkdir(mode=0o755, exist_ok=True)
 info = settings_package.lstat()
 if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
     raise SystemExit("Pixel settings program directory is not root protected")
+os.chmod(settings_package, 0o755, follow_symlinks=False)
 for name in ('__init__.py', 'contract.py', 'projection.py', 'runtime.py', 'coordinator.py'):
-    write(settings_package / name, (source / 'bin/pixel_settings' / name).read_bytes(), 0o644)
+    write(settings_package / name, (code_source / 'bin/pixel_settings' / name).read_bytes(), 0o644)
 provider_package = target / 'pixel_provider'
 provider_package.mkdir(mode=0o755, exist_ok=True)
 info = provider_package.lstat()
 if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
     raise SystemExit("Pixel provider program directory is not root protected")
+os.chmod(provider_package, 0o755, follow_symlinks=False)
 for name in ('__init__.py', 'config.py', 'store.py', 'activation_config.py',
              'managed_deployment.py', 'service_environment.py', 'service_activation.py',
              'runtime_custody.py', 'coordinator.py'):
-    write(provider_package / name, (source / 'bin/pixel_provider' / name).read_bytes(), 0o644)
+    write(provider_package / name, (code_source / 'bin/pixel_provider' / name).read_bytes(), 0o644)
 config_dir = pathlib.Path('/etc/ods')
 config_dir.mkdir(mode=0o755, exist_ok=True)
 info = config_dir.lstat()
@@ -2272,27 +2892,139 @@ if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
 binary = pathlib.Path(sys.argv[3])
 if not binary.is_absolute() or not os.access(binary, os.X_OK):
     raise SystemExit("The installed OpenClaw validator is unavailable")
+try:
+    gateway_port = int(sys.argv[4])
+except (TypeError, ValueError):
+    raise SystemExit("The installed Pixel gateway port is invalid") from None
+if not 1 <= gateway_port <= 65535 or str(gateway_port) != sys.argv[4]:
+    raise SystemExit("The installed Pixel gateway port is invalid")
+unit_owner = subprocess.check_output(['systemctl', 'show', 'openclaw-gateway.service',
+                                      '--property=User', '--value'], text=True).strip()
+unit_start = subprocess.check_output(['systemctl', 'show', 'openclaw-gateway.service',
+                                      '--property=ExecStart', '--value'], text=True).strip()
+if unit_owner != owner.pw_name or unit_start.count('argv[]=') != 1:
+    raise SystemExit("The installed Pixel gateway unit does not match its owner")
+command = unit_start.split('argv[]=', 1)[1].split(' ; ignore_errors=', 1)[0]
+arguments = shlex.split(command)
+if (len(arguments) < 2 or arguments[0] != str(binary) or arguments[1] != 'gateway'
+        or arguments.count('--port') != 1
+        or arguments[arguments.index('--port') + 1:arguments.index('--port') + 2] != [str(gateway_port)]):
+    raise SystemExit("The installed Pixel gateway unit port differs from onboarding")
 sys.path.insert(0, str(target))  # Import only the freshly root-protected bundle.
 from pixel_settings.runtime import settings_data_directory
-settings_data_dir = settings_data_directory(source.resolve(), (source / '.env').read_text(encoding='utf-8'))
+from pixel_access_bridge import SystemdAccessBridge
+binding = None
+if sys.argv[5] == 'true':
+    # Deliberate legacy migration only. Preserve the actual configuration and
+    # mode; no fabricated installer completion or ready marker is created.
+    binding = SystemdAccessBridge(source, '', installed_binary=str(binary), gateway_owner=owner.pw_name).gateway_installation_binding(require_running=True)
+environment_path = source / '.env'
+environment_text = ''
+if os.path.lexists(environment_path):
+    # The normal installer runs before Compose starts Edge. Read only the
+    # qualified installation file, never source it or inherit shell secrets.
+    fd = os.open(environment_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as handle:
+        info = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, owner.pw_uid)
+                or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > 1024 * 1024):
+            raise SystemExit('The managed installation environment is unsafe')
+        environment_raw = handle.read(1024 * 1024 + 1)
+    if len(environment_raw) > 1024 * 1024:
+        raise SystemExit('The managed installation environment is too large')
+    environment_text = environment_raw.decode('utf-8')
+    settings_data_dir = settings_data_directory(source.resolve(), environment_text)
+elif sys.argv[5] == 'true':
+    # An explicitly adopted guest can be access-only while the actual settings
+    # store belongs to the Windows/macOS host. Do not invent a guest data path
+    # or copy an unrelated host .env (and its secrets) into the guest.
+    settings_data_dir = None
+else:
+    raise SystemExit('The managed installation environment is unavailable')
 if settings_data_dir is None:
-    print('Warning: custom ODS_DATA_DIR is not absolute; Pixel settings Apply remains unavailable', file=sys.stderr)
+    print('No qualified local settings store; access control remains separate from Settings Apply', file=sys.stderr)
+# The owner-only relay credential is not put in argv, the nonsecret service
+# environment, the agent config, or any socket/container bind mount.
+if sys.argv[5] == 'true':
+    edge = json.loads(subprocess.run(['docker', 'inspect', 'ods-pixel-edge'],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=10).stdout)[0]
+    if not edge.get('State', {}).get('Running') or edge.get('Config', {}).get('Labels', {}).get('com.docker.compose.service') != 'pixel-edge':
+        raise SystemExit('The managed Edge runtime is unavailable')
+    values = dict(line.split('=', 1) for line in edge.get('Config', {}).get('Env', []) if '=' in line)
+    key = values.get('PIXEL_PREVIEW_PROXY_KEY', '')
+else:
+    values = {}
+    for line in environment_text.splitlines():
+        name, separator, value = line.partition('=')
+        if separator and name.strip() in ('DASHBOARD_API_KEY', 'PIXEL_OPENWEBUI_KEY'):
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            values[name.strip()] = value
+    # Compose maps this exact local owner key to PIXEL_PREVIEW_PROXY_KEY.
+    key = values.get('DASHBOARD_API_KEY', '')
+if not 32 <= len(key) <= 4096 or any(ord(char) < 33 or ord(char) > 126 for char in key) or key == values.get('PIXEL_OPENWEBUI_KEY'):
+    raise SystemExit('Distinct Dashboard owner credential required for the access relay')
+write(config_dir / 'pixel-access-relay.key', key.encode(), 0o600, owner.pw_uid, owner.pw_gid)
 write(config_dir / 'pixel-access.json', json.dumps({'install_dir': str(source.resolve()), 'owner': owner.pw_name,
-    'openclaw_bin': str(binary), 'settings_data_dir': settings_data_dir}).encode(), 0o600)
+    'openclaw_bin': str(binary), 'gateway_port': gateway_port,
+    'settings_data_dir': settings_data_dir,
+    'edge_owner_key_sha256': hashlib.sha256(key.encode()).hexdigest(),
+    **({'gateway_binding':binding} if binding is not None else {})}).encode(), 0o600)
 write(pathlib.Path('/etc/systemd/system/ods-pixel-access.service'), (host / 'ods-pixel-access.service').read_bytes(), 0o644)
 # Hold the same transition lock through activation, so a Settings request cannot
 # begin between code replacement and coordinator restart.
-subprocess.run(['systemctl', 'daemon-reload'], check=True)
-subprocess.run(['systemctl', 'enable', 'ods-pixel-access.service'], check=True)
-subprocess.run(['systemctl', 'restart', 'ods-pixel-access.service'], check=True)
+if sys.argv[6] == 'true':
+    subprocess.run(['systemctl', 'daemon-reload'], check=True)
+    subprocess.run(['systemctl', 'enable', 'ods-pixel-access.service'], check=True)
+    subprocess.run(['systemctl', 'restart', 'ods-pixel-access.service'], check=True)
+    # A spawned service does not yet prove the owner-ready control socket.
+    socket_path = pathlib.Path('/run/ods-pixel-access/control.sock')
+    for attempt in range(30):
+        try:
+            directory_info = socket_path.parent.lstat()
+            socket_info = socket_path.lstat()
+            owner_ready = (
+                stat.S_ISDIR(directory_info.st_mode)
+                and directory_info.st_uid == 0
+                and stat.S_IMODE(directory_info.st_mode) == 0o711
+                and stat.S_ISSOCK(socket_info.st_mode)
+                and socket_info.st_uid == 0
+                and socket_info.st_gid == owner.pw_gid
+                and stat.S_IMODE(socket_info.st_mode) == 0o660
+            )
+            if owner_ready:
+                # A stale but correctly owned socket must not count as ready.
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                    probe.settimeout(2)
+                    probe.connect(str(socket_path))
+                    probe.sendall(b'{"operation":"status"}\n')
+                    with probe.makefile('rb') as stream:
+                        response = json.loads(stream.readline(65537))
+                owner_ready = (
+                    set(response) == {'status', 'body'}
+                    and response['status'] in (200, 400, 403, 409, 503)
+                    and isinstance(response['body'], dict)
+                )
+        except (FileNotFoundError, ConnectionError, TimeoutError, OSError,
+                ValueError, TypeError, json.JSONDecodeError):
+            owner_ready = False
+        if owner_ready:
+            break
+        if attempt < 29:
+            time.sleep(1)
+    else:
+        raise SystemExit('Pixel access coordinator socket did not become owner-ready')
 PY
     [[ $? -eq 0 ]] || return 1
 }
 
 _ods_pixel_mark_installing() {
-    local owner="$1" home="$2" marker
+    local owner="$1" home="$2" requested_contract_sha256="${3:-}" marker
+    [[ -z "$requested_contract_sha256" || "$requested_contract_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
     marker="$home/.config/ods/pixel-managed.json"
-    ods_pixel_run_as_owner "$owner" "$home" python3 - "$marker" "${INSTALL_DIR:?}" "${PIXEL_SOURCE_REF:?}" <<'PY'
+    ods_pixel_run_as_owner "$owner" "$home" python3 - "$marker" "${INSTALL_DIR:?}" \
+        "${PIXEL_SOURCE_REF:?}" "$requested_contract_sha256" <<'PY'
 import json, os, pathlib, stat, sys, tempfile
 
 path = pathlib.Path(sys.argv[1])
@@ -2308,7 +3040,10 @@ value["state"] = "installing"
 if all(key in value for key in (
         "active_release_version", "release_identity_sha256", "install_manifest_sha256",
         "sandbox_image", "sandbox_image_id")):
+    if len(sys.argv[4]) != 64 or any(character not in "0123456789abcdef" for character in sys.argv[4]):
+        raise SystemExit("active Pixel transition requires the exact requested contract")
     value["requested_source_ref"] = sys.argv[3]
+    value["requested_contract_sha256"] = sys.argv[4]
 else:
     value["pixel_source_ref"] = sys.argv[3]
 fd, temporary = tempfile.mkstemp(prefix=".pixel-managed.", dir=path.parent)
@@ -2324,6 +3059,183 @@ finally:
     if os.path.exists(temporary):
         os.unlink(temporary)
 PY
+}
+
+# Pixel deliberately preserves a release that was rolled back after live
+# mutation as audit evidence.  A later ODS retry can render a different plan
+# for the same Pixel version (for example after an ODS-managed route change),
+# and Pixel correctly refuses to overwrite that non-identical release.  When
+# this is the first ODS-managed deployment, archive only the exact inactive,
+# internally verified release that the failed apply named, then allow one
+# clean retry.  The archive remains owner-private evidence; nothing is deleted.
+_ods_pixel_retire_inactive_conflicting_release() {
+    local owner="$1" home="$2" pixel_root="$3" apply_log="$4"
+    local marker install_root version gateway_unit retired_release
+    marker="$home/.config/ods/pixel-managed.json"
+    install_root="$home/.local/share/pixel"
+    gateway_unit="${ODS_PIXEL_GATEWAY_UNIT_PATH:-/etc/systemd/system/openclaw-gateway.service}"
+
+    [[ -f "$pixel_root/VERSION" && ! -L "$pixel_root/VERSION" ]] || return 1
+    version="$(ods_pixel_run_as_owner "$owner" "$home" sed -n '1p' "$pixel_root/VERSION")" || return 1
+    [[ "$version" =~ ^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] || return 1
+    if [[ -e "$gateway_unit" || -L "$gateway_unit" ]] \
+        || { [[ "$gateway_unit" == /etc/systemd/system/openclaw-gateway.service ]] \
+            && systemctl is-active --quiet openclaw-gateway.service 2>/dev/null; }; then
+        return 1
+    fi
+
+    retired_release="$(ods_pixel_run_as_owner "$owner" "$home" python3 - \
+        "$marker" "${INSTALL_DIR:?}" "${PIXEL_SOURCE_REF:?}" "$install_root" \
+        "$version" "$apply_log" "$home" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+import tempfile
+
+marker, install_dir, source_ref, install_root, version, apply_log, home = sys.argv[1:]
+marker = pathlib.Path(marker)
+install_dir = pathlib.Path(install_dir)
+install_root = pathlib.Path(install_root)
+apply_log = pathlib.Path(apply_log)
+home = pathlib.Path(home)
+uid = os.getuid()
+
+def regular(path, maximum, private=False):
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_nlink != 1 or info.st_uid != uid
+            or info.st_size > maximum or info.st_mode & 0o022
+            or (private and info.st_mode & 0o077)):
+        raise SystemExit(f"unsafe inactive Pixel recovery file: {path}")
+    return info
+
+def directory(path, private=False):
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid or info.st_mode & 0o022
+            or (private and info.st_mode & 0o077)):
+        raise SystemExit(f"unsafe inactive Pixel recovery directory: {path}")
+    return info
+
+regular(marker, 65536, private=True)
+value = json.loads(marker.read_text(encoding="utf-8"))
+if (value.get("schema_version") != 2 or value.get("manager") != "ods"
+        or value.get("state") != "installing"
+        or value.get("initial_active_state") != "absent"
+        or value.get("install_dir") != str(install_dir)
+        or value.get("pixel_source_ref") != source_ref
+        or value.get("requested_source_ref") not in {None, source_ref}):
+    raise SystemExit("inactive Pixel recovery marker is not bound to this ODS install")
+for key in (
+    "active_release_version", "release_identity_sha256", "install_manifest_sha256",
+    "sandbox_image", "sandbox_image_id", "retired_release_path",
+):
+    if key in value:
+        raise SystemExit("verified or deactivating Pixel state cannot use inactive recovery")
+
+regular(apply_log, 2 * 1024 * 1024, private=True)
+release = install_root / "releases" / version
+expected_error = (
+    "[pixel] ERROR: Release already exists but is not byte-exact to the reviewed plan: "
+    + str(release)
+)
+if expected_error not in apply_log.read_text(encoding="utf-8", errors="strict").splitlines():
+    raise SystemExit("Pixel apply did not report the exact inactive-release conflict")
+
+for path in (
+    install_root / "current",
+    install_root / "runtime-attestation.json",
+    install_root / ".ods-uninstall-current",
+    install_root / ".ods-uninstall-runtime-attestation",
+    home / ".config/systemd/user/openclaw-gateway.service",
+    home / ".config/systemd/system/openclaw-gateway.service",
+    home / ".config/systemd/user/pixel-web-courier.service",
+):
+    if path.exists() or path.is_symlink():
+        raise SystemExit("inactive Pixel recovery found live or staged deployment state")
+
+directory(install_root, private=True)
+releases = install_root / "releases"
+directory(releases, private=True)
+directory(release)
+identity_path = release / "release-identity.json"
+manifest_path = release / "install-manifest.sha256"
+regular(identity_path, 65536)
+regular(manifest_path, 2 * 1024 * 1024)
+identity_bytes = identity_path.read_bytes()
+identity = json.loads(identity_bytes)
+source = identity.get("source") if isinstance(identity, dict) else None
+if (identity.get("pixel") != version or not isinstance(source, dict)
+        or source.get("state") != "git-clean" or source.get("commit") != source_ref
+        or not isinstance(source.get("tree"), str)
+        or not re.fullmatch(r"[0-9a-f]{40}", source["tree"])):
+    raise SystemExit("inactive Pixel release identity is not bound to the requested source")
+
+manifest_entries = {}
+for line in manifest_path.read_text(encoding="utf-8").splitlines():
+    match = re.fullmatch(r"([0-9a-f]{64})  (\./[^\r\n]+)", line)
+    if not match:
+        raise SystemExit("inactive Pixel release manifest is malformed")
+    digest, relative = match.groups()
+    relative_path = pathlib.PurePosixPath(relative[2:])
+    if (not relative_path.parts or relative_path.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative_path.parts)
+            or relative in manifest_entries):
+        raise SystemExit("inactive Pixel release manifest has an unsafe path")
+    manifest_entries[relative] = digest
+
+actual_files = set()
+for root, directories, files in os.walk(release, topdown=True, followlinks=False):
+    root_path = pathlib.Path(root)
+    directory(root_path)
+    for name in directories:
+        directory(root_path / name)
+    for name in files:
+        path = root_path / name
+        regular(path, 64 * 1024 * 1024)
+        relative = "./" + path.relative_to(release).as_posix()
+        actual_files.add(relative)
+        if relative == "./install-manifest.sha256":
+            continue
+        expected = manifest_entries.get(relative)
+        if expected is None or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise SystemExit("inactive Pixel release bytes do not match their manifest")
+if actual_files != set(manifest_entries) | {"./install-manifest.sha256"}:
+    raise SystemExit("inactive Pixel release manifest does not cover the exact file set")
+if "./release-identity.json" not in manifest_entries or "./VERSION" not in manifest_entries:
+    raise SystemExit("inactive Pixel release manifest lacks identity evidence")
+
+identity_sha256 = hashlib.sha256(identity_bytes).hexdigest()
+archive_root = install_root / "retired-ods-releases"
+if archive_root.exists() or archive_root.is_symlink():
+    directory(archive_root, private=True)
+else:
+    archive_root.mkdir(mode=0o700)
+container = pathlib.Path(tempfile.mkdtemp(
+    prefix=f"{version}-{identity_sha256[:12]}.", dir=archive_root,
+))
+os.chmod(container, 0o700, follow_symlinks=False)
+destination = container / "release"
+try:
+    os.rename(release, destination)
+except BaseException:
+    container.rmdir()
+    raise
+for path in (releases, archive_root, container):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+print(destination)
+PY
+    )" || return 1
+    [[ "$retired_release" == "$install_root/retired-ods-releases/$version-"*.????????/release ]] || return 1
+    printf '%s\n' "$retired_release"
 }
 
 ods_pixel_prepare_runtime_identity() {
@@ -2350,39 +3262,74 @@ ods_pixel_prepare_runtime_identity() {
     if declare -f _phase11_env_set >/dev/null 2>&1; then
         _phase11_env_set PIXEL_INGRESS_GID "$gid"
     fi
+    if ! _ods_pixel_prepare_wsl_runtime_bridge "$owner"; then
+        ai_bad "Could not prepare Pixel's shared WSL runtime before container startup."
+        return 1
+    fi
     ai_ok "Prepared the unprivileged Pixel runtime identity"
+}
+
+# Docker Desktop translates bind sources from the WSL client's namespace.
+# Establish the shared projection before Compose starts Pixel Edge, including
+# on a fresh install where the persistent bridge unit is not installed yet.
+_ods_pixel_prepare_wsl_runtime_bridge() {
+    local owner="$1" env_file="${INSTALL_DIR:?}/.env"
+    grep -Fxq 'PIXEL_RUNTIME_BIND_PROPAGATION=rshared' "$env_file" || return 0
+    grep -Fxq 'PIXEL_INGRESS_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/ingress' "$env_file" || return 1
+    grep -Fxq 'PIXEL_PREVIEW_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/preview' "$env_file" || return 1
+    local bridge="$INSTALL_DIR/extensions/services/pixel-agent/host/pixel-wsl-runtime-bridge.sh"
+    [[ -f "$bridge" && ! -L "$bridge" ]] || return 1
+    [[ ! -L /run/ods-pixel && ! -L /run/ods-pixel-preview ]] || return 1
+    ods_sudo install -d -o "$owner" -g ods-pixel -m 0710 /run/ods-pixel || return 1
+    ods_sudo install -d -o "$owner" -g ods-pixel -m 0750 /run/ods-pixel-preview || return 1
+    ods_sudo /bin/bash "$bridge" ensure
 }
 
 _ods_pixel_source_checkout() {
     local owner="$1" home="$2" source_root="$3"
     local source="${PIXEL_SOURCE_URL:?}" ref="${PIXEL_SOURCE_REF:?}"
     local source_timeout="${ODS_PIXEL_SOURCE_TIMEOUT_SECONDS:-180}"
+    local -a git_env=(env -i PATH="$PATH" HOME="$home" USER="$owner" LOGNAME="$owner"
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+        GIT_ALLOW_PROTOCOL=file GIT_NO_REPLACE_OBJECTS=1)
+    [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || return 1
+    if [[ "$source" == bundled ]]; then
+        if [[ "$ref" != "$ODS_PIXEL_BUNDLED_REF" ]]; then
+            printf '%s\n' 'error: The requested Pixel pin is not in the verified public bundle' >&2
+            return 1
+        fi
+    elif [[ "$source" != /* || "$source" == / || "$source" == *$'\n'* || "$source" == *$'\r'* ]]; then
+        printf '%s\n' 'error: Pixel checkout requires the verified ODS bundle or an absolute local source' >&2
+        return 1
+    fi
     [[ "$source_root" == /* && "$source_root" != / && ! -L "$source_root" ]] || return 1
     [[ "$source_timeout" =~ ^[0-9]+$ && "$source_timeout" -ge 1 && "$source_timeout" -le 900 ]] || return 1
+    if [[ "$source" == bundled ]]; then
+        [[ "$ref" == "$ODS_PIXEL_BUNDLED_REF" ]] && ods_pixel_bundled_source || return 1
+    fi
 
     if [[ ! -e "$source_root" ]]; then
         local parent="${source_root%/*}" stage checkout
         ods_pixel_run_as_owner "$owner" "$home" mkdir -p -- "$parent"
         stage="$(ods_pixel_run_as_owner "$owner" "$home" mktemp -d "$parent/.pixel-source.XXXXXX")" || return 1
         checkout="$stage/checkout"
-        if [[ "$source" == https://github.com/Osmantic/Pixel.git ]]; then
+        if [[ "$source" == bundled ]]; then
             if ! ods_pixel_run_as_owner_with_umask "$owner" "$home" 0022 timeout "${source_timeout}s" \
-                env GIT_TERMINAL_PROMPT=0 git -c credential.interactive=never \
-                clone --filter=blob:none --no-checkout -- "$source" "$checkout" >/dev/null; then
+                "${git_env[@]}" git -c credential.interactive=never \
+                clone --no-local --no-checkout -- "${INSTALL_DIR:?}/vendor/pixel.bundle" "$checkout" >/dev/null; then
                 ods_pixel_run_as_owner "$owner" "$home" rm -rf -- "$stage"
-                printf '%s\n' 'error: Pixel source clone failed or timed out; configure authorized Git access or use the documented local checkout' >&2
                 return 1
             fi
         else
             if ! ods_pixel_run_as_owner_with_umask "$owner" "$home" 0022 timeout "${source_timeout}s" \
-                env GIT_TERMINAL_PROMPT=0 git -c credential.interactive=never \
+                "${git_env[@]}" git -c credential.interactive=never \
                 clone --no-local --no-checkout -- "$source" "$checkout" >/dev/null; then
                 ods_pixel_run_as_owner "$owner" "$home" rm -rf -- "$stage"
                 return 1
             fi
         fi
         if ! ods_pixel_run_as_owner_with_umask "$owner" "$home" 0022 timeout 60s \
-            env GIT_TERMINAL_PROMPT=0 git -C "$checkout" -c advice.detachedHead=false checkout --detach "$ref" >/dev/null \
+            "${git_env[@]}" git -C "$checkout" -c advice.detachedHead=false checkout --detach "$ref" >/dev/null \
             || ! ods_pixel_run_as_owner "$owner" "$home" mv -T -- "$checkout" "$source_root"; then
             ods_pixel_run_as_owner "$owner" "$home" rm -rf -- "$stage"
             return 1
@@ -2394,10 +3341,35 @@ _ods_pixel_source_checkout() {
     # before cloning; this closes the narrow replacement window between mv and
     # the exact-commit/clean-tree verification below.
     [[ ! -L "$source_root" && -d "$source_root/.git" && ! -L "$source_root/.git" ]] || return 1
-    [[ "$(ods_pixel_run_as_owner "$owner" "$home" git -C "$source_root" rev-parse HEAD)" == "$ref" ]] || return 1
-    ods_pixel_run_as_owner "$owner" "$home" git -C "$source_root" diff --quiet --ignore-submodules --
-    ods_pixel_run_as_owner "$owner" "$home" git -C "$source_root" diff --cached --quiet --ignore-submodules --
+    [[ "$(ods_pixel_run_as_owner "$owner" "$home" "${git_env[@]}" git -C "$source_root" rev-parse HEAD)" == "$ref" ]] || return 1
+    ods_pixel_run_as_owner "$owner" "$home" "${git_env[@]}" git -C "$source_root" diff --quiet --ignore-submodules --
+    ods_pixel_run_as_owner "$owner" "$home" "${git_env[@]}" git -C "$source_root" diff --cached --quiet --ignore-submodules --
     printf '%s\n' "$source_root"
+}
+
+_ods_pixel_gateway_health() {
+    # Read-only discovery: prefer direct IPv6 loopback; retain IPv4-only hosts.
+    # Split the existing five-second probe budget across the two candidates.
+    local port="${1:-18789}" host body
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || return 1
+    for host in '[::1]' '127.0.0.1'; do
+        if body="$(curl --noproxy '*' --fail --silent --show-error --max-time 2.5 \
+            "http://${host}:${port}/health" 2>/dev/null)" \
+            && jq -e '.ok == true and .status == "live"' >/dev/null 2>&1 <<<"$body"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+_ods_pixel_wait_gateway() {
+    local attempts="${1:-60}" port="${2:-18789}" attempt
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        _ods_pixel_gateway_health "$port" && return 0
+        (( attempt == attempts )) || sleep 2
+    done
+    ai_bad "Pixel gateway did not become ready at its loopback endpoint."
+    return 1
 }
 
 _ods_pixel_wait_http() {
@@ -2429,6 +3401,12 @@ _ods_pixel_runtime_model_identity() {
     local model=""
     if [[ -n "${EXTERNAL_LLM_URL:-}" ]]; then
         model="${EXTERNAL_LLM_MODEL:-}"
+        [[ -n "$model" ]] || return 1
+    elif [[ "${LEMONADE_EXTERNAL:-false}" == true ]]; then
+        # WSL can attach to a Windows-hosted Lemonade server while its Linux
+        # hardware detector correctly reports CPU. Bind Pixel to the served
+        # model, not the stale GGUF selected before the external route.
+        model="${LEMONADE_MODEL:-}"
         [[ -n "$model" ]] || return 1
     elif [[ "${GPU_BACKEND:-}" == amd \
         && "${LLM_BACKEND:-}" == lemonade \
@@ -2870,7 +3848,7 @@ PY
 
 _ods_pixel_write_operations_policy() {
     local owner="$1" home="$2" policy="$3" install_root="${INSTALL_DIR:?}"
-    local workspace="$home/.openclaw/workspace-pixel"
+    local workspace="${4:-$home/.openclaw/workspace-pixel}"
     local system_observer_source="$install_root/extensions/services/pixel-agent/host/system_observe.py"
 
     ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "${policy%/*}" || return 1
@@ -2907,16 +3885,15 @@ def normalized_root(value, label):
 
 install_root = normalized_root(install_root, "ODS install root")
 workspace = normalized_root(workspace, "Pixel workspace")
-manager_socket_root = "/run/ods-pixel-manager"
+native_macos = sys.platform == "darwin"
+broker_state = "/private/var/lib/pixel-ops-broker" if native_macos else "/var/lib/pixel-ops-broker"
+manager_socket_root = "/private/var/lib/ods-pixel-manager" if native_macos else "/run/ods-pixel-manager"
 manager_socket = manager_socket_root + "/extension-manager.sock"
-manager_program = "/opt/pixel-ops-broker/ods-extension-manager.py"
-system_observer = "/usr/local/libexec/ods-pixel-system-observe.py"
+manager_program = "/usr/local/libexec/ods-pixel-services/manager/extension_manager.py" if native_macos else "/opt/pixel-ops-broker/ods-extension-manager.py"
+extension_search = "/usr/local/libexec/ods-pixel-services/helpers/extension_search.py" if native_macos else "/opt/pixel-ops-broker/ods-extension-search.py"
+extension_catalog = "/usr/local/libexec/ods-pixel-services/helpers/extension-catalog.json" if native_macos else "/opt/pixel-ops-broker/ods-extension-catalog.json"
+system_observer = "/usr/local/libexec/ods-pixel-services/helpers/system_observe.py" if native_macos else "/usr/local/libexec/ods-pixel-system-observe.py"
 system_observer_source = pathlib.Path(system_observer_source_raw)
-python_binary = str(pathlib.Path("/usr/bin/python3").resolve(strict=True))
-hostname_binary = "/usr/bin/hostname"
-uname_binary = "/usr/bin/uname"
-cat_binary = "/usr/bin/cat"
-uptime_binary = "/usr/bin/uptime"
 
 def required_binary(name):
     candidate = shutil.which(name)
@@ -2924,17 +3901,24 @@ def required_binary(name):
         raise SystemExit(f"required Pixel Operations executable is unavailable: {name}")
     return str(pathlib.Path(candidate).resolve(strict=True))
 
+python_binary = str(pathlib.Path("/usr/bin/python3").resolve(strict=True))
+hostname_binary = required_binary("hostname")
+uname_binary = required_binary("uname")
+cat_binary = required_binary("cat")
+uptime_binary = required_binary("uptime")
 ps_binary = required_binary("ps")
-systemctl_binary = required_binary("systemctl")
-lscpu_binary = required_binary("lscpu")
-free_binary = required_binary("free")
+systemctl_binary = None if native_macos else required_binary("systemctl")
+lscpu_binary = None if native_macos else required_binary("lscpu")
+free_binary = None if native_macos else required_binary("free")
 df_binary = required_binary("df")
-ip_binary = required_binary("ip")
-ss_binary = required_binary("ss")
+ip_binary = None if native_macos else required_binary("ip")
+ss_binary = None if native_macos else required_binary("ss")
 for binary in (
     python_binary, hostname_binary, uname_binary, cat_binary, uptime_binary, ps_binary,
     systemctl_binary, lscpu_binary, free_binary, df_binary, ip_binary, ss_binary,
 ):
+    if binary is None:
+        continue
     info = pathlib.Path(binary).lstat()
     if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
             or info.st_uid != 0 or info.st_mode & 0o022
@@ -2959,7 +3943,7 @@ payload = {
     "identityCacheSeconds": 30,
     "sshBinary": "/usr/bin/ssh",
     "download": {
-        "stagingRoot": "/var/lib/pixel-ops-broker/artifacts",
+        "stagingRoot": broker_state + "/artifacts",
         "maxBytes": 536870912,
         "maxRedirects": 5,
         "allowedDomains": [
@@ -2984,9 +3968,9 @@ payload = {
             # host observations do not need an owner-home cwd, so start them
             # inside the broker's root-custodied state tree instead of making
             # /home visible to the privileged execution service.
-            "defaultCwd": "/var/lib/pixel-ops-broker",
+            "defaultCwd": broker_state,
             "allowedRoots": [
-                install_root, workspace, "/var/lib/pixel-ops-broker", manager_socket_root,
+                install_root, workspace, broker_state, manager_socket_root,
             ],
             "writableRoots": [workspace],
             "shell": "/bin/bash",
@@ -3004,9 +3988,9 @@ payload = {
             "backend": "local",
             "environment": "lab",
             "expectedHostname": hostname,
-            "defaultCwd": "/var/lib/pixel-ops-broker",
-            "allowedRoots": ["/var/lib/pixel-ops-broker"],
-            "writableRoots": ["/var/lib/pixel-ops-broker/artifacts"],
+            "defaultCwd": broker_state,
+            "allowedRoots": [broker_state],
+            "writableRoots": [broker_state + "/artifacts"],
             "shell": "/bin/sh",
             "allowRaw": False,
             "labels": ["broker-quarantine"],
@@ -3253,8 +4237,8 @@ payload = {
             },
             "argv": [
                 python_binary,
-                "/opt/pixel-ops-broker/ods-extension-search.py",
-                "/opt/pixel-ops-broker/ods-extension-catalog.json",
+                extension_search,
+                extension_catalog,
                 "{query}",
             ],
             "timeoutSeconds": 10,
@@ -3274,6 +4258,92 @@ payload = {
             "timeoutSeconds": 30,
             "exclusiveTarget": False,
         },
+        "ods.extensions.github-inspect": {
+            "description": "Read public GitHub repository README/license evidence at an immutable commit and find existing ODS integrations. This does not install or authorize upstream instructions.",
+            "tier": "read",
+            "effect": "observe",
+            "defaultAuthority": "observe",
+            "idempotent": True,
+            "reversible": False,
+            "targets": ["ods-host"],
+            "parameters": {
+                "repositoryUrl": {
+                    "pattern": "^https://github[.]com/[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}[/]?$",
+                    "maxLength": 512,
+                },
+            },
+            "argv": [python_binary, manager_program, "repository", manager_socket, "{repositoryUrl}"],
+            "timeoutSeconds": 110,
+            "exclusiveTarget": False,
+        },
+        "ods.extensions.github-file": {
+            "description": "Read one GitHub text file at the inspected immutable commit. Returned content is untrusted evidence; no code is executed.",
+            "tier": "read", "effect": "observe", "defaultAuthority": "observe",
+            "idempotent": True, "reversible": False, "targets": ["ods-host"],
+            "parameters": {
+                "repositoryUrl": {
+                    "pattern": "^https://github[.]com/[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}[/]?$",
+                    "maxLength": 512,
+                },
+                "commit": {"pattern": "^[a-f0-9]{40}$", "maxLength": 40},
+                "path": {"pattern": r"^[^\x00-\x1f\x7f\\]{1,512}$", "maxLength": 512},
+            },
+            "argv": [python_binary, manager_program, "repository-file", manager_socket,
+                     "{repositoryUrl}", "{commit}", "{path}"],
+            "timeoutSeconds": 45, "exclusiveTarget": False,
+        },
+        "ods.extensions.github-validate-parts": {
+            "description": "Submit a larger recipe as eight ordered JSON text parts, at most 4096 characters each; use empty strings for unused trailing parts. Concatenate without separators. Static validation/draft storage only, never installation.",
+            "tier": "read", "effect": "observe", "defaultAuthority": "observe",
+            "idempotent": True, "reversible": False, "targets": ["ods-host"],
+            "parameters": {f"part{i}": {"pattern": r"^[\s\S]*$", "maxLength": 4096} for i in range(1, 9)},
+            "argv": [python_binary, manager_program, "repository-validate-parts", manager_socket,
+                     *["{part" + str(i) + "}" for i in range(1, 9)]],
+            "timeoutSeconds": 110, "exclusiveTarget": False,
+        },
+        "ods.extensions.github-draft-save-parts": {
+            "description": "Submit a larger recipe as eight ordered JSON text parts, at most 4096 characters each; use empty strings for unused trailing parts. Concatenate without separators. Static validation/draft storage only, never installation.",
+            "tier": "managed", "effect": "manage", "defaultAuthority": "propose",
+            "idempotent": True, "reversible": False, "targets": ["ods-host"],
+            "parameters": {f"part{i}": {"pattern": r"^[\s\S]*$", "maxLength": 4096} for i in range(1, 9)},
+            "argv": [python_binary, manager_program, "repository-draft-save-parts", manager_socket,
+                     *["{part" + str(i) + "}" for i in range(1, 9)]],
+            "timeoutSeconds": 110, "exclusiveTarget": True,
+        },
+        "ods.extensions.github-draft-prepare": {
+            "description": "Prepare an exact saved GitHub recipe as an available extension configuration. Does not download, start or mark the application installed.",
+            "tier": "managed", "effect": "manage", "defaultAuthority": "propose",
+            "idempotent": True, "reversible": False, "targets": ["ods-host"],
+            "parameters": {"draftId": {"pattern": "^[a-f0-9]{64}$", "maxLength": 64}},
+            "argv": [python_binary, manager_program, "repository-draft-prepare", manager_socket, "{draftId}"],
+            "timeoutSeconds": 150, "exclusiveTarget": True,
+        },
+        "ods.extensions.github-draft-read": {
+            "description": "Recover a saved extension recipe by its exact draft ID. Recovered proposals require fresh validation and do not prove installation.",
+            "tier": "read", "effect": "observe", "defaultAuthority": "observe",
+            "idempotent": True, "reversible": False, "targets": ["ods-host"],
+            "parameters": {"draftId": {"pattern": "^[a-f0-9]{64}$", "maxLength": 64}},
+            "argv": [python_binary, manager_program, "repository-draft-read", manager_socket, "{draftId}"],
+            "timeoutSeconds": 45, "exclusiveTarget": False,
+        },
+        "ods.extensions.github-draft-save": {
+            "description": "Save an immutable, statically validated extension recipe for recovery. This stores a draft only; it does not install or register an extension.",
+            "tier": "managed", "effect": "manage", "defaultAuthority": "propose",
+            "idempotent": True, "reversible": False, "targets": ["ods-host"],
+            "parameters": {"recipeJson": {"pattern": r"^[\s\S]+$", "maxLength": 4096}},
+            "argv": [python_binary, manager_program, "repository-draft-save", manager_socket, "{recipeJson}"],
+            "timeoutSeconds": 110, "exclusiveTarget": True,
+        },
+        "ods.extensions.github-validate": {
+            "description": "Validate a proposed GitHub extension manifest and Compose recipe; returns static diagnostics only, without installation or registration.",
+            "tier": "read", "effect": "observe", "defaultAuthority": "observe",
+            "idempotent": True, "reversible": False, "targets": ["ods-host"],
+            "parameters": {
+                "recipeJson": {"pattern": r"^[\s\S]+$", "maxLength": 4096},
+            },
+            "argv": [python_binary, manager_program, "repository-validate", manager_socket, "{recipeJson}"],
+            "timeoutSeconds": 110, "exclusiveTarget": False,
+        },
         "ods.extensions.inspect": {
             "description": "Inspect one ODS extension's installed state and configuration prerequisites through the scoped lifecycle proxy.",
             "tier": "read",
@@ -3291,7 +4361,7 @@ payload = {
             "argv": [
                 python_binary, manager_program, "client", manager_socket, "inspect", "{serviceId}",
             ],
-            "timeoutSeconds": 30,
+            "timeoutSeconds": 90,
             "exclusiveTarget": False,
         },
         "ods.extensions.install": {
@@ -3314,6 +4384,27 @@ payload = {
                 python_binary, manager_program, "client", manager_socket, "install", "{serviceId}",
             ],
             "timeoutSeconds": 900,
+            "exclusiveTarget": True,
+        },
+        "ods.extensions.install-next": {
+            "description": "Advance one installation step for a cataloged ODS extension and its declared dependencies. Retains uncertain effects; acceptance is not readiness.",
+            "tier": "managed",
+            "effect": "manage",
+            "defaultAuthority": "propose",
+            "idempotent": True,
+            "reversible": False,
+            "verificationAction": "ods.extensions.inspect",
+            "targets": ["ods-host"],
+            "parameters": {
+                "serviceId": {
+                    "pattern": "^([a-z0-9]|[a-z0-9][a-z0-9._-]{0,62}[a-z0-9])$",
+                    "maxLength": 64,
+                },
+            },
+            "argv": [
+                python_binary, manager_program, "client", manager_socket, "install-next", "{serviceId}",
+            ],
+            "timeoutSeconds": 240,
             "exclusiveTarget": True,
         },
         "ods.extensions.enable": {
@@ -3400,6 +4491,10 @@ payload = {
         }],
     },
 }
+if native_macos:
+    for observation in ("os-release", "cpu", "memory", "processes", "services", "storage",
+                        "network-addresses", "network-routes", "listening-ports"):
+        payload["actions"]["host." + observation]["argv"] = [python_binary, system_observer, observation]
 content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
 descriptor, temporary = tempfile.mkstemp(prefix=".pixel-ops-policy.", dir=path.parent)
 try:
@@ -3424,7 +4519,7 @@ _ods_pixel_write_onboarding() {
     local owner="$1" home="$2" answers="$3" openclaw_bin="$4" plugin_path="$5" plugin_digest="$6"
     local web_search_provider="${7:-searxng}" parallel_path="${8:-}" parallel_digest="${9:-}"
     local context="${MAX_CONTEXT:-16384}" max_tokens reasoning=false
-    local gateway_alias gateway_label runtime_model gateway_port="${LITELLM_PORT:-4000}" gateway_key="${LITELLM_KEY:-}"
+    local gateway_alias gateway_label runtime_model model_gateway_port="${PIXEL_MODEL_RELAY_PORT:-4006}" pixel_gateway_port gateway_key="${PIXEL_MODEL_RELAY_KEY:-}"
     local gateway_key_file write_status=0
     if [[ "$context" =~ ^[0-9]+$ && "$context" -ge 4096 ]]; then
         :
@@ -3450,15 +4545,22 @@ _ods_pixel_write_onboarding() {
     gateway_label="Default"
     [[ "$gateway_alias" == "ods/current" ]] && gateway_label="Current"
     runtime_model="$(_ods_pixel_runtime_model_identity)" || return 1
-    if [[ ! "$gateway_port" =~ ^[0-9]+$ ]] || (( gateway_port < 1 || gateway_port > 65535 )); then
-        ai_bad "Pixel requires a valid loopback LiteLLM port."
+    if [[ ! "$model_gateway_port" =~ ^[0-9]+$ ]] || (( model_gateway_port < 1 || model_gateway_port > 65535 )); then
+        ai_bad "Pixel requires a valid loopback model relay port."
         return 1
     fi
+    pixel_gateway_port="$(_ods_pixel_gateway_port)" || {
+        ai_bad "Pixel requires a valid loopback gateway port."
+        return 1
+    }
     [[ -n "$gateway_key" && ${#gateway_key} -le 4096 ]] || {
-        ai_bad "Pixel requires the generated LiteLLM gateway key."
+        ai_bad "Pixel requires the generated model relay key."
         return 1
     }
 
+    local renderer
+    renderer="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/pixel-onboarding.py" || return 1
+    [[ -f "$renderer" ]] || return 1
     ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "${answers%/*}" || return 1
     gateway_key_file="$(ods_pixel_run_as_owner "$owner" "$home" \
         mktemp "${answers%/*}/.pixel-gateway-key.XXXXXX")" || return 1
@@ -3468,152 +4570,11 @@ _ods_pixel_write_onboarding() {
         ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$gateway_key_file" || true
         return 1
     fi
-    ods_pixel_run_as_owner "$owner" "$home" python3 - "$answers" \
+    ods_pixel_run_as_owner "$owner" "$home" python3 "$renderer" "$answers" \
         "$openclaw_bin" "$home" "$runtime_model" "$context" "$max_tokens" "$reasoning" \
-        "$gateway_alias" "$gateway_label" "$gateway_port" "$gateway_key_file" \
+        "$gateway_alias" "$gateway_label" "$model_gateway_port" "$pixel_gateway_port" "$gateway_key_file" \
         "${SEARXNG_PORT:-8888}" "$plugin_path" "$plugin_digest" \
-        "$web_search_provider" "$parallel_path" "$parallel_digest" <<'PY' || write_status=$?
-import json, os, pathlib, re, stat, sys, tempfile
-
-(out, openclaw_bin, home, model, context, max_tokens, reasoning,
- gateway_alias, gateway_label, gateway_port, gateway_key_path,
- search_port, plugin_path, plugin_digest, web_search_provider, parallel_path, parallel_digest) = sys.argv[1:]
-if web_search_provider not in {"searxng", "parallel-free"}:
-    raise SystemExit("invalid native search provider")
-if web_search_provider == "parallel-free" and (
-        not pathlib.Path(parallel_path).is_absolute()
-        or not re.fullmatch(r"[0-9a-f]{64}", parallel_digest)):
-    raise SystemExit("native search requires a provisioned and verified parallel plugin")
-gateway_key_path = pathlib.Path(gateway_key_path)
-gateway_key_info = gateway_key_path.lstat()
-if (not stat.S_ISREG(gateway_key_info.st_mode) or stat.S_ISLNK(gateway_key_info.st_mode)
-        or gateway_key_info.st_nlink != 1 or gateway_key_info.st_uid != os.getuid()
-        or gateway_key_info.st_mode & 0o077 or gateway_key_info.st_size > 4096):
-    raise SystemExit("unsafe ODS Pixel gateway credential")
-gateway_key = gateway_key_path.read_text(encoding="utf-8")
-if gateway_alias not in {"default", "ods/current"}:
-    raise SystemExit("invalid ODS Pixel gateway alias")
-if gateway_label not in {"Default", "Current"}:
-    raise SystemExit("invalid ODS Pixel gateway label")
-if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+:/ @(),=-]{0,255}", model):
-    raise SystemExit("invalid ODS Pixel model id")
-if (not gateway_port.isdigit() or not 1 <= int(gateway_port) <= 65535
-        or not gateway_key or len(gateway_key) > 4096
-        or any(ord(character) < 32 or ord(character) == 127 for character in gateway_key)):
-    raise SystemExit("invalid ODS Pixel gateway route")
-home = pathlib.Path(home)
-path = pathlib.Path(out)
-# A source/plugin upgrade is not a request to reset the owner's output budget.
-# Preserve it for the same model route and context; explicit model settings are
-# still applied by _ods_pixel_update_onboarding_model.
-try:
-    previous_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-except FileNotFoundError:
-    if path.is_symlink():
-        raise SystemExit("ODS Pixel onboarding contract cannot be a symlink")
-else:
-    with os.fdopen(previous_fd, "rb") as previous_file:
-        info = os.fstat(previous_file.fileno())
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                or info.st_uid != os.getuid() or info.st_mode & 0o077
-                or info.st_size > 2 * 1024 * 1024):
-            raise SystemExit("unsafe existing ODS Pixel onboarding contract")
-        previous_bytes = previous_file.read(2 * 1024 * 1024 + 1)
-    if len(previous_bytes) > 2 * 1024 * 1024:
-        raise SystemExit("oversized existing ODS Pixel onboarding contract")
-    previous = json.loads(previous_bytes)
-    if (not isinstance(previous, dict)
-            or previous.get("deploymentName") != "ods-default" or previous.get("agentId") != "pixel"
-            or type(previous.get("modelContextWindow")) is not int
-            or type(previous.get("modelMaxTokens")) is not int
-            or type(previous.get("modelReasoning")) is not bool
-            or not 4096 <= previous["modelContextWindow"] <= 10_000_000
-            or not 1 <= previous["modelMaxTokens"] <= previous["modelContextWindow"]):
-        raise SystemExit("invalid existing ODS Pixel model contract")
-    same_model = {
-        "modelProvider": "ods-gateway", "modelId": gateway_alias,
-        "modelName": f"ODS {gateway_label} ({model})",
-        "modelBaseUrl": f"http://127.0.0.1:{gateway_port}/v1",
-        "modelContextWindow": int(context), "modelReasoning": reasoning == "true",
-    }
-    if all(previous.get(key) == value for key, value in same_model.items()):
-        max_tokens = str(previous["modelMaxTokens"])
-payload = {
-    "deploymentProfile": "prepared",
-    "capabilityProfile": "engineering-operator",
-    "ownerName": "ODS Owner",
-    "organization": "Local ODS",
-    "deploymentName": "ods-default",
-    "timeZone": "UTC",
-    "agentId": "pixel",
-    "agentName": "Pixel",
-    "openclawBin": openclaw_bin,
-    "openclawHome": str(home / ".openclaw"),
-    "installDir": str(home / ".local" / "share" / "pixel"),
-    "workspace": str(home / ".openclaw" / "workspace-pixel"),
-    "modelProvider": "ods-gateway",
-    "modelId": gateway_alias,
-    "modelName": f"ODS {gateway_label} ({model})",
-    "modelBaseUrl": f"http://127.0.0.1:{gateway_port}/v1",
-    "modelApiKey": gateway_key,
-    "modelReasoning": reasoning == "true",
-    "modelContextWindow": int(context),
-    "modelMaxTokens": int(max_tokens),
-    "modelPrivateHosts": [],
-    "webSearchProvider": web_search_provider,
-    "searxngBaseUrl": f"http://127.0.0.1:{search_port}",
-    "embeddingModel": "embeddinggemma-300m-qat-Q8_0.gguf",
-    "embeddingCache": str(home / ".cache" / "openclaw" / "embeddings"),
-    "googleAccount": "ods@localhost.local",
-    "calendarId": "primary",
-    "gatewayPort": 18789,
-    "gatewayExtensions": [{
-        "id": "pixel-ods",
-        "path": plugin_path,
-        "sha256": plugin_digest,
-        "tools": ["pixel_ods_status", "pixel_ods_apps_list", "pixel_ods_extensions", "pixel_ods_host_observe", "pixel_ods_host_command_propose", "pixel_ods_evidence_report", "pixel_ods_evidence_readback", "pixel_ods_research", "pixel_ods_web_extract", "pixel_ods_download_promote", "pixel_ods_workspace_preview"],
-    }],
-    "localCapabilityPacks": [],
-    "agentSkills": [],
-    "emailLimbEnabled": False,
-    "calendarLimbEnabled": False,
-    "calendarDirectEnabled": False,
-    "socialLimbEnabled": False,
-    "webLimbEnabled": False,
-    "operationsLimbEnabled": True,
-    "operationsPolicyFile": str(path.parent / "operations-policy.json"),
-    "frontierLimbEnabled": False,
-    "frontierAuthMode": "api-key",
-    # Pixel still validates the managed Frontier policy while the limb is
-    # disabled. Use its smallest built-in budget rather than "custom", which
-    # is reserved for a separate private policy and otherwise renders an empty
-    # budget object during configure.
-    "frontierBudgetProfile": "starter",
-    "frontierTaskPacks": [],
-    "operationsActionPacks": [],
-}
-if web_search_provider == "parallel-free":
-    payload["gatewayExtensions"].append({"id": "parallel", "path": parallel_path, "sha256": parallel_digest})
-path.parent.mkdir(parents=True, exist_ok=True)
-if path.is_symlink():
-    raise SystemExit("ODS Pixel onboarding contract cannot be a symlink")
-if path.exists():
-    info = path.stat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 2 * 1024 * 1024:
-        raise SystemExit("invalid existing ODS Pixel onboarding contract")
-content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-fd, temporary = tempfile.mkstemp(prefix=".pixel-onboarding.", dir=path.parent)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-finally:
-    if os.path.exists(temporary):
-        os.unlink(temporary)
-PY
+        "$web_search_provider" "$parallel_path" "$parallel_digest" || write_status=$?
     ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$gateway_key_file" || write_status=1
     return "$write_status"
 }
@@ -3633,7 +4594,7 @@ _ods_pixel_wait_extension_manager_probe() {
             && jq -e --arg id "$extension_id" '.schemaVersion == 1
                 and .kind == "ods-pixel-extension-lifecycle"
                 and .action == "inspect" and .extensionId == $id
-                and (.outcome == "ready" or .outcome == "blocked")
+                and (.outcome == "inspected" or .outcome == "blocked")
                 and .changed == false and .externalEffectOccurred == false
                 and (.requiredConfiguration | type == "array")
                 and (.optionalConfiguration | type == "array")
@@ -3700,7 +4661,7 @@ _ods_pixel_wait_workspace_preview_probe() {
 _ods_pixel_install_ingress() {
     local owner="$1" home="$2" plugin_root="$3" extension_catalog="$4"
     local rendered_extension_manager_unit="$5" rendered_artifact_promoter_unit="$6"
-    local rendered_workspace_preview_unit="$7" preview_port="${PIXEL_PREVIEW_PORT:-9437}"
+    local rendered_workspace_preview_unit="$7" preview_port="${PIXEL_PREVIEW_PORT:-9437}" gateway_port
     local token_file="$home/.openclaw/openclaw.json"
     local runtime_token_file="/run/ods-pixel/openclaw.json"
     local extension_helper="$plugin_root/host/extension_search.py"
@@ -3713,12 +4674,22 @@ _ods_pixel_install_ingress() {
     local system_artifact_promoter="/usr/local/libexec/ods-pixel-artifact-promoter.py"
     local workspace_preview="$plugin_root/host/workspace_preview.py"
     local system_workspace_preview="/usr/local/libexec/ods-pixel-workspace-preview.py"
+    local unix_peer="$plugin_root/host/unix_peer.py"
     local system_observer="$plugin_root/host/system_observe.py"
     local installed_system_observer="/usr/local/libexec/ods-pixel-system-observe.py"
     local operations_service_dropin="$plugin_root/host/pixel-ops-broker-ods.conf"
     local operations_service_dropin_dir="/etc/systemd/system/pixel-ops-broker.service.d"
     local installed_operations_service_dropin="$operations_service_dropin_dir/10-ods-host-observation.conf"
-    local ods_version="${VERSION:-2.6.0}"
+    local wsl_bridge=false
+    local wsl_bridge_source="$plugin_root/host/pixel-wsl-runtime-bridge.sh"
+    local wsl_bridge_unit="$plugin_root/host/pixel-wsl-runtime-bridge.service"
+    local ods_version="${VERSION:-3.0.0}"
+    if grep -Fxq 'PIXEL_RUNTIME_BIND_PROPAGATION=rshared' "${INSTALL_DIR:?}/.env"; then
+        grep -Fxq 'PIXEL_INGRESS_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/ingress' "$INSTALL_DIR/.env" || return 1
+        grep -Fxq 'PIXEL_PREVIEW_RUNTIME_DIR=/mnt/wsl/ods-portal-runtime/preview' "$INSTALL_DIR/.env" || return 1
+        grep -qi microsoft /proc/sys/kernel/osrelease || return 1
+        wsl_bridge=true
+    fi
     [[ "$ods_version" =~ ^[0-9]+(\.[0-9]+){1,3}([-+][A-Za-z0-9.-]+)?$ ]] || return 1
     [[ -f "$token_file" && ! -L "$token_file" ]] || return 1
     [[ "$(stat -c '%u' -- "$token_file")" == "$(id -u "$owner")" ]] || return 1
@@ -3728,7 +4699,7 @@ _ods_pixel_install_ingress() {
         "$extension_manager" "$rendered_extension_manager_unit" \
         "$artifact_promoter" "$rendered_artifact_promoter_unit" \
         "$workspace_preview" "$rendered_workspace_preview_unit" \
-        "$system_observer" \
+        "$system_observer" "$unix_peer" \
         "$operations_service_dropin"; do
         [[ -f "$projection_source" && ! -L "$projection_source" ]] || return 1
         IFS='|' read -r kind uid mode size < <(stat -c '%F|%u|%a|%s' -- "$projection_source")
@@ -3737,9 +4708,20 @@ _ods_pixel_install_ingress() {
         (( (8#$mode & 0022) == 0 )) || return 1
     done
     (( (8#$(stat -c '%a' -- "$extension_catalog") & 0077) == 0 )) || return 1
+    if "$wsl_bridge"; then
+        for projection_source in "$wsl_bridge_source" "$wsl_bridge_unit"; do
+            [[ -f "$projection_source" && ! -L "$projection_source" ]] || return 1
+            IFS='|' read -r kind uid mode size < <(stat -c '%F|%u|%a|%s' -- "$projection_source")
+            [[ "$kind" == "regular file" && "$uid" == "$(id -u "$owner")" \
+                && "$size" =~ ^[0-9]+$ && "$size" -le 2097152 ]] || return 1
+            (( (8#$mode & 0022) == 0 )) || return 1
+        done
+    fi
 
+    gateway_port="$(_ods_pixel_gateway_port)" || return 1
     [[ "$preview_port" =~ ^[0-9]+$ ]] || return 1
     (( preview_port >= 1 && preview_port <= 65535 )) || return 1
+    (( preview_port != gateway_port )) || return 1
     local app_port
     for app_port in \
         "${DASHBOARD_PORT:-3001}" "${WEBUI_PORT:-3000}" "${SEARXNG_PORT:-8888}" \
@@ -3755,13 +4737,14 @@ _ods_pixel_install_ingress() {
     local stage extension_probe
     stage="$(mktemp -d)" || return 1
     python3 - "$plugin_root/host/pixel-ingress.service" "$stage/pixel-ingress.service" "$owner" "$token_file" "$runtime_token_file" <<'PY'
-import pathlib, sys
+import pathlib, pwd, sys
 
 source, target, owner, token_source, token_file = sys.argv[1:6]
 text = pathlib.Path(source).read_text(encoding="utf-8")
 if any(c in owner + token_source + token_file for c in "\n\r\0"):
     raise SystemExit("unsafe systemd substitution")
 text = (text.replace("__PIXEL_SERVICE_USER__", owner)
+            .replace("__PIXEL_SERVICE_GID__", str(pwd.getpwnam(owner).pw_gid))
             .replace("__PIXEL_GATEWAY_TOKEN_SOURCE__", token_source)
             .replace("__PIXEL_GATEWAY_TOKEN_FILE__", token_file))
 if "__PIXEL_" in text:
@@ -3770,9 +4753,11 @@ pathlib.Path(target).write_text(text, encoding="utf-8", newline="\n")
 PY
     cat > "$stage/pixel-agent.env" <<EOF
 PIXEL_INGRESS_SOCKET=/run/ods-pixel/pixel-ingress.sock
+PIXEL_CHAT_STATE_DIR=/var/lib/ods-pixel-chat
+PIXEL_ACCESS_OWNER_KEY_FILE=/etc/ods/pixel-access-relay.key
 PIXEL_INGRESS_GID=${PIXEL_INGRESS_GID:?}
 PIXEL_GATEWAY_TOKEN_FILE=$runtime_token_file
-PIXEL_GATEWAY_PORT=18789
+PIXEL_GATEWAY_PORT=$gateway_port
 PIXEL_STATUS_FILE=/run/ods-pixel/ods-status.json
 PIXEL_STATUS_INTERVAL_MS=30000
 PIXEL_ODS_VERSION=$ods_version
@@ -3803,6 +4788,8 @@ EOF
     ods_sudo install -o root -g root -m 0755 "$artifact_promoter" "$system_artifact_promoter"
     ods_sudo install -o root -g root -m 0755 "$workspace_preview" "$system_workspace_preview"
     ods_sudo install -o root -g root -m 0755 "$system_observer" "$installed_system_observer"
+    ods_sudo install -o root -g root -m 0644 "$unix_peer" /usr/local/libexec/unix_peer.py
+    ods_sudo install -o root -g root -m 0644 "$unix_peer" /opt/pixel-ops-broker/unix_peer.py
     if ods_sudo test -e "$operations_service_dropin_dir" \
         || ods_sudo test -L "$operations_service_dropin_dir"; then
         ods_sudo test -d "$operations_service_dropin_dir" || return 1
@@ -3821,6 +4808,8 @@ EOF
     ods_sudo cmp -s -- "$artifact_promoter" "$system_artifact_promoter"
     ods_sudo cmp -s -- "$workspace_preview" "$system_workspace_preview"
     ods_sudo cmp -s -- "$system_observer" "$installed_system_observer"
+    ods_sudo cmp -s -- "$unix_peer" /usr/local/libexec/unix_peer.py
+    ods_sudo cmp -s -- "$unix_peer" /opt/pixel-ops-broker/unix_peer.py
     ods_sudo cmp -s -- "$operations_service_dropin" "$installed_operations_service_dropin" \
         || return 1
     extension_probe="$(ods_sudo -u pixel-ops-broker /usr/bin/python3 \
@@ -3830,7 +4819,12 @@ EOF
         and (.matches | type == "array") and (.matches | length) <= 10
         and (.boundary | type == "string")' <<<"$extension_probe" >/dev/null || return 1
     ods_sudo install -o root -g root -m 0755 "$plugin_root/host/pixel_ingress.mjs" /usr/local/libexec/ods-pixel-ingress.mjs
+    ods_sudo install -o root -g root -m 0644 "$plugin_root/host/chat_history_ledger.mjs" /usr/local/libexec/chat_history_ledger.mjs
+    ods_sudo install -o root -g root -m 0644 "$plugin_root/host/chat_image_store.mjs" /usr/local/libexec/chat_image_store.mjs
+    ods_sudo install -o root -g root -m 0644 "$plugin_root/host/chat_image_transport.mjs" /usr/local/libexec/chat_image_transport.mjs
+    ods_sudo install -o root -g root -m 0644 "$plugin_root/host/access_mode_relay.mjs" /usr/local/libexec/access_mode_relay.mjs
     ods_sudo install -o root -g root -m 0644 "$plugin_root/host/task_activity_schema.mjs" /usr/local/libexec/task_activity_schema.mjs
+    ods_sudo install -o root -g root -m 0644 "$plugin_root/host/questions_schema.mjs" /usr/local/libexec/questions_schema.mjs
     ods_sudo install -o root -g ods-pixel -m 0640 "$stage/pixel-agent.env" /etc/ods/pixel-agent.env
     ods_sudo install -o root -g root -m 0644 "$stage/pixel-ingress.service" /etc/systemd/system/pixel-ingress.service
     ods_sudo install -o root -g root -m 0644 "$rendered_extension_manager_unit" \
@@ -3845,6 +4839,14 @@ EOF
         /etc/systemd/system/pixel-workspace-preview.service
     ods_sudo cmp -s -- "$rendered_workspace_preview_unit" \
         /etc/systemd/system/pixel-workspace-preview.service
+    if "$wsl_bridge"; then
+        ods_sudo install -o root -g root -m 0755 "$wsl_bridge_source" \
+            /usr/local/libexec/ods-pixel-wsl-runtime-bridge || return 1
+        ods_sudo install -o root -g root -m 0644 "$wsl_bridge_unit" \
+            /etc/systemd/system/ods-pixel-wsl-runtime-bridge.service || return 1
+        ods_sudo cmp -s -- "$wsl_bridge_source" /usr/local/libexec/ods-pixel-wsl-runtime-bridge || return 1
+        ods_sudo cmp -s -- "$wsl_bridge_unit" /etc/systemd/system/ods-pixel-wsl-runtime-bridge.service || return 1
+    fi
     rm -f -- "$stage/pixel-agent.env" "$stage/pixel-ingress.service"
     rmdir -- "$stage"
     ods_sudo systemctl daemon-reload || return 1
@@ -3881,6 +4883,16 @@ PY
     # reviewed program or environment changes. Restart only the ingress here;
     # the Pixel gateway was already verified above and need not be disturbed.
     ods_sudo systemctl restart pixel-ingress.service || return 1
+    if "$wsl_bridge"; then
+        ods_sudo systemctl enable ods-pixel-wsl-runtime-bridge.service || return 1
+        if ! ods_sudo systemctl start ods-pixel-wsl-runtime-bridge.service \
+            || ! ods_sudo systemctl is-active --quiet ods-pixel-wsl-runtime-bridge.service; then
+            ai_bad "The WSL runtime bridge for Pixel Edge did not start. Its journal:"
+            ods_sudo journalctl -u ods-pixel-wsl-runtime-bridge.service -n 20 --no-pager -o cat \
+                || ai_warn "journalctl could not read the bridge journal (non-fatal)"
+            return 1
+        fi
+    fi
     ods_sudo systemctl is-active --quiet openclaw-gateway.service pixel-ingress.service \
         pixel-extension-manager.service pixel-artifact-promoter.service \
         pixel-workspace-preview.service || return 1
@@ -3891,7 +4903,72 @@ PY
     _ods_pixel_wait_extension_manager_probe "$installed_extension_manager" "$extension_id" || return 1
     _ods_pixel_wait_artifact_promoter_probe "$owner" "$home" "$system_artifact_promoter" || return 1
     _ods_pixel_wait_workspace_preview_probe "$owner" "$home" "$system_workspace_preview" \
-        "$preview_port"
+        "$preview_port" || return 1
+    _ods_pixel_install_preview_inspection "$owner" "$home" "$plugin_root/host"
+}
+
+_ods_pixel_install_preview_inspection() {
+    local owner="$1" home="$2" source="$3" config
+    local installer="${INSTALL_DIR:?}/installers/lib/pixel-preview-inspection.py"
+    config="$(ods_pixel_run_as_owner "$owner" "$home" /usr/bin/python3 "$installer" build \
+        --source "$source" --owner-uid "$(id -u "$owner")" --transport local)" || return 1
+    printf '%s\n' "$config" | ods_sudo /usr/bin/python3 "$installer" install-linux --source "$source" || return 1
+    ods_sudo systemctl daemon-reload || return 1
+    ods_sudo systemctl enable pixel-preview-inspection.service || return 1
+    ods_sudo systemctl restart pixel-preview-inspection.service || return 1
+    ods_sudo systemctl is-active --quiet pixel-preview-inspection.service || return 1
+    ods_pixel_run_as_owner "$owner" "$home" /usr/bin/python3 - <<'PY' || return 1
+import socket, time
+for attempt in range(50):
+    try:
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(1)
+            client.connect('/run/ods-pixel-inspection/control.sock')
+        break
+    except OSError:
+        if attempt == 49:
+            raise SystemExit('Pixel preview inspection socket is not ready for its owner')
+        time.sleep(.1)
+PY
+    ods_sudo /usr/bin/python3 -B /usr/local/libexec/ods-pixel-inspection/preview_inspection.py health \
+        | jq -e '.schemaVersion == 1 and .kind == "ods-pixel-preview-inspection" and .status == "ready"' >/dev/null
+}
+
+_ods_pixel_install_project_runtime() {
+    local owner="$1" home="$2" source="$3" config
+    local installer="${INSTALL_DIR:?}/installers/lib/pixel-project-runtime.py"
+    config="$(ods_pixel_run_as_owner "$owner" "$home" /usr/bin/python3 "$installer" build \
+        --source "$source" --owner-uid "$(id -u "$owner")")" || return 1
+    printf '%s\n' "$config" | ods_sudo /usr/bin/python3 -B "$installer" check-install --source "$source" || return 1
+    if [[ -e /etc/systemd/system/ods-pixel-project.service ]]; then
+        ods_sudo systemctl stop ods-pixel-project.service || return 1
+    fi
+    printf '%s\n' "$config" | ods_sudo /usr/bin/python3 -B "$installer" install-linux --source "$source" || return 1
+    ods_sudo systemctl daemon-reload || return 1
+    ods_sudo systemctl start ods-pixel-project.service || return 1
+    ods_pixel_run_as_owner "$owner" "$home" /usr/bin/python3 - "$config" <<'PY' || return 1
+import json, socket, sys, time
+expected = json.loads(sys.argv[1])
+for attempt in range(30):
+    try:
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(20)
+            client.connect('/var/lib/ods-pixel-project/control.sock')
+            client.sendall(b'{"schemaVersion":1,"action":"health"}\n')
+            with client.makefile('rb') as stream:
+                result = json.loads(stream.readline(8192))
+        if (result.get('kind') == 'ods-project-runtime' and result.get('status') == 'ready'
+                and result.get('image') == expected['imageId']
+                and result.get('runtimes') == {'npm': expected['imageId'], 'python': expected['pythonImageId']}
+                and result.get('executionPolicy') == 'runtime-verified-full-access'):
+            break
+    except (OSError, ValueError):
+        pass
+    if attempt == 29:
+        raise SystemExit('Project executor did not pass installation health')
+    time.sleep(.2)
+PY
+    ods_sudo systemctl enable ods-pixel-project.service || return 1
 }
 
 _ods_pixel_wait_ingress() {
@@ -3914,7 +4991,7 @@ _ods_pixel_wait_ingress() {
 
 _ods_pixel_restart_ingress_and_verify() {
     local owner="$1" home="$2" answers="$3"
-    local previous_pid current_pid unit_user restart_policy owner_uid process_uid attempt
+    local previous_pid current_pid unit_user restart_policy restart_force owner_uid process_uid attempt
     [[ "$answers" == /* && -f "$answers" && ! -L "$answers" ]] || return 1
     if ! systemctl is-active --quiet pixel-ingress.service; then
         # First installation reconciles the model before it installs ingress.
@@ -3927,10 +5004,13 @@ _ods_pixel_restart_ingress_and_verify() {
     else
         unit_user="$(systemctl show pixel-ingress.service -p User --value 2>/dev/null || true)"
         restart_policy="$(systemctl show pixel-ingress.service -p Restart --value 2>/dev/null || true)"
+        restart_force="$(systemctl show pixel-ingress.service -p RestartForceExitStatus --value 2>/dev/null || true)"
         owner_uid="$(id -u "$owner" 2>/dev/null || true)"
         process_uid="$(awk '/^Uid:/ { print $2; exit }' "/proc/${previous_pid}/status" 2>/dev/null || true)"
         [[ "$(id -un)" == "$owner" && "$unit_user" == "$owner" \
-            && "$restart_policy" == "on-failure" && "$owner_uid" =~ ^[0-9]+$ \
+            && "$restart_policy" == "on-failure" \
+            && "$restart_force" =~ (^|[[:space:]])HUP($|[[:space:]]) \
+            && "$owner_uid" =~ ^[0-9]+$ \
             && "$process_uid" == "$owner_uid" ]] || return 1
         current_pid="$(systemctl show pixel-ingress.service -p MainPID --value 2>/dev/null || true)"
         [[ "$current_pid" == "$previous_pid" ]] || return 1
@@ -3991,15 +5071,66 @@ PY
     return 1
 }
 
+_ods_pixel_prepare_wsl_runtime_targets() {
+    local base="${1:-/mnt/wsl/ods-portal-runtime}" target
+    for target in "$base" "$base/ingress" "$base/preview"; do
+        # Existing targets may be bind mounts of the live Pixel directories.
+        # install -d would chown/chmod the source through those mounts and
+        # prevent the unprivileged services from recreating their sockets.
+        if [[ -L "$target" || ( -e "$target" && ! -d "$target" ) ]]; then
+            ai_bad "Pixel runtime target is not a regular directory: $target"
+            return 1
+        fi
+        if [[ ! -d "$target" ]]; then
+            ods_sudo install -d -o root -g root -m 0755 -- "$target" || return 1
+        fi
+    done
+}
+
 ods_pixel_install_default_agent() {
     [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]] || return 0
     local owner home source_root pixel_root plugin_root answers operations_policy extension_catalog extension_manager_unit artifact_promoter_unit workspace_preview_unit openclaw_bin plugin_digest contract_sha256 runtime_budget_status gateway_alias pixel_log
-    local candidate_runtime_status reuse_active=false same_verified_source=false same_source_resume=false
-    local web_search_provider parallel_path="" parallel_digest=""
-    local -a pixel_prerequisites=(litellm dashboard-api)
+    local candidate_runtime_status reuse_active=false same_verified_source=false same_source_resume=false pixel_gateway_port gateway_port_status
+    local web_search_provider parallel_path="" parallel_digest="" apply_attempt="" initial_access_reproved=false
+    # The access coordinator's proof ceremony inspects Pixel Edge's durable
+    # transition gate. Start the edge before the host ingress is installed;
+    # its transition endpoint is independent of upstream chat readiness, and
+    # the final access reproof below still runs only after ingress is healthy.
+    local -a pixel_prerequisites=(litellm dashboard-api pixel-edge pixel-model-relay)
+    # Managed inference needs the router before the relay's real model probe.
+    # Cloud/external installs instead bind the relay to authenticated LiteLLM;
+    # their Compose overlays intentionally profile model-router out.
+    if [[ "${ODS_MODE:-local}" != cloud && -z "${EXTERNAL_LLM_URL:-}" ]]; then
+        pixel_prerequisites+=(model-router)
+    fi
     owner="${PIXEL_SERVICE_USER:-$(ods_pixel_install_owner)}" || return 1
     home="$(ods_pixel_owner_home "$owner")" || return 1
+    pixel_gateway_port="$(_ods_pixel_gateway_port)" || {
+        ai_bad "Pixel requires a valid loopback gateway port."
+        return 1
+    }
+    if [[ -n "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+        _ods_pixel_check_source_transaction "$owner" || return 1
+        # From here generated config, native package repairs and auxiliary
+        # services may change. Failure is resume-only under the durable hold;
+        # restoring just the checkout would not restore the whole runtime.
+        _ods_pixel_source_upgrade downstream "$owner" || return 1
+    fi
     _ods_pixel_assert_managed_state "$owner" "$home" || return 1
+    gateway_port_status=0
+    _ods_pixel_existing_gateway_port_matches "$owner" "$home" "$pixel_gateway_port" \
+        || gateway_port_status=$?
+    case "$gateway_port_status" in
+        0) ;;
+        2)
+            ai_bad "An installed ODS-managed Pixel uses a different gateway port. Keep its existing PIXEL_GATEWAY_PORT value or uninstall that managed Pixel before choosing a new port."
+            return 1
+            ;;
+        *)
+            ai_bad "The installed ODS-managed Pixel gateway-port contract is unsafe or invalid."
+            return 1
+            ;;
+    esac
     pixel_log="$(_ods_pixel_prepare_attempt_log "$owner" "$home" "$INSTALL_DIR/logs/pixel-install.log")" || {
         ai_bad "Could not create Pixel's owner-private persistent install log."
         return 1
@@ -4011,22 +5142,53 @@ ods_pixel_install_default_agent() {
     }
     plugin_root="${INSTALL_DIR:?}/extensions/services/pixel-agent"
     [[ -f "$plugin_root/plugin/openclaw.plugin.json" \
+        && -f "$plugin_root/plugin/playground-projects.mjs" \
+        && -f "$plugin_root/plugin/workspace-projects.mjs" \
+        && -f "$plugin_root/plugin/context-compaction.mjs" \
+        && -f "$plugin_root/plugin/model-runtime-readback.mjs" \
+        && -f "$plugin_root/plugin/history-context.mjs" \
         && -f "$plugin_root/host/pixel_ingress.mjs" \
+        && -f "$plugin_root/host/chat_history_ledger.mjs" \
+        && -f "$plugin_root/host/chat_image_store.mjs" \
+        && -f "$plugin_root/host/chat_image_transport.mjs" \
+        && -f "$plugin_root/host/access_mode_relay.mjs" \
         && -f "$plugin_root/host/task_activity_schema.mjs" \
+        && -f "$plugin_root/host/questions_schema.mjs" \
         && -f "$plugin_root/host/extension_search.py" \
         && -f "$plugin_root/host/extension_manager.py" \
         && -f "$plugin_root/host/pixel-extension-manager.service" \
         && -f "$plugin_root/host/artifact_promoter.py" \
         && -f "$plugin_root/host/pixel-artifact-promoter.service" \
         && -f "$plugin_root/host/workspace_preview.py" \
+        && -f "$plugin_root/host/unix_peer.py" \
         && -f "$plugin_root/host/pixel-workspace-preview.service" \
         && -f "$plugin_root/host/system_observe.py" \
+        && -f "$plugin_root/host/preview_inspection.py" \
+        && -f "$plugin_root/host/preview_inspection_protocol.py" \
+        && -f "$plugin_root/host/preview_inspection_capsule.py" \
+        && -f "$plugin_root/host/Dockerfile.inspection" \
+        && -f "$plugin_root/host/preview-inspection.requirements.lock" \
+        && -f "$plugin_root/host/pixel-preview-inspection.service" \
         && -f "$plugin_root/host/openclaw_tool_recovery.py" \
         && -f "$plugin_root/host/native_search.py" \
         && -f "$plugin_root/host/openclaw-tool-recovery.json" \
         && -f "$plugin_root/host/openclaw-completion-recovery.json" \
         && -f "$plugin_root/host/openclaw-compaction-export.json" \
+        && -f "$plugin_root/host/openclaw-compaction-idle.json" \
+        && -f "$plugin_root/host/openclaw-compaction-resume.json" \
+        && -f "$plugin_root/host/openclaw-read-range.json" \
+        && -f "$plugin_root/host/openclaw-sandbox-mkdir-bridge.json" \
+        && -f "$plugin_root/host/openclaw-sandbox-mkdir-secure.json" \
+        && -f "$plugin_root/host/openclaw-tool-result-projection.json" \
+        && -f "$plugin_root/host/openclaw-diagnostic-stream-writes.json" \
+        && -f "$plugin_root/host/openclaw-command-attempt-warning.json" \
         && -f "$plugin_root/host/openclaw-image-envelope.json" \
+        && -f "$plugin_root/host/openclaw-context-usage.json" \
+        && -f "$plugin_root/host/openclaw-yield-usage.json" \
+        && -f "$plugin_root/host/openclaw-compaction-empty.json" \
+        && -f "$plugin_root/host/openclaw-compaction-no-work.json" \
+        && -f "$plugin_root/host/openclaw-hook-provenance.json" \
+        && -f "$plugin_root/host/openclaw-run-id-redaction.json" \
         && -f "$plugin_root/host/pixel-ops-broker-ods.conf" \
         && -f "$plugin_root/host/cancellable-exec.sh" \
         && -f "$plugin_root/host/noninteractive-sudo.sh" ]] || return 1
@@ -4048,26 +5210,43 @@ ods_pixel_install_default_agent() {
         "$plugin_root/host/native_search.py" --answers-file "$answers" \
         --provider "${PIXEL_WEB_SEARCH_PROVIDER:-}")" || return 1
     case "$web_search_provider" in
-        searxng) pixel_prerequisites+=(searxng) ;;
-        parallel-free) ;;
+        searxng|parallel-free) ;;
         *) ai_bad "Pixel returned an invalid native search provider."; return 1 ;;
     esac
+    if [[ -n "${PIXEL_RESOLVED_WEB_SEARCH_PROVIDER:-}" &&
+          "$web_search_provider" != "$PIXEL_RESOLVED_WEB_SEARCH_PROVIDER" ]]; then
+        ai_bad "Pixel's web search choice changed after Compose services were selected. Retry without altering the onboarding contract."
+        return 1
+    fi
+    if [[ "$web_search_provider" == searxng ]]; then
+        pixel_prerequisites+=(searxng)
+    fi
+    if grep -Fxq 'PIXEL_RUNTIME_BIND_PROPAGATION=rshared' "${INSTALL_DIR:?}/.env"; then
+        # Pixel Edge starts here, before the WSL runtime bridge is installed.
+        # Create the fixed empty targets on WSL's shared tmpfs so its rshared
+        # binds exist now and receive the bridge mounts when they arrive.
+        _ods_pixel_prepare_wsl_runtime_targets || return 1
+    fi
     ai "Starting the ODS model gateway, control API, and search prerequisites for Pixel review..."
     # The scoped extension manager validates its contract against dashboard-api
-    # while Pixel is installed below. Start the API from this exact Compose
-    # project before that probe. Otherwise a fresh install has no endpoint, and
-    # a migration can accidentally probe a stale related install on the same
-    # port. Treat Compose startup failure as authoritative instead of allowing
-    # later endpoint checks to accept unrelated containers.
+    # while Pixel is installed below. The access coordinator also requires the
+    # exact Pixel Edge transition gate before the later whole-stack launch.
+    # Start both from this exact Compose project before those probes. Otherwise
+    # a fresh install has no endpoint, and a migration can accidentally probe a
+    # stale related install on the same port. Treat Compose startup failure as
+    # authoritative instead of allowing later checks to accept unrelated
+    # containers.
     if ! $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" up -d --no-build --pull never \
         "${pixel_prerequisites[@]}" >>"$LOG_FILE" 2>&1; then
         ai_bad "Could not start Pixel's exact ODS prerequisite services. See $LOG_FILE."
         return 1
     fi
-    _ods_pixel_wait_model_gateway "ODS model gateway" "${LITELLM_PORT:-4000}" \
-        "${LITELLM_KEY:-}" "$gateway_alias" 180
+    _ods_pixel_wait_model_gateway "ODS Pixel model relay" "${PIXEL_MODEL_RELAY_PORT:-4006}" \
+        "${PIXEL_MODEL_RELAY_KEY:-}" "$gateway_alias" 180
     if [[ "$web_search_provider" == searxng ]]; then
-        _ods_pixel_wait_http "ODS local search" "http://127.0.0.1:${SEARXNG_PORT:-8888}/search?q=pixel-preflight&format=json" 90 '.results | type == "array"'
+        _ods_pixel_wait_http "ODS local search" \
+            "http://127.0.0.1:${SEARXNG_PORT:-8888}/search?q=pixel-preflight&format=json" \
+            90 '.results | type == "array"'
     fi
     _ods_pixel_wait_http "ODS control API" \
         "http://127.0.0.1:${DASHBOARD_API_PORT:-3002}/health" 90
@@ -4078,6 +5257,30 @@ ods_pixel_install_default_agent() {
         ai_bad "Pixel requires Linux Node.js 20+ and Linux npm; Windows-mounted WSL tools are not accepted."
         return 1
     fi
+    if [[ "$web_search_provider" == parallel-free ]]; then
+        parallel_path="$INSTALL_DIR/data/pixel/native-search/parallel-2026.6.33"
+        # Pixel bootstrap validates an existing OpenClaw configuration before
+        # replacing it. Reinstalls can therefore still reference the pinned
+        # ODS-managed Parallel path; provision that path before bootstrap so
+        # the fail-closed validator sees the exact extension it was bound to.
+        if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+            "$plugin_root/host/native_search.py" \
+            --base-dir "$INSTALL_DIR/data/pixel/native-search" >>"$pixel_log" 2>&1; then
+            ai_bad "Pixel could not provision its pinned native search plugin. See $pixel_log."
+            return 1
+        fi
+    fi
+    # Only a proven first install may reprove before bootstrap creates its
+    # initial config. Retained and partial releases must resume their durable
+    # transition below before access-mode reproof, as they did previously.
+    if [[ -z "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]] \
+        && _ods_pixel_initial_unconfigured_marker "$owner" "$home" >>"$pixel_log" 2>&1; then
+        if ! _ods_pixel_reprove_access_marker_if_needed "$owner" "$home" "" >>"$pixel_log" 2>&1; then
+            ai_bad "Pixel's initial access marker could not be verified before bootstrap. See $pixel_log."
+            return 1
+        fi
+        initial_access_reproved=true
+    fi
     if ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" bootstrap --apply >>"$pixel_log" 2>&1; then
         ai_bad "Pixel bootstrap failed. See $pixel_log for the exact Pixel error."
         return 1
@@ -4087,13 +5290,6 @@ ods_pixel_install_default_agent() {
     plugin_digest="$(ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" extension-hash "$plugin_root/plugin")"
     [[ "$plugin_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
     if [[ "$web_search_provider" == parallel-free ]]; then
-        parallel_path="$INSTALL_DIR/data/pixel/native-search/parallel-2026.6.33"
-        if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
-            "$plugin_root/host/native_search.py" \
-            --base-dir "$INSTALL_DIR/data/pixel/native-search" >>"$pixel_log" 2>&1; then
-            ai_bad "Pixel could not provision its pinned native search plugin. See $pixel_log."
-            return 1
-        fi
         parallel_digest="$(ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" extension-hash "$parallel_path")" || return 1
         [[ "$parallel_digest" =~ ^[0-9a-f]{64}$ ]] || return 1
     fi
@@ -4135,13 +5331,23 @@ ods_pixel_install_default_agent() {
         return 1
     }
     [[ "$contract_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
+    if ! _ods_pixel_resume_completed_release "$owner" "$home" "$pixel_root" "$contract_sha256" >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel has a pending update that could not be reverified safely. See $pixel_log before retrying."
+        return 1
+    fi
+    if [[ "$initial_access_reproved" != true ]]; then
+        if ! _ods_pixel_reprove_access_marker_if_needed "$owner" "$home" "$openclaw_bin" >>"$pixel_log" 2>&1; then
+            ai_bad "Pixel's existing access mode could not be reverified before upgrade. See $pixel_log."
+            return 1
+        fi
+    fi
     if _ods_pixel_managed_contract_matches "$owner" "$home" "$contract_sha256"; then
         reuse_active=true
     fi
     if _ods_pixel_verified_source_matches "$owner" "$home"; then
         same_verified_source=true
     fi
-    _ods_pixel_mark_installing "$owner" "$home" || return 1
+    _ods_pixel_mark_installing "$owner" "$home" "$contract_sha256" || return 1
     if ! _ods_pixel_enable_chat_endpoint "$owner" "$home"; then
         ai_bad "Could not enable Pixel's loopback chat endpoint."
         return 1
@@ -4160,13 +5366,42 @@ ods_pixel_install_default_agent() {
             ai_bad "Pixel's root-custodied Operations policy does not match the ODS-managed policy."
             return 1
         fi
-        if ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" verify >>"$pixel_log" 2>&1; then
+        if [[ "${FORCE:-false}" == true ]]; then
+            # Forced reinstall retires an interrupted agent sandbox while
+            # the gateway is stopped, then runs the unchanged verifier.
+            if ! ods_sudo systemctl stop openclaw-gateway.service >>"$pixel_log" 2>&1; then
+                ai_bad "The ODS-managed Pixel gateway could not enter maintenance mode. See $pixel_log."
+                return 1
+            fi
+            if ! _ods_pixel_recreate_agent_sandbox "$owner" "$home" "$openclaw_bin" \
+                >>"$pixel_log" 2>&1; then
+                # Restore the previously configured service when cleanup
+                # fails; the installer still fails closed and does not claim
+                # the sandbox boundary was refreshed.
+                ods_sudo systemctl start openclaw-gateway.service >>"$pixel_log" 2>&1 || true
+                ai_bad "Pixel could not retire its stale agent sandbox during forced recovery. See $pixel_log."
+                return 1
+            fi
+            if ! ods_sudo systemctl start openclaw-gateway.service >>"$pixel_log" 2>&1; then
+                ai_bad "The ODS-managed Pixel gateway could not restart after forced sandbox recovery. See $pixel_log."
+                return 1
+            fi
+            if ! _ods_pixel_wait_gateway 60 "$pixel_gateway_port"; then
+                ai_bad "The ODS-managed Pixel gateway did not become healthy after forced sandbox recovery. See $pixel_log."
+                return 1
+            fi
+        fi
+        if ! _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" >>"$pixel_log" 2>&1; then
             ai_bad "The existing ODS-managed Pixel contract failed exact-source verification. See $pixel_log."
             return 1
         fi
     else
         if ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" configure --answers "$answers" --force >>"$pixel_log" 2>&1; then
             ai_bad "Pixel configure failed. See $pixel_log for the exact Pixel error."
+            return 1
+        fi
+        if ! _ods_pixel_reconcile_workspace_guidance "$owner" "$home" "$pixel_root/.generated/workspace" generated >>"$pixel_log" 2>&1; then
+            ai_bad "Could not safely prepare Portal workspace guidance. See $pixel_log."
             return 1
         fi
         if ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" plan >>"$pixel_log" 2>&1; then
@@ -4197,7 +5432,7 @@ ods_pixel_install_default_agent() {
                 # recovery path. Unrelated live changes still fail closed into
                 # the transactional model-reconciliation path below.
                 candidate_runtime_status="$(_ods_pixel_apply_runtime_budget "$owner" "$home" \
-                    "$pixel_root/dist/openclaw.json" "$openclaw_bin")" || {
+                    "$pixel_root/dist/openclaw.json" "$openclaw_bin" "$answers")" || {
                     ai_bad "Could not validate the exact-source Pixel runtime candidate for safe recovery."
                     return 1
                 }
@@ -4233,12 +5468,11 @@ ods_pixel_install_default_agent() {
                     ai_bad "The ODS-managed Pixel gateway could not restart after sandbox recovery. See $pixel_log."
                     return 1
                 fi
-                if ! _ods_pixel_wait_http "Pixel gateway" "http://127.0.0.1:18789/health" \
-                    60 '.ok == true and .status == "live"'; then
+                if ! _ods_pixel_wait_gateway 60 "$pixel_gateway_port"; then
                     ai_bad "The ODS-managed Pixel gateway did not become healthy after sandbox recovery. See $pixel_log."
                     return 1
                 fi
-                if ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" verify \
+                if ! _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" \
                     >>"$pixel_log" 2>&1; then
                     ai_bad "The recovered ODS-managed Pixel contract failed verification. See $pixel_log."
                     return 1
@@ -4246,21 +5480,72 @@ ods_pixel_install_default_agent() {
             else
                 ai "The exact Pixel release is active with an older ODS route; reconciling the reviewed model/runtime policy..."
                 if ! ods_pixel_reconcile_promoted_model "$owner" "$home" \
-                    "$(_ods_pixel_runtime_model_identity)" installing >>"$pixel_log" 2>&1; then
+                    "$(_ods_pixel_runtime_model_identity)" installing "" "" "" \
+                    "$(jq -r '.modelRouteFingerprint // ""' "$answers")" "${ODS_PIXEL_SOURCE_TRANSACTION:-}" \
+                    "$(jq -r '.modelImageInput // "unknown"' "$answers")" >>"$pixel_log" 2>&1; then
                     ai_bad "The ODS-managed Pixel model route could not be reconciled safely. See $pixel_log."
                     return 1
                 fi
             fi
-        elif ! {
-            ods_pixel_run_as_owner "$owner" "$home" env \
-                PATH="$home/.openclaw/.ods-exec-control:$PATH" \
-                "$pixel_root/pixel" apply --confirm </dev/null &&
-            ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" verify
-        } >>"$pixel_log" 2>&1; then
-            ai_bad "Pixel apply or verify failed. See $pixel_log for the exact Pixel error."
-            return 1
+        else
+            local release_transaction=''
+            local -a release_arguments=()
+            release_transaction="$(_ods_pixel_begin_release_transition "$owner" "$home")" || {
+                ai_bad "Could not acquire the existing Pixel access state for release update; resolve any pending transaction before retrying."
+                return 1
+            }
+            if [[ -n "$release_transaction" ]]; then
+                release_arguments=(--ods-release-transaction "$release_transaction")
+                if [[ "$release_transaction" == "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]] \
+                    && _ods_pixel_source_upgrade status "$owner" | jq -e '.mode == "sandboxed"' >/dev/null; then
+                    release_arguments=(--ods-model-transaction "$release_transaction")
+                fi
+            fi
+            apply_attempt="$(ods_pixel_run_as_owner "$owner" "$home" \
+                mktemp "$INSTALL_DIR/logs/.pixel-apply.XXXXXXXX")" || return 1
+            ods_pixel_run_as_owner "$owner" "$home" chmod 0600 "$apply_attempt" || return 1
+            if {
+                ods_pixel_run_as_owner "$owner" "$home" env \
+                    PATH="$home/.openclaw/.ods-exec-control:$PATH" \
+                    "$pixel_root/pixel" apply --confirm "${release_arguments[@]}" </dev/null &&
+                _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"
+            } >"$apply_attempt" 2>&1; then
+                ods_pixel_run_as_owner "$owner" "$home" cat "$apply_attempt" >>"$pixel_log" 2>&1 || return 1
+            else
+                ods_pixel_run_as_owner "$owner" "$home" cat "$apply_attempt" >>"$pixel_log" 2>&1 || return 1
+                if _ods_pixel_retire_inactive_conflicting_release \
+                    "$owner" "$home" "$pixel_root" "$apply_attempt" >>"$pixel_log" 2>&1; then
+                    ai "Archived an exact, inactive ODS-owned Pixel release that conflicted with the current reviewed plan; retrying once..."
+                    ods_pixel_run_as_owner "$owner" "$home" truncate -s 0 "$apply_attempt" || return 1
+                    if ! {
+                        ods_pixel_run_as_owner "$owner" "$home" env \
+                            PATH="$home/.openclaw/.ods-exec-control:$PATH" \
+                            "$pixel_root/pixel" apply --confirm "${release_arguments[@]}" </dev/null &&
+                        _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"
+                    } >"$apply_attempt" 2>&1; then
+                        ods_pixel_run_as_owner "$owner" "$home" cat "$apply_attempt" >>"$pixel_log" 2>&1 || true
+                        ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$apply_attempt" || true
+                        ai_bad "Pixel apply or verify failed after the single inactive-release recovery retry. See $pixel_log for the exact Pixel error."
+                        return 1
+                    fi
+                    ods_pixel_run_as_owner "$owner" "$home" cat "$apply_attempt" >>"$pixel_log" 2>&1 || return 1
+                else
+                    ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$apply_attempt" || true
+                    ai_bad "Pixel apply or verify failed. See $pixel_log for the exact Pixel error."
+                    return 1
+                fi
+            fi
+            if [[ -n "$release_transaction" ]] && ! _ods_pixel_finish_release_transition \
+                "$owner" "$home" "$pixel_root" "$release_transaction" >>"$pixel_log" 2>&1; then
+                ai_bad "Pixel release verification could not finish its access transaction; admission remains held for recovery. See $pixel_log."
+                return 1
+            fi
+            ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$apply_attempt" || return 1
         fi
     fi
+    # Both a fresh apply and the already-active-contract path reach this owner
+    # migration. It leaves custom text intact and precedes the gateway restart.
+    _ods_pixel_migrate_live_workspace_guidance "$owner" "$home" "$pixel_log"
     # Record the verified Pixel release before applying the ODS-owned runtime
     # overlay. If power is lost between the atomic config update and gateway
     # verification, the next installer run can safely enter the exact-source
@@ -4270,7 +5555,7 @@ ods_pixel_install_default_agent() {
         return 1
     fi
     runtime_budget_status="$(_ods_pixel_apply_runtime_budget "$owner" "$home" \
-        "$home/.openclaw/openclaw.json" "$openclaw_bin")" || {
+        "$home/.openclaw/openclaw.json" "$openclaw_bin" "$answers")" || {
         ai_bad "Could not validate and apply Pixel's ODS managed-runtime policy."
         return 1
     }
@@ -4282,6 +5567,30 @@ ods_pixel_install_default_agent() {
             return 1
             ;;
     esac
+    # The runtime overlay above replaces the live configuration atomically.
+    # Bind that exact canonical file before any fallible runtime repair,
+    # registry or service operation. If a later step is interrupted, the next
+    # installer or uninstaller run can prove the managed contract without
+    # misclassifying ODS's own runtime policy as unmanaged drift.
+    if ! _ods_pixel_mark_verified_installing "$owner" "$home" "$contract_sha256" "$pixel_root"; then
+        ai_bad "Could not bind the verified Pixel ODS managed-runtime configuration."
+        return 1
+    fi
+    # Another ODS build can leave OpenClaw runtime patch sets that this
+    # version does not manage. Restore only sets whose private receipt records
+    # the live bytes and a verified original, then archive their state, so
+    # this ODS version never runs on another build's runtime patches.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" \
+        --restore-foreign "$home/.openclaw/ods-runtime-patches" \
+        --known tool-recovery completion-recovery image-envelope compaction-export \
+            compaction-idle compaction-resume read-range tool-result-projection \
+            diagnostic-stream-writes command-attempt-warning compaction-budget context-usage yield-usage compaction-empty compaction-no-work hook-provenance run-id-redaction sandbox-mkdir-bridge sandbox-mkdir-secure \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel could not restore OpenClaw runtime patches left by another ODS build. See $pixel_log."
+        return 1
+    fi
     # OpenClaw 2026.6.33 mistakes "Unknown tool id: name" for a missing tool
     # named "id", then vetoes every later tool_call. Repair only the reviewed
     # package bytes; preserve its other detectors and retain rollback custody.
@@ -4327,13 +5636,138 @@ ods_pixel_install_default_agent() {
         ai_bad "Pixel's compaction export repair could not verify its package bytes. See $pixel_log."
         return 1
     fi
-    # The runtime overlay above replaces the live configuration atomically.
-    # Bind that exact canonical file before any fallible registry or service
-    # operation. If either later step is interrupted, the next installer run
-    # can prove the managed contract and resume without misclassifying ODS's
-    # own runtime policy as unmanaged drift.
-    if ! _ods_pixel_mark_verified_installing "$owner" "$home" "$contract_sha256" "$pixel_root"; then
-        ai_bad "Could not bind the verified Pixel ODS managed-runtime configuration."
+    # Manual compaction must reject an active run instead of interrupting it.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --compaction-idle \
+        --state-dir "$home/.openclaw/ods-runtime-patches/compaction-idle" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's compaction admission repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Resume a truncated tool turn after compaction without replaying its prompt.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --compaction-resume \
+        --state-dir "$home/.openclaw/ods-runtime-patches/compaction-resume" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's compaction continuation repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Parallel writes may create the same parent directory. Reopen it with the
+    # pinned no-follow directory flags after EEXIST; never accept a symlink.
+    local mkdir_module
+    for mkdir_module in bridge secure; do
+        if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+            "$plugin_root/host/openclaw_tool_recovery.py" \
+            --openclaw-bin "$openclaw_bin" --sandbox-mkdir "$mkdir_module" \
+            --state-dir "$home/.openclaw/ods-runtime-patches/sandbox-mkdir-$mkdir_module" \
+            >>"$pixel_log" 2>&1; then
+            ai_bad "Pixel's concurrent workspace directory repair could not verify its package bytes. See $pixel_log."
+            return 1
+        fi
+    done
+    # Preserve the real line count when a read starts beyond EOF. A silent
+    # empty success makes the model keep requesting higher invalid offsets.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --read-range \
+        --state-dir "$home/.openclaw/ods-runtime-patches/read-range" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's file read range repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Deliver every new tool result to the model. The pinned live prompt
+    # projection otherwise sends new results empty once the tool output in the
+    # model context exceeds its aggregate budget; reduce older results instead.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --tool-result-projection \
+        --state-dir "$home/.openclaw/ods-runtime-patches/tool-result-projection" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's tool result delivery repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # The model-call diagnostic observer's stream proxy ignores iterator and
+    # result replacements made by wrappers applied outside it. It is outermost
+    # here, so this changes nothing today; the native macOS bundle runs it
+    # inside the tool-call argument repair and composes the same recipe.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --diagnostic-stream-writes \
+        --state-dir "$home/.openclaw/ods-runtime-patches/diagnostic-stream-writes" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's model stream wrapper repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Preserve failed command evidence while distinguishing the attempt from
+    # the final answer; do not infer recovery from a different successful command.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --command-attempt-warning \
+        --state-dir "$home/.openclaw/ods-runtime-patches/command-attempt-warning" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's command attempt warning repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Honor the configured compaction budget on slow local providers.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --compaction-budget \
+        --state-dir "$home/.openclaw/ods-runtime-patches/compaction-budget" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's compaction budget repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Keep opaque UUIDs intact without disabling credential redaction.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --run-id-redaction \
+        --state-dir "$home/.openclaw/ods-runtime-patches/run-id-redaction" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's run identity redaction repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Preserve trusted inter-session provenance in native prompt-hook contexts.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --hook-provenance \
+        --state-dir "$home/.openclaw/ods-runtime-patches/hook-provenance" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's hook provenance repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Keep billing totals out of context accounting and skip empty checkpoints.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --context-usage \
+        --state-dir "$home/.openclaw/ods-runtime-patches/context-usage" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's context-usage repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --yield-usage \
+        --state-dir "$home/.openclaw/ods-runtime-patches/yield-usage" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's yield-usage repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --compaction-empty \
+        --state-dir "$home/.openclaw/ods-runtime-patches/compaction-empty" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's compaction-empty repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --compaction-no-work \
+        --state-dir "$home/.openclaw/ods-runtime-patches/compaction-no-work" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's compaction-no-work repair could not verify its package bytes. See $pixel_log."
         return 1
     fi
     # OpenClaw persists plugin descriptors separately from its live config.
@@ -4369,6 +5803,17 @@ ods_pixel_install_default_agent() {
         ai_bad "Could not install and start the private Pixel ingress."
         return 1
     fi
+    # Enable the deferred inspector only after its exact image, broker and
+    # owner transport have passed installation health. Existing model-budget
+    # reconciliation never grants this capability to an older installation.
+    _ods_pixel_install_project_runtime "$owner" "$home" "$plugin_root/host" || return 1
+    runtime_budget_status="$(_ods_pixel_apply_runtime_budget "$owner" "$home" \
+        "$home/.openclaw/openclaw.json" "$openclaw_bin" "$answers" unix /var/lib/ods-pixel-project/control.sock)" || return 1
+    case "$runtime_budget_status" in
+        changed) _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$pixel_root" || return 1 ;;
+        unchanged) ;;
+        *) return 1 ;;
+    esac
     # sudo -u starts a fresh owner session with the newly assigned ods-pixel
     # supplementary group; the original installer shell may not see that group
     # until the next login.
@@ -4386,6 +5831,18 @@ ods_pixel_install_default_agent() {
     fi
     if ! _ods_pixel_install_access_service "$owner" "$openclaw_bin"; then
         ai_bad "Pixel access coordinator installation failed; access mode changes remain unavailable."
+        return 1
+    fi
+    if [[ -n "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+        _ods_pixel_source_upgrade finish "$owner" || {
+            ai_bad "Pixel source update requires recovery; admission remains protected until its exact runtime is proved."
+            return 1
+        }
+        unset ODS_PIXEL_SOURCE_TRANSACTION
+    fi
+    if ! _ods_pixel_reverify_access_after_gateway_restart "$owner" "$home" true \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel access coordinator could not verify the live gateway after installation. See $pixel_log."
         return 1
     fi
     ai_ok "Pixel is installed, verified, and ready on the private ODS ingress"

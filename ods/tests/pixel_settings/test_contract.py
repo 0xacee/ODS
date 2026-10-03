@@ -89,7 +89,8 @@ def test_sampling_and_reasoning_capabilities_are_not_invented():
 
 @pytest.mark.parametrize("changes", [
     {"backendContextTokens": True}, {"backendContextTokens": None},
-    {"providerMaxOutputTokens": 200000}, {"supportedThinkingLevels": ["off", "off"]},
+    {"providerMaxOutputTokens": 200000}, {"activeContextTokens": 200000},
+    {"activeMaxOutputTokens": 20000}, {"supportedThinkingLevels": ["off", "off"]},
     {"supportedThinkingLevels": [None]}, {"samplingSupported": 1}, {"capacitySource": "guessed"},
 ])
 def test_invalid_capability_evidence_is_not_used(changes):

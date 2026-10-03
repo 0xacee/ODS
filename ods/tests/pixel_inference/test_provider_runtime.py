@@ -1,5 +1,5 @@
 import asyncio
-from copy import deepcopy
+from copy import deepcopy as deepcopy
 import json
 from pathlib import Path
 import sys
@@ -65,7 +65,8 @@ def test_backup_receives_exact_completed_tool_history_and_own_key():
 def test_auth_config_and_redirect_never_fall_back(status):
     calls = []
     def handler(request):
-        calls.append(request); return httpx.Response(status)
+        calls.append(request)
+        return httpx.Response(status)
     app = make_app(handler)
     async def check():
         first = await request_to(app,payload())
@@ -88,7 +89,8 @@ def test_refusal_is_a_response_not_a_failure():
 def test_total_attempt_budget_and_terminal_lease():
     calls = []
     def handler(request):
-        calls.append(request); return httpx.Response(503)
+        calls.append(request)
+        return httpx.Response(503)
     app = make_app(handler)
     async def check():
         assert (await request_to(app,payload())).json()['error']['code'] == 'provider-attempts-exhausted'
@@ -98,10 +100,12 @@ def test_total_attempt_budget_and_terminal_lease():
 
 
 def test_smaller_backup_is_not_sent_tool_history():
-    config = configuration(); config['providers'][1]['contextTokens'] = 16384
+    config = configuration()
+    config['providers'][1]['contextTokens'] = 16384
     calls = []
     def handler(request):
-        calls.append(request); return httpx.Response(503)
+        calls.append(request)
+        return httpx.Response(503)
     response = asyncio.run(request_to(make_app(handler,config),payload()))
     assert response.status_code == 400 and len(calls)==1
 
@@ -109,8 +113,10 @@ def test_smaller_backup_is_not_sent_tool_history():
 def test_missing_output_budget_is_bounded():
     calls = []
     def handler(request):
-        calls.append(json.loads(request.content)); return answer(request)
-    body = payload(); del body['max_tokens']
+        calls.append(json.loads(request.content))
+        return answer(request)
+    body = payload()
+    del body['max_tokens']
     asyncio.run(request_to(make_app(handler),body))
     assert calls[0]['max_tokens']==1024
 
@@ -118,13 +124,64 @@ def test_missing_output_budget_is_bounded():
 def test_policy_copy_pins_revision():
     config,events = configuration(),[]
     app = make_app(answer,config,events)
-    config['revision'] = 100; config['roles']['leader']='backup'
+    config['revision'] = 100
+    config['roles']['leader']='backup'
     result = asyncio.run(request_to(app,payload()))
     assert result.headers['x-ods-provider-revision']=='4'
     assert result.headers['x-ods-provider']=='primary'
 
 
 SSE = b'data: {"id":"fixture","choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: [DONE]\n\n'
+
+
+class Chunks(httpx.AsyncByteStream):
+    def __init__(self,chunks):
+        self.chunks = chunks
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
+
+def streamed(chunks,events=None):
+    def handler(request):
+        return httpx.Response(200,headers={'content-type':'text/event-stream'},stream=Chunks(chunks))
+    return make_app(handler,events=events)
+
+
+@pytest.mark.parametrize('size',[1,2,5])
+def test_done_marker_is_detected_across_chunk_boundaries(size):
+    # The terminator scan must not depend on where transport chunks split a line.
+    stream = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+    chunks = [stream[i:i+size] for i in range(0,len(stream),size)]
+    response = asyncio.run(request_to(streamed(chunks),payload(True)))
+    assert response.status_code == 200
+    assert response.content == stream
+
+
+def test_done_marker_without_trailing_newline_still_completes():
+    body = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]'
+    response = asyncio.run(request_to(streamed([body]),payload(True)))
+    assert response.status_code == 200 and response.content == body
+
+
+def test_crlf_framed_done_marker_completes():
+    chunks = [b'data: {"choices":[{"delta":{"content":"ok"}}]}\r\n\r\ndata: [DONE]\r\n\r\n']
+    response = asyncio.run(request_to(streamed(chunks),payload(True)))
+    assert response.status_code == 200
+
+
+def test_marker_prefix_inside_a_longer_line_never_terminates():
+    # A transport split after "data: [DONE]" must not terminate the stream when
+    # the line continues; only a complete marker line is terminal.
+    events = []
+    chunks = [b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',b'data: [DONE]',b'trailing\n\n']
+    app = streamed(chunks,events)
+    async def check():
+        with pytest.raises(Exception):
+            await request_to(app,payload(True))
+        assert (await request_to(app,payload())).status_code==409
+    asyncio.run(check())
+    assert events[-1]['result']=='stream-interrupted'
 
 
 def test_stream_can_fallback_before_commit():
@@ -158,7 +215,8 @@ def test_partial_stream_never_splices_backup():
 
 
 def test_one_deadline_cancels_waiting_headers():
-    config = configuration(); config['policy']['deadlineSeconds']=1
+    config = configuration()
+    config['policy']['deadlineSeconds']=1
     cancelled = []
     async def handler(request):
         try:

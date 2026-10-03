@@ -12,32 +12,44 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
-from typing import AsyncIterator, Literal
+from typing import AsyncIterator, Callable, Literal
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from host_agent_client import AgentClientError, AgentHTTPError, async_request_json as request_agent_json
+from runtime_projection import active_runtime_projection as _active_runtime_projection
 from pixel_runtime_state import begin_pixel_stream, end_pixel_stream, try_begin_pixel_stream
 from pixel_chat_results import ChatResultStore, ResultCapacity, ResultConflict, owner_namespace
 from security import verify_api_key
 from config import read_live_env_value
+from helpers import get_loaded_model, get_llama_context_size
+from pixel_chat_identity import messages_with_identity
+from pixel_chat_context import HistoryMessage, HistorySnapshot, public_context
+from pixel_runtime_identity import project_runtime_identity, unknown_runtime_identity
+from pixel_readiness import project_readiness
+from routers.pixel_images import router as image_router, resolve_message_images, conversation_storage
+from pixel_edge_read_client import borrow_edge_read_client, get_edge_read_client
 
 
 logger = logging.getLogger(__name__)
 
 
 _DEFAULT_EDGE_URL = "http://pixel-edge:9595"
-_MODEL = "pixel/default"
+_MODEL = "portal/default"
 _CHAT_STREAM_TIMEOUT_SECONDS = 2040.0
 _CLIENT_DISCONNECT_POLL_SECONDS = 0.25
-_CLIENT_CANCEL_TIMEOUT_SECONDS = 7.0
+_STREAM_KEEPALIVE_SECONDS = 15.0
+_STREAM_KEEPALIVE = b": pixel working\n\n"
+_CLIENT_CANCEL_TIMEOUT_SECONDS = 27.0
 _MAX_KEY_LENGTH = 4096
 _MAX_STATUS_BYTES = 64 * 1024
+_READINESS_PROBE_SECONDS = 4.0
 _MAX_SSE_LINE_BYTES = 1024 * 1024
 _MAX_MESSAGE_CHARS = 16 * 1024
 _MAX_TOTAL_MESSAGE_BYTES = 256 * 1024
@@ -57,11 +69,14 @@ _OPS_STATUSES = frozenset(
     }
 )
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-_MODEL_SWITCH_DETAIL = "Model switch in progress; Pixel will be ready when activation completes"
-_MODEL_ADAPTIVE_DETAIL = (
-    "Pixel is ready and adapts its tool flow for this model. Model capability "
-    "affects the quality and persistence of complex work, not access or the "
-    "broker-enforced safety boundary."
+_MODEL_SWITCH_DETAIL = "Model switch in progress; Portal will be ready when activation completes"
+_MODEL_IDENTITY_DETAIL = (
+    "Portal cannot verify its recorded model against the loaded Lemonade model. "
+    "Re-select the model in Models before using Portal."
+)
+_MODEL_CAPABILITY_DETAIL = (
+    "The active model is recorded as not agent-qualified. Tool-driven tasks "
+    "may be unreliable; chat and experiments remain available."
 )
 
 
@@ -94,15 +109,16 @@ def _pixel_config() -> tuple[str, str] | None:
     return _validate_edge_url(raw_url), raw_key
 
 
-def _edge_headers(key: str, *, accept: str) -> dict[str, str]:
+def _edge_headers(key: str, *, accept: str, image_turn: bool = False) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {key}",
         "Accept": accept,
         "Content-Type": "application/json",
+        **({"X-ODS-Image-Turn": "1"} if image_turn else {}),
     }
 
 
-class _Message(BaseModel):
+class _Message(HistoryMessage):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     role: str
@@ -116,12 +132,20 @@ class _Message(BaseModel):
         return value
 
 
+class ImageRoute(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    routeFingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
+    unknownConsent: bool
+
+
 class ChatStreamRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     chat_id: str
     request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
     messages: list[_Message] = Field(min_length=1, max_length=50)
+    history_snapshot: HistorySnapshot | None = None
+    image_route: ImageRoute | None = None
 
     @field_validator("chat_id")
     @classmethod
@@ -137,6 +161,25 @@ class ChatStreamRequest(BaseModel):
         if total > _MAX_TOTAL_MESSAGE_BYTES:
             raise ValueError("aggregate message content is too large")
         return messages
+
+    @model_validator(mode="after")
+    def _history_matches_turn(self):
+        image_messages = [index for index, message in enumerate(self.messages) if message.images is not None]
+        history_images = self.history_snapshot is not None and any(message.images for message in self.history_snapshot.messages)
+        if (image_messages or history_images) and self.image_route is None:
+            raise ValueError("Image conversations require a confirmed model route")
+        if image_messages:
+            if image_messages != [len(self.messages) - 1]:
+                raise ValueError("Earlier image messages belong in the persistent history snapshot")
+            if self.request_id is None or self.history_snapshot is None or self.history_snapshot.schemaVersion != 2:
+                raise ValueError("Image turns require persistent version 2 history and a request_id")
+        if self.history_snapshot is not None:
+            if self.request_id is None:
+                raise ValueError("Persistent history requires a request_id")
+            latest = self.history_snapshot.messages[-1]
+            if latest.role != "user" or latest.model_dump() != self.messages[-1].model_dump():
+                raise ValueError("Conversation history must end with the submitted user message")
+        return self
 
 
 class ChatCancelRequest(BaseModel):
@@ -154,9 +197,11 @@ class ChatCancelRequest(BaseModel):
 
 
 router = APIRouter(prefix="/api/pixel", tags=["pixel"])
+router.include_router(image_router)
 
 _result_store: ChatResultStore | None = None
 _result_tasks: dict[tuple[str, str, str], asyncio.Task] = {}
+_result_preflights: set[tuple[str, str, str]] = set()
 _result_stops: set[tuple[str, str]] = set()
 _result_abort_ack: set[tuple[str, str, str]] = set()
 
@@ -171,7 +216,8 @@ def _chat_results() -> ChatResultStore:
 def _result_state(store, identity):
     row = store.get(identity)
     task = _result_tasks.get(identity)
-    if row is not None and row["state"] == "active" and (task is None or task.done()):
+    if (row is not None and row["state"] == "active" and identity not in _result_preflights
+            and (task is None or task.done())):
         # A producer may fail while committing its last bytes. The API process
         # being alive does not prove that this particular task is still running.
         row["state"] = "unresolved"
@@ -180,6 +226,84 @@ def _result_state(store, identity):
 
 class ChatResultRequest(ChatCancelRequest):
     request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+
+async def _chat_context_request(body: ChatCancelRequest, *, compact: bool = False):
+    config = _pixel_config()
+    if config is None:
+        raise HTTPException(503, "Portal is not enabled")
+    edge_url, key = config
+    payload = {"user": body.chat_id}
+    if compact:
+        payload["request_id"] = body.request_id
+    try:
+        # Starting a compaction returns a job receipt promptly. CPU/model time
+        # belongs to the runtime job, not the browser's HTTP connection.
+        timeout = httpx.Timeout(connect=3.0, read=20.0, write=5.0, pool=3.0)
+        # Compaction mutates runtime state and retains its independent transport.
+        client_context = (httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False)
+                          if compact else borrow_edge_read_client())
+        async with client_context as client:
+            async with client.stream(
+                "POST", f"{edge_url}/v1/chat/{'compact' if compact else 'context'}",
+                json=payload, headers=_edge_headers(key, accept="application/json"),
+                timeout=timeout,
+            ) as response:
+                if response.status_code in {409, 423, 429}:
+                    raise HTTPException(response.status_code, "Portal is busy. Wait for the current task to finish.")
+                if response.status_code != 200 or not response.headers.get("content-type", "").lower().startswith("application/json"):
+                    raise ValueError("Invalid context response")
+                raw = await _bounded_response_bytes(response, 16 * 1024)
+        return public_context(json.loads(raw))
+    except (httpx.HTTPError, asyncio.TimeoutError):
+        # A timeout does not cancel a native compaction. The caller retains its
+        # request ID and reads /context before attempting any further mutation.
+        raise HTTPException(503, "Could not confirm context status. Check again before retrying compaction.") from None
+    except (ValueError, TypeError):
+        raise HTTPException(502, "Portal context status could not be verified") from None
+
+
+async def _delete_native_conversation_images(chat_id):
+    config = _pixel_config()
+    if config is None:
+        raise HTTPException(503, "Portal is unavailable. Retry deletion when it is running.")
+    edge_url, key = config
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(22, connect=3), trust_env=False, follow_redirects=False) as client:
+            async with client.stream("POST", f"{edge_url}/v1/chat/images-delete", json={"user": chat_id},
+                                     headers=_edge_headers(key, accept="application/json")) as result:
+                if result.status_code in {409, 423, 429}:
+                    raise HTTPException(409, "Conversation deletion is pending. Finish or recover its active work, then retry deletion.")
+                if result.status_code != 200 or not result.headers.get("content-type", "").lower().startswith("application/json"):
+                    raise ValueError("invalid receipt")
+                receipt = json.loads(await _bounded_response_bytes(result, 256))
+                if (receipt != {"schemaVersion": 1, "deleted": True}
+                        or type(receipt.get("schemaVersion")) is not int or receipt.get("deleted") is not True):
+                    raise ValueError("invalid receipt")
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError, TypeError, asyncio.TimeoutError):
+        raise HTTPException(503, "Image deletion is not confirmed. Your local history is preserved; retry deletion.") from None
+
+
+@router.post("/chat/context", dependencies=[Depends(verify_api_key)])
+async def pixel_chat_context(body: ChatCancelRequest):
+    return await _chat_context_request(body)
+
+
+@router.post("/chat/compact")
+async def pixel_chat_compact(body: ChatResultRequest, owner: str = Depends(verify_api_key)):
+    await conversation_storage("assert_available", owner, body.chat_id)
+    store = _chat_results()
+    if store.has_pending((owner_namespace(owner), body.chat_id)):
+        raise HTTPException(423, "Recover or finish the current response before compacting this conversation")
+    issue = await _model_readiness_issue()
+    if issue is not None:
+        raise HTTPException(409, issue[1])
+    # The ingress serializes this mutation with chat admission, including other
+    # dashboard processes and clients. Never invoke native sessions.compact
+    # directly here: that RPC may abort an active run.
+    return await _chat_context_request(body, compact=True)
 
 
 @router.post("/chat/result")
@@ -231,7 +355,7 @@ def _access_projection(value):
             raise ValueError("inconsistent runtime proof")
         return status.model_dump()
     except (ValueError, TypeError):
-        raise HTTPException(status_code=502, detail="Pixel access status could not be verified") from None
+        raise HTTPException(status_code=502, detail="Portal access status could not be verified") from None
 
 
 @router.get("/access-mode", dependencies=[Depends(verify_api_key)])
@@ -239,7 +363,7 @@ async def pixel_access_status():
     try:
         return _access_projection(await request_agent_json("GET", "/v1/pixel/access-mode", timeout=30.0))
     except AgentClientError:
-        raise HTTPException(status_code=503, detail="Pixel access service is unavailable") from None
+        raise HTTPException(status_code=503, detail="Portal access service is unavailable") from None
 
 
 @router.post("/access-mode", dependencies=[Depends(verify_api_key)])
@@ -288,6 +412,8 @@ async def _local_inference_issue(host_status: object) -> str | None:
 
 
 def _model_readiness_issue_from_status(status: object) -> tuple[str, str] | None:
+    if isinstance(status, dict) and status.get("modelTransactionPending") is True:
+        return "model_switching", _MODEL_SWITCH_DETAIL
     switching = (
         isinstance(status, dict)
         and status.get("activeOperation") == "model_activation"
@@ -306,50 +432,91 @@ def _model_support_from_status(status: object) -> dict[str, str] | None:
     intelligence, so an unqualified model remains usable and testable.
     """
     if isinstance(status, dict) and status.get("activeAgentViable") is False:
-        return {"tier": "adaptive", "detail": _MODEL_ADAPTIVE_DETAIL}
+        # Keep the legacy wire value for rolling UI upgrades. It denotes an
+        # advisory, not evidence that the runtime adapts or the model can act.
+        return {"tier": "adaptive", "detail": _MODEL_CAPABILITY_DETAIL}
     return None
 
 
 async def _model_readiness_issue() -> tuple[str, str] | None:
-    """Return a host-proven model transition, if present.
+    """Return a host-proven transition or an unverified Lemonade route.
 
-    A failed lifecycle probe does not falsely take down an otherwise healthy
-    Pixel edge. Model quality metadata is advisory; the edge readiness check
-    remains authoritative.
+    A failed host lifecycle probe alone does not take down the Pixel edge.
+    A recorded Lemonade route does require live identity proof before chat.
+    Model quality metadata remains advisory, not an access restriction.
     """
-    return _model_readiness_issue_from_status(await _host_model_status())
+    return await _model_readiness_issue_for_status(await _host_model_status())
 
 
-def _active_runtime_projection(status: object) -> dict[str, object] | None:
-    if not isinstance(status, dict):
-        return None
-    runtime = status.get("activeRuntime")
-    if isinstance(runtime, dict) and runtime.get("source") == "local-switchboard":
-        expected = {"source", "model", "contextLength"}
-        if (
-            set(runtime) == expected
-            and isinstance(runtime.get("model"), str)
-            and 1 <= len(runtime["model"]) <= 256
-            and type(runtime.get("contextLength")) is int
-            and 1 <= runtime["contextLength"] <= 10_000_000
-        ):
-            return {key: runtime[key] for key in expected}
-        return None
-    expected = {"source", "model", "contextLength", "maxTokens", "reasoning"}
+async def _verified_external_host_runtime(host_status: object) -> dict[str, object] | None:
+    """Identify a fixed external model from a live probe, never .env alone.
+
+    This is a status identity, not a model-switch or agent-quality proof. Do not
+    expose the configured origin, credentials, or provider response body.
+    """
     if (
-        not isinstance(runtime, dict)
-        or set(runtime) != expected
-        or runtime.get("source") != "remote-provider"
-        or not isinstance(runtime.get("model"), str)
-        or not 1 <= len(runtime["model"]) <= 256
-        or type(runtime.get("contextLength")) is not int
-        or not 4096 <= runtime["contextLength"] <= 10_000_000
-        or type(runtime.get("maxTokens")) is not int
-        or not 1 <= runtime["maxTokens"] <= runtime["contextLength"]
-        or type(runtime.get("reasoning")) is not bool
+        not isinstance(host_status, dict)
+        or host_status.get("activeRuntime") is not None
+        or os.environ.get("LLM_BACKEND", "").strip().casefold() != "external"
+        or read_live_env_value("LLM_BACKEND").strip().casefold() != "external"
+        or read_live_env_value("ODS_MODEL_SWITCHBOARD").strip().casefold() != "observe"
+        or read_live_env_value("EXTERNAL_LLM_PROVIDER").strip().casefold() != "openai-compatible"
     ):
         return None
-    return {key: runtime[key] for key in expected}
+    expected = read_live_env_value("EXTERNAL_LLM_MODEL").strip()
+    if (
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/+:-]{0,255}", expected) is None
+        or "://" in expected
+    ):
+        return None
+    try:
+        loaded = await asyncio.wait_for(get_loaded_model(), timeout=3.0)
+    except (asyncio.TimeoutError, httpx.HTTPError, OSError, ValueError, TypeError):
+        return None
+    if loaded != expected:
+        return None
+    runtime: dict[str, object] = {"source": "external-host", "model": loaded}
+    try:
+        context = await asyncio.wait_for(get_llama_context_size(loaded), timeout=3.0)
+    except (asyncio.TimeoutError, httpx.HTTPError, OSError, ValueError, TypeError):
+        context = None
+    if type(context) is int and 1 <= context <= 10_000_000:
+        runtime["contextLength"] = context
+    return _active_runtime_projection({"activeRuntime": runtime})
+
+
+def _model_identity_tokens(value: str | None) -> set[str]:
+    """Compare a Lemonade ID with the equivalent GGUF basename, not a path."""
+    if not isinstance(value, str) or not value.strip():
+        return set()
+    name = Path(value.strip()).name.casefold()
+    tokens = {name}
+    if name.startswith("extra."):
+        tokens.add(name[6:])
+    for token in tuple(tokens):
+        if token.endswith(".gguf"):
+            tokens.add(token[:-5])
+    return tokens
+
+
+async def _model_readiness_issue_for_status(status: object) -> tuple[str, str] | None:
+    issue = _model_readiness_issue_from_status(status)
+    if issue is not None:
+        return issue
+    runtime = _active_runtime_projection(status)
+    if (runtime is None or runtime.get("source") != "local-switchboard"
+            or read_live_env_value("LLM_BACKEND").strip().casefold() != "lemonade"):
+        return None
+    try:
+        loaded = await asyncio.wait_for(get_loaded_model(), timeout=3.0)
+    except Exception as exc:
+        # Probe failures cannot validate a recorded external route. Do not log
+        # exception text; it may contain the private backend origin or key.
+        logger.warning("Pixel Lemonade identity probe failed (%s)", type(exc).__name__)
+        return "model_unavailable", _MODEL_IDENTITY_DETAIL
+    if not (_model_identity_tokens(runtime["model"]) & _model_identity_tokens(loaded)):
+        return "model_unavailable", _MODEL_IDENTITY_DETAIL
+    return None
 
 
 async def _model_activation_in_progress() -> bool:
@@ -369,14 +536,47 @@ async def _bounded_response_bytes(response: httpx.Response, limit: int) -> bytes
     return b"".join(chunks)
 
 
+async def _current_access_readiness():
+    try:
+        # Bound the entire transport, including connect/retry time, rather
+        # than only its socket-read timeout. Diagnostics cannot gate chat.
+        async with async_timeout(_READINESS_PROBE_SECONDS):
+            value = await request_agent_json("GET", "/v1/pixel/access-mode", timeout=_READINESS_PROBE_SECONDS)
+            return _access_projection(value), None
+    except asyncio.TimeoutError:
+        return None, "access-probe-timeout"
+    except AgentClientError:
+        return None, "access-probe-unavailable"
+    except (HTTPException, ValueError, TypeError, RecursionError):
+        return None, "access-probe-invalid"
+
+
+async def _current_runtime_identity(edge_url, key):
+    try:
+        async with async_timeout(_READINESS_PROBE_SECONDS):
+            client = get_edge_read_client()
+            async with client.stream("GET", f"{edge_url}/v1/runtime-identity",
+                                     headers=_edge_headers(key, accept="application/json"),
+                                     timeout=httpx.Timeout(_READINESS_PROBE_SECONDS)) as response:
+                if response.status_code == 200 and response.headers.get("content-type", "").lower().startswith("application/json"):
+                    return project_runtime_identity(json.loads(await _bounded_response_bytes(response, 8192)))
+    except (httpx.HTTPError, asyncio.TimeoutError, ValueError, TypeError, RecursionError):
+        pass
+    return unknown_runtime_identity()
+
+
 @router.get("/status", dependencies=[Depends(verify_api_key)])
-async def pixel_status() -> dict[str, object]:
+async def pixel_status(http_response: Response = None) -> dict[str, object]:
     """Return a fixed, nonsecret Pixel availability projection."""
+    # The browser-facing response is newly constructed, so upstream no-store
+    # headers do not survive automatically. Never cache a live identity check.
+    if http_response is not None:
+        http_response.headers["Cache-Control"] = "no-store"
     config = _pixel_config()
     if config is None:
-        return {"available": False, "model": None, "detail": "Pixel is not enabled"}
+        return {"available": False, "model": None, "detail": "Portal is not enabled"}
     host_status = await _host_model_status()
-    readiness_issue = _model_readiness_issue_from_status(host_status)
+    readiness_issue = await _model_readiness_issue_for_status(host_status)
     if readiness_issue is not None:
         state, detail = readiness_issue
         return {
@@ -388,17 +588,18 @@ async def pixel_status() -> dict[str, object]:
     edge_url, key = config
     try:
         timeout = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0)
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
-            async with client.stream(
-                "GET",
-                f"{edge_url}/v1/models",
-                headers=_edge_headers(key, accept="application/json"),
-            ) as response:
-                if response.status_code != 200:
-                    return {"available": False, "model": None, "detail": "Pixel edge is unavailable"}
-                if not response.headers.get("content-type", "").lower().startswith("application/json"):
-                    return {"available": False, "model": None, "detail": "Pixel edge returned an invalid response"}
-                raw = await _bounded_response_bytes(response, _MAX_STATUS_BYTES)
+        client = get_edge_read_client()
+        async with client.stream(
+            "GET",
+            f"{edge_url}/v1/models",
+            headers=_edge_headers(key, accept="application/json"),
+            timeout=timeout,
+        ) as response:
+            if response.status_code != 200:
+                return {"available": False, "model": None, "detail": "Portal service is unavailable"}
+            if not response.headers.get("content-type", "").lower().startswith("application/json"):
+                return {"available": False, "model": None, "detail": "Portal service returned an invalid response"}
+            raw = await _bounded_response_bytes(response, _MAX_STATUS_BYTES)
         payload = json.loads(raw)
         models = payload.get("data") if isinstance(payload, dict) else None
         available = isinstance(models, list) and any(
@@ -407,33 +608,52 @@ async def pixel_status() -> dict[str, object]:
         result: dict[str, object] = {
             "available": available,
             "model": _MODEL if available else None,
-            "detail": "Owner agent ready" if available else "pixel/default is unavailable",
+            "detail": "Owner agent ready" if available else "Portal model is unavailable",
         }
         if available:
             inference_issue = await _local_inference_issue(host_status)
             if inference_issue:
                 return {"available": False, "model": None, "state": "model_unavailable", "detail": inference_issue}
         runtime = _active_runtime_projection(host_status)
+        if available and runtime is None:
+            runtime = await _verified_external_host_runtime(host_status)
         if available and runtime is not None:
             result["runtime"] = runtime
         model_support = _model_support_from_status(host_status)
         if available and model_support is not None:
             result["modelSupport"] = model_support
+        # Availability is not installed-release verification. A missing, old,
+        # or malformed diagnostic route must not disable otherwise working chat.
+        identity = unknown_runtime_identity()
+        access, access_issue = None, "access-probe-unavailable"
+        if available:
+            identity, (access, access_issue) = await asyncio.gather(
+                _current_runtime_identity(edge_url, key), _current_access_readiness())
+        result["runtimeIdentity"] = identity
+        result["runtimeMatchesRelease"] = identity["runtimeMatchesRelease"]
+        result["readiness"] = project_readiness(available, access, identity, access_issue)
+        if available:
+            result["detail"] = "Owner agent available; " + ("runtime files changed since initialization" if identity["state"] == "mismatch"
+                                                         else "release identity is not fully verified")
+            if result["readiness"]["accessState"] == "failed":
+                result["detail"] = "Owner agent available; host access verification failed; effective access and release readiness are unverified"
+            elif result["readiness"]["accessState"] == "transitioning":
+                result["detail"] = "Owner agent available; access transition is unfinished; release readiness is unverified"
         return result
     except (httpx.HTTPError, asyncio.TimeoutError) as exc:
         # Exception text and request objects can contain upstream credentials.
         # Retain the failure phase/type without logging those sensitive values.
         logger.warning("Pixel edge status request failed (%s)", type(exc).__name__)
-        return {"available": False, "model": None, "detail": "Pixel edge is unavailable"}
+        return {"available": False, "model": None, "detail": "Portal service is unavailable"}
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
-        return {"available": False, "model": None, "detail": "Pixel edge returned an invalid response"}
+        return {"available": False, "model": None, "detail": "Portal service returned an invalid response"}
 
 
 @router.get("/ops/{job_id}", dependencies=[Depends(verify_api_key)])
 async def pixel_operations_status(job_id: str, plan_hash: str) -> dict[str, object]:
     """Return only a host-verified, nonsecret Operations status receipt."""
     if _OPS_JOB_ID.fullmatch(job_id) is None or _OPS_PLAN_HASH.fullmatch(plan_hash) is None:
-        raise HTTPException(status_code=400, detail="Invalid Pixel Operations receipt")
+        raise HTTPException(status_code=400, detail="Invalid Portal Operations receipt")
     try:
         value = await request_agent_json(
             "GET",
@@ -442,7 +662,7 @@ async def pixel_operations_status(job_id: str, plan_hash: str) -> dict[str, obje
             timeout=7.0,
         )
     except AgentClientError as exc:
-        raise HTTPException(status_code=503, detail="Pixel Operations status is unavailable") from exc
+        raise HTTPException(status_code=503, detail="Portal Operations status is unavailable") from exc
     expected = {
         "schemaVersion",
         "kind",
@@ -469,7 +689,7 @@ async def pixel_operations_status(job_id: str, plan_hash: str) -> dict[str, obje
         or not 1 <= len(value["updatedAt"]) <= 64
         or (command is not None and (not isinstance(command, str) or not 1 <= len(command) <= 4096))
     ):
-        raise HTTPException(status_code=502, detail="Pixel Operations returned an invalid status")
+        raise HTTPException(status_code=502, detail="Portal Operations returned an invalid status")
     return {key: value[key] for key in expected}
 
 
@@ -480,7 +700,8 @@ def _error_event(message: str) -> bytes:
 
 async def _cancel_edge_run(edge_url: str, key: str, chat_id: str) -> bool:
     """Best-effort cancellation over the fixed authenticated internal edge."""
-    timeout = httpx.Timeout(connect=2.0, read=5.0, write=2.0, pool=2.0)
+    # Edge can wait 20 s for harness and managed-project cleanup.
+    timeout = httpx.Timeout(connect=2.0, read=22.0, write=2.0, pool=2.0)
     try:
         async with httpx.AsyncClient(
             timeout=timeout,
@@ -527,14 +748,22 @@ async def pixel_chat_cancel(body: ChatCancelRequest, owner: str = Depends(verify
     """
     config = _pixel_config()
     if config is None:
-        raise HTTPException(status_code=503, detail="Pixel is not enabled")
+        raise HTTPException(status_code=503, detail="Portal is not enabled")
     edge_url, key = config
     if body.request_id is not None:
         store = _chat_results()
         identity = (owner_namespace(owner), body.chat_id, body.request_id)
         row = _result_state(store, identity)
-        # A late Stop for a completed/unknown attempt must not stop a newer run.
-        if row is None or row["state"] not in {"active", "unresolved"}:
+        # Interrupted receipts still need native abort/idle confirmation. An
+        # old receipt must never cancel a successor in the same conversation.
+        if row is None or row["state"] not in {"active", "unresolved", "interrupted"}:
+            return {"aborted": False}
+        recovering_interrupted = row["state"] == "interrupted"
+        if recovering_interrupted and not store.is_latest(identity):
+            return {"aborted": False}
+        # A reserved attempt can still be checking local readiness and identity.
+        # There is no native run to cancel until its producer has been created.
+        if identity in _result_preflights:
             return {"aborted": False}
         if identity[:2] in _result_stops:
             return {"aborted": False}
@@ -542,15 +771,19 @@ async def pixel_chat_cancel(body: ChatCancelRequest, owner: str = Depends(verify
         try:
             aborted = await _cancel_edge_run(edge_url, key, body.chat_id)
             if aborted:
-                if store.get(identity)["state"] == "complete":
+                entry = store.get(identity)
+                if entry is None or entry["state"] == "complete":
                     return {"aborted": False}
                 _result_abort_ack.add(identity)
                 task = _result_tasks.get(identity)
                 if task is not None and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
-                if store.get(identity)["state"] == "complete":
+                entry = store.get(identity)
+                if entry is None or entry["state"] == "complete":
                     return {"aborted": False}
+                if recovering_interrupted:
+                    return {"aborted": store.confirm_interrupted_cancel(identity)}
                 store.finish(identity, "cancelled")
             return {"aborted": aborted}
         finally:
@@ -591,18 +824,15 @@ class _ClientDisconnected(Exception):
 
 
 async def _retained_chat_stream(request, body, owner):
+    await conversation_storage("assert_available", owner, body.chat_id)
     store = _chat_results()
     identity = (owner_namespace(owner), body.chat_id, body.request_id)
-    fingerprint = hashlib.sha256(json.dumps([m.model_dump() for m in body.messages],
-                                           sort_keys=True, ensure_ascii=True).encode()).hexdigest()
-    existing = store.get(identity)
-    if existing is None:
-        config = _pixel_config()
-        if config is None:
-            raise HTTPException(status_code=503, detail="Pixel is not enabled")
-        issue = await _model_readiness_issue()
-        if issue is not None:
-            raise HTTPException(status_code=409, detail=issue[1])
+    fingerprint_input = [m.model_dump() for m in body.messages]
+    if body.history_snapshot is not None:
+        fingerprint_input = {"messages": fingerprint_input, "history_snapshot": body.history_snapshot.model_dump()}
+    if body.image_route is not None:
+        fingerprint_input = {"conversation": fingerprint_input, "image_route": body.image_route.model_dump()}
+    fingerprint = hashlib.sha256(json.dumps(fingerprint_input, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
     try:
         if identity[:2] in _result_stops:
             raise ResultConflict("Stop is still being confirmed")
@@ -612,18 +842,40 @@ async def _retained_chat_stream(request, body, owner):
     except ResultCapacity as exc:
         raise HTTPException(status_code=507, detail=str(exc)) from None
     if created:
-        begin_pixel_stream()
-        task = asyncio.create_task(_produce_retained_result(store, identity, body, config))
-        _result_tasks[identity] = task
-        def release(finished):
-            _result_tasks.pop(identity, None)
-            end_pixel_stream()
-            if not finished.cancelled() and finished.exception() is not None:
-                logger.error("Pixel result persistence failed (%s)", type(finished.exception()).__name__)
-        task.add_done_callback(release)
+        _result_preflights.add(identity)
+        try:
+            try:
+                config = _pixel_config()
+                if config is None:
+                    raise HTTPException(status_code=503, detail="Portal is not enabled")
+                issue = await _model_readiness_issue()
+                if issue is not None:
+                    raise HTTPException(status_code=409, detail=issue[1])
+                messages = await _prepare_chat_messages(body, owner)
+                await conversation_storage("assert_available", owner, body.chat_id)
+            except Exception:
+                # The attempt ID was committed, but no producer or agent turn
+                # was started. Retain an exact terminal receipt for reloads.
+                text = "Portal did not start this attempt. Restore its connection and send your message again."
+                frame = {"choices": [{"delta": {"content": text}}]}
+                data = f"data: {json.dumps(frame)}\n\n".encode() + _error_event(text) + b"data: [DONE]\n\n"
+                store.reject_before_submission(identity, data)
+                raise
+            begin_pixel_stream()
+            task = asyncio.create_task(_produce_retained_result(store, identity, body, config, messages, owner=owner))
+            _result_tasks[identity] = task
+            def release(finished):
+                _result_tasks.pop(identity, None)
+                end_pixel_stream()
+                if not finished.cancelled() and finished.exception() is not None:
+                    logger.error("Pixel result persistence failed (%s)", type(finished.exception()).__name__)
+            task.add_done_callback(release)
+        finally:
+            _result_preflights.discard(identity)
 
     async def subscribe():
         after = -1
+        last_sent = time.monotonic()
         while True:
             # Snapshot terminal state before yielding any bytes. Sending a chunk
             # can suspend this subscriber while the producer commits its tail.
@@ -632,10 +884,17 @@ async def _retained_chat_stream(request, body, owner):
             for chunk in store.chunks(identity, after):
                 after = chunk["sequence"]
                 yield chunk["data"]
+                last_sent = time.monotonic()
             if row is None or row["state"] != "active":
                 return
             if await request.is_disconnected():
                 return
+            if time.monotonic() - last_sent >= _STREAM_KEEPALIVE_SECONDS:
+                # A CPU-backed local model can spend minutes in prompt prefill.
+                # Keep the subscriber alive without inventing an answer or
+                # persisting transport-only comments in the result receipt.
+                yield _STREAM_KEEPALIVE
+                last_sent = time.monotonic()
             # Subscriber disposal never cancels the independent bounded producer.
             await asyncio.sleep(_CLIENT_DISCONNECT_POLL_SECONDS)
 
@@ -644,20 +903,31 @@ async def _retained_chat_stream(request, body, owner):
     })
 
 
-async def _produce_retained_result(store, identity, body, config):
+async def _produce_retained_result(store, identity, body, config, messages, *, owner=None):
     edge_url, key = config
     done_seen = False
+    answer_seen = False
+    empty_done_seen = False
+    terminal_error_seen = False
     cancelled = False
     failed = False
     stopped = False
+    rejected = False
+    oversized_image = False
     try:
+        extension_context = None
+        if owner is not None and body.messages and body.messages[-1].role == 'user':
+            from routers.extensions import chat_extension_request_context
+            extension_context = await chat_extension_request_context(
+                owner, body.chat_id, body.request_id, body.messages[-1].content, include_evidence=True)
         timeout = httpx.Timeout(connect=5.0, read=_CHAT_STREAM_TIMEOUT_SECONDS, write=30.0, pool=5.0)
         async with async_timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
             async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
                 async with client.stream("POST", f"{edge_url}/v1/chat/completions",
-                        json={"model": _MODEL, "stream": True, "user": body.chat_id,
-                              "messages": [m.model_dump() for m in body.messages]},
-                        headers=_edge_headers(key, accept="text/event-stream")) as upstream:
+                        **_edge_request_arguments(_edge_chat_body(body, messages, extension_context=extension_context),
+                                                  image_turn=bool(body.messages[-1].images)),
+                        headers=_edge_headers(key, accept="text/event-stream", image_turn=bool(body.messages[-1].images))) as upstream:
+                    rejected = 400 <= upstream.status_code < 500
                     if upstream.status_code != 200 or not upstream.headers.get("content-type", "").lower().startswith("text/event-stream"):
                         raise ValueError("Invalid upstream stream")
                     buffered = bytearray()
@@ -669,16 +939,61 @@ async def _produce_retained_result(store, identity, body, config):
                             del buffered[:newline + 1]
                             if len(line.rstrip(b"\r\n")) > _MAX_SSE_LINE_BYTES:
                                 raise ResultCapacity("SSE line limit")
-                            store.append(identity, line)
-                            if line.rstrip(b"\r\n") == b"data: [DONE]":
+                            stripped = line.rstrip(b"\r\n")
+                            if stripped.startswith(b"data: ") and stripped != b"data: [DONE]":
+                                try:
+                                    event = json.loads(stripped[6:])
+                                except (json.JSONDecodeError, UnicodeDecodeError):
+                                    event = None
+                                if isinstance(event, dict):
+                                    if "error" in event:
+                                        # A syntactically terminal SSE stream can still be
+                                        # a failed attempt. Keep its sanitized error bytes
+                                        # for replay, but never publish it as complete.
+                                        terminal_error_seen = True
+                                        failed = True
+                                    choices = event.get("choices")
+                                    for choice in choices if isinstance(choices, list) else []:
+                                        if not isinstance(choice, dict):
+                                            continue
+                                        for field in ("delta", "message"):
+                                            payload = choice.get(field)
+                                            if isinstance(payload, dict) and (
+                                                (isinstance(payload.get("content"), str) and payload["content"])
+                                                or bool(payload.get("tool_calls"))
+                                                or bool(payload.get("function_call"))
+                                            ):
+                                                answer_seen = True
+                            if stripped == b"data: [DONE]":
+                                if not answer_seen and not terminal_error_seen:
+                                    # Live Pixel Edge cancellations can end with only
+                                    # [DONE]. The host session reports zero output and
+                                    # aborted, so a syntactic DONE is not a user answer.
+                                    # Do not persist it as a successful receipt.
+                                    terminal_error_seen = True
+                                    empty_done_seen = True
+                                    failed = True
+                                    store.append(identity, _error_event("Portal returned no answer. Try again.")
+                                                 + b"data: [DONE]\n\n", terminal=True)
+                                else:
+                                    # The upstream blank separator remains in the
+                                    # buffer when this terminal line ends the loop.
+                                    # Persist one complete SSE event for live clients
+                                    # and replay, including an upstream error frame.
+                                    store.append(identity, b"data: [DONE]\n\n")
                                 done_seen = True
                                 break
+                            store.append(identity, line)
                         if done_seen:
                             break
                         if len(buffered) > _MAX_SSE_LINE_BYTES:
                             raise ResultCapacity("SSE line limit")
                     if not done_seen:
                         failed = True
+    except HTTPException as exc:
+        oversized_image = exc.status_code == 413 and bool(body.messages[-1].images)
+        rejected = oversized_image
+        failed = True
     except asyncio.CancelledError:
         cancelled = identity in _result_abort_ack
         failed = not cancelled
@@ -688,27 +1003,106 @@ async def _produce_retained_result(store, identity, body, config):
     finally:
         # Keep this conversation reserved until cancellation has finished. A late
         # native cancellation must never target the next attempt in this chat.
-        if not done_seen and not cancelled:
+        if not done_seen and not cancelled and not rejected:
             try:
                 stopped = await asyncio.wait_for(_cancel_edge_run(edge_url, key, body.chat_id), _CLIENT_CANCEL_TIMEOUT_SECONDS)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
         try:
             if not done_seen:
-                text = "Pixel was stopped." if cancelled else "Pixel could not complete the response. Check saved work before continuing."
+                text = ("Portal was stopped." if cancelled else
+                        "This image turn exceeds the 16 MiB encoded limit. Reduce attachments or conversation text." if oversized_image else
+                        "Portal did not accept this turn. Check the conversation's context status before continuing." if rejected else
+                        "Portal could not complete the response. Check saved work before continuing.")
                 store.append(identity, _error_event(text) + b"data: [DONE]\n\n", terminal=True)
         finally:
-            state = "complete" if done_seen else "cancelled" if cancelled else "interrupted" if failed and stopped else "unresolved" if failed else "complete"
+            state = (
+                "complete" if done_seen and not terminal_error_seen
+                else "cancelled" if cancelled
+                # A DONE-only frame can overtake the Edge Stop acknowledgment.
+                # Keep the attempt reserved until Stop resolves; an acknowledged
+                # abort then commits cancelled, while an unacknowledged native
+                # run must remain unresolved instead of admitting a successor.
+                else "unresolved" if empty_done_seen and identity[:2] in _result_stops
+                else "interrupted" if rejected or terminal_error_seen or failed and stopped
+                else "unresolved" if failed
+                else "complete"
+            )
             store.finish(identity, state)
+
+
+async def _prepare_chat_messages(body, owner):
+    if body.image_route is not None:
+        state = await _chat_context_request(ChatCancelRequest(chat_id=body.chat_id))
+        model = state.get("model") or {}
+        if (model.get("imageRouteFingerprint") or model.get("routeFingerprint")) != body.image_route.routeFingerprint:
+            raise HTTPException(409, "The model route changed. Review the selected model before sending images.")
+        capability = model.get("imageInput")
+        if capability == "unsupported":
+            raise HTTPException(409, "The selected model is declared text-only. Choose an image-capable model.")
+        if capability not in {"supported", "unknown"}:
+            raise HTTPException(409, "Image support for the selected runtime has not been verified.")
+        if capability == "unknown" and not body.image_route.unknownConsent:
+            raise HTTPException(409, "Image support is unknown. Confirm an image test on this model route first.")
+    messages = await messages_with_identity(body.messages)
+    latest = body.messages[-1]
+    if latest.images is not None:
+        parts = await resolve_message_images(owner, body.chat_id, latest.content,
+                                             [image.model_dump() for image in latest.images])
+        # Identity injection inserts a system message; the final owner turn
+        # remains last. Preserve references for Edge/ingress integrity checks.
+        messages[-1] = {**messages[-1], "content": parts}
+        _image_json_size(_edge_chat_body(body, messages))
+    return messages
+
+
+def _image_json_size(payload):
+    total = 0
+    for token in json.JSONEncoder(ensure_ascii=True).iterencode(payload):
+        total += len(token)
+        if total > 16 * 1024 * 1024:
+            raise HTTPException(413, "Image turn exceeds the 16 MiB encoded limit. Reduce attachments or conversation text.")
+    return total
+
+
+def _edge_request_arguments(payload, *, image_turn):
+    if not image_turn:
+        return {"json": payload}
+    _image_json_size(payload)
+
+    async def encoded():
+        for token in json.JSONEncoder(ensure_ascii=True).iterencode(payload):
+            for offset in range(0, len(token), 32768):
+                yield token[offset:offset + 32768].encode("ascii")
+            await asyncio.sleep(0)
+    return {"content": encoded()}
+
+
+def _edge_chat_body(body, messages, *, extension_context=None):
+    from extension_requests import model_request_context
+    latest = body.messages[-1] if body.messages else None
+    context = extension_context or (model_request_context(latest.content, body.chat_id, body.request_id) if latest and latest.role == 'user' else None)
+    if context:
+        position = next((index for index, item in enumerate(messages) if item['role'] != 'system'), len(messages))
+        messages = [*messages[:position], context, *messages[position:]]
+    result = {"model": _MODEL, "stream": True, "user": body.chat_id, "messages": messages}
+    if body.history_snapshot is not None:
+        result["history_snapshot"] = body.history_snapshot.model_dump()
+        result["request_id"] = body.request_id
+    if body.image_route is not None:
+        result["image_route"] = body.image_route.model_dump()
+    return result
 
 
 async def _iter_upstream_chunks(
     upstream: httpx.Response,
     request: Request,
+    can_emit_keepalive: Callable[[], bool],
 ) -> AsyncIterator[bytes]:
     """Yield upstream bytes while promptly observing a silent client exit."""
     iterator = upstream.aiter_bytes().__aiter__()
     pending: asyncio.Task[bytes] | None = None
+    last_sent = time.monotonic()
     try:
         while True:
             pending = asyncio.create_task(anext(iterator))
@@ -721,12 +1115,19 @@ async def _iter_upstream_chunks(
                     break
                 if await request.is_disconnected():
                     raise _ClientDisconnected
+                # A comment is safe only between complete SSE lines. The
+                # caller may be holding an upstream fragment without a newline;
+                # injecting a comment there would corrupt that data line.
+                if can_emit_keepalive() and time.monotonic() - last_sent >= _STREAM_KEEPALIVE_SECONDS:
+                    yield _STREAM_KEEPALIVE
+                    last_sent = time.monotonic()
             try:
                 chunk = pending.result()
             except StopAsyncIteration:
                 return
             pending = None
             yield chunk
+            last_sent = time.monotonic()
     finally:
         if pending is not None and not pending.done():
             pending.cancel()
@@ -739,24 +1140,21 @@ async def _iter_upstream_chunks(
 @router.post("/chat/stream")
 async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: str = Depends(verify_api_key)) -> StreamingResponse:
     """Forward one bounded chat over authenticated, unbuffered SSE."""
+    if isinstance(owner, str):
+        await conversation_storage("assert_available", owner, body.chat_id)
     if body.request_id is not None:
         return await _retained_chat_stream(request, body, owner)
     if isinstance(owner, str) and _result_store is not None and _result_store.has_pending((owner_namespace(owner), body.chat_id)):
         raise HTTPException(status_code=423, detail="Recover or stop the retained attempt before starting another turn")
     config = _pixel_config()
     if config is None:
-        raise HTTPException(status_code=503, detail="Pixel is not enabled")
+        raise HTTPException(status_code=503, detail="Portal is not enabled")
     readiness_issue = await _model_readiness_issue()
     if readiness_issue is not None:
         _state, detail = readiness_issue
         raise HTTPException(status_code=409, detail=detail)
     edge_url, key = config
-    edge_body = {
-        "model": _MODEL,
-        "stream": True,
-        "user": body.chat_id,
-        "messages": [message.model_dump() for message in body.messages],
-    }
+    edge_body = _edge_chat_body(body, await messages_with_identity(body.messages))
 
     # Pixel Edge is capped at 33 minutes; retain one bounded minute of outer
     # headroom so this bridge never aborts a valid CPU-only first turn first.
@@ -796,7 +1194,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             end_pixel_stream()
 
     if not try_begin_pixel_stream():
-        raise HTTPException(status_code=429, detail="Pixel stream capacity is busy; retry shortly")
+        raise HTTPException(status_code=429, detail="Portal stream capacity is busy; retry shortly")
 
     try:
         client = httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False)
@@ -811,11 +1209,16 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             entered = True
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             logger.warning("Pixel edge stream connection failed (%s)", type(exc).__name__)
-            raise HTTPException(status_code=503, detail="Pixel stream is unavailable") from exc
+            raise HTTPException(status_code=503, detail="Portal stream is unavailable") from exc
+        if upstream.status_code == 409:
+            # Pixel Edge uses 409 while its managed runtime is transitioning.
+            # Preserve the actionable retry class without reflecting any
+            # upstream response body into the owner-facing dashboard.
+            raise HTTPException(status_code=409, detail=_MODEL_SWITCH_DETAIL)
         if upstream.status_code != 200:
-            raise HTTPException(status_code=502, detail="Pixel request was rejected")
+            raise HTTPException(status_code=502, detail="Portal request was rejected")
         if not upstream.headers.get("content-type", "").lower().startswith("text/event-stream"):
-            raise HTTPException(status_code=502, detail="Pixel returned an invalid stream")
+            raise HTTPException(status_code=502, detail="Portal returned an invalid stream")
     except BaseException:
         await release_stream()
         raise
@@ -825,7 +1228,7 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
         try:
             async with async_timeout(_CHAT_STREAM_TIMEOUT_SECONDS):
                 buffered = bytearray()
-                async for chunk in _iter_upstream_chunks(upstream, request):
+                async for chunk in _iter_upstream_chunks(upstream, request, lambda: not buffered):
                     buffered.extend(chunk)
                     while True:
                         newline = buffered.find(b"\n")
@@ -834,26 +1237,33 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
                         line = bytes(buffered[: newline + 1])
                         del buffered[: newline + 1]
                         if len(line.rstrip(b"\r\n")) > _MAX_SSE_LINE_BYTES:
-                            yield _error_event("Pixel stream exceeded its safety limit")
-                            yield b"data: [DONE]\n\n"
+                            yield _error_event("Portal stream exceeded its safety limit")
+                            if not done_seen:
+                                yield b"data: [DONE]\n\n"
                             return
                         yield line
                         if line.rstrip(b"\r\n") == b"data: [DONE]":
                             done_seen = True
                     if len(buffered) > _MAX_SSE_LINE_BYTES:
-                        yield _error_event("Pixel stream exceeded its safety limit")
-                        yield b"data: [DONE]\n\n"
+                        yield _error_event("Portal stream exceeded its safety limit")
+                        if not done_seen:
+                            yield b"data: [DONE]\n\n"
                         return
                 if buffered:
-                    yield bytes(buffered)
+                    # The final upstream line may lack a newline. Forward it
+                    # terminated so it cannot fuse with the appended [DONE],
+                    # and recognize a bare trailing marker as a real [DONE].
+                    if buffered.rstrip(b"\r\n") == b"data: [DONE]":
+                        done_seen = True
+                    yield bytes(buffered) + b"\n"
         except _ClientDisconnected:
             return
         except (GeneratorExit, asyncio.CancelledError):
             raise
         except (httpx.HTTPError, asyncio.TimeoutError):
-            yield _error_event("Pixel stream is unavailable")
+            yield _error_event("Portal stream is unavailable")
         except Exception:
-            yield _error_event("Pixel stream failed")
+            yield _error_event("Portal stream failed")
         finally:
             await release_stream()
         if not done_seen:
@@ -876,4 +1286,3 @@ async def pixel_chat_stream(request: Request, body: ChatStreamRequest, owner: st
             "X-Accel-Buffering": "no",
         },
     )
-

@@ -10,8 +10,8 @@ import {
   UserPlus,
   CreditCard,
   Code,
-  Bot,
 } from 'lucide-react'
+import { isRemoteInference } from '../lib/inferenceMode'
 
 const Dashboard = lazy(() => import('../pages/Dashboard'))
 const SettingsPage = lazy(() => import('../pages/Settings'))
@@ -24,10 +24,11 @@ const Invites = lazy(() => import('../pages/Invites'))
 const Usage = lazy(() => import('../pages/Usage'))
 const Pixel = lazy(() => import('../pages/Pixel'))
 const PixelSettings = lazy(() => import('../pages/PixelSettings'))
+const OpenCodeApp = lazy(() => import('../pages/OpenCodeApp'))
 
 export const coreRoutes = [
-  { id: 'home', path: '/', label: 'Home', icon: Bot, component: Pixel, getProps: ({ status }) => ({ systemStatus: status }), sidebar: false },
-  { id: 'pixel-settings', path: '/pixel/settings', label: 'Pixel settings', icon: Settings, component: PixelSettings, getProps: () => ({}), sidebar: false },
+  { id: 'home', path: '/', label: 'Home', icon: Cloud, component: Pixel, getProps: ({ status }) => ({ systemStatus: status }), sidebar: false },
+  { id: 'pixel-settings', path: '/pixel/settings', label: 'Portal settings', icon: Settings, component: PixelSettings, getProps: () => ({}), sidebar: false },
   {
     id: 'dashboard',
     path: '/dashboard',
@@ -44,9 +45,10 @@ export const coreRoutes = [
     label: 'GPU Monitor',
     icon: Activity,
     component: GPUMonitor,
-    getProps: () => ({}),
-    // Route is always registered; sidebar entry only appears on multi-GPU systems
-    sidebar: ({ status }) => (status?.gpu?.gpu_count || 1) > 1,
+    getProps: ({ status, loading }) => ({ status, loading }),
+    // Route is always registered; sidebar entry only appears on multi-GPU
+    // local systems. Remote/cloud inference never shows the local GPU entry.
+    sidebar: ({ status, loading }) => !loading && !isRemoteInference(status) && (status?.gpu?.gpu_count || 1) > 1,
     order: 1,
   },
   {
@@ -80,6 +82,18 @@ export const coreRoutes = [
     order: 3,
   },
   {
+    // OpenCode status, start/setup, and how-to. The Applications entry opens
+    // OpenCode directly when this browser can reach it, otherwise this page.
+    id: 'opencode-app',
+    path: '/apps/opencode',
+    label: 'OpenCode',
+    icon: Code,
+    component: OpenCodeApp,
+    getProps: () => ({}),
+    sidebar: false,
+    order: 2.2,
+  },
+  {
     id: 'remote-provider',
     path: '/remote-provider',
     label: 'Remote GPU',
@@ -107,7 +121,7 @@ export const coreRoutes = [
     id: 'pixel',
     path: '/pixel',
     label: 'Portal',
-    icon: Bot,
+    icon: Cloud,
     component: Pixel,
     getProps: ({ status }) => ({ systemStatus: status }),
     sidebar: false,
@@ -135,9 +149,12 @@ export const coreRoutes = [
   },
 ]
 
-// OpenCode is an ODS application on every platform, even though its process is
-// host-managed rather than part of the Docker stack. Keep the launcher present
-// while health data is loading or the host service needs attention.
+// OpenCode is a host application (systemd user unit, LaunchAgent, or scheduled
+// task), not a container, and it is opt-in on Linux. The host agent reports its
+// lifecycle, so the entry appears once OpenCode is set up: it opens OpenCode
+// when running and this browser is on the ODS machine, and otherwise leads to
+// the OpenCode page (start it, finish setup, or use it from another device).
+// It listens only on host loopback, so it is never linked by LAN hostname.
 export const coreExternalLinks = [
   {
     id: 'opencode',
@@ -146,6 +163,7 @@ export const coreExternalLinks = [
     port: 3003,
     ui_path: '/',
     healthNeedles: ['opencode', 'OpenCode (IDE)'],
-    alwaysVisible: true,
+    appPath: '/apps/opencode',
+    loopbackOnly: true,
   },
 ]

@@ -22,7 +22,7 @@ test('does not allow draft changes while work is active', () => {
   render(<MemoryRouter><PixelComposerTools input="/" disabled onInsert={() => {}}/></MemoryRouter>)
   expect(screen.getByRole('button', {name:'Open prompt commands'})).toBeDisabled()
   expect(screen.queryByRole('group', {name:'Prompt commands'})).not.toBeInTheDocument()
-  expect(screen.getByTitle('Pixel access settings')).toHaveAttribute('href','/pixel/settings?section=access')
+  expect(screen.getByTitle('Portal access settings')).toHaveAttribute('href','/pixel/settings?section=access')
 })
 
 test('opening prompt commands places keyboard focus on the first choice and supports arrows', () => {
@@ -31,6 +31,8 @@ test('opening prompt commands places keyboard focus on the first choice and supp
   const trigger=screen.getByRole('button',{name:'Open prompt commands'})
   trigger.focus()
   fireEvent.click(trigger)
+  expect(screen.getByRole('button',{name:/Goal Plan, work/})).toHaveFocus()
+  fireEvent.keyDown(document.activeElement,{key:'ArrowDown'})
   expect(screen.getByRole('button',{name:/Plan Milestones/})).toHaveFocus()
   fireEvent.keyDown(document.activeElement,{key:'ArrowDown'})
   expect(screen.getByRole('button',{name:/Research Current/})).toHaveFocus()
@@ -45,7 +47,7 @@ test('slash-triggered choices return focus to the composer on Escape', () => {
   const field=screen.getByRole('textbox',{name:'Composer'})
   field.focus()
   view.rerender(<MemoryRouter><textarea aria-label="Composer"/><PixelComposerTools input="/" onInsert={() => {}}/></MemoryRouter>)
-  expect(screen.getByRole('button',{name:/Plan Milestones/})).toHaveFocus()
+  expect(screen.getByRole('button',{name:/Goal Plan, work/})).toHaveFocus()
   fireEvent.keyDown(document.activeElement,{key:'Escape'})
   expect(field).toHaveFocus()
 })
