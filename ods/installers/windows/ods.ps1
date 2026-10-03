@@ -626,6 +626,16 @@ function Test-ODSUninstallCommandOwned {
             # Inline commands and unknown switches cannot establish script execution.
             return $false
         }
+    } elseif ($program -match '^bash(\.exe)?$') {
+        # Native model upgrades use Git Bash with exactly one generated ODS
+        # wrapper. Do not infer ownership from -c, another script, or a shared
+        # bash.exe location.
+        if ($argv.Count -ne 1 -or -not (Test-ODSUninstallPathOwned $argv[0])) { return $false }
+        try {
+            $expected=[IO.Path]::GetFullPath((Join-Path $InstallDir 'logs\bootstrap-run.sh'))
+            $actual=[IO.Path]::GetFullPath($argv[0])
+            return $actual.Equals($expected, [StringComparison]::OrdinalIgnoreCase)
+        } catch { return $false }
     } elseif ($program -match '^(python(?:3(?:\.\d+)?)?|pythonw|py)(\.exe)?$') {
         foreach ($arg in $argv) {
             if ($arg -in @('-u','-B','-E','-s','-S') -or $arg -match '^-[23](?:\.\d+)?$') { continue }
@@ -675,7 +685,7 @@ function Stop-ODSUninstallOwnedHelpers {
     $owned=@{}
     foreach ($process in $processes) {
         if ($ancestors.ContainsKey([int]$process.ProcessId)) { continue }
-        if ([string]$process.Name -notmatch '^(python(?:3(?:\.\d+)?)?|pythonw|py|powershell|pwsh|wscript|cscript|opencode|llama-server|lemonade-server)(\.exe)?$') { continue }
+        if ([string]$process.Name -notmatch '^(python(?:3(?:\.\d+)?)?|pythonw|py|bash|powershell|pwsh|wscript|cscript|opencode|llama-server|lemonade-server)(\.exe)?$') { continue }
         if ((Test-ODSUninstallPathOwned ([string]$process.ExecutablePath)) -or
             (Test-ODSUninstallCommandOwned ([string]$process.CommandLine) ([string]$process.Name))) {
             $owned[[int]$process.ProcessId]=$true

@@ -147,6 +147,21 @@ try {
     Check (-not (Test-ODSUninstallCommandOwned ('powershell.exe -Command "Get-FileHash ''{0}/ods.ps1''"' -f $InstallDir))) 'reading an owned file does not authorize killing an unrelated shell'
     Check (-not (Test-ODSUninstallCommandOwned ('python.exe -c "print(''{0}/agent.py'')"' -f $InstallDir))) 'Python inline data references do not establish script ownership'
     Check (-not (Test-ODSUninstallCommandOwned ('python.exe ''{0}/agent.py''' -f $InstallDir))) 'single quotes do not invent Windows argument grouping'
+    $bashExe = 'C:\Program Files\Git\bin\bash.exe'
+    $upgradeWrapper = Join-Path $InstallDir 'logs\bootstrap-run.sh'
+    $upgradeTask = [pscustomobject]@{Actions=@([pscustomobject]@{Execute=$bashExe; Arguments=('"{0}"' -f $upgradeWrapper)})}
+    Check (Test-ODSUninstallTaskOwned $upgradeTask) 'the generated Git Bash model-upgrade task is owned by this install'
+    Check (Test-ODSUninstallCommandOwned ('"{0}" "{1}"' -f $bashExe, $upgradeWrapper)) 'a running Git Bash upgrade wrapper is recognized by its exact script path'
+    foreach ($otherArguments in @(
+        ('"{0}"' -f (Join-Path $InstallDir 'scripts\bootstrap-upgrade.sh')),
+        '"C:\AnotherInstallation\ods\logs\bootstrap-run.sh"',
+        ('"{0}" --foreign' -f $upgradeWrapper),
+        ('-c "echo {0}"' -f $upgradeWrapper),
+        'bootstrap-run.sh'
+    )) {
+        $otherTask = [pscustomobject]@{Actions=@([pscustomobject]@{Execute=$bashExe; Arguments=$otherArguments})}
+        Check (-not (Test-ODSUninstallTaskOwned $otherTask)) 'a non-exact Git Bash task is preserved'
+    }
     $generated = ('$env:PATH=''C:/Docker;''+$env:PATH; $agentArgs=@(''-3'')+@(''{0}/scripts/ods-host-agent.py'',''--port'',''3003''); Set-Location ''{0}''; Start-Process -FilePath ''C:/Python/py.exe'' -ArgumentList $agentArgs -WindowStyle Hidden -Wait' -f $InstallDir)
     $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($generated))
     Check (Test-ODSUninstallTaskOwned ([pscustomobject]@{Actions=@([pscustomobject]@{Execute='powershell.exe';Arguments="-NoProfile -EncodedCommand $encoded"})})) 'the generated array and py launcher is recognized without evaluation'
