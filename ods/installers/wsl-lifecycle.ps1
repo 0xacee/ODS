@@ -502,15 +502,32 @@ function Assert-ODSWslStartupStillWanted {
 function Disable-ODSWslStartup($Identity,[switch]$ValidateOnly,[switch]$RetireRelay) {
     $task=Get-ScheduledTask -TaskName ($Identity.taskName + '-Startup') -ErrorAction SilentlyContinue
     $relayTask=$null
-    if ($RetireRelay) { $relayTask=Get-ScheduledTask -TaskName ($Identity.taskName + '-Relay') -ErrorAction SilentlyContinue }
+    $lifetimeTask=$null
+    if ($RetireRelay) {
+        $relayTask=Get-ScheduledTask -TaskName ($Identity.taskName + '-Relay') -ErrorAction SilentlyContinue
+        $lifetimeTask=Get-ScheduledTask -TaskName $Identity.taskName -ErrorAction SilentlyContinue
+    }
     if (-not (Test-Path -LiteralPath $Identity.directory)) {
-        if ($task -or $relayTask) { throw 'Windows task exists without its owner manifest; refusing to modify it' }
+        if ($task -or $relayTask -or $lifetimeTask) { throw 'Windows task exists without its owner manifest; refusing to modify it' }
         return [pscustomobject]@{scope='wsl-startup';state='unmanaged';identity=$Identity;relayRetirement='unmanaged'}
     }
     $null=Assert-ODSWslManifest $Identity
     if ($task) { $null=Assert-ODSWslStartupTask $Identity }
     # Uninstall validates every task it will retire before changing startup intent.
     if ($relayTask) { $null=Assert-ODSWslRelayTask $Identity }
+    if ($lifetimeTask) {
+        $null=Assert-ODSWslTask $Identity
+        if ((Read-ODSWslJson (Join-Path $Identity.directory 'runtime.json')) -and
+            -not (Read-ODSWslJson (Join-Path $Identity.directory 'request.json'))) {
+            throw 'Owned WSL lifetime request is missing; runtime generation requires recovery before uninstall'
+        }
+    }
+    elseif ($RetireRelay -and ((Test-Path -LiteralPath (Join-Path $Identity.directory 'request.json')) -or
+                              (Test-Path -LiteralPath (Join-Path $Identity.directory 'runtime.json')))) {
+        # A partially registered installation without lifetime records can be
+        # retired. Existing records without their task require owner recovery.
+        throw 'Owned WSL lifetime task is missing; retained lifetime records require recovery before uninstall'
+    }
     $null=Get-ODSWslStartupIntent $Identity
     $lock=$null
     try {
@@ -529,8 +546,12 @@ function Disable-ODSWslStartup($Identity,[switch]$ValidateOnly,[switch]$RetireRe
         $lock=Open-ODSWslCommandLock $Identity
         Assert-ODSWslCommandSettled $Identity
         # Ordinary login opt-out leaves manually running services alone. Only
-        # explicit uninstall retirement stops the independently owned relay.
-        if ($RetireRelay) { Stop-ODSWslAgentRelay $Identity }
+        # explicit uninstall retirement stops the independently owned relay
+        # and releases this installation's WSL holder, never the distribution.
+        if ($RetireRelay) {
+            Stop-ODSWslAgentRelay $Identity
+            if ($lifetimeTask) { $null=Stop-ODSWslLifetime $Identity }
+        }
         [pscustomobject]@{scope='wsl-startup';state='disabled';identity=$Identity;relayRetirement=$(if ($RetireRelay) { 'stopped' } else { 'not-requested' })}
     } finally { if ($lock) { $lock.Dispose() } }
 }
