@@ -189,6 +189,35 @@ class UninstallVolumeTests(unittest.TestCase):
             "ods_perplexica-data", "ods_perplexica-uploads",
         })
 
+    def test_bind_only_stopped_container_blocks_uninstall_postflight(self):
+        self.fake.volumes = {}
+        self.fake.containers[0]["State"] = {"Status": "exited"}
+        self.fake.containers[0]["Config"]["Labels"]["com.docker.compose.service"] = "open-webui"
+        self.fake.containers[0]["Mounts"] = [{
+            "Type": "bind", "Source": str(self.root / "data/open-webui"),
+            "Destination": "/app/backend/data",
+        }]
+        MODULE.preflight(self.root, self.snapshot, ["-f", "docker-compose.base.yml"])
+        with self.assertRaisesRegex(ValueError, "ODS containers remain after Compose cleanup"):
+            MODULE.postflight_containers(self.root, self.snapshot)
+        self.fake.containers = []
+        MODULE.postflight_containers(self.root, self.snapshot)
+
+    def test_keep_data_still_checks_owned_containers_after_down(self):
+        self.fake.containers[0]["State"] = {"Status": "exited"}
+        MODULE.preflight(self.root, self.snapshot, [], keep_data=True)
+        with self.assertRaisesRegex(ValueError, "ODS containers remain after Compose cleanup"):
+            MODULE.postflight_containers(self.root, self.snapshot)
+        self.fake.containers = []
+        MODULE.postflight_containers(self.root, self.snapshot)
+
+    def test_container_ownership_drift_blocks_postflight(self):
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.fake.containers[0]["Config"]["Labels"][
+            "com.docker.compose.project.working_dir"] = "/other/ods"
+        with self.assertRaisesRegex(ValueError, "another installation"):
+            MODULE.postflight_containers(self.root, self.snapshot)
+
     def test_volume_replacement_after_preflight_is_not_deleted(self):
         MODULE.preflight(self.root, self.snapshot, [])
         self.fake.volumes["ods_perplexica-data"]["CreatedAt"] = "2026-10-01T01:00:00Z"
