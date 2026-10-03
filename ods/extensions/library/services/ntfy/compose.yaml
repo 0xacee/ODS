@@ -5,6 +5,9 @@ services:
     command: [serve]
     restart: unless-stopped
     init: true
+    # Run as the install owner: ODS pre-creates data/ntfy as that user, and
+    # root without CAP_DAC_OVERRIDE cannot create the SQLite files there.
+    user: "${ODS_UID:-1000}:${ODS_GID:-1000}"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -23,7 +26,7 @@ services:
     volumes:
       - ./data/ntfy:/var/lib/ntfy
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${NTFY_PORT:-8097}:8080"
+      - "127.0.0.1:${NTFY_PORT:-8097}:8080"
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8080/v1/health"]
       interval: 30s

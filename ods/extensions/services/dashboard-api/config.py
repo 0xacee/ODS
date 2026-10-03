@@ -138,8 +138,29 @@ def _apply_host_native_llm_service_override(
     gpu_backend: str,
     environment: Mapping[str, str] | None = None,
 ) -> None:
-    """Route host-inference probes independently of WSL's GPU exposure."""
+    """Route probes to native inference rather than the container's default port."""
     env = environment if environment is not None else os.environ
+    if str(gpu_backend).lower() == "apple":
+        service = services.get("llama-server")
+        if not service or str(env.get("LLM_BACKEND", "")).lower() == "external":
+            return
+        # The macOS overlay supplies the Docker-reachable native endpoint.
+        # Do not substitute a general model-router/LiteLLM URL here.
+        configured_url = env.get("OLLAMA_URL", "")
+        if not configured_url:
+            return
+        try:
+            parsed = urlparse(configured_url)
+            port = parsed.port if parsed.port is not None else 80
+            if (parsed.scheme != "http" or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.query or parsed.fragment or not 1 <= port <= 65535):
+                return
+        except ValueError:
+            return
+        service["host"] = parsed.hostname
+        service["port"] = port
+        return
     lemonade = str(env.get("LLM_BACKEND", "")).strip().lower() == "lemonade"
     if str(gpu_backend).lower() != "amd" and not lemonade:
         return
@@ -415,6 +436,7 @@ def _read_manifest_file(path: Path) -> dict[str, Any]:
 
 def load_extension_manifests(
     manifest_dir: Path, gpu_backend: str,
+    *, only_service_ids: frozenset[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     """Load service and feature definitions from extension manifests.
 
@@ -434,6 +456,8 @@ def load_extension_manifests(
 
     manifest_files: list[Path] = []
     for item in sorted(manifest_dir.iterdir()):
+        if only_service_ids is not None and item.name not in only_service_ids:
+            continue
         if item.is_dir():
             for name in ("manifest.yaml", "manifest.yml", "manifest.json"):
                 candidate = item / name
@@ -592,7 +616,6 @@ def _default_n8n_url() -> str:
     return f"http://{host}:{port}"
 
 N8N_URL = os.environ.get("N8N_URL", _default_n8n_url())
-N8N_API_KEY = os.environ.get("N8N_API_KEY", "")
 
 # --- Setup / Personas ---
 
@@ -673,6 +696,10 @@ ALWAYS_ON_SERVICES: frozenset = frozenset({
     "llama-server", "model-router", "remote-provider-egress",
     "remote-provider-ssh-tunnel", "open-webui", "dashboard", "dashboard-api",
 })
+
+# Built-ins qualified for Dashboard Library Add/Disable. The live health poll
+# must refresh this same set after a fragment changes without an API restart.
+LIBRARY_MANAGEABLE_BUILTINS: frozenset = frozenset({"n8n", "perplexica", "searxng"})
 
 
 def load_extension_catalog() -> list[dict]:

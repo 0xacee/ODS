@@ -11,7 +11,6 @@ import { useVersion } from './hooks/useVersion'
 import { useFirstRun } from './hooks/useFirstRun'
 import { useSessionBootstrap } from './hooks/useSessionBootstrap'
 import { getInternalRoutes } from './plugins/registry'
-import SplashScreen from './components/SplashScreen'
 import { X, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { PortalIdentityProvider } from './contexts/PortalIdentityContext'
 
@@ -60,8 +59,6 @@ function App() {
   // See hooks/useSessionBootstrap.js for the full rationale.
   useSessionBootstrap(!isTalkPath)
 
-  // Play the current brand animation on each document load, including refresh.
-  const [splashDone, setSplashDone] = useState(false)
   const { status, loading, error } = useSystemStatus()
   const { version, showUpdate, dismissUpdate } = useVersion()
   // Server-side first-run flag (sourced from /api/setup/status). localStorage
@@ -108,10 +105,6 @@ function App() {
   if (firstRun) {
     return (
       <div className="min-h-screen bg-theme-bg text-theme-text">
-        {!splashDone && <SplashScreen preview={new URLSearchParams(location.search).get('intro') === 'preview'} onComplete={() => {
-          setStorageValue('sessionStorage', 'ods-splash-shown', '1')
-          setSplashDone(true)
-        }} />}
         <Suspense fallback={
           <div className="min-h-screen flex items-center justify-center">
             <div className="font-mono text-sm text-theme-accent tracking-widest animate-pulse">ODS</div>
@@ -127,10 +120,6 @@ function App() {
     <PortalIdentityProvider>
     <div className={`pixel-app flex min-h-screen bg-theme-bg text-theme-text relative ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <WallpaperVideo />
-      {!splashDone && <SplashScreen preview={new URLSearchParams(location.search).get('intro') === 'preview'} onComplete={() => {
-        setStorageValue('sessionStorage', 'ods-splash-shown', '1')
-        setSplashDone(true)
-      }} />}
       <Sidebar
         status={status}
         collapsed={sidebarCollapsed}
@@ -141,7 +130,7 @@ function App() {
         <div className="portal-chat">
           {showUpdate && <PortalUpdateNotice version={version} onDismiss={dismissUpdate} onReview={() => navigate('/settings?section=updates')} />}
           {status?.bootstrap?.active && <BootstrapBanner bootstrap={status.bootstrap} />}
-          <Suspense fallback={<p className="p-6 text-theme-text-muted">Opening Pixel…</p>}><Pixel systemStatus={status} /></Suspense>
+          <Suspense fallback={<p className="p-6 text-theme-text-muted">Opening Portal…</p>}><Pixel systemStatus={status} /></Suspense>
         </div>
         {panelOpen && <aside style={{'--portal-panel-width':`${panelWidth}px`}} className={`portal-side-panel ${panelCollapsed ? 'is-collapsed' : ''}`} aria-label="Workspace panel">
           {!panelCollapsed && <PanelResizeHandle width={panelWidth} onResize={setPanelWidth} />}

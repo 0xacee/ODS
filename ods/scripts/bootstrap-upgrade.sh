@@ -40,6 +40,11 @@ LOG_TAG="[BOOTSTRAP-UPGRADE]"
 log()  { echo "$LOG_TAG $(date '+%H:%M:%S') $*"; }
 MODEL_ROUTER_SWAP_GATE_TOKEN=""
 MODEL_ROUTER_SWAP_GATE_HEARTBEAT_PID=""
+BOOTSTRAP_PIXEL_TRANSACTION=""
+BOOTSTRAP_PIXEL_OWNER=""
+BOOTSTRAP_PIXEL_HOME=""
+BOOTSTRAP_PIXEL_CONFIG_MUTATED=false
+BOOTSTRAP_PIXEL_RELEASE_FAILED=false
 
 model_router_swap_gate_call() {
     local action="$1" token="$2" lease_seconds="${3:-30}"
@@ -229,11 +234,12 @@ MODELS_INI="$INSTALL_DIR/config/llama-server/models.ini"
 STATUS_FILE="$INSTALL_DIR/data/bootstrap-status.json"
 UPGRADE_LOCK_DIR=""
 
-reconcile_ods_managed_pixel_model() {
-    local target_model="${1:-$FULL_LLM_MODEL}"
+prepare_bootstrap_pixel_model() {
+    BOOTSTRAP_PIXEL_OWNER=""
+    BOOTSTRAP_PIXEL_HOME=""
     [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]] || return 0
 
-    local owner home marker sudo_helper pixel_helper target_context target_max_tokens target_reasoning reasoning_mode
+    local owner home marker sudo_helper pixel_helper
     if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
         owner="${SUDO_USER:-}"
     else
@@ -264,6 +270,60 @@ reconcile_ods_managed_pixel_model() {
     # shellcheck source=installers/lib/pixel-host-install.sh
     . "$pixel_helper"
 
+    BOOTSTRAP_PIXEL_OWNER="$owner"
+    BOOTSTRAP_PIXEL_HOME="$home"
+}
+
+acquire_bootstrap_pixel_model_transaction() {
+    prepare_bootstrap_pixel_model || return 1
+    [[ -n "$BOOTSTRAP_PIXEL_OWNER" ]] || return 0
+    local binary transaction
+    binary="$(_ods_pixel_openclaw_bin "$BOOTSTRAP_PIXEL_OWNER" "$BOOTSTRAP_PIXEL_HOME")" || return 1
+    _ods_pixel_install_access_service "$BOOTSTRAP_PIXEL_OWNER" "$binary" || return 1
+    # Drain whole Portal turns before closing model-router admission: an active
+    # turn may still need more inference requests to finish its tools/follow-up.
+    transaction="$(_ods_pixel_model_transition begin "$BOOTSTRAP_PIXEL_OWNER" "$BOOTSTRAP_PIXEL_HOME")" || return 1
+    [[ "$transaction" =~ ^[0-9a-f]{64}$ ]] || return 1
+    BOOTSTRAP_PIXEL_TRANSACTION="$transaction"
+    log "Closed Pixel admission and drained active Portal turns before model promotion."
+}
+
+finish_bootstrap_pixel_model_transaction() {
+    local outcome="$1"
+    [[ -n "$BOOTSTRAP_PIXEL_TRANSACTION" ]] || return 0
+    [[ "$BOOTSTRAP_PIXEL_RELEASE_FAILED" != true ]] || return 1
+    if ! _ods_pixel_model_transition finish "$BOOTSTRAP_PIXEL_OWNER" "$BOOTSTRAP_PIXEL_HOME" \
+        "$BOOTSTRAP_PIXEL_TRANSACTION" "$outcome"; then
+        BOOTSTRAP_PIXEL_RELEASE_FAILED=true
+        log "ERROR: Pixel model transaction release requires recovery; do not mutate the route further."
+        return 1
+    fi
+    BOOTSTRAP_PIXEL_TRANSACTION=""
+}
+
+cleanup_bootstrap_pixel_model_transaction() {
+    [[ -n "$BOOTSTRAP_PIXEL_TRANSACTION" ]] || return 0
+    # A lost finish reply can follow a partial gate release. Do not replay it
+    # from EXIT even when inference configuration was never changed.
+    [[ "$BOOTSTRAP_PIXEL_RELEASE_FAILED" != true ]] || return 1
+    if [[ "$BOOTSTRAP_PIXEL_CONFIG_MUTATED" == false ]]; then
+        finish_bootstrap_pixel_model_transaction rolled-back || return 1
+    else
+        # Never reopen Portal admission on a possibly half-promoted route.
+        # A verified rollback or the same transaction's recovery must do so.
+        log "ERROR: Unfinished Pixel model transaction retained for explicit recovery."
+        return 1
+    fi
+}
+
+reconcile_ods_managed_pixel_model() {
+    local target_model="${1:-$FULL_LLM_MODEL}" outcome="${2:-applied}"
+    local owner home target_context target_max_tokens target_reasoning reasoning_mode
+    if [[ -z "$BOOTSTRAP_PIXEL_TRANSACTION" ]]; then
+        prepare_bootstrap_pixel_model || return 1
+    fi
+    owner="$BOOTSTRAP_PIXEL_OWNER"; home="$BOOTSTRAP_PIXEL_HOME"
+    [[ -n "$owner" ]] || return 0
     target_context="$(read_env_value MAX_CONTEXT)"
     [[ "$target_context" =~ ^[0-9]+$ ]] || target_context="$(read_env_value CTX_SIZE)"
     if ! [[ "$target_context" =~ ^[0-9]+$ && "$target_context" -ge 4096 ]]; then
@@ -283,7 +343,8 @@ reconcile_ods_managed_pixel_model() {
 
     log "Reconciling the ODS-managed Pixel route to ${target_model} at ${target_context} tokens..."
     if ods_pixel_reconcile_promoted_model "$owner" "$home" "$target_model" ready \
-        "$target_context" "$target_max_tokens" "$target_reasoning"; then
+        "$target_context" "$target_max_tokens" "$target_reasoning" "" "$BOOTSTRAP_PIXEL_TRANSACTION"; then
+        finish_bootstrap_pixel_model_transaction "$outcome" || return 1
         log "ODS-managed Pixel now targets ${target_model}."
         return 0
     fi
@@ -312,7 +373,14 @@ get_remote_size() {
 write_status() {
     local status="$1" percent="${2:-}" downloaded="${3:-0}" total="${4:-0}" speed="${5:-0}" eta="${6:-}"
     local _safe_model="${FULL_GGUF_FILE//\"/\\\"}"
-    cat > "$STATUS_FILE.tmp" << STATUSEOF
+    local _status_dir _tmp
+    _status_dir="$(dirname "$STATUS_FILE")"
+    mkdir -p "$_status_dir" 2>/dev/null || true
+    _tmp="$(umask 077; mktemp "${STATUS_FILE}.tmp.XXXXXX" 2>/dev/null)" || {
+        log "WARNING: could not create private status temp file next to $STATUS_FILE"
+        return 1
+    }
+    if ! cat > "$_tmp" << STATUSEOF
 {
   "status": "$status",
   "model": "$_safe_model",
@@ -324,7 +392,15 @@ write_status() {
   "updatedAt": "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
 }
 STATUSEOF
-    mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+    then
+        rm -f "$_tmp" 2>/dev/null || true
+        return 1
+    fi
+    if ! mv "$_tmp" "$STATUS_FILE"; then
+        rm -f "$_tmp" 2>/dev/null || true
+        return 1
+    fi
+    return 0
 }
 
 status_percent() {
@@ -374,6 +450,22 @@ write_existing_upgrade_status() {
     write_status "downloading" "$percent" "$downloaded" "$total" 0 "$message"
 }
 
+validate_bootstrap_compose_args() {
+    # A saved stack is not authorization: recipes may have changed since the
+    # installer resolved it. Validate immediately before every Compose call,
+    # including retries and companion-agent recreation. Preserve argv boundaries.
+    local policy="$INSTALL_DIR/scripts/compose-cache-policy.py"
+    local python_cmd="${ODS_PYTHON_CMD:-}"
+    if [[ -z "$python_cmd" ]]; then
+        python_cmd="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+    fi
+    if [[ ! -f "$policy" || -z "$python_cmd" ]]; then
+        log "ERROR: cannot validate the saved Compose stack; repair the ODS installation before upgrading models."
+        return 1
+    fi
+    "$python_cmd" "$policy" --install-dir "$INSTALL_DIR" --arguments "$@" >/dev/null
+}
+
 compose_recreate_llama_server_with_retry() {
     local -a compose_args=("$@")
     local max_attempts="${ODS_BOOTSTRAP_COMPOSE_RETRY_ATTEMPTS:-3}"
@@ -385,6 +477,7 @@ compose_recreate_llama_server_with_retry() {
     local retries=$(( max_attempts - 1 ))
     local output rc
     while true; do
+        validate_bootstrap_compose_args "${compose_args[@]}" || return 1
         output=$(env -u GGUF_FILE -u LLM_MODEL -u MAX_CONTEXT -u CTX_SIZE \
             $DOCKER_COMPOSE_CMD "${compose_args[@]}" up -d --force-recreate --no-deps llama-server 2>&1)
         rc=$?
@@ -426,6 +519,7 @@ compose_recreate_hermes() {
     # replaced, so recreate Hermes through the exact active Compose stack.
     (
         cd "$INSTALL_DIR"
+        validate_bootstrap_compose_args "${compose_args[@]}" || return 1
         env -u GGUF_FILE -u LLM_MODEL -u LEMONADE_MODEL -u MAX_CONTEXT -u CTX_SIZE \
             $DOCKER_COMPOSE_CMD "${compose_args[@]}" \
             up -d --force-recreate --no-deps hermes
@@ -468,15 +562,69 @@ acquire_upgrade_lock() {
 
     UPGRADE_LOCK_DIR="$lock_dir"
     printf '%s\n' "$$" > "$pid_file"
-    trap 'release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock' EXIT
+    trap 'stop_download_monitor; cleanup_bootstrap_pixel_model_transaction; release_model_router_swap_gate; release_model_lifecycle_lock; release_upgrade_lock' EXIT
 }
 
 model_sha256() {
     local path="$1"
+    case "$(uname -s 2>/dev/null || true)" in
+        MINGW*|MSYS*|CYGWIN*)
+            local ps_cmd=""
+            if command -v powershell.exe >/dev/null 2>&1; then
+                ps_cmd="powershell.exe"
+            elif command -v pwsh.exe >/dev/null 2>&1; then
+                ps_cmd="pwsh.exe"
+            fi
+            if [[ -n "$ps_cmd" ]] && command -v cygpath >/dev/null 2>&1; then
+                local win_path output rc
+                win_path="$(cygpath -w "$path")" || return 1
+                output="$(ODS_SHA_PATH="$win_path" "$ps_cmd" -NoLogo -NoProfile -NonInteractive -Command '
+$ErrorActionPreference = [System.Management.Automation.ActionPreference]::Stop
+$stream = $null
+$hasher = $null
+try {
+    $stream = [System.IO.File]::OpenRead($env:ODS_SHA_PATH)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    [Console]::WriteLine([BitConverter]::ToString($hasher.ComputeHash($stream)).Replace("-", ""))
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+} finally {
+    if ($stream) { $stream.Dispose() }
+    if ($hasher) { $hasher.Dispose() }
+}
+' 2>/dev/null)"
+                rc=$?
+                if (( rc != 0 )); then
+                    return 1
+                fi
+                output="$(printf '%s' "$output" | tr -d '\r' | tr 'A-F' 'a-f')"
+                if [[ ! "$output" =~ ^[0-9a-f]{64}$ ]]; then
+                    return 1
+                fi
+                printf '%s\n' "$output"
+                return 0
+            fi
+            ;;
+    esac
     if command -v sha256sum &>/dev/null; then
-        sha256sum "$path" 2>/dev/null | awk '{print $1}'
+        local out rc
+        out="$(sha256sum "$path" 2>/dev/null)"
+        rc=$?
+        (( rc == 0 )) || return 1
+        out="${out%% *}"
+        [[ -n "$out" ]] || return 1
+        printf '%s\n' "$out"
+        return 0
     elif command -v shasum &>/dev/null; then
-        shasum -a 256 "$path" 2>/dev/null | awk '{print $1}'
+        local out rc
+        out="$(shasum -a 256 "$path" 2>/dev/null)"
+        rc=$?
+        (( rc == 0 )) || return 1
+        out="${out%% *}"
+        [[ -n "$out" ]] || return 1
+        printf '%s\n' "$out"
+        return 0
     else
         return 2
     fi
@@ -490,8 +638,8 @@ verify_model_integrity() {
     case "$?" in
         0) ;;
         2)
-            log "WARNING: No checksum tool available — skipping SHA256 verification"
-            return 0
+            log "ERROR: No SHA256 hasher available (sha256sum/shasum/PowerShell); refusing to verify $path"
+            return 1
             ;;
         *)
             log "Could not compute SHA256 for $path"
@@ -573,6 +721,10 @@ snapshot_active_model_config() {
 }
 
 restore_active_model_config() {
+    if [[ "${BOOTSTRAP_PIXEL_RELEASE_FAILED:-false}" == true ]]; then
+        log "ERROR: Pixel transaction release is uncertain; automatic config/model-file rollback suppressed."
+        return 1
+    fi
     [[ -n "${ACTIVE_CONFIG_SNAPSHOT_DIR:-}" && -d "$ACTIVE_CONFIG_SNAPSHOT_DIR" ]] || return 1
 
     if [[ -f "$ACTIVE_CONFIG_SNAPSHOT_DIR/env" ]]; then
@@ -618,6 +770,11 @@ discard_active_model_config_snapshot() {
 restore_docker_llama_server_after_swap_failure() {
     local health_url="${1:-}"
     local reconcile_pixel="${2:-false}"
+    if [[ "$BOOTSTRAP_PIXEL_RELEASE_FAILED" == true ]]; then
+        log "ERROR: Pixel transaction release is uncertain; automatic inference rollback suppressed."
+        return 1
+    fi
+    [[ -z "$BOOTSTRAP_PIXEL_TRANSACTION" ]] || reconcile_pixel=true
     local compose_arg_count=0
     local previous_gguf previous_gpu_backend previous_llm_model previous_model_id
     local rollback_healthy=false
@@ -678,7 +835,7 @@ restore_docker_llama_server_after_swap_failure() {
             fi
         fi
         if [[ "$reconcile_pixel" == "true" && -n "$previous_llm_model" ]] \
-            && ! reconcile_ods_managed_pixel_model "$previous_llm_model"; then
+            && ! reconcile_ods_managed_pixel_model "$previous_llm_model" rolled-back; then
             log "WARNING: previous inference runtime is healthy, but the managed Pixel route could not be reconciled to ${previous_llm_model}."
             return 1
         fi
@@ -721,6 +878,10 @@ move_bootstrap_model_aside_for_windows_swap() {
 }
 
 restore_bootstrap_model_after_windows_swap_failure() {
+    if [[ "${BOOTSTRAP_PIXEL_RELEASE_FAILED:-false}" == true ]]; then
+        log "ERROR: Pixel transaction release is uncertain; automatic config/model-file rollback suppressed."
+        return 1
+    fi
     [[ -n "$BOOTSTRAP_SWAP_BACKUP_PATH" && -f "$BOOTSTRAP_SWAP_BACKUP_PATH" ]] || return 0
 
     mv "$BOOTSTRAP_SWAP_BACKUP_PATH" "$BOOTSTRAP_PATH" || return 1
@@ -1139,8 +1300,8 @@ restart_windows_lemonade_with_full_model() {
 
     local pid_file bind_addr lemonade_port target_context helper_path env_path
     pid_file="$INSTALL_DIR/data/llama-server.pid"
-    bind_addr="$(read_env_value BIND_ADDRESS)"
-    [[ -n "$bind_addr" ]] || bind_addr="127.0.0.1"
+    # Model upgrades must preserve the private native inference listener.
+    bind_addr="127.0.0.1"
     lemonade_port="$(read_env_value AMD_INFERENCE_PORT)"
     [[ -n "$lemonade_port" ]] || lemonade_port="8080"
     target_context="$(read_env_value CTX_SIZE)"
@@ -1394,6 +1555,24 @@ restart_windows_lemonade_with_full_model() {
     for _i in $(seq 1 "$_swap_attempts"); do
         if curl -sf --max-time 5 "http://127.0.0.1:${lemonade_port}/api/v1/models" 2>/dev/null \
             | grep -q "\"id\"[[:space:]]*:[[:space:]]*\"${model_id}\""; then
+            # Loading through chat alone can leave ctx_size absent on Lemonade
+            # 10.0, even when the server was launched with --ctx-size. Use the
+            # same explicit per-model load contract as catalog activation.
+            if ! env "ODS_WIN_LEMONADE_HELPER=$(windows_path "$helper_path")" \
+                "ODS_WIN_ENV_PATH=$(windows_path "$env_path")" \
+                "ODS_WIN_LEMONADE_PORT=$lemonade_port" \
+                "ODS_WIN_MODEL_ID=$model_id" "ODS_WIN_CONTEXT_SIZE=$target_context" \
+                "$ps_cmd" -NoProfile -ExecutionPolicy Bypass -Command '
+                    $ErrorActionPreference = "Stop"
+                    . $env:ODS_WIN_LEMONADE_HELPER
+                    $key = Get-ODSLemonadeAdminApiKey -EnvPath $env:ODS_WIN_ENV_PATH
+                    Set-ODSLemonadeLoadedModel -Port ([int]$env:ODS_WIN_LEMONADE_PORT) `
+                        -ModelId $env:ODS_WIN_MODEL_ID -ContextSize ([int]$env:ODS_WIN_CONTEXT_SIZE) `
+                        -ApiKey $key
+                ' >>"$ps_output_file" 2>&1; then
+                log "Windows Lemonade rejected the explicit model/context load; refusing promotion."
+                return 1
+            fi
             if curl -sf --max-time 240 -X POST \
                 "http://127.0.0.1:${lemonade_port}/api/v1/chat/completions" \
                 -H "Content-Type: application/json" \
@@ -1426,6 +1605,59 @@ restart_windows_lemonade_with_previous_model() {
     restart_windows_lemonade_with_full_model "$previous_gguf" "previous model"
 }
 
+# Print the checkpoint interval llama-server.exe can take, or nothing. Called
+# in a command substitution, so warnings go to stderr (the upgrade log).
+# Mirrors installers/macos/lib/native-checkpoint-args.py and
+# installers/windows/lib/native-llama-args.ps1: llama.cpp removed
+# --checkpoint-every-n-tokens in b9310, and llama-server exits on a flag it
+# does not know. The setting is opt-in, so an unusable value is dropped with a
+# warning rather than failing the swap.
+windows_native_checkpoint_interval() {
+    local llama_exe="$1" value="$2" number="" help_text
+    [[ -n "$value" ]] || return 0
+    if [[ "$value" == "-1" ]]; then
+        number="-1"
+    elif [[ "$value" =~ ^[0-9]{1,12}$ ]] && (( 10#$value >= 1 && 10#$value <= 262144 )); then
+        number="$((10#$value))"
+    else
+        log "WARNING: LLAMA_ARG_CHECKPOINT_EVERY_NT=$value is not an integer from -1 to 262144 (0 is not allowed); starting llama-server without it." >&2
+        return 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        help_text="$(timeout 15 "$llama_exe" --help 2>&1)" || help_text=""
+    else
+        help_text="$("$llama_exe" --help 2>&1)" || help_text=""
+    fi
+    if ! grep -Eq -- '(^|[^[:alnum:]_-])--checkpoint-every-n-tokens([^[:alnum:]_-]|$)' <<< "$help_text"; then
+        log "WARNING: this llama-server has no --checkpoint-every-n-tokens (removed in llama.cpp b9310); starting it without LLAMA_ARG_CHECKPOINT_EVERY_NT." >&2
+        return 0
+    fi
+    printf '%s\n' "$number"
+}
+
+# Print which reasoning switch llama-server.exe takes for LLAMA_REASONING:
+# "reasoning" when it has --reasoning (b9014), "budget" when it lacks it but
+# has --reasoning-budget and the mode is off (b8248: budget 0 disables
+# thinking, and its default -1 leaves it on), or nothing to keep only the
+# --reasoning-format mapping. b9014 defaults --reasoning to auto, which turns
+# Qwen3.5 thinking on, and with --reasoning-format none the reasoning comes
+# back inside the reply. Mirrors installers/windows/lib/native-llama-args.ps1.
+windows_native_reasoning_flag() {
+    local llama_exe="$1" mode="$2" help_text
+    case "$mode" in off|on|auto) ;; *) return 0 ;; esac
+    if command -v timeout >/dev/null 2>&1; then
+        help_text="$(timeout 15 "$llama_exe" --help 2>&1)" || return 0
+    else
+        help_text="$("$llama_exe" --help 2>&1)" || return 0
+    fi
+    if grep -E -- '(^|[^[:alnum:]_-])--reasoning([^[:alnum:]_-]|$)' <<< "$help_text" | grep -qvi 'has been removed'; then
+        printf '%s\n' reasoning
+    elif [[ "$mode" == off ]] \
+        && grep -E -- '(^|[^[:alnum:]_-])--reasoning-budget([^[:alnum:]_-]|$)' <<< "$help_text" | grep -qvi 'has been removed'; then
+        printf '%s\n' budget
+    fi
+}
+
 restart_windows_native_llama_server_with_full_model() {
     is_windows_bash || return 1
 
@@ -1449,8 +1681,8 @@ restart_windows_native_llama_server_with_full_model() {
     model_path="$MODELS_DIR/$FULL_GGUF_FILE"
     rollback_model_path="$MODELS_DIR/$BOOTSTRAP_GGUF_FILE"
     log_path="$INSTALL_DIR/data/llama-server.log"
-    bind_addr="$(read_env_value BIND_ADDRESS)"
-    [[ -n "$bind_addr" ]] || bind_addr="127.0.0.1"
+    # Model upgrades must preserve the private native inference listener.
+    bind_addr="127.0.0.1"
     ctx_size="$(read_env_value CTX_SIZE)"
     [[ -n "$ctx_size" ]] || ctx_size="$(read_env_value MAX_CONTEXT)"
     [[ -n "$ctx_size" ]] || ctx_size="$FULL_MAX_CONTEXT"
@@ -1484,12 +1716,14 @@ restart_windows_native_llama_server_with_full_model() {
     ODS_WIN_CTX_SIZE="$ctx_size" \
     ODS_WIN_GPU_LAYERS="$(read_env_value N_GPU_LAYERS)" \
     ODS_WIN_REASONING_FORMAT="$reasoning_fmt" \
+    ODS_WIN_REASONING_MODE="$reasoning" \
+    ODS_WIN_REASONING_FLAG="$(windows_native_reasoning_flag "$llama_exe" "$reasoning")" \
     ODS_WIN_FLASH_ATTN="$(read_env_value LLAMA_ARG_FLASH_ATTN)" \
     ODS_WIN_CACHE_TYPE_K="$(read_env_value LLAMA_ARG_CACHE_TYPE_K)" \
     ODS_WIN_CACHE_TYPE_V="$(read_env_value LLAMA_ARG_CACHE_TYPE_V)" \
     ODS_WIN_N_CPU_MOE="$(read_env_value LLAMA_ARG_N_CPU_MOE)" \
     ODS_WIN_PARALLEL="$(read_env_value LLAMA_PARALLEL)" \
-    ODS_WIN_CHECKPOINT_EVERY_N_TOKENS="$(read_env_value LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS)" \
+    ODS_WIN_CHECKPOINT_EVERY_N_TOKENS="$(windows_native_checkpoint_interval "$llama_exe" "$(read_env_value LLAMA_ARG_CHECKPOINT_EVERY_NT)")" \
     ODS_WIN_NO_CACHE_PROMPT="$(read_env_value LLAMA_ARG_NO_CACHE_PROMPT)" \
     ODS_WIN_SPEC_TYPE="$(read_env_value LLAMA_ARG_SPEC_TYPE)" \
     ODS_WIN_SPEC_DRAFT_N_MAX="$(read_env_value LLAMA_ARG_SPEC_DRAFT_N_MAX)" \
@@ -1549,9 +1783,13 @@ restart_windows_native_llama_server_with_full_model() {
                 "--port", $env:ODS_WIN_LLAMA_PORT,
                 "--n-gpu-layers", $gpuLayers,
                 "--ctx-size", $env:ODS_WIN_CTX_SIZE,
-                "--reasoning-format", $env:ODS_WIN_REASONING_FORMAT,
                 "--metrics"
             )
+            if ($env:ODS_WIN_REASONING_FLAG -eq "reasoning") { $args += @("--reasoning", $env:ODS_WIN_REASONING_MODE) }
+            else {
+                $args += @("--reasoning-format", $env:ODS_WIN_REASONING_FORMAT)
+                if ($env:ODS_WIN_REASONING_FLAG -eq "budget") { $args += @("--reasoning-budget", "0") }
+            }
             if ($env:ODS_WIN_FLASH_ATTN) { $args += @("--flash-attn", $env:ODS_WIN_FLASH_ATTN) }
             if ($env:ODS_WIN_CACHE_TYPE_K) { $args += @("--cache-type-k", $env:ODS_WIN_CACHE_TYPE_K) }
             if ($env:ODS_WIN_CACHE_TYPE_V) { $args += @("--cache-type-v", $env:ODS_WIN_CACHE_TYPE_V) }
@@ -1791,7 +2029,10 @@ capture_windows_lemonade_dependent_state() {
 }
 
 load_windows_lemonade_compose_args() {
-    [[ ${#WINDOWS_LEMONADE_COMPOSE_ARGS[@]} -eq 0 ]] || return 0
+    if [[ ${#WINDOWS_LEMONADE_COMPOSE_ARGS[@]} -gt 0 ]]; then
+        validate_bootstrap_compose_args "${WINDOWS_LEMONADE_COMPOSE_ARGS[@]}"
+        return $?
+    fi
     [[ -n "${DOCKER_COMPOSE_CMD:-}" ]] || return 1
 
     local resolved_flags="" recovered_flags=false
@@ -1848,6 +2089,7 @@ load_windows_lemonade_compose_args() {
         index=$((index + 1))
     done
     (( compose_file_count > 0 )) || return 1
+    validate_bootstrap_compose_args "${candidate_args[@]}" || return 1
 
     if [[ "$recovered_flags" == "true" ]]; then
         printf '%s\n' "$resolved_flags" > "$INSTALL_DIR/.compose-flags" || return 1
@@ -2110,6 +2352,11 @@ snapshot_env_value() {
 
 rollback_windows_lemonade_swap() {
     local reconcile_pixel="${1:-false}"
+    if [[ "${BOOTSTRAP_PIXEL_RELEASE_FAILED:-false}" == true ]]; then
+        log "ERROR: Pixel transaction release is uncertain; automatic Windows inference rollback suppressed."
+        return 1
+    fi
+    [[ -z "${BOOTSTRAP_PIXEL_TRANSACTION:-}" ]] || reconcile_pixel=true
     local previous_gguf previous_llm_model previous_model_id rollback_ok=true inference_restored=false route_verified=false
     previous_gguf="$(snapshot_env_value GGUF_FILE)"
     previous_llm_model="$(snapshot_env_value LLM_MODEL)"
@@ -2131,9 +2378,11 @@ rollback_windows_lemonade_swap() {
     if [[ "$WINDOWS_LEMONADE_OPENCLAW_PRESENT" == "true" && -n "$previous_model_id" ]]; then
         verify_windows_lemonade_openclaw_model_env "$previous_model_id" || rollback_ok=false
     fi
-    if [[ "$reconcile_pixel" == "true" && -n "$previous_llm_model" ]] \
-        && ! reconcile_ods_managed_pixel_model "$previous_llm_model"; then
-        rollback_ok=false
+    if [[ "$reconcile_pixel" == "true" ]]; then
+        if [[ "$rollback_ok" != true || "$inference_restored" != true || -z "$previous_llm_model" ]] \
+            || ! reconcile_ods_managed_pixel_model "$previous_llm_model" rolled-back; then
+            rollback_ok=false
+        fi
     fi
 
     # Downstream verification traverses the model router. Keep admission
@@ -2174,7 +2423,7 @@ windows_lemonade_swap_failed() {
 activate_windows_lemonade_full_model() {
     local model_id
     if ! restart_windows_lemonade_with_full_model; then
-        windows_lemonade_swap_failed "native Lemonade did not load it after swap (registration timeout)"
+        windows_lemonade_swap_failed "native Lemonade model load, completion, or context verification failed after swap; inspect the Lemonade restart log"
         return 1
     fi
     model_id="$(read_env_value LEMONADE_MODEL)"
@@ -2307,6 +2556,7 @@ refresh_lemonade_after_bootstrap_cleanup() {
     fi
 
     log "Refreshing Lemonade after bootstrap model cleanup so stale model metadata is dropped..."
+    validate_bootstrap_compose_args "${compose_args[@]}" || return 1
     env -u GGUF_FILE -u LLM_MODEL -u MAX_CONTEXT -u CTX_SIZE \
         $DOCKER_COMPOSE_CMD "${compose_args[@]}" up -d --force-recreate --no-deps llama-server 2>&1 || return 1
 
@@ -2397,6 +2647,26 @@ monitor_download() {
         prev_bytes=$current_bytes
         prev_time=$now
     done
+}
+
+# Monitor lifecycle helpers. The monitor runs in a background subshell, so
+# shell variables mutated there are invisible to the parent. All coordination
+# must go through the process table (kill/wait) and the on-disk status file.
+MONITOR_PID=""
+
+start_download_monitor() {
+    local part_file="$1" total_bytes="$2"
+    stop_download_monitor
+    monitor_download "$part_file" "$total_bytes" &
+    MONITOR_PID=$!
+}
+
+stop_download_monitor() {
+    local pid="${MONITOR_PID:-}"
+    MONITOR_PID=""
+    [[ -n "$pid" ]] || return 0
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
 }
 
 # ── Docker permission detection ──
@@ -2528,13 +2798,11 @@ if [[ -f "$_part_path" && "$TOTAL_BYTES" -gt 0 ]]; then
 fi
 
 if [[ "$_dl_success" != "true" ]]; then
-    monitor_download "$_part_path" "$TOTAL_BYTES" &
-    _monitor_pid=$!
     # Exit 75 distinguishes a supervisor-retryable session/bridge interruption
     # from a genuine bounded download failure (exit 1). A deliberate
     # `systemctl stop` still suppresses Restart=, while the portable nohup path
     # remains honestly failed until `ods start` or `ods restart` resumes it.
-    trap 'kill $_monitor_pid 2>/dev/null || true; write_failed_download_status "$_part_path" "$TOTAL_BYTES" "Download interrupted; partial file preserved for resume."; release_model_lifecycle_lock; release_upgrade_lock; exit 75' HUP TERM INT
+    trap 'stop_download_monitor; write_failed_download_status "$_part_path" "$TOTAL_BYTES" "Download interrupted; partial file preserved for resume."; release_model_lifecycle_lock; release_upgrade_lock; exit 75' HUP TERM INT
 
     # Download with resume support. curl success is not enough: finalizing the
     # .part file can fail, and checksum verification can expose a corrupt
@@ -2571,10 +2839,12 @@ if [[ "$_dl_success" != "true" ]]; then
                 # Let this script own retry/resume. curl's internal retry path can
                 # restart the transfer from byte zero after a long connection reset,
                 # truncating an otherwise good multi-GB .part file.
+                start_download_monitor "$_part_path" "$TOTAL_BYTES"
                 if curl -fSL -C - --connect-timeout "$_download_connect_timeout" \
                         --speed-time "$_download_speed_time" --speed-limit "$_download_speed_limit" \
                         "${_download_curl_http_flags[@]}" \
                         -o "$_part_path" "$FULL_GGUF_URL" 2>&1; then
+                    stop_download_monitor
                     if [[ ! -s "$_part_path" ]]; then
                         log "Download attempt $_attempt reported success but produced no partial file: $_part_path"
                     else
@@ -2585,6 +2855,7 @@ if [[ "$_dl_success" != "true" ]]; then
                         fi
                     fi
                 else
+                    stop_download_monitor
                     log "Download attempt $_attempt failed"
                 fi
             fi
@@ -2639,8 +2910,8 @@ if [[ "$_dl_success" != "true" ]]; then
         _download_round=$(( _download_round + 1 ))
     done
 
-    kill $_monitor_pid 2>/dev/null || true
-    trap - TERM INT
+    stop_download_monitor
+    trap - HUP TERM INT
 
     if [[ "$_dl_success" != "true" ]]; then
         write_failed_download_status "$_part_path" "$TOTAL_BYTES" "Download failed after bounded retry budget; partial file preserved for resume."
@@ -2688,6 +2959,11 @@ elif [[ -n "$DOCKER_CMD" ]]; then
 fi
 
 if [[ "$_windows_lemonade_swap_applies" == "true" || "$_windows_native_llama_swap_applies" == "true" || "$_docker_llama_swap_applies" == "true" ]]; then
+    if ! acquire_bootstrap_pixel_model_transaction; then
+        write_status "failed" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 \
+            "Full model downloaded and verified, but ODS could not safely drain Portal work before activation. Current model configuration was left unchanged; inspect Pixel transition recovery before retrying."
+        fail "Could not safely drain Portal work before full-model activation."
+    fi
     if ! acquire_model_router_swap_gate; then
         write_status "failed" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 \
             "Full model downloaded and verified, but ODS could not safely drain model traffic before activation. The current model was left unchanged; re-run to retry."
@@ -2711,6 +2987,7 @@ if [[ "$_windows_lemonade_swap_applies" == "true" || "$_windows_native_llama_swa
 fi
 
 # ── Phase 3: Update .env ──
+BOOTSTRAP_PIXEL_CONFIG_MUTATED=true
 write_status "swapping" 100 "$TOTAL_BYTES" "$TOTAL_BYTES" 0 ""
 log "Updating .env..."
 if promote_full_model_env "initial full-model promotion"; then
@@ -3234,6 +3511,7 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
             # which executes the first compose-arg (e.g. `-f`) as a binary.
             # Skip the recreate and surface a clear warning instead.
             if [[ ${#COMPOSE_ARGS[@]} -gt 0 && -n "$DOCKER_COMPOSE_CMD" ]]; then
+                validate_bootstrap_compose_args "${COMPOSE_ARGS[@]}" && \
                 env -u GGUF_FILE -u LLM_MODEL -u MAX_CONTEXT -u CTX_SIZE \
                     $DOCKER_COMPOSE_CMD "${COMPOSE_ARGS[@]}" up -d --force-recreate openclaw 2>&1 || \
                     log "WARNING: OpenClaw recreate failed (non-fatal)"
@@ -3405,7 +3683,7 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
 
     LLAMA_SERVER_BIN="$INSTALL_DIR/bin/llama-server"
     LLAMA_SERVER_PID_FILE="$INSTALL_DIR/data/.llama-server.pid"
-    LLAMA_SERVER_LOG="$INSTALL_DIR/data/llama-server.log"
+    LLAMA_SERVER_LOG="$HOME/Library/Logs/ODS/llama-server.log"
 
     if [[ ! -x "$LLAMA_SERVER_BIN" ]]; then
         log "WARNING: llama-server binary not found at $LLAMA_SERVER_BIN. Cannot hot-swap."
@@ -3421,6 +3699,47 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
         if [[ ! -f "$_model_path" ]]; then
             log "WARNING: Model file not found at $_model_path"
         else
+            # Read reasoning mode from .env (default off to prevent thinking models
+            # from consuming the entire token budget on internal reasoning)
+            _reasoning=$(grep '^LLAMA_REASONING=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "")
+            [[ -z "$_reasoning" ]] && _reasoning="off"
+            case "$_reasoning" in
+                off)  _reasoning_fmt="none" ;;
+                on)   _reasoning_fmt="deepseek" ;;
+                *)    _reasoning_fmt="$_reasoning" ;;
+            esac
+
+            # Spell draft flags for this runtime and add the macOS defaults it
+            # supports (--ctx-checkpoints 32, --spec-type ngram-mod, and
+            # --reasoning on b9014 instead of this --reasoning-format), with the
+            # helper install-macos.sh and ods-macos.sh use, before the bootstrap
+            # model is stopped. A rejected setting must not strand the swap.
+            _llama_tuning_args=(--reasoning-format "$_reasoning_fmt")
+            _tuning_helper="$INSTALL_DIR/installers/macos/lib/native-checkpoint-args.py"
+            if [[ -f "$_tuning_helper" ]] && _tuning_file="$(mktemp)"; then
+                if "${ODS_PYTHON_CMD:-python3}" "$_tuning_helper" --binary "$LLAMA_SERVER_BIN" \
+                    --interval="$(read_env_value LLAMA_ARG_CHECKPOINT_EVERY_NT)" \
+                    --checkpoints="$(read_env_value LLAMA_ARG_CTX_CHECKPOINTS)" \
+                    --cache-mib="$(read_env_value LLAMA_ARG_CACHE_RAM)" \
+                    --idle-seconds="$(read_env_value LLAMA_ARG_SLEEP_IDLE_SECONDS)" \
+                    --min-spacing="$(read_env_value LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT)" \
+                    --explicit-spec-type="$(read_env_value LLAMA_ARG_SPEC_TYPE)" \
+                    --spec-default="$(read_env_value LLAMA_SPEC_TYPE)" \
+                    --draft-n-max="$(read_env_value LLAMA_ARG_SPEC_DRAFT_N_MAX)" \
+                    --draft-type-k="$(read_env_value LLAMA_ARG_SPEC_DRAFT_TYPE_K)" \
+                    --draft-type-v="$(read_env_value LLAMA_ARG_SPEC_DRAFT_TYPE_V)" \
+                    --reasoning-mode="$_reasoning" --reasoning-format-fallback="$_reasoning_fmt" \
+                    --apply-defaults > "$_tuning_file"; then
+                    _llama_tuning_args=()
+                    while IFS= read -r -d '' _tuning_field; do
+                        _llama_tuning_args+=("$_tuning_field")
+                    done < "$_tuning_file"
+                else
+                    log "WARNING: native llama-server tuning was rejected for this runtime; starting the full model without it. Fix .env, then run './ods-macos.sh restart'."
+                fi
+                rm -f "$_tuning_file"
+            fi
+
             # Capture old model path for rollback before we kill the process
             _old_pid=$(cat "$LLAMA_SERVER_PID_FILE" 2>/dev/null | tr -d '[:space:]')
             _old_model_path=""
@@ -3443,19 +3762,8 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
                 fi
             fi
 
-            # Read reasoning mode from .env (default off to prevent thinking models
-            # from consuming the entire token budget on internal reasoning)
-            _reasoning=$(grep '^LLAMA_REASONING=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "")
-            [[ -z "$_reasoning" ]] && _reasoning="off"
-            case "$_reasoning" in
-                off)  _reasoning_fmt="none" ;;
-                on)   _reasoning_fmt="deepseek" ;;
-                *)    _reasoning_fmt="$_reasoning" ;;
-            esac
-
-            # Honour the unified BIND_ADDRESS knob (PR #964); empty/missing → loopback.
-            _bind=$(grep '^BIND_ADDRESS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
-            [[ -z "$_bind" ]] && _bind="127.0.0.1"
+            # The dashboard's LAN binding must not expose native inference.
+            _bind="127.0.0.1"
             _native_port=$(grep '^ODS_NATIVE_LLAMA_PORT=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
             [[ "$_native_port" =~ ^[0-9]+$ ]] || _native_port="8080"
             _flash_attn=$(grep '^LLAMA_ARG_FLASH_ATTN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
@@ -3465,13 +3773,11 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
             _gpu_layers=$(grep '^N_GPU_LAYERS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
             [[ -z "$_gpu_layers" ]] && _gpu_layers="auto"
             _spec_type=$(grep '^LLAMA_ARG_SPEC_TYPE=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
-            _spec_draft_n_max=$(grep '^LLAMA_ARG_SPEC_DRAFT_N_MAX=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
             _llama_args=(
                 --host "$_bind" --port "$_native_port"
                 --model "$_model_path"
                 --ctx-size "$_ctx_size"
                 --n-gpu-layers "$_gpu_layers"
-                --reasoning-format "$_reasoning_fmt"
                 --metrics
             )
             [[ -n "$_flash_attn" ]] && _llama_args+=(--flash-attn "$_flash_attn")
@@ -3479,16 +3785,13 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
             [[ -n "$_cache_type_v" ]] && _llama_args+=(--cache-type-v "$_cache_type_v")
             [[ -n "$_n_cpu_moe" ]] && _llama_args+=(--n-cpu-moe "$_n_cpu_moe")
             [[ -n "$_spec_type" ]] && _llama_args+=(--spec-type "$_spec_type")
-            [[ -n "$_spec_draft_n_max" ]] && _llama_args+=(--spec-draft-n-max "$_spec_draft_n_max")
+            _llama_args+=(${_llama_tuning_args[@]+"${_llama_tuning_args[@]}"})
 
             # Relaunch with new model
             log "Starting native llama-server with ${_gguf_file}..."
-            (
-                cd "$INSTALL_DIR" || exit 1
-                exec "$LLAMA_SERVER_BIN" "${_llama_args[@]}"
-            ) > "$LLAMA_SERVER_LOG" 2>&1 &
-            _new_pid=$!
-            echo "$_new_pid" > "$LLAMA_SERVER_PID_FILE"
+            bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
+                "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" "${_llama_args[@]}"
+            _new_pid="$(cat "$LLAMA_SERVER_PID_FILE")"
 
             # Wait for health
             log "Waiting for native llama-server health..."
@@ -3512,18 +3815,15 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
                     kill -9 "$_new_pid" 2>/dev/null || true
                 fi
                 if [[ -n "${_old_model_path:-}" && -f "$_old_model_path" ]]; then
-                    (
-                        cd "$INSTALL_DIR" || exit 1
-                        exec "$LLAMA_SERVER_BIN" \
+                    bash "$INSTALL_DIR/installers/macos/lib/native-llama-service.sh" start \
+                            "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$LLAMA_SERVER_PID_FILE" \
                             --host "$_bind" --port "$_native_port" \
                             --model "$_old_model_path" \
                             --ctx-size "$_ctx_size" \
                             --n-gpu-layers "$_gpu_layers" \
                             --reasoning-format "${_reasoning_fmt:-none}" \
                             --metrics
-                    ) > "$LLAMA_SERVER_LOG" 2>&1 &
-                    _rollback_pid=$!
-                    echo "$_rollback_pid" > "$LLAMA_SERVER_PID_FILE"
+                    _rollback_pid="$(cat "$LLAMA_SERVER_PID_FILE")"
                     log "Rolled back to previous model: $(basename "$_old_model_path") (PID $_rollback_pid)"
                 else
                     log "WARNING: Could not rollback — previous model not found."
@@ -3625,7 +3925,8 @@ if curl -sf --max-time 3 "${_perplexica_url}/api/config" >/dev/null 2>&1; then
 import os, sys, json, urllib.request
 config = json.load(sys.stdin)["values"]
 providers = config.get("modelProviders", [])
-openai_prov = next((p for p in providers if p["type"] == "openai"), None)
+openai_index = next((i for i, p in enumerate(providers) if p["type"] == "openai"), None)
+openai_prov = providers[openai_index] if openai_index is not None else None
 if not openai_prov:
     sys.exit(0)  # Perplexica has no OpenAI provider configured; skip (non-fatal)
 url = os.environ["PERPLEXICA_URL"] + "/api/config"
@@ -3649,7 +3950,9 @@ prov_config = openai_prov.get("config") or {}
 prov_config["apiKey"] = key
 prov_config["baseURL"] = base_url
 openai_prov["config"] = prov_config
-post("modelProviders", providers)
+# GET includes Vane-built-in models. Write only route fields for this provider.
+post(f"modelProviders.{openai_index}.chatModels", openai_prov["chatModels"])
+post(f"modelProviders.{openai_index}.config", openai_prov["config"])
 prefs = config.get("preferences", {})
 prefs["defaultChatModel"] = model
 prefs["defaultChatProvider"] = openai_prov["id"]

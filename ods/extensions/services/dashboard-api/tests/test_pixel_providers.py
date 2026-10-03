@@ -1,4 +1,4 @@
-from host_agent_client import AgentUnavailable, AgentHTTPError, AgentProtocolError
+from host_agent_client import AgentUnavailable, AgentHTTPError as AgentHTTPError, AgentProtocolError as AgentProtocolError
 import copy
 import json
 from unittest.mock import AsyncMock, patch

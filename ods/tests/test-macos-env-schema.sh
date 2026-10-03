@@ -46,6 +46,7 @@ chmod +x "$STUB_DIR/docker" "$STUB_DIR/hostname"
 generate_env() {
     local tier="$1"
     local install_dir="$2"
+    local force_overwrite="${3:-true}"
     mkdir -p "$install_dir/config/searxng"
     (
         export PATH="$STUB_DIR:$PATH"
@@ -63,7 +64,7 @@ generate_env() {
         DOCKER_BACKEND="docker-desktop"
         ODS_MODEL_SWITCHBOARD="enabled"
         resolve_tier_config "$tier" || exit 3
-        generate_ods_env "$install_dir" "$tier" true
+        generate_ods_env "$install_dir" "$tier" "$force_overwrite"
     ) >"$install_dir/generate.log" 2>&1 \
         || fail "generate_ods_env failed for tier $tier: $(tail -n 3 "$install_dir/generate.log")"
     [[ -f "$install_dir/.env" ]] || fail "tier $tier produced no .env"
@@ -80,12 +81,18 @@ for tier in 1 CLOUD; do
     install_dir="$TMP_DIR/tier-$tier"
     generate_env "$tier" "$install_dir"
     env_file="$install_dir/.env"
+    grep -qx 'N8N_RUN_USER=node' "$env_file" \
+        || fail "tier $tier must use the image user for n8n on macOS"
 
     dupes="$(duplicate_keys "$env_file")"
     [[ -z "$dupes" ]] \
         || fail "tier $tier .env assigns a key more than once: $(printf '%s' "$dupes" | tr '\n' ' ')"
     [[ "$(grep -c '^LLM_BACKEND=' "$env_file")" -eq 1 ]] \
         || fail "tier $tier .env must declare LLM_BACKEND exactly once"
+    grep -qx 'TTS_WORKERS=1' "$env_file" \
+        || fail "tier $tier macOS install must use one TTS worker"
+    grep -qx 'HERMES_REQUIRE_OWNER_CARD=false' "$env_file" \
+        || fail "tier $tier must open Hermes without an owner card by default"
     pass "tier $tier: generated .env assigns every key once"
 
     # validate-env.sh needs Bash 4+ (associative arrays); ods-cli runs it with
@@ -95,3 +102,57 @@ for tier in 1 CLOUD; do
     fi
     pass "tier $tier: generated .env validates against .env.schema.json"
 done
+
+tts_override_dir="$TMP_DIR/tts-worker-override"
+generate_env 1 "$tts_override_dir"
+awk '{ if ($0 == "TTS_WORKERS=1") print "TTS_WORKERS=2"; else print }' \
+    "$tts_override_dir/.env" > "$tts_override_dir/.env.new"
+mv "$tts_override_dir/.env.new" "$tts_override_dir/.env"
+generate_env 1 "$tts_override_dir" false
+grep -qx 'TTS_WORKERS=2' "$tts_override_dir/.env" \
+    || fail 'macOS reinstall did not preserve an explicit TTS worker override'
+pass 'macOS reinstall preserves an explicit TTS worker override'
+
+hermes_override_dir="$TMP_DIR/hermes-owner-card-override"
+generate_env 1 "$hermes_override_dir"
+sed 's/^HERMES_REQUIRE_OWNER_CARD=false$/HERMES_REQUIRE_OWNER_CARD=true/' \
+    "$hermes_override_dir/.env" > "$hermes_override_dir/.env.new"
+mv "$hermes_override_dir/.env.new" "$hermes_override_dir/.env"
+generate_env 1 "$hermes_override_dir" false
+grep -qx 'HERMES_REQUIRE_OWNER_CARD=true' "$hermes_override_dir/.env" \
+    || fail 'macOS reinstall did not preserve explicit Hermes owner-card gating'
+pass 'macOS reinstall preserves explicit Hermes owner-card gating'
+
+# A forced reinstall must not rotate credentials already bound to a persisted
+# Langfuse database. Other install secrets may still rotate under --force.
+langfuse_dir="$TMP_DIR/langfuse-force"
+generate_env 1 "$langfuse_dir"
+mkdir -p "$langfuse_dir/data/langfuse/postgres"
+printf '16\n' > "$langfuse_dir/data/langfuse/postgres/PG_VERSION"
+old_langfuse="$(grep '^LANGFUSE_' "$langfuse_dir/.env")"
+old_dashboard_key="$(grep '^DASHBOARD_API_KEY=' "$langfuse_dir/.env")"
+generate_env 1 "$langfuse_dir"
+[[ "$(grep '^LANGFUSE_' "$langfuse_dir/.env")" == "$old_langfuse" ]] \
+    || fail 'forced reinstall rotated persisted Langfuse credentials'
+[[ "$(grep '^DASHBOARD_API_KEY=' "$langfuse_dir/.env")" != "$old_dashboard_key" ]] \
+    || fail 'forced reinstall did not rotate an unbound install secret'
+pass 'forced reinstall preserves persisted Langfuse credentials'
+
+missing_env_dir="$TMP_DIR/langfuse-without-env"
+mkdir -p "$missing_env_dir/data/langfuse/postgres"
+printf '16\n' > "$missing_env_dir/data/langfuse/postgres/PG_VERSION"
+if (generate_env 1 "$missing_env_dir") >/dev/null 2>&1; then
+    fail 'persisted Langfuse database accepted a missing prior .env'
+fi
+[[ ! -f "$missing_env_dir/.env" ]] \
+    || fail 'missing prior Langfuse credentials still produced a new .env'
+pass 'persisted Langfuse database fails closed without prior credentials'
+
+sed '/^LANGFUSE_DB_PASSWORD=/d' "$langfuse_dir/.env" > "$langfuse_dir/.env.missing-key"
+mv "$langfuse_dir/.env.missing-key" "$langfuse_dir/.env"
+if (generate_env 1 "$langfuse_dir") >/dev/null 2>&1; then
+    fail 'persisted Langfuse database accepted a missing password'
+fi
+[[ "$(grep -c '^LANGFUSE_DB_PASSWORD=' "$langfuse_dir/.env" || true)" -eq 0 ]] \
+    || fail 'rejected Langfuse credentials were overwritten'
+pass 'persisted Langfuse database fails closed on an incomplete prior .env'

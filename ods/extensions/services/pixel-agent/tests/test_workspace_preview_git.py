@@ -104,8 +104,10 @@ def _build_exact_repo_fixture(site: pathlib.Path) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(site.parent)
     subprocess.run(["git", "add", "."], capture_output=True, check=True, cwd=str(site), env=env)
+    # The mutation assertion includes .git; background Git maintenance must
+    # not create/remove its own lock files after the fixture returns.
     subprocess.run(
-        ["git", "commit", "-m", "initial"],
+        ["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "commit", "-m", "initial"],
         capture_output=True, check=True, cwd=str(site), env=env,
     )
 
@@ -138,11 +140,14 @@ def test_exact_normal_repo_fixture():
 
         canonical = _build_exact_repo_fixture(site)
 
-        # Pre-snapshot source tree snapshot for mutation check
+        # Compare the user's source files, not Git's own transient maintenance
+        # locks. Git may remove .git/objects/maintenance.lock after git commit
+        # returns, independently of publication.
         source_files_pre = {}
         for f in site.rglob("*"):
-            if f.is_file():
-                source_files_pre[str(f.relative_to(site))] = f.read_bytes()
+            rel = f.relative_to(site)
+            if f.is_file() and ".git" not in rel.parts:
+                source_files_pre[str(rel)] = f.read_bytes()
 
         # Publish — must succeed with the revised patch
         result = MODULE.publish_snapshot(workspace, previews, "gitea-demo", os.getuid())
@@ -779,7 +784,7 @@ def test_asset_ownership_mode_hardlink_size_checks_preserved():
         try:
             MODULE.publish_snapshot(workspace, previews, "grp-write-file", os.getuid())
         except MODULE.PreviewError as exc:
-            assert "unsafe" in str(exc).lower()
+            assert str(exc) == "writable preview file"
         else:
             raise AssertionError("group-writable file was accepted")
 
@@ -812,4 +817,3 @@ def test_metadata_is_never_opened_or_traversed_and_alias_is_rejected():
         (site / "assets").symlink_to(site / ".git", target_is_directory=True)
         with pytest.raises(MODULE.PreviewError, match="unsafe"):
             MODULE.publish_snapshot(workspace, previews, site.name, os.getuid())
-

@@ -11,12 +11,26 @@
 #           LOG_FILE, BGRN, AMB, NC,
 #           WHISPER_PORT, TTS_PORT, OPENCLAW_PORT,
 #           PERPLEXICA_PORT (:-3004), COMFYUI_PORT (:-8188),
-#           show_phase(), check_service(), ai(), ai_ok(), ai_warn(), signal()
+#           show_phase(), check_service(), ai(), ai_ok(), ai_warn(), signal(),
+#           ui_status_line(), ods_ui_cinematic()
 # Provides: Health check results, Perplexica auto-configuration
 #
 # Modder notes:
 #   Add new service health checks or auto-configuration here.
 # ============================================================================
+
+# Keep standalone phase harnesses usable; production defines this in ui.sh.
+if ! declare -F ui_status_line >/dev/null 2>&1; then
+    ui_status_line() {
+        local kind="$1" message="$2" label
+        case "$kind" in ok) label="OK" ;; warn) label="WARN" ;; error) label="ERROR" ;; *) label="INFO" ;; esac
+        printf '  [%s] %s\n' "$label" "$message"
+    }
+fi
+
+_phase12_cinematic() {
+    declare -F ods_ui_cinematic >/dev/null 2>&1 && ods_ui_cinematic
+}
 
 # Source service registry for port/health resolution
 . "$SCRIPT_DIR/lib/service-registry.sh"
@@ -35,7 +49,12 @@ show_phase 6 6 "Systems Online" "~1-2 minutes"
 
 if $DRY_RUN; then
     log "[DRY RUN] Would verify service health:"
-    log "[DRY RUN]   - llama-server, Open WebUI, Perplexica, ComfyUI"
+    if [[ -n "${EXTERNAL_LLM_URL:-}" ]]; then
+        log "[DRY RUN]   - External model through LiteLLM"
+    else
+        log "[DRY RUN]   - Managed llama-server"
+    fi
+    [[ "${ENABLE_OPEN_WEBUI:-true}" != "true" ]] || log "[DRY RUN]   - Open WebUI"
     log "[DRY RUN]   - Auto-configure Perplexica for ${LLM_MODEL:-default model}"
     [[ "$ENABLE_HERMES" == "true" ]] && log "[DRY RUN]   - Hermes Agent + hermes-proxy"
     [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" ]] && log "[DRY RUN]   - Pixel gateway + private ingress + edge"
@@ -73,13 +92,17 @@ _check_container_health() {
     read -r -a docker_cmd_arr <<< "$docker_cmd"
     [[ ${#docker_cmd_arr[@]} -gt 0 ]] || docker_cmd_arr=(docker)
 
-    printf "  ${GRN}...${NC} Waiting for %-20s " "$name"
+    if _phase12_cinematic; then
+        printf "  ${GRN}...${NC} Waiting for %-20s " "$name"
+    else
+        printf "  ... Waiting for %s\n" "$name"
+    fi
     for attempt in $(seq 1 "$max_attempts"); do
         local state=""
         state=$("${docker_cmd_arr[@]}" inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null || echo "missing")
         case "$state" in
             exited|dead|missing)
-                printf "\r  ${RED}ERR${NC} %-55s\n" "$name container $state"
+                ui_status_line error "$name container $state"
                 ai_warn "$name container is $state; not retrying health probe."
                 return 1
                 ;;
@@ -89,12 +112,12 @@ _check_container_health() {
         health=$("${docker_cmd_arr[@]}" inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_name" 2>/dev/null || echo "missing")
         case "$health" in
             healthy)
-                printf "\r  ${BGRN}OK${NC} %-56s\n" "$name healthy"
+                ui_status_line ok "$name healthy"
                 return 0
                 ;;
             running)
                 # No Docker healthcheck declared. Treat running as good enough.
-                printf "\r  ${BGRN}OK${NC} %-56s\n" "$name running"
+                ui_status_line ok "$name running"
                 return 0
                 ;;
         esac
@@ -102,7 +125,7 @@ _check_container_health() {
         sleep 5
     done
 
-    printf "\r  ${AMB}WARN${NC} %-54s\n" "$name delayed (container health not healthy yet)"
+    ui_status_line warn "$name delayed (container health not healthy yet)"
     ai_warn "$name container health is not healthy yet. I will continue."
     return 1
 }
@@ -217,7 +240,7 @@ _phase12_verify_external_lemonade_completion() {
 }
 
 _phase12_verify_external_llm_completion() {
-    local host_url container_url provider model dashboard_container response
+    local host_url container_url provider model dashboard_container response probe_diagnostics
     local -a docker_cmd_arr=()
     host_url="${EXTERNAL_LLM_URL:-$(_phase12_env_get EXTERNAL_LLM_URL "")}"
     container_url="${EXTERNAL_LLM_CONTAINER_URL:-$(_phase12_env_get EXTERNAL_LLM_CONTAINER_URL "")}"
@@ -239,21 +262,26 @@ _phase12_verify_external_llm_completion() {
         ai "Restore the model/service, or re-run the installer with --no-external-llm."
         return 1
     fi
-    if ! external_llm_probe_completion "$host_url" "$model"; then
+    if ! probe_diagnostics="$(external_llm_probe_completion "$host_url" "$model" 2>&1)"; then
         ai_bad "External ${provider} accepted discovery but failed a real completion for ${model}."
-        ai "Check the provider logs and model readiness, then re-run the installer."
+        ai "Check the probe diagnostic in ${LOG_FILE} and provider readiness, then re-run the installer."
+        printf 'External %s completion probe diagnostic:\n%.*s\n' \
+            "$provider" 2048 "$probe_diagnostics" >> "$LOG_FILE"
         return 1
     fi
 
     ai "Verifying the external model route from the ODS Docker network..."
     response="$(
-        "${docker_cmd_arr[@]}" exec "$dashboard_container" python -c '
+        if [[ -n "${EXTERNAL_LLM_API_KEY_FILE:-}" ]]; then
+            external_llm_read_api_key "$EXTERNAL_LLM_API_KEY_FILE"
+        fi | "${docker_cmd_arr[@]}" exec -i "$dashboard_container" python -c '
 import json
 import sys
 import urllib.request
 
 base = sys.argv[1].rstrip("/")
 model = sys.argv[2]
+key = sys.stdin.read()
 payload = json.dumps({
     "model": model,
     "messages": [{"role": "user", "content": "Reply with OK."}],
@@ -261,10 +289,13 @@ payload = json.dumps({
     "temperature": 0,
     "stream": False,
 }).encode()
+headers = {"Content-Type": "application/json"}
+if key:
+    headers["Authorization"] = "Bearer " + key
 request = urllib.request.Request(
     base + "/v1/chat/completions",
     data=payload,
-    headers={"Content-Type": "application/json"},
+    headers=headers,
 )
 with urllib.request.urlopen(request, timeout=90) as result:
     body = json.load(result)
@@ -397,8 +428,10 @@ else
 fi
 
 # Open WebUI: 150 attempts * adaptive backoff = up to ~20 minutes
-ods_progress 89 "health" "Waiting for Chat UI"
-_check_health "Open WebUI" "http://127.0.0.1:${SERVICE_PORTS[open-webui]:-3000}${SERVICE_HEALTH[open-webui]:-/}" 150 10 "$(sr_container open-webui)"
+if [[ "${ENABLE_OPEN_WEBUI:-true}" == "true" ]]; then
+    ods_progress 89 "health" "Waiting for Chat UI"
+    _check_health "Open WebUI" "http://127.0.0.1:${SERVICE_PORTS[open-webui]:-3000}${SERVICE_HEALTH[open-webui]:-/}" 150 10 "$(sr_container open-webui)"
+fi
 # Perplexica: 150 attempts * adaptive backoff = up to ~20 minutes
 if [[ "${ENABLE_PERPLEXICA:-false}" == "true" ]]; then
     ods_progress 91 "health" "Waiting for Research engine"
@@ -432,7 +465,12 @@ if $DOCKER_CMD inspect ods-perplexica &>/dev/null; then
     PERPLEXICA_URL="http://127.0.0.1:${SERVICE_PORTS[perplexica]:-3004}"
     _perplexica_switchboard_mode="$(printf '%s' "${ODS_MODEL_SWITCHBOARD:-enabled}" | tr '[:upper:]' '[:lower:]')"
     PERPLEXICA_MODEL="${LLM_MODEL:-default}"
-    if [[ -n "${GGUF_FILE:-}" ]]; then
+    if [[ -n "${EXTERNAL_LLM_URL:-}" && -n "${EXTERNAL_LLM_MODEL:-}" ]]; then
+        # Generic external installs intentionally keep the local tier GGUF
+        # metadata for recommendations. It must not replace the exact model
+        # selected from the external provider in Perplexica's persisted route.
+        PERPLEXICA_MODEL="$EXTERNAL_LLM_MODEL"
+    elif [[ -n "${GGUF_FILE:-}" ]]; then
         PERPLEXICA_MODEL="$GGUF_FILE"
         # Lemonade serves the model under a separate id. An AMD local install
         # runs Lemonade while LLM_BACKEND stays "llama-server", so the runtime
@@ -497,7 +535,8 @@ import sys, json, urllib.request
 
 config = json.load(sys.stdin)["values"]
 providers = config.get("modelProviders", [])
-openai_prov = next((p for p in providers if p["type"] == "openai"), None)
+openai_index = next((i for i, p in enumerate(providers) if p["type"] == "openai"), None)
+openai_prov = providers[openai_index] if openai_index is not None else None
 transformers_prov = next((p for p in providers if p["type"] == "transformers"), None)
 
 if not openai_prov:
@@ -529,7 +568,9 @@ openai_prov["config"] = {
     "apiKey": api_key,
     "baseURL": base_url,
 }
-post("modelProviders", providers)
+# GET includes Vane-built-in models. Write only route fields for this provider.
+post(f"modelProviders.{openai_index}.chatModels", openai_prov["chatModels"])
+post(f"modelProviders.{openai_index}.config", openai_prov["config"])
 
 # Set default providers and models
 post("preferences", {
@@ -543,8 +584,8 @@ post("preferences", {
 post_setup_complete()
 print("ok")
 ' >> "$LOG_FILE" 2>&1 && \
-            printf "\r  ${BGRN}✓${NC} %-60s\n" "Perplexica configured (model: ${PERPLEXICA_MODEL})" || \
-            printf "\r  ${AMB}⚠${NC} %-60s\n" "Perplexica config — complete setup at :${PERPLEXICA_PORT:-3004}"
+            ui_status_line ok "Perplexica configured (model: ${PERPLEXICA_MODEL})" || \
+            ui_status_line warn "Perplexica config — complete setup at :${PERPLEXICA_PORT:-3004}"
     fi
 fi
 
@@ -656,11 +697,11 @@ if [[ "$ENABLE_VOICE" == "true" ]]; then
     done
 
     if ! $_stt_api_ready; then
-        printf "\r  ${AMB}⚠${NC} %-60s\n" "STT models API not ready — download manually:"
+        ui_status_line warn "STT models API not ready — download manually:"
         printf "      %s\n" "$STT_RECOVERY_CMD"
     # Step 2: skip download if already cached.
     elif _stt_model_cached "$STT_MODEL_URL"; then
-        printf "\r  ${BGRN}✓${NC} %-60s\n" "STT model already cached (${STT_MODEL})"
+        ui_status_line ok "STT model already cached (${STT_MODEL})"
     else
         # Step 3: POST to trigger download. Log stdout/stderr to install log.
         ai "Downloading STT model (${STT_MODEL})..."
@@ -669,9 +710,9 @@ if [[ "$ENABLE_VOICE" == "true" ]]; then
         # Step 4: verify the model is actually cached. POST can return 200
         # even if the download partially fails, so this GET is the real test.
         if _wait_stt_model_cached "$STT_MODEL_URL"; then
-            printf "\r  ${BGRN}✓${NC} %-60s\n" "STT model cached (${STT_MODEL})"
+            ui_status_line ok "STT model cached (${STT_MODEL})"
         else
-            printf "\r  ${AMB}⚠${NC} %-60s\n" "STT model download failed — run manually:"
+            ui_status_line warn "STT model download failed — run manually:"
             printf "      %s\n" "$STT_RECOVERY_CMD"
             printf "      %s\n" "See $LOG_FILE for details."
         fi
@@ -691,8 +732,8 @@ if [[ "$HEALTH_FAILURES" -gt 0 ]]; then
     if [[ "$EMBEDDINGS_HEALTH_FAILED" == "true" ]]; then
         ai_warn "Embeddings/RAG was selected, but the embeddings service did not become healthy."
         ai_warn "This often means text-embeddings-inference stalled while downloading its ONNX model from Hugging Face."
-        ai_warn "Recovery: docker compose logs embeddings"
-        ai_warn "Then retry after network/CDN recovery: docker compose up -d embeddings"
+        ai_warn "Recovery: cd \"$INSTALL_DIR\" && ./ods-cli logs embeddings"
+        ai_warn "Then retry after network/CDN recovery: cd \"$INSTALL_DIR\" && ./ods-cli start embeddings"
         exit 1
     fi
     if [[ "${COMPOSE_STARTED_WITH_DELAYED_HEALTH:-false}" == "true" ]]; then

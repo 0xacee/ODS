@@ -3,10 +3,11 @@ import {displayForActivity} from './activity-display.mjs';
 // selected/filtered metadata and excerpts enter this projection. Token counts are
 // optional numeric measurements from the final model response, never estimates.
 const RUN = /^chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const noEarlierThan = (observed, floor) => observed < floor ? floor : observed;
 const ORDER = ['read', 'agent', 'run', 'edit', 'browser', 'preview', 'action', 'unknown'];
 const KINDS = new Map([
   ...['read', 'ls', 'glob', 'grep'].map(name => [name, 'read']),
-  ...['write', 'edit', 'apply_patch'].map(name => [name, 'edit']),
+  ...['write', 'edit', 'apply_patch', 'pixel_ods_workspace_bundle'].map(name => [name, 'edit']),
   ...['exec', 'process', 'shell', 'bash', 'eval', 'lsp', 'debug'].map(name => [name, 'run']),
   ...['task', 'hub', 'sessions_spawn', 'sessions_send'].map(name => [name, 'agent']),
   ...['browser', 'web_search', 'web_fetch', 'pixel_ods_web_extract', 'pixel_ods_research'].map(name => [name, 'browser']),
@@ -31,7 +32,8 @@ function failedResult(event) {
   let result = event?.result;
   for (let depth = 0; depth < 3 && result && typeof result === 'object'; depth++) {
     const details = result.details;
-    if (result.isError === true || ['failed', 'error', 'blocked'].includes(details?.status)
+    if (result.isError === true || details?.ok === false || details?.success === false
+      || ['failed', 'error', 'blocked'].includes(details?.status)
       || (Number.isInteger(details?.exitCode) && details.exitCode !== 0)) return true;
     result = details?.result;
   }
@@ -56,13 +58,35 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
   function begin(event, context) {
     const id = identify(event, context);
     if (!RUN.test(id ?? '')) return;
-    if (runs.has(id)) {knownRun(event,context);return;}
+    if (runs.has(id)) {
+      const run = knownRun(event, context);
+      const freshPromptBuild = event && typeof event === 'object' && !run.promptBuildEvents.has(event);
+      if (event && typeof event === 'object') run.promptBuildEvents.add(event);
+      // OpenClaw emits agent_end for each embedded attempt, including a
+      // context-overflow precheck that it subsequently compacts and retries.
+      // Only a fresh owned before_prompt_build may reopen a failed attempt.
+      // Preserve all prior tool failures and the original request start time.
+      if (freshPromptBuild && typeof event.prompt === 'string' && event.prompt.trim()
+          && run.state === 'failed' && run.finishedAt && !run.sessionConflict
+          && typeof run.sessionId === 'string' && run.sessionId
+          && context?.sessionId === run.sessionId
+          && typeof run.sessionKey === 'string' && run.sessionKey
+          && context?.sessionKey === run.sessionKey) {
+        run.state = 'running';
+        run.finishedAt = null;
+      }
+      return;
+    }
     while (runs.size >= maximumRuns) {
       const settled = [...runs].find(([, run]) => run.state !== 'running');
       if (!settled) return;
       runs.delete(settled[0]);
     }
-    runs.set(id, {runId:id, sessionKey:context?.sessionKey, startedAt:now(), finishedAt:null, state:'running', calls:new Map(), truncated:false, context:null});
+    const promptBuildEvents = new WeakSet();
+    if (event && typeof event === 'object') promptBuildEvents.add(event);
+    runs.set(id, {runId:id, sessionId:context?.sessionId, sessionKey:context?.sessionKey, promptBuildEvents,
+      workspaceRoot:context?.workspaceRoot,
+      startedAt:now(), finishedAt:null, state:'running', calls:new Map(), truncated:false, context:null});
   }
   function record(event, context, outcome) {
     const run = knownRun(event, context);
@@ -86,8 +110,13 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
     // A blocked attempt must not later become a successful effect because a
     // wrapper emitted an after-hook. Duplicate hook delivery is idempotent.
     if (existing?.outcome === 'blocked' || (existing && outcome === 'running' && existing.outcome !== 'running')) return;
-    const display=outcome==='blocked' ? null : displayForActivity(event,context,existing?.display);
-    run.calls.set(callId, {kind:existing?.kind ?? kindFor(event, context), outcome, display, startedAt:existing?.startedAt ?? now(), finishedAt:outcome === 'running' ? null : existing?.finishedAt ?? now(), wrapped:existing?.wrapped ?? toolName === 'tool_call'});
+    const display=outcome==='blocked' ? null : displayForActivity(event,{...context,workspaceRoot:run.workspaceRoot},existing?.display);
+    // WSL/host clock sync can move wall time backwards between the tool hooks.
+    // Keep the public receipt monotonic or ingress rejects the entire answer.
+    const observedAt=now();
+    const startedAt=existing?.startedAt ?? noEarlierThan(observedAt,run.startedAt);
+    const finishedAt=outcome==='running' ? null : existing?.finishedAt ?? noEarlierThan(observedAt,startedAt);
+    run.calls.set(callId, {kind:existing?.kind ?? kindFor(event, context), outcome, display, startedAt, finishedAt, wrapped:existing?.wrapped ?? toolName === 'tool_call'});
   }
   return {
     begin,
@@ -102,7 +131,7 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
       if (['cacheRead','cacheWrite'].some(key => usage[key] !== undefined && !valid(usage[key]))) return;
       const used = usage.input + usage.output + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
       // All-zero usage is a common sentinel from providers without telemetry.
-      if (used > 0 && valid(used)) run.context = {used, window, measuredAt:now()};
+      if (used > 0 && valid(used)) run.context = {used, window, measuredAt:noEarlierThan(now(),run.startedAt)};
     },
     activeForUser(user) {
       if (typeof user !== 'string' || !/^ods-[a-f0-9]{64}$/.test(user)) return null;
@@ -116,7 +145,8 @@ export function createTaskActivity({agentId = 'pixel', now = () => new Date().to
       const run = knownRun(event, context);
       if (!run) return;
       if (run.finishedAt) return;
-      run.finishedAt = now();
+      run.finishedAt = [...run.calls.values()].reduce((latest,call)=>
+        noEarlierThan(latest,call.finishedAt ?? call.startedAt),noEarlierThan(now(),run.startedAt));
       run.state = event?.success === true ? 'completed' : event?.success === false || event?.error ? 'failed' : 'finished';
     },
     projection(id) {

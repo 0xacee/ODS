@@ -54,6 +54,77 @@ function fixture({
   };
 }
 
+test('URL-only reads return bounded untrusted overviews without claiming a query match', async () => {
+  const harness = fixture({body: 'README\n' + 'project details '.repeat(1000)});
+  const result = await harness.tool.execute('overview', {url: 'https://github.com/owner/project'});
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.mode, 'overview');
+  assert.equal(result.details.matched, false);
+  assert.equal(result.details.evidence_truncated_after, true);
+  assert.match(result.content[0].text, /EXTERNAL_UNTRUSTED_CONTENT/);
+  assert.ok(result.content[0].text.length < 6500);
+  assert.equal(harness.releases(), 1);
+  assert.equal(failedToolOutcome({result}), false);
+});
+
+test('URL-only reads still reject local destinations and explicit invalid queries', async () => {
+  for (const params of [{url:'http://127.0.0.1/'}, {url:'https://github.com/a/b',query:null},
+    {url:'https://github.com/a/b',query:''}]) {
+    const harness = fixture();
+    assert.equal((await harness.tool.execute('invalid', params)).isError, true);
+    assert.equal(harness.calls.length, 0);
+  }
+});
+
+for (const scenario of ['success', 'missing-repository', 'redirect-loop', 'blocked', 'aborted', 'forbidden']) {
+  test('missing GitHub file recovery: ' + scenario, async () => {
+    const calls = [], releases = [];
+    const source = 'https://raw.githubusercontent.com/owner/project/main/missing.py';
+    const controller = new AbortController();
+    const tool = createPublicWebExtractTool({
+      guardedFetch: async options => {
+        calls.push(options);
+        if (calls.length === 2 && scenario === 'blocked') throw new Error('SSRF denied');
+        if (calls.length === 2 && scenario === 'aborted') {
+          assert.equal(options.signal.aborted, true);
+          throw new Error('aborted');
+        }
+        if (scenario === 'aborted') controller.abort();
+        // A 403 is refused again by the single plain fallback request.
+        const status = scenario === 'forbidden' ? 403 : calls.length === 1 ? 404
+          : ['missing-repository','redirect-loop'].includes(scenario) ? 404 : 200;
+        return {response:new Response(status === 200 ? 'Actual repository file listing' : 'Missing', {
+          status, headers:{'Content-Type':'text/plain'},
+        }), finalUrl:scenario === 'redirect-loop' ? source : options.url,
+        release:() => releases.push(options.url)};
+      },
+      readResponseText:async response => ({text:await response.text(),truncated:false}),
+      extractBasicHtmlContent:async ({html}) => ({text:html}),
+    });
+    const result = await tool.execute('recover', {url:source,query:'installation'}, controller.signal);
+    assert.equal(calls.length, 2);
+    if (scenario === 'forbidden') {
+      // Only a missing file leads to the repository page; a refusal does not.
+      assert.deepEqual(calls.map(call => call.url), [source, source]);
+      assert.equal(result.details.recovery, undefined);
+      assert.equal(result.details.status, 403);
+    } else {
+      assert.equal(calls[1].url, 'https://github.com/owner/project');
+      assert.equal(calls[1].signal, controller.signal);
+      assert.equal(calls[1].useEnvProxy, false);
+      assert.equal(result.details.failed_source_url, source);
+      assert.match(result.content[0].text, /It was not read/);
+    }
+    if (scenario === 'success') {
+      assert.equal(result.isError, undefined);
+      assert.equal(result.details.source_url, 'https://github.com/owner/project');
+      assert.equal(result.details.matched, false);
+      assert.match(result.content[1].text, /Actual repository file listing/);
+    } else assert.equal(result.isError, true);
+    assert.equal(releases.length, ['blocked','aborted'].includes(scenario) ? 1 : 2);
+  });
+}
+
 test("selects a bounded evidence window and falls back to the qualified dotted name", () => {
   const text = `${"prefix\n".repeat(300)}Path.exists(*, follow_symlinks=True)\nReturn True for an existing path.\n${"tail\n".repeat(2000)}`;
   const selected = selectEvidenceWindow(text, "pathlib.Path.exists");
@@ -337,3 +408,65 @@ for (const [body, matched] of [["Path.exists returns a boolean", true], ["Unrela
     assert.equal(harness.releases(), 1);
   });
 }
+
+
+test('literal occurrence tool receipt navigates repeated headings without widening reads', async () => {
+  const heading='TableStyle Span Commands';
+  const body=`Contents\n${heading}\n`+'Earlier section\n'.repeat(700)+`${heading}\nSPAN merges cells.\n`;
+  const harness=fixture({body});
+  const args={url:'https://docs.example.org/reference',query:heading};
+  const first=await harness.tool.execute('first',args);
+  assert.equal(first.details.match_count,2);
+  assert.equal(first.details.next_occurrence,2);
+  assert.match(first.content[0].text,/Literal occurrence 1 of 2; next occurrence: 2/);
+  const second=await harness.tool.execute('second',{...args,occurrence:2});
+  assert.equal(second.details.offset_basis,'extracted-text-utf16');
+  assert.equal(second.details.match_offset,body.lastIndexOf(heading));
+  assert.match(second.content[0].text,/SPAN merges cells/);
+  assert.equal(second.details.next_occurrence,null);
+  assert.equal(second.details.response_truncated,false);
+  assert.ok(second.details.evidence_end_offset-second.details.evidence_start_offset<=6000);
+  const missing=await harness.tool.execute('missing',{...args,occurrence:3});
+  assert.equal(missing.isError,true);
+  assert.equal(missing.details.matched,false);
+  assert.equal(missing.details.match_count,2);
+  assert.match(missing.content[0].text,/out of range: 2 literal matches/);
+  assert.equal(harness.calls.length,3,'one guarded read per explicit call, no automatic navigation');
+  assert.equal(harness.releases(),3);
+});
+
+test('occurrence validation rejects malformed navigation before any network work', async () => {
+  const harness=fixture({body:'SPAN'});
+  for(const occurrence of [0,-1,1.1,'2',null,Infinity,1000001]) {
+    const result=await harness.tool.execute('bad',{url:'https://docs.example.org/reference',query:'SPAN',occurrence});
+    assert.equal(result.isError,true,String(occurrence));
+  }
+  assert.equal((await harness.tool.execute('noquery',{url:'https://docs.example.org/reference',occurrence:1})).isError,true);
+  assert.equal(harness.calls.length,0);
+  assert.equal(harness.tool.parameters.properties.occurrence.type,'integer');
+});
+
+test('navigation cannot relabel a keyword window as the second literal match', async () => {
+  const harness=fixture({body:'Alpha supported bravo options charlie enabled.'});
+  const args={url:'https://docs.example.org/reference',query:'alpha bravo charlie'};
+  const first=await harness.tool.execute('default',args);
+  assert.equal(first.details.match_kind,'keywords');
+  assert.equal(first.details.match_count,undefined);
+  const second=await harness.tool.execute('second',{...args,occurrence:2});
+  assert.equal(second.isError,true);
+  assert.equal(second.details.matched,false);
+  assert.match(second.content[0].text,/requires a literal query/);
+});
+
+test('occurrence offsets preserve Unicode and regex punctuation with constant-size evidence', () => {
+  const text='İ😀 [cache](a+b)?\n'+'noise\n'.repeat(1200)+'İ😀 [CACHE](a+b)?\nDone';
+  const result=selectEvidenceWindow(text,'[cache](a+b)?',2);
+  assert.equal(result.matchCount,2);
+  assert.equal(result.matchOffset,text.indexOf('[CACHE]'));
+  assert.equal(result.text,text.slice(result.startOffset,result.endOffset));
+  assert.ok(result.text.length<=6000);
+  const dense=selectEvidenceWindow('aa'.repeat(500000),'aa',500000);
+  assert.equal(dense.matchCount,500000);
+  assert.equal(dense.matchOffset,999998);
+  assert.ok(dense.text.length<=6000);
+});

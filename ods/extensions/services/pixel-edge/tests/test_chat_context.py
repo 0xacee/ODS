@@ -1,7 +1,7 @@
 """Context route and lifecycle tests using the real edge HTTP server."""
 import asyncio
 import copy
-import json
+import json as json
 from unittest.mock import patch
 
 from test_pixel_edge import BaseEdgeTest
@@ -25,6 +25,16 @@ def state(status="idle", request_id=None):
 
 
 class TestContextRoutes(BaseEdgeTest):
+    def test_image_capability_is_explicit_and_bounded(self):
+        for capability in ("supported", "unsupported", "unknown"):
+            value = state()
+            value["model"]["imageInput"] = capability
+            self.assertEqual(project_context(value)["model"]["imageInput"], capability)
+        value["model"]["imageInput"] = True
+        with self.assertRaises(ValueError):
+            project_context(value)
+        self.assertNotIn("imageInput", project_context(state())["model"])
+
     def test_model_route_projection_is_bounded_and_does_not_expose_connection_details(self):
         value = state()
         value["model"].update(routeFingerprint="a" * 64, baseUrl="https://private.example", apiKey="secret")

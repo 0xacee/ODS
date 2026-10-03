@@ -20,6 +20,8 @@ import { pathToFileURL } from "node:url";
 import { parseTaskActivity } from "./task_activity_schema.mjs";
 import { parseQuestions } from "./questions_schema.mjs";
 import {createChatHistoryLedger,HistoryError} from './chat_history_ledger.mjs';
+import {createChatImageStore,createChatImageReadHandler,ChatImageError} from './chat_image_store.mjs';
+import {decodeChatImageTurn,nativeHistoryMessages,validateImageRoute} from './chat_image_transport.mjs';
 import {handleAccessMode, handleModelControl, readAccessOwnerKey} from './access_mode_relay.mjs';
 
 // ---------------------------------------------------------------------------
@@ -28,6 +30,7 @@ import {handleAccessMode, handleModelControl, readAccessOwnerKey} from './access
 
 const MAX_BODY = 2 * 1024 * 1024; // 2 MiB request body cap
 const MAX_HISTORY_BODY = 8 * 1024 * 1024;
+const MAX_IMAGE_BODY = 16 * 1024 * 1024;
 const MAX_NONSTREAM_RESPONSE = 2 * 1024 * 1024; // 2 MiB non-stream response cap
 const MAX_STREAM_RESPONSE = 4 * 1024 * 1024; // 4 MiB terminal completion cap for SSE clients
 // A broad typed host report can legitimately include bounded summaries for
@@ -37,6 +40,7 @@ const MAX_STREAM_RESPONSE = 4 * 1024 * 1024; // 4 MiB terminal completion cap fo
 const MAX_VERIFICATION_TEXT = 32 * 1024;
 const MAX_VERIFICATION_RESPONSE = 1024 * 1024;
 const OPENAI_RUN_ID = /^chatcmpl_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EMPTY_ASSISTANT_RESPONSE = "⚠️ Agent couldn't generate a response. Please try again.";
 const OPERATIONS_UNAVAILABLE_ZERO_SUBMISSIONS_CODE =
   "operations-unavailable-zero-submissions";
 const CONNECT_TIMEOUT_MS = 5000;
@@ -45,7 +49,8 @@ const CONNECT_TIMEOUT_MS = 5000;
 // and the gateway, rather than an intermediate proxy, owns terminal timeout.
 const TOTAL_TIMEOUT_MS = 1920000;
 const GATEWAY_PROBE_TIMEOUT_MS = 2000;
-const GATEWAY_ABORT_TIMEOUT_MS = 5000;
+// The harness may drain for 4 s, then managed project jobs for 10 s.
+const GATEWAY_ABORT_TIMEOUT_MS = 16000;
 const GATEWAY_ABORT_RETRY_MS = 100;
 const GATEWAY_ABORT_MAX_ATTEMPTS = 30;
 const DOCKER_TIMEOUT_MS = 10000;
@@ -262,8 +267,13 @@ function directGatewayFetch(url, options = {}) {
 // before sending any body. A reset after a POST is an unknown outcome: only
 // the next request may discover another endpoint, never replay that POST.
 export function createLoopbackGatewayFetch(fetchImpl = directGatewayFetch, {
-  probeTimeoutMs = 750, cacheMs = 5000, now = Date.now,
+  probeTimeoutMs = 750, cacheMs = 5000, now = Date.now, transport = 'loopback',
 } = {}) {
+  if (!['loopback', 'docker-desktop-host'].includes(transport)) throw new Error('invalid gateway transport');
+  // Docker Desktop reaches a native macOS gateway through its fixed host
+  // endpoint. Never accept a request-selected destination or fall back across
+  // these trust boundaries after a mutation may have been accepted.
+  const hosts = transport === 'docker-desktop-host' ? ['host.docker.internal'] : ['[::1]', '127.0.0.1'];
   const endpoints = new Map();
   const discoveries = new Map();
   const validate = (url) => {
@@ -277,7 +287,7 @@ export function createLoopbackGatewayFetch(fetchImpl = directGatewayFetch, {
     if (cached && cached.expiresAt > now()) return cached.origin;
     if (discoveries.has(port)) return discoveries.get(port);
     const pending = (async () => {
-      for (const host of ['[::1]', '127.0.0.1']) {
+      for (const host of hosts) {
         const origin = `http://${host}:${port}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), probeTimeoutMs);
@@ -308,7 +318,7 @@ export function createLoopbackGatewayFetch(fetchImpl = directGatewayFetch, {
     const origin = await discover(port, options.headers);
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('request aborted');
     try {
-      return await fetchImpl(`${origin}${parsed.pathname}${parsed.search}`, options);
+      return await fetchImpl(`${origin}${parsed.pathname}${parsed.search}`, {...options, redirect:'error'});
     } catch (error) {
       // HTTP bodies/streams are never retried. Even a transport reset can
       // arrive after the gateway has accepted a mutation or started a run.
@@ -332,6 +342,9 @@ const defaultDeps = {
 // ---------------------------------------------------------------------------
 
 export function validateConfig(cfg) {
+  if (!['loopback', 'docker-desktop-host'].includes(cfg.gatewayTransport ?? 'loopback')) {
+    throw new Error('invalid gateway transport');
+  }
   const port = Number(cfg.gatewayPort);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("invalid gateway port");
@@ -384,6 +397,7 @@ export function configFromEnv(env = process.env) {
     gatewayTokenFile:
       env.PIXEL_GATEWAY_TOKEN_FILE || "/etc/pixel/openclaw.json",
     gatewayPort: Number(env.PIXEL_GATEWAY_PORT || "18789"),
+    gatewayTransport: env.PIXEL_GATEWAY_TRANSPORT ?? 'loopback',
     statusFile: env.PIXEL_STATUS_FILE || "/run/ods-pixel/ods-status.json",
     statusIntervalMs: Number(env.PIXEL_STATUS_INTERVAL_MS || "30000"),
     ingressGid: env.PIXEL_INGRESS_GID ? Number(env.PIXEL_INGRESS_GID) : null,
@@ -741,6 +755,21 @@ async function readBounded(stream, limit) {
   }
 }
 
+function validSourceReview(value, directory) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join(',') === 'bytes,files,omitted,relativeDirectory,schemaVersion,sha256,sourceId'
+    && value.schemaVersion === 1 && typeof value.relativeDirectory === 'string'
+    && value.relativeDirectory.length <= 512 && value.relativeDirectory.split('/').length <= 12
+    && value.relativeDirectory.split('/').every(part => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(part))
+    && (directory === value.relativeDirectory || directory?.startsWith(value.relativeDirectory + '/'))
+    && /^[a-f0-9]{64}$/.test(value.sha256) && value.sourceId === 'source-' + value.sha256.slice(0,24)
+    && Number.isInteger(value.files) && value.files >= 1 && value.files <= 128
+    && Number.isInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 1024*1024
+    && value.omitted && typeof value.omitted === 'object' && !Array.isArray(value.omitted)
+    && Object.keys(value.omitted).sort().join(',') === 'directories,files,sensitiveFiles'
+    && Object.values(value.omitted).every(n => Number.isInteger(n) && n >= 0 && n <= 16384);
+}
+
 function parseVerificationResponse(value, runId) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new HttpError(502, "verification state unavailable");
@@ -768,6 +797,8 @@ function parseVerificationResponse(value, runId) {
     : ["status"];
   if (suppressStaleExecWarning) expectedKeys.push("suppressStaleExecWarning");
   if (hasPreview) expectedKeys.push("preview");
+  const hasArtifacts=Object.hasOwn(value,'artifacts');
+  if (hasArtifacts) expectedKeys.push('artifacts');
   const hasTask = Object.prototype.hasOwnProperty.call(value, "task");
   if (hasTask) expectedKeys.push("task");
   const hasQuestions = Object.prototype.hasOwnProperty.call(value, 'questions');
@@ -786,6 +817,7 @@ function parseVerificationResponse(value, runId) {
     "schemaVersion",
     "sha256",
     "siteId",
+    ...(preview && Object.hasOwn(preview, 'source') ? ['source'] : []),
     "url",
   ];
   const previewValid =
@@ -815,7 +847,8 @@ function parseVerificationResponse(value, runId) {
       preview.bytes >= 1 &&
       preview.bytes <= 16 * 1024 * 1024 &&
       /^[a-f0-9]{64}$/.test(preview.sha256) &&
-      /^[a-f0-9]{64}$/.test(preview.entrySha256));
+      /^[a-f0-9]{64}$/.test(preview.entrySha256) &&
+      (!Object.hasOwn(preview, 'source') || validSourceReview(preview.source, preview.relativeDirectory)));
   if (
     Object.keys(value).sort().join("\n") !== expectedKeys.sort().join("\n") ||
     (hasRecoveryCode && hasPreview) ||
@@ -824,6 +857,7 @@ function parseVerificationResponse(value, runId) {
         value.text.length < 1 ||
         value.text.length > MAX_VERIFICATION_TEXT ||
         /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text))) ||
+    (hasArtifacts && (!['none','passed','failed'].includes(status) || !validDeliveredArtifacts(value.artifacts))) ||
     !previewValid || (hasTask && !parseTaskActivity(value.task, runId)) ||
     (hasQuestions && (status !== 'pending' || !parseQuestions(value.questions)))
   ) {
@@ -887,11 +921,96 @@ async function verificationForRun(runId, token, gatewayPort, signal, deps) {
   }
 }
 
+// A native sessions_yield response is an introduction, not the completed owner
+// answer. Keep this exact request open for its registered parent continuation.
+// Polling reads host receipts only; it never invokes the model or replays tools.
+async function awaitSubagentDelivery(completion, user, token, gatewayPort, signal, deps) {
+  const runId=completion?.id;
+  if (!OPENAI_RUN_ID.test(runId ?? '') || !/^ods-[a-f0-9]{64}$/.test(user ?? '')) throw new HttpError(502,'delegated delivery unavailable');
+  for (;;) {
+    if (signal.aborted) throw new HttpError(502,'delegated delivery interrupted');
+    const response=await deps.fetch(`http://127.0.0.1:${gatewayPort}/pixel-ods/subagent-delivery`,{
+      method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json',accept:'application/json'},
+      body:JSON.stringify({user,runId}),redirect:'error',signal:AbortSignal.any([signal,AbortSignal.timeout(5000)]),
+    });
+    if (response.status !== 200 || !String(response.headers.get('content-type') ?? '').startsWith('application/json')) {
+      await drain(response.body);throw new HttpError(502,'delegated delivery unavailable');
+    }
+    const value=JSON.parse((await readBounded(response.body,MAX_VERIFICATION_RESPONSE)).toString('utf8'));
+    const keys=value && typeof value==='object' && !Array.isArray(value) ? Object.keys(value).sort().join() : '';
+    const baseKeys='kind,runId,schemaVersion,status';
+    if (value?.schemaVersion!==1 || value.kind!=='ods-subagent-delivery' || value.runId!==runId) throw new HttpError(502,'delegated delivery invalid');
+    if (value.status==='not-delegated' && keys===baseKeys) return {completion};
+    if (value.status==='ready' && keys==='kind,runId,schemaVersion,status,text,verification') {
+      if (typeof value.text!=='string' || !value.text.trim() || Buffer.byteLength(value.text)>256*1024
+          || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value.text)) throw new HttpError(502,'delegated delivery invalid');
+      const verification=parseVerificationResponse(value.verification,runId);
+      const {usage,...original}=completion; // Original introduction usage is not the continuation's token measurement.
+      return {completion:{...original,choices:[{index:0,message:{role:'assistant',content:value.text},finish_reason:'stop'}]},verification};
+    }
+    if (value.status!=='waiting' || keys!==baseKeys) throw new HttpError(502,'delegated delivery interrupted');
+    await new Promise(resolve=>{
+      const timer=deps.setTimeout(done,600);
+      function done() {deps.clearTimeout(timer);signal.removeEventListener('abort',done);resolve();}
+      signal.addEventListener('abort',done,{once:true});if(signal.aborted)done();
+    });
+  }
+}
+
+function missingVisibleAssistantText(content) {
+  return typeof content === 'string' && (!content.trim() ||
+    ['NO_REPLY', 'No response from OpenClaw.', EMPTY_ASSISTANT_RESPONSE].includes(content.trim()));
+}
+
+// Standalone ingress is installed beside host helpers, without plugin code.
+// Accept only the bounded publication receipt, never model-authored MEDIA paths.
+function validDeliveredArtifacts(items) {
+  const exact=(value,keys)=>value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === keys.split(',').sort().join(',');
+  const component=value=>typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
+  const sha=value=>typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  return Array.isArray(items) && items.length <= 4 && items.every(item=>
+    exact(item,'schemaVersion,kind,relativePath,siteId,sha256,file') && item.schemaVersion === 1 && item.kind === 'ods-pixel-workspace-artifact' &&
+    typeof item.relativePath === 'string' && item.relativePath.length <= 512 && item.relativePath.split('/').length <= 12 &&
+    item.relativePath.split('/').every(component) && /\.(?:md|markdown|txt|csv|tsv|json|pdf|zip|rar|docx|xlsx|pptx)$/i.test(item.relativePath) &&
+    sha(item.sha256) && item.siteId === 'site-'+item.sha256.slice(0,24) && exact(item.file,'path,bytes,sha256') &&
+    component(item.file.path) && item.file.path === item.relativePath.split('/').at(-1) &&
+    Number.isSafeInteger(item.file.bytes) && item.file.bytes >= 0 && item.file.bytes <= 4*1024*1024 && sha(item.file.sha256)) &&
+    new Set(items.map(item=>item.siteId+'/'+item.file.path)).size === items.length;
+}
+
+function deliveryVerification(completion, verification) {
+  const choice = completion?.choices?.length === 1 ? completion.choices[0] : undefined;
+  const content = choice?.message?.content;
+  // Missing/non-text content is a malformed gateway envelope, not evidence of
+  // a model that completed silently. Reject it consistently for JSON and SSE.
+  if (typeof content !== 'string') throw new HttpError(502, 'invalid upstream response');
+  // A completed transport/run is not proof of a useful answer. The harness can
+  // skip before_agent_finalize for an empty assistant message, so classify its
+  // terminal result here, after reading the same run's trusted evidence. This
+  // never resubmits the owner request or repeats a possibly completed effect.
+  if (!missingVisibleAssistantText(content) || choice.finish_reason === 'tool_calls' ||
+      choice.message.tool_calls?.length || verification.text || verification.status === 'pending') return verification;
+  const { suppressStaleExecWarning, ...evidence } = verification;
+  return {
+    ...evidence, status:'failed',
+    text:(verification.artifacts?.length ? 'Verified file downloads are attached, but Portal ended without a written answer. This request may be incomplete. ' : 'Portal ended without a visible answer or a delivered result. This request is incomplete. ') +
+      'Earlier tool activity may have completed; check its receipts before repeating any action. ' +
+      'No detailed failure reason was returned.',
+  };
+}
+
 function applyVerificationToCompletion(completion, verification) {
+  const result=baseApplyVerificationToCompletion(completion,verification);
+  const {pixel_artifacts: _untrustedArtifacts, ...clean}=result;
+  return verification.artifacts?.length
+    ? {...clean,pixel_artifacts:{schemaVersion:1,artifacts:verification.artifacts}} : clean;
+}
+
+function baseApplyVerificationToCompletion(completion, verification) {
   if (verification.deliveryMode === "append") {
     const choice = completion?.choices?.[0];
     const content = choice?.message?.content;
-    if (typeof content === "string" && content.trim()) {
+    if (typeof content === "string" && !missingVisibleAssistantText(content)) {
       // Both input components already have transport bounds. Preserve the
       // model's work summary; a verified observation is not the entire task.
       const scope = verification.preview
@@ -973,6 +1092,7 @@ function completionSse(completion, verification) {
     model,
     choices: [{ index: 0, delta, finish_reason: finishReason }],
     ...(terminal && terminalPixel ? { pixel: terminalPixel } : {}),
+    ...(terminal && verification?.artifacts?.length ? {pixel_artifacts:{schemaVersion:1,artifacts:verification.artifacts}} : {}),
     ...(terminal && verification?.task ? { pixel_task: verification.task } : {}),
     ...(terminal && verification?.questions ? { pixel_questions: {schemaVersion:1,questions:verification.questions} } : {}),
     ...(terminal ? {pixel_outcome: {schemaVersion:1,status:verification?.status ?? 'none'}} : {}),
@@ -1045,6 +1165,107 @@ function abortActiveGatewayTransports(activeGatewayTransports, user) {
   for (const controller of [...controllers]) controller.abort();
 }
 
+function isEmptyAssistantFailure(completion) {
+  return OPENAI_RUN_ID.test(completion?.id ?? '') && completion?.choices?.length === 1 &&
+    completion.choices[0]?.finish_reason === 'stop' &&
+    completion.choices[0]?.message?.content === EMPTY_ASSISTANT_RESPONSE;
+}
+
+async function readOnlyExtensionContinuation(runId, user, token, gatewayPort, signal, deps) {
+  if (!OPENAI_RUN_ID.test(runId ?? '') || typeof user !== 'string') return false;
+  try {
+    const response = await deps.fetch(`http://127.0.0.1:${gatewayPort}/pixel-ods/read-only-extension-continuation`, {
+      method:'POST', headers:upstreamHeaders(false, token),
+      body:JSON.stringify({runId}), redirect:'error', signal,
+    });
+    if (response.status !== 200 || !String(response.headers.get('content-type') || '').toLowerCase().startsWith('application/json')) {
+      await drain(response.body); return false;
+    }
+    const proof = JSON.parse((await readBounded(response.body, 1024)).toString('utf8'));
+    if (proof?.schemaVersion !== 1 || proof.kind !== 'ods-extension-read-only-continuation' ||
+        proof.eligible !== true || Object.keys(proof).sort().join() !== 'chatId,eligible,kind,requestId,schemaVersion' ||
+        typeof proof.chatId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(proof.chatId) ||
+        typeof proof.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(proof.requestId)) return false;
+    return user === 'ods-' + createHash('sha256').update(proof.chatId, 'utf8').digest('hex');
+  } catch { return false; }
+}
+
+async function maybeContinueReadOnlyExtensionTurn(completion, outgoing, token, gatewayPort, signal, deps) {
+  if (!isEmptyAssistantFailure(completion) ||
+      !await readOnlyExtensionContinuation(completion.id, outgoing.user, token, gatewayPort, signal, deps))
+    return completion;
+  if (signal.aborted) throw new HttpError(503, 'extension continuation interrupted');
+  // This is a new, bounded model continuation, never a replay of the owner's
+  // original request or any tool. The request manager reconciled state above.
+  const continuation = {...outgoing, stream:false, messages:[{role:'user', content:
+    'ODS internal continuation: your previous response ended empty after the saved extension request status read. Continue the owner\'s existing request from the recorded conversation and exact durable receipts. Do not repeat any proposal or host action without checking its saved outcome. Give a visible answer based only on observed results.'}]};
+  const upstream = await deps.fetch(`http://127.0.0.1:${gatewayPort}/v1/chat/completions`, {
+    method:'POST', headers:upstreamHeaders(false, token), body:JSON.stringify(continuation),
+    redirect:'error', signal,
+  });
+  if (upstream.status !== 200 || !String(upstream.headers.get('content-type') || '').toLowerCase().startsWith('application/json')) {
+    await drain(upstream.body);
+    throw new HttpError(502, 'extension continuation unavailable');
+  }
+  const recovered = JSON.parse((await readBounded(upstream.body, MAX_NONSTREAM_RESPONSE)).toString('utf8'));
+  if (!OPENAI_RUN_ID.test(recovered?.id ?? '') || recovered.id === completion.id ||
+      !Array.isArray(recovered.choices) || recovered.choices.length !== 1 ||
+      typeof recovered.choices[0]?.message?.content !== 'string')
+    throw new HttpError(502, 'extension continuation invalid');
+  return recovered;
+}
+
+async function unfinishedExtensionDecision(completion, user, token, gatewayPort, signal, deps) {
+  if (!OPENAI_RUN_ID.test(completion?.id ?? '') || typeof user !== 'string' ||
+      completion?.choices?.length !== 1 || completion.choices[0]?.finish_reason !== 'stop' ||
+      typeof completion.choices[0]?.message?.content !== 'string' ||
+      completion.choices[0].message.content === EMPTY_ASSISTANT_RESPONSE) return null;
+  try {
+    const response = await deps.fetch(`http://127.0.0.1:${gatewayPort}/pixel-ods/unfinished-extension-decision`, {
+      method:'POST', headers:upstreamHeaders(false, token),
+      body:JSON.stringify({runId:completion.id}), redirect:'error', signal,
+    });
+    if (response.status !== 200 || !String(response.headers.get('content-type') || '').toLowerCase().startsWith('application/json')) {
+      await drain(response.body); return null;
+    }
+    const proof = JSON.parse((await readBounded(response.body, 2048)).toString('utf8'));
+    if (proof?.schemaVersion !== 1 || proof.kind !== 'ods-extension-unfinished-decision' ||
+        proof.eligible !== true ||
+        Object.keys(proof).sort().join() !== 'chatId,eligible,kind,repository,requestId,schemaVersion' ||
+        typeof proof.chatId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(proof.chatId) ||
+        typeof proof.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(proof.requestId) ||
+        typeof proof.repository !== 'string' ||
+        !/^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(proof.repository) ||
+        user !== 'ods-' + createHash('sha256').update(proof.chatId, 'utf8').digest('hex')) return null;
+    return proof;
+  } catch { return null; }
+}
+
+async function maybeContinueUnfinishedExtensionDecision(completion, outgoing, token, gatewayPort, signal, deps) {
+  const proof = await unfinishedExtensionDecision(completion, outgoing.user, token, gatewayPort, signal, deps);
+  if (!proof) return completion;
+  if (signal.aborted) throw new HttpError(503, 'extension continuation interrupted');
+  // The saved request has no proposal or host work. This bounded new model
+  // turn keeps the same session and activates the extension completion gate.
+  // It never replays the owner's message or a tool call.
+  const continuation = {...outgoing, stream:false, messages:[{role:'user', content:
+    `/extensions ${proof.repository} ODS internal continuation for saved request ${proof.requestId}: the authorized installation is still pending and the last prepare receipt required a proposal. Continue from the repository evidence already collected, submit the proposal for this same request, then check durable receipts and report only verified results. Do not repeat an uncertain host action.`}]};
+  const upstream = await deps.fetch(`http://127.0.0.1:${gatewayPort}/v1/chat/completions`, {
+    method:'POST', headers:upstreamHeaders(false, token), body:JSON.stringify(continuation),
+    redirect:'error', signal,
+  });
+  if (upstream.status !== 200 || !String(upstream.headers.get('content-type') || '').toLowerCase().startsWith('application/json')) {
+    await drain(upstream.body);
+    throw new HttpError(502, 'extension continuation unavailable');
+  }
+  const recovered = JSON.parse((await readBounded(upstream.body, MAX_NONSTREAM_RESPONSE)).toString('utf8'));
+  if (!OPENAI_RUN_ID.test(recovered?.id ?? '') || recovered.id === completion.id ||
+      !Array.isArray(recovered.choices) || recovered.choices.length !== 1 ||
+      typeof recovered.choices[0]?.message?.content !== 'string')
+    throw new HttpError(502, 'extension continuation invalid');
+  return recovered;
+}
+
 async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps, hooks = {}, activeGatewayTransports = new Map()) {
   const controller = new AbortController();
   const unregisterGatewayTransport = registerActiveGatewayTransport(activeGatewayTransports, outgoing.user, controller);
@@ -1095,11 +1316,16 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
     );
     if (upstream.status < 200 || upstream.status >= 300) {
       await drain(upstream.body);
+      // Classify only the gateway's status, never its potentially sensitive body.
+      // A failed tool turn must not be replayed automatically.
+      const rateLimited = upstream.status === 429;
+      const message = rateLimited ? "model provider rate limit reached" : "pixel request rejected";
+      const code = rateLimited ? "provider_rate_limited" : undefined;
       if (wantsStream) {
-        res.write('data: {"error":{"message":"pixel request rejected","type":"pixel_ingress_error"}}\n\n');
+        res.write(`data: ${JSON.stringify({error:{message,type:"pixel_ingress_error",...(code ? {code} : {})}})}\n\n`);
         res.end("data: [DONE]\n\n");
       } else {
-        sendError(res, upstream.status >= 400 && upstream.status < 500 ? 400 : 502, "pixel request rejected");
+        sendError(res, rateLimited ? 429 : upstream.status >= 400 && upstream.status < 500 ? 400 : 502, message, code);
       }
       return;
     }
@@ -1120,18 +1346,28 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
       let completionRunId;
       try {
         const body = await readBounded(upstream.body, MAX_STREAM_RESPONSE);
-        const completion = JSON.parse(body.toString("utf8"));
+        let completion = JSON.parse(body.toString("utf8"));
         if (typeof completion?.id === "string" && OPENAI_RUN_ID.test(completion.id)) {
           completionRunId = completion.id;
         }
+        deliveryStage = "read-only-continuation";
+        completion = await maybeContinueReadOnlyExtensionTurn(completion, gatewayOutgoing, token,
+          gatewayPort, controller.signal, deps);
+        deliveryStage = "unfinished-extension-decision";
+        completion = await maybeContinueUnfinishedExtensionDecision(completion, gatewayOutgoing, token,
+          gatewayPort, controller.signal, deps);
+        completionRunId = completion?.id;
+        deliveryStage = "subagent-delivery";
+        const delegated = await awaitSubagentDelivery(completion,outgoing.user,token,gatewayPort,controller.signal,deps);
+        completion = delegated.completion;
         deliveryStage = "verification";
-        const verification = await verificationForRun(
+        const verification = deliveryVerification(completion, delegated.verification ?? await verificationForRun(
           completion?.id,
           token,
           gatewayPort,
           controller.signal,
           deps
-        );
+        ));
         await hooks.onComplete?.(completion,verification);
         deliveryStage = "delivery";
         res.end(completionSse(
@@ -1157,16 +1393,23 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
       sendError(res, 502, "invalid upstream response");
       return;
     }
-    const verification = await verificationForRun(
+    const originalCompletion = completion;
+    completion = await maybeContinueReadOnlyExtensionTurn(completion, gatewayOutgoing, token,
+      gatewayPort, controller.signal, deps);
+    completion = await maybeContinueUnfinishedExtensionDecision(completion, gatewayOutgoing, token,
+      gatewayPort, controller.signal, deps);
+    const delegated = await awaitSubagentDelivery(completion,outgoing.user,token,gatewayPort,controller.signal,deps);
+    completion = delegated.completion;
+    const verification = deliveryVerification(completion, delegated.verification ?? await verificationForRun(
       completion?.id,
       token,
       gatewayPort,
       controller.signal,
       deps
-    );
+    ));
     await hooks.onComplete?.(completion,verification);
     const verifiedCompletion = applyVerificationToCompletion(completion, verification);
-    const responseBody = verifiedCompletion === completion
+    const responseBody = verifiedCompletion === completion && completion === originalCompletion
       ? body
       : Buffer.from(JSON.stringify(verifiedCompletion), "utf8");
     res.writeHead(200, {
@@ -1189,7 +1432,7 @@ async function forwardChat(res, outgoing, token, gatewayPort, deps = defaultDeps
   }
 }
 
-function sendError(res, status, message) {
+function sendError(res, status, message, code) {
   if (res.headersSent) {
     if (!res.writableEnded) res.destroy();
     return;
@@ -1198,7 +1441,7 @@ function sendError(res, status, message) {
     "Content-Type": "application/json",
     "Cache-Control": "no-store",
   });
-  res.end(JSON.stringify({ error: { message, type: "pixel_ingress_error" } }));
+  res.end(JSON.stringify({ error: { message, type: "pixel_ingress_error", ...(code ? {code} : {}) } }));
 }
 
 function sendJson(res, status, payload) {
@@ -1228,6 +1471,51 @@ export async function checkGatewayReachable(gatewayPort, deps = defaultDeps) {
   } finally {
     deps.clearTimeout(timer);
   }
+}
+
+export function projectRuntimeIdentity(value) {
+  const identity = value?.identities, schemas = value?.toolSchemas;
+  const nullableHash = item => item === null || typeof item === 'string' && /^[a-f0-9]{64}$/.test(item);
+  const reasons = {partial:'release-binding-unavailable', mismatch:'runtime-files-changed', unavailable:'runtime-identity-unavailable'};
+  if (!value || value.schemaVersion !== 1 || !Object.hasOwn(reasons, value.state)
+      || value.reasonCode !== reasons[value.state] || value.boundary !== 'initialization-files-not-evaluated-code-or-release-proof'
+      || !['match','mismatch','unavailable'].includes(value.diskComparison)
+      || (value.state === 'mismatch') !== (value.diskComparison === 'mismatch')
+      || value.runtimeMatchesRelease !== (value.state === 'mismatch' ? false : null)
+      || typeof value.observedAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.observedAt)
+      || !Number.isFinite(Date.parse(value.observedAt)) || Math.abs(Date.now() - Date.parse(value.observedAt)) > 120000
+      || !identity || identity.odsReleaseCommit !== null || identity.pixelSourceRevision !== null || identity.previewImageDigest !== null
+      || !nullableHash(identity.pluginSha256) || !nullableHash(identity.openclawModuleSha256)
+      || !(identity.openclawVersion === null || typeof identity.openclawVersion === 'string' && /^[0-9]{4}\.[0-9]+\.[0-9]+(?:-[0-9]+)?$/.test(identity.openclawVersion))
+      || !schemas || schemas.boundary !== 'latest-created-plugin-tools-not-offered-surface'
+      || !Number.isInteger(schemas.registeredPluginToolCount) || schemas.registeredPluginToolCount < 0 || schemas.registeredPluginToolCount > 64
+      || !nullableHash(schemas.registeredPluginToolSchemasSha256)
+      || (schemas.registeredPluginToolCount === 0) !== (schemas.registeredPluginToolSchemasSha256 === null)
+      || schemas.offeredToolCount !== null || schemas.offeredToolSchemasSha256 !== null) throw new Error('invalid runtime identity');
+  return {
+    schemaVersion:1, state:value.state, diskComparison:value.diskComparison, runtimeMatchesRelease:value.runtimeMatchesRelease,
+    reasonCode:value.reasonCode, observedAt:value.observedAt, boundary:value.boundary,
+    identities:Object.fromEntries(['odsReleaseCommit','pixelSourceRevision','pluginSha256','openclawVersion','openclawModuleSha256','previewImageDigest'].map(key=>[key,identity[key]])),
+    toolSchemas:Object.fromEntries(['boundary','registeredPluginToolCount','registeredPluginToolSchemasSha256','offeredToolCount','offeredToolSchemasSha256'].map(key=>[key,schemas[key]])),
+  };
+}
+
+async function handleRuntimeIdentity(res, token, gatewayPort, deps) {
+  const controller = new AbortController();
+  const timer = deps.setTimeout(() => controller.abort(), GATEWAY_PROBE_TIMEOUT_MS);
+  try {
+    const response = await deps.fetch(`http://127.0.0.1:${gatewayPort}/pixel-ods/runtime-identity`, {
+      headers:{Authorization:`Bearer ${token}`, Accept:'application/json'}, redirect:'error', signal:controller.signal,
+    });
+    if (response.status !== 200 || !response.headers.get('content-type')?.startsWith('application/json')) throw new Error('unavailable');
+    let raw = '';
+    for await (const chunk of response.body) {
+      raw += Buffer.from(chunk).toString('utf8');
+      if (Buffer.byteLength(raw) > 8192) throw new Error('unavailable');
+    }
+    sendJson(res, 200, projectRuntimeIdentity(JSON.parse(raw)));
+  } catch { sendJson(res, 503, {error:'runtime-identity-unavailable'}); }
+  finally { deps.clearTimeout(timer); }
 }
 
 function execFilePromise(execImpl, command, args, options) {
@@ -1459,11 +1747,13 @@ export async function writeStatus(
   return projection;
 }
 
-export function createIngressServer({ token, gatewayPort, deps = defaultDeps, historyLedger = null, accessOwnerKey = null }) {
+export function createIngressServer({ token, gatewayPort, deps = defaultDeps, historyLedger = null, imageStore = null, accessOwnerKey = null }) {
   // Cancellation is scoped to this ingress instance and the opaque ODS user.
   // A Set preserves correct behavior if one chat has overlapping transports.
   const activeGatewayTransports = new Map();
   const historyAborters=new Map();
+  const imageRoutes=new Map();
+  let imageTurnActive=false;
   return http.createServer((req, res) => {
     let pathname;
     try {
@@ -1475,6 +1765,14 @@ export function createIngressServer({ token, gatewayPort, deps = defaultDeps, hi
 
     if (pathname === '/v1/model-control') {
       void handleModelControl(req, res, {ownerKey:typeof accessOwnerKey === 'function' ? accessOwnerKey() : accessOwnerKey});
+      return;
+    }
+    if(pathname==='/v1/chat/image' || pathname==='/v1/chat/image-policy') {
+      void handleImageRead(req,res,{policyOnly:pathname.endsWith('image-policy'),imageStore,historyLedger,imageRoutes,token,gatewayPort,deps});
+      return;
+    }
+    if(pathname==='/v1/chat/images-delete') {
+      void handleImageDelete(req,res,{imageStore,historyLedger,imageRoutes,token,gatewayPort,deps});
       return;
     }
     if (pathname === '/v1/access-mode') {
@@ -1498,6 +1796,12 @@ export function createIngressServer({ token, gatewayPort, deps = defaultDeps, hi
       return;
     }
 
+    if (pathname === '/v1/runtime-identity') {
+      if (req.method !== 'GET' || req.url !== pathname) { sendError(res, 400, 'invalid request'); return; }
+      void handleRuntimeIdentity(res, token, gatewayPort, deps);
+      return;
+    }
+
     if (pathname === "/v1/chat/completions") {
       if (req.method !== "POST") {
         sendError(res, 405, "method not allowed");
@@ -1508,7 +1812,12 @@ export function createIngressServer({ token, gatewayPort, deps = defaultDeps, hi
         sendError(res, 415, "content type must be application/json");
         return;
       }
-      void handleChat(req, res, token, gatewayPort, deps, historyLedger, historyAborters, activeGatewayTransports);
+      const imageTurn=req.headers['x-ods-image-turn'];
+      if(imageTurn!==undefined && imageTurn!=='1') {sendError(res,400,'invalid image turn');return;}
+      if(imageTurn && imageTurnActive) {sendError(res,429,'image turn capacity is busy');return;}
+      if(imageTurn) imageTurnActive=true;
+      void handleChat(req, res, token, gatewayPort, deps, historyLedger, historyAborters, activeGatewayTransports, imageStore, imageRoutes,
+        Boolean(imageTurn)).finally(()=>{if(imageTurn) imageTurnActive=false;});
       return;
     }
 
@@ -1596,10 +1905,58 @@ async function handleCancel(req, res, token, gatewayPort, deps, ledger, historyA
   } catch {sendError(res,503,'cancellation-unconfirmed');}
 }
 
-async function handleChat(req, res, token, gatewayPort, deps, historyLedger, historyAborters, activeGatewayTransports) {
+async function handleImageDelete(req,res,{imageStore,historyLedger,imageRoutes,token,gatewayPort,deps}) {
+  let release;
+  try {
+    if(req.method!=='POST' || req.url!=='/v1/chat/images-delete' || String(req.headers['content-type']||'').split(';',1)[0]!=='application/json') throw new HistoryError('invalid-image-deletion-request',400);
+    const body=JSON.parse((await readBody(req,512)).toString('utf8'));
+    if(!body || Object.keys(body).join()!=='user' || typeof body.user!=='string' || body.user.length>128 || !/^[A-Za-z0-9_-]+$/.test(body.user)) throw new HistoryError('invalid-image-deletion-request',400);
+    if(!historyLedger || !imageStore) throw new HistoryError('image-storage-unavailable',503);
+    const user=computeSessionUser({user:body.user});release=historyLedger.lock(user);
+    const state=historyLedger.read(user);
+    if(state && !['ready','deleted'].includes(state.status)) throw new HistoryError('history-outcome-unknown',409);
+    if(state?.status!=='deleted') {
+      const native=await nativeContextRequest('context',{user},token,gatewayPort,deps);
+      if(native.status==='busy' || native.compaction.status==='running')throw new HistoryError('history-busy',409);
+      if(!['ready','missing'].includes(native.status) || native.compaction.status==='unknown')throw new HistoryError('context-unavailable',503);
+      historyLedger.deleteConversation(user);
+    }
+    imageRoutes.delete(user);
+    // Native transcript deletion has its own durable journal, maintenance
+    // lease and exact SDK binding. Cache/API copies are not the only copies.
+    const receipt=await nativeContextRequest('images-delete',{user},token,gatewayPort,deps);
+    if(receipt?.schemaVersion!==1 || receipt.deleted!==true)throw new HistoryError('image-deletion-unconfirmed',503);
+    imageStore.deleteConversation(user);
+    sendJson(res,200,{schemaVersion:1,deleted:true});
+  } catch(error) {sendError(res,error instanceof HistoryError || error instanceof ChatImageError?error.status:400,error instanceof HistoryError || error instanceof ChatImageError?error.message:'invalid-image-deletion-request');}
+  finally {try {release?.();}catch{/* Keep failed lock custody closed. */}}
+}
+
+async function handleImageRead(req,res,{policyOnly,imageStore,historyLedger,imageRoutes,token,gatewayPort,deps}) {
+  try {
+    if(req.method!=='POST') {sendError(res,405,'method not allowed');return;}
+    if(String(req.headers['content-type']||'').split(';',1)[0].trim()!=='application/json') {sendError(res,415,'content type must be application/json');return;}
+    const body=JSON.parse((await readBody(req,1024)).toString('utf8'));
+    if(!body || Object.keys(body).sort().join()!==(policyOnly?'user':'id,sha256,user')
+        || typeof body.user!=='string' || body.user.length!==68 || !/^ods-[a-f0-9]{64}$/.test(body.user))
+      throw new ChatImageError('invalid-image-request',400);
+    if(!imageStore || !historyLedger || !imageRoutes.has(body.user)) throw new ChatImageError('image-input-unverified',409);
+    const native=await nativeContextRequest('context',{user:body.user},token,gatewayPort,deps);
+    if(!['ready','busy'].includes(native.status)) throw new ChatImageError('image-input-unverified',409);
+    const policy=validateImageRoute(imageRoutes.get(body.user),native.model);
+    if(policyOnly) {sendJson(res,200,{schemaVersion:1,policy});return;}
+    const reader=createChatImageReadHandler(imageStore,user=>(historyLedger.read(user)?.messages||[]).flatMap(message=>message.images||[]));
+    sendJson(res,200,await reader(body.user,{id:body.id,sha256:body.sha256}));
+  } catch(error) {
+    const known=error instanceof ChatImageError || error instanceof HistoryError || error instanceof HttpError;
+    sendError(res,known?error.status:400,known?error.message:'invalid image request');
+  }
+}
+
+async function handleChat(req, res, token, gatewayPort, deps, historyLedger, historyAborters, activeGatewayTransports, imageStore, imageRoutes, imageTurn=false) {
   let raw;
   try {
-    raw = await readBody(req, MAX_HISTORY_BODY);
+    raw = await readBody(req, imageTurn?MAX_IMAGE_BODY:MAX_HISTORY_BODY);
   } catch (error) {
     sendError(
       res,
@@ -1623,14 +1980,29 @@ async function handleChat(req, res, token, gatewayPort, deps, historyLedger, his
 
   let release,prepared,submitted=false,completed=false,user;
   try {
+    const latestSubmitted=[...(parsed.messages||[])].reverse().find(message=>message?.role==='user');
+    if(imageTurn!==Boolean(latestSubmitted?.images?.length)) throw new ChatImageError('invalid-image-turn',400);
+    if(imageTurn && parsed.history_snapshot?.schemaVersion!==2) throw new ChatImageError('invalid-image-turn',400);
     if(!parsed.history_snapshot && raw.length>MAX_BODY) throw new HistoryError('request-too-large',413);
     user=computeSessionUser(parsed);
-    const outgoing = buildOutgoing(parsed, user);
+    // Native anonymous requests already use a fresh session. Give that exact
+    // request an opaque identity so delegated delivery also has custody. This
+    // does not turn an anonymous history snapshot into a stable owner session.
+    const outgoing = buildOutgoing(parsed, user ?? (!parsed.history_snapshot ? `ods-${randomBytes(32).toString('hex')}` : undefined));
     if(historyLedger && user) release=historyLedger.lock(user);
+    if(historyLedger?.read(user)?.status==='deleted')throw new HistoryError('conversation-deleted',410);
     if(!parsed.history_snapshot) {await forwardChat(res,outgoing,token,gatewayPort,deps,{},activeGatewayTransports);return;}
     if(!historyLedger || !user) throw new HistoryError('history-storage-unavailable',503);
     const native=await nativeContextRequest('context',{user},token,gatewayPort,deps);
+    const hasImages=parsed.history_snapshot?.messages?.some(message=>message?.images?.length);
+    if(hasImages) validateImageRoute(parsed.image_route,native.model);
     prepared=historyLedger.prepare(user,parsed.request_id,parsed.history_snapshot,native);
+    if(hasImages) {
+      const binding=await nativeContextRequest('images-bind',{user},token,gatewayPort,deps);
+      if(binding?.schemaVersion!==1 || binding.bound!==true)throw new HistoryError('image-custody-unavailable',503);
+      if(!imageRoutes.has(user) && imageRoutes.size>=1024) throw new ChatImageError('image-session-capacity',503);
+      imageRoutes.set(user,{...parsed.image_route});
+    } else imageRoutes.delete(user);
     if(prepared.replay) {
       const result=prepared.replay;
       if(outgoing.stream) {res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store'});res.end(completionSse(applyVerificationToCompletion(result.completion,result.verification),result.verification));}
@@ -1639,14 +2011,23 @@ async function handleChat(req, res, token, gatewayPort, deps, historyLedger, his
     }
     const latest=[...(outgoing.messages || [])].reverse().find(message=>message.role==='user');
     if(!latest) throw new HistoryError('invalid-history-input',400);
+    const archivedLatest=prepared.state.messages.at(-1);
+    const images=decodeChatImageTurn(latest,archivedLatest);
+    if(images.length) {
+      if(!imageStore) throw new ChatImageError('image-storage-unavailable',503);
+      imageStore.put(user,images,prepared.state.messages.flatMap(message=>message.images||[]));
+    }
+    const nativeLatest={role:latest.role,content:latest.content};
+    if(images.length) nativeLatest.content=[...latest.content,{type:'text',text:
+      nativeHistoryMessages([{role:'user',content:'',images:archivedLatest.images}])[0].content}];
     // Identity/delivery policy belongs to the trusted API/edge messages. The
     // snapshot is data only; it cannot introduce system/developer instructions.
-    outgoing.messages=[...(outgoing.messages || []).filter(message=>message.role==='system'),...prepared.delta.slice(0,-1),latest];
+    outgoing.messages=[...(outgoing.messages || []).filter(message=>message.role==='system'),...nativeHistoryMessages(prepared.delta.slice(0,-1)),nativeLatest];
     await forwardChat(res,outgoing,token,gatewayPort,deps,{
       onController:controller=>historyAborters?.set(user,{requestId:parsed.request_id,controller}),
       beforeRequest:async signal=>{
         if(!prepared.hydrate) return;
-        const seeded=await nativeContextRequest('history',{user,request_id:parsed.request_id,messages:prepared.archive},token,gatewayPort,deps,signal,30000);
+        const seeded=await nativeContextRequest('history',{user,request_id:parsed.request_id,messages:nativeHistoryMessages(prepared.archive)},token,gatewayPort,deps,signal,30000);
         if(seeded?.hydrated!==true) throw new HistoryError('history-preparation-failed',503);
         const request_id=`history-${createHash('sha256').update(`${parsed.request_id}:${prepared.state.revision}`).digest('hex')}`;
         let state=await nativeContextRequest('compact',{user,request_id},token,gatewayPort,deps,signal);
@@ -1672,8 +2053,8 @@ async function handleChat(req, res, token, gatewayPort, deps, historyLedger, his
   } catch (error) {
     sendError(
       res,
-      error instanceof HttpError || error instanceof HistoryError ? error.status : 400,
-      error instanceof HttpError || error instanceof HistoryError ? error.message : "invalid request body"
+      error instanceof HttpError || error instanceof HistoryError || error instanceof ChatImageError ? error.status : 400,
+      error instanceof HttpError || error instanceof HistoryError || error instanceof ChatImageError ? error.message : "invalid request body"
     );
   } finally {
     if(historyAborters?.get(user)?.requestId===prepared?.state?.requestId) historyAborters.delete(user);
@@ -1691,7 +2072,7 @@ async function nativeContextRequest(operation,body,token,gatewayPort,deps,outerS
     const response=await deps.fetch(`http://127.0.0.1:${gatewayPort}/pixel-ods/${operation}`,{method:'POST',headers:upstreamHeaders(false,token),body:JSON.stringify(body),redirect:'error',signal:controller.signal});
     if(response.status!==200 || !String(response.headers.get('content-type') || '').startsWith('application/json')) {await drain(response.body);throw new HistoryError(response.status===409?'context-busy':'context-unavailable',response.status===409?409:503);}
     const value=JSON.parse((await readBounded(response.body,32768)).toString('utf8'));
-    if(operation==='history') return value;
+    if(operation==='history' || operation==='images-delete' || operation==='images-bind') return value;
     if(value?.schemaVersion!==1 || !['ready','missing','busy','unavailable'].includes(value.status) || !['idle','running','completed','skipped','failed','unknown'].includes(value.compaction?.status) || !Number.isInteger(value.compaction?.count)) throw new HistoryError('context-unavailable',503);
     return value;
   } catch(error) {if(error instanceof HistoryError) throw error;throw new HistoryError('context-unavailable',503)}
@@ -1714,6 +2095,7 @@ async function handleContextControl(req,res,pathname,token,gatewayPort,deps,ledg
     const compact=pathname==='/v1/chat/compact';
     if(Object.keys(body).sort().join()!==(compact?'request_id,user':'user') || !/^[A-Za-z0-9_-]{1,128}$/.test(body.user || '') || (compact && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.request_id || ''))) throw new HistoryError('invalid-context-request',400);
     const user=computeSessionUser({user:body.user});
+    if(ledger.read(user)?.status==='deleted')throw new HistoryError('conversation-deleted',410);
     if(compact) {
       release=ledger.lock(user);
       if(ledger.projection(user).status!=='ready') throw new HistoryError('history-outcome-unknown',409);
@@ -1747,16 +2129,20 @@ export async function start(cfg = configFromEnv(), opts = {}) {
   let gateway;
   try {
     validateConfig(cfg);
+    if (!opts.deps?.fetch && cfg.gatewayTransport === 'docker-desktop-host') {
+      deps.fetch = createLoopbackGatewayFetch(directGatewayFetch, {transport: cfg.gatewayTransport});
+    }
     startupStage = "token-read";
     gateway = readGatewayConfiguration(cfg.gatewayTokenFile, opts.euid);
     const token = gateway.token;
     startupStage = "socket-prepare";
     prepareSocketPath(cfg.socketPath);
     const historyLedger=createChatHistoryLedger(cfg.chatStateDir || path.join(path.dirname(cfg.socketPath),'chat-state'));
+    const imageStore=createChatImageStore(path.join(cfg.chatStateDir || path.join(path.dirname(cfg.socketPath),'chat-state'),'images'));
     // Re-read on access requests so credential rotation or first installation
     // does not restart an active chat. Missing/unsafe key disables only access.
     const accessOwnerKey = () => readAccessOwnerKey(cfg.accessOwnerKeyFile, opts.euid);
-    server = createIngressServer({ token, gatewayPort: cfg.gatewayPort, deps, historyLedger, accessOwnerKey });
+    server = createIngressServer({ token, gatewayPort: cfg.gatewayPort, deps, historyLedger, imageStore, accessOwnerKey });
     startupStage = "socket-listen";
     await listenUnix(server, cfg.socketPath);
     startupStage = "runtime-state";

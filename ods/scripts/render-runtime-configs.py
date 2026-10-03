@@ -34,17 +34,41 @@ REMOTE_PROVIDER_EGRESS_BASE_URL = "http://remote-provider-egress:8091/v1"
 REMOTE_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 
 
-def atomic_write_text(target: Path, content: str) -> None:
+def atomic_write_text(target: Path, content: str, *, file_mode: int | None = None) -> None:
     """Replace a generated config without exposing a truncated live file."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    # Generated YAML is bind-mounted into LiteLLM and must remain readable
-    # when the image runs as a non-root UID. Preserve an existing mode and use
-    # the checked-in template's 0644 mode only when recreating a missing file.
-    mode = 0o644
+    # Preserve the mode of existing configs, which may hold private values.
+    # The nonsecret router endpoint allowlist explicitly requests 0644.
+    mode = file_mode if file_mode is not None else 0o644
+    if file_mode is None:
+        try:
+            if target.is_file():
+                mode = stat.S_IMODE(target.stat().st_mode)
+        except OSError:
+            pass
+
+    # Docker Desktop can retain the old inode behind a file bind. Do not
+    # invalidate that view when a render changes neither bytes nor mode.
+    # A symlink, special file, hardlink or changed target still takes the
+    # existing atomic replacement path, including permission repair.
     try:
-        if target.is_file():
-            mode = stat.S_IMODE(target.stat().st_mode)
+        before = target.lstat()
+        expected = content.encode("utf-8")
+        if stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size == len(expected):
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            with os.fdopen(os.open(target, flags), "rb") as existing:
+                opened = os.fstat(existing.fileno())
+                same_file = (before.st_dev, before.st_ino) == (opened.st_dev, opened.st_ino)
+                if same_file and stat.S_ISREG(opened.st_mode):
+                    matches = existing.read(len(expected) + 1) == expected
+                    after = target.lstat()
+                    identity = lambda info: (info.st_dev, info.st_ino, info.st_size,
+                                             info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_nlink)
+                    if matches and identity(before) == identity(after) and stat.S_IMODE(after.st_mode) == mode:
+                        return
     except OSError:
+        # Missing/unreadable paths do not qualify for the no-op optimization.
+        # Preserve the original write and its normal error handling below.
         pass
 
     fd, tmp_name = tempfile.mkstemp(
@@ -92,6 +116,7 @@ class RenderInputs:
     remote_llm_transport: str = ""
     remote_llm_base_url: str = ""
     remote_llm_model: str = ""
+    external_llm_authenticated: bool = False
     # Switchboard rollout mode: legacy | observe | enabled (plan section 8)
     switchboard_mode: str = "enabled"
 
@@ -209,7 +234,7 @@ def render_litellm_external(inputs: RenderInputs) -> RenderedFile:
     litellm_params:
       model: {yaml_scalar('openai/' + model)}
       api_base: {yaml_scalar(base)}
-      api_key: not-needed
+      api_key: {'os.environ/EXTERNAL_LLM_API_KEY' if inputs.external_llm_authenticated else 'not-needed'}
 """)
     content = "model_list:\n" + "\n".join(entries) + """
 general_settings:
@@ -314,12 +339,12 @@ litellm_settings:
   # Stable public alias used by Switchboard-aware ODS consumers.
   - model_name: ods/current
     litellm_params:
-      model: anthropic/claude-sonnet-4-5-20250514
+      model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: default
     litellm_params:
-      model: anthropic/claude-sonnet-4-5-20250514
+      model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: gpt4o
@@ -379,7 +404,7 @@ def render_litellm_hybrid(inputs: RenderInputs) -> RenderedFile:
 
   - model_name: cloud
     litellm_params:
-      model: anthropic/claude-sonnet-4-5-20250514
+      model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: minimax
@@ -602,7 +627,7 @@ def render_litellm_switchboard(inputs: RenderInputs) -> RenderedFile:
         routes.extend([
             """  - model_name: cloud
     litellm_params:
-      model: anthropic/claude-sonnet-4-5-20250514
+      model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 """,
             """  - model_name: minimax
@@ -650,6 +675,11 @@ def render_model_router_endpoints(inputs: RenderInputs) -> RenderedFile:
         base = (url or fallback).rstrip("/")
         if base.endswith("/v1"):
             base = base[: -len("/v1")]
+        parsed = urlsplit(base)
+        if (parsed.scheme not in {"http", "https"} or not parsed.netloc
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment):
+            raise ValueError("model router endpoint origin must be an HTTP URL without embedded credentials")
         return base
 
     endpoints = [
@@ -736,6 +766,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--gpu-backend", choices=["amd", "apple", "cpu", "nvidia"], default="nvidia")
     parser.add_argument("--ods-mode", choices=["local", "cloud", "hybrid", "lemonade"], default="local")
     parser.add_argument("--llm-base-url", default="http://llama-server:8080/v1")
+    parser.add_argument("--external-llm-authenticated", action="store_true")
     parser.add_argument(
         "--litellm-key",
         default=os.environ.get("ODS_RENDER_LITELLM_KEY", DEFAULT_LITELLM_KEY),
@@ -873,6 +904,7 @@ def render(args: argparse.Namespace) -> dict[str, object]:
         remote_llm_transport=args.remote_llm_transport,
         remote_llm_base_url=args.remote_llm_base_url,
         remote_llm_model=args.remote_llm_model,
+        external_llm_authenticated=args.external_llm_authenticated,
     )
     validate_render_inputs(inputs)
     if args.surface == "litellm-switchboard" and inputs.ods_mode == "cloud":
@@ -894,7 +926,17 @@ def render(args: argparse.Namespace) -> dict[str, object]:
         output_root = Path(args.output_root)
         for item in files:
             target = output_root / item.path
-            atomic_write_text(target, ensure_trailing_newline(item.content))
+            if item.surface == "model-router-endpoints":
+                # Docker mounts this directory at /config. Its non-root router
+                # needs traversal and read access even when the installer used
+                # umask 077. This file contains endpoint origins, never keys.
+                if target.parent.is_symlink() or target.parent.parent.is_symlink():
+                    raise ValueError("model router config directory must not be a symlink")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.parent.chmod(0o711)
+                atomic_write_text(target, ensure_trailing_newline(item.content), file_mode=0o644)
+            else:
+                atomic_write_text(target, ensure_trailing_newline(item.content))
             written.append(str(target))
     return {
         "version": "1",

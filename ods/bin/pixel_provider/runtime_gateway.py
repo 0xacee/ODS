@@ -14,6 +14,7 @@ import copy
 import hmac
 import ipaddress
 import json
+import re
 import socket
 import ssl
 import time
@@ -32,6 +33,8 @@ from .store import MAX_BYTES,StoreError,decode_document
 
 MODEL = 'ods/pixel'
 MAX_RESPONSE = 2*1024*1024
+DONE_LINE = b'data: [DONE]'
+_LINE_END = re.compile(rb'[\r\n]')
 TRANSIENT = {429,500,502,503,504}
 FIELDS = {'model','messages','stream','stream_options','max_tokens','max_completion_tokens',
     'temperature','top_p','tools','tool_choice','parallel_tool_calls','response_format','seed','stop',
@@ -210,7 +213,8 @@ def create_app(config,credentials,token,*,events=None,client_factory=None):
             attempts = 0
             for provider in candidates:
                 if cooldown.get(provider['id'],0)>time.monotonic():
-                    event(provider,'cooldown'); continue
+                    event(provider,'cooldown')
+                    continue
                 attempts += 1
                 event(provider,'attempt',attempt=attempts)
                 try:
@@ -230,8 +234,10 @@ def create_app(config,credentials,token,*,events=None,client_factory=None):
                     if upstream.status_code in TRANSIENT:
                         event(provider,'transient-failure',upstreamStatus=upstream.status_code)
                         cooldown[provider['id']] = time.monotonic()+30
-                        await upstream.aclose(); upstream = None
-                        await client.aclose(); client = None
+                        await upstream.aclose()
+                        upstream = None
+                        await client.aclose()
+                        client = None
                         await guarded(asyncio.sleep(min(.1*attempts,1)))
                         continue
                     if upstream.status_code != 200:
@@ -248,22 +254,44 @@ def create_app(config,credentials,token,*,events=None,client_factory=None):
                         async def stream(first=first,iterator=iterator,provider=provider):
                             nonlocal terminal,stream_finished
                             size = 0
-                            tail = b''
                             done = False
+                            dead = False
+                            carry = bytearray()
                             try:
                                 chunk = first
                                 while True:
                                     size += len(chunk)
                                     if size>MAX_RESPONSE:
                                         raise RuntimeErrorCode('response-too-large')
-                                    tail = (tail+chunk)[-MAX_RESPONSE:]
-                                    done = done or any(line.strip()==b'data: [DONE]' for line in tail.splitlines())
+                                    # Detect a data: [DONE] line without recopying or
+                                    # rescanning the response per chunk. carry holds the
+                                    # unterminated line fragment while it can still match;
+                                    # dead marks a line that already failed the check.
+                                    start = 0
+                                    for boundary in _LINE_END.finditer(chunk):
+                                        piece = chunk[start:boundary.start()]
+                                        if dead:
+                                            dead = False
+                                        elif (carry or piece) and (bytes(carry)+piece).strip() == DONE_LINE:
+                                            done = True
+                                        carry.clear()
+                                        start = boundary.end()
+                                    if not dead:
+                                        carry += chunk[start:]
+                                        core = bytes(carry).lstrip()
+                                        if DONE_LINE.startswith(core):
+                                            carry = bytearray(core)
+                                        elif core.startswith(DONE_LINE) and not core[len(DONE_LINE):].strip():
+                                            carry = bytearray(DONE_LINE)
+                                        else:
+                                            dead = True
+                                            carry.clear()
                                     yield chunk
                                     try:
                                         chunk = await guarded(anext(iterator))
                                     except StopAsyncIteration:
                                         break
-                                if not done:
+                                if not done and bytes(carry) != DONE_LINE:
                                     raise RuntimeErrorCode('provider-stream-interrupted')
                                 stream_finished = True
                                 event(provider,'completed')
@@ -306,9 +334,11 @@ def create_app(config,credentials,token,*,events=None,client_factory=None):
                     event(provider,'transient-transport-failure')
                     cooldown[provider['id']] = time.monotonic()+30
                     if upstream:
-                        await upstream.aclose(); upstream = None
+                        await upstream.aclose()
+                        upstream = None
                     if client:
-                        await client.aclose(); client = None
+                        await client.aclose()
+                        client = None
                     await guarded(asyncio.sleep(min(.1*attempts,1)))
                     continue
             raise RuntimeErrorCode('provider-attempts-exhausted')

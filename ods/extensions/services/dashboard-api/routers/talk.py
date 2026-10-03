@@ -24,7 +24,7 @@ from starlette.requests import ClientDisconnect
 import hermes_bridge
 import session_signer
 from config import INSTALL_DIR, SERVICES
-from helpers import check_service_health, get_loaded_model
+from helpers import check_service_health, get_llama_context_size, get_loaded_model
 from performance_oracle import (
     find_catalog_model,
     load_model_catalog,
@@ -82,6 +82,19 @@ _TALK_BLOCKING_COMPATIBILITY_STATUSES = {
 }
 
 
+def _configured_context_length() -> int | None:
+    """The context llama-server was launched with (CTX_SIZE, else MAX_CONTEXT)."""
+    for key in ("CTX_SIZE", "MAX_CONTEXT"):
+        for reader in (read_env_file_value, read_env_value):
+            try:
+                value = int(str(reader(key, INSTALL_DIR) or "").strip())
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+    return None
+
+
 async def _active_model_app_compatibility() -> dict[str, Any]:
     catalog = load_model_catalog(INSTALL_DIR)
     loaded_model = await get_loaded_model()
@@ -92,31 +105,98 @@ async def _active_model_app_compatibility() -> dict[str, Any]:
         model_name = read_env_file_value("LLM_MODEL", INSTALL_DIR) or read_env_value("LLM_MODEL", INSTALL_DIR)
         gguf = read_env_file_value("GGUF_FILE", INSTALL_DIR) or read_env_value("GGUF_FILE", INSTALL_DIR)
     entry = find_catalog_model(catalog, model_name, gguf)
+    runtime_context = model_compatibility_runtime_context(INSTALL_DIR)
+    # The served context decides ODS Talk before Hermes does: below the
+    # Hermes floor Hermes answers every turn with an HTTP 502, so report the
+    # block (with the reason) here instead. The live llama-server n_ctx is
+    # what Hermes sees, so it wins; the launch configuration is the fallback
+    # for catalog models while the runtime cannot answer. A model outside the
+    # catalog is judged on the live value only (a cloud or external backend
+    # has no local launch context to go by).
+    served_context = await get_llama_context_size(model_hint=loaded_model) if loaded_model else None
+    if served_context is None and entry:
+        served_context = _configured_context_length()
     compatibility = model_app_compatibility(
         entry or {},
-        runtime_context=model_compatibility_runtime_context(INSTALL_DIR),
+        runtime_context=runtime_context,
+        context_length=served_context,
     )
     compatibility["activeModel"] = {
         "id": entry.get("id") if entry else None,
         "model": model_name or None,
         "gguf": gguf or None,
     }
+    compatibility["recommendedModel"] = _talk_recommended_model(catalog, entry, runtime_context)
     return compatibility
 
 
-def _hermes_talk_block_reason(compatibility: dict[str, Any]) -> str | None:
-    agent_viability = compatibility.get("agentViability") if isinstance(compatibility, dict) else {}
-    agent_status = str((agent_viability or {}).get("status") or "unknown").strip().lower()
-    if agent_status in _TALK_BLOCKING_COMPATIBILITY_STATUSES:
-        reason = str((agent_viability or {}).get("reason") or "").strip()
-        return reason or "The active model is not currently viable for ODS agent workflows."
+def _talk_recommended_model(
+    catalog: list[dict[str, Any]],
+    active_entry: dict[str, Any] | None,
+    runtime_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Installer-recommended model to suggest when the active one can't run Talk.
 
-    hermes_talk = compatibility.get("hermesTalk") if isinstance(compatibility, dict) else {}
-    status = str((hermes_talk or {}).get("status") or "unknown").strip().lower()
-    if status not in _TALK_BLOCKING_COMPATIBILITY_STATUSES:
+    Only offered when it differs from the active model and is not itself
+    blocked for ODS Talk on this runtime.
+    """
+    model_name = (
+        read_env_file_value("MODEL_RECOMMENDED_MODEL", INSTALL_DIR)
+        or read_env_value("MODEL_RECOMMENDED_MODEL", INSTALL_DIR)
+    )
+    gguf = (
+        read_env_file_value("MODEL_RECOMMENDED_GGUF", INSTALL_DIR)
+        or read_env_value("MODEL_RECOMMENDED_GGUF", INSTALL_DIR)
+    )
+    recommended = find_catalog_model(catalog, model_name, gguf)
+    if not recommended or not recommended.get("id"):
         return None
-    reason = str((hermes_talk or {}).get("reason") or "").strip()
-    return reason or "The active model is not currently compatible with ODS Talk."
+    if active_entry and active_entry.get("id") == recommended.get("id"):
+        return None
+    if _hermes_talk_block_reason(model_app_compatibility(recommended, runtime_context=runtime_context)):
+        return None
+    return {
+        "id": recommended["id"],
+        "name": str(recommended.get("name") or recommended["id"]),
+    }
+
+
+# Shown when the active model is blocked for ODS Talk. The catalog ``reason``
+# on each compatibility entry is an internal fleet-QA note (run IDs, harness
+# vocabulary) and must never be returned to Talk users; only ``userMessage``
+# or this copy is.
+TALK_MODEL_NOT_SUPPORTED_MESSAGE = (
+    "This model isn't supported in ODS Talk yet. Switch to a recommended model to use ODS Talk."
+)
+TALK_MODEL_NOT_SUPPORTED_CODE = "model_not_supported"
+
+
+def _compatibility_status(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return "unknown"
+    return str(entry.get("status") or "unknown").strip().lower()
+
+
+def _hermes_talk_block_reason(compatibility: dict[str, Any]) -> str | None:
+    """Return user-facing copy when the active model blocks ODS Talk, else None.
+
+    Blocking is unchanged: either ``agentViability`` or ``hermesTalk`` in a
+    blocking status disables Talk.
+    """
+    if not isinstance(compatibility, dict):
+        return None
+    hermes_talk = compatibility.get("hermesTalk")
+    hermes_blocked = _compatibility_status(hermes_talk) in _TALK_BLOCKING_COMPATIBILITY_STATUSES
+    agent_blocked = (
+        _compatibility_status(compatibility.get("agentViability")) in _TALK_BLOCKING_COMPATIBILITY_STATUSES
+    )
+    if not (hermes_blocked or agent_blocked):
+        return None
+    if hermes_blocked:
+        message = str(hermes_talk.get("userMessage") or "").strip()
+        if message:
+            return message
+    return TALK_MODEL_NOT_SUPPORTED_MESSAGE
 
 
 async def _require_hermes_talk_compatible() -> dict[str, Any]:
@@ -702,7 +782,9 @@ async def talk_status(request: Request) -> dict[str, Any]:
             "audio_message": voice_ready,
             "live_mic_requires_secure_context": True,
         },
+        # User-facing copy (never the catalog's internal fleet note).
         "reason": talk_block_reason,
+        "reasonCode": TALK_MODEL_NOT_SUPPORTED_CODE if talk_block_reason else None,
     }
 
 

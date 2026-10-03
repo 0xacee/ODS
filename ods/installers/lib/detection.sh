@@ -136,7 +136,7 @@ load_backend_contract() {
 
 get_host_logical_cpus() {
     local cores
-    cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "1")
+    cores=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "1")
     if [[ "$cores" =~ ^[0-9]+$ ]] && [[ "$cores" -gt 0 ]]; then
         echo "$cores"
     else
@@ -279,6 +279,7 @@ show_amd_gpu_device_guidance() {
 
 apply_cpu_gpu_fallback() {
     local reason="${1:-AMD GPU runtime devices are unavailable.}"
+    local external="${LEMONADE_EXTERNAL:-false}" managed="${AMD_INFERENCE_MANAGED:-}"
     ai_warn "$reason"
     ai "Using CPU mode so installation can complete without GPU passthrough."
 
@@ -289,7 +290,20 @@ apply_cpu_gpu_fallback() {
     GPU_MEMORY_TYPE="none"
     GPU_DEVICE_ID=""
     HAS_NPU=false
-    [[ "${ODS_MODE:-local}" == "lemonade" ]] && ODS_MODE="local"
+    # A missing GPU device in WSL changes the container backend, not the
+    # Windows-owned Lemonade inference route. Only managed Lemonade needs the
+    # local llama-server CPU fallback.
+    if [[ "${ODS_MODE:-local}" == "lemonade" ]]; then
+        case "${external,,}" in
+            true|1|yes|on) ;;
+            *)
+                if [[ "${AMD_INFERENCE_RUNTIME:-}" != "lemonade" \
+                   || "${managed,,}" != "false" ]]; then
+                    ODS_MODE="local"
+                fi
+                ;;
+        esac
+    fi
     BACKEND_ID="cpu"
     CAP_LLM_BACKEND="cpu"
     CAP_GPU_VENDOR="cpu"
@@ -567,13 +581,33 @@ detect_gpu() {
     GPU_COUNT=0
     GPU_BACKEND="cpu"
     GPU_MEMORY_TYPE="none"
-    warn "No GPU detected. Falling back to CPU-only mode (inference will be slow)."
-    log "CPU-only mode: llama.cpp will use CPU inference. Consider adding a GPU for better performance."
+    if [[ "${LEMONADE_EXTERNAL:-false}" == "true" && -n "${LEMONADE_GPU_NAME:-}" ]]; then
+        # Windows under WSL: the GPU is used by Lemonade on the host, not here.
+        ai "No GPU inside this Linux environment; the model runs on ${LEMONADE_GPU_NAME} through Lemonade."
+        log "Model inference uses the external Lemonade GPU: ${LEMONADE_GPU_NAME}."
+    else
+        warn "No GPU detected. Falling back to CPU-only mode (inference will be slow)."
+        log "CPU-only mode: llama.cpp will use CPU inference. Consider adding a GPU for better performance."
+    fi
     return 1
 }
 
 MIN_DRIVER_VERSION=570
 MIN_WHISPER_CUDA_DRIVER_VERSION=575
+
+# WSL2 receives the NVIDIA driver from Windows through /usr/lib/wsl/lib.
+# Installing a Linux nvidia-driver package inside the distro shadows those
+# libraries and breaks GPU passthrough, and "reboot" inside WSL does not load
+# a Windows driver. An old WSL driver is therefore a Windows-side fix only.
+ods_wsl_nvidia_driver_too_old() {
+    local driver="${1:-unknown}"
+    ai_bad "NVIDIA driver ${driver} comes from Windows and is older than ${MIN_DRIVER_VERSION}."
+    ai "Update the NVIDIA driver on Windows (NVIDIA App or nvidia.com), then run in PowerShell:"
+    ai "  wsl --shutdown"
+    ai "Reopen Ubuntu, confirm nvidia-smi shows driver >= ${MIN_DRIVER_VERSION}, and re-run ODS."
+    ai "Do not install NVIDIA drivers inside WSL; that breaks GPU passthrough."
+    error "NVIDIA driver ${driver} on Windows is below ${MIN_DRIVER_VERSION}."
+}
 
 ods_whisper_cuda_supported() {
     local backend="${1:-${GPU_BACKEND:-cpu}}"
@@ -616,7 +650,7 @@ ods_configure_whisper_acceleration() {
     if [[ "$WHISPER_ACCELERATION" == "cpu" ]]; then
         _ods_csv_add_unique ODS_SKIP_GPU_OVERLAYS whisper
         if [[ -z "${WHISPER_IMAGE:-}" || "${WHISPER_IMAGE:-}" =~ [Cc][Uu][Dd][Aa] ]]; then
-            WHISPER_IMAGE="ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu"
+            WHISPER_IMAGE="ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu@sha256:2163775b6df5e451a71200e8f675fed68dbd8ab184fc604453d549e486f22fd2"
         fi
         if [[ "${AUDIO_STT_MODEL:-}" =~ ([Ll]arge-v3|[Tt]urbo) ]]; then
             AUDIO_STT_MODEL="Systran/faster-whisper-base"

@@ -3,11 +3,11 @@
 import json
 import os
 from pathlib import Path
+import platform
 import pwd
-import socket
+import socket as socket
 import socketserver
 import stat
-import struct
 import sys
 
 sys.dont_write_bytecode = True
@@ -23,9 +23,9 @@ def protected(path):
 
 PROGRAM = Path(__file__).resolve().parent
 protected(PROGRAM)
-for name in ("access_mode_server.py", "pixel_access_bridge.py", "pixel_access_client.py", "pixel_access_reconcile.py",
-             "pixel_model_transition.py",
-             "access_mode_worker.py", "pixel_access_mode.py", "access_mode_config.py",
+for name in ("access_mode_server.py", "unix_peer.py", "pixel_access_bridge.py", "pixel_access_client.py", "pixel_access_reconcile.py",
+             "pixel_model_transition.py", "pixel_gateway_service.py",
+             "access_mode_worker.py", "pixel_access_mode.py", "access_mode_config.py", "access_release_transaction.py",
              "settings_transaction.py", "pixel_access_protocol.py", "pixel_settings/__init__.py",
              "pixel_settings/contract.py", "pixel_settings/projection.py", "pixel_settings/runtime.py", "pixel_settings/coordinator.py",
              "pixel_provider/__init__.py", "pixel_provider/config.py", "pixel_provider/store.py",
@@ -35,12 +35,19 @@ for name in ("access_mode_server.py", "pixel_access_bridge.py", "pixel_access_cl
     protected(PROGRAM / name)
 for name in ("pixel_model_contract.py", "pixel_model_coordinator.py", "model_transaction.py"):
     protected(PROGRAM / name)
+if platform.system() == "Linux":
+    protected(PROGRAM / "pixel_source_upgrade.py")
+if platform.system() == "Darwin":
+    for name in ("pixel_macos_custody.py", "pixel_macos_process.py", "pixel_macos_policy.py"):
+        protected(PROGRAM / name)
 sys.path.insert(0, str(PROGRAM))
-from pixel_access_bridge import AccessError, SystemdAccessBridge, private_json
+from pixel_access_bridge import (AccessError, LaunchdAccessBridge,
+                                 SystemdAccessBridge, private_json)
 from pixel_access_protocol import control_request, decode_frame
+from unix_peer import peer_ids
 
 
-def main():
+def main(*, reprove_installer_access=False):
     if os.geteuid() != 0: raise RuntimeError("root service required")
     settings = private_json("/etc/ods/pixel-access.json", 0, 8192)
     owner = pwd.getpwnam(settings["owner"])
@@ -70,23 +77,41 @@ def main():
     def make_adapter():
         # Discovery has request-local owner/gateway snapshots. Never let another
         # handler replace the active transition's authentication or runtime data.
+        if platform.system() == "Darwin":
+            required = ("gateway_target", "gateway_plist", "gateway_process", "gateway_binding", "gateway_policy")
+            if any(key not in settings for key in required):
+                raise RuntimeError("incomplete macOS gateway binding")
+            return LaunchdAccessBridge(
+                install, key, gateway_target=settings["gateway_target"],
+                gateway_plist=settings["gateway_plist"], gateway_process=settings["gateway_process"],
+                state=Path(settings.get("state_dir", "/private/var/lib/ods-pixel-access")),
+                gateway_binding=settings["gateway_binding"], installed_binary=settings["openclaw_bin"],
+                gateway_policy=settings["gateway_policy"],
+                gateway_owner=owner.pw_name, settings_data_dir=settings.get("settings_data_dir"),
+                gateway_port=settings.get("gateway_port"))
         return SystemdAccessBridge(install, key, installed_binary=settings["openclaw_bin"],
                                    gateway_owner=owner.pw_name, settings_data_dir=settings.get("settings_data_dir"),
                                    gateway_binding=settings.get('gateway_binding'),
                                    gateway_port=settings.get('gateway_port'))
-    address = "/run/ods-pixel-access/control.sock"
+    if reprove_installer_access:
+        # Root-only CLI ceremony; deliberately absent from the socket protocol.
+        # Uses the same installed custody checks, credentials and lifecycle lock.
+        print(json.dumps(make_adapter().reprove_installer_access(), separators=(",", ":")))
+        return
+    address = ("/private/var/run/ods-pixel-access/control.sock"
+               if platform.system() == "Darwin" else "/run/ods-pixel-access/control.sock")
 
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
             self.connection.settimeout(340)
-            _pid, uid, _gid = struct.unpack("3i", self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
             status, body = 403, {"error": "owner-required"}
             try:
+                uid, _gid = peer_ids(self.connection)
                 if uid not in (0, owner.pw_uid): raise PermissionError()
                 raw = self.rfile.readline(2049)
                 if len(raw) > 2048 or not raw.endswith(b"\n"): raise ValueError()
                 request = control_request(decode_frame(raw.decode("utf-8"), 2048))
-                if request["operation"] in ("model-begin", "model-route-begin"):
+                if request["operation"] in ("model-begin", "model-route-begin", "installer-source-begin"):
                     self.connection.settimeout(1850)
                 adapter = make_adapter()
                 if request == {"operation": "status"}:
@@ -97,6 +122,28 @@ def main():
                     status, body = 200, adapter.change(request["request"])
                 elif request == {"operation": "model-begin"}:
                     status, body = 200, adapter.model_begin()
+                elif request['operation'] == 'installer-source-begin':
+                    if uid != 0:
+                        raise PermissionError()
+                    status, body = 200, adapter.model_begin(installer_source=True)
+                elif request["operation"] == "installer-model-verify":
+                    status, body = 200, adapter.verify_installer_model_access(request["request"]["transaction_id"])
+                elif request['operation'].startswith('installer-release-'):
+                    # These are local owner/root operations under an existing
+                    # held transaction, never dashboard permission overrides.
+                    payload = request['request']
+                    operation = request['operation']
+                    if operation == 'installer-release-prepare':
+                        body = adapter.prepare_release_access(payload['transaction_id'],
+                            payload['candidate_path'], payload['candidate_sha256'])
+                    elif operation == 'installer-release-publish':
+                        body = adapter.publish_release_access(payload['transaction_id'], payload['outcome'])
+                    elif operation == 'installer-release-abort':
+                        body = adapter.abort_release_access(payload['transaction_id'])
+                    else:
+                        body = adapter.finish_release_access(payload['transaction_id'],
+                            payload['config_sha256'], payload['outcome'])
+                    status = 200
                 elif set(request) == {"operation", "request"} and request["operation"] == "model-finish":
                     status, body = 200, adapter.model_finish(request["request"])
                 elif request["operation"].startswith("settings-"):
@@ -121,8 +168,14 @@ def main():
             except Exception: status, body = 503, {"error": "access-service-unavailable"}
             self.wfile.write(json.dumps({"status": status, "body": body}).encode() + b"\n")
 
-    # RuntimeDirectory is root-only until this daemon provisions the owner socket.
-    os.chmod(Path(address).parent, 0o711)
+    # systemd creates this directory through RuntimeDirectory. launchd has no
+    # equivalent, so the root daemon creates the fixed directory itself.
+    parent = Path(address).parent
+    parent.mkdir(mode=0o711, exist_ok=True)
+    info = parent.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022):
+        raise RuntimeError("unsafe socket directory")
+    os.chmod(parent, 0o711)
     if os.path.lexists(address):
         info = os.lstat(address)
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0: raise RuntimeError("unsafe socket")
@@ -135,4 +188,9 @@ def main():
         server.serve_forever()
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--reprove-installer-access", action="store_true")
+    options = parser.parse_args()
+    main(reprove_installer_access=options.reprove_installer_access)

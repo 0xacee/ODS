@@ -79,6 +79,33 @@ assert_grep "installers/windows/phases/03-features.ps1" 'hermesContextSize[[:spa
     "Windows Hermes target context floor is 64K"
 
 echo ""
+echo "Selection plans the Hermes floor and the raise is re-checked:"
+assert_grep "installers/lib/model-selector.sh" '^ODS_HERMES_MIN_CONTEXT=65536$' \
+    "Linux selector floor is 64K"
+assert_grep "installers/phases/02-detection.sh" '--min-context "\$ODS_HERMES_MIN_CONTEXT"' \
+    "Linux phase 02 selects at the 64K floor"
+assert_grep "installers/macos/install-macos.sh" '--min-context "\$HERMES_CONTEXT_SIZE"' \
+    "macOS selects at the 64K floor"
+assert_grep "installers/windows/phases/02-detection.ps1" '-MinContext \$script:HERMES_MIN_CONTEXT' \
+    "Windows selects at the 64K floor"
+assert_grep "installers/phases/03-features.sh" 'ods_catalog_fit_check' \
+    "Linux re-checks fit before raising to 64K"
+assert_grep "installers/phases/03-features.sh" '--require-min-context' \
+    "Linux re-selects a model that fits at 64K"
+assert_grep "installers/macos/install-macos.sh" '--check-fit' \
+    "macOS re-checks fit before raising to 64K"
+assert_grep "installers/windows/phases/03-features.ps1" 'Test-CatalogModelContextFit' \
+    "Windows re-checks fit before raising to 64K"
+assert_grep "installers/windows/phases/03-features.ps1" '-RequireMinContext' \
+    "Windows re-selects a model that fits at 64K"
+assert_grep "installers/phases/03-features.sh" 'INSTALLER_RECOMMENDED_CONTEXT="\$MAX_CONTEXT"' \
+    "Linux records the served context as MODEL_RECOMMENDED_CONTEXT"
+assert_grep "installers/macos/lib/env-generator.sh" '^MODEL_RECOMMENDED_CONTEXT=\$\{MAX_CONTEXT\}$' \
+    "macOS records the served context as MODEL_RECOMMENDED_CONTEXT"
+assert_grep "installers/windows/lib/env-generator.ps1" '^MODEL_RECOMMENDED_CONTEXT=\$\(\$TierConfig.MaxContext\)' \
+    "Windows records the served context as MODEL_RECOMMENDED_CONTEXT"
+
+echo ""
 echo ".env context parity:"
 assert_grep "installers/phases/06-directories.sh" '^MAX_CONTEXT=\$\{MAX_CONTEXT\}$' \
     "Linux .env generator writes MAX_CONTEXT"
@@ -188,6 +215,10 @@ assert_grep "installers/phases/07-devtools.sh" 'ODS_MODEL_SWITCHBOARD' \
     "Linux OpenCode config reads switchboard mode"
 assert_grep "installers/phases/07-devtools.sh" '_opencode_model_id="ods/current"' \
     "Linux OpenCode config uses stable switchboard alias"
+assert_grep "installers/phases/07-devtools.sh" '_opencode_model_id="\$EXTERNAL_LLM_MODEL"' \
+    "Linux OpenCode config uses the exact generic external model"
+assert_grep "installers/phases/07-devtools.sh" '_opencode_url="http://127\.0\.0\.1:\$\{LITELLM_PORT:-4000\}/v1"' \
+    "Linux OpenCode generic external config routes through LiteLLM"
 assert_grep "installers/phases/07-devtools.sh" 'OpenCode config updated \(model, API key, and URL refreshed\)' \
     "Linux OpenCode reinstall migrates stale model route"
 assert_grep "installers/macos/install-macos.sh" '_opencode_switchboard_mode=.*ODS_MODEL_SWITCHBOARD' \

@@ -9,7 +9,8 @@ PLAN = {'status':'active','summary':'Working','steps':[{'id':'work','title':'Do 
 
 
 def goal_frame(status='active', changed=False):
-    plan=copy.deepcopy(PLAN);plan['status']=status
+    plan=copy.deepcopy(PLAN)
+    plan['status']=status
     if status=='completed':
         for step in plan['steps']:step['status']='completed'
     if changed:plan['steps'][0]['title']='A different task'
@@ -68,21 +69,29 @@ async def test_goal_never_replays_ambiguous_effects_or_reports_false_completion(
 
 @pytest.mark.asyncio
 async def test_stop_partial_goal_never_starts_a_continuation_or_claims_completed(tmp_path):
-    started,release=asyncio.Event(),asyncio.Event();calls=[]
+    started,release=asyncio.Event(),asyncio.Event()
+    calls=[]
     async def run(owner,agent):
-        calls.append(agent['request_id']);started.set();await release.wait()
+        calls.append(agent['request_id'])
+        started.set()
+        await release.wait()
         yield goal_frame()
         for frame in finish('Partial saved work'):yield frame
-    async def cancel(*_):release.set();return True
+    async def cancel(*_):
+        release.set()
+        return True
     manager=TeamManager(TeamStore(tmp_path/'teams'),run,cancel)
     row=manager.start(OWNER,'chat','goal','Do work',None,'','goal')
-    await started.wait();await manager.stop(OWNER,row['id']);await settle(manager)
+    await started.wait()
+    await manager.stop(OWNER,row['id'])
+    await settle(manager)
     assert len(calls)==1 and manager.list(OWNER,'chat')[0]['status']=='cancelled'
 
 
 @pytest.mark.asyncio
 async def test_goal_question_waits_for_answer_and_keeps_goal_mode(tmp_path):
-    calls=[];questions=[{'id':'style','question':'Qual estilo?','options':['Clean','Colorido']}]
+    calls=[]
+    questions=[{'id':'style','question':'Qual estilo?','options':['Clean','Colorido']}]
     async def run(owner,agent):
         calls.append(copy.deepcopy(agent))
         yield goal_frame('waiting' if len(calls)==1 else 'active' if len(calls)==2 else 'completed')
@@ -92,7 +101,8 @@ async def test_goal_question_waits_for_answer_and_keeps_goal_mode(tmp_path):
     row=manager.start(OWNER,'chat','goal','Make a proposal',None,'','goal')
     await settle(manager)
     assert manager.list(OWNER,'chat')[0]['status']=='waiting' and len(calls)==1
-    manager.answer(OWNER,row['id'],'0',{'style':'Clean'});await settle(manager)
+    manager.answer(OWNER,row['id'],'0',{'style':'Clean'})
+    await settle(manager)
     assert calls[1]['messages'][-1]['content'].startswith('/goal Make a proposal')
     assert "Owner's answers:" in calls[1]['messages'][-1]['content']
     assert len(calls)==3 and 'Clean' in calls[2]['messages'][-1]['content']

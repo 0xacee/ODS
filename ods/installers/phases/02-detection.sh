@@ -50,13 +50,9 @@ if [[ "${ODS_MODE:-local}" == "cloud" ]]; then
     GPU_MEMORY_TYPE="none"
     TIER="CLOUD"
     if grep -qi microsoft /proc/version 2>/dev/null; then
-        _wsl_ram_bytes=""
-        if command -v powershell.exe &>/dev/null; then
-            _wsl_ram_bytes=$(powershell.exe -NoProfile -Command \
-                "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory" 2>/dev/null | tr -d '\r')
-        fi
-        if [[ -n "$_wsl_ram_bytes" && "$_wsl_ram_bytes" =~ ^[0-9]+$ ]]; then
-            RAM_KB=$((_wsl_ram_bytes / 1024))
+        _wsl_host_kb="$(ods_wsl_host_ram_kb)" || _wsl_host_kb=""
+        if [[ -n "$_wsl_host_kb" ]]; then
+            RAM_KB="$_wsl_host_kb"
         else
             RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
         fi
@@ -90,18 +86,7 @@ load_capability_profile || true
 # reserved value only for coarse tier selection; system_ram_min_gb profiles and
 # the persisted SYSTEM_RAM_GB contract describe actual addressable VM memory.
 if grep -qi microsoft /proc/version 2>/dev/null; then
-    _wsl_ram_kb=""
-    if command -v powershell.exe &>/dev/null; then
-        _wsl_ram_bytes=$(powershell.exe -NoProfile -Command \
-            "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory" 2>/dev/null | tr -d '\r')
-        if [[ -n "$_wsl_ram_bytes" && "$_wsl_ram_bytes" =~ ^[0-9]+$ ]]; then
-            _wsl_ram_kb=$((_wsl_ram_bytes / 1024))
-        fi
-    fi
-    if [[ -z "$_wsl_ram_kb" ]] && command -v wmic.exe &>/dev/null; then
-        _wsl_ram_kb=$(wmic.exe OS get TotalVisibleMemorySize /value 2>/dev/null \
-            | grep -oE '[0-9]+' | sed -n '1p')
-    fi
+    _wsl_ram_kb="$(ods_wsl_host_ram_kb)" || _wsl_ram_kb=""
     _wsl_vm_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     RAM_KB="$_wsl_vm_kb"
     RAM_GB=$((RAM_KB / 1024 / 1024))
@@ -226,6 +211,9 @@ if [[ $GPU_COUNT -gt 0 && "$GPU_BACKEND" == "nvidia" ]]; then
     if [[ -n "$DRIVER_VERSION" && "$DRIVER_VERSION" =~ ^[0-9]+$ ]]; then
         log "NVIDIA driver: $DRIVER_VERSION"
         if [[ "$DRIVER_VERSION" -lt "$MIN_DRIVER_VERSION" ]]; then
+            if ods_is_wsl_host; then
+                ods_wsl_nvidia_driver_too_old "$DRIVER_VERSION"
+            fi
             ai_bad "NVIDIA driver $DRIVER_VERSION is too old. llama-server (CUDA) requires driver >= $MIN_DRIVER_VERSION."
             if nvidia_blackwell_hardware_detected; then
                 ai_bad "This is a Blackwell GPU, so install an NVIDIA open kernel module driver."
@@ -549,20 +537,9 @@ resolve_tier_config
 if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "${TIER:-}" != "CLOUD" ]]; then
     _selector_script="$SCRIPT_DIR/scripts/select-model.py"
     _selector_catalog="$SCRIPT_DIR/config/model-library.json"
-    if [[ -f "$_selector_script" && -f "$_selector_catalog" ]]; then
-        _selector_python=""
-        if [[ -f "$SCRIPT_DIR/lib/python-cmd.sh" ]]; then
-            # shellcheck source=/dev/null
-            . "$SCRIPT_DIR/lib/python-cmd.sh"
-            _selector_python="$(ods_detect_python_cmd || true)"
-        fi
-        if [[ -z "$_selector_python" ]]; then
-            if command -v python3 >/dev/null 2>&1; then
-                _selector_python="python3"
-            elif command -v python >/dev/null 2>&1; then
-                _selector_python="python"
-            fi
-        fi
+    if [[ -f "$_selector_script" && -f "$_selector_catalog" ]] \
+        && declare -F ods_run_catalog_selector >/dev/null 2>&1; then
+        _selector_python="$(ods_model_selector_python)"
         if [[ -n "$_selector_python" ]]; then
             PIXEL_AGENT_MODEL_READY=unknown
             _pixel_default_selector=false
@@ -586,22 +563,22 @@ if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "${TIER:-}" !=
                 # itself cannot produce trusted metadata.
                 PIXEL_AGENT_MODEL_READY=false
             fi
+            # Hermes is on by default and needs 64K context: prefer models
+            # that fit at 64K themselves (a soft floor; a smaller context is
+            # chosen only when nothing fits at 64K). Phase 03 re-checks the
+            # pick once the feature set is final.
             _run_catalog_selector() {
-                "$_selector_python" "$_selector_script" \
-                    --catalog "$_selector_catalog" \
-                    --backend "${GPU_BACKEND:-unknown}" \
-                    --memory-type "${GPU_MEMORY_TYPE:-discrete}" \
-                    --vram-mb "${GPU_VRAM:-0}" \
-                    --ram-gb "${RAM_GB:-0}" \
-                    --profile "${MODEL_PROFILE_EFFECTIVE:-${MODEL_PROFILE:-qwen}}" \
-                    --tier "${TIER:-1}" \
-                    --max-size-mb "$_selector_max_size_mb" \
-                    --host-arch "${HOST_ARCH:-unknown}" \
-                    --installable-only \
-                    "$@" \
-                    --env
+                ods_run_catalog_selector "$_selector_python" "$_selector_max_size_mb" \
+                    --min-context "$ODS_HERMES_MIN_CONTEXT" \
+                    "$@"
             }
-            _selector_env="$(_run_catalog_selector 2>>"$LOG_FILE" || true)"
+            ODS_SELECTOR_MAX_SIZE_MB="$_selector_max_size_mb"
+            _selector_status=0
+            _selector_env="$(_run_catalog_selector 2>>"$LOG_FILE")" || _selector_status=$?
+            if [[ "$_selector_status" -eq 2 ]]; then
+                error "No catalog model fits the detected memory and selected profile. Choose a smaller model profile or use cloud mode; refusing an unsafe tier-map fallback."
+                exit 1
+            fi
             if [[ "$_pixel_default_selector" == true && -n "$_selector_env" ]]; then
                 log "Pixel default selected the strongest installable hardware-fit model; catalog qualification remains advisory"
             fi
@@ -632,7 +609,43 @@ INSTALLER_RECOMMENDED_MODEL="${LLM_MODEL:-}"
 INSTALLER_RECOMMENDED_GGUF="${GGUF_FILE:-}"
 INSTALLER_RECOMMENDED_CONTEXT="${MAX_CONTEXT:-}"
 MODEL_SELECTION_SOURCE="installer"
+ods_verify_retained_external_model_snapshot() {
+    [[ -n "${_retained_external_env_sha:-}" ]] || return 0
+    local current_hash
+    current_hash="$(sha256sum "$INSTALL_DIR/.env" 2>>"$LOG_FILE")" || {
+        error "Could not verify retained external model settings before installation."
+        return 1
+    }
+    current_hash="${current_hash%% *}"
+    if [[ "$current_hash" != "$_retained_external_env_sha" ]]; then
+        error "Retained external model settings changed during installation; rerun to use the current selection."
+        return 1
+    fi
+}
 if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${TIER:-}" != "CLOUD" ]]; then
+    _selected_external="${LEMONADE_EXTERNAL:-false}"
+    _retained_external="$(external_llm_env_value "$INSTALL_DIR/.env" LEMONADE_EXTERNAL || true)"
+    if [[ "${_selected_external,,}" != "true" && "${ODS_MODE_EXPLICIT:-false}" != "true" \
+          && "${_retained_external,,}" == "true" ]]; then
+        error "This retained installation uses external Lemonade. Select it explicitly for this rerun or use --reselect-model."
+        exit 1
+    fi
+    _must_preserve_external=false
+    if [[ "${_selected_external,,}" == "true" && "${_retained_external,,}" == "true" ]]; then
+        _must_preserve_external=true
+        _retained_lemonade_model="$(external_llm_env_value "$INSTALL_DIR/.env" LEMONADE_MODEL || true)"
+        if [[ -n "${LEMONADE_MODEL:-}" && "$LEMONADE_MODEL" != "$_retained_lemonade_model" ]]; then
+            error "The requested Lemonade model differs from the retained selection. Use --reselect-model to change models."
+            exit 1
+        fi
+        unset _retained_lemonade_model
+        _retained_external_env_sha="$(sha256sum "$INSTALL_DIR/.env" 2>>"$LOG_FILE")" || {
+            error "Could not snapshot retained external model settings."
+            exit 1
+        }
+        _retained_external_env_sha="${_retained_external_env_sha%% *}"
+    fi
+    unset _retained_external
     _preserve_script="$SCRIPT_DIR/scripts/preserve-active-model.py"
     if [[ -f "$_preserve_script" ]]; then
         if [[ -z "${_selector_python:-}" ]]; then
@@ -645,6 +658,9 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
             fi
         fi
         if [[ -n "${_selector_python:-}" ]]; then
+            _preserve_mode=--local-model
+            [[ "${_selected_external,,}" != "true" ]] || _preserve_mode=--external-lemonade
+            _preserve_status=0
             _preserved_model_env="$("$_selector_python" "$_preserve_script" \
                 --env "$INSTALL_DIR/.env" \
                 --catalog "$SCRIPT_DIR/config/model-library.json" \
@@ -656,7 +672,16 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
                 --vram-mb "${GPU_VRAM:-0}" \
                 --ram-gb "${RAM_GB:-0}" \
                 --host-arch "${HOST_ARCH:-unknown}" \
-                2>>"$LOG_FILE" || true)"
+                "$_preserve_mode" \
+                2>>"$LOG_FILE")" || _preserve_status=$?
+            if [[ "$_preserve_status" -ne 0 && "$_preserve_mode" == "--external-lemonade" ]]; then
+                error "Could not validate the retained external model selection. Repair the saved settings or explicitly use --reselect-model."
+                exit 1
+            fi
+            if [[ "$_must_preserve_external" == true && -z "$_preserved_model_env" ]]; then
+                error "Retained external model selection could not be recovered; refusing to replace it."
+                exit 1
+            fi
             if [[ -n "$_preserved_model_env" ]] && command -v load_model_selector_env_from_output >/dev/null 2>&1; then
                 # Remove every model-selector runtime value before loading the
                 # preserved active contract. The helper omits inactive optional
@@ -667,13 +692,23 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
                 unset LLAMA_CPP_RELEASE_TAG_OVERRIDE LLAMA_CPP_SERVER_BINARY
                 unset LLAMA_ARG_FLASH_ATTN LLAMA_ARG_CACHE_TYPE_K LLAMA_ARG_CACHE_TYPE_V
                 unset LLAMA_ARG_N_CPU_MOE LLAMA_ARG_NO_CACHE_PROMPT
-                unset LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS LLAMA_ARG_SPEC_TYPE
+                unset LLAMA_ARG_CHECKPOINT_EVERY_NT LLAMA_ARG_SPEC_TYPE
+                unset LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM
                 unset LLAMA_ARG_SPEC_DRAFT_N_MAX LLAMA_ARG_SPLIT_MODE LLAMA_ARG_TENSOR_SPLIT
                 load_model_selector_env_from_output <<< "$_preserved_model_env"
-                log "Preserved active local model across installer rerun: ${LLM_MODEL} (${GGUF_FILE})"
+                log "Preserved active model across installer rerun: ${LLM_MODEL} (${GGUF_FILE})"
             fi
+            unset _preserve_mode _preserve_status
+            ods_verify_retained_external_model_snapshot || exit 1
+        elif [[ "$_must_preserve_external" == true ]]; then
+            error "Python is required to preserve the retained external model selection."
+            exit 1
         fi
+    elif [[ "$_must_preserve_external" == true ]]; then
+        error "The retained external model preservation helper is missing."
+        exit 1
     fi
+    unset _selected_external _must_preserve_external
 elif [[ "${ODS_RESELECT_MODEL:-false}" == "true" ]]; then
     log "Active-model preservation disabled by --reselect-model"
 fi
@@ -681,7 +716,13 @@ fi
 # Display hardware summary with nice formatting
 CPU_INFO=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "Unknown")
 if [[ "$INTERACTIVE" == "true" ]]; then
-    show_hardware_summary "$GPU_NAME" "$((GPU_VRAM / 1024))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL"
+    # An external Lemonade (Windows under WSL) runs the model on a GPU this
+    # Linux probe cannot see; show that GPU instead of "None".
+    if [[ "${LEMONADE_EXTERNAL:-false}" == "true" && -n "${LEMONADE_GPU_NAME:-}" ]]; then
+        show_hardware_summary "${LEMONADE_GPU_NAME} (Lemonade)" "$(( (${LEMONADE_GPU_VRAM_MB:-0} + 512) / 1024 ))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL"
+    else
+        show_hardware_summary "$GPU_NAME" "$((GPU_VRAM / 1024))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL"
+    fi
 
     if [[ "$TIER" == "CLOUD" ]]; then
         SPEED_EST="cloud API"

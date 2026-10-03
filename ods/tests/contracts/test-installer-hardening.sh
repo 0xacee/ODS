@@ -228,6 +228,9 @@ assert_contains "$bootstrap" 'ods_ref_is_exact_sha' "bootstrap should detect exa
 assert_contains "$bootstrap" 'checkout_requested_sha_ref "\$ODS_REF"' "bootstrap should checkout exact SHA refs after cloning"
 assert_contains "$bootstrap" 'BOOTSTRAP_FORCE=false' "bootstrap should parse --force before incomplete install prompts"
 assert_contains "$bootstrap" 'BOOTSTRAP_NON_INTERACTIVE=false' "bootstrap should parse --non-interactive before incomplete install prompts"
+assert_contains "$bootstrap" '"\$\{BOOTSTRAP_NON_INTERACTIVE\}" == "true"' "bootstrap non-interactive output should disable ANSI even on a TTY"
+assert_contains "$bootstrap" '-n "\$\{ODS_INSTALLER_GUI:-\}"' "bootstrap GUI output should disable ANSI even on a TTY"
+assert_contains "$bootstrap" '"\$\{ODS_UI_MODE:-auto\}" == "plain"' "bootstrap should honor the shared plain presentation mode"
 assert_contains "$bootstrap" 'Removing incomplete install because --force was provided' "bootstrap --force should remove incomplete install dirs without prompting"
 assert_contains "$bootstrap" 'Re-run with --force to remove it automatically' "bootstrap --non-interactive should fail with a force hint instead of prompting"
 assert_contains "$bootstrap" 'remove_install_dir()' "bootstrap should centralize incomplete install cleanup"
@@ -246,10 +249,12 @@ sha_repo="$tmpdir/sha-ref-repo"
 sha_home="$tmpdir/sha-home"
 sha_install="$tmpdir/sha-install"
 sha_marker="$tmpdir/sha-marker"
-mkdir -p "$sha_repo/ods/scripts" "$sha_repo/ods/extensions/library" "$sha_home" "$tmpdir/bin"
+mkdir -p "$sha_repo/ods/scripts" "$sha_repo/ods/extensions/library" "$sha_repo/ods/installers" "$sha_home" "$tmpdir/bin"
+cp installers/reinstall-preflight.sh "$sha_repo/ods/installers/reinstall-preflight.sh"
 cat > "$sha_repo/ods/install.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${1:-}" != --preflight-only ]] || exit 0
 printf '%s\n' first-commit > "${ODS_TEST_BOOTSTRAP_INSTALL_MARKER:?}"
 EOF
 chmod +x "$sha_repo/ods/install.sh"
@@ -628,11 +633,10 @@ print("windows-native-llama-runtime-limited")
 PY
 assert_contains "$tmpdir/windows-upgrade-launcher.out" 'windows-upgrade-launcher-supervised' "Windows installer should supervise the full-model upgrade in the scheduled task"
 win_phase04="installers/windows/phases/04-requirements.ps1"
-assert_contains "$win_phase04" 'function Stop-WindowsODSLemonadePortConflicts' "Windows requirements phase should stop native Lemonade conflicts"
-assert_contains "$win_phase04" 'Native Lemonade is running but this install uses Docker-backed inference' "Windows requirements phase should explain non-AMD Lemonade conflicts"
+assert_contains "$win_phase04" 'function Get-WindowsODSLemonadeProcesses' "Windows requirements phase should identify a managed AMD Lemonade listener"
 assert_contains "$win_phase04" '\$gpuInfo\.Backend -eq "amd" -and -not \$cloudMode' "Windows requirements phase should preserve AMD/Lemonade native runtime"
-assert_contains "$win_phase04" 'Stop-Process -Id \(\[int\]\$_proc\.ProcessId\)' "Windows requirements phase should stop detected Lemonade processes"
-assert_contains "$win_phase04" 'Stop-WindowsODSLemonadePortConflicts `' "Windows requirements phase should run Lemonade cleanup before port scan"
+assert_not_contains "$win_phase04" 'Stop-WindowsODSLemonadePortConflicts|Stop-Process -Id' "Windows installer must not kill unrelated Lemonade during preflight or dry-run"
+assert_contains "$win_phase04" 'if \(\$NonInteractive -and -not \$Force -and -not \$DryRun\)' "Non-interactive Windows installs should fail closed on occupied selected ports"
 assert_contains "installers/windows/ods.ps1" 'Invoke-ODSSttModelDownloadTrigger' "ods.ps1 repair voice should trigger STT preload through a bounded helper"
 assert_not_contains "installers/windows/ods.ps1" 'Invoke-WebRequest -Method POST -Uri \$voice\.SttModelUrl -TimeoutSec 3600' "ods.ps1 repair voice should not block on the long STT preload POST"
 assert_contains "installers/windows/ods.ps1" 'Start-ODSLemonadeDirectProcess -Contract \$launchContract -DiagnosticLogPath \$diagnosticLog' "ods.ps1 should use the shared detached direct Lemonade fallback"
@@ -686,7 +690,9 @@ assert_contains "installers/phases/06-directories.sh" 'find -P "\$_installed_cod
 assert_contains "installers/phases/06-directories.sh" '"\$INSTALL_DIR/bin"' "Linux installer does not normalize installed command modes"
 assert_contains "installers/phases/06-directories.sh" 'find -P "\$INSTALL_DIR" -maxdepth 1' "Linux installer does not normalize root executable modes"
 assert_contains "installers/phases/06-directories.sh" 'chmod go-w \{\} \+' "Linux installer leaves copied product code ambiently writable"
-assert_contains "installers/phases/06-directories.sh" 'find -P "\$INSTALL_DIR/data/extensions-library"' "Linux installer does not normalize copied extension-library modes"
+assert_contains "installers/phases/06-directories.sh" 'ods_copy_extensions_library' "Linux installer does not stage readable extension-library templates"
+assert_contains "installers/lib/extensions-library-copy.sh" 'chmod go\+rX,go-w' "Linux installer does not repair extension-library file readability"
+assert_contains "installers/lib/extensions-library-copy.sh" 'find -P "\$target_dir"' "Linux installer does not secure retained extension-library entries"
 
 echo "[contract] Windows phase 06 stages the extension library"
 win_phase06="installers/windows/phases/06-directories.ps1"
@@ -889,7 +895,7 @@ assert_contains "installers/macos/install-macos.sh" 'ODS_DOCKER_BUILD_MAX_ATTEMP
 assert_contains "installers/macos/install-macos.sh" '_macos_build_failed=\$\(\(_macos_build_failed \+ 1\)\)' "macOS installer does not count failed required local image builds"
 assert_contains "installers/macos/install-macos.sh" 'refusing to launch stale images' "macOS installer can still launch stale images after required local builds fail"
 assert_not_contains "installers/macos/install-macos.sh" 'wait .*\|\| ai_warn "Build failed' "macOS installer still treats required local build failures as warnings"
-assert_contains "installers/macos/install-macos.sh" 'colima start --network-address --network-preferred-route' "macOS installer does not prefer the private Colima vmnet route"
+assert_contains "installers/macos/install-macos.sh" '_active_colima start --network-address --network-preferred-route' "macOS installer does not preserve the active profile while enabling the private Colima vmnet route"
 assert_contains "installers/macos/install-macos.sh" 'ODS_MACOS_HOST_GATEWAY' "macOS installer does not persist the private Colima host gateway"
 assert_contains "installers/macos/install-macos.sh" '_configure_macos_host_agent_bridge' "macOS installer does not bridge host-agent actions over private Colima networking"
 assert_contains "installers/macos/install-macos.sh" 'source "\$\{LIB_DIR\}/bridge-manager\.sh"' "macOS installer does not source shared bridge lifecycle code"

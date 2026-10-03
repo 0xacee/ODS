@@ -127,6 +127,16 @@ def test_gateway_restart_during_discovery_cannot_authorize_post(tmp_path):
         assert seen == [(socket.AF_INET, "GET")]
 
 
+def test_same_pid_with_different_native_birth_cannot_authorize_post(tmp_path, monkeypatch):
+    with gateways(socket.AF_INET) as (port, seen):
+        adapter = adapter_at(tmp_path, port)
+        identities = iter([(123, 100, 1, 501), (123, 101, 1, 501)])
+        monkeypatch.setattr(adapter.gateway_service, 'process_identity', lambda **kwargs: next(identities))
+        with pytest.raises(bridge.AccessError, match='gateway-process-mismatch'):
+            adapter.native('probe', 'd' * 64)
+        assert seen == [(socket.AF_INET, 'GET')]
+
+
 def test_new_gateway_pid_discovers_ipv6_again_instead_of_reusing_ipv4(tmp_path, monkeypatch):
     adapter = adapter_at(tmp_path, 18789)
     adapter.native_origin = "http://127.0.0.1:18789"

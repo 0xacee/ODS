@@ -29,7 +29,9 @@ error() { echo -e "${RED}✗${NC} $1" >&2; exit 1; }
 # Uses awk index() instead of sed to avoid delimiter collisions
 env_set() {
     local key="$1" val="$2"
-    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    # Probe with the same literal-prefix test awk uses below — a regex treats
+    # dots/brackets in the key as wildcards and can silently drop the update.
+    if awk -v k="$key" 'index($0, k "=") == 1 { found = 1 } END { exit !found }' "$ENV_FILE" 2>/dev/null; then
         awk -v k="$key" -v v="$val" '{
             if (index($0, k "=") == 1) print k "=" v; else print
         }' "$ENV_FILE" > "${ENV_FILE}.tmp" && cat "${ENV_FILE}.tmp" > "$ENV_FILE" && rm -f "${ENV_FILE}.tmp"

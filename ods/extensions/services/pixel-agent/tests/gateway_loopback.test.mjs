@@ -1,11 +1,49 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import {createLoopbackGatewayFetch, gatewayFetch} from '../host/pixel_ingress.mjs';
+import {createLoopbackGatewayFetch, gatewayFetch, configFromEnv, validateConfig} from '../host/pixel_ingress.mjs';
 
 const ok = () => new Response('{"ok":true}', {headers:{'content-type':'application/json'}});
 const origin = 'http://127.0.0.1:18789';
 const mutation = {method:'POST',headers:{authorization:'Bearer test-only'},body:'{"request_id":"one"}'};
+
+test('Docker Desktop transport is explicit and only targets the fixed host endpoint', async () => {
+  assert.equal(configFromEnv({}).gatewayTransport, 'loopback');
+  const cfg = configFromEnv({PIXEL_GATEWAY_TRANSPORT:'docker-desktop-host'});
+  assert.equal(cfg.gatewayTransport, 'docker-desktop-host');
+  for (const transport of ['', 'http://example.com', 'example.com', 'host.docker.internal']) {
+    assert.throws(() => createLoopbackGatewayFetch(undefined, {transport}), /invalid gateway transport/);
+    assert.throws(() => validateConfig({...cfg, gatewayTransport:transport}), /invalid gateway transport/);
+  }
+  const calls = [];
+  const fetch = createLoopbackGatewayFetch(async (url, options) => {calls.push({url,options});return ok();},
+    {transport:'docker-desktop-host'});
+  await fetch(origin+'/pixel-ods/context', {...mutation, redirect:'follow'});
+  assert.deepEqual(calls.map(call=>call.url), ['http://host.docker.internal:18789/health',
+    'http://host.docker.internal:18789/pixel-ods/context']);
+  assert.equal(calls[1].options.body, mutation.body);
+  assert.ok(calls.every(call=>call.options.redirect==='error'));
+  for (const address of ['http://example.com/', 'http://host.docker.internal/', 'http://user@127.0.0.1/', 'https://127.0.0.1/']) {
+    await assert.rejects(fetch(address, mutation), /invalid local gateway/);
+  }
+  assert.equal(calls.length, 2);
+});
+
+test('Docker Desktop failure never falls back to container loopback or replays a mutation', async () => {
+  const calls = [];
+  let healthy = false;
+  const fetch = createLoopbackGatewayFetch(async (url, options) => {
+    calls.push({url, method:options.method});
+    if (options.method === 'GET') return healthy ? ok() : new Response('{}', {status:503});
+    throw new Error('accepted then disconnected');
+  }, {transport:'docker-desktop-host'});
+  await assert.rejects(fetch(origin+'/pixel-ods/compact', mutation), /unavailable/);
+  assert.equal(calls.length, 1);
+  healthy = true;
+  await assert.rejects(fetch(origin+'/pixel-ods/compact', mutation), /disconnected/);
+  assert.equal(calls.filter(call=>call.method==='POST').length, 1);
+  assert.ok(calls.every(call=>call.url.startsWith('http://host.docker.internal:18789/')));
+});
 
 test('qualifies IPv6 first with a read-only request and keeps the endpoint stable for a burst', async () => {
   const calls=[];

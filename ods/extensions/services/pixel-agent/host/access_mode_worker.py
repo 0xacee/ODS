@@ -17,7 +17,7 @@ sys.dont_write_bytecode = True
 # Python excludes cwd, PYTHONPATH and user site packages; add this protected path.
 directory = Path(__file__).resolve().parent
 for path in (directory, *directory.parents, *(directory / name for name in (
-        "pixel_access_mode.py", "access_mode_config.py", "settings_transaction.py", "pixel_access_protocol.py", "model_transaction.py", "pixel_model_contract.py",
+        "pixel_access_mode.py", "access_mode_config.py", "settings_transaction.py", "pixel_access_protocol.py", "model_transaction.py", "pixel_model_contract.py", "access_release_transaction.py",
         "pixel_settings", "pixel_settings/__init__.py", "pixel_settings/contract.py", "pixel_settings/projection.py",
         "provider_transaction.py", "pixel_provider", "pixel_provider/__init__.py", "pixel_provider/store.py",
         "pixel_provider/activation_config.py"))):
@@ -30,6 +30,7 @@ import pixel_access_protocol as protocol
 import settings_transaction
 import provider_transaction
 import model_transaction
+import access_release_transaction
 from pixel_model_contract import ModelError
 from pixel_provider.store import StoreError
 from pixel_settings.contract import SettingsError
@@ -45,7 +46,10 @@ def main():
     except protocol.ProtocolError:
         emit({"error": "owner-protocol-failed"})
         return
-    path = os.path.join(os.environ["HOME"], ".openclaw", "openclaw.json")
+    # Only the root coordinator launches this worker, with a clean environment
+    # derived from its bound deployment. API requests cannot choose this path.
+    path = os.environ.get("OPENCLAW_CONFIG_PATH") or os.path.join(
+        os.environ["HOME"], ".openclaw", "openclaw.json")
     # New integrated installations keep recovery state under the already
     # private config directory. A user's general XDG state parent may validly
     # be group-writable; do not chmod that shared directory or weaken custody.
@@ -69,6 +73,46 @@ def main():
             return False
 
     try:
+        if request['operation'].startswith('release-'):
+            # Root chooses these inputs on the private worker pipe. No public
+            # socket operation accepts candidate paths or release operations.
+            if controller._sha256_bytes(controller._load_config(path)[2]) != request['config_sha256']:
+                raise SettingsError('access-release-input-changed')
+            common = dict(transaction_id=request['transaction_id'],
+                          check_no_active_run=lambda: hook('busy'))
+            if request['operation'] == 'release-baseline':
+                result = access_release_transaction.baseline(path, state_dir,
+                    expected_current=request['config_sha256'], **common)
+            elif request['operation'] == 'release-abort':
+                result = access_release_transaction.abort_unprepared(path, state_dir,
+                    expected_current=request['config_sha256'], expected_receipt=request['receipt_sha256'],
+                    verify_runtime=lambda _: hook('release-verify'), **common)
+            elif request['operation'] == 'release-prepare':
+                result = access_release_transaction.prepare(path, request['candidate_path'], state_dir,
+                    expected_current=request['config_sha256'], expected_candidate=request['candidate_sha256'],
+                    expected_receipt=request['receipt_sha256'],
+                    validate_config=validate, **common)
+            elif request['operation'] == 'release-recover':
+                changed = access_release_transaction.recover(path, state_dir,
+                    outcome=request['release_outcome'], validate_config=validate, **common)
+                result = {'configSha256': changed['configSha256']}
+            else:
+                def verify_release(digest):
+                    if digest != request['config_sha256']:
+                        raise SettingsError('access-release-input-changed')
+                    return hook('release-verify')
+                changed = access_release_transaction.finish(path, state_dir,
+                    outcome=request['release_outcome'], verify_runtime=verify_release, **common)
+                result = {'configSha256': changed['configSha256']}
+            emit({'result': result})
+            return
+        if request['operation'] == 'access-relocate':
+            selection = request['relocation']
+            changed = controller.relocate_receipt(selection['source_config'], path, state_dir,
+                old_sha256=selection['source_sha256'], new_sha256=request['config_sha256'],
+                check_no_active_run=lambda: hook('busy'))
+            emit({'result': {'relocated': changed}})
+            return
         if request["operation"].startswith("model-"):
             result = model_transaction.operate(path, state_dir=state_dir, operation=request["operation"],
                 transaction_id=request.get("transaction_id"), proposed=request.get("model_target"),

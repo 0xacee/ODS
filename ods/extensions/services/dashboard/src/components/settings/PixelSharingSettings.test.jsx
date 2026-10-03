@@ -46,6 +46,16 @@ it('does not fabricate a usable snapshot from malformed or failed reads', async 
   expect(screen.queryByRole('button', { name: 'Start sharing' })).not.toBeInTheDocument()
 })
 
+it('explains an unsupported sharing host without offering installation controls', async () => {
+  const fetchMock = vi.fn(async () => response({code: 'unsupported-platform'}, 503))
+  vi.stubGlobal('fetch', fetchMock)
+  render(createElement(PixelSharingSettings))
+  expect(await screen.findByRole('alert')).toHaveTextContent('not supported by this host')
+  expect(screen.getByRole('alert')).toHaveTextContent('WSL')
+  expect(screen.queryByRole('button', {name: 'Start sharing'})).not.toBeInTheDocument()
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+})
+
 it('copies the one-time key only on explicit action and never persists it in browser storage', async () => {
   const storage = vi.spyOn(window.Storage.prototype, 'setItem')
   const { fetchMock } = setup()

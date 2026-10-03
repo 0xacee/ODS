@@ -27,6 +27,9 @@
 #   or change directory layout here.
 # ============================================================================
 
+# shellcheck source=installers/lib/extensions-library-copy.sh
+source "$SCRIPT_DIR/installers/lib/extensions-library-copy.sh"
+
 ods_progress 38 "directories" "Preparing installation directory"
 chapter "SETTING UP INSTALLATION"
 
@@ -76,6 +79,42 @@ _phase06_env_hex_secret() {
     printf '%s%s' "$prefix" "$value"
 }
 
+# Optional paths are only passed by the isolated WSL mount contract test.
+# shellcheck disable=SC2120
+_phase06_pixel_runtime_layout() {
+    PIXEL_INGRESS_RUNTIME_DIR_VALUE=/run/ods-pixel
+    PIXEL_PREVIEW_RUNTIME_DIR_VALUE=/run/ods-pixel-preview
+    PIXEL_RUNTIME_BIND_PROPAGATION_VALUE=rprivate
+    local kernel_release="${1:-/proc/sys/kernel/osrelease}" wsl_mount="${2:-/mnt/wsl}"
+    [[ -r "$kernel_release" ]] || return 0
+    grep -qi microsoft "$kernel_release" || return 0
+    # Docker Desktop's daemon runs in a different WSL distro. /run in this
+    # distro is therefore not its /run; /mnt/wsl is the shared tmpfs bridge.
+    # Phase 05 may select sudo docker before a new docker group membership
+    # takes effect. Probe with that same command, not an unprivileged client.
+    local -a docker_command=(docker)
+    case "${DOCKER_CMD:-docker}" in
+        docker) ;;
+        'sudo docker') docker_command=(sudo docker) ;;
+        *) return 1 ;;
+    esac
+    # A remote daemon cannot bind this distro's /run or /mnt/wsl. Check both
+    # the explicit override and the selected context before trusting its OS.
+    [[ -z "${DOCKER_HOST:-}" || "${DOCKER_HOST}" == unix:///* ]] || return 1
+    local docker_endpoint docker_os
+    docker_endpoint="$(timeout 10s "${docker_command[@]}" context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)" || return 1
+    [[ "$docker_endpoint" == unix:///* ]] || return 1
+    docker_os="$(timeout 10s "${docker_command[@]}" info --format '{{.OperatingSystem}}' 2>/dev/null)" || return 1
+    [[ "$docker_os" == "Docker Desktop" ]] || return 0
+    [[ -d "$wsl_mount" && "$(findmnt -n -o PROPAGATION -T "$wsl_mount")" == shared ]] || return 1
+    # Use this distro's path. Docker Desktop's WSL proxy translates bind
+    # sources from the calling distro; the daemon's own name for this tmpfs
+    # is resolved inside this distro instead and fails as "not a shared mount".
+    PIXEL_INGRESS_RUNTIME_DIR_VALUE=/mnt/wsl/ods-portal-runtime/ingress
+    PIXEL_PREVIEW_RUNTIME_DIR_VALUE=/mnt/wsl/ods-portal-runtime/preview
+    PIXEL_RUNTIME_BIND_PROPAGATION_VALUE=rshared
+}
+
 if $DRY_RUN; then
     log "[DRY RUN] Would create: $INSTALL_DIR/{config,data,models}"
     log "[DRY RUN] Would copy compose files ($COMPOSE_FLAGS) and source tree"
@@ -96,11 +135,100 @@ else
 
     # shellcheck source=../lib/llama-memory-budget.sh
     source "$SCRIPT_DIR/installers/lib/llama-memory-budget.sh"
+    # shellcheck source=../lib/searxng-locale.sh
+    source "$SCRIPT_DIR/installers/lib/searxng-locale.sh"
 
     # shellcheck source=../../lib/dotenv-quote.sh
     source "$SCRIPT_DIR/lib/dotenv-quote.sh"
     # shellcheck source=../../lib/safe-env.sh
     source "$SCRIPT_DIR/lib/safe-env.sh"
+
+    _env_existing=""
+    [[ -f "$INSTALL_DIR/.env" ]] && _env_existing="$INSTALL_DIR/.env"
+
+    # Resolve the requested source before replacing installed code or retiring
+    # a managed Pixel. Never source the owner's .env as shell code. Decode with
+    # the same grammar used when its values were written so quoted values stay
+    # literal across an upgrade.
+    _env_get() {
+        local key="$1" default="${2:-}"
+        if [[ -n "$_env_existing" ]]; then
+            local val
+            val=$(grep -m1 "^${key}=" "$_env_existing" 2>/dev/null | cut -d= -f2- || true)
+            val="$(safe_env_decode_value "$val")"
+            if [[ -n "$val" ]]; then
+                printf '%s\n' "$val"
+                return
+            fi
+        fi
+        printf '%s\n' "$default"
+    }
+
+    _env_get_explicit_first() {
+        local key="$1" default="${2:-}" val
+        val="${!key-}"
+        if [[ -n "$val" ]]; then
+            printf '%s\n' "$val"
+            return
+        fi
+        _env_get "$key" "$default"
+    }
+
+    _phase06_requested_pixel_url=""
+    _phase06_requested_pixel_ref=""
+    _phase06_requested_pixel_dir=""
+    if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]]; then
+        _phase06_requested_pixel_url="$(_env_get_explicit_first PIXEL_SOURCE_URL bundled)"
+        _phase06_requested_pixel_ref="$(_env_get_explicit_first PIXEL_SOURCE_REF "$ODS_PIXEL_BUNDLED_REF")"
+        _phase06_requested_pixel_dir="$(_env_get_explicit_first PIXEL_SOURCE_DIR "")"
+        # A persisted bundled ref identifies the release that was installed,
+        # not a pin against future ODS updates. Use this release's verified
+        # bundle unless the caller explicitly requested an exact source ref.
+        # The source-transition checks below still validate/retire the prior
+        # managed checkout before installed code is replaced.
+        if [[ "$_phase06_requested_pixel_url" == bundled && -z "${PIXEL_SOURCE_REF:-}" ]]; then
+            _phase06_requested_pixel_ref="$ODS_PIXEL_BUNDLED_REF"
+        fi
+        # This is an upgrade sentinel only; no private repository is fetched.
+        if [[ "$_phase06_requested_pixel_url" == 'https://github.com/Osmantic/Pixel.git' \
+            && "$_phase06_requested_pixel_ref" == 'b33730436baf5d98bf58f7d57c090318fe19f433' ]]; then
+            _phase06_requested_pixel_url=bundled
+            _phase06_requested_pixel_ref="$ODS_PIXEL_BUNDLED_REF"
+            ai "Migrating the former Pixel source setting to the bundled ODS release."
+        fi
+        [[ "$_phase06_requested_pixel_ref" =~ ^[0-9a-f]{40}$ ]] || {
+            error "Pixel requires an exact source commit before an upgrade."
+            return 1
+        }
+        if [[ "$_phase06_requested_pixel_url" == bundled ]]; then
+            _phase06_source_bundle="$SCRIPT_DIR/vendor/pixel.bundle"
+            [[ "$_phase06_requested_pixel_ref" == "$ODS_PIXEL_BUNDLED_REF" \
+                && -f "$_phase06_source_bundle" && ! -L "$_phase06_source_bundle" \
+                && "$(sha256sum -- "$_phase06_source_bundle" | cut -d ' ' -f 1)" == "$ODS_PIXEL_BUNDLED_SHA256" ]] || {
+                error "The requested bundled Pixel source is absent or changed; the installed release was left intact."
+                return 1
+            }
+            unset _phase06_source_bundle
+        elif [[ "$_phase06_requested_pixel_url" == /* ]]; then
+            PIXEL_SOURCE_URL="$_phase06_requested_pixel_url" \
+                PIXEL_SOURCE_REF="$_phase06_requested_pixel_ref" \
+                PIXEL_SOURCE_DIR="$_phase06_requested_pixel_dir" \
+                ods_pixel_validate_source || {
+                    error "The requested local Pixel source is invalid; the installed release was left intact."
+                    return 1
+                }
+            env -i PATH="$PATH" HOME="$HOME" GIT_CONFIG_NOSYSTEM=1 \
+                GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=file GIT_NO_REPLACE_OBJECTS=1 \
+                git -C "$_phase06_requested_pixel_url" cat-file -e \
+                "${_phase06_requested_pixel_ref}^{commit}" || {
+                    error "The requested local Pixel commit is unavailable; the installed release was left intact."
+                    return 1
+                }
+        else
+            error "Pixel source must be bundled or an absolute local checkout; the installed release was left intact."
+            return 1
+        fi
+    fi
 
     # A Pixel-to-Hermes rerun must retire the exact ODS-managed host runtime,
     # not merely remove the Compose edge from the next launch. Do this before
@@ -109,7 +237,6 @@ else
     _phase06_pixel_marker="$HOME/.config/ods/pixel-managed.json"
     _phase06_pixel_source_transition=0
     if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" \
-        && -n "${PIXEL_SOURCE_REF:-}" \
         && ( -e "$_phase06_pixel_marker" || -L "$_phase06_pixel_marker" ) ]]; then
         _phase06_pixel_owner="$(ods_pixel_install_owner)" || {
             error "Could not identify the ODS owner for a Pixel source transition."
@@ -120,25 +247,51 @@ else
             return 1
         }
         _ods_pixel_source_transition_required \
-            "$_phase06_pixel_owner" "$_phase06_pixel_home" "$PIXEL_SOURCE_REF" \
+            "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_requested_pixel_ref" "$SCRIPT_DIR" \
             || _phase06_pixel_source_transition=$?
+        if [[ "$_phase06_pixel_source_transition" == 0 || "$_phase06_pixel_source_transition" == 1 ]] \
+            && ods_sudo test -d /var/lib/ods-pixel-access/source-upgrade; then
+            _phase06_source_status="$(_ods_pixel_source_upgrade status "$_phase06_pixel_owner")" || return 1
+            if jq -e '.pending == true and .phase == "complete"' <<<"$_phase06_source_status" >/dev/null; then
+                _ods_pixel_source_upgrade finish "$_phase06_pixel_owner" || return 1
+            elif jq -e '.pending == true' <<<"$_phase06_source_status" >/dev/null; then
+                _phase06_pixel_source_transition=0
+            fi
+            unset _phase06_source_status
+        fi
         case "$_phase06_pixel_source_transition" in
             0)
-                if ! declare -F ods_pixel_uninstall_managed >/dev/null 2>&1; then
-                    # shellcheck source=../../lib/pixel-uninstall.sh
-                    source "$SCRIPT_DIR/lib/pixel-uninstall.sh"
-                fi
                 _phase06_step "rebind-pixel-source"
-                ai "Retiring the verified prior Pixel source before applying the new immutable source..."
+                ai "Preparing the verified Pixel source upgrade while preserving its access mode..."
                 if ! _ods_pixel_restore_transition_source \
-                    "$_phase06_pixel_owner" "$_phase06_pixel_home" "$PIXEL_SOURCE_REF" >/dev/null; then
-                    error "Could not reconstruct the exact prior Pixel source needed for safe retirement."
+                    "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_requested_pixel_ref" >/dev/null; then
+                    error "Could not verify the prior Pixel checkout for safe upgrade. Restore its local backup before retrying; no private repository was contacted."
                     return 1
                 fi
-                if ! ods_pixel_uninstall_managed "$INSTALL_DIR" "$_phase06_pixel_home"; then
-                    error "Could not safely retire the prior ODS-managed Pixel source."
+                if ! _ods_pixel_source_upgrade stage "$_phase06_pixel_owner" \
+                    "$SCRIPT_DIR" "$_phase06_requested_pixel_ref"; then
+                    error "Could not stage the exact Pixel source upgrade; the active source and access state were left intact."
                     return 1
                 fi
+                _phase06_pixel_binary="$(_ods_pixel_openclaw_bin "$_phase06_pixel_owner" "$_phase06_pixel_home")" || return 1
+                # Install the source-release guard in the protected controller
+                # before taking its hold. The helper journals every mirror
+                # replacement first and keeps the actual installation binding.
+                _phase06_source_status="$(_ods_pixel_source_upgrade status "$_phase06_pixel_owner")" || return 1
+                if jq -e '.transaction == null and .phase == "staged"' <<<"$_phase06_source_status" >/dev/null; then
+                    _ods_pixel_install_access_service "$_phase06_pixel_owner" \
+                        "$_phase06_pixel_binary" false true "$SCRIPT_DIR" || return 1
+                fi
+                unset _phase06_source_status
+                ODS_PIXEL_SOURCE_TRANSACTION="$(_ods_pixel_source_upgrade hold "$_phase06_pixel_owner")" || return 1
+                [[ "$ODS_PIXEL_SOURCE_TRANSACTION" =~ ^[a-f0-9]{64}$ ]] || return 1
+                export ODS_PIXEL_SOURCE_TRANSACTION
+                _ods_pixel_source_upgrade copy "$_phase06_pixel_owner" || return 1
+                # Everything after this boundary can update Compose/env/data
+                # and native services. Recovery must resume this same candidate;
+                # a source-only rollback would no longer restore the installer.
+                _ods_pixel_source_upgrade downstream "$_phase06_pixel_owner" || return 1
+                unset _phase06_pixel_binary
                 ;;
             1) ;;
             *)
@@ -177,27 +330,6 @@ else
         esac
     fi
 
-    _env_existing=""
-    [[ -f "$INSTALL_DIR/.env" ]] && _env_existing="$INSTALL_DIR/.env"
-
-    # Safe reader: extract a value from existing .env without sourcing it.
-    # Decode it with the same grammar as lib/safe-env.sh, so a value the
-    # dashboard or the owner quoted ('pa$$word', "it's") comes back literally;
-    # the .env template writes preserved values back with dotenv_value.
-    _env_get() {
-        local key="$1" default="${2:-}"
-        if [[ -n "$_env_existing" ]]; then
-            local val
-            val=$(grep -m1 "^${key}=" "$_env_existing" 2>/dev/null | cut -d= -f2- || true)
-            val="$(safe_env_decode_value "$val")"
-            if [[ -n "$val" ]]; then
-                printf '%s\n' "$val"
-                return
-            fi
-        fi
-        printf '%s\n' "$default"
-    }
-
     _phase06_compose_uid=$(_env_get ODS_UID "")
     _phase06_compose_gid=$(_env_get ODS_GID "")
     # Migrate the old Compose-only UID/GID keys without writing Bash's
@@ -222,7 +354,7 @@ else
     mkdir -p "$INSTALL_DIR"/config/{n8n,litellm,openclaw,searxng}
 
     _phase06_repair_host_path() {
-        local target="$1" description="$2"
+        local target="$1" description="$2" target_parent
 
         if $_phase06_rootless; then
             local relative="${target#"$INSTALL_DIR"/}"
@@ -234,8 +366,30 @@ else
             return 0
         fi
         if ! ods_sudo_available; then
-            error "Cannot repair $description without privileged access: $target. Fix its ownership manually, then re-run ODS."
-            return 1
+            # A rootful Docker daemon can repair a container-owned ODS path
+            # through an exact bind mount without granting host sudo. Never
+            # follow a replaced top-level directory or an arbitrary path.
+            target_parent="${target%/}"
+            target_parent="${target_parent%/*}"
+            if [[ "$target_parent" != "$INSTALL_DIR/data" \
+               && "$target_parent" != "$INSTALL_DIR/config" ]] \
+               || [[ ! -d "$target" || -L "${target%/}" \
+                   || -L "$target_parent" || -L "$INSTALL_DIR" ]]; then
+                error "Refusing unsafe $description repair: $target"
+                return 1
+            fi
+            _ods_rootless_ensure_helper_image || return 1
+            if ! docker_run run --rm --network none --user 0:0 \
+                --mount "type=bind,src=${target%/},dst=/data" \
+                "$ODS_ROOTLESS_HELPER_IMAGE" chown -h -R "$(id -u):$(id -g)" /data; then
+                error "Could not repair $description with scoped Docker access: $target"
+                return 1
+            fi
+            [[ -w "$target" ]] || {
+                error "Repaired $description is still not writable: $target"
+                return 1
+            }
+            return 0
         fi
         if ! ods_sudo chown -R "$(id -u):$(id -g)" "$target" 2>/dev/null; then
             error "Failed to repair $description: $target"
@@ -252,18 +406,26 @@ else
         && [[ "${ENABLE_HERMES:-false}" == "true" && -d "$INSTALL_DIR/data/hermes" ]]; then
         _hermes_metadata=$(stat -c '%u:%g:%a' "$INSTALL_DIR/data/hermes" 2>/dev/null || true)
         if [[ "$_hermes_metadata" != "$_phase06_compose_uid:$_phase06_compose_gid:700" ]]; then
-            if ! ods_sudo_available; then
-                error "Hermes requires data/hermes ownership $_phase06_compose_uid:$_phase06_compose_gid and mode 700 with a rootful runtime. Grant privileged access or disable Hermes, then re-run ODS."
-                return 1
+            # A fresh no-sudo install creates this directory as the invoking
+            # user, often with mode 755/775. That user can make it private
+            # directly; privileged repair is only needed for foreign owners.
+            if [[ "${_hermes_metadata%:*}" == "$_phase06_compose_uid:$_phase06_compose_gid" ]] \
+                && chmod 700 "$INSTALL_DIR/data/hermes" 2>/dev/null; then
+                :
+            else
+                if ! ods_sudo_available; then
+                    error "Hermes requires data/hermes ownership $_phase06_compose_uid:$_phase06_compose_gid and mode 700 with a rootful runtime. Grant privileged access or disable Hermes, then re-run ODS."
+                    return 1
+                fi
+                ods_sudo chown -R "$_phase06_compose_uid:$_phase06_compose_gid" "$INSTALL_DIR/data/hermes" 2>/dev/null || {
+                    error "Failed to restore data/hermes ownership to $_phase06_compose_uid:$_phase06_compose_gid"
+                    return 1
+                }
+                ods_sudo chmod 700 "$INSTALL_DIR/data/hermes" 2>/dev/null || {
+                    error "Failed to preserve private mode 700 on data/hermes"
+                    return 1
+                }
             fi
-            ods_sudo chown -R "$_phase06_compose_uid:$_phase06_compose_gid" "$INSTALL_DIR/data/hermes" 2>/dev/null || {
-                error "Failed to restore data/hermes ownership to $_phase06_compose_uid:$_phase06_compose_gid"
-                return 1
-            }
-            ods_sudo chmod 700 "$INSTALL_DIR/data/hermes" 2>/dev/null || {
-                error "Failed to preserve private mode 700 on data/hermes"
-                return 1
-            }
         fi
         unset _hermes_metadata
     fi
@@ -273,6 +435,14 @@ else
     if ! $_phase06_rootless; then
         for _data_dir in "$INSTALL_DIR"/data/*/; do
             [[ "${ENABLE_HERMES:-false}" == "true" && "$_data_dir" == "$INSTALL_DIR/data/hermes/" ]] && continue
+            # Private retained chat results belong to Dashboard UID 1000.
+            [[ "$_data_dir" == "$INSTALL_DIR/data/pixel-chat-results/" ]] && continue
+            # Token Spy's persistent directory intentionally belongs to its
+            # container UID 1000; phase 06 verifies that identity below.
+            [[ "$_data_dir" == "$INSTALL_DIR/data/token-spy/" ]] && continue
+            # APE's private governance state/audit directory intentionally
+            # belongs to the APE container UID; phase 06 prepares it below.
+            [[ "$_data_dir" == "$INSTALL_DIR/data/ape/" ]] && continue
             if [[ -d "$_data_dir" ]] && ! [[ -w "$_data_dir" ]]; then
                 _phase06_repair_host_path "$_data_dir" "container-owned data directory" || return 1
             fi
@@ -293,6 +463,9 @@ else
             [[ -d "$INSTALL_DIR/$_root" ]] || continue
             for _d in "$INSTALL_DIR/$_root"/*/; do
                 [[ "${ENABLE_HERMES:-false}" == "true" && "$_d" == "$INSTALL_DIR/data/hermes/" ]] && continue
+                [[ "$_d" == "$INSTALL_DIR/data/pixel-chat-results/" ]] && continue
+                [[ "$_d" == "$INSTALL_DIR/data/token-spy/" ]] && continue
+                [[ "$_d" == "$INSTALL_DIR/data/ape/" ]] && continue
                 [[ -d "$_d" ]] && ! [[ -w "$_d" ]] && _cant_write="$_cant_write ${_d#"$INSTALL_DIR"/}"
             done
         done
@@ -308,37 +481,31 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     ods_progress 39 "directories" "Copying source files"
     if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
         ai "Copying source files to $INSTALL_DIR..."
-        if command -v rsync &>/dev/null; then
-            rsync -a --no-owner --no-group \
-                --exclude='.git' \
-                --exclude='data/' \
-                --exclude='logs/' \
-                --exclude='models/' \
-                --exclude='.env' \
-                --exclude='node_modules/' \
-                --exclude='dist/' \
-                --exclude='*.log' \
-                --exclude='.current-mode' \
-                --exclude='.profiles' \
-                --exclude='.target-model' \
-                --exclude='.target-quantization' \
-                --exclude='.offline-mode' \
-                "$SCRIPT_DIR/" "$INSTALL_DIR/"
-        else
-            # Fallback: cp -r everything, then remove runtime artifacts
-            if ! cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR/" 2>>"$LOG_FILE"; then
-                warn "Source copy incomplete — some files may be missing"
-            fi
-            if ! cp "$SCRIPT_DIR"/.gitignore "$INSTALL_DIR/" 2>>"$LOG_FILE"; then
-                warn "Failed to copy .gitignore"
-            fi
-            rm -rf "$INSTALL_DIR/.git" 2>>"$LOG_FILE" || true
-        fi
+        # shellcheck source=../lib/source-copy.sh
+        source "$SCRIPT_DIR/installers/lib/source-copy.sh"
+        ods_copy_install_source "$SCRIPT_DIR" "$INSTALL_DIR" "$LOG_FILE" || {
+            error "Source upgrade failed; existing cloud provider configuration was preserved."
+            return 1
+        }
         # Ensure scripts are executable
-        chmod +x "$INSTALL_DIR"/*.sh "$INSTALL_DIR"/scripts/*.sh "$INSTALL_DIR"/ods-cli 2>>"$LOG_FILE" || warn "Some scripts may not be executable — verify after install"
+        if [[ -n "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+            # Protected source modes were installed from the exact staged
+            # inventory; do not mutate them after hashing, including custom
+            # scripts retained from the previous installation.
+            chmod +x "$INSTALL_DIR"/*.sh "$INSTALL_DIR"/ods-cli 2>>"$LOG_FILE" || warn "Some scripts may not be executable — verify after install"
+        else
+            chmod +x "$INSTALL_DIR"/*.sh "$INSTALL_DIR"/scripts/*.sh "$INSTALL_DIR"/ods-cli 2>>"$LOG_FILE" || warn "Some scripts may not be executable — verify after install"
+        fi
         ai_ok "Source files installed"
     else
         log "Running in-place (source == install dir), skipping file copy"
+    fi
+
+    if declare -F _ods_apply_deferred_feature_state >/dev/null; then
+        _ods_apply_deferred_feature_state || {
+            error "Deferred feature reconciliation failed; resume the same installer candidate."
+            return 1
+        }
     fi
 
     # A Windows-mounted WSL checkout can surface every source entry as 0777.
@@ -347,19 +514,36 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # any link where a regular file or directory is required.
     for _installed_code_root in \
         "$INSTALL_DIR/bin" \
+        "$INSTALL_DIR/lib" \
         "$INSTALL_DIR/scripts" \
+        "$INSTALL_DIR/installers" \
         "$INSTALL_DIR/config" \
-        "$INSTALL_DIR/extensions"
+        "$INSTALL_DIR/extensions" \
+        "$INSTALL_DIR/vendor"
     do
         [[ -d "$_installed_code_root" && ! -L "$_installed_code_root" ]] \
             || error "Missing or unsafe installed code tree: $_installed_code_root"
-        find -P "$_installed_code_root" \( -type d -o -type f \) -exec chmod go-w -- {} + \
+        find -P "$_installed_code_root" \( -type d -o -type f \) \
+            \( -perm -020 -o -perm -002 \) -exec chmod go-w {} + \
             || error "Could not secure installed code tree: $_installed_code_root"
     done
     find -P "$INSTALL_DIR" -maxdepth 1 -type f \
-        \( -name '*.sh' -o -name 'ods-cli' \) -exec chmod go-w -- {} + \
+        \( -name '*.sh' -o -name 'ods-cli' \) \
+        \( -perm -020 -o -perm -002 \) -exec chmod go-w {} + \
         || error "Could not secure installed root executables"
+    [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] || error "Unsafe installed root"
+    chmod go-w "$INSTALL_DIR" || error "Could not secure installed root"
     unset _installed_code_root
+
+    # Source staging under umask 077 makes the two public policy bind mounts
+    # unreadable to APE and remote-provider-egress, which run as non-root.
+    # Normalize them on fresh and retained installs before Compose starts.
+    _phase06_step "prepare-public-policy-mounts"
+    if ! bash "$INSTALL_DIR/scripts/prepare-public-policy-mounts.sh" "$INSTALL_DIR" \
+        >> "$LOG_FILE" 2>&1; then
+        error "Could not prepare public policy mounts for non-root services. See $LOG_FILE for details."
+        return 1
+    fi
 
     # Windows-mounted WSL checkouts commonly present every copied file as
     # mode 0777 even when Git records a narrower executable bit. Pixel refuses
@@ -370,7 +554,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         _pixel_exec_control_path="$_pixel_exec_control_dir/$_pixel_exec_control"
         [[ -f "$_pixel_exec_control_path" && ! -L "$_pixel_exec_control_path" ]] \
             || error "Missing or unsafe Pixel execution-control helper: $_pixel_exec_control_path"
-        chmod 0755 -- "$_pixel_exec_control_path" \
+        chmod 0755 "$_pixel_exec_control_path" \
             || error "Could not secure Pixel execution-control helper: $_pixel_exec_control_path"
     done
     unset _pixel_exec_control_dir _pixel_exec_control _pixel_exec_control_path
@@ -409,12 +593,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         if [[ -d "$_candidate" ]]; then _ext_lib_src="$_candidate"; break; fi
     done
     if [[ -n "$_ext_lib_src" ]]; then
-        mkdir -p "$INSTALL_DIR/data/extensions-library"
-        cp -r "$_ext_lib_src/." "$INSTALL_DIR/data/extensions-library/"
-        [[ ! -L "$INSTALL_DIR/data/extensions-library" ]] \
-            || error "Installed extension library cannot be a symlink"
-        find -P "$INSTALL_DIR/data/extensions-library" \( -type d -o -type f \) \
-            -exec chmod go-w -- {} + \
+        ods_copy_extensions_library "$_ext_lib_src" "$INSTALL_DIR/data" \
             || error "Could not secure the installed extension library"
         ai_ok "Extensions library copied to data/extensions-library/ (from $_ext_lib_src)"
     else
@@ -490,10 +669,94 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         fi
     fi
 
+    _phase06_step "prepare-dashboard-permissions"
+    # shellcheck source=../lib/dashboard-data.sh
+    source "$SCRIPT_DIR/installers/lib/dashboard-data.sh"
+    if ! ods_prepare_dashboard_data "$INSTALL_DIR" "$_phase06_rootless"; then
+        error "Could not prepare Dashboard data for passwords and Portal chat results. Verify privileged Docker/host access, then re-run the installer."
+        return 1
+    fi
+
     # Prepare service-specific ownership after compose selection is final.
     _phase06_step "prepare-service-permissions"
-    if ! $_phase06_rootless; then
-        chown -R 1000:1000 "$INSTALL_DIR/data/token-spy" || warn "Failed to chown data/token-spy to 1000:1000 (non-fatal); container may crash if installer ran as a different uid"
+    if ! $_phase06_rootless && [[ -f "$INSTALL_DIR/extensions/services/token-spy/compose.yaml" ]]; then
+        # The image runs as UID 1000, independently of the installer owner.
+        # A warning here leaves a healthy-looking service unable to store usage.
+        # Do not use ods_sudo when unavailable: it deliberately returns success
+        # for skipped optional commands. A matching owner can still chown directly.
+        _token_spy_chown=(chown -R 1000:1000 "$INSTALL_DIR/data/token-spy")
+        if ods_sudo_available; then
+            _token_spy_chown=(ods_sudo "${_token_spy_chown[@]}")
+        elif [[ "$(id -u)" != 1000 ]]; then
+            # Docker access can perform this scoped repair without host sudo.
+            [[ -d "$INSTALL_DIR/data/token-spy" && ! -L "$INSTALL_DIR/data/token-spy" ]] || {
+                error "Cannot safely prepare data/token-spy: expected a real directory."
+                return 1
+            }
+            _ods_rootless_ensure_helper_image || return 1
+            _token_spy_chown=(docker_run run --rm --network none --user 0:0
+                --mount "type=bind,src=$INSTALL_DIR/data/token-spy,dst=/data"
+                "$ODS_ROOTLESS_HELPER_IMAGE" chown -h -R 1000:1000 /data)
+        fi
+        if ! "${_token_spy_chown[@]}"; then
+            error "Cannot prepare data/token-spy for container UID 1000. Grant privileged access or repair its ownership, then re-run the installer."
+            return 1
+        fi
+        unset _token_spy_chown
+    fi
+
+    # APE (Agent Policy Engine) persists private governance state and the
+    # audit log to the data/ape bind mount. Its image runs as the system user
+    # created by `adduser --system --no-create-home ape`, which on the pinned
+    # python:3.12-slim base resolves to UID 100 / GID 65534 (nogroup),
+    # independently of the installer owner. A rootful install would otherwise
+    # leave data/ape owned by the invoking account under the invoking umask, so
+    # the container cannot create state.json/audit.jsonl and crash-loops with
+    # PermissionError. Prepare the private state directory for the APE
+    # container UID/GID without a broad chmod 777 and without following
+    # symlinks (chown -h so a link is never dereferenced; no -R across a
+    # symlinked ancestor because install, data, and ape must be physical directories).
+    # Scope: only data/ape. This block is a no-op on rootless installs, which
+    # ods_fix_rootless_ownership prepares separately.
+    if ! $_phase06_rootless \
+        && [[ -f "$INSTALL_DIR/extensions/services/ape/compose.yaml" ]] \
+        && grep -Eq '^[[:space:]]*-?[[:space:]]*(\./)?data/ape:/data/ape(:[^[:space:]]*)?[[:space:]]*$' \
+            "$INSTALL_DIR/extensions/services/ape/compose.yaml"; then
+        _ape_uid=100
+        _ape_gid=65534
+        # These IDs match the pinned image and the rootless repair contract.
+        # Refuse links in the bind source and its install-owned ancestry before
+        # privileged recursive ownership changes.
+        [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" \
+            && -d "$INSTALL_DIR/data" && ! -L "$INSTALL_DIR/data" \
+            && -d "$INSTALL_DIR/data/ape" && ! -L "$INSTALL_DIR/data/ape" ]] || {
+            error "Cannot safely prepare data/ape: expected real install, data, and APE directories."
+            return 1
+        }
+        if ods_sudo_available; then
+            ods_sudo chown -h -R "$_ape_uid:$_ape_gid" "$INSTALL_DIR/data/ape" \
+                && ods_sudo chmod 700 "$INSTALL_DIR/data/ape" || {
+                error "Cannot prepare data/ape for APE container UID $_ape_uid. Grant privileged access or repair its ownership, then re-run the installer."
+                return 1
+            }
+        else
+            _ods_rootless_ensure_helper_image || return 1
+            if ! docker_run run --rm --network none --user 0:0 \
+                --mount "type=bind,src=$INSTALL_DIR/data/ape,dst=/data" \
+                "$ODS_ROOTLESS_HELPER_IMAGE" sh -ec '
+                    chown -h -R "$1:$2" /data
+                    chmod 700 /data
+                ' sh "$_ape_uid" "$_ape_gid"; then
+                error "Cannot prepare data/ape for APE container UID $_ape_uid. Grant privileged access or repair its ownership, then re-run the installer."
+                return 1
+            fi
+        fi
+        _ape_meta=$(stat -c '%u:%g:%a' "$INSTALL_DIR/data/ape" 2>/dev/null || true)
+        if [[ "$_ape_meta" != "$_ape_uid:$_ape_gid:700" ]]; then
+            error "data/ape ownership/mode verification failed: got ${_ape_meta:-unreadable}, expected $_ape_uid:$_ape_gid:700."
+            return 1
+        fi
+        unset _ape_meta _ape_uid _ape_gid
     fi
 
     # ── .env merge logic: preserve user-configured values on re-install ──
@@ -517,16 +780,6 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
             return
         fi
         printf '%s\n' "$default"
-    }
-
-    _env_get_explicit_first() {
-        local key="$1" default="${2:-}" val
-        val="${!key-}"
-        if [[ -n "$val" ]]; then
-            echo "$val"
-            return
-        fi
-        _env_get "$key" "$default"
     }
 
     _phase06_detect_lemonade_url() {
@@ -581,6 +834,15 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         error "OLLAMA_PORT must be a port from 1 to 65535"
         return 1
     fi
+    # Keep the selected SearXNG origin consistent across Compose and Pixel on
+    # a rerun. An explicit port override wins over the retained installed port.
+    SEARXNG_PORT_VALUE="$(_env_get_explicit_first SEARXNG_PORT 8888)"
+    if [[ ! "$SEARXNG_PORT_VALUE" =~ ^[1-9][0-9]{0,4}$ ]] \
+        || (( 10#$SEARXNG_PORT_VALUE > 65535 )); then
+        error "SEARXNG_PORT must be a port from 1 to 65535"
+        return 1
+    fi
+    SEARXNG_PORT="$SEARXNG_PORT_VALUE"
 
     # Secrets: reuse existing values, generate only if missing
     WEBUI_SECRET=$(_phase06_env_hex_secret WEBUI_SECRET 32)
@@ -590,6 +852,13 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     OPENCLAW_TOKEN=$(_phase06_env_hex_secret OPENCLAW_TOKEN 24)
     LEMONADE_EXTERNAL_VALUE="${LEMONADE_EXTERNAL:-false}"
     [[ "${LEMONADE_EXTERNAL_VALUE,,}" == "true" ]] && LEMONADE_EXTERNAL_VALUE="true" || LEMONADE_EXTERNAL_VALUE="false"
+    LEMONADE_HOST_TRANSPORT="$(_env_get_explicit_first LEMONADE_HOST_TRANSPORT direct)"
+    ODS_WINDOWS_SYSTEM_DIRECTORY="$(_env_get_explicit_first ODS_WINDOWS_SYSTEM_DIRECTORY '')"
+    ODS_WSL_STATE_ROOT="$(_env_get_explicit_first ODS_WSL_STATE_ROOT '')"
+    case "$LEMONADE_HOST_TRANSPORT" in
+        direct|model-router) ;;
+        *) error "LEMONADE_HOST_TRANSPORT must be direct or model-router"; return 1 ;;
+    esac
     if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" && -n "${LEMONADE_API_KEY:-}" ]]; then
         LITELLM_LEMONADE_API_KEY="$LEMONADE_API_KEY"
     fi
@@ -654,6 +923,9 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     LIVEKIT_API_KEY=$(_phase06_env_hex_secret LIVEKIT_API_KEY 16)
     DASHBOARD_API_KEY=$(_phase06_env_hex_secret DASHBOARD_API_KEY 32)
     ODS_AGENT_KEY=$(_phase06_env_hex_secret ODS_AGENT_KEY 32)
+    ODS_AGENT_BIND_VALUE="$(_env_get ODS_AGENT_BIND "${ODS_AGENT_BIND:-}")"
+    ODS_AGENT_HOST_VALUE="$(_env_get ODS_AGENT_HOST "${ODS_AGENT_HOST:-}")"
+    ODS_AGENT_ADDRESS_MODE_VALUE="$(_env_get ODS_AGENT_ADDRESS_MODE "${ODS_AGENT_ADDRESS_MODE:-}")"
     # HMAC key for signing ods-session cookies (magic-link redemption).
     # 32 random bytes hex-encoded. Rotating invalidates every issued cookie —
     # the only revocation mechanism we have today, so don't rotate casually.
@@ -708,8 +980,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         [[ -z "$PIXEL_INGRESS_GID_VALUE" || "$PIXEL_INGRESS_GID_VALUE" =~ ^[1-9][0-9]*$ ]] || \
             error "Existing PIXEL_INGRESS_GID is invalid"
 
-        PIXEL_SOURCE_URL_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_URL "https://github.com/Osmantic/Pixel.git")"
-        PIXEL_SOURCE_REF_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_REF "b33730436baf5d98bf58f7d57c090318fe19f433")"
+        PIXEL_SOURCE_URL_VALUE="$_phase06_requested_pixel_url"
+        PIXEL_SOURCE_REF_VALUE="$_phase06_requested_pixel_ref"
         PIXEL_GATEWAY_PORT_VALUE="$(_env_get_explicit_first PIXEL_GATEWAY_PORT "18789")"
         PIXEL_PREVIEW_PORT_VALUE="$(_env_get_explicit_first PIXEL_PREVIEW_PORT "9437")"
         [[ "$PIXEL_GATEWAY_PORT_VALUE" =~ ^[1-9][0-9]{0,4}$ \
@@ -733,7 +1005,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
             *) ai_bad "PIXEL_WEB_SEARCH_PROVIDER must be parallel-free or searxng."; return 1 ;;
         esac
         export PIXEL_WEB_SEARCH_PROVIDER="$PIXEL_WEB_SEARCH_PROVIDER_VALUE"
-        PIXEL_SOURCE_DIR_VALUE="$(_env_get_explicit_first PIXEL_SOURCE_DIR "")"
+        PIXEL_SOURCE_DIR_VALUE="$_phase06_requested_pixel_dir"
         # Phase 11 installs Pixel in this same installer shell. Preserve the
         # resolved immutable source contract in that shell as well as in .env;
         # transient environment prefixes used for validation do not persist.
@@ -754,7 +1026,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         _phase06_pixel_source_root="$INSTALL_DIR/data/pixel/source-$PIXEL_SOURCE_REF_VALUE"
         if ! _ods_pixel_source_checkout \
             "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_pixel_source_root" >/dev/null; then
-            error "Pixel source is unavailable. Configure authorized Git access or use a documented clean local checkout before retrying."
+            error "Pixel source is unavailable. Verify the bundled source and its digest, or use a documented clean local developer checkout before retrying."
         fi
         unset _phase06_pixel_owner _phase06_pixel_home _phase06_pixel_source_root
     fi
@@ -793,6 +1065,33 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         fi
         EXTERNAL_LLM_ACTIVE=true
         LLM_MODEL="$EXTERNAL_SELECTED_MODEL"
+        _external_key_target="$INSTALL_DIR/config/litellm/external-upstream.key"
+        [[ ! -L "$_external_key_target" && ( ! -e "$_external_key_target" || -f "$_external_key_target" ) ]] || {
+            error "External LLM key destination must be a regular file."
+            return 1
+        }
+        if [[ -n "${EXTERNAL_LLM_API_KEY_FILE:-}" ]]; then
+            external_llm_read_api_key "$EXTERNAL_LLM_API_KEY_FILE" >/dev/null || return 1
+            if [[ "$EXTERNAL_LLM_API_KEY_FILE" != "$_external_key_target" ]]; then
+                _external_key_tmp="$(mktemp "${_external_key_target}.XXXXXX")" || return 1
+                chmod 600 "$_external_key_tmp"
+                if ! external_llm_read_api_key "$EXTERNAL_LLM_API_KEY_FILE" >"$_external_key_tmp"; then
+                    rm -f -- "$_external_key_tmp"
+                    error "Could not stage the external LLM key."
+                    return 1
+                fi
+                mv -f -- "$_external_key_tmp" "$_external_key_target"
+            fi
+        elif [[ "${EXTERNAL_LLM_API_KEY_RESET:-false}" == "true" ]]; then
+            (umask 077; : >"$_external_key_target")
+        elif [[ ! -e "$_external_key_target" ]]; then
+            (umask 077; : >"$_external_key_target")
+        fi
+        chmod 600 "$_external_key_target"
+        if [[ -s "$_external_key_target" ]]; then
+            EXTERNAL_LLM_API_KEY_FILE="$_external_key_target"
+        fi
+        unset _external_key_tmp _external_key_target
     fi
     LLAMA_SERVER_MEMORY_LIMIT_VALUE=""
     if [[ "$GPU_BACKEND" == "nvidia" && "$EXTERNAL_LLM_ACTIVE" != "true" && "${ODS_MODE:-local}" != "cloud" ]]; then
@@ -801,6 +1100,12 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         _llama_memory_default="$(ods_default_nvidia_llama_memory_limit "$_effective_memory_gb")"
         LLAMA_SERVER_MEMORY_LIMIT_VALUE="$(_env_get LLAMA_SERVER_MEMORY_LIMIT "${LLAMA_SERVER_MEMORY_LIMIT:-$_llama_memory_default}")"
         unset _docker_memory_gb _effective_memory_gb _llama_memory_default
+    elif [[ "$GPU_BACKEND" == "cpu" || "$GPU_BACKEND" == "none" ]] \
+        && [[ "$EXTERNAL_LLM_ACTIVE" != "true" && "${ODS_MODE:-local}" != "cloud" ]]; then
+        # CPU runtime profiles size the container for their model (weights,
+        # KV and capped context checkpoints). Without one, leave the key unset
+        # so docker-compose.cpu.yml's 6G default applies as before.
+        LLAMA_SERVER_MEMORY_LIMIT_VALUE="$(_env_get LLAMA_SERVER_MEMORY_LIMIT "${LLAMA_SERVER_MEMORY_LIMIT:-}")"
     fi
     ODS_MODE_VALUE="$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo "local"; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "lemonade"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "lemonade"; else echo "${ODS_MODE:-local}"; fi)"
     ODS_MODEL_SWITCHBOARD_VALUE=$(_env_get ODS_MODEL_SWITCHBOARD "${ODS_MODEL_SWITCHBOARD:-enabled}")
@@ -812,6 +1117,12 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         ai_warn "External LLM reuse uses the authenticated LiteLLM gateway directly; setting ODS_MODEL_SWITCHBOARD=observe."
         ODS_MODEL_SWITCHBOARD_VALUE="observe"
     fi
+    # Compose inherits exported installer variables ahead of the generated
+    # .env. Keep the live process value aligned with the effective value so an
+    # external-model install cannot select switchboard.yaml while its router
+    # service is disabled by docker-compose.external-llm.yml.
+    ODS_MODEL_SWITCHBOARD="$ODS_MODEL_SWITCHBOARD_VALUE"
+    export ODS_MODEL_SWITCHBOARD
     _default_llm_api_url="$(if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "http://litellm:4000"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "http://litellm:4000"; elif [[ "${ODS_MODE:-local}" == "local" ]]; then echo "http://llama-server:8080"; else echo "http://litellm:4000"; fi)"
     if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then
         LLM_API_URL_VALUE="http://litellm:4000"
@@ -823,6 +1134,15 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         OPEN_WEBUI_LLM_API_KEY_VALUE=""
     else
         LLM_API_URL_VALUE=$(_env_get LLM_API_URL "$_default_llm_api_url")
+        # A retained local route cannot serve an external Lemonade install.
+        # Preserve other existing values as operator-selected endpoints.
+        if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then
+            case "$LLM_API_URL_VALUE" in
+                http://llama-server:8080|http://llama-server:8080/v1)
+                    LLM_API_URL_VALUE="$_default_llm_api_url"
+                    ;;
+            esac
+        fi
     fi
     if [[ "$EXTERNAL_LLM_ACTIVE" != "true" && "${EXTERNAL_LLM_RESET:-false}" != "true" && "$ODS_MODEL_SWITCHBOARD_VALUE" == "enabled" ]]; then
         OPEN_WEBUI_LLM_BASE_URL_VALUE=$(_env_get OPEN_WEBUI_LLM_BASE_URL "http://litellm:4000")
@@ -880,7 +1200,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     LLM_API_URL="$LLM_API_URL_VALUE"
     HERMES_LLM_BASE_URL="$HERMES_LLM_BASE_URL_VALUE"
     HERMES_LLM_API_KEY="$HERMES_LLM_API_KEY_VALUE"
-    if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" && "$LEMONADE_BASE_URL_VALUE" =~ ^http://(localhost|127\.0\.0\.1|\[::1\])(:|/|$) && "$(uname -s 2>/dev/null || echo unknown)" == "Linux" ]]; then
+    if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" && "${LEMONADE_HOST_TRANSPORT:-direct}" != "model-router" && "$LEMONADE_BASE_URL_VALUE" =~ ^http://(localhost|127\.0\.0\.1|\[::1\])(:|/|$) && "$(uname -s 2>/dev/null || echo unknown)" == "Linux" ]]; then
         warn "Existing Lemonade URL uses loopback ($LEMONADE_BASE_URL_VALUE). Docker containers will use $LEMONADE_CONTAINER_BASE_URL_VALUE; ensure Lemonade is reachable there (for example: lemonade config set host=0.0.0.0 on a trusted host)."
     fi
 
@@ -927,6 +1247,25 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     if LC_ALL=C awk "BEGIN { exit !($LLAMA_CPU_RESERVATION > $LLAMA_CPU_LIMIT) }"; then
         LLAMA_CPU_RESERVATION="$LLAMA_CPU_LIMIT"
     fi
+    # CPU inference: llama.cpp's own default is one thread per physical core;
+    # the compose file's fixed 4 left most cores idle. Bound it by the
+    # container's CPU limit. An owner-set LLAMA_THREADS is kept. GPU backends
+    # keep the compose default (their threads only feed the GPU).
+    LLAMA_THREADS_VALUE=""
+    if [[ "$_cpu_backend" == "cpu" && "${ODS_MODE:-local}" != "cloud" ]]; then
+        LLAMA_THREADS_VALUE="$(_env_get LLAMA_THREADS \
+            "$(ods_default_cpu_llama_threads "$(ods_physical_cpu_cores 2>/dev/null || true)" "$LLAMA_CPU_LIMIT")")"
+        [[ "$LLAMA_THREADS_VALUE" =~ ^[1-9][0-9]*$ ]] || LLAMA_THREADS_VALUE=""
+    fi
+
+    _tts_docker_memory_gb="$(ods_docker_memory_gb 2>/dev/null || true)"
+    _tts_effective_memory_gb="$(ods_effective_container_memory_gb "${RAM_GB:-0}" "$_tts_docker_memory_gb")"
+    _tts_workers_default="$(ods_default_tts_workers "$_tts_effective_memory_gb")"
+    TTS_WORKERS_VALUE="$(_env_get TTS_WORKERS "${TTS_WORKERS:-$_tts_workers_default}")"
+    if [[ ! "$TTS_WORKERS_VALUE" =~ ^[1-9][0-9]*$ ]]; then
+        TTS_WORKERS_VALUE="$_tts_workers_default"
+    fi
+    unset _tts_docker_memory_gb _tts_effective_memory_gb _tts_workers_default
 
     TTS_CPU_LIMIT=$(_select_service_cpu_limit TTS_CPU_LIMIT "8.0" "$_docker_available_cpus")
     TTS_CPU_RESERVATION=$(_select_service_cpu_reservation TTS_CPU_RESERVATION "2.0" "$TTS_CPU_LIMIT")
@@ -1021,7 +1360,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         _default_whisper_image=""
     else
         _default_stt_model="Systran/faster-whisper-base"
-        _default_whisper_image="ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu"
+        _default_whisper_image="ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu@sha256:2163775b6df5e451a71200e8f675fed68dbd8ab184fc604453d549e486f22fd2"
     fi
     AUDIO_STT_MODEL=$(_env_get AUDIO_STT_MODEL "${AUDIO_STT_MODEL:-$_default_stt_model}")
     WHISPER_IMAGE_VALUE=$(_env_get WHISPER_IMAGE "${WHISPER_IMAGE:-$_default_whisper_image}")
@@ -1039,6 +1378,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     N_GPU_LAYERS_VALUE=$(_env_get N_GPU_LAYERS "${N_GPU_LAYERS:-auto}")
     N_GPU_LAYERS_VALUE="$(printf '%s' "$N_GPU_LAYERS_VALUE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     N_GPU_LAYERS_VALUE="${N_GPU_LAYERS_VALUE:-auto}"
+    # Owner opt-out for the overlay default; empty keeps ngram-mod implicit.
+    LLAMA_SPEC_TYPE_VALUE=$(_env_get LLAMA_SPEC_TYPE "${LLAMA_SPEC_TYPE:-}")
 
     _phase06_lemonade_uses_host_9000() {
         [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]] && return 0
@@ -1072,8 +1413,20 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     else
         GPU_ASSIGNMENT_JSON_B64=""
     fi
+    # Resolve before opening .env for writing; a here-document lookup would
+    # read the already-truncated file and lose a retained host port override.
+    DASHBOARD_API_PORT_VALUE="$(_env_get DASHBOARD_API_PORT 3002)"
+    # Phase 05 renders Pixel's extension-manager unit from this shell value.
+    # Keep it aligned with the retained .env port on an upgrade.
+    DASHBOARD_API_PORT="$DASHBOARD_API_PORT_VALUE"
 
     # Generate .env file
+    if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]]; then
+        _phase06_pixel_runtime_layout || {
+            error "Pixel could not verify the local WSL Docker daemon or Docker Desktop shared runtime mount"
+            return 1
+        }
+    fi
     # Subshell-scope a tighter umask so the file is created 0600 from the start
     # (closes a brief window on systems where $HOME is world-readable, e.g.
     # Ubuntu defaults). The umask MUST NOT leak to the rest of phase 06 or
@@ -1088,7 +1441,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
 # Tier: ${TIER} (${TIER_NAME})
 
 #=== ODS Version (used by ods-cli update for version-compat checks) ===
-ODS_VERSION=${VERSION:-2.6.0}
+ODS_VERSION=${VERSION:-3.0.0}
 
 #=== Network Binding ===
 # 127.0.0.1 = localhost only (secure default)
@@ -1103,6 +1456,9 @@ REMOTE_PROVIDER_DATA_GID=$(id -g 2>/dev/null || echo 1000)
 
 #=== LLM Backend Mode ===
 ODS_MODE=${ODS_MODE_VALUE}
+ODS_GATEWAY_ONLY=${ODS_GATEWAY_ONLY:-false}
+ENABLE_OPEN_WEBUI=${ENABLE_OPEN_WEBUI:-true}
+ENABLE_DEVTOOLS=${ENABLE_DEVTOOLS:-false}
 ODS_MODEL_SWITCHBOARD=$(dotenv_value "${ODS_MODEL_SWITCHBOARD_VALUE}")
 LLM_API_URL=$(dotenv_value "${LLM_API_URL_VALUE}")
 OPEN_WEBUI_LLM_BASE_URL=$(dotenv_value "${OPEN_WEBUI_LLM_BASE_URL_VALUE}")
@@ -1123,6 +1479,9 @@ AMD_INFERENCE_SUPPORTED_BACKENDS=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; th
 AMD_INFERENCE_RUNTIME_MODE=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "external-lemonade"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "linux-container"; else echo ""; fi)
 AMD_INFERENCE_MANAGED=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "false"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "true"; else echo ""; fi)
 LEMONADE_EXTERNAL=${LEMONADE_EXTERNAL_VALUE}
+LEMONADE_HOST_TRANSPORT=$(dotenv_value "${LEMONADE_HOST_TRANSPORT}")
+$(if [[ -n "${ODS_WINDOWS_SYSTEM_DIRECTORY}" ]]; then printf 'ODS_WINDOWS_SYSTEM_DIRECTORY=%s' "$(dotenv_value "$ODS_WINDOWS_SYSTEM_DIRECTORY")"; fi)
+$(if [[ -n "${ODS_WSL_STATE_ROOT}" ]]; then printf 'ODS_WSL_STATE_ROOT=%s' "$(dotenv_value "$ODS_WSL_STATE_ROOT")"; fi)
 LEMONADE_BASE_URL=$(dotenv_value "${LEMONADE_BASE_URL_VALUE}")
 LEMONADE_CONTAINER_BASE_URL=$(dotenv_value "${LEMONADE_CONTAINER_BASE_URL_VALUE}")
 LEMONADE_API_BASE_PATH=$(dotenv_value "${LEMONADE_API_BASE_PATH_VALUE}")
@@ -1175,9 +1534,15 @@ LLAMA_ARG_CACHE_TYPE_V=${LLAMA_ARG_CACHE_TYPE_V:-f16}
 # Optional MoE only. Example for 8-12GB VRAM: LLAMA_ARG_N_CPU_MOE=25
 $(if [[ -n "${LLAMA_ARG_N_CPU_MOE:-}" ]]; then echo "LLAMA_ARG_N_CPU_MOE=${LLAMA_ARG_N_CPU_MOE}"; fi)
 $(if [[ -n "${LLAMA_ARG_NO_CACHE_PROMPT:-}" ]]; then echo "LLAMA_ARG_NO_CACHE_PROMPT=${LLAMA_ARG_NO_CACHE_PROMPT}"; fi)
-$(if [[ -n "${LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS:-}" ]]; then echo "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS=${LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS}"; fi)
+$(if [[ -n "${LLAMA_ARG_CHECKPOINT_EVERY_NT:-}" ]]; then echo "LLAMA_ARG_CHECKPOINT_EVERY_NT=${LLAMA_ARG_CHECKPOINT_EVERY_NT}"; fi)
+$(if [[ -n "${LLAMA_ARG_CTX_CHECKPOINTS:-}" ]]; then echo "LLAMA_ARG_CTX_CHECKPOINTS=${LLAMA_ARG_CTX_CHECKPOINTS}"; fi)
+$(if [[ -n "${LLAMA_ARG_CACHE_RAM:-}" ]]; then echo "LLAMA_ARG_CACHE_RAM=${LLAMA_ARG_CACHE_RAM}"; fi)
+$(if [[ -n "${LLAMA_THREADS_VALUE:-}" ]]; then echo "LLAMA_THREADS=${LLAMA_THREADS_VALUE}"; fi)
 LLAMA_PARALLEL=${LLAMA_PARALLEL:-1}
-# Optional MTP speculative decoding only. Requires an MTP-capable GGUF and llama.cpp build.
+# NVIDIA/CPU llama.cpp images default to lossless n-gram speculation (ngram-mod).
+# LLAMA_SPEC_TYPE=none turns it off; unset keeps the default.
+$(if [[ -n "$LLAMA_SPEC_TYPE_VALUE" ]]; then echo "LLAMA_SPEC_TYPE=$(dotenv_value "$LLAMA_SPEC_TYPE_VALUE")"; fi)
+# Optional per-model MTP speculative decoding. Requires an MTP-capable GGUF and llama.cpp build.
 # LLAMA_ARG_SPEC_TYPE=draft-mtp
 # LLAMA_ARG_SPEC_DRAFT_N_MAX=3
 $(if [[ -n "${LLAMA_ARG_SPEC_TYPE:-}" ]]; then echo "LLAMA_ARG_SPEC_TYPE=${LLAMA_ARG_SPEC_TYPE}"; fi)
@@ -1189,6 +1554,7 @@ LLAMA_CPU_RESERVATION=${LLAMA_CPU_RESERVATION}
 
 # Bundled service CPU budgets. These are capped to CPUs exposed by Docker so
 # small hosts do not fail container creation on fixed compose limits.
+TTS_WORKERS=$(dotenv_value "${TTS_WORKERS_VALUE}")
 TTS_CPU_LIMIT=${TTS_CPU_LIMIT}
 TTS_CPU_RESERVATION=${TTS_CPU_RESERVATION}
 WHISPER_CPU_LIMIT=${WHISPER_CPU_LIMIT}
@@ -1239,7 +1605,7 @@ VIDEO_GID=$(getent group video 2>/dev/null | cut -d: -f3 || echo 44)
 RENDER_GID=$(getent group render 2>/dev/null | cut -d: -f3 || echo 992)
 
 #=== AMD ROCm Settings (gfx target detected from topology) ===
-LEMONADE_SERVER_IMAGE=${LEMONADE_SERVER_IMAGE:-${BACKEND_LEMONADE_CONTAINER_IMAGE:-ghcr.io/lemonade-sdk/lemonade-server:v10.2.0}}
+LEMONADE_SERVER_IMAGE=${LEMONADE_SERVER_IMAGE:-${BACKEND_LEMONADE_CONTAINER_IMAGE:-ghcr.io/lemonade-sdk/lemonade-server:v10.2.0@sha256:08edbf1128a7fd82b39f1de72c2f70c013f2ecfefac6a99c52bcf58eba532a3a}}
 ${_amd_hsa_override}
 HSA_XNACK=1
 ROCBLAS_USE_HIPBLASLT=1
@@ -1258,8 +1624,8 @@ VIDEO_GID=$(getent group video 2>/dev/null | cut -d: -f3 || echo 44)
 RENDER_GID=$(getent group render 2>/dev/null | cut -d: -f3 || echo 992)
 
 #=== Intel Arc / oneAPI SYCL Settings ===
-ONEAPI_DEVICE_SELECTOR=level_zero:gpu
-SYCL_CACHE_PERSISTENT=1
+# Set level_zero:0 on hosts with more than one Intel GPU.
+ONEAPI_DEVICE_SELECTOR=$(dotenv_value "$(_env_get ONEAPI_DEVICE_SELECTOR level_zero:gpu)")
 ZES_ENABLE_SYSMAN=1
 INTEL_ENV
 fi)
@@ -1267,7 +1633,8 @@ fi)
 #=== Ports ===
 OLLAMA_PORT=$(dotenv_value "${OLLAMA_PORT_VALUE}")
 WEBUI_PORT=3000
-SEARXNG_PORT=8888
+DASHBOARD_API_PORT=$(dotenv_value "${DASHBOARD_API_PORT_VALUE}")
+SEARXNG_PORT=$(dotenv_value "${SEARXNG_PORT_VALUE}")
 PERPLEXICA_PORT=3004
 WHISPER_PORT=$(dotenv_value "${WHISPER_PORT_VALUE}")
 TTS_PORT=8880
@@ -1290,6 +1657,7 @@ LANGFUSE_PORT=$(dotenv_value "${LANGFUSE_PORT}")
 HERMES_LLM_BASE_URL=$(dotenv_value "${HERMES_LLM_BASE_URL_VALUE}")
 HERMES_LLM_API_KEY=$(dotenv_value "${HERMES_LLM_API_KEY_VALUE}")
 HERMES_LANGUAGE=${HERMES_LANGUAGE:-en}
+HERMES_REQUIRE_OWNER_CARD=${HERMES_REQUIRE_OWNER_CARD:-false}
 HERMES_PROXY_PORT=${HERMES_PROXY_PORT:-9120}
 HERMES_PROXY_UPSTREAM=${HERMES_PROXY_UPSTREAM:-ods-hermes:9119}
 ODS_AUTH_UPSTREAM=${ODS_AUTH_UPSTREAM:-ods-dashboard-api:3002}
@@ -1298,13 +1666,15 @@ ODS_AUTH_UPSTREAM=${ODS_AUTH_UPSTREAM:-ods-dashboard-api:3002}
 WEBUI_SECRET=$(dotenv_value "${WEBUI_SECRET}")
 DASHBOARD_API_KEY=$(dotenv_value "${DASHBOARD_API_KEY}")
 ODS_AGENT_KEY=$(dotenv_value "${ODS_AGENT_KEY}")
+ODS_AGENT_BIND=$(dotenv_value "${ODS_AGENT_BIND_VALUE}")
+ODS_AGENT_HOST=$(dotenv_value "${ODS_AGENT_HOST_VALUE}")
+ODS_AGENT_ADDRESS_MODE=$(dotenv_value "${ODS_AGENT_ADDRESS_MODE_VALUE}")
 ODS_SESSION_SECRET=$(dotenv_value "${ODS_SESSION_SECRET}")
 HERMES_DASHBOARD_SESSION_TOKEN=$(dotenv_value "${HERMES_DASHBOARD_SESSION_TOKEN}")
 $(if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" ]]; then cat << PIXEL_ENV
 
-#=== Pixel core agent (separate written license required) ===
+#=== Pixel core agent (bundled ODS component) ===
 PIXEL_AGENT_MODE=pixel
-PIXEL_LICENSE_ACCEPTED=true
 PIXEL_SOURCE_URL=$(dotenv_quote "$PIXEL_SOURCE_URL_VALUE")
 PIXEL_SOURCE_REF=$(dotenv_value "${PIXEL_SOURCE_REF_VALUE}")
 PIXEL_SOURCE_DIR=$(dotenv_quote "$PIXEL_SOURCE_DIR_VALUE")
@@ -1312,8 +1682,9 @@ $(if [[ -n "$PIXEL_WEB_SEARCH_PROVIDER_VALUE" ]]; then printf 'PIXEL_WEB_SEARCH_
 PIXEL_OPENWEBUI_KEY=$(dotenv_value "${PIXEL_OPENWEBUI_KEY_VALUE}")
 PIXEL_MODEL_RELAY_KEY=$(dotenv_value "${PIXEL_MODEL_RELAY_KEY_VALUE}")
 PIXEL_MODEL_RELAY_PORT=$(dotenv_value "${PIXEL_MODEL_RELAY_PORT_VALUE}")
-PIXEL_INGRESS_RUNTIME_DIR=/run/ods-pixel
-PIXEL_PREVIEW_RUNTIME_DIR=/run/ods-pixel-preview
+PIXEL_INGRESS_RUNTIME_DIR=${PIXEL_INGRESS_RUNTIME_DIR_VALUE}
+PIXEL_PREVIEW_RUNTIME_DIR=${PIXEL_PREVIEW_RUNTIME_DIR_VALUE}
+PIXEL_RUNTIME_BIND_PROPAGATION=${PIXEL_RUNTIME_BIND_PROPAGATION_VALUE}
 PIXEL_INGRESS_GID=${PIXEL_INGRESS_GID_VALUE}
 PIXEL_GATEWAY_PORT=$(dotenv_value "${PIXEL_GATEWAY_PORT_VALUE}")
 PIXEL_PREVIEW_PORT=$(dotenv_value "${PIXEL_PREVIEW_PORT_VALUE}")
@@ -1412,6 +1783,12 @@ ENV_EOF
     )
 
     chmod 600 "$INSTALL_DIR/.env"  # Secure secrets file
+    # Docker Desktop's daemon is outside the installing WSL namespace.
+    # Prepare its authenticated control address before phase 07 starts the
+    # host agent and before Compose inherits dashboard-api's environment.
+    # shellcheck source=../../lib/wsl-agent-address.sh
+    . "$INSTALL_DIR/lib/wsl-agent-address.sh"
+    ods_prepare_wsl_agent_address "$INSTALL_DIR" || exit 1
     ai_ok "Created $INSTALL_DIR"
     ai_ok "Generated secure secrets in .env (permissions: 600)"
 
@@ -1436,13 +1813,17 @@ ENV_EOF
     if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then
         # Fail installation if the external route cannot be materialized. Pixel
         # must never bind its authenticated gateway to a stale local template.
+        _external_render_auth=()
+        [[ -n "${EXTERNAL_LLM_API_KEY_FILE:-}" ]] && _external_render_auth+=(--external-llm-authenticated)
         if ! "${ODS_PYTHON_CMD:-python3}" "$SCRIPT_DIR/scripts/render-runtime-configs.py" \
             --surface litellm-external --model "$EXTERNAL_SELECTED_MODEL" \
             --llm-base-url "$EXTERNAL_LLM_CONTAINER_URL_VALUE" \
+            "${_external_render_auth[@]}" \
             --output-root "$INSTALL_DIR" --write >> "$LOG_FILE" 2>&1; then
             error "Runtime config renderer failed for the external model gateway"
             return 1
         fi
+        unset _external_render_auth
     elif [[ "$GPU_BACKEND" == "amd" || "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then
         _phase06_step "render-amd-litellm-config"
         mkdir -p "$INSTALL_DIR/config/litellm"
@@ -1572,6 +1953,7 @@ ENV_EOF
     if [[ -f "$INSTALL_DIR/config/searxng/settings.yml" ]] && ! [[ -w "$INSTALL_DIR/config/searxng/settings.yml" ]]; then
         _phase06_repair_host_path "$INSTALL_DIR/config/searxng/settings.yml" "SearXNG configuration" || return 1
     fi
+    _searxng_lang="$(ods_searxng_default_lang)"
     cat > "$INSTALL_DIR/config/searxng/settings.yml" << SEARXNG_EOF
 use_default_settings: true
 server:
@@ -1581,13 +1963,16 @@ server:
   limiter: false
 search:
   safe_search: 0
+  # Install locale. API clients send no language, so "auto" would mean "all".
+  default_lang: "${_searxng_lang}"
   formats:
     - html
     - json
+$(ods_searxng_hostnames_yaml "$_searxng_lang")
 engines:
   - name: bing
-    # Requalify before enabling: https://github.com/searxng/searxng/pull/6671
-    disabled: true
+    # Fallback when other general engines are blocked (CAPTCHA/429/access denied).
+    disabled: false
   - name: duckduckgo
     disabled: false
   - name: google
@@ -1604,7 +1989,8 @@ engines:
   - name: stackoverflow
     disabled: false
 SEARXNG_EOF
-    ai_ok "Generated SearXNG config with randomized secret key"
+    ai_ok "Generated SearXNG config with randomized secret key (search language ${_searxng_lang})"
+    unset _searxng_lang
 fi
 
 # Documentation, CLI tools, and compose variants already copied by rsync/cp block above

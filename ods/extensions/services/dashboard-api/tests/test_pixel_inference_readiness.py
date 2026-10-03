@@ -3,7 +3,9 @@ import json
 from unittest.mock import patch
 
 import pytest
-from test_pixel import FakeClient, FakeResponse, pixel, pixel_env
+from test_pixel import FakeClient, FakeResponse, pixel, pixel_env as pixel_env
+
+pytestmark = pytest.mark.usefixtures("mock_edge_read_transport")
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +24,7 @@ async def test_agent_catalog_does_not_mask_unavailable_inference(monkeypatch, te
         calls.append((method, path))
         return telemetry if path == '/v1/llm/status' else {'status': 'idle'}
     monkeypatch.setattr(pixel, 'request_agent_json', host)
-    upstream = FakeResponse(chunks=[json.dumps({'data':[{'id':'pixel/default'}]}).encode()])
+    upstream = FakeResponse(chunks=[json.dumps({'data':[{'id':'portal/default'}]}).encode()])
     with patch.object(pixel.httpx, 'AsyncClient', return_value=FakeClient(upstream)):
         result = await pixel.pixel_status()
     assert result['available'] is False
@@ -66,7 +68,7 @@ async def test_unsupported_host_telemetry_does_not_disable_discoverable_agent(mo
             raise pixel.AgentHTTPError(code, 'private-diagnostic')
         return {'status': 'idle'}
     monkeypatch.setattr(pixel, 'request_agent_json', host)
-    upstream = FakeResponse(chunks=[json.dumps({'data': [{'id': 'pixel/default'}]}).encode()])
+    upstream = FakeResponse(chunks=[json.dumps({'data': [{'id': 'portal/default'}]}).encode()])
     with patch.object(pixel.httpx, 'AsyncClient', return_value=FakeClient(upstream)):
         result = await pixel.pixel_status()
     assert result['available'] is available

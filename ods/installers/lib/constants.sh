@@ -14,7 +14,7 @@
 #   Change VERSION for custom builds. Add new color codes here.
 # ============================================================================
 
-VERSION="2.6.0"
+VERSION="3.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Source path utilities for cross-platform path resolution
@@ -26,9 +26,12 @@ else
     INSTALL_DIR="${INSTALL_DIR:-$HOME/ods}"
 fi
 
-LOG_FILE="${LOG_FILE:-${TMPDIR:-/tmp}/ods-install.log}"
-CAPABILITY_PROFILE_FILE="${CAPABILITY_PROFILE_FILE:-${TMPDIR:-/tmp}/ods-capabilities.json}"
-PREFLIGHT_REPORT_FILE="${PREFLIGHT_REPORT_FILE:-${TMPDIR:-/tmp}/ods-preflight-report.json}"
+# Shared names in /tmp collide with another account's installer artifacts on
+# multi-user hosts. Keep explicit overrides and secure-log's ownership checks.
+_ods_install_uid="$(id -u)"
+LOG_FILE="${LOG_FILE:-${TMPDIR:-/tmp}/ods-install-${_ods_install_uid}.log}"
+CAPABILITY_PROFILE_FILE="${CAPABILITY_PROFILE_FILE:-${TMPDIR:-/tmp}/ods-capabilities-${_ods_install_uid}.json}"
+PREFLIGHT_REPORT_FILE="${PREFLIGHT_REPORT_FILE:-${TMPDIR:-/tmp}/ods-preflight-report-${_ods_install_uid}.json}"
 INSTALL_START_EPOCH=$(date +%s)
 
 # Auto-detect system timezone (fallback to UTC)
@@ -47,11 +50,20 @@ RED='\033[0;31m'
 GRN='\033[0;32m'         # Standard green — body text
 BGRN='\033[1;32m'        # Bright green — emphasis, success, headings
 DGRN='\033[2;32m'        # Dim green — secondary text, lore
+MAG='\033[0;35m'         # Magenta — CRT signal/static accents
+BMAG='\033[1;35m'        # Bright magenta — sequence and finale accents
 AMB='\033[0;33m'         # Amber — warnings, ETA labels
 WHT='\033[1;37m'         # White — key URLs
 DIM='\033[2;37m'         # Dim white
 NC='\033[0m'             # Reset
 CURSOR='█'               # Block cursor for typing
+
+# Machine-readable and redirected output must never contain ANSI escapes.
+# `ODS_UI_MODE=cinematic` may force the layout for screenshots, but color still
+# follows the standard NO_COLOR contract.
+if [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" ]]; then
+    RED='' GRN='' BGRN='' DGRN='' MAG='' BMAG='' AMB='' WHT='' DIM='' NC=''
+fi
 
 #=============================================================================
 # Cross-platform helpers

@@ -455,6 +455,7 @@ fi
 # a hard validation failure.
 manifest_env_contract() {
     awk '
+        { sub(/\r$/, "") }
         /^[[:space:]]+external_port_env:[[:space:]]*/ {
             if ($2 == "\047\047" || $2 == "\"\"") next
             print FILENAME "	" $2
@@ -508,11 +509,13 @@ fi
 # 22. Keys the Linux installer itself writes for Intel Arc (GPU_BACKEND=sycl,
 # installers/phases/06-directories.sh INTEL_ENV block) must be declared, or
 # `ods config validate` reports them as unknown on every Arc install.
+# SYCL_CACHE_PERSISTENT is no longer written, but .env files from earlier
+# installers still carry it and must keep validating.
 cp "$TMP_DIR/valid.env" "$TMP_DIR/arc.env"
 cat >> "$TMP_DIR/arc.env" <<'EOF'
-ONEAPI_DEVICE_SELECTOR=level_zero:gpu
-SYCL_CACHE_PERSISTENT=1
+ONEAPI_DEVICE_SELECTOR=level_zero:0
 ZES_ENABLE_SYSMAN=1
+SYCL_CACHE_PERSISTENT=1
 EOF
 set +e
 out=$("$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" "$TMP_DIR/arc.env" "$ROOT_DIR/.env.schema.json" 2>&1)
@@ -615,7 +618,7 @@ cp "$TMP_DIR/valid.env" "$TMP_DIR/library-invalid-port.env"
 printf 'DIFY_PORT=65536\n' >> "$TMP_DIR/library-invalid-port.env"
 if out=$("$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" "$TMP_DIR/library-invalid-port.env" "$ROOT_DIR/.env.schema.json" 2>&1); then
     fail "Out-of-range library port passed validation"
-elif [[ "$out" == *"DIFY_PORT: value 65536 is > maximum 65535"* ]]; then
+elif [[ "$out" == *"DIFY_PORT: value is > maximum 65535"* ]]; then
     pass "Library ports retain numeric range validation"
 else
     fail "Library port was rejected for the wrong reason: $out"

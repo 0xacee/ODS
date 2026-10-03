@@ -9,6 +9,12 @@ command -v jq >/dev/null 2>&1 || {
   exit 1
 }
 
+echo "[contract] n8n nonstandard-UID home and cookie policy"
+bash tests/test-n8n-cookie-policy.sh
+
+echo "[contract] installed preflight model route"
+bash tests/test-ods-preflight-llm-route.sh
+
 echo "[contract] backend contract files"
 for f in config/backends/amd.json config/backends/nvidia.json config/backends/cpu.json config/backends/apple.json; do
   test -f "$f" || { echo "[FAIL] missing $f"; exit 1; }
@@ -52,6 +58,7 @@ bash tests/test-windows-restart-recreate-env.sh
 
 echo "[contract] external Lemonade compose overlay readiness"
 bash tests/contracts/test-external-lemonade-contracts.sh
+bash tests/contracts/test-external-lemonade-cpu-fallback.sh
 
 echo "[contract] bootstrap hot-swap force-recreate"
 bash tests/test-bootstrap-upgrade-hotswap-contract.sh
@@ -257,6 +264,12 @@ if ! PRE_ODS_INSTALL_DIR="" ODS_ALLOW_LEGACY_PARALLEL="" \
 fi
 rm -rf "$_pre_ods_guard_tmp"
 
+echo "[contract] forced bootstrap reinstall distinguishes owned and foreign Compose stacks"
+bash tests/test-bootstrap-force-own-compose.sh
+
+echo "[contract] existing-install start advice works from any directory"
+bash tests/test-bootstrap-recovery-guidance.sh
+
 echo "[contract] bootstrap download finalization is non-destructive"
 bash tests/test-bootstrap-upgrade-download-finalization.sh
 
@@ -303,8 +316,19 @@ bash tests/test-macos-host-agent-verification.sh
 echo "[contract] macOS CLI reports Compose start failures"
 bash tests/test-macos-cli-compose-failure.sh
 
+echo "[contract] macOS Core omits optional Open WebUI"
+bash tests/test-macos-webui-optional.sh
+python3 tests/test_macos_webui_optional_contract.py
+
+echo "[contract] macOS .env upsert preserves secrets and recovers from write failure"
+bash tests/test-macos-env-upsert.sh
+
 echo "[contract] macOS direct binds replace conflicting Colima bridges"
 bash tests/test-macos-direct-bind-bridge.sh
+python3 tests/test_macos_native_service.py
+python3 extensions/services/pixel-agent/tests/test_unix_peer.py
+bash tests/test-macos-native-llama-launch-cwd.sh
+python3 tests/test_macos_runtime_download.py
 
 echo "[contract] macOS CLI preserves cloud/local model routing"
 bash tests/test-macos-cli-mode-routing.sh
@@ -317,6 +341,12 @@ bash tests/test-macos-installer-transitions.sh
 
 echo "[contract] macOS Compose pre-pull reuses matching platform caches"
 bash tests/test-macos-compose-image-cache.sh
+
+echo "[contract] macOS private networking preserves the active Colima profile"
+bash tests/test-macos-colima-profile.sh
+
+echo "[contract] macOS port conflicts include root-hidden listeners"
+bash tests/test-macos-port-detection.sh
 
 echo "[contract] AMD reassign keeps HSA override Strix-only"
 grep -q '_env_set "HSA_OVERRIDE_GFX_VERSION" "11.5.1"' ods-cli \
@@ -374,6 +404,14 @@ grep -A16 -F 'location ~ ^/api/models/.+/load$ {' "$dashboard_nginx" | grep -qF 
 echo "[contract] bundled service CPU limits are env-driven"
 grep -qF "cpus: '\${TTS_CPU_LIMIT:-1.0}'" extensions/services/tts/compose.yaml \
   || { echo "[FAIL] Kokoro TTS CPU limit must be env-driven with safe fallback"; exit 1; }
+grep -qF 'UVICORN_WORKERS=${TTS_WORKERS:-2}' extensions/services/tts/compose.yaml \
+  || { echo "[FAIL] Kokoro TTS must preserve its non-macOS worker default and allow an override"; exit 1; }
+jq -e '.properties.TTS_WORKERS.type == "integer" and .properties.TTS_WORKERS.minimum == 1' .env.schema.json >/dev/null \
+  || { echo "[FAIL] TTS_WORKERS must be a positive integer in the env schema"; exit 1; }
+grep -qF 'TTS_WORKERS=1' installers/macos/lib/env-generator.sh \
+  || { echo "[FAIL] macOS installs must conserve VM memory with one TTS worker"; exit 1; }
+grep -qF 'upsert_env_value "$env_path" "TTS_WORKERS" "$tts_workers"' installers/macos/lib/env-generator.sh \
+  || { echo "[FAIL] macOS reinstalls must preserve an explicit TTS worker override"; exit 1; }
 grep -qF "cpus: '\${WHISPER_CPU_LIMIT:-1.0}'" extensions/services/whisper/compose.yaml \
   || { echo "[FAIL] Whisper CPU limit must be env-driven with safe fallback"; exit 1; }
 grep -qF "cpus: '\${WHISPER_CPU_LIMIT:-1.0}'" extensions/services/whisper/compose.nvidia.yaml \
@@ -444,6 +482,7 @@ run_phase03_rag_guard() {
     INSTALL_CHOICE=1
     TIER=1
     ODS_MODE=local
+    ENABLE_PIXEL=false
     ENABLE_RAG=true
     ENABLE_HERMES=false
     ENABLE_OPENCLAW=false
@@ -559,6 +598,9 @@ for f in "${_resolver_callers[@]}"; do
 done
 unset _resolver_callers
 
+echo "[contract] dry-run does not install a missing jq prerequisite"
+bash tests/test-installer-dry-run-jq.sh
+
 echo "[contract] optional extension compose files are installer-gated"
 bash tests/test-installer-feature-state-sync.sh
 # Bundled optional/recommended services that ship compose.yaml must not enter
@@ -596,10 +638,12 @@ done
 
 echo "[contract] SearXNG follows web search consumers, not only --recommended"
 bash tests/test-pixel-support-services.sh
+bash tests/test-pixel-search-provider-resolution.sh
+bash tests/test-pixel-model-relay-compose.sh
 grep -qE 'ENABLE_RECOMMENDED:-false' "$features_phase" \
   || { echo "[FAIL] ENABLE_SEARXNG derivation must consult ENABLE_RECOMMENDED"; exit 1; }
-grep -qE 'ENABLE_PIXEL_RUNTIME:-false' "$features_phase" \
-  || { echo "[FAIL] ENABLE_SEARXNG derivation must consult ENABLE_PIXEL_RUNTIME"; exit 1; }
+grep -Fq '"$PIXEL_RESOLVED_WEB_SEARCH_PROVIDER" == "searxng"' "$features_phase" \
+  || { echo "[FAIL] ENABLE_SEARXNG derivation must consult Pixel's selected provider"; exit 1; }
 grep -qE 'ENABLE_PERPLEXICA:-false' "$features_phase" \
   || { echo "[FAIL] ENABLE_SEARXNG derivation must consult ENABLE_PERPLEXICA"; exit 1; }
 grep -qE 'ENABLE_HERMES:-false' "$features_phase" \
@@ -650,6 +694,7 @@ grep -q '\$_buildServices = \$_selectedBuildServices' installers/windows/install
 
 echo "[contract] failed requested local builds cannot reuse stale images"
 bash tests/test-phase11-local-build-failure.sh
+bash tests/test-phase11-litellm-reload.sh
 
 echo "[contract] OpenClaw deprecation preserves actual installs only"
 for installer in install-core.sh installers/macos/install-macos.sh; do
@@ -823,8 +868,8 @@ grep -q 'brew --prefix' installers/macos/install-macos.sh \
   || { echo "[FAIL] macOS installer must check the Homebrew prefix for OpenCode"; exit 1; }
 grep -q '_opencode_candidate_is_file' installers/macos/install-macos.sh \
   || { echo "[FAIL] macOS installer must validate resolved OpenCode as an absolute executable file"; exit 1; }
-grep -q 'brew install opencode' installers/macos/install-macos.sh \
-  || { echo "[FAIL] macOS installer should prefer Homebrew OpenCode when brew is available"; exit 1; }
+grep -q 'ods_install_opencode' installers/macos/install-macos.sh \
+  || { echo "[FAIL] macOS installer must install the reviewed OpenCode release"; exit 1; }
 grep -q '<string>${OPENCODE_BIN}</string>' installers/macos/install-macos.sh \
   || { echo "[FAIL] macOS OpenCode LaunchAgent must use resolved OPENCODE_BIN"; exit 1; }
 grep -q '_compute_launchd_path "$(dirname "$OPENCODE_BIN")"' installers/macos/install-macos.sh \
@@ -852,6 +897,8 @@ bash tests/test-linux-installer-model-lifecycle-lock.sh
 
 echo "[contract] Podman and no-sudo rootless lifecycle"
 bash tests/test-podman-rootless-contracts.sh
+echo "[contract] Token Spy rootful install ownership"
+bash tests/test-token-spy-install-owner.sh
 bash tests/test-installer-noninteractive-sudo.sh
 
 echo "[PASS] installer contracts"

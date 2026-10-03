@@ -10,12 +10,91 @@
 #           GGUF_FILE, GGUF_URL, LLM_MODEL, MAX_CONTEXT,
 #           DOCKER_COMPOSE_CMD, COMPOSE_FLAGS, BGRN, RED, AMB, NC,
 #           show_phase(), bootline(), signal(), ai(), ai_ok(), ai_bad(),
-#           ai_warn(), log(), spin_task()
+#           ai_warn(), log(), spin_task(), ui_status_line()
 # Provides: Running Docker Compose stack
 #
 # Modder notes:
 #   Change model download logic or compose launch flags here.
 # ============================================================================
+
+# Keep standalone phase harnesses usable; production defines this in ui.sh.
+if ! declare -F ui_status_line >/dev/null 2>&1; then
+    ui_status_line() {
+        local kind="$1" message="$2" label
+        case "$kind" in ok) label="OK" ;; warn) label="WARN" ;; error) label="ERROR" ;; *) label="INFO" ;; esac
+        printf '  [%s] %s\n' "$label" "$message"
+    }
+fi
+
+_phase11_prepare_uid1000_bind_data() {
+    local base="$1" host_uid host_gid path owner
+    shift
+    local -a writable=("$@") targets=() container_targets=()
+
+    # These images run as UID 1000. On a multi-user host the installing
+    # account can have another UID, so its bind mounts need a scoped repair.
+    # Rootless Docker has its own namespace repair.
+    [[ "${_phase06_rootless:-false}" == "true" ]] && return 0
+    host_uid="$(id -u)" || return 1
+    [[ "$host_uid" == 1000 ]] && return 0
+    host_gid="$(id -g)" || return 1
+    [[ "$host_gid" =~ ^[0-9]+$ ]] || return 1
+    [[ -d "$base" && ! -L "$base" ]] || {
+        ai_bad "UID 1000 data root is not a real directory: $base"
+        return 1
+    }
+    for path in "${writable[@]}"; do
+        [[ -d "$base/$path" && ! -L "$base/$path" ]] || {
+            ai_bad "UID 1000 bind source is not a real directory: $base/$path"
+            return 1
+        }
+        targets+=("$base/$path")
+        container_targets+=("/data/$path")
+    done
+
+    if ods_sudo_available; then
+        ods_sudo chown -h -R "1000:$host_gid" "${targets[@]}" || return 1
+        ods_sudo chmod -R ug+rwX "${targets[@]}" || return 1
+    else
+        _ods_rootless_ensure_helper_image || return 1
+        # Docker access already granted to the installer can perform this
+        # repair inside an exact bind mount, without changing host privilege.
+        docker_run run --rm --network none --user 0:0 \
+            --mount "type=bind,src=$base,dst=/data" \
+            "$ODS_ROOTLESS_HELPER_IMAGE" sh -ec '
+                gid="$1"; shift
+                chown -h -R "1000:$gid" "$@"
+                chmod -R ug+rwX "$@"
+            ' sh "$host_gid" "${container_targets[@]}" || return 1
+    fi
+    for path in "${writable[@]}"; do
+        owner="$(stat -c '%u:%g' "$base/$path")" || return 1
+        [[ "$owner" == "1000:$host_gid" && -w "$base/$path" ]] || {
+            ai_bad "UID 1000 bind source is not writable by the container and install group: $base/$path"
+            return 1
+        }
+    done
+}
+
+_phase11_refresh_litellm() {
+    local services
+    if ! services="$($DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" config --services 2>>"$LOG_FILE")"; then
+        ai_bad "Could not resolve services before refreshing the model gateway."
+        return 1
+    fi
+    if ! grep -qx 'litellm' <<< "$services"; then
+        return 0
+    fi
+    # Phase 06 replaces rendered config files atomically. Compose cannot see
+    # changed bind-mounted bytes, and a running LiteLLM keeps the old inode
+    # and its startup configuration. Refresh before Pixel uses that route.
+    ai "Reloading the installed LiteLLM model route..."
+    if ! $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" up -d --no-deps \
+        --force-recreate --no-build --pull never litellm >>"$LOG_FILE" 2>&1; then
+        ai_bad "Could not reload the model gateway. See $LOG_FILE."
+        return 1
+    fi
+}
 
 _phase11_build_local_images() {
     local -a build_services=("$@")
@@ -42,7 +121,9 @@ _phase11_build_local_images() {
                 echo "===== $svc build attempt $attempt/$max_attempts at $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
             } >> "$build_log"
 
-            $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" build --no-cache "$svc" >> "$build_log" 2>&1 &
+            # Always build the selected source; Docker may reuse unchanged
+            # layers on a retained install, while changed inputs invalidate them.
+            $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" build "$svc" >> "$build_log" 2>&1 &
             build_pid=$!
             build_failed=false
             label="[$build_count/$build_total] Building $svc"
@@ -77,7 +158,7 @@ except Exception:
                 break
             fi
 
-            printf "\r  ${AMB}⚠${NC} %-60s\n" "$svc build failed (attempt $attempt/$max_attempts)"
+            ui_status_line warn "$svc build failed (attempt $attempt/$max_attempts)"
             if (( attempt < max_attempts )); then
                 ai_warn "$svc build failed; retrying in ${retry_delay}s (attempt $((attempt + 1))/$max_attempts)..."
                 sleep "$retry_delay"
@@ -85,7 +166,7 @@ except Exception:
         done
 
         if $build_failed; then
-            printf "\r  ${AMB}⚠${NC} %-60s\n" "$svc build failed or image missing"
+            ui_status_line warn "$svc build failed or image missing"
             {
                 echo ""
                 echo "===== $svc build log tail ($build_log) ====="
@@ -94,7 +175,7 @@ except Exception:
             ai "Build log: $build_log"
             failed_build_services+=("$svc")
         else
-            printf "\r  ${BGRN}✓${NC} %-60s\n" "$svc built"
+            ui_status_line ok "$svc built"
         fi
     done
 
@@ -141,6 +222,34 @@ _phase11_recreate_exited_services() {
     $DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" up -d --no-deps \
         --force-recreate --no-build --pull never "${exited_services[@]}" \
         >> "$LOG_FILE" 2>&1
+}
+
+# Docker's daemon-wide Created inventory can include other projects. Capture
+# full IDs and prove this installation's labels before starting any of them.
+_phase11_start_created_owned() {
+    local ids id project root state
+    local -a owned=()
+    # DOCKER_CMD is intentionally either docker or the phase-05 sudo docker.
+    # shellcheck disable=SC2086
+    ids="$($DOCKER_CMD ps -a --no-trunc --filter status=created \
+        --filter label=com.docker.compose.project=ods --format '{{.ID}}' 2>>"$LOG_FILE")" || return 1
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        [[ "$id" =~ ^[0-9a-f]{64}$ ]] || return 1
+        # shellcheck disable=SC2086
+        project="$($DOCKER_CMD inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$id" 2>>"$LOG_FILE")" || return 1
+        # shellcheck disable=SC2086
+        root="$($DOCKER_CMD inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$id" 2>>"$LOG_FILE")" || return 1
+        # shellcheck disable=SC2086
+        state="$($DOCKER_CMD inspect -f '{{.State.Status}}' "$id" 2>>"$LOG_FILE")" || return 1
+        [[ "$project" == ods && "$root" == "$INSTALL_DIR" && "$state" == created ]] || continue
+        owned+=("$id")
+        (( ${#owned[@]} <= 64 )) || return 1
+    done <<< "$ids"
+    for id in "${owned[@]}"; do
+        # shellcheck disable=SC2086
+        $DOCKER_CMD start "$id" >>"$LOG_FILE" 2>&1 || return 1
+    done
 }
 
 _phase11_download_hf_artifact() {
@@ -313,7 +422,8 @@ else
         external="${LEMONADE_EXTERNAL:-$(_phase11_env_get LEMONADE_EXTERNAL false)}"
         managed="${AMD_INFERENCE_MANAGED:-$(_phase11_env_get AMD_INFERENCE_MANAGED "")}"
         mode="${ODS_MODE:-$(_phase11_env_get ODS_MODE local)}"
-        [[ "${external,,}" == "true" ]] || [[ "${mode,,}" == "lemonade" && "${managed,,}" == "false" ]]
+        case "${external,,}" in true|1|yes|on) return 0 ;; esac
+        [[ "${mode,,}" == "lemonade" && "${managed,,}" == "false" ]]
     }
 
     _phase11_external_llm() {
@@ -353,6 +463,14 @@ else
             log "CPU fallback tier selected: $TIER"
         fi
 
+        _phase11_env_set GPU_BACKEND "cpu"
+        if _phase11_external_lemonade; then
+            # The Linux container cannot use the GPU, but the selected model
+            # is served by Windows. Keep its persisted route and model values.
+            ai_ok "Retained external Lemonade inference during CPU device fallback"
+            return 0
+        fi
+
         load_backend_contract "cpu" || true
         LLM_HEALTHCHECK_URL="${BACKEND_PUBLIC_HEALTH_URL:-http://localhost:8080/health}"
         LLM_PUBLIC_API_PORT="${BACKEND_PUBLIC_API_PORT:-8080}"
@@ -361,7 +479,6 @@ else
         resolve_tier_config
         GPU_BACKEND="cpu"
 
-        _phase11_env_set GPU_BACKEND "$GPU_BACKEND"
         _phase11_env_set ODS_MODE "local"
         _phase11_env_set LLM_API_URL "http://llama-server:8080"
         _phase11_env_set LLM_MODEL "$LLM_MODEL"
@@ -369,7 +486,7 @@ else
         _phase11_env_set MAX_CONTEXT "$MAX_CONTEXT"
         _phase11_env_set CTX_SIZE "$MAX_CONTEXT"
         _phase11_env_set AUDIO_STT_MODEL "Systran/faster-whisper-base"
-        _phase11_env_set LLAMA_SERVER_IMAGE "${LLAMA_SERVER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9014}"
+        _phase11_env_set LLAMA_SERVER_IMAGE "${LLAMA_SERVER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9014@sha256:2e7953dfef88f302bf0683bffa7dc1f8d86ef75910380bc41126ec5b8bedaf53}"
         ai_ok "Rewrote .env for CPU fallback"
     }
 
@@ -511,6 +628,20 @@ else
             exit 1
         fi
         _phase11_apply_cpu_fallback "$_amd_missing_devices"
+    fi
+
+    # An owned Windows Lemonade task serves its private Windows model store.
+    # Register that read-only API mount before resolving the Compose overlays.
+    if [[ "${LEMONADE_HOST_TRANSPORT:-$(_phase11_env_get LEMONADE_HOST_TRANSPORT direct)}" == "model-router" ]]; then
+        _wsl_store_python="${ODS_PYTHON_CMD:-}"
+        if [[ -z "$_wsl_store_python" ]]; then
+            _wsl_store_python="$(command -v python3 || command -v python)"
+        fi
+        if ! "$_wsl_store_python" "$INSTALL_DIR/scripts/configure-wsl-model-store.py" \
+            --install-dir "$INSTALL_DIR" >> "$LOG_FILE" 2>&1; then
+            error "The registered Windows Lemonade runtime could not be verified; stopping before service configuration."
+            return 1
+        fi
     fi
 
     # Re-resolve compose flags against the actual install directory.
@@ -807,37 +938,37 @@ else
                     # fires. A spurious "Model downloaded" line then misleads
                     # later phases that depend on the file existing.
                     if mv "$ODS_ACTIVE_DOWNLOAD_PART" "$GGUF_DIR/$GGUF_FILE" && [[ -s "$GGUF_DIR/$GGUF_FILE" ]]; then
-                        printf "\r  ${BGRN}✓${NC} %-60s\n" "Model downloaded: $GGUF_FILE"
+                        ui_status_line ok "Model downloaded: $GGUF_FILE"
                         _dl_success=true
                         break
                     else
                         rm -f "$GGUF_DIR/$GGUF_FILE" 2>/dev/null || true
-                        printf "\r  ${AMB}⚠${NC} %-60s\n" "Download claimed to succeed but $GGUF_FILE is missing/empty"
+                        ui_status_line warn "Download claimed to succeed but $GGUF_FILE is missing/empty"
                     fi
                 else
                     ODS_ACTIVE_DOWNLOAD_PID=""
                     if _phase11_download_hf_artifact "$GGUF_URL" "$ODS_ACTIVE_DOWNLOAD_PART" "$INSTALL_DIR/logs/model-download.log"; then
                         if mv "$ODS_ACTIVE_DOWNLOAD_PART" "$GGUF_DIR/$GGUF_FILE" && [[ -s "$GGUF_DIR/$GGUF_FILE" ]]; then
-                            printf "\r  ${BGRN}✓${NC} %-60s\n" "Model downloaded via Hugging Face client: $GGUF_FILE"
+                            ui_status_line ok "Model downloaded via Hugging Face client: $GGUF_FILE"
                             _dl_success=true
                             break
                         else
                             rm -f "$GGUF_DIR/$GGUF_FILE" 2>/dev/null || true
-                            printf "\r  ${AMB}⚠${NC} %-60s\n" "Hugging Face fallback completed but $GGUF_FILE is missing/empty"
+                            ui_status_line warn "Hugging Face fallback completed but $GGUF_FILE is missing/empty"
                         fi
                     fi
                 fi
-                printf "\r  ${AMB}⚠${NC} %-60s\n" "Download attempt $_attempt failed"
+                ui_status_line warn "Download attempt $_attempt failed"
                 sleep 3
             done
 
             if [[ "$_dl_success" != "true" ]] && _phase11_model_file_valid "$GGUF_DIR/$GGUF_FILE" "$GGUF_SHA256"; then
-                printf "\r  ${BGRN}✓${NC} %-60s\n" "Model present after download retries: $GGUF_FILE"
+                ui_status_line ok "Model present after download retries: $GGUF_FILE"
                 _dl_success=true
             fi
 
             if [[ "$_dl_success" != "true" ]]; then
-                printf "\r  ${RED}✗${NC} %-60s\n" "Download failed after 3 attempts: $GGUF_FILE"
+                ui_status_line error "Download failed after 3 attempts: $GGUF_FILE"
                 # Nothing above deletes the .part, so the bytes already on disk
                 # are still usable. Users who do not know that re-download from
                 # zero or clear the directory by hand.
@@ -855,7 +986,7 @@ else
                             ai_warn "Could not compute checksum for downloaded file"
                             ai_warn "Proceeding without verification (file may be corrupt)"
                         else
-                            printf "\r  ${RED}✗${NC} %-60s\n" "Downloaded file is corrupt (SHA256 mismatch)"
+                            ui_status_line error "Downloaded file is corrupt (SHA256 mismatch)"
                             ai "  Expected: $GGUF_SHA256"
                             ai "  Got:      $ACTUAL_HASH"
                             rm -f "$GGUF_DIR/$GGUF_FILE"
@@ -912,6 +1043,11 @@ else
         # NVIDIA ComfyUI also needs output/input/workflows bind-mount dirs
         if [[ "$GPU_BACKEND" == "nvidia" ]]; then
             mkdir -p "$INSTALL_DIR/data/comfyui"/{output,input,workflows,user}
+            if ! _phase11_prepare_uid1000_bind_data \
+                "$INSTALL_DIR/data/comfyui" models output input user; then
+                ai_bad "Could not prepare NVIDIA ComfyUI data for its container user."
+                exit 1
+            fi
         fi
 
         SDXL_MODEL="sdxl_lightning_4step.safetensors"
@@ -961,6 +1097,16 @@ else
             ai "SDXL Lightning downloading in background (~6.5GB). ComfyUI will be ready once complete."
         else
             ai_ok "SDXL Lightning model already present"
+        fi
+    fi
+
+    # Speaches writes its Hugging Face model cache as UID 1000. Docker would
+    # otherwise mount a fresh cache owned by a different install account.
+    if [[ -f "$INSTALL_DIR/extensions/services/whisper/compose.yaml" ]]; then
+        mkdir -p "$INSTALL_DIR/data/whisper"
+        if ! _phase11_prepare_uid1000_bind_data "$INSTALL_DIR/data/whisper" .; then
+            ai_bad "Could not prepare the speech model cache for its container user."
+            exit 1
         fi
     fi
 
@@ -1188,6 +1334,48 @@ MODELS_INI_EOF
     fi
     ai_ok "Compose configuration valid"
 
+    if _phase11_external_lemonade &&
+       ! ods_external_lemonade_assert_no_managed_llama "${COMPOSE_FLAGS_ARR[@]}" 2>>"$LOG_FILE"; then
+        ai_bad "External Lemonade Compose could start ODS-managed llama-server; inspect $LOG_FILE and clear COMPOSE_PROFILES."
+        exit 1
+    fi
+
+    if [[ "${ENABLE_OPEN_WEBUI:-true}" != true ]] &&
+       ! ods_compose_assert_no_webui "${COMPOSE_FLAGS_ARR[@]}" 2>>"$LOG_FILE"; then
+        ai_bad "No-WebUI Compose could start Open WebUI; inspect $LOG_FILE and clear COMPOSE_PROFILES."
+        exit 1
+    fi
+
+    if [[ "${ODS_GATEWAY_ONLY:-false}" == true ]]; then
+        # `--remove-orphans` does not stop a service still declared behind a
+        # profile. An upgrade from local inference can otherwise leave the old
+        # llama-server holding GPU memory after the gateway install succeeds.
+        # Check the effective Compose service set before stopping anything: a
+        # caller-selected profile must never start managed inference here.
+        if ! ods_gateway_assert_no_managed_inference "${COMPOSE_FLAGS_ARR[@]}" \
+            2>>"$LOG_FILE"; then
+            ai_bad "Gateway-only Compose could start ODS-managed inference; inspect $LOG_FILE and clear COMPOSE_PROFILES."
+            exit 1
+        fi
+        if ! $DOCKER_COMPOSE_CMD --profile local-inference \
+            "${COMPOSE_FLAGS_ARR[@]}" stop llama-server model-router >>"$LOG_FILE" 2>&1; then
+            ai_bad "Could not stop the previous ODS managed-inference services."
+            exit 1
+        fi
+        if ! _gateway_inference_running="$($DOCKER_COMPOSE_CMD \
+            --profile local-inference "${COMPOSE_FLAGS_ARR[@]}" \
+            ps --status running -q llama-server model-router 2>>"$LOG_FILE")"; then
+            ai_bad "Could not verify ODS managed inference stopped."
+            exit 1
+        fi
+        if [[ -n "$_gateway_inference_running" ]]; then
+            ai_bad "ODS managed inference is still running after gateway-only selection."
+            exit 1
+        fi
+        unset _gateway_inference_running
+        ai_ok "Previous ODS managed inference stopped; model data retained"
+    fi
+
     if ! _phase11_prefetch_embeddings_model; then
         exit 1
     fi
@@ -1202,7 +1390,7 @@ MODELS_INI_EOF
     compose_ok=false
     # Build local images individually so every failure is reported before the
     # installer refuses to launch any potentially stale image.
-    _candidate_build_services=(dashboard dashboard-api model-router remote-provider-egress remote-provider-ssh-tunnel ape token-spy privacy-shield brave-search pixel-edge pixel-model-relay pixel-inference)
+    _candidate_build_services=(dashboard dashboard-api model-router remote-provider-egress remote-provider-ssh-tunnel ape token-spy privacy-shield brave-search pixel-edge pixel-model-relay pixel-inference langfuse-minio langfuse-minio-init)
     [[ "$ENABLE_COMFYUI" == "true" ]] && _candidate_build_services+=(comfyui)
     [[ "$GPU_BACKEND" == "amd" ]] && _candidate_build_services+=(llama-server)
     if ! _enabled_compose_services="$($DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" config --services 2>>"$LOG_FILE")"; then
@@ -1236,6 +1424,9 @@ MODELS_INI_EOF
     if ! _phase11_pre_pull_compose_images; then
         exit 1
     fi
+    if ! _phase11_refresh_litellm; then
+        exit 1
+    fi
     # Install and verify the host Pixel gateway/ingress before Open WebUI is
     # launched with Pixel as its default provider. This fails closed: users
     # never receive a selectable but nonfunctional default agent.
@@ -1255,7 +1446,7 @@ MODELS_INI_EOF
             if ! _phase11_recreate_exited_services; then
                 log "Bounded exited-service recreation did not complete; continuing the normal launch retry."
             fi
-            printf "\r  ${AMB}⚠${NC} %-60s\n" "Some services still starting..."
+            ui_status_line warn "Some services still starting..."
             ai_warn "Some containers need more time. Waiting 30s before retry..."
             sleep 30
         fi
@@ -1264,7 +1455,7 @@ MODELS_INI_EOF
     # starting other containers. Some end up in "Created", others never got
     # past "Creating" because their dependencies weren't ready yet.
     # Step 1: start any containers already in Created state
-    $DOCKER_CMD start $($DOCKER_CMD ps -a --filter status=created -q) 2>/dev/null || true
+    _phase11_start_created_owned || log "Owned Created-container recovery could not be completed."
     # Step 2: wait for services to stabilize, then compose pass
     sleep 10
     # Preserve the recovery result. A successful recovery must be allowed to
@@ -1278,7 +1469,7 @@ MODELS_INI_EOF
         compose_ok=true
     fi
     # Step 3: catch any stragglers from the second pass
-    $DOCKER_CMD start $($DOCKER_CMD ps -a --filter status=created -q) 2>/dev/null || true
+    _phase11_start_created_owned || log "Owned Created-container recovery could not be completed."
 
     # If ODS_AGENT_BIND is unset, the Linux host-agent binds to the ODS
     # Docker network gateway once that network exists. Phase 07 may have
@@ -1327,17 +1518,43 @@ MODELS_INI_EOF
     fi
 
     if $compose_ok; then
+        # A service hidden behind a Compose profile is not removed by `up
+        # --remove-orphans` on an upgrade because it is still declared in the
+        # project. Stop only this project's WebUI service; keep its data and
+        # container available for an explicit --with-webui rollback.
+        if [[ "${ENABLE_OPEN_WEBUI:-true}" != true ]]; then
+            if ! $DOCKER_COMPOSE_CMD --profile gateway-webui "${COMPOSE_FLAGS_ARR[@]}" \
+                stop open-webui >> "$LOG_FILE" 2>&1; then
+                ai_bad "Could not stop the previous ODS Open WebUI service."
+                exit 1
+            fi
+            if ! _gateway_webui_running="$($DOCKER_COMPOSE_CMD --profile gateway-webui \
+                "${COMPOSE_FLAGS_ARR[@]}" ps --status running -q open-webui 2>>"$LOG_FILE")"; then
+                ai_bad "Could not verify the ODS Open WebUI service stopped."
+                exit 1
+            fi
+            if [[ -n "$_gateway_webui_running" ]]; then
+                ai_bad "ODS Open WebUI is still running after no-WebUI selection."
+                exit 1
+            fi
+            unset _gateway_webui_running
+            ai_ok "Open WebUI stopped; its data remains available for rollback"
+        fi
         if $_compose_started_with_delayed_health; then
-            printf "\r  ${AMB}⚠${NC} %-60s\n" "Containers launched; waiting on health checks"
+            ui_status_line warn "Containers launched; waiting on health checks"
             echo ""
             ai_warn "Some containers are still becoming healthy. Continuing to the longer health checks."
         else
             if ! _phase11_assert_managed_containers; then
                 exit 1
             fi
-            printf "\r  ${BGRN}✓${NC} %-60s\n" "All containers launched"
+            ui_status_line ok "All containers launched"
             echo ""
-            ai_ok "Services started (llama-server)"
+            if [[ -n "${EXTERNAL_LLM_URL:-}" ]]; then
+                ai_ok "Services started (external model through LiteLLM)"
+            else
+                ai_ok "Services started (llama-server)"
+            fi
         fi
 
         # Re-render data/persona/SOUL.md now that services are actually
@@ -1358,7 +1575,7 @@ MODELS_INI_EOF
             fi
         fi
     else
-        printf "\r  ${RED}✗${NC} %-60s\n" "Some containers failed to launch"
+        ui_status_line error "Some containers failed to launch"
         echo ""
         ai_warn "Some services failed. Check: docker compose logs"
         ai_warn "Log file: $LOG_FILE"
@@ -1474,23 +1691,7 @@ MODELS_INI_EOF
     fi
 
     ods_progress 83 "services" "Running extension setup hooks"
-    # ── Run extension setup hooks ──
-    if [[ -f "$INSTALL_DIR/lib/service-registry.sh" ]]; then
-        _HOOK_DIR="$INSTALL_DIR"
-        . "$_HOOK_DIR/lib/service-registry.sh"
-        sr_load
-        _hook_count=0
-        for sid in "${SERVICE_IDS[@]}"; do
-            hook="${SERVICE_SETUP_HOOKS[$sid]:-}"
-            [[ -z "$hook" || ! -f "$hook" ]] && continue
-            [[ -x "$hook" ]] || chmod +x "$hook"
-            log "Running setup hook for $sid: $hook"
-            if bash "$hook" "$INSTALL_DIR" "$GPU_BACKEND" >> "$LOG_FILE" 2>&1; then
-                _hook_count=$((_hook_count + 1))
-            else
-                ai_warn "Setup hook for $sid exited with error (non-fatal)"
-            fi
-        done
-        [[ $_hook_count -gt 0 ]] && ai_ok "Ran $_hook_count extension setup hook(s)" || true
-    fi
+    . "$INSTALL_DIR/installers/lib/extension-setup-hooks.sh"
+    ods_run_selected_extension_setup_hooks \
+        "$INSTALL_DIR" "$GPU_BACKEND" "$LOG_FILE" "${COMPOSE_FLAGS_ARR[@]}"
 fi

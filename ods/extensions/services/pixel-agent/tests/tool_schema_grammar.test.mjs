@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { createDownloadPromoteTool } from "../plugin/download-promote.mjs";
 import { createPerplexicaResearchTool } from "../plugin/perplexica-research.mjs";
 import { createHostCommandProposeTool } from "../plugin/host-observe.mjs";
+import {registeredPixelTools, combinedToolSchema} from './tool-grammar-registration.mjs';
 
 const promotion = {
   jobId: "ops-1788130169655-22b40ab50141", filename: "reference.html",
@@ -14,11 +15,51 @@ const promotion = {
 };
 const longUrl = length => "https://example.org/" + "a".repeat(length - 20);
 const nativeGrammar = process.env.ODS_TEST_LLAMA_SCHEMA;
+const nativeOnly = {skip: !nativeGrammar && 'set ODS_TEST_LLAMA_SCHEMA to the pinned native test bridge'};
+const registered = await registeredPixelTools();
+const libraryProposal = {repository: 'https://github.com/o/r', serviceId: 'example', name: 'Example',
+  pythonVersion: '3.12', pythonImports: ['example']};
+
+function compileSchema(schema) {
+  const result = spawnSync(nativeGrammar, [], {
+    input: JSON.stringify({schema, compileOnly: true}), encoding: 'utf8', timeout: 30000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr.slice(0, 2000));
+  assert.ok(JSON.parse(result.stdout).grammarBytes > 0);
+}
+
+test('grammar inventory captures every actual Pixel registration', () => {
+  assert.equal(registered.length, 28);
+  for (const name of ['pixel_ods_image_read', 'pixel_ods_workspace_preview', 'pixel_ods_workspace_bundle', 'pixel_ods_workspace_artifact', 'pixel_ods_source_proposal',
+    'pixel_ods_python_library_proposal', 'pixel_ods_extension_request_retry', 'pixel_ods_workspace_preview_inspect',
+    'pixel_ods_project_build']) {
+    assert.ok(registered.some(tool => tool.name === name), name);
+  }
+});
+
+test('legacy configuration does not expose an unavailable inspector', async () => {
+  const legacy = await registeredPixelTools({inspection:false, project:false});
+  assert.equal(legacy.length,26);
+  assert.equal(legacy.some(tool => tool.name === 'pixel_ods_workspace_preview_inspect'),false);
+  assert.equal(legacy.some(tool => tool.name === 'pixel_ods_project_build'),false);
+});
+
+for (const tool of registered) {
+  test(`${tool.name} registered schema compiles in llama.cpp`, nativeOnly, () => compileSchema(tool.parameters));
+}
+test('all registered Pixel schemas compile together, including deferred specialists', nativeOnly,
+  () => compileSchema(combinedToolSchema(registered)));
 
 for (const [tool, samples] of [
+  [registered.find(tool => tool.name === 'pixel_ods_image_read'), [{id:'img-'+'a'.repeat(32),sha256:'b'.repeat(64)}]],
+  [registered.find(tool => tool.name === 'pixel_ods_workspace_bundle'),
+    [{files:[{source:'project/source.py',key:'source.py',copyTo:'source.txt'}],mappingPath:'sources.json',outputRoot:'project/public'}]],
   [createDownloadPromoteTool(), [promotion, { ...promotion, sourceUrl: longUrl(4096) }]],
-  [createPerplexicaResearchTool(), [{ query: "Find public sources" }, { query: "a".repeat(16000) }]],
+  [createPerplexicaResearchTool(), [{ query: "Find public sources" }, { query: "a".repeat(1000) }]],
   [createHostCommandProposeTool(), [{ command: "pwd" }, { command: "a".repeat(16384) }]],
+  [registered.find(tool => tool.name === 'pixel_ods_python_library_proposal'),
+    [libraryProposal, {...libraryProposal, pythonVerification: {expression: 'a'.repeat(2048), expected: 'a'.repeat(2048)}}]],
 ]) {
   test(`${tool.name} schema compiles and accepts short and full-size arguments in llama.cpp`,
     { skip: !nativeGrammar && "set ODS_TEST_LLAMA_SCHEMA to the pinned native test bridge" }, () => {
@@ -51,14 +92,14 @@ test("promotion keeps the 4096-character URL limit at execution before any host 
   assert.equal(requests.length, 1);
 });
 
-test("research accepts the existing 16000-character brief and rejects larger input before HTTP", async () => {
+test("research accepts a 1000-character brief and rejects larger input before HTTP", async () => {
   let calls = 0;
   const tool = createPerplexicaResearchTool({ env: {}, fetch: async () => {
     calls++; return Response.json({ values: { preferences: {} } });
   } });
-  assert.equal((await tool.execute("full-brief", { query: "a".repeat(16000) })).details.status, "configuration_required");
+  assert.equal((await tool.execute("full-brief", { query: "a".repeat(1000) })).details.status, "configuration_required");
   assert.equal(calls, 1);
-  for (const query of ["a".repeat(16001), "", "   "]) {
+  for (const query of ["a".repeat(1001), "", "   ", "https://example.org/only-a-link"]) {
     assert.equal((await tool.execute("invalid-brief", { query })).details.status, "invalid_request");
   }
   assert.equal(calls, 1);

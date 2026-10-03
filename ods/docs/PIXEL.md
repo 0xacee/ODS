@@ -1,9 +1,10 @@
-# Pixel in ODS
+# Portal in ODS
 
-Pixel is the heart of ODS's conversational experience and a core feature under
-active development. On the host and license path described here, it is the
-default `pixel/default` model in Open WebUI and has a dedicated **Pixel** app
-in the ODS Dashboard. The full goal is to create projects, use host tools,
+Portal is the public-facing name of ODS's conversational assistant and a core
+feature under active development. Its internal runtime and compatibility route
+retain the Pixel identifier; on qualified hosts the `portal/default` model in
+Open WebUI and the dedicated **Portal** app in the ODS Dashboard use the same
+assistant. The full goal is to create projects, use host tools,
 manage ODS, and carry out sustained work through conversation.
 
 See the [enhancement priorities](pixel/ENHANCEMENT-PRIORITIES.md) for the
@@ -13,8 +14,9 @@ acceptance tests.
 The rollout is experimental: Hermes, OpenCode, Open WebUI and the other ODS
 applications remain available in parallel while Pixel matures. This integration
 does not require their removal or a Pixel-only core download. Hermes remains
-installed by default; OpenCode and deprecated OpenClaw remain separately
-selectable. Pixel's capability and model-flexibility goals are unchanged.
+available; the macOS installer disables it while native Pixel is selected.
+OpenCode and deprecated OpenClaw remain separately selectable. Pixel's
+capability and model-flexibility goals are unchanged.
 
 Pixel does not maintain a model allowlist and ODS does not block chat or tool
 use behind a "Pixel-ready" verdict. Every model or remote provider that is
@@ -22,7 +24,7 @@ callable through the active ODS Switchboard route is callable through Pixel.
 ODS still applies its ordinary hardware-fit and inference-readiness checks when
 it chooses a fresh install's default model; any agent-quality measurements are
 advisory capability evidence, not an access gate. Hermes remains independently
-available when the Pixel runtime, host, license, or authenticated gateway is unavailable,
+available when the Pixel runtime, host, or authenticated gateway is unavailable,
 not a substitute selected merely because a callable model scored poorly on an
 agent probe.
 
@@ -36,43 +38,79 @@ authenticated LiteLLM gateway used by other ODS consumers. Gateway readiness
 proves that the route is callable; it does not claim that every underlying
 model has equal intelligence or tool-use skill.
 
+## Capability-aware bootstrap defaults
+
+ODS scopes the exact shipped `AGENTS.md` and `TOOLS.md` bootstrap defaults in
+memory before each Pixel run. Detailed Calendar and Frontier guidance is omitted
+only when their provider is explicitly disabled or every corresponding tool is
+explicitly denied. A tool deferred behind Tool Search remains enabled; Operations
+guidance and general authority, privacy, research and verification rules remain.
+The personal development contract in the known vendor default is
+replaced with instructions to use this installation's configured model and tools.
+
+This does not edit workspace files or alter available tools. Owner-customized
+files, unknown template revisions, other agents, mismatched workspaces and disabled
+prompt hooks retain their original text. Capability changes are evaluated on the
+next bootstrap, so enabling Calendar or Frontier restores its detailed guidance.
+Reduced bootstrap text is not evidence of task quality or a measured speedup.
+
+## Availability and runtime readiness
+
+The authenticated `/api/pixel/status` response keeps model-route `available`
+separate from its additive `readiness` projection. A callable model route does
+not establish effective host permissions or an installed-release match.
+Readiness version 1 reports current access verification and partial runtime
+identity, with states `unverified`, `attention`, or `unavailable`; it cannot
+report `ready`. Runtime identity version 1 leaves `runtimeMatchesRelease` null
+unless observed file drift establishes a mismatch (`false`).
+
+The readiness checks are read-only, concurrent, and individually bounded by a
+four-second whole-request deadline. Missing older endpoints, timeouts, and
+invalid proof remain unverified. A valid failed host access inspection or an
+unfinished access transition is shown as needing attention. `busy` alone is
+activity, not failed proof; `pending: false` does not establish that admission
+is open. No paths, credentials, or raw upstream errors enter this projection.
+
+Portal shows a readiness warning only for a concrete access failure, an
+unfinished access transition, or a runtime file mismatch. Unknown, missing,
+or unsupported readiness remains unverified in status diagnostics without a
+persistent chat warning. It does not disable chat, select another model,
+change access, bypass admission and recovery controls, or establish that the
+runtime is ready.
+
 ## Legal and release boundary
 
-Pixel's repository currently uses a proprietary, all-rights-reserved license.
-ODS does not grant a right to install or use Pixel. Set
-`PIXEL_LICENSE_ACCEPTED=true` only after a separately negotiated written
-agreement authorizes the relevant installation. A public ODS release cannot
-legally deliver Pixel to every installer until the Pixel copyright holder
-publishes a compatible license or grants the required distribution and use
-rights.
+Pixel source is included in ODS at [`vendor/pixel`](../vendor/pixel) under the
+[Pixel License for ODS](../vendor/pixel/LICENSE.md). It grants broad use,
+modification and distribution rights as part of ODS, including commercial ODS
+use, without a separate agreement or acknowledgement flag. It does **not**
+license Pixel as a standalone product or under ODS's Apache-2.0 license. See
+the [repository licensing overview](../LICENSING.md).
 
-This technical integration therefore fails closed:
+The Linux/WSL2 installer applies the following technical eligibility rules:
 
-| Request | Qualified host | Written authorization acknowledged | Result |
-|---------|----------------|------------------------------------|--------|
-| `ENABLE_PIXEL=auto` (default) | Yes | Yes | Pixel is enabled as the core agent and Open WebUI's default model |
-| `ENABLE_PIXEL=auto` | No | Any | Pixel is skipped; existing ODS tools remain available |
-| `ENABLE_PIXEL=auto` | Yes | No | Pixel is skipped; existing ODS tools remain available |
-| `--pixel` | Yes | Yes | Pixel is required and installed |
-| `--pixel` | No | Any | Installer stops before changing the agent route |
-| `--pixel` | Yes | No | Installer stops before changing the agent route |
-| `--no-pixel` | Any | Any | Pixel route is disabled; Hermes remains available |
+| Request | Qualified host | Result |
+|---------|----------------|--------|
+| `ENABLE_PIXEL=auto` (default) | Yes | Pixel is enabled as the core agent and Open WebUI's default model |
+| `ENABLE_PIXEL=auto` | No | Pixel is skipped; existing ODS tools remain available |
+| `--pixel` | Yes | Pixel is required and installed |
+| `--pixel` | No | Installer stops before changing the agent route |
+| `--no-pixel` | Any | Pixel route is disabled; Hermes remains available |
 
-The environment value must be exactly `true`. There is no click-through or
-implicit acceptance.
+## Linux and WSL2 eligibility
 
-## Host eligibility
-
-Pixel is selected only on:
+The Linux installer selects Pixel on:
 
 - Ubuntu 24.04/26.04 LTS or Debian 12;
 - Linux with `systemd` as PID 1;
 - a native Linux host or WSL2 (WSL1 is rejected); and
 - an ODS-managed local, cloud, hybrid, Lemonade, or external OpenAI-compatible model route.
 
-ODS supports more platforms than Pixel. macOS, Windows-native, other Linux
-distributions continue to install ODS and use Hermes. External Ollama, LM Studio,
-and generic OpenAI-compatible endpoints are bound through authenticated LiteLLM;
+ODS supports more platforms than this Linux path. The native Windows PowerShell
+installer and other Linux distributions use Hermes. Docker Desktop's WSL2
+backend alone does not install Pixel: use the ODS Linux installer inside a
+qualified WSL2 distribution with systemd for that host runtime. External Ollama,
+LM Studio, and generic OpenAI-compatible endpoints are bound through authenticated LiteLLM;
 Pixel uses the exact selected upstream model behind `ods/current`. For a generic
 local/LAN endpoint, select `--external-llm-provider openai-compatible` together
 with `--external-llm-url` and `--external-llm-model`. This reuse path is for
@@ -80,7 +118,26 @@ credential-free upstreams; credentialed remote providers use the Remote GPU
 provider workflow. Do not put credentials in an endpoint URL.
 These are ODS capability gates, not a reduction of the ODS support matrix.
 
-## Architecture
+## Native macOS eligibility
+
+The Apple Silicon macOS installer enables native Pixel by default. It acquires
+the verified `vendor/pixel.bundle` from the public ODS checkout, prepares the
+gateway and managed host services, then activates them with the Docker ingress,
+edge, sandbox and preview services. Metal inference stays on the Mac. No
+separate Linux VM, Linux systemd, private GitHub repository or acknowledgement
+flag is needed for this path.
+
+`--no-pixel` selects the non-Pixel path for a fresh installation. The base
+installer rejects existing native Pixel state rather than silently replacing
+or disabling it; use the managed native update/migration path and preserve
+`data/pixel-native` and its receipts. Do not delete protected state or use force
+to work around that guard. See [MACOS-QUICKSTART.md](MACOS-QUICKSTART.md).
+
+## Linux host architecture
+
+The following systemd/socket layout describes Linux and WSL2. macOS uses native
+service management and a Docker ingress instead of these systemd services;
+the edge authentication, scoped tools and Operations approval boundaries remain.
 
 ```text
 Browser
@@ -276,51 +333,52 @@ public-web tools and shell cannot be used as substitutes.
 
 ## Install
 
-From an authorized Ubuntu 24.04/26.04 or Debian 12 host:
+From a qualified Ubuntu 24.04/26.04 or Debian 12 host:
 
 ```bash
 git clone https://github.com/Osmantic/ODS.git
 cd ODS/ods
-PIXEL_LICENSE_ACCEPTED=true ./install.sh --pixel
+./install.sh --pixel
 ```
 
 Omit `--pixel` to use automatic selection. Explicit `--pixel` is recommended
 for qualification because it turns an unexpected fallback into a visible
 installer failure.
 
-The installer pins Pixel to an immutable full commit. To qualify an
+The installer uses the local, one-commit Pixel bundle shipped in ODS and
+checks its immutable digest before activation; it does not clone a private
+repository. To qualify an
 owner-controlled local Pixel checkout, place it under a secure directory you
 own and set all three source values:
 
 ```bash
-PIXEL_LICENSE_ACCEPTED=true \
 PIXEL_SOURCE_DIR=/home/me/src \
 PIXEL_SOURCE_URL=/home/me/src/Pixel \
 PIXEL_SOURCE_REF=<40-character-commit> \
 ./install.sh --pixel
 ```
 
-The canonical remote URL is the only remote source accepted. A local source
-must be a clean Git checkout below `PIXEL_SOURCE_DIR`; the owner directories
-must not be group- or world-writable. Remote Git credential prompts are
-disabled and source operations are bounded, so an inaccessible private source
-fails instead of hanging the installer. Authorized users without configured
-non-interactive Git access should use the local-checkout form above.
+Public ODS installs accept only the verified bundle shipped in ODS or an
+explicit absolute local checkout; remote source URLs are not supported,
+including as development overrides. A local source must be a clean Git
+checkout below `PIXEL_SOURCE_DIR`; the owner directories must not be group-
+or world-writable. Source operations are bounded. Normal ODS users need no
+Pixel Git credentials.
 
 ## User experience
 
 After a successful install:
 
-1. Open `http://localhost:3000`. New chats default to `pixel/default` when
-   Pixel is enabled; the ordinary ODS model remains selectable.
-2. Open `http://localhost:3001/pixel`, or choose **Pixel** in the Dashboard
+1. Open `http://localhost:3000`. New chats default to `portal/default` when
+   Portal is enabled; the ordinary ODS model remains selectable.
+2. Open `http://localhost:3001/pixel`, or choose **Portal** in the Dashboard
    toolbar, for the dedicated streaming agent UI.
 3. Hermes remains at its authenticated proxy URL shown by the installer.
 4. OpenCode remains an independent coding UI when enabled.
 
 Pixel follows the active ODS model without a qualification allowlist. Every
 callable ODS chat model can be used in the dedicated Pixel UI and through
-`pixel/default`. Qualification affects recommendation and the displayed
+`portal/default`. Qualification affects recommendation and the displayed
 reliability tier only: a model that has not passed the demanding multi-step
 agent replay uses Pixel's **adaptive** route, while the composer remains enabled.
 Model intelligence may change the quality, speed, tool judgment, and length of
@@ -361,7 +419,9 @@ compatibility policy after the new runtime and downstream routes pass their
 proofs. Cloud, hybrid, and external Lemonade modes can change the route behind
 the same alias without teaching Pixel a provider-specific endpoint. The Pixel
 gateway is restarted and verified before the transaction commits. The public
-Open WebUI identity remains `pixel/default` throughout.
+Open WebUI identity remains `portal/default` throughout. Existing clients may
+continue to request the legacy `pixel/default` API alias; it is not listed for
+new conversations.
 
 The Dashboard Remote Provider page uses that same stable alias. A direct
 provider becomes active only after its egress probe, a real LiteLLM completion,
@@ -443,7 +503,11 @@ act as a capability gate:
   one evidence window. The tool returns only that bounded, explicitly untrusted
   window. It is the targeted fallback when the normal `web_fetch` prefix is
   truncated before the requested detail; local, private, single-label,
-  credentialed, and raw-IP destinations remain blocked.
+  credentialed, and raw-IP destinations remain blocked. It requests a page as
+  a browser-compatible navigation that names `ODS-Pixel/1.0`, and only after a
+  plain 403 or 406 repeats the plain request once. Script and style text is
+  removed before extraction. A bot challenge or block is reported as not read;
+  ODS never solves, waits out or retries one, and runs no JavaScript.
 - `pixel_ods_download_promote` can publish one already-successful, exact broker
   download into one new relative path in Pixel's workspace. It cannot fetch,
   transform, overwrite, execute, or select an arbitrary host file.
@@ -454,27 +518,36 @@ act as a capability gate:
   performs an HTTP readback before returning a receipt. The private ingress
   carries that exact receipt in a structured terminal frame; the Dashboard
   never opens a URL parsed from model prose. The Pixel portal automatically
-  shows the snapshot in a side panel with a script-capable iframe. On the ODS
-  host, each content-addressed snapshot receives its own `site-*.localhost`
-  origin, and the host rejects a request whose origin hostname does not match
-  the snapshot path. That path retains ordinary origin-scoped browser storage.
-  When the Dashboard itself is opened on another private LAN or Tailscale
-  client, it uses `/pixel-preview/<site-id>/` on that same Dashboard authority.
+  shows the snapshot in a side panel with a script-capable iframe. Every
+  Dashboard client, including localhost and SSH-forwarded clients, uses
+  `/pixel-preview/<site-id>/` on that same Dashboard authority. The underlying
+  host snapshot retains its content-addressed `site-*.localhost` URL and rejects
+  mismatched host/path pairs; that URL is not the Dashboard's iframe route.
   Nginx authenticates the hop to the internal-only Pixel Edge, Pixel Edge reads
   through a group-scoped Unix socket rather than opening a host port, and the
   returned document receives an enforced CSP sandbox without
-  `allow-same-origin`. The remote document can run its scripts and load its own
+  `allow-same-origin`. The preview document can run its scripts and load its own
   immutable local assets, but it cannot inherit Dashboard cookies, DOM, or
-  storage authority; the same CSP applies to the new-tab view. Both routes
+  storage authority; the same CSP applies to the new-tab view. Accessing
+  `localStorage` or `sessionStorage`, including their property getters, reads
+  and writes, may throw. Model-authored apps must treat persistence as optional:
+  keep working state in memory and guard storage access and every operation
+  with `try/catch` and an in-memory fallback. Failed saving must not prevent
+  startup or continued interaction. In-memory state does not survive reload;
+  neither the preview contract nor a publication receipt promises durable
+  persistence. Do not add `allow-same-origin`, inject a storage shim, or bypass
+  isolation to make an artifact work. Dashboard previews
   allow client-side form validation/submit handlers and browser downloads for
   exports (for example, a clicked CSV download link). CSP still denies every
-  network form action with `form-action 'none'`. Both routes block external
+  network form action with `form-action 'none'`. They block external
   connections, popups, top-level navigation, camera, microphone, and
   geolocation. The standard `allow-downloads` permission enables browser-managed
   downloads; it does not guarantee that every download required a user gesture,
-  and it grants no application execution or arbitrary host-file access. Starting a
-  development server inside Pixel's disposable sandbox is explicitly rejected
-  because that port is not the owner's browser-facing host.
+  and it grants no application execution or arbitrary host-file access. A
+  development server inside Pixel's disposable sandbox is not the owner's
+  browser-facing host. HTTP readback establishes publication only, not successful
+  script startup or interaction. Verify requested controls and continued work
+  after failed saving at the exact published URL before claiming they work.
 
   Every creative artifact follows the same model-authored workspace path.
   Open-ended demos, games, task boards, animated SVGs, voxel scenes, named
@@ -573,13 +646,20 @@ onboarding record, active release, runtime attestation, or gateway systemd unit
 without its management marker, the installer stops and leaves that deployment
 untouched.
 
+An upgrade from the former ODS-managed Pixel source pin migrates the canonical
+`https://github.com/Osmantic/Pixel.git` setting to ODS's bundled source without
+contacting that repository. Before replacing installed ODS files, the installer
+verifies and retires the previous managed Pixel release using its exact local
+source checkout. If that checkout is missing or changed, the upgrade stops
+before retirement or source copy; restore the checkout from a local backup and
+retry. Custom remote source settings are not silently migrated.
+
 ## Configuration reference
 
 | Variable | Default / owner | Meaning |
 |----------|-----------------|---------|
 | `ENABLE_PIXEL` | `auto` | `auto`, exact `true`, or exact `false` selection |
-| `PIXEL_LICENSE_ACCEPTED` | unset/false; operator | Exact acknowledgement after written authorization |
-| `PIXEL_SOURCE_URL` | canonical Pixel GitHub URL | Canonical remote or validated local checkout |
+| `PIXEL_SOURCE_URL` | `bundled` | Local ODS source bundle; explicit developer overrides only |
 | `PIXEL_SOURCE_REF` | ODS-pinned full SHA | Immutable Pixel source revision |
 | `PIXEL_SOURCE_DIR` | empty | Secure owner-controlled root for a local checkout |
 | `PIXEL_OPENWEBUI_KEY` | generated; installer | Narrow Open WebUI/Dashboard-to-edge key; secret |
@@ -642,11 +722,11 @@ release link and runtime attestation, and moves the fully verified release tree
 into Pixel's private
 `retired-ods-releases/` archive. An ambient, legacy, incompletely bound, or
 drifted Pixel/OpenClaw deployment is left untouched. Re-enable only after the
-qualification predicate and written authorization are still valid; ODS then
+qualification predicate is still valid; ODS then
 recreates the live deployment from the configured immutable Pixel source:
 
 ```bash
-PIXEL_LICENSE_ACCEPTED=true ./install.sh --pixel
+./install.sh --pixel
 ```
 
 A full `ods-uninstall.sh` removes the Pixel host deployment only when the
@@ -676,6 +756,19 @@ ODS `data/` tree. The bounded deactivation prevents a retired ODS install from
 blocking a later fresh install at a different path without treating ambient
 Pixel state as ODS-owned.
 
+An installer **source transition** first applies the same strict broker-home
+validation as uninstall. A clean home follows the ordinary verified cleanup
+path. If a child fails that deletion guard, ODS stops the old broker and moves
+the entire old `/var/lib/pixel-ops-broker` home into a root-only private sibling
+named `.pixel-ops-broker-custody-*/state`, then installs a fresh broker home.
+This preserves any unique files as well as `/etc/skel` entries copied by older
+Pixel installers; the installer prints the exact retained path. ODS does not
+automatically restore or delete that retained state. Review it after the
+upgrade, especially if you need prior Operations Broker receipts or artifacts;
+retained custody consumes disk space until reviewed and removed by the owner.
+Rollback and full uninstall continue to use the strict validated removal path
+described above.
+
 ## Qualification gate
 
 A candidate is not fresh-install ready until all of these pass on the exact PR
@@ -689,7 +782,7 @@ head:
 - Dashboard API tests, Dashboard component tests, and production build;
 - extension manifest validation and repository regression checks;
 - a clean supported-host install with PID1 systemd;
-- a real Open WebUI `pixel/default` chat;
+- a real Open WebUI `portal/default` chat;
 - a real Dashboard `/pixel` streaming chat;
 - a real static website build whose host-readback receipt opens the interactive
   Dashboard side panel, with click behavior verified and a model-authored
