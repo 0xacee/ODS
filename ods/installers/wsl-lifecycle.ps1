@@ -178,9 +178,19 @@ function Get-ODSWslRunningDistributions {
 function Get-ODSProcessIdentity([int]$ProcessId) {
     $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if (-not $process) { return $null }
-    $native = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId"
-    if (-not $native) { return $null }
-    [pscustomobject]@{ pid=$ProcessId; startTicks=$process.StartTime.ToUniversalTime().Ticks.ToString(); executable=$native.ExecutablePath; commandLine=$native.CommandLine }
+    try {
+        # Keep this process instance pinned across the slower CIM query. A
+        # holder can exit during shutdown, and its PID may then be reused.
+        $null = $process.Handle
+        $started = $process.StartTime
+        if (-not $started -or $process.HasExited) { return $null }
+        $native = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId"
+        if (-not $native -or $process.HasExited) { return $null }
+        [pscustomobject]@{ pid=$ProcessId; startTicks=$started.ToUniversalTime().Ticks.ToString(); executable=$native.ExecutablePath; commandLine=$native.CommandLine }
+    } catch [System.InvalidOperationException] {
+        # Process properties can become unavailable after an ordinary exit.
+        return $null
+    } finally { $process.Dispose() }
 }
 
 function Test-ODSProcessIdentity($Expected, $Actual) {
