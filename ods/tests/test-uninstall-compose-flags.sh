@@ -43,7 +43,8 @@ emit_filtered() {
 }
 
 if [[ "${1:-}" == "ps" ]]; then
-    if [[ " $* " == *" label=com.docker.compose.project="* ]]; then
+    if [[ " $* " == *" label=com.docker.compose.project="* ||
+          " $* " == *" label=com.docker.compose.project "* ]]; then
         [[ -z "${DOCKER_RESIDUAL_CONTAINER_ID:-}" ]] || printf '%s\n' "$DOCKER_RESIDUAL_CONTAINER_ID"
         exit 0
     fi

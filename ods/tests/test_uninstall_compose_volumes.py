@@ -70,6 +70,14 @@ class FakeDocker:
                 row for row in self.containers
                 if "--all" in args or row.get("State", {}).get("Status") != "exited"
             ]
+            project_filter = next((arg.split("=", 2)[2] for arg in args
+                                   if arg.startswith("label=com.docker.compose.project=")), None)
+            if project_filter is not None:
+                visible = [row for row in visible if row["Config"]["Labels"].get(
+                    "com.docker.compose.project") == project_filter]
+            elif "label=com.docker.compose.project" in args:
+                visible = [row for row in visible if "com.docker.compose.project" in
+                           row["Config"]["Labels"]]
             volume_filter = next((arg.split("=", 1)[1] for arg in args
                                   if arg.startswith("volume=")), None)
             if volume_filter is not None:
@@ -217,6 +225,29 @@ class UninstallVolumeTests(unittest.TestCase):
             "com.docker.compose.project.working_dir"] = "/other/ods"
         with self.assertRaisesRegex(ValueError, "another installation"):
             MODULE.postflight_containers(self.root, self.snapshot)
+
+    def test_old_project_label_is_caught_before_uninstall_mutation(self):
+        self.fake.containers[0]["Config"]["Labels"]["com.docker.compose.project"] = "ods-old"
+        self.fake.volumes = {}
+        with self.assertRaisesRegex(ValueError, "another project still reference"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertEqual(self.snapshot.stat().st_size, 0)
+
+    def test_project_label_change_after_preflight_blocks_postflight(self):
+        self.fake.volumes = {}
+        self.fake.containers[0]["Mounts"] = []
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.fake.containers[0]["Config"]["Labels"]["com.docker.compose.project"] = "ods-old"
+        with self.assertRaisesRegex(ValueError, "ODS containers remain after Compose cleanup"):
+            MODULE.postflight_containers(self.root, self.snapshot)
+
+    def test_unrelated_compose_project_does_not_block_postflight(self):
+        MODULE.preflight(self.root, self.snapshot, [])
+        other = self.fake._container(Path("/other/ods"))
+        other["Id"] = "b" * 64
+        other["Config"]["Labels"]["com.docker.compose.project"] = "other"
+        self.fake.containers = [other]
+        MODULE.postflight_containers(self.root, self.snapshot)
 
     def test_volume_replacement_after_preflight_is_not_deleted(self):
         MODULE.preflight(self.root, self.snapshot, [])
