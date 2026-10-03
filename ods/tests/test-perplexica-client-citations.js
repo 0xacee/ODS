@@ -26,6 +26,10 @@ function fixture() {
   return `"use strict";function render(s,l){let d=/\\[(\\d+)\\]/g;${ORIGINAL};return s}`;
 }
 
+function fixtureTrust(content) {
+  return { "sample.js": crypto.createHash("sha256").update(content).digest("hex") };
+}
+
 function embeddedRenderer(patched) {
   assert.ok(patched.startsWith('"use strict";' + PRELUDE));
   assert.equal(patched.split(CALL).length - 1, 1);
@@ -43,6 +47,9 @@ function checkCases(render) {
   assert.equal(render("```python\nx = [1]", source), "```python\nx = [1]");
   assert.equal(render("Use `[1]` and ``[1,2]``. See [1].", source), `Use \`[1]\` and \`\`[1,2]\`\`. See ${cited(1)}.`);
   assert.equal(render("Use `[1]\n[2]` then [1].", source), `Use \`[1]\n[2]\` then ${cited(1)}.`);
+  assert.equal(render(">     values = [1, 2]", source), ">     values = [1, 2]");
+  assert.equal(render("An escaped \\` tick; fact [1].", source), "An escaped \\` tick; fact " + cited(1) + ".");
+  assert.equal(render("One ` unmatched tick; fact [1].", source), "One ` unmatched tick; fact " + cited(1) + ".");
   assert.equal(render("[a [b] c](https://x.test) [1 [2]]", source), "[a [b] c](https://x.test) [1 [2]]");
   assert.equal(render("\\[1\\] [1](https://x.test/a) [2][ref] ![1] [1]: ref", source), "\\[1\\] [1](https://x.test/a) [2][ref] ![1] [1]: ref");
   assert.equal(render("[label] [0] [-1] [1.5] [1,3] [9]", source), "[label] [0] [-1] [1.5] [1,3] [9]");
@@ -60,13 +67,17 @@ test("pinned Vane expression corrupts fenced code; patched embedded renderer pre
     const upstream = vm.runInNewContext(`${original};render`, {});
     assert.match(upstream("```python\nx = [1,2]\n```", source), /<citation href=/);
 
-    assert.equal(patchClientChunk(root).changed, true);
+    assert.throws(() => patchClientChunk(root), /unqualified/);
+    const trusted = fixtureTrust(original);
+    assert.equal(patchClientChunk(root, trusted).changed, true);
     const patched = fs.readFileSync(file, "utf8");
     assert.equal(patched.split(ORIGINAL).length - 1, 0);
     checkCases(embeddedRenderer(patched));
     assert.equal(spawnSync(process.execPath, ["--check", file]).status, 0);
-    assert.equal(patchClientChunk(root).changed, false);
+    assert.equal(patchClientChunk(root, trusted).changed, false);
     assert.equal(fs.readFileSync(file, "utf8"), patched);
+    fs.appendFileSync(file, "/* partial or modified bundle */");
+    assert.throws(() => patchClientChunk(root, trusted), /patched Vane client hash mismatch/);
   });
 });
 
@@ -74,7 +85,7 @@ test("unknown, duplicate, and partial client chunks stop the patch", () => {
   for (const content of ["unknown bundle", `${ORIGINAL}${ORIGINAL}`, `self.__odsVaneCitationRender20261003=bad;${CALL}`]) {
     withTemp((root) => {
       fs.writeFileSync(path.join(root, "sample.js"), content);
-      assert.throws(() => patchClientChunk(root));
+      assert.throws(() => patchClientChunk(root, fixtureTrust(content)), content === "unknown bundle" ? /expected one/ : /unknown or partial/);
     });
   }
   withTemp((root) => {
@@ -88,8 +99,8 @@ test("unknown, duplicate, and partial client chunks stop the patch", () => {
   });
 });
 
-const authentic = process.env.ODS_VANE_AUTHENTIC_CHUNK;
-test("captured pinned image chunk has the same live behavior and patches cleanly", { skip: !authentic }, () => {
+const authentic = process.env.ODS_VANE_AUTHENTIC_CHUNK || path.join(__dirname, "fixtures", "vane-v1.12.2-1220-5cd2adbf287bf784.js");
+test("captured pinned image chunk has the same live behavior and patches cleanly", () => {
   const bytes = fs.readFileSync(authentic);
   assert.equal(bytes.length, 49892);
   assert.equal(crypto.createHash("sha256").update(bytes).digest("hex"), KNOWN_SHA256);

@@ -50,7 +50,16 @@ function renderCitations(message, sources) {
     return -1;
   }
 
-  function prose(line) {
+  function hasClosingTicks(from, marker) {
+    let at = message.indexOf(marker, from);
+    while (at !== -1) {
+      if (message[at - 1] !== "`" && message[at + marker.length] !== "`") return true;
+      at = message.indexOf(marker, at + marker.length);
+    }
+    return false;
+  }
+
+  function prose(line, base) {
     let output = "";
     for (let i = 0; i < line.length;) {
       if (inline) {
@@ -67,8 +76,12 @@ function renderCitations(message, sources) {
       if (line[i] === "`") {
         let end = i + 1;
         while (line[end] === "`") end += 1;
-        inline = line.slice(i, end);
-        output += inline;
+        const marker = line.slice(i, end);
+        let escapes = 0;
+        for (let k = i - 1; k >= 0 && line[k] === "\\"; k -= 1) escapes += 1;
+        // Escaped or unmatched backticks are prose, so later [N] can cite.
+        if (escapes % 2 === 0 && hasClosingTicks(base + end, marker)) inline = marker;
+        output += marker;
         i = end;
         continue;
       }
@@ -96,8 +109,11 @@ function renderCitations(message, sources) {
     return output;
   }
 
+  let base = 0;
   return message.split("\n").map((line) => {
-    if (inline) return prose(line);
+    const lineBase = base;
+    base += line.length + 1;
+    if (inline) return prose(line, lineBase);
     const marker = /^(?: {0,3}> ?)* {0,3}(`{3,}|~{3,})/.exec(line);
     if (fence) {
       const close = /^(?: {0,3}> ?)* {0,3}(`+|~+)[ \t]*\r?$/.exec(line);
@@ -105,8 +121,9 @@ function renderCitations(message, sources) {
       return line;
     }
     if (marker) { fence = marker[1]; return line; }
-    if (/^(?: {4}|\t)/.test(line)) return line;
-    return prose(line);
+    const content = line.replace(/^(?: {0,3}> ?)+/, "");
+    if (/^(?: {4}|\t)/.test(content)) return line;
+    return prose(line, lineBase);
   }).join("\n");
 }
 
