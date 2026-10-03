@@ -509,6 +509,27 @@ function Assert-ODSWslStartupStillWanted {
     if ((Get-ODSWslUtcNow) -ge $script:ODSWslStartupDeadline) { throw 'WSL startup deadline exceeded; inspect startup-status.json and retry start after Docker is ready' }
 }
 
+function Get-ODSWslLifetimeForRetirement($Identity) {
+    $task=Get-ScheduledTask -TaskName $Identity.taskName -ErrorAction SilentlyContinue
+    if ($task) {
+        $null=Assert-ODSWslTask $Identity
+        $request=Read-ODSWslJson (Join-Path $Identity.directory 'request.json')
+        if (-not $request -or [string]::IsNullOrWhiteSpace($request.generation) -or $request.action -notin @('run','stop')) {
+            throw 'Owned WSL lifetime request is missing or invalid; generation requires recovery before uninstall'
+        }
+        $runtime=Read-ODSWslJson (Join-Path $Identity.directory 'runtime.json')
+        if (-not $runtime -or [string]::IsNullOrWhiteSpace($runtime.generation) -or $runtime.generation -cne $request.generation) {
+            # A Ready task does not prove that a former child exited. Do not
+            # fabricate a stopped record when its ownership proof was lost.
+            throw 'Owned WSL lifetime runtime is missing or inconsistent; child ownership requires recovery before uninstall'
+        }
+    } elseif ((Test-Path -LiteralPath (Join-Path $Identity.directory 'request.json')) -or
+              (Test-Path -LiteralPath (Join-Path $Identity.directory 'runtime.json'))) {
+        throw 'Owned WSL lifetime task is missing; retained lifetime records require recovery before uninstall'
+    }
+    $task
+}
+
 function Disable-ODSWslStartup($Identity,[switch]$ValidateOnly,[switch]$RetireRelay) {
     $task=Get-ScheduledTask -TaskName ($Identity.taskName + '-Startup') -ErrorAction SilentlyContinue
     $relayTask=$null
@@ -525,19 +546,7 @@ function Disable-ODSWslStartup($Identity,[switch]$ValidateOnly,[switch]$RetireRe
     if ($task) { $null=Assert-ODSWslStartupTask $Identity }
     # Uninstall validates every task it will retire before changing startup intent.
     if ($relayTask) { $null=Assert-ODSWslRelayTask $Identity }
-    if ($lifetimeTask) {
-        $null=Assert-ODSWslTask $Identity
-        if ((Read-ODSWslJson (Join-Path $Identity.directory 'runtime.json')) -and
-            -not (Read-ODSWslJson (Join-Path $Identity.directory 'request.json'))) {
-            throw 'Owned WSL lifetime request is missing; runtime generation requires recovery before uninstall'
-        }
-    }
-    elseif ($RetireRelay -and ((Test-Path -LiteralPath (Join-Path $Identity.directory 'request.json')) -or
-                              (Test-Path -LiteralPath (Join-Path $Identity.directory 'runtime.json')))) {
-        # A partially registered installation without lifetime records can be
-        # retired. Existing records without their task require owner recovery.
-        throw 'Owned WSL lifetime task is missing; retained lifetime records require recovery before uninstall'
-    }
+    if ($RetireRelay) { $lifetimeTask=Get-ODSWslLifetimeForRetirement $Identity }
     $null=Get-ODSWslStartupIntent $Identity
     $lock=$null
     try {
@@ -548,6 +557,7 @@ function Disable-ODSWslStartup($Identity,[switch]$ValidateOnly,[switch]$RetireRe
                 $lock=[IO.File]::Open($path,'Open','ReadWrite','None')
             }
             Assert-ODSWslCommandSettled $Identity -ValidateOnly
+            if ($RetireRelay) { $null=Get-ODSWslLifetimeForRetirement $Identity }
             return [pscustomobject]@{scope='wsl-startup';state='validated';identity=$Identity;relayRetirement=$(if ($RetireRelay) { 'validated' } else { 'not-requested' })}
         }
         Set-ODSWslStartupIntent $Identity $false
@@ -559,6 +569,9 @@ function Disable-ODSWslStartup($Identity,[switch]$ValidateOnly,[switch]$RetireRe
         # explicit uninstall retirement stops the independently owned relay
         # and releases this installation's WSL holder, never the distribution.
         if ($RetireRelay) {
+            # A start holding command.lock first may have registered a holder
+            # after the precheck. Only the settled, locked state decides stop.
+            $lifetimeTask=Get-ODSWslLifetimeForRetirement $Identity
             Stop-ODSWslAgentRelay $Identity
             if ($lifetimeTask) { $null=Stop-ODSWslLifetime $Identity }
         }

@@ -14,7 +14,7 @@ function Record([int]$Number) { [pscustomobject]@{pid=$Number;startTicks=('ticks
 function Key([string]$Name) { Join-Path $script:identity.directory $Name }
 function Reset {
     $script:files=@{}; $script:task=$null; $script:processes=@{}; $script:started=0; $script:spawned=0; $script:stopped=@(); $script:mode='running'; $script:ticks=0; $script:holder=$false
-    $script:lifetimeTask=$null; $script:lifetimeWedged=$false
+    $script:lifetimeTask=$null; $script:lifetimeWedged=$false; $script:lateLifetime=$false
     $script:directoryExists=$false; $script:intentWrites=0; $script:lockBusy=$false; $script:pending=$false
     $script:processes[101]=Record 101; $script:processes[102]=Record 102; $script:processes[$PID]=Record $PID
 }
@@ -142,7 +142,11 @@ Check ($script:files[(Key 'relay-runtime.json')].state -eq 'stopped') 'holder re
 # interop, lock file, process or startup preference may escape these fakes.
 function Get-ODSWslStartupIntent { param($Identity); $null }
 function Set-ODSWslStartupIntent { param($Identity,$DesiredRunning); $script:intentWrites++ }
-function Open-ODSWslCommandLock { param($Identity); if ($script:lockBusy) { throw 'fixture command lock busy' }; [IO.MemoryStream]::new() }
+function Open-ODSWslCommandLock { param($Identity)
+    if ($script:lockBusy) { throw 'fixture command lock busy' }
+    if ($script:lateLifetime) { NewLifetimeTask }
+    [IO.MemoryStream]::new()
+}
 function Assert-ODSWslCommandSettled { param($Identity,[switch]$ValidateOnly); if ($script:pending) { throw 'fixture command pending' } }
 function Disable-ScheduledTask { param($TaskName); throw 'Fixture has no startup task to disable' }
 Reset; NewTask; $script:directoryExists=$true
@@ -200,6 +204,9 @@ Check ($script:task.State -eq 'Ready' -and -not $script:processes.ContainsKey(10
 $stops=$script:stopped.Count
 $null=Disable-ODSWslStartup $script:identity -RetireRelay
 Check ($script:stopped.Count -eq $stops -and $script:processes.ContainsKey(105)) 'repeated retirement does not kill any process again'
+Reset; $script:directoryExists=$true; $script:lateLifetime=$true
+$null=Disable-ODSWslStartup $script:identity -RetireRelay
+Check ($script:lifetimeTask.State -eq 'Ready' -and -not $script:processes.ContainsKey(104)) 'uninstall retires a holder created by a start that held the command lock first'
 foreach ($readonly in @($true,$false)) {
     foreach ($mutation in @(
         { $script:lifetimeTask.Actions[0].Arguments+=' foreign' },
@@ -219,6 +226,14 @@ foreach ($readonly in @($true,$false)) {
     Reset; NewLifetimeTask; $script:directoryExists=$true; $script:files.Remove((Key 'request.json'))
     Reject { Disable-ODSWslStartup $script:identity -RetireRelay -ValidateOnly:$readonly } '*lifetime request is missing*'
     Check ($script:intentWrites -eq 0 -and $script:processes.ContainsKey(104) -and -not $script:files.ContainsKey((Key 'request.json'))) 'missing request cannot be replaced with an ambiguous stop generation'
+    Reset; NewLifetimeTask; $script:directoryExists=$true; $script:lifetimeTask.State='Ready'
+    $script:files.Remove((Key 'request.json')); $script:files.Remove((Key 'runtime.json'))
+    Reject { Disable-ODSWslStartup $script:identity -RetireRelay -ValidateOnly:$readonly } '*lifetime request is missing*'
+    Check ($script:intentWrites -eq 0 -and $script:processes.ContainsKey(104) -and -not $script:files.ContainsKey((Key 'runtime.json'))) 'both missing records cannot fabricate stopped state while an orphan child survives'
+    Reset; NewLifetimeTask; $script:directoryExists=$true; $script:lifetimeTask.State='Ready'
+    $script:files.Remove((Key 'runtime.json'))
+    Reject { Disable-ODSWslStartup $script:identity -RetireRelay -ValidateOnly:$readonly } '*lifetime runtime*recovery*'
+    Check ($script:intentWrites -eq 0 -and $script:processes.ContainsKey(104) -and -not $script:files.ContainsKey((Key 'runtime.json'))) 'missing runtime alone also cannot prove the former child exited'
 }
 foreach ($failure in @('lockBusy','pending')) {
     Reset; NewTask; NewLifetimeTask; $script:directoryExists=$true
