@@ -51,7 +51,19 @@ export default function PixelSharingSettings() {
         ...(payload ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : {}),
       })
       if (!current()) return
-      if (!response.ok) throw new Error('Sharing request failed')
+      if (!response.ok) {
+        if (!action && response.status === 503) {
+          const failure = await response.json()
+          if (failure?.code === 'unsupported-platform') {
+            if (!current()) return
+            setSnapshot(null)
+            setIssued(null)
+            setError('Model sharing is not supported by this host. A Portal agent running in WSL does not enable sharing on a Windows host. Reloading will not enable this capability.')
+            return
+          }
+        }
+        throw new Error('Sharing request failed')
+      }
       const result = await response.json()
       const next = readSharing(result)
       const defaultUrl = `http://127.0.0.1:${next.transport.port}/v1`
@@ -173,7 +185,7 @@ export default function PixelSharingSettings() {
         <button className={buttonStyle} disabled={locked || !route || !activeDevice || snapshot.runtime.status === 'starting'} onClick={() => setConfirm({action:'start',revision:config.revision})}>Start sharing</button>
         <button className={buttonStyle} disabled={locked || snapshot.runtime.status === 'starting'} onClick={() => setConfirm({action:'stop',revision:config.revision})}>Stop sharing</button>
       </div>
-      {confirm && <div role="dialog" aria-label="Confirm inference sharing" className="rounded border border-amber-500/40 p-4 space-y-3">
+      {confirm && <div role="dialog" aria-label="Confirm inference sharing" className="rounded border border-theme-border p-4 space-y-3">
         <p className="text-sm">{confirm.action === 'start'
           ? `Enable issued device keys and build/start only the sharing service on 127.0.0.1:${snapshot.transport.port}? The model router and global ODS provider mode will not be changed.`
           : 'Disable device requests and stop only the sharing service? Active inference will be cancelled. This does not undo completed output.'}</p>

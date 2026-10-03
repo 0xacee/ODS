@@ -10,8 +10,11 @@ import json
 import os
 import pathlib
 import socket
+import stat
 import tempfile
 import threading
+
+import pytest
 
 
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "host" / "workspace_preview.py"
@@ -19,6 +22,105 @@ SPEC = importlib.util.spec_from_file_location("workspace_preview", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
+
+
+def test_framework_export_underscore_assets_keep_reserved_routes_private(tmp_path):
+    site = tmp_path / "export"
+    site.mkdir(mode=0o700)
+    (site / "index.html").write_text('<script src="./_next/static/app.js"></script>')
+    (site / "_next" / "static").mkdir(parents=True, mode=0o700)
+    (site / "_next" / "static" / "app.js").write_text('document.title="Ready";')
+    (site / "__next._full.txt").write_text("framework data")
+    files = MODULE._source_files(tmp_path, "export", os.getuid())
+    assert {name for name, _, _ in files} == {
+        "index.html", "_next/static/app.js", "__next._full.txt"
+    }
+    reserved = site / "__ods_view__.html"
+    reserved.write_text("spoof")
+    with pytest.raises(MODULE.PreviewError, match="unsafe preview file"):
+        MODULE._source_files(tmp_path, "export", os.getuid())
+
+
+@pytest.mark.parametrize("mode", [0o664, 0o646, 0o666])
+def test_generated_asset_writable_permissions_are_actionable_without_relaxation(tmp_path, mode):
+    site = tmp_path / "site"
+    site.mkdir(mode=0o700)
+    entry = site / "index.html"
+    entry.write_text("<!doctype html><script src='app.js'></script>")
+    entry.chmod(0o600)
+    asset = site / "app.js"
+    asset.write_text("console.log('preview');")
+    asset.chmod(mode)
+    with pytest.raises(MODULE.PreviewError, match="writable preview file") as caught:
+        MODULE._source_files(tmp_path, "site", os.getuid())
+    code = MODULE.PREVIEW_FAILURE_CODES[str(caught.value)]
+    assert MODULE._error_result(code)["errorCode"] == "writable_file"
+    assert stat.S_IMODE(asset.stat().st_mode) == mode
+    asset.chmod(mode & ~0o022)
+    assert len(MODULE._source_files(tmp_path, "site", os.getuid())) == 2
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "unsafe-name"])
+def test_permission_coaching_never_masks_other_unsafe_file_properties(tmp_path, kind):
+    site = tmp_path / "site"
+    site.mkdir(mode=0o700)
+    (site / "index.html").write_text("<!doctype html><h1>Test</h1>")
+    asset = site / ("bad name.js" if kind == "unsafe-name" else "app.js")
+    original = tmp_path / "source.js"
+    original.write_text("console.log('test');")
+    original.chmod(0o666)
+    if kind == "symlink":
+        asset.symlink_to(original)
+    elif kind == "hardlink":
+        os.link(original, asset)
+    else:
+        asset.write_bytes(original.read_bytes())
+        asset.chmod(0o666)
+    with pytest.raises(MODULE.PreviewError, match="^unsafe preview file$"):
+        MODULE._source_files(tmp_path, "site", os.getuid())
+
+
+@pytest.mark.parametrize("fault", [None, "foreign-owner", "different-inode",
+    "group-writable", "non-root-mount-owner"])
+def test_virtiofs_mount_root_requires_same_private_owner_inode(tmp_path, monkeypatch, fault):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o700)
+    workspace.chmod(0o700)
+    original_lstat = pathlib.Path.lstat
+    original_stat = os.stat
+
+    def changed(info, *, owner=None, inode=None, mode=None):
+        fields = list(info)
+        if owner is not None:
+            fields[4] = owner
+        if inode is not None:
+            fields[1] = inode
+        if mode is not None:
+            fields[0] = mode
+        return os.stat_result(fields)
+
+    def mount_lstat(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if path == workspace:
+            return changed(info, owner=777 if fault == "non-root-mount-owner" else 0)
+        return info
+
+    def real_directory_stat(path, *args, **kwargs):
+        info = original_stat(path, *args, **kwargs)
+        if path == os.fspath(workspace) + "/.":
+            return changed(info,
+                owner=os.getuid() + 1 if fault == "foreign-owner" else os.getuid(),
+                inode=info.st_ino + 1 if fault == "different-inode" else info.st_ino,
+                mode=stat.S_IFDIR | 0o720 if fault == "group-writable" else info.st_mode)
+        return info
+
+    monkeypatch.setattr(pathlib.Path, "lstat", mount_lstat)
+    monkeypatch.setattr(os, "stat", real_directory_stat)
+    if fault is None:
+        MODULE._safe_root(workspace, os.getuid())
+    else:
+        with pytest.raises(MODULE.PreviewError, match="unsafe preview root"):
+            MODULE._safe_root(workspace, os.getuid())
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -30,6 +132,58 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.settimeout(self.timeout)
         self.sock.connect(self.socket_path)
+
+
+def test_next_dynamic_assets_and_source_paths_publish_without_reserved_metadata(tmp_path):
+    workspace, previews = tmp_path / 'workspace', tmp_path / 'previews'
+    workspace.mkdir(mode=0o700)
+    previews.mkdir(mode=0o700)
+    project = workspace / 'demo'
+    source = project / 'app' / '[slug]' / 'page.js'
+    source.parent.mkdir(parents=True, mode=0o700)
+    source.write_text('export default function Page() { return null }')
+    output = project / 'out'
+    asset = '_next/static/chunks/app/[slug]/page.js'
+    target = output / asset
+    target.parent.mkdir(parents=True, mode=0o700)
+    target.write_bytes(b'console.log("verified")')
+    (output / 'index.html').write_text('<h1>Next</h1>')
+    receipt = MODULE.publish_snapshot(workspace, previews, 'demo/out', os.getuid(), source_directory='demo')
+    manifest = json.loads(MODULE.snapshot_manifest(previews, receipt['siteId']))
+    assert asset in [file['path'] for file in manifest['files']]
+    with MODULE.PreviewHTTPServer(('127.0.0.1', 0), previews) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for prefix in (f"/{receipt['siteId']}/", '/'):
+                connection = http.client.HTTPConnection('127.0.0.1', server.server_port)
+                connection.request('GET', prefix + asset.replace('[', '%5B').replace(']', '%5D'),
+                                   headers={'Host': f"{receipt['siteId']}.localhost:{server.server_port}"})
+                response = connection.getresponse()
+                assert response.status == 200
+                assert response.read() == target.read_bytes()
+                connection.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+    for name in ('__ods_manifest__.json', '__ods_source__', '__pycache__', '.env', '..'):
+        assert MODULE.ASSET_COMPONENT.fullmatch(name) is None
+
+
+def test_review_source_excludes_previous_managed_build_generations(tmp_path):
+    workspace = tmp_path / 'workspace'
+    source = workspace / 'demo' / 'app' / 'page.js'
+    source.parent.mkdir(parents=True, mode=0o700)
+    source.write_text('export default function Page() { return null }')
+    for generation in ('previous', 'current'):
+        output = workspace / 'demo' / 'ods-builds' / generation / 'site'
+        output.mkdir(parents=True, mode=0o700)
+        (output / 'index.html').write_text('<h1>Built output</h1>')
+    captured = MODULE._capture_review_source(workspace, 'demo', os.getuid(),
+                                             'demo/ods-builds/current/site')
+    assert [entry['path'] for entry in captured['files']] == ['app/page.js']
+    assert captured['omitted']['directories'] == 1
+    assert (workspace / 'demo/ods-builds/previous/site/index.html').is_file()
 
 
 def test_manifest_rehashes_published_files_without_reading_live_workspace():
@@ -438,8 +592,11 @@ def test_http_snapshot_ignores_asset_queries_without_changing_path_or_bytes():
         site = workspace / "site"
         site.mkdir(mode=0o700)
         page = b'<link rel="stylesheet" href="style.css?v=2"><script src="app.js?build=abc"></script>'
-        assets = {"index.html": page, "style.css": b"body{color:purple}", "app.js": b"document.title='Ready'"}
+        assets = {"index.html": page, "style.css": b"body{color:purple}", "app.js": b"document.title='Ready'",
+                  "_next/static/chunk.js": b"document.title='Next ready'",
+                  "__next._full.txt": b"framework data"}
         for name, data in assets.items():
+            (site / name).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             (site / name).write_bytes(data)
             (site / name).chmod(0o600)
         receipt = MODULE.publish_snapshot(workspace, previews, "site", os.getuid())
@@ -471,6 +628,8 @@ def test_http_snapshot_ignores_asset_queries_without_changing_path_or_bytes():
                     assert status == 200 and body == b""
                     assert int(head["Content-Length"]) == len(expected)
                 assert request(f"/{receipt['siteId']}/../secret?v=2")[0] == 404
+                assert request(f"/{receipt['siteId']}/_next/../../secret")[0] == 404
+                assert request(f"/{receipt['siteId']}/__ods_unknown__.js")[0] == 404
                 assert request(f"/{receipt['siteId']}/style.css?v=2", authority="wrong.localhost")[0] == 404
             finally:
                 server.shutdown()
@@ -525,3 +684,84 @@ def test_changes_use_the_same_lf_line_boundaries_as_verified_source():
                         connection.close()
                         server.shutdown()
                         thread.join(timeout=5)
+
+
+def test_published_path_receipt_excludes_unpublished_sibling_source_copies(tmp_path):
+    workspace, previews = tmp_path / "workspace", tmp_path / "previews"
+    workspace.mkdir(mode=0o700)
+    previews.mkdir(mode=0o700)
+    project, public = workspace / "project", workspace / "public"
+    project.mkdir(mode=0o700)
+    public.mkdir(mode=0o700)
+    for folder, names in ((project, ["report.py.txt", "totals.py.txt", "test_totals.py.txt"]),
+                          (public, ["index.html", "sources.json", "test-results.txt"])):
+        for name in names:
+            (folder / name).write_text('{}' if name.endswith('.json') else "actual bytes")
+            (folder / name).chmod(0o600)
+    result = MODULE.publish_snapshot(workspace, previews, "public", os.getuid())
+    assert result["publishedPaths"] == ["index.html", "sources.json", "test-results.txt"]
+    assert result["publishedPathsOmitted"] == 0
+    manifest = json.loads(MODULE.snapshot_manifest(previews, result["siteId"]))
+    assert result["publishedPaths"] == [row["path"] for row in manifest["files"]]
+    assert MODULE.publish_snapshot(workspace, previews, "public", os.getuid()) == result
+    (public / "report.py.txt").write_text("new bytes")
+    (public / "report.py.txt").chmod(0o600)
+    changed = MODULE.publish_snapshot(workspace, previews, "public", os.getuid())
+    assert changed["siteId"] != result["siteId"]
+    assert "report.py.txt" in changed["publishedPaths"]
+    assert "report.py.txt" not in result["publishedPaths"]
+
+
+def test_published_path_feedback_caps_count_and_total_characters():
+    names = [f"asset-{n:03}.txt" for n in range(127)] + ["index.html"]
+    result = MODULE._published_path_feedback(names)
+    assert result["publishedPaths"] == sorted(names)[:32]
+    assert result["publishedPathsOmitted"] == 96
+    names = [f"a{n:03}" + "x" * 115 + ".txt" for n in range(30)] + ["index.html"]
+    result = MODULE._published_path_feedback(names)
+    assert sum(map(len, result["publishedPaths"])) <= 2048
+    assert result["publishedPaths"] == sorted(names)[:len(result["publishedPaths"])]
+    assert len(result["publishedPaths"]) + result["publishedPathsOmitted"] == len(names)
+    assert len(json.dumps(result).encode()) < 4096
+
+
+def test_empty_path_feedback_is_bounded_and_fits_the_socket_response(tmp_path):
+    names = [f"{n:03}" + "x" * 57 + ".txt" for n in range(127)] + ["index.html"]
+    feedback = MODULE._published_path_feedback(names, names[:-1])
+    assert len(feedback["publishedEmptyPaths"]) == 32
+    assert feedback["publishedEmptyPaths"] == sorted(names[:-1])[:32]
+    assert feedback["publishedEmptyPathsOmitted"] == 95
+    assert sum(map(len, feedback["publishedEmptyPaths"])) <= 2048
+    workspace, previews = tmp_path / "workspace", tmp_path / "previews"
+    workspace.mkdir(mode=0o700)
+    previews.mkdir(mode=0o700)
+    (workspace / "site").mkdir(mode=0o700)
+    (workspace / "site" / "index.html").write_text("<h1>x</h1>")
+    (workspace / "site" / "index.html").chmod(0o600)
+    response = MODULE.publish_snapshot(workspace, previews, "site", os.getuid())
+    response.update(feedback, relativeDirectory="/".join(["d" * 41] * 12), port=65535,
+                    url=f"http://{response['siteId']}.localhost:65535/{response['siteId']}/",
+                    httpStatus=200, readbackVerified=True)
+    encoded = (json.dumps(response, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    assert len(encoded) <= MODULE.MAX_RESPONSE_BYTES
+
+
+def test_configured_portal_profile_keeps_its_existing_receipt_schema(tmp_path):
+    spec = importlib.util.spec_from_file_location("profile_preview_feedback_test", MODULE_PATH)
+    profile = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profile)
+    profile.configure_portal("profile-a")
+    workspace, previews = tmp_path / "workspace", tmp_path / "previews"
+    workspace.mkdir(mode=0o700)
+    previews.mkdir(mode=0o700)
+    site = workspace / "site"
+    site.mkdir(mode=0o700)
+    (site / "index.html").write_text("<h1>Profile-owned artifact</h1>")
+    (site / "index.html").chmod(0o600)
+    result = profile.publish_snapshot(workspace, previews, "site", os.getuid())
+    assert result["kind"] == "ods-portal-workspace-preview"
+    assert result["profileId"] == "profile-a"
+    assert set(result) == {"schemaVersion", "kind", "status", "profileId",
+                           "relativeDirectory", "siteId", "files", "bytes",
+                           "sha256", "entryFile", "entrySha256", "executable",
+                           "overwritten", "boundary"}

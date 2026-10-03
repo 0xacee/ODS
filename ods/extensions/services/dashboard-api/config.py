@@ -436,6 +436,7 @@ def _read_manifest_file(path: Path) -> dict[str, Any]:
 
 def load_extension_manifests(
     manifest_dir: Path, gpu_backend: str,
+    *, only_service_ids: frozenset[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     """Load service and feature definitions from extension manifests.
 
@@ -455,6 +456,8 @@ def load_extension_manifests(
 
     manifest_files: list[Path] = []
     for item in sorted(manifest_dir.iterdir()):
+        if only_service_ids is not None and item.name not in only_service_ids:
+            continue
         if item.is_dir():
             for name in ("manifest.yaml", "manifest.yml", "manifest.json"):
                 candidate = item / name
@@ -613,7 +616,6 @@ def _default_n8n_url() -> str:
     return f"http://{host}:{port}"
 
 N8N_URL = os.environ.get("N8N_URL", _default_n8n_url())
-N8N_API_KEY = os.environ.get("N8N_API_KEY", "")
 
 # --- Setup / Personas ---
 
@@ -694,6 +696,10 @@ ALWAYS_ON_SERVICES: frozenset = frozenset({
     "llama-server", "model-router", "remote-provider-egress",
     "remote-provider-ssh-tunnel", "open-webui", "dashboard", "dashboard-api",
 })
+
+# Built-ins qualified for Dashboard Library Add/Disable. The live health poll
+# must refresh this same set after a fragment changes without an API restart.
+LIBRARY_MANAGEABLE_BUILTINS: frozenset = frozenset({"n8n", "perplexica", "searxng"})
 
 
 def load_extension_catalog() -> list[dict]:

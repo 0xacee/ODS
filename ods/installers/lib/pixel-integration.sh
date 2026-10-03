@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pixel capability, license, source, and secret helpers for the ODS installer.
+# Pixel capability, source, and secret helpers for the ODS installer.
 # Importing this file has no side effects.
 
 _ods_pixel_secure_regular_file() {
@@ -99,34 +99,29 @@ ods_pixel_host_qualified() {
     [[ "$_ODS_PIXEL_OS_ID" == "debian" && "$_ODS_PIXEL_OS_VERSION_ID" == "12" ]]
 }
 
-ods_pixel_license_accepted() {
-    [[ "${PIXEL_LICENSE_ACCEPTED:-}" == "true" ]]
-}
-
 # Usage: ods_pixel_resolve_enablement true|false|auto [os-release] [pid1-comm] [proc-version]
 ods_pixel_resolve_enablement() {
     local requested="${1:-}"
     local os_release_path="${2:-/etc/os-release}"
     local proc1_comm_path="${3:-/proc/1/comm}"
     local proc_version_path="${4:-/proc/version}"
-    local qualified=false licensed=false
+    local qualified=false
 
     ods_pixel_host_qualified "$os_release_path" "$proc1_comm_path" "$proc_version_path" && qualified=true
-    ods_pixel_license_accepted && licensed=true
 
     case "$requested" in
         false)
             printf '%s\n' hermes
             ;;
         auto)
-            if [[ "$qualified" == true && "$licensed" == true ]]; then
+            if [[ "$qualified" == true ]]; then
                 printf '%s\n' pixel
             else
                 printf '%s\n' hermes
             fi
             ;;
         true)
-            if [[ "$qualified" == true && "$licensed" == true ]]; then
+            if [[ "$qualified" == true ]]; then
                 printf '%s\n' pixel
             else
                 printf '%s\n' 'error: pixel-prerequisites-not-met' >&2
@@ -174,8 +169,19 @@ _ods_pixel_secure_owner_directory() {
     (( (8#$mode & 0022) == 0 ))
 }
 
-# Accept only the canonical Pixel repository or an owner-controlled local Git
-# checkout below PIXEL_SOURCE_DIR. Always require an immutable full commit SHA.
+# The public ODS release carries Pixel source and a one-commit local bundle.
+# Owner-controlled local checkouts remain explicit developer overrides.
+ODS_PIXEL_BUNDLED_REF='9f3b6ecd25db3ab51bef4091473d88ee5824bc3b'
+ODS_PIXEL_BUNDLED_SHA256='b499ac4fe2f183caaafc8c3ccefd4824bb6e491a589e07ba0e2495b8b37e7d68'
+
+ods_pixel_bundled_source() {
+    local bundle="${INSTALL_DIR:?}/vendor/pixel.bundle"
+    [[ -f "$bundle" && ! -L "$bundle" ]] || return 1
+    [[ "$(sha256sum -- "$bundle" | cut -d ' ' -f 1)" == "$ODS_PIXEL_BUNDLED_SHA256" ]]
+}
+
+# Always require an immutable full commit SHA. The bundled path is verified by
+# digest before it is trusted as executable source.
 ods_pixel_validate_source() {
     local source="${PIXEL_SOURCE_URL:-}"
     local ref="${PIXEL_SOURCE_REF:-}"
@@ -187,12 +193,13 @@ ods_pixel_validate_source() {
     }
     [[ "$source" != *$'\n'* && "$source" != *$'\r'* ]] || return 1
 
-    if [[ "$source" == "https://github.com/Osmantic/Pixel.git" ]]; then
-        return 0
+    if [[ "$source" == bundled ]]; then
+        [[ "$ref" == "$ODS_PIXEL_BUNDLED_REF" ]] && ods_pixel_bundled_source
+        return
     fi
 
     [[ "$source" == /* && "$owner_root" == /* ]] || {
-        printf '%s\n' 'error: invalid-pixel-source' >&2
+        printf '%s\n' 'error: Pixel source must be the verified ODS bundle or an absolute local checkout' >&2
         return 1
     }
     _ods_pixel_secure_owner_directory "$owner_root" || return 1

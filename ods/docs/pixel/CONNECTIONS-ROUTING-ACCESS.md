@@ -246,10 +246,12 @@ run-owned IDs; evidence and failed fixtures were retained.
 
 ### Isolated Pixel client (Linux / WSL guest)
 
-`bin/ods-pixel-connect` prepares a **new** private client using the exact Pixel
-commit pinned by ODS (`70f44c90`, v4.3.24) and its canonical onboarding/config
-renderer. It requires an existing OpenClaw 2026.6.33 installation, Node, Python
-3.11+, Git source containing that Pixel commit, and the installed Pixel sandbox
+`bin/ods-pixel-connect` prepares a **new** private client from the pinned Pixel
+source bundle shipped inside ODS (`ods/vendor/pixel.bundle`). It verifies the
+bundle digest and single synthetic commit before using Pixel's canonical
+onboarding/config renderer. No separate Pixel clone, private-repository access,
+or license-acceptance flag is required. It does require an existing OpenClaw
+2026.6.33 installation, Node, Python 3.11+, Git, and the installed Pixel sandbox
 image. It does not install or upgrade these prerequisites, change a production
 Pixel, activate a service, or change access mode. Native Windows is explicitly
 unsupported by this POSIX adapter; WSL evidence is not native Windows acceptance.
@@ -285,7 +287,7 @@ python3 ods/bin/ods-pixel-connect probe \
 python3 ods/bin/ods-pixel-connect prepare \
   --connection-file /private/connection.json \
   --confirm-endpoint http://127.0.0.1:4005/v1 \
-  --directory /private/new-client --pixel-repository /source/Pixel \
+  --directory /private/new-client \
   --openclaw-bin /absolute/path/to/openclaw --reasoning off
 python3 ods/bin/ods-pixel-connect run \
   --directory /private/new-client --message-file /private/task.txt

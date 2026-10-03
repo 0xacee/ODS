@@ -453,6 +453,23 @@ class TestAuth(BaseEdgeTest):
 
 class TestPreviewRelay(BaseEdgeTest):
 
+    async def test_framework_assets_keep_authenticated_snapshot_routing(self):
+        from pixel_edge import _preview_upstream_path
+        site = "site-" + "a" * 24
+        self.assertEqual(_preview_upstream_path(site, '_next/static/app/[slug]/page.js'),
+                         f'/{site}/_next/static/app/%5Bslug%5D/page.js')
+        for tail in ["_next/static/app.js", "__next._full.txt"]:
+            for method in ["GET", "HEAD"]:
+                async with self.client.request(method, f"http://localhost/preview/{site}/{tail}", headers=self.auth()) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(await response.read(), b"<button id=launch>Remote preview</button>" if method == "GET" else b"")
+            async with self.client.get(f"http://localhost/preview/{site}/{tail}") as response:
+                self.assertEqual(response.status, 401)
+        self.assertEqual(self.up_runner.app["preview_paths"],
+                         [f"/{site}/_next/static/app.js"] * 2 + [f"/{site}/__next._full.txt"] * 2)
+        for tail in ["__ods_unknown__.js", "_next/../secret", "_next/.hidden", "__pycache__/cache.js"]:
+            self.assertIsNone(_preview_upstream_path(site, tail), tail)
+
     async def test_nested_directory_links_resolve_to_published_index(self):
         site = "site-" + "a" * 24
         for method in ["GET", "HEAD"]:
@@ -487,7 +504,7 @@ class TestPreviewRelay(BaseEdgeTest):
             self.assertIsNone(_preview_upstream_path(site, tail))
         for tail in ["__ods_view__.html?path=secret", "../__ods_view__.html", "__ods_view__.html/extra"]:
             self.assertIsNone(_preview_upstream_path(site, tail))
-        for tail in ["__ods_manifest__.json/other", "__ods_manifest__.json?path=secret", "../__ods_manifest__.json", "__anything"]:
+        for tail in ["__ods_manifest__.json/other", "__ods_manifest__.json?path=secret", "../__ods_manifest__.json", "__ods_anything"]:
             self.assertIsNone(_preview_upstream_path(site, tail))
         self.assertIsNone(_preview_upstream_path("not-a-site", "__ods_manifest__.json"))
         async with self.client.get(f"http://localhost/preview/{site}/__ods_manifest__.json") as resp:
@@ -531,6 +548,22 @@ class TestPreviewRelay(BaseEdgeTest):
         async with self.client.get(f"http://localhost/preview/{site_id}/") as resp:
             self.assertEqual(resp.status, 401)
             self.assertNotIn("Access-Control-Allow-Origin", resp.headers)
+
+    async def test_source_review_uses_authenticated_relay_without_preview_cors(self):
+        route='/preview/site-'+'a'*24+'/__ods_source__/source-'+'b'*24+'.json'
+        async with self.client.get('http://localhost'+route) as response:
+            self.assertEqual(response.status,401)
+        async with self.client.get('http://localhost'+route,headers={'Authorization':'Bearer incorrect-key','Origin':'null'}) as response:
+            self.assertEqual(response.status,401)
+        async with self.client.get('http://localhost'+route,headers={'Origin':'null'}) as response:
+            self.assertEqual(response.status,401)
+        async with self.client.get('http://localhost'+route,headers={**self.auth(),'Origin':'null'}) as response:
+            self.assertEqual(response.status,200)
+            self.assertNotIn('Access-Control-Allow-Origin',response.headers)
+            self.assertEqual(response.headers['Cross-Origin-Resource-Policy'],'same-origin')
+            self.assertEqual(response.headers['Content-Type'],'application/json; charset=utf-8')
+            self.assertIn("default-src 'none'",response.headers['Content-Security-Policy'])
+        self.assertEqual(self.pe._preview_upstream_path('site-'+'a'*24,'__ods_source__/../../secret.json'),None)
 
     async def test_preview_relays_exact_bytes_with_an_opaque_browser_sandbox(self):
         site_id = "site-" + "a" * 24
@@ -929,7 +962,7 @@ class TestModelAllowlist(BaseEdgeTest):
         ) as resp:
             self.assertEqual(resp.status, 200)
         content = self.up_runner.app["chat_requests"][-1]["messages"][-1]["content"]
-        self.assertNotIn("ODS Pixel network inspection route", content)
+        self.assertNotIn("ODS Portal network inspection route", content)
 
     async def test_code_about_a_machine_does_not_get_host_execution_route(self):
         async with self.client.post(
@@ -965,8 +998,8 @@ class TestModelAllowlist(BaseEdgeTest):
         ) as resp:
             self.assertEqual(resp.status, 200)
         content = self.up_runner.app["chat_requests"][-1]["messages"][-1]["content"]
-        self.assertIn("[ODS Pixel workspace task route:", content)
-        self.assertNotIn("[ODS Pixel host inspection route:", content)
+        self.assertIn("[ODS Portal workspace task route:", content)
+        self.assertNotIn("[ODS Portal host inspection route:", content)
         self.assertNotIn("pixel_ods_host_observe", content)
 
     async def test_workspace_mutation_gets_mutate_before_verify_route(self):
@@ -987,6 +1020,33 @@ class TestModelAllowlist(BaseEdgeTest):
         self.assertIn("edit cannot create a file", content)
         self.assertIn("Perform the requested workspace mutation before verification", content)
         self.assertIn("Do not repeatedly list directories", content)
+        # Copies and JSON maps of existing files come from a command, never
+        # from write: the route must not restrict exec to readback and tests.
+        self.assertIn("or copies of existing files", content)
+        self.assertIn("cp or python3 with json.dump, never by re-typing them", content)
+
+    async def test_read_only_file_request_with_write_reply_has_no_mutation_route(self):
+        async with self.client.post(
+            "http://localhost/v1/chat/completions", headers=self.auth(),
+            json={"model": "pixel/default", "messages": [{"role": "user", "content": (
+                "Use a file-reading tool to read sample.txt, without changing it. "
+                "Quote both lines and then write CHECK-READ-ONLY."
+            )}]},
+        ) as resp:
+            self.assertEqual(resp.status, 200)
+        content = self.up_runner.app["chat_requests"][-1]["messages"][-1]["content"]
+        self.assertNotIn("[ODS Portal workspace task route:", content)
+
+    async def test_file_read_followed_by_explicit_file_write_has_mutation_route(self):
+        async with self.client.post(
+            "http://localhost/v1/chat/completions", headers=self.auth(),
+            json={"model": "pixel/default", "messages": [{"role": "user", "content": (
+                "Read the file notes.txt, then write the result to file answer.txt."
+            )}]},
+        ) as resp:
+            self.assertEqual(resp.status, 200)
+        content = self.up_runner.app["chat_requests"][-1]["messages"][-1]["content"]
+        self.assertIn("[ODS Portal workspace task route:", content)
 
     async def test_run_and_wait_gets_one_exec_then_exact_process_poll_route(self):
         async with self.client.post(
@@ -1005,7 +1065,7 @@ class TestModelAllowlist(BaseEdgeTest):
         ) as resp:
             self.assertEqual(resp.status, 200)
         content = self.up_runner.app["chat_requests"][-1]["messages"][-1]["content"]
-        self.assertIn("ODS Pixel command completion route", content)
+        self.assertIn("ODS Portal command completion route", content)
         self.assertIn("Call exec exactly once", content)
         self.assertIn("tool_call control with id process", content)
         self.assertIn("action poll", content)
@@ -1028,7 +1088,7 @@ class TestModelAllowlist(BaseEdgeTest):
         ) as resp:
             self.assertEqual(resp.status, 200)
         content = self.up_runner.app["chat_requests"][-1]["messages"][-1]["content"]
-        self.assertIn("ODS Pixel exact workspace route", content)
+        self.assertIn("ODS Portal exact workspace route", content)
         self.assertIn("tool_call exactly once with id write", content)
         self.assertIn("tool_call once with id read", content)
         self.assertIn("tool_call once with id exec", content)
@@ -1060,7 +1120,7 @@ class TestModelAllowlist(BaseEdgeTest):
         ) as resp:
             self.assertEqual(resp.status, 200)
         content = self.up_runner.app["chat_requests"][-1]["messages"][-1]["content"]
-        self.assertIn("ODS Pixel exact workspace route", content)
+        self.assertIn("ODS Portal exact workspace route", content)
         self.assertIn("tool_call exactly once with id write", content)
         self.assertIn(
             r'{"path":"pixel-qualification/model-flex-9b.txt","content":"Pixel 9B model flexibility passed.\n"}',
@@ -1121,6 +1181,31 @@ class TestModelAllowlist(BaseEdgeTest):
                 self.assertEqual(content, original + self.pe._INTERACTIVE_DELIVERY_CONTRACT
                                  + self.pe._WORKSPACE_MUTATION_ROUTE)
 
+    async def test_managed_readonly_workers_do_not_receive_builder_execution_routes(self):
+        for role in ('Coordinator', 'Explorer', 'Planner', 'Reviewer', 'Verifier', 'Reporter'):
+            with self.subTest(role=role):
+                original = (f"You are the {role} in the owner's Portal team. "
+                            "Your assignment: review the supplied evidence.\n"
+                            "Owner's requested outcome:\nCreate files in /workspace/demo and publish the website.")
+                content = self.pe._with_interactive_delivery_contract(
+                    {'messages': [{'role': 'user', 'content': original}]}
+                )['messages'][-1]['content']
+                self.assertTrue(content.startswith(original))
+                self.assertIn('read-only team route', content)
+                self.assertNotIn(self.pe._WORKSPACE_MUTATION_ROUTE, content)
+                self.assertNotIn(self.pe._RUN_COMMAND_AND_WAIT_ROUTE, content)
+
+    async def test_builder_and_quoted_team_role_keep_authorized_workspace_routes(self):
+        for original in (
+            "You are the Builder in the owner's Portal team. Create files in /workspace/demo.",
+            'Write a file containing "You are the Reviewer in the owner\'s Portal team."',
+        ):
+            content = self.pe._with_interactive_delivery_contract(
+                {'messages': [{'role': 'user', 'content': original}]}
+            )['messages'][-1]['content']
+            self.assertIn(self.pe._WORKSPACE_MUTATION_ROUTE, content)
+            self.assertNotIn('read-only team route', content)
+
     async def test_readonly_workspace_later_owner_authorization_is_current(self):
         earlier = {"role": "user", "content": "Read-only: inspect /workspace/project. Do not edit files."}
         current = {"role": "user", "content": "Now edit the file /workspace/project/fix.py."}
@@ -1152,7 +1237,7 @@ class TestModelAllowlist(BaseEdgeTest):
             {"messages": [{"role": "user", "content": original}]}
         )["messages"][-1]["content"]
         self.assertTrue(content.startswith(original + self.pe._INTERACTIVE_DELIVERY_CONTRACT))
-        self.assertIn("[ODS Pixel exact workspace route:", content)
+        self.assertIn("[ODS Portal exact workspace route:", content)
         self.assertIn(json.dumps({"path": "/workspace/rules.txt", "content": '"Do not edit files".\n'},
                                  separators=(",", ":")), content)
 
@@ -1349,10 +1434,11 @@ class TestSyntheticModels(BaseEdgeTest):
             data = await resp.json()
             self.assertEqual(data["object"], "list")
             ids = [m["id"] for m in data["data"]]
-            self.assertIn("pixel/default", ids)
+            self.assertEqual(ids, ["portal/default"])
             self.assertNotIn("openclaw/default", ids)
             for m in data["data"]:
-                self.assertEqual(m["owned_by"], "pixel")
+                self.assertEqual(m["owned_by"], "ods")
+                self.assertEqual(m["name"], "Portal")
 
 
 # ---------------------------------------------------------------------------
@@ -1386,6 +1472,17 @@ class TestResponseRewrite(BaseEdgeTest):
                 data["choices"][0]["message"]["content"],
                 "openclaw/default is assistant text",
             )
+
+    async def test_public_model_alias_rewrites_response_without_breaking_legacy(self):
+        for model in ("portal/default", "pixel/default"):
+            with self.subTest(model=model):
+                async with self.client.post(
+                    "http://localhost/v1/chat/completions", headers=self.auth(),
+                    json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    data = await response.json()
+                    self.assertEqual(data["model"], model)
 
     async def test_non_stream_reserved_reply_becomes_natural_test_acknowledgement(self):
         async with self.client.post(
@@ -1544,6 +1641,24 @@ class TestPrivateUrlBoundary(BaseEdgeTest):
 # ---------------------------------------------------------------------------
 
 class TestSSE(BaseEdgeTest):
+    async def test_public_model_alias_is_preserved_in_stream_and_portal_reply(self):
+        async with self.client.post(
+            "http://localhost/v1/chat/completions", headers=self.auth(),
+            json={"model": "portal/default", "stream": True,
+                  "messages": [{"role": "user", "content": "hello"}],
+                  "trigger_reserved": True},
+        ) as response:
+            self.assertEqual(response.status, 200)
+            body = await response.text()
+        packets = [json.loads(line[6:]) for line in body.splitlines()
+                   if line.startswith("data: {")]
+        self.assertTrue(packets)
+        self.assertTrue(all(packet.get("model") == "portal/default" for packet in packets))
+        answer = "".join(packet["choices"][0].get("delta", {}).get("content", "")
+                         for packet in packets)
+        self.assertIn("Portal is online", answer)
+        self.assertNotIn("Pixel is online", answer)
+
     async def test_fallback_frames_are_independently_decodable_sse_events(self):
         for no_space in (False, True):
             for crlf in (False, True):
@@ -1644,7 +1759,7 @@ class TestSanitizedErrors(BaseEdgeTest):
         ) as resp:
             self.assertEqual(resp.status, 502)
             body = await resp.text()
-            self.assertIn("pixel request rejected", body)
+            self.assertIn("Portal request rejected", body)
             self.assertNotIn("upstream-secret", body)
             self.assertNotIn("private/token", body)
 
@@ -1703,8 +1818,8 @@ class TestHostRequestIntent(BaseEdgeTest):
         ]:
             content = await self.forwarded_content(prompt)
             self.assertIn(prompt, content)
-            self.assertIn("[ODS Pixel delivery requirement:", content)
-            self.assertNotIn("[ODS Pixel host inspection route:", content)
+            self.assertIn("[ODS Portal delivery requirement:", content)
+            self.assertNotIn("[ODS Portal host inspection route:", content)
 
     async def test_host_route_uses_only_positive_facets(self):
         content = await self.forwarded_content(

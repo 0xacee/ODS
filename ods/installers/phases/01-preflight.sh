@@ -6,6 +6,7 @@
 # Purpose: Root/OS/tools checks, existing installation detection
 #
 # Expects: SCRIPT_DIR, INSTALL_DIR, LOG_FILE, INTERACTIVE, DRY_RUN,
+#           PREFLIGHT_ONLY (install-core.sh --preflight-only: check only),
 #           PKG_MANAGER,
 #           show_phase(), ai(), ai_ok(), signal(), log(), warn(), error()
 # Provides: OS sourced from /etc/os-release, OPTIONAL_TOOLS_MISSING
@@ -51,11 +52,24 @@ ods_preflight_require_jq
 # image/model download to look like an unexplained installer hang.
 _phase01_check_required_network() {
     [[ "${OFFLINE_MODE:-false}" == "true" ]] && return 0
-    local target target_name url status
+    local target target_name url status attempt reached
     for target in "GitHub|https://github.com" "Docker Hub|https://registry-1.docker.io/v2/"; do
         IFS='|' read -r target_name url <<< "$target"
-        if ! status="$(curl -sS --connect-timeout 5 --max-time 10 -o /dev/null \
-            -w '%{http_code}' "$url")"; then
+        # A single transient DNS or connect failure must not abort an install
+        # that the forced-reinstall preflight cleared moments earlier: retry a
+        # few times before concluding that the target is unreachable.
+        reached=false
+        for attempt in 1 2 3; do
+            # Reachability needs the HTTP status, not a full homepage body.
+            # Slow body transfer can outlast max-time after a valid response.
+            if status="$(curl -sS --head --connect-timeout 5 --max-time 10 -o /dev/null \
+                -w '%{http_code}' "$url")"; then
+                reached=true
+                break
+            fi
+            [[ "$attempt" -lt 3 ]] && sleep "${ODS_PREFLIGHT_NETWORK_RETRY_DELAY:-3}"
+        done
+        if [[ "$reached" != true ]]; then
             error "Could not reach ${target_name}. Check DNS, proxy, or captive-portal access, then re-run the installer."
         fi
         # Docker Registry v2 intentionally challenges anonymous clients with
@@ -144,14 +158,16 @@ _ods_is_related_install_dir() {
 }
 
 _ods_related_compose_containers() {
+    local reinstall_root="${1:-}"
     command -v docker >/dev/null 2>&1 || return 0
 
     docker ps -a \
-        --format '{{.Names}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}' \
+        --format '{{.Names}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.project.working_dir"}}' \
         2>/dev/null |
-        awk -F '|' '
+        awk -F '|' -v reinstall_root="$reinstall_root" '
             $2 != "" {
                 project = $2
+                if (reinstall_root == "" || $4 != reinstall_root) foreign[project] = 1
                 if (names[project] == "") {
                     names[project] = $1
                 } else {
@@ -163,7 +179,7 @@ _ods_related_compose_containers() {
             }
             END {
                 for (project in names) {
-                    if (open_webui[project] && dashboard_api[project] && inference[project]) {
+                    if (open_webui[project] && dashboard_api[project] && inference[project] && foreign[project]) {
                         print names[project]
                     }
                 }
@@ -201,8 +217,10 @@ if [[ ! -d "$INSTALL_DIR" ]] && ! _ods_truthy "${ODS_ALLOW_LEGACY_PARALLEL:-}"; 
     unset _pre_ods_install_dir _pre_ods_findings _pre_ods_candidate _pre_ods_containers
 fi
 
-# Existing installation — update in place (secrets and data are preserved)
-if [[ -d "$INSTALL_DIR" ]]; then
+# Existing installation — update in place (secrets and data are preserved).
+# A --preflight-only run is checking a host whose installation is about to be
+# replaced, not updated.
+if [[ -d "$INSTALL_DIR" && "${PREFLIGHT_ONLY:-false}" != "true" ]]; then
     log "Existing installation found at $INSTALL_DIR — updating in place"
     signal "Existing install detected. Secrets and data will be preserved."
 fi

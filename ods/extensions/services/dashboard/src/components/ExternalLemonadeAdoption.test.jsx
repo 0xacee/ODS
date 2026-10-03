@@ -16,11 +16,15 @@ const clickAdopt = async () => {
 afterEach(() => vi.unstubAllGlobals())
 
 test('keeps nonexternal Lemonade installations free of an adoption control', async () => {
-  const fetch = vi.fn().mockResolvedValue(response({}, 409))
+  let settleObservation
+  const observation = new Promise(resolve => { settleObservation = resolve })
+  const fetch = vi.fn().mockReturnValue(observation)
   vi.stubGlobal('fetch', fetch)
   view()
-  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
-  expect(screen.queryByRole('region', { name: 'External Lemonade model' })).toBeNull()
+  expect(await screen.findByRole('region', { name: 'External Lemonade model' })).toBeVisible()
+  settleObservation(response({}, 409))
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'External Lemonade model' })).toBeNull())
+  expect(fetch).toHaveBeenCalledTimes(1)
 })
 
 test('rechecks the exact physical model before one adoption and refreshes ODS', async () => {
@@ -38,11 +42,11 @@ test('rechecks the exact physical model before one adoption and refreshes ODS', 
   expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({ model_id: loaded.modelId })
 })
 
-test('keeps the narrow Portal model drawer concise without hiding the native ownership warning', async () => {
+test('keeps the narrow Portal model drawer concise without hiding the startup model limitation', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(loaded)))
   view({ compact: true })
-  expect(await screen.findByText(/After switching in Lemonade, adopt here/)).toBeVisible()
-  expect(screen.getByText(/ODS leaves the native model loaded/)).toBeVisible()
+  expect(await screen.findByText(/Adopt the loaded model for Portal and ODS/)).toBeVisible()
+  expect(screen.getByText(/Adoption does not change Lemonade's startup model/)).toBeVisible()
   await waitFor(() => expect(screen.getByRole('button', { name: 'Adopt loaded model in ODS' })).toBeEnabled())
 })
 
@@ -80,8 +84,8 @@ test('pending adoption tells the user Pixel remains held', async () => {
   view()
   await clickAdopt()
   expect(await screen.findByRole('alert')).toHaveTextContent('Adoption is incomplete')
-  expect(screen.getByText(/Pixel stays held until recovery/)).toBeVisible()
-  expect(screen.getByRole('link', { name: 'Open Pixel recovery' })).toHaveAttribute('href', '/pixel')
+  expect(screen.getByText(/Portal stays held until recovery/)).toBeVisible()
+  expect(screen.getByRole('link', { name: 'Open Portal recovery' })).toHaveAttribute('href', '/pixel')
 })
 
 test('insufficient context cannot be adopted for managed Pixel', async () => {
@@ -89,5 +93,5 @@ test('insufficient context cannot be adopted for managed Pixel', async () => {
   view()
   const button = await screen.findByRole('button', { name: 'Adopt loaded model in ODS' })
   expect(button).toBeDisabled()
-  expect(screen.getByText(/Pixel needs at least/)).toBeVisible()
+  expect(screen.getByText(/Portal needs at least/)).toBeVisible()
 })

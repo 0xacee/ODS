@@ -13,6 +13,7 @@ import http.client
 import ipaddress
 import json
 import os
+import plistlib
 from pathlib import Path
 import platform
 import re
@@ -27,7 +28,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 import pixel_access_protocol as protocol
-from pixel_gateway_service import SystemdGatewayService
+from pixel_gateway_service import LaunchdGatewayService, SystemdGatewayService
 
 UNIT = "openclaw-gateway.service"
 STATE = Path("/var/lib/ods-pixel-access")
@@ -38,12 +39,14 @@ OWNER_EXIT_TIMEOUT = 5
 OWNER_TERMINATE_TIMEOUT = 10
 MODEL_DRAIN_TIMEOUT = 1800
 _DEADLINE = contextvars.ContextVar("pixel_access_operation_deadline", default=None)
+_INSTALLER_ACCESS_REPROOF = contextvars.ContextVar("pixel_installer_access_reproof", default=False)
 
 
 class AccessError(Exception):
-    def __init__(self, code, *, http_status=None):
+    def __init__(self, code, *, http_status=None, returncode=None):
         self.code = code
         self.http_status = http_status
+        self.returncode = returncode
         super().__init__(code)
 
 
@@ -95,6 +98,11 @@ def _pipe_send(stream, value, deadline):
             except BlockingIOError: continue
             if count <= 0: raise AccessError("owner-protocol-failed")
             data = data[count:]
+
+
+def runtime_config_path(bridge):
+    """Use the protected deployment's config, retaining the Linux default."""
+    return getattr(bridge, '_runtime_config_path', None) or bridge.home / '.openclaw/openclaw.json'
 
 
 def private_json(path, uid, maximum=1024 * 1024):
@@ -176,7 +184,7 @@ def _edge_json(raw):
     return value
 
 
-def _edge_container_request(container_id, path, key, payload, timeout=20):
+def _edge_container_request(container_id, path, key, payload, timeout=20, *, process_context=None):
     """Bound one request to the exact running edge, including Docker Desktop.
 
     Container IPs are not necessarily routable from the systemd host. Docker
@@ -185,7 +193,7 @@ def _edge_container_request(container_id, path, key, payload, timeout=20):
     retain admission holds until its normal recovery proves the resulting state.
     """
     if (not isinstance(container_id, str) or not HEX.fullmatch(container_id)
-            or path not in ("/v1/transition", "/v1/transition/acquire",
+            or path not in ("/v1/transition", "/v1/transition/acquire", "/v1/transition/drain",
                             "/v1/transition/recover", "/v1/transition/release")):
         raise AccessError("edge-container-unavailable")
     if (not isinstance(key, str) or not 32 <= len(key) <= 4096
@@ -211,7 +219,7 @@ def _edge_container_request(container_id, path, key, payload, timeout=20):
             ["docker", "exec", "-i", container_id, "python3", "-I", "-c",
              _EDGE_CONTAINER_SCRIPT, str(timeout)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            bufsize=0)
+            bufsize=0, **(process_context or {}))
         os.set_blocking(process.stdin.fileno(), False)
         os.set_blocking(process.stdout.fileno(), False)
         with selectors.DefaultSelector() as selector:
@@ -358,6 +366,8 @@ class SystemdAccessBridge:
             result = subprocess.run(args, check=True, stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, text=True, timeout=timeout)
             return result.stdout.strip()
+        except subprocess.CalledProcessError as error:
+            raise AccessError("host-command-failed", returncode=error.returncode) from None
         except (OSError, subprocess.SubprocessError):
             raise AccessError("host-command-failed") from None
 
@@ -472,8 +482,11 @@ class SystemdAccessBridge:
         else:
             marker = private_json(marker_path, owner.pw_uid, 65536)
             if (marker.get("schema_version") != 2 or marker.get("manager") != "ods"
-                    or marker.get("state") not in allowed_states
                     or Path(marker.get("install_dir", "")).resolve() != self.install):
+                raise AccessError("managed-owner-mismatch")
+            if marker.get("state") == "installing" and not allow_installing:
+                raise AccessError("managed-installation-incomplete")
+            if marker.get("state") not in allowed_states:
                 raise AccessError("managed-owner-mismatch")
         config = private_json(home / ".openclaw/openclaw.json", owner.pw_uid)
         binary = self.installed_binary
@@ -503,7 +516,7 @@ class SystemdAccessBridge:
         except ValueError: raise AccessError("invalid-service-origin") from None
         if (parts.scheme != "http" or not (address.is_loopback or address.is_private)
                 or parts.username or parts.password or parts.query or parts.fragment or parts.path
-                or path not in ("/health", "/pixel-ods/access-runtime", "/v1/transition", "/v1/transition/acquire",
+                or path not in ("/health", "/pixel-ods/access-runtime", "/v1/transition", "/v1/transition/acquire", "/v1/transition/drain",
                                 "/v1/transition/recover", "/v1/transition/release")):
             raise AccessError("invalid-service-origin")
         budget = remaining(timeout)
@@ -671,34 +684,46 @@ class SystemdAccessBridge:
                 "pid": 0, "proof": None, "stopped": True}
 
     def edge(self, operation=None, token=None, revision=None):
-        if operation not in (None, "acquire", "release", "recover"):
+        if operation not in (None, "acquire", "drain", "release", "recover"):
             raise AccessError("invalid-edge-operation")
         budget = remaining(20)
         started = time.monotonic()
         # Pin the inspected running instance, not a replaceable container name.
-        identity = self.command(["docker", "inspect", "ods-pixel-edge", "--format",
-                                 "{{.Id}} {{.State.Running}}"], timeout=budget).split()
+        identity = self._inspect_edge(timeout=budget).split()
         if len(identity) != 2 or not HEX.fullmatch(identity[0]) or identity[1] != "true":
             raise AccessError("edge-container-unavailable")
         payload = dict(token=token, revision=revision) if operation else None
-        return _edge_container_request(identity[0],
+        return self._request_edge(identity[0],
             "/v1/transition" + ("/" + operation if operation else ""),
             self.edge_key, payload, timeout=budget - (time.monotonic() - started))
+
+    def _inspect_edge(self, *, timeout):
+        return self.command(['docker', 'inspect', 'ods-pixel-edge', '--format',
+                             '{{.Id}} {{.State.Running}}'], timeout=timeout)
+
+    def _request_edge(self, *args, **kwargs):
+        return _edge_container_request(*args, **kwargs)
+
+    def _native_owner_identity(self):
+        import pwd
+        owner = pwd.getpwnam(self.owner.pw_name)
+        if (os.geteuid() != 0 or owner.pw_uid <= 0 or owner.pw_gid < 0
+                or owner.pw_uid != self.owner.pw_uid or owner.pw_gid != self.owner.pw_gid):
+            raise AccessError('unsafe-owner-identity')
+        # The native worker only needs the owner's UID and primary GID for its
+        # owner-owned files and Docker socket. Do not carry root's groups into
+        # the child: macOS users can exceed subprocess's setgroups limit.
+        return {'user': owner.pw_uid, 'group': owner.pw_gid,
+                'extra_groups': []}
 
     def _launch_owner_worker(self, env):
         script = Path(__file__).resolve().parent / "access_mode_worker.py"
         command = [sys.executable, "-I", "-u", str(script)]
         identity = {}
         if platform.system() == "Darwin":
-            import pwd
-            owner = pwd.getpwnam(self.owner.pw_name)
-            if (os.geteuid() != 0 or owner.pw_uid <= 0 or owner.pw_gid < 0
-                    or owner.pw_uid != self.owner.pw_uid or owner.pw_gid != self.owner.pw_gid):
-                raise AccessError("unsafe-owner-identity")
             # Popen drops groups/GID/UID in the child before exec, without a
             # shell, user-controlled launcher, or thread-unsafe preexec_fn.
-            identity = {"user": owner.pw_uid, "group": owner.pw_gid,
-                        "extra_groups": os.getgrouplist(owner.pw_name, owner.pw_gid)}
+            identity = self._native_owner_identity()
         else:
             command = [self._linux_owner_launcher(), "-u", self.owner.pw_name, "--", *command]
         return subprocess.Popen(command, cwd="/", env=env, stdin=subprocess.PIPE,
@@ -726,13 +751,28 @@ class SystemdAccessBridge:
             raise AccessError("owner-launcher-unavailable")
         return launcher
 
+    def worker_environment(self):
+        return {"HOME": str(self.home), "USER": self.owner.pw_name, "LOGNAME": self.owner.pw_name,
+                "PATH": str(Path(self.binary).parent) + ":/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
+
     def worker(self, operation="status", *, confirmed=False, config_hash=None, busy=None, restart=None,
                transaction_id=None, settings_revision=None, preferences=None, capabilities=None, activate_settings=None,
                binding=None, activate_provider=None, expected_projection=None, provider_probe=None,
-               model_target=None, model_outcome=None):
-        env = {"HOME": str(self.home), "USER": self.owner.pw_name, "LOGNAME": self.owner.pw_name,
-               "PATH": str(Path(self.binary).parent) + ":/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
+               model_target=None, model_outcome=None, relocation=None,
+               candidate_path=None, candidate_sha256=None, release_outcome=None, verify_release=None,
+               receipt_sha256=None):
+        env = self.worker_environment()
         request = dict(operation=operation, openclaw=self.binary, config_sha256=config_hash, confirmed=confirmed)
+        if operation.startswith('release-'):
+            request['transaction_id'] = transaction_id
+            if operation == 'release-prepare':
+                request.update(candidate_path=candidate_path, candidate_sha256=candidate_sha256)
+            if operation in ('release-prepare', 'release-abort'):
+                request['receipt_sha256'] = receipt_sha256
+            if operation in ('release-recover', 'release-finish'):
+                request['release_outcome'] = release_outcome
+        if operation == 'access-relocate':
+            request['relocation'] = relocation
         if operation == 'provider-worker-status':
             request['provider_probe'] = provider_probe
         if operation in ("settings-apply", "settings-recover", "provider-change", "provider-recover"):
@@ -795,7 +835,8 @@ class SystemdAccessBridge:
                     if type(value["hook"]) is not str or value["hook"] not in protocol.HOOKS.get(operation, ()):
                         raise AccessError("owner-protocol-failed")
                     callback = {"busy": busy, "restart": restart, "settings-activate": activate_settings,
-                                "provider-activate": activate_provider}.get(value["hook"])
+                                "provider-activate": activate_provider,
+                                "release-verify": verify_release}.get(value["hook"])
                     if callback is None: raise AccessError("owner-protocol-failed")
                     remaining(deadline - time.monotonic())
                     answer = callback()
@@ -844,6 +885,7 @@ class SystemdAccessBridge:
         # ordinary status/settings/provider inspection ready-only, but let the
         # model-transition entry point admit that exact managed state so a
         # retry can resume instead of deadlocking on its own marker.
+        allow_installing = allow_installing or _INSTALLER_ACCESS_REPROOF.get()
         self.discover(allow_installing=allow_installing)
         config, native, edge = self.worker(), self.native(), self.edge()
         if not native.get("available") or edge.get("capability") != "available": raise AccessError("admission-gate-unavailable")
@@ -900,8 +942,12 @@ class SystemdAccessBridge:
     def unit_boundary(self):
         return self.gateway_service.boundary()
 
+    def service_restore_required(self):
+        return self.dropin.exists()
+
     def provision_probe(self):
-        base = Path("/var/lib/ods-pixel-access-probes")
+        base = (Path("/private/var/lib/ods-pixel-access-probes")
+                if platform.system() == "Darwin" else Path("/var/lib/ods-pixel-access-probes"))
         base.mkdir(mode=0o711, exist_ok=True)
         info = base.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
@@ -918,7 +964,12 @@ class SystemdAccessBridge:
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != self.owner.pw_uid or info.st_mode & 0o077:
             raise AccessError("unsafe-probe-directory")
 
-    def verify_held_mode(self, token, mode):
+    def probe_held_mode(self, token, mode):
+        """Probe the held runtime without acquiring the owner's config lock.
+
+        This returns evidence, not a persisted config attestation. Callers must
+        bind it to the configuration and recheck admission before accepting it.
+        """
         if mode not in ("full-access", "sandboxed") or type(token) is not str or not HEX.fullmatch(token):
             raise AccessError("invalid-model-transition")
         self.provision_probe()
@@ -952,6 +1003,10 @@ class SystemdAccessBridge:
                 raise AccessError("runtime-proof-" + failure) from None
             raise error
         if proof.get("proof", {}).get("mode") != mode: raise AccessError("runtime-proof-failed")
+        return proof, boundary
+
+    def verify_held_mode(self, token, mode):
+        proof, boundary = self.probe_held_mode(token, mode)
         verified_config = self.worker()
         if verified_config.get("configured_status") != mode:
             raise AccessError("configured-mode-changed")
@@ -994,6 +1049,24 @@ class SystemdAccessBridge:
                   "start_config_sha256": journal["start_config_sha256"]}
         if "error" in journal:
             result["error"] = journal["error"]
+        intent_path = self.state / 'release-intent.json'
+        completed_path = self.state / 'release-completed.json'
+        if intent_path.exists() and completed_path.exists():
+            intent = private_json(intent_path, 0, 8192)
+            completed = private_json(completed_path, 0, 8192)
+            if (type(intent) is not dict or set(intent) != {'transactionId', 'candidateSha256'}
+                    or any(type(v) is not str or not HEX.fullmatch(v) for v in intent.values())
+                    or type(completed) is not dict
+                    or set(completed) != {'transactionId', 'configSha256', 'outcome'}
+                    or completed.get('outcome') not in ('apply', 'rollback')
+                    or any(type(completed[k]) is not str or not HEX.fullmatch(completed[k])
+                           for k in ('transactionId', 'configSha256'))):
+                raise AccessError('release-recovery-required')
+            if intent['transactionId'] == completed['transactionId'] == journal['transaction_id']:
+                # An installer may resume only the previously proved outcome.
+                # This projection grants no authority; finish re-proves runtime.
+                result['release_completion'] = dict(outcome=completed['outcome'],
+                    config_sha256=completed['configSha256'])
         return result
 
     def model_error(self, pending, error):
@@ -1039,11 +1112,25 @@ class SystemdAccessBridge:
             return None
         return value
 
-    def model_begin(self):
+    def model_begin(self, *, installer_source=False):
         with self.bounded(MODEL_DRAIN_TIMEOUT + 30), self.locked():
             if self.pending() is not None:
+                if installer_source:
+                    return self.resume_source_begin()
                 raise AccessError("transition-recovery-required")
             snapshot = self.inspect(allow_installing=True)
+            source_plan = None
+            if installer_source or (platform.system() == 'Linux' and os.path.lexists(self.state / 'source-upgrade')):
+                if platform.system() != 'Linux' or (installer_source and os.geteuid() != 0):
+                    raise AccessError('source-installer-root-required')
+                from pixel_source_upgrade import begin_plan, UpgradeError
+                try:
+                    source_plan = begin_plan(self.state, self.install, self.owner, installer=installer_source)
+                    if (source_plan is not None and snapshot['_config'].get('config_sha256')
+                            != source_plan.journal()['identity']['configSha256']):
+                        raise AccessError('source-owner-state-changed')
+                except UpgradeError as error:
+                    raise AccessError(str(error)) from None
             configured_mode = snapshot["configured_mode"]
             trusted_snapshot = (
                 snapshot["available"] is True
@@ -1075,28 +1162,47 @@ class SystemdAccessBridge:
             if (configured_mode not in ("full-access", "sandboxed")
                     or not (runtime_ready or stale_runtime_proof)):
                 raise AccessError("runtime-proof-required")
-            if (snapshot["_native"].get("phase") != "idle"
-                    or snapshot["_edge"].get("phase") != "idle"):
+            # An ordinary active turn is exactly what the bounded drain below
+            # is for. Held/interrupted phases and pending journals still fail
+            # closed; never adopt a different controller's admission hold.
+            if (snapshot["_native"].get("phase") not in ("idle", "busy")
+                    or snapshot["_edge"].get("phase") not in ("idle", "busy")):
                 raise AccessError("transition-recovery-required")
             pending = {"kind": "model", "transaction_id": os.urandom(32).hex(),
                        "token": os.urandom(32).hex(), "phase": "acquiring",
                        "edge_revision": snapshot["_edge"]["revision"],
                        "configured_mode": snapshot["configured_mode"],
                        "start_config_sha256": snapshot["_config"]["config_sha256"]}
+            if source_plan is not None:
+                # Reserve the source token before the ordinary model journal.
+                # If interrupted between these two durable writes, only this
+                # root-only operation may resume the same staged transaction.
+                previous = source_plan.journal()['hold']
+                if previous is not None:
+                    pending['transaction_id'] = previous
+                try:
+                    source_plan.bind(pending['transaction_id'], lambda _token: None)
+                except UpgradeError as error:
+                    raise AccessError(str(error)) from None
             # Durable intent precedes both admission-gate acquisition calls.
             atomic_json(self.state / "transition.json", pending)
             try:
-                edge = self.edge("acquire", pending["token"], pending["edge_revision"])
+                edge = self.edge("drain", pending["token"], pending["edge_revision"])
                 pending["edge_revision"] = edge["revision"]
                 pending["phase"] = "draining"
                 atomic_json(self.state / "transition.json", pending)
-                self.native("acquire", pending["token"])
+                # Edge holds new Portal admission durably while existing
+                # turns keep their native/tools/inference path until finished.
+                # Acquiring native first would reject or disrupt a busy turn.
                 deadline = time.monotonic() + MODEL_DRAIN_TIMEOUT
                 while True:
-                    native = self.native("acquire", pending["token"], timeout=5)
+                    native = self.native(timeout=5)
                     edge = self.edge("acquire", pending["token"], pending["edge_revision"])
-                    if (native.get("phase") == "held" and edge.get("phase") == "held"
+                    if (native.get("phase") == "idle" and edge.get("phase") == "held"
                             and not native.get("active") and not edge.get("streams")):
+                        native = self.native("acquire", pending["token"], timeout=5)
+                        if native.get("phase") != "held" or native.get("active"):
+                            raise AccessError("native-lease-unconfirmed")
                         break
                     if time.monotonic() >= deadline:
                         raise AccessError("runtime-busy")
@@ -1113,6 +1219,427 @@ class SystemdAccessBridge:
                 if isinstance(error, AccessError): raise
                 raise AccessError("model-transition-failed") from None
 
+    def resume_source_begin(self):
+        """Recover only an exact source acquisition interrupted before copying.
+
+        Called under model_begin's existing root lock/deadline. It neither
+        adopts an arbitrary model hold nor changes a permission preference.
+        """
+        if platform.system() != 'Linux' or os.geteuid() != 0:
+            raise AccessError('source-installer-root-required')
+        self.discover(allow_installing=True)
+        from pixel_source_upgrade import begin_plan, UpgradeError
+        try:
+            manager = begin_plan(self.state, self.install, self.owner, installer=True)
+            plan = manager.journal()
+            pending = self.model_journal(plan['hold'])
+            if (plan['phase'] != 'held' or pending['phase'] not in ('acquiring', 'draining', 'error')
+                    or pending['start_config_sha256'] != plan['identity']['configSha256']):
+                raise AccessError('source-acquisition-recovery-required')
+        except UpgradeError as error:
+            raise AccessError(str(error)) from None
+        try:
+            token = pending['token']
+            edge = self.edge()
+            operation = {'idle': 'drain', 'held': 'acquire', 'interrupted': 'recover'}.get(edge.get('phase'))
+            if operation is None:
+                raise AccessError('model-lease-lost')
+            edge = self.edge(operation, token, edge['revision'])
+            pending.update(phase='draining', edge_revision=edge['revision'])
+            pending.pop('error', None)
+            atomic_json(self.state / 'transition.json', pending)
+            deadline = time.monotonic() + MODEL_DRAIN_TIMEOUT
+            while True:
+                native = self.native(timeout=5)
+                edge = self.edge('acquire', token, pending['edge_revision'])
+                if (native.get('phase') in ('idle', 'held', 'interrupted') and not native.get('active')
+                        and not native.get('stopped') and edge.get('phase') == 'held' and not edge.get('streams')):
+                    native = self.native('acquire', token, timeout=5)
+                    if native.get('phase') != 'held' or native.get('active'):
+                        raise AccessError('native-lease-unconfirmed')
+                    break
+                if time.monotonic() >= deadline:
+                    raise AccessError('runtime-busy')
+                time.sleep(1)
+            current = self.worker()
+            if (current.get('configured_status') != pending['configured_mode']
+                    or current.get('config_sha256') != pending['start_config_sha256']):
+                raise AccessError('source-owner-state-changed')
+            self.verify_held_mode(token, pending['configured_mode'])
+            pending['phase'] = 'held'
+            atomic_json(self.state / 'transition.json', pending)
+            return {'status': 'held', 'transaction_id': pending['transaction_id']}
+        except Exception as error:
+            self.model_error(pending, error)
+            if isinstance(error, AccessError):
+                raise
+            raise AccessError('source-acquisition-recovery-failed') from None
+
+    def verify_installer_model_access(self, transaction_id):
+        """Re-prove an installer's held model transaction without releasing it.
+
+        This is an internal root-only installer operation, not a public access
+        mode override. Restarting the gateway invalidates the earlier process
+        proof. Both admission gates must therefore be held again before the
+        installer may use the selected mode to verify the restarted service.
+        """
+        if os.geteuid() != 0:
+            raise AccessError("root-service-required")
+        if type(transaction_id) is not str or not HEX.fullmatch(transaction_id):
+            raise AccessError("invalid-model-transition")
+        with self.bounded(300), self.locked():
+            pending = self.model_journal(transaction_id)
+            if pending["phase"] not in ("held", "error"):
+                raise AccessError("model-lease-lost")
+            try:
+                self.discover(allow_installing=True)
+                token = pending["token"]
+                edge = self.edge()
+                if edge.get("phase") not in ("held", "interrupted") or edge.get("streams"):
+                    raise AccessError("model-lease-lost")
+                operation = "recover" if edge["phase"] == "interrupted" else "acquire"
+                edge = self.edge(operation, token, edge["revision"])
+                if edge.get("phase") != "held" or edge.get("streams"):
+                    raise AccessError("model-lease-lost")
+                pending["edge_revision"] = edge["revision"]
+                atomic_json(self.state / "transition.json", pending)
+                native = self.native("acquire", token, timeout=10)
+                if (native.get("phase") != "held" or native.get("active")
+                        or native.get("stopped")):
+                    raise AccessError("model-lease-lost")
+                config = self.worker()
+                if config.get("configured_status") != pending["configured_mode"]:
+                    raise AccessError("configured-mode-changed")
+                self.verify_held_mode(token, pending["configured_mode"])
+                verified = private_json(self.state / "verified.json", 0, 8192)
+                current = self.worker()
+                native = self.native(timeout=10)
+                edge = self.edge()
+                if (native.get("phase") != "held" or native.get("active")
+                        or native.get("stopped") or edge.get("phase") != "held"
+                        or edge.get("streams")
+                        or edge.get("revision") != pending["edge_revision"]
+                        or type(native.get("pid")) is not int or native["pid"] <= 0
+                        or verified.get("pid") != native["pid"]
+                        or current.get("configured_status") != pending["configured_mode"]
+                        or verified.get("config_sha256") != current.get("config_sha256")
+                        or current.get("config_sha256") != config.get("config_sha256")
+                        or verified.get("boundary") != self.unit_boundary()):
+                    raise AccessError("runtime-proof-required")
+                pending["phase"] = "held"
+                pending.pop("error", None)
+                atomic_json(self.state / "transition.json", pending)
+                return {"mode": pending["configured_mode"], "pid": native["pid"],
+                        "config_sha256": verified["config_sha256"]}
+            except Exception as error:
+                self.model_error(pending, error)
+                if isinstance(error, AccessError):
+                    raise
+                raise AccessError("model-verification-failed") from None
+
+    def prepare_release_access(self, transaction_id, candidate_path, candidate_sha256):
+        """Prepare the reviewed candidate while retaining the existing hold.
+
+        The installer supplies the candidate already checked against its plan.
+        This method is exposed only through the authenticated local installer
+        control protocol, never through the dashboard HTTP access API.
+        """
+        if os.geteuid() != 0:
+            raise AccessError('root-service-required')
+        # Validate before discovery or any runtime mutation. The owner worker
+        # independently checks candidate custody, content hash and CLI validity.
+        try:
+            protocol.request(dict(operation='release-prepare', openclaw='/validated-later',
+                confirmed=False, config_sha256='0' * 64, transaction_id=transaction_id,
+                candidate_path=candidate_path, candidate_sha256=candidate_sha256, receipt_sha256='0' * 64))
+        except protocol.ProtocolError:
+            raise AccessError('invalid-release-candidate') from None
+        with self.bounded(300), self.locked():
+            pending = self.model_journal(transaction_id)
+            if pending['phase'] not in ('held', 'error') or pending['configured_mode'] != 'full-access':
+                raise AccessError('model-lease-lost')
+            try:
+                self.discover(allow_installing=True)
+                token = pending['token']
+                external = self.edge()
+                if external.get('phase') not in ('held', 'interrupted') or external.get('streams'):
+                    raise AccessError('model-lease-lost')
+                external = self.edge('recover' if external['phase'] == 'interrupted' else 'acquire',
+                                     token, external['revision'])
+                if external.get('phase') != 'held' or external.get('streams'):
+                    raise AccessError('model-lease-lost')
+                pending['edge_revision'] = external['revision']
+                atomic_json(self.state / 'transition.json', pending)
+                current = self.native('acquire', token, timeout=10)
+                if current.get('phase') != 'held' or current.get('active') or current.get('stopped'):
+                    raise AccessError('model-lease-lost')
+                self.verify_held_mode(token, 'full-access')
+                verified = private_json(self.state / 'verified.json', 0, 8192)
+                before = self.worker()
+                if (before.get('configured_status') != 'full-access'
+                        or verified.get('config_sha256') != before.get('config_sha256')):
+                    raise AccessError('configured-mode-changed')
+
+                def idle():
+                    native = self.native(timeout=10)
+                    edge = self.edge()
+                    if (native.get('phase') != 'held' or native.get('stopped')
+                            or native.get('pid') != verified.get('pid')
+                            or edge.get('phase') != 'held'
+                            or edge.get('revision') != pending['edge_revision']
+                            or self.unit_boundary() != verified.get('boundary')):
+                        raise AccessError('model-lease-lost')
+                    return bool(native.get('active') or edge.get('streams'))
+
+                if idle():
+                    raise AccessError('model-lease-lost')
+                # Persist this guard before the worker can create its journal.
+                # A lost prepare reply must not allow generic model-finish to
+                # reopen admission while owner-side release recovery remains.
+                intent = dict(transactionId=transaction_id, candidateSha256=candidate_sha256)
+                intent_path = self.state / 'release-intent.json'
+                baseline_path = self.state / 'release-baseline.json'
+                existing_intent = False
+                if os.path.lexists(intent_path):
+                    previous_intent = private_json(intent_path, 0, 8192)
+                    existing_intent = previous_intent.get('transactionId') == transaction_id
+                    if (previous_intent.get('transactionId') == transaction_id
+                            and previous_intent != intent):
+                        raise AccessError('release-candidate-changed')
+                if existing_intent:
+                    baseline = self.release_baseline(transaction_id)
+                else:
+                    original = self.worker('release-baseline', transaction_id=transaction_id,
+                        config_hash=before['config_sha256'], busy=idle)
+                    if (original.get('configSha256') != before['config_sha256']
+                            or before['config_sha256'] != pending['start_config_sha256'] or idle()):
+                        raise AccessError('release-original-state-changed')
+                    baseline = dict(transactionId=transaction_id, **original)
+                    atomic_json(baseline_path, baseline)
+                if baseline['configSha256'] != before['config_sha256']:
+                    raise AccessError('release-original-state-changed')
+                atomic_json(intent_path, intent)
+                result = self.worker('release-prepare', transaction_id=transaction_id,
+                    config_hash=before['config_sha256'], candidate_path=candidate_path,
+                    candidate_sha256=candidate_sha256, receipt_sha256=baseline['receiptSha256'], busy=idle)
+                if (result.get('beforeSha') != before['config_sha256'] or idle()):
+                    raise AccessError('runtime-proof-required')
+                # The root record binds the prepared result for subsequent
+                # publication/recovery. No ready marker or gate is changed.
+                atomic_json(self.state / 'release-prepared.json', dict(
+                    transactionId=transaction_id, candidateSha256=candidate_sha256,
+                    beforeSha=result['beforeSha'], afterSha=result['afterSha']))
+                pending['phase'] = 'held'
+                pending.pop('error', None)
+                atomic_json(self.state / 'transition.json', pending)
+                return result
+            except Exception as error:
+                self.model_error(pending, error)
+                if isinstance(error, AccessError):
+                    raise
+                raise AccessError('release-preparation-failed') from None
+
+    def publish_release_access(self, transaction_id, outcome):
+        """Publish/recover prepared bytes only while the gateway is stopped."""
+        if os.geteuid() != 0:
+            raise AccessError('root-service-required')
+        if (type(transaction_id) is not str or not HEX.fullmatch(transaction_id)
+                or outcome not in ('apply', 'rollback')):
+            raise AccessError('invalid-model-transition')
+        with self.bounded(300), self.locked():
+            pending = self.model_journal(transaction_id)
+            if pending['phase'] not in ('held', 'error') or pending['configured_mode'] != 'full-access':
+                raise AccessError('model-lease-lost')
+            try:
+                self.discover(allow_installing=True)
+                prepared = private_json(self.state / 'release-prepared.json', 0, 8192)
+                if (type(prepared) is not dict
+                        or set(prepared) != {'transactionId', 'candidateSha256', 'beforeSha', 'afterSha'}
+                        or prepared['transactionId'] != transaction_id
+                        or any(type(value) is not str or not HEX.fullmatch(value) for value in prepared.values())):
+                    raise AccessError('release-preparation-required')
+                self.gateway_service.assert_stopped()
+                edge = self.edge()
+                if edge.get('phase') not in ('held', 'interrupted') or edge.get('streams'):
+                    raise AccessError('model-lease-lost')
+                edge = self.edge('recover' if edge['phase'] == 'interrupted' else 'acquire',
+                                 pending['token'], edge['revision'])
+                if edge.get('phase') != 'held' or edge.get('streams'):
+                    raise AccessError('model-lease-lost')
+                pending['edge_revision'] = edge['revision']
+                atomic_json(self.state / 'transition.json', pending)
+                current = self.worker()
+                if current.get('config_sha256') not in (prepared['beforeSha'], prepared['afterSha']):
+                    raise AccessError('release-config-changed')
+
+                def idle():
+                    self.gateway_service.assert_stopped()
+                    external = self.edge()
+                    if (external.get('phase') != 'held'
+                            or external.get('revision') != pending['edge_revision']):
+                        raise AccessError('model-lease-lost')
+                    return bool(external.get('streams'))
+
+                result = self.worker('release-recover', transaction_id=transaction_id,
+                    config_hash=current['config_sha256'], release_outcome=outcome, busy=idle)
+                expected = prepared['afterSha' if outcome == 'apply' else 'beforeSha']
+                if result != {'configSha256': expected} or idle():
+                    raise AccessError('release-publication-unverified')
+                pending['phase'] = 'held'
+                pending.pop('error', None)
+                atomic_json(self.state / 'transition.json', pending)
+                return result
+            except Exception as error:
+                self.model_error(pending, error)
+                if isinstance(error, AccessError):
+                    raise
+                raise AccessError('release-publication-failed') from None
+
+    def release_baseline(self, transaction_id):
+        try:
+            baseline = private_json(self.state / 'release-baseline.json', 0, 8192)
+        except FileNotFoundError:
+            raise AccessError('release-legacy-baseline-unavailable') from None
+        except (OSError, ValueError):
+            raise AccessError('release-original-state-unavailable') from None
+        if (type(baseline) is not dict or set(baseline) != {'transactionId', 'configSha256', 'receiptSha256'}
+                or baseline['transactionId'] != transaction_id
+                or any(type(v) is not str or not HEX.fullmatch(v) for v in baseline.values())):
+            raise AccessError('release-original-state-unavailable')
+        return baseline
+
+    def abort_release_access(self, transaction_id):
+        """Explicitly finish only a proved, never-prepared release attempt.
+
+        The proof operation retains both gates. Existing model-finish then
+        independently re-proves and releases them; its completion receipt
+        supports a reply lost after release. No generic exception calls this.
+        """
+        if (os.geteuid() != 0 or type(transaction_id) is not str
+                or not HEX.fullmatch(transaction_id)):
+            raise AccessError('invalid-model-transition')
+        request = dict(transaction_id=transaction_id, outcome='rolled-back')
+        with self.bounded(300):
+            with self.locked():
+                completed = self.model_completion(request)
+                if completed is not None:
+                    return {'configSha256': self.release_baseline(transaction_id)['configSha256']}
+                baseline = self.release_baseline(transaction_id)
+            result = self.finish_release_access(transaction_id, baseline['configSha256'], 'rollback',
+                                                abort_unprepared=True)
+            self.model_finish(request)
+            return result
+
+    def finish_release_access(self, transaction_id, config_sha256, outcome, *, abort_unprepared=False):
+        """Complete owner migration under the installer's existing root hold.
+
+        Private installer coordination, not a public socket operation. This
+        does not reopen admission: the normal model-finish ceremony does that.
+        """
+        if os.geteuid() != 0:
+            raise AccessError('root-service-required')
+        if (type(transaction_id) is not str or not HEX.fullmatch(transaction_id)
+                or type(config_sha256) is not str or not HEX.fullmatch(config_sha256)
+                or outcome not in ('apply', 'rollback')):
+            raise AccessError('invalid-model-transition')
+        with self.bounded(300), self.locked():
+            pending = self.model_journal(transaction_id)
+            if pending['phase'] not in ('held', 'error') or pending['configured_mode'] != 'full-access':
+                raise AccessError('model-lease-lost')
+            try:
+                baseline = None
+                if abort_unprepared:
+                    baseline = self.release_baseline(transaction_id)
+                    intent = private_json(self.state / 'release-intent.json', 0, 8192)
+                    if (type(intent) is not dict or set(intent) != {'transactionId', 'candidateSha256'}
+                            or intent['transactionId'] != transaction_id
+                            or any(type(v) is not str or not HEX.fullmatch(v) for v in intent.values())
+                            or outcome != 'rollback' or config_sha256 != baseline['configSha256']
+                            or config_sha256 != pending['start_config_sha256']):
+                        raise AccessError('release-original-state-changed')
+                    prepared_path = self.state / 'release-prepared.json'
+                    if os.path.lexists(prepared_path):
+                        prepared = private_json(prepared_path, 0, 8192)
+                        if (type(prepared) is not dict
+                                or set(prepared) != {'transactionId', 'candidateSha256', 'beforeSha', 'afterSha'}
+                                or any(type(v) is not str or not HEX.fullmatch(v) for v in prepared.values())
+                                or prepared['transactionId'] == transaction_id):
+                            raise AccessError('release-prepared-recovery-required')
+                else:
+                    prepared = private_json(self.state / 'release-prepared.json', 0, 8192)
+                    if (type(prepared) is not dict
+                            or set(prepared) != {'transactionId', 'candidateSha256', 'beforeSha', 'afterSha'}
+                            or prepared['transactionId'] != transaction_id
+                            or any(type(value) is not str or not HEX.fullmatch(value) for value in prepared.values())
+                            or config_sha256 != prepared['afterSha' if outcome == 'apply' else 'beforeSha']):
+                        raise AccessError('release-preparation-required')
+                self.discover(allow_installing=True)
+                token = pending['token']
+                edge = self.edge()
+                if edge.get('phase') not in ('held', 'interrupted') or edge.get('streams'):
+                    raise AccessError('model-lease-lost')
+                edge = self.edge('recover' if edge['phase'] == 'interrupted' else 'acquire',
+                                 token, edge['revision'])
+                if edge.get('phase') != 'held' or edge.get('streams'):
+                    raise AccessError('model-lease-lost')
+                pending['edge_revision'] = edge['revision']
+                atomic_json(self.state / 'transition.json', pending)
+                native = self.native('acquire', token, timeout=10)
+                if native.get('phase') != 'held' or native.get('active') or native.get('stopped'):
+                    raise AccessError('model-lease-lost')
+                evidence = {}
+
+                def idle():
+                    current = self.native(timeout=10)
+                    external = self.edge()
+                    if (current.get('phase') != 'held' or current.get('stopped')
+                            or external.get('phase') != 'held'
+                            or external.get('revision') != pending['edge_revision']):
+                        raise AccessError('model-lease-lost')
+                    return bool(current.get('active') or external.get('streams'))
+
+                def verify():
+                    if idle():
+                        raise AccessError('model-lease-lost')
+                    # The owner holds apply.lock here. Never launch a nested
+                    # status worker or call verify_held_mode from this hook.
+                    proof, boundary = self.probe_held_mode(token, 'full-access')
+                    current = self.native(timeout=10)
+                    if (type(proof.get('pid')) is not int or proof['pid'] <= 0
+                            or current.get('pid') != proof['pid'] or idle()
+                            or self.unit_boundary() != boundary):
+                        raise AccessError('runtime-proof-required')
+                    evidence.update(pid=proof['pid'], proof=proof['proof'], boundary=boundary)
+                    return 'verified'
+
+                if abort_unprepared:
+                    result = self.worker('release-abort', config_hash=config_sha256,
+                        transaction_id=transaction_id, receipt_sha256=baseline['receiptSha256'],
+                        busy=idle, verify_release=verify)
+                else:
+                    result = self.worker('release-finish', config_hash=config_sha256,
+                        transaction_id=transaction_id, release_outcome=outcome,
+                        busy=idle, verify_release=verify)
+                # An acknowledged worker result alone cannot stand in for the
+                # native proof, including after a lost-reply completion replay.
+                current = self.native(timeout=10)
+                if (not evidence or result != {'configSha256': config_sha256}
+                        or current.get('pid') != evidence['pid'] or idle()
+                        or self.unit_boundary() != evidence['boundary']):
+                    raise AccessError('runtime-proof-required')
+                atomic_json(self.state / 'verified.json', dict(evidence, config_sha256=config_sha256))
+                atomic_json(self.state / 'release-completed.json', dict(
+                    transactionId=transaction_id, configSha256=config_sha256, outcome=outcome))
+                pending['phase'] = 'held'
+                pending.pop('error', None)
+                atomic_json(self.state / 'transition.json', pending)
+                return result
+            except Exception as error:
+                self.model_error(pending, error)
+                if isinstance(error, AccessError):
+                    raise
+                raise AccessError('release-verification-failed') from None
+
     def model_finish(self, request):
         if (type(request) is not dict or set(request) != {"transaction_id", "outcome"}
                 or type(request["transaction_id"]) is not str
@@ -1120,6 +1647,14 @@ class SystemdAccessBridge:
                 or request["outcome"] not in ("applied", "rolled-back")):
             raise AccessError("invalid-request")
         with self.bounded(300), self.locked():
+            if platform.system() == "Linux" and os.path.lexists(self.state / 'source-upgrade'):
+                from pixel_source_upgrade import release_guard, UpgradeError
+                try:
+                    self.discover(allow_installing=True)
+                    release_guard(self.state, self.install, self.owner.pw_uid,
+                                  request['transaction_id'], request['outcome'])
+                except UpgradeError as error:
+                    raise AccessError(str(error)) from None
             completion = self.model_completion(request)
             if completion is not None:
                 # The socket reply may have been lost after both gates released.
@@ -1174,7 +1709,51 @@ class SystemdAccessBridge:
                 if (request["outcome"] == "rolled-back"
                         and config.get("config_sha256") != pending["start_config_sha256"]):
                     raise AccessError("rollback-config-mismatch")
+                overlay = self.require_release_completion(pending['transaction_id'],
+                                                config.get('config_sha256'), request['outcome'])
                 self.verify_held_mode(token, pending["configured_mode"])
+                if overlay is not None:
+                    # A receipt for the original release cannot attest a later
+                    # installer overlay. Reprove its exact derivation AFTER the
+                    # fresh native probe; never refresh the original receipt.
+                    after = self.require_release_completion(pending['transaction_id'],
+                        config.get('config_sha256'), request['outcome'])
+                    if after != overlay or self.worker().get('config_sha256') != config['config_sha256']:
+                        raise AccessError('source-overlay-state-changed')
+                    verified = private_json(self.state / 'verified.json', 0, 8192)
+                    current_native, current_edge = self.native(), self.edge()
+                    if (verified.get('config_sha256') != config['config_sha256']
+                            or verified.get('boundary') != self.unit_boundary()
+                            or current_native.get('pid') != verified.get('pid')
+                            or current_native.get('proof') != verified.get('proof')
+                            or current_native.get('phase') != 'held' or current_native.get('active')
+                            or current_native.get('stopped') or current_edge.get('phase') != 'held'
+                            or current_edge.get('streams') or current_edge.get('revision') != pending['edge_revision']):
+                        raise AccessError('source-overlay-runtime-changed')
+                    completion_path = self.state / 'source-overlay-completed.json'
+                    if os.path.lexists(completion_path):
+                        previous = private_json(completion_path, 0, 8192)
+                        if previous != overlay:
+                            # Retain one bounded historical receipt. A different
+                            # completed transaction is not authority for this one,
+                            # but must not prevent the next independently proved
+                            # source update. Same-transaction drift always fails.
+                            if (type(previous) is not dict or set(previous) - {'provisionSha256'} != set(overlay) - {'provisionSha256'}
+                                    or 'provisionSha256' in previous and (type(previous['provisionSha256']) is not str
+                                        or not HEX.fullmatch(previous['provisionSha256']))
+                                    or previous.get('version') != 1
+                                    or previous.get('transactionId') == pending['transaction_id']
+                                    or any(type(previous.get(key)) is not str or not HEX.fullmatch(previous[key])
+                                        for key in ('transactionId', 'sourcePlanSha256', 'rendererSha256',
+                                            'beforeSha256', 'configSha256', 'candidateSha256'))
+                                    or type(previous.get('ownerSnapshots')) is not list
+                                    or len(previous['ownerSnapshots']) != 6
+                                    or any(type(v) is not str or not HEX.fullmatch(v) for v in previous['ownerSnapshots'])
+                                    or type(previous.get('rootRecords')) is not dict
+                                    or set(previous['rootRecords']) != set(overlay['rootRecords'])
+                                    or any(type(v) is not str or not HEX.fullmatch(v) for v in previous['rootRecords'].values())):
+                                raise AccessError('source-overlay-completion-changed')
+                    atomic_json(completion_path, overlay)
                 pending["phase"] = "releasing"
                 atomic_json(self.state / "transition.json", pending)
                 # Keep edge admission closed until the native runtime release
@@ -1228,6 +1807,152 @@ class SystemdAccessBridge:
                 if isinstance(error, AccessError): raise
                 raise AccessError("model-transition-failed") from None
 
+    def require_release_completion(self, transaction_id, config_sha, outcome):
+        path = self.state / 'release-intent.json'
+        if not os.path.lexists(path):
+            return
+        intent = private_json(path, 0, 8192)
+        if (type(intent) is not dict or set(intent) != {'transactionId', 'candidateSha256'}
+                or any(type(value) is not str or not HEX.fullmatch(value) for value in intent.values())):
+            raise AccessError('release-recovery-required')
+        if intent['transactionId'] != transaction_id:
+            return
+        try:
+            completed = private_json(self.state / 'release-completed.json', 0, 8192)
+        except FileNotFoundError:
+            raise AccessError('release-completion-required') from None
+        expected = dict(transactionId=transaction_id, configSha256=config_sha,
+                        outcome='apply' if outcome == 'applied' else 'rollback')
+        if completed != expected:
+            if platform.system() != 'Linux' or outcome != 'applied':
+                raise AccessError('release-completion-required')
+            from pixel_source_upgrade import prove_runtime_overlay, UpgradeError
+            try:
+                return prove_runtime_overlay(self, transaction_id, config_sha, outcome)
+            except UpgradeError as error:
+                raise AccessError(str(error)) from None
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                raise AccessError('source-overlay-proof-failed') from None
+
+    def prepare_access_marker(self, pending, expected_sha):
+        # The root journal retains the exact pre-transition configuration.
+        # Never adopt an already drifted owner config as an install baseline.
+        from pixel_model_coordinator import _config, _managed_marker, _marker_digest
+        _, marker = _managed_marker(self, allow_installing=_INSTALLER_ACCESS_REPROOF.get())
+        if marker is None:
+            return  # Native macOS uses the protected launchd binding instead.
+        config, config_sha = _config(self)
+        if config_sha != expected_sha:
+            raise AccessError("access-config-changed")
+        prior = _marker_digest(config)
+        if marker["configuration_sha256"] != prior:
+            config = self.legacy_access_marker_baseline(config, marker)
+            prior = _marker_digest(config)
+        atomic_json(self.state / "access-before.json", config)
+        pending["markerBeforeSha"] = prior
+
+    def legacy_access_marker_baseline(self, config, marker):
+        # Releases before marker binding recorded Full Access in the owner
+        # controller and root runtime proof only. Accept just that exact
+        # five-field migration; a fresh held-mode proof still precedes binding.
+        from access_mode_config import enable, restore, MigrationError
+        from pixel_model_coordinator import _marker_digest
+        legacy = self.home / ".local/state/ods-pixel-access-mode"
+        folder = legacy if os.path.lexists(legacy) else runtime_config_path(self).parent / ".ods-access-mode"
+        try:
+            info = folder.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or folder.resolve() != folder
+                    or info.st_uid != self.owner.pw_uid or info.st_mode & 0o077):
+                raise AccessError("access-marker-drifted")
+            receipt = private_json(folder / "pixel-access-mode.json", self.owner.pw_uid)
+            verified = private_json(self.state / "verified.json", 0, 8192)
+            proof = verified.get("proof", {})
+            if (receipt.get("version") != 1 or receipt.get("status") != "full-access"
+                    or receipt.get("config_path") != str(runtime_config_path(self))
+                    or not isinstance(receipt.get("config_sha256"), str)
+                    or not HEX.fullmatch(receipt["config_sha256"])
+                    or verified.get("config_sha256") != receipt["config_sha256"]
+                    or proof.get("mode") != "full-access" or proof.get("executed") is not True
+                    or verified.get("boundary") != self.unit_boundary()):
+                raise AccessError("access-marker-drifted")
+            enabled, _ = enable(config, receipt["baseline"])
+            baseline, _ = restore(config, receipt["baseline"])
+            if enabled != config or _marker_digest(baseline) != marker["configuration_sha256"]:
+                raise AccessError("access-marker-drifted")
+            return baseline
+        except (OSError, ValueError, KeyError, TypeError, MigrationError):
+            raise AccessError("access-marker-drifted") from None
+
+    def finish_access_marker(self, pending):
+        from pixel_model_coordinator import _config, _managed_marker, _marker_digest, _bind_managed_marker
+        _, marker = _managed_marker(self, allow_installing=_INSTALLER_ACCESS_REPROOF.get())
+        if marker is None:
+            return
+        config, config_sha = _config(self)
+        verified = private_json(self.state / "verified.json", 0, 8192)
+        if verified.get("config_sha256") != config_sha:
+            raise AccessError("access-config-changed")
+        if "markerBeforeSha" not in pending:
+            # A legacy interrupted restore has no root before-snapshot. It may
+            # restore the already bound configuration, but cannot rebind drift.
+            if marker["configuration_sha256"] != _marker_digest(config):
+                raise AccessError("access-marker-recovery-required")
+            return
+        before = private_json(self.state / "access-before.json", 0, 8 * 1024 * 1024)
+
+        def unrelated(value):
+            value = json.loads(json.dumps(value))
+            agents = [item for item in value.get("agents", {}).get("list", []) if item.get("id") == "pixel"]
+            if len(agents) != 1:
+                raise AccessError("access-config-changed")
+            for path in (("sandbox", "mode"), ("tools", "exec", "host"),
+                         ("tools", "exec", "security"), ("tools", "exec", "ask"),
+                         ("tools", "fs", "workspaceOnly")):
+                node, parents = agents[0], []
+                for key in path[:-1]:
+                    if key not in node:
+                        break
+                    if type(node[key]) is not dict:
+                        raise AccessError("access-config-changed")
+                    parents.append((node, key))
+                    node = node[key]
+                else:
+                    node.pop(path[-1], None)
+                    for parent, key in reversed(parents):
+                        if parent[key]:
+                            break
+                        del parent[key]
+            return value
+
+        if unrelated(before) != unrelated(config):
+            raise AccessError("access-unrelated-config-changed")
+        # Persist the verified candidate before the atomic marker replacement.
+        # A later release failure may require restoring the original snapshot;
+        # the root journal must also recognize this intermediate bound marker.
+        pending.setdefault("markerAppliedSha", _marker_digest(config))
+        atomic_json(self.state / "transition.json", pending)
+        _bind_managed_marker(self, pending, config_sha, snapshot_name="access-before.json",
+                             allow_installing=_INSTALLER_ACCESS_REPROOF.get())
+
+    def reprove_installer_access(self):
+        """Root installer only: verify the existing mode without sealing install."""
+        if os.geteuid() != 0:
+            raise AccessError("root-installer-required")
+        token = _INSTALLER_ACCESS_REPROOF.set(True)
+        try:
+            with self.bounded(330):
+                snapshot = self.inspect(allow_installing=True)
+                mode = snapshot["configured_mode"]
+                if snapshot["pending"] or snapshot["busy"] or mode not in ("sandboxed", "full-access"):
+                    raise AccessError("installer-access-recovery-required")
+                result = self.change({"mode": mode, "confirmed": mode == "full-access",
+                                      "revision": snapshot["revision"]})
+                if result.get("effective_mode") != mode or result.get("runtime_verified") is not True:
+                    raise AccessError("installer-access-proof-failed")
+                return {"result": "reproved", "mode": mode}
+        finally:
+            _INSTALLER_ACCESS_REPROOF.reset(token)
+
     def change(self, request):
         if (not isinstance(request, dict) or set(request) != {"mode", "revision", "confirmed"}
                 or request["mode"] not in ("full-access", "sandboxed") or type(request["confirmed"]) is not bool
@@ -1248,6 +1973,7 @@ class SystemdAccessBridge:
             if pending and request["mode"] != "sandboxed": raise AccessError("restore-required")
             if not pending:
                 pending = {"kind": "access", "token": os.urandom(32).hex(), "phase": "acquiring", "edge_revision": snapshot["_edge"]["revision"]}
+                self.prepare_access_marker(pending, snapshot["_config"]["config_sha256"])
                 atomic_json(self.state / "transition.json", pending)
             token = pending["token"]
             try:
@@ -1272,7 +1998,7 @@ class SystemdAccessBridge:
 
                 def restart():
                     if busy(): return False
-                    current = private_json(self.home / ".openclaw/openclaw.json", self.owner.pw_uid)
+                    current = private_json(runtime_config_path(self), self.owner.pw_uid)
                     agents = [agent for agent in current.get("agents", {}).get("list", []) if agent.get("id") == "pixel"]
                     if len(agents) != 1: return False
                     self.dropin_for(agents[0].get("sandbox", {}).get("mode") == "off" and agents[0].get("tools", {}).get("exec", {}).get("host") == "gateway")
@@ -1307,12 +2033,13 @@ class SystemdAccessBridge:
                 # a baseline or performing an unnecessary restore.
                 if not (request["mode"] == "sandboxed" and not config.get("managed") and config.get("configured_status") == "sandboxed"):
                     self.worker(request["mode"], confirmed=request["confirmed"], config_hash=config["config_sha256"], busy=busy, restart=restart)
-                elif self.dropin.exists():
+                elif self.service_restore_required():
                     if not restart(): raise AccessError("restore-restart-failed")
                 # A pending journal alone does not mean this pristine config
                 # changed. Recheck the actual service boundary and core tools
                 # below; restarting again can perpetually interrupt recovery.
                 self.verify_held_mode(token, request["mode"])
+                self.finish_access_marker(pending)
                 pending["phase"] = "releasing"
                 atomic_json(self.state / "transition.json", pending)
                 native_at("release", "release", token)
@@ -1327,3 +2054,404 @@ class SystemdAccessBridge:
                 atomic_json(self.state / "transition.json", pending)
                 if isinstance(error, AccessError): raise
                 raise AccessError("transition-failed") from None
+
+
+class LaunchdAccessBridge(SystemdAccessBridge):
+    """Darwin bridge for a root-owned system LaunchDaemon gateway.
+
+    The transaction engine is shared with Linux, but every systemd-specific
+    assumption is replaced here: launchd custody, plist identity and pinned
+    Seatbelt profiles. A user LaunchAgent never qualifies as this bridge.
+    """
+    def __init__(self, install_dir, edge_key, *, gateway_target, gateway_plist,
+                 gateway_process, state, gateway_binding, installed_binary,
+                 gateway_owner, gateway_port=None, settings_data_dir=None, gateway_policy=None):
+        if (not isinstance(gateway_target, str)
+                or not re.fullmatch(r'system/[A-Za-z0-9][A-Za-z0-9.-]{0,127}', gateway_target)):
+            raise AccessError('system-launchdaemon-required')
+        gateway_plist = Path(gateway_plist) if isinstance(gateway_plist, str) else gateway_plist
+        if (not isinstance(gateway_plist, Path) or not gateway_plist.is_absolute()
+                or gateway_plist.parent != Path('/Library/LaunchDaemons')
+                or gateway_plist.name != gateway_target.rsplit('/', 1)[1] + '.plist'):
+            raise AccessError('system-launchdaemon-required')
+        super().__init__(install_dir, edge_key, state=state, installed_binary=installed_binary,
+                         gateway_owner=gateway_owner, gateway_port=gateway_port,
+                         settings_data_dir=settings_data_dir, gateway_binding=gateway_binding)
+        self.gateway_target = gateway_target
+        self.gateway_plist = gateway_plist
+        self.gateway_process = dict(gateway_process) if isinstance(gateway_process, dict) else gateway_process
+        self.gateway_policy = gateway_policy
+        self.gateway_service = LaunchdGatewayService(
+            lambda *args, **kwargs: self.command(*args, **kwargs), AccessError,
+            gateway_target, self._verify_launchd_loaded, process=self.gateway_process,
+            plist=self.gateway_plist, verify_definition=self._verify_launchd_definition,
+            save_stop=self._save_gateway_stop, load_stop=self._load_gateway_stop)
+        # The shared change() implementation checks this path only to detect a
+        # legacy systemd drop-in. Darwin mode never creates one.
+        self.dropin = Path('/private/var/empty/ods-pixel-no-systemd-dropin')
+
+    @contextlib.contextmanager
+    def locked(self):
+        with super().locked():
+            # Do not infer successful recovery from a journal phase alone.
+            # The upgrader removes this marker only after live verification.
+            if os.path.lexists(self.state / 'runtime-upgrade.json'):
+                raise AccessError('runtime-upgrade-recovery-required')
+            yield
+
+    @contextlib.contextmanager
+    def recovery_locked(self, *, completed_digest=None):
+        """Reserve the controller for the explicit runtime recovery path.
+
+        Holding this lock does not authorize journal contents or reopening
+        admission. Recovery must validate both before modifying services.
+        """
+        with super().locked():
+            pending = os.path.lexists(self.state / 'runtime-upgrade.json')
+            if completed_digest is None:
+                if not pending:
+                    raise AccessError('runtime-upgrade-journal-required')
+            else:
+                if type(completed_digest) is not str or not re.fullmatch('[a-f0-9]{64}', completed_digest):
+                    raise AccessError('runtime-upgrade-digest-invalid')
+                if pending:
+                    raise AccessError('runtime-upgrade-pending-recovery')
+                if not os.path.lexists(self.state / ('runtime-upgrade-' + completed_digest + '.completed.json')):
+                    raise AccessError('runtime-upgrade-archive-required')
+            if any(os.path.lexists(self.state / name) for name in
+                   ('transition.json', 'policy-activation.json')):
+                raise AccessError('runtime-upgrade-pending-recovery')
+            yield
+
+    def status(self):
+        if os.path.lexists(self.state / 'runtime-upgrade.json'):
+            return {'available': False, 'surface': 'darwin', 'configured_mode': 'unknown',
+                    'effective_mode': 'unknown', 'runtime_verified': False, 'revision': None,
+                    'busy': False, 'pending': True, 'reason': 'runtime-upgrade-recovery-required',
+                    'scope': 'owner-host'}
+        return super().status()
+
+    def _stop_transaction(self):
+        journal = self.pending()
+        if (type(journal) is not dict or journal.get('kind') != 'provider'
+                or journal.get('phase') not in ('invoking', 'restarting')
+                or type(journal.get('token')) is not str or not HEX.fullmatch(journal['token'])):
+            raise AccessError('native-stop-transaction-unavailable')
+        return journal
+
+    def _save_gateway_stop(self, witness):
+        journal = self._stop_transaction()
+        atomic_json(self.state / 'launchd-stop.json', {'token': journal['token'], 'witness': witness})
+
+    def _load_gateway_stop(self):
+        journal = self._stop_transaction()
+        try:
+            value = private_json(self.state / 'launchd-stop.json', 0, 256 * 1024)
+        except (OSError, ValueError):
+            raise AccessError('native-stop-witness-unavailable') from None
+        if (type(value) is not dict or set(value) != {'token', 'witness'}
+                or value['token'] != journal['token'] or value['witness'] is None):
+            raise AccessError('native-stop-witness-unavailable')
+        return value['witness']
+
+    def _launchd_document(self):
+        import grp
+        import pwd
+        from pixel_macos_custody import CustodyError, protected_bytes
+        try:
+            raw = protected_bytes(self.gateway_plist)
+            document = plistlib.loads(raw)
+        except (CustodyError, OSError, ValueError, TypeError, plistlib.InvalidFileException):
+            raise AccessError('gateway-launchd-custody-required') from None
+        if type(document) is not dict:
+            raise AccessError('gateway-launchd-custody-required')
+        try:
+            group = grp.getgrgid(pwd.getpwnam(self.gateway_owner).pw_gid).gr_name
+        except (KeyError, TypeError):
+            raise AccessError('gateway-owner-unavailable') from None
+        if (document.get('Label') != self.gateway_target.rsplit('/', 1)[1]
+                or document.get('UserName') != self.gateway_owner
+                or document.get('GroupName') != group):
+            raise AccessError('gateway-launchdaemon-identity-mismatch')
+        return raw, document
+
+    def _verify_launchd_definition(self):
+        self._launchd_document()
+        if (self.gateway_binding is None or
+                self.gateway_service.definition() != self.gateway_binding.get('definition')):
+            raise AccessError('gateway-installation-changed')
+
+    def _verify_launchd_loaded(self):
+        from pixel_macos_custody import CustodyError, verify_loaded_launchd_definition
+        _, document = self._launchd_document()
+        try:
+            self._verify_launchd_definition()
+            raw = self.command(['/bin/launchctl', 'print', self.gateway_target])
+            verify_loaded_launchd_definition(raw, self.gateway_target, self.gateway_plist, document)
+        except CustodyError as error:
+            raise AccessError(str(error)) from None
+
+    def gateway_installation_binding(self, *, require_running=False):
+        import pwd
+        _, document = self._launchd_document()
+        try:
+            self._verify_launchd_loaded()
+        except AccessError as error:
+            if require_running or error.code != 'host-command-failed' or error.returncode != 113:
+                raise
+            # Recovery can rediscover an intentionally unloaded job only with
+            # a same-transaction, same-boot root witness and fresh OS checks.
+            self.gateway_service.assert_stopped()
+        if require_running:
+            self.gateway_service.pid(require_running=True)
+        owner = pwd.getpwnam(self.gateway_owner)
+        if owner.pw_uid == 0:
+            raise AccessError('unsafe-gateway-owner')
+        process = self.gateway_process
+        if (type(process) is not dict or set(process) != {'uid', 'gid', 'executable'}
+                or process['uid'] != owner.pw_uid or process['gid'] != owner.pw_gid):
+            raise AccessError('gateway-process-specification-required')
+        binding = {'schemaVersion': 1, 'target': self.gateway_target,
+                   'plist': str(self.gateway_plist), 'definition': self.gateway_service.definition(),
+                   'owner': owner.pw_name, 'executable': process['executable'], 'process': process}
+        return binding
+
+    def verify_gateway_installation_binding(self):
+        if self.gateway_binding is None or self.gateway_installation_binding() != self.gateway_binding:
+            raise AccessError('gateway-installation-changed')
+        self._policy_state()
+
+    def _policy_state(self):
+        from pixel_macos_policy import PolicyError, policy_state
+        try:
+            state = policy_state(self.gateway_policy)
+        except (PolicyError, OSError) as error:
+            raise AccessError(str(error) if isinstance(error, PolicyError) else 'policy-unavailable') from None
+        _, document = self._launchd_document()
+        arguments = document.get('ProgramArguments', [])
+        if arguments.count('/usr/bin/sandbox-exec') != 1:
+            raise AccessError('gateway-policy-binding-mismatch')
+        index = arguments.index('/usr/bin/sandbox-exec')
+        if len(arguments) <= index + 3 or arguments[index + 1] != '-f':
+            raise AccessError('gateway-policy-binding-mismatch')
+        profile = arguments[index + 2]
+        # Only Apple's fixed /etc alias is permitted; do not resolve arbitrary
+        # symlinks before the custody checker has inspected the actual paths.
+        if profile.startswith('/etc/'):
+            profile = '/private' + profile
+        if profile != state['active']:
+            raise AccessError('gateway-policy-binding-mismatch')
+        return state
+
+    def _runtime_environment(self):
+        _, document = self._launchd_document()
+        arguments = document.get('ProgramArguments')
+        if (type(arguments) is not list or len(arguments) < 4
+                or arguments[:2] != ['/usr/bin/env', '-i']):
+            raise AccessError('gateway-runtime-environment-unavailable')
+        values = {}
+        for argument in arguments[2:]:
+            if not isinstance(argument, str):
+                raise AccessError('gateway-runtime-environment-unavailable')
+            key, separator, value = argument.partition('=')
+            if not separator or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key):
+                break
+            if key in values:
+                raise AccessError('gateway-runtime-environment-unavailable')
+            values[key] = value
+        for key in ('HOME', 'OPENCLAW_CONFIG_PATH', 'OPENCLAW_STATE_DIR'):
+            value = values.get(key)
+            if (not isinstance(value, str) or not value.startswith('/') or value == '/'
+                    or any(part in ('', '.', '..') for part in value.split('/')[1:])
+                    or any(ord(char) < 32 for char in value)
+                    or Path(value).resolve() != Path(value)):
+                raise AccessError('gateway-runtime-path-unavailable')
+        return values
+
+    def worker_environment(self):
+        self.verify_gateway_installation_binding()
+        configured = self._runtime_environment()
+        if (Path(configured['HOME']) != self.home
+                or Path(configured['OPENCLAW_CONFIG_PATH']) != runtime_config_path(self)):
+            raise AccessError('gateway-installation-changed')
+        env = super().worker_environment()
+        for key in ('OPENCLAW_CONFIG_PATH', 'OPENCLAW_STATE_DIR', 'PATH', 'TMPDIR',
+                    'DOCKER_HOST', 'DOCKER_CONFIG', 'OPENCLAW_WRAPPER'):
+            if key in configured:
+                env[key] = configured[key]
+        return env
+
+    def _docker_process_context(self):
+        # Docker Desktop and its socket are owner-managed. Drop root before
+        # exec and use only the environment bound to the protected gateway.
+        return dict(cwd='/', env=self.worker_environment(), **self._native_owner_identity())
+
+    def _inspect_edge(self, *, timeout):
+        context = self._docker_process_context()
+        try:
+            result = subprocess.run(['docker', 'inspect', 'ods-pixel-edge', '--format',
+                                     '{{.Id}} {{.State.Running}}'],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=remaining(timeout), **context)
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as error:
+            raise AccessError('host-command-failed', returncode=error.returncode) from None
+        except (OSError, subprocess.SubprocessError):
+            raise AccessError('host-command-failed') from None
+
+    def _request_edge(self, *args, **kwargs):
+        return _edge_container_request(*args, **kwargs, process_context=self._docker_process_context())
+
+    def discover(self, *, allow_installing=False):
+        if platform.system() != 'Darwin':
+            raise AccessError('macos-platform-required')
+        if os.geteuid() != 0:
+            raise AccessError('root-host-adapter-required')
+        program = Path(__file__).resolve()
+        for path in (program, *program.parents):
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                raise AccessError('root-program-custody-required')
+        if self.gateway_binding is None:
+            raise AccessError('gateway-launchd-binding-required')
+        self.verify_gateway_installation_binding()
+        import pwd
+        try:
+            owner = pwd.getpwnam(self.gateway_owner)
+        except KeyError:
+            raise AccessError('gateway-owner-unavailable') from None
+        if owner.pw_uid == 0 or not Path(owner.pw_dir).is_absolute() or Path(owner.pw_dir).resolve() != Path(owner.pw_dir):
+            raise AccessError('unsafe-gateway-owner')
+        # Like Linux's explicit adoption path, the verified root deployment
+        # receipt authorizes discovery without inventing an owner ready marker.
+        environment = self._runtime_environment()
+        runtime_home = Path(environment['HOME'])
+        runtime_config = Path(environment['OPENCLAW_CONFIG_PATH'])
+        home_info = runtime_home.lstat()
+        if (not stat.S_ISDIR(home_info.st_mode) or home_info.st_uid != owner.pw_uid
+                or home_info.st_mode & 0o077):
+            raise AccessError('unsafe-gateway-home')
+        config = private_json(runtime_config, owner.pw_uid)
+        binary = self.installed_binary
+        if not isinstance(binary, str) or not Path(binary).is_absolute() or not os.access(binary, os.X_OK):
+            raise AccessError('installed-validator-unavailable')
+        port = self.configured_gateway_port(config)
+        token = config.get('gateway', {}).get('auth', {}).get('token')
+        if not isinstance(token, str) or not 16 <= len(token) <= 4096:
+            raise AccessError('gateway-auth-unavailable')
+        self.owner, self.home, self.binary = owner, runtime_home, binary
+        self._runtime_config_path = runtime_config
+        if (self.native_port, self.native_key) != (port, token):
+            self.native_port = self.native_key = self.native_origin = self._native_identity = None
+        self.native_port, self.native_key = port, token
+        # Public Edge/Dashboard schemas already use darwin for macOS. Keep
+        # the launchd-specific identity in the private boundary receipt.
+        self.surface = 'darwin'
+
+    def unit_boundary(self):
+        definition = self.gateway_service.definition()
+        value = json.dumps({'schemaVersion': 1, 'platform': 'macos-launchd',
+                            'target': self.gateway_target, 'plist': str(self.gateway_plist),
+                            'definition': definition, 'policy': self._policy_state()},
+                           sort_keys=True, separators=(',', ':'))
+        if len(value) > 4096:
+            raise AccessError('gateway-boundary-unavailable')
+        return value
+
+    def dropin_for(self, enabled):
+        if type(enabled) is not bool:
+            raise AccessError('invalid-access-mode')
+        self._verify_launchd_loaded()
+        self._policy_state()
+        mode = 'full-access' if enabled else 'sandboxed'
+        # Persist before the file switch: interruption must never let an old
+        # process qualify against newly selected on-disk policy bytes.
+        atomic_json(self.state / 'policy-activation.json', {
+            'mode': mode, 'before': self.gateway_service.transaction_identity()})
+        from pixel_macos_policy import PolicyError, select_policy
+        try:
+            select_policy(self.gateway_policy, mode)
+        except (PolicyError, OSError) as error:
+            raise AccessError(str(error) if isinstance(error, PolicyError) else 'policy-selection-failed') from None
+        # change() must still observe the old PID, restart, and run the core
+        # tool proof. Selecting a file alone never establishes an effective mode.
+
+    def service_restore_required(self):
+        return (self._policy_state()['activeMode'] != 'sandboxed'
+                or (self.state / 'policy-activation.json').exists())
+
+    def _policy_activation_identity(self, mode):
+        path = self.state / 'policy-activation.json'
+        if not path.exists():
+            return None
+        record = private_json(path, 0, 8192)
+        current = self.gateway_service.transaction_identity()
+        try:
+            before = record['before']
+            if (set(record) != {'mode', 'before'} or record['mode'] != mode
+                    or type(before) is not dict or set(before) != {'boot', 'pid', 'started'}
+                    or type(before['pid']) is not int or before['pid'] <= 0
+                    or type(before['started']) is not int or before['started'] <= 0
+                    or type(before['boot']) is not str
+                    or current['boot'] != before['boot'] or current['pid'] == before['pid']
+                    or current['started'] <= before['started']):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise AccessError('policy-restart-unconfirmed') from None
+        return current
+
+    def _probe_policy_held_mode(self, token, mode):
+        if mode not in ('full-access', 'sandboxed') or type(token) is not str or not HEX.fullmatch(token):
+            raise AccessError('invalid-model-transition')
+        self.provision_probe()
+        baseline_file = self.state / 'service-baseline.json'
+        if not baseline_file.exists():
+            raise AccessError('service-baseline-missing')
+        baseline = private_json(baseline_file, 0, 8192).get('boundary')
+        boundary = self.unit_boundary()
+        try:
+            expected = json.loads(baseline)
+            if expected['policy']['activeMode'] != 'sandboxed':
+                raise ValueError()
+            expected['policy']['activeMode'] = mode
+        except (ValueError, TypeError, KeyError):
+            raise AccessError('service-baseline-invalid') from None
+        if expected != json.loads(boundary):
+            raise AccessError('service-boundary-mismatch')
+        activation_identity = self._policy_activation_identity(mode)
+        try:
+            proof = self.native('probe', token)
+        except AccessError as error:
+            try:
+                snapshot = self.native(timeout=10)
+                failure = snapshot.get('probe_failure') if snapshot.get('phase') == 'held' else None
+            except AccessError:
+                failure = None
+            if failure in PROBE_FAILURES:
+                raise AccessError('runtime-proof-' + failure) from None
+            raise error
+        if proof.get('proof', {}).get('mode') != mode:
+            raise AccessError('runtime-proof-failed')
+        if activation_identity is not None and (
+                proof.get('pid') != activation_identity['pid']
+                or self.gateway_service.transaction_identity() != activation_identity):
+            raise AccessError('policy-restart-unconfirmed')
+        return proof, boundary, activation_identity
+
+    def probe_held_mode(self, token, mode):
+        proof, boundary, _ = self._probe_policy_held_mode(token, mode)
+        return proof, boundary
+
+    def verify_held_mode(self, token, mode):
+        proof, boundary, activation_identity = self._probe_policy_held_mode(token, mode)
+        verified_config = self.worker()
+        if verified_config.get('configured_status') != mode:
+            raise AccessError('configured-mode-changed')
+        if activation_identity is not None and (
+                proof.get('pid') != activation_identity['pid']
+                or self.gateway_service.transaction_identity() != activation_identity):
+            raise AccessError('policy-restart-unconfirmed')
+        atomic_json(self.state / 'verified.json', {'pid': proof['pid'], 'proof': proof['proof'],
+                    'config_sha256': verified_config['config_sha256'], 'boundary': boundary})
+        if activation_identity is not None:
+            (self.state / 'policy-activation.json').unlink()

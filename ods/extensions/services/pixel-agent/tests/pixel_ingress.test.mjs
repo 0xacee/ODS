@@ -22,7 +22,7 @@ import http from "node:http";
 import net from "node:net";
 import { createHash } from "node:crypto";
 
-import {
+const {
   gatewayRuntimeFromConfig,
   readGatewayConfiguration,
   readGatewayToken,
@@ -38,7 +38,7 @@ import {
   writeStatus,
   start,
   gatewayFetch,
-} from "../host/pixel_ingress.mjs";
+} = await import(process.env.PIXEL_INGRESS_MODULE ?? "../host/pixel_ingress.mjs");
 
 const DIR = path.join(os.tmpdir(), `px-ing-${process.pid}-${Date.now()}`);
 fs.mkdirSync(DIR, { recursive: true });
@@ -56,11 +56,20 @@ let socketCounter = 0;
 function fakeGateway({
   onRequest,
   onVerificationRequest,
+  onRecoveryRequest,
+  onDecisionRequest,
+  onDeliveryRequest,
+  delivery,
+  recovery = {schemaVersion:1,kind:'ods-extension-read-only-continuation',eligible:false},
+  decisionProof = {schemaVersion:1,kind:'ods-extension-unfinished-decision',eligible:false},
+  completionResponses,
   verification = { status: "none" },
   abortReplies = [true],
   completionText = "ok",
+  completionStatus = 200,
 } = {}) {
   let abortIndex = 0;
+  let completionIndex = 0;
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -82,6 +91,25 @@ function fakeGateway({
         res.end(JSON.stringify(verification));
         return;
       }
+      if (req.url === '/pixel-ods/subagent-delivery') {
+        onDeliveryRequest?.(captured);
+        res.writeHead(200,{'Content-Type':'application/json'});
+        res.end(JSON.stringify(typeof delivery==='function' ? delivery(captured) : delivery ??
+          {schemaVersion:1,kind:'ods-subagent-delivery',runId:captured.body.runId,status:'not-delegated'}));
+        return;
+      }
+      if (req.url === "/pixel-ods/read-only-extension-continuation") {
+        onRecoveryRequest?.(captured);
+        res.writeHead(200,{"Content-Type":"application/json"});
+        res.end(JSON.stringify(recovery));
+        return;
+      }
+      if (req.url === "/pixel-ods/unfinished-extension-decision") {
+        onDecisionRequest?.(captured);
+        res.writeHead(200,{"Content-Type":"application/json"});
+        res.end(JSON.stringify(decisionProof));
+        return;
+      }
       if (onRequest) onRequest(captured);
       if (req.url === "/pixel-ods/abort") {
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -96,8 +124,9 @@ function fakeGateway({
         res.end("data: [DONE]\n\n");
         return;
       }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ id: TEST_RUN_ID, choices: [{ message: { content: completionText } }] }));
+      res.writeHead(completionStatus, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(completionResponses?.[completionIndex++] ??
+        { id: TEST_RUN_ID, choices: [{ message: { content: completionText } }] }));
     });
   });
   return new Promise((resolve) => {
@@ -122,6 +151,30 @@ function startIngress({ token = TOKEN, gatewayPort, socket, deps } = {}) {
   });
 }
 
+for (const stream of [false, true]) {
+  for (const status of [429, 500]) {
+    test(`sanitizes upstream ${status} while preserving rate-limit identity (stream=${stream})`, async () => {
+      let submissions = 0;
+      const gw = await fakeGateway({completionStatus:status, completionText:'private-provider-secret', onRequest:()=>submissions++});
+      const srv = await startIngress({gatewayPort:gw.port});
+      try {
+        const result = await request(srv, 'POST', '/v1/chat/completions', {
+          body:JSON.stringify({messages:[{role:'user',content:'Continue editing'}],stream}),
+          headers:{'Content-Type':'application/json'},
+        });
+        assert.equal(result.status, stream ? 200 : status === 429 ? 429 : 502);
+        assert.equal(result.body.includes('provider_rate_limited'), status === 429);
+        assert.ok(!result.body.includes('private-provider-secret'));
+        assert.equal(submissions, 1, 'never replay work after a provider failure');
+        if (stream) assert.ok(result.body.endsWith('data: [DONE]\n\n'));
+      } finally {
+        await new Promise(resolve=>srv.close(resolve));
+        await new Promise(resolve=>gw.server.close(resolve));
+      }
+    });
+  }
+}
+
 test('re-reads a briefly unavailable final receipt without resubmitting work', async()=>{
   let submissions=0, reads=0;
   const verification={status:'unavailable'};
@@ -139,6 +192,191 @@ test('re-reads a briefly unavailable final receipt without resubmitting work', a
     assert.equal(submissions,1);assert.equal(reads,2);
   } finally {
     await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));
+  }
+});
+
+for (const stream of [false,true]) {
+  test(`yield waits for scoped consolidated delivery without replay (stream=${stream})`,async()=>{
+    let reads=0,submissions=0;const owners=[];
+    const gw=await fakeGateway({completionText:'Waiting for child review',onRequest:value=>{if(value.url==='/v1/chat/completions')submissions++;},
+      onDeliveryRequest:captured=>owners.push(captured.body),delivery:captured=>{
+        reads++;
+        return {schemaVersion:1,kind:'ods-subagent-delivery',runId:captured.body.runId,
+          ...(reads===1?{status:'waiting'}:{status:'ready',text:'Both reviews consolidated and verified',verification:{status:'passed'}})};
+      }});
+    const srv=await startIngress({gatewayPort:gw.port});
+    try {
+      const response=await request(srv,'POST','/v1/chat/completions',{
+        body:JSON.stringify({user:'delegated-owner',messages:[{role:'user',content:'Ask reviewers then consolidate'}],stream}),
+        headers:{'Content-Type':'application/json'},
+      });
+      assert.equal(response.status,200);assert.match(response.body,/Both reviews consolidated and verified/);
+      assert.ok(!response.body.includes('Waiting for child review'));
+      assert.equal(submissions,1);assert.equal(reads,2);
+      assert.deepEqual(owners[0],owners[1]);assert.match(owners[0].user,/^ods-[a-f0-9]{64}$/);
+      assert.equal(owners[0].runId,TEST_RUN_ID);
+      if(stream)assert.equal(response.body.match(/data: \[DONE\]/g).length,1);
+    } finally {await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));}
+  });
+  test(`lost or mismatched continuation receipt cannot deliver introduction (stream=${stream})`,async()=>{
+    for(const result of [{status:'interrupted',message:'fixed interruption'},{status:'ready',text:'Foreign answer',verification:{status:'none'},runId:'foreign'}]) {
+      let submissions=0;
+      const gw=await fakeGateway({completionText:'Waiting for child review',onRequest:value=>{if(value.url==='/v1/chat/completions')submissions++;},
+        delivery:{schemaVersion:1,kind:'ods-subagent-delivery',runId:TEST_RUN_ID,...result}});
+      const srv=await startIngress({gatewayPort:gw.port});
+      try {
+        const response=await request(srv,'POST','/v1/chat/completions',{
+          body:JSON.stringify({user:'delegated-owner',messages:[{role:'user',content:'Delegate review'}],stream}),headers:{'Content-Type':'application/json'},
+        });
+        assert.equal(response.status,stream?200:502);assert.match(response.body,/error/);
+        assert.ok(!response.body.includes('Waiting for child review'));assert.ok(!response.body.includes('Foreign answer'));
+        assert.equal(submissions,1);
+      } finally {await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));}
+    }
+  });
+}
+
+test('anonymous chat retains ephemeral sessions with distinct internal delivery custody',async()=>{
+  const requests=[],reads=[];
+  const gw=await fakeGateway({onRequest:value=>{if(value.url==='/v1/chat/completions')requests.push(value.body);},onDeliveryRequest:value=>reads.push(value.body)});
+  const srv=await startIngress({gatewayPort:gw.port});
+  try {
+    for(let i=0;i<2;i++) {
+      const response=await request(srv,'POST','/v1/chat/completions',{
+        body:JSON.stringify({messages:[{role:'user',content:'Hello'}]}),headers:{'Content-Type':'application/json'},
+      });
+      assert.equal(response.status,200);assert.match(response.body,/ok/);
+    }
+    assert.notEqual(requests[0].user,requests[1].user);
+    for(let i=0;i<2;i++){assert.match(requests[i].user,/^ods-[a-f0-9]{64}$/);assert.equal(reads[i].user,requests[i].user);}
+  } finally {await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));}
+});
+
+test('explicit Stop interrupts a held delegated response without exposing the introduction',async()=>{
+  let began;const observed=new Promise(resolve=>began=resolve);let reads=0;
+  const gw=await fakeGateway({completionText:'Waiting for children',delivery:captured=>{
+    reads++;began();return {schemaVersion:1,kind:'ods-subagent-delivery',runId:captured.body.runId,status:'waiting'};
+  }});
+  const srv=await startIngress({gatewayPort:gw.port});
+  try {
+    const pending=request(srv,'POST','/v1/chat/completions',{
+      body:JSON.stringify({user:'stop-owner',messages:[{role:'user',content:'Review'}],stream:true}),headers:{'Content-Type':'application/json'},
+    });
+    await observed;
+    const cancelled=await request(srv,'POST','/v1/chat/cancel',{
+      body:JSON.stringify({user:'stop-owner'}),headers:{'Content-Type':'application/json'},
+    });
+    assert.equal(cancelled.status,200);
+    const response=await pending;assert.match(response.body,/error/);assert.ok(!response.body.includes('Waiting for children'));
+    const settledReads=reads;await new Promise(resolve=>setTimeout(resolve,700));assert.equal(reads,settledReads);
+  } finally {await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));}
+});
+
+test('empty response continues once only after a matching read-only extension proof',async()=>{
+  const first={id:TEST_RUN_ID,choices:[{message:{role:'assistant',content:
+    "⚠️ Agent couldn't generate a response. Please try again."},finish_reason:'stop'}]};
+  const second={id:'chatcmpl_aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',choices:[{
+    message:{role:'assistant',content:'Verified continuation.'},finish_reason:'stop'}]};
+  const observed=[], recoveryCalls=[];
+  const gw=await fakeGateway({completionResponses:[first,second],
+    recovery:{schemaVersion:1,kind:'ods-extension-read-only-continuation',eligible:true,
+      chatId:'chat',requestId:'turn'},onRequest:value=>observed.push(value),
+    onRecoveryRequest:value=>recoveryCalls.push(value)});
+  const srv=await startIngress({gatewayPort:gw.port});
+  try {
+    const response=await request(srv,'POST','/v1/chat/completions',{
+      body:JSON.stringify({user:'chat',messages:[{role:'user',content:'/extensions install https://github.com/example/project'}],stream:true}),
+      headers:{'Content-Type':'application/json'},
+    });
+    assert.equal(response.status,200);
+    assert.match(response.body,/Verified continuation/);
+    assert.equal(observed.length,2);
+    assert.equal(recoveryCalls.length,1);
+    assert.deepEqual(recoveryCalls[0].body,{runId:TEST_RUN_ID});
+    assert.equal(observed[0].body.user,observed[1].body.user);
+    assert.notDeepEqual(observed[0].body.messages,observed[1].body.messages);
+    assert.match(observed[1].body.messages[0].content,/ODS internal continuation/);
+    assert.doesNotMatch(observed[1].body.messages[0].content,/github.com\/example/);
+  } finally {
+    await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));
+  }
+});
+
+test('empty response does not continue from a mismatched or absent proof',async()=>{
+  const first={id:TEST_RUN_ID,choices:[{message:{role:'assistant',content:
+    "⚠️ Agent couldn't generate a response. Please try again."},finish_reason:'stop'}]};
+  for(const recovery of [
+    {schemaVersion:1,kind:'ods-extension-read-only-continuation',eligible:false},
+    {schemaVersion:1,kind:'ods-extension-read-only-continuation',eligible:true,chatId:'other',requestId:'turn'},
+  ]) {
+    const observed=[];
+    const gw=await fakeGateway({completionResponses:[first],recovery,onRequest:value=>observed.push(value)});
+    const srv=await startIngress({gatewayPort:gw.port});
+    try {
+      const response=await request(srv,'POST','/v1/chat/completions',{
+        body:JSON.stringify({user:'chat',messages:[{role:'user',content:'continue'}],stream:true}),
+        headers:{'Content-Type':'application/json'},
+      });
+      assert.equal(response.status,200);
+      assert.equal(observed.length,1);
+      assert.doesNotMatch(response.body,/Verified continuation/);
+    } finally {
+      await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));
+    }
+  }
+});
+
+test('unfinished extension decision continues once only from matching durable proof',async()=>{
+  const first={id:TEST_RUN_ID,choices:[{message:{role:'assistant',content:'I will propose the install next.'},finish_reason:'stop'}]};
+  const second={id:'chatcmpl_aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',choices:[{
+    message:{role:'assistant',content:'Verified proposal receipt.'},finish_reason:'stop'}]};
+  const observed=[], decisionCalls=[];
+  const gw=await fakeGateway({completionResponses:[first,second],
+    decisionProof:{schemaVersion:1,kind:'ods-extension-unfinished-decision',eligible:true,
+      chatId:'chat',requestId:'turn',repository:'https://github.com/example/project'},
+    onRequest:value=>observed.push(value),onDecisionRequest:value=>decisionCalls.push(value)});
+  const srv=await startIngress({gatewayPort:gw.port});
+  try {
+    const response=await request(srv,'POST','/v1/chat/completions',{
+      body:JSON.stringify({user:'chat',messages:[{role:'user',content:'/extensions https://github.com/example/project install'}]}),
+      headers:{'Content-Type':'application/json'},
+    });
+    assert.equal(response.status,200);
+    assert.match(response.body,/Verified proposal receipt/);
+    assert.doesNotMatch(response.body,/I will propose/);
+    assert.equal(observed.length,2);
+    assert.equal(decisionCalls.length,1);
+    assert.deepEqual(decisionCalls[0].body,{runId:TEST_RUN_ID});
+    assert.equal(observed[0].body.user,observed[1].body.user);
+    assert.match(observed[1].body.messages[0].content,
+      /^\/extensions https:\/\/github\.com\/example\/project ODS internal continuation/);
+    assert.match(observed[1].body.messages[0].content,/saved request turn/);
+  } finally {
+    await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));
+  }
+});
+
+test('unfinished extension decision does not continue from absent or mismatched proof',async()=>{
+  const first={id:TEST_RUN_ID,choices:[{message:{role:'assistant',content:'I will propose next.'},finish_reason:'stop'}]};
+  for(const decisionProof of [
+    {schemaVersion:1,kind:'ods-extension-unfinished-decision',eligible:false},
+    {schemaVersion:1,kind:'ods-extension-unfinished-decision',eligible:true,chatId:'other',requestId:'turn',repository:'https://github.com/example/project'},
+    {schemaVersion:1,kind:'ods-extension-unfinished-decision',eligible:true,chatId:'chat',requestId:'turn',repository:'https://github.com/example/project',extra:true},
+  ]) {
+    const observed=[];
+    const gw=await fakeGateway({completionResponses:[first],decisionProof,onRequest:value=>observed.push(value)});
+    const srv=await startIngress({gatewayPort:gw.port});
+    try {
+      const response=await request(srv,'POST','/v1/chat/completions',{
+        body:JSON.stringify({user:'chat',messages:[{role:'user',content:'continue'}]}),
+        headers:{'Content-Type':'application/json'},
+      });
+      assert.equal(response.status,200);
+      assert.equal(observed.length,1);
+      assert.match(response.body,/I will propose next/);
+    } finally {
+      await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));
+    }
   }
 });
 
@@ -535,6 +773,33 @@ test("successful explicit cancel closes only the matching gateway transport", as
     await new Promise((resolve) => ingress.close(resolve));
     await new Promise((resolve) => upstream.close(resolve));
   }
+});
+
+test('cancel waits for harness drain plus managed project cleanup', async () => {
+  // Scale both clocks equally: 4 s harness + 10 s project cleanup.
+  const deps = {
+    setTimeout: (fn, ms) => setTimeout(fn, ms / 100), clearTimeout,
+    fetch: async (_url, {signal}) => {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 140);
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer); reject(new Error('deadline'));
+        }, {once:true});
+      });
+      return new Response(JSON.stringify({aborted:true}), {
+        headers:{'Content-Type':'application/json'},
+      });
+    },
+  };
+  const srv = await startIngress({gatewayPort:18789, deps});
+  try {
+    const response = await request(srv, 'POST', '/v1/chat/cancel', {
+      body:JSON.stringify({user:'managed-project-stop'}),
+      headers:{'Content-Type':'application/json'},
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(JSON.parse(response.body), {aborted:true});
+  } finally { await new Promise(resolve => srv.close(resolve)); }
 });
 
 test("health fails closed when the Pixel gateway is unreachable", async () => {
@@ -1231,6 +1496,21 @@ test("workspace preview metadata fails closed for an unverified URL or extra fie
   }
 });
 
+test('source snapshot receipt survives authenticated delivery and rejects foreign project metadata', async()=>{
+  const sha256='a'.repeat(64),siteId='site-'+sha256.slice(0,24);
+  const source={schemaVersion:1,sourceId:'source-'+'c'.repeat(24),sha256:'c'.repeat(64),relativeDirectory:'demo',files:2,bytes:80,omitted:{directories:1,files:0,sensitiveFiles:0}};
+  const base={schemaVersion:1,kind:'ods-pixel-workspace-preview',relativeDirectory:'demo/dist',siteId,port:9437,url:`http://${siteId}.localhost:9437/${siteId}/`,files:2,bytes:100,sha256,entrySha256:'b'.repeat(64)};
+  for(const candidate of [source,{...source,relativeDirectory:'foreign'},{...source,sourceId:'source-'+'d'.repeat(24)},{...source,omitted:{files:0}}]) {
+    const gw=await fakeGateway({verification:{status:'passed',text:'Captured source and built preview.',preview:{...base,source:candidate}}});
+    const srv=await startIngress({gatewayPort:gw.port});
+    try {
+      const response=await request(srv,'POST','/v1/chat/completions',{body:JSON.stringify({stream:true,messages:[{role:'user',content:'Build project'}]}),headers:{'Content-Type':'application/json'}});
+      if(candidate===source){assert.equal(response.status,200);assert.match(response.body,/"sourceId":"source-cccc/);}
+      else {assert.match(response.body,/upstream stream failed/);assert.doesNotMatch(response.body,/"sourceId"/);}
+    }finally{await new Promise(resolve=>srv.close(resolve));await new Promise(resolve=>gw.server.close(resolve));}
+  }
+});
+
 test("preview delivery preserves useful answers and retains stale snapshots without false success", async () => {
   const sha256 = "a".repeat(64), siteId = `site-${sha256.slice(0, 24)}`;
   const preview = { schemaVersion: 1, kind: "ods-pixel-workspace-preview", relativeDirectory: "orbit-garden",
@@ -1458,6 +1738,10 @@ test("chat waits for delayed gateway headers after the loopback connection succe
     fetch: (url, options) =>
       new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
+          if (url.endsWith('/pixel-ods/subagent-delivery')) {
+            resolve(new Response(JSON.stringify({schemaVersion:1,kind:'ods-subagent-delivery',runId:TEST_RUN_ID,status:'not-delegated'}),
+              {status:200,headers:{'Content-Type':'application/json'}}));return;
+          }
           if (url.endsWith("/pixel-ods/verification")) {
             resolve(
               new Response(JSON.stringify({ status: "none" }), {

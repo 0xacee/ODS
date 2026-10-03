@@ -49,13 +49,15 @@ from host_agent_client import (
 )
 from models import ModelLibraryGpu, ModelLibraryResponse
 from pixel_runtime_state import pixel_stream_active
+from context_policy import HERMES_MIN_CONTEXT
 from performance_oracle import (
+    activation_context_plan,
     build_models_payload,
     build_sample_signature,
     current_model_matches,
     find_catalog_model,
     load_model_catalog,
-    model_files_dir,
+    model_files_dir as model_files_dir,
     read_env_file_value,
     read_env_value,
 )
@@ -119,6 +121,7 @@ _HF_AVATAR_CACHE_MAX_ENTRIES = 512
 _HF_AVATAR_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
 _HF_AVATAR_CACHE_LOCK = threading.Lock()
 _IMPORTED_MODELS_LOCK = threading.Lock()
+_last_recorded_throughput_sample = None
 _MODEL_DISCOVERY_TIMEOUT_SECONDS = float(os.environ.get("DASHBOARD_MODEL_DISCOVERY_TIMEOUT", "15.0"))
 _MIN_MODEL_CONTEXT = 1024
 _MAX_MODEL_CONTEXT = 9007199254740991
@@ -194,9 +197,9 @@ def _model_activation_mode_denial(
         code = "external_llm_managed"
         reason = "external_backend_selected"
         message = (
-            "Local model activation is unavailable while ODS is using an "
-            "external Ollama or LM Studio backend. Re-run the installer with "
-            "--no-external-llm before activating a downloaded local model."
+            "Local model activation is unavailable with a generic external "
+            "model service. Select an ODS-managed backend or a supported "
+            "Lemonade integration before activating downloaded models."
         )
     elif "unknown" in {effective_mode, configured_mode}:
         code = "ods_mode_unknown"
@@ -386,6 +389,10 @@ def _configured_llm_base_url(host: str, port: int) -> str:
             value = read_env_value(key, INSTALL_DIR)
             if value:
                 return _strip_llm_api_suffix(value)
+    if LLM_BACKEND == "external":
+        value = read_env_value("EXTERNAL_LLM_CONTAINER_URL", INSTALL_DIR)
+        if value:
+            return _strip_llm_api_suffix(value)
     for key in ("LLM_URL", "LLM_API_URL", "OLLAMA_URL"):
         value = read_env_value(key, INSTALL_DIR)
         if value:
@@ -584,6 +591,57 @@ def _requested_activation_context(
             detail=f"context_length must be a safe integer of at least {_MIN_MODEL_CONTEXT}",
         )
     return value
+
+
+def _policy_activation_context(model_id: str, preferred_context: int | None = None) -> int | None:
+    """Context a switch to ``model_id`` serves: the installer's policy.
+
+    performance_oracle.activation_context_plan runs the installer's selector
+    code for this one model on this hardware (the Hermes floor when it fits,
+    otherwise the largest context that does), so a dashboard switch, the
+    model list and a fresh install agree. None keeps the host agent's own
+    default (unknown hardware, an import outside the catalog, or a model that
+    fits at no context).
+    """
+    entry = _find_normalized_model(model_id)
+    if entry is None:
+        return None
+    try:
+        gpu = get_gpu_info()
+    except _GPU_VRAM_EXCEPTIONS as exc:
+        logger.debug("GPU detection failed while planning activation context: %s", exc)
+        gpu = None
+    plan = activation_context_plan(entry, INSTALL_DIR, gpu, preferred_context=preferred_context)
+    if not plan or not plan.get("fits"):
+        return None
+    try:
+        context = int(plan.get("context_length") or 0)
+    except (TypeError, ValueError):
+        return None
+    return context if _MIN_MODEL_CONTEXT <= context <= _MAX_MODEL_CONTEXT else None
+
+
+def _recommended_model_context(model: dict) -> int | None:
+    """Installer-recorded context when ``model`` is the installer's pick."""
+    identity = {
+        str(value).casefold()
+        for value in (
+            read_env_file_value("MODEL_RECOMMENDED_GGUF", INSTALL_DIR),
+            read_env_file_value("MODEL_RECOMMENDED_MODEL", INSTALL_DIR),
+        )
+        if value
+    }
+    if not identity & {
+        str(value).casefold()
+        for value in (model.get("gguf_file"), model.get("llm_model_name"), model.get("id"))
+        if value
+    }:
+        return None
+    try:
+        context = int(str(read_env_file_value("MODEL_RECOMMENDED_CONTEXT", INSTALL_DIR) or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return context if context > 0 else None
 
 
 def _configured_context_length() -> int | None:
@@ -1250,12 +1308,8 @@ async def huggingface_repository_details(
     return await _hf_repo_details(repo_id)
 
 
-@router.post("/api/models/huggingface/import")
-async def import_huggingface_model(
-    body: dict[str, Any] = Body(...),
-    api_key: str = Depends(verify_api_key),
-):
-    """Pin, register, and start one integrity-qualified Hub GGUF download."""
+async def _prepare_huggingface_import(body: dict[str, Any]):
+    """Prepare metadata without submitting a download to the host."""
     repo_id = str(body.get("repoId") or "").strip()
     artifact_id = str(body.get("artifactId") or "").strip()
     if not _HF_REPO_RE.fullmatch(repo_id) or not re.fullmatch(r"[0-9a-f]{20}", artifact_id):
@@ -1306,6 +1360,31 @@ async def import_huggingface_model(
         retained.append(record)
         _write_imported_library(retained)
 
+    return details, artifact, record
+
+
+@router.post("/api/models/huggingface/import")
+async def import_huggingface_model(
+    body: dict[str, Any] = Body(...),
+    api_key: str = Depends(verify_api_key),
+):
+    """Pin, register, and start one integrity-qualified Hub GGUF download."""
+    # A failure before dispatch is a definitive refusal, even if its status
+    # is 500. A transport failure after dispatch remains uncertain: never
+    # encourage the UI to replay a potentially accepted host operation.
+    try:
+        details, artifact, record = await _prepare_huggingface_import(body)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "X-ODS-Import-Started": "false"}
+        raise
+    except Exception as exc:
+        logger.exception("Hugging Face import preparation failed before dispatch")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not prepare the import. No download was started; you can retry.",
+            headers={"X-ODS-Import-Started": "false"},
+        ) from exc
+
     payload = {
         "gguf_file": record["gguf_file"],
         "gguf_url": record["gguf_url"],
@@ -1324,15 +1403,51 @@ async def import_huggingface_model(
     return {
         **result,
         "modelId": record["id"],
-        "repoId": repo_id,
+        "repoId": details["id"],
         "artifact": artifact["label"],
         "revision": details["sha"],
     }
 
 
+def _newly_measured_tps(metrics: dict, loaded_model: str | None) -> float:
+    # Sticky Dashboard values are historical evidence, not a fresh performance
+    # sample for the model catalogue/current context on every polling request.
+    if (metrics.get("throughput_state") != "measured"
+            or metrics.get("throughput_model") != loaded_model
+            # Runtime live intervals can aggregate concurrent slots; do not
+            # turn them into single-request model performance/benchmark data.
+            or metrics.get("throughput_mode") == "live_output_interval"):
+        return 0.0
+    return float(metrics.get("tokens_per_second") or 0)
+
+
+def _model_management() -> dict:
+    """Project capability evidence; a network topology flag grants no control."""
+    if not _external_lemonade_runtime():
+        return {"managed": False, "canActivate": False, "canUnload": False, "running": False}
+    try:
+        value = request_agent_json("GET", "/v1/model/management", timeout=20)
+        if not isinstance(value, dict) or any(type(value.get(key)) is not bool for key in (
+            "managed", "canActivate", "canUnload", "running"
+        )):
+            raise ValueError("Invalid model management response")
+        if (not value['managed'] and any(value[key] for key in ('canActivate', 'canUnload', 'running'))
+                or value['canActivate'] and not value['running']):
+            raise ValueError("Inconsistent model management response")
+        result = {key: value[key] for key in ("managed", "canActivate", "canUnload", "running")}
+        if isinstance(value.get('reason'), str):
+            result['reason'] = value['reason'][:500]
+        return result
+    except (AgentClientError, ValueError):
+        # A failed proof is unknown, not evidence of an independently managed service.
+        return {"managed": None, "canActivate": False, "canUnload": False, "running": False,
+                "reason": "Runtime management could not be verified"}
+
+
 @router.get("/api/models", response_model=ModelLibraryResponse)
 async def list_models(api_key: str = Depends(verify_api_key)):
     """List model catalog entries with source-labelled performance metadata."""
+    global _last_recorded_throughput_sample
     gpu_info, loaded_model, agent_status = await asyncio.gather(
         asyncio.to_thread(get_gpu_info),
         _await_or_default(
@@ -1367,7 +1482,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
         ),
     )
     context_size = context_size or _verified_activation_context(loaded_model)
-    live_tps = float(metrics.get("tokens_per_second") or 0)
+    live_tps = _newly_measured_tps(metrics, loaded_model)
     payload = await asyncio.to_thread(
         build_models_payload,
         gpu_info,
@@ -1384,7 +1499,11 @@ async def list_models(api_key: str = Depends(verify_api_key)):
         _model_lifecycle_from_agent_status(agent_status),
     )
     loaded_entry = next((m for m in payload["models"] if m["status"] == "loaded"), None) or {}
-    if gpu_info and loaded_model and live_tps > 0 and loaded_entry.get("metadata", {}).get("source") != "runtime":
+    sample_key = (loaded_model, metrics.get("throughput_sampled_at"))
+    if (gpu_info and loaded_model and live_tps > 0
+            and sample_key[1] is not None and sample_key != _last_recorded_throughput_sample
+            and loaded_entry.get("metadata", {}).get("source") != "runtime"):
+        _last_recorded_throughput_sample = sample_key
         signature = build_sample_signature(
             loaded_entry or {"id": loaded_model, "gguf": _read_active_model()},
             gpu_info,
@@ -1412,6 +1531,8 @@ async def list_models(api_key: str = Depends(verify_api_key)):
     payload["configuredMode"] = _configured_ods_mode()
     payload["llmBackend"] = LLM_BACKEND or "unknown"
     payload["externalLemonade"] = _external_lemonade_runtime()
+    if payload["externalLemonade"]:
+        payload["modelManagement"] = await asyncio.to_thread(_model_management)
     payload["activationReadyModel"] = (
         payload.get("currentModel")
         if loaded_entry
@@ -1625,6 +1746,20 @@ def _get_agent_model_status(timeout: int = 5) -> Optional[dict]:
         return status
 
 
+def _invalidate_agent_model_status_cache() -> None:
+    """Forget the cached host-agent model status.
+
+    Reads hold the lock across the host-agent request, so an in-flight read
+    finishes (and caches) before this reset, never after it. Only the
+    timestamp is reset: a lock-free reader then sees either the previous
+    consistent entry or an expired one, never a torn value.
+    """
+    global _agent_model_status_cache_at
+
+    with _agent_model_status_cache_lock:
+        _agent_model_status_cache_at = 0.0
+
+
 # Large GGUF downloads can report the row as downloaded before the host-agent
 # releases the model_download lifecycle lock. Keep this finite so unrelated
 # conflicts still surface, but cover observed 30s+ multipart teardown lag.
@@ -1787,7 +1922,23 @@ def _find_normalized_model(model_id: str) -> Optional[dict]:
 async def _fetch_llama_loaded_model(host: str, port: int, api_prefix: str) -> str | None:
     base_url = _configured_llm_base_url(host, port)
     lemonade_api = api_prefix == "/api/v1"
+    external_compatible = (
+        LLM_BACKEND == "external"
+        and os.environ.get("EXTERNAL_LLM_PROVIDER", "").strip().lower() == "openai-compatible"
+    )
     async with httpx.AsyncClient(timeout=10.0) as client:
+        if external_compatible:
+            try:
+                resp = await client.get(f"{base_url}/api/v1/health")
+                resp.raise_for_status()
+                health = resp.json()
+                if isinstance(health, dict) and "model_loaded" in health:
+                    loaded = health["model_loaded"]
+                    if health.get("status") == "ok" and isinstance(loaded, str) and loaded.strip():
+                        return loaded
+                    return None
+            except (httpx.HTTPError, ValueError):
+                pass
         if lemonade_api:
             try:
                 resp = await client.get(f"{base_url}{api_prefix}/health")
@@ -1811,7 +1962,7 @@ async def _fetch_llama_loaded_model(host: str, port: int, api_prefix: str) -> st
                     return model.get("id")
             if lemonade_api:
                 return None
-            if data and data[0].get("id"):
+            if data and data[0].get("id") and not external_compatible:
                 return data[0]["id"]
         except (httpx.HTTPError, ValueError):
             pass
@@ -1877,7 +2028,7 @@ async def _run_current_model_benchmark(model_id: str, max_tokens: int) -> dict:
         build_models_payload,
         gpu_info,
         loaded_model,
-        float(metrics.get("tokens_per_second") or 0),
+        _newly_measured_tps(metrics, loaded_model),
         INSTALL_DIR,
         DATA_DIR,
         context_size,
@@ -2091,7 +2242,7 @@ def adopt_external_model(
     if pixel_stream_active():
         raise HTTPException(status_code=409, detail={
             'code': 'pixel_chat_active',
-            'message': 'Pixel is working. Stop the active response before adopting a model.',
+            'message': 'Portal is working. Stop the active response before adopting a model.',
         })
     try:
         value = request_agent_json(
@@ -2125,6 +2276,23 @@ def adopt_external_model(
     }, headers={'Cache-Control': 'no-store'})
 
 
+@router.post("/api/models/runtime/{operation}")
+def manage_model_runtime(operation: str, body: dict | None = Body(default=None),
+                         api_key: str = Depends(verify_api_key)):
+    if operation not in {"stop", "start"} or body not in (None, {}):
+        raise HTTPException(status_code=400, detail="A start or stop operation with an empty body is required")
+    if pixel_stream_active():
+        raise HTTPException(status_code=409, detail="Stop the active Portal response before changing its runtime")
+    try:
+        value = _call_agent_model(f"/v1/model/runtime/{operation}", {}, timeout=1200)
+    finally:
+        _invalidate_agent_model_status_cache()
+    expected = "started" if operation == "start" else "stopped"
+    if not isinstance(value, dict) or value.get("status") != expected:
+        raise HTTPException(status_code=502, detail="The runtime operation was not confirmed; refresh its status")
+    return JSONResponse({"status": expected}, headers={"Cache-Control": "no-store"})
+
+
 @router.post("/api/models/{model_id}/load")
 def load_model(
     model_id: str,
@@ -2142,7 +2310,7 @@ def load_model(
             status_code=409,
             detail={**mode_denial, "requestedModelId": model_id},
         )
-    if _external_lemonade_runtime():
+    if _external_lemonade_runtime() and not _model_management().get("canActivate"):
         raise HTTPException(
             status_code=409,
             detail={
@@ -2158,9 +2326,29 @@ def load_model(
 
     requested_context = _requested_activation_context(body)
     already_active, loaded_model = _already_active_model(model_id, model)
-    if already_active and (
+    served_context = _verified_activation_context(loaded_model) if already_active else None
+    # Without an explicit context, a switch serves what the installer would
+    # serve on this hardware (see _policy_activation_context), starting from
+    # the context this model already runs at, or the installer's pick.
+    policy_context = None
+    if requested_context is None:
+        if _configured_model_identity_matches(model):
+            preferred = _configured_context_length()
+        else:
+            preferred = _recommended_model_context(model)
+        policy_context = _policy_activation_context(model_id, preferred)
+    # An idempotent reload keeps a running model as it is, unless it runs
+    # below the Hermes floor and the floor fits: that model cannot serve
+    # ODS Talk, so the reload repairs it.
+    raise_below_floor = (
         requested_context is None
-        or requested_context == _verified_activation_context(loaded_model)
+        and policy_context is not None
+        and served_context is not None
+        and served_context < HERMES_MIN_CONTEXT <= policy_context
+    )
+    if already_active and not raise_below_floor and (
+        requested_context is None
+        or requested_context == served_context
     ):
         response: dict[str, Any] = {
             "status": "already_active",
@@ -2177,7 +2365,7 @@ def load_model(
             status_code=409,
             detail={
                 "code": "pixel_chat_active",
-                "message": "Pixel is working. Stop the active response before changing models.",
+                "message": "Portal is working. Stop the active response before changing models.",
                 "requestedModelId": model_id,
             },
         )
@@ -2192,6 +2380,8 @@ def load_model(
     # Activation includes downstream synchronization and a bounded rollback.
     activation_body: dict[str, Any] = {"model_id": model_id}
     activation_context = requested_context
+    if activation_context is None and policy_context is not None:
+        activation_context = policy_context
     if (
         activation_context is None
         and (
@@ -2216,12 +2406,18 @@ def load_model(
             activation_context = configured_context
     if activation_context is not None:
         activation_body["context_length"] = activation_context
-    result = _call_agent_model(
-        "/v1/model/activate",
-        activation_body,
-        timeout=2700,
-        retry_download_busy_seconds=_MODEL_DOWNLOAD_BUSY_ACTIVATION_GRACE_SECONDS,
-    )
+    try:
+        result = _call_agent_model(
+            "/v1/model/activate",
+            activation_body,
+            timeout=2700,
+            retry_download_busy_seconds=_MODEL_DOWNLOAD_BUSY_ACTIVATION_GRACE_SECONDS,
+        )
+    finally:
+        # A status read cached while the activation ran still reports its
+        # lifecycle as active. Drop it so the dashboard's confirming poll,
+        # sent as soon as this response lands, sees the settled state.
+        _invalidate_agent_model_status_cache()
     return result
 
 

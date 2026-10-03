@@ -1,10 +1,106 @@
 // Only the configured owner workspace is an alias for /workspace. Never infer
 // a host root from model arguments or expand traversal.
-import {lstatSync} from 'node:fs';
+import {lstatSync, statSync} from 'node:fs';
 import path from 'node:path';
 
 const selectedTool = id => typeof id === 'string' && /^(?:openclaw:core:)?(?:read|write|edit|exec)$/.test(id)
   ? id.split(':').at(-1) : id === 'pixel_ods_workspace_preview' ? id : undefined;
+
+// A missing leading slash is not an alias: accepting it would create a second
+// host-looking tree inside the workspace. Owner-named trees remain ordinary
+// core-tool paths, and existing files there stay readable and editable so
+// misplaced work can be recovered; never reinterpret or move their files.
+export function malformedRelativeWorkspacePath(tool, params, root, ownerIntent, stat = lstatSync) {
+  if (tool === 'tool_call') return malformedRelativeWorkspacePath(selectedTool(params?.id), params?.args, root, ownerIntent, stat);
+  if (!['read','write','edit'].includes(tool) || typeof params?.path !== 'string' || typeof root !== 'string') return undefined;
+  const configured = root.replace(/\/+$/, '');
+  const value = params.path;
+  if (!configured.startsWith('/') || configured === '/' || configured === '/workspace'
+      || configured.length > 4096 || path.posix.normalize(configured) !== configured
+      || /[\x00-\x1f\\]/.test(configured) || value.length > 4096
+      || /[\x00-\x1f\\]/.test(value) || value.split('/').some(part=>part === '.' || part === '..' || !part)) return undefined;
+  const relativeRoot = configured.slice(1);
+  if (!value.startsWith(relativeRoot + '/')) return undefined;
+  const parts = value.split('/');
+  const rootParts = relativeRoot.split('/');
+  // This is a conservative exception, not an authorization grant: any exact
+  // literal owner-selected path/namespace still passes normal core policy.
+  if (typeof ownerIntent === 'string') {
+    const pathCharacter = /[\p{L}\p{N}_./\\-]/u;
+    for (let count=rootParts.length;count<=parts.length;count++) {
+      const literal=parts.slice(0,count).join('/');
+      for (let at=ownerIntent.indexOf(literal);at!==-1;at=ownerIntent.indexOf(literal,at+literal.length)) {
+        if ((!at || !pathCharacter.test(ownerIntent[at-1]))
+            && (at+literal.length===ownerIntent.length || !pathCharacter.test(ownerIntent[at+literal.length]))) return undefined;
+      }
+    }
+  }
+  // An earlier misplaced write must not make the repeated tree look owned:
+  // every new write there is refused, whether or not the tree exists.
+  if (tool !== 'write') {
+    let cursor=configured;
+    let missing=false;
+    for (const component of rootParts) {
+      cursor=path.posix.join(cursor,component);
+      try {
+        const entry=stat(cursor);
+        // Never follow a link to decide whether an existing namespace is real.
+        if (entry.isSymbolicLink() || !entry.isDirectory()) return undefined;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') return undefined;
+        missing=true;break;
+      }
+    }
+    if (!missing) return undefined;
+  }
+  const suffix=value.slice(relativeRoot.length+1);
+  const correction=suffix.length<=240 ? `Use the workspace-relative path ${JSON.stringify(suffix)}.`
+    : 'Use a workspace-relative file path without that host-root prefix.';
+  return `Nothing was ${tool === 'read' ? 'read' : 'written or edited'}: this relative path repeats the configured absolute workspace root without its leading slash. ${correction} No path was rewritten.`;
+}
+
+// Diagnose a terminal path lookup failure, never rewrite shell source or infer
+// a host root from model arguments. The exec cwd receipt is host-side metadata;
+// it does not establish that the same absolute path exists inside the sandbox.
+export function sandboxHostWorkspaceFailure(params, result, root, executionHost) {
+  if (executionHost !== 'sandbox' || typeof root !== 'string' || !root.startsWith('/') ||
+      root === '/' || root === '/workspace' || root.includes('\0') || root.split('/').includes('..') ||
+      typeof params?.command !== 'string' || /[\r\n\0]/.test(params.command) || params.command.length > 8192 ||
+      result?.details?.status !== 'completed' || !Number.isInteger(result.details.exitCode) || result.details.exitCode === 0) return undefined;
+  const text = typeof result.details.aggregated === 'string' ? result.details.aggregated : '';
+  if (text.length > 16000) return undefined;
+  const configured = root.replace(/\/+$/, '');
+  const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const line of text.split('\n')) {
+    const match = line.match(/(?:can't cd to|cannot cd to|can't open file)\s+['"]?([^'"\r\n]+)/);
+    const failedPath = match?.[1]?.trim();
+    if (!failedPath || !(failedPath === configured || failedPath.startsWith(configured + '/')) || failedPath.split('/').includes('..')) continue;
+    const literal = escape(failedPath);
+    const invocation = new RegExp(`(?:^|&&\\s*)(?:cd|python(?:3(?:\\.\\d+)?)?)\\s+(?:'${literal}'|"${literal}"|${literal}(?=\\s|$|[;&]))`);
+    if (!invocation.test(params.command)) continue;
+    return '[ODS Pixel path correction] This failed sandbox command used the configured host workspace path. Shell commands see that workspace at /workspace; the host-side cwd in tool metadata is not an in-sandbox path. Keep the existing project files: use /workspace plus the same project-relative subdirectory as workdir, then run relative filenames. Inspect that project if needed; do not recreate the files in a different directory. No command was rewritten or retried.';
+  }
+  return undefined;
+}
+
+// Core exec falls back to its process cwd for missing directories. Native
+// execution must not silently move a workspace mutation into that directory.
+export function nativeExecWorkdir(value, root, stat = statSync) {
+  const denied = {block:true, blockReason:'Nothing was executed: exec requires an existing working directory. Use the configured workspace as workdir, or create the first file with write (including its parent folders), then run commands there. Do not rely on a fallback directory.'};
+  if (typeof root !== 'string' || !path.isAbsolute(root) || root === '/' || root.includes('\0')) return denied;
+  if (value !== undefined && (typeof value !== 'string' || !value || value.includes('\0') || value.split('/').includes('..'))) return denied;
+  let directory;
+  if (value === undefined || ['.', 'workspace', '/workspace'].includes(value)) directory = root;
+  else if (value.startsWith('/workspace/')) directory = path.join(root, value.slice('/workspace/'.length));
+  else if (value.startsWith('workspace/')) directory = path.join(root, value.slice('workspace/'.length));
+  else directory = path.isAbsolute(value) ? value : path.join(root, value);
+  try {
+    if (!stat(directory).isDirectory()) return denied;
+  } catch { return denied; }
+  // This selects cwd, not authorization. Core policy and the native process
+  // profile remain responsible for access to the selected directory.
+  return {workdir:directory};
+}
 
 export function workspaceFileParent(tool, params, root, stat = lstatSync) {
   if (tool === 'tool_call') return workspaceFileParent(selectedTool(params?.id),params?.args,root,stat);

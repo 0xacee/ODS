@@ -66,6 +66,10 @@ def _isolate_opencode_config(monkeypatch, tmp_path):
         lambda: {"system": _mod.platform.system(), "active": False},
     )
     monkeypatch.setattr(_mod, "_opencode_installed", lambda: False)
+    # These fixtures describe synthetic containers. Never fingerprint a real
+    # developer's running gateway and accidentally converge it during a test.
+    # Live-input reuse is exercised separately in test_model_switch_speed.py.
+    monkeypatch.setattr(_mod, "_dependent_bind_inputs", lambda _container: None)
 
 
 @pytest.fixture(autouse=True)
@@ -382,13 +386,84 @@ def test_external_lemonade_observation_endpoint_is_authenticated_and_redacted(mo
         thread.join(timeout=5)
 
 
+def test_external_observation_transport_timeout_is_redacted_503(monkeypatch):
+    monkeypatch.setattr(_mod, "AGENT_API_KEY", "observation-test-key")
+    monkeypatch.setattr(_mod, "load_env", lambda _path: {"LEMONADE_EXTERNAL": "true"})
+    def timed_out(_env):
+        raise subprocess.TimeoutExpired("private-runtime-command", 5)
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", timed_out)
+    server = _mod.ThreadedHTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        connection.request("GET", "/v1/model/external-observation", headers={
+            "Authorization": "Bearer observation-test-key",
+        })
+        response = connection.getresponse()
+        assert response.status == 503
+        assert json.loads(response.read()) == {"error": "External Lemonade identity is unavailable"}
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_external_stats_observation_is_authenticated_bounded_and_redacted(monkeypatch, failed):
+    monkeypatch.setattr(_mod, "AGENT_API_KEY", "observation-test-key")
+    monkeypatch.setattr(_mod, "load_env", lambda _path: {"LEMONADE_EXTERNAL": "true"})
+    calls = []
+
+    def observe(_env, *, include_stats=False):
+        calls.append(include_stats)
+        if failed:
+            raise subprocess.TimeoutExpired("private-runtime-command", 5)
+        return {"modelId": "model", "checkpoint": "C:/private/checkpoint.gguf", "contextLength": 65536,
+                "backend": "vulkan", "stats": {"tokens_per_second": 24.5, "output_tokens": 163}}
+
+    monkeypatch.setattr(_mod, "_read_external_lemonade_observation", observe)
+    server = _mod.ThreadedHTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        connection.request("GET", "/v1/model/external-observation?stats=1")
+        denied = connection.getresponse()
+        assert denied.status == 401
+        denied.read()
+        assert not calls
+        connection.request("GET", "/v1/model/external-observation?stats=1", headers={
+            "Authorization": "Bearer observation-test-key",
+        })
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == (503 if failed else 200)
+        assert "no-store" in response.getheader("Cache-Control")
+        assert "private" not in json.dumps(payload)
+        assert calls == [True]
+        if not failed:
+            assert payload["modelId"] == "model"
+            assert payload["stats"] == {"tokens_per_second": 24.5, "output_tokens": 163}
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_external_adoption_endpoint_requires_auth_and_preserves_pending_hold(monkeypatch):
     monkeypatch.setattr(_mod, "AGENT_API_KEY", "adoption-test-key")
     actions = []
     monkeypatch.setattr(_mod, "_begin_model_activation", lambda model: (
         actions.append(("begin", model)) or (True, None)
     ))
-    monkeypatch.setattr(_mod, "_end_model_activation", lambda: actions.append(("end", None)))
+    activation_ended = threading.Event()
+    def end_activation():
+        actions.append(("end", None))
+        activation_ended.set()
+    monkeypatch.setattr(_mod, "_end_model_activation", end_activation)
     monkeypatch.setattr(_mod, "_adopt_external_lemonade_model", lambda _model: (
         (_ for _ in ()).throw(_mod._PixelModelTransactionUncertain("private detail"))
     ))
@@ -413,6 +488,9 @@ def test_external_adoption_endpoint_requires_auth_and_preserves_pending_hold(mon
         assert payload["code"] == "managed_model_recovery_required"
         assert payload["pending"] is True
         assert "private detail" not in json.dumps(payload)
+        # The HTTP body can reach the client before the handler's finally
+        # finishes. Synchronize on that cleanup instead of scheduler timing.
+        assert activation_ended.wait(timeout=5)
         assert actions == [("begin", "loaded-B"), ("end", None)]
         monkeypatch.setattr(_mod, "_adopt_external_lemonade_model", lambda _model: (
             (_ for _ in ()).throw(_mod._ExternalAdoptionReceiptUnavailable("private detail"))
@@ -1486,6 +1564,164 @@ class TestLemonadeCompletionReady:
         assert proof == {}
         assert completion_calls == []
 
+    @staticmethod
+    def _capped_runtime(n_ctx_train, n_ctx, probes):
+        """llama.cpp b9014 caps a slot at the GGUF training context."""
+
+        def fake_run(cmd, **_kwargs):
+            url = next((str(part) for part in cmd if str(part).startswith("http")), "")
+            if url.endswith("/v1/models"):
+                probes.append(url)
+                body = json.dumps({
+                    "object": "list",
+                    "data": [{
+                        "id": "Qwen3-30B-A3B-Q4_K_M.gguf",
+                        "object": "model",
+                        "meta": {"n_ctx_train": n_ctx_train},
+                    }],
+                })
+            elif url.endswith("/props"):
+                body = json.dumps({"default_generation_settings": {"n_ctx": n_ctx}})
+            else:
+                body = ""
+            return subprocess.CompletedProcess(cmd, 0, stdout=body, stderr="")
+
+        return fake_run
+
+    @pytest.mark.parametrize("fast_poll_seconds", [0.0, 30.0])
+    def test_readiness_fails_fast_when_request_exceeds_training_context(
+        self, monkeypatch, fast_poll_seconds
+    ):
+        # Live tower2 2026-09-25: catalog asked for 131072 on a 40960-token
+        # GGUF; the model loaded in 4 s but the host agent reported
+        # identity=False for ~5.5 minutes, then rolled back.
+        probes = []
+        monkeypatch.setattr(_mod.subprocess, "run", self._capped_runtime(40960, 40960, probes))
+        monkeypatch.setattr(_mod.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_a, **_k: True)
+        diagnosis = {}
+        proof = _mod._wait_for_model_readiness(
+            {"GPU_BACKEND": "nvidia", "OLLAMA_PORT": "11434", "CTX_SIZE": "131072"},
+            model_id="qwen3-30b-a3b-q4",
+            gguf_file="Qwen3-30B-A3B-Q4_K_M.gguf",
+            llm_model_name="qwen3-30b-a3b",
+            attempts=55,
+            initial_delay=0,
+            interval=0,
+            return_proof=True,
+            fast_poll_seconds=fast_poll_seconds,
+            fast_poll_interval=0.05,
+            diagnosis=diagnosis,
+        )
+        assert proof == {}
+        assert len(probes) == 1
+        assert diagnosis["final"] is True
+        assert diagnosis["reason"] == (
+            "Qwen3-30B-A3B-Q4_K_M.gguf is loaded but serves a 40960-token context; "
+            "131072 was requested, above the model's 40960-token training context "
+            "(llama.cpp caps the slot there)"
+        )
+
+    def test_readiness_keeps_polling_a_short_context_below_training_context(
+        self, monkeypatch
+    ):
+        # A runtime short of the request for another reason (for example a
+        # memory fit) is not proven final by the training context.
+        probes = []
+        monkeypatch.setattr(_mod.subprocess, "run", self._capped_runtime(262144, 32768, probes))
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_a, **_k: True)
+        diagnosis = {}
+        proof = _mod._wait_for_model_readiness(
+            {"GPU_BACKEND": "nvidia", "OLLAMA_PORT": "11434", "CTX_SIZE": "65536"},
+            model_id="qwen3-30b-a3b-q4",
+            gguf_file="Qwen3-30B-A3B-Q4_K_M.gguf",
+            llm_model_name="qwen3-30b-a3b",
+            attempts=3,
+            initial_delay=0,
+            interval=0,
+            return_identity=True,
+            diagnosis=diagnosis,
+        )
+        assert proof == ""
+        assert len(probes) == 3
+        assert "final" not in diagnosis
+        assert diagnosis["reason"] == (
+            "Qwen3-30B-A3B-Q4_K_M.gguf is loaded but serves a 32768-token context; "
+            "65536 was requested"
+        )
+
+    def test_readiness_succeeds_at_the_native_training_context(self, monkeypatch):
+        probes = []
+        monkeypatch.setattr(_mod.subprocess, "run", self._capped_runtime(40960, 40960, probes))
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_a, **_k: True)
+        diagnosis = {}
+        proof = _mod._wait_for_model_readiness(
+            {"GPU_BACKEND": "nvidia", "OLLAMA_PORT": "11434", "CTX_SIZE": "40960"},
+            model_id="qwen3-30b-a3b-q4",
+            gguf_file="Qwen3-30B-A3B-Q4_K_M.gguf",
+            llm_model_name="qwen3-30b-a3b",
+            attempts=3,
+            initial_delay=0,
+            interval=0,
+            return_proof=True,
+            require_exact_context=True,
+            diagnosis=diagnosis,
+        )
+        assert proof["identity"] == "Qwen3-30B-A3B-Q4_K_M.gguf"
+        assert proof["contextLength"] == 40960
+        assert diagnosis == {}
+
+
+class TestRuntimeLogExcerpt:
+    def test_excerpt_keeps_bounded_redacted_signal_lines(self):
+        noise = [f"print_info: tensor {index} loaded" for index in range(400)]
+        log = "\n".join(
+            noise
+            + [
+                "\x1b[33mllama_context: n_ctx_seq (131072) > n_ctx_train (40960) -- possible training context overflow\x1b[0m",
+                "srv    load_model: the slot context (131072) exceeds the training context of the model (40960) - capping",
+                "main: invalid argument --api-key sk-live-secret-value",
+                "error: Authorization: Bearer abc.def.ghi",
+                "x" * 600 + " error",
+                "main: server is listening on http://0.0.0.0:8080",
+            ]
+        )
+        excerpt = _mod._runtime_log_excerpt(log)
+        lines = excerpt.splitlines()
+        assert len(lines) <= _mod._RUNTIME_LOG_EXCERPT_MAX_LINES
+        assert len(excerpt) <= _mod._RUNTIME_LOG_EXCERPT_MAX_CHARS
+        assert all(len(line) <= 240 for line in lines)
+        assert "exceeds the training context of the model (40960) - capping" in excerpt
+        assert "\x1b[" not in excerpt
+        assert "sk-live-secret-value" not in excerpt
+        assert "abc.def.ghi" not in excerpt
+        assert excerpt.count("[REDACTED]") == 2
+        assert "tensor 12 loaded" not in excerpt
+
+    def test_excerpt_falls_back_to_the_log_tail_without_signal_lines(self):
+        log = "\n".join(f"line {index}" for index in range(30))
+        assert _mod._runtime_log_excerpt(log).splitlines() == [
+            f"line {index}" for index in range(18, 30)
+        ]
+        assert _mod._runtime_log_excerpt(None) == ""
+
+    def test_failed_container_log_read_never_raises(self, monkeypatch):
+        def broken_run(*_args, **_kwargs):
+            raise RuntimeError("docker unavailable")
+
+        monkeypatch.setattr(_mod.subprocess, "run", broken_run)
+        assert _mod._failed_llama_server_log_excerpt() == ""
+
+        seen = []
+
+        def logs_run(cmd, **kwargs):
+            seen.append((cmd, kwargs.get("stderr")))
+            return subprocess.CompletedProcess(cmd, 0, stdout="main: error loading model\n")
+
+        monkeypatch.setattr(_mod.subprocess, "run", logs_run)
+        assert _mod._failed_llama_server_log_excerpt() == "main: error loading model"
+        assert seen == [(["docker", "logs", "--tail", "400", "ods-llama-server"], subprocess.STDOUT)]
+
 
 # --- _write_lemonade_config ---
 
@@ -1779,6 +2015,20 @@ class TestOpenCodeModelRoute:
         assert calls[0][1]["creationflags"] == 0x08000000
         assert calls[0][1]["env"]["ODS_EXPECTED_GGUF"] == "model.gguf"
 
+    @pytest.mark.parametrize("failure", ["timeout", "missing"])
+    def test_windows_context_inspection_fails_closed_without_replay(self, monkeypatch, failure):
+        calls = []
+        monkeypatch.setattr(_mod, "_windows_management_shell", lambda: "selected-pwsh.exe")
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            assert kwargs["timeout"] == 15
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            raise FileNotFoundError("selected shell disappeared")
+        monkeypatch.setattr(_mod.subprocess, "run", run)
+        assert _mod._windows_lemonade_process_context_length("model.gguf") is None
+        assert len(calls) == 1
+
     @pytest.mark.parametrize("arguments,expected", [
         ('--ctx-size 65536', 65536),
         ('"--ctx-size" "65536"', 65536),
@@ -1806,7 +2056,24 @@ class TestOpenCodeModelRoute:
                 '"C:\\Program Files\\llama-server.exe" "--model" "C:\\Models\\model.gguf" '
                 + arguments + ' "--parallel" "1"')
             fixture = 'function Get-CimInstance { [pscustomobject]@{CommandLine=$env:ODS_CONTEXT_TEST_COMMAND_LINE; CreationDate=1} }\n'
-            return _real_subprocess_run([*command[:-1], fixture + command[-1]], **kwargs)
+            # This integration case tests the real parser, not cold PowerShell
+            # startup latency on a shared CI runner. Keep the production limit
+            # independently asserted and fail visibly on fixture process errors.
+            assert kwargs["timeout"] == 15
+            kwargs["timeout"] = 60
+            try:
+                result = _real_subprocess_run([*command[:-1], fixture + command[-1]], **kwargs)
+            except subprocess.TimeoutExpired as exc:
+                pytest.fail(
+                    f"PowerShell parser fixture timed out after {exc.timeout}s for {arguments!r}",
+                    pytrace=False,
+                )
+            assert result.returncode in (0, 1), (
+                f"PowerShell parser fixture exit={result.returncode}; "
+                f"stdout={result.stdout[:500]!r}; stderr={result.stderr[:500]!r}"
+            )
+            assert not result.stderr.strip(), f"PowerShell parser fixture stderr={result.stderr[:500]!r}"
+            return result
         monkeypatch.setattr(_mod.subprocess, "run", run)
         assert _mod._windows_lemonade_process_context_length("model.gguf") == expected
         assert len(calls) == 1
@@ -2752,6 +3019,60 @@ class TestRecreateLlamaServerFromInspect:
             "--alias", "llama-server", "metrics-network", "ods-llama-server",
         ] in calls
 
+    @staticmethod
+    def _spec_env_values(argv):
+        return [
+            argv[index + 1]
+            for index, token in enumerate(argv[:-1])
+            if token == "-e" and argv[index + 1].startswith("LLAMA_ARG_SPEC_TYPE=")
+        ]
+
+    @pytest.mark.parametrize(
+        ("env_extra", "expected"),
+        [
+            ({"GPU_BACKEND": "nvidia"}, ["LLAMA_ARG_SPEC_TYPE=ngram-mod"]),
+            ({"GPU_BACKEND": "jetson"}, ["LLAMA_ARG_SPEC_TYPE=ngram-mod"]),
+            ({"GPU_BACKEND": "cpu"}, ["LLAMA_ARG_SPEC_TYPE=ngram-mod"]),
+            ({"GPU_BACKEND": "nvidia", "LLAMA_SPEC_TYPE": ""}, ["LLAMA_ARG_SPEC_TYPE=ngram-mod"]),
+            ({"GPU_BACKEND": "nvidia", "LLAMA_SPEC_TYPE": "none"}, ["LLAMA_ARG_SPEC_TYPE=none"]),
+            ({"GPU_BACKEND": "cpu", "LLAMA_SPEC_TYPE": "ngram-simple"}, ["LLAMA_ARG_SPEC_TYPE=ngram-simple"]),
+            (
+                {"GPU_BACKEND": "nvidia", "LLAMA_SPEC_TYPE": "none", "LLAMA_ARG_SPEC_TYPE": "draft-mtp"},
+                ["LLAMA_ARG_SPEC_TYPE=draft-mtp"],
+            ),
+            ({"GPU_BACKEND": "amd"}, []),
+            ({"GPU_BACKEND": "sycl"}, []),
+            ({"GPU_BACKEND": "apple"}, []),
+            ({"GPU_BACKEND": "cpu", "LLM_BACKEND": "lemonade"}, []),
+        ],
+    )
+    def test_recreate_keeps_the_compose_overlay_speculative_default(
+        self, monkeypatch, env_extra, expected,
+    ):
+        """A recreate drops inspected LLAMA_ARG_* values that .env does not
+        name, so it must re-derive docker-compose.{nvidia,cpu}.yml's default
+        instead of silently serving without speculation after a model switch."""
+        inspect_config = {
+            "Config": {
+                "Image": "ghcr.io/ggml-org/llama.cpp:server-cuda-b9014",
+                "Cmd": ["--model", "/models/old.gguf", "--metrics"],
+                "Env": [
+                    "PATH=/usr/bin",
+                    "GGUF_FILE=old.gguf",
+                    # Resolved by Compose from the overlay default.
+                    "LLAMA_ARG_SPEC_TYPE=ngram-mod",
+                ],
+            },
+            "HostConfig": {"Binds": ["/srv/models:/models:ro"]},
+            "NetworkSettings": {"Networks": {}},
+            "Mounts": [],
+        }
+        env = {"GGUF_FILE": "new.gguf", "CTX_SIZE": "8192", "MAX_CONTEXT": "8192", **env_extra}
+
+        argv, _calls = self._capture_recreate(monkeypatch, inspect_config, env)
+
+        assert self._spec_env_values(argv) == expected
+
 
 class TestLaunchNativeLlamaServer:
 
@@ -2783,6 +3104,9 @@ class TestLaunchNativeLlamaServer:
 
         monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
         monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        # This fixture tests launch arguments, not the runtime help probe.
+        monkeypatch.setattr(_mod, "_windows_llama_reasoning_arguments",
+                            lambda binary, mode, fmt: ["--reasoning-format", fmt])
 
         _launch_native_llama_server(env_path, llama_bin, llama_log, pid_file)
 
@@ -2798,7 +3122,67 @@ class TestLaunchNativeLlamaServer:
         assert "deepseek" in cmd
         assert _kwargs["cwd"] == str(tmp_path)
 
-    def test_llm_bridge_is_disabled_before_native_bind(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize(
+        ("help_text", "help_rc", "reasoning", "expected"),
+        [
+            # b9014 has --reasoning (default auto): pass the mode itself.
+            ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "off", ["--reasoning", "off"]),
+            ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "", ["--reasoning", "off"]),
+            ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "on", ["--reasoning", "on"]),
+            # b8248 has no --reasoning: keep the format, and for off add
+            # --reasoning-budget 0, which disables thinking there.
+            ("--reasoning-format FORMAT\n--reasoning-budget N\n", 0, "off",
+             ["--reasoning-format", "none", "--reasoning-budget", "0"]),
+            ("--reasoning-format FORMAT\n--reasoning-budget N\n", 0, "on", ["--reasoning-format", "deepseek"]),
+            ("--reasoning-format FORMAT\n", 0, "off", ["--reasoning-format", "none"]),
+            # A mode that is not off/on/auto keeps the format mapping.
+            ("-rea, --reasoning [on|off|auto]\n", 0, "deepseek", ["--reasoning-format", "deepseek"]),
+            # An unreadable --help keeps the previous behaviour.
+            ("-rea, --reasoning [on|off|auto]\n", 1, "off", ["--reasoning-format", "none"]),
+        ],
+    )
+    def test_windows_passes_reasoning_where_the_runtime_has_it(
+        self, monkeypatch, tmp_path, help_text, help_rc, reasoning, expected,
+    ):
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            f"GGUF_FILE=test-model.gguf\nLLAMA_REASONING={reasoning}\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "data" / "models").mkdir(parents=True)
+        llama_bin = tmp_path / "llama-server" / "llama-server.exe"
+        llama_bin.parent.mkdir(parents=True)
+        llama_bin.write_text("", encoding="utf-8")
+        calls = []
+
+        class _FakeProc:
+            pid = 4321
+
+        def fake_run(cmd, **_kwargs):
+            assert cmd == [str(llama_bin), "--help"]
+            return subprocess.CompletedProcess(cmd, help_rc, help_text, "")
+
+        def fake_popen(cmd, **kwargs):
+            calls.append(cmd)
+            return _FakeProc()
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(_mod.subprocess, "Popen", fake_popen)
+
+        _launch_native_llama_server(
+            env_path, llama_bin, tmp_path / "data" / "llama-server.log", tmp_path / "data" / "llama-server.pid",
+        )
+
+        cmd = calls[0]
+        start = cmd.index(expected[0])
+        assert cmd[start:start + len(expected)] == expected
+        for flag in ("--reasoning", "--reasoning-format", "--reasoning-budget"):
+            assert (flag in cmd) == (flag in expected), flag
+
+    @pytest.mark.parametrize('system', ['Windows', 'Darwin', 'Linux'])
+    def test_ui_lan_preference_does_not_publish_native_inference(self, monkeypatch, tmp_path, system):
         env = {
             "GGUF_FILE": "test-model.gguf",
             "BIND_ADDRESS": "0.0.0.0",
@@ -2819,6 +3203,9 @@ class TestLaunchNativeLlamaServer:
 
         monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
         monkeypatch.setattr(_mod, "load_env", lambda _path: env)
+        monkeypatch.setattr(_mod.platform, "system", lambda: system)
+        monkeypatch.setattr(_mod, "_windows_llama_reasoning_arguments",
+                            lambda binary, mode, fmt: ["--reasoning-format", fmt])
         monkeypatch.setattr(_mod, "_disable_conflicting_macos_bridge", fake_disable)
         monkeypatch.setattr(_mod.subprocess, "Popen", fake_popen)
 
@@ -2832,11 +3219,11 @@ class TestLaunchNativeLlamaServer:
         assert events[0] == (
             "bootout",
             env,
-            "0.0.0.0",
+            "127.0.0.1",
             "com.ods.llm-bridge",
         )
         assert events[1][0] == "bind"
-        assert events[1][1][events[1][1].index("--host") + 1] == "0.0.0.0"
+        assert events[1][1][events[1][1].index("--host") + 1] == "127.0.0.1"
 
 
 class TestWindowsNativeLlamaServer:
@@ -2952,6 +3339,7 @@ class TestRestartWindowsLemonade:
         })
 
         script = captured["script"]
+        assert captured["env"]["ODS_WIN_BIND_ADDR"] == "127.0.0.1"
         assert captured["cmd"][0] == "selected-pwsh.exe"
         assert "-NonInteractive" in captured["cmd"]
         assert captured["creationflags"] == 0x08000000
@@ -3008,6 +3396,19 @@ class TestRestartWindowsLemonade:
         shell = shutil.which("pwsh") or shutil.which("powershell.exe")
         if not shell:
             pytest.skip("PowerShell is unavailable")
+        if sys.platform != "win32":
+            # WSL can expose powershell.exe on PATH even when Windows interop
+            # is disabled. Only run this cross-OS fixture when the shell can
+            # actually start; native Windows must still fail if it cannot.
+            try:
+                probe = _real_subprocess_run(
+                    [shell, "-NoProfile", "-NonInteractive", "-Command", "exit 0"],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pytest.skip("PowerShell is present but not runnable")
+            if probe.returncode != 0:
+                pytest.skip("PowerShell is present but not runnable")
 
         local_app_data = tmp_path / "AppData" / "Local"
         lemonade_exe = (
@@ -3253,7 +3654,7 @@ class TestRestartWindowsLemonade:
         assert "launch stdout" in message
         assert "stderr-secret" not in message
         assert "stdout-secret" not in message
-        assert "[redacted]" in message
+        assert "[REDACTED]" in message
         assert captured["capture_output"] is None
         assert captured["stdout"] is not None
         assert captured["stderr"] is not None
@@ -4003,6 +4404,48 @@ def test_model_gpu_plan_expands_davep_two_gpu_assignment(tmp_path, monkeypatch):
     assert merged["gpu_assignment"]["services"]["whisper"]["gpus"] == ["GPU-ti-2"]
 
 
+@pytest.mark.parametrize("mode", ["tensor", "hybrid"])
+def test_nvidia_model_gpu_plan_never_emits_row_split(tmp_path, monkeypatch, mode):
+    # CUDA row split fails at model load from llama.cpp b9890 ("does not
+    # support split buffers") and is not fleet-qualified; NVIDIA tensor and
+    # hybrid assignments run with layer split.
+    _install_dir, target, env = _write_nvidia_gpu_plan_fixture(tmp_path, monkeypatch)
+    planned_gpus = ["GPU-ti-0", "GPU-1080", "GPU-ti-2"]
+    monkeypatch.setattr(
+        _mod,
+        "_run_nvidia_gpu_planner",
+        lambda *_args: {
+            "gpu_assignment": {
+                "version": "1.0",
+                "strategy": "dedicated",
+                "services": {
+                    "llama_server": {
+                        "gpus": planned_gpus,
+                        "gpu_indices": [0, 1, 2],
+                        "parallelism": {
+                            "mode": mode,
+                            "tensor_parallel_size": 3,
+                            "pipeline_parallel_size": 1,
+                            "tensor_split": [1, 1, 1],
+                        },
+                    }
+                },
+            }
+        },
+    )
+
+    plan = _mod._plan_nvidia_model_gpu_assignment(
+        env,
+        {"vram_required_gb": 24, "size_mb": 21110},
+        target,
+    )
+
+    assert plan is not None
+    assert plan["split_mode"] == "layer"
+    assert plan["env_updates"]["LLAMA_ARG_SPLIT_MODE"] == "layer"
+    assert plan["env_updates"]["LLAMA_ARG_TENSOR_SPLIT"] == "1,1,1"
+
+
 def test_model_gpu_plan_preserves_sufficient_existing_assignment(tmp_path, monkeypatch):
     _install_dir, target, env = _write_nvidia_gpu_plan_fixture(tmp_path, monkeypatch)
 
@@ -4410,7 +4853,8 @@ def test_managed_pixel_reconcile_uses_positional_args_and_minimal_environment(
     install_dir.mkdir()
     home.mkdir()
     (install_dir / ".env").write_text(
-        "PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\n"
+        "PIXEL_SOURCE_URL=bundled\n"
+        "PIXEL_SOURCE_REF=9f3b6ecd25db3ab51bef4091473d88ee5824bc3b\n"
         f"{gateway_setting}",
         encoding="utf-8",
     )
@@ -4436,7 +4880,7 @@ def test_managed_pixel_reconcile_uses_positional_args_and_minimal_environment(
         max_tokens=4096,
         reasoning=True,
     ) == "reconciled"
-    assert captured["argv"][-8:] == [
+    assert captured["argv"][-9:] == [
         str(install_dir),
         "pixel-owner",
         str(home),
@@ -4445,14 +4889,133 @@ def test_managed_pixel_reconcile_uses_positional_args_and_minimal_environment(
         "4096",
         "true",
         "",
+        "unknown",
     ]
     assert captured["kwargs"]["timeout"] == 900
     assert captured["kwargs"]["check"] is False
-    assert captured["kwargs"]["env"]["PIXEL_SOURCE_URL"] == (
-        "https://github.com/Osmantic/Pixel.git"
-    )
+    assert captured["kwargs"]["env"]["PIXEL_SOURCE_URL"] == "bundled"
     assert captured["kwargs"]["env"]["PIXEL_GATEWAY_PORT"] == expected_gateway_port
     assert "UNRELATED_SECRET" not in captured["kwargs"]["env"]
+
+
+@pytest.mark.parametrize("explicit_source", [True, False])
+def test_managed_pixel_reconcile_accepts_bundled_source(
+    tmp_path, monkeypatch, explicit_source,
+):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    source_ref = "9f3b6ecd25db3ab51bef4091473d88ee5824bc3b"
+    source_setting = "PIXEL_SOURCE_URL=bundled\n" if explicit_source else ""
+    (install_dir / ".env").write_text(
+        f"{source_setting}PIXEL_SOURCE_REF={source_ref}\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0, stdout="reconciled\n", stderr="")
+
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+    assert _mod._reconcile_ods_managed_pixel_model("safe-model", 65536) == "reconciled"
+    assert captured["env"]["PIXEL_SOURCE_URL"] == "bundled"
+
+
+@pytest.mark.parametrize("source_setting", [
+    "PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\n",
+    "PIXEL_SOURCE_URL=bundled\nPIXEL_SOURCE_REF=b33730436baf5d98bf58f7d57c090318fe19f433\n",
+    "PIXEL_SOURCE_REF=b33730436baf5d98bf58f7d57c090318fe19f433\n",
+])
+def test_managed_pixel_reconcile_rejects_private_or_legacy_source_before_subprocess(
+    tmp_path, monkeypatch, source_setting,
+):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text(source_setting, encoding="utf-8")
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(_mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home))
+    monkeypatch.setattr(
+        _mod.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("private source must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="Pixel source|Pixel source pin"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
+
+
+def test_managed_pixel_reconcile_rejects_relative_source(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text("PIXEL_SOURCE_URL=../pixel\n", encoding="utf-8")
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(
+        _mod.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("an invalid source must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="configured Pixel source"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
+
+
+def test_managed_pixel_reconcile_rejects_remote_source(tmp_path, monkeypatch):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text(
+        "PIXEL_SOURCE_URL=https://github.com/Osmantic/Pixel.git\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(
+        _mod.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("remote source must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="configured Pixel source"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
+
+
+def test_managed_pixel_reconcile_rejects_old_ref_without_local_checkout(
+    tmp_path, monkeypatch,
+):
+    install_dir = tmp_path / "install"
+    home = tmp_path / "owner-home"
+    install_dir.mkdir()
+    home.mkdir()
+    (install_dir / ".env").write_text(
+        "PIXEL_SOURCE_REF=b33730436baf5d98bf58f7d57c090318fe19f433\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+    monkeypatch.setattr(
+        _mod, "_ods_managed_pixel_identity", lambda: ("pixel-owner", home),
+    )
+    monkeypatch.setattr(
+        _mod.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("old bundle ref must fail before subprocess"),
+    )
+
+    with pytest.raises(RuntimeError, match="reinstall the managed runtime"):
+        _mod._reconcile_ods_managed_pixel_model("safe-model", 65536)
 
 
 @pytest.mark.parametrize(
@@ -4560,7 +5123,9 @@ class TestModelActivateRollback:
         env_path.write_text(original,encoding='utf-8')
         previous={'model':'old-model.gguf','contextLength':65536,'maxTokens':3072,'reasoning':True,'routeFingerprint':'d'*64}
         state={'schemaVersion':1,'status':'ready','revision':'a'*64,'contract':previous,'pending':False,'transactionId':None,'outcome':None}
-        calls=[];proofs=[];restarts=[]
+        calls=[]
+        proofs=[]
+        restarts=[]
         def control(operation,request=None,*,config):
             calls.append(operation)
             if operation=='model-status':
@@ -4588,7 +5153,8 @@ class TestModelActivateRollback:
                 state.update(status='completed',pending=False,outcome=request['outcome'])
             return dict(state)
         def readiness(*args,**kwargs):
-            identity=kwargs.get('gguf_file');proofs.append(identity)
+            identity=kwargs.get('gguf_file')
+            proofs.append(identity)
             if failure=='rollback-unproved' and identity=='old-model.gguf':return False
             return _mock_verified_readiness(*args,**kwargs)
         real_write=_mod._atomic_write_json
@@ -4676,7 +5242,7 @@ class TestModelActivateRollback:
         assert reconciliations == [(
             "new-model.gguf",
             65536,
-            {"max_tokens": 8192, "reasoning": False},
+            {"max_tokens": 8192, "reasoning": False, "image_input": "unknown"},
         )]
         response = handler.parse_response()
         assert response["consumers"]["pixel"] == "reconciled"
@@ -4755,8 +5321,8 @@ class TestModelActivateRollback:
         assert "simulated Pixel reconciliation failure" in response["error"]
         assert runtime_restarts == ["new-model", "old-model"]
         assert reconciliations == [
-            ("new-model.gguf", 4096, {"max_tokens": 1024, "reasoning": False}),
-            ("old-model.gguf", 4096, {"max_tokens": 1024, "reasoning": False}),
+            ("new-model.gguf", 4096, {"max_tokens": 1024, "reasoning": False, "image_input": "unknown"}),
+            ("old-model.gguf", 4096, {"max_tokens": 1024, "reasoning": False, "image_input": "unknown"}),
         ]
         assert _mod.load_env(env_path)["LLM_MODEL"] == "old-model"
 
@@ -4961,6 +5527,59 @@ class TestModelActivateRollback:
                 },
             )
 
+    @pytest.mark.parametrize("gpu_backend", ["none", "unknown", "", "cpu"])
+    def test_cpu_backend_aliases_select_the_catalog_cpu_profile(
+        self,
+        monkeypatch,
+        gpu_backend,
+    ):
+        # Windows no-GPU installs write GPU_BACKEND=none; the installer's
+        # selector reads it as cpu, so a switch must keep the CPU profile's
+        # q8 KV cache and container limit instead of running unprofiled.
+        monkeypatch.setattr(_mod, "_system_ram_gb", lambda: 32)
+        monkeypatch.setattr(_mod.platform, "machine", lambda: "x86_64")
+        catalog_path = Path(__file__).resolve().parents[4] / "config" / "model-library.json"
+        model = next(
+            entry
+            for entry in json.loads(catalog_path.read_text(encoding="utf-8"))["models"]
+            if entry["id"] == "qwen3.5-9b-q4"
+        )
+
+        profile = _mod._select_runtime_profile(
+            model,
+            {"GPU_BACKEND": gpu_backend, "SYSTEM_RAM_GB": "32"},
+        )
+
+        assert profile is not None
+        assert profile["id"] == "cpu-64k-q8-kv"
+        assert profile["env"]["LLAMA_ARG_CACHE_TYPE_K"] == "q8_0"
+
+    def test_profile_above_its_ram_ceiling_does_not_apply(self, monkeypatch):
+        # model_selection.hardware_matching_profiles: a RAM ceiling scopes a
+        # profile to a class of machines. Above it the profile neither
+        # applies nor blocks activation as an unmet requirement.
+        monkeypatch.setattr(_mod, "_system_ram_gb", lambda: 64)
+        monkeypatch.setattr(_mod.platform, "machine", lambda: "x86_64")
+        model = {
+            "runtime_profiles": [
+                {
+                    "id": "cpu-small-host",
+                    "backend": "cpu",
+                    "system_ram_min_gb": 12,
+                    "system_ram_max_gb": 22,
+                    "context_length": 65536,
+                }
+            ]
+        }
+
+        assert _mod._select_runtime_profile(
+            model, {"GPU_BACKEND": "cpu", "SYSTEM_RAM_GB": "64"}
+        ) is None
+        monkeypatch.setattr(_mod, "_system_ram_gb", lambda: 16)
+        assert _mod._select_runtime_profile(
+            model, {"GPU_BACKEND": "cpu", "SYSTEM_RAM_GB": "16"}
+        )["id"] == "cpu-small-host"
+
     def test_nvidia_vram_probe_uses_wsl_bridge_outside_service_path(
         self,
         monkeypatch,
@@ -5049,11 +5668,11 @@ class TestModelActivateRollback:
         ("bind_addr", "expected_identity_url"),
         [
             ("0.0.0.0", "http://127.0.0.1:9090/v1/models"),
-            ("::", "http://[::1]:9090/v1/models"),
-            ("192.168.106.1", "http://192.168.106.1:9090/v1/models"),
+            ("::", "http://127.0.0.1:9090/v1/models"),
+            ("192.168.106.1", "http://127.0.0.1:9090/v1/models"),
         ],
     )
-    def test_apple_native_activation_probes_reachable_bind(
+    def test_apple_native_activation_probes_private_inference_despite_ui_bind(
         self,
         tmp_path,
         monkeypatch,
@@ -7105,7 +7724,9 @@ class TestModelActivateRollback:
             env_path.read_text(encoding="utf-8")
             + "MODEL_RECOMMENDED_MODEL=new-model\n"
             + "MODEL_RECOMMENDED_GGUF=new-model.gguf\n"
-            + "MODEL_RECOMMENDED_CONTEXT=131072\n",
+            + "MODEL_RECOMMENDED_CONTEXT=131072\n"
+            # Former checkpoint key name that no llama.cpp build reads.
+            + "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS=-1\n",
             encoding="utf-8",
         )
         model_library = install_dir / "config" / "model-library.json"
@@ -7134,7 +7755,9 @@ class TestModelActivateRollback:
                         "LLAMA_ARG_CACHE_TYPE_V": "turbo3",
                         "LLAMA_ARG_N_CPU_MOE": "30",
                         "LLAMA_ARG_NO_CACHE_PROMPT": "1",
-                        "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS": "-1",
+                        "LLAMA_ARG_CHECKPOINT_EVERY_NT": "-1",
+                        "LLAMA_ARG_CTX_CHECKPOINTS": "4",
+                        "LLAMA_ARG_CACHE_RAM": "1024",
                         "LLAMA_ARG_SPEC_TYPE": "draft-mtp",
                         "LLAMA_ARG_SPEC_DRAFT_N_MAX": "3",
                     },
@@ -7167,7 +7790,10 @@ class TestModelActivateRollback:
         assert "LLAMA_SERVER_IMAGE=example.test/llama:turbo" in env_text
         assert "LLAMA_ARG_CACHE_TYPE_V=turbo3" in env_text
         assert "LLAMA_ARG_N_CPU_MOE=30" in env_text
-        assert "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS=-1" in env_text
+        assert "LLAMA_ARG_CHECKPOINT_EVERY_NT=-1" in env_text
+        assert "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS" not in env_text
+        assert "LLAMA_ARG_CTX_CHECKPOINTS=4" in env_text
+        assert "LLAMA_ARG_CACHE_RAM=1024" in env_text
         assert "LLAMA_ARG_SPEC_TYPE=draft-mtp" in env_text
         assert "LLAMA_ARG_SPEC_DRAFT_N_MAX=3" in env_text
 
@@ -7320,6 +7946,55 @@ class TestModelActivateRollback:
 
         assert handler.response_code == 400
         assert "failed catalog verification" in handler.parse_response()["error"]
+        assert env_path.read_text(encoding="utf-8") == env_text
+        assert models_ini.read_text(encoding="utf-8") == ini_text
+
+    @pytest.mark.parametrize(
+        ("gpu_backend", "catalog_image", "blocked"),
+        [
+            ("nvidia", None, True),
+            ("cpu", None, True),
+            ("apple", "ghcr.io/ggml-org/llama.cpp:server-cuda-b11146@sha256:" + "a" * 64, True),
+            ("nvidia", "ghcr.io/ggml-org/llama.cpp:server-cuda-b11146@sha256:" + "a" * 64, False),
+        ],
+    )
+    def test_activation_refuses_model_the_default_runtime_cannot_load(
+        self, tmp_path, monkeypatch, gpu_backend, catalog_image, blocked,
+    ):
+        install_dir, env_path, env_text, models_ini, ini_text, _yaml, _yaml_text = (
+            _write_model_activation_fixture(tmp_path, gpu_backend=gpu_backend)
+        )
+        library_path = install_dir / "config" / "model-library.json"
+        library = json.loads(library_path.read_text(encoding="utf-8"))
+        library["models"][0]["llama_server_image"] = catalog_image
+        library["models"][0]["default_runtime_compatibility"] = {
+            "status": "incompatible",
+            "runtime": "llama.cpp b9014",
+            "reason": "internal detail",
+            "userNote": "This model needs a newer llama.cpp runtime than ODS installs by default.",
+        }
+        library_path.write_text(json.dumps(library), encoding="utf-8")
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.delenv("ODS_HOST_INSTALL_DIR", raising=False)
+        reached_runtime = []
+
+        def refuse(*_args, **_kwargs):
+            reached_runtime.append(True)
+            raise RuntimeError("stop after the runtime-compatibility gate")
+
+        monkeypatch.setattr(_mod, "_select_runtime_profile", refuse)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+
+        if blocked:
+            assert handler.response_code == 400
+            assert handler.parse_response()["error"] == (
+                "This model needs a newer llama.cpp runtime than ODS installs by default."
+            )
+            assert reached_runtime == []
+        else:
+            assert reached_runtime == [True]
         assert env_path.read_text(encoding="utf-8") == env_text
         assert models_ini.read_text(encoding="utf-8") == ini_text
 
@@ -7508,6 +8183,10 @@ class TestModelActivateRollback:
                 "model": "llama-server/old-model",
                 "small_model": "llama-server/old-model",
                 "theme": "system",
+                "agent": {
+                    "build": {"model": "custom-cloud/owner-model", "temperature": 0.2},
+                    "reviewer": {"model": "custom-cloud/review-model"},
+                },
                 "provider": {
                     "custom-cloud": {"npm": "@ai-sdk/openai"},
                     "llama-server": {
@@ -7546,6 +8225,11 @@ class TestModelActivateRollback:
             config = json.loads(path.read_text(encoding="utf-8"))
             assert config["model"] == f"llama-server/{expected_model_id}"
             assert config["small_model"] == f"llama-server/{expected_model_id}"
+            assert config["agent"]["build"]["model"] == (
+                "custom-cloud/owner-model" if path == primary
+                else f"llama-server/{expected_model_id}"
+            )
+            assert config["agent"]["plan"]["model"] == f"llama-server/{expected_model_id}"
             provider = config["provider"]["llama-server"]
             assert provider["options"]["baseURL"] == "http://127.0.0.1:8080/v1"
             assert provider["options"]["apiKey"] == "no-key"
@@ -7560,6 +8244,10 @@ class TestModelActivateRollback:
             "npm": "@ai-sdk/openai"
         }
         assert primary_config["provider"]["llama-server"]["options"]["timeout"] == 900
+        assert primary_config["agent"]["build"]["temperature"] == 0.2
+        assert primary_config["agent"]["reviewer"] == {
+            "model": "custom-cloud/review-model"
+        }
         assert compat_config["compat_only"] is True
 
     def test_switchboard_activation_routes_opencode_through_stable_alias(
@@ -7614,6 +8302,8 @@ class TestModelActivateRollback:
             assert config["theme"] == "system"
             assert config["model"] == "llama-server/ods/current"
             assert config["small_model"] == "llama-server/ods/current"
+            assert config["agent"]["build"]["model"] == "llama-server/ods/current"
+            assert config["agent"]["plan"]["model"] == "llama-server/ods/current"
             provider = config["provider"]["llama-server"]
             assert provider["name"] == "ODS switchboard"
             assert provider["options"] == {

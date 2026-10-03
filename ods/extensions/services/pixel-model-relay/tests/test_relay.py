@@ -26,6 +26,21 @@ async def start(app):
 
 
 class RelayTests(unittest.IsolatedAsyncioTestCase):
+    def test_generation_summary_allowlists_only_safe_scalars(self):
+        payload = {"model": "ods/current", "stream": True, "max_tokens": 4096, "max_completion_tokens": 2048,
+                   "chat_template_kwargs": {"enable_thinking": False, "secret": "private"},
+                   "tools": [{"secret": "private"}], "messages": ["private"]}
+        self.assertEqual(relay._generation_summary(payload), {
+            "stream": True, "max_tokens": 4096, "max_completion_tokens": 2048, "enable_thinking": False, "tool_count": 1})
+        self.assertEqual(payload["messages"], ["private"])
+
+    def test_generation_summary_never_echoes_unexpected_values(self):
+        self.assertEqual(relay._generation_summary({
+            "stream": "private", "max_tokens": "private",
+            "chat_template_kwargs": {"enable_thinking": "private"}, "tools": "private"}),
+            {"stream": False, "max_tokens": None, "max_completion_tokens": None, "enable_thinking": None, "tool_count": 0})
+        self.assertIsNone(relay._generation_summary({"max_tokens": True})["max_tokens"])
+
     async def asyncSetUp(self):
         self.disconnected = asyncio.Event()
 
@@ -80,6 +95,32 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(b"data:", await response.content.read(25))
             response.close()
             await asyncio.wait_for(self.disconnected.wait(), timeout=3)
+
+    async def test_large_image_envelope_forwarded_with_bounded_admission(self):
+        received = []
+        async def capture(request):
+            received.append(await request.read())
+            return web.json_response({'ok': True})
+        upstream = web.Application(client_max_size=relay.MAX_BODY + 1)
+        upstream.router.add_post('/v1/chat/completions', capture)
+        runner, relay.UPSTREAM = await start(upstream)
+        import json
+        body = json.dumps({'model': 'ods/current', 'messages': [{'role': 'user', 'content': [
+            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + 'a' * (5 * 1024 * 1024)}}]}]}).encode()
+        try:
+            async with ClientSession() as client:
+                headers = {'Authorization': 'Bearer test-only-pixel-relay-key'}
+                async with client.post(self.url + '/v1/chat/completions', data=body, headers=headers) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(await response.json(), {'ok': True})
+                self.assertEqual(received, [body])
+                async with client.post(self.url + '/v1/chat/completions', data=body) as response:
+                    self.assertEqual(response.status, 401)
+                async with client.post(self.url + '/v1/chat/completions', data=b'x' * (relay.MAX_BODY + 1), headers=headers) as response:
+                    self.assertEqual(response.status, 413)
+                self.assertEqual(len(received), 1)
+        finally:
+            await runner.cleanup()
 
     async def test_stalled_local_reader_times_out(self):
         class StalledResponse:

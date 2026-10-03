@@ -42,6 +42,21 @@ if [[ ! -f "$ROOT_DIR/scripts/resolve-compose-stack.sh" ]]; then
 fi
 pass "resolve-compose-stack.sh exists"
 
+# The long-lived host agent sends an external-route presence marker after
+# reading the installed .env. It must select the external overlay without
+# carrying a potentially credential-bearing upstream URL in its environment.
+marker_flags=$(ODS_EXTERNAL_LLM_SELECTED=true EXTERNAL_LLM_URL="" \
+    ODS_GATEWAY_ONLY=true ENABLE_OPEN_WEBUI=false ODS_MODE=local \
+    bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+        --script-dir "$ROOT_DIR" --tier 1 --gpu-backend cpu 2>/dev/null)
+if contains_path "$marker_flags" "docker-compose.external-llm.yml" \
+    && contains_path "$marker_flags" "docker-compose.gateway-only.yml" \
+    && ! contains_path "$marker_flags" "perplexica/compose.local.yaml"; then
+    pass "Persisted external-route marker excludes managed Perplexica inference"
+else
+    fail "Persisted external-route marker resolved a local Perplexica dependency"
+fi
+
 # 2. --skip-broken flag is accepted
 help_exit=0
 bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" --help 2>&1 | grep -q "skip-broken" || help_exit=$?
@@ -482,7 +497,7 @@ else
 fi
 
 # ============================================================================
-# 20. User-ext compose with BIND_ADDRESS-default loopback port must be ACCEPTED
+# 20. A loopback interpolation default must not authorize a LAN-capable port
 # ============================================================================
 mkdir -p "$TEMP_DIR/data/user-extensions/user-loopback-default"
 cat > "$TEMP_DIR/data/user-extensions/user-loopback-default/manifest.yaml" <<'EOF'
@@ -506,9 +521,9 @@ ld_stdout=$(bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
     2>/dev/null) || true
 
 if contains_path "$ld_stdout" "user-loopback-default/compose.yaml"; then
-    pass "User-ext with BIND_ADDRESS-default loopback port accepted"
+    fail "User-ext interpolation could publish its port on the UI LAN address"
 else
-    fail "User-ext with BIND_ADDRESS-default loopback port should be accepted"
+    pass "User-ext interpolated host bind rejected even with a loopback default"
 fi
 
 # ============================================================================
@@ -665,6 +680,32 @@ real_external_flags=$(EXTERNAL_LLM_URL="http://127.0.0.1:11434" \
     --script-dir "$ROOT_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
     2>/dev/null)
 
+real_managed_flags=$(EXTERNAL_LLM_URL="" \
+    ODS_MODE=local \
+    bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$ROOT_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>/dev/null)
+if printf '%s\n' "$real_managed_flags" | grep -Fq \
+    "extensions/services/perplexica/compose.local.yaml"; then
+    pass "Managed-local Perplexica keeps its llama-server health overlay"
+else
+    fail "Managed-local Perplexica lost its llama-server health overlay"
+fi
+
+if printf '%s\n' "$real_managed_flags" | grep -Fq \
+    "extensions/services/hermes/compose.local.yaml"; then
+    pass "Managed-local Hermes keeps its llama-server health overlay"
+else
+    fail "Managed-local Hermes lost its llama-server health overlay"
+fi
+
+if printf '%s\n' "$real_external_flags" | grep -Fq \
+    "extensions/services/hermes/compose.local.yaml"; then
+    fail "External-LLM Hermes retained a managed llama-server dependency"
+else
+    pass "External-LLM Hermes omits its managed llama-server dependency"
+fi
+
 if printf '%s\n' "$real_external_flags" | grep -Fq "compose.local.yaml"; then
     fail "External-LLM stack retained a local llama-server dependency overlay"
 else
@@ -777,5 +818,11 @@ else
 fi
 
 echo ""
+if python3 -m pytest -q "$ROOT_DIR/tests/test_extension_build_projection.py" -k test_resolver_; then
+    pass "Imported recipe backend selection preserves provenance and disabled controls"
+else
+    fail "Imported recipe backend selection regression"
+fi
+
 echo "Result: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]

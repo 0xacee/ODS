@@ -214,6 +214,7 @@ class ModelLibraryEntry(BaseModel):
 
 class ModelLibraryGpu(BaseModel):
     vramTotal: float
+    modelMemoryBudgetGb: Optional[float] = None
     vramUsed: float
     vramFree: float
 
@@ -235,3 +236,4 @@ class ModelLibraryResponse(BaseModel):
     configuredMode: str = "unknown"
     llmBackend: str = "unknown"
     externalLemonade: bool = False
+    modelManagement: Optional[dict[str, Any]] = None

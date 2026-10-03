@@ -120,6 +120,17 @@ test_install() {
 }
 
 get_compose_flags() {
+    local flags helper
+    flags="$(_get_base_compose_flags)" || return $?
+    helper="${INSTALL_DIR}/installers/macos/lib/pixel-native-stack.py"
+    if [[ -e "${INSTALL_DIR}/data/pixel-native/preparation/activation.json" || -L "${INSTALL_DIR}/data/pixel-native/preparation/activation.json" ]]; then
+        /usr/bin/python3 "$helper" --install-dir "$INSTALL_DIR" --flags="$flags"
+    else
+        printf '%s\n' "$flags"
+    fi
+}
+
+_get_base_compose_flags() {
     ensure_hermes_dashboard_session_token
 
     local flags_file="${INSTALL_DIR}/.compose-flags"
@@ -130,18 +141,20 @@ get_compose_flags() {
     # Fallback: dynamic resolution via resolve-compose-stack.sh so user-installed
     # extensions in data/user-extensions/ are discovered when the .compose-flags
     # cache is missing or stale. Mirrors ods-cli's get_compose_flags fallback.
-    local ods_mode
+    local ods_mode webui_enabled
     ods_mode="$(read_env_value "${INSTALL_DIR}/.env" "ODS_MODE")"
     ods_mode="${ods_mode#\"}"
     ods_mode="${ods_mode%\"}"
     ods_mode="${ods_mode#\'}"
     ods_mode="${ods_mode%\'}"
     [[ -n "$ods_mode" ]] || ods_mode="local"
+    webui_enabled="$(read_env_value "${INSTALL_DIR}/.env" "ENABLE_OPEN_WEBUI")"
+    [[ -n "$webui_enabled" ]] || webui_enabled=true
     if [[ -x "${INSTALL_DIR}/scripts/resolve-compose-stack.sh" ]]; then
         # Pass --gpu-count for parity with the Linux paths even though there's
         # currently no docker-compose.multigpu-apple.yml — keeps the contract
         # uniform across all resolver call sites.
-        "${INSTALL_DIR}/scripts/resolve-compose-stack.sh" \
+        ENABLE_OPEN_WEBUI="$webui_enabled" "${INSTALL_DIR}/scripts/resolve-compose-stack.sh" \
             --script-dir "$INSTALL_DIR" \
             --tier "${TIER:-1}" \
             --gpu-backend "${GPU_BACKEND:-apple}" \
@@ -156,11 +169,47 @@ get_compose_flags() {
     elif [[ -f "${INSTALL_DIR}/installers/macos/docker-compose.macos.yml" ]]; then
         flags="$flags -f installers/macos/docker-compose.macos.yml"
     fi
+    if [[ "$(read_env_value "${INSTALL_DIR}/.env" "ENABLE_OPEN_WEBUI")" == false ]] \
+        && [[ -f "${INSTALL_DIR}/docker-compose.gateway-only.yml" ]]; then
+        flags="$flags -f docker-compose.gateway-only.yml"
+    fi
     macos_model_store_compose_flags "$flags"
 }
 
 compose_pull_with_retry() {
     local flags="$1"
+    local -a pull_services=()
+    if [[ -f "${INSTALL_DIR}/data/pixel-native/preparation/activation.json" ]]; then
+        local image actual services service found=false
+        image="$(read_env_value "${INSTALL_DIR}/.env" PIXEL_NATIVE_INGRESS_IMAGE)"
+        if [[ ! "$image" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            ai_err "Native Pixel ingress image identity is missing; retain its installation receipts."
+            return 1
+        fi
+        actual="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)" || actual=""
+        if [[ "$actual" != "$image" ]]; then
+            ai_err "The pinned native Pixel ingress image is unavailable locally; recover it before updating."
+            return 1
+        fi
+        # A local image ID is not a registry reference. Keep the verified native
+        # transport image while pulling the remaining updatable services.
+        # shellcheck disable=SC2086
+        services="$(docker compose $flags config --services)" || return 1
+        while IFS= read -r service; do
+            if [[ "$service" == pixel-native-ingress ]]; then
+                found=true
+            elif [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+                pull_services+=("$service")
+            else
+                ai_err "Invalid Compose service selection."
+                return 1
+            fi
+        done <<< "$services"
+        if ! $found || [[ ${#pull_services[@]} -eq 0 ]]; then
+            ai_err "Native Pixel Compose selection is incomplete."
+            return 1
+        fi
+    fi
     local log_file
     log_file="$(mktemp)"
     local max_attempts="${ODS_COMPOSE_PULL_RETRY_ATTEMPTS:-3}"
@@ -173,7 +222,7 @@ compose_pull_with_retry() {
         : > "$log_file"
         rc=0
         # shellcheck disable=SC2086
-        docker compose $flags pull --ignore-buildable >"$log_file" 2>&1 || rc=$?
+        docker compose $flags pull --ignore-buildable "${pull_services[@]}" >"$log_file" 2>&1 || rc=$?
         if (( rc == 0 )); then
             rm -f "$log_file"
             return 0
@@ -393,7 +442,7 @@ resolve_cli_llm_route() {
     CLI_LLM_API_KEY=""
     if [[ "$CLI_LLM_MODE" == "cloud" ]]; then
         local litellm_port="${ENV_LITELLM_PORT:-4000}"
-        local cloud_bind_address="${ENV_BIND_ADDRESS:-127.0.0.1}"
+        local cloud_bind_address="127.0.0.1"
         local cloud_probe_host
         [[ "$litellm_port" =~ ^[0-9]+$ ]] || litellm_port="4000"
         cloud_probe_host="$(macos_bind_probe_host "$cloud_bind_address")"
@@ -407,7 +456,7 @@ resolve_cli_llm_route() {
 
     local native_port="${ENV_ODS_NATIVE_LLAMA_PORT:-${ENV_OLLAMA_PORT:-8080}}"
     [[ "$native_port" =~ ^[0-9]+$ ]] || native_port="8080"
-    local bind_address="${ENV_BIND_ADDRESS:-127.0.0.1}"
+    local bind_address="127.0.0.1"
     local probe_host
     probe_host="$(macos_bind_probe_host "$bind_address")"
     CLI_LLM_NAME="LLM API"
@@ -461,6 +510,16 @@ proxy_is_enabled() {
         || [[ -f "${INSTALL_DIR}/data/user-extensions/ods-proxy/compose.yaml" ]]
 }
 
+webui_is_selected() {
+    local flags="$1"
+    local services
+    # Explicit `compose up open-webui` bypasses profiles. Check the selected
+    # project first so restart cannot pull an intentionally omitted image.
+    # shellcheck disable=SC2086
+    services="$(docker compose $flags config --services 2>/dev/null)" || return 2
+    grep -qx 'open-webui' <<< "$services"
+}
+
 require_proxy_auth() {
     local env_file="${INSTALL_DIR}/.env"
     [[ -f "$env_file" ]] || {
@@ -476,6 +535,10 @@ require_proxy_auth() {
 
 prepare_proxy_start() {
     local flags="$1"
+    if ! webui_is_selected "$flags"; then
+        ai_err "ODS proxy requires Open WebUI; re-run the installer with --with-webui."
+        return 1
+    fi
     require_proxy_auth || return 1
     ai "Applying authenticated Open WebUI configuration..."
     # shellcheck disable=SC2086
@@ -609,7 +672,7 @@ get_native_llama_status() {
         native_port="$(read_env_value "${INSTALL_DIR}/.env" "ODS_NATIVE_LLAMA_PORT")"
         [[ "$native_port" =~ ^[0-9]+$ ]] || native_port="8080"
         local bind_address probe_host
-        bind_address="$(read_env_value "${INSTALL_DIR}/.env" "BIND_ADDRESS")"
+        bind_address="127.0.0.1"
         probe_host="$(macos_bind_probe_host "${bind_address:-127.0.0.1}")"
         if curl -sf --max-time 10 "http://${probe_host}:${native_port}/health" >/dev/null 2>&1; then
             NATIVE_LLAMA_HEALTHY=true
@@ -651,7 +714,7 @@ start_native_llama() {
     gpu_layers="$(printf '%s' "$gpu_layers" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     gpu_layers="${gpu_layers:-auto}"
     local native_port="${ENV_ODS_NATIVE_LLAMA_PORT:-8080}"
-    local bind_address="${ENV_BIND_ADDRESS:-127.0.0.1}"
+    local bind_address="127.0.0.1"
     local probe_host
     probe_host="$(macos_bind_probe_host "$bind_address")"
     [[ "$native_port" =~ ^[0-9]+$ ]] || native_port="8080"
@@ -673,11 +736,10 @@ start_native_llama() {
         --model "$model_path"
         --ctx-size "$ctx_size"
         --n-gpu-layers "$gpu_layers"
-        --reasoning-format "$reasoning_fmt"
         --metrics
     )
     if [[ "$MACOS_NATIVE_PROFILE" == true ]]; then
-        llama_args+=("${MACOS_NATIVE_PROFILE_ARGS[@]}")
+        llama_args+=(--reasoning-format "$reasoning_fmt" "${MACOS_NATIVE_PROFILE_ARGS[@]}")
     else
     llama_args+=(--parallel "${ENV_LLAMA_PARALLEL:-1}")
     [[ -n "${ENV_LLAMA_ARG_FLASH_ATTN:-}" ]] && llama_args+=(--flash-attn "$ENV_LLAMA_ARG_FLASH_ATTN")
@@ -685,11 +747,11 @@ start_native_llama() {
     [[ -n "${ENV_LLAMA_ARG_CACHE_TYPE_V:-}" ]] && llama_args+=(--cache-type-v "$ENV_LLAMA_ARG_CACHE_TYPE_V")
     [[ -n "${ENV_LLAMA_ARG_N_CPU_MOE:-}" ]] && llama_args+=(--n-cpu-moe "$ENV_LLAMA_ARG_N_CPU_MOE")
     [[ -n "${ENV_LLAMA_ARG_SPEC_TYPE:-}" ]] && llama_args+=(--spec-type "$ENV_LLAMA_ARG_SPEC_TYPE")
-    [[ -n "${ENV_LLAMA_ARG_SPEC_DRAFT_N_MAX:-}" ]] && llama_args+=(--spec-draft-n-max "$ENV_LLAMA_ARG_SPEC_DRAFT_N_MAX")
-    [[ -n "${ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_K:-}" ]] && llama_args+=(--spec-draft-type-k "$ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_K")
-    [[ -n "${ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_V:-}" ]] && llama_args+=(--spec-draft-type-v "$ENV_LLAMA_ARG_SPEC_DRAFT_TYPE_V")
-    macos_resolve_checkpoint_args "$INSTALL_DIR" "$LLAMA_SERVER_BIN" || return 1
-    llama_args+=("${MACOS_NATIVE_CHECKPOINT_ARGS[@]}")
+    # Draft flags, --ctx-checkpoints 32, the ngram-mod default and the reasoning
+    # flags (--reasoning on b9014, else this --reasoning-format) are spelled
+    # for, and only added when supported by, the selected runtime.
+    macos_resolve_checkpoint_args "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$reasoning_fmt" || return 1
+    llama_args+=(${MACOS_NATIVE_CHECKPOINT_ARGS[@]+"${MACOS_NATIVE_CHECKPOINT_ARGS[@]}"})
     fi
 
     # Artifact and argument verification must precede termination of working inference.
@@ -787,8 +849,18 @@ cmd_status() {
     echo -e "  ${DGRN}$(printf -- '-%.0s' {1..40})${NC}"
 
     # Parallel arrays (Bash 3.2 compatible)
-    local ep_names=("$CLI_LLM_NAME" "Chat UI" "Dashboard" "OpenCode (IDE)")
-    local ep_urls=("$CLI_LLM_HEALTH_URL" "http://127.0.0.1:3000" "http://127.0.0.1:3001" "http://127.0.0.1:3003")
+    local ep_names=("$CLI_LLM_NAME" "Dashboard" "OpenCode (IDE)")
+    local ep_urls=("$CLI_LLM_HEALTH_URL" "http://127.0.0.1:3001" "http://127.0.0.1:3003")
+    if webui_is_selected "$flags"; then
+        ep_names+=("Chat UI (Open WebUI)")
+        ep_urls+=("http://127.0.0.1:3000")
+    else
+        local selection_rc=$?
+        if [[ "$selection_rc" == 2 ]]; then
+            ai_err "Cannot resolve Compose configuration for status."
+            return 1
+        fi
+    fi
 
     for ((i=0; i<${#ep_names[@]}; i++)); do
         local name="${ep_names[$i]}"
@@ -830,6 +902,19 @@ cmd_start() {
 
     local flags
     flags=$(get_compose_flags)
+    if [[ "$service" == "open-webui" ]]; then
+        if webui_is_selected "$flags"; then
+            :
+        else
+            local selection_rc=$?
+            if [[ "$selection_rc" == 2 ]]; then
+                ai_err "Failed to start open-webui: Compose configuration could not be resolved."
+            else
+                ai_err "Open WebUI is not selected. Re-run the installer with --with-webui."
+            fi
+            return 1
+        fi
+    fi
 
     if [[ "$service" == "ods-proxy" ]]; then
         prepare_proxy_start "$flags" || return 1
@@ -869,7 +954,21 @@ cmd_stop() {
     cd "$INSTALL_DIR"
 
     local flags
-    flags=$(get_compose_flags)
+    if ! flags=$(get_compose_flags); then
+        local policy_python="${ODS_PYTHON_CMD:-python3}"
+        local args=(--install-dir "$INSTALL_DIR")
+        if [[ "$service" == "llama-server" || "$service" == "llama" ]]; then
+            stop_native_llama
+            return $?
+        fi
+        [[ -n "$service" ]] && args+=(--service "$service")
+        ai "Compose validation failed; stopping only verified containers from this installation."
+        "$policy_python" "$INSTALL_DIR/scripts/stop-owned-containers.py" "${args[@]}" || return 1
+        if [[ -z "$service" && -f "$LLAMA_SERVER_PID_FILE" ]]; then
+            stop_native_llama
+        fi
+        return 0
+    fi
 
     if [[ "$service" == "llama-server" || "$service" == "llama" ]]; then
         stop_native_llama
@@ -880,8 +979,10 @@ cmd_stop() {
         ai_ok "${service} stopped"
     else
         ai "Stopping all services..."
+        # Keep Compose containers and their install-path labels for a later
+        # uninstall ownership check. Native llama is stopped separately.
         # shellcheck disable=SC2086
-        docker compose $flags down
+        docker compose $flags stop
 
         # Stop native llama-server
         if [[ -f "$LLAMA_SERVER_PID_FILE" ]]; then
@@ -900,6 +1001,19 @@ cmd_restart() {
 
     local flags
     flags=$(get_compose_flags)
+    if [[ "$service" == "open-webui" ]]; then
+        if webui_is_selected "$flags"; then
+            :
+        else
+            local selection_rc=$?
+            if [[ "$selection_rc" == 2 ]]; then
+                ai_err "Failed to restart open-webui: Compose configuration could not be resolved."
+            else
+                ai_err "Open WebUI is not selected. Re-run the installer with --with-webui."
+            fi
+            return 1
+        fi
+    fi
 
     if [[ "$service" == "ods-proxy" ]]; then
         prepare_proxy_start "$flags" || return 1
@@ -1053,6 +1167,12 @@ cmd_chat() {
     echo ""
 }
 
+cmd_update_pixel() {
+    test_install
+    /usr/bin/python3 "${INSTALL_DIR}/installers/macos/lib/pixel-native-update.py" \
+        --install-dir "$INSTALL_DIR" --ods-source "$INSTALL_DIR" "$@"
+}
+
 cmd_update() {
     test_install
     cd "$INSTALL_DIR"
@@ -1107,6 +1227,7 @@ show_help() {
     echo -e "  ${GRN}  config edit${NC}         ${DGRN}Open .env in \$EDITOR${NC}"
     echo -e "  ${GRN}  chat \"message\"${NC}      ${DGRN}Quick chat via API${NC}"
     echo -e "  ${GRN}  update${NC}              ${DGRN}Pull latest images and restart${NC}"
+    echo -e "  ${GRN}  update-pixel${NC}        ${DGRN}Update the native Pixel runtime and services${NC}"
     echo -e "  ${GRN}  version${NC}             ${DGRN}Show version${NC}"
     echo -e "  ${GRN}  help${NC}                ${DGRN}Show this help${NC}"
     echo ""
@@ -1145,6 +1266,7 @@ case "$COMMAND" in
         ;;
     chat)       cmd_chat "$*" ;;
     update)     cmd_update ;;
+    update-pixel) cmd_update_pixel "$@" ;;
     version)    cmd_version ;;
     help)       show_help ;;
     *)

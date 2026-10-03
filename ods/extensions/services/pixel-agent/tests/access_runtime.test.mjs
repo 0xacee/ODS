@@ -18,6 +18,26 @@ function fixture() {
 const token = 'a'.repeat(64), other = 'b'.repeat(64);
 const runtimeUrl = new URL('../plugin/access-runtime.mjs', import.meta.url).href;
 const linux = {skip: process.platform !== 'linux'};
+test('startup diagnostics distinguish qualification from private state failures', t => {
+  const cases = [
+    {change: o => {o.hooksAllowed = false;}, stage: null, qualification: 'conversation-hooks'},
+    {change: o => {o.runtimeVersion = 'unknown';}, stage: null, qualification: 'runtime-version'},
+    {change: o => {fs.mkdirSync(o.directory, {mode: 0o755});}, stage: 'state-directory', qualification: null},
+    {change: o => {seed(o, {pid: process.pid});}, stage: 'process-identity', qualification: null},
+  ];
+  for (const item of cases) {
+    const options = fixture();
+    t.after(() => fs.rmSync(path.dirname(options.directory), {recursive: true, force: true}));
+    item.change(options);
+    const runtime = createAccessRuntime(options), snapshot = runtime.status();
+    assert.equal(snapshot.available, false);
+    assert.equal(snapshot.initialization_failure, item.stage);
+    assert.equal(snapshot.qualification_failure, item.qualification);
+    assert.equal(JSON.stringify(snapshot).includes(options.directory), false);
+    // Qualification disables access changes, not ordinary legacy admission.
+    assert.equal(runtime.admit({}, {runId: 'diagnostic-test'}).outcome, item.stage ? 'block' : 'pass');
+  }
+});
 function seed(options, lock, phase = 'idle') {
   fs.mkdirSync(options.directory, {mode: 0o700});
   fs.writeFileSync(path.join(options.directory, 'process.json'), JSON.stringify(lock), {mode: 0o600});
@@ -146,6 +166,91 @@ test('reused PID recovers with unreadable foreign environment but preserves a ma
         }
       });
     }
+  }
+});
+
+test('restricted proc reclaims a same-tick PID only when it is proven to be the managed ingress service', linux, async t => {
+  const {child} = await childProcess(t, `process.send({ready:true}); setInterval(() => {}, 1000);`);
+  const previous = {version: 3, pid: child.pid, invocationId: 'd'.repeat(32),
+    startTicks: identity(child.pid).startTicks};
+  const cgroup = `/proc/${child.pid}/cgroup`, cmdline = `/proc/${child.pid}/cmdline`;
+  const read = fs.readFileSync;
+  for (const [group, command, expectedAvailable, changedGroup] of [
+    ['0::/system.slice/pixel-ingress.service\n', 'node\0/usr/local/libexec/ods-pixel-ingress.mjs\0', true, false],
+    ['0::/system.slice/openclaw-gateway.service\n', 'node\0/usr/local/libexec/ods-pixel-ingress.mjs\0', false, false],
+    ['0::/system.slice/pixel-ingress.service\n', 'openclaw\0gateway\0', false, false],
+    ['0::/system.slice/pixel-ingress.service\n', 'node\0/usr/local/libexec/ods-pixel-ingress.mjs\0', false, true],
+  ]) {
+    const options = fixture(); seed(options, previous, 'held');
+    let groupReads = 0;
+    fs.readFileSync = function (name, ...args) {
+      if (name === cgroup) return changedGroup && ++groupReads > 1
+        ? '0::/system.slice/openclaw-gateway.service\n' : group;
+      if (name === cmdline) return Buffer.from(command);
+      return read.call(this, name, ...args);
+    };
+    try {
+      withInvocations({[process.pid]: `INVOCATION_ID=${'e'.repeat(32)}\0`}, () => {
+        const runtime = createAccessRuntime(options);
+        assert.equal(runtime.status().available, expectedAvailable);
+        assert.equal(runtime.status().phase, expectedAvailable ? 'held' : 'unavailable');
+        assert.equal(runtime.admit({}, {runId:'native'}).outcome, 'block');
+        if (!expectedAvailable) {
+          assert.deepEqual(JSON.parse(fs.readFileSync(path.join(options.directory, 'process.json'))), previous);
+        }
+      });
+    } finally { fs.readFileSync = read; }
+  }
+});
+
+test('invisible proc reclaims only a stable systemd-attested ingress PID, never an unknown owner', linux, async t => {
+  const {child} = await childProcess(t, `process.send({ready:true}); setInterval(() => {}, 1000);`);
+  const previous = {version: 3, pid: child.pid, invocationId: 'd'.repeat(32),
+    startTicks: identity(child.pid).startTicks};
+  const owner = os.userInfo().username, currentInvocation = 'e'.repeat(32);
+  for (const [ingressPid, ingressInvocation, gatewayPid, unstable, expectedAvailable] of [
+    [child.pid, 'f'.repeat(32), process.pid, false, true],
+    [child.pid + 1, 'f'.repeat(32), process.pid, false, false],
+    [child.pid, previous.invocationId, process.pid, false, false],
+    [child.pid, 'f'.repeat(32), process.pid + 1, false, false],
+    [child.pid, 'f'.repeat(32), process.pid, true, false],
+  ]) {
+    const options = fixture(); seed(options, previous, 'held');
+    withInvocations({[process.pid]: `INVOCATION_ID=${currentInvocation}\0`}, () => {
+      const read = fs.readFileSync, originalSpawn = childProcessApi.spawnSync;
+      let ingressReads = 0;
+      fs.readFileSync = function (name, ...args) {
+        if (name === `/proc/${child.pid}/stat`) throw Object.assign(new Error('hidden'), {code:'ENOENT'});
+        return read.call(this, name, ...args);
+      };
+      childProcessApi.spawnSync = (command, args, opts) => {
+        if (command !== '/usr/bin/systemctl') return originalSpawn(command, args, opts);
+        const unit = args[1];
+        const own = unit === 'openclaw-gateway.service';
+        assert.ok(own || unit === 'pixel-ingress.service');
+        const pid = own ? gatewayPid : unstable && ++ingressReads > 1 ? child.pid + 1 : ingressPid;
+        const lines = own
+          ? [`MainPID=${pid}`, `InvocationID=${currentInvocation}`, `User=${owner}`, 'ActiveState=active']
+          : [`MainPID=${pid}`, `InvocationID=${ingressInvocation}`, `User=${owner}`, 'Group=ods-pixel',
+            'ActiveState=active', 'FragmentPath=/etc/systemd/system/pixel-ingress.service',
+            'ExecMainStartTimestampMonotonic=696936270000',
+            'ExecStart={ path=/usr/bin/env ; argv[]=/usr/bin/env node /usr/local/libexec/ods-pixel-ingress.mjs ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }'];
+        return {status:0,stdout:lines.join('\n')+'\n',stderr:''};
+      };
+      syncBuiltinESMExports();
+      try {
+        const runtime = createAccessRuntime(options);
+        assert.equal(runtime.status().available, expectedAvailable);
+        assert.equal(runtime.admit({}, {runId:'native'}).outcome, 'block');
+        if (!expectedAvailable) {
+          assert.deepEqual(JSON.parse(fs.readFileSync(path.join(options.directory, 'process.json'))), previous);
+        }
+      } finally {
+        fs.readFileSync = read;
+        childProcessApi.spawnSync = originalSpawn;
+        syncBuiltinESMExports();
+      }
+    });
   }
 });
 
@@ -662,4 +767,20 @@ test('settings readback on an inherited hold refuses unqualified runtime version
     config: () => { throw new Error('config must not be read'); }});
   assert.equal(runtime.status().available, false);
   assert.throws(() => runtime.readSettings(token, runtime.status().revision), /runtime lease mismatch/);
+});
+
+test('activity diagnostics distinguish owner classes without releasing or exposing identities', t => {
+  const options = fixture();
+  t.after(() => fs.rmSync(path.dirname(options.directory), {recursive: true, force: true}));
+  const runtime = createAccessRuntime(options);
+  const ctx = {runId:'private-run',agentId:'pixel',sessionKey:'private-session'};
+  runtime.admit({},ctx);
+  runtime.beforeTool({toolCallId:'private-call',toolName:'exec'},ctx);
+  assert.deepEqual(runtime.status().activity,{runs:1,tools:1,detached:0});
+  runtime.afterTool({toolCallId:'private-call',toolName:'exec',result:{details:{status:'running',sessionId:'private-process',startedAt:1}}},ctx);
+  runtime.finish({},ctx);
+  const snapshot=runtime.status();
+  assert.deepEqual(snapshot.activity,{runs:0,tools:0,detached:1});
+  assert.equal(snapshot.active,1);assert.equal(snapshot.phase,'busy');
+  assert.equal(JSON.stringify(snapshot).includes('private-'),false);
 });

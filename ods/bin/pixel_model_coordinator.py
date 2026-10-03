@@ -5,9 +5,9 @@ import os
 import stat
 import tempfile
 import time
-from pixel_access_bridge import AccessError, atomic_json, private_json, digest, remaining
+from pixel_access_bridge import AccessError, atomic_json, private_json, digest, remaining, runtime_config_path
 from pixel_settings.coordinator import _read, _identity, _valid_identity
-from pixel_model_contract import ModelError, checksum, target, plan, projection
+from pixel_model_contract import ModelError as ModelError, checksum, target, plan, projection
 
 
 def _sha(value):
@@ -37,7 +37,7 @@ def _write(bridge, journal):
 
 
 def _config(bridge):
-    return _read(bridge.home / ".openclaw/openclaw.json", bridge.owner.pw_uid)
+    return _read(runtime_config_path(bridge), bridge.owner.pw_uid)
 
 
 def _marker_digest(config):
@@ -47,16 +47,31 @@ def _marker_digest(config):
     return hashlib.sha256(b"ods-pixel-openclaw-v1\0" + canonical).hexdigest()
 
 
-def _managed_marker(bridge):
+def _managed_marker(bridge, *, allow_installing=False):
+    if bridge.surface == "darwin":
+        # Native macOS installs are bound by the protected launchd deployment,
+        # not the Linux/WSL owner marker.
+        if bridge.gateway_binding is None:
+            raise AccessError("gateway-installation-changed")
+        bridge.verify_gateway_installation_binding()
+        return None, None
     path = bridge.home / ".config/ods/pixel-managed.json"
     for directory, unsafe_bits in ((path.parent.parent, 0o022), (path.parent, 0o077)):
-        info = directory.lstat()
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            raise AccessError("model-marker-missing") from None
         if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
                 or info.st_uid != bridge.owner.pw_uid or info.st_mode & unsafe_bits):
             raise AccessError("model-marker-unsafe")
-    marker = private_json(path, bridge.owner.pw_uid, 65536)
+    try:
+        marker = private_json(path, bridge.owner.pw_uid, 65536)
+    except FileNotFoundError:
+        raise AccessError("model-marker-missing") from None
+    except OSError:
+        raise AccessError("model-marker-unsafe") from None
     if (type(marker) is not dict or marker.get("schema_version") != 2
-            or marker.get("manager") != "ods" or marker.get("state") != "ready"
+            or marker.get("manager") != "ods" or marker.get("state") not in (("ready", "installing") if allow_installing else ("ready",))
             or marker.get("initial_active_state") != "absent"
             or marker.get("install_dir") != str(bridge.install)
             or type(marker.get("configuration_sha256")) is not str
@@ -65,8 +80,10 @@ def _managed_marker(bridge):
     return path, marker
 
 
-def _bind_managed_marker(bridge, journal, expected_sha):
-    before = private_json(bridge.state / "model-before.json", 0, 8 * 1024 * 1024)
+def _bind_managed_marker(bridge, journal, expected_sha, *, snapshot_name="model-before.json", allow_installing=False):
+    if snapshot_name not in ("model-before.json", "access-before.json"):
+        raise AccessError("invalid-marker-snapshot")
+    before = private_json(bridge.state / snapshot_name, 0, 8 * 1024 * 1024)
     prior = _marker_digest(before)
     # Pre-upgrade journals did not carry markerBeforeSha. Their root-owned
     # model-before snapshot and the still-bound owner marker can prove the
@@ -76,14 +93,21 @@ def _bind_managed_marker(bridge, journal, expected_sha):
     config, config_sha = _config(bridge)
     if config_sha != expected_sha:
         raise AccessError("model-config-changed")
-    path, marker = _managed_marker(bridge)
+    path, marker = _managed_marker(bridge, allow_installing=allow_installing)
+    if marker is None:
+        return
     current = _marker_digest(config)
     if marker["configuration_sha256"] == current:
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try: os.fsync(directory)
         finally: os.close(directory)
         return  # A retry after the marker rename is idempotent.
-    if marker["configuration_sha256"] != prior:
+    accepted_prior = {prior}
+    if snapshot_name == "access-before.json" and "markerAppliedSha" in journal:
+        if not checksum(journal["markerAppliedSha"]):
+            raise AccessError("invalid-marker-snapshot")
+        accepted_prior.add(journal["markerAppliedSha"])
+    if marker["configuration_sha256"] not in accepted_prior:
         raise AccessError("model-marker-drifted")
     original = path.lstat()
     marker["configuration_sha256"] = current
@@ -268,12 +292,13 @@ def control(bridge, operation, request=None):
             if access["configured_mode"] not in ("sandboxed", "full-access"): raise AccessError("model-access-mode-unknown")
             config, config_sha = _config(bridge)
             _, marker = _managed_marker(bridge)
-            if marker["configuration_sha256"] != _marker_digest(config):
+            marker_before = _marker_digest(config) if marker is None else marker["configuration_sha256"]
+            if marker_before != _marker_digest(config):
                 raise AccessError("model-marker-drifted")
             journal = dict(kind="model", phase="acquiring", token=os.urandom(32).hex(), transactionId=request["transactionId"],
                            edge_revision=access["_edge"]["revision"], edgeHeld=False, beforeSha=config_sha, afterSha=None, target=None,
                            boundary=bridge.unit_boundary(), mode=access["configured_mode"], beforeIdentity=_identity(bridge),
-                           markerBeforeSha=marker["configuration_sha256"])
+                           markerBeforeSha=marker_before)
             atomic_json(bridge.state / "model-before.json", config)
             _write(bridge, journal)
         _hold(bridge, journal)
@@ -284,7 +309,8 @@ def control(bridge, operation, request=None):
             if journal["phase"] == "acquiring":
                 if config_sha != journal["beforeSha"]: raise AccessError("model-config-changed")
                 worker("model-begin")
-                journal["phase"] = "held"; _write(bridge, journal)
+                journal["phase"] = "held"
+                _write(bridge, journal)
             return _status(bridge)
         if operation == "model-apply":
             if journal["phase"] in ("restoring", "releasing"): raise AccessError("model-transaction-finishing")
@@ -296,7 +322,8 @@ def control(bridge, operation, request=None):
             result = worker("model-apply", model_target=request["target"])
             if result["configSha256"] != journal["afterSha"]: raise AccessError("model-projection-mismatch")
             _activate(bridge, journal, journal["afterSha"])
-            journal["phase"] = "applied"; _write(bridge, journal)
+            journal["phase"] = "applied"
+            _write(bridge, journal)
             return _status(bridge)
         outcome = request["outcome"]
         if "outcome" in journal and journal["outcome"] != outcome: raise AccessError("model-outcome-conflict")
@@ -305,12 +332,14 @@ def control(bridge, operation, request=None):
             # The process can have accepted the target before its HTTP reply or
             # phase checkpoint was lost. Prove it, without dispatching apply again.
             _verify(bridge, journal, expected_sha)
-            journal["phase"] = "applied"; _write(bridge, journal)
+            journal["phase"] = "applied"
+            _write(bridge, journal)
         if outcome == "commit" and journal["phase"] not in ("applied", "releasing"):
             raise AccessError("model-apply-unverified")
         owner = bridge.worker("model-status")
         if outcome == "rollback" and owner["pending"]:
-            journal["phase"] = "restoring"; _write(bridge, journal)
+            journal["phase"] = "restoring"
+            _write(bridge, journal)
             worker("model-rollback")
         elif outcome == "rollback" and config_sha != journal["beforeSha"]:
             raise AccessError("model-rollback-conflict")
@@ -325,7 +354,8 @@ def control(bridge, operation, request=None):
         _verify(bridge, journal, expected_sha)
         if owner["pending"]: worker("model-finish", model_outcome=outcome)
         _bind_managed_marker(bridge, journal, expected_sha)
-        journal.update(phase="releasing", outcome=outcome); _write(bridge, journal)
+        journal.update(phase="releasing", outcome=outcome)
+        _write(bridge, journal)
         atomic_json(bridge.state / "model-route-completed.json", {"transactionId": journal["transactionId"], "outcome": outcome, "configSha256": expected_sha})
         bridge.edge("release", journal["token"], journal["edge_revision"])
         bridge.native("release", journal["token"])

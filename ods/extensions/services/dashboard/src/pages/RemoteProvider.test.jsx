@@ -481,7 +481,7 @@ test('offers one-click reconciliation when the active consumer drifted', async (
 
   render(createElement(RemoteProvider))
 
-  expect(await screen.findByText(/ODS and Pixel are not using its exact model contract/i)).toBeInTheDocument()
+  expect(await screen.findByText(/ODS and Portal are not using its exact model contract/i)).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: /^reconcile route$/i }))
 
   await waitFor(() => {
@@ -587,6 +587,8 @@ test('starts and cancels peer model download through proxy endpoints', async () 
   expect(globalThis.fetch.mock.calls[3][0]).toBe('/api/remote-provider/peer/models/remote-available/download')
   expect(globalThis.fetch.mock.calls[3][1].method).toBe('POST')
 
+  // Fetch completion precedes the action cleanup that enables this control.
+  await waitFor(() => expect(screen.getByRole('button', { name: /cancel download/i })).not.toBeDisabled())
   fireEvent.click(screen.getByRole('button', { name: /cancel download/i }))
 
   await waitFor(() => {

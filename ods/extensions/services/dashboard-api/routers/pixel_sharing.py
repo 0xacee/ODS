@@ -53,6 +53,16 @@ async def _request(action=None, payload=None):
             PREFIX + ('/' + action if action else ''), payload=payload, timeout=10)
     except AgentHTTPError as error:
         code = error.status_code if error.status_code in (400,409,413,503) else 502
+        # Only expose a known capability reason, never arbitrary host diagnostics.
+        if not action and code == 503:
+            try:
+                reason = json.loads(error.response_text)
+            except (ValueError, TypeError, RecursionError):
+                reason = None
+            if isinstance(reason, dict) and reason.get('code') == 'unsupported-platform':
+                return JSONResponse({'detail': 'Sharing is not supported on this host',
+                    'code': 'unsupported-platform'}, status_code=503,
+                    headers={'Cache-Control': 'no-store'})
         raise HTTPException(code, 'Sharing request failed') from None
     except AgentUnavailable:
         raise HTTPException(503, 'Sharing is unavailable') from None

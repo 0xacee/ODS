@@ -6,14 +6,26 @@ import pytest
 import test_model_activate as fixtures
 
 host=fixtures._mod
+_real_prove_pixel_model_contract=host._prove_pixel_model_contract
 OLD={'model':'same-model','contextLength':65536,'maxTokens':2048,'reasoning':False,'routeFingerprint':'a'*64}
 NEW={'model':'same-model','contextLength':65536,'maxTokens':8192,'reasoning':True,'routeFingerprint':'b'*64}
+
+
+def test_local_contract_identity_accepts_only_exact_active_store_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(host, '_active_model_directory', lambda _: tmp_path)
+    config = {'GGUF_FILE': 'model.gguf'}
+    assert host._pixel_local_identity_matches(config, 'model.gguf', 'model.gguf')
+    assert host._pixel_local_identity_matches(config, str(tmp_path / 'model.gguf'), 'model.gguf')
+    assert not host._pixel_local_identity_matches(config, '/other/model.gguf', 'model.gguf')
+    assert not host._pixel_local_identity_matches(config, str(tmp_path / 'model.gguf'), 'other.gguf')
+    assert not host._pixel_local_identity_matches({}, str(tmp_path / 'model.gguf'), 'model.gguf')
 
 
 @pytest.fixture
 def controller(tmp_path,monkeypatch):
     monkeypatch.setattr(host,'INSTALL_DIR',tmp_path)
-    config=tmp_path/'config.json';config.write_text('old')
+    config=tmp_path/'config.json'
+    config.write_text('old')
     monkeypatch.setattr(host,'_pixel_model_config_paths',lambda:{'config':config})
     state=dict(schemaVersion=1,status='ready',revision='c'*64,contract=copy.deepcopy(OLD),pending=False,transactionId=None,outcome=None)
     calls=[]
@@ -39,7 +51,8 @@ def test_journal_is_private_and_precedes_begin_without_secrets(controller):
     text=host._pixel_model_journal_path().read_text()
     assert 'never-store-key' not in text and 'private' not in text
     assert host._pixel_model_recovery_status()=={'pending':True,'phase':'held','transactionId':tx.id}
-    tx.apply(NEW);tx.finish('commit')
+    tx.apply(NEW)
+    tx.finish('commit')
     assert calls==['model-status','model-begin','model-apply','model-finish']
     assert host._pixel_model_recovery_status()['pending'] is False
 
@@ -69,9 +82,12 @@ def test_restart_recovery_finishes_only_exact_saved_state_and_current_proof(cont
     env={'PIXEL_OPENWEBUI_KEY':'configured'}
     tx=host._begin_pixel_model_transaction(env)
     if outcome=='commit':
-        config.write_text('new');tx.apply(NEW)
+        config.write_text('new')
+        tx.apply(NEW)
     def lose_finish(operation,request=None,*,config):
-        if operation=='model-finish':calls.append(operation);raise TimeoutError()
+        if operation=='model-finish':
+            calls.append(operation)
+            raise TimeoutError()
         return call(operation,request,config=config)
     monkeypatch.setattr(host,'_runtime_model_control',lose_finish)
     with pytest.raises(host._PixelModelTransactionUncertain):tx.finish(outcome)
@@ -88,6 +104,42 @@ def test_restart_recovery_finishes_only_exact_saved_state_and_current_proof(cont
     assert calls.count('model-begin')==1 and calls.count('model-apply')==(outcome=='commit')
 
 
+@pytest.mark.parametrize('proof,other_drift,proof_drift', [
+    (True, False, False), (False, False, False),
+    (True, True, False), (True, False, True),
+])
+def test_commit_recovery_accepts_only_proven_stable_env_only_drift(
+        controller,monkeypatch,proof,other_drift,proof_drift):
+    _,_,calls,_=controller
+    env_file=host.INSTALL_DIR/'.env'
+    env_file.write_text('MODEL=old\n')
+    other_file=host.INSTALL_DIR/'model-config'
+    other_file.write_text('old')
+    monkeypatch.setattr(host,'_pixel_model_config_paths',lambda:{
+        '.env':env_file,'model-config':other_file,
+    })
+    env={'PIXEL_OPENWEBUI_KEY':'configured'}
+    transaction=host._begin_pixel_model_transaction(env)
+    env_file.write_text('MODEL=new\n')
+    other_file.write_text('new')
+    transaction.apply(NEW)
+    transaction._save('committing')
+    env_file.write_text('MODEL=new\nUNRELATED_SETTING=changed\n')
+    if other_drift:
+        other_file.write_text('changed-after-commit')
+    def prove(*_args):
+        if proof_drift:
+            env_file.write_text('MODEL=new\nCHANGED_DURING_PROOF=true\n')
+        return proof
+    monkeypatch.setattr(host,'_prove_pixel_model_contract',prove)
+
+    result=host._recover_pixel_model_transaction(env)
+
+    expected_pending=not proof or other_drift or proof_drift
+    assert result['pending'] is expected_pending
+    assert calls.count('model-finish')==(0 if expected_pending else 1)
+
+
 def test_partial_host_mutation_cannot_be_recovered_by_a_generic_reset(controller):
     config,state,calls,_=controller
     env={'PIXEL_OPENWEBUI_KEY':'configured'}
@@ -98,6 +150,77 @@ def test_partial_host_mutation_cannot_be_recovered_by_a_generic_reset(controller
     assert state['pending'] and 'model-finish' not in calls
     with pytest.raises(host._PixelModelTransactionUncertain):host._begin_pixel_model_transaction(env)
     assert calls.count('model-begin')==1
+
+
+@pytest.mark.parametrize('drift', ['LEMONADE_MODEL=other-model', 'CTX_SIZE=8192'])
+def test_commit_recovery_reads_current_env_before_releasing_native_hold(controller,monkeypatch,drift):
+    _,state,calls,_=controller
+    env_file=host.INSTALL_DIR/'.env'
+    text=('PIXEL_OPENWEBUI_KEY=configured\nLEMONADE_EXTERNAL=true\n'
+          'LEMONADE_MODEL=same-model\nCTX_SIZE=65536\nMAX_CONTEXT=65536\n')
+    env_file.write_text(text)
+    monkeypatch.setattr(host,'_pixel_model_config_paths',lambda:{'.env':env_file})
+    monkeypatch.setattr(host,'_managed_wsl_lemonade',lambda _env:{'managed':False})
+    monkeypatch.setattr(host,'_read_external_lemonade_observation',lambda _env:{
+        'modelId':'same-model','contextLength':65536,
+    })
+    env=host.load_env(env_file)
+    transaction=host._begin_pixel_model_transaction(env)
+    target={key:value for key,value in NEW.items() if key!='routeFingerprint'}
+    transaction.apply(target)
+    transaction._save('committing')
+    key=drift.split('=',1)[0]
+    env_file.write_text('\n'.join(drift if line.startswith(key+'=') else line
+                                  for line in text.splitlines())+'\n')
+    monkeypatch.setattr(host,'_prove_pixel_model_contract',_real_prove_pixel_model_contract)
+    assert _real_prove_pixel_model_contract(env,target) is True
+    assert _real_prove_pixel_model_contract(host.load_env(env_file),target) is False
+
+    result=host._recover_pixel_model_transaction(env)
+
+    assert result['pending'] is True
+    assert state['pending'] is True
+    assert 'model-finish' not in calls
+
+
+def test_explicit_recovery_commits_exact_applied_target_without_replaying_apply(controller):
+    config,state,calls,_=controller
+    env={'PIXEL_OPENWEBUI_KEY':'configured'}
+    transaction=host._begin_pixel_model_transaction(env)
+    transaction.target=copy.deepcopy(NEW)
+    transaction._save('applying')
+    config.write_text('new')
+    state.update(status='applied',contract=copy.deepcopy(NEW),pending=True,
+                 transactionId=transaction.id,outcome=None)
+
+    result=host._recover_pixel_model_transaction(env)
+
+    assert result=={'pending':False,'phase':'completed',
+                    'transactionId':transaction.id,'outcome':'commit'}
+    assert calls.count('model-apply')==0 and calls.count('model-finish')==1
+    assert host._read_pixel_model_journal()['phase']=='completed'
+
+
+@pytest.mark.parametrize('proof,change_during_proof',[(False,False),(True,True)])
+def test_explicit_recovery_leaves_unproved_applied_target_pending(
+        controller,monkeypatch,proof,change_during_proof):
+    config,state,calls,_=controller
+    env={'PIXEL_OPENWEBUI_KEY':'configured'}
+    transaction=host._begin_pixel_model_transaction(env)
+    transaction.target=copy.deepcopy(NEW)
+    transaction._save('applying')
+    config.write_text('new')
+    state.update(status='applied',contract=copy.deepcopy(NEW),pending=True,
+                 transactionId=transaction.id,outcome=None)
+    def prove(*_args):
+        if change_during_proof:config.write_text('changed-during-proof')
+        return proof
+    monkeypatch.setattr(host,'_prove_pixel_model_contract',prove)
+
+    result=host._recover_pixel_model_transaction(env)
+
+    assert result['pending'] is True and result['phase']=='applying'
+    assert calls.count('model-apply')==0 and calls.count('model-finish')==0
 
 
 def test_unreceived_begin_cannot_clear_hold_when_external_model_changed(controller,monkeypatch):
@@ -166,11 +289,13 @@ def test_finish_recovery_qualifies_exact_state_when_one_gate_was_already_release
     env={'PIXEL_OPENWEBUI_KEY':'configured'}
     tx=host._begin_pixel_model_transaction(env)
     if outcome=='commit':
-        config.write_text('new');tx.apply(NEW)
+        config.write_text('new')
+        tx.apply(NEW)
     tx._save('committing' if outcome=='commit' else 'rolling-back')
     def partly_released(operation,request=None,*,config):
         if operation=='model-status':
-            calls.append(operation);raise RuntimeError('model-hold-unconfirmed')
+            calls.append(operation)
+            raise RuntimeError('model-hold-unconfirmed')
         assert operation=='model-finish' and request=={'transactionId':tx.id,'outcome':outcome}
         return call(operation,request,config=config)
     monkeypatch.setattr(host,'_runtime_model_control',partly_released)
@@ -188,11 +313,15 @@ def test_recovery_does_not_release_if_config_changes_during_current_proof(contro
     config,state,calls,call=controller
     env={'PIXEL_OPENWEBUI_KEY':'configured'}
     tx=host._begin_pixel_model_transaction(env)
-    config.write_text('new');tx.apply(NEW);tx._save('committing')
+    config.write_text('new')
+    tx.apply(NEW)
+    tx._save('committing')
     if not status_available:
         def unavailable(*_args,**_kwargs):raise RuntimeError('model-hold-unconfirmed')
         monkeypatch.setattr(host,'_runtime_model_control',unavailable)
-    def changed(*_args):config.write_text('changed-during-proof');return True
+    def changed(*_args):
+        config.write_text('changed-during-proof')
+        return True
     monkeypatch.setattr(host,'_prove_pixel_model_contract',changed)
     assert host._recover_pixel_model_transaction(env)['pending']
     assert state['pending'] and 'model-finish' not in calls
@@ -202,12 +331,15 @@ def test_recovery_does_not_release_if_config_changes_during_current_proof(contro
 def test_partial_begin_recovery_only_rolls_back_exact_unchanged_host_state(controller,monkeypatch,changed):
     config,state,calls,call=controller
     env={'PIXEL_OPENWEBUI_KEY':'configured'}
-    tx=host._PixelModelTransaction(env);tx.previous=copy.deepcopy(OLD);tx._save('prepared')
+    tx=host._PixelModelTransaction(env)
+    tx.previous=copy.deepcopy(OLD)
+    tx._save('prepared')
     state.update(pending=True,transactionId=tx.id,status='held')
     if changed:config.write_text('unconfirmed-other-change')
     def partial(operation,request=None,*,config):
         if operation=='model-status':
-            calls.append(operation);raise RuntimeError('model-begin-unconfirmed')
+            calls.append(operation)
+            raise RuntimeError('model-begin-unconfirmed')
         assert operation=='model-finish' and request=={'transactionId':tx.id,'outcome':'rollback'}
         return call(operation,request,config=config)
     monkeypatch.setattr(host,'_runtime_model_control',partial)
@@ -273,10 +405,139 @@ def test_recovery_endpoint_uses_only_owned_journal_and_releases_lifecycle_lock(m
     assert actions==([('begin','model_recovery'),('recover',None),('end','model_recovery')] if body=={} else [])
 
 
+@pytest.fixture
+def model_readback(tmp_path,monkeypatch):
+    monkeypatch.setattr(host,'INSTALL_DIR',tmp_path)
+    monkeypatch.setattr(host,'_remote_provider_route_state_path',lambda:tmp_path/'route.json')
+    (tmp_path/'.env').write_text('one')
+    clock=[100.0]
+    jobs=[]
+    class Thread:
+        def __init__(self,target,**_):self.target=target
+        def start(self):jobs.append(self.target)
+    monkeypatch.setattr(host.threading,'Thread',Thread)
+    monkeypatch.setattr(host.time,'monotonic',lambda:clock[0])
+    monkeypatch.setattr(host,'_managed_pixel_runtime_contract',lambda:copy.deepcopy(OLD))
+    monkeypatch.setattr(host,'_pixel_model_read_cache',{})
+    return clock,jobs,tmp_path/'.env'
+
+
+def test_model_readback_refreshes_before_expiry_with_one_worker(model_readback):
+    clock,jobs,_=model_readback
+    read=host._cached_managed_pixel_runtime_contract
+    assert read() is None
+    jobs.pop()()
+    # Keep crossing the original TTL with newly confirmed, never stale proof.
+    for _ in range(4):
+        clock[0]+=5
+        assert read()==OLD
+        assert len(jobs)==1
+        assert all(read()==OLD for _ in range(8)) and len(jobs)==1
+        jobs.pop()()
+        assert read()==OLD and not jobs
+
+
+def test_model_readback_never_serves_expired_value_during_refresh(model_readback):
+    clock,jobs,_=model_readback
+    read=host._cached_managed_pixel_runtime_contract
+    assert read() is None
+    jobs.pop()()
+    clock[0]+=10
+    assert read()==OLD and len(jobs)==1
+    clock[0]+=5
+    assert read() is None and len(jobs)==1
+    jobs.pop()()
+    assert read()==OLD
+
+
+@pytest.mark.parametrize('failure',[None,RuntimeError('denied')])
+def test_model_readback_failed_refresh_revokes_still_fresh_value(model_readback,monkeypatch,failure):
+    clock,jobs,_=model_readback
+    read=host._cached_managed_pixel_runtime_contract
+    read()
+    jobs.pop()()
+    clock[0]+=10
+    assert read()==OLD and len(jobs)==1
+    def failed():
+        if failure:raise failure
+        return None
+    monkeypatch.setattr(host,'_managed_pixel_runtime_contract',failed)
+    jobs.pop()()
+    assert read() is None
+
+
+@pytest.mark.parametrize('poll_changed_key',[True,False])
+def test_model_readback_rejects_old_worker_after_config_change(model_readback,monkeypatch,poll_changed_key):
+    clock,jobs,env=model_readback
+    read=host._cached_managed_pixel_runtime_contract
+    read()
+    jobs.pop()()
+    clock[0]+=10
+    assert read()==OLD and len(jobs)==1
+    env.write_text('two-new-provider')
+    if poll_changed_key:
+        assert read() is None and len(jobs)==1
+    jobs.pop()()
+    # Old worker must neither qualify the new generation nor prevent its readback.
+    assert read() is None and len(jobs)==1
+    monkeypatch.setattr(host,'_managed_pixel_runtime_contract',lambda:copy.deepcopy(NEW))
+    jobs.pop()()
+    assert read()==NEW
+
+
+def test_model_readback_does_not_return_old_value_after_immediate_failed_refresh(model_readback,monkeypatch):
+    clock,jobs,_=model_readback
+    read=host._cached_managed_pixel_runtime_contract
+    read()
+    jobs.pop()()
+    clock[0]+=10
+    class ImmediateThread:
+        def __init__(self,target,**_):self.target=target
+        def start(self):self.target()
+    monkeypatch.setattr(host.threading,'Thread',ImmediateThread)
+    monkeypatch.setattr(host,'_managed_pixel_runtime_contract',lambda:None)
+    assert read() is None
+
+
+def test_model_readback_old_worker_cannot_publish_after_key_changes_back(model_readback,monkeypatch):
+    _,jobs,_=model_readback
+    key=['original']
+    monkeypatch.setattr(host,'_managed_pixel_readback_key',lambda:key[0])
+    read=host._cached_managed_pixel_runtime_contract
+    assert read() is None
+    key[0]='changed'
+    assert read() is None and len(jobs)==1
+    key[0]='original'
+    assert read() is None and len(jobs)==1
+    jobs.pop()()
+    assert read() is None and len(jobs)==1
+    jobs.pop()()
+    assert read()==OLD
+
+
+def test_model_readback_retries_after_worker_start_failure(model_readback,monkeypatch):
+    clock,jobs,_=model_readback
+    read=host._cached_managed_pixel_runtime_contract
+    read()
+    jobs.pop()()
+    clock[0]+=10
+    regular_thread=host.threading.Thread
+    class FailedThread:
+        def __init__(self,**_):pass
+        def start(self):raise RuntimeError('cannot start thread')
+    monkeypatch.setattr(host.threading,'Thread',FailedThread)
+    assert read() is None
+    monkeypatch.setattr(host.threading,'Thread',regular_thread)
+    assert read()==OLD and len(jobs)==1
+    jobs.pop()()
+    assert read()==OLD
+
+
 def test_background_model_readback_is_unknown_until_confirmed_and_invalidates_after_config_change(tmp_path,monkeypatch):
     monkeypatch.setattr(host,'INSTALL_DIR',tmp_path)
     monkeypatch.setattr(host,'_remote_provider_route_state_path',lambda:tmp_path/'route.json')
-    env=tmp_path/'.env';env.write_text('one')
+    env=tmp_path/'.env'
+    env.write_text('one')
     jobs=[]
     class Thread:
         def __init__(self,target,**_):self.target=target

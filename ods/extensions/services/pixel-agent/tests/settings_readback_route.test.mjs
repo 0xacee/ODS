@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import {createManagedRuntimeRegistry, DEPLOYMENT_ENV, requiredManagedHooks} from '../plugin/managed-runtime-lifecycle.mjs';
 import {readRuntimeSettings} from '../plugin/settings-runtime-readback.mjs';
 import {createManagedProviderBootstrap} from '../plugin/provider-bootstrap.mjs';
+import {registerBootstrapCapabilities} from '../plugin/bootstrap-capabilities.mjs';
 
 // Execute the real registration block with controlled owners. Gateway auth and
 // installed restart/readback still require real integration qualification.
@@ -14,14 +15,23 @@ const end = source.indexOf('    api.on("tool_result_persist"', start);
 assert.ok(start >= 0 && end > start);
 function setup(deny = false) {
   let route;
-  const calls = [], result = {source: 'current-runtime-config'};
+  const calls = [], result = {source: 'current-runtime-config'}, proof = {phase: 'held', proof: {mode: 'sandboxed'}};
   vm.runInNewContext(source.slice(start, end), {
     api: {registerHttpRoute(value) { route = value; }},
-    managedRuntime: {assertTransition() { calls.push('owner'); if (deny) throw new Error(); }, readControlStatus: () => ({available: true})},
-    accessRuntime: {readSettings(token, revision) { calls.push(['read', token, revision]); return result; }},
+    managedRuntime: {
+      assertTransition() { calls.push('owner'); if (deny) throw new Error(); },
+      async qualifyTransition(token, revision) {
+        calls.push(['qualify', token, revision]); if (deny) throw new Error(); return {phase: 'held'};
+      },
+      readControlStatus: () => ({available: true}),
+    },
+    accessRuntime: {
+      readSettings(token, revision) { calls.push(['read', token, revision]); return result; },
+      async probe(token) { calls.push(['probe', token]); return proof; },
+    },
     sendJson(res, status, body) { Object.assign(res, {status, body}); },
   });
-  return {route, calls, result};
+  return {route, calls, result, proof};
 }
 async function request(route, body, method = 'POST') {
   const res = {};
@@ -44,6 +54,18 @@ test('busy managed owner prevents readback without reaching config', async () =>
   const {route, calls} = setup(true);
   assert.equal((await request(route, body)).status, 409);
   assert.deepEqual(calls, ['owner']);
+});
+test('managed proof qualifies the exact held token and revision before execution', async () => {
+  const {route, calls, proof} = setup();
+  const requestBody = {...body, operation: 'probe'};
+  const res = await request(route, requestBody);
+  assert.equal(res.status, 200); assert.equal(res.body, proof);
+  assert.deepEqual(calls, [['qualify', body.token, body.revision], ['probe', body.token]]);
+});
+test('refused managed proof never reaches the access runtime', async () => {
+  const {route, calls} = setup(true);
+  assert.equal((await request(route, {...body, operation: 'probe'})).status, 409);
+  assert.deepEqual(calls, [['qualify', body.token, body.revision]]);
 });
 test('unknown fields and malformed identities fail before owner or readback', async () => {
   for (const changed of [{...body, path: '/private'}, {...body, token: 'bad'}, {...body, revision: null}]) {
@@ -120,11 +142,14 @@ test('registration supplies the SDK current snapshot lazily, separate from start
   assert.ok(begin >= 0 && finish > begin);
   const startup = {generation: 'startup'};
   let current = {generation: 'current'}, reads = 0;
-  const context = {api: {config: startup, runtime: {config: {current() { reads++; return current; }}}},
+  const hooks = [];
+  const context = {api: {config: startup, registerHook: (...args) => hooks.push(args), runtime: {config: {current() { reads++; return current; }}}},
+    registerBootstrapCapabilities,
     accessRuntime: undefined, createAccessRuntime: options => options,
     createOpenClawCodingTools() {}, resolveSandboxContext() {}, execCancellationControl: {},
     OPENCLAW_VERSION: '2026.6.33'};
   vm.runInNewContext(source.slice(begin, finish), context);
+  assert.equal(hooks.length, 1); assert.equal(hooks[0][0], 'agent:bootstrap');
   const options = context.accessRuntime;
   assert.equal(reads, 0);
   assert.equal(options.config(), startup);
@@ -147,6 +172,7 @@ function registeredRoute(managed) {
     leaseTimeoutSeconds: 180, approvalTimeoutSeconds: 60}), OPENCLAW_REQUIRED_PLUGINS:
     JSON.stringify({version: 1, plugins: [{id: 'pixel-ods', hooks: requiredManagedHooks}]})} : {};
   let route, reads = 0, providers = 0;
+  const hooks = [];
   const access = {status: () => ({available: true, phase: 'held', active: 0}),
     isProbe: () => false, admit: () => ({outcome: 'block'}), finish() {},
     readSettings(token, revision) {
@@ -155,6 +181,7 @@ function registeredRoute(managed) {
         observedAt: '2026-09-09T13:00:00.000Z'});
     }};
   const api = {registrationMode: 'full', config, pluginConfig: config.plugins.entries['pixel-ods'].config,
+    registerHook: (...args) => hooks.push(args),
     runtime: {config: {current: () => config}}, registerProvider() {providers++;}, on() {}, registerRuntimeLifecycle() {},
     registerHttpRoute(value) {route = value;}};
   const registry = createManagedRuntimeRegistry({environment,
@@ -163,7 +190,7 @@ function registeredRoute(managed) {
     createRouting: args => createManagedProviderBootstrap({...args,
       createLease: () => ({durableReplayGuard: true, acquireLease() {throw new Error('no transport allowed');}, releaseLease() {}}),
       createHandoff: () => async () => null})});
-  const context = vm.createContext({api, managedRuntimeRegistry: registry,
+  const context = vm.createContext({api, managedRuntimeRegistry: registry, registerBootstrapCapabilities,
     accessRuntime: undefined, createAccessRuntime: () => access, createOpenClawCodingTools() {},
     resolveSandboxContext() {}, execCancellationControl: {}, OPENCLAW_VERSION: '2026.6.33',
     sendJson(res, status, value) {Object.assign(res, {status, body: value});}});
@@ -172,6 +199,7 @@ function registeredRoute(managed) {
   assert.ok(begin >= 0 && finish > begin);
   // Include the actual production assignment from registry to route owner.
   vm.runInContext(source.slice(begin, finish) + source.slice(start, end), context);
+  assert.equal(hooks.length, 1); assert.equal(hooks[0][0], 'agent:bootstrap');
   return {route, config, binding, reads: () => reads, providers: () => providers};
 }
 

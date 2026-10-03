@@ -3,6 +3,10 @@ import fs from 'node:fs';
 import net from 'node:net';
 import {timingSafeEqual} from 'node:crypto';
 
+export const ACCESS_SOCKET_PATH = process.platform === 'darwin'
+  ? '/private/var/run/ods-pixel-access/control.sock'
+  : '/run/ods-pixel-access/control.sock';
+
 export function readAccessOwnerKey(filename, uid = process.geteuid?.()) {
   if (!filename || !filename.startsWith('/') || filename.includes('\0')) return null;
   let fd;
@@ -28,14 +32,17 @@ const hex = value => typeof value === 'string' && value.length === 64 && /^[a-f0
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join() === [...keys].sort().join();
 export function validModelContract(value) {
-  return (exact(value, ['model','contextLength','maxTokens','reasoning'])
-      || exact(value, ['model','contextLength','maxTokens','reasoning','routeFingerprint']))
+  const required = ['model','contextLength','maxTokens','reasoning'];
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && required.every(key => Object.hasOwn(value, key))
+    && Object.keys(value).every(key => [...required,'routeFingerprint','imageInput'].includes(key))
     && typeof value.model === 'string' && value.model.length <= 256
     && /^[A-Za-z0-9][A-Za-z0-9._+:/ @(),=-]*$/.test(value.model) && !/[\r\n]/.test(value.model)
     && Number.isInteger(value.contextLength) && value.contextLength >= 4096 && value.contextLength <= 10000000
     && Number.isInteger(value.maxTokens) && value.maxTokens >= 1 && value.maxTokens <= value.contextLength
     && typeof value.reasoning === 'boolean'
-    && (!Object.hasOwn(value,'routeFingerprint') || hex(value.routeFingerprint));
+    && (!Object.hasOwn(value,'routeFingerprint') || hex(value.routeFingerprint))
+    && (!Object.hasOwn(value,'imageInput') || ['supported','unsupported','unknown'].includes(value.imageInput));
 }
 
 export function validModelControl(value) {
@@ -88,7 +95,7 @@ export async function handleModelControl(req, res, {ownerKey, request = requestA
   } catch {return reply(503,{error:'model-control-unavailable'});}
 }
 
-export function requestAccessController(payload, {socketPath = '/run/ods-pixel-access/control.sock', timeout = 305000} = {}) {
+export function requestAccessController(payload, {socketPath = ACCESS_SOCKET_PATH, timeout = 305000} = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let chunks = [], bytes = 0, settled = false;

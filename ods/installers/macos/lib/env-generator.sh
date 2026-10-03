@@ -42,6 +42,8 @@ read_env_value() {
 # shellcheck source=../../../lib/dotenv-quote.sh
 _ODS_MACOS_ENV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 . "$_ODS_MACOS_ENV_ROOT/lib/dotenv-quote.sh"
+# shellcheck source=../../lib/searxng-locale.sh
+. "$_ODS_MACOS_ENV_ROOT/installers/lib/searxng-locale.sh"
 unset _ODS_MACOS_ENV_ROOT
 
 env_key_exists() {
@@ -75,19 +77,46 @@ upsert_env_value() {
     local env_path="$1"
     local key="$2"
     local value="$3"
-    if awk -v k="$key" 'index($0, k "=") == 1 { found=1; exit } END { exit !found }' "$env_path" 2>/dev/null; then
-        awk -v k="$key" -v v="$value" '
-            index($0, k "=") == 1 { print k "=" v; next }
-            { print }
-        ' "$env_path" > "${env_path}.tmp" && cat "${env_path}.tmp" > "$env_path" && rm -f "${env_path}.tmp"
-    else
-        # Appending after a last line that has no newline would join the new
-        # assignment onto that line and corrupt both keys.
-        if [[ -s "$env_path" && -n "$(tail -c 1 "$env_path")" ]]; then
-            printf '\n' >> "$env_path"
+    # The live file may be bind-mounted, so retain its inode. Stage and back up
+    # private copies before opening it for writing; a recoverable copy failure
+    # can then be rolled back without leaving a truncated or exposed .env.
+    (
+        umask 077
+        [[ ! -L "$env_path" && ( ! -e "$env_path" || -f "$env_path" ) ]] || return 1
+        stage_dir="$(mktemp -d "${env_path}.stage.XXXXXX")" || return 1
+        staged="$stage_dir/next"
+        backup=""
+        found=false
+        trap 'rm -f "$staged"; if [[ -n "$backup" ]]; then rm -f "$backup"; fi; rmdir "$stage_dir"' EXIT
+        if [[ -f "$env_path" ]]; then
+            backup="$stage_dir/previous"
+            cp "$env_path" "$backup" || return 1
+            : > "$staged" || return 1
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                if [[ "$line" == "$key="* ]]; then
+                    printf '%s=%s\n' "$key" "$value" || return 1
+                    found=true
+                else
+                    printf '%s\n' "$line" || return 1
+                fi
+            done < "$env_path" > "$staged" || return 1
+            if [[ "$found" == false ]]; then
+                printf '%s=%s\n' "$key" "$value" >> "$staged" || return 1
+            fi
+            if ! cat "$staged" > "$env_path" || ! cmp -s "$staged" "$env_path"; then
+                cp "$backup" "$env_path" || {
+                    echo "ERROR: failed to restore $env_path after an incomplete write" >&2
+                    return 1
+                }
+                return 1
+            fi
+        else
+            printf '%s=%s\n' "$key" "$value" > "$staged" || return 1
+            # A hard link publishes the private file without replacing a path
+            # that another process created while we were staging it.
+            ln "$staged" "$env_path" || return 1
         fi
-        printf '%s=%s\n' "$key" "$value" >> "$env_path"
-    fi
+    )
 }
 
 cap_cpu_value() {
@@ -247,6 +276,10 @@ generate_ods_env() {
         comfyui_cpu_reservation="$(select_env_service_cpu_reservation "$env_path" "COMFYUI_CPU_RESERVATION" "2.0" "$comfyui_cpu_limit")"
         upsert_env_value "$env_path" "TTS_CPU_LIMIT" "$tts_cpu_limit"
         upsert_env_value "$env_path" "TTS_CPU_RESERVATION" "$tts_cpu_reservation"
+        local tts_workers
+        tts_workers="$(read_env_value "$env_path" "TTS_WORKERS")"
+        [[ "$tts_workers" =~ ^[1-9][0-9]*$ ]] || tts_workers=1
+        upsert_env_value "$env_path" "TTS_WORKERS" "$tts_workers"
         upsert_env_value "$env_path" "WHISPER_CPU_LIMIT" "$whisper_cpu_limit"
         upsert_env_value "$env_path" "WHISPER_CPU_RESERVATION" "$whisper_cpu_reservation"
         upsert_env_value "$env_path" "HERMES_CPU_LIMIT" "$hermes_cpu_limit"
@@ -634,8 +667,15 @@ LLAMA_ARG_CACHE_TYPE_V=${LLAMA_ARG_CACHE_TYPE_V:-f16}
 # Optional native hybrid-model cache tuning; requires matching runtime --help support.
 # Empty/unset preserves runtime defaults; registered model profiles own their arguments.
 # LLAMA_ARG_CHECKPOINT_EVERY_NT=1024
-# LLAMA_ARG_CTX_CHECKPOINTS=8
+# Newer runtimes use minimum spacing instead of the legacy interval; never set both.
+# LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT=1024
+# Prompt checkpoints per slot. Unset uses 32 (about 50 MiB each for Qwen3.5-9B);
+# lower it, or set 0, to save memory.
+# LLAMA_ARG_CTX_CHECKPOINTS=32
 # LLAMA_ARG_CACHE_RAM=512
+# Lossless n-gram speculation (--spec-type ngram-mod) is on by default when the
+# installed llama-server supports it (b8955+; ODS pins b9014). Turn it off with:
+# LLAMA_SPEC_TYPE=none
 # Optional idle unloading: saves RAM between sessions, but loses prompt cache on sleep.
 # LLAMA_ARG_SLEEP_IDLE_SECONDS=120
 # Optional MoE only. Example for 8-12GB VRAM: LLAMA_ARG_N_CPU_MOE=25
@@ -648,6 +688,7 @@ LLAMA_CPU_RESERVATION=${detected_cpu_reservation}
 #=== Bundled Service CPU Budgets ===
 TTS_CPU_LIMIT=${tts_cpu_limit}
 TTS_CPU_RESERVATION=${tts_cpu_reservation}
+TTS_WORKERS=1
 WHISPER_CPU_LIMIT=${whisper_cpu_limit}
 WHISPER_CPU_RESERVATION=${whisper_cpu_reservation}
 HERMES_CPU_LIMIT=${hermes_cpu_limit}
@@ -681,6 +722,7 @@ LANGFUSE_PORT=3006
 HERMES_LLM_BASE_URL=${hermes_llm_base_url}
 HERMES_LLM_API_KEY=${hermes_llm_api_key}
 HERMES_LANGUAGE=en
+HERMES_REQUIRE_OWNER_CARD=${HERMES_REQUIRE_OWNER_CARD:-false}
 HERMES_PROXY_PORT=9120
 HERMES_PROXY_UPSTREAM=ods-hermes:9119
 ODS_AUTH_UPSTREAM=ods-dashboard-api:3002
@@ -725,6 +767,7 @@ EMBEDDINGS_MEMORY_LIMIT=${embeddings_memory_limit}
 
 #=== Web UI Settings ===
 # Loopback installs open directly. Network-bound installs require a login.
+ENABLE_OPEN_WEBUI=${ENABLE_OPEN_WEBUI:-false}
 WEBUI_AUTH=${webui_auth}
 ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-true}
 WEB_SEARCH_ENGINE=searxng
@@ -777,6 +820,10 @@ generate_searxng_config() {
         return 0
     fi
 
+    # Terminal sessions usually export LANG; otherwise use the macOS locale.
+    local search_lang
+    search_lang="$(ods_searxng_default_lang "${LC_ALL:-${LC_MESSAGES:-${LANG:-$(defaults read -g AppleLocale 2>/dev/null || true)}}}")"
+
     cat > "$settings_path" << SEARXEOF
 use_default_settings: true
 server:
@@ -786,13 +833,16 @@ server:
   limiter: false
 search:
   safe_search: 0
+  # Install locale. API clients send no language, so "auto" would mean "all".
+  default_lang: "${search_lang}"
   formats:
     - html
     - json
+$(ods_searxng_hostnames_yaml "$search_lang")
 engines:
   - name: bing
-    # Requalify before enabling: https://github.com/searxng/searxng/pull/6671
-    disabled: true
+    # Fallback when other general engines are blocked (CAPTCHA/429/access denied).
+    disabled: false
   - name: duckduckgo
     disabled: false
   - name: google

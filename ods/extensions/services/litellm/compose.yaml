@@ -27,10 +27,13 @@ services:
       # /tmp/config.yaml, so the callback must be mounted alongside it.
       - ./extensions/services/litellm/ods_token_spy_callback.py:/tmp/ods_token_spy_callback.py:ro,z
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${LITELLM_PORT:-4000}:4000"
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        if [ -s /run/secrets/ods-external-llm-api-key ]; then
+          export EXTERNAL_LLM_API_KEY="$$(cat /run/secrets/ods-external-llm-api-key)"
+        fi
         CONFIG_PATH=$$(sh /app/ods-select-config.sh)
         if [ -z "$$CONFIG_PATH" ] || [ ! -r "$$CONFIG_PATH" ]; then
           echo "ERROR: LiteLLM config selector returned an unreadable path: $${CONFIG_PATH:-<empty>}" >&2

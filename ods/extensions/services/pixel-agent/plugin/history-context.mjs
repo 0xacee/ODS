@@ -1,5 +1,6 @@
 import http from 'node:http';
 import {createHash,randomUUID} from 'node:crypto';
+import {readHistoryViaDocker} from './history-docker.mjs';
 
 const PREFIX='agent:pixel:openai-user:';
 const USER=/^ods-[a-f0-9]{64}$/;
@@ -15,7 +16,7 @@ function archiveMessages(messages) {
   }
   return messages;
 }
-export function createHistoryHydrator({getSessionEntry,patchSessionEntry,resolveStorePath,withSessionTranscriptWriteLock,readConfig,now=Date.now}) {
+export function createHistoryHydrator({getSessionEntry,patchSessionEntry,resolveStorePath,withSessionTranscriptWriteLock,appendAssistantMirrorMessageByIdentity,readConfig,now=Date.now}) {
   return async function hydrate({user,messages}) {
     if(!USER.test(user)) throw failure('invalid-history-user');
     archiveMessages(messages);
@@ -50,19 +51,44 @@ export function createHistoryHydrator({getSessionEntry,patchSessionEntry,resolve
       }
       if(appended) await publishUpdate();
     });
+    // Record the changed transcript before sealing: a failed seal is retried,
+    // and the retry appends nothing, so it would never reach this update.
     if(appended) await patchSessionEntry({...scope,update:current=>current.sessionId===entry.sessionId?{updatedAt:now(),totalTokensFresh:false}:null});
+    if(messages.length) {
+      // The pinned runtime treats a transcript containing only user messages
+      // as an unfinished first turn and clears it when preparing a run. Use
+      // its public delivery-mirror API to seal the import. This zero-usage,
+      // transcript-only receipt is excluded from model context by the SDK;
+      // it does not impersonate a model answer or grant permission to act.
+      const sealed=await appendAssistantMirrorMessageByIdentity({...scope,sessionId:entry.sessionId,config,
+        idempotencyKey:`ods-history-seed:${revision}`,
+        text:'Portal imported historical reference. No task has been executed or verified.'});
+      if(sealed?.ok!==true) throw failure('history-seal-unconfirmed');
+    }
     return {schemaVersion:1,hydrated:true,revision,messages:messages.length,appended};
   };
 }
 
-export function readArchivedHistory(user,args,{socketPath=process.env.PIXEL_INGRESS_SOCKET || '/run/ods-pixel/pixel-ingress.sock',request=http.request}={}) {
+function historyResponse(body) {
+  try {
+    const value=JSON.parse(body);
+    if(value?.schemaVersion!==1 || value?.source!=='archived-conversation' || value?.untrusted!==true || !Array.isArray(value.messages)) throw failure('history-unavailable');
+    return value;
+  } catch {throw failure('history-unavailable');}
+}
+export function readArchivedHistory(user,args,{socketPath=process.env.PIXEL_INGRESS_SOCKET || '/run/ods-pixel/pixel-ingress.sock',request=http.request,
+  transport=process.env.PIXEL_HISTORY_TRANSPORT || 'unix',dockerRead=readHistoryViaDocker,
+  dockerPath=process.env.PIXEL_HISTORY_DOCKER,project=process.env.PIXEL_HISTORY_PROJECT,
+  image=process.env.PIXEL_HISTORY_IMAGE,containerUser=process.env.PIXEL_HISTORY_USER}={}) {
+  if(transport==='docker-exec') return dockerRead(user,args,{dockerPath,project,image,containerUser}).then(historyResponse);
+  if(transport!=='unix') return Promise.reject(failure('history-unavailable'));
   return new Promise((resolve,reject)=>{
     const body=JSON.stringify({user,...args});
     const req=request({socketPath,path:'/v1/chat/history',method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(body)}},res=>{
       const parts=[];let bytes=0;
       res.on('data',chunk=>{bytes+=chunk.length;if(bytes>16*1024){res.destroy();reject(failure('history-response-too-large'))}else parts.push(chunk)});
       res.on('error',()=>reject(failure('history-unavailable')));
-      res.on('end',()=>{try {if(res.statusCode!==200) throw failure('history-unavailable');const value=JSON.parse(Buffer.concat(parts).toString('utf8'));if(value?.schemaVersion!==1 || value?.source!=='archived-conversation' || value?.untrusted!==true || !Array.isArray(value.messages)) throw failure('history-unavailable');resolve(value)} catch {reject(failure('history-unavailable'))}});
+      res.on('end',()=>{try {if(res.statusCode!==200) throw failure('history-unavailable');resolve(historyResponse(Buffer.concat(parts).toString('utf8')))} catch {reject(failure('history-unavailable'))}});
     });
     req.on('error',()=>reject(failure('history-unavailable')));
     req.setTimeout(5000,()=>{req.destroy();reject(failure('history-unavailable'))});

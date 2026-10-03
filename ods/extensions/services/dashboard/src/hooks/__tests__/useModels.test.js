@@ -187,14 +187,15 @@ describe('useModels', () => {
 
     const activationPosts = fetch.mock.calls.filter(([, options]) => options?.method === 'POST')
     expect(activationPosts).toHaveLength(0)
-    expect(result.current.error).toContain('external Ollama or LM Studio backend')
+    expect(result.current.error).toContain('model service outside ODS')
   })
 
   test('externally managed Lemonade keeps browsing but routes switching through adoption', async () => {
     const target = 'downloaded-model'
     fetch.mockResolvedValue(modelsResponse(
       [{ id: target, status: 'downloaded' }],
-      { odsMode: 'lemonade', configuredMode: 'lemonade', llmBackend: 'lemonade', externalLemonade: true }
+      { odsMode: 'lemonade', configuredMode: 'lemonade', llmBackend: 'lemonade', externalLemonade: true,
+        modelManagement: { managed: false, canActivate: false, canUnload: false, running: false } }
     ))
 
     const { result } = renderHook(() => useModels())
@@ -207,7 +208,7 @@ describe('useModels', () => {
     await act(async () => { await result.current.loadModel(target) })
 
     expect(fetch.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(0)
-    expect(result.current.error).toContain('managed outside ODS')
+    expect(result.current.error).toBe('Change the loaded model in Lemonade, then use Adopt loaded model here to update ODS and Portal.')
   })
 
   test('ODS-managed Lemonade retains local model activation', async () => {
@@ -327,7 +328,7 @@ describe('useModels', () => {
           json: () => Promise.resolve({
             detail: {
               code: 'pixel_chat_active',
-              message: 'Pixel is working. Stop the active response before changing models.',
+              message: 'Portal is working. Stop the active response before changing models.',
               requestedModelId: target,
             },
           }),
@@ -350,7 +351,7 @@ describe('useModels', () => {
       })
 
       expect(result.current.error).toBe(
-        'Pixel is working. Stop the active response before changing models.'
+        'Portal is working. Stop the active response before changing models.'
       )
       expect(result.current.error).not.toMatch(/active target|server did not identify/i)
     } finally {
@@ -438,6 +439,87 @@ describe('useModels', () => {
         await loadPromise
       })
       expect(result.current.activationReadyModel).toBe(target)
+      expect(result.current.actionLoading).toBeNull()
+      expect(result.current.error).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('confirms a committed activation as soon as the server answers', async () => {
+    vi.useFakeTimers()
+    const target = 'fast-model'
+    let currentModel = null
+    const activation = deferred()
+    fetch.mockImplementation((_url, options) => {
+      if (options?.method === 'POST') return activation.promise
+      return Promise.resolve(modelsResponse(
+        [{ id: target, status: currentModel ? 'loaded' : 'downloaded' }],
+        { currentModel }
+      ))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let settled = false
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target).then(() => { settled = true })
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+      expect(settled).toBe(false)
+      expect(result.current.actionLoading).toBe(target)
+
+      currentModel = target
+      activation.resolve({ ok: true })
+      // Far inside the 5-second activation poll interval.
+      await act(async () => { await vi.advanceTimersByTimeAsync(10) })
+      expect(settled).toBe(true)
+      expect(result.current.actionLoading).toBeNull()
+      expect(result.current.error).toBeNull()
+      await loadPromise
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('cuts only one activation poll short when status lags the answer', async () => {
+    vi.useFakeTimers()
+    const target = 'lagging-model'
+    let currentModel = null
+    fetch.mockImplementation((_url, options) => {
+      if (options?.method === 'POST') return Promise.resolve({ ok: true })
+      return Promise.resolve(modelsResponse(
+        [{ id: target, status: currentModel ? 'loaded' : 'downloaded' }],
+        { currentModel }
+      ))
+    })
+
+    try {
+      const { result } = renderHook(() => useModels())
+      await act(async () => {})
+
+      let loadPromise
+      act(() => {
+        loadPromise = result.current.loadModel(target)
+      })
+      const callsBefore = fetch.mock.calls.length
+      await act(async () => { await vi.advanceTimersByTimeAsync(4000) })
+      const statusReads = fetch.mock.calls
+        .slice(callsBefore)
+        .filter(call => call[1]?.method !== 'POST').length
+      // One immediate confirmation plus the regular background polls: the
+      // answered request must never turn the wait into a request loop.
+      expect(statusReads).toBeLessThanOrEqual(5)
+      expect(result.current.actionLoading).toBe(target)
+
+      currentModel = target
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+        await loadPromise
+      })
       expect(result.current.actionLoading).toBeNull()
       expect(result.current.error).toBeNull()
     } finally {

@@ -27,7 +27,9 @@ test('real harness recovers a premature stop and retains safe delivery when furt
   const port=probe.address().port;await new Promise(resolve=>probe.close(resolve));
   mkdirSync(join(root,'node_modules'));symlinkSync(pkg,join(root,'node_modules','openclaw'));
   const plugin=join(root,'plugin');mkdirSync(plugin);
-  copyFileSync(new URL('../plugin/completion-assurance.mjs',import.meta.url),join(plugin,'completion-assurance.mjs'));
+  // completion-assurance.mjs and its one plugin-local import.
+  for (const file of ['completion-assurance.mjs','page-excerpt.mjs'])
+    copyFileSync(new URL(`../plugin/${file}`,import.meta.url),join(plugin,file));
   writeFileSync(join(plugin,'package.json'),JSON.stringify({name:'completion-fixture',version:'1.0.0',type:'module',openclaw:{extensions:['./index.mjs']}}));
   writeFileSync(join(plugin,'openclaw.plugin.json'),JSON.stringify({id:'completion-fixture',contracts:{tools:['fixture_source']},toolMetadata:{fixture_source:{replaySafe:true}},activation:{onStartup:true},configSchema:{type:'object',properties:{}}}));
   writeFileSync(join(plugin,'index.mjs'),`
@@ -71,9 +73,9 @@ test('real harness recovers a premature stop and retains safe delivery when furt
     assert.equal(rounds,3);
     assert.deepEqual(hooks.map(x=>x.result?.action),['revise','revise']);
     assert.match(log,/revision after potential side effects/);
-    assert.match(hooks.at(-1).terminal,/https:\/\/example.org\/news/);
+    assert.doesNotMatch(hooks.at(-1).terminal,/https?:/);
     assert.match(hooks.at(-1).terminal,/O resultado foi encontrado/);
-    assert.match(hooks.at(-1).terminal,/Fontes retornadas pela pesquisa/);
+    assert.match(hooks.at(-1).terminal,/atribuição permanece incompleta/);
   } finally {
     if(child && child.exitCode===null){const closed=once(child,'close');process.kill(-child.pid,'SIGTERM');await Promise.race([closed,delay(3000)]);if(child.exitCode===null)process.kill(-child.pid,'SIGKILL');}
     upstream.closeAllConnections();await new Promise(resolve=>upstream.close(resolve));

@@ -68,6 +68,13 @@ export default function Models({ compact = false }) {
     configuredModel,
     odsMode,
     configuredMode,
+    llmBackend,
+    externalLemonade,
+    modelManagement,
+    modelLifecycle,
+    runtimeActionLoading,
+    stopRuntime,
+    startRuntime,
     canActivateModels,
     activationModeError,
     recommendationAlternatives,
@@ -96,7 +103,7 @@ export default function Models({ compact = false }) {
   const [contextFloor, setContextFloor] = useState(0)
   const [deleteConfirmModel, setDeleteConfirmModel] = useState(null)
   const [activationConfigModel, setActivationConfigModel] = useState(null)
-  const [libraryScope, setLibraryScope] = useState(compact ? 'installed' : 'recommended')
+  const [libraryScope, setLibraryScope] = useState('recommended')
   const libraryRef = useRef(null)
 
   useEffect(() => {
@@ -154,7 +161,7 @@ export default function Models({ compact = false }) {
   )
   const odsCatalogModels = useMemo(
     () => models
-      .filter(model => model.metadata?.catalogSource !== 'huggingface')
+      .filter(model => model.metadata?.catalogSource !== 'huggingface' && model.metadata?.source !== 'runtime')
       .sort((left, right) => Number(Boolean(right.recommended)) - Number(Boolean(left.recommended)) || Number(Boolean(right.fitsVram)) - Number(Boolean(left.fitsVram))),
     [models]
   )
@@ -251,9 +258,9 @@ export default function Models({ compact = false }) {
     canActivateModels={canActivateModels} activationModeError={activationModeError}
     hermesMinimumContext={hermesMinimumContext} pixelMinimumContext={pixelMinimumContext}
     isCurrentModel={model.id === currentModel} isLoading={pendingModelActions.includes(model.id)}
-    loadBusy={pendingModelActions.length > 0} activationBusy={Boolean(activationLoading)}
+    loadBusy={pendingModelActions.length > 0} activationBusy={Boolean(activationLoading || runtimeActionLoading)}
     downloadBusy={downloadProgress.isDownloading || !!downloadStarting} downloadStarting={downloadStarting === model.id}
-    onDownload={() => handleDownload(model.id)} onLoad={() => setActivationConfigModel(model)}
+    onDownload={() => handleDownload(model.id)} onLoad={() => { if (canActivateModels && !runtimeActionLoading) setActivationConfigModel(model) }}
     onBenchmark={() => benchmarkModel(model.id)} onDelete={() => setDeleteConfirmModel(model)}/>
 
   if (loading) {
@@ -276,7 +283,7 @@ export default function Models({ compact = false }) {
 
   return (
     <div className={compact ? 'models-refined' : 'p-3 sm:p-6 lg:p-8'}>
-      {compact ? <header className="models-toolbar"><h2>Your models</h2><span>Runtime: {formatModeLabel(odsMode)}{configuredMode !== odsMode ? ` / configured ${formatModeLabel(configuredMode)}` : ''}</span><button className="pixel-metal-control" title="Refresh models" onClick={refresh}><MetalMetricIcon icon={RefreshCw} size={14}/></button></header> : <header className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      {compact ? <header className="models-toolbar"><h2>Your models</h2><button type="button" className="models-browse-link" onClick={() => { setLibraryScope('recommended'); libraryRef.current?.scrollIntoView?.({ block: 'start' }) }}>Browse {odsCatalogModels.length} {odsCatalogModels.length === 1 ? 'model' : 'models'} ↓</button><span>Runtime: {formatModeLabel(odsMode)}{configuredMode !== odsMode ? ` / configured ${formatModeLabel(configuredMode)}` : ''}</span><button className="pixel-metal-control" title="Refresh models" onClick={refresh}><MetalMetricIcon icon={RefreshCw} size={14}/></button></header> : <header className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           {!compact && <h1 className="text-2xl font-bold text-theme-text">Models</h1>}
           <p className="mt-1 text-sm text-theme-text-muted">
@@ -314,19 +321,19 @@ export default function Models({ compact = false }) {
         </div>
       )}
 
-      {!canActivateModels && (
-        <section className="mb-5 flex flex-col gap-3 rounded-xl border border-amber-400/25 bg-amber-500/10 p-4 sm:flex-row sm:items-center sm:justify-between">
+      {!canActivateModels && !(modelManagement?.managed === true && modelManagement.running === false) && (
+        <section className={compact ? 'models-external-notice' : 'mb-5 flex flex-col gap-3 rounded-xl border border-theme-border bg-theme-text-secondary/10 p-4 sm:flex-row sm:items-center sm:justify-between'}>
           <div className="flex min-w-0 items-start gap-3">
-            <AlertCircle size={18} className="mt-0.5 shrink-0 text-amber-300" />
+            <AlertCircle size={18} className="mt-0.5 shrink-0 text-theme-text-secondary" />
             <div>
-              <p className="text-sm font-semibold text-amber-100">Local model runtime unavailable</p>
-              <p className="mt-1 text-sm text-amber-100/75">{activationModeError}</p>
-              <p className="mt-1 text-xs text-amber-100/60">Model downloads and deletion remain available.</p>
+              <p className="text-sm font-semibold text-theme-text-secondary">{llmBackend === 'external' || (externalLemonade && modelManagement?.managed === false) ? 'Model changes managed externally' : externalLemonade && modelManagement?.managed == null ? 'Runtime management unavailable' : 'Local model runtime unavailable'}</p>
+              <p className="mt-1 text-sm text-theme-text-secondary/75">{activationModeError}</p>
+              {!compact && <p className="mt-1 text-xs text-theme-text-secondary/60">Model downloads and deletion remain available.</p>}
             </div>
           </div>
           <Link
             to="/settings"
-            className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-amber-500/25 bg-theme-bg/45 px-3 text-xs font-semibold text-amber-500 transition-colors hover:border-amber-500/45"
+            className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-theme-border bg-theme-bg/45 px-3 text-xs font-semibold text-theme-text-secondary transition-colors hover:border-theme-border"
           >
             Review runtime settings
           </Link>
@@ -343,6 +350,17 @@ export default function Models({ compact = false }) {
         />
       )}
 
+      {modelManagement?.managed === true && modelManagement.canUnload === true && (
+        <section aria-label="Model runtime controls" className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-theme-border p-3 text-sm">
+          <p>{modelManagement.running ? 'Unload the model to release GPU memory. Your saved model selection is kept.' : 'The model runtime is stopped. Resume your saved model to enable model changes.'}</p>
+          <button type="button" onClick={modelManagement.running ? stopRuntime : startRuntime}
+            disabled={Boolean(runtimeActionLoading || activationLoading || modelLifecycle?.active || pendingModelActions.length || downloadProgress.isDownloading)}
+            className="rounded-md border border-theme-border px-3 py-2 disabled:opacity-50">
+            {runtimeActionLoading === 'stop' ? 'Unloading…' : runtimeActionLoading === 'start' ? 'Resuming…' : modelManagement.running ? 'Unload model' : 'Resume model'}
+          </button>
+        </section>
+      )}
+
       <CurrentModelPanel
         compact={compact}
         model={activeModel}
@@ -351,21 +369,21 @@ export default function Models({ compact = false }) {
       />
 
       <ExternalLemonadeAdoption
-        enabled={odsMode === 'lemonade'}
+        enabled={odsMode === 'lemonade' && externalLemonade === true && modelManagement?.managed === false}
         minimumContext={pixelMinimumContext}
         onSettled={refresh}
         compact={compact}
       />
 
       {!currentModel && !loadedModel && configuredModel && (
-        <section className="mb-4 rounded-xl border border-amber-400/25 bg-amber-500/10 p-4">
+        <section className="mb-4 rounded-xl border border-theme-border bg-theme-text-secondary/10 p-4">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-sm text-amber-200">
+            <div className="text-sm text-theme-text-secondary">
               <AlertCircle size={14} className="mr-2 inline" />
               Selected during install: <strong>{configuredModel}</strong>. Run a benchmark after first launch for local tok/s.
             </div>
             {recommendationAlternatives.length > 0 && (
-              <div className="text-xs text-amber-100/70">
+              <div className="text-xs text-theme-text-secondary/70">
                 Top catalog fit: {recommendationAlternatives.slice(0, 3).map(item => item.name).join(' / ')}
               </div>
             )}
@@ -373,6 +391,7 @@ export default function Models({ compact = false }) {
         </section>
       )}
 
+      <div ref={libraryRef}>
       <ModelSourceTabs
         compact={compact}
         value={libraryScope}
@@ -380,16 +399,16 @@ export default function Models({ compact = false }) {
         installedCount={installedModels.length}
         recommendedCount={odsCatalogModels.length}
       />
+      </div>
 
       {libraryScope === 'huggingface' ? (
         <section
-          ref={libraryRef}
           className={compact ? 'models-hub' : 'rounded-lg border p-4 sm:p-5'}
           style={compact ? undefined : TECH_PANEL_STYLE}
         >
           <HuggingFaceModelBrowser
             gpu={gpu}
-            downloadBusy={downloadProgress.isDownloading || Boolean(downloadStarting)}
+            downloadBusy={downloadProgress.isDownloading || Boolean(downloadStarting || runtimeActionLoading)}
             onImportStarted={handleHuggingFaceImportStarted}
           />
         </section>
@@ -424,7 +443,6 @@ export default function Models({ compact = false }) {
           <div className="models-results"><span>{libraryScope === 'installed' ? 'On this device' : 'ODS recommended'}</span><span>{filteredModels.length} {filteredModels.length === 1 ? 'model' : 'models'}</span></div>
           {filteredModels.length ? <FittedLibraryPage key={`${libraryScope}:${query}:${categoryFilter}:${compatibilityFilter}:${speedFilter}:${contextFloor}`} items={filteredModels} label="Model library" minimumItems={6}>{items => <div className="models-list">{items.map(renderModel)}</div>}</FittedLibraryPage> : <p className="models-empty">No models match the current filters.</p>}
         </> : <section
-          ref={libraryRef}
           className="overflow-hidden rounded-xl border"
           style={TECH_PANEL_STYLE}
         >
@@ -476,6 +494,8 @@ export default function Models({ compact = false }) {
           pixelMinimumContext={pixelMinimumContext}
           hermesMinimumContext={hermesMinimumContext}
           isCurrentModel={activationConfigModel.id === currentModel}
+          canActivate={canActivateModels && !runtimeActionLoading}
+          activationModeError={activationModeError}
           onCancel={() => setActivationConfigModel(null)}
           onConfirm={handleConfirmActivation}
         />
@@ -575,7 +595,7 @@ function ModelSourceTabs({ value, onChange, installedCount, recommendedCount, co
       boxShadow: 'none',
     },
     amber: {
-      borderColor: 'rgba(251, 191, 106, 0.72)',
+      borderColor: 'rgb(var(--theme-text-secondary) / 0.72)',
       background: '#1d1e1f',
       boxShadow: 'none',
     },
@@ -583,12 +603,12 @@ function ModelSourceTabs({ value, onChange, installedCount, recommendedCount, co
   const iconStyles = {
     emerald: 'border-emerald-300/20 bg-emerald-400/10 text-emerald-200',
     purple: 'border-theme-accent/25 bg-theme-accent/10 text-theme-accent-light',
-    amber: 'border-amber-300/20 bg-amber-300/10 text-amber-100',
+    amber: 'border-theme-border bg-theme-text-secondary/10 text-theme-text-secondary',
   }
   const indicatorStyles = {
     emerald: 'bg-emerald-300 shadow-[0_0_10px_rgba(110,231,183,0.75)]',
     purple: 'bg-theme-accent-light',
-    amber: 'bg-amber-200 shadow-[0_0_12px_rgba(253,230,138,0.9)]',
+    amber: 'bg-theme-text-secondary shadow-none',
   }
   return (
     <div
@@ -620,7 +640,7 @@ function ModelSourceTabs({ value, onChange, installedCount, recommendedCount, co
             </span>
             <span className="min-w-0 flex-1">
               <span className="block text-[13px] font-semibold leading-4 text-theme-text sm:text-[15px] sm:leading-5">{label}</span>
-              <span className={`mt-1 block truncate text-xs ${active && tone === 'amber' ? 'text-amber-200/80' : 'text-theme-text-muted/70'}`}>{detail}</span>
+              <span className={`mt-1 block truncate text-xs ${active && tone === 'amber' ? 'text-theme-text-secondary/80' : 'text-theme-text-muted/70'}`}>{detail}</span>
             </span>
             {count !== null && (
               <span className="flex h-10 min-w-10 shrink-0 items-center justify-end border-l border-theme-border pl-3 font-mono text-lg font-semibold text-theme-accent">
@@ -826,6 +846,7 @@ function ModelTableRow({
   const isRuntimeManaged = model.metadata?.source === 'runtime'
   const memory = getMemoryMeta(model, gpu)
   const compatibility = getCompatibilityMeta(model, memory, pixelMinimumContext)
+  const compatibilityNotes = getCompatibilityNotes(model)
   const speed = getSpeedDisplay(model)
   const tags = getModelTags(model, hermesMinimumContext)
   const iconTone = getIconTone(model, compatibility)
@@ -847,9 +868,9 @@ function ModelTableRow({
     <div className="model-fit"><span>{compatibility.label}</span><span>{compatibility.detail}</span></div>
     <footer><div className="model-entry-actions">
       <PrimaryAction model={model} isLoaded={isLoaded} isDownloaded={isDownloaded} isLoading={isLoading} activationBusy={activationBusy} downloadBusy={downloadBusy} downloadStarting={downloadStarting} runDisabledReason={runDisabledReason} hermesMinimumContext={hermesMinimumContext} onDownload={onDownload} onLoad={onLoad} onBenchmark={onBenchmark}/>
-      {isLoaded && !isRuntimeManaged && <button aria-label={`Configure context for ${model.name}`} title={`Configure context for ${model.name}`} disabled={activationBusy} onClick={onLoad}><MetalMetricIcon icon={SlidersHorizontal} size={14}/></button>}
+      {isLoaded && !isRuntimeManaged && <button aria-label={`Configure context for ${model.name}`} title={activationModeError || `Configure context for ${model.name}`} disabled={activationBusy || !canActivateModels} onClick={onLoad}><MetalMetricIcon icon={SlidersHorizontal} size={14}/></button>}
       <DeleteAction model={model} isLoaded={isLoaded} isDownloaded={isDownloaded} isLoading={isLoading} activationBusy={activationBusy} onDelete={onDelete}/>
-    </div><details className="model-entry-details"><summary>Details <ChevronRight size={12}/></summary><div><p>{model.description || 'No description available.'}</p><p>{tags.join(' · ')}</p>{performanceBadge && <p>{performanceBadge.label}</p>}<p>{compatibility.label}: {compatibility.detail}</p>{runDisabledReason && <p>{runDisabledReason}</p>}</div></details></footer>
+    </div><details className="model-entry-details"><summary>Details <ChevronRight size={12}/></summary><div><p>{model.description || 'No description available.'}</p><p>{tags.join(' · ')}</p>{performanceBadge && <p>{performanceBadge.label}</p>}<p>{compatibility.label}: {compatibility.detail}</p>{compatibilityNotes.map(note => <p key={note}>{note}</p>)}{runDisabledReason && <p>{runDisabledReason}</p>}</div></details></footer>
   </article>
 
   return (
@@ -892,9 +913,9 @@ function ModelTableRow({
           <button
             type="button"
             onClick={onLoad}
-            disabled={activationBusy}
+            disabled={activationBusy || !canActivateModels}
             aria-label={`Configure context for ${model.name}`}
-            title={`Configure context for ${model.name}`}
+            title={activationModeError || `Configure context for ${model.name}`}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-theme-border bg-theme-bg/45 text-theme-text-muted transition-colors hover:border-theme-accent/35 hover:text-theme-accent disabled:cursor-not-allowed disabled:opacity-40"
           >
             <SlidersHorizontal size={14} />
@@ -940,7 +961,7 @@ function ModelTableRow({
         {formatContext(model.contextLength)}
       </div>
 
-      <div className="col-span-2 self-center lg:col-span-1">
+      <div className="col-span-2 self-center lg:col-span-1" title={compatibilityNotes.join(' ') || undefined}>
         <MobileMetricLabel>Compatibility</MobileMetricLabel>
         <Badge tone={compatibility.tone}>{compatibility.label}</Badge>
         <p className="mt-1 text-[10px] text-theme-text-muted">{compatibility.detail}</p>
@@ -1123,6 +1144,8 @@ function ModelActivationDialog({
   pixelMinimumContext,
   hermesMinimumContext,
   isCurrentModel,
+  canActivate,
+  activationModeError,
   onCancel,
   onConfirm,
 }) {
@@ -1151,16 +1174,16 @@ function ModelActivationDialog({
   const agentViability = getAgentViabilityCompatibility(model)
   const pixelContextReady = selectedContext >= Number(pixelMinimumContext || 16384)
   const appProfile = isOpenAiChatBlocked(openAiChat)
-    ? { label: 'Pixel adaptive', tone: 'text-theme-accent-light' }
+    ? { label: 'Portal adaptive', tone: 'text-theme-accent-light' }
     : isAgentViabilityBlocked(pixelAgent)
-    ? { label: 'Pixel adaptive', tone: 'text-theme-accent-light' }
+    ? { label: 'Portal adaptive', tone: 'text-theme-accent-light' }
     : isAgentViabilityBlocked(agentViability)
-      ? { label: 'Pixel adaptive', tone: 'text-theme-accent-light' }
+      ? { label: 'Portal adaptive', tone: 'text-theme-accent-light' }
       : !pixelContextReady
-        ? { label: `Pixel compact · ${formatContext(selectedContext)}`, tone: 'text-amber-300' }
+        ? { label: `Portal compact · ${formatContext(selectedContext)}`, tone: 'text-theme-text-secondary' }
         : isPixelAgentVerified(pixelAgent)
-          ? { label: 'Pixel verified', tone: 'text-emerald-400' }
-          : { label: 'Pixel adaptive', tone: 'text-theme-accent-light' }
+          ? { label: 'Portal verified', tone: 'text-emerald-400' }
+          : { label: 'Portal adaptive', tone: 'text-theme-accent-light' }
   const memoryCapacity = Number(gpu?.vramTotal || 0)
   const exceedsMemory = selected?.fitsVram === false
   const exceedsDeclaredLimit = declaredLimit > 0 && selectedContext > declaredLimit
@@ -1289,14 +1312,14 @@ function ModelActivationDialog({
           </div>
 
           {exceedsMemory && (
-            <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2.5 text-xs text-theme-text-secondary">
-              <AlertCircle size={15} className="mt-0.5 shrink-0 text-amber-400" />
+            <div className="mt-4 flex items-start gap-2 rounded-lg border border-theme-border bg-theme-text-secondary/10 px-3 py-2.5 text-xs text-theme-text-secondary">
+              <AlertCircle size={15} className="mt-0.5 shrink-0 text-theme-text-secondary" />
               This context exceeds the reported GPU memory estimate. Activation may use system memory or roll back.
             </div>
           )}
           {contextValid && exceedsDeclaredLimit && (
-            <div className="mt-3 flex items-start gap-2 rounded-lg border border-orange-400/25 bg-orange-500/10 px-3 py-2.5 text-xs text-theme-text-secondary">
-              <AlertCircle size={15} className="mt-0.5 shrink-0 text-orange-400" />
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-theme-border bg-theme-text-secondary/10 px-3 py-2.5 text-xs text-theme-text-secondary">
+              <AlertCircle size={15} className="mt-0.5 shrink-0 text-theme-text-secondary" />
               This override exceeds the model&apos;s declared context. The runtime may reject it or roll back.
             </div>
           )}
@@ -1304,7 +1327,7 @@ function ModelActivationDialog({
 
         <div className="flex items-center justify-between gap-3 border-t border-theme-border bg-theme-bg/25 px-5 py-4">
           <span className="text-[11px] text-theme-text-muted">
-            {isCurrentModel ? `Active: ${formatContext(currentContext)}` : model.quantization || 'GGUF'}
+            {!canActivate ? activationModeError || 'Wait for the runtime operation to finish.' : isCurrentModel ? `Active: ${formatContext(currentContext)}` : model.quantization || 'GGUF'}
           </span>
           <div className="flex gap-2">
             <button
@@ -1317,7 +1340,7 @@ function ModelActivationDialog({
             <button
               type="button"
               onClick={() => onConfirm(selectedContext)}
-              disabled={!contextValid || sameContext || (model.fitsVram === false && !model.recommended && selected?.fitsVram === false)}
+              disabled={!canActivate || !contextValid || sameContext || (model.fitsVram === false && !model.recommended && selected?.fitsVram === false)}
               className="inline-flex h-9 min-w-28 items-center justify-center gap-2 rounded-md bg-theme-accent px-4 text-xs font-semibold text-white shadow-[0_0_18px_rgba(168,85,247,0.28)] transition-colors hover:bg-theme-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Play size={13} />
@@ -1443,7 +1466,7 @@ function DownloadProgressBar({ progress, helpers, onRetry }) {
       )}
 
       {statusError && (
-        <p role="alert" className="mb-3 text-sm text-amber-300">
+        <p role="alert" className="mb-3 text-sm text-theme-text-secondary">
           {statusError}
         </p>
       )}
@@ -1521,6 +1544,10 @@ function getRunDisabledReason({
     if (!shorterContextFits) {
       const required = Number(model.estimatedRequired || model.vramRequired || 0)
       const total = Number(gpu?.vramTotal || 0)
+      const budget = Number(gpu?.modelMemoryBudgetGb ?? total)
+      if (required > 0 && budget > 0 && Math.abs(budget - total) > 0.1) {
+        return `Requires ${formatNumber(required)} GB; ODS has a ${formatNumber(budget)} GB model memory budget (${formatNumber(total)} GB GPU memory detected).`
+      }
       if (required > 0 && total > 0) {
         return `Requires ${formatNumber(required)} GB VRAM; the detected GPU has ${formatNumber(total)} GB total.`
       }
@@ -1575,7 +1602,7 @@ function Badge({ children, tone = 'neutral', subdued = false }) {
       ? 'border-theme-border bg-theme-bg/35 text-theme-text-muted'
       : 'border-theme-border bg-theme-surface-hover text-theme-text-secondary',
     green: 'border-emerald-400/20 bg-emerald-500/12 text-emerald-300',
-    amber: 'border-amber-400/25 bg-amber-500/12 text-amber-300',
+    amber: 'border-theme-border bg-theme-text-secondary/12 text-theme-text-secondary',
     red: 'border-red-400/25 bg-red-500/12 text-red-300',
     purple: 'border-theme-accent/25 bg-theme-accent/12 text-theme-accent-light',
   }
@@ -1757,7 +1784,7 @@ function getCompatibilityMeta(model, memory, pixelMinimumContext = 0) {
   const openAiChat = getOpenAiChatCompatibility(model)
   if (isOpenAiChatBlocked(openAiChat)) {
     return {
-      label: 'Pixel adaptive',
+      label: 'Portal adaptive',
       detail: 'Capability varies',
       tone: 'purple',
     }
@@ -1765,7 +1792,7 @@ function getCompatibilityMeta(model, memory, pixelMinimumContext = 0) {
   const agentViability = getAgentViabilityCompatibility(model)
   if (isAgentViabilityBlocked(agentViability)) {
     return {
-      label: 'Pixel adaptive',
+      label: 'Portal adaptive',
       detail: 'Capability varies',
       tone: 'purple',
     }
@@ -1781,7 +1808,7 @@ function getCompatibilityMeta(model, memory, pixelMinimumContext = 0) {
   const pixelAgent = getPixelAgentCompatibility(model)
   if (isAgentViabilityBlocked(pixelAgent)) {
     return {
-      label: 'Pixel adaptive',
+      label: 'Portal adaptive',
       detail: 'Available to use',
       tone: 'purple',
     }
@@ -1790,21 +1817,21 @@ function getCompatibilityMeta(model, memory, pixelMinimumContext = 0) {
   const minimumContext = Number(pixelMinimumContext || 0)
   if (minimumContext > 0 && contextLength > 0 && contextLength < minimumContext) {
     return {
-      label: 'Pixel compact',
+      label: 'Portal compact',
       detail: `${formatContext(contextLength)} context`,
       tone: 'amber',
     }
   }
   if (!isPixelAgentVerified(pixelAgent)) {
     return {
-      label: 'Pixel adaptive',
+      label: 'Portal adaptive',
       detail: 'Available to use',
       tone: 'purple',
     }
   }
   const talkCompatibility = getHermesTalkCompatibility(model)
   if (isHermesTalkVerified(talkCompatibility)) {
-    return { label: 'Pixel verified', detail: model.recommended || model.status === 'loaded' ? 'Best' : 'Verified', tone: 'green' }
+    return { label: 'Portal verified', detail: model.recommended || model.status === 'loaded' ? 'Best' : 'Verified', tone: 'green' }
   }
   if (model.recommended || model.status === 'loaded') {
     return { label: model.fitLabel || 'Fits GPU', detail: 'Best', tone: 'green' }
@@ -1827,6 +1854,18 @@ function getAgentViabilityCompatibility(model) {
 
 function getPixelAgentCompatibility(model) {
   return model?.appCompatibility?.pixelAgent || null
+}
+
+// User copy for each blocked app. Only `userMessage` may be rendered: the
+// entry's `reason` is an internal fleet-QA note (run IDs, harness jargon).
+function getCompatibilityNotes(model) {
+  const notes = []
+  for (const entry of Object.values(model?.appCompatibility || {})) {
+    if (!entry || typeof entry !== 'object' || !isAgentViabilityBlocked(entry)) continue
+    const message = typeof entry.userMessage === 'string' ? entry.userMessage.trim() : ''
+    if (message && !notes.includes(message)) notes.push(message)
+  }
+  return notes
 }
 
 function getBlockedAppCompatibility(model) {
@@ -1959,8 +1998,8 @@ function getModelTags(model, hermesMinimumContext) {
 
 function getIconTone(model, compatibility) {
   if (model?.metadata?.source === 'runtime') return { border: 'border-purple-400/35', bg: 'bg-purple-500/10', text: 'text-purple-400' }
-  if (!model?.fitsVram) return { border: 'border-orange-400/35', bg: 'bg-orange-500/10', text: 'text-orange-400' }
-  if (compatibility.tone === 'amber') return { border: 'border-amber-400/35', bg: 'bg-amber-500/10', text: 'text-amber-300' }
+  if (!model?.fitsVram) return { border: 'border-theme-border', bg: 'bg-theme-text-secondary/10', text: 'text-theme-text-secondary' }
+  if (compatibility.tone === 'amber') return { border: 'border-theme-border', bg: 'bg-theme-text-secondary/10', text: 'text-theme-text-secondary' }
   if (compatibility.detail === 'Best') return { border: 'border-theme-accent/35', bg: 'bg-theme-accent/10', text: 'text-theme-accent' }
   return { border: 'border-emerald-400/30', bg: 'bg-emerald-500/10', text: 'text-emerald-400' }
 }
@@ -2029,7 +2068,7 @@ function getContextOptions(model, gpu) {
   values.add(recommended)
   values.add(maximum)
   const baseEstimate = Number(model?.estimatedRequired || model?.vramRequired || 0)
-  const capacity = Number(gpu?.vramTotal || 0)
+  const capacity = Number(gpu?.modelMemoryBudgetGb ?? gpu?.vramTotal ?? 0)
 
   return [...values]
     .sort((left, right) => left - right)
