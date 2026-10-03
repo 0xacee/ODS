@@ -10,8 +10,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 REAL_JQ="$(command -v jq)"
 REAL_TAR="$(command -v tar)"
-REAL_SHA256SUM="$(command -v sha256sum)"
-export REAL_JQ REAL_TAR REAL_SHA256SUM
+if command -v sha256sum >/dev/null 2>&1; then HASH_TOOL=sha256sum; else HASH_TOOL=shasum; fi
+REAL_HASH="$(command -v "$HASH_TOOL")"
+export REAL_JQ REAL_TAR REAL_HASH
 mkdir -p "$TMP/bin" "$TMP/ods/lib" "$TMP/ods/config"
 cp "$SCRIPT_DIR/../lib/rsync.sh" "$SCRIPT_DIR/../lib/backup-paths.sh" "$TMP/ods/lib/"
 printf 'TEST_SECRET=retained\n' > "$TMP/ods/.env"
@@ -52,10 +53,10 @@ cat > "$TMP/bin/jq" <<'SH'
 if [[ "${INJECT_FAILURE:-}" == manifest && "$1" == -n ]]; then exit 4; fi
 exec "$REAL_JQ" "$@"
 SH
-cat > "$TMP/bin/sha256sum" <<'SH'
+cat > "$TMP/bin/$HASH_TOOL" <<'SH'
 #!/usr/bin/env bash
 if [[ "${INJECT_FAILURE:-}" == checksum ]]; then exit 1; fi
-exec "$REAL_SHA256SUM" "$@"
+exec "$REAL_HASH" "$@"
 SH
 cat > "$TMP/bin/mv" <<'SH'
 #!/usr/bin/env bash
