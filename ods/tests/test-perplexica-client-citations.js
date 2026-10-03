@@ -44,6 +44,9 @@ function checkCases(render) {
   assert.equal(render("See [1, 2].", source), `See ${cited(1)}${cited(2, "https://example.test/two?a=1&amp;b=2")}.`);
   assert.equal(render("```python\nx = [1,2]\n```\nSee [1].", source), `\`\`\`python\nx = [1,2]\n\`\`\`\nSee ${cited(1)}.`);
   assert.equal(render("~~~python\nx = [1]\n~~~\nSee [1].", source), `~~~python\nx = [1]\n~~~\nSee ${cited(1)}.`);
+  assert.equal(render("- ~~~python\n  a = [1]\n  ~~~\nSee [1].", source), `- ~~~python\n  a = [1]\n  ~~~\nSee ${cited(1)}.`);
+  assert.equal(render("1. ```python\n   a = [1]\n   ```\nSee [1].", source), `1. \`\`\`python\n   a = [1]\n   \`\`\`\nSee ${cited(1)}.`);
+  assert.equal(render("- ```python\n  a = [1]", source), "- ```python\n  a = [1]");
   assert.equal(render("```python\nx = [1]", source), "```python\nx = [1]");
   assert.equal(render("Use `[1]` and ``[1,2]``. See [1].", source), `Use \`[1]\` and \`\`[1,2]\`\`. See ${cited(1)}.`);
   assert.equal(render("Use `[1]\n[2]` then [1].", source), `Use \`[1]\n[2]\` then ${cited(1)}.`);

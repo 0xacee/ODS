@@ -114,13 +114,17 @@ function renderCitations(message, sources) {
     const lineBase = base;
     base += line.length + 1;
     if (inline) return prose(line, lineBase);
-    const marker = /^(?: {0,3}> ?)* {0,3}(`{3,}|~{3,})/.exec(line);
+    const marker = /^(?: {0,3}> ?)*( {0,3}(?:[-+*]|\d{1,9}[.)]) +)? {0,3}(`{3,}|~{3,})/.exec(line);
     if (fence) {
-      const close = /^(?: {0,3}> ?)* {0,3}(`+|~+)[ \t]*\r?$/.exec(line);
-      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
+      const close = /^(?: {0,3}> ?)*([ \t]*)(`+|~+)[ \t]*\r?$/.exec(line);
+      if (close && close[1].length <= fence.maxIndent && close[2][0] === fence.marker[0]
+        && close[2].length >= fence.marker.length) fence = null;
       return line;
     }
-    if (marker) { fence = marker[1]; return line; }
+    if (marker) {
+      fence = { marker: marker[2], maxIndent: marker[1] ? marker[1].length + 3 : 3 };
+      return line;
+    }
     const content = line.replace(/^(?: {0,3}> ?)+/, "");
     if (/^(?: {4}|\t)/.test(content)) return line;
     return prose(line, lineBase);
