@@ -195,11 +195,11 @@ class BootstrapStatusChecksumTests(unittest.TestCase):
         bin_dir.mkdir()
         write_lf((bin_dir / "uname"), "#!/usr/bin/env bash\necho MINGW64_NT-10.0\n")
         (bin_dir / "uname").chmod(0o755)
-        write_lf((bin_dir / "cygpath"), 
+        write_lf((bin_dir / "cygpath"),
             "#!/usr/bin/env bash\nprintf 'C:\\\\fake\\\\%s\\n' \"$(basename \"$1\")\"\n"
         )
         (bin_dir / "cygpath").chmod(0o755)
-        write_lf((bin_dir / "powershell.exe"), 
+        write_lf((bin_dir / "powershell.exe"),
             "#!/usr/bin/env bash\nprintf '%s\\r\\n' \"$(echo '" + expected.upper() + "')\"\n"
         )
         (bin_dir / "powershell.exe").chmod(0o755)
@@ -219,11 +219,11 @@ class BootstrapStatusChecksumTests(unittest.TestCase):
         bin_dir.mkdir()
         write_lf((bin_dir / "uname"), "#!/usr/bin/env bash\necho MSYS_NT-10.0\n")
         (bin_dir / "uname").chmod(0o755)
-        write_lf((bin_dir / "cygpath"), 
+        write_lf((bin_dir / "cygpath"),
             "#!/usr/bin/env bash\nprintf 'C:\\\\fake\\\\%s\\n' \"$(basename \"$1\")\"\n"
         )
         (bin_dir / "cygpath").chmod(0o755)
-        write_lf((bin_dir / "powershell.exe"), 
+        write_lf((bin_dir / "powershell.exe"),
             "#!/usr/bin/env bash\nprintf 'not-a-hash\\r\\n'\n"
         )
         (bin_dir / "powershell.exe").chmod(0o755)
@@ -246,11 +246,11 @@ class BootstrapStatusChecksumTests(unittest.TestCase):
         bin_dir.mkdir()
         write_lf((bin_dir / "uname"), "#!/usr/bin/env bash\necho CYGWIN_NT-10.0\n")
         (bin_dir / "uname").chmod(0o755)
-        write_lf((bin_dir / "cygpath"), 
+        write_lf((bin_dir / "cygpath"),
             "#!/usr/bin/env bash\nprintf 'C:\\\\fake\\\\%s\\n' \"$(basename \"$1\")\"\n"
         )
         (bin_dir / "cygpath").chmod(0o755)
-        write_lf((bin_dir / "powershell.exe"), 
+        write_lf((bin_dir / "powershell.exe"),
             "#!/usr/bin/env bash\necho 'boom' >&2\nexit 1\n"
         )
         (bin_dir / "powershell.exe").chmod(0o755)
