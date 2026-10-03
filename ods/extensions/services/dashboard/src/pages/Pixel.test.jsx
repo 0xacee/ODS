@@ -116,10 +116,10 @@ describe('Pixel', () => {
 
   it('opens working local chat when Portal was never enabled', async () => {
     globalThis.fetch.mockResolvedValue(response({available:false, detail:'Portal is not enabled'}))
-    render(<Pixel systemStatus={{services:[{
-      id:'open-webui', name:'Open WebUI (Chat)', status:'healthy',
-      port:8080, external_port:3000,
-    }]}} />)
+    render(<Pixel systemStatus={{services:[
+      {id:'open-webui-preview', name:'Open WebUI Preview', status:'healthy', public_url:'https://preview.example.test'},
+      {id:'open-webui', name:'Open WebUI (Chat)', status:'healthy', port:8080, external_port:3000},
+    ]}} />)
     const chat = await screen.findByRole('link', {name:'Open local chat'})
     expect(chat).toHaveAttribute('href', 'http://localhost:3000')
     expect(screen.getByText(/Portal's owner agent is not enabled/)).toBeVisible()

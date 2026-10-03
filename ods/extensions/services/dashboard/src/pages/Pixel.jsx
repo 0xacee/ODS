@@ -1548,8 +1548,7 @@ export default function Pixel({ systemStatus = null }) {
   // Portal conversations on other installations.
   if (status === 'unavailable' && statusDetail === 'Portal is not enabled') {
     const chatService = (systemStatus?.services || []).find(service =>
-      service?.status === 'healthy' && [service?.id, service?.name].some(value =>
-        /^open[ -]?webui/i.test(String(value || ''))))
+      service?.id === 'open-webui' && service?.status === 'healthy')
     const chatHref = chatService ? serviceUrl(chatService) : null
     return <div className="pixel-chat flex flex-col items-center justify-center px-6 text-theme-text">
       <div className="max-w-lg rounded-2xl border border-theme-border bg-theme-card p-8 text-center">
