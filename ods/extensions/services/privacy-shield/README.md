@@ -61,9 +61,11 @@ Environment variables (set in `.env`):
 | `PII_CACHE_SIZE` | 1000 | Max cached request texts per session |
 | `PII_CACHE_TTL` | 300 | Request result cache TTL in seconds |
 
-The request cache retains original short request text in process memory until
-expiry or capacity eviction. It is owned by the session's detector, so cached
-tokens retain their restoration mapping. Expiring or evicting a cached result
+The request cache retains original short request text in process memory.
+Expired results cannot be reused, but their storage can remain until a later
+cache mutation cleans it up; TTL is not a guaranteed memory-erasure deadline.
+The cache is owned by the session's detector, so cached tokens retain their
+restoration mapping. Expiring or evicting a cached result
 does not erase that mapping: session restoration state has its own
 `SHIELD_SESSION_TTL` (default 3,600 seconds) and `SHIELD_SESSION_MAXSIZE`
 (default 10,000 sessions). A replacement session starts with a new detector and
