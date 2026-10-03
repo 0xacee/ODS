@@ -9385,9 +9385,9 @@ class TestWindowsObservability:
     def test_windows_llm_status_sends_litellm_lemonade_api_key(
         self, tmp_path, monkeypatch,
     ):
-        # Installers persist the Lemonade credential as LITELLM_LEMONADE_API_KEY
-        # (phase 06 / Windows env-generator); the bare LEMONADE_API_KEY name is
-        # only a legacy alias and is never written to .env.
+        # Use the persisted gateway credential when no explicit runtime key is
+        # configured. This does not imply default Lemonade 10.0 is secured by
+        # the installer's separate admin-key environment variable.
         monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
         monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
         (tmp_path / ".env").write_text(

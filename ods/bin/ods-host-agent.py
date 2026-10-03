@@ -7083,7 +7083,7 @@ def _windows_llm_status() -> dict | None:
             port = 8080
         base = f"http://127.0.0.1:{port}"
         api_key = str(
-            env.get("LITELLM_LEMONADE_API_KEY") or env.get("LEMONADE_API_KEY") or ""
+            env.get("LEMONADE_API_KEY") or env.get("LITELLM_LEMONADE_API_KEY") or ""
         ).strip()
 
         def fetch_json(name: str) -> dict:
