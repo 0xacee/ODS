@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP="$SCRIPT_DIR/../ods-backup.sh"
+RESTORE="$SCRIPT_DIR/../ods-restore.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 REAL_JQ="$(command -v jq)"
@@ -94,11 +95,26 @@ done
 
 # Operators can still see an orphan after uncatchable process death. It must
 # remain outside the discoverable backup namespace and retention pool.
-root="$TMP/success"
+root="$ODS_DIR/.backups"
 mkdir -p "$root/.partial-interrupted/backup-123-20000101-000000"
 printf '{}' > "$root/.partial-interrupted/backup-123-20000101-000000/manifest.json"
+bash "$BACKUP" --output "$root" --type config > "$TMP/restore-source.log"
 list_out=$(bash "$BACKUP" --output "$root" --list)
 [[ "$list_out" != *interrupted* ]] || { echo 'FAIL: list shows staging'; failed=$((failed + 1)); }
+restore_list=$(bash "$RESTORE" --list)
+[[ "$restore_list" != *interrupted* ]] || {
+    echo 'FAIL: restore list shows staging'; failed=$((failed + 1));
+}
+selection_out=$(printf '1\n' | bash "$RESTORE" --dry-run --config-only 2>&1)
+[[ "$selection_out" != *interrupted* ]] || {
+    echo 'FAIL: restore selection shows staging'; failed=$((failed + 1));
+}
+selection_rc=0
+selection_out=$(printf '2\n' | bash "$RESTORE" --dry-run --config-only 2>&1) || selection_rc=$?
+if [[ "$selection_rc" == 0 || "$selection_out" != *'Invalid selection: 2'* ]]; then
+    echo 'FAIL: restore chooser still indexes an undisplayed staging directory'
+    failed=$((failed + 1))
+fi
 
 for compress in false true; do
     root="$TMP/success-$compress"
