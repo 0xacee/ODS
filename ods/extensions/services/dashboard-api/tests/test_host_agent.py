@@ -6914,6 +6914,41 @@ class TestPrecreateDataDirs:
         assert not (ext_dir / "named_vol").exists()
         assert not (install_dir / "named_vol").exists()
 
+    def test_creates_dirs_from_the_selected_gpu_overlays(self, tmp_path, monkeypatch):
+        """ComfyUI declares its mounts only in compose.<gpu>.yaml (Tower3 2026-10-04)."""
+        pytest.importorskip("yaml")
+        builtin_root = tmp_path / "builtin"
+        install_dir = tmp_path / "install"
+        install_dir.mkdir()
+        ext_dir = builtin_root / "comfyui"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "compose.yaml").write_text(
+            "services:\n  comfyui:\n    image: test:latest\n", encoding="utf-8")
+        for name, mount in (("compose.nvidia.yaml", "./data/comfyui/models:/models"),
+                            ("compose.amd.yaml", "./data/comfyui/amd-only:/x"),
+                            ("compose.multigpu-nvidia.yaml", "./data/comfyui/multi:/y"),
+                            ("compose.local.yaml", "./data/comfyui/local:/z")):
+            (ext_dir / name).write_text(
+                f"services:\n  comfyui:\n    volumes:\n      - {mount}\n", encoding="utf-8")
+
+        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", builtin_root)
+        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", tmp_path / "user")
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "GPU_BACKEND", "nvidia")
+        monkeypatch.setattr(_mod, "GPU_COUNT", "1")
+
+        _mod._precreate_data_dirs("comfyui")
+
+        data = install_dir / "data" / "comfyui"
+        assert (data / "models").is_dir()
+        assert (data / "local").is_dir()
+        assert not (data / "amd-only").exists()
+        assert not (data / "multi").exists()
+
+        monkeypatch.setattr(_mod, "GPU_COUNT", "2")
+        _mod._precreate_data_dirs("comfyui")
+        assert (data / "multi").is_dir()
+
 
 class TestRootlessDataOwnershipRepair:
     def test_whisper_uses_rootful_or_rootless_cache_preparation(self, tmp_path, monkeypatch):
