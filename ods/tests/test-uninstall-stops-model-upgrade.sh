@@ -55,6 +55,7 @@ done
 [[ -n "$ours_child" ]] || fail "fixture did not start the download child"
 
 (
+    # shellcheck disable=SC2034  # read by the evaluated uninstall block
     INSTALL_DIR="$ours"
     log_info() { echo "INFO $*"; }
     eval "$block"
@@ -77,6 +78,7 @@ done
 legacy_child="$(pgrep -P "$legacy_script")"
 [[ -n "$legacy_child" ]] || fail "legacy fixture did not start the download child"
 (
+    # shellcheck disable=SC2034  # read by the evaluated uninstall block
     INSTALL_DIR="$ours"
     log_info() { echo "INFO $*"; }
     eval "$block"
