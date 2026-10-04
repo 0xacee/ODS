@@ -1306,6 +1306,14 @@ _ods_cli_pull_external_images() {
 # Commands
 #=============================================================================
 
+# A core service the installation deliberately left out is not part of the
+# stack, so status must not report it as "not responding". Lean and
+# gateway-only installs set ENABLE_OPEN_WEBUI=false; Open WebUI is then an
+# optional Library add-back rather than a missing core service.
+_ods_cli_service_not_installed() {
+    [[ "$1" == "open-webui" && "${ENABLE_OPEN_WEBUI:-true}" == "false" ]]
+}
+
 _ods_cli_service_health() {
     local sid="$1" port="$2" health_path="$3"
     shift 3
@@ -1395,6 +1403,7 @@ cmd_status() {
         if [[ "$sid" == "llama-server" || "$sid" == "model-router" ]] && ods_preflight_uses_litellm; then
             continue
         fi
+        _ods_cli_service_not_installed "$sid" && continue
         local health="${SERVICE_HEALTH[$sid]}"
         local port_env="${SERVICE_PORT_ENVS[$sid]}"
         local default_port="${SERVICE_PORTS[$sid]}"
@@ -1507,6 +1516,7 @@ cmd_status_json() {
         if [[ "$sid" == "llama-server" || "$sid" == "model-router" ]] && ods_preflight_uses_litellm; then
             continue
         fi
+        _ods_cli_service_not_installed "$sid" && continue
         local cat="${SERVICE_CATEGORIES[$sid]}"
         local health="${SERVICE_HEALTH[$sid]}"
         local port_env="${SERVICE_PORT_ENVS[$sid]}"

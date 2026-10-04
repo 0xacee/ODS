@@ -81,6 +81,7 @@ test: ## Run unit and contract tests
 	@python3 tests/test_dashboard_data_permissions.py
 	@bash tests/test-token-spy-install-owner.sh
 	@bash tests/test-cli-status-docker-error.sh
+	@bash tests/test-cli-status-optional-webui.sh
 	@python3 tests/test-cli-stt-env.py
 	@echo ""
 	@echo "=== AMD/Lemonade contracts ==="
