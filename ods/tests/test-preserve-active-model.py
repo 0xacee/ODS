@@ -353,10 +353,12 @@ def test_installer_keeps_recommendation_and_active_model_separate() -> None:
     detection = (ROOT / "installers" / "phases" / "02-detection.sh").read_text(encoding="utf-8")
     env_writer = (ROOT / "installers" / "phases" / "06-directories.sh").read_text(encoding="utf-8")
     assert "--reselect-model) ODS_RESELECT_MODEL=true" in installer
-    assert detection.index('INSTALLER_RECOMMENDED_MODEL="${LLM_MODEL:-}"') < detection.index(
-        'preserve-active-model.py'
-    )
-    assert detection.index("unset LLAMA_ARG_N_CPU_MOE") < detection.index(
+    recommendation = detection.index('INSTALLER_RECOMMENDED_MODEL="${LLM_MODEL:-}"')
+    preservation = detection.index('_preserve_script="$SCRIPT_DIR/scripts/preserve-active-model.py"')
+    # An external Lemonade's served model is this run's pick, so it is recorded
+    # before the recommendation; retained-model preservation runs after it.
+    assert detection.index("--project-external-lemonade") < recommendation < preservation
+    assert detection.index("unset LLAMA_ARG_N_CPU_MOE", preservation) < detection.index(
         'load_model_selector_env_from_output <<< "$_preserved_model_env"'
     )
     assert '--state "$INSTALL_DIR/data/model-state.json"' in detection
