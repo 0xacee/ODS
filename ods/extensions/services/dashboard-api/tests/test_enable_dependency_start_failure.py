@@ -126,7 +126,33 @@ def test_enabled_target_reports_its_start_outcome(test_client, installation, sta
     assert response.json()["failed_services"] == ([] if start_ok else ["hermes-proxy"])
     assert response.json()["restart_required"] is not start_ok
     start.assert_called_once_with("start", "hermes-proxy")
+    progress = json.loads((root / "extension-progress/hermes-proxy.json").read_text())
     if not start_ok:
-        progress = json.loads((root / "extension-progress/hermes-proxy.json").read_text())
         assert progress["status"] == "error"
         assert "ods restart" in progress["error"]
+    else:
+        # The Extensions page polls until a terminal status; a receipt left
+        # at "Starting installation..." kept the Retry card spinning forever.
+        assert progress["status"] == "started"
+        assert progress["error"] is None
+
+
+def test_enabled_target_keeps_the_hosts_own_terminal_receipt(test_client, installation):
+    root, start, _ = installation
+    for service in ("hermes-proxy", "hermes", "searxng"):
+        directory = root / "bundled" / service
+        (directory / "compose.yaml.disabled").rename(directory / "compose.yaml")
+    receipt = {"service_id": "hermes-proxy", "status": "started", "phase_label": "CLI verification complete",
+               "error": None, "exit_verified": True, "started_at": "x", "updated_at": "2999-01-01T00:00:00+00:00"}
+
+    def host_start(action, service):
+        (root / "extension-progress/hermes-proxy.json").write_text(json.dumps(receipt))
+        return True
+
+    start.side_effect = host_start
+
+    response = test_client.post("/api/extensions/hermes-proxy/enable",
+                                headers=test_client.auth_headers)
+
+    assert response.status_code == 200
+    assert json.loads((root / "extension-progress/hermes-proxy.json").read_text()) == receipt

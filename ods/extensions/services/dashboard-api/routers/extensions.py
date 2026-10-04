@@ -298,6 +298,25 @@ def _write_error_progress(service_id: str, error_msg: str) -> None:
     progress_file.write_text(json.dumps(data), encoding="utf-8")
 
 
+def _write_started_progress(service_id: str) -> None:
+    """Finish the initial receipt after a synchronous start succeeded.
+
+    Retry on an error card restarts an extension that is still selected: the
+    enable route writes the initial receipt and the host starts the service,
+    but nothing completed the receipt. The Extensions page polls until a
+    terminal status, so the card showed "Starting installation..." forever
+    (Strixy, 2026-10-03). A terminal receipt the host wrote itself (a
+    verified one-shot exit) is kept.
+    """
+    progress = _read_progress(service_id)
+    if not progress or progress.get("status") != "pulling":
+        return
+    progress.update(status="started", phase_label="Service started", error=None,
+                    updated_at=datetime.now(timezone.utc).isoformat())
+    progress_file = Path(DATA_DIR) / "extension-progress" / f"{service_id}.json"
+    progress_file.write_text(json.dumps(progress), encoding="utf-8")
+
+
 def _has_error_progress(service_id: str) -> bool:
     progress = _read_progress(service_id)
     return bool(progress and progress.get("status") == "error")
@@ -4588,6 +4607,8 @@ def enable_extension(
                     svc_id,
                     "Host agent failed to start extension. Run 'ods restart' to recover.",
                 )
+            else:
+                _write_started_progress(svc_id)
             continue
         # pre_start failure is terminal for this service â€” do not start it
         if not _call_agent_hook(svc_id, "pre_start"):
