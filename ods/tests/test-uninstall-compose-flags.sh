@@ -46,15 +46,19 @@ if [[ "${1:-}" == "ps" ]]; then
     if [[ " $* " == *" label=com.docker.compose.project="* ||
           " $* " == *" label=com.docker.compose.project "* ]]; then
         [[ -z "${DOCKER_RESIDUAL_CONTAINER_ID:-}" ]] || printf '%s\n' "$DOCKER_RESIDUAL_CONTAINER_ID"
+        if [[ -n "${DOCKER_PROFILE_STATE_FILE:-}" && -s "$DOCKER_PROFILE_STATE_FILE" ]]; then
+            cat "$DOCKER_PROFILE_STATE_FILE"
+        fi
         exit 0
     fi
     NAMES="ods-litellm ods-llama-server ods-download-test-sentinel ods-inspection-blocked-test-sentinel kube-pods-proxy methods-runner ods-pixel-retired-0123456789abcdef"
     emit_filtered "$@"
     exit 0
 fi
-if [[ "${1:-}" == "inspect" && -n "${DOCKER_RESIDUAL_CONTAINER_ID:-}" ]]; then
+if [[ "${1:-}" == "inspect" && ( -n "${DOCKER_RESIDUAL_CONTAINER_ID:-}" ||
+        ( -n "${DOCKER_PROFILE_STATE_FILE:-}" && -s "$DOCKER_PROFILE_STATE_FILE" ) ) ]]; then
     printf '[{"Id":"%s","Config":{"Labels":{"com.docker.compose.project":"ods","com.docker.compose.service":"open-webui","com.docker.compose.project.working_dir":"%s","com.docker.compose.project.config_files":"%s/docker-compose.base.yml"}},"Mounts":[{"Type":"bind","Source":"%s/data/open-webui"}]}]\n' \
-        "$DOCKER_RESIDUAL_CONTAINER_ID" "$INSTALL_DIR" "$INSTALL_DIR" "$INSTALL_DIR"
+        "${2:?}" "$INSTALL_DIR" "$INSTALL_DIR" "$INSTALL_DIR"
     exit 0
 fi
 if [[ "${1:-}" == "volume" && "${2:-}" == "ls" ]]; then
@@ -79,6 +83,12 @@ if [[ "${1:-}" == "compose" && " $* " == *" config --format json "* ]]; then
     exit 0
 fi
 if [[ "${1:-}" == "compose" && " $* " == *" down "* ]]; then
+    # Compose retains a service in a disabled profile unless all profiles are
+    # selected. The real postflight must observe that container disappearing.
+    if [[ "${DOCKER_DOWN_EXIT_CODE:-0}" == "0" && -n "${DOCKER_PROFILE_STATE_FILE:-}" &&
+          " $* " == *" --profile * down "* ]]; then
+        : > "$DOCKER_PROFILE_STATE_FILE"
+    fi
     [[ "${DOCKER_DOWN_EXIT_CODE:-0}" == "0" ]] || printf 'fixture Compose diagnostic\n' >&2
     exit "${DOCKER_DOWN_EXIT_CODE:-0}"
 fi
@@ -169,6 +179,7 @@ run_uninstall() {
     SUDO_VALIDATE_EXIT_CODE="${SUDO_VALIDATE_EXIT_CODE:-0}" \
     DOCKER_DOWN_EXIT_CODE="${DOCKER_DOWN_EXIT_CODE:-0}" \
     DOCKER_RESIDUAL_CONTAINER_ID="${DOCKER_RESIDUAL_CONTAINER_ID:-}" \
+    DOCKER_PROFILE_STATE_FILE="${DOCKER_PROFILE_STATE_FILE:-}" \
     DOCKER_GID_EXPECTED="${DOCKER_GID_EXPECTED:-}" \
     DOCKER_GID_ENV_COPY="${DOCKER_GID_ENV_COPY:-}" \
     PIXEL_INGRESS_GID="${PIXEL_INGRESS_GID-}" \
@@ -286,6 +297,39 @@ EOF
         pass "recipe drift during retirement is rechecked before Compose down"
     fi
 
+    # A stopped, bind-only service can be absent from the selected profiles
+    # while still belonging to this installation. Exercise both data policies;
+    # the existing permanent-residue case below must continue to fail closed.
+    local profile_mode profile_install profile_home profile_log profile_state
+    local profile_id="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    for profile_mode in keep purge; do
+        profile_install="$TMP_DIR/profile-$profile_mode"
+        profile_home="$TMP_DIR/profile-home-$profile_mode"
+        profile_log="$TMP_DIR/profile-$profile_mode.log"
+        profile_state="$TMP_DIR/profile-$profile_mode.container"
+        make_install "$profile_install"
+        mkdir -p "$profile_home"
+        printf 'retained user data\n' > "$profile_install/data/owner.txt"
+        printf '%s\n' "$profile_id" > "$profile_state"
+        if [[ "$profile_mode" == keep ]]; then
+            DOCKER_LOG="$profile_log" SUDO_LOG="$TMP_DIR/profile-sudo.log" \
+                DOCKER_PROFILE_STATE_FILE="$profile_state" \
+                run_uninstall "$profile_install" "$profile_home" "$stub_dir" --keep-data
+            [[ -f "$profile_install/data/owner.txt" ]] || fail "profile cleanup must retain requested data"
+        else
+            DOCKER_LOG="$profile_log" SUDO_LOG="$TMP_DIR/profile-sudo.log" \
+                DOCKER_PROFILE_STATE_FILE="$profile_state" \
+                run_uninstall "$profile_install" "$profile_home" "$stub_dir"
+            [[ ! -e "$profile_install" ]] || fail "profile cleanup must complete full uninstall"
+        fi
+        [[ ! -s "$profile_state" ]] || fail "disabled-profile container must be removed"
+        assert_no_name_cleanup "$profile_log"
+        if grep -Eq ' down .* (-v|--volumes)( |$)' "$profile_log"; then
+            fail "profile cleanup must leave volume removal to the custody helper"
+        fi
+        pass "disabled-profile container is removed with $profile_mode data policy"
+    done
+
     local install_keep="$TMP_DIR/install-keep"
     local home_keep="$TMP_DIR/home-keep"
     local log_keep="$TMP_DIR/docker-keep.log"
@@ -297,7 +341,7 @@ EOF
     ln -s "$install_keep/ods-cli" "$home_keep/.local/bin/ods"
     DOCKER_LOG="$log_keep" SUDO_LOG="$sudo_log" run_uninstall "$install_keep" "$home_keep" "$stub_dir" --keep-data
 
-    grep -qF 'compose -f docker-compose.base.yml -f docker-compose.cpu.yml down --remove-orphans' "$log_keep" \
+    grep -qF 'compose -f docker-compose.base.yml -f docker-compose.cpu.yml --profile * down --remove-orphans' "$log_keep" \
         || fail "uninstall must use saved .compose-flags for docker compose down"
     if grep -qF 'down -v --remove-orphans' "$log_keep"; then
         fail "--keep-data must not remove compose volumes with -v"
@@ -315,7 +359,7 @@ EOF
     make_install "$install_purge"
     DOCKER_LOG="$log_purge" SUDO_LOG="$sudo_log" run_uninstall "$install_purge" "$home_purge" "$stub_dir"
 
-    grep -qF 'compose -f docker-compose.base.yml -f docker-compose.cpu.yml down --remove-orphans' "$log_purge" \
+    grep -qF 'compose -f docker-compose.base.yml -f docker-compose.cpu.yml --profile * down --remove-orphans' "$log_purge" \
         || fail "normal uninstall must stop Compose without deleting volumes before custody review"
     if grep -qF 'down -v' "$log_purge"; then
         fail "normal uninstall must not let Compose delete volumes before custody review"
@@ -351,7 +395,7 @@ EOF
         run_uninstall "$failed_install" "$failed_home" "$stub_dir" 2>"$TMP_DIR/failed-error"; then
         fail "Compose down failure must fail uninstall"
     fi
-    grep -qF 'compose -f docker-compose.base.yml -f docker-compose.cpu.yml down --remove-orphans' "$failed_docker" \
+    grep -qF 'compose -f docker-compose.base.yml -f docker-compose.cpu.yml --profile * down --remove-orphans' "$failed_docker" \
         || fail "failure fixture must reach the existing Compose down command"
     assert_no_name_cleanup "$failed_docker"
     [[ -f "$failed_install/ods-uninstall.sh" && -f "$failed_install/data/owner.txt" && \
