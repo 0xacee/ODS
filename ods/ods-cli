@@ -2072,8 +2072,9 @@ cmd_dry_run() {
         api_key=$(cat "$INSTALL_DIR/data/dashboard-api-key.txt" | tr -d '\r\n ' || true)
     fi
     if [[ -n "$api_key" ]]; then
+        # A header file keeps the key out of argv, which any local user can read.
         api_json=$(curl -sf --max-time 5 \
-            -H "Authorization: Bearer ${api_key}" \
+            -H @<(printf 'Authorization: Bearer %s\n' "$api_key") \
             "http://127.0.0.1:${dashboard_api_port}/api/update/dry-run" 2>/dev/null || true)
     fi
 

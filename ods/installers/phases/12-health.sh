@@ -139,6 +139,18 @@ _phase12_env_get() {
     echo "$default"
 }
 
+# curl with an optional bearer token. The token reaches curl through a header
+# file descriptor, never argv, which any local user can read with ps.
+_phase12_curl_bearer() {
+    local token="$1"
+    shift
+    if [[ -n "$token" ]]; then
+        curl -H @<(printf 'Authorization: Bearer %s\n' "$token") "$@"
+    else
+        curl "$@"
+    fi
+}
+
 _phase12_external_lemonade() {
     local external managed mode
     external="${LEMONADE_EXTERNAL:-$(_phase12_env_get LEMONADE_EXTERNAL false)}"
@@ -173,19 +185,16 @@ _phase12_verify_external_lemonade_completion() {
     local litellm_key="${LITELLM_KEY:-$(_phase12_env_get LITELLM_KEY "")}"
     local model="${LEMONADE_MODEL:-$(_phase12_env_get LEMONADE_MODEL default)}"
     [[ -n "$model" ]] || model="default"
-    local auth_header=()
-    [[ -n "$litellm_key" ]] && auth_header=(-H "Authorization: Bearer ${litellm_key}")
     local body response response_file error_file http_status curl_rc curl_error
     body='{"model":"default","messages":[{"role":"user","content":"Reply with exactly OK."}],"max_tokens":16,"temperature":0,"stream":false,"chat_template_kwargs":{"enable_thinking":false}}'
 
     ai "Verifying external Lemonade completion route through LiteLLM..."
     response_file="$(mktemp "${TMPDIR:-/tmp}/ods-lemonade-response.XXXXXX")"
     error_file="$(mktemp "${TMPDIR:-/tmp}/ods-lemonade-error.XXXXXX")"
-    if http_status="$(curl -sS --max-time 180 \
+    if http_status="$(_phase12_curl_bearer "$litellm_key" -sS --max-time 180 \
         -o "$response_file" \
         -w '%{http_code}' \
         -X POST "http://127.0.0.1:${litellm_port}/v1/chat/completions" \
-        "${auth_header[@]}" \
         -H "Content-Type: application/json" \
         -d "$body" 2>"$error_file")"; then
         curl_rc=0

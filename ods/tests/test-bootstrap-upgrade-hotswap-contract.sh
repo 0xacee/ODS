@@ -417,8 +417,8 @@ pass "Windows Lemonade restart propagates and verifies the promoted context befo
 host_agent_notify_block="$(function_block notify_host_agent_model_status | grep -v '^[[:space:]]*#')"
 grep -qF '/v1/model/status' <<<"$host_agent_notify_block" \
     || fail "bootstrap upgrade must notify host-agent model status after full-model completion"
-grep -qF 'Authorization: Bearer $key' <<<"$host_agent_notify_block" \
-    || fail "host-agent model status notification must authenticate with ODS_AGENT_KEY"
+grep -qF -- "-H @<(printf 'Authorization: Bearer %s\\n' \"\$key\")" <<<"$host_agent_notify_block" \
+    || fail "host-agent model status notification must authenticate with ODS_AGENT_KEY through a header file, never argv"
 grep -qF 'ss -ltnH' <<<"$host_agent_notify_block" \
     || fail "host-agent model status notification must discover the actual listening bind"
 grep -qF 'ip -o -4 addr show' <<<"$host_agent_notify_block" \
@@ -467,8 +467,8 @@ grep -qF 'ODS_MODEL_SWITCHBOARD' <<<"$switchboard_reconcile_block" \
     || fail "Windows Lemonade bootstrap reconciliation must be gated by enabled switchboard mode"
 grep -qF '/v1/model/status' <<<"$switchboard_reconcile_block" \
     || fail "Windows Lemonade bootstrap reconciliation must schedule host-agent route proof"
-grep -qF 'Authorization: Bearer $key' <<<"$switchboard_reconcile_block" \
-    || fail "Windows Lemonade bootstrap reconciliation must authenticate with ODS_AGENT_KEY"
+grep -qF -- "-H @<(printf 'Authorization: Bearer %s\\n' \"\$key\")" <<<"$switchboard_reconcile_block" \
+    || fail "Windows Lemonade bootstrap reconciliation must authenticate with ODS_AGENT_KEY through a header file, never argv"
 
 windows_lemonade_block="$(awk '
     /^if \[\[ "\$_windows_lemonade_swap_applies" == "true" \]\]; then/ { in_block=1 }
@@ -524,8 +524,10 @@ grep -qF 'read_env_value HERMES_LLM_BASE_URL' <<<"$downstream_block" \
     || fail "Windows Lemonade route proof must use the configured Hermes downstream route"
 grep -qF 'read_env_value LITELLM_KEY' <<<"$downstream_block" \
     || fail "Windows Lemonade route proof must fall back to LITELLM_KEY for older installs"
-grep -qF '$DOCKER_CMD exec "$route_container" curl' <<<"$downstream_block" \
+grep -qF '$DOCKER_CMD exec -i "$route_container" curl' <<<"$downstream_block" \
     || fail "Windows Lemonade route proof must execute from the downstream Hermes container when present"
+grep -qF -- '-H @-' <<<"$downstream_block" \
+    || fail "Windows Lemonade container route proof must read its Authorization header from stdin"
 grep -qF 'request_body="{\"model\":\"${escaped_model}\"' <<<"$downstream_block" \
     || fail "Windows Lemonade route proof must request the exact resolved model ID"
 pass "Windows Lemonade refreshes LiteLLM and proves the consumer route"
