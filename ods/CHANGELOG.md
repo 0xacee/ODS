@@ -7,6 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- n8n is upgraded from 2.6.4 to 2.41.6. Twelve critical advisories affect
+  2.6.4, most of them remote code execution by a signed-in n8n user, and
+  2.6.4's owner account went to whoever completed n8n's first-run screen
+  first, including another container on `ods-network`.
+  - New installs, and installs where nobody had created n8n's owner, now
+    get the owner from `N8N_USER`/`N8N_PASS` before n8n starts. An owner
+    someone already created stays as it is.
+  - n8n's database upgrades cannot be undone, so ODS copies the database
+    to `data/n8n/ods-backups/` before a new n8n version first starts.
+  - The plaintext `N8N_PASS` no longer reaches n8n's environment; ODS
+    passed it as `N8N_DEFAULT_ADMIN_PASSWORD`, which n8n does not read.
 - The Portal Full Access confirmation now says what it turns off. It disables
   the sandbox and per-command approval, so commands run directly as the owner
   account, while web search and page fetching stay on. It also notes that
