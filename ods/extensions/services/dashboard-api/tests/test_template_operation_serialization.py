@@ -68,7 +68,7 @@ def lifecycle_api(monkeypatch, tmp_path):
                         assert hashlib.sha256(compose.read_bytes()).hexdigest() == payload["expected_sha256"][sid]
                     if not enabling:
                         # Preserve the actual stop -> rename physical boundary.
-                        extensions.request_agent_json("POST", "/v1/service/stop", {"service_id": sid})
+                        extensions.request_agent_json("POST", "/v1/service/stop", payload={"service_id": sid})
                     if source.exists():
                         source.rename(destination)
             return {"action": "enabled" if enabling else "disabled", "service_ids": selected}
