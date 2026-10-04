@@ -5814,6 +5814,17 @@ def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> lis
                 flags.extend(["-f", str(active_mount)])
             return _macos_native_pixel_compose_flags(flags)
 
+    return _run_compose_resolver()
+
+
+def _run_compose_resolver(*, assume_enabled: tuple[str, ...] = (),
+                          selector_overrides: dict[str, str] | None = None) -> list:
+    """Run the Compose resolver against the installed state.
+
+    ``assume_enabled`` and ``selector_overrides`` serve image preparation only:
+    they resolve the stack as it will be once those bundled services (or Open
+    WebUI) are selected, without changing what is selected.
+    """
     script = INSTALL_DIR / "scripts" / "resolve-compose-stack.sh"
     # Contract note: every resolver launch below must include --gpu-count and
     # the persisted ODS_MODE. Extension toggles invalidate the cache while the
@@ -5851,6 +5862,7 @@ def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> lis
     env["ODS_EXTERNAL_LLM_SELECTED"] = (
         "true" if install_env.get("EXTERNAL_LLM_URL", "").strip() else "false"
     )
+    env.update(selector_overrides or {})
     cmd = [
         bash, _to_bash_path(script),
         "--script-dir", _to_bash_path(INSTALL_DIR),
@@ -5861,6 +5873,8 @@ def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> lis
     ]
     if platform.system() == "Windows" and not _windows_whisper_cuda_supported(install_env):
         cmd.extend(["--skip-gpu-overlays", "whisper"])
+    if assume_enabled:
+        cmd.extend(["--assume-enabled", ",".join(assume_enabled)])
     try:
         result = subprocess.run(
             cmd,
@@ -8588,6 +8602,136 @@ def _disable_unprepared_install(service_id: str) -> str:
             "settings and data were kept. Resolve the error above, then retry or remove it.")
 
 
+# A first image download can take far longer than the 600 s start allowance on
+# a slow link, so downloads report progress and stop only when Docker reports
+# nothing for the stall window, or after the overall cap.
+IMAGE_PULL_STALL_SECONDS = int(os.environ.get("ODS_IMAGE_PULL_STALL_SECONDS", "900"))
+IMAGE_PULL_MAX_SECONDS = int(os.environ.get("ODS_IMAGE_PULL_MAX_SECONDS", "21600"))
+_IMAGE_PULL_PROGRESS_SECONDS = 15
+_IMAGE_PREPARE_MAX_SERVICES = 16
+# Compose selectors that decide which services exist; mirrors the Open WebUI
+# add-back so a preview resolves exactly the stack its enable will run.
+_PREPARE_COMPOSE_SELECTORS = (
+    "ENABLE_OPEN_WEBUI", "ODS_GATEWAY_ONLY", "EXTERNAL_LLM_URL",
+    "LEMONADE_EXTERNAL", "AMD_INFERENCE_RUNTIME",
+    "AMD_INFERENCE_MANAGED", "WHISPER_ACCELERATION",
+    "ODS_SKIP_GPU_OVERLAYS", "BIND_ADDRESS", "WEBUI_AUTH", "ENABLE_ODS_PROXY",
+)
+
+
+def _is_bundled_service(service_id: str) -> bool:
+    """True for an extension shipped with ODS that has a Compose definition."""
+    service_dir = EXTENSIONS_DIR / service_id
+    if service_dir.is_symlink() or not service_dir.is_dir():
+        return False
+    return any((service_dir / name).is_file() and not (service_dir / name).is_symlink()
+               for name in ("compose.yaml", "compose.yaml.disabled"))
+
+
+def _image_prepare_context(service_ids: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Compose flags and environment for the stack these services are about to join.
+
+    Nothing is selected: bundled services resolve through the resolver's
+    ``--assume-enabled`` and Open WebUI through its selector, exactly as their
+    enable will run them.
+    """
+    installed = load_env(INSTALL_DIR / ".env")
+    overrides = {"ENABLE_OPEN_WEBUI": "true"} if "open-webui" in service_ids else {}
+    flags = _run_compose_resolver(
+        assume_enabled=tuple(s for s in service_ids if s != "open-webui"),
+        selector_overrides=overrides,
+    )
+    env = os.environ.copy()
+    env.pop("COMPOSE_PROFILES", None)
+    for selector in _PREPARE_COMPOSE_SELECTORS:
+        env.pop(selector, None)
+        if selector in installed:
+            env[selector] = installed[selector]
+    env.update(overrides)
+    return flags, env
+
+
+def _services_missing_images(flags: list[str], service_ids: list[str],
+                             env: dict[str, str]) -> list[str]:
+    """The services among ``service_ids`` whose Compose image is not on this host.
+
+    Locally built images are left to their own build step. The resolved
+    configuration carries credential values, so it is parsed and never logged.
+    """
+    command = ["docker", "compose", *flags, "config", "--format", "json"]
+    result = subprocess.run(command, cwd=str(INSTALL_DIR), env=env,
+                            capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError("Could not resolve the Compose configuration for these services")
+    services = json.loads(result.stdout).get("services")
+    if not isinstance(services, dict):
+        raise RuntimeError("Invalid Compose configuration")
+    missing = []
+    for service_id in service_ids:
+        definition = services.get(service_id)
+        if not isinstance(definition, dict):
+            raise RuntimeError(f"The Compose stack does not define {service_id}")
+        image = definition.get("image")
+        if definition.get("build") or not isinstance(image, str) or not image:
+            continue
+        inspected = subprocess.run(["docker", "image", "inspect", image],
+                                   capture_output=True, text=True, timeout=30)
+        if inspected.returncode:
+            missing.append(service_id)
+    return missing
+
+
+def _pull_compose_images(flags: list[str], service_ids: list[str], progress_id: str,
+                         *, env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """Download the images of ``service_ids`` with live progress under ``progress_id``.
+
+    Compose resolves each image from the same files and pinned digests that
+    ``up`` uses. Returns ``(ok, error)``; the pull is stopped only when Docker
+    reports nothing for IMAGE_PULL_STALL_SECONDS or IMAGE_PULL_MAX_SECONDS pass.
+    """
+    command = ["docker", "compose", "--progress", "plain", *flags, "pull", *service_ids]
+    proc = subprocess.Popen(command, cwd=str(INSTALL_DIR), env=env, text=True, errors="replace",
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    tail: collections.deque = collections.deque(maxlen=40)
+    seen = {"last": time.monotonic(), "layers": 0}
+
+    def _read_output() -> None:
+        for line in proc.stdout:
+            tail.append(line.rstrip())
+            seen["last"] = time.monotonic()
+            if "Pull complete" in line or "Already exists" in line:
+                seen["layers"] += 1
+
+    reader = threading.Thread(target=_read_output, daemon=True)
+    reader.start()
+    started = reported = time.monotonic()
+    _write_progress(progress_id, "pulling", "Downloading images...")
+    failure = ""
+    while proc.poll() is None:
+        time.sleep(1)
+        now = time.monotonic()
+        if now - seen["last"] > IMAGE_PULL_STALL_SECONDS:
+            failure = f"Image download made no progress for {IMAGE_PULL_STALL_SECONDS // 60} minutes."
+        elif now - started > IMAGE_PULL_MAX_SECONDS:
+            failure = f"Image download did not finish within {IMAGE_PULL_MAX_SECONDS // 3600} hours."
+        if failure:
+            proc.kill()
+            break
+        if now - reported >= _IMAGE_PULL_PROGRESS_SECONDS:
+            reported = now
+            minutes, seconds = divmod(int(now - started), 60)
+            _write_progress(progress_id, "pulling",
+                            f"Downloading images... {minutes}:{seconds:02d} elapsed, "
+                            f"{seen['layers']} layers done")
+    proc.wait()
+    reader.join(timeout=5)
+    if failure:
+        return False, failure
+    if proc.returncode:
+        return False, "Image download failed:\n" + "\n".join(list(tail)[-12:])
+    return True, ""
+
+
 def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, str]:
     """Prepare only the requested service's effective Compose dependency graph.
 
@@ -8631,10 +8775,8 @@ def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, st
     except (ValueError, KeyError, TypeError):
         return False, "Invalid installation Compose dependency graph"
     if pulls:
-        _write_progress(service_id, "pulling", "Downloading images...")
-        result = subprocess.run(base + ["pull", *sorted(pulls)], cwd=str(INSTALL_DIR),
-                                capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_START)
-        if result.returncode:
+        pulled, _pull_error = _pull_compose_images(flags, sorted(pulls), service_id)
+        if not pulled:
             # A cached image may still satisfy Compose up. Startup remains the
             # authority; this does not report installation as successful.
             logger.warning("Image pull failed for %s; checking cached images at startup", service_id)
@@ -9779,6 +9921,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_logs()
         elif self.path == "/v1/extension/install":
             self._handle_install()
+        elif self.path == "/v1/extension/prepare-images":
+            self._handle_prepare_images()
         elif self.path == "/v1/extension/setup-hook":
             self._handle_setup_hook()
         elif self.path == "/v1/extension/hooks":
@@ -12172,6 +12316,79 @@ class AgentHandler(BaseHTTPRequestHandler):
         # A disconnected observer must not cancel or replay an accepted worker.
         json_response(self, 202, {"status": "accepted", "service_id": service_id,
                                  "action": "install", 'operation_id': operation_id})
+
+    def _handle_prepare_images(self):
+        """Download the images a planned enable needs before anything is selected.
+
+        Takes service ids only: bundled extensions and Open WebUI, whose images
+        Compose resolves from their shipped files and pinned digests. Answers
+        200 when every image is already here, otherwise 202 and downloads in
+        the background, reporting progress under ``progress_id`` until it
+        records ``prepared`` or ``error``. Each service allows one operation.
+        """
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+        service_ids = body.get("service_ids")
+        progress_id = body.get("progress_id")
+        if (not isinstance(service_ids, list)
+                or not 1 <= len(service_ids) <= _IMAGE_PREPARE_MAX_SERVICES
+                or not all(isinstance(s, str) and SERVICE_ID_RE.fullmatch(s) for s in service_ids)
+                or len(set(service_ids)) != len(service_ids) or progress_id not in service_ids):
+            json_response(self, 400, {"error": "service_ids must list distinct service ids, including progress_id"})
+            return
+        for service_id in service_ids:
+            if service_id != "open-webui" and not _is_bundled_service(service_id):
+                json_response(self, 400, {"error": f"Images can be prepared only for bundled services: {service_id}"})
+                return
+        held: list[threading.Lock] = []
+        for service_id in service_ids:
+            lock = _service_locks[service_id]
+            if not lock.acquire(blocking=False):
+                for acquired in held:
+                    acquired.release()
+                json_response(self, 409, {"error": f"Operation in progress for {service_id}"})
+                return
+            held.append(lock)
+
+        def _release() -> None:
+            for acquired in held:
+                acquired.release()
+
+        try:
+            flags, env = _image_prepare_context(service_ids)
+            missing = _services_missing_images(flags, service_ids, env)
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            _release()
+            logger.warning("Image preparation could not resolve %s: %s", progress_id, type(exc).__name__)
+            json_response(self, 503, {"error": str(exc)[:300]})
+            return
+        if not missing:
+            _release()
+            json_response(self, 200, {"status": "ready", "service_ids": service_ids})
+            return
+
+        def _download() -> None:
+            try:
+                pulled, error = _pull_compose_images(flags, missing, progress_id, env=env)
+                if pulled:
+                    _write_progress(progress_id, "prepared", "Images downloaded")
+                else:
+                    _write_progress(progress_id, "error", "Image download failed", error=error)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                logger.exception("Image preparation failed for %s", progress_id)
+                _write_progress(progress_id, "error", "Image download failed", error=str(exc)[:500])
+            finally:
+                _release()
+
+        try:
+            threading.Thread(target=_download, daemon=True).start()
+        except Exception:
+            _release()
+            raise
+        json_response(self, 202, {"status": "accepted", "service_ids": service_ids, "pulling": missing})
 
 
     # ── Model management handlers ──

@@ -76,7 +76,24 @@ def host(tmp_path, monkeypatch):
         def start(self):
             self.target()
 
+        def join(self, timeout=None):
+            return None
+
     monkeypatch.setattr(_mod.threading, "Thread", Worker)
+
+    class Pull:  # `docker compose pull`: images already here, nothing to report.
+        def __init__(self, command, **kwargs):
+            calls.append(list(command))
+            self.stdout = iter(())
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(_mod.subprocess, "Popen", Pull)
     for service_id in ("gotify", "bookstack", "hooked", "builtin-svc"):
         _mod._service_locks.pop(service_id, None)
 

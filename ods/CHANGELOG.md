@@ -449,6 +449,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `ods-uninstall.sh` now validates Pixel before it stops the background model
   upgrade or turns off Windows startup. A Pixel refusal used to leave start-up
   at sign-in disabled; now it changes nothing.
+- Adding a bundled extension or Open WebUI from Extensions no longer fails on a slow
+  link. A first image download (several GB for Hermes Agent or Open WebUI) ran
+  inside a 600-second start allowance, and the Dashboard gave up on adding Open
+  WebUI after 180 seconds, while the host kept going and the card lost its Add
+  button. The Extensions page now downloads the images first, showing elapsed time
+  and completed layers on the card, and enables once they are local. A download
+  stops only when Docker makes no progress for 15 minutes (or after 6 hours);
+  Library installs download the same way.
 - Model compatibility verdicts recorded on named test machines now apply only
   to an install that sets `ODS_FLEET_HOST_ID` or `ODS_COMPATIBILITY_HOST`. The
   Dashboard used to fall back to the computer's own name, so a machine called
