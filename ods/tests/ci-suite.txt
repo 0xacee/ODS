@@ -86,7 +86,6 @@ tests/test-llama-memory-budget.sh
 tests/test-llama-mtp-args.sh
 tests/test-llm-cold-storage-arithmetic.py
 tests/test-local-app-auth-defaults.sh
-tests/test-no-credentials-in-argv.sh
 tests/test-locale-safe-cpu-formatting.sh
 tests/test-macos-agent-python.sh
 tests/test-macos-bridge-bootstrap-retry.sh
@@ -108,6 +107,7 @@ tests/test-model-library-coverage.py
 tests/test-model-library-verdicts.py
 tests/test-network-security.sh
 tests/test-network-timeouts.sh
+tests/test-no-credentials-in-argv.sh
 tests/test-nonroot-image-source-modes.sh
 tests/test-ods-cli-bootstrap-env-refresh.sh
 tests/test-ods-cli-host-cpu-fallback.sh
@@ -149,6 +149,7 @@ tests/test-preset-compatibility.sh
 tests/test-preset-diff.sh
 tests/test-preset-import-export.sh
 tests/test-preview-inspection.mjs
+tests/test-resolve-compose-nondict-service.sh
 tests/test-resolver-assume-enabled.py
 tests/test-restore-data-transaction-contract.sh
 tests/test-restore-empty-config.sh
