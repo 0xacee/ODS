@@ -2259,6 +2259,11 @@ cmd_update() {
 
     [[ "$rebuild_images" == "true" ]] && _ods_cli_rebuild_images "${flags[@]}"
 
+    # Recreating everything recreates Open WebUI too.
+    if _ods_cli_network_access_enabled; then
+        _ods_cli_require_proxy_auth
+    fi
+
     if ! _compose_run_with_summary "Recreating containers with new images" "${flags[@]}" up -d --force-recreate; then
         error "Failed to recreate containers. Run 'ods rollback' to restore previous state."
     fi

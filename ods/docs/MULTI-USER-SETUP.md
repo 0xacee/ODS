@@ -54,7 +54,7 @@ Verify: `docker compose logs llama-server | grep parallel` after restart.
 ./install.sh --lan
 ```
 
-Or set `BIND_ADDRESS=0.0.0.0` in `.env` and run `ods restart`. `install-core.sh` maps `--lan` to that value, and the base plus extension compose port bindings use `${BIND_ADDRESS:-127.0.0.1}` — no per-service edits needed.
+Or set `BIND_ADDRESS=0.0.0.0` in `.env` and run `ods restart` (`.\ods.ps1 restart` on native Windows), which turns Open WebUI sign-in on before recreating it. `install-core.sh` maps `--lan` to that value, and the base plus extension compose port bindings use `${BIND_ADDRESS:-127.0.0.1}` — no per-service edits needed.
 
 ### 3. Add firewall rules
 

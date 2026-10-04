@@ -1217,6 +1217,11 @@ cmd_update() {
     ai "Pulling latest images..."
     compose_pull_with_retry "$flags"
 
+    # Recreating everything recreates Open WebUI too.
+    if network_access_is_enabled; then
+        require_proxy_auth || return 1
+    fi
+
     ai "Recreating containers..."
     # shellcheck disable=SC2086
     docker compose $flags up -d --force-recreate

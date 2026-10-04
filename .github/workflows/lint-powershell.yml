@@ -288,6 +288,16 @@ jobs:
         shell: pwsh
         run: ./tests/test-windows-restart-model-preflight.ps1
 
+      - name: Windows Network Sign-in (PowerShell 7)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./tests/test-windows-network-signin.ps1
+
+      - name: Windows Network Sign-in (Windows PowerShell)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: powershell
+        run: ./tests/test-windows-network-signin.ps1
+
       - name: Windows Whisper Port Conflict
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: pwsh

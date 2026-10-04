@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- On native Windows, `.\ods.ps1 start`, `restart` and `update` now turn Open
+  WebUI sign-in on whenever `BIND_ADDRESS` publishes Open WebUI beyond this
+  machine, as `ods start` and `ods restart` already did on Linux, WSL and macOS
+  (GHSA-69cg-cxxf-jc6m). Before, a localhost-only Windows install whose `.env`
+  was edited to `BIND_ADDRESS=0.0.0.0` restarted Open WebUI with sign-in off,
+  reachable from the network. `ods update` on Linux, WSL and macOS now applies
+  the same rule before it recreates the containers.
 - The Portal Full Access confirmation now says what it turns off. It disables
   the sandbox and per-command approval, so commands run directly as the owner
   account, while web search and page fetching stay on. It also notes that
