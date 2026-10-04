@@ -250,11 +250,10 @@ passwords to set before you expose anything.
 ### How do I create a workflow?
 Workflows run in n8n, which is optional: choose Full Stack or `--workflows`
 when installing, or run `ods enable n8n` and then `ods start n8n`. Open
-http://localhost:5678 right away: n8n asks you to create its owner account
-the first time, and until an owner exists anything that can reach n8n can
-create one. The bundled n8n version does not use `N8N_USER` or `N8N_PASS`
-from `.env`. Then create a workflow, add a trigger and actions, save it, and
-switch it to Active.
+http://localhost:5678 and sign in with `N8N_USER` and `N8N_PASS` from
+`.env`. If someone created n8n's owner on its first-run screen before ODS
+managed it, that account keeps working instead. Then create a workflow, add
+a trigger and actions, save it, and switch it to Active.
 
 ### What's n8n?
 n8n is the optional workflow engine bundled with ODS. It provides a visual

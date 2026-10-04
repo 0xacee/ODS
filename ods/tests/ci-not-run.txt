@@ -19,8 +19,10 @@ tests/test-concurrency.sh                     live: needs a running ODS stack (r
 tests/test-embeddings-full.sh                 live: needs a running ODS stack (run-m8-tests.sh)
 tests/test-integration.sh                     live: probes the running dashboard and services
 tests/test-remote-provider-isolation-live.sh  live: inspects a running stack's networks; run by the fleet harness
+tests/test-n8n-owner-live.sh                  live: needs a running stack with n8n; run by the fleet harness
 tests/test-multi-distro.sh                    host: needs distrobox and distribution images
 tests/test-multi-turn.sh                      live: needs a running ODS stack (run-m8-tests.sh)
+tests/test-open-webui-live.sh                 live: needs a running stack with Open WebUI; run by the fleet harness
 tests/test-streaming.sh                       live: needs a running ODS stack (run-m8-tests.sh)
 tests/test-stt-full.sh                        live: needs a running Whisper service and ffmpeg (run-m8-tests.sh)
 tests/test-tts-full.sh                        live: needs a running ODS stack (run-m8-tests.sh)

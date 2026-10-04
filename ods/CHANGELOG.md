@@ -20,6 +20,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     network their own file does not declare, or name a container after a core
     service.
   - This only mattered when a remote provider was configured.
+- n8n is upgraded from 2.6.4 to 2.41.6. Twelve critical advisories affect
+  2.6.4, most of them remote code execution by a signed-in n8n user, and
+  2.6.4's owner account went to whoever completed n8n's first-run screen
+  first, including another container on `ods-network`.
+  - New installs, and installs where nobody had created n8n's owner, now
+    get the owner from `N8N_USER`/`N8N_PASS` before n8n starts. An owner
+    someone already created stays as it is.
+  - n8n's database upgrades cannot be undone, so ODS copies the database
+    to `data/n8n/ods-backups/` before a new n8n version first starts.
+  - The plaintext `N8N_PASS` no longer reaches n8n's environment; ODS
+    passed it as `N8N_DEFAULT_ADMIN_PASSWORD`, which n8n does not read.
+- Open WebUI is upgraded from 0.7.2 to 0.11.4, which fixes 101 published
+  advisories that affect 0.7.2: 1 critical, 41 high, 54 medium and 5 low. Two
+  of the high ones are fixed only in 0.11.4.
+  - Open WebUI's settings now come from ODS at every start
+    (`ENABLE_PERSISTENT_CONFIG=false`). Since 0.10, Open WebUI otherwise writes
+    every setting into its database on its first start and ignores later
+    changes, so mode switches, Pixel, key rotation and the Dashboard Settings
+    page would have stopped applying. Changes made in Open WebUI's Admin Panel
+    > Settings now last until Open WebUI restarts, and settings saved there
+    before this release are no longer used.
+  - Signup is closed (`ENABLE_SIGNUP=false`). Open WebUI still lets the first
+    account sign up on a new install with sign-in on and makes it the
+    administrator, who adds other accounts in Admin Panel > Users.
+  - Open WebUI's database migrations cannot be undone, so ODS copies
+    `webui.db` to `data/open-webui/ods-backups/` before a new Open WebUI
+    version first starts and keeps the two newest copies. It refuses to start
+    Open WebUI, with the reason in its log, when two accounts have email
+    addresses that differ only in case (the upgrade would stop partway
+    through), or when the image is older than the version that last used the
+    data. The first start after this upgrade migrates the database and can
+    take many minutes on a large install.
+  - Chats and models without a chosen function-calling mode now use Open
+    WebUI's Native tool calling.
 - The Portal Full Access confirmation now says what it turns off. It disables
   the sandbox and per-command approval, so commands run directly as the owner
   account, while web search and page fetching stay on. It also notes that

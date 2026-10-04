@@ -64,9 +64,11 @@ ods restart
 
 Hex values avoid characters that would break the `sed` expression. Rotating
 `WEBUI_SECRET` or `ODS_SESSION_SECRET` signs everyone out, and rotating
-`DASHBOARD_API_KEY` also invalidates dashboard sessions. The bundled n8n
-version does not read `N8N_USER` or `N8N_PASS`; n8n's owner account is the
-one created on its first-run screen, and its password is changed inside n8n.
+`DASHBOARD_API_KEY` also invalidates dashboard sessions. n8n's owner account
+comes from `N8N_USER` and `N8N_PASS` wherever no owner had been created yet,
+and n8n resets it to them at every start, so rotate `N8N_PASS` and restart
+n8n. An owner created earlier on n8n's first-run screen keeps its own
+password, which is changed inside n8n.
 
 ---
 
@@ -402,7 +404,7 @@ llama-server has no authentication by default. Use LiteLLM as your authenticated
 |---------|------|-------|
 | Dashboard | Session off-machine; none for local browsers | See [Dashboard Sign-in](#dashboard-sign-in) and [Trust Boundary](#trust-boundary) |
 | Open WebUI | Off on localhost-only installs; on with `--lan` | Change the `admin@localhost` password before exposing (see [Quick LAN Access](#quick-lan-access)); disable signups |
-| n8n | Owner account, created on first visit | Open n8n and create the owner as soon as you enable it (until then anything that can reach port 5678 can claim it); enable 2FA |
+| n8n | Owner account | Set from `N8N_USER`/`N8N_PASS` where no owner existed; an owner created earlier in n8n keeps its own password |
 | llama-server | None | Keep localhost-only, use LiteLLM for remote |
 | LiteLLM | API key | Set `LITELLM_KEY` in .env |
 | OpenCode web (optional) | None | Listens on `127.0.0.1:3003`; single-user machines only |
