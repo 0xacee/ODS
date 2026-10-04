@@ -5404,6 +5404,19 @@ class TestHandleEnvUpdate:
         assert "WEBUI_AUTH=false" in (install_dir / ".env").read_text(encoding="utf-8")
         assert handler.parse_response()["enforced_values"] == {}
 
+    @pytest.mark.parametrize("payload", [b"[]", b'"KEY=value"', b"42", b"null"])
+    def test_non_object_json_is_rejected_without_writing(self, env_update_env, payload):
+        # read_json_body() rejects these; this handler parses its own body.
+        install_dir, _ = env_update_env
+        before = (install_dir / ".env").read_bytes()
+        handler = _FakeHandler(payload)
+
+        _mod.AgentHandler._handle_env_update(handler)
+
+        assert handler.response_code == 400
+        assert handler.parse_response()["error"] == "JSON body must be an object"
+        assert (install_dir / ".env").read_bytes() == before
+
     def test_413_oversize_body(self, env_update_env):
         # Construct headers claiming body is too large; rfile content is irrelevant.
         handler = _FakeHandler(b"x", headers={"Content-Length": str(_mod.MAX_BODY + 999999) if hasattr(_mod, "MAX_BODY") else "100000"})
