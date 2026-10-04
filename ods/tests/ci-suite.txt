@@ -85,6 +85,7 @@ tests/test-llama-memory-budget.sh
 tests/test-llama-mtp-args.sh
 tests/test-llm-cold-storage-arithmetic.py
 tests/test-local-app-auth-defaults.sh
+tests/test-no-credentials-in-argv.sh
 tests/test-locale-safe-cpu-formatting.sh
 tests/test-macos-agent-python.sh
 tests/test-macos-bridge-bootstrap-retry.sh

@@ -570,13 +570,15 @@ cmd_check() {
     
     # Fetch latest release from GitHub
     local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
-    local response
-    local curl_args=(-sf --max-time 15)
+    local response fetched=true
+    # A header file keeps the token out of argv, which any local user can read.
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-        curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+        response=$(curl -sf --max-time 15 -H @<(printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN") \
+            "${api_url}" 2>/dev/null) || fetched=false
+    else
+        response=$(curl -sf --max-time 15 "${api_url}" 2>/dev/null) || fetched=false
     fi
-
-    if ! response=$(curl "${curl_args[@]}" "${api_url}" 2>/dev/null); then
+    if [[ "$fetched" != true ]]; then
         log_error "Failed to check for updates. Check network or GITHUB_TOKEN."
         return 1
     fi

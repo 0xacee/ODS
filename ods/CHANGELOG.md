@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Installer, update, health-check and CLI scripts no longer put API keys on a
+  command line. Fifteen curl calls passed `Authorization: Bearer <key>` as an
+  argument, which any local user can read with `ps` while the call runs. The
+  background model upgrade polls repeatedly, so its keys were exposed for
+  long stretches. Keys now reach curl through a header file descriptor, or on
+  stdin when curl runs inside a container through `docker exec`. The affected
+  keys were the LiteLLM key, the host-agent key, the dashboard API key, the
+  Lemonade key and an optional `GITHUB_TOKEN`. A CI check now fails on any
+  shipped script that puts a credential header on a command line.
 - The Portal Full Access confirmation now says what it turns off. It disables
   the sandbox and per-command approval, so commands run directly as the owner
   account, while web search and page fetching stay on. It also notes that

@@ -2237,10 +2237,13 @@ verify_windows_lemonade_downstream_route() {
     log "Verifying ${route_label} through the configured downstream route: ${route_base}"
     for _route_i in $(seq 1 "$attempts"); do
         if [[ "$route_mode" == "container" ]]; then
-            if $DOCKER_CMD exec "$route_container" curl -sf --max-time "$request_timeout" -X POST \
+            # The key goes through stdin: every process's argv is readable by
+            # any local user, including docker exec's on the host.
+            if printf 'Authorization: Bearer %s\n' "$route_key" \
+                | $DOCKER_CMD exec -i "$route_container" curl -sf --max-time "$request_timeout" -X POST \
                 "$route_url" \
                 -H "Content-Type: application/json" \
-                -H "Authorization: Bearer ${route_key}" \
+                -H @- \
                 -d "$request_body" >/dev/null 2>&1; then
                 log "Verified ${route_label} through ${route_base} with model ${model_id}."
                 return 0
@@ -2248,7 +2251,7 @@ verify_windows_lemonade_downstream_route() {
         elif curl -sf --max-time "$request_timeout" -X POST \
             "$route_url" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${route_key}" \
+            -H @<(printf 'Authorization: Bearer %s\n' "$route_key") \
             -d "$request_body" >/dev/null 2>&1; then
             log "Verified ${route_label} through ${route_base} with model ${model_id}."
             return 0
@@ -2279,7 +2282,7 @@ verify_model_completion_route() {
             response="$(curl -fsS --max-time "$request_timeout" -X POST \
                 "${route_base%/}/chat/completions" \
                 -H "Content-Type: application/json" \
-                -H "Authorization: Bearer ${route_key}" \
+                -H @<(printf 'Authorization: Bearer %s\n' "$route_key") \
                 -d "$request_body" 2>/dev/null || true)"
         else
             response="$(curl -fsS --max-time "$request_timeout" -X POST \
@@ -2318,7 +2321,7 @@ request_windows_switchboard_route_reconciliation() {
     # host agent's single-flight runtime proof, and only that agent may publish
     # the verified switchboard state.
     if curl -fsS --max-time 20 \
-        -H "Authorization: Bearer $key" \
+        -H @<(printf 'Authorization: Bearer %s\n' "$key") \
         "http://127.0.0.1:${port}/v1/model/status" >/dev/null 2>&1; then
         log "Host agent accepted promoted switchboard route reconciliation."
         return 0
@@ -4060,7 +4063,7 @@ notify_host_agent_model_status() {
                 url_host="[$url_host]"
             fi
             if curl -fsS --max-time 20 \
-                -H "Authorization: Bearer $key" \
+                -H @<(printf 'Authorization: Bearer %s\n' "$key") \
                 "http://${url_host}:${port}/v1/model/status" >/dev/null 2>&1; then
                 log "Host agent accepted full-model route reconciliation."
                 return 0

@@ -907,8 +907,10 @@ _verify_macos_dashboard_host_agent() {
     fi
 
     for attempt in $(seq 1 20); do
-        if docker exec ods-dashboard-api curl -fsS --max-time 2 \
-            -H "Authorization: Bearer ${api_key}" \
+        # The key goes through stdin, never argv, which any local user can read.
+        if printf 'Authorization: Bearer %s\n' "$api_key" \
+            | docker exec -i ods-dashboard-api curl -fsS --max-time 2 \
+            -H @- \
             "http://${host}:${port}/v1/model/status" >/dev/null 2>&1; then
             ai_ok "Dashboard container reached the authenticated host agent"
             return 0
@@ -3567,7 +3569,7 @@ if $CLOUD_MODE; then
     if [[ -n "$_cloud_health_key" ]]; then
         for _cloud_health_i in $(seq 1 30); do
             if curl -fsS --connect-timeout 2 --max-time 5 \
-                -H "Authorization: Bearer ${_cloud_health_key}" \
+                -H @<(printf 'Authorization: Bearer %s\n' "$_cloud_health_key") \
                 "http://${_cloud_health_host}:${_cloud_health_port}/v1/models" \
                 >/dev/null 2>&1; then
                 _cloud_auth_ok=true
