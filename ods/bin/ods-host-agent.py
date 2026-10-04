@@ -11246,11 +11246,14 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         requested = body.get("service_ids", [])
-        unique_service_ids = sorted(set(requested)) if isinstance(requested, list) else requested
-        ok, error = validate_core_recreate_ids(unique_service_ids)
+        # Validate before deduplicating: set() and sorted() raise on
+        # unhashable or mixed-type elements, which drops the connection
+        # instead of answering 400.
+        ok, error = validate_core_recreate_ids(requested)
         if not ok:
             json_response(self, 400, {"error": error})
             return
+        unique_service_ids = sorted(set(requested))
 
         locks = []
         try:
