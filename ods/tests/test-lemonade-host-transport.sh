@@ -12,7 +12,13 @@ trap 'rm -rf "$tmp"' EXIT
 source "$ROOT/lib/safe-env.sh"
 source "$ROOT/lib/dotenv-quote.sh"
 
-defaults="$(sed -n '/^LEMONADE_EXTERNAL=/,/^LEMONADE_GPU_VRAM_MB=/p' "$ROOT/install-core.sh")"
+# Capture the initialization block once, including its explicit-selection
+# marker. A later persisted-selection assignment must not restart the slice.
+defaults="$(awk '
+    /^LEMONADE_EXTERNAL(_EXPLICIT)?=/ { emit = 1 }
+    emit { print }
+    /^LEMONADE_GPU_VRAM_MB=/ { exit }
+' "$ROOT/install-core.sh")"
 parser="$(sed -n '/^while \[\[ \$# -gt 0 \]\]; do$/,/^done$/p' "$ROOT/install-core.sh")"
 exports="$(sed -n '/^if \[\[ "\${LEMONADE_EXTERNAL,,}" == "true" \]\]; then$/,/^fi$/p' "$ROOT/install-core.sh")"
 route_source="$(sed -n '/^    LEMONADE_EXTERNAL_VALUE=/,/^    LEMONADE_CONTAINER_API_BASE_VALUE=/p' "$PHASE")"
