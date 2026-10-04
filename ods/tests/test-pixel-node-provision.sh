@@ -14,13 +14,15 @@ trap cleanup EXIT
 # A PATH that holds no node/npm but the few tools the phase calls here.
 SANDBOX="$TEST_ROOT/bin"
 mkdir -p "$SANDBOX"
-for tool in bash tee readlink; do
+for tool in bash tee readlink cp chmod; do
     ln -s "$(command -v "$tool")" "$SANDBOX/$tool"
 done
 
 run_phase() {
     (
+        # shellcheck disable=SC2034  # read by the sourced phase
         SCRIPT_DIR="$ROOT"
+        # shellcheck disable=SC2034  # read by the sourced phase
         LOG_FILE="$TEST_ROOT/install.log"
         PATH="$SANDBOX"
         ods_progress() { :; }
