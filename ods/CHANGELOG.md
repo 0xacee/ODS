@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Other containers can no longer spend a remote LLM provider's API key
+  (GHSA-4rpc-g4mc-jm9c). The remote-provider egress, which adds the
+  provider key to outbound requests, accepted unauthenticated requests from
+  any container on `ods-network`, including installed extensions. The SSH
+  tunnel's forwards were reachable the same way.
+  - The egress and the tunnel now run on their own networks. Only LiteLLM and
+    dashboard-api can reach them, over an internal network.
+  - The egress refuses every request except its status reads unless the
+    caller presents the LiteLLM gateway key.
+  - The extension policy refuses extensions that join those networks, join a
+    network their own file does not declare, or name a container after a core
+    service.
+  - This only mattered when a remote provider was configured.
 - The Portal Full Access confirmation now says what it turns off. It disables
   the sandbox and per-command approval, so commands run directly as the owner
   account, while web search and page fetching stay on. It also notes that

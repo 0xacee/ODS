@@ -221,6 +221,11 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # remote-provider is internal, so ods-network stays this container's
+    # default route; config.py finds the host agent through that gateway.
+    networks:
+      - default
+      - remote-provider
     ports:
       - "127.0.0.1:${DASHBOARD_API_PORT:-3002}:3002"
     security_opt:
@@ -390,6 +395,12 @@ services:
     restart: unless-stopped
     expose:
       - "8091"
+    # Not on ods-network: only LiteLLM and dashboard-api share the internal
+    # remote-provider network, and the outbound network carries provider
+    # traffic. Extensions on ods-network cannot reach this service.
+    networks:
+      - remote-provider
+      - remote-provider-outbound
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -406,6 +417,8 @@ services:
       - ODS_REMOTE_PROVIDER_ROUTE_PATH=/state/remote-provider/routing-state.json
       - ODS_REMOTE_PROVIDER_POLICY_PATH=/config/remote-provider-egress-policy.json
       - ODS_REMOTE_PROVIDER_API_KEY_FILE=/state/remote-provider/secrets/provider-api-key
+      # Callers must present the LiteLLM gateway key (LiteLLM, dashboard-api).
+      - ODS_REMOTE_PROVIDER_CALLER_KEY=${LITELLM_KEY:-}
       - ODS_REMOTE_PROVIDER_MAX_BODY_BYTES=${ODS_REMOTE_PROVIDER_MAX_BODY_BYTES:-4194304}
       - ODS_REMOTE_PROVIDER_UPSTREAM_TIMEOUT=${ODS_REMOTE_PROVIDER_UPSTREAM_TIMEOUT:-600}
       - ODS_REMOTE_PROVIDER_SSH_TUNNEL_HEALTH_URL=${ODS_REMOTE_PROVIDER_SSH_TUNNEL_HEALTH_URL:-http://remote-provider-ssh-tunnel:18090/health}
@@ -442,6 +455,11 @@ services:
       - "18090"
       - "18091"
       - "18092"
+    # Its SSH forwards are plain TCP with no caller check, so they must not be
+    # reachable from ods-network; see remote-provider-egress.
+    networks:
+      - remote-provider
+      - remote-provider-outbound
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -521,3 +539,12 @@ services:
 networks:
   default:
     name: ods-network
+  # The remote-provider egress boundary. Internal, so it never becomes a
+  # member's default route; only LiteLLM, dashboard-api, the egress and the
+  # SSH tunnel join it, and extensions may not (shared compose policy).
+  remote-provider:
+    name: ods-remote-provider
+    internal: true
+  # Internet access for the egress and the SSH tunnel only.
+  remote-provider-outbound:
+    name: ods-remote-provider-outbound

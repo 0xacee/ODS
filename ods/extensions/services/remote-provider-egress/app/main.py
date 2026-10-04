@@ -3,10 +3,15 @@
 The service is internal-only. It accepts the OpenAI-compatible paths LiteLLM
 uses, validates generated route state against the shared policy contract, and
 injects provider credentials from a private file at the final egress boundary.
+
+Only LiteLLM and dashboard-api share its network, and every request except the
+status reads must carry the LiteLLM gateway key, so a container that can reach
+the service still cannot spend the provider key without it.
 """
 
 from __future__ import annotations
 
+import hmac
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +73,12 @@ PROBE_TIMEOUT_SECONDS = float(
         str(DEFAULT_PROBE_TIMEOUT_SECONDS),
     )
 )
+# The LiteLLM gateway key. Anyone holding it can already reach the provider
+# through LiteLLM, so requiring it here admits no new caller.
+CALLER_KEY = os.environ.get("ODS_REMOTE_PROVIDER_CALLER_KEY", "")
+# Status reads stay open for the container healthcheck and dashboard-api's
+# service poller; they carry no provider credential and spend nothing.
+_OPEN_ROUTES = frozenset({("GET", "/health"), ("HEAD", "/health"), ("GET", "/telemetry")})
 app = FastAPI(title="ODS Remote Provider Egress", docs_url=None, redoc_url=None, openapi_url=None)
 
 _HOP_BY_HOP_RESPONSE_HEADERS = {
@@ -144,6 +155,35 @@ def _probe_error_response(exc: ProbeError) -> JSONResponse:
         },
         status_code=exc.status,
     )
+
+
+def _caller_rejection(method: str, path: str, authorization: str) -> JSONResponse | None:
+    """Refuse a caller that does not present the gateway key."""
+    if (method.upper(), path) in _OPEN_ROUTES:
+        return None
+    if not CALLER_KEY:
+        return _error_response(EgressError(
+            503, "missing_caller_key",
+            "remote provider egress has no caller key; rerun the ODS installer",
+        ))
+    scheme, _, presented = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not hmac.compare_digest(
+            presented.strip().encode("utf-8"), CALLER_KEY.encode("utf-8")):
+        response = _error_response(EgressError(
+            401, "caller_unauthorized", "remote provider egress requires the gateway key",
+        ))
+        response.headers["WWW-Authenticate"] = "Bearer"
+        return response
+    return None
+
+
+@app.middleware("http")
+async def _require_caller_key(request: Request, call_next):
+    rejection = _caller_rejection(
+        request.method, request.url.path, request.headers.get("authorization", ""))
+    if rejection is not None:
+        return rejection
+    return await call_next(request)
 
 
 def _response_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -263,6 +303,15 @@ async def health() -> dict[str, Any]:
             "status": "degraded",
             "ready": False,
             "reason": "missing_provider_secret",
+            "route": _safe_route_summary(route),
+            "resolution": resolution,
+            "secret": secret,
+        }
+    if not CALLER_KEY:
+        return {
+            "status": "degraded",
+            "ready": False,
+            "reason": "missing_caller_key",
             "route": _safe_route_summary(route),
             "resolution": resolution,
             "secret": secret,

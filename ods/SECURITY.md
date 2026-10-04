@@ -172,6 +172,13 @@ Docker network, as one trust zone:
   request a local browser can, so it can use the dashboard admin API. Install
   library extensions only from sources you trust, because installing one gives
   it this level of access.
+- **The remote-provider boundary.** The remote-provider egress (which holds a
+  remote LLM provider's API key) and its SSH tunnel are not on `ods-network`.
+  They share an internal network with LiteLLM and dashboard-api only, and the
+  egress serves only callers that present the LiteLLM gateway key
+  (`LITELLM_KEY`). Extensions cannot join that network. A container that holds
+  `LITELLM_KEY` can still use the remote provider through LiteLLM, as it can
+  any other model.
 - **The host agent.** The host agent performs host-side actions for
   dashboard-api and requires `ODS_AGENT_KEY`. It runs as the installing user
   with Docker group access, so anything that controls dashboard-api can manage

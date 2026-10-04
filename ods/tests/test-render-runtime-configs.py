@@ -195,7 +195,10 @@ def test_remote_cloud_projection_uses_internal_egress_and_state_receipt() -> Non
     assert 'model: "openai/qwen/remote:latest"' in cloud
     assert 'model_name: "qwen/remote:latest"' in cloud
     assert 'api_base: "http://remote-provider-egress:8091/v1"' in cloud
-    assert "api_key: not-needed" in cloud
+    # The egress admits only the LiteLLM gateway key (GHSA-4rpc); the value
+    # stays in LiteLLM's environment, never in the rendered file.
+    assert cloud.count("api_key: os.environ/LITELLM_MASTER_KEY") == 3
+    assert "not-needed" not in cloud
     assert "https://gpu.example.test" not in cloud
     assert "REMOTE_LLM_API_KEY" not in cloud
 

@@ -1300,11 +1300,14 @@ def test_remote_provider_probe_posts_to_egress_and_sanitizes_receipt(
         async def __aexit__(self, *_args):
             return False
 
-        async def post(self, url):
-            calls.append(("post", url))
+        async def post(self, url, headers=None):
+            calls.append(("post", url, headers))
             return FakeResponse()
 
     monkeypatch.setattr(rps, "EGRESS_URL", "http://egress.internal:8091/")
+    # The egress admits only the LiteLLM gateway key, read live from .env.
+    monkeypatch.setattr(rps, "read_live_env_value",
+                        lambda key, default="": "sk-ods-gateway" if key == "LITELLM_KEY" else default)
     monkeypatch.setattr(rps.httpx, "AsyncClient", FakeAsyncClient)
     async def fake_agent_request(method, path, *, payload, timeout):
         agent_calls.append((method, path, payload, timeout))
@@ -1371,7 +1374,7 @@ def test_remote_provider_probe_posts_to_egress_and_sanitizes_receipt(
     }
     assert calls == [
         ("timeout", 60.0),
-        ("post", "http://egress.internal:8091/probe"),
+        ("post", "http://egress.internal:8091/probe", {"Authorization": "Bearer sk-ods-gateway"}),
     ]
     assert agent_calls == [
         (
@@ -1444,7 +1447,7 @@ def test_remote_provider_probe_reports_nonfatal_proof_record_failure(
         async def __aexit__(self, *_args):
             return False
 
-        async def post(self, _url):
+        async def post(self, _url, headers=None):
             return FakeResponse()
 
     async def fake_agent_request(*_args, **_kwargs):
@@ -1503,7 +1506,7 @@ def test_remote_provider_probe_preserves_sanitized_egress_errors(
         async def __aexit__(self, *_args):
             return False
 
-        async def post(self, _url):
+        async def post(self, _url, headers=None):
             return FakeResponse()
 
     monkeypatch.setattr(rps.httpx, "AsyncClient", FakeAsyncClient)

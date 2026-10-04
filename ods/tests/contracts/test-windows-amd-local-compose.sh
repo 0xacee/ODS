@@ -164,6 +164,7 @@ grep -q 'OPENAI_API_KEY: ci-litellm-key' <<<"$switchboard_webui_rendered" \
 switchboard_litellm_rendered="$(
   docker compose \
     --env-file "$tmp_switchboard_env" \
+    -f docker-compose.base.yml \
     -f extensions/services/litellm/compose.yaml \
     -f extensions/services/litellm/compose.amd.yaml \
     config litellm

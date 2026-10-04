@@ -305,23 +305,24 @@ def render_litellm_cloud(inputs: RenderInputs) -> RenderedFile:
         content = f"""model_list:
   # Stable public alias used by ODS consumers. Provider credentials stay in
   # remote-provider-egress, never in LiteLLM YAML or generated public config.
+  # The egress admits only callers holding the LiteLLM gateway key.
   - model_name: {PUBLIC_MODEL_ALIAS}
     litellm_params:
       model: {model_param}
       api_base: {egress_base}
-      api_key: not-needed
+      api_key: os.environ/LITELLM_MASTER_KEY
 
   - model_name: default
     litellm_params:
       model: {model_param}
       api_base: {egress_base}
-      api_key: not-needed
+      api_key: os.environ/LITELLM_MASTER_KEY
 
   - model_name: {yaml_scalar(model)}
     litellm_params:
       model: {model_param}
       api_base: {egress_base}
-      api_key: not-needed
+      api_key: os.environ/LITELLM_MASTER_KEY
 
 router_settings:
   routing_strategy: simple-shuffle

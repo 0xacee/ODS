@@ -548,6 +548,11 @@ _COMPOSE_POLICY_ROOT_UID_RE = re.compile(r"[+-]?[0-9]+")
 _COMPOSE_POLICY_WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:[\\/]|[\\/]{2}")
 _COMPOSE_POLICY_RESERVATION_KEYS = frozenset({"cpus", "memory", "devices"})
 _COMPOSE_POLICY_NETWORK_KEYS = frozenset({"external", "name", "internal", "labels"})
+# Networks docker-compose.base.yml declares for the remote-provider egress
+# boundary. Compose merges every -f file into one project, so an extension
+# that declared or referenced one of these keys would join it and reach the
+# egress or the SSH tunnel. Only built-in LiteLLM joins them.
+_COMPOSE_POLICY_CORE_NETWORKS = frozenset({"remote-provider", "remote-provider-outbound"})
 _COMPOSE_POLICY_VOLUME_KEYS = frozenset({"labels"})
 _COMPOSE_POLICY_MARKER_MAX_BYTES = 524288
 # A Compose file with every alias expanded; ODS's largest is a few hundred
@@ -789,8 +794,14 @@ def _compose_policy_service_problems(name, service, *, own_services, accelerator
     return problems
 
 
-def _compose_policy_document_problems(data):
-    """Policy problems of the top level: keys, named networks and volumes."""
+def _compose_policy_document_problems(data, *, builtin=False):
+    """Policy problems of the top level: keys, named networks and volumes.
+
+    Also which networks each service joins: an extension may join only the
+    default network or one its own file declares, never an ODS core network.
+    ``builtin`` marks an extension shipped with ODS, which may join core
+    networks that docker-compose.base.yml declares.
+    """
     problems = []
     for key in data:
         if not isinstance(key, str) or not (key in _COMPOSE_POLICY_TOP_LEVEL or key.startswith("x-")):
@@ -799,7 +810,22 @@ def _compose_policy_document_problems(data):
     networks = data.get("networks")
     if networks is not None and not isinstance(networks, dict):
         problems.append("top-level networks must be a mapping")
+    declared = set(networks) if isinstance(networks, dict) else set()
+    services = data.get("services")
+    for name, service in (services.items() if isinstance(services, dict) else ()):
+        joined = service.get("networks") if isinstance(service, dict) else None
+        for key in (list(joined) if isinstance(joined, (dict, list)) else ()):
+            if not isinstance(key, str):
+                problems.append(f"service '{name}' lists an invalid network entry")
+            elif key in _COMPOSE_POLICY_CORE_NETWORKS:
+                if not builtin:
+                    problems.append(f"service '{name}' joins ODS core network '{key}'")
+            elif not builtin and key != "default" and key not in declared:
+                problems.append(f"service '{name}' joins network '{key}' that its file does not declare")
     for key, network in (networks.items() if isinstance(networks, dict) else ()):
+        if key in _COMPOSE_POLICY_CORE_NETWORKS:
+            problems.append(f"network '{key}' is reserved for ODS core")
+            continue
         if network is None:
             continue
         if not isinstance(network, dict) or set(network) - _COMPOSE_POLICY_NETWORK_KEYS:
@@ -942,6 +968,14 @@ def _scan_user_compose_content(compose_path, trusted_library=False, accelerator=
         # dashboard-api install endpoint's skip_name_collision=False path.
         if svc_name in _CORE_SERVICE_IDS:
             reject(f"service '{svc_name}' collides with a built-in core service name")
+        # Docker DNS answers to container names too, so a container named
+        # after a core service would shadow it for every caller on ods-network.
+        container_name = svc_def.get("container_name")
+        if container_name is not None:
+            if not isinstance(container_name, str) or _compose_policy_interpolates(container_name):
+                reject(f"service '{svc_name}' container name must be a literal string")
+            elif container_name.lower() in _CORE_SERVICE_IDS | {f"ods-{sid}" for sid in _CORE_SERVICE_IDS}:
+                reject(f"container name '{container_name}' collides with a built-in core service name")
         for problem in _compose_policy_service_problems(
                 svc_name, svc_def, own_services=own_services, accelerator=accelerator,
                 namespace=namespace):

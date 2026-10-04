@@ -1,4 +1,4 @@
-"""Exercise egress header forwarding through its ASGI HTTP boundary."""
+"""Exercise egress caller auth and header forwarding through its ASGI HTTP boundary."""
 import importlib.util
 import sys
 from pathlib import Path
@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bin"))
+# The LiteLLM gateway key, as LiteLLM and dashboard-api present it.
+CALLER = {"Authorization": "Bearer caller-token"}
 
 
 @pytest.fixture
@@ -26,6 +28,7 @@ def egress(monkeypatch):
     })
     monkeypatch.setattr(module, "validate_direct_provider_resolution", lambda route: [])
     monkeypatch.setattr(module, "read_provider_secret", lambda path: "provider-token")
+    monkeypatch.setattr(module, "CALLER_KEY", "caller-token")
     yield module
 
 
@@ -65,7 +68,8 @@ def test_completion_telemetry_preserves_response_and_only_records_confirmed_usag
     with TestClient(egress.app) as client:
         transport = httpx.AsyncClient(transport=httpx.MockTransport(provider))
         monkeypatch.setattr(egress, '_http_client', lambda key='': transport)
-        response = client.post('/v1/chat/completions', json={'model': 'ods/current', 'stream': stream})
+        response = client.post('/v1/chat/completions', json={'model': 'ods/current', 'stream': stream},
+                               headers=CALLER)
         assert response.content == wire
         sample = client.get('/telemetry').json()['sample']
         if ending == 'success' or ending == 'incomplete' and not stream:
@@ -128,7 +132,7 @@ def test_response_connection_options_stay_on_provider_hop(egress, monkeypatch, s
     with TestClient(egress.app) as client:
         transport = httpx.AsyncClient(transport=httpx.MockTransport(provider))
         monkeypatch.setattr(egress, "_http_client", lambda key="": transport)
-        response = client.post("/v1/chat/completions", json={"stream": stream})
+        response = client.post("/v1/chat/completions", json={"stream": stream}, headers=CALLER)
         client.portal.call(transport.aclose)
     assert response.status_code == status
     assert response.content == b'{"ok": true}'
@@ -138,3 +142,92 @@ def test_response_connection_options_stay_on_provider_hop(egress, monkeypatch, s
     assert response.headers["x-request-id"] == "retained"
     assert response.headers["retry-after"] == "7"
     assert response.headers["x-ods-provider-model"] == "real-model"
+
+
+def _record_provider(egress, monkeypatch, client):
+    seen = []
+
+    def provider(request):
+        seen.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+    monkeypatch.setattr(egress, "_http_client", lambda key="": transport)
+    return seen, transport
+
+
+@pytest.mark.parametrize("authorization", [
+    None, "", "Bearer", "Bearer wrong-token", "Bearer caller-token-extra", "Basic caller-token",
+    "caller-token", "Bearer provider-token",
+])
+@pytest.mark.parametrize("endpoint", ["chat/completions", "completions", "responses"])
+def test_forwarding_requires_the_gateway_key(egress, monkeypatch, authorization, endpoint):
+    headers = {} if authorization is None else {"Authorization": authorization}
+    with TestClient(egress.app) as client:
+        seen, transport = _record_provider(egress, monkeypatch, client)
+        response = client.post("/v1/" + endpoint, json={"model": "ods/current"}, headers=headers)
+        client.portal.call(transport.aclose)
+    assert response.status_code == 401
+    assert response.json()["error"]["type"] == "caller_unauthorized"
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert seen == []
+
+
+@pytest.mark.parametrize("authorization", ["Bearer caller-token", "bearer caller-token", "Bearer  caller-token "])
+def test_gateway_key_is_accepted_and_never_forwarded(egress, monkeypatch, authorization):
+    with TestClient(egress.app) as client:
+        seen, transport = _record_provider(egress, monkeypatch, client)
+        response = client.post("/v1/chat/completions", json={"model": "ods/current"},
+                               headers={"Authorization": authorization})
+        client.portal.call(transport.aclose)
+    assert response.status_code == 200
+    assert len(seen) == 1
+    assert seen[0].headers["authorization"] == "Bearer provider-token"
+    assert "caller-token" not in str(seen[0].headers)
+
+
+def test_probe_and_model_list_require_the_gateway_key(egress, monkeypatch):
+    probed = []
+    monkeypatch.setattr(egress, "probe_route_response", lambda *args, **kwargs: probed.append(1) or {})
+    with TestClient(egress.app) as client:
+        assert client.post("/probe").status_code == 401
+        assert client.get("/v1/models").status_code == 401
+        assert client.post("/probe", headers=CALLER).status_code == 200
+        assert client.get("/v1/models", headers=CALLER).status_code == 200
+    assert probed == [1]
+
+
+@pytest.mark.parametrize("method, path", [
+    ("POST", "/health"), ("DELETE", "/health"), ("POST", "/telemetry"), ("GET", "/health/"),
+    ("GET", "/v1/chat/completions"), ("GET", "/anything"),
+])
+def test_only_status_reads_are_open(egress, method, path):
+    with TestClient(egress.app) as client:
+        assert client.request(method, path).status_code == 401
+
+
+def test_status_reads_need_no_key(egress, monkeypatch):
+    monkeypatch.setattr(egress, "provider_secret_status",
+                        lambda path: {"configured": True, "path": str(path), "bytes": 14})
+    with TestClient(egress.app) as client:
+        health = client.get("/health")
+        telemetry = client.get("/telemetry")
+    assert health.status_code == 200 and health.json()["ready"] is True
+    assert telemetry.status_code == 200 and telemetry.json() == {"sample": None}
+
+
+def test_missing_gateway_key_fails_closed(egress, monkeypatch):
+    monkeypatch.setattr(egress, "CALLER_KEY", "")
+    monkeypatch.setattr(egress, "provider_secret_status",
+                        lambda path: {"configured": True, "path": str(path), "bytes": 14})
+    with TestClient(egress.app) as client:
+        seen, transport = _record_provider(egress, monkeypatch, client)
+        for headers in ({}, {"Authorization": "Bearer "}, CALLER):
+            response = client.post("/v1/chat/completions", json={"model": "ods/current"}, headers=headers)
+            assert response.status_code == 503
+            assert response.json()["error"]["type"] == "missing_caller_key"
+        health = client.get("/health").json()
+        client.portal.call(transport.aclose)
+    assert seen == []
+    assert health["ready"] is False
+    assert health["reason"] == "missing_caller_key"

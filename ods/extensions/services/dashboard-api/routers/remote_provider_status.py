@@ -17,7 +17,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
-from config import DATA_DIR
+from config import DATA_DIR, read_live_env_value
 from host_agent_client import (
     AgentHTTPError,
     AgentProtocolError,
@@ -58,8 +58,10 @@ _LOCAL_HOSTNAMES = {
     "localhost.localdomain",
 }
 _EGRESS_ERROR_MESSAGES = {
+    "caller_unauthorized": "Remote provider egress refused the LiteLLM gateway key",
     "invalid_route": "Remote provider route is invalid",
     "invalid_route_state": "Remote provider route state is invalid",
+    "missing_caller_key": "LITELLM_KEY is missing from .env; rerun the ODS installer",
     "missing_provider_secret": "Remote provider secret is missing",
     "provider_http_error": "Remote provider probe returned an HTTP error",
     "provider_probe_too_large": "Remote provider probe response exceeded the safety limit",
@@ -923,9 +925,13 @@ async def _fetch_egress_health() -> dict[str, Any]:
 
 async def _post_egress_probe() -> dict[str, Any]:
     url = f"{EGRESS_URL.rstrip('/')}/probe"
+    # The egress admits only holders of the LiteLLM gateway key. Read it live,
+    # as the egress and LiteLLM receive it from the same .env.
+    caller_key = read_live_env_value("LITELLM_KEY")
+    headers = {"Authorization": f"Bearer {caller_key}"} if caller_key else {}
     try:
         async with httpx.AsyncClient(timeout=EGRESS_PROBE_TIMEOUT_SECONDS) as client:
-            response = await client.post(url)
+            response = await client.post(url, headers=headers)
     except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
         logger.debug("remote-provider-egress probe unavailable: %s", exc)
         raise HTTPException(
