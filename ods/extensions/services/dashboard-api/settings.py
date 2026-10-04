@@ -557,12 +557,12 @@ def _compute_env_apply_plan(
     if rag_admin_sync_required:
         post_apply_actions.append({
             "id": "open-webui-rag-sync",
-            "title": "Apply RAG settings in Open WebUI",
+            "title": "Check RAG settings in Open WebUI",
             "message": (
-                "After Open WebUI is healthy, open Admin Panel / Settings / "
-                "Documents and set the embedding engine, endpoint, model, and "
-                "credential to the saved values. Open WebUI persists these settings "
-                "in its database after first boot."
+                "Open WebUI reads its embedding settings from ODS each time it "
+                "starts, so the recreated container uses the saved engine, "
+                "endpoint, model, and credential. After it is healthy, Admin "
+                "Panel / Settings / Documents shows them."
             ),
         })
     if rag_reindex_required:

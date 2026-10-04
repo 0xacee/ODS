@@ -403,7 +403,7 @@ llama-server has no authentication by default. Use LiteLLM as your authenticated
 | Service | Auth | Notes |
 |---------|------|-------|
 | Dashboard | Session off-machine; none for local browsers | See [Dashboard Sign-in](#dashboard-sign-in) and [Trust Boundary](#trust-boundary) |
-| Open WebUI | Off on localhost-only installs; on with `--lan` | Change the `admin@localhost` password before exposing (see [Quick LAN Access](#quick-lan-access)); disable signups |
+| Open WebUI | Off on localhost-only installs; on with `--lan` | Change the `admin@localhost` password before exposing (see [Quick LAN Access](#quick-lan-access)); signup is closed, so administrators add accounts in Admin Panel > Users |
 | n8n | Owner account | Set from `N8N_USER`/`N8N_PASS` where no owner existed; an owner created earlier in n8n keeps its own password |
 | llama-server | None | Keep localhost-only, use LiteLLM for remote |
 | LiteLLM | API key | Set `LITELLM_KEY` in .env |
