@@ -17,6 +17,7 @@ from pathlib import Path
 import plistlib
 import pwd
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -193,6 +194,27 @@ class NativeSandboxes:
             if selected: result.append(selected)
         return result
 
+    def prune_retired(self, keep):
+        """Remove stopped sandboxes that earlier, completed retirements kept.
+
+        Only this owner's exact Pixel sandbox under its retired name qualifies;
+        the sandboxes this retirement just preserved are kept.
+        """
+        ids = self.call('ps', '-aq', '--no-trunc').splitlines()
+        if len(ids) > 256 or any(not re.fullmatch('[a-f0-9]{64}', cid) for cid in ids):
+            raise ValueError('native-retirement-sandbox-inventory-invalid')
+        for cid in ids:
+            if cid in keep:
+                continue
+            value = self.inspect(cid)
+            labels = value.get('Config', {}).get('Labels') or {}
+            if (value.get('Name') == '/ods-pixel-retired-' + cid[:16]
+                    and value.get('State', {}).get('Running') is False
+                    and labels.get('openclaw.sandbox') == '1'
+                    and labels.get('openclaw.sessionKey') == 'agent:pixel'
+                    and labels.get('org.osmantic.pixel.sandbox-uid') == str(self.owner.pw_uid)):
+                self.call('rm', cid)
+
     def preserve(self, plans):
         for plan in plans:
             current = self.inspect(plan['id'])
@@ -211,6 +233,31 @@ class NativeSandboxes:
             current = self.inspect(plan['id'])
             if current['Name'] != plan['retiredName'] or current['State']['Running']:
                 raise ValueError('native-retirement-sandbox-retirement-unconfirmed')
+
+
+def prune_superseded_retirements(current):
+    """Keep only the newest completed retirement archive.
+
+    Each retirement moves the retired release's pinned runtimes (about
+    0.5 GB), service definitions and access state into a new archive, and
+    nothing reads an archive once its retirement completed: fleet Macs held 60
+    archives (34 GB) after repeated reinstalls. Older archives whose own
+    receipt records a completed retirement are removed; any other entry,
+    including an interrupted retirement, is kept for inspection.
+    """
+    for entry in current.parent.iterdir():
+        if entry == current or not re.fullmatch('[0-9a-f]{32}', entry.name):
+            continue
+        info = entry.lstat()
+        # The helper runs as root, which owns every archive it creates.
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            continue
+        try:
+            value = json.loads((entry / 'receipt.json').read_text())
+        except (OSError, ValueError):
+            continue  # Missing or partial receipt: not provably complete.
+        if isinstance(value, dict) and value.get('schema') == 1 and value.get('status') == 'retired':
+            shutil.rmtree(entry)
 
 
 def verify_witness(value, *, owner, boot, hashes, targets):
@@ -418,6 +465,10 @@ def retire(install_dir, owner_name, *, validate_only=False):
             receipt['status'] = 'retired'
             save()
             account.verify_empty_home_only() if os.path.lexists(BROKER) else account.verify_identity_only()
+            # This retirement is complete and is now the recovery record;
+            # earlier completed ones and their stopped sandboxes are only disk.
+            sandboxes.prune_retired({plan['id'] for plan in sandbox_plans})
+            prune_superseded_retirements(archive)
             return {'status': 'retired', 'archive': str(archive)}
         finally:
             os.close(lock)
