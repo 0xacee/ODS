@@ -214,9 +214,15 @@ class HookOrderTests(unittest.TestCase):
     def test_windows_precheck_and_apply_precede_pixel_then_host_agent_removal(self):
         script = (SOURCE / 'ods-uninstall.sh').read_text(encoding='utf-8')
         precheck = script.index('! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR" --validate-only')
+        pixel_check = script.index('if ! ODS_PIXEL_UNINSTALL_VALIDATE_ONLY=true ods_pixel_uninstall_managed')
+        upgrade_stop = script.index("# Stop this installation's background full-model upgrade")
         pixel = script.index('if ! ods_pixel_uninstall_managed')
         apply = script.index('if ! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR";')
         host = script.index('if ! ods_uninstall_system_units')
+        # A Pixel refusal must come before anything changes, Windows startup included.
+        self.assertLess(precheck, pixel_check)
+        self.assertLess(pixel_check, upgrade_stop)
+        self.assertLess(pixel_check, apply)
         self.assertLess(precheck, apply)
         self.assertLess(apply, pixel)
         self.assertLess(pixel, host)

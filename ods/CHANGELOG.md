@@ -359,6 +359,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   service downloads the model itself, as root, so the installer could not
   write into that cache. The installer now leaves a cache owned by the service
   alone; fresh installs still prefetch the model and still stop if that fails.
+- Two defects stopped Pixel's held source upgrade, which installs a new Pixel
+  release over an existing one on Linux and WSL. No release has used that path
+  yet; its first live run found both.
+  - In Sandbox mode, the installer proved access on Pixel's raw candidate
+    before ODS's runtime settings were back in place. The proof's command
+    wrapper is mounted only by those settings, so it always failed. The proof
+    now runs after the settings, and again before admission reopens, as
+    intended.
+  - With Full Access, the installer rewrote the OpenClaw config with its keys
+    sorted even when nothing changed. The upgrade compares the exact bytes it
+    recorded at the start, so it refused to continue. The config is now left
+    alone when the chat endpoint is already enabled.
+  - A held upgrade that failed after its point of no return could only resume
+    the same candidate. When that candidate failed every time, the machine
+    stayed stuck: Portal was paused, another installer was refused, and so was
+    uninstall. A corrected installer for the same update can now take it over
+    under the same hold, and the update completes normally. The takeover is
+    refused unless the installed tree exactly matches the stuck plan and the
+    protected coordinator is intact. A Full Access update whose configuration
+    bytes changed still needs manual recovery
+    (`docs/pixel/SOURCE-UPGRADE-RECOVERY.md`).
+- `ods-uninstall.sh` now validates Pixel before it stops the background model
+  upgrade or turns off Windows startup. A Pixel refusal used to leave start-up
+  at sign-in disabled; now it changes nothing.
 - Model compatibility verdicts recorded on named test machines now apply only
   to an install that sets `ODS_FLEET_HOST_ID` or `ODS_COMPATIBILITY_HOST`. The
   Dashboard used to fall back to the computer's own name, so a machine called

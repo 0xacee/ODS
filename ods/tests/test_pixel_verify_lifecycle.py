@@ -256,6 +256,68 @@ _ods_pixel_finish_release_transition fixture /home/fixture /pixel "$token"
     assert lines == proofs + releases
 
 
+@pytest.mark.parametrize('scenario', ['source-sandboxed', 'source-full-access', 'release-update', 'first-install'])
+def test_sandboxed_source_apply_defers_the_access_proof(tmp_path, scenario):
+    # Pixel's raw candidate lacks the ODS runtime overlay, including the
+    # exec-control bind the access proof runs through. A held Sandbox source
+    # upgrade must apply it under Pixel's own strict verifier and prove the
+    # transaction only after the overlay; every other path keeps its proof.
+    source = (ROOT / 'installers/lib/pixel-host-install.sh').read_text()
+    block = source[source.index("            local release_transaction='' prove_after_apply=true"):
+                   source.index('            if [[ -n "$release_transaction" ]] && ! _ods_pixel_finish_release_transition')]
+    events = tmp_path / 'events'
+    script = r'''
+set -eu
+source "$1/installers/lib/pixel-host-install.sh"
+scenario=$2
+events=$3
+owner=fixture home=/home/fixture pixel_root=/pixel pixel_log=/dev/null INSTALL_DIR=/install
+transaction=$(printf 'a%.0s' {1..64})
+[[ "$scenario" != source-* ]] || ODS_PIXEL_SOURCE_TRANSACTION=$transaction
+_ods_pixel_begin_release_transition() { [[ "$scenario" == first-install ]] || echo "$transaction"; }
+_ods_pixel_source_upgrade() {
+    [[ "$*" == "status fixture" ]] || return 9
+    if [[ "$scenario" == source-sandboxed ]]; then echo '{"mode":"sandboxed"}'
+    else echo '{"mode":"full-access"}'; fi
+}
+ods_pixel_run_as_owner() {
+    shift 2
+    case "$1" in
+        mktemp) echo "$events.attempt" ;;
+        env) shift 2; echo "apply ${*:4}" >> "$events" ;;
+        chmod|cat|rm) ;;
+        *) echo "unexpected $*" >> "$events"; return 9 ;;
+    esac
+}
+_ods_pixel_verify_current_runtime() { echo "verify $3 ${4:-}" >> "$events"; }
+apply_block() {
+''' + block + r'''
+}
+apply_block
+'''
+    result = subprocess.run(['bash', '-c', script, 'fixture', str(ROOT), scenario, str(events)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    lines = events.read_text().splitlines()
+    transaction = 'a' * 64
+    if scenario == 'source-sandboxed':
+        assert lines == ['apply ']
+    elif scenario == 'first-install':
+        assert lines == ['apply ', 'verify /pixel ']
+    else:
+        assert lines == ['apply --ods-release-transaction ' + transaction, 'verify /pixel ' + transaction]
+
+
+def test_source_upgrade_proves_access_only_after_the_ods_overlay():
+    source = (ROOT / 'installers/lib/pixel-host-install.sh').read_text()
+    install = source[source.index('ods_pixel_install_default_agent() {'):]
+    apply = install.index('"$pixel_root/pixel" apply --confirm')
+    overlay = install.index('runtime_budget_status="$(_ods_pixel_apply_runtime_budget')
+    proof = install.index('if ! _ods_pixel_restart_gateway_and_verify "$owner" "$home" "$pixel_root"')
+    finish = install.index('_ods_pixel_source_upgrade finish "$owner"')
+    assert apply < overlay < proof < finish
+
+
 @pytest.mark.parametrize("scenario", ["initial", "generated", "ready", "active", "foreign", "extra", "wrong-source"])
 def test_access_reproof_distinguishes_empty_bootstrap(tmp_path, scenario):
     import json
