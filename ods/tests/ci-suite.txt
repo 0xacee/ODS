@@ -151,6 +151,7 @@ tests/test-restore-data-transaction-contract.sh
 tests/test-restore-empty-config.sh
 tests/test-restore-safety-ux.sh
 tests/test-rollback-compose-stack.sh
+tests/test-root-build-context.sh
 tests/test-rootless-docker-ownership.sh
 tests/test-service-registry-cache.sh
 tests/test-service-registry-encoding.py
