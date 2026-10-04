@@ -6,7 +6,7 @@
 # Purpose: Build image pull list and download all Docker images
 #
 # Expects: DRY_RUN, GPU_BACKEND, ENABLE_VOICE, ENABLE_WORKFLOWS,
-#           ENABLE_RAG, ENABLE_QDRANT, ENABLE_EMBEDDINGS, ENABLE_HERMES, ENABLE_OPENCLAW,
+#           ENABLE_RAG, ENABLE_QDRANT, ENABLE_EMBEDDINGS, ENABLE_HERMES,
 #           DOCKER_CMD, LOG_FILE, BGRN, AMB, NC,
 #           show_phase(), bootline(), signal(), ai(), ai_ok(), ai_warn(),
 #           pull_with_progress()
@@ -116,7 +116,6 @@ if [[ "$ENABLE_HERMES" == "true" ]]; then
     PULL_LIST+=("${HERMES_AGENT_IMAGE:-nousresearch/hermes-agent:v2026.9.24@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7}|HERMES — default agent (Nous Research)")
     PULL_LIST+=("caddy:2.11.3-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794|HERMES PROXY — magic-link auth gate (Caddy)")
 fi
-[[ "$ENABLE_OPENCLAW" == "true" ]] && PULL_LIST+=("ghcr.io/openclaw/openclaw:2026.3.8@sha256:7b1294f6aa2eb05b2070cc614743f79212313fc294e5de221ada8a2969ea52f6|OPENCLAW — agent framework")
 [[ "${ENABLE_EMBEDDINGS:-${ENABLE_RAG:-false}}" == "true" ]] && PULL_LIST+=("ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.1@sha256:b7772cdd9dcbced147b16a7dff17d4aed1ab36333f8d3e686c50d2175e1d2126|TEI — embedding engine")
 
 if command -v ods_compose_external_images >/dev/null 2>&1 && [[ -n "${COMPOSE_FLAGS:-}" ]]; then

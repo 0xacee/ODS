@@ -20,7 +20,7 @@
 #     phases/03-features.ps1     -- interactive feature selection menu
 #     phases/04-requirements.ps1 -- tier RAM/disk minimums, port conflicts
 #     phases/05-docker.ps1       -- Docker daemon health, Compose detection
-#     phases/06-directories.ps1  -- dirs, robocopy, .env, SearXNG, OpenClaw
+#     phases/06-directories.ps1  -- dirs, robocopy, .env, SearXNG
 #     phases/07-devtools.ps1     -- OpenCode, Claude Code, Codex CLI
 #
 #   Phases 08 (LAUNCH) and 09 (VERIFY) remain inline here pending extraction.
@@ -52,6 +52,8 @@ param(
     [switch]$NoRecommended,
     [switch]$Hermes,
     [switch]$NoHermes,
+    # Ignored: the legacy OpenClaw extension was removed. Still accepted so
+    # existing commands keep working; the installer prints a notice.
     [switch]$OpenClaw,
     [switch]$All,
     [switch]$Cloud,
@@ -121,7 +123,6 @@ $recommendedFlag = $Recommended.IsPresent
 $noRecommendedFlag = $NoRecommended.IsPresent
 $hermesFlag     = $Hermes.IsPresent
 $noHermesFlag   = $NoHermes.IsPresent
-$openClawFlag   = $OpenClaw.IsPresent
 $allFlag        = $All.IsPresent
 $comfyuiFlag    = $Comfyui.IsPresent
 $noComfyuiFlag  = $NoComfyui.IsPresent
@@ -196,14 +197,18 @@ $PhasesDir = Join-Path $ScriptDir "phases"
 
 Write-ODSBanner
 
+if ($OpenClaw.IsPresent) {
+    Write-AIWarn "The legacy OpenClaw extension was removed; -OpenClaw is ignored. Portal (Pixel) and Hermes are the supported agents."
+}
+
 # Variables produced by each phase and consumed by downstream phases:
 #
 #  Phase 01 → $preflight_docker (hashtable)
 #  Phase 02 → $gpuInfo, $systemRamGB, $selectedTier, $tierConfig, $llamaServerImage
-#  Phase 03 → $enableVoice, $enableWorkflows, $enableRag, $enableOpenClaw, $openClawConfig
+#  Phase 03 → $enableVoice, $enableWorkflows, $enableRag, $enableHermes
 #  Phase 04 → $requirementsMet
 #  Phase 05 → $dockerComposeCmd
-#  Phase 06 → $envResult (SearxngSecret, OpenclawToken)
+#  Phase 06 → $envResult (SearxngSecret)
 #  Phase 07 → (no output -- tools installed to $env:USERPROFILE)
 
 # Phases signal a fatal, already-explained failure by throwing the
@@ -983,7 +988,6 @@ litellm_settings:
             -EnableWorkflows $enableWorkflows `
             -EnableRag $enableRag `
             -EnableHermes $enableHermes `
-            -EnableOpenClaw $enableOpenClaw `
             -EnableComfyui $enableComfyui `
             -EnableDeepResearch $enableDeepResearch `
             -EnablePrivacyShield $enablePrivacyShield `
@@ -2094,7 +2098,6 @@ if ($dryRun) {
         -EnableWorkflows $enableWorkflows `
         -EnableRag $enableRag `
         -EnableHermes $enableHermes `
-        -EnableOpenClaw $enableOpenClaw `
         -EnableComfyui $enableComfyui `
         -EnableDeepResearch $enableDeepResearch `
         -EnablePrivacyShield $enablePrivacyShield `
@@ -2476,10 +2479,6 @@ if ($enableRag) {
     $qdrantPort = Get-ReadinessPort -Name "QDRANT_PORT" -Default "6333"
     $readinessChecks += @{ Name = "Qdrant"; Url = "http://localhost:$qdrantPort"; Container = "ods-qdrant"; OpenUrl = "http://localhost:$qdrantPort" }
 }
-if ($enableOpenClaw) {
-    $openClawPort = Get-ReadinessPort -Name "OPENCLAW_PORT" -Default "7860"
-    $readinessChecks += @{ Name = "OpenClaw"; Url = "http://localhost:$openClawPort"; Container = "ods-openclaw"; OpenUrl = "http://localhost:$openClawPort" }
-}
 if (Test-ODSWindowsServiceEnabled -ServiceId "hermes-proxy" -Plan $servicePlan) {
     $hermesProxyPort = Get-ReadinessPort -Name "HERMES_PROXY_PORT" -Default "9120"
     $readinessChecks += @{ Name = "Hermes Proxy"; Url = "http://localhost:$hermesProxyPort/health"; Container = "ods-hermes-proxy"; OpenUrl = "http://localhost:$hermesProxyPort" }
@@ -2593,7 +2592,6 @@ if ($SummaryJsonPath) {
             rag          = $enableRag
             recommended  = $enableRecommended
             hermes       = $enableHermes
-            openclaw     = $enableOpenClaw
             comfyui      = $enableComfyui
             deepResearch = $enableDeepResearch
             privacyShield = $enablePrivacyShield

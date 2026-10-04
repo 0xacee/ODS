@@ -21,7 +21,6 @@ run_linux_phase_with_context() {
         TIER=1
         ENABLE_HERMES=true
         ENABLE_COMFYUI=false
-        ENABLE_OPENCLAW=false
         ENABLE_APE=false
         ENABLE_PERPLEXICA=false
         ENABLE_PRIVACY_SHIELD=false
@@ -100,7 +99,6 @@ run_fit_case() {
         INSTALL_CHOICE=1
         ENABLE_HERMES=true
         ENABLE_COMFYUI=false
-        ENABLE_OPENCLAW=false
         ENABLE_APE=false
         ENABLE_PERPLEXICA=false
         ENABLE_PRIVACY_SHIELD=false

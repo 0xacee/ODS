@@ -1683,33 +1683,6 @@ async def _build_api_status() -> dict:
 
 # --- Settings ---
 
-@app.get("/api/service-tokens", dependencies=[Depends(verify_api_key)])
-async def service_tokens():
-    """Return connection tokens for services that need browser-side auth."""
-    def _read_tokens():
-        tokens = {}
-        oc_token = os.environ.get("OPENCLAW_TOKEN", "")
-        if not oc_token:
-            for path in [Path("/data/openclaw/home/gateway-token"), Path("/ods/.env")]:
-                try:
-                    if path.suffix == ".env":
-                        for line in path.read_text().splitlines():
-                            if line.startswith("OPENCLAW_TOKEN="):
-                                oc_token = line.split("=", 1)[1].strip()
-                                break
-                    else:
-                        oc_token = path.read_text().strip()
-                except (OSError, ValueError):
-                    continue
-                if oc_token:
-                    break
-        if oc_token:
-            tokens["openclaw"] = oc_token
-        return tokens
-
-    return await asyncio.to_thread(_read_tokens)
-
-
 @app.get("/api/external-links")
 async def get_external_links(api_key: str = Depends(verify_api_key)):
     """Return sidebar-ready external links derived from service manifests."""

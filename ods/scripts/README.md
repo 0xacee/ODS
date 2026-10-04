@@ -35,7 +35,6 @@ Utility scripts for diagnostics, testing, validation, and operations.
 | `mode-switch.sh` | Switch deployment modes | Yes |
 | `upgrade-model.sh` | Legacy model-directory swap helper; use [`../docs/MODEL-MANAGEMENT.md`](../docs/MODEL-MANAGEMENT.md) for current GGUF workflows | Yes |
 | `migrate-config.sh` | Migrate config between versions | No |
-| `session-cleanup.sh` | OpenClaw session lifecycle | Yes |
 | `pre-download.sh` | Legacy Hugging Face pre-download helper (pre-GGUF tier names); download GGUF models from Dashboard → Models instead | No |
 | `llm-cold-storage.sh` | Archive/restore models | No |
 
@@ -60,9 +59,8 @@ Utility scripts for diagnostics, testing, validation, and operations.
 
 | Unit | Description |
 |------|-------------|
-| `openclaw-session-cleanup.service/.timer` | Periodic OpenClaw session cleanup |
-| `memory-shepherd-memory.service/.timer` | Agent memory lifecycle management |
-| `memory-shepherd-workspace.service/.timer` | Agent workspace maintenance |
+| `memory-shepherd-memory.service/.timer` | Agent memory lifecycle management. No longer installed; older AMD installs may still run it for the removed legacy OpenClaw workspace |
+| `memory-shepherd-workspace.service/.timer` | Agent workspace maintenance. No longer installed; older AMD installs may still run it for the removed legacy OpenClaw workspace |
 
 ## Other
 

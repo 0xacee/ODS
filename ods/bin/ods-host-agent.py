@@ -190,7 +190,7 @@ _MACOS_HOST_AGENT_BRIDGE_LABEL = "com.ods.host-agent-bridge"
 # the API key to stop core services like llama-server or dashboard-api.
 _FALLBACK_CORE_IDS = frozenset({
     "dashboard-api", "dashboard", "llama-server", "model-router", "open-webui",
-    "litellm", "langfuse", "hermes", "hermes-proxy", "n8n", "openclaw", "opencode",
+    "litellm", "langfuse", "hermes", "hermes-proxy", "n8n", "opencode",
     "perplexica", "searxng", "qdrant", "remote-provider-egress",
     "remote-provider-ssh-tunnel", "tts", "whisper",
     "embeddings", "token-spy", "comfyui", "ape", "privacy-shield",
@@ -270,7 +270,7 @@ _MIN_MANAGED_PIXEL_CONTEXT = 4096
 _service_locks: dict[str, threading.Lock] = collections.defaultdict(threading.Lock)
 _ALLOWED_CORE_RECREATE_IDS = frozenset({
     "llama-server", "open-webui", "litellm", "langfuse", "n8n",
-    "hermes", "hermes-proxy", "openclaw", "opencode", "perplexica", "searxng", "qdrant",
+    "hermes", "hermes-proxy", "opencode", "perplexica", "searxng", "qdrant",
     "tts", "whisper", "embeddings", "token-spy", "comfyui",
     "ape", "privacy-shield", "model-router",
 })
@@ -6699,29 +6699,6 @@ def docker_compose_recreate(service_ids: list[str], *, force_recreate: bool = Tr
         return False, f"Docker compose operation timed out ({SUBPROCESS_TIMEOUT_START}s)"
 
 
-def _post_install_core_recreate(service_id: str) -> None:
-    """Force-recreate core services whose env was overridden by ``service_id``'s
-    compose.yaml overlay.
-
-    ``docker compose up -d <ext>`` (how _handle_install starts the extension)
-    will not pick up overlay changes targeting already-running core services
-    without ``--force-recreate``. openclaw's compose.yaml appends an
-    OPENAI_API_BASE_URLS entry to open-webui; without this post-install
-    recreate that overlay is silently ignored until the next core restart.
-
-    Failure is logged and swallowed — the extension itself is already running;
-    the overlay will apply on the next manual restart of the core service.
-    """
-    if service_id != "openclaw":
-        return
-    ok, err = docker_compose_recreate(["open-webui"])
-    if not ok:
-        logger.warning(
-            "Post-install recreate of open-webui failed after openclaw install: %s",
-            err,
-        )
-
-
 def _parse_mem_value(s: str) -> float:
     """Parse Docker memory string like '256MiB' or '4GiB' to MB."""
     s = s.strip()
@@ -12151,18 +12128,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                 # Step 4: Success
                 _write_progress(service_id, "started", "Service started", exit_verified=one_shot)
 
-                # Step 5: Post-install core recreate (best-effort, non-fatal).
-                # Some extensions (e.g. openclaw) add overlay env to already-
-                # running core services; `up -d <ext>` (without --force-recreate)
-                # won't apply those changes. Failure here must not fail the install.
-                try:
-                    _post_install_core_recreate(service_id)
-                except Exception:
-                    logger.exception(
-                        "Post-install core recreate raised for %s (ignored)",
-                        service_id,
-                    )
-
             except subprocess.TimeoutExpired:
                 # Docker can continue daemon-side after its CLI times out.
                 _install_operation_context.value = {**_install_operation_context.value,
@@ -13536,7 +13501,6 @@ class AgentHandler(BaseHTTPRequestHandler):
         litellm_restart_attempted = False
         hermes_config_mutated = False
         hermes_restart_attempted = False
-        openclaw_recreate_attempted = False
         perplexica_mutated = False
         pixel_reconcile_attempted = False
         pixel_status = "not_installed"
@@ -13745,13 +13709,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                         container_states["ods-hermes"],
                         recreate=True,
                     )
-                openclaw_recreated = False
-                if openclaw_recreate_attempted:
-                    openclaw_recreated = _restore_container_state(
-                        "ods-openclaw",
-                        container_states["ods-openclaw"],
-                        recreate=True,
-                    )
                 if perplexica_mutated and perplexica_snapshot is not None:
                     _restore_perplexica_config(perplexica_snapshot)
                 if opencode_config_mutated and opencode_runtime_state and opencode_runtime_state.get("active"):
@@ -13794,9 +13751,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                 if litellm_restarted:
                     _wait_for_container_health("ods-litellm")
                     _verify_litellm_route(rollback_env)
-                if openclaw_recreated:
-                    _verify_openclaw_model_env(previous_hermes_model)
-                    _wait_for_container_health("ods-openclaw")
                 if pixel_transaction is not None:
                     # The coordinator restores its exact captured bytes,
                     # including remote identity and output/reasoning limits.
@@ -14014,7 +13968,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                 for name in (
                     "ods-litellm",
                     "ods-hermes",
-                    "ods-openclaw",
                     "ods-perplexica",
                 )
             }
@@ -14028,7 +13981,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 litellm_inputs_before = _dependent_bind_inputs("ods-litellm")
             active_litellm_consumers = [
                 name
-                for name in ("ods-hermes", "ods-openclaw", "ods-perplexica")
+                for name in ("ods-hermes", "ods-perplexica")
                 if container_states[name]["running"]
             ]
             if (
@@ -14533,10 +14486,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                         hermes_base_url,
                         int(context_length),
                     )
-                openclaw_recreate_attempted = container_states["ods-openclaw"]["running"]
-                openclaw_recreated = _recreate_openclaw_if_present(
-                    container_states["ods-openclaw"]
-                )
                 if perplexica_snapshot is not None:
                     perplexica_mutated = True
                     _update_perplexica_model(
@@ -14545,9 +14494,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                         gguf_file=gguf_file,
                         lemonade_model_id=lemonade_model_id,
                     )
-                if openclaw_recreated:
-                    _verify_openclaw_model_env(hermes_model_name)
-                    _wait_for_container_health("ods-openclaw")
                 if opencode_snapshot is not None and opencode_runtime_state is not None:
                     opencode_restarted = _restart_managed_opencode(opencode_runtime_state)
 
@@ -14620,12 +14566,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                         if hermes_config_mutated
                         else "unchanged"
                     ),
+                    # Pixel's host OpenClaw gateway; the legacy ods-openclaw
+                    # container this key also reported was removed.
                     "openclaw": (
-                        "recreated"
-                        if openclaw_recreated
-                        else "stopped"
-                        if container_states["ods-openclaw"]["exists"]
-                        else "host_gateway_reconciled"
+                        "host_gateway_reconciled"
                         if pixel_status == "reconciled"
                         else "not_installed"
                     ),
@@ -15582,8 +15526,7 @@ def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
     opencode_snapshot = _capture_opencode_config()
     opencode_state = _capture_managed_opencode_state() if opencode_snapshot is not None else None
     states = {name: _capture_container_state(name) for name in (
-        "ods-model-router", "ods-litellm", "ods-hermes", "ods-openclaw",
-        "ods-perplexica",
+        "ods-model-router", "ods-litellm", "ods-hermes", "ods-perplexica",
     )}
     if not states["ods-model-router"]["running"]:
         raise RuntimeError("Model router must be running to adopt an external model")
@@ -15680,10 +15623,6 @@ def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
             _restart_existing_container("ods-hermes", states["ods-hermes"], recreate=True)
             _wait_for_container_health("ods-hermes")
             _verify_running_hermes_route(expected_model_id, hermes_base_url, context_length)
-        if states["ods-openclaw"]["running"]:
-            _recreate_openclaw_if_present(states["ods-openclaw"])
-            _verify_openclaw_model_env(expected_model_id)
-            _wait_for_container_health("ods-openclaw")
         if opencode_state and opencode_state.get("active"):
             _restart_managed_opencode(opencode_state)
 
@@ -19298,25 +19237,6 @@ def _restore_perplexica_config(snapshot: dict) -> None:
         raise RuntimeError("Perplexica rollback could not be verified")
 
 
-def _recreate_openclaw_if_present(
-    expected_state: dict[str, bool] | None = None,
-) -> bool:
-    """Recreate OpenClaw only when the optional service is already running."""
-    state = expected_state or _capture_container_state("ods-openclaw")
-    if not state["exists"]:
-        return False
-    if not state["running"]:
-        logger.info("Preserving stopped optional container ods-openclaw")
-        return False
-    current = _capture_container_state("ods-openclaw")
-    if not current["exists"] or not current["running"]:
-        raise RuntimeError("ods-openclaw stopped during model activation")
-    ok, error = docker_compose_recreate(["openclaw"])
-    if not ok:
-        raise RuntimeError(f"Could not recreate OpenClaw after model change: {error}")
-    return True
-
-
 def _verify_litellm_route(env: dict, *, model: str = "default") -> None:
     """Prove one active LiteLLM public route can serve a completion."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", model):
@@ -19332,41 +19252,6 @@ def _verify_litellm_route(env: dict, *, model: str = "default") -> None:
     raise RuntimeError(
         f"LiteLLM did not serve a completion through the active {model} route"
     )
-
-
-def _verify_openclaw_model_env(expected_model: str) -> None:
-    """Verify recreated OpenClaw received the active persisted model identity."""
-    result = subprocess.run(
-        [
-            "docker", "inspect", "--type", "container", "--format",
-            "{{range .Config.Env}}{{println .}}{{end}}", "ods-openclaw",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(f"Could not verify OpenClaw model environment: {detail[:300]}")
-    values = {}
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            values[key] = value
-    actual_model = (
-        values.get("LEMONADE_MODEL")
-        or values.get("GGUF_FILE")
-        or values.get("LLM_MODEL")
-        or ""
-    )
-    if not _runtime_model_identity_matches(
-        actual_model,
-        model_id=expected_model,
-        gguf_file=expected_model,
-    ):
-        raise RuntimeError(
-            f"OpenClaw recreated with model {actual_model or '<empty>'}, expected {expected_model}"
-        )
 
 
 def _read_hermes_container_config() -> str:

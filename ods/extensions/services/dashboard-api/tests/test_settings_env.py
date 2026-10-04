@@ -981,19 +981,75 @@ def test_settings_apply_plan_maps_agent_and_proxy_env_keys():
     previous = {
         "APE_STRICT_MODE": "false",
         "ODS_PROXY_PORT": "80",
-        "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH": "",
     }
     updated = {
         "APE_STRICT_MODE": "true",
         "ODS_PROXY_PORT": "8080",
-        "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH": "true",
     }
 
     plan = _compute_env_apply_plan(previous, updated)
 
     assert plan["status"] == "ready"
-    assert plan["services"] == ["ape", "ods-proxy", "openclaw"]
+    assert plan["services"] == ["ape", "ods-proxy"]
     assert plan["manualKeys"] == []
+
+
+def test_settings_apply_plan_ignores_retired_legacy_openclaw_keys():
+    """Nothing reads the removed extension's keys, so editing one restarts nothing."""
+    from settings import _compute_env_apply_plan
+
+    previous = {
+        "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH": "",
+        "OPENCLAW_TOKEN": "old-token-value",
+        "HOST_LAN_IP": "",
+    }
+    updated = {
+        "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH": "true",
+        "OPENCLAW_TOKEN": "new-token-value",
+        "HOST_LAN_IP": "192.0.2.10",
+    }
+
+    plan = _compute_env_apply_plan(previous, updated)
+
+    assert plan["services"] == []
+    assert plan["manualKeys"] == []
+
+
+def test_retired_env_keys_match_schema_deprecated_properties():
+    """The no-restart list must track the keys the schema marks as retired."""
+    from settings import _RETIRED_ENV_KEYS
+
+    schema_path = Path(__file__).resolve().parents[4] / ".env.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    deprecated = {
+        key for key, definition in schema["properties"].items()
+        if definition.get("deprecated") is True
+    }
+
+    assert deprecated == set(_RETIRED_ENV_KEYS)
+    assert not deprecated & set(schema["required"])
+    for key in deprecated:
+        assert schema["properties"][key]["description"].startswith(
+            "Retired: the legacy OpenClaw extension was removed; ignored if present."
+        )
+
+
+def test_settings_fields_show_retired_keys_only_when_present():
+    """Retired schema keys stay hidden unless this .env still carries them."""
+    from settings import _build_env_fields
+
+    schema = {
+        "OPENCLAW_TOKEN": {"type": "string", "secret": True, "deprecated": True},
+        "LLM_MODEL": {"type": "string"},
+    }
+
+    fresh = _build_env_fields(schema, set(), {"LLM_MODEL": "qwen"})
+    assert "OPENCLAW_TOKEN" not in fresh
+    assert fresh["LLM_MODEL"]["value"] == "qwen"
+
+    upgraded = _build_env_fields(schema, set(), {"OPENCLAW_TOKEN": "kept-token"})
+    assert upgraded["OPENCLAW_TOKEN"]["secret"] is True
+    assert upgraded["OPENCLAW_TOKEN"]["hasValue"] is True
 
 
 def test_settings_apply_plan_recreates_bundled_embedding_consumers():
@@ -1662,20 +1718,20 @@ def test_render_env_quotes_values_compose_would_rewrite(commented_example_templa
     values = {
         "LLM_BACKEND": "local",
         "N8N_PASS": "hunter$two",
-        "OPENCLAW_TOKEN": "token #1",
+        "TOKEN_SPY_API_KEY": "token #1",
         "LLM_MODEL": "it's $5",
     }
     rendered = _render_env_from_values(values)
     lines = rendered.splitlines()
     assert "LLM_BACKEND=local" in lines
     assert "N8N_PASS='hunter$two'" in lines
-    assert "OPENCLAW_TOKEN='token #1'" in lines
+    assert "TOKEN_SPY_API_KEY='token #1'" in lines
     assert 'LLM_MODEL="it\'s \\$5"' in lines
 
     reparsed, issues = _parse_env_text(rendered)
     assert issues == []
     assert reparsed["N8N_PASS"] == "hunter$two"
-    assert reparsed["OPENCLAW_TOKEN"] == "token #1"
+    assert reparsed["TOKEN_SPY_API_KEY"] == "token #1"
 
 
 def test_api_settings_env_save_quotes_interpolation_sensitive_secret(test_client, settings_env_fixture):

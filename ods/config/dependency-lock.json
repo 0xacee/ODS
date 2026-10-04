@@ -260,12 +260,6 @@
       "value": "n8nio/n8n:2.6.4@sha256:b962d7f8ba9e990a0c530256d841fdc52312dce32173f29808e29a9430811ad3"
     },
     {
-      "id": "openclaw.app",
-      "type": "image",
-      "path": "extensions/services/openclaw/compose.yaml",
-      "value": "ghcr.io/openclaw/openclaw:2026.3.8@sha256:7b1294f6aa2eb05b2070cc614743f79212313fc294e5de221ada8a2969ea52f6"
-    },
-    {
       "id": "perplexica.app",
       "type": "image",
       "path": "extensions/services/perplexica/compose.yaml",

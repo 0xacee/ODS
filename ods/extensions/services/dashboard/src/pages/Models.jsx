@@ -1882,7 +1882,6 @@ function formatCompatibilityAppName(key) {
     litellm: 'LiteLLM',
     openWebui: 'Open WebUI',
     opencode: 'OpenCode',
-    openclaw: 'OpenClaw',
     perplexica: 'Perplexica',
     privacyShield: 'Privacy Shield',
     tokenSpy: 'Token Spy',

@@ -3471,10 +3471,10 @@ def _scan_installed_compose(service_id: str, ext_dir: Path, compose_path: Path, 
 
     Built-in extensions legitimately declare their own service name in their
     compose file, so skip the CORE_SERVICE_IDS name-collision check for them.
-    User extensions still get the full anti-shadowing scan. Some built-ins
+    User extensions still get the full anti-shadowing scan. A built-in may
     also legitimately need `user: "0:0"` to perform init-time chown before
-    dropping privileges via setpriv (e.g. openclaw), so skip the root-user
-    check for built-ins only. The `trusted` flag is separate: a curated
+    dropping privileges via setpriv, so skip the root-user check for
+    built-ins only. The `trusted` flag is separate: a curated
     library recipe keeps install's privileges (local `build:`, the
     host-gateway route) only while its installed files still match the
     library recipe it was installed from. When it lost them, a rejection

@@ -300,6 +300,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--reasoning`, as Docker does. Without it, b9014 turned Qwen3.5 thinking on
   and put `<think>` blocks in replies.
 
+### Removed
+- The legacy OpenClaw extension, deprecated since 2026-05-12, is removed: the
+  `ods-openclaw` container (image `ghcr.io/openclaw/openclaw:2026.3.8`, port
+  7860), its configuration files, its session-cleanup script and timer, the
+  n8n OpenClaw trigger workflow and the dashboard API's `/api/service-tokens`
+  endpoint, which only served the OpenClaw sidebar link. Its pinned image had
+  unresolved critical upstream security advisories. Portal (Pixel) and Hermes
+  Agent are the supported agents. Pixel's own OpenClaw runtime
+  (`openclaw-gateway.service`) is separate and unchanged.
+- Installer reruns on Linux, macOS and Windows delete
+  `extensions/services/openclaw` from the install directory and remove the
+  `ods-openclaw` container when they start the stack. They no longer re-enable
+  OpenClaw when they find its container or data. `data/openclaw` and
+  `config/openclaw` stay on disk; the
+  [removal notice](docs/MIGRATION-OPENCLAW-TO-HERMES.md) explains how to
+  delete them.
+- `--openclaw` and `--no-openclaw` (Linux and macOS) and `-OpenClaw` (Windows)
+  are still accepted, but only print a notice. Installers no longer write
+  `OPENCLAW_TOKEN`, `OPENCLAW_PORT` or `HOST_LAN_IP`. An `.env` that still has
+  these or the other retired OpenClaw keys keeps validating, and the Dashboard
+  settings page lists retired keys only when they are present. AMD reruns
+  retire the `openclaw-session-cleanup` user timer, and new AMD installs no
+  longer install the memory-shepherd timers that maintained OpenClaw's
+  workspace.
+
 ### Fixed
 - Model compatibility verdicts recorded on named test machines now apply only
   to an install that sets `ODS_FLEET_HOST_ID` or `ODS_COMPATIBILITY_HOST`. The

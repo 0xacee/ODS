@@ -295,7 +295,7 @@ def test_core_feature_selection_keeps_pixel_dependencies_without_heavy_services(
     shell = '''set -eu
 NON_INTERACTIVE=true; ALL_FEATURES=false; DRY_RUN=false
 CLOUD_MODE=false; ENABLE_RECOMMENDED=false
-ENABLE_HERMES=false; ENABLE_OPENCLAW=false; ENABLE_APE=false
+ENABLE_HERMES=false; ENABLE_APE=false
 ENABLE_PERPLEXICA=false; ENABLE_VOICE=false; ENABLE_RAG=false; ENABLE_WORKFLOWS=false
 ENABLE_OPENCODE=false; OPENCODE_ENABLE_EXPLICIT=false; OPENCODE_DISABLE_EXPLICIT=false
 OPENCODE_DISABLE_SELECTED=false
@@ -304,11 +304,11 @@ ENABLE_ODS_PROXY=false
 read_env_value() { printf '\\n'; }
 ai_err() { printf '%s\\n' "$*" >&2; }
 ''' + script[resolver_start:resolver_stop] + '\nENABLE_PIXEL=' + pixel + '\n' + script[start:stop] + '''
-printf '%s %s %s %s %s %s %s %s' "$ENABLE_RECOMMENDED" "$ENABLE_LITELLM" "$ENABLE_SEARXNG" "$ENABLE_HERMES" "$ENABLE_OPENCLAW" "$ENABLE_VOICE" "$ENABLE_RAG" "$ENABLE_WORKFLOWS"
+printf '%s %s %s %s %s %s %s' "$ENABLE_RECOMMENDED" "$ENABLE_LITELLM" "$ENABLE_SEARXNG" "$ENABLE_HERMES" "$ENABLE_VOICE" "$ENABLE_RAG" "$ENABLE_WORKFLOWS"
 '''
     result = subprocess.run(['bash'], input=shell, capture_output=True, text=True, check=True,
         env={**os.environ, 'SOURCE_ROOT': str(ROOT), 'INSTALL_DIR': str(tmp_path)})
-    assert result.stdout == 'false true false false false false false false'
+    assert result.stdout == 'false true false false false false false'
 
 
 @pytest.mark.parametrize('mode', ['direct', 'volta', 'brew', 'missing-brew', 'bad-brew'])

@@ -177,7 +177,7 @@ This will remove:
     - Verified ODS Docker volumes (unless --keep-data)
     - Installation directory ($INSTALL_DIR)
     - ODS-managed Pixel host services and private configuration
-    - Systemd user services (opencode-web, openclaw timers)
+    - Systemd user services (opencode-web, maintenance timers from older installs)
     - Systemd system services (ods-host-agent, ods-mdns)
     - macOS LaunchAgents (com.ods.host-agent, com.ods.opencode-web, legacy agents)
     - CLI symlinks (/usr/local/bin/ods, ~/.local/bin/ods, legacy /usr/local/bin/ods-cli)
@@ -500,6 +500,9 @@ if [[ -d "$_ods_uninstall_runtime_dir" && -S "$_ods_uninstall_runtime_dir/bus" ]
     ods_uninstall_systemctl_user stop ods-model-upgrade.service 2>/dev/null || true
     ods_uninstall_systemctl_user reset-failed ods-model-upgrade.service 2>/dev/null || true
 fi
+# The session-cleanup and memory-shepherd timers are no longer installed; they
+# served the removed legacy OpenClaw extension. Older installs may still have
+# them, so remove them when present.
 for unit in opencode-web.service openclaw-session-cleanup.timer \
             memory-shepherd-workspace.timer memory-shepherd-memory.timer \
             openclaw-session-cleanup.service \

@@ -6,7 +6,7 @@
 # Purpose: Interactive feature selection menu
 #
 # Expects: INTERACTIVE, DRY_RUN, TIER, ENABLE_VOICE, ENABLE_WORKFLOWS,
-#           ENABLE_RAG, ENABLE_HERMES, ENABLE_OPENCLAW, ENABLE_OPENCODE,
+#           ENABLE_RAG, ENABLE_HERMES, ENABLE_OPENCODE,
 #           GPU_COUNT, GPU_BACKEND,
 #           HOST_ARCH, HOST_PAGE_SIZE,
 #           GPU_TOPOLOGY_JSON, LLM_MODEL_SIZE_MB, SCRIPT_DIR, VERBOSE, DEBUG,
@@ -14,8 +14,8 @@
 #           show_phase(), show_install_menu(), chapter(), bootline(),
 #           success(), log(), warn(), error(), signal()
 # Provides: ENABLE_VOICE, ENABLE_WORKFLOWS, ENABLE_RAG, ENABLE_EMBEDDINGS,
-#           ENABLE_QDRANT, ENABLE_HERMES, ENABLE_OPENCLAW, ENABLE_SEARXNG,
-#           ENABLE_WEB_SEARCH, OPENCLAW_CONFIG, GPU_ASSIGNMENT_JSON,
+#           ENABLE_QDRANT, ENABLE_HERMES, ENABLE_SEARXNG,
+#           ENABLE_WEB_SEARCH, GPU_ASSIGNMENT_JSON,
 #           LLAMA_SERVER_GPU_UUIDS, WHISPER_GPU_UUID, COMFYUI_GPU_UUID,
 #           EMBEDDINGS_GPU_UUID, LLAMA_ARG_SPLIT_MODE, LLAMA_ARG_TENSOR_SPLIT
 #
@@ -75,7 +75,6 @@ if $INTERACTIVE && ! $DRY_RUN; then
         _phase03_prompt_bool ENABLE_RAG "Enable Qdrant vector database (for RAG)?"
         # Explicit agent flags also take precedence over the Custom menu.
         [[ "${HERMES_EXPLICIT:-false}" == true ]] || _phase03_prompt_bool ENABLE_HERMES "Enable Hermes Agent?"
-        [[ "${OPENCLAW_EXPLICIT:-false}" == true ]] || _phase03_prompt_bool ENABLE_OPENCLAW "Enable OpenClaw AI agent framework (DEPRECATED - Hermes replaces it)?"
         _phase03_prompt_bool ENABLE_OPENCODE "Enable the OpenCode browser IDE extension?"
         [[ "${DEVTOOLS_EXPLICIT:-false}" == true ]] || _phase03_prompt_bool ENABLE_DEVTOOLS "Install Claude Code and Codex CLI on this host?"
         _phase03_prompt_bool ENABLE_COMFYUI "Enable image generation (ComfyUI + SDXL Lightning, ~6.5GB)?"
@@ -451,7 +450,7 @@ if ! $DRY_RUN; then
     fi
     unset _host_arch _host_page_size
 
-    if [[ "${ENABLE_HERMES:-false}" != "true" && "${ENABLE_OPENCLAW:-false}" != "true" ]]; then
+    if [[ "${ENABLE_HERMES:-false}" != "true" ]]; then
         ENABLE_APE=false
     fi
     _pixel_support_services="${ENABLE_RECOMMENDED:-false}"
@@ -499,8 +498,7 @@ if ! $DRY_RUN; then
     if [[ "${ENABLE_RECOMMENDED:-false}" == "true" ||
           "$PIXEL_RESOLVED_WEB_SEARCH_PROVIDER" == "searxng" ||
           "${ENABLE_PERPLEXICA:-false}" == "true" ||
-          "${ENABLE_HERMES:-false}" == "true" ||
-          "${ENABLE_OPENCLAW:-false}" == "true" ]]; then
+          "${ENABLE_HERMES:-false}" == "true" ]]; then
         ENABLE_SEARXNG=true
     else
         ENABLE_SEARXNG=false
@@ -525,7 +523,6 @@ if ! $DRY_RUN; then
     _sync_extension_compose "${ENABLE_HERMES:-}"     hermes-proxy  "Hermes proxy"  "Hermes agent not enabled" || return 1
     _sync_extension_compose "${ENABLE_PIXEL_RUNTIME:-false}" pixel-edge "Pixel edge" "Pixel host not qualified" || return 1
     _sync_extension_compose "${ENABLE_PIXEL_RUNTIME:-false}" pixel-model-relay "Pixel model relay" "Pixel host not qualified" || return 1
-    _sync_extension_compose "${ENABLE_OPENCLAW:-}"   openclaw   "OpenClaw"      "agent framework not enabled" || return 1
     _sync_extension_compose "${ENABLE_APE:-}"        ape        "APE"           "agent governance not enabled" || return 1
     _sync_extension_compose "${ENABLE_COMFYUI:-}"    comfyui    "ComfyUI"       "image generation not enabled" || return 1
     _sync_extension_compose "${ENABLE_PERPLEXICA:-}" perplexica "Perplexica"    "deep research not enabled" || return 1
@@ -570,20 +567,6 @@ if [[ -x "$SCRIPT_DIR/scripts/resolve-compose-stack.sh" ]]; then
 fi
 
 # All services are core — no profiles needed (compose profiles removed)
-
-# Select tier-appropriate OpenClaw config
-if [[ "$ENABLE_OPENCLAW" == "true" ]]; then
-    case $TIER in
-        NV_ULTRA) OPENCLAW_CONFIG="pro.json" ;;
-        SH_LARGE|SH_COMPACT) OPENCLAW_CONFIG="openclaw-strix-halo.json" ;;
-        1) OPENCLAW_CONFIG="openclaw.json" ;;
-        2) OPENCLAW_CONFIG="openclaw.json" ;;
-        3) OPENCLAW_CONFIG="openclaw.json" ;;
-        4) OPENCLAW_CONFIG="pro.json" ;;
-        *) OPENCLAW_CONFIG="openclaw.json" ;;
-    esac
-    log "OpenClaw config: $OPENCLAW_CONFIG (matched to Tier $TIER)"
-fi
 
 log "All services enabled (core install)"
 

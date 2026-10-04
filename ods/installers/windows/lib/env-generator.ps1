@@ -2,7 +2,7 @@
 # ODS Windows Installer -- Environment Generator
 # ============================================================================
 # Part of: installers/windows/lib/
-# Purpose: Generate .env file, SearXNG config, OpenClaw configs
+# Purpose: Generate .env file and SearXNG config
 #          Uses .NET crypto for secrets (no openssl dependency)
 #
 # Canonical source: installers/phases/06-directories.sh (keep .env format in sync)
@@ -839,7 +839,6 @@ function New-ODSEnv {
         $tokenSpyApiKeyDefault = New-SecureHex -Bytes 32
     }
     $tokenSpyApiKey = Get-EnvOrNew "TOKEN_SPY_API_KEY" $tokenSpyApiKeyDefault
-    $openclawToken   = Get-EnvOrNew "OPENCLAW_TOKEN"     (New-SecureHex -Bytes 24)
     $searxngSecret   = Get-EnvOrNew "SEARXNG_SECRET"     (New-SecureHex -Bytes 32)
     $difySecretKey    = Get-EnvOrNew "DIFY_SECRET_KEY"           (New-SecureHex -Bytes 32)
     $qdrantApiKey     = Get-EnvOrNew "QDRANT_API_KEY"            (New-SecureHex -Bytes 32)
@@ -1193,7 +1192,6 @@ QDRANT_PORT=6333
 QDRANT_GRPC_PORT=6334
 QDRANT_API_KEY=$qdrantApiKey
 LITELLM_PORT=4000
-OPENCLAW_PORT=7860
 SEARXNG_PORT=8888
 
 #=== Hermes Agent ===
@@ -1218,7 +1216,6 @@ LITELLM_KEY=$litellmKey
 $(if ($GpuBackend -eq "amd") { "LITELLM_LEMONADE_API_KEY=$litellmLemonadeApiKey" })
 LIVEKIT_API_KEY=$livekitApiKey
 LIVEKIT_API_SECRET=$livekitSecret
-OPENCLAW_TOKEN=$openclawToken
 OPENCODE_SERVER_PASSWORD=$opencodePassword
 OPENCODE_PORT=3003
 TOKEN_SPY_API_KEY=$tokenSpyApiKey
@@ -1358,7 +1355,6 @@ litellm_settings:
 
     return @{
         SearxngSecret  = $searxngSecret
-        OpenclawToken  = $openclawToken
         LemonadeModel  = $effectiveLemonadeModel
     }
 }
@@ -1458,129 +1454,6 @@ engines:
     $settingsPath = Join-Path $configDir "settings.yml"
     Write-Utf8NoBom -Path $settingsPath -Content $config
     return $settingsPath
-}
-
-function New-OpenClawConfig {
-    <#
-    .SYNOPSIS
-        Generate OpenClaw home config and auth profiles for local llama-server.
-    #>
-    param(
-        [string]$InstallDir,
-        [string]$LlmModel,
-        [int]$MaxContext,
-        [string]$Token,
-        [string]$ProviderName = "local-llama",
-        [string]$ProviderUrl  = "http://host.docker.internal:8080"
-    )
-
-    # Create directories
-    # NOTE: Nested Join-Path required -- PS 5.1 only accepts 2 arguments
-    $homeDir  = Join-Path (Join-Path (Join-Path $InstallDir "data") "openclaw") "home"
-    $agentDir = Join-Path (Join-Path (Join-Path $homeDir "agents") "main") "agent"
-    $sessDir  = Join-Path (Join-Path (Join-Path $homeDir "agents") "main") "sessions"
-    New-Item -ItemType Directory -Path $agentDir -Force | Out-Null
-    New-Item -ItemType Directory -Path $sessDir -Force | Out-Null
-
-    # Home config
-    $homeConfig = @"
-{
-  "models": {
-    "providers": {
-      "$ProviderName": {
-        "baseUrl": "$ProviderUrl",
-        "apiKey": "none",
-        "api": "openai-completions",
-        "models": [
-          {
-            "id": "$LlmModel",
-            "name": "ODS LLM (Local)",
-            "reasoning": false,
-            "input": ["text"],
-            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-            "contextWindow": $MaxContext,
-            "maxTokens": 8192,
-            "compat": {
-              "supportsStore": false,
-              "supportsDeveloperRole": false,
-              "supportsReasoningEffort": false,
-              "maxTokensField": "max_tokens"
-            }
-          }
-        ]
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": {"primary": "$ProviderName/$LlmModel"},
-      "models": {"$ProviderName/$LlmModel": {}},
-      "compaction": {"mode": "safeguard"},
-      "subagents": {"maxConcurrent": 20, "model": "$ProviderName/$LlmModel"}
-    }
-  },
-  "commands": {"native": "auto", "nativeSkills": "auto"},
-  "gateway": {
-    "mode": "local",
-    "bind": "lan",
-    "controlUi": {"allowInsecureAuth": true},
-    "auth": {"mode": "token", "token": "$Token"}
-  }
-}
-"@
-    Write-Utf8NoBom -Path (Join-Path $homeDir "openclaw.json") -Content $homeConfig
-
-    # Auth profiles
-    $authProfiles = @"
-{
-  "version": 1,
-  "profiles": {
-    "${ProviderName}:default": {
-      "type": "api_key",
-      "provider": "$ProviderName",
-      "key": "none"
-    }
-  },
-  "lastGood": {"$ProviderName": "${ProviderName}:default"},
-  "usageStats": {}
-}
-"@
-    Write-Utf8NoBom -Path (Join-Path $agentDir "auth-profiles.json") -Content $authProfiles
-
-    # Models config
-    $modelsConfig = @"
-{
-  "providers": {
-    "$ProviderName": {
-      "baseUrl": "$ProviderUrl",
-      "apiKey": "none",
-      "api": "openai-completions",
-      "models": [
-        {
-          "id": "$LlmModel",
-          "name": "ODS LLM (Local)",
-          "reasoning": false,
-          "input": ["text"],
-          "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-          "contextWindow": $MaxContext,
-          "maxTokens": 8192,
-          "compat": {
-            "supportsStore": false,
-            "supportsDeveloperRole": false,
-            "supportsReasoningEffort": false,
-            "maxTokensField": "max_tokens"
-          }
-        }
-      ]
-    }
-  }
-}
-"@
-    Write-Utf8NoBom -Path (Join-Path $agentDir "models.json") -Content $modelsConfig
-
-    # Workspace directory (must exist before Docker Compose)
-    $workspaceDir = Join-Path (Join-Path (Join-Path (Join-Path $InstallDir "config") "openclaw") "workspace") "memory"
-    New-Item -ItemType Directory -Path $workspaceDir -Force | Out-Null
 }
 
 function Set-PerplexicaConfig {

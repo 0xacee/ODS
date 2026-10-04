@@ -100,8 +100,8 @@ update_env_value() { printf changed > "$1"; }
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='POSIX bootstrap integration')
-@pytest.mark.parametrize('action', ['llama', 'llama-retry', 'hermes', 'windows-openclaw',
-                                   'windows-cached', 'windows-recovered', 'lemonade', 'openclaw'])
+@pytest.mark.parametrize('action', ['llama', 'llama-retry', 'hermes', 'windows-flags',
+                                   'windows-cached', 'windows-recovered', 'lemonade'])
 @pytest.mark.parametrize('confined', [False, True])
 def test_bootstrap_revalidates_every_compose_entry(installed, action, confined):
     source_recipe(installed, confined=confined)
@@ -128,7 +128,7 @@ def test_bootstrap_revalidates_every_compose_entry(installed, action, confined):
     source = (ODS / 'scripts/bootstrap-upgrade.sh').read_text()
     names = ['validate_bootstrap_compose_args', 'compose_recreate_llama_server_with_retry',
              'compose_recreate_hermes', 'load_windows_lemonade_compose_args',
-             'recreate_windows_lemonade_openclaw', 'refresh_lemonade_after_bootstrap_cleanup']
+             'refresh_lemonade_after_bootstrap_cleanup']
     functions = '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^}', source,
                                      re.MULTILINE | re.DOTALL).group() for name in names)
     prelude = '''
@@ -139,7 +139,6 @@ DOCKER_CMD=true
 ODS_BOOTSTRAP_COMPOSE_RETRY_DELAY=0
 COMPOSE_ARGS=(-f base.yml -f data/user-extensions/example/compose.yaml)
 WINDOWS_LEMONADE_COMPOSE_ARGS=()
-WINDOWS_LEMONADE_OPENCLAW_PRESENT=true
 FULL_GGUF_FILE=full.gguf
 BOOTSTRAP_GGUF=small.gguf
 is_windows_bash() { return 1; }
@@ -151,14 +150,17 @@ cd "$INSTALL_DIR" || exit 1
         'llama': 'compose_recreate_llama_server_with_retry "${COMPOSE_ARGS[@]}"',
         'llama-retry': 'compose_recreate_llama_server_with_retry "${COMPOSE_ARGS[@]}"',
         'hermes': 'compose_recreate_hermes',
-        'windows-openclaw': 'recreate_windows_lemonade_openclaw',
-        'windows-cached': 'WINDOWS_LEMONADE_COMPOSE_ARGS=("${COMPOSE_ARGS[@]}"); recreate_windows_lemonade_openclaw',
-        'windows-recovered': 'rm .compose-flags; recreate_windows_lemonade_openclaw',
+        # Windows Lemonade stacks reach Compose through the cached, saved or
+        # recovered argument loader; Hermes is its remaining dependent.
+        'windows-flags': ('is_windows_bash() { return 0; }; COMPOSE_ARGS=(); '
+                          'load_windows_lemonade_compose_args; compose_recreate_hermes'),
+        'windows-cached': ('is_windows_bash() { return 0; }; '
+                           'WINDOWS_LEMONADE_COMPOSE_ARGS=("${COMPOSE_ARGS[@]}"); COMPOSE_ARGS=(); '
+                           'load_windows_lemonade_compose_args; compose_recreate_hermes'),
+        'windows-recovered': ('is_windows_bash() { return 0; }; COMPOSE_ARGS=(); '
+                              'rm .compose-flags; compose_recreate_hermes'),
         'lemonade': 'refresh_lemonade_after_bootstrap_cleanup',
     }
-    if action == 'openclaw':
-        block = source.split('log "Recreating OpenClaw to pick up model change..."', 1)[1]
-        calls[action] = block.split('\n            fi', 1)[0] + '\n            fi\n'
     env = dict(os.environ, PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ['PATH'])
     result = subprocess.run(['bash', '-s', '--', str(installed), sys.executable],
                             input=prelude + functions + '\n' + calls[action],

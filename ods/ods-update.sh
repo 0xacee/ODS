@@ -248,7 +248,7 @@ _prune_rollback_snapshots() {
 #   Creates data/backups/pre-update-<timestamp>/ and copies:
 #     • .env and .env.* variants
 #     • docker-compose*.yml overlays (tracks active stack)
-#     • config/{litellm,n8n,openclaw,searxng}/ (per-extension config)
+#     • config/{litellm,n8n,searxng}/ (per-extension config)
 #     • .version
 #   Validates timestamp format, writes snapshot.json, verifies integrity,
 #   then prints the snapshot directory path on stdout.
@@ -292,8 +292,10 @@ snapshot_pre_update() {
         files_saved=$(( files_saved + 1 ))
     fi
 
-    # Per-extension config directories
-    for ext_dir in litellm n8n openclaw searxng; do
+    # Per-extension config directories. config/openclaw is no longer captured:
+    # the legacy OpenClaw extension was removed and its folder is left on disk
+    # untouched, so it does not need a rollback copy.
+    for ext_dir in litellm n8n searxng; do
         local src="${INSTALL_DIR}/config/${ext_dir}"
         if [[ -d "$src" ]]; then
             cp -r "$src" "${snap_dir}/config-${ext_dir}"
@@ -371,6 +373,9 @@ _restore_snapshot() (
         sources+=("$f")
         destinations+=("${INSTALL_DIR}/${base}")
     done
+    # config-openclaw exists only in snapshots taken before the legacy OpenClaw
+    # extension was removed. Restoring it keeps a rollback across the removal
+    # faithful to what that snapshot captured; newer snapshots never contain it.
     for ext_dir in litellm n8n openclaw searxng; do
         f="${snap_dir}/config-${ext_dir}"
         [[ -d "$f" ]] || continue
@@ -727,8 +732,8 @@ cmd_backup() {
     # Per-extension config directories — the same set snapshot_pre_update
     # captures. `ods update` delegates its pre-update snapshot to this
     # command; without config-* entries a rollback cannot restore litellm,
-    # n8n, openclaw, or searxng configuration.
-    for ext_dir in litellm n8n openclaw searxng; do
+    # n8n, or searxng configuration.
+    for ext_dir in litellm n8n searxng; do
         local src="${INSTALL_DIR}/config/${ext_dir}"
         if [[ -d "$src" ]]; then
             cp -r "$src" "${backup_path}/config-${ext_dir}"
@@ -1248,7 +1253,7 @@ Commands:
 
 Rollback snapshots:
   Stored in:  <install_dir>/data/backups/pre-update-<timestamp>/
-  Contents:   .env, docker-compose overlays, config/{litellm,n8n,openclaw,searxng}/
+  Contents:   .env, docker-compose overlays, config/{litellm,n8n,searxng}/
   Retained:   MAX_BACKUPS most recent snapshots (oldest pruned automatically)
 
 Environment Variables:

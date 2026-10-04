@@ -4,7 +4,7 @@
 # Part of: installers/windows/phases/
 # Purpose: Create install directory tree, copy source files via robocopy,
 #          generate .env with secure secrets, generate SearXNG settings.yml,
-#          generate OpenClaw configs (if enabled), validate .env schema.
+#          validate .env schema.
 #
 # Reads:
 #   $installDir, $sourceRoot   -- from orchestrator context
@@ -13,12 +13,10 @@
 #   $gpuInfo                   -- from phase 02
 #   $llamaServerImage          -- from phase 02
 #   $whisperCudaSupported      -- from phase 02
-#   $enableOpenClaw            -- from phase 03
 #   $enableRecommended, $enableDeepResearch, $enableHermes -- from phase 03
-#   $openClawConfig            -- from phase 03
 #
 # Writes:
-#   $envResult  -- hashtable: SearxngSecret, OpenclawToken
+#   $envResult  -- hashtable: SearxngSecret
 #
 # Modder notes:
 #   Add new directories to $_dirs array below.
@@ -35,13 +33,9 @@ if ($dryRun) {
     Write-AI "[DRY RUN] Would generate .env with secure secrets (WEBUI_SECRET, N8N_PASS, LITELLM_KEY, ...)"
     Write-AI "[DRY RUN] Would generate SearXNG config with randomized secret key"
     Write-AI "[DRY RUN] Would copy ods.ps1 CLI + lib/ to install root"
-    if ($enableOpenClaw) {
-        Write-AI "[DRY RUN] Would generate OpenClaw configs (model: $($tierConfig.LlmModel))"
-    }
     # Signal to later phases: no envResult in dry-run mode
     $envResult = @{
         SearxngSecret = "(dry-run-placeholder)"
-        OpenclawToken = "(dry-run-placeholder)"
     }
     return
 }
@@ -55,7 +49,6 @@ $_dirs = @(
     (Join-Path $_configDir "searxng"),
     (Join-Path $_configDir "n8n"),
     (Join-Path $_configDir "litellm"),
-    (Join-Path $_configDir "openclaw"),
     (Join-Path $_configDir "llama-server"),
     (Join-Path $_dataDir "auth"),
     (Join-Path $_dataDir "config"),
@@ -229,6 +222,18 @@ if (Test-Path $_retiredODSForge) {
     Remove-Item -LiteralPath $_retiredODSForge -Recurse -Force
     Write-AI "Removed retired ODSForge service files from extensions/services"
 }
+# The legacy OpenClaw extension (the ods-openclaw container) was removed;
+# Portal (Pixel) and Hermes are the supported agents. Remove its stale service
+# files the same way so `up --remove-orphans` drops the old container, and keep
+# data\openclaw and config\openclaw for the owner to archive or delete.
+$_retiredOpenClaw = Join-Path $installDir "extensions\services\openclaw"
+if (Test-Path -LiteralPath $_retiredOpenClaw) {
+    Remove-Item -LiteralPath $_retiredOpenClaw -Recurse -Force
+    Write-AI "Removed retired OpenClaw service files from extensions/services"
+}
+if ((Test-Path -LiteralPath (Join-Path $_dataDir "openclaw")) -or (Test-Path -LiteralPath (Join-Path $_configDir "openclaw"))) {
+    Write-AI "The legacy OpenClaw extension was removed. Its data\openclaw and config\openclaw folders were kept; delete them by hand when you no longer need them."
+}
 
 # Copy extensions library to data dir for dashboard portal. Keep this in
 # parity with Linux phase 06 and macOS install: dashboard-api installs
@@ -326,8 +331,7 @@ if ($amdLemonadeRuntime -and $amdLemonadeRuntime.container_image) {
 $_enableWebSearch = Test-ODSWindowsSearxngNeeded `
     -EnableRecommended $enableRecommended `
     -EnableDeepResearch $enableDeepResearch `
-    -EnableHermes $enableHermes `
-    -EnableOpenClaw $enableOpenClaw
+    -EnableHermes $enableHermes
 $envResult = New-ODSEnv `
     -InstallDir     $installDir `
     -TierConfig     $tierConfig `
@@ -358,7 +362,7 @@ Write-AISuccess "Generated .env with secure secrets"
 # NOTE: Only checks keys that use :? (required non-empty) in compose files.
 # Keys like ANTHROPIC_API_KEY= are intentionally empty and not checked here.
 $_envPath = Join-Path $installDir ".env"
-$_requiredKeys = @("WEBUI_SECRET", "N8N_PASS", "LITELLM_KEY", "OPENCLAW_TOKEN", "DASHBOARD_API_KEY")
+$_requiredKeys = @("WEBUI_SECRET", "N8N_PASS", "LITELLM_KEY", "DASHBOARD_API_KEY")
 $_envLines = @{}
 if (Test-Path $_envPath) {
     Get-Content $_envPath | ForEach-Object {
@@ -722,46 +726,6 @@ if ($enableHermes) {
 # ── Generate SearXNG config ───────────────────────────────────────────────────
 $_searxngPath = New-SearxngConfig -InstallDir $installDir -SecretKey $envResult.SearxngSecret
 Write-AISuccess "Generated SearXNG config ($_searxngPath)"
-
-# ── Generate OpenClaw configs ─────────────────────────────────────────────────
-if ($enableOpenClaw) {
-    # On Windows, AMD native inference server is reachable from Docker containers
-    # via host.docker.internal; NVIDIA runs in Docker as llama-server service name.
-    # Lemonade serves at /api/v1, so OpenClaw base URL needs /api prefix
-    # (OpenClaw appends /v1/chat/completions to the base URL)
-    $_providerUrl = $(if ($gpuInfo.Backend -eq "amd") {
-        "http://host.docker.internal:$($script:LEMONADE_PORT)/api"
-    } else {
-        "http://llama-server:8080"
-    })
-
-    New-OpenClawConfig `
-        -InstallDir   $installDir `
-        -LlmModel     $tierConfig.LlmModel `
-        -MaxContext   $tierConfig.MaxContext `
-        -Token        $envResult.OpenclawToken `
-        -ProviderUrl  $_providerUrl
-    Write-AISuccess "Generated OpenClaw configs (model: $($tierConfig.LlmModel))"
-
-    # Select and copy the tier-appropriate OpenClaw agent profile
-    if ($openClawConfig) {
-        $_ocSrcProfile = Join-Path (Join-Path $installDir "config\openclaw") $openClawConfig
-        $_ocDstProfile = Join-Path (Join-Path $installDir "config\openclaw") "openclaw.json"
-        if (Test-Path $_ocSrcProfile) {
-            $_ocSrcResolved = (Resolve-Path $_ocSrcProfile).Path
-            $_ocDstResolved = [System.IO.Path]::GetFullPath($_ocDstProfile)
-            if ($_ocSrcResolved -ieq $_ocDstResolved) {
-                Write-AISuccess "OpenClaw profile already installed: $openClawConfig"
-            } else {
-                Copy-Item -Path $_ocSrcProfile -Destination $_ocDstProfile -Force
-                Write-AISuccess "Installed OpenClaw profile: $openClawConfig -> openclaw.json"
-            }
-        } else {
-            Write-AIError "Missing OpenClaw config $openClawConfig and no fallback present in repo. This is a packaging bug; please re-clone or report."
-            throw "ODS_INSTALL_ABORTED"
-        }
-    }
-}
 
 # ── Create llama-server models.ini stub ──────────────────────────────────────
 $_modelsIni = Join-Path (Join-Path $installDir "config\llama-server") "models.ini"

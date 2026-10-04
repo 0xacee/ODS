@@ -4,22 +4,19 @@
 # ============================================================================
 # Part of: installers/phases/
 # Purpose: Create directories, copy source files, generate .env, configure
-#          OpenClaw, SearXNG, and validate .env schema
+#          SearXNG, and validate .env schema
 #
 # Expects: SCRIPT_DIR, INSTALL_DIR, LOG_FILE, DRY_RUN, INTERACTIVE,
 #           TIER, TIER_NAME, VERSION, GPU_BACKEND, SYSTEM_TZ,
 #           LLM_MODEL, MAX_CONTEXT, GGUF_FILE, COMPOSE_FLAGS,
-#           ENABLE_VOICE, ENABLE_WORKFLOWS, ENABLE_RAG, ENABLE_HERMES, ENABLE_OPENCLAW,
-#           OPENCLAW_CONFIG, OPENCLAW_PROVIDER_NAME_DEFAULT,
-#           OPENCLAW_PROVIDER_URL_DEFAULT, GPU_ASSIGNMENT_JSON,
-#           COMFYUI_GPU_UUID, WHISPER_GPU_UUID, EMBEDDINGS_GPU_UUID,
-#           LLAMA_SERVER_GPU_UUIDS, LLAMA_ARG_SPLIT_MODE, LLAMA_ARG_TENSOR_SPLIT,
+#           ENABLE_VOICE, ENABLE_WORKFLOWS, ENABLE_RAG, ENABLE_HERMES,
+#           GPU_ASSIGNMENT_JSON, COMFYUI_GPU_UUID, WHISPER_GPU_UUID,
+#           EMBEDDINGS_GPU_UUID, LLAMA_SERVER_GPU_UUIDS, LLAMA_ARG_SPLIT_MODE,
+#           LLAMA_ARG_TENSOR_SPLIT,
 #           chapter(), ai(), ai_ok(), ai_warn(), log(), warn(), error()
 # Provides: WEBUI_SECRET, N8N_PASS, LITELLM_KEY, LIVEKIT_SECRET,
 #           DASHBOARD_API_KEY, SHIELD_API_KEY, TOKEN_SPY_API_KEY,
-#           OPENCODE_SERVER_PASSWORD,
-#           OPENCLAW_TOKEN, OPENCLAW_PROVIDER_NAME, OPENCLAW_PROVIDER_URL,
-#           OPENCLAW_MODEL, OPENCLAW_CONTEXT, GPU_ASSIGNMENT_JSON_B64 (in .env)
+#           OPENCODE_SERVER_PASSWORD, GPU_ASSIGNMENT_JSON_B64 (in .env)
 #           PIXEL_SOURCE_URL, PIXEL_SOURCE_REF, PIXEL_SOURCE_DIR when Pixel is enabled
 #
 # Modder notes:
@@ -121,7 +118,6 @@ if $DRY_RUN; then
     log "[DRY RUN] Would generate .env with secrets (WEBUI_SECRET, N8N_PASS, LITELLM_KEY, etc.)"
     log "[DRY RUN] Would generate SearXNG config with randomized secret key"
     [[ "$ENABLE_HERMES" == "true" ]] && log "[DRY RUN] Would configure Hermes Agent (LLM endpoint: http://llama-server:8080/v1; data dir: $INSTALL_DIR/data/hermes)"
-    [[ "$ENABLE_OPENCLAW" == "true" ]] && log "[DRY RUN] Would configure OpenClaw (model: $LLM_MODEL, config: ${OPENCLAW_CONFIG:-default})"
     log "[DRY RUN] Would validate .env against schema"
 else
     # install-core.sh normally imports these helpers before the phase runs.
@@ -228,6 +224,35 @@ else
             error "Pixel source must be bundled or an absolute local checkout; the installed release was left intact."
             return 1
         fi
+    fi
+
+    # Retired bundled services. The source copy below never deletes files a
+    # release removed, so an upgraded install still carries their extension
+    # directories, and a stale compose.yaml there would keep the old container
+    # in the stack. Delete only the service code; each service's data stays
+    # for the owner to archive or delete.
+    #
+    # This runs before the Pixel source transaction below is staged: that
+    # transaction records the installed extensions tree as its baseline and
+    # checks it again before release, so a removal after it is applied would
+    # be reported as live drift and stop the upgrade.
+    _phase06_step "prune-retired-services"
+    # ODSForge was retired from the shipped stack after Hermes became the
+    # default agent surface; data/odsforge is preserved.
+    if [[ -d "$INSTALL_DIR/extensions/services/odsforge" ]]; then
+        rm -rf "$INSTALL_DIR/extensions/services/odsforge"
+        log "Removed retired ODSForge service files from extensions/services"
+    fi
+    # The legacy OpenClaw extension (the ods-openclaw container) was removed;
+    # Portal (Pixel) and Hermes are the supported agents. Once it is out of
+    # the stack, phase 11's `up --remove-orphans` removes the old container.
+    # data/openclaw and config/openclaw are preserved.
+    if [[ -d "$INSTALL_DIR/extensions/services/openclaw" ]]; then
+        rm -rf "$INSTALL_DIR/extensions/services/openclaw"
+        log "Removed retired OpenClaw service files from extensions/services"
+    fi
+    if [[ -d "$INSTALL_DIR/data/openclaw" || -d "$INSTALL_DIR/config/openclaw" ]]; then
+        ai "The legacy OpenClaw extension was removed. Its data/openclaw and config/openclaw folders were kept; delete them by hand when you no longer need them."
     fi
 
     # A Pixel-to-Hermes rerun must retire the exact ODS-managed host runtime,
@@ -351,7 +376,7 @@ else
     mkdir -p "$INSTALL_DIR"/data/hermes-proxy/{caddy-data,caddy-config}
     mkdir -p "$INSTALL_DIR"/data/langfuse/{postgres,clickhouse,redis,minio}
     mkdir -p "$INSTALL_DIR"/data/remote-provider/secrets
-    mkdir -p "$INSTALL_DIR"/config/{n8n,litellm,openclaw,searxng}
+    mkdir -p "$INSTALL_DIR"/config/{n8n,litellm,searxng}
 
     _phase06_repair_host_path() {
         local target="$1" description="$2" target_parent
@@ -564,18 +589,6 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         error "Could not reconcile the installed Pixel Compose fragment with the selected Pixel enablement"
     fi
 
-    # ODSForge was retired from the shipped stack after Hermes became the
-    # default agent surface. Existing installs may still contain the old
-    # bundled extension because the source copy above does not prune removed
-    # files. Delete only the retired service code so stale compose files cannot
-    # be picked up; preserve data/odsforge for users who want to archive it.
-    _retired_odsforge_dir="$INSTALL_DIR/extensions/services/odsforge"
-    _phase06_step "prune-retired-services"
-    if [[ -d "$_retired_odsforge_dir" ]]; then
-        rm -rf "$_retired_odsforge_dir"
-        log "Removed retired ODSForge service files from extensions/services"
-    fi
-
     # Copy extensions library to data dir for dashboard portal.
     # Source resolution: dev installs and full checkouts read the product-owned
     # library under extensions/library/. Bootstrap installs also get the same
@@ -598,75 +611,6 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         ai_ok "Extensions library copied to data/extensions-library/ (from $_ext_lib_src)"
     else
         ai_warn "Extensions library not found; dashboard Extensions page will return 503 until populated"
-    fi
-
-    # Select tier-appropriate OpenClaw config
-    _phase06_step "configure-legacy-openclaw"
-    if [[ "$ENABLE_OPENCLAW" == "true" && -n "$OPENCLAW_CONFIG" ]]; then
-        OPENCLAW_MODEL="$LLM_MODEL"
-        OPENCLAW_CONTEXT=$MAX_CONTEXT
-
-        # Tiers 1/2/3 set OPENCLAW_CONFIG="openclaw.json", which is also the
-        # destination filename — skip the self-copy in that case so the file
-        # the rsync from SCRIPT_DIR placed there is used as-is.
-        _oc_src="$INSTALL_DIR/config/openclaw/$OPENCLAW_CONFIG"
-        _oc_dst="$INSTALL_DIR/config/openclaw/openclaw.json"
-        if [[ -f "$_oc_src" ]]; then
-            if [[ ! "$_oc_src" -ef "$_oc_dst" ]]; then
-                cp "$_oc_src" "$_oc_dst"
-            fi
-        elif [[ -f "$SCRIPT_DIR/config/openclaw/$OPENCLAW_CONFIG" ]]; then
-            cp "$SCRIPT_DIR/config/openclaw/$OPENCLAW_CONFIG" "$_oc_dst"
-        else
-            error "Missing OpenClaw config $OPENCLAW_CONFIG and no fallback present in repo. This is a packaging bug; please re-clone or report."
-        fi
-        unset _oc_src _oc_dst
-        # Resolve provider name/URL before any sed replacements that depend on them
-        OPENCLAW_PROVIDER_NAME="${OPENCLAW_PROVIDER_NAME_DEFAULT}"
-        OPENCLAW_PROVIDER_URL="${OPENCLAW_PROVIDER_URL_DEFAULT}"
-
-        # Replace model and provider placeholders to match what the inference backend actually serves
-        # Escape sed special chars in variable values to prevent injection
-        _sed_escape() { printf '%s\n' "$1" | sed 's/[&/\|]/\\&/g'; }
-        _oc_model_esc=$(_sed_escape "$OPENCLAW_MODEL")
-        _oc_prov_esc=$(_sed_escape "$OPENCLAW_PROVIDER_NAME")
-        _sed_i "s|__LLM_MODEL__|${_oc_model_esc}|g" "$INSTALL_DIR/config/openclaw/openclaw.json"
-        _sed_i "s|Qwen/Qwen2.5-[^\"]*|${_oc_model_esc}|g" "$INSTALL_DIR/config/openclaw/openclaw.json"
-        _sed_i "s|local-ollama|${_oc_prov_esc}|g" "$INSTALL_DIR/config/openclaw/openclaw.json"
-        _oc_key_esc=$(_sed_escape "${LITELLM_KEY:-none}")
-        _sed_i "s|__LITELLM_KEY__|${_oc_key_esc}|g" "$INSTALL_DIR/config/openclaw/openclaw.json"
-        log "Installed OpenClaw config: $OPENCLAW_CONFIG -> openclaw.json (model: $OPENCLAW_MODEL)"
-        # Generate OPENCLAW_TOKEN (used by compose env and inject-token.js)
-        OPENCLAW_TOKEN=$(_phase06_generate_hex_secret 24)
-        # Note: inject-token.js regenerates /home/node/.openclaw/openclaw.json
-        # on every container start, so that file stays ephemeral. OpenClaw also
-        # writes agent, cron, and canvas state under /home/node/.openclaw; those
-        # paths are bind-mounted under data/openclaw/home. workspace/ is
-        # persisted separately under config/openclaw/workspace.
-        mkdir -p "$INSTALL_DIR/data/openclaw/home"/{agents,canvas,cron}
-        # Create workspace directory (must exist before Docker Compose,
-        # otherwise Docker auto-creates it as root and the container can't write to it)
-        mkdir -p "$INSTALL_DIR/config/openclaw/workspace/memory"
-        # Copy workspace personality files (Todd identity, system knowledge, etc.)
-        # Exclude .git and .openclaw dirs — those are runtime/dev artifacts
-        if [[ -d "$SCRIPT_DIR/config/openclaw/workspace" ]]; then
-            if command -v rsync &>/dev/null; then
-                rsync -a --no-owner --no-group --exclude='.git' --exclude='.openclaw' --exclude='.gitkeep' \
-                    "$SCRIPT_DIR/config/openclaw/workspace/" "$INSTALL_DIR/config/openclaw/workspace/"
-            else
-                cp -r "$SCRIPT_DIR/config/openclaw/workspace"/* "$INSTALL_DIR/config/openclaw/workspace/" 2>/dev/null || true
-                rm -rf "$INSTALL_DIR/config/openclaw/workspace/.git" 2>/dev/null || true
-                rm -rf "$INSTALL_DIR/config/openclaw/workspace/.openclaw" 2>/dev/null || true
-            fi
-            log "Installed OpenClaw workspace files (agent personality)"
-        fi
-        # OpenClaw container runs as node (uid 1000) — fix ownership
-        # Pre-create data/openclaw so chown doesn't fail on a fresh install where
-        # the directory hasn't been touched yet.
-        mkdir -p "$INSTALL_DIR/data/openclaw"
-        if ! $_phase06_rootless; then
-            chown -R 1000:1000 "$INSTALL_DIR/data/openclaw" "$INSTALL_DIR/config/openclaw/workspace" || warn "Failed to chown openclaw paths to 1000:1000 (non-fatal); container may need uid fixup"
-        fi
     fi
 
     _phase06_step "prepare-dashboard-permissions"
@@ -849,7 +793,6 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     N8N_PASS=$(_env_get N8N_PASS "$(openssl rand -base64 16 2>/dev/null || head -c 16 /dev/urandom | base64)")
     LITELLM_KEY=$(_phase06_env_hex_secret LITELLM_KEY 16 "sk-ods-")
     LITELLM_LEMONADE_API_KEY=$(_phase06_env_hex_secret LITELLM_LEMONADE_API_KEY 16 "sk-ods-lemonade-")
-    OPENCLAW_TOKEN=$(_phase06_env_hex_secret OPENCLAW_TOKEN 24)
     LEMONADE_EXTERNAL_VALUE="${LEMONADE_EXTERNAL:-false}"
     [[ "${LEMONADE_EXTERNAL_VALUE,,}" == "true" ]] && LEMONADE_EXTERNAL_VALUE="true" || LEMONADE_EXTERNAL_VALUE="false"
     LEMONADE_HOST_TRANSPORT="$(_env_get_explicit_first LEMONADE_HOST_TRANSPORT direct)"
@@ -1289,29 +1232,6 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         WEBUI_AUTH=$(_env_get WEBUI_AUTH "false")
     fi
 
-    # Host LAN IP — only meaningful when BIND_ADDRESS=0.0.0.0. Some services
-    # (e.g. openclaw) need to know the host's LAN address so the Control UI
-    # accepts cross-origin requests from LAN clients. Detection prefers
-    # `hostname -I` (GNU coreutils, Linux) then `ip route get` then ifconfig
-    # so WSL2 + odd Linux variants are covered. Empty default keeps the
-    # compose ${HOST_LAN_IP:-} fallback safe when binding to loopback.
-    HOST_LAN_IP=""
-    if [[ "$BIND_ADDRESS" == "0.0.0.0" ]]; then
-        if command -v hostname >/dev/null 2>&1 && hostname -I >/dev/null 2>&1; then
-            HOST_LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-        fi
-        if [[ -z "$HOST_LAN_IP" ]] && command -v ip >/dev/null 2>&1; then
-            HOST_LAN_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
-        fi
-        if [[ -z "$HOST_LAN_IP" ]] && command -v ifconfig >/dev/null 2>&1; then
-            HOST_LAN_IP=$(ifconfig 2>/dev/null | awk '/inet / && $2 != "127.0.0.1" {print $2; exit}')
-        fi
-    fi
-    # Preserve operator override across re-runs: if .env already has a value,
-    # use it instead of the freshly-detected one (matches the _env_get pattern
-    # used for every other persistent value in this phase).
-    HOST_LAN_IP=$(_env_get HOST_LAN_IP "$HOST_LAN_IP")
-
     # Device name — used by ods-mdns (publishes <name>.local + per-service
     # subdomains: auth.<name>.local, chat.<name>.local, etc.) and by magic-
     # link URL generation in dashboard-api. The previous default literal
@@ -1428,7 +1348,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # (closes a brief window on systems where $HOME is world-readable, e.g.
     # Ubuntu defaults). The umask MUST NOT leak to the rest of phase 06 or
     # subsequent phases — later mkdirs create container-bind-mount dirs that
-    # need world-traverse (e.g. SearXNG runs as uid 977, OpenClaw as 1000).
+    # need world-traverse (e.g. SearXNG runs as uid 977).
     # The chmod 600 below is belt-and-braces.
     (
         umask 077
@@ -1444,9 +1364,6 @@ ODS_VERSION=${VERSION:-3.0.0}
 # 127.0.0.1 = localhost only (secure default)
 # 0.0.0.0   = accessible from LAN (install with --lan or set manually)
 BIND_ADDRESS=$(dotenv_value "${BIND_ADDRESS}")
-# Host LAN IP (populated when BIND_ADDRESS=0.0.0.0; empty otherwise).
-# Containers like openclaw read this to advertise the host's LAN address.
-HOST_LAN_IP=$(dotenv_value "${HOST_LAN_IP}")
 # Lets the non-root remote-provider services read only lifecycle secrets that
 # the host agent writes mode 0640 under this installation owner's data group.
 REMOTE_PROVIDER_DATA_GID=$(id -g 2>/dev/null || echo 1000)
@@ -1641,7 +1558,6 @@ QDRANT_PORT=6333
 QDRANT_GRPC_PORT=6334
 EMBEDDINGS_PORT=8090
 LITELLM_PORT=4000
-OPENCLAW_PORT=7860
 LANGFUSE_PORT=$(dotenv_value "${LANGFUSE_PORT}")
 
 #=== Hermes Agent ===
@@ -1694,7 +1610,6 @@ N8N_PASS=$(dotenv_value "${N8N_PASS}")
 LITELLM_KEY=$(dotenv_value "${LITELLM_KEY}")
 LIVEKIT_API_KEY=$(dotenv_value "${LIVEKIT_API_KEY}")
 LIVEKIT_API_SECRET=$(dotenv_value "${LIVEKIT_SECRET}")
-OPENCLAW_TOKEN=$(dotenv_value "${OPENCLAW_TOKEN}")
 QDRANT_API_KEY=$(dotenv_value "${QDRANT_API_KEY}")
 TOKEN_SPY_API_KEY=$(dotenv_value "${TOKEN_SPY_API_KEY}")
 OPENCODE_SERVER_PASSWORD=$(dotenv_value "${OPENCODE_SERVER_PASSWORD}")

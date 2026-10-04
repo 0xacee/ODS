@@ -69,8 +69,7 @@ query_status() {
 # framework, and a compact document puts every entry on a single line. A
 # greedy `sed 's/.*"sessionId": *"\([^"]*\)".*/\1/'` then reports only the
 # LAST id on that line, so every other live session reads as inactive and
-# gets deleted. Match each occurrence instead, as scripts/session-cleanup.sh
-# already does.
+# gets deleted. Match each occurrence instead.
 extract_active_ids() {
   local sessions_json="$1"
   grep -oE '"sessionId"[[:space:]]*:[[:space:]]*"[^"]+"' "$sessions_json" 2>/dev/null \

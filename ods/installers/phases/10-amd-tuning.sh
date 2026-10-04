@@ -7,7 +7,7 @@
 #
 # Expects: GPU_BACKEND, DRY_RUN, INSTALL_DIR, LOG_FILE, PKG_MANAGER,
 #           ai(), ai_ok(), ai_warn(), log()
-# Provides: System tuning applied (sysctl, modprobe, timers, tuned)
+# Provides: System tuning applied (sysctl, modprobe, tuned)
 #
 # Modder notes:
 #   Add new AMD-specific tuning parameters or kernel options here.
@@ -16,7 +16,6 @@
 ods_progress 70 "amd-tuning" "Tuning AMD GPU settings"
 if [[ "$GPU_BACKEND" == "amd" ]] && $DRY_RUN; then
     log "[DRY RUN] Would apply AMD APU system tuning:"
-    log "[DRY RUN]   - Install systemd user timers (session cleanup, memory shepherd)"
     log "[DRY RUN]   - Apply sysctl tuning (swappiness=10, vfs_cache_pressure=50)"
     log "[DRY RUN]   - Install amdgpu modprobe options"
     log "[DRY RUN]   - Install GTT memory optimization"
@@ -60,50 +59,29 @@ elif [[ "$GPU_BACKEND" == "amd" ]] && ! $DRY_RUN; then
         ai_ok "GPU devices verified (/dev/kfd, /dev/dri/renderD128)"
     fi
 
-    # Management scripts and Memory Shepherd already copied by rsync/cp block above
-    [[ -d "$INSTALL_DIR/memory-shepherd" ]] && ai_ok "Memory Shepherd installed"
-
-    # ── Install systemd user timers (session cleanup, session manager, memory shepherd) ──
-    ai "Installing maintenance timers..."
-    SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
-    mkdir -p "$SYSTEMD_USER_DIR"
-
-    # Ensure scripts are executable
-    chmod +x "$INSTALL_DIR/scripts/session-cleanup.sh" \
-             "$INSTALL_DIR/memory-shepherd/memory-shepherd.sh" 2>/dev/null || true
-
-    # Copy user-level systemd units/timers. Skip root/system units and units
-    # rendered with path substitutions (__INSTALL_DIR__ etc.) elsewhere.
-    if [[ -d "$INSTALL_DIR/scripts/systemd" ]]; then
-        for _unit in "$INSTALL_DIR/scripts/systemd"/*.service "$INSTALL_DIR/scripts/systemd"/*.timer; do
-            [[ -f "$_unit" ]] || continue
-            # Skip system-scope units: they carry __PLACEHOLDER__ tokens that
-            # phase 07 renders when installing to /etc/systemd/system
-            # (ods-host-agent, ods-ap-mode, ods-mdns). Copying them raw here
-            # drops an unrendered, non-functional unit into the user scope that
-            # also survives uninstall. Detect them by their placeholders rather
-            # than a name list, which previously missed ods-mdns.service.
-            if grep -q '__[A-Z0-9_]\{1,\}__' "$_unit"; then
-                continue
-            fi
-            cp "$_unit" "$SYSTEMD_USER_DIR/" 2>/dev/null || true
-        done
+    # This phase no longer installs user maintenance timers. They served only
+    # the removed legacy OpenClaw extension: its session-cleanup timer pruned
+    # that agent's sessions, and the memory-shepherd timers reset its
+    # workspace files. Memory Shepherd itself stays available under
+    # memory-shepherd/ (its install.sh schedules it for other agents).
+    #
+    # Retire the session-cleanup units an earlier install copied into the user
+    # scope; their script and unit files are no longer shipped. Existing
+    # memory-shepherd timers are left as configured, and data/openclaw stays.
+    _phase10_user_units="$HOME/.config/systemd/user"
+    if [[ -f "$_phase10_user_units/openclaw-session-cleanup.timer" \
+        || -f "$_phase10_user_units/openclaw-session-cleanup.service" ]]; then
+        # A user manager that is not running cannot stop the timer, but
+        # deleting its units below still keeps it from starting again.
+        ods_systemctl_user disable --now openclaw-session-cleanup.timer >> "$LOG_FILE" 2>&1 \
+            || log "Could not stop openclaw-session-cleanup.timer (non-fatal); removing its unit files"
+        rm -f "$_phase10_user_units/openclaw-session-cleanup.timer" \
+            "$_phase10_user_units/openclaw-session-cleanup.service"
+        ods_systemctl_user daemon-reload >> "$LOG_FILE" 2>&1 \
+            || log "Could not reload the user systemd manager (non-fatal)"
+        ai_ok "Retired the legacy OpenClaw session-cleanup timer"
     fi
-
-    # Create archive directories for memory shepherd
-    mkdir -p "$INSTALL_DIR/data/memory-archives/ods-agent"/{memory,agents,tools}
-
-    # Reload and enable all timers
-    ods_systemctl_user daemon-reload 2>/dev/null || true
-    for timer in openclaw-session-cleanup memory-shepherd-workspace memory-shepherd-memory; do
-        ods_systemctl_user enable --now "${timer}.timer" >> "$LOG_FILE" 2>&1 || true
-    done
-    ai_ok "Maintenance timers enabled (session cleanup, memory shepherd)"
-
-    # Enable lingering so user timers survive logout
-    loginctl enable-linger "$(whoami)" 2>/dev/null || \
-        _phase10_privileged loginctl enable-linger "$(whoami)" 2>/dev/null || \
-        ai_warn "Could not enable linger. Timers may stop after logout. Run: loginctl enable-linger $(whoami)"
+    unset _phase10_user_units
 
     # Install sysctl tuning (vm.swappiness, vfs_cache_pressure)
     if [[ -f "$INSTALL_DIR/config/system-tuning/99-ods.conf" ]]; then

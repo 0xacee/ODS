@@ -352,16 +352,25 @@ def test_dashboard_pre_stages_hsts() -> None:
     )
 
 
-def test_openclaw_stays_deprecated_optional_and_token_gated() -> None:
-    manifest = read(SERVICES / "openclaw" / "manifest.yaml")
-    docs = read(ROOT / "docs" / "OPENCLAW-INTEGRATION.md")
-    policy = json.loads(read(POLICY))["services"]["openclaw"]
+def test_legacy_openclaw_extension_stays_removed() -> None:
+    """The removed legacy OpenClaw container must not come back.
 
-    assert_true(manifest_bool(manifest, "deprecated"), "OpenClaw must remain deprecated")
-    assert_true(manifest_value(manifest, "category") == "optional", "OpenClaw must stay optional")
-    assert_true("OPENCLAW_TOKEN" in manifest, "OpenClaw manifest must require a token")
-    assert_true(policy["lan_exposure"] == "opt-in-only", "OpenClaw policy must stay opt-in-only")
-    assert_true("DEPRECATED" in docs, "OpenClaw docs must keep the deprecation notice")
+    Pixel's host OpenClaw runtime is separate and is not covered here.
+    """
+    assert_true(not (SERVICES / "openclaw").exists(), "legacy OpenClaw extension must stay removed")
+    policy = json.loads(read(POLICY))["services"]
+    assert_true("openclaw" not in policy, "removed legacy OpenClaw extension must not keep an exposure policy")
+    ports = json.loads(read(ROOT / "config" / "ports.json"))["ports"]
+    assert_true(
+        all(entry.get("service_id") != "openclaw" for entry in ports),
+        "removed legacy OpenClaw extension must not keep a port contract",
+    )
+    compose_files = [*sorted(ROOT.glob("docker-compose*.yml")), *sorted(SERVICES.glob("*/compose*.yaml"))]
+    for compose_path in compose_files:
+        assert_true(
+            "ghcr.io/openclaw/openclaw" not in read(compose_path),
+            f"{compose_path.relative_to(ROOT)} must not run the legacy OpenClaw image",
+        )
 
 
 def test_litellm_gateway_auth_is_enforced() -> None:
@@ -389,7 +398,7 @@ def main() -> int:
         test_ods_proxy_caps_request_body_sizes,
         test_hermes_proxy_caps_request_body,
         test_dashboard_pre_stages_hsts,
-        test_openclaw_stays_deprecated_optional_and_token_gated,
+        test_legacy_openclaw_extension_stays_removed,
         test_litellm_gateway_auth_is_enforced,
     ]
     for test in tests:

@@ -44,7 +44,7 @@ _SCALAR_CONSTRAINT_MESSAGES = {
 
 _SETTINGS_APPLY_ALLOWED_SERVICES = frozenset({
     "llama-server", "open-webui", "litellm", "langfuse", "n8n",
-    "hermes", "hermes-proxy", "openclaw", "opencode", "perplexica", "searxng", "qdrant",
+    "hermes", "hermes-proxy", "opencode", "perplexica", "searxng", "qdrant",
     "tts", "whisper", "embeddings", "token-spy", "comfyui",
     "ape", "privacy-shield", "ods-proxy", "model-router",
 })
@@ -78,6 +78,13 @@ _LIVE_READ_ENV_KEYS = {
     # agent fallback, so recreating services would only add downtime.
     "HF_TOKEN",
 }
+# Read only by the removed legacy OpenClaw extension; marked "deprecated" in
+# .env.schema.json. Nothing consumes them now, so a change needs no restart.
+_RETIRED_ENV_KEYS = frozenset({
+    "BOOTSTRAP_MODEL", "HOST_LAN_IP", "OPENCLAW_API_KEY", "OPENCLAW_CONFIG",
+    "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH", "OPENCLAW_HTTP_API",
+    "OPENCLAW_LLM_URL", "OPENCLAW_PORT", "OPENCLAW_TOKEN",
+})
 _READ_ONLY_ENV_FIELDS = {
     "ODS_MODE": "Runtime mode is selected by the installer and cannot be changed from the dashboard.",
     "TIER": "The active tier is managed by Model Manager so model consumers stay synchronized.",
@@ -213,6 +220,10 @@ def _build_env_fields(
     fields: dict[str, dict[str, Any]] = {}
 
     for key, definition in schema_properties.items():
+        # Retired keys stay in the schema so older .env files that still
+        # carry them keep validating. Show one only when this file has it.
+        if definition.get("deprecated") is True and key not in values:
+            continue
         field_type = definition.get("type", "string")
         value = values.get(key, "")
         fields[key] = {
@@ -435,8 +446,6 @@ def _match_apply_service(key: str) -> Optional[str]:
         return "hermes"
     if key.startswith("ODS_PROXY_"):
         return "ods-proxy"
-    if key.startswith("OPENCLAW_"):
-        return "openclaw"
     if key.startswith("COMFYUI_"):
         return "comfyui"
     if key.startswith("RAG_"):
@@ -504,7 +513,7 @@ def _compute_env_apply_plan(
         return False
 
     for key in changed_keys:
-        if key in _LIVE_READ_ENV_KEYS:
+        if key in _LIVE_READ_ENV_KEYS or key in _RETIRED_ENV_KEYS:
             continue
         if key == "EMBEDDING_MODEL":
             schedule("embeddings")
