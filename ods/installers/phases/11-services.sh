@@ -1648,6 +1648,14 @@ MODELS_INI_EOF
         if command -v systemd-run >/dev/null 2>&1 \
             && [[ -d "$_upgrade_runtime_dir" && -S "$_upgrade_runtime_dir/bus" ]] \
             && "${_upgrade_systemd_env[@]}" systemctl --user show-environment >/dev/null 2>&1; then
+            # Without lingering, the user manager stops when the installer's
+            # login session ends and takes this unit with it. OpenCode (phase
+            # 07) and AMD tuning (phase 10) enable it already; default NVIDIA
+            # and CPU installs reach this point without it. Each attempt's
+            # error output is dropped because the next step covers it.
+            loginctl enable-linger "$(whoami)" 2>/dev/null \
+                || { ods_sudo_available && ods_sudo loginctl enable-linger "$(whoami)" 2>/dev/null; } \
+                || ai_warn "Could not enable linger. The background model download may stop after logout. Run: loginctl enable-linger $(whoami)"
             "${_upgrade_systemd_env[@]}" systemctl --user stop "$_upgrade_unit" >/dev/null 2>&1 || true
             "${_upgrade_systemd_env[@]}" systemctl --user reset-failed "$_upgrade_unit" >/dev/null 2>&1 || true
             if "${_upgrade_systemd_env[@]}" systemd-run --user --unit="${_upgrade_unit%.service}" --no-block \
