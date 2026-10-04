@@ -469,7 +469,7 @@ function Get-ODSWslStartupConfig($Identity) {
     $value
 }
 
-function Enable-ODSWslStartup($Identity,[string]$DockerDesktopPath = '') {
+function Enable-ODSWslStartup($Identity,[string]$DockerDesktopPath = '',[switch]$NewInstallation) {
     $null = Assert-ODSWslManifest $Identity
     $null = Assert-ODSWslTask $Identity
     $taskName = $Identity.taskName + '-Startup'
@@ -488,7 +488,13 @@ function Enable-ODSWslStartup($Identity,[string]$DockerDesktopPath = '') {
     if (Test-Path -LiteralPath $relaySource -PathType Leaf) {
         Write-ODSPrivateBytes (Join-Path $Identity.directory 'wsl-agent-relay.ps1') ([IO.File]::ReadAllBytes($relaySource))
     }
-    if (-not (Get-ODSWslStartupIntent $Identity)) { Set-ODSWslStartupIntent $Identity $true }
+    # Uninstall retires sign-in startup (stop preference, task disabled) but
+    # keeps this per-root directory, so a new installation at the same root
+    # inherited that stop and never returned after sign-in (fleet run,
+    # 2026-10-03). A verified new installation re-arms recovery; an installer
+    # rerun over an existing installation keeps the owner's explicit stop.
+    $intent = Get-ODSWslStartupIntent $Identity
+    if (-not $intent -or ($NewInstallation -and -not $intent.desiredRunning)) { Set-ODSWslStartupIntent $Identity $true }
     if (-not $existing) {
         $action = New-ScheduledTaskAction -Execute (Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe') -Argument (Get-ODSWslStartupArguments $Identity)
         $principal = New-ScheduledTaskPrincipal -UserId $Identity.ownerSid -LogonType Interactive -RunLevel Limited
@@ -497,7 +503,8 @@ function Enable-ODSWslStartup($Identity,[string]$DockerDesktopPath = '') {
         $settings = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit ([TimeSpan]::FromMinutes(25)) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Trigger $trigger -Settings $settings -Description 'Restore this ODS WSL installation at owner sign-in only while its saved preference is running.' | Out-Null
     }
-    $null = Assert-ODSWslStartupTask $Identity
+    $task = Assert-ODSWslStartupTask $Identity
+    if ($NewInstallation -and $task.State -eq 'Disabled') { Enable-ScheduledTask -TaskName $taskName | Out-Null }
 }
 
 function Assert-ODSWslStartupStillWanted {

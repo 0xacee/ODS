@@ -118,6 +118,19 @@ try {
     Set-ODSWslStartupIntent $identity $false
     Enable-ODSWslStartup $identity
     Check ($script:registrations -eq 1 -and -not (Get-ODSWslStartupIntent $identity).desiredRunning) 'rerun preserves explicit stop and never rewrites task registration'
+    # Uninstall retirement leaves desiredRunning=false and a disabled task in
+    # this per-root directory; only a new installation re-arms both.
+    $script:startupTask | Add-Member -NotePropertyName State -NotePropertyValue 'Disabled' -Force
+    $script:enabledTasks=@()
+    function Enable-ScheduledTask { param($TaskName); $script:enabledTasks+=$TaskName; $script:startupTask.State='Ready' }
+    Enable-ODSWslStartup $identity
+    Check (-not (Get-ODSWslStartupIntent $identity).desiredRunning -and $script:enabledTasks.Count -eq 0) 'installer rerun keeps the stop and leaves the disabled startup task alone'
+    Enable-ODSWslStartup $identity -NewInstallation
+    Check ((Get-ODSWslStartupIntent $identity).desiredRunning) 'new installation at a retired root re-arms sign-in recovery'
+    Check ($script:enabledTasks.Count -eq 1 -and $script:enabledTasks[0] -ceq ($identity.taskName+'-Startup') -and $script:registrations -eq 1) 'new installation re-enables the retired startup task without re-registering it'
+    Enable-ODSWslStartup $identity -NewInstallation
+    Check ($script:enabledTasks.Count -eq 1) 'an enabled startup task is not re-enabled'
+    Set-ODSWslStartupIntent $identity $false
     Invoke-ODSWslStartup $fixture
     Check ($script:events.Count -eq 0) 'disabled startup performs no Docker WSL or service operation'
     Check ((Read-ODSWslJson (Join-Path $fixture 'startup-status.json')).state -eq 'disabled') 'disabled startup is visible in status'
