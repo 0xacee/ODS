@@ -30,6 +30,11 @@ make_stub_bin() {
     cat > "$stub_dir/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${DOCKER_LOG:?}"
+if [[ "${1:-}" == ps ]]; then
+    [[ "${FAKE_DOCKER_MODE:-}" == postcheck-fail ]] && exit 77
+    [[ "${FAKE_DOCKER_MODE:-}" == project-survives ]] && printf '%s\n' 'unselected-running-service'
+    exit 0
+fi
 if [[ "${1:-}" == "compose" && "${2:-}" == "ls" ]]; then
     [[ "${FAKE_DOCKER_MODE:-}" == inventory-fail ]] && exit 73
     printf '%s\n' "ods"
@@ -101,22 +106,6 @@ main() {
     fi
     pass "restore stops the authoritative Compose project with saved .compose-flags"
 
-    # Without the receipt, the resolver/base overlay fallback must still give
-    # compose a project file instead of a bare `down`.
-    local install_noflags="$TMP_DIR/install-noflags"
-    local log_noflags="$TMP_DIR/docker-noflags.log"
-    mkdir -p "$install_noflags"
-    : > "$log_noflags"
-    make_install "$install_noflags"
-    rm -f "$install_noflags/.compose-flags"
-    printf '#!/bin/sh\nprintf "%%s\\n" "-f docker-compose.base.yml"\n' > "$install_noflags/scripts/resolve-compose-stack.sh"
-    chmod +x "$install_noflags/scripts/resolve-compose-stack.sh"
-    DOCKER_LOG="$log_noflags" run_restore "$install_noflags" "$stub_dir"
-
-    grep -qF 'compose -f docker-compose.base.yml down' "$log_noflags" \
-        || fail "restore must fall back to the base compose file when no receipt exists (got: $(cat "$log_noflags"))"
-    pass "restore uses the authoritative resolver without a receipt"
-
     local spaced="$TMP_DIR/install-spaced" spaced_log="$TMP_DIR/spaced.log"
     make_install "$spaced"
     touch "$spaced/overlay space.yml"
@@ -127,7 +116,7 @@ main() {
     pass "quoted Compose file paths survive parsing"
 
     local mode failed_install failed_log
-    for mode in empty-flags malformed-flags missing-file missing-stack resolver-fail config-fail inventory-fail stop-fail; do
+    for mode in empty-flags malformed-flags missing-file missing-stack missing-receipt-with-resolver config-fail inventory-fail stop-fail project-survives postcheck-fail; do
         failed_install="$TMP_DIR/failure-$mode"
         failed_log="$TMP_DIR/$mode.log"
         make_install "$failed_install"
@@ -137,9 +126,9 @@ main() {
             malformed-flags) printf '%s\n' '--project-name foreign' > "$failed_install/.compose-flags" ;;
             missing-file) printf '%s\n' '-f missing.yml' > "$failed_install/.compose-flags" ;;
             missing-stack) rm "$failed_install/.compose-flags" ;;
-            resolver-fail)
+            missing-receipt-with-resolver)
                 rm "$failed_install/.compose-flags"
-                printf '#!/bin/sh\nexit 76\n' > "$failed_install/scripts/resolve-compose-stack.sh"
+                printf '#!/bin/sh\nprintf "%%s\\n" "-f docker-compose.base.yml"\n' > "$failed_install/scripts/resolve-compose-stack.sh"
                 chmod +x "$failed_install/scripts/resolve-compose-stack.sh" ;;
         esac
         : > "$failed_log"
@@ -147,7 +136,7 @@ main() {
             fail "$mode must refuse restore"
         fi
         [[ "$(cat "$failed_install/data/sentinel")" == 'recovery sentinel' ]] || fail "$mode lost recovery data"
-        if [[ "$mode" != stop-fail ]] && grep -F ' down' "$failed_log"; then fail "$mode attempted shutdown"; fi
+        if [[ "$mode" != stop-fail && "$mode" != project-survives && "$mode" != postcheck-fail ]] && grep -F ' down' "$failed_log"; then fail "$mode attempted shutdown"; fi
         pass "$mode fails closed before restoring data"
     done
 }

@@ -405,15 +405,8 @@ resolve_compose_flags() {
     if [[ -e "$ODS_DIR/.compose-flags" || -L "$ODS_DIR/.compose-flags" ]]; then
         [[ -f "$ODS_DIR/.compose-flags" && ! -L "$ODS_DIR/.compose-flags" ]] || return 1
         cat "$ODS_DIR/.compose-flags"
-    elif [[ -x "$ODS_DIR/scripts/resolve-compose-stack.sh" ]]; then
-        "$ODS_DIR/scripts/resolve-compose-stack.sh" \
-            --script-dir "$ODS_DIR" \
-            --tier "${TIER:-1}" \
-            --gpu-backend "${GPU_BACKEND:-nvidia}" \
-            --gpu-count "${GPU_COUNT:-1}" \
-            --ods-mode "${ODS_MODE:-local}"
     else
-        log_error "Cannot resolve the installed Compose stack; restore .compose-flags or its resolver before retrying." >&2
+        log_error "Cannot prove the installed Compose stack without .compose-flags; rebuild the stack receipt before retrying." >&2
         return 1
     fi
 }
@@ -461,16 +454,26 @@ print(name)
         log_error "Cannot determine running containers; refusing to restore."
         return 1
     fi
-    if ! printf '%s\n' "$projects" | grep -Fxq -- "$project"; then
-        log_info "No running containers found for $project"
-        return 0
+    if printf '%s\n' "$projects" | grep -Fxq -- "$project"; then
+        if ! docker compose "${compose_args[@]}" down; then
+            log_error "Containers did not stop; refusing to restore live data."
+            return 1
+        fi
     fi
-    if docker compose "${compose_args[@]}" down; then
-        log_success "Containers stopped"
-    else
-        log_error "Containers did not stop; refusing to restore live data."
+    # A stale/incomplete receipt may omit an enabled service. Preserve such
+    # containers rather than widening down to orphans, but never restore data
+    # while any container in the actual project is still running.
+    local remaining
+    if ! remaining=$(docker ps --filter "label=com.docker.compose.project=$project" --format '{{.ID}}'); then
+        log_error "Cannot verify project shutdown; refusing to restore live data."
         return 1
     fi
+    if [[ -n "$remaining" ]]; then
+        log_error "Project containers remain running; preserve them and repair .compose-flags before retrying restore."
+        return 1
+    fi
+    log_success "Project containers are stopped"
+    return 0
 }
 
 # Restore all selected paths as one transaction. User data remains additive:
