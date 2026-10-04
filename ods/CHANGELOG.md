@@ -313,6 +313,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     sorted even when nothing changed. The upgrade compares the exact bytes it
     recorded at the start, so it refused to continue. The config is now left
     alone when the chat endpoint is already enabled.
+  - A held upgrade that failed after its point of no return could only resume
+    the same candidate. When that candidate failed every time, the machine
+    stayed stuck: Portal was paused, another installer was refused, and so was
+    uninstall. A corrected installer for the same update can now take it over
+    under the same hold, and the update completes normally. The takeover is
+    refused unless the installed tree exactly matches the stuck plan and the
+    protected coordinator is intact. A Full Access update whose configuration
+    bytes changed still needs manual recovery
+    (`docs/pixel/SOURCE-UPGRADE-RECOVERY.md`).
 - `ods-uninstall.sh` now validates Pixel before it stops the background model
   upgrade or turns off Windows startup. A Pixel refusal used to leave start-up
   at sign-in disabled; now it changes nothing.

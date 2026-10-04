@@ -282,6 +282,15 @@ else
                     _ods_pixel_install_access_service "$_phase06_pixel_owner" \
                         "$_phase06_pixel_binary" false true "$SCRIPT_DIR" || return 1
                 fi
+                # Past the downstream boundary the update can only go forward,
+                # possibly under this corrected installer, which took over a
+                # failed one at stage. Its coordinator replaces the previous
+                # one once this tree is applied, before anything else runs.
+                _phase06_source_downstream=false
+                if jq -e '.downstream == true' <<<"$_phase06_source_status" >/dev/null; then
+                    _phase06_source_downstream=true
+                    ai "Resuming the interrupted Pixel source upgrade under its existing admission hold..."
+                fi
                 unset _phase06_source_status
                 ODS_PIXEL_SOURCE_TRANSACTION="$(_ods_pixel_source_upgrade hold "$_phase06_pixel_owner")" || return 1
                 [[ "$ODS_PIXEL_SOURCE_TRANSACTION" =~ ^[a-f0-9]{64}$ ]] || return 1
@@ -291,7 +300,11 @@ else
                 # and native services. Recovery must resume this same candidate;
                 # a source-only rollback would no longer restore the installer.
                 _ods_pixel_source_upgrade downstream "$_phase06_pixel_owner" || return 1
-                unset _phase06_pixel_binary
+                if [[ "$_phase06_source_downstream" == true ]]; then
+                    _ods_pixel_install_access_service "$_phase06_pixel_owner" \
+                        "$_phase06_pixel_binary" false true || return 1
+                fi
+                unset _phase06_pixel_binary _phase06_source_downstream
                 ;;
             1) ;;
             *)

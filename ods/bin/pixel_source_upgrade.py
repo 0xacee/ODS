@@ -985,7 +985,8 @@ class SourceUpgrade:
         return self._mirror_record()['after']
 
     @locked
-    def stage(self, source, source_uid, identity, *, retire_complete=None, rebase_unheld=False):
+    def stage(self, source, source_uid, identity, *, retire_complete=None, rebase_unheld=False,
+              supersede=False):
         source = Path(source)
         if source.resolve() == self.install:
             raise UpgradeError('source-separate-candidate-required')
@@ -1001,6 +1002,7 @@ class SourceUpgrade:
         candidate = inventory(source, source_uid, candidate=True)
         existing = self.journal()
         preserved_mirror = None
+        superseded = None
         if existing is not None:
             same = existing['identity'] == identity and existing['candidate'] == candidate
             if existing['phase'] == 'complete' and callable(retire_complete):
@@ -1027,6 +1029,19 @@ class SourceUpgrade:
                         if absolute_file(Path(key))[0] not in (record['before'][key], record['after'][key]):
                             raise UpgradeError('source-mirror-changed')
                     preserved_mirror = raw
+            elif not same and supersede:
+                # Resume-only recovery cannot finish an update whose own
+                # candidate fails every time. A corrected candidate of the
+                # SAME update may take over its exactly applied tree under the
+                # same hold. Nothing is rolled back, admission stays held, and
+                # the new plan is past the downstream boundary from the start.
+                if (existing['phase'] != 'applied' or existing['hold'] is None
+                        or existing['identity'] != identity):
+                    raise UpgradeError('source-supersede-refused')
+                if inventory(self.install, self.uid) != existing['after']:
+                    raise UpgradeError('source-live-drift')
+                self.verify_mirror()
+                superseded = existing
             elif not same:
                 raise UpgradeError("source-candidate-changed")
             else:
@@ -1035,12 +1050,16 @@ class SourceUpgrade:
                     self._prepare_scratch()
                 return existing
         before = inventory(self.install, self.uid)
+        if superseded is not None and before != superseded['after']:
+            raise UpgradeError('source-live-drift')
         # Match source-copy's existing non-deleting semantics: an upgrade is
         # not authorization to remove owner-added extensions or old helpers.
         after = installed_projection(before, candidate)
         value = dict(version=1, install=str(self.install), uid=self.uid,
                      identity=identity, before=before, after=after, candidate=candidate,
                      hold=None, phase="staged", outcome=None)
+        if superseded is not None:
+            value.update(hold=superseded['hold'], phase='held')
         # Capture both complete inventories before publishing intent. A crash
         # leaves unused hash-addressed blobs, never an authorized partial plan.
         for root, uid, listing, is_candidate in ((self.install, self.uid, before, False), (source, source_uid, candidate, True)):
@@ -1054,8 +1073,15 @@ class SourceUpgrade:
         if preserved_mirror is not None:
             name = 'mirror-' + sha(encoded([identity, candidate])) + '.json'
             self._write(name, preserved_mirror)
+        if superseded is not None:
+            # The replaced plan, its mirror and its downstream record remain
+            # as content-addressed evidence; none of them is authority again.
+            raw = encoded(superseded)
+            self._write(sha(raw), raw)
         self._save(value)
         self.journal()  # validate the complete serialized contract before use
+        if superseded is not None:
+            self._write(self.downstream_name(), encoded({'transaction': value['hold']}))
         self._renew_unheld_scratch_after_remount()
         self._prepare_scratch()
         return value
@@ -1377,7 +1403,26 @@ def _stage(manager, account, source, requested_ref):
     def retire(_completed):
         if os.path.lexists(manager.state.parent / 'transition.json'):
             raise UpgradeError('source-previous-hold-pending')
-    manager.stage(Path(source), account.pw_uid, identity, retire_complete=retire, rebase_unheld=rebase_unheld)
+    # Only a fully applied plan whose own model transaction still holds
+    # admission (matched to this hold above) may be taken over.
+    supersede = (not fresh and existing['phase'] == 'applied'
+                 and os.path.lexists(manager.state.parent / 'transition.json'))
+    manager.stage(Path(source), account.pw_uid, identity, retire_complete=retire,
+                  rebase_unheld=rebase_unheld, supersede=supersede)
+
+
+def needs_source_begin(plan, status, past_downstream):
+    """Whether `hold` must acquire admission rather than re-verify its hold.
+
+    Acquisition requires the original owner baseline, which no longer exists
+    after the downstream boundary. A plan past it, including one that took
+    over a failed update, re-verifies its existing hold even after an error.
+    """
+    if plan['hold'] is None or status == {'pending': False}:
+        return True
+    if status.get('phase') in ('acquiring', 'draining'):
+        return True
+    return status.get('phase') == 'error' and plan['phase'] == 'held' and not past_downstream
 
 
 @contextlib.contextmanager
@@ -1422,22 +1467,20 @@ def main(argv):
             return
         raise UpgradeError("source-stage-required")
     client = _client()
+    past_downstream = os.path.lexists(manager.state / manager.downstream_name())
     if action == "status":
         pending = client("status")
         if value["phase"] == "complete" and pending == {"pending": False}:
             print(json.dumps({"pending": False}))
         else:
             print(json.dumps(dict(pending=True, transaction=value["hold"], phase=value["phase"],
-                                  mode=pending.get("configured_mode"))))
+                                  mode=pending.get("configured_mode"), downstream=past_downstream)))
         return
     if action == "hold":
         transaction = value["hold"]
         # source-begin reserves this exact token under the root admission lock
         # before any gate call. A lost reply can never orphan an unrelated hold.
-        status = client('status')
-        if (transaction is None or status == {'pending': False}
-                or status.get('phase') in ('acquiring', 'draining')
-                or status.get('phase') == 'error' and value['phase'] == 'held'):
+        if needs_source_begin(value, client('status'), past_downstream):
             transaction = client("source-begin")
         manager.bind(transaction, lambda token: client("verify", token))
         print(transaction)
