@@ -242,6 +242,14 @@ rm -f -- "$TEST_ROOT/attempt-logs"
 _ods_pixel_enable_chat_endpoint "$owner" "$home"
 check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["gateway"]["http"]["endpoints"]["chatCompletions"]["enabled"] is True; assert v["preserve"]["value"] == 7' "$home/.openclaw/openclaw.json"
 check test "$(stat -c '%a' "$home/.openclaw/openclaw.json")" = 600
+# An already enabled endpoint leaves the file byte-for-byte alone, whatever its
+# serialization: a held source upgrade compares the exact bytes it recorded
+# before this step (Full Access writes the config unsorted).
+printf '%s\n' '{"preserve": {"value": 7}, "gateway": {"http": {"endpoints": {"chatCompletions": {"enabled": true}}}}}' \
+    > "$home/.openclaw/openclaw.json"
+chat_config_before="$(sha256sum "$home/.openclaw/openclaw.json")"
+_ods_pixel_enable_chat_endpoint "$owner" "$home"
+check test "$(sha256sum "$home/.openclaw/openclaw.json")" = "$chat_config_before"
 
 rm -f "$home/.openclaw/openclaw.json"
 printf '%s\n' '{}' > "$TEST_ROOT/symlink-target.json"

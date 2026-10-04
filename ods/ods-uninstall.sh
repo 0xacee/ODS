@@ -334,6 +334,22 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -r)" == *[Mm]icrosoft* ]]; then
     fi
 fi
 
+# Validate Pixel before stopping the model upgrade or changing Windows startup,
+# so a refusal leaves everything as it was. Removal below validates again.
+if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ -f "$SCRIPT_DIR/lib/pixel-uninstall.sh" ]]; then
+        # shellcheck source=lib/pixel-uninstall.sh
+        . "$SCRIPT_DIR/lib/pixel-uninstall.sh"
+        if ! ODS_PIXEL_UNINSTALL_VALIDATE_ONLY=true ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME"; then
+            log_error "Pixel validation failed; nothing was changed"
+            exit 1
+        fi
+    elif [[ -e "$HOME/.config/ods/pixel-managed.json" || -L "$HOME/.config/ods/pixel-managed.json" ]]; then
+        log_error "ODS-managed Pixel marker exists but its uninstall helper is missing; nothing was changed"
+        exit 1
+    fi
+fi
+
 # Stop this installation's background full-model upgrade (bootstrap-upgrade.sh
 # and its download) before anything else changes. It runs detached on macOS,
 # and on Linux without a user systemd session, tracked only by a PID file in
