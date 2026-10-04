@@ -18,7 +18,50 @@
 ods_progress 42 "devtools" "Installing developer tools"
 # shellcheck source=../lib/node-runtime.sh
 . "$SCRIPT_DIR/installers/lib/node-runtime.sh"
+
+# Install Linux Node.js 22 with the host package manager when Linux Node.js
+# 20+ and npm are missing. $1 names the consumer for messages. Failures are
+# reported here; callers decide whether a missing runtime is fatal.
+_phase07_install_linux_node() {
+    local consumer="$1" tmpfile
+    if ! ods_sudo_available; then
+        ai_warn "sudo unavailable — skipping Linux Node.js install for $consumer."
+        ai "  Install Linux Node.js 22+ yourself and re-run."
+        return 0
+    fi
+    ai "Installing Linux Node.js for $consumer..."
+    case "$PKG_MANAGER" in
+        apt)
+            tmpfile=$(mktemp /tmp/nodesource-setup.XXXXXX.sh)
+            if curl -fsSL --max-time 300 https://deb.nodesource.com/setup_22.x -o "$tmpfile" 2>/dev/null; then
+                ods_sudo -E bash "$tmpfile" 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to run NodeSource apt setup script for $consumer"
+            fi
+            rm -f "$tmpfile"
+            ods_sudo apt-get install -y nodejs 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to install nodejs via apt-get for $consumer"
+            ;;
+        dnf)
+            ods_sudo dnf module install -y nodejs:22 2>&1 | tee -a "$LOG_FILE" || \
+                ods_sudo dnf install -y nodejs 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to install nodejs via dnf for $consumer"
+            ;;
+        pacman)
+            ods_sudo pacman -S --noconfirm --needed nodejs npm 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to install nodejs via pacman for $consumer"
+            ;;
+        zypper)
+            ods_sudo zypper --non-interactive install nodejs22 2>&1 | tee -a "$LOG_FILE" || \
+                ods_sudo zypper --non-interactive install nodejs 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to install nodejs via zypper for $consumer"
+            ;;
+        *)
+            ai_warn "Unknown package manager — cannot install Node.js automatically for $consumer"
+            ;;
+    esac
+    hash -r
+}
+
 if $DRY_RUN; then
+    # Pixel's host runtime needs Linux Node.js even when developer CLIs are off.
+    if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]] && ! ods_linux_node_tools_available; then
+        log "[DRY RUN] Would install Linux Node.js 22 for Portal (Pixel)"
+    fi
     if [[ "${ENABLE_DEVTOOLS:-false}" == true ]]; then
         log "[DRY RUN] Would install AI developer tools (Claude Code and Codex CLI)"
     else
@@ -32,46 +75,27 @@ if $DRY_RUN; then
     log "[DRY RUN] Would install ODS host agent systemd service (system-mode, port 7710)"
     log "[DRY RUN] Would install ODS mDNS announcer systemd service (if zeroconf available)"
 else
+    # Portal (Pixel) bootstraps a pinned Node.js runtime in phase 11 and needs
+    # Linux Node.js 20+ and npm whether or not the developer CLIs are selected.
+    # A fresh Ubuntu (including a new WSL distro) has neither, so provision it
+    # here and stop now with a clear reason instead of after the image builds.
+    if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]] && ! ods_linux_node_tools_available; then
+        _phase07_install_linux_node "Portal (Pixel)"
+        if ! ods_linux_node_tools_available; then
+            ai_bad "Portal (Pixel) requires Linux Node.js 20+ and npm, and they could not be installed automatically. See $LOG_FILE."
+            ai "  Install Linux Node.js 22 inside this Linux system (https://nodejs.org/en/download), then rerun the installer."
+            return 1 2>/dev/null || exit 1
+        fi
+        ai_ok "Linux Node.js $(node -p 'process.versions.node') ready for Portal (Pixel)"
+    fi
+
     if [[ "${ENABLE_DEVTOOLS:-false}" == true ]]; then
         ai "Installing AI developer tools..."
 
-    # Ensure Node.js/npm is available (needed for Claude Code and Codex)
+    # Ensure Node.js/npm is available (needed for Claude Code and Codex). The
+    # CLIs are optional: a failed or skipped Node.js install only skips them.
     if ! ods_linux_node_tools_available; then
-        # Node.js install needs root. When sudo isn't usable (rootless box, or
-        # non-interactive without cached/passwordless sudo), skip it with a clear
-        # warning instead of failing the install. The optional AI dev-tool CLIs
-        # (Claude Code / Codex) simply won't be installed; core ODS is
-        # unaffected. ods_sudo() below also skips these calls when sudo is absent.
-        if ! ods_sudo_available; then
-            ai_warn "sudo unavailable — skipping Node.js install (optional dev-tool CLIs will be skipped)."
-            ai "  Install Node.js 22+ yourself and re-run to add Claude Code / Codex."
-        else
-            ai "Installing Node.js..."
-            case "$PKG_MANAGER" in
-                apt)
-                    tmpfile=$(mktemp /tmp/nodesource-setup.XXXXXX.sh)
-                    if curl -fsSL --max-time 300 https://deb.nodesource.com/setup_22.x -o "$tmpfile" 2>/dev/null; then
-                        ods_sudo -E bash "$tmpfile" 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to run NodeSource apt setup script (non-fatal — Claude Code/Codex CLI will be skipped)"
-                    fi
-                    rm -f "$tmpfile"
-                    ods_sudo apt-get install -y nodejs 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to install nodejs via apt-get (non-fatal — Claude Code/Codex CLI will be skipped)"
-                    ;;
-                dnf)
-                    ods_sudo dnf module install -y nodejs:22 2>&1 | tee -a "$LOG_FILE" || \
-                        ods_sudo dnf install -y nodejs 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to install nodejs via dnf (non-fatal — Claude Code/Codex CLI will be skipped)"
-                    ;;
-                pacman)
-                    ods_sudo pacman -S --noconfirm --needed nodejs npm 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to install nodejs via pacman (non-fatal — Claude Code/Codex CLI will be skipped)"
-                    ;;
-                zypper)
-                    ods_sudo zypper --non-interactive install nodejs22 2>&1 | tee -a "$LOG_FILE" || \
-                        ods_sudo zypper --non-interactive install nodejs 2>&1 | tee -a "$LOG_FILE" || ai_warn "Failed to install nodejs via zypper (non-fatal — Claude Code/Codex CLI will be skipped)"
-                    ;;
-                *)
-                    ai_warn "Unknown package manager — cannot install Node.js automatically"
-                    ;;
-            esac
-        fi
+        _phase07_install_linux_node "Claude Code and Codex CLI"
     fi
 
     if ods_linux_node_tools_available; then
