@@ -963,6 +963,12 @@ cmd_start() {
             return 1
         fi
         ai_ok "All services started"
+        # The legacy OpenClaw extension was removed. Starts never remove orphan
+        # containers, so an upgrade that stopped before its final stack start
+        # can leave the old ods-openclaw container running.
+        if docker container inspect ods-openclaw >/dev/null 2>&1; then
+            ai_warn "The removed legacy OpenClaw container ods-openclaw still exists. Remove it with: docker rm -f ods-openclaw (see docs/MIGRATION-OPENCLAW-TO-HERMES.md)"
+        fi
     fi
 
     if [[ -z "$service" || "$service" == "llama-server" || "$service" == "llama" ]]; then

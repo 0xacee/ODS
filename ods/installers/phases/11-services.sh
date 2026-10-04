@@ -483,8 +483,6 @@ else
         load_backend_contract "cpu" || true
         LLM_HEALTHCHECK_URL="${BACKEND_PUBLIC_HEALTH_URL:-http://localhost:8080/health}"
         LLM_PUBLIC_API_PORT="${BACKEND_PUBLIC_API_PORT:-8080}"
-        OPENCLAW_PROVIDER_NAME_DEFAULT="${BACKEND_PROVIDER_NAME:-local-llama}"
-        OPENCLAW_PROVIDER_URL_DEFAULT="${BACKEND_PROVIDER_URL:-http://llama-server:8080/v1}"
         resolve_tier_config
         GPU_BACKEND="cpu"
 

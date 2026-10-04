@@ -7,9 +7,9 @@
 #          pre-download STT model
 #
 # Expects: DRY_RUN, GPU_BACKEND, ENABLE_VOICE, ENABLE_WORKFLOWS, ENABLE_RAG, ENABLE_QDRANT,
-#           ENABLE_EMBEDDINGS, ENABLE_HERMES, ENABLE_OPENCLAW, LLM_MODEL,
+#           ENABLE_EMBEDDINGS, ENABLE_HERMES, LLM_MODEL,
 #           LOG_FILE, BGRN, AMB, NC,
-#           WHISPER_PORT, TTS_PORT, OPENCLAW_PORT,
+#           WHISPER_PORT, TTS_PORT,
 #           PERPLEXICA_PORT (:-3004), COMFYUI_PORT (:-8188),
 #           show_phase(), check_service(), ai(), ai_ok(), ai_warn(), signal(),
 #           ui_status_line(), ods_ui_cinematic()
@@ -58,7 +58,6 @@ if $DRY_RUN; then
     log "[DRY RUN]   - Auto-configure Perplexica for ${LLM_MODEL:-default model}"
     [[ "$ENABLE_HERMES" == "true" ]] && log "[DRY RUN]   - Hermes Agent + hermes-proxy"
     [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" ]] && log "[DRY RUN]   - Pixel gateway + private ingress + edge"
-    [[ "$ENABLE_OPENCLAW" == "true" ]] && log "[DRY RUN]   - OpenClaw"
     [[ "$ENABLE_VOICE" == "true" ]] && log "[DRY RUN]   - Whisper (STT), Kokoro (TTS), pre-download STT model"
     [[ "$ENABLE_WORKFLOWS" == "true" ]] && log "[DRY RUN]   - n8n"
     [[ "${ENABLE_QDRANT:-${ENABLE_RAG:-false}}" == "true" ]] && log "[DRY RUN]   - Qdrant"
@@ -618,7 +617,6 @@ if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" ]]; then
         HEALTH_FAILURES=$((HEALTH_FAILURES + 1))
     fi
 fi
-[[ "$ENABLE_OPENCLAW" == "true" ]] && _check_health "OpenClaw" "http://127.0.0.1:${SERVICE_PORTS[openclaw]:-7860}${SERVICE_HEALTH[openclaw]:-/}" 150 10 "$(sr_container openclaw)"
 if [[ "${ENABLE_OPENCODE:-false}" == "true" ]]; then
     ods_systemctl_user is-active opencode-web &>/dev/null && _check_health "OpenCode Web" "http://127.0.0.1:3003/" 10 5
 fi

@@ -29,7 +29,7 @@ values. The core credentials are:
 | `WEBUI_SECRET` | Session signing for Open WebUI |
 | `LITELLM_KEY`, `LITELLM_LEMONADE_API_KEY` | LiteLLM gateway keys |
 | `QDRANT_API_KEY`, `SHIELD_API_KEY`, `TOKEN_SPY_API_KEY` | Service API keys |
-| `HERMES_DASHBOARD_SESSION_TOKEN`, `OPENCLAW_TOKEN`, `OPENCODE_SERVER_PASSWORD` | Agent and coding-tool credentials |
+| `HERMES_DASHBOARD_SESSION_TOKEN`, `OPENCODE_SERVER_PASSWORD` | Agent and coding-tool credentials |
 | `N8N_PASS`, `SEARXNG_SECRET`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DIFY_SECRET_KEY` | Optional-service credentials |
 
 Each of these is marked `"secret": true` in `.env.schema.json`. Library

@@ -27,7 +27,6 @@ tests/test-backup-macos-appledouble.sh
 tests/test-backup-restore-cli.sh
 tests/test-bash32-guards.sh
 tests/test-bind-address-sweep.sh
-tests/test-bootstrap-openclaw-compose-guard.sh
 tests/test-bootstrap-pixel-catalog-permissions.sh
 tests/test-bootstrap-upgrade-close-inherited-fds.sh
 tests/test-bootstrap-upgrade-sha-retry.sh
@@ -127,7 +126,6 @@ tests/test-ods-test-http-code.sh
 tests/test-ods-test.sh
 tests/test-ods-update-runtime-compose.sh
 tests/test-offline-embedding-gate.sh
-tests/test-openclaw-inject-token.sh
 tests/test-opencode-release.py
 tests/test-opencode-runtime.sh
 tests/test-parallel-health-checks.sh
@@ -155,7 +153,6 @@ tests/test-rollback-compose-stack.sh
 tests/test-rootless-docker-ownership.sh
 tests/test-service-registry-cache.sh
 tests/test-service-registry-encoding.py
-tests/test-session-cleanup.sh
 tests/test-simulate-installers-exit-codes.sh
 tests/test-templates.sh
 tests/test-tier-map-parity.sh
@@ -168,6 +165,7 @@ tests/test-update-backup-retention-spaces.sh
 tests/test-update-compose-restart-contract.sh
 tests/test-update-current-branch-contract.sh
 tests/test-update-current-version.sh
+tests/test-update-refreshes-compose-flags.sh
 tests/test-update-script-backup.sh
 tests/test-voice-repair-command.sh
 tests/test-webui-compose-selection.py

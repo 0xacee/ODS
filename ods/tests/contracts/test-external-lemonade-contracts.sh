@@ -71,7 +71,7 @@ phase08_plan="$({
   DRY_RUN=true GPU_BACKEND=cpu LEMONADE_EXTERNAL=true \
   ENABLE_COMFYUI=false ENABLE_VOICE=false ENABLE_WORKFLOWS=false \
   ENABLE_RAG=false ENABLE_QDRANT=false ENABLE_EMBEDDINGS=false \
-  ENABLE_HERMES=false ENABLE_OPENCLAW=false COMPOSE_FLAGS='' \
+  ENABLE_HERMES=false COMPOSE_FLAGS='' \
   bash -c '
     ods_progress() { :; }; show_phase() { :; }; ai() { :; }
     ai_ok() { :; }; ai_warn() { :; }; bootline() { :; }; signal() { :; }
@@ -261,7 +261,6 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     WEBUI_SECRET=test \
     HERMES_DASHBOARD_SESSION_TOKEN=test-hermes-dashboard-session-token \
     LITELLM_KEY=test \
-    OPENCLAW_TOKEN=test \
     N8N_USER=test@example.local \
     N8N_PASS=test \
     SEARXNG_SECRET=test \

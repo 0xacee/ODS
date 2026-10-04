@@ -135,7 +135,7 @@ def test_hermes_health_wait_remains_bounded_and_fail_closed(monkeypatch):
 @pytest.mark.parametrize(
     ("container", "attempts", "expected_attempts"),
     [
-        ("ods-openclaw", None, _mod.MODEL_ACTIVATION_HEALTH_ATTEMPTS),
+        ("ods-litellm", None, _mod.MODEL_ACTIVATION_HEALTH_ATTEMPTS),
         ("ods-hermes", 3, 3),
     ],
 )
@@ -623,7 +623,7 @@ def test_external_adoption_converges_consumers_without_touching_native_runtime(
         "_patch_hermes_model_config", "_update_opencode_config",
         "_update_perplexica_model",
         "_verify_litellm_route", "_verify_running_hermes_route",
-        "_verify_openclaw_model_env", "_restart_managed_opencode",
+        "_restart_managed_opencode",
     ):
         monkeypatch.setattr(_mod, name, lambda *_args, _name=name, **_kwargs: (
             events.append(_name) or True
@@ -644,9 +644,6 @@ def test_external_adoption_converges_consumers_without_touching_native_runtime(
         monkeypatch.setattr(_mod, "_verify_litellm_route", fail_route)
     monkeypatch.setattr(_mod, "_restart_existing_container", lambda name, *_args, **_kwargs: (
         events.append(("restart", name)) or True
-    ))
-    monkeypatch.setattr(_mod, "_recreate_openclaw_if_present", lambda *_args: (
-        events.append("openclaw") or True
     ))
     monkeypatch.setattr(_mod, "_publish_activation_route", lambda *_args: (
         events.append("route") or {}
@@ -699,7 +696,7 @@ def test_external_adoption_converges_consumers_without_touching_native_runtime(
     assert events[-1] == "receipt"
     for consumer in (
         "_write_lemonade_config", "_render_model_router_runtime_configs",
-        "_update_opencode_config", "_update_perplexica_model", "openclaw",
+        "_update_opencode_config", "_update_perplexica_model",
     ):
         assert consumer in events
 
@@ -2587,38 +2584,6 @@ class TestDownstreamRouteVerification:
         _mod._verify_litellm_route({"LITELLM_PORT": "4100", "LITELLM_KEY": "secret"})
 
         assert calls == [("127.0.0.1", "4100", "default", "/v1", "secret")]
-
-    def test_openclaw_probe_accepts_exact_lemonade_id(self, monkeypatch):
-        def fake_run(cmd, **_kwargs):
-            return subprocess.CompletedProcess(
-                cmd,
-                0,
-                stdout=(
-                    "LLM_MODEL=logical-name\n"
-                    "GGUF_FILE=Modern-Model.gguf\n"
-                    "LEMONADE_MODEL=Modern-Model\n"
-                ),
-                stderr="",
-            )
-
-        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-
-        _mod._verify_openclaw_model_env("Modern-Model")
-
-    def test_openclaw_probe_rejects_stale_model(self, monkeypatch):
-        monkeypatch.setattr(
-            _mod.subprocess,
-            "run",
-            lambda cmd, **_kwargs: subprocess.CompletedProcess(
-                cmd,
-                0,
-                stdout="LEMONADE_MODEL=Old-Model\nGGUF_FILE=Old-Model.gguf\n",
-                stderr="",
-            ),
-        )
-
-        with pytest.raises(RuntimeError, match="expected Modern-Model"):
-            _mod._verify_openclaw_model_env("Modern-Model")
 
 
 class TestPatchHermesModelConfig:
@@ -5425,7 +5390,6 @@ class TestModelActivateRollback:
         states = {
             "ods-litellm": {"exists": False, "running": False},
             "ods-hermes": {"exists": True, "running": True},
-            "ods-openclaw": {"exists": False, "running": False},
             "ods-perplexica": {"exists": False, "running": False},
         }
         events = []
@@ -6750,7 +6714,6 @@ class TestModelActivateRollback:
         states = {
             "ods-litellm": {"exists": True, "running": True},
             "ods-hermes": {"exists": False, "running": False},
-            "ods-openclaw": {"exists": False, "running": False},
             "ods-perplexica": {"exists": False, "running": False},
         }
         events = []
@@ -7017,7 +6980,6 @@ class TestModelActivateRollback:
         monkeypatch.setattr(_mod, "_restart_existing_container", fail_dependent)
         monkeypatch.setattr(_mod, "_verify_litellm_route", fail_dependent)
         monkeypatch.setattr(_mod, "_verify_running_hermes_route", fail_dependent)
-        monkeypatch.setattr(_mod, "_recreate_openclaw_if_present", fail_dependent)
         handler = _ResponseHandler()
 
         _mod.AgentHandler._do_windows_lemonade_runtime_ensure(
@@ -7179,7 +7141,7 @@ class TestModelActivateRollback:
         monkeypatch.setattr(
             _mod,
             "_container_exists",
-            lambda container: container != "ods-openclaw",
+            lambda _container: True,
         )
         monkeypatch.setattr(
             _mod,
@@ -8149,7 +8111,6 @@ class TestModelActivateRollback:
         states = {
             "ods-litellm": {"exists": True, "running": True},
             "ods-hermes": {"exists": False, "running": False},
-            "ods-openclaw": {"exists": False, "running": False},
             "ods-perplexica": {"exists": False, "running": False},
         }
         monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
@@ -8188,44 +8149,6 @@ class TestModelActivateRollback:
         _mod.AgentHandler._do_model_activate(handler, "target-model")
 
         assert handler.response_code == 200
-
-    def test_activation_recreates_openclaw_with_the_new_model_env(
-        self, tmp_path, monkeypatch,
-    ):
-        install_dir, _env_path, _env_text, _models_ini, _ini_text, _yaml, _yaml_text = (
-            _write_model_activation_fixture(tmp_path)
-        )
-        recreates = []
-        verified_models = []
-
-        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
-        monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
-        monkeypatch.setattr(_mod, "_wait_for_model_readiness", _mock_verified_readiness)
-        monkeypatch.setattr(
-            _mod, "_restart_existing_container", lambda _container, _state=None, **_kwargs: False
-        )
-        monkeypatch.setattr(
-            _mod,
-            "_container_exists",
-            lambda container: container == "ods-openclaw",
-        )
-        monkeypatch.setattr(
-            _mod,
-            "docker_compose_recreate",
-            lambda services: (recreates.append(list(services)) or True, ""),
-        )
-        monkeypatch.setattr(
-            _mod,
-            "_verify_openclaw_model_env",
-            lambda model_name: verified_models.append(model_name),
-        )
-        handler = _ResponseHandler()
-
-        _mod.AgentHandler._do_model_activate(handler, "target-model")
-
-        assert handler.response_code == 200
-        assert recreates == [["openclaw"]]
-        assert verified_models == ["new-model.gguf"]
 
     @pytest.mark.parametrize(
         ("system_name", "expected_model_id"),
@@ -8715,7 +8638,6 @@ class TestModelActivateRollback:
             for name in (
                 "ods-litellm",
                 "ods-hermes",
-                "ods-openclaw",
                 "ods-perplexica",
             )
         }
@@ -8741,7 +8663,8 @@ class TestModelActivateRollback:
         assert handler.response_code == 200
         receipt = handler.parse_response()["consumers"]
         assert receipt["litellm"] == "stopped"
-        assert receipt["openclaw"] == "stopped"
+        # Only Pixel's host gateway is reported under this key now.
+        assert receipt["openclaw"] == "not_installed"
         assert receipt["perplexica"] == "stopped"
         assert not any(call[:2] in (["docker", "restart"], ["docker", "stop"]) for call in docker_calls)
 
@@ -8760,7 +8683,6 @@ class TestModelActivateRollback:
         states = {
             "ods-litellm": {"exists": True, "running": False},
             "ods-hermes": {"exists": True, "running": True},
-            "ods-openclaw": {"exists": False, "running": False},
             "ods-perplexica": {"exists": False, "running": False},
         }
         restarts = []
@@ -8803,7 +8725,6 @@ class TestModelActivateRollback:
         states = {
             "ods-litellm": {"exists": False, "running": False},
             "ods-hermes": {"exists": True, "running": True},
-            "ods-openclaw": {"exists": False, "running": False},
             "ods-perplexica": {"exists": False, "running": False},
         }
         runtime_models = []
@@ -8876,7 +8797,6 @@ class TestModelActivateRollback:
         states = {
             "ods-litellm": {"exists": False, "running": False},
             "ods-hermes": {"exists": True, "running": True},
-            "ods-openclaw": {"exists": False, "running": False},
             "ods-perplexica": {"exists": False, "running": False},
         }
         runtime_models = []
@@ -9064,13 +8984,15 @@ class TestModelActivateRollback:
         install_dir, env_path, _env_text, _models_ini, _ini_text, _yaml, _yaml_text = (
             _write_model_activation_fixture(tmp_path)
         )
-        calls = 0
+        edited = False
         restarts = []
 
-        def capture_state(_name):
-            nonlocal calls
-            calls += 1
-            if calls == 4:
+        def capture_state(name):
+            nonlocal edited
+            # Edit .env while the pre-activation snapshot is being captured;
+            # Perplexica is the last container that snapshot records.
+            if name == "ods-perplexica" and not edited:
+                edited = True
                 env_path.write_text("GPU_BACKEND=nvidia\nLLM_MODEL=external-edit\n", encoding="utf-8")
             return {"exists": False, "running": False}
 
@@ -9214,7 +9136,6 @@ class TestModelActivateRollback:
         states = {
             "ods-litellm": {"exists": True, "running": True},
             "ods-hermes": {"exists": False, "running": False},
-            "ods-openclaw": {"exists": False, "running": False},
             "ods-perplexica": {"exists": False, "running": False},
         }
         monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
@@ -9278,7 +9199,6 @@ class TestModelActivateRollback:
         states = {
             "ods-litellm": {"exists": True, "running": True},
             "ods-hermes": {"exists": False, "running": False},
-            "ods-openclaw": {"exists": False, "running": False},
             "ods-perplexica": {"exists": False, "running": False},
         }
         route_probes = 0

@@ -12,9 +12,7 @@ for f in \
   installers/windows/docker-compose.windows-amd.yml \
   installers/windows/docker-compose.windows-amd.local.yml \
   extensions/services/litellm/compose.yaml \
-  extensions/services/litellm/compose.amd.yaml \
-  extensions/services/openclaw/compose.yaml \
-  extensions/services/openclaw/compose.amd.yaml; do
+  extensions/services/litellm/compose.amd.yaml; do
   test -f "$f" || { echo "[FAIL] missing $f"; exit 1; }
 done
 
@@ -29,7 +27,7 @@ if grep -q 'exec litellm --config /app/config.yaml' extensions/services/litellm/
   exit 1
 fi
 grep -qF 'ODS_AGENT_HOST=$(Get-EnvOrNew "ODS_AGENT_HOST" "host.docker.internal")' installers/windows/lib/env-generator.ps1 \
-  || { echo "[FAIL] Windows env generation must provide the Docker Desktop host gateway used by OpenClaw"; exit 1; }
+  || { echo "[FAIL] Windows env generation must provide the Docker Desktop host gateway for host services"; exit 1; }
 grep -q 'config.*litellm' installers/windows/install-windows.ps1 \
   || { echo "[FAIL] Windows llama-server fallback must update LiteLLM local config"; exit 1; }
 grep -q 'host.docker.internal:.*v1' installers/windows/install-windows.ps1 \
@@ -51,9 +49,8 @@ fi
 tmp_env="$(mktemp)"
 tmp_custom_port_env="$(mktemp)"
 tmp_switchboard_env="$(mktemp)"
-tmp_openclaw_windows_env="$(mktemp)"
-tmp_openclaw_linux_env="$(mktemp)"
-trap 'rm -f "$tmp_env" "$tmp_custom_port_env" "$tmp_switchboard_env" "$tmp_openclaw_windows_env" "$tmp_openclaw_linux_env"' EXIT
+tmp_full_stack_env="$(mktemp)"
+trap 'rm -f "$tmp_env" "$tmp_custom_port_env" "$tmp_switchboard_env" "$tmp_full_stack_env"' EXIT
 cat > "$tmp_env" <<'ENV_EOF'
 WEBUI_SECRET=ci-placeholder
 OLLAMA_PORT=11434
@@ -75,21 +72,14 @@ OPEN_WEBUI_LLM_BASE_URL=http://litellm:4000
 OPEN_WEBUI_LLM_API_KEY=ci-litellm-key
 ENV_EOF
 
-cat > "$tmp_openclaw_windows_env" <<'ENV_EOF'
+cat > "$tmp_full_stack_env" <<'ENV_EOF'
 WEBUI_SECRET=ci-placeholder
 HERMES_DASHBOARD_SESSION_TOKEN=ci-hermes-dashboard-session-token
-OPENCLAW_TOKEN=ci-openclaw-token
 ODS_AGENT_HOST=host.docker.internal
 AMD_INFERENCE_PORT=18080
 SEARXNG_SECRET=ci-searxng-secret
 N8N_USER=ci@example.test
 N8N_PASS=ci-n8n-password
-ENV_EOF
-
-cat > "$tmp_openclaw_linux_env" <<'ENV_EOF'
-WEBUI_SECRET=ci-placeholder
-OPENCLAW_TOKEN=ci-openclaw-token
-AMD_INFERENCE_PORT=8080
 ENV_EOF
 
 rendered="$(
@@ -138,8 +128,6 @@ grep -q 'OLLAMA_URL: http://host.docker.internal:18080' <<<"$custom_port_rendere
 grep -q 'OPENAI_API_BASE_URL: http://host.docker.internal:18080/v1' <<<"$custom_port_rendered" \
   || { echo "[FAIL] Open WebUI must honor AMD_INFERENCE_PORT"; exit 1; }
 
-grep -qF '"http://host.docker.internal:$($script:LEMONADE_PORT)/api"' installers/windows/phases/06-directories.ps1 \
-  || { echo "[FAIL] Windows OpenClaw config must honor the resolved native port"; exit 1; }
 grep -qF '"--port", [string]$script:LEMONADE_PORT' installers/windows/install-windows.ps1 \
   || { echo "[FAIL] Windows installer must launch native llama-server on the resolved port"; exit 1; }
 grep -qF '$script:LEMONADE_PORT = if ($cloudMode)' installers/windows/install-windows.ps1 \
@@ -177,45 +165,38 @@ grep -q 'ods-select-config.sh' <<<"$switchboard_litellm_rendered" \
 
 # Match the Windows installer's precedence: platform overlays are loaded before
 # extension base/GPU overlays. Rendering the complete stack catches a later
-# compose.amd.yaml accidentally restoring the disabled llama-server endpoint.
-openclaw_windows_compose_args=(
-  --env-file "$tmp_openclaw_windows_env"
+# extension compose.yaml or compose.amd.yaml that points a core service back at
+# the disabled in-network llama-server.
+full_stack_compose_args=(
+  --env-file "$tmp_full_stack_env"
   -f docker-compose.base.yml
   -f installers/windows/docker-compose.windows-amd.yml
   -f installers/windows/docker-compose.windows-amd.local.yml
 )
 for extension_dir in extensions/services/*/; do
   [[ -f "${extension_dir}compose.yaml" ]] \
-    && openclaw_windows_compose_args+=(-f "${extension_dir}compose.yaml")
+    && full_stack_compose_args+=(-f "${extension_dir}compose.yaml")
   [[ -f "${extension_dir}compose.amd.yaml" ]] \
-    && openclaw_windows_compose_args+=(-f "${extension_dir}compose.amd.yaml")
+    && full_stack_compose_args+=(-f "${extension_dir}compose.amd.yaml")
 done
 
-openclaw_windows_rendered="$(
-  env -u ODS_AGENT_HOST -u AMD_INFERENCE_PORT \
-    docker compose "${openclaw_windows_compose_args[@]}" config openclaw
+full_stack_webui_rendered="$(
+  env -u ODS_AGENT_HOST -u AMD_INFERENCE_PORT -u OPEN_WEBUI_LLM_BASE_URL -u LLM_API_BASE_PATH \
+    docker compose "${full_stack_compose_args[@]}" config open-webui
 )"
-
-openclaw_windows_ollama_url="$(sed -n 's/^[[:space:]]*OLLAMA_URL:[[:space:]]*//p' <<<"$openclaw_windows_rendered")"
-if [[ "$openclaw_windows_ollama_url" != "http://host.docker.internal:18080/api" ]]; then
-  echo "[FAIL] Windows AMD OpenClaw OLLAMA_URL mismatch: ${openclaw_windows_ollama_url:-<missing>}"
+full_stack_webui_url="$(sed -n 's/^[[:space:]]*OPENAI_API_BASE_URL:[[:space:]]*//p' <<<"$full_stack_webui_rendered")"
+if [[ "$full_stack_webui_url" != "http://host.docker.internal:18080/v1" ]]; then
+  echo "[FAIL] Windows AMD full-stack Open WebUI OPENAI_API_BASE_URL mismatch: ${full_stack_webui_url:-<missing>}"
   exit 1
 fi
 
-openclaw_linux_rendered="$(
-  env -u ODS_AGENT_HOST -u AMD_INFERENCE_PORT \
-    docker compose \
-    --env-file "$tmp_openclaw_linux_env" \
-    -f docker-compose.base.yml \
-    -f docker-compose.amd.yml \
-    -f extensions/services/openclaw/compose.yaml \
-    -f extensions/services/openclaw/compose.amd.yaml \
-    config openclaw
+full_stack_dashboard_rendered="$(
+  env -u ODS_AGENT_HOST -u AMD_INFERENCE_PORT -u LLM_API_BASE_PATH \
+    docker compose "${full_stack_compose_args[@]}" config dashboard-api
 )"
-
-openclaw_linux_ollama_url="$(sed -n 's/^[[:space:]]*OLLAMA_URL:[[:space:]]*//p' <<<"$openclaw_linux_rendered")"
-if [[ "$openclaw_linux_ollama_url" != "http://llama-server:8080/api" ]]; then
-  echo "[FAIL] Linux AMD OpenClaw OLLAMA_URL mismatch: ${openclaw_linux_ollama_url:-<missing>}"
+full_stack_dashboard_url="$(sed -n 's/^[[:space:]]*OLLAMA_URL:[[:space:]]*//p' <<<"$full_stack_dashboard_rendered")"
+if [[ "$full_stack_dashboard_url" != "http://host.docker.internal:18080" ]]; then
+  echo "[FAIL] Windows AMD full-stack dashboard-api OLLAMA_URL mismatch: ${full_stack_dashboard_url:-<missing>}"
   exit 1
 fi
 

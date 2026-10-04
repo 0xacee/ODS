@@ -130,7 +130,7 @@ def mount_id(fd):
 FEATURE_COMPOSE_SERVICES = frozenset({
     'litellm', 'searxng', 'token-spy', 'whisper', 'tts', 'n8n', 'qdrant',
     'embeddings', 'hermes', 'hermes-proxy', 'pixel-edge', 'pixel-model-relay',
-    'openclaw', 'ape', 'comfyui', 'perplexica', 'privacy-shield', 'ods-proxy',
+    'ape', 'comfyui', 'perplexica', 'privacy-shield', 'ods-proxy',
     'tailscale', 'langfuse', 'brave-search',
 })
 

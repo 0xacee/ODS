@@ -365,15 +365,12 @@ assert_in_order "$cleanup_refresh_block" "Lemonade cleanup refresh compose args"
     'up -d --force-recreate --no-deps llama-server'
 pass "Lemonade cleanup refresh reuses active compose args before .compose-flags fallback"
 
-openclaw_recreate_block="$(awk '
-    /Recreating OpenClaw to pick up model change/ { in_block=1 }
-    in_block { print }
-    in_block && /up -d --force-recreate openclaw/ { exit }
-' "$TARGET" | grep -v '^[[:space:]]*#')"
-
-grep -qF 'env -u GGUF_FILE -u LLM_MODEL -u MAX_CONTEXT -u CTX_SIZE' <<<"$openclaw_recreate_block" \
-    || fail "OpenClaw recreate must strip model vars so .env wins compose interpolation"
-pass "OpenClaw recreate strips model env before compose"
+# The legacy OpenClaw extension was removed; nothing may recreate or inspect
+# its container. Pixel's host OpenClaw runtime is reconciled separately.
+if grep -Eq 'ods-openclaw|_lemonade_openclaw|LEMONADE_OPENCLAW|force-recreate( --no-deps)? openclaw' <<<"$active_code"; then
+    fail "bootstrap upgrade must not recreate or inspect the removed legacy OpenClaw container"
+fi
+pass "bootstrap upgrade no longer touches the removed legacy OpenClaw container"
 
 grep -qF 'inspect ods-llama-server --format' <<<"$active_code" \
     || fail "hot-swap must inspect the recreated container command"
@@ -460,8 +457,6 @@ assert_in_order "$windows_activation_block" "Windows Lemonade activation" \
     'model_id="$(read_env_value LEMONADE_MODEL)"' \
     'refresh_windows_lemonade_litellm_after_swap "$model_id"' \
     'patch_hermes_model_after_swap' \
-    'recreate_windows_lemonade_openclaw' \
-    'verify_windows_lemonade_openclaw_model_env "$model_id"' \
     'request_windows_switchboard_route_reconciliation' \
     'reconcile_ods_managed_pixel_model' \
     'release_model_router_swap_gate' \
@@ -520,23 +515,9 @@ grep -qF 'model: openai/${model_id}' <<<"$litellm_refresh_block" \
 grep -qF '$DOCKER_CMD restart ods-litellm' <<<"$litellm_refresh_block" \
     || fail "Windows Lemonade must reload LiteLLM after regenerating its config"
 
-openclaw_refresh_block="$(function_block recreate_windows_lemonade_openclaw | grep -v '^[[:space:]]*#')"
 dependent_state_block="$(function_block windows_lemonade_container_present | grep -v '^[[:space:]]*#')"
 grep -qF '$DOCKER_CMD ps -a' <<<"$dependent_state_block" \
     || fail "Windows Lemonade must detect stopped or running dependent containers before the transaction"
-grep -qF 'env -u GGUF_FILE -u LLM_MODEL -u LEMONADE_MODEL -u MAX_CONTEXT -u CTX_SIZE' <<<"$openclaw_refresh_block" \
-    || fail "Windows Lemonade OpenClaw recreate must let the restored/current .env win interpolation"
-grep -qF 'up -d --force-recreate --no-deps openclaw' <<<"$openclaw_refresh_block" \
-    || fail "Windows Lemonade must force-recreate an existing OpenClaw without dependencies"
-openclaw_verify_block="$(function_block verify_windows_lemonade_openclaw_model_env | grep -v '^[[:space:]]*#')"
-grep -qF '$DOCKER_CMD inspect --type container' <<<"$openclaw_verify_block" \
-    || fail "Windows Lemonade must inspect the recreated OpenClaw environment"
-grep -qF 'LEMONADE_MODEL' <<<"$openclaw_verify_block" \
-    || fail "Windows Lemonade OpenClaw proof must prefer the exact Lemonade model ID"
-grep -qF 'actual_model="extra.${gguf_file}"' <<<"$openclaw_verify_block" \
-    || fail "Windows Lemonade OpenClaw proof must mirror OpenClaw's GGUF fallback"
-grep -qF 'actual_model" == "$expected_model' <<<"$openclaw_verify_block" \
-    || fail "Windows Lemonade OpenClaw proof must fail on stale model identity"
 
 downstream_block="$(function_block verify_windows_lemonade_downstream_route | grep -v '^[[:space:]]*#')"
 grep -qF 'read_env_value HERMES_LLM_BASE_URL' <<<"$downstream_block" \
@@ -547,7 +528,7 @@ grep -qF '$DOCKER_CMD exec "$route_container" curl' <<<"$downstream_block" \
     || fail "Windows Lemonade route proof must execute from the downstream Hermes container when present"
 grep -qF 'request_body="{\"model\":\"${escaped_model}\"' <<<"$downstream_block" \
     || fail "Windows Lemonade route proof must request the exact resolved model ID"
-pass "Windows Lemonade refreshes LiteLLM/OpenClaw and proves the consumer route"
+pass "Windows Lemonade refreshes LiteLLM and proves the consumer route"
 
 rollback_block="$(function_block rollback_windows_lemonade_swap | grep -v '^[[:space:]]*#')"
 rollback_dependents_block="$(function_block restart_windows_lemonade_dependents_after_rollback | grep -v '^[[:space:]]*#')"
@@ -555,22 +536,19 @@ grep -qF '$DOCKER_CMD restart ods-litellm' <<<"$rollback_dependents_block" \
     || fail "Windows Lemonade rollback must restart LiteLLM with its restored config"
 grep -qF 'compose_recreate_hermes' <<<"$rollback_dependents_block" \
     || fail "Windows Lemonade rollback must recreate Hermes with its restored config"
-grep -qF 'recreate_windows_lemonade_openclaw' <<<"$rollback_dependents_block" \
-    || fail "Windows Lemonade rollback must recreate a previously present OpenClaw"
 assert_in_order "$rollback_block" "Windows Lemonade rollback" \
     'previous_gguf="$(snapshot_env_value GGUF_FILE)"' \
     'restore_bootstrap_model_after_windows_swap_failure' \
     'restore_active_model_config' \
     'restart_windows_lemonade_with_previous_model "$previous_gguf"' \
     'restart_windows_lemonade_dependents_after_rollback' \
-    'verify_windows_lemonade_openclaw_model_env "$previous_model_id"' \
     'reconcile_ods_managed_pixel_model "$previous_llm_model"' \
     'release_model_router_swap_gate' \
     'verify_windows_lemonade_downstream_route "$previous_model_id" "previous model route"' \
     'Rollback verified: the previous model completed through the restored downstream route.'
 pass "Windows Lemonade rollback restarts and proves the previous routed model and managed Pixel route"
 
-for injected_failure in native model-id litellm hermes openclaw openclaw-env reconcile pixel route; do
+for injected_failure in native model-id litellm hermes reconcile pixel route; do
     if ! (
         eval "$windows_activation_block"
         failure_stage="$injected_failure"
@@ -592,14 +570,6 @@ for injected_failure in native model-id litellm hermes openclaw openclaw-env rec
         patch_hermes_model_after_swap() {
             calls+=(hermes)
             [[ "$failure_stage" != "hermes" ]]
-        }
-        recreate_windows_lemonade_openclaw() {
-            calls+=(openclaw)
-            [[ "$failure_stage" != "openclaw" ]]
-        }
-        verify_windows_lemonade_openclaw_model_env() {
-            calls+=(openclaw-env)
-            [[ "$failure_stage" != "openclaw-env" ]]
         }
         request_windows_switchboard_route_reconciliation() {
             calls+=(reconcile)
@@ -638,11 +608,9 @@ for injected_failure in native model-id litellm hermes openclaw openclaw-env rec
             native|model-id) ;;
             litellm) expected+=(litellm) ;;
             hermes) expected+=(litellm hermes) ;;
-            openclaw) expected+=(litellm hermes openclaw) ;;
-            openclaw-env) expected+=(litellm hermes openclaw openclaw-env) ;;
-            reconcile) expected+=(litellm hermes openclaw openclaw-env reconcile) ;;
-            pixel) expected+=(litellm hermes openclaw openclaw-env reconcile pixel) ;;
-            route) expected+=(litellm hermes openclaw openclaw-env reconcile pixel gate-open route gate-close) ;;
+            reconcile) expected+=(litellm hermes reconcile) ;;
+            pixel) expected+=(litellm hermes reconcile pixel) ;;
+            route) expected+=(litellm hermes reconcile pixel gate-open route gate-close) ;;
         esac
         expected+=(rollback)
         [[ "${calls[*]}" == "${expected[*]}" ]]

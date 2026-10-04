@@ -11,7 +11,6 @@ image_plan() (
     export ENABLE_OPEN_WEBUI="${7:-true}"
     export ENABLE_VOICE=false ENABLE_WORKFLOWS=false ENABLE_RAG=false
     export ENABLE_QDRANT=false ENABLE_EMBEDDINGS=false ENABLE_HERMES=false
-    export ENABLE_OPENCLAW=false
     ods_progress() { :; }; show_phase() { :; }; ai() { :; }
     ai_ok() { :; }; ai_warn() { :; }; bootline() { :; }; signal() { :; }
     source "$ROOT_DIR/installers/phases/08-images.sh"

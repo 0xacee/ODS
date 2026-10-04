@@ -102,11 +102,9 @@ ENABLE_WORKFLOWS=false
 ENABLE_RAG=false
 ENABLE_RECOMMENDED=true
 RECOMMENDED_EXPLICIT=false
-# Hermes Agent is the new default agent as of 2026-05-12. OpenClaw is
-# deprecated and gates behind --openclaw for the deprecation release.
+# Hermes Agent is the default agent when Pixel is not selected.
 ENABLE_HERMES=true
 HERMES_EXPLICIT=false
-ENABLE_OPENCLAW=false
 ENABLE_OPENCODE=false
 OPENCODE_ENABLE_EXPLICIT=false
 OPENCODE_DISABLE_EXPLICIT=false
@@ -131,7 +129,6 @@ WEBUI_RETAINED=""
 # --all run can still suppress Langfuse.
 ENABLE_LANGFUSE=false
 NO_LANGFUSE_EXPLICIT=false
-OPENCLAW_EXPLICIT=false
 ALL_FEATURES=false
 CLOUD_MODE=false
 NO_BOOTSTRAP=false
@@ -152,8 +149,10 @@ while [[ $# -gt 0 ]]; do
         --no-recommended) ENABLE_RECOMMENDED=false; RECOMMENDED_EXPLICIT=true; shift ;;
         --hermes)        ENABLE_HERMES=true; HERMES_EXPLICIT=true; shift ;;
         --no-hermes)     ENABLE_HERMES=false; HERMES_EXPLICIT=true; shift ;;
-        --openclaw)      ENABLE_OPENCLAW=true; OPENCLAW_EXPLICIT=true; shift ;;
-        --no-openclaw)   ENABLE_OPENCLAW=false; OPENCLAW_EXPLICIT=true; shift ;;
+        # Kept parseable so existing scripts keep working after the removal.
+        --openclaw|--no-openclaw)
+            printf '[WARN] The legacy OpenClaw extension was removed; %s is ignored. Portal (Pixel) and Hermes are the supported agents.\n' "$1" >&2
+            shift ;;
         --opencode)     ENABLE_OPENCODE=true; OPENCODE_ENABLE_EXPLICIT=true; shift ;;
         --no-opencode)  ENABLE_OPENCODE=false; OPENCODE_DISABLE_EXPLICIT=true; shift ;;
         --with-webui)   ENABLE_OPEN_WEBUI=true; WEBUI_ENABLE_EXPLICIT=true; shift ;;
@@ -183,11 +182,8 @@ if $ALL_FEATURES; then
     ENABLE_WORKFLOWS=true
     ENABLE_RAG=true
     ENABLE_RECOMMENDED=true
-    # --all enables the new default Hermes Agent. OpenClaw stays opt-in via
-    # --openclaw during the deprecation release; will be removed entirely
-    # in the next release.
+    # --all enables the default Hermes Agent.
     ENABLE_HERMES=true
-    $OPENCLAW_EXPLICIT || ENABLE_OPENCLAW=false
     $OPENCODE_DISABLE_EXPLICIT || ENABLE_OPENCODE=true
     ENABLE_APE=true
     ENABLE_PERPLEXICA=true
@@ -323,7 +319,6 @@ _macos_sync_builtin_compose_states() {
     _macos_set_builtin_compose_state embeddings "$ENABLE_RAG"
     _macos_set_builtin_compose_state hermes "$ENABLE_HERMES"
     _macos_set_builtin_compose_state hermes-proxy "$ENABLE_HERMES"
-    _macos_set_builtin_compose_state openclaw "$ENABLE_OPENCLAW"
     _macos_set_builtin_compose_state ape "$ENABLE_APE"
     _macos_set_builtin_compose_state perplexica "$ENABLE_PERPLEXICA"
     _macos_set_builtin_compose_state privacy-shield "$ENABLE_PRIVACY_SHIELD"
@@ -339,7 +334,7 @@ _macos_resolve_support_services() {
     ENABLE_LITELLM=true
 
     ENABLE_SEARXNG=false
-    if $ENABLE_RECOMMENDED || $ENABLE_PERPLEXICA || $ENABLE_HERMES || $ENABLE_OPENCLAW; then
+    if $ENABLE_RECOMMENDED || $ENABLE_PERPLEXICA || $ENABLE_HERMES; then
         ENABLE_SEARXNG=true
     fi
     if $ENABLE_PIXEL; then
@@ -1339,26 +1334,6 @@ if $ENABLE_PIXEL && ! $PREFLIGHT_ONLY; then
     /usr/bin/python3 "${LIB_DIR}/pixel-native-install.py" "${_pixel_install_args[@]}" \
         --preflight-only || exit 1
     ENABLE_HERMES=false
-    ENABLE_OPENCLAW=false
-    OPENCLAW_EXPLICIT=true
-fi
-
-if ! $OPENCLAW_EXPLICIT; then
-    _existing_openclaw=false
-    if command -v docker >/dev/null 2>&1 \
-       && docker ps -a --filter "name=^/ods-openclaw$" --format '{{.Names}}' 2>/dev/null \
-            | grep -q '^ods-openclaw$'; then
-        _existing_openclaw=true
-    fi
-    if [[ -d "${INSTALL_DIR}/data/openclaw" ]] \
-       && [[ -n "$(ls -A "${INSTALL_DIR}/data/openclaw" 2>/dev/null)" ]]; then
-        _existing_openclaw=true
-    fi
-    if $_existing_openclaw; then
-        ENABLE_OPENCLAW=true
-        ai "Existing OpenClaw install detected; preserving it for this deprecation release"
-    fi
-    unset _existing_openclaw
 fi
 
 # Reuse the same private-log guard as Linux. In particular, an existing log
@@ -1735,7 +1710,6 @@ if ! $NON_INTERACTIVE && ! $ALL_FEATURES && ! $DRY_RUN; then
             ENABLE_VOICE=true; ENABLE_WORKFLOWS=true
             ENABLE_RAG=true; ENABLE_HERMES=true
             ENABLE_RECOMMENDED=true
-            ENABLE_OPENCLAW=false  # deprecated; Hermes is the default
             if [[ -n "$feature_choice" ]] && ! $OPENCODE_DISABLE_EXPLICIT; then ENABLE_OPENCODE=true; fi
             ENABLE_APE=true
             ENABLE_PERPLEXICA=true
@@ -1747,7 +1721,6 @@ if ! $NON_INTERACTIVE && ! $ALL_FEATURES && ! $DRY_RUN; then
             ENABLE_VOICE=false; ENABLE_WORKFLOWS=false
             ENABLE_RAG=false; ENABLE_RECOMMENDED=false
             ENABLE_HERMES=false
-            ENABLE_OPENCLAW=false
             if ! $OPENCODE_ENABLE_EXPLICIT; then
                 ENABLE_OPENCODE=false
                 OPENCODE_DISABLE_SELECTED=true
@@ -1769,8 +1742,6 @@ if ! $NON_INTERACTIVE && ! $ALL_FEATURES && ! $DRY_RUN; then
             [[ "$yn" =~ ^[nN] ]] && ENABLE_RECOMMENDED=false || ENABLE_RECOMMENDED=true
             read -r -p "  Enable Hermes Agent (default AI agent)? [Y/n] " yn < /dev/tty
             [[ "$yn" =~ ^[nN] ]] && ENABLE_HERMES=false || ENABLE_HERMES=true
-            read -r -p "  Enable OpenClaw (DEPRECATED — Hermes replaces it)? [y/N] " yn < /dev/tty
-            [[ "$yn" =~ ^[yY] ]] && ENABLE_OPENCLAW=true
             if ! $OPENCODE_ENABLE_EXPLICIT && ! $OPENCODE_DISABLE_EXPLICIT; then
                 read -r -p "  Enable OpenCode browser IDE? [y/N] " yn < /dev/tty
                 if [[ "$yn" =~ ^[yY] ]]; then
@@ -1793,7 +1764,6 @@ if ! $NON_INTERACTIVE && ! $ALL_FEATURES && ! $DRY_RUN; then
             ENABLE_VOICE=true; ENABLE_WORKFLOWS=true
             ENABLE_RAG=true; ENABLE_HERMES=true
             ENABLE_RECOMMENDED=true
-            ENABLE_OPENCLAW=false  # deprecated; Hermes is the default
             $OPENCODE_DISABLE_EXPLICIT || ENABLE_OPENCODE=true
             ENABLE_APE=true
             ENABLE_PERPLEXICA=true
@@ -1821,9 +1791,8 @@ $OPENCODE_ENABLE_EXPLICIT && ENABLE_OPENCODE=true
 
 if $ENABLE_PIXEL; then
     ENABLE_HERMES=false
-    ENABLE_OPENCLAW=false
 fi
-if ! $ENABLE_HERMES && ! $ENABLE_OPENCLAW; then
+if ! $ENABLE_HERMES; then
     ENABLE_APE=false
 fi
 
@@ -1916,7 +1885,6 @@ info_box "  Token Spy:" "$(if $ENABLE_RECOMMENDED; then echo enabled; else echo 
 info_box "  LiteLLM gateway:" "$(if $ENABLE_LITELLM; then echo enabled; else echo disabled; fi)"
 info_box "  Hermes:" "$(if $ENABLE_HERMES; then echo enabled; else echo disabled; fi)"
 info_box "  Portal (native):" "$(if $ENABLE_PIXEL; then echo enabled; else echo disabled; fi)"
-info_box "  OpenClaw:" "$(if $ENABLE_OPENCLAW; then echo "enabled (DEPRECATED)"; else echo disabled; fi)"
 info_box "  OpenCode:" "$(if $ENABLE_OPENCODE; then echo enabled; else echo disabled; fi)"
 info_box "  Perplexica:" "$(if $ENABLE_PERPLEXICA; then echo enabled; else echo disabled; fi)"
 info_box "  Privacy Shield:" "$(if $ENABLE_PRIVACY_SHIELD; then echo enabled; else echo disabled; fi)"
@@ -1943,7 +1911,6 @@ if $DRY_RUN; then
     ai "[DRY RUN] Would generate .env with secrets"
     ai "[DRY RUN] Would generate SearXNG config"
     $ENABLE_HERMES && ai "[DRY RUN] Would configure Hermes Agent (data: ${INSTALL_DIR}/data/hermes)"
-    $ENABLE_OPENCLAW && ai "[DRY RUN] Would configure OpenClaw"
     $ENABLE_LANGFUSE && ai "[DRY RUN] Would enable Langfuse (LLM observability)"
     $ENABLE_OPENCODE && ai "[DRY RUN] Would install and start OpenCode"
     if ! $ENABLE_OPENCODE; then
@@ -1957,7 +1924,6 @@ else
     mkdir -p "${INSTALL_DIR}/config/searxng"
     mkdir -p "${INSTALL_DIR}/config/n8n"
     mkdir -p "${INSTALL_DIR}/config/litellm"
-    mkdir -p "${INSTALL_DIR}/config/openclaw"
     mkdir -p "${INSTALL_DIR}/config/llama-server"
     mkdir -p "${INSTALL_DIR}/data/open-webui"
     mkdir -p "${INSTALL_DIR}/data/whisper"
@@ -2054,6 +2020,62 @@ else
         rm -rf "${INSTALL_DIR}/extensions/services/odsforge"
         log "Removed retired ODSForge service files from extensions/services"
     fi
+    # The legacy OpenClaw extension (the ods-openclaw container) was removed;
+    # Portal (Pixel) and Hermes are the supported agents. Remove its stale
+    # service files the same way, so `up --remove-orphans` below drops the old
+    # container.
+    if [[ -d "${INSTALL_DIR}/extensions/services/openclaw" ]]; then
+        rm -rf "${INSTALL_DIR}/extensions/services/openclaw"
+        log "Removed retired OpenClaw service files from extensions/services"
+    fi
+    # Every release copied the OpenClaw templates into config/openclaw, used
+    # or not. A template that is still byte-identical to a shipped version is
+    # not owner data; anything else, and data/openclaw, stays.
+    _macos_file_sha256() {
+        if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$1"
+        else
+            sha256sum "$1"
+        fi | cut -d ' ' -f 1
+    }
+    _macos_openclaw_config="${INSTALL_DIR}/config/openclaw"
+    _macos_openclaw_data="${INSTALL_DIR}/data/openclaw"
+    _macos_openclaw_manifest="${SOURCE_ROOT}/installers/lib/retired-openclaw-config.sha256"
+    if [[ -d "$_macos_openclaw_config" && ! -L "$_macos_openclaw_config" && -f "$_macos_openclaw_manifest" ]]; then
+        while read -r _macos_digest _macos_relative; do
+            # A source tree copied from a Windows checkout has CRLF lines.
+            _macos_relative="${_macos_relative%$'\r'}"
+            [[ -n "$_macos_digest" && "$_macos_digest" != \#* && "$_macos_relative" != *..* ]] || continue
+            _macos_path="${_macos_openclaw_config}/${_macos_relative}"
+            # Never reach a template through a linked folder.
+            [[ "$_macos_relative" != */* || ! -L "${_macos_openclaw_config}/${_macos_relative%/*}" ]] || continue
+            [[ -f "$_macos_path" && ! -L "$_macos_path" ]] || continue
+            # An unreadable file has no digest, so it is kept.
+            [[ "$(_macos_file_sha256 "$_macos_path" 2>/dev/null)" == "$_macos_digest" ]] || continue
+            rm -f "$_macos_path" || log "Could not remove the unchanged OpenClaw template ${_macos_path} (non-fatal)"
+        done < "$_macos_openclaw_manifest"
+        for _macos_path in "${_macos_openclaw_config}/workspace" "$_macos_openclaw_config"; do
+            if [[ -d "$_macos_path" && ! -L "$_macos_path" && -r "$_macos_path" && -x "$_macos_path" && -z "$(ls -A "$_macos_path")" ]]; then
+                rmdir "$_macos_path" || log "Could not remove the empty folder ${_macos_path} (non-fatal)"
+            fi
+        done
+    fi
+    _macos_openclaw_folders=""
+    if [[ -e "$_macos_openclaw_config" || -L "$_macos_openclaw_config" ]]; then
+        _macos_openclaw_folders="config/openclaw"
+    fi
+    # An unreadable data folder may still hold the agent's state.
+    if [[ -d "$_macos_openclaw_data" ]]; then
+        if [[ ! -r "$_macos_openclaw_data" || ! -x "$_macos_openclaw_data" ]] || [[ -n "$(ls -A "$_macos_openclaw_data")" ]]; then
+            _macos_openclaw_folders="${_macos_openclaw_folders:+$_macos_openclaw_folders and }data/openclaw"
+        fi
+    fi
+    if [[ -n "$_macos_openclaw_folders" ]]; then
+        ai "The legacy OpenClaw extension was removed. Its remaining files in ${_macos_openclaw_folders} were kept; delete them by hand when you no longer need them (docs/MIGRATION-OPENCLAW-TO-HERMES.md explains how)."
+    fi
+    unset _macos_openclaw_config _macos_openclaw_data _macos_openclaw_manifest _macos_openclaw_folders \
+        _macos_digest _macos_relative _macos_path
+    unset -f _macos_file_sha256
 
     # Copy extensions library to data dir for dashboard portal.
     # Source resolution: dev installs and full checkouts read the product-owned
@@ -2298,30 +2320,6 @@ else
         ai_ok "Preserved existing SearXNG config (use --force to regenerate)"
     else
         ai_ok "Generated SearXNG config"
-    fi
-
-    # Generate OpenClaw configs (if enabled)
-    if $ENABLE_OPENCLAW; then
-        openclaw_existed=false
-        [[ -f "${INSTALL_DIR}/data/openclaw/home/openclaw.json" ]] && openclaw_existed=true
-        _openclaw_model="$LLM_MODEL"
-        _openclaw_api_key="none"
-        if $CLOUD_MODE; then
-            _openclaw_model="default"
-            _openclaw_api_key="$(read_env_value "$INSTALL_DIR/.env" "LITELLM_KEY")"
-        fi
-        if [[ -z "$_openclaw_api_key" ]] \
-           || ! generate_openclaw_config "$INSTALL_DIR" "$_openclaw_model" "$MAX_CONTEXT" \
-                "$ENV_OPENCLAW_TOKEN" "$CONTAINER_LLM_URL" "$FORCE" "$_openclaw_api_key"; then
-            ai_err "Could not configure OpenClaw for the active inference route."
-            exit 1
-        fi
-        if $openclaw_existed && ! $FORCE; then
-            ai_ok "Refreshed OpenClaw's managed inference route while preserving unrelated settings"
-        else
-            ai_ok "Generated OpenClaw configs"
-        fi
-        unset _openclaw_model _openclaw_api_key
     fi
 
     # Create llama-server models.ini (empty -- populated later)
@@ -2691,7 +2689,6 @@ else
                 n8n)           $ENABLE_WORKFLOWS || SKIP=true ;;
                 qdrant|embeddings) $ENABLE_RAG || SKIP=true ;;
                 hermes|hermes-proxy) $ENABLE_HERMES || SKIP=true ;;
-                openclaw)      $ENABLE_OPENCLAW || SKIP=true ;;
                 ape)           $ENABLE_APE || SKIP=true ;;
                 perplexica)    $ENABLE_PERPLEXICA || SKIP=true ;;
                 privacy-shield) $ENABLE_PRIVACY_SHIELD || SKIP=true ;;

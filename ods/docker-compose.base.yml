@@ -275,7 +275,6 @@ services:
       - ODS_ROUTER_INTERNAL_KEY=${ODS_ROUTER_INTERNAL_KEY:-}
       - MODEL_ROUTER_URL=http://model-router:9099
       - SHIELD_API_KEY=${SHIELD_API_KEY:-}
-      - OPENCLAW_TOKEN=${OPENCLAW_TOKEN:-}
       - TOKEN_SPY_URL=${TOKEN_SPY_URL:-http://token-spy:8080}
       - TOKEN_SPY_API_KEY=${TOKEN_SPY_API_KEY:-}
       # Signing secret for ods-session cookies. session_signer.py reads

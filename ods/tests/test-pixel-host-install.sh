@@ -458,6 +458,7 @@ if (
     COMPOSE_FLAGS_ARR=()
     LOG_FILE="$TEST_ROOT/repair-compose.log"
     ai_bad() { printf '%s\n' "$*" >> "$repair_messages"; }
+    ai_warn() { printf '%s\n' "$*" >> "$repair_messages"; }
     ods_pixel_owner_home() { printf '%s\n' "$repair_home"; }
     _ods_pixel_source_checkout() { printf '%s\n' "$repair_pixel"; }
     _ods_pixel_contract_sha256() { printf '%s\n' "$repair_contract"; }
@@ -1105,6 +1106,7 @@ if (
     SCRIPT_DIR="$ROOT"
     ENABLE_PIXEL_RUNTIME=true
     ai() { :; }
+    _phase06_step() { :; }
     error() { :; return 1; }
     source "$ROOT/lib/safe-env.sh"
     _phase06_pre_copy_fixture
@@ -1122,6 +1124,7 @@ if (
     SCRIPT_DIR="$ROOT"
     ENABLE_PIXEL_RUNTIME=true
     ai() { :; }
+    _phase06_step() { :; }
     error() { printf '%s\n' "$*" >&2; return 1; }
     source "$ROOT/lib/safe-env.sh"
     _phase06_pre_copy_fixture
@@ -1183,6 +1186,7 @@ if (
     SCRIPT_DIR="$ROOT"
     ENABLE_PIXEL_RUNTIME=true
     ai() { :; }
+    _phase06_step() { :; }
     error() { :; return 1; }
     source "$ROOT/lib/safe-env.sh"
     _phase06_pre_copy_fixture
@@ -1208,6 +1212,7 @@ if (
     ods_pixel_install_owner() { printf '%s\n' "$owner"; }
     ods_pixel_owner_home() { printf '%s\n' "$transition_home"; }
     ods_pixel_uninstall_managed() { : > "$transition_install/retired"; }
+    ods_sudo() { return 1; }
     source "$ROOT/lib/safe-env.sh"
     _phase06_pre_copy_fixture
 ); then

@@ -190,9 +190,6 @@ test: ## Run unit and contract tests
 	@bash tests/test-cli-preset-restore-user-extensions.sh
 	@bash tests/test-preset-export-permissions.sh
 	@echo ""
-	@echo "=== bootstrap OpenClaw compose-guard regression ==="
-	@bash tests/test-bootstrap-openclaw-compose-guard.sh
-	@echo ""
 	@echo "=== ods-update.sh backup command ==="
 	@bash tests/test-update-backup-retention-labels.sh
 	@bash tests/test-update-script-backup.sh
@@ -252,7 +249,6 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== documented security suites (SECURITY_AUDIT.md) ==="
 	@bash tests/test-secret-security.sh
-	@bash tests/test-openclaw-device-auth-default.sh
 	@bash tests/contracts/test-security-suites-wired.sh
 	@echo ""
 	@echo "=== NVIDIA multi-GPU visibility contract ==="
@@ -260,9 +256,6 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== CLI user-extension dependency resolution ==="
 	@bash tests/test-cli-user-extension-deps.sh
-	@echo ""
-	@echo "=== session cleanup lifecycle ==="
-	@bash tests/test-session-cleanup.sh
 
 bats: ## Run BATS unit tests for shell libraries
 	@echo "=== BATS unit tests ==="

@@ -169,7 +169,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   write access. A CI contract keeps them out until a reviewed redesign, and
   `docs/AI_WORKFLOW_GUARDRAILS.md` sets the policy for AI-assisted PRs.
 - Windows: `install.ps1` now installs ODS inside Ubuntu/WSL2 with Pixel
-  (`--pixel --no-hermes --no-openclaw`) instead of the native Windows stack.
+  (`--pixel --no-hermes`) instead of the native Windows stack.
   It prepares WSL and Ubuntu 24.04 when needed, and stops with instructions,
   before changing anything in Ubuntu, when WSL2, systemd, a non-root user,
   Docker Desktop's WSL integration or, on NVIDIA machines, a Windows driver
@@ -260,9 +260,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The Windows/WSL hardware scan no longer claims CPU inference immediately
   after identifying the Windows GPU used by Lemonade. Linux services retain
   their detected backend.
-- Explicit Hermes and OpenClaw flags now take precedence in the Custom
+- An explicit `--hermes` or `--no-hermes` now takes precedence in the Custom
   feature menu as well as presets. The Windows Pixel path no longer asks to
-  enable agents that its command line explicitly disabled.
+  enable an agent that its command line explicitly disabled.
 - Every curated catalog download URL now names a Hugging Face commit instead
   of `resolve/main`, so an upstream rewrite cannot change or remove a catalog
   file. The 48 other re-pinned models download the same bytes: each sha256 was
@@ -361,6 +361,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--reasoning` switch, `LLAMA_REASONING` (default `off`) is passed as
   `--reasoning`, as Docker does. Without it, b9014 turned Qwen3.5 thinking on
   and put `<think>` blocks in replies.
+
+### Removed
+- The legacy OpenClaw extension, deprecated since 2026-05-12, is removed: the
+  `ods-openclaw` container (image `ghcr.io/openclaw/openclaw:2026.3.8`, port
+  7860), its configuration templates, its session-cleanup script and timer,
+  the n8n OpenClaw trigger workflow and the dashboard API's
+  `/api/service-tokens` endpoint, which only served the OpenClaw sidebar link.
+  The extension still pinned OpenClaw 2026.3.8, an older release than the
+  2026.6.33 runtime that Pixel qualifies. Portal (Pixel) and Hermes Agent are
+  the supported agents. Pixel's own OpenClaw runtime
+  (`openclaw-gateway.service`) is separate and unchanged.
+- Installer reruns on Linux, macOS and Windows delete
+  `extensions/services/openclaw` from the install directory and remove the
+  `ods-openclaw` container when they start the stack. They also delete the
+  OpenClaw templates in `config/openclaw` that are unchanged from a shipped
+  version. Files the owner changed or added there, and `data/openclaw`, stay
+  on disk; the installer names what it kept, and the
+  [removal notice](docs/MIGRATION-OPENCLAW-TO-HERMES.md) explains how to
+  delete it. On Linux, this cleanup waits while an unfinished Pixel source
+  upgrade is pending, so the release that started it can still finish or roll
+  it back. The installers no longer re-enable OpenClaw when they find its
+  container or data.
+- On installs where OpenClaw was the only feature that needed SearXNG or APE,
+  an upgrade turns those services off and removes their containers.
+- Git checkouts updated with `ods-update.sh update` must run
+  `ods disable openclaw` first when OpenClaw is enabled, and move a modified
+  `config/openclaw/openclaw.json` out of the checkout (see the removal
+  notice). The updater of the previous release restarts the stack with its old
+  file list, which fails once the pull deletes the OpenClaw files; running
+  `ods-update.sh update` again then finishes the update. From this release on,
+  the updater resolves the stack again after the pull and during a rollback.
+- `--openclaw` and `--no-openclaw` (Linux and macOS) and `-OpenClaw` (Windows)
+  are still accepted, but only print a notice. Installers no longer write
+  `OPENCLAW_TOKEN`, `OPENCLAW_PORT` or `HOST_LAN_IP`. An `.env` that still has
+  these or the other retired OpenClaw keys keeps validating; the Dashboard
+  settings page lists them only when they are present, and clearing one
+  removes it. AMD reruns retire the `openclaw-session-cleanup` user timer
+  while it still carries the shipped definition, and new AMD installs no
+  longer install the memory-shepherd timers that maintained OpenClaw's
+  workspace. `ods start` warns when an `ods-openclaw` container is still
+  present.
 
 ### Fixed
 - Rerunning the installer (an update) no longer fails with "Embeddings model

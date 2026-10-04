@@ -2007,7 +2007,6 @@ patch_hermes_model_after_swap() {
 
 WINDOWS_LEMONADE_LITELLM_PRESENT=false
 WINDOWS_LEMONADE_HERMES_PRESENT=false
-WINDOWS_LEMONADE_OPENCLAW_PRESENT=false
 WINDOWS_LEMONADE_COMPOSE_ARGS=()
 WINDOWS_LEMONADE_SWAP_FAILURE=""
 WINDOWS_LEMONADE_ROLLBACK_VERIFIED=false
@@ -2022,10 +2021,8 @@ windows_lemonade_container_present() {
 capture_windows_lemonade_dependent_state() {
     WINDOWS_LEMONADE_LITELLM_PRESENT=false
     WINDOWS_LEMONADE_HERMES_PRESENT=false
-    WINDOWS_LEMONADE_OPENCLAW_PRESENT=false
     windows_lemonade_container_present ods-litellm && WINDOWS_LEMONADE_LITELLM_PRESENT=true
     windows_lemonade_container_present ods-hermes && WINDOWS_LEMONADE_HERMES_PRESENT=true
-    windows_lemonade_container_present ods-openclaw && WINDOWS_LEMONADE_OPENCLAW_PRESENT=true
 }
 
 load_windows_lemonade_compose_args() {
@@ -2145,56 +2142,6 @@ refresh_windows_lemonade_litellm_after_swap() {
         log "Restarting LiteLLM with the resolved Lemonade route..."
         $DOCKER_CMD restart ods-litellm 2>&1 || return 1
     fi
-}
-
-recreate_windows_lemonade_openclaw() {
-    [[ "$WINDOWS_LEMONADE_OPENCLAW_PRESENT" == "true" ]] || return 0
-    if ! load_windows_lemonade_compose_args; then
-        log "ERROR: cannot recreate OpenClaw because the active compose stack is unavailable."
-        return 1
-    fi
-
-    log "Recreating OpenClaw with the resolved Lemonade model..."
-    env -u GGUF_FILE -u LLM_MODEL -u LEMONADE_MODEL -u MAX_CONTEXT -u CTX_SIZE \
-        $DOCKER_COMPOSE_CMD "${WINDOWS_LEMONADE_COMPOSE_ARGS[@]}" \
-        up -d --force-recreate --no-deps openclaw 2>&1
-}
-
-openclaw_env_value_from_inspect() {
-    local key="$1" env_output="$2"
-    printf '%s\n' "$env_output" | sed -n "s/^${key}=//p" | tail -1 | tr -d '\r'
-}
-
-verify_windows_lemonade_openclaw_model_env() {
-    local expected_model="${1:-}" env_output lemonade_model gguf_file llm_model ollama_url actual_model
-    [[ "$WINDOWS_LEMONADE_OPENCLAW_PRESENT" == "true" ]] || return 0
-    [[ -n "$expected_model" ]] || return 1
-    [[ -n "${DOCKER_CMD:-}" ]] || return 1
-
-    if ! env_output=$($DOCKER_CMD inspect --type container --format '{{range .Config.Env}}{{println .}}{{end}}' ods-openclaw 2>/dev/null); then
-        log "ERROR: could not inspect OpenClaw environment after recreate."
-        return 1
-    fi
-
-    lemonade_model="$(openclaw_env_value_from_inspect LEMONADE_MODEL "$env_output")"
-    gguf_file="$(openclaw_env_value_from_inspect GGUF_FILE "$env_output")"
-    llm_model="$(openclaw_env_value_from_inspect LLM_MODEL "$env_output")"
-    ollama_url="$(openclaw_env_value_from_inspect OLLAMA_URL "$env_output")"
-    if [[ -n "$lemonade_model" ]]; then
-        actual_model="$lemonade_model"
-    elif [[ "$ollama_url" == */api || "$ollama_url" == */api/ ]]; then
-        [[ -n "$gguf_file" ]] && actual_model="extra.${gguf_file}"
-    else
-        actual_model="$llm_model"
-    fi
-
-    if [[ "$actual_model" == "$expected_model" ]]; then
-        log "Verified OpenClaw recreated with model ${actual_model}."
-        return 0
-    fi
-
-    log "ERROR: OpenClaw recreated with model ${actual_model:-<empty>}; expected ${expected_model}."
-    return 1
 }
 
 verify_windows_lemonade_downstream_route() {
@@ -2337,10 +2284,6 @@ restart_windows_lemonade_dependents_after_rollback() {
         log "Recreating Hermes with its restored config..."
         compose_recreate_hermes 2>&1 || dependents_ok=false
     fi
-    if [[ "$WINDOWS_LEMONADE_OPENCLAW_PRESENT" == "true" ]]; then
-        log "Recreating OpenClaw with the restored model environment..."
-        recreate_windows_lemonade_openclaw || dependents_ok=false
-    fi
     [[ "$dependents_ok" == "true" ]]
 }
 
@@ -2375,9 +2318,6 @@ rollback_windows_lemonade_swap() {
     fi
 
     restart_windows_lemonade_dependents_after_rollback || rollback_ok=false
-    if [[ "$WINDOWS_LEMONADE_OPENCLAW_PRESENT" == "true" && -n "$previous_model_id" ]]; then
-        verify_windows_lemonade_openclaw_model_env "$previous_model_id" || rollback_ok=false
-    fi
     if [[ "$reconcile_pixel" == "true" ]]; then
         if [[ "$rollback_ok" != true || "$inference_restored" != true || -z "$previous_llm_model" ]] \
             || ! reconcile_ods_managed_pixel_model "$previous_llm_model" rolled-back; then
@@ -2437,14 +2377,6 @@ activate_windows_lemonade_full_model() {
     fi
     if ! patch_hermes_model_after_swap; then
         windows_lemonade_swap_failed "Hermes config update or restart failed"
-        return 1
-    fi
-    if ! recreate_windows_lemonade_openclaw; then
-        windows_lemonade_swap_failed "OpenClaw recreate failed"
-        return 1
-    fi
-    if ! verify_windows_lemonade_openclaw_model_env "$model_id"; then
-        windows_lemonade_swap_failed "OpenClaw recreated with a stale model environment"
         return 1
     fi
     if ! request_windows_switchboard_route_reconciliation; then
@@ -2993,7 +2925,7 @@ log "Updating .env..."
 if promote_full_model_env "initial full-model promotion"; then
     # Linux AMD installs route through Lemonade, whose request model id is a
     # separate runtime alias. Keep it in lockstep with the promoted GGUF so
-    # LiteLLM/Hermes/OpenClaw do not keep targeting the deleted bootstrap id.
+    # LiteLLM/Hermes do not keep targeting the deleted bootstrap id.
     if ! is_windows_bash; then
         _promotion_gpu_backend="$(read_env_value GPU_BACKEND | tr '[:upper:]' '[:lower:]')"
         _promotion_llm_backend="$(read_env_value LLM_BACKEND | tr '[:upper:]' '[:lower:]')"
@@ -3495,30 +3427,6 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
             exit 1
         fi
         discard_active_model_config_snapshot
-        # Recreate OpenClaw so inject-token.js picks up the new GGUF_FILE/LLM_MODEL
-        # from .env. A restart alone won't work — env vars are baked in at container
-        # creation time, and inject-token.js builds the Lemonade model name from them.
-        # Strip the same model-config vars here as the llama-server recreate path
-        # so shell-env pollution cannot override the freshly-updated .env.
-        if $DOCKER_CMD ps --filter name=ods-openclaw --format '{{.Names}}' 2>/dev/null | grep -q ods-openclaw; then
-            log "Recreating OpenClaw to pick up model change..."
-            # Guard on BOTH compose args AND a non-empty $DOCKER_COMPOSE_CMD —
-            # mirrors the llama-server hot-swap contract above (the
-            # `${#COMPOSE_ARGS[@]} -gt 0 && -n "$DOCKER_COMPOSE_CMD"` checks).
-            # If $DOCKER_COMPOSE_CMD is empty (no compose v2 plugin AND no
-            # docker-compose v1 binary), expanding it as the command word
-            # would turn the line into `"${COMPOSE_ARGS[@]}" up -d ...`,
-            # which executes the first compose-arg (e.g. `-f`) as a binary.
-            # Skip the recreate and surface a clear warning instead.
-            if [[ ${#COMPOSE_ARGS[@]} -gt 0 && -n "$DOCKER_COMPOSE_CMD" ]]; then
-                validate_bootstrap_compose_args "${COMPOSE_ARGS[@]}" && \
-                env -u GGUF_FILE -u LLM_MODEL -u MAX_CONTEXT -u CTX_SIZE \
-                    $DOCKER_COMPOSE_CMD "${COMPOSE_ARGS[@]}" up -d --force-recreate openclaw 2>&1 || \
-                    log "WARNING: OpenClaw recreate failed (non-fatal)"
-            else
-                log "WARNING: No compose binary available (DOCKER_COMPOSE_CMD empty or compose args missing) — OpenClaw was NOT recreated. The new model will not take effect until OpenClaw is recreated manually with: env -u GGUF_FILE -u LLM_MODEL -u MAX_CONTEXT -u CTX_SIZE docker compose up -d --force-recreate openclaw"
-            fi
-        fi
         # Patch Hermes Agent's config so it stops asking the LLM server for the
         # bootstrap model id. PR #1191 substitutes model.default in the template
         # at install time, but at install time we've only loaded the bootstrap

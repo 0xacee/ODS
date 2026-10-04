@@ -247,7 +247,7 @@ except (OSError, ValueError):
     _CORE_SERVICE_IDS = {
         "ape", "comfyui", "dashboard", "dashboard-api",
         "embeddings", "langfuse", "litellm", "llama-server", "n8n",
-        "open-webui", "openclaw", "perplexica", "privacy-shield", "qdrant",
+        "open-webui", "perplexica", "privacy-shield", "qdrant",
         "remote-provider-egress", "remote-provider-ssh-tunnel",
         "searxng", "token-spy", "tts", "whisper",
     }

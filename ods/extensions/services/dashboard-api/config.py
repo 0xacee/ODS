@@ -644,7 +644,6 @@ PERSONAS = {
 SIDEBAR_ICONS = {
     "open-webui": "MessageSquare",
     "n8n": "Network",
-    "openclaw": "Bot",
     "hermes": "Bot",
     "hermes-proxy": "Shield",
     "opencode": "Code",
@@ -681,7 +680,7 @@ def _load_core_service_ids() -> frozenset:
     # Fallback to hardcoded list
     return frozenset({
         "dashboard-api", "dashboard", "llama-server", "model-router", "open-webui",
-        "litellm", "langfuse", "hermes", "hermes-proxy", "n8n", "openclaw", "opencode",
+        "litellm", "langfuse", "hermes", "hermes-proxy", "n8n", "opencode",
         "perplexica", "searxng", "qdrant", "remote-provider-egress",
         "remote-provider-ssh-tunnel", "tts", "whisper",
         "embeddings", "token-spy", "comfyui", "ape", "privacy-shield",

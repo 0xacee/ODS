@@ -8,7 +8,7 @@
 #
 # Expects: DRY_RUN, INSTALL_DIR, SCRIPT_DIR, LOG_FILE, INTERACTIVE,
 #           TIER, TIER_NAME, VERSION, GPU_BACKEND, LLM_MODEL, OFFLINE_MODE,
-#           ENABLE_VOICE, ENABLE_WORKFLOWS, ENABLE_RAG, ENABLE_QDRANT, ENABLE_HERMES, ENABLE_OPENCLAW,
+#           ENABLE_VOICE, ENABLE_WORKFLOWS, ENABLE_RAG, ENABLE_QDRANT, ENABLE_HERMES,
 #           ENABLE_PIXEL_RUNTIME, PIXEL_AGENT_MODE,
 #           COMPOSE_FLAGS, SUMMARY_JSON_FILE, PREFLIGHT_REPORT_FILE,
 #           BGRN, GRN, AMB, WHT, NC, DASHBOARD_PORT (:-3001),
@@ -161,7 +161,6 @@ fi
 [[ "${ENABLE_PERPLEXICA:-false}" == "true" ]] && echo "  • Perplexica:    http://localhost:${SERVICE_PORTS[perplexica]:-3004}"
 [[ "${ENABLE_COMFYUI:-false}" == "true" ]] && echo "  • ComfyUI:       http://localhost:${SERVICE_PORTS[comfyui]:-8188}"
 [[ "$ENABLE_HERMES" == "true" ]] && echo "  • Hermes: http://localhost:${SERVICE_PORTS[hermes-proxy]:-9120}"
-[[ "$ENABLE_OPENCLAW" == "true" ]] && echo "  • OpenClaw:      http://localhost:${SERVICE_PORTS[openclaw]:-7860}"
 if [[ "${ENABLE_OPENCODE:-false}" == "true" ]]; then
     ods_systemctl_user is-active opencode-web &>/dev/null && echo "  • OpenCode:      http://localhost:3003"
 fi
@@ -450,8 +449,6 @@ if ! $DRY_RUN && command -v ods_readiness_summary >/dev/null 2>&1; then
             "${SERVICE_PORTS[litellm]:-4000}" "${SERVICE_HEALTH[litellm]:-/health/readiness}" "$(sr_container litellm)" "http://localhost:${SERVICE_PORTS[litellm]:-4000}"
         [[ "${ENABLE_PERPLEXICA:-false}" == "true" ]] && printf 'Perplexica|http://127.0.0.1:%s%s|%s|%s\n' \
             "${SERVICE_PORTS[perplexica]:-3004}" "${SERVICE_HEALTH[perplexica]:-/}" "$(sr_container perplexica)" "http://localhost:${SERVICE_PORTS[perplexica]:-3004}"
-        [[ "$ENABLE_OPENCLAW" == "true" ]] && printf 'OpenClaw|http://127.0.0.1:%s%s|%s|%s\n' \
-            "${SERVICE_PORTS[openclaw]:-7860}" "${SERVICE_HEALTH[openclaw]:-/}" "$(sr_container openclaw)" "http://localhost:${SERVICE_PORTS[openclaw]:-7860}"
         [[ "$ENABLE_VOICE" == "true" ]] && printf 'Whisper (STT)|http://127.0.0.1:%s%s|%s|%s\n' \
             "${SERVICE_PORTS[whisper]:-9000}" "${SERVICE_HEALTH[whisper]:-/health}" "$(sr_container whisper)" "http://localhost:${SERVICE_PORTS[whisper]:-9000}"
         [[ "$ENABLE_VOICE" == "true" ]] && printf 'Kokoro (TTS)|http://127.0.0.1:%s%s|%s|%s\n' \
@@ -482,7 +479,6 @@ DASHBOARD_REMOTE_PORT="${_dashboard_remote_port_config:-${DASHBOARD_REMOTE_PORT:
 [[ "$DASHBOARD_REMOTE_PORT" =~ ^[0-9]+$ ]] || DASHBOARD_REMOTE_PORT=3011
 unset _dashboard_remote_port_config
 WEBUI_PORT="${SERVICE_PORTS[open-webui]:-3000}"
-OPENCLAW_PORT="${SERVICE_PORTS[openclaw]:-7860}"
 LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
 echo -e "${GRN}──────────────────────────────────────────────────────────────────────────────${NC}"
 if $DRY_RUN; then
@@ -498,8 +494,6 @@ echo -e "  ${BGRN}Dashboard${NC}    ${WHT}http://localhost:${DASHBOARD_PORT}${NC
 echo -e "  ${BGRN}Portal${NC}       ${WHT}http://localhost:${DASHBOARD_PORT}/pixel${NC}  ${AMB}(core agent)${NC}"
 [[ "$ENABLE_HERMES" == "true" ]] && \
 echo -e "  ${BGRN}Hermes${NC}       ${WHT}http://localhost:${SERVICE_PORTS[hermes-proxy]:-9120}${NC}"
-[[ "$ENABLE_OPENCLAW" == "true" ]] && \
-echo -e "  ${BGRN}OpenClaw${NC}     ${WHT}http://localhost:${OPENCLAW_PORT}${NC}"
 ods_systemctl_user is-active opencode-web &>/dev/null && \
 [[ "${ENABLE_OPENCODE:-false}" == "true" ]] && \
     echo -e "  ${BGRN}OpenCode${NC}     ${WHT}http://localhost:3003${NC}"

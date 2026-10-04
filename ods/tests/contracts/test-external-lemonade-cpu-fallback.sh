@@ -171,7 +171,7 @@ phase08_images="$(
     export LEMONADE_EXTERNAL=false AMD_INFERENCE_RUNTIME=LEMONADE AMD_INFERENCE_MANAGED=FALSE
     export ENABLE_COMFYUI=false ENABLE_VOICE=false ENABLE_WORKFLOWS=false
     export ENABLE_RAG=false ENABLE_QDRANT=false ENABLE_EMBEDDINGS=false
-    export ENABLE_HERMES=false ENABLE_OPENCLAW=false ENABLE_OPEN_WEBUI=false
+    export ENABLE_HERMES=false ENABLE_OPEN_WEBUI=false
     COMPOSE_FLAGS=''
     ods_progress() { :; }
     show_phase() { :; }

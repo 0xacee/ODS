@@ -655,7 +655,6 @@ fi
 consumer_route_files=(
     "$ROOT_DIR/docker-compose.external-llm.yml"
     "$ROOT_DIR/extensions/services/hermes/compose.yaml"
-    "$ROOT_DIR/extensions/services/openclaw/compose.yaml"
     "$ROOT_DIR/extensions/services/perplexica/compose.yaml"
     "$ROOT_DIR/extensions/services/privacy-shield/compose.yaml"
     "$ROOT_DIR/extensions/services/token-spy/compose.yaml"
@@ -730,7 +729,6 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
         export ODS_AGENT_KEY="external-llm-compose-test"
         export N8N_USER="admin@example.invalid"
         export N8N_PASS="external-llm-compose-test"
-        export OPENCLAW_TOKEN="external-llm-compose-test"
         export SEARXNG_SECRET="external-llm-compose-test"
         docker compose $real_external_flags config > "$compose_config_file"
     ); then
@@ -793,7 +791,6 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
         export ODS_AGENT_KEY="external-llm-compose-test"
         export N8N_USER="admin@example.invalid"
         export N8N_PASS="external-llm-compose-test"
-        export OPENCLAW_TOKEN="external-llm-compose-test"
         export SEARXNG_SECRET="external-llm-compose-test"
         docker compose $amd_external_flags config > "$amd_compose_config_file"
     ); then
