@@ -272,6 +272,45 @@ def fingerprint(row: dict) -> dict:
     return {key: row.get(key) for key in ("Name", "Labels", "CreatedAt", "Driver")}
 
 
+# A purge preflight proves volume ownership through the containers that mount
+# them, and Compose down then removes those containers. Keep the verified
+# record in the retained installation tree so an uninstall interrupted after
+# that point can finish: only volumes whose exact identity is unchanged since
+# the proof are accepted, and foreign consumers are still refused.
+RESUME_RECORD = ".ods-uninstall-custody.json"
+
+
+def resume_record(root: Path, project: str) -> tuple[dict[str, dict], dict[str, dict]]:
+    path = root / RESUME_RECORD
+    if not os.path.lexists(path):
+        return {}, {}
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Uninstall resume record is invalid")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(record, dict) or record.get("schemaVersion") != 1 or
+            record.get("installDir") != str(root) or
+            record.get("project") != project):
+        raise ValueError("Uninstall resume record does not belong to this installation")
+    volumes, anonymous = record.get("volumes"), record.get("anonymous", {})
+    if (not isinstance(volumes, dict) or not isinstance(anonymous, dict) or
+            any(not isinstance(name, str) or not VOLUME_RE.fullmatch(name) or
+                not isinstance(value, dict) for name, value in volumes.items()) or
+            any(not CONTAINER_RE.fullmatch(name) or not isinstance(value, dict)
+                for name, value in anonymous.items())):
+        raise ValueError("Uninstall resume record is invalid")
+    return volumes, anonymous
+
+
+def write_resume_record(root: Path, record: dict) -> None:
+    temporary = root / (RESUME_RECORD + ".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, sort_keys=True))
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, root / RESUME_RECORD)
+
+
 def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = False,
               trusted_root: Path | None = None) -> None:
     trusted_root = trusted_root or root
@@ -289,6 +328,7 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
         }), encoding="utf-8")
         return
     volumes = project_volumes(root, project)
+    resumed, resumed_anonymous = resume_record(root, project)
     disabled = disabled_volume_provenance(root, trusted_root)
     expected_names = set(selected) | {
         f"{project}_{key}" for key in trusted_plain_volume_keys(trusted_root)
@@ -300,11 +340,17 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
     if unlabelled_expected:
         name = sorted(unlabelled_expected)[0]
         raise ValueError(f"Volume {name} matches an ODS recipe but lacks Compose ownership labels")
-    if volumes and not container_ids:
+    def proven_earlier(name: str, row: dict) -> bool:
+        # Unmounted now, but identical to what an interrupted uninstall proved.
+        return name not in mounted and resumed.get(name) == fingerprint(row)
+
+    if volumes and not container_ids and not all(
+            name in external or proven_earlier(name, row) for name, row in volumes.items()):
         raise ValueError(
             "ODS project volumes remain but no container proves the installation path; "
-            "an older 'ods stop' may have removed that proof. Use --keep-data or "
-            "review these volumes manually before removal"
+            "an older 'ods stop' or an interrupted uninstall may have removed that proof. "
+            "Rerun with --keep-data to remove the installation and keep these volumes, then "
+            "review them with 'docker volume ls' before removing them yourself"
         )
     owned = {}
     anonymous = {}
@@ -317,8 +363,15 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
             continue
         if name in selected and key != selected[name]:
             raise ValueError(f"Selected volume {name} has a conflicting Compose label")
+        if proven_earlier(name, row):
+            owned[name] = fingerprint(row)
+            continue
         if name in selected and name not in mounted:
-            raise ValueError(f"Selected volume {name} has no verified ODS container mount")
+            raise ValueError(
+                f"Selected volume {name} has no verified ODS container mount; an interrupted "
+                "uninstall may have removed that proof. Rerun with --keep-data to keep the "
+                "volumes and remove the rest of the installation"
+            )
         disabled_owned = (
             name in mounted and key in disabled and
             name == f"{project}_{key}" and
@@ -338,6 +391,13 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
                 row.get("Driver") != "local"):
             raise ValueError(f"Mounted volume {name} has unproven ownership; purge refused")
         anonymous[name] = fingerprint(row)
+    # Anonymous volumes from the interrupted attempt lost their mount with the
+    # removed containers; accept only an unchanged identity.
+    leftover = (set(resumed_anonymous) & all_names) - set(anonymous)
+    for name, row in inspect_volumes(root, leftover).items():
+        if fingerprint(row) != resumed_anonymous[name]:
+            raise ValueError(f"Anonymous volume {name} changed since the interrupted uninstall; purge refused")
+        anonymous[name] = fingerprint(row)
     check_volume_consumers(root, set(owned) | set(anonymous), container_ids)
     record = {
         "schemaVersion": 1,
@@ -353,6 +413,7 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
         "flags": flags,
     }
     snapshot.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    write_resume_record(root, record)
 
 
 def postflight_containers(root: Path, snapshot: Path,

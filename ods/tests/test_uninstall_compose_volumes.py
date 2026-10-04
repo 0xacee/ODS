@@ -377,6 +377,60 @@ class UninstallVolumeTests(unittest.TestCase):
             MODULE.preflight(self.root, self.snapshot, [])
         self.assertFalse(self.fake.removed)
 
+    def interrupt_after_compose_down(self):
+        """A purge preflight passed, Compose down removed the containers, then
+        the uninstall stopped before volume cleanup (e.g. a stray container)."""
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.assertTrue((self.root / MODULE.RESUME_RECORD).is_file())
+        self.assertEqual((self.root / MODULE.RESUME_RECORD).stat().st_mode & 0o777, 0o600)
+        self.fake.containers = []
+        retry = Path(self.temp.name) / "retry-snapshot.json"
+        retry.touch()
+        return retry
+
+    def test_interrupted_purge_resumes_from_verified_record(self):
+        retry = self.interrupt_after_compose_down()
+        MODULE.preflight(self.root, retry, [])
+        self.assertEqual(set(json.loads(retry.read_text())["volumes"]), set(self.fake.volumes))
+        MODULE.complete(self.root, retry)
+        self.assertEqual(self.fake.volumes, {})
+        self.assertEqual(self.fake.foreign, {"ods-pixel-retired-research", "ods-unrelated"})
+
+    def test_interrupted_purge_without_record_still_refuses(self):
+        retry = self.interrupt_after_compose_down()
+        (self.root / MODULE.RESUME_RECORD).unlink()
+        with self.assertRaisesRegex(ValueError, "--keep-data"):
+            MODULE.preflight(self.root, retry, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_resume_refuses_a_volume_whose_identity_changed(self):
+        retry = self.interrupt_after_compose_down()
+        self.fake.volumes["ods_perplexica-data"]["CreatedAt"] = "2026-10-02T00:00:00Z"
+        with self.assertRaisesRegex(ValueError, "no container proves"):
+            MODULE.preflight(self.root, retry, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_resume_refuses_a_volume_with_a_foreign_consumer(self):
+        retry = self.interrupt_after_compose_down()
+        self.fake.foreign_consumers["ods_perplexica-data"] = ["b" * 64]
+        with self.assertRaisesRegex(ValueError, "outside this installation"):
+            MODULE.preflight(self.root, retry, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_resume_record_from_another_installation_is_rejected(self):
+        retry = self.interrupt_after_compose_down()
+        path = self.root / MODULE.RESUME_RECORD
+        record = json.loads(path.read_text())
+        record["installDir"] = "/other/ods"
+        path.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            MODULE.preflight(self.root, retry, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_keep_data_preflight_writes_no_resume_record(self):
+        MODULE.preflight(self.root, self.snapshot, [], keep_data=True)
+        self.assertFalse((self.root / MODULE.RESUME_RECORD).exists())
+
     def test_unknown_same_prefix_volume_is_retained_and_reported(self):
         name = "ods_obsolete-unknown-probe"
         self.fake.volumes[name] = {
