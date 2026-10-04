@@ -214,6 +214,12 @@ def test_dashboard_admin_api_requires_sign_in_off_the_machine() -> None:
         "proxy_read_timeout 720s;" in enable and "proxy_send_timeout 720s;" in enable,
         "cold Library enables must outlast the host agent's 660-second request budget",
     )
+    webui = next(block for block in blocks if block.startswith("    location = /api/webui/selection "))
+    assert_true(
+        "auth_request /_ods_dashboard_gate;" in webui
+        and "proxy_read_timeout 960s;" in webui and "proxy_send_timeout 960s;" in webui,
+        "adding Open WebUI must pass the sign-in gate and outlast the Dashboard API's 900-second host request",
+    )
     talk = next(block for block in blocks if block.startswith("    location ^~ /api/talk/"))
     assert_true("DASHBOARD_API_KEY" not in talk, "ODS Talk must not receive the dashboard admin key")
     assert_true(

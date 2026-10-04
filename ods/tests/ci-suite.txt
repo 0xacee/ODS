@@ -148,6 +148,7 @@ tests/test-preset-compatibility.sh
 tests/test-preset-diff.sh
 tests/test-preset-import-export.sh
 tests/test-preview-inspection.mjs
+tests/test-resolver-assume-enabled.py
 tests/test-restore-data-transaction-contract.sh
 tests/test-restore-empty-config.sh
 tests/test-restore-safety-ux.sh

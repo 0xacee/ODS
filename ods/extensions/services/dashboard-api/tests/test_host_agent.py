@@ -442,6 +442,21 @@ def test_cli_running_is_not_a_successful_one_shot_exit(monkeypatch):
     assert _mod._verify_one_shot_exit([], 'specific-cli', timeout=1)[0] is False
 
 
+class _FinishedPull:
+    """`docker compose pull` stand-in that has already exited with ``returncode``."""
+
+    def __init__(self, calls, command, returncode=0):
+        calls.append(list(command))
+        self.stdout = iter(())
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 @pytest.mark.parametrize('build_exit', [0, 1])
 def test_install_prepares_only_dependency_images_and_surfaces_build_failure(monkeypatch, build_exit):
     monkeypatch.setenv('BUILD_TEST_TOKEN', 'private')
@@ -459,6 +474,7 @@ def test_install_prepares_only_dependency_images_and_surfaces_build_failure(monk
         return types.SimpleNamespace(returncode=build_exit if 'build' in command else 0,
                                      stdout=json.dumps(config), stderr='private build output')
     monkeypatch.setattr(_mod.subprocess, 'run', run)
+    monkeypatch.setattr(_mod.subprocess, 'Popen', lambda command, **kwargs: _FinishedPull(calls, command))
     monkeypatch.setattr(_mod, '_write_progress', lambda *args: progress.append(args))
     ok, error = _mod._prepare_install_images(['-p', 'ods'], 'demo')
     assert ok is (build_exit == 0)
@@ -469,7 +485,9 @@ def test_install_prepares_only_dependency_images_and_surfaces_build_failure(monk
         assert error.splitlines()[1] == 'Untrusted build diagnostic (tail):'
         assert error.endswith('\n[REDACTED] build output')
     base = ['docker', 'compose', '-p', 'ods']
-    assert calls == [base + ['config', '--format', 'json'], base + ['pull', 'demo-db'],
+    # The pull streams progress; the build keeps the plain Compose command.
+    assert calls == [base + ['config', '--format', 'json'],
+                     ['docker', 'compose', '--progress', 'plain', '-p', 'ods', 'pull', 'demo-db'],
                      base + ['build', '--build-arg', 'BUILDKIT_CONTEXT_KEEP_GIT_DIR=1', 'demo', 'demo-worker']]
     assert progress[-1][2] == 'Building images from source...'
 
@@ -636,12 +654,13 @@ def test_image_preparation_allows_cached_images_and_absent_optional_dependency(m
     config = {'services': {'demo': {'image': 'demo:1', 'depends_on': {'optional': {'required': False}}}}}
     def run(command, **kwargs):
         calls.append(command)
-        return types.SimpleNamespace(returncode=1 if 'pull' in command else 0,
-                                     stdout=json.dumps(config), stderr='')
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(config), stderr='')
     monkeypatch.setattr(_mod.subprocess, 'run', run)
+    # The download fails, but a cached image may still satisfy `up`.
+    monkeypatch.setattr(_mod.subprocess, 'Popen', lambda command, **kwargs: _FinishedPull(calls, command, 1))
     monkeypatch.setattr(_mod, '_write_progress', lambda *args: None)
     assert _mod._prepare_install_images([], 'demo') == (True, '')
-    assert calls[-1] == ['docker', 'compose', 'pull', 'demo']
+    assert calls[-1] == ['docker', 'compose', '--progress', 'plain', 'pull', 'demo']
 
 
 def test_extension_stop_includes_owned_companions_but_not_shared_services(tmp_path, monkeypatch):
