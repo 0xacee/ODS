@@ -20928,6 +20928,63 @@ def _monitor_native_pixel_access():
     logger.warning('Pixel access monitor stopped; recovery requires attention')
 
 
+def _unreachable_docker_credential_helpers(config: dict, search_path: str) -> list[str]:
+    """Return the configured Docker credential helpers this process cannot run."""
+    helpers = set()
+    if isinstance(config.get("credsStore"), str) and config["credsStore"]:
+        helpers.add(config["credsStore"])
+    if isinstance(config.get("credHelpers"), dict):
+        helpers.update(h for h in config["credHelpers"].values() if isinstance(h, str) and h)
+    return sorted(h for h in helpers
+                  if shutil.which(f"docker-credential-{h}", path=search_path) is None)
+
+
+def _public_docker_client_config(install_dir: Path, environ) -> Path | None:
+    """Return an install-scoped Docker config when the user's helper cannot run.
+
+    Docker Desktop's WSL integration writes ``"credsStore": "desktop.exe"`` to
+    ~/.docker/config.json. Interactive WSL shells find that helper on the
+    appended Windows PATH; this systemd service does not, so every image pull
+    failed with "error getting credentials" and extensions could not install
+    (Strixy, 2026-10-03). A helper that cannot run supplies no credentials, so
+    pull anonymously through a config without credential helpers (the shape
+    the Windows installer uses) and keep the user's CLI plugin directories.
+    An explicit DOCKER_CONFIG is the owner's choice and is left alone.
+    """
+    if environ.get("DOCKER_CONFIG"):
+        return None
+    user_dir = Path(environ.get("HOME") or Path.home()) / ".docker"
+    try:
+        config = json.loads((user_dir / "config.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        # Docker itself falls back to its defaults for an unreadable config.
+        logger.warning("Could not read the Docker client config: %s", exc)
+        return None
+    if not isinstance(config, dict):
+        return None
+    missing = _unreachable_docker_credential_helpers(config, environ.get("PATH", os.defpath))
+    if not missing:
+        return None
+    extra = config.get("cliPluginsExtraDirs")
+    candidates = [user_dir / "cli-plugins"]
+    if isinstance(extra, list):
+        candidates += [Path(d) for d in extra if isinstance(d, str) and os.path.isabs(d)]
+    plugin_dirs = list(dict.fromkeys(str(d) for d in candidates if d.is_dir()))
+    document = {"auths": {}}
+    if plugin_dirs:
+        document["cliPluginsExtraDirs"] = plugin_dirs
+    config_dir = install_dir / "data" / "docker-client-public"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    staged = config_dir / f"config.json.{os.getpid()}.tmp"
+    staged.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    os.replace(staged, config_dir / "config.json")
+    logger.warning("Docker credential helper not on this service's PATH (%s); "
+                   "pulling public images with %s", ", ".join(missing), config_dir)
+    return config_dir
+
+
 def main():
     global INSTALL_DIR, DATA_DIR, AGENT_API_KEY, GPU_BACKEND, STARTUP_ODS_MODE
     global TIER, GPU_COUNT, CORE_SERVICE_IDS
@@ -20961,6 +21018,9 @@ def main():
     if not INSTALL_DIR.is_dir():
         logger.error("Install directory not found: %s", INSTALL_DIR)
         sys.exit(1)
+    docker_config = _public_docker_client_config(INSTALL_DIR, os.environ)
+    if docker_config is not None:
+        os.environ["DOCKER_CONFIG"] = str(docker_config)
 
     env = load_env(INSTALL_DIR / ".env")
     # Prefer dedicated ODS_AGENT_KEY; fall back to DASHBOARD_API_KEY for
