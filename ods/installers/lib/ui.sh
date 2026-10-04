@@ -25,7 +25,7 @@
 DIVIDER="──────────────────────────────────────────────────────────────────────────────"
 
 # Resolve presentation separately from install interactivity. The cinematic UI
-# is for a human at a real terminal; pipes, CI, Tauri, and unattended installs
+# is for a human at a real terminal; pipes, CI, GUI front ends, and unattended installs
 # get stable one-line output with no cursor motion or screen clearing.
 ods_ui_cinematic() {
   case "${ODS_UI_MODE:-auto}" in

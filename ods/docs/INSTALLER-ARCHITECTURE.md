@@ -89,9 +89,10 @@ behavior. In the default `auto` mode, `TERM=dumb`, `CI`, and redirected stdout
 also select plain behavior; `cinematic` is the explicit operator override for
 an interactive capture. Plain mode never clears the screen, rings the terminal
 bell, or emits cursor-motion animation. Detailed operational messages remain in
-the install log during cinematic runs; warnings and errors stay visible. The
-Tauri installer continues to consume only the structured `ODS_PROGRESS`
-protocol.
+the install log during cinematic runs; warnings and errors stay visible.
+`ODS_INSTALLER_GUI=1` also turns on the structured `ODS_PROGRESS` lines
+(`installers/lib/progress.sh`) for a graphical front end. None ships today:
+the unsupported Tauri desktop installer was removed.
 
 Long-wait lore and completion assurances must reflect the active runtime mode.
 Local mode may describe local inference; cloud and external-endpoint modes must

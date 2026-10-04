@@ -144,6 +144,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rejects a llama.cpp image without a digest.
 
 ### Changed
+- The unsupported Tauri desktop installer under `installer/` is removed. No CI
+  built it and no release shipped it, and its installer arguments no longer
+  matched the current installers. Its build dependencies carried the
+  repository's last four open Dependabot alerts. Install with the commands in
+  the README.
 - Privacy defaults: bundled services no longer phone home. Open WebUI's
   upstream version check, Qdrant usage telemetry, LiteLLM's start-up cost-map
   fetch from GitHub, n8n diagnostics and version notifications, and the
