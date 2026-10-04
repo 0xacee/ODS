@@ -224,6 +224,62 @@ class RetirementSelection(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'identity-changed'): client.preserve([plan])
             commands.assert_not_called()
 
+    def test_prune_retired_removes_only_this_owners_stopped_retired_sandboxes(self):
+        def container(cid, name, running=False, uid='501'):
+            value = self.sandbox()
+            value.update(Id=cid, Name=name)
+            value['State']['Running'] = running
+            value['Config']['Labels']['org.osmantic.pixel.sandbox-uid'] = uid
+            return value
+        old, running, foreign, kept, live = ('b' * 64, 'c' * 64, 'd' * 64, 'e' * 64, 'f' * 64)
+        inventory = {
+            old: container(old, '/ods-pixel-retired-' + old[:16]),
+            running: container(running, '/ods-pixel-retired-' + running[:16], running=True),
+            foreign: container(foreign, '/ods-pixel-retired-' + foreign[:16], uid='502'),
+            kept: container(kept, '/ods-pixel-retired-' + kept[:16]),
+            live: container(live, '/pixel-sbx-agent-pixel-' + 'f' * 8),
+        }
+        client = object.__new__(retirement.NativeSandboxes)
+        client.owner = self.owner
+        def call(*args):
+            if args[:2] == ('ps', '-aq'): return '\n'.join(inventory) + '\n'
+            return ''
+        with patch.object(client, 'inspect', side_effect=lambda cid: copy.deepcopy(inventory[cid])), \
+                patch.object(client, 'call', side_effect=call) as commands:
+            client.prune_retired({kept})
+        removed = [c.args[1] for c in commands.call_args_list if c.args[0] == 'rm']
+        self.assertEqual(removed, [old])
+
+    def test_prune_superseded_retirements_keeps_newest_and_incomplete(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            def archive(name, receipt):
+                path = base / name
+                path.mkdir()
+                (path / 'item-0').mkdir()
+                if receipt is not None:
+                    (path / 'receipt.json').write_text(json.dumps(receipt))
+                return path
+            current = archive('a' * 32, {'schema': 1, 'status': 'retired'})
+            completed = archive('b' * 32, {'schema': 1, 'status': 'retired'})
+            interrupted = archive('c' * 32, {'schema': 1, 'status': 'retiring'})
+            unreadable = archive('d' * 32, None)
+            (unreadable / 'receipt.json').write_text('{"schema": 1, "status": ')
+            other = archive('not-an-archive', {'schema': 1, 'status': 'retired'})
+            retirement.prune_superseded_retirements(current)
+            self.assertTrue(current.exists())
+            self.assertFalse(completed.exists())
+            self.assertTrue(interrupted.exists())
+            self.assertTrue(unreadable.exists())
+            self.assertTrue(other.exists())
+
+    def test_retire_prunes_only_after_its_own_receipt_is_retired(self):
+        source = (ROOT / 'installers/macos/lib/pixel-native-uninstall.py').read_text()
+        retired = source.index("receipt['status'] = 'retired'")
+        self.assertLess(retired, source.index('sandboxes.prune_retired('))
+        self.assertLess(retired, source.index('prune_superseded_retirements(archive)'))
+
     def test_docker_executes_as_owner_with_bound_context(self):
         self.owner.pw_dir, self.owner.pw_gid = '/Users/owner', 20
         definition = {'ProgramArguments': ['DOCKER_HOST=unix:///Users/owner/.colima/test/docker.sock',
