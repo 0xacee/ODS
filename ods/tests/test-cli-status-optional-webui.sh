@@ -18,12 +18,12 @@ helper_src="$(sed -n '/^_ods_cli_service_not_installed()/,/^}/p' "$CLI")"
 [[ -n "$helper_src" ]] || fail "could not extract _ods_cli_service_not_installed from ods-cli"
 eval "$helper_src"
 
-ENABLE_OPEN_WEBUI=false
+export ENABLE_OPEN_WEBUI=false
 _ods_cli_service_not_installed open-webui || fail "disabled Open WebUI is still treated as installed"
 _ods_cli_service_not_installed dashboard && fail "a disabled Open WebUI flag hid another core service"
 pass "ENABLE_OPEN_WEBUI=false leaves Open WebUI out of status"
 
-ENABLE_OPEN_WEBUI=true
+export ENABLE_OPEN_WEBUI=true
 _ods_cli_service_not_installed open-webui && fail "enabled Open WebUI was skipped"
 unset ENABLE_OPEN_WEBUI
 _ods_cli_service_not_installed open-webui && fail "an install without the flag must keep checking Open WebUI"
