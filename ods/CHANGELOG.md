@@ -424,6 +424,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   longer install the memory-shepherd timers that maintained OpenClaw's
   workspace. `ods start` warns when an `ods-openclaw` container is still
   present.
+- Token Spy no longer has a poll-frequency setting
+  (`poll_interval_minutes`). It only rewrote the OpenClaw session-cleanup
+  timer, which was removed with that extension. The Token Spy dashboard no
+  longer shows the field, `/api/settings` no longer reports or stores it, and
+  a value saved by an earlier version disappears from `settings.json` on the
+  next save. `session-manager.sh` still runs on whatever timer or cron job
+  you give it.
 
 ### Fixed
 - Rerunning the installer (an update) no longer fails with "Embeddings model
