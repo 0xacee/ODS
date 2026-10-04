@@ -699,7 +699,14 @@ ALWAYS_ON_SERVICES: frozenset = frozenset({
 
 # Built-ins qualified for Dashboard Library Add/Disable. The live health poll
 # must refresh this same set after a fragment changes without an API restart.
-LIBRARY_MANAGEABLE_BUILTINS: frozenset = frozenset({"n8n", "perplexica", "searxng"})
+# A lean install adds the original stack back from here, one click each; every
+# entry was enabled live from a lean fleet install and proved working. Token
+# Spy and APE build app source locally and wait for a reviewed source recipe.
+LIBRARY_MANAGEABLE_BUILTINS: frozenset = frozenset({
+    "n8n", "perplexica", "searxng",
+    "hermes", "hermes-proxy", "qdrant", "embeddings", "tts", "whisper",
+    "comfyui", "langfuse",
+})
 
 
 def load_extension_catalog() -> list[dict]:

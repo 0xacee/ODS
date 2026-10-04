@@ -1,0 +1,44 @@
+name: Open WebUI service contracts
+# The tests read the base compose file, every overlay that changes Open WebUI,
+# the dependency lock and the installer's pull list, so changes to any of them
+# run the suite.
+on:
+  pull_request:
+    paths:
+      - 'ods/extensions/services/open-webui/**'
+      - 'ods/extensions/services/pixel-edge/compose.yaml.disabled'
+      - 'ods/docker-compose.*.yml'
+      - 'ods/installers/macos/docker-compose.macos.yml'
+      - 'ods/installers/windows/docker-compose.windows-amd*.yml'
+      - 'ods/installers/phases/08-images.sh'
+      - 'ods/config/dependency-lock.json'
+      - '.github/workflows/open-webui-service.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'ods/extensions/services/open-webui/**'
+      - 'ods/extensions/services/pixel-edge/compose.yaml.disabled'
+      - 'ods/docker-compose.*.yml'
+      - 'ods/installers/macos/docker-compose.macos.yml'
+      - 'ods/installers/windows/docker-compose.windows-amd*.yml'
+      - 'ods/installers/phases/08-images.sh'
+      - 'ods/config/dependency-lock.json'
+      - '.github/workflows/open-webui-service.yml'
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      # The pinned Open WebUI image runs openwebui-prepare.py on Python 3.11.
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.11'
+      - name: Install pytest
+        run: python -m pip install 'pytest>=8,<9'
+      - name: Pre-upgrade backup, upgrade refusals and compose wiring
+        run: python -m pytest -q ods/extensions/services/open-webui/tests

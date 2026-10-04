@@ -770,7 +770,7 @@ AUDIO_STT_MODEL=Systran/faster-whisper-base
 TTS_VOICE=en_US-lessac-medium
 
 #=== Embeddings / RAG ===
-# Open WebUI uses this canonical model at first boot unless an explicit
+# Open WebUI uses this canonical model at every start unless an explicit
 # external-provider override is configured.
 EMBEDDING_MODEL=${embedding_model}
 RAG_EMBEDDING_MODEL=${rag_embedding_model}

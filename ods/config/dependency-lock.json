@@ -23,7 +23,7 @@
       "id": "base.open-webui",
       "type": "image",
       "path": "docker-compose.base.yml",
-      "value": "ghcr.io/open-webui/open-webui:v0.7.2@sha256:16d9a3615b45f14a0c89f7ad7a3bf151f923ed32c2e68f9204eb17d1ce40774b"
+      "value": "ghcr.io/open-webui/open-webui:v0.11.4@sha256:9591b13f13843c7721c2b8eaf7382846c81b3ffe126526d1888d1fed50c6a33f"
     },
     {
       "id": "apple.llama-server",
@@ -257,7 +257,7 @@
       "id": "n8n.app",
       "type": "image",
       "path": "extensions/services/n8n/compose.yaml",
-      "value": "n8nio/n8n:2.6.4@sha256:b962d7f8ba9e990a0c530256d841fdc52312dce32173f29808e29a9430811ad3"
+      "value": "n8nio/n8n:2.41.6@sha256:87e0bab2c93192e8dd885ff7b0697c22a1bd97489568a8c67cc140fd7dbb342d"
     },
     {
       "id": "openclaw.app",

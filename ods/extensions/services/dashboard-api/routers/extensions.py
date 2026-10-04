@@ -475,12 +475,24 @@ def _opencode_extension_action(action: str) -> dict:
     return {"id": "opencode", "action": action, "state": status.get("state")}
 
 
+def _gpu_compatible(ext: dict) -> bool:
+    """True when this host's GPU backend can run the catalog entry."""
+    gpu_backends = ext.get("gpu_backends", [])
+    return not gpu_backends or "all" in gpu_backends or GPU_BACKEND in gpu_backends
+
+
 def _compute_extension_status(ext: dict, services_by_id: dict) -> str:
     """Compute the runtime status of an extension."""
     ext_id = ext["id"]
     if ext_id == "opencode" and ext_id in SERVICES:
         return _opencode_extension_status(services_by_id.get(ext_id))
     one_shot = _is_one_shot_extension(ext)
+
+    # A Library built-in this host's backend cannot run (ComfyUI needs AMD or
+    # NVIDIA) stays incompatible even though other hosts may add it; its
+    # selection and any receipt from a refused attempt are moot here.
+    if ext_id in LIBRARY_MANAGEABLE_BUILTINS and not _gpu_compatible(ext):
+        return "incompatible"
 
     # Check for in-flight install operations (progress files take priority)
     progress = _read_progress(ext_id)
@@ -556,8 +568,7 @@ def _compute_extension_status(ext: dict, services_by_id: dict) -> str:
             return "disabled"
 
     # GPU incompatibility
-    gpu_backends = ext.get("gpu_backends", [])
-    if gpu_backends and "all" not in gpu_backends and GPU_BACKEND not in gpu_backends:
+    if not _gpu_compatible(ext):
         return "incompatible"
 
     if ext.get("catalog_source") == "builtin":
@@ -4310,6 +4321,21 @@ def rollback_extension_update(
 
 def _parse_manifest_deps(manifest_path: Path) -> list[str]:
     """Reject unreadable dependency declarations rather than silently dropping them."""
+    svc = _load_dependency_manifest(manifest_path).get("service")
+    error = f"Invalid dependency manifest for extension: {manifest_path.parent.name}"
+    if not isinstance(svc, dict):
+        raise HTTPException(status_code=400, detail=error)
+    depends_on = svc.get("depends_on", [])
+    if not isinstance(depends_on, list) or any(
+        not isinstance(dep, str) or not _SERVICE_ID_RE.fullmatch(dep)
+        for dep in depends_on
+    ):
+        raise HTTPException(status_code=400, detail=error)
+    return list(dict.fromkeys(depends_on))
+
+
+def _load_dependency_manifest(manifest_path: Path) -> dict:
+    """Read one bounded, non-symlink manifest document."""
     error = f"Invalid dependency manifest for extension: {manifest_path.parent.name}"
     try:
         if not stat.S_ISREG(manifest_path.lstat().st_mode):
@@ -4332,16 +4358,39 @@ def _parse_manifest_deps(manifest_path: Path) -> list[str]:
         raise HTTPException(status_code=400, detail=error) from exc
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=400, detail=error)
-    svc = manifest.get("service")
-    if not isinstance(svc, dict):
-        raise HTTPException(status_code=400, detail=error)
-    depends_on = svc.get("depends_on", [])
-    if not isinstance(depends_on, list) or any(
-        not isinstance(dep, str) or not _SERVICE_ID_RE.fullmatch(dep)
-        for dep in depends_on
-    ):
-        raise HTTPException(status_code=400, detail=error)
-    return list(dict.fromkeys(depends_on))
+    return manifest
+
+
+def _feature_companions(service_id: str) -> list[str]:
+    """Qualified built-ins a feature needs running alongside service_id.
+
+    A feature's manifest lists every service it runs on
+    (``enabled_services_all``). Hermes Agent is reachable only through
+    hermes-proxy, so adding Hermes from the Extensions page must add its
+    proxy too, or the owner has nothing to open. Only Library-manageable
+    built-ins can be companions; core services stay ODS-managed.
+    """
+    if service_id not in LIBRARY_MANAGEABLE_BUILTINS:
+        return []
+    for name in ("manifest.yaml", "manifest.yml", "manifest.json"):
+        candidate = EXTENSIONS_DIR / service_id / name
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        features = _load_dependency_manifest(candidate).get("features") or []
+        break
+    else:
+        return []
+    companions: list[str] = []
+    for feature in features if isinstance(features, list) else []:
+        members = feature.get("enabled_services_all") if isinstance(feature, dict) else None
+        for member in members if isinstance(members, list) else []:
+            if (isinstance(member, str) and member != service_id
+                    and member in LIBRARY_MANAGEABLE_BUILTINS
+                    and member not in ALWAYS_ON_SERVICES and member not in companions):
+                companions.append(member)
+    return companions
 
 
 def _read_direct_deps(service_id: str) -> list[str]:
@@ -4537,6 +4586,16 @@ def enable_extension(
         # Start never triggers a download. Owners can select Install explicitly.
         return _opencode_extension_action("start")
     _assert_not_core(service_id)
+    # The Compose resolver leaves a built-in out of the stack on an unsupported
+    # backend, so enabling it would only fail at start with a generic error.
+    entry = next((e for e in EXTENSION_CATALOG if e.get("id") == service_id), {})
+    if service_id in LIBRARY_MANAGEABLE_BUILTINS and not _gpu_compatible(entry):
+        backends = ", ".join(backend.upper() for backend in entry["gpu_backends"])
+        raise HTTPException(
+            status_code=409,
+            detail=f"{entry.get('name', service_id)} needs one of these GPU backends: {backends}. "
+                   "It is not available on this hardware.",
+        )
 
     ext_dir = _resolve_extension_dir(service_id)
 
@@ -4589,6 +4648,15 @@ def enable_extension(
                     dep, installed=True, setup_hook_runs=_has_error_progress(dep),
                     outcome="started")
 
+    # Feature companions start after the target in the same plan (Hermes
+    # Agent with its hermes-proxy). A companion whose own dependencies this
+    # plan does not satisfy stays off instead of failing the request.
+    companions = [
+        companion for companion in _feature_companions(service_id)
+        if companion not in missing_deps and not _is_dep_satisfied(companion)
+        and set(_get_missing_deps_transitive(companion)) <= set(missing_deps) | {service_id}
+    ]
+
     enabled_services: list[str] = []
     expected_sha256: dict[str, str] = {}
 
@@ -4616,6 +4684,12 @@ def enable_extension(
         if result.get("action") in ("enabled", "already_enabled"):
             enabled_services.append(service_id)
             expected_sha256[service_id] = result["sha256"]
+
+        for companion in companions:
+            result = _activate_service(companion)
+            if result.get("action") in ("enabled", "already_enabled"):
+                enabled_services.append(companion)
+                expected_sha256[companion] = result["sha256"]
 
     # The host validates the complete desired graph and commits all marker
     # moves under the CLI's shared lock before any service is started.
@@ -4852,11 +4926,18 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
     # error, then let the host recheck it under that lock through stop and
     # marker change. No container lock is held across the host request.
     dependents = _enabled_dependents(service_id)
-    if dependents:
+    # Feature companions Add started with this service (Hermes's
+    # hermes-proxy) stop with it; any other dependent still blocks.
+    companions = [c for c in _feature_companions(service_id) if c in dependents]
+    blocking = [d for d in dependents if d not in companions]
+    for companion in companions:
+        blocking += [d for d in _enabled_dependents(companion)
+                     if d != service_id and d not in companions and d not in blocking]
+    if blocking:
         raise HTTPException(
             status_code=409,
             detail=(f"Cannot disable {service_id}: enabled extensions "
-                    f"{', '.join(dependents)} depend on it. Disable them first."),
+                    f"{', '.join(blocking)} depend on it. Disable them first."),
         )
     try:
         st = os.lstat(enabled_compose)
@@ -4867,16 +4948,20 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
     if stat.S_ISLNK(st.st_mode):
         raise HTTPException(status_code=400, detail="Compose file is a symlink")
 
-    _select_extensions_on_host("disable", [service_id])
-    progress_file = Path(DATA_DIR) / "extension-progress" / f"{service_id}.json"
-    progress_file.unlink(missing_ok=True)
+    # The host disables one service per request and rechecks dependents each
+    # time, so companions go first.
+    for target in (*companions, service_id):
+        _select_extensions_on_host("disable", [target])
+        progress_file = Path(DATA_DIR) / "extension-progress" / f"{target}.json"
+        progress_file.unlink(missing_ok=True)
 
-    logger.info("Disabled extension: %s", service_id)
+    logger.info("Disabled extension: %s (companions: %s)", service_id, companions or "none")
 
     return {
         "id": service_id,
         "action": "disabled",
         "restart_required": False,
+        "companions_disabled": companions,
         "dependents_warning": [],
         "data_info": _get_service_data_info(service_id) if include_data_info else None,
         "message": "Extension disabled and stopped.",

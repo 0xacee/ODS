@@ -126,6 +126,8 @@ Be honest with your users about this:
 
 `open-webui` is the only service in the stack with a real multi-user account model — chat history is per-account. If your users only interact via open-webui, the sharing problems above mostly don't surface.
 
+ODS keeps open-webui's self-signup closed. The first account created on a new install with `WEBUI_AUTH=true` becomes the administrator, who creates each user's account in **Admin Panel > Users**. Settings changed in open-webui's Admin Panel last until it restarts; see [Settings come from ODS](../extensions/services/open-webui/README.md#settings-come-from-ods).
+
 ---
 
 ## Capacity guidance

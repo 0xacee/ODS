@@ -250,11 +250,10 @@ passwords to set before you expose anything.
 ### How do I create a workflow?
 Workflows run in n8n, which is optional: choose Full Stack or `--workflows`
 when installing, or run `ods enable n8n` and then `ods start n8n`. Open
-http://localhost:5678 right away: n8n asks you to create its owner account
-the first time, and until an owner exists anything that can reach n8n can
-create one. The bundled n8n version does not use `N8N_USER` or `N8N_PASS`
-from `.env`. Then create a workflow, add a trigger and actions, save it, and
-switch it to Active.
+http://localhost:5678 and sign in with `N8N_USER` and `N8N_PASS` from
+`.env`. If someone created n8n's owner on its first-run screen before ODS
+managed it, that account keeps working instead. Then create a workflow, add
+a trigger and actions, save it, and switch it to Active.
 
 ### What's n8n?
 n8n is the optional workflow engine bundled with ODS. It provides a visual
@@ -355,6 +354,21 @@ model is running on the CPU; see "NVIDIA GPU not detected" above.
 Check that the webhook URL is reachable from the service that calls it, read
 `ods logs n8n`, and make sure the workflow is switched to Active in the editor.
 
+### Open WebUI's admin settings changed back after a restart
+ODS gives Open WebUI its settings each time it starts, from `.env`, your
+hardware and mode, and the Dashboard Settings page, so changes made in Open
+WebUI's Admin Panel > Settings last until Open WebUI restarts. Make lasting
+changes in ODS. Accounts, chats, workspace models, knowledge and prompts are
+kept as usual. See [Settings come from ODS](extensions/services/open-webui/README.md#settings-come-from-ods).
+
+### Open WebUI does not start after an update
+Read `ods logs open-webui`. The first start of a new Open WebUI version migrates
+its database before it answers, which can take many minutes on a large
+install; let it finish. If ODS refused to start it, the log says why, for
+example two accounts whose email addresses differ only in case. ODS copies the
+database to `data/open-webui/ods-backups/` before each new version; to go
+back, follow [Upgrades and backups](extensions/services/open-webui/README.md#upgrades-and-backups).
+
 ### Docker volumes taking too much space
 Use the ODS uninstaller with `--keep-data` if you want to remove the
 application while keeping its volumes (back up `.env` first; see the uninstall
@@ -413,8 +427,9 @@ or uninstall and reinstall to update. `~/ods` is not a git checkout, so
 ### Where is the data stored?
 In folders under `~/ods/data/` rather than Docker volumes: for example n8n's
 workflows and credentials in `~/ods/data/n8n/` and Open WebUI's in
-`~/ods/data/open-webui/`. Stop a service before copying its files, or use
-`ods backup`.
+`~/ods/data/open-webui/`, which also keeps copies of its database from before
+the last two Open WebUI upgrades in `ods-backups/`. Stop a service before
+copying its files, or use `ods backup`.
 
 ### Can I use OpenAI or Anthropic models?
 Yes. See [Can I send requests to cloud APIs?](#can-i-send-requests-to-cloud-apis)
