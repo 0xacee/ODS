@@ -347,6 +347,9 @@ jobs:
       - name: Uninstall Compose Flags Tests
         run: bash tests/test-uninstall-compose-flags.sh
 
+      - name: Uninstall stops the background model upgrade
+        run: bash tests/test-uninstall-stops-model-upgrade.sh
+
       - name: Uninstall volume custody and stopped-stack tests
         run: |
           python3 tests/test_uninstall_compose_volumes.py

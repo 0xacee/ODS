@@ -334,6 +334,42 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -r)" == *[Mm]icrosoft* ]]; then
     fi
 fi
 
+# Stop this installation's background full-model upgrade (bootstrap-upgrade.sh
+# and its download) before anything else changes. It runs detached on macOS,
+# and on Linux without a user systemd session, tracked only by a PID file in
+# the tree being removed. A survivor keeps downloading for up to an hour, can
+# swap models or restart services mid-uninstall, and later rewrites the next
+# installation at the same path. Newer installers make it a process-group
+# leader so the group signal also reaches curl; older ones leave a plain child.
+if command -v pgrep >/dev/null 2>&1; then
+    _ods_upgrade_groups=()
+    while IFS= read -r _ods_upgrade_pid; do
+        [[ -n "$_ods_upgrade_pid" ]] || continue
+        _ods_upgrade_pgid="$(ps -o pgid= -p "$_ods_upgrade_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ "$_ods_upgrade_pgid" == "$_ods_upgrade_pid" ]]; then
+            _ods_upgrade_groups+=("-$_ods_upgrade_pid")
+        else
+            while IFS= read -r _ods_upgrade_child; do
+                [[ -n "$_ods_upgrade_child" ]] && _ods_upgrade_groups+=("$_ods_upgrade_child")
+            done < <(pgrep -P "$_ods_upgrade_pid" 2>/dev/null || true)
+            _ods_upgrade_groups+=("$_ods_upgrade_pid")
+        fi
+    done < <(pgrep -f "$INSTALL_DIR/scripts/bootstrap-upgrade.sh" 2>/dev/null || true)
+    if [[ -n "${_ods_upgrade_groups[0]-}" ]]; then
+        log_info "Stopping the background model upgrade: ${_ods_upgrade_groups[*]}"
+        kill -TERM -- "${_ods_upgrade_groups[@]}" 2>/dev/null || true
+        for _ods_upgrade_wait in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 -- "${_ods_upgrade_groups[@]}" 2>/dev/null || break
+            sleep 0.5
+        done
+        if kill -0 -- "${_ods_upgrade_groups[@]}" 2>/dev/null; then
+            log_info "Background model upgrade still running; sending SIGKILL"
+            kill -KILL -- "${_ods_upgrade_groups[@]}" 2>/dev/null || true
+        fi
+    fi
+    unset _ods_upgrade_groups _ods_upgrade_pid _ods_upgrade_pgid _ods_upgrade_child _ods_upgrade_wait
+fi
+
 # Disable and settle the bound Windows login startup before removing Pixel:
 # a sign-in coordinator must not restart services during their retirement.
 # Lemonade itself and its model library remain installed.
