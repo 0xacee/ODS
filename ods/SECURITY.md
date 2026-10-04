@@ -394,7 +394,7 @@ llama-server has no authentication by default. Use LiteLLM as your authenticated
 | Service | Auth | Notes |
 |---------|------|-------|
 | Dashboard | Session off-machine; none for local browsers | See [Dashboard Sign-in](#dashboard-sign-in) and [Trust Boundary](#trust-boundary) |
-| Open WebUI | Off on localhost-only installs; on with `--lan` | Change the `admin@localhost` password before exposing (see [Quick LAN Access](#quick-lan-access)); disable signups |
+| Open WebUI | Off on localhost-only installs; on with `--lan` | Change the `admin@localhost` password before exposing (see [Quick LAN Access](#quick-lan-access)); signup is closed, so administrators add accounts in Admin Panel > Users |
 | n8n | Owner account, created on first visit | Open n8n and create the owner as soon as you enable it (until then anything that can reach port 5678 can claim it); enable 2FA |
 | llama-server | None | Keep localhost-only, use LiteLLM for remote |
 | LiteLLM | API key | Set `LITELLM_KEY` in .env |

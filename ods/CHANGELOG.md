@@ -7,6 +7,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Open WebUI is upgraded from 0.7.2 to 0.11.4, which fixes 101 published
+  advisories that affect 0.7.2: 1 critical, 41 high, 54 medium and 5 low. Two
+  of the high ones are fixed only in 0.11.4.
+  - Open WebUI's settings now come from ODS at every start
+    (`ENABLE_PERSISTENT_CONFIG=false`). Since 0.10, Open WebUI otherwise writes
+    every setting into its database on its first start and ignores later
+    changes, so mode switches, Pixel, key rotation and the Dashboard Settings
+    page would have stopped applying. Changes made in Open WebUI's Admin Panel
+    > Settings now last until Open WebUI restarts, and settings saved there
+    before this release are no longer used.
+  - Signup is closed (`ENABLE_SIGNUP=false`). Open WebUI still lets the first
+    account sign up on a new install with sign-in on and makes it the
+    administrator, who adds other accounts in Admin Panel > Users.
+  - Open WebUI's database migrations cannot be undone, so ODS copies
+    `webui.db` to `data/open-webui/ods-backups/` before a new Open WebUI
+    version first starts and keeps the two newest copies. It refuses to start
+    Open WebUI, with the reason in its log, when two accounts have email
+    addresses that differ only in case (the upgrade would stop partway
+    through), or when the image is older than the version that last used the
+    data. The first start after this upgrade migrates the database and can
+    take many minutes on a large install.
+  - Chats and models without a chosen function-calling mode now use Open
+    WebUI's Native tool calling.
 - The Portal Full Access confirmation now says what it turns off. It disables
   the sandbox and per-command approval, so commands run directly as the owner
   account, while web search and page fetching stay on. It also notes that
