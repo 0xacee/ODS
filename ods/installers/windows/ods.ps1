@@ -1332,6 +1332,28 @@ function Set-ODSProxyAuthRequired {
     $env:WEBUI_AUTH = "true"
 }
 
+# A BIND_ADDRESS other than loopback publishes Open WebUI beyond this machine,
+# with or without the ODS proxy, so it needs the same sign-in enforcement.
+# Same rule as _bind_address_is_network in bin/ods-host-agent.py.
+function Test-ODSBindAddressIsNetwork {
+    param([string]$BindAddress)
+
+    $bind = $BindAddress.Trim().Trim([char[]]@('"', "'"))
+    if ($bind -eq "") { $bind = "127.0.0.1" }
+    # -notin ignores case, as the host agent's lower() does.
+    return $bind -notin @("127.0.0.1", "::1", "[::1]", "localhost")
+}
+
+# Mirrors _ods_cli_network_access_enabled in ods-cli.
+function Test-ODSNetworkAccessEnabled {
+    param([string[]]$ComposeFlags)
+
+    if (Test-ODSBindAddressIsNetwork -BindAddress (Get-ODSEnvValue -Name "BIND_ADDRESS")) {
+        return $true
+    }
+    return [bool](Test-ODSComposeServiceAvailable -ComposeFlags $ComposeFlags -Service "ods-proxy")
+}
+
 function Invoke-ODSProxyAuthPreflight {
     param([Parameter(Mandatory = $true)][string[]]$ComposeFlags)
 
@@ -2610,7 +2632,7 @@ function Invoke-Start {
         if ($Service -eq "ods-proxy") {
             Invoke-ODSProxyAuthPreflight -ComposeFlags $flags
         } elseif ((-not $Service -or $Service -eq "open-webui") -and
-            (Test-ODSComposeServiceAvailable -ComposeFlags $flags -Service "ods-proxy")) {
+            (Test-ODSNetworkAccessEnabled -ComposeFlags $flags)) {
             Set-ODSProxyAuthRequired
         }
         if ($Service) {
@@ -2758,7 +2780,7 @@ function Invoke-Restart {
         if ($Service -eq "ods-proxy") {
             Invoke-ODSProxyAuthPreflight -ComposeFlags $flags
         } elseif ((-not $Service -or $Service -eq "open-webui") -and
-            (Test-ODSComposeServiceAvailable -ComposeFlags $flags -Service "ods-proxy")) {
+            (Test-ODSNetworkAccessEnabled -ComposeFlags $flags)) {
             Set-ODSProxyAuthRequired
         }
         if ($Service) {
@@ -2945,6 +2967,10 @@ function Invoke-Update {
             Write-AIError "docker compose pull failed (exit code: $pullExit)"
             Write-ODSComposeDiagnostics -InstallDir $InstallDir -ComposeFlags $flags -Phase "ods.ps1 update (pull)"
             exit 1
+        }
+        # Recreating everything recreates Open WebUI too.
+        if (Test-ODSNetworkAccessEnabled -ComposeFlags $flags) {
+            Set-ODSProxyAuthRequired
         }
         Write-AI "Recreating containers..."
         $upExit = Invoke-ODSDockerCompose -InstallDir $InstallDir -ComposeFlags $flags `
