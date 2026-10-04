@@ -73,11 +73,14 @@ else
     printf 'INFO the owner was created on n8n'"'"'s first-run screen; it keeps its own password\n'
 fi
 
-# n8n's processes (not tini, PID 1, which Docker starts with the container
-# environment) must not carry the plaintext password.
+# No process in the container may carry the plaintext password, PID 1
+# included. `docker exec` starts this checker with the container's configured
+# environment, so it skips itself and the commands it runs.
 leaks="$(docker exec "$CONTAINER" sh -c '
     for dir in /proc/[0-9]*; do
-        [ "${dir#/proc/}" = 1 ] && continue
+        pid="${dir#/proc/}"
+        [ "$pid" = "$$" ] && continue
+        [ "$(awk "/^PPid:/ { print \$2 }" "$dir/status" 2>/dev/null)" = "$$" ] && continue
         tr "\0" "\n" < "$dir/environ" 2>/dev/null \
             | grep -q -e "^ODS_N8N_OWNER_PASSWORD=" -e "^N8N_DEFAULT_ADMIN_PASSWORD=" \
             && echo "${dir#/proc/}"

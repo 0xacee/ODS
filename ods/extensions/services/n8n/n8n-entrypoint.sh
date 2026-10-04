@@ -31,4 +31,7 @@ if [ "$requested_cookie_policy" = "false" ] \
 fi
 
 export N8N_SECURE_COOKIE="$resolved_cookie_policy"
-exec /docker-entrypoint.sh "$@"
+# This script starts as PID 1 so that tini, which becomes PID 1 here, is
+# exec'd without the plaintext password: /proc/1/environ is readable by every
+# process in the container that runs as the same user.
+exec tini -- /docker-entrypoint.sh "$@"
