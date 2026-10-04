@@ -475,12 +475,24 @@ def _opencode_extension_action(action: str) -> dict:
     return {"id": "opencode", "action": action, "state": status.get("state")}
 
 
+def _gpu_compatible(ext: dict) -> bool:
+    """True when this host's GPU backend can run the catalog entry."""
+    gpu_backends = ext.get("gpu_backends", [])
+    return not gpu_backends or "all" in gpu_backends or GPU_BACKEND in gpu_backends
+
+
 def _compute_extension_status(ext: dict, services_by_id: dict) -> str:
     """Compute the runtime status of an extension."""
     ext_id = ext["id"]
     if ext_id == "opencode" and ext_id in SERVICES:
         return _opencode_extension_status(services_by_id.get(ext_id))
     one_shot = _is_one_shot_extension(ext)
+
+    # A Library built-in this host's backend cannot run (ComfyUI needs AMD or
+    # NVIDIA) stays incompatible even though other hosts may add it; its
+    # selection and any receipt from a refused attempt are moot here.
+    if ext_id in LIBRARY_MANAGEABLE_BUILTINS and not _gpu_compatible(ext):
+        return "incompatible"
 
     # Check for in-flight install operations (progress files take priority)
     progress = _read_progress(ext_id)
@@ -556,8 +568,7 @@ def _compute_extension_status(ext: dict, services_by_id: dict) -> str:
             return "disabled"
 
     # GPU incompatibility
-    gpu_backends = ext.get("gpu_backends", [])
-    if gpu_backends and "all" not in gpu_backends and GPU_BACKEND not in gpu_backends:
+    if not _gpu_compatible(ext):
         return "incompatible"
 
     if ext.get("catalog_source") == "builtin":
@@ -4533,6 +4544,16 @@ def enable_extension(
         # Start never triggers a download. Owners can select Install explicitly.
         return _opencode_extension_action("start")
     _assert_not_core(service_id)
+    # The Compose resolver leaves a built-in out of the stack on an unsupported
+    # backend, so enabling it would only fail at start with a generic error.
+    entry = next((e for e in EXTENSION_CATALOG if e.get("id") == service_id), {})
+    if service_id in LIBRARY_MANAGEABLE_BUILTINS and not _gpu_compatible(entry):
+        backends = ", ".join(backend.upper() for backend in entry["gpu_backends"])
+        raise HTTPException(
+            status_code=409,
+            detail=f"{entry.get('name', service_id)} needs one of these GPU backends: {backends}. "
+                   "It is not available on this hardware.",
+        )
 
     ext_dir = _resolve_extension_dir(service_id)
 
