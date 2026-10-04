@@ -250,6 +250,8 @@ else
                 relative="${relative%$'\r'}"
                 [[ -n "$digest" && "$digest" != \#* && "$relative" != *..* ]] || continue
                 path="$config/$relative"
+                # Never reach a template through a linked folder.
+                [[ "$relative" != */* || ! -L "$config/${relative%/*}" ]] || continue
                 [[ -f "$path" && ! -L "$path" ]] || continue
                 # An unreadable file has no digest, so it is kept.
                 [[ "$(sha256sum -- "$path" 2>/dev/null | cut -d ' ' -f 1)" == "$digest" ]] || continue

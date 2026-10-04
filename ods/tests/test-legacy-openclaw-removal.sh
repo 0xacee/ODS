@@ -118,6 +118,10 @@ fi
 if grep -v '^#' "$MANIFEST" | grep -Fq '..'; then
     fail "template manifest must not name a path outside config/openclaw"
 fi
+# The installers refuse a linked parent folder; that check covers one level.
+if grep -v '^#' "$MANIFEST" | grep -Eq '/[^ ]*/'; then
+    fail "template manifest paths may be at most one folder deep"
+fi
 pass "the template manifest lists the shipped OpenClaw templates"
 
 # ── Upgrade prune: Linux and macOS ───────────────────────────────────────────
@@ -227,6 +231,17 @@ check_prune() {
         fail "$platform upgrade warned about OpenClaw files an owner never had"
     fi
     pass "$platform upgrade of an install that never used OpenClaw leaves nothing and stays quiet"
+
+    # A linked folder is never followed, even to a byte-identical template.
+    install="$tmp/$platform-linked"
+    home="$tmp/$platform-linked-home"
+    mkdir -p "$install/config/openclaw" "$tmp/$platform-outside" "$home"
+    cp "$tmp/pristine-SYSTEM.md" "$tmp/$platform-outside/SYSTEM.md"
+    ln -s "$tmp/$platform-outside" "$install/config/openclaw/workspace"
+    run_prune "$platform" "$install" "$home" > "$tmp/$platform-linked.out"
+    [[ -f "$tmp/$platform-outside/SYSTEM.md" ]] \
+        || fail "$platform upgrade followed a linked folder out of config/openclaw"
+    pass "$platform upgrade never follows a linked folder out of config/openclaw"
 
     # Fresh install: nothing to prune, nothing printed, nothing created.
     install="$tmp/$platform-fresh"

@@ -2047,6 +2047,8 @@ else
             _macos_relative="${_macos_relative%$'\r'}"
             [[ -n "$_macos_digest" && "$_macos_digest" != \#* && "$_macos_relative" != *..* ]] || continue
             _macos_path="${_macos_openclaw_config}/${_macos_relative}"
+            # Never reach a template through a linked folder.
+            [[ "$_macos_relative" != */* || ! -L "${_macos_openclaw_config}/${_macos_relative%/*}" ]] || continue
             [[ -f "$_macos_path" && ! -L "$_macos_path" ]] || continue
             # An unreadable file has no digest, so it is kept.
             [[ "$(_macos_file_sha256 "$_macos_path" 2>/dev/null)" == "$_macos_digest" ]] || continue

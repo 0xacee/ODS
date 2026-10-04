@@ -237,13 +237,17 @@ $_openClawConfig = Join-Path $_configDir "openclaw"
 $_openClawData = Join-Path $_dataDir "openclaw"
 $_openClawManifest = Join-Path $sourceRoot "installers\lib\retired-openclaw-config.sha256"
 if ((Test-Path -LiteralPath $_openClawConfig -PathType Container) -and
-    (Test-Path -LiteralPath $_openClawManifest -PathType Leaf)) {
+    (Test-Path -LiteralPath $_openClawManifest -PathType Leaf) -and
+    -not ((Get-Item -LiteralPath $_openClawConfig -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
     foreach ($_line in Get-Content -LiteralPath $_openClawManifest) {
         if ($_line -notmatch '^([0-9a-f]{64})\s+(\S+)$') { continue }
         $_digest = $Matches[1]
         $_relative = $Matches[2]
         if ($_relative.Contains('..')) { continue }
         $_template = Join-Path $_openClawConfig ($_relative -replace '/', '\')
+        # Never reach a template through a linked folder.
+        $_parent = Get-Item -LiteralPath (Split-Path -Parent $_template) -Force -ErrorAction SilentlyContinue
+        if ($null -ne $_parent -and ($_parent.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
         $_item = Get-Item -LiteralPath $_template -Force -ErrorAction SilentlyContinue
         if ($null -eq $_item -or $_item.PSIsContainer -or
             ($_item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }

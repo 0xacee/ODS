@@ -288,6 +288,16 @@ jobs:
         shell: pwsh
         run: ./tests/test-windows-restart-model-preflight.ps1
 
+      - name: Windows OpenClaw Template Cleanup (PowerShell 7)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: pwsh
+        run: ./tests/test-windows-openclaw-template-cleanup.ps1
+
+      - name: Windows OpenClaw Template Cleanup (Windows PowerShell)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: powershell
+        run: ./tests/test-windows-openclaw-template-cleanup.ps1
+
       - name: Windows Whisper Port Conflict
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: pwsh
