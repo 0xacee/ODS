@@ -25,6 +25,7 @@ from helpers import (
     _get_aio_session, set_services_cache, get_cached_services,
     _get_httpx_client, _get_lifetime_tokens, record_model_performance,
 )
+from config import LIBRARY_MANAGEABLE_BUILTINS
 from models import BootstrapStatus, ServiceStatus, DiskUsage
 
 
@@ -740,7 +741,7 @@ class TestGetAllServices:
                            "external_port": port, "health": "/healthz"}
 
         def current_manifests(*args, **kwargs):
-            assert kwargs["only_service_ids"] == frozenset({"n8n", "perplexica", "searxng"})
+            assert kwargs["only_service_ids"] == LIBRARY_MANAGEABLE_BUILTINS
             return ({service_id: optional_config} if selected else {}), [], []
 
         async def fake_health(sid, cfg):

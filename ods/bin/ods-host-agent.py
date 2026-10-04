@@ -5935,13 +5935,30 @@ def _fs_type(path: Path) -> str | None:
 
 
 def _precreate_data_dirs(service_id: str):
-    """Pre-create data directories for an extension with correct ownership."""
+    """Pre-create data directories for an extension with correct ownership.
+
+    Read every fragment the Compose resolver can select for the service: the
+    base file plus its GPU, local-mode and multi-GPU overlays. ComfyUI
+    declares its mounts only in compose.<gpu>.yaml; reading the base file
+    alone left Docker to create data/comfyui/* as root, and the uid-1000
+    container crash-looped on mkdir /models/checkpoints (Tower3, 2026-10-04).
+    """
     ext_dir = _find_ext_dir(service_id)
     if ext_dir is None:
         return
-    compose_path = ext_dir / "compose.yaml"
-    if not compose_path.exists():
+    if not (ext_dir / "compose.yaml").exists():
         return
+    names = ["compose.yaml", f"compose.{GPU_BACKEND}.yaml", "compose.local.yaml"]
+    if str(GPU_COUNT).isdecimal() and int(GPU_COUNT) > 1:
+        names.append(f"compose.multigpu-{GPU_BACKEND}.yaml")
+    for name in names:
+        compose_path = ext_dir / name
+        if compose_path.is_file() and not compose_path.is_symlink():
+            _precreate_compose_data_dirs(service_id, ext_dir, compose_path)
+
+
+def _precreate_compose_data_dirs(service_id: str, ext_dir: Path, compose_path: Path):
+    """Create one Compose fragment's relative bind-mount sources."""
     try:
         import yaml
         data = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
@@ -5950,7 +5967,7 @@ def _precreate_data_dirs(service_id: str):
         logger.debug("PyYAML not available, skipping data dir pre-creation for %s", service_id)
         return
     except (OSError, yaml.YAMLError) as e:
-        logger.debug("Failed to parse compose.yaml for %s: %s", service_id, e)
+        logger.debug("Failed to parse %s for %s: %s", compose_path.name, service_id, e)
         return
     if not isinstance(data, dict):
         return
