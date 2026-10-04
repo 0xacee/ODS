@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Open WebUI no longer starts for other devices while its built-in
+  administrator, `admin@localhost`, still has the password `admin`. Open WebUI
+  creates that account while it runs without sign-in, the default for a
+  localhost-only install, and the account keeps working after sign-in is
+  turned on. So anyone on the network could sign in as administrator once the
+  install was exposed. When Open WebUI would be reachable from other devices,
+  through `BIND_ADDRESS` or the ODS proxy, its start-up now refuses, changes
+  nothing, and explains in its log how to change that password first. The
+  ODS proxy now also counts as exposure for the sign-in rule below.
 - Open WebUI now starts with sign-in on whenever it is published beyond this
   machine (`BIND_ADDRESS` not loopback), whatever `WEBUI_AUTH` says in `.env`.
   The CLI, `ods.ps1` and the host agent already turn sign-in on in that case.

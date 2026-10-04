@@ -100,7 +100,10 @@ without sign-in on localhost-only installs. In that mode it creates a built-in
 administrator, `admin@localhost`, with the password `admin`, and that account
 keeps working after sign-in is turned on. Sign in as `admin@localhost` and
 change its password (or create your own administrator and delete it) before
-other devices can reach port 3000.
+other devices can reach port 3000. ODS refuses to start Open WebUI for other
+devices, through `BIND_ADDRESS` or the ODS proxy, while that account still has
+the password `admin`. In that case Open WebUI stays stopped, and its log
+(`docker logs ods-webui`) explains these steps.
 
 Docker publishes container ports through its own firewall rules, so host
 firewalls such as `ufw` do not reliably restrict them. Restrict exposure with

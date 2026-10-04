@@ -13,13 +13,18 @@ those migrations cannot be undone. This step:
    migrated by a newer Open WebUI, or user accounts have email addresses that
    differ only in case, which one migration rejects partway through
    (revision f0bd01a18a3d);
-2. when the Open WebUI version differs from the one recorded beside the
+2. refuses to start Open WebUI for other devices (--published-on-network)
+   while its built-in administrator, admin@localhost, still has the password
+   "admin". Open WebUI creates that account when it runs without sign-in, and
+   it keeps working after sign-in is turned on;
+3. when the Open WebUI version differs from the one recorded beside the
    database, copies the database to ods-backups/ first, keeping the two newest
    copies, and records the new version.
 
 It reports on stderr. A refusal exits with status 1 before Open WebUI starts
-and leaves the database and the recorded version as they were. Standard
-library only: it runs on the Python that the Open WebUI image ships.
+and leaves the database and the recorded version as they were. It runs on the
+Python that the Open WebUI image ships: the standard library, plus Open WebUI's
+own password hashing (bcrypt, or argon2 for an argon2 hash) for step 2.
 """
 from __future__ import annotations
 
@@ -55,6 +60,11 @@ UNIQUE_EMAIL_REVISION = "f0bd01a18a3d"
 UNIQUE_EMAIL_INDEX = "uq_user_email_lower"
 REVISION = re.compile(r"""^revision(?:\s*:[^=\n]*)?\s*=\s*['"]([0-9A-Za-z_]+)['"]""", re.M)
 DOCS = "ods/extensions/services/open-webui/README.md (Upgrades and backups)"
+# The administrator Open WebUI creates, and signs everyone in as, while sign-in
+# is off (routers/auths.py in v0.11.4).
+DEFAULT_ADMIN_EMAIL = "admin@localhost"
+DEFAULT_ADMIN_PASSWORD = "admin"
+LAN_DOCS = "ods/SECURITY.md (Quick LAN Access)"
 
 
 def report(message: str) -> None:
@@ -173,6 +183,59 @@ def preflight(data_dir: Path, app_dir: Path, installed: str, recorded: str | Non
             f"again. Nothing was changed.", data_dir)
 
 
+def is_default_password(stored: str | None) -> bool:
+    """Whether a stored hash is Open WebUI's hash of the default password."""
+    if not stored:
+        return False
+    if stored.startswith("$argon2"):
+        try:
+            from argon2 import PasswordHasher
+            from argon2.exceptions import InvalidHashError, VerificationError
+        except ImportError:
+            # An image without argon2 cannot verify this hash, so nobody can
+            # sign in with it either.
+            return False
+        try:
+            return PasswordHasher().verify(stored, DEFAULT_ADMIN_PASSWORD)
+        except (InvalidHashError, VerificationError):
+            return False
+    import bcrypt  # Open WebUI's own dependency; its sign-in imports it too.
+    try:
+        return bcrypt.checkpw(DEFAULT_ADMIN_PASSWORD.encode("utf-8"), stored.encode("utf-8"))
+    except ValueError:
+        return False
+
+
+def default_administrator_active(database: Path) -> bool:
+    """Whether admin@localhost can still sign in with the default password; read-only."""
+    if not database.exists():
+        return False
+    with closing(read_only(database)) as connection:
+        if not has(connection, "table", "auth"):
+            return False
+        rows = connection.execute(
+            "SELECT password FROM auth WHERE lower(email) = ? AND active",
+            (DEFAULT_ADMIN_EMAIL,)).fetchall()
+    return any(is_default_password(row[0]) for row in rows)
+
+
+def refuse_default_administrator(data_dir: Path) -> None:
+    """Refuse a start for other devices while the default administrator is usable."""
+    if default_administrator_active(data_dir / DATABASE):
+        raise SystemExit(
+            f"ODS: Open WebUI was not started. Other devices can reach it, but its built-in "
+            f"administrator {DEFAULT_ADMIN_EMAIL} still has the password "
+            f"\"{DEFAULT_ADMIN_PASSWORD}\", so anyone on your network could sign in as the "
+            f"administrator.\n"
+            f"ODS: Open WebUI created that account while it ran without sign-in. To fix it, make "
+            f"Open WebUI local-only again (BIND_ADDRESS=127.0.0.1 in .env, and turn off the ODS "
+            f"proxy if you use it), then run `ods restart`. Sign in on this computer as "
+            f"{DEFAULT_ADMIN_EMAIL} with the password \"{DEFAULT_ADMIN_PASSWORD}\", and change "
+            f"that password (or create your own administrator and delete {DEFAULT_ADMIN_EMAIL}). "
+            f"Then turn network access back on. Nothing was changed.\n"
+            f"ODS: see {LAN_DOCS}")
+
+
 def remove_set(base: Path) -> None:
     for suffix in ("",) + LOGS + (SHARED_MEMORY,):
         Path(f"{base}{suffix}").unlink(missing_ok=True)
@@ -239,12 +302,16 @@ def main(argv: list[str] | None = None, now: datetime | None = None) -> int:
                         help="Open WebUI's data directory (default: %(default)s)")
     parser.add_argument("--app-dir", type=Path, default=Path("/app"),
                         help="the Open WebUI installation in the image (default: %(default)s)")
+    parser.add_argument("--published-on-network", action="store_true",
+                        help="Open WebUI is reachable from other devices")
     args = parser.parse_args(argv)
     data_dir, app_dir = args.data_dir, args.app_dir
 
     installed = installed_version(app_dir)
     recorded = recorded_version(data_dir)
     preflight(data_dir, app_dir, installed, recorded)
+    if args.published_on_network:
+        refuse_default_administrator(data_dir)
     if recorded == installed:
         return 0
     saved = backup_database(data_dir, recorded, now or datetime.now(timezone.utc))
