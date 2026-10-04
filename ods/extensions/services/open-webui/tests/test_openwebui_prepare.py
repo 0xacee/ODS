@@ -344,6 +344,8 @@ def test_compose_runs_the_step_before_the_images_own_start_command():
         assert f"      - {mount}\n" in block
     assert '      ENABLE_PERSISTENT_CONFIG: "false"\n' in block
     assert '      ENABLE_SIGNUP: "false"\n' in block
+    # The wrapper sees the address the port below is published on.
+    assert '      ODS_WEBUI_BIND_ADDRESS: "${BIND_ADDRESS:-127.0.0.1}"\n' in block
     # Unchanged: the image's user and port, and the health probe.
     assert not re.search(r"^    (user|working_dir):", block, re.M)
     assert '      - "${BIND_ADDRESS:-127.0.0.1}:${WEBUI_PORT:-3000}:8080"\n' in block
@@ -363,6 +365,51 @@ def test_the_wrapper_starts_open_webui_only_when_the_step_succeeds(tmp_path, sta
     assert "step /opt/ods/openwebui-prepare.py" in started.stderr
     assert started.returncode == status
     assert started.stdout == ("" if status else "started\n")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX wrapper with sh")
+@pytest.mark.parametrize("bind,auth,expected", [
+    # Loopback, by the host agent's rule, keeps the operator's choice.
+    (None, "false", "false"),
+    ("", "false", "false"),
+    ("127.0.0.1", "false", "false"),
+    (" 127.0.0.1 ", "false", "false"),
+    ('"127.0.0.1"', "False", "False"),
+    ("'::1'", "false", "false"),
+    ("[::1]", "0", "0"),
+    ("LOCALHOST", "false", "false"),
+    # Published beyond this machine: sign-in is on, whatever .env says.
+    ("0.0.0.0", "false", "true"),
+    ("0.0.0.0", "False", "true"),
+    ("0.0.0.0", "0", "true"),
+    ("0.0.0.0", "", "true"),
+    ("192.168.1.20", "false", "true"),
+    ('"0.0.0.0"', "false", "true"),
+    ("::", "false", "true"),
+    ("[::]", "false", "true"),
+    ("ods.lan", "false", "true"),
+    ("127.0.0.2", "false", "true"),
+    # Already on: left exactly as configured.
+    ("0.0.0.0", "true", "true"),
+    ("0.0.0.0", "True", "True"),
+    ("0.0.0.0", None, "unset"),
+])
+def test_the_wrapper_turns_sign_in_on_when_open_webui_is_published_beyond_loopback(tmp_path, bind, auth, expected):
+    stand_in = tmp_path / "python3"
+    stand_in.write_text("#!/bin/sh\nexit 0\n")
+    stand_in.chmod(0o755)
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("ODS_WEBUI_BIND_ADDRESS", "WEBUI_AUTH")}
+    environment["PATH"] = f"{tmp_path}{os.pathsep}{os.environ['PATH']}"
+    if bind is not None:
+        environment["ODS_WEBUI_BIND_ADDRESS"] = bind
+    if auth is not None:
+        environment["WEBUI_AUTH"] = auth
+    started = subprocess.run(["sh", str(WRAPPER), "sh", "-c", 'printf "%s" "${WEBUI_AUTH-unset}"'],
+                             capture_output=True, text=True, env=environment, check=False)
+    assert started.returncode == 0, started.stderr
+    assert started.stdout == expected
+    assert ("starts with sign-in on" in started.stderr) == (expected == "true" and auth != "true")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX wrapper with sh")
@@ -404,7 +451,7 @@ def test_no_overlay_replaces_the_step_or_odss_settings():
             continue
         checked.append(path.relative_to(ODS).as_posix())
         for key in ("image:", "entrypoint:", "command:", "user:", "working_dir:",
-                    "ENABLE_PERSISTENT_CONFIG", "ENABLE_SIGNUP"):
+                    "ENABLE_PERSISTENT_CONFIG", "ENABLE_SIGNUP", "ODS_WEBUI_BIND_ADDRESS", "ports:"):
             assert key not in block, f"{path} sets {key} on open-webui"
     # The overlays that change Open WebUI's environment are all still seen.
     for expected in (
