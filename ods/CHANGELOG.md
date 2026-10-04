@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Open WebUI now starts with sign-in on whenever it is published beyond this
+  machine (`BIND_ADDRESS` not loopback), whatever `WEBUI_AUTH` says in `.env`.
+  The CLI, `ods.ps1` and the host agent already turn sign-in on in that case.
+  The check now also runs inside the container, so paths that skip those
+  tools cannot publish Open WebUI on the network without sign-in: the
+  Dashboard's update, a rollback, or a plain `docker compose up`.
 - Other containers can no longer spend a remote LLM provider's API key
   (GHSA-4rpc-g4mc-jm9c). The remote-provider egress, which adds the
   provider key to outbound requests, accepted unauthenticated requests from
