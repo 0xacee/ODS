@@ -5,7 +5,9 @@
 # into the user scope, and every timer it enabled served only the removed
 # legacy OpenClaw extension. The phase now installs no user units at all; on
 # an upgrade it retires the legacy session-cleanup units an older install
-# copied there and leaves memory-shepherd timers as the owner configured them.
+# copied there, but only while they still carry the shipped definition, and
+# leaves memory-shepherd timers as the owner configured them. It still enables
+# linger, which phase 11's background model download needs after logout.
 # This extracts the real retirement block from the phase and runs it.
 set -euo pipefail
 
@@ -34,10 +36,20 @@ pass "phase 10 installs no user units, templated or otherwise"
     || fail "the legacy session-cleanup units must not ship"
 pass "the legacy session-cleanup units are not shipped"
 
+# Phase 11 starts the background full-model download as a transient user unit
+# (systemd-run --user); without linger it stops when the installing session
+# ends. The AMD path enabled linger before this removal and must keep doing so.
+amd_branch="$(awk '/^elif \[\[ "\$GPU_BACKEND" == "amd" \]\] && ! \$DRY_RUN; then$/ {grab=1} grab {print}' "$PHASE")"
+grep -Fq 'loginctl enable-linger "$(whoami)"' <<<"$amd_branch" \
+    || fail "phase 10 must keep enabling linger on AMD installs"
+grep -Fq '_phase10_privileged loginctl enable-linger "$(whoami)"' <<<"$amd_branch" \
+    || fail "phase 10 must retry linger with privileges"
+pass "phase 10 keeps enabling linger for the background model download"
+
 block="$(awk '
     /_phase10_user_units="\$HOME\/\.config\/systemd\/user"/ {grab=1}
     grab {print}
-    grab && /^    unset _phase10_user_units$/ {exit}
+    grab && /^    unset _phase10_user_units / {exit}
 ' "$PHASE")"
 [[ -n "$block" ]] || fail "could not extract the legacy unit retirement block from $PHASE"
 
@@ -53,24 +65,54 @@ run_block() {
     )
 }
 
-# Upgrade: the legacy units are retired; memory-shepherd timers stay.
-upgrade_home="$TMP_DIR/upgrade-home"
-units="$upgrade_home/.config/systemd/user"
-mkdir -p "$units"
-for unit in openclaw-session-cleanup.timer openclaw-session-cleanup.service \
-            memory-shepherd-workspace.timer memory-shepherd-workspace.service; do
-    printf '[Unit]\nDescription=fixture\n' > "$units/$unit"
+write_shipped_units() {
+    local units="$1" install_root="$2"
+    printf '[Unit]\nDescription=OpenClaw Session Cleanup\nAfter=network.target\n\n[Service]\nType=oneshot\nExecStart=%%h/%s/scripts/session-cleanup.sh\n' \
+        "$install_root" > "$units/openclaw-session-cleanup.service"
+    printf '[Unit]\nDescription=OpenClaw Session Cleanup Timer\n\n[Timer]\nOnBootSec=30s\nOnUnitActiveSec=60s\n\n[Install]\nWantedBy=timers.target\n' \
+        > "$units/openclaw-session-cleanup.timer"
+}
+
+# Upgrade: the shipped units and their enablement link are retired;
+# memory-shepherd timers stay.
+for install_root in ods dream-server; do
+    upgrade_home="$TMP_DIR/upgrade-$install_root"
+    units="$upgrade_home/.config/systemd/user"
+    mkdir -p "$units/timers.target.wants"
+    write_shipped_units "$units" "$install_root"
+    ln -s ../openclaw-session-cleanup.timer "$units/timers.target.wants/openclaw-session-cleanup.timer"
+    for unit in memory-shepherd-workspace.timer memory-shepherd-workspace.service; do
+        printf '[Unit]\nDescription=fixture\n' > "$units/$unit"
+    done
+    calls="$TMP_DIR/upgrade-$install_root-calls"
+    run_block "$upgrade_home" "$calls"
+    [[ ! -e "$units/openclaw-session-cleanup.timer" && ! -e "$units/openclaw-session-cleanup.service" ]] \
+        || fail "upgrade ($install_root) kept the legacy session-cleanup units"
+    [[ ! -e "$units/timers.target.wants/openclaw-session-cleanup.timer" \
+        && ! -L "$units/timers.target.wants/openclaw-session-cleanup.timer" ]] \
+        || fail "upgrade ($install_root) left the timer's enablement link"
+    [[ -f "$units/memory-shepherd-workspace.timer" && -f "$units/memory-shepherd-workspace.service" ]] \
+        || fail "upgrade must leave memory-shepherd units as configured"
+    grep -Fxq 'disable --now openclaw-session-cleanup.timer' "$calls" \
+        || fail "upgrade ($install_root) did not stop the legacy session-cleanup timer"
+    grep -Fxq 'daemon-reload' "$calls" || fail "upgrade did not reload the user manager"
 done
-calls="$TMP_DIR/upgrade-calls"
-run_block "$upgrade_home" "$calls"
-[[ ! -e "$units/openclaw-session-cleanup.timer" && ! -e "$units/openclaw-session-cleanup.service" ]] \
-    || fail "upgrade kept the legacy session-cleanup units"
-[[ -f "$units/memory-shepherd-workspace.timer" && -f "$units/memory-shepherd-workspace.service" ]] \
-    || fail "upgrade must leave memory-shepherd units as configured"
-grep -Fxq 'disable --now openclaw-session-cleanup.timer' "$calls" \
-    || fail "upgrade did not stop the legacy session-cleanup timer"
-grep -Fxq 'daemon-reload' "$calls" || fail "upgrade did not reload the user manager"
-pass "upgrade retires the legacy session-cleanup units and keeps memory-shepherd timers"
+pass "upgrade retires the shipped session-cleanup units and keeps memory-shepherd timers"
+
+# Units an owner rewrote under the same names are not ODS's to remove.
+foreign_home="$TMP_DIR/foreign-home"
+units="$foreign_home/.config/systemd/user"
+mkdir -p "$units"
+printf '[Unit]\nDescription=OpenClaw Session Cleanup\n\n[Service]\nType=oneshot\nExecStart=%%h/bin/clean-pixel-sessions\n' \
+    > "$units/openclaw-session-cleanup.service"
+printf '[Unit]\nDescription=Owner session cleanup\n\n[Timer]\nOnBootSec=1h\n' \
+    > "$units/openclaw-session-cleanup.timer"
+calls="$TMP_DIR/foreign-calls"
+run_block "$foreign_home" "$calls"
+[[ -f "$units/openclaw-session-cleanup.service" && -f "$units/openclaw-session-cleanup.timer" ]] \
+    || fail "upgrade removed session-cleanup units the owner rewrote"
+[[ ! -s "$calls" ]] || fail "upgrade touched the user manager for foreign units: $(cat "$calls")"
+pass "upgrade keeps session-cleanup units the owner rewrote"
 
 # Fresh install: nothing to retire, no user-manager calls.
 fresh_home="$TMP_DIR/fresh-home"

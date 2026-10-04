@@ -49,7 +49,8 @@ fi
 tmp_env="$(mktemp)"
 tmp_custom_port_env="$(mktemp)"
 tmp_switchboard_env="$(mktemp)"
-trap 'rm -f "$tmp_env" "$tmp_custom_port_env" "$tmp_switchboard_env"' EXIT
+tmp_full_stack_env="$(mktemp)"
+trap 'rm -f "$tmp_env" "$tmp_custom_port_env" "$tmp_switchboard_env" "$tmp_full_stack_env"' EXIT
 cat > "$tmp_env" <<'ENV_EOF'
 WEBUI_SECRET=ci-placeholder
 OLLAMA_PORT=11434
@@ -69,6 +70,16 @@ ODS_MODEL_SWITCHBOARD=enabled
 LITELLM_KEY=ci-litellm-key
 OPEN_WEBUI_LLM_BASE_URL=http://litellm:4000
 OPEN_WEBUI_LLM_API_KEY=ci-litellm-key
+ENV_EOF
+
+cat > "$tmp_full_stack_env" <<'ENV_EOF'
+WEBUI_SECRET=ci-placeholder
+HERMES_DASHBOARD_SESSION_TOKEN=ci-hermes-dashboard-session-token
+ODS_AGENT_HOST=host.docker.internal
+AMD_INFERENCE_PORT=18080
+SEARXNG_SECRET=ci-searxng-secret
+N8N_USER=ci@example.test
+N8N_PASS=ci-n8n-password
 ENV_EOF
 
 rendered="$(
@@ -150,5 +161,42 @@ grep -q 'ODS_MODE: local' <<<"$switchboard_litellm_rendered" \
   || { echo "[FAIL] AMD LiteLLM render must receive the active ODS mode"; exit 1; }
 grep -q 'ods-select-config.sh' <<<"$switchboard_litellm_rendered" \
   || { echo "[FAIL] AMD LiteLLM render must keep the mode-aware config selector"; exit 1; }
+
+# Match the Windows installer's precedence: platform overlays are loaded before
+# extension base/GPU overlays. Rendering the complete stack catches a later
+# extension compose.yaml or compose.amd.yaml that points a core service back at
+# the disabled in-network llama-server.
+full_stack_compose_args=(
+  --env-file "$tmp_full_stack_env"
+  -f docker-compose.base.yml
+  -f installers/windows/docker-compose.windows-amd.yml
+  -f installers/windows/docker-compose.windows-amd.local.yml
+)
+for extension_dir in extensions/services/*/; do
+  [[ -f "${extension_dir}compose.yaml" ]] \
+    && full_stack_compose_args+=(-f "${extension_dir}compose.yaml")
+  [[ -f "${extension_dir}compose.amd.yaml" ]] \
+    && full_stack_compose_args+=(-f "${extension_dir}compose.amd.yaml")
+done
+
+full_stack_webui_rendered="$(
+  env -u ODS_AGENT_HOST -u AMD_INFERENCE_PORT -u OPEN_WEBUI_LLM_BASE_URL -u LLM_API_BASE_PATH \
+    docker compose "${full_stack_compose_args[@]}" config open-webui
+)"
+full_stack_webui_url="$(sed -n 's/^[[:space:]]*OPENAI_API_BASE_URL:[[:space:]]*//p' <<<"$full_stack_webui_rendered")"
+if [[ "$full_stack_webui_url" != "http://host.docker.internal:18080/v1" ]]; then
+  echo "[FAIL] Windows AMD full-stack Open WebUI OPENAI_API_BASE_URL mismatch: ${full_stack_webui_url:-<missing>}"
+  exit 1
+fi
+
+full_stack_dashboard_rendered="$(
+  env -u ODS_AGENT_HOST -u AMD_INFERENCE_PORT -u LLM_API_BASE_PATH \
+    docker compose "${full_stack_compose_args[@]}" config dashboard-api
+)"
+full_stack_dashboard_url="$(sed -n 's/^[[:space:]]*OLLAMA_URL:[[:space:]]*//p' <<<"$full_stack_dashboard_rendered")"
+if [[ "$full_stack_dashboard_url" != "http://host.docker.internal:18080" ]]; then
+  echo "[FAIL] Windows AMD full-stack dashboard-api OLLAMA_URL mismatch: ${full_stack_dashboard_url:-<missing>}"
+  exit 1
+fi
 
 echo "[PASS] Windows AMD local compose overlay"

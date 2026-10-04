@@ -534,6 +534,15 @@ _update_rollback() {
     fi
 
     local -a rollback_compose_args=()
+    if [[ -n "$compose_flags_arg" ]] && ! compose_flags_files_exist "$compose_flags_arg"; then
+        # Rollback restores configuration, not git, so the update may have
+        # deleted Compose files these flags name. Restart the stack the
+        # current tree resolves to instead.
+        log_warn "Compose flags name files that no longer exist; resolving the stack again."
+        if ! compose_flags_arg="$(resolve_compose_flags)"; then
+            compose_flags_arg=""
+        fi
+    fi
     if ! compose_flags_parse "$compose_flags_arg"; then
         log_error "Cannot restart rollback with malformed compose flags."
         return 1
@@ -874,6 +883,25 @@ cmd_update() {
                 fi
             fi
         done
+    fi
+
+    # The pull and the migrations can delete Compose files that the pre-pull
+    # flags name, for example a removed bundled service. Resolve the stack
+    # again so the restart uses the updated tree, and so `down
+    # --remove-orphans` removes containers whose service is gone.
+    if ! compose_flags_files_exist "$compose_flags"; then
+        log_warn "The update removed Compose files the running stack used; resolving the stack again."
+        local updated_compose_flags=""
+        if ! updated_compose_flags="$(resolve_compose_flags)"; then
+            updated_compose_flags=""
+        fi
+        if ! compose_flags_parse "$updated_compose_flags"; then
+            _update_rollback "Cannot restart with malformed compose flags after the update." \
+                "$snap_dir" "$compose_flags"
+            return 1
+        fi
+        compose_flags="$updated_compose_flags"
+        compose_args=("${COMPOSE_PARSED_ARGS[@]}")
     fi
 
     # ── Step 4: restart services ──────────────────────────────────────────────

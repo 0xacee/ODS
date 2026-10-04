@@ -229,31 +229,74 @@ else
     # Retired bundled services. The source copy below never deletes files a
     # release removed, so an upgraded install still carries their extension
     # directories, and a stale compose.yaml there would keep the old container
-    # in the stack. Delete only the service code; each service's data stays
-    # for the owner to archive or delete.
+    # in the stack. Delete only the service code and untouched shipped
+    # templates; each service's data stays for the owner to archive or delete.
     #
-    # This runs before the Pixel source transaction below is staged: that
-    # transaction records the installed extensions tree as its baseline and
-    # checks it again before release, so a removal after it is applied would
-    # be reported as live drift and stop the upgrade.
-    _phase06_step "prune-retired-services"
-    # ODSForge was retired from the shipped stack after Hermes became the
-    # default agent surface; data/odsforge is preserved.
-    if [[ -d "$INSTALL_DIR/extensions/services/odsforge" ]]; then
-        rm -rf "$INSTALL_DIR/extensions/services/odsforge"
-        log "Removed retired ODSForge service files from extensions/services"
-    fi
-    # The legacy OpenClaw extension (the ods-openclaw container) was removed;
-    # Portal (Pixel) and Hermes are the supported agents. Once it is out of
-    # the stack, phase 11's `up --remove-orphans` removes the old container.
-    # data/openclaw and config/openclaw are preserved.
-    if [[ -d "$INSTALL_DIR/extensions/services/openclaw" ]]; then
-        rm -rf "$INSTALL_DIR/extensions/services/openclaw"
-        log "Removed retired OpenClaw service files from extensions/services"
-    fi
-    if [[ -d "$INSTALL_DIR/data/openclaw" || -d "$INSTALL_DIR/config/openclaw" ]]; then
-        ai "The legacy OpenClaw extension was removed. Its data/openclaw and config/openclaw folders were kept; delete them by hand when you no longer need them."
-    fi
+    # The Pixel source transaction below records the installed extensions tree
+    # as its baseline and checks it again before release. The prune therefore
+    # runs before a new plan is staged, but never while an unfinished plan is
+    # pending: that plan is bound to the tree it recorded, and only the release
+    # that staged it can finish, resume or roll it back.
+    _phase06_retire_openclaw_config() {
+        # Every release copied the OpenClaw templates into config/openclaw,
+        # whether the extension was used or not. A template that is still
+        # byte-identical to a shipped version is not owner data.
+        local config="$INSTALL_DIR/config/openclaw" data="$INSTALL_DIR/data/openclaw"
+        local manifest="$SCRIPT_DIR/installers/lib/retired-openclaw-config.sha256"
+        local digest relative path folders=""
+        if [[ -d "$config" && ! -L "$config" && -f "$manifest" ]]; then
+            while read -r digest relative; do
+                # A source tree copied from a Windows checkout has CRLF lines.
+                relative="${relative%$'\r'}"
+                [[ -n "$digest" && "$digest" != \#* && "$relative" != *..* ]] || continue
+                path="$config/$relative"
+                [[ -f "$path" && ! -L "$path" ]] || continue
+                # An unreadable file has no digest, so it is kept.
+                [[ "$(sha256sum -- "$path" 2>/dev/null | cut -d ' ' -f 1)" == "$digest" ]] || continue
+                rm -f -- "$path" || log "Could not remove the unchanged OpenClaw template $path (non-fatal)"
+            done < "$manifest"
+            for path in "$config/workspace" "$config"; do
+                if [[ -d "$path" && ! -L "$path" && -r "$path" && -x "$path" && -z "$(ls -A -- "$path")" ]]; then
+                    rmdir -- "$path" || log "Could not remove the empty folder $path (non-fatal)"
+                fi
+            done
+        fi
+        if [[ -e "$config" || -L "$config" ]]; then
+            folders="config/openclaw"
+        fi
+        # An unreadable data folder may still hold the agent's state.
+        if [[ -d "$data" ]]; then
+            if [[ ! -r "$data" || ! -x "$data" ]] || [[ -n "$(ls -A -- "$data")" ]]; then
+                folders="${folders:+$folders and }data/openclaw"
+            fi
+        fi
+        if [[ -n "$folders" ]]; then
+            ai "The legacy OpenClaw extension was removed. Its remaining files in $folders were kept; delete them by hand when you no longer need them (docs/MIGRATION-OPENCLAW-TO-HERMES.md explains how)."
+            if [[ -f "$HOME/.config/systemd/user/memory-shepherd-memory.timer" \
+                || -f "$HOME/.config/systemd/user/memory-shepherd-workspace.timer" ]]; then
+                ai "Disable the memory-shepherd-memory and memory-shepherd-workspace user timers before deleting config/openclaw; they still maintain its workspace."
+            fi
+        fi
+    }
+
+    _phase06_prune_retired_services() {
+        _phase06_step "prune-retired-services"
+        # ODSForge was retired from the shipped stack after Hermes became the
+        # default agent surface; data/odsforge is preserved.
+        if [[ -d "$INSTALL_DIR/extensions/services/odsforge" ]]; then
+            rm -rf "$INSTALL_DIR/extensions/services/odsforge"
+            log "Removed retired ODSForge service files from extensions/services"
+        fi
+        # The legacy OpenClaw extension (the ods-openclaw container) was
+        # removed; Portal (Pixel) and Hermes are the supported agents. Once it
+        # is out of the stack, phase 11's `up --remove-orphans` removes the old
+        # container.
+        if [[ -d "$INSTALL_DIR/extensions/services/openclaw" ]]; then
+            rm -rf "$INSTALL_DIR/extensions/services/openclaw"
+            log "Removed retired OpenClaw service files from extensions/services"
+        fi
+        _phase06_retire_openclaw_config
+    }
 
     # A Pixel-to-Hermes rerun must retire the exact ODS-managed host runtime,
     # not merely remove the Compose edge from the next launch. Do this before
@@ -261,6 +304,8 @@ else
     # still compare root-owned artifacts with the source that installed them.
     _phase06_pixel_marker="$HOME/.config/ods/pixel-managed.json"
     _phase06_pixel_source_transition=0
+    # Cleared below while an unfinished Pixel source plan is pending.
+    _phase06_prune_ready=true
     if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" \
         && ( -e "$_phase06_pixel_marker" || -L "$_phase06_pixel_marker" ) ]]; then
         _phase06_pixel_owner="$(ods_pixel_install_owner)" || {
@@ -281,6 +326,12 @@ else
                 _ods_pixel_source_upgrade finish "$_phase06_pixel_owner" || return 1
             elif jq -e '.pending == true' <<<"$_phase06_source_status" >/dev/null; then
                 _phase06_pixel_source_transition=0
+                # The pending plan is bound to the tree it recorded. Keep the
+                # retired service files: `stage` below either resumes this
+                # release's own plan, which pruned them before staging, or
+                # refuses an older plan so the release that staged it can
+                # still finish or roll it back.
+                _phase06_prune_ready=false
             fi
             unset _phase06_source_status
         fi
@@ -292,6 +343,9 @@ else
                     "$_phase06_pixel_owner" "$_phase06_pixel_home" "$_phase06_requested_pixel_ref" >/dev/null; then
                     error "Could not verify the prior Pixel checkout for safe upgrade. Restore its local backup before retrying; no private repository was contacted."
                     return 1
+                fi
+                if [[ "$_phase06_prune_ready" == true ]]; then
+                    _phase06_prune_retired_services
                 fi
                 if ! _ods_pixel_source_upgrade stage "$_phase06_pixel_owner" \
                     "$SCRIPT_DIR" "$_phase06_requested_pixel_ref"; then
@@ -318,7 +372,9 @@ else
                 _ods_pixel_source_upgrade downstream "$_phase06_pixel_owner" || return 1
                 unset _phase06_pixel_binary
                 ;;
-            1) ;;
+            1)
+                _phase06_prune_retired_services
+                ;;
             *)
                 error "The existing ODS-managed Pixel state is unsafe for a source transition."
                 return 1
@@ -336,8 +392,12 @@ else
             error "Could not safely deactivate the ODS-managed Pixel host runtime."
             return 1
         fi
+        _phase06_prune_retired_services
+    else
+        _phase06_prune_retired_services
     fi
-    unset _phase06_pixel_marker _phase06_pixel_source_transition
+    unset _phase06_pixel_marker _phase06_pixel_source_transition _phase06_prune_ready
+    unset -f _phase06_prune_retired_services _phase06_retire_openclaw_config
 
     _phase06_rootless=false
     if [[ -f "$SCRIPT_DIR/lib/rootless-ownership.sh" ]]; then

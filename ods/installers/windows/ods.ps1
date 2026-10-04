@@ -232,6 +232,22 @@ function Test-ODSDockerRunningQuiet {
     }
 }
 
+function Test-ODSLegacyOpenClawContainer {
+    # The legacy OpenClaw extension was removed. Starts never remove orphan
+    # containers, so an upgrade that stopped before its final stack start can
+    # leave the old ods-openclaw container running.
+    $previousPreference = $ErrorActionPreference
+    try {
+        # PowerShell 5.1 turns native stderr into terminating errors under
+        # Stop; a missing container is the normal case here.
+        $ErrorActionPreference = 'Continue'
+        $null = & docker container inspect ods-openclaw 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
 function Get-ODSDockerProjectResourceNames {
     param(
         [Parameter(Mandatory=$true)]
@@ -2631,6 +2647,9 @@ function Invoke-Start {
                 exit 1
             }
             Write-AISuccess "All services started"
+            if (Test-ODSLegacyOpenClawContainer) {
+                Write-AIWarn "The removed legacy OpenClaw container ods-openclaw still exists. Remove it with: docker rm -f ods-openclaw (see docs/MIGRATION-OPENCLAW-TO-HERMES.md)"
+            }
             if ($hermesInStack) {
                 Invoke-HermesSoulRefresh -SyncContainer
             }

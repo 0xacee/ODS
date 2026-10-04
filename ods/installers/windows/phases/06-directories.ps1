@@ -224,15 +224,58 @@ if (Test-Path $_retiredODSForge) {
 }
 # The legacy OpenClaw extension (the ods-openclaw container) was removed;
 # Portal (Pixel) and Hermes are the supported agents. Remove its stale service
-# files the same way so `up --remove-orphans` drops the old container, and keep
-# data\openclaw and config\openclaw for the owner to archive or delete.
+# files the same way so `up --remove-orphans` drops the old container.
 $_retiredOpenClaw = Join-Path $installDir "extensions\services\openclaw"
 if (Test-Path -LiteralPath $_retiredOpenClaw) {
     Remove-Item -LiteralPath $_retiredOpenClaw -Recurse -Force
     Write-AI "Removed retired OpenClaw service files from extensions/services"
 }
-if ((Test-Path -LiteralPath (Join-Path $_dataDir "openclaw")) -or (Test-Path -LiteralPath (Join-Path $_configDir "openclaw"))) {
-    Write-AI "The legacy OpenClaw extension was removed. Its data\openclaw and config\openclaw folders were kept; delete them by hand when you no longer need them."
+# Every release copied the OpenClaw templates into config\openclaw, used or
+# not. A template that is still byte-identical to a shipped version is not
+# owner data; anything else, and data\openclaw, stays.
+$_openClawConfig = Join-Path $_configDir "openclaw"
+$_openClawData = Join-Path $_dataDir "openclaw"
+$_openClawManifest = Join-Path $sourceRoot "installers\lib\retired-openclaw-config.sha256"
+if ((Test-Path -LiteralPath $_openClawConfig -PathType Container) -and
+    (Test-Path -LiteralPath $_openClawManifest -PathType Leaf)) {
+    foreach ($_line in Get-Content -LiteralPath $_openClawManifest) {
+        if ($_line -notmatch '^([0-9a-f]{64})\s+(\S+)$') { continue }
+        $_digest = $Matches[1]
+        $_relative = $Matches[2]
+        if ($_relative.Contains('..')) { continue }
+        $_template = Join-Path $_openClawConfig ($_relative -replace '/', '\')
+        $_item = Get-Item -LiteralPath $_template -Force -ErrorAction SilentlyContinue
+        if ($null -eq $_item -or $_item.PSIsContainer -or
+            ($_item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+        # An unreadable file has no digest, so it is kept.
+        $_hash = Get-FileHash -LiteralPath $_template -Algorithm SHA256 -ErrorAction SilentlyContinue
+        if ($null -eq $_hash -or $_hash.Hash.ToLowerInvariant() -ne $_digest) { continue }
+        Remove-Item -LiteralPath $_template -Force -ErrorAction SilentlyContinue -ErrorVariable _removeErrors
+        if ($_removeErrors.Count -gt 0) {
+            Write-AIWarn "Could not remove the unchanged OpenClaw template $_template"
+        }
+    }
+    foreach ($_folder in @((Join-Path $_openClawConfig "workspace"), $_openClawConfig)) {
+        if (-not (Test-Path -LiteralPath $_folder -PathType Container)) { continue }
+        # A folder that cannot be listed may hold owner data, so it stays.
+        $_entries = @(Get-ChildItem -LiteralPath $_folder -Force -ErrorAction SilentlyContinue -ErrorVariable _listErrors)
+        if ($_listErrors.Count -eq 0 -and $_entries.Count -eq 0) {
+            Remove-Item -LiteralPath $_folder -Force -ErrorAction SilentlyContinue -ErrorVariable _removeErrors
+            if ($_removeErrors.Count -gt 0) {
+                Write-AIWarn "Could not remove the empty folder $_folder"
+            }
+        }
+    }
+}
+$_openClawKept = @()
+if (Test-Path -LiteralPath $_openClawConfig) { $_openClawKept += "config\openclaw" }
+if (Test-Path -LiteralPath $_openClawData -PathType Container) {
+    # A data folder that cannot be listed may still hold the agent's state.
+    $_entries = @(Get-ChildItem -LiteralPath $_openClawData -Force -ErrorAction SilentlyContinue -ErrorVariable _listErrors)
+    if ($_listErrors.Count -gt 0 -or $_entries.Count -gt 0) { $_openClawKept += "data\openclaw" }
+}
+if ($_openClawKept.Count -gt 0) {
+    Write-AI "The legacy OpenClaw extension was removed. Its remaining files in $($_openClawKept -join ' and ') were kept; delete them by hand when you no longer need them (docs/MIGRATION-OPENCLAW-TO-HERMES.md explains how)."
 }
 
 # Copy extensions library to data dir for dashboard portal. Keep this in

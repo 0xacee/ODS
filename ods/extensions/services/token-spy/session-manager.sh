@@ -22,9 +22,7 @@ MONITOR_HOST="${MONITOR_HOST:-127.0.0.1}"
 #     "my-agent|9110|/home/user/.openclaw/agents/main/sessions"
 #     "my-other-agent|9111|/home/user/other/.openclaw/agents/main/sessions"
 #   )
-AGENTS=(
-  "openclaw|9110|~/ods/data/openclaw/home/agents/main/sessions"
-)
+AGENTS=()
 
 # Remote agents: "agent-name|remote-host|remote-sessions-dir"
 REMOTE_AGENTS=()

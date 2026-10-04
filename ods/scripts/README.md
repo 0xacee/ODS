@@ -59,8 +59,14 @@ Utility scripts for diagnostics, testing, validation, and operations.
 
 | Unit | Description |
 |------|-------------|
-| `memory-shepherd-memory.service/.timer` | Agent memory lifecycle management. No longer installed; older AMD installs may still run it for the removed legacy OpenClaw workspace |
-| `memory-shepherd-workspace.service/.timer` | Agent workspace maintenance. No longer installed; older AMD installs may still run it for the removed legacy OpenClaw workspace |
+| `ods-host-agent.service` | Host agent API; the installer renders and installs it |
+| `ods-mdns.service` | Publishes `<device>.local` and service subdomains ([MDNS](../docs/MDNS.md)) |
+| `ods-ap-mode.service` | First-boot setup access point; disabled by default ([AP mode](../docs/AP-MODE.md)) |
+
+Memory Shepherd's own `memory-shepherd/install.sh` generates its timers. The
+`memory-shepherd-memory` and `memory-shepherd-workspace` timers that older AMD
+installs enabled served only the removed legacy OpenClaw extension; see
+[the removal notice](../docs/MIGRATION-OPENCLAW-TO-HERMES.md).
 
 ## Other
 

@@ -1750,34 +1750,9 @@ async def api_update_settings(request: Request):
 
     save_settings(settings)
 
-    new_poll = settings.get("poll_interval_minutes", 5)
-    _update_timer_interval(new_poll)
-
     log.info(f"[SETTINGS] Updated: {body}")
     return api_get_settings()
 
-
-def _update_timer_interval(minutes: int):
-    """Best-effort update of the systemd timer interval."""
-    import subprocess
-    timer_path = os.environ.get("SESSION_TIMER_PATH", "/etc/systemd/system/openclaw-session-cleanup.timer")
-    try:
-        with open(timer_path, "r") as f:
-            timer_content = f.read()
-        import re as _re
-        new_content = _re.sub(
-            r"OnUnitActiveSec=\d+min",
-            f"OnUnitActiveSec={minutes}min",
-            timer_content,
-        )
-        if new_content != timer_content:
-            with open(timer_path, "w") as f:
-                f.write(new_content)
-            subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
-            subprocess.run(["systemctl", "restart", "openclaw-session-cleanup.timer"], capture_output=True)
-            log.info(f"[SETTINGS] Timer updated to {minutes}min")
-    except Exception as e:
-        log.warning(f"[SETTINGS] Could not update timer: {e} (may need sudo)")
 
 @app.get("/api/usage", dependencies=[Depends(verify_api_key)])
 def api_usage(agent: str | None = None, hours: int = 24, limit: int = 200):

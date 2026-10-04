@@ -1015,23 +1015,74 @@ def test_settings_apply_plan_ignores_retired_legacy_openclaw_keys():
     assert plan["manualKeys"] == []
 
 
-def test_retired_env_keys_match_schema_deprecated_properties():
-    """The no-restart list must track the keys the schema marks as retired."""
+def test_retired_env_keys_match_schema_retired_properties():
+    """Keys nothing reads any more stay in the schema as "Retired:" entries.
+
+    Older .env files keep validating, a change restarts nothing, and an owner
+    can remove each one. Other deprecated keys may still be read during a
+    migration window, so they are not tied to this list.
+    """
     from settings import _RETIRED_ENV_KEYS
 
     schema_path = Path(__file__).resolve().parents[4] / ".env.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    deprecated = {
-        key for key, definition in schema["properties"].items()
-        if definition.get("deprecated") is True
+    properties = schema["properties"]
+    retired = {
+        key for key, definition in properties.items()
+        if definition.get("description", "").startswith("Retired:")
     }
 
-    assert deprecated == set(_RETIRED_ENV_KEYS)
-    assert not deprecated & set(schema["required"])
-    for key in deprecated:
-        assert schema["properties"][key]["description"].startswith(
-            "Retired: the legacy OpenClaw extension was removed; ignored if present."
-        )
+    assert retired == set(_RETIRED_ENV_KEYS)
+    assert not retired & set(schema["required"])
+    for key in retired:
+        assert properties[key].get("deprecated") is True, key
+        if properties[key].get("secret"):
+            assert properties[key].get("clearable") is True, key
+
+
+def test_api_settings_env_removes_retired_keys(test_client, settings_env_fixture):
+    """Clearing a retired key removes its line; a retired secret is clearable."""
+    env_path = settings_env_fixture["env_path"]
+    schema_path = settings_env_fixture["schema_path"]
+    retired = "Retired: the legacy OpenClaw extension was removed; ignored if present."
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema["properties"].update({
+        "OPENCLAW_TOKEN": {
+            "type": "string", "description": retired,
+            "secret": True, "clearable": True, "deprecated": True,
+        },
+        "HOST_LAN_IP": {"type": "string", "description": retired, "deprecated": True},
+        "OPENCLAW_PORT": {"type": "integer", "description": retired, "deprecated": True},
+    })
+    schema_path.write_text(json.dumps(schema), encoding="utf-8")
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8")
+        + "OPENCLAW_TOKEN=retired-token-value\nHOST_LAN_IP=192.0.2.10\nOPENCLAW_PORT=7860\n",
+        encoding="utf-8",
+    )
+    from main import _cache
+
+    _cache.clear()
+
+    response = test_client.put(
+        "/api/settings/env",
+        headers=test_client.auth_headers,
+        json={
+            "mode": "form",
+            "values": {"HOST_LAN_IP": "", "OPENCLAW_PORT": ""},
+            "clearSecrets": ["OPENCLAW_TOKEN"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    updated_env = env_path.read_text(encoding="utf-8")
+    for key in ("OPENCLAW_TOKEN", "HOST_LAN_IP", "OPENCLAW_PORT"):
+        assert f"{key}=" not in updated_env
+        assert key not in payload["fields"]
+    assert "OPENAI_API_KEY=sk-live-secret" in updated_env
+    assert "RAG_OPENAI_API_KEY=rag-live-secret" in updated_env
+    assert payload["applyPlan"]["services"] == []
 
 
 def test_settings_fields_show_retired_keys_only_when_present():
@@ -1660,7 +1711,8 @@ def test_production_schema_marks_provider_api_keys_secret(key):
     assert entry.get("secret") is True, f"{key} must have 'secret': true in .env.schema.json"
 
 
-def test_production_schema_only_allows_explicit_rag_secret_removal():
+def test_production_schema_only_allows_explicit_rag_and_retired_secret_removal():
+    """Live secrets stay protected; only the RAG key and retired keys can be cleared."""
     import pathlib
 
     schema_path = pathlib.Path(__file__).resolve().parents[4] / ".env.schema.json"
@@ -1669,7 +1721,13 @@ def test_production_schema_only_allows_explicit_rag_secret_removal():
         key for key, definition in schema["properties"].items()
         if definition.get("clearable") is True
     }
-    assert clearable == {"RAG_OPENAI_API_KEY"}
+    retired_secrets = {
+        key for key, definition in schema["properties"].items()
+        if definition.get("secret") is True
+        and definition.get("description", "").startswith("Retired:")
+    }
+    assert retired_secrets == {"OPENCLAW_API_KEY", "OPENCLAW_TOKEN"}
+    assert clearable == {"RAG_OPENAI_API_KEY"} | retired_secrets
 
 
 def test_production_schema_protects_hermes_dashboard_session_token():

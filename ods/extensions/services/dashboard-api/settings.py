@@ -78,8 +78,9 @@ _LIVE_READ_ENV_KEYS = {
     # agent fallback, so recreating services would only add downtime.
     "HF_TOKEN",
 }
-# Read only by the removed legacy OpenClaw extension; marked "deprecated" in
-# .env.schema.json. Nothing consumes them now, so a change needs no restart.
+# Read only by the removed legacy OpenClaw extension; marked "deprecated" and
+# described as "Retired:" in .env.schema.json. Nothing consumes them now, so a
+# change needs no restart, and clearing one removes it from .env.
 _RETIRED_ENV_KEYS = frozenset({
     "BOOTSTRAP_MODEL", "HOST_LAN_IP", "OPENCLAW_API_KEY", "OPENCLAW_CONFIG",
     "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH", "OPENCLAW_HTTP_API",
@@ -408,6 +409,10 @@ def _empty_value_unsets_env_key(key: str, field: dict[str, Any]) -> bool:
     """Return true when an empty form value should remove a runtime env key."""
     if field.get("required") or field.get("secret"):
         return False
+    # Nothing reads a retired key, so clearing it removes the line instead of
+    # leaving an empty assignment that keeps the field listed.
+    if key in _RETIRED_ENV_KEYS:
+        return True
     return key.startswith("LLAMA_ARG_") or key in {
         "RAG_EMBEDDING_MODEL",
         "RAG_OPENAI_API_BASE_URL",

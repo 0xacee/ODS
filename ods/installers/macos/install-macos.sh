@@ -2023,14 +2023,57 @@ else
     # The legacy OpenClaw extension (the ods-openclaw container) was removed;
     # Portal (Pixel) and Hermes are the supported agents. Remove its stale
     # service files the same way, so `up --remove-orphans` below drops the old
-    # container. data/openclaw and config/openclaw are preserved.
+    # container.
     if [[ -d "${INSTALL_DIR}/extensions/services/openclaw" ]]; then
         rm -rf "${INSTALL_DIR}/extensions/services/openclaw"
         log "Removed retired OpenClaw service files from extensions/services"
     fi
-    if [[ -d "${INSTALL_DIR}/data/openclaw" || -d "${INSTALL_DIR}/config/openclaw" ]]; then
-        ai "The legacy OpenClaw extension was removed. Its data/openclaw and config/openclaw folders were kept; delete them by hand when you no longer need them."
+    # Every release copied the OpenClaw templates into config/openclaw, used
+    # or not. A template that is still byte-identical to a shipped version is
+    # not owner data; anything else, and data/openclaw, stays.
+    _macos_file_sha256() {
+        if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$1"
+        else
+            sha256sum "$1"
+        fi | cut -d ' ' -f 1
+    }
+    _macos_openclaw_config="${INSTALL_DIR}/config/openclaw"
+    _macos_openclaw_data="${INSTALL_DIR}/data/openclaw"
+    _macos_openclaw_manifest="${SOURCE_ROOT}/installers/lib/retired-openclaw-config.sha256"
+    if [[ -d "$_macos_openclaw_config" && ! -L "$_macos_openclaw_config" && -f "$_macos_openclaw_manifest" ]]; then
+        while read -r _macos_digest _macos_relative; do
+            # A source tree copied from a Windows checkout has CRLF lines.
+            _macos_relative="${_macos_relative%$'\r'}"
+            [[ -n "$_macos_digest" && "$_macos_digest" != \#* && "$_macos_relative" != *..* ]] || continue
+            _macos_path="${_macos_openclaw_config}/${_macos_relative}"
+            [[ -f "$_macos_path" && ! -L "$_macos_path" ]] || continue
+            # An unreadable file has no digest, so it is kept.
+            [[ "$(_macos_file_sha256 "$_macos_path" 2>/dev/null)" == "$_macos_digest" ]] || continue
+            rm -f "$_macos_path" || log "Could not remove the unchanged OpenClaw template ${_macos_path} (non-fatal)"
+        done < "$_macos_openclaw_manifest"
+        for _macos_path in "${_macos_openclaw_config}/workspace" "$_macos_openclaw_config"; do
+            if [[ -d "$_macos_path" && ! -L "$_macos_path" && -r "$_macos_path" && -x "$_macos_path" && -z "$(ls -A "$_macos_path")" ]]; then
+                rmdir "$_macos_path" || log "Could not remove the empty folder ${_macos_path} (non-fatal)"
+            fi
+        done
     fi
+    _macos_openclaw_folders=""
+    if [[ -e "$_macos_openclaw_config" || -L "$_macos_openclaw_config" ]]; then
+        _macos_openclaw_folders="config/openclaw"
+    fi
+    # An unreadable data folder may still hold the agent's state.
+    if [[ -d "$_macos_openclaw_data" ]]; then
+        if [[ ! -r "$_macos_openclaw_data" || ! -x "$_macos_openclaw_data" ]] || [[ -n "$(ls -A "$_macos_openclaw_data")" ]]; then
+            _macos_openclaw_folders="${_macos_openclaw_folders:+$_macos_openclaw_folders and }data/openclaw"
+        fi
+    fi
+    if [[ -n "$_macos_openclaw_folders" ]]; then
+        ai "The legacy OpenClaw extension was removed. Its remaining files in ${_macos_openclaw_folders} were kept; delete them by hand when you no longer need them (docs/MIGRATION-OPENCLAW-TO-HERMES.md explains how)."
+    fi
+    unset _macos_openclaw_config _macos_openclaw_data _macos_openclaw_manifest _macos_openclaw_folders \
+        _macos_digest _macos_relative _macos_path
+    unset -f _macos_file_sha256
 
     # Copy extensions library to data dir for dashboard portal.
     # Source resolution: dev installs and full checkouts read the product-owned

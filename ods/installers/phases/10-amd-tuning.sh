@@ -66,22 +66,44 @@ elif [[ "$GPU_BACKEND" == "amd" ]] && ! $DRY_RUN; then
     # memory-shepherd/ (its install.sh schedules it for other agents).
     #
     # Retire the session-cleanup units an earlier install copied into the user
-    # scope; their script and unit files are no longer shipped. Existing
-    # memory-shepherd timers are left as configured, and data/openclaw stays.
+    # scope; their script and unit files are no longer shipped. A unit is
+    # removed only while it still carries the shipped definition, because an
+    # owner may have reused the name. Existing memory-shepherd timers are left
+    # as configured, and data/openclaw stays.
     _phase10_user_units="$HOME/.config/systemd/user"
-    if [[ -f "$_phase10_user_units/openclaw-session-cleanup.timer" \
-        || -f "$_phase10_user_units/openclaw-session-cleanup.service" ]]; then
+    _phase10_cleanup_timer="$_phase10_user_units/openclaw-session-cleanup.timer"
+    _phase10_cleanup_service="$_phase10_user_units/openclaw-session-cleanup.service"
+    _phase10_retired=false
+    if [[ -f "$_phase10_cleanup_timer" && ! -L "$_phase10_cleanup_timer" ]] \
+        && grep -qx 'Description=OpenClaw Session Cleanup Timer' "$_phase10_cleanup_timer"; then
         # A user manager that is not running cannot stop the timer, but
-        # deleting its units below still keeps it from starting again.
+        # deleting the unit and its enablement link keeps it from starting.
         ods_systemctl_user disable --now openclaw-session-cleanup.timer >> "$LOG_FILE" 2>&1 \
             || log "Could not stop openclaw-session-cleanup.timer (non-fatal); removing its unit files"
-        rm -f "$_phase10_user_units/openclaw-session-cleanup.timer" \
-            "$_phase10_user_units/openclaw-session-cleanup.service"
+        rm -f "$_phase10_cleanup_timer" \
+            "$_phase10_user_units/timers.target.wants/openclaw-session-cleanup.timer"
+        _phase10_retired=true
+    fi
+    if [[ -f "$_phase10_cleanup_service" && ! -L "$_phase10_cleanup_service" ]] \
+        && grep -qx 'Description=OpenClaw Session Cleanup' "$_phase10_cleanup_service" \
+        && grep -Eqx 'ExecStart=%h/(ods|dream-server)/scripts/session-cleanup\.sh' "$_phase10_cleanup_service"; then
+        rm -f "$_phase10_cleanup_service"
+        _phase10_retired=true
+    fi
+    if [[ "$_phase10_retired" == true ]]; then
         ods_systemctl_user daemon-reload >> "$LOG_FILE" 2>&1 \
             || log "Could not reload the user systemd manager (non-fatal)"
         ai_ok "Retired the legacy OpenClaw session-cleanup timer"
     fi
-    unset _phase10_user_units
+    unset _phase10_user_units _phase10_cleanup_timer _phase10_cleanup_service _phase10_retired
+
+    # Keep the user manager running after logout: phase 11 starts the
+    # background full-model download as a transient user unit (systemd-run
+    # --user), which would otherwise stop when the installing session ends.
+    # Each attempt's error output is dropped because the next step covers it.
+    loginctl enable-linger "$(whoami)" 2>/dev/null || \
+        _phase10_privileged loginctl enable-linger "$(whoami)" 2>/dev/null || \
+        ai_warn "Could not enable linger. The background model download may stop after logout. Run: loginctl enable-linger $(whoami)"
 
     # Install sysctl tuning (vm.swappiness, vfs_cache_pressure)
     if [[ -f "$INSTALL_DIR/config/system-tuning/99-ods.conf" ]]; then
