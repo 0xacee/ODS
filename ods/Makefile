@@ -83,6 +83,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-token-spy-install-owner.sh
 	@bash tests/test-cli-status-docker-error.sh
 	@bash tests/test-cli-status-optional-webui.sh
+	@bash tests/test-macos-status-optional-opencode.sh
 	@python3 tests/test-cli-stt-env.py
 	@echo ""
 	@echo "=== AMD/Lemonade contracts ==="
