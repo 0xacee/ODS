@@ -1097,6 +1097,7 @@ if (
     SCRIPT_DIR="$ROOT"
     ENABLE_PIXEL_RUNTIME=true
     ai() { :; }
+    _phase06_step() { :; }
     error() { :; return 1; }
     source "$ROOT/lib/safe-env.sh"
     _phase06_pre_copy_fixture
@@ -1114,6 +1115,7 @@ if (
     SCRIPT_DIR="$ROOT"
     ENABLE_PIXEL_RUNTIME=true
     ai() { :; }
+    _phase06_step() { :; }
     error() { printf '%s\n' "$*" >&2; return 1; }
     source "$ROOT/lib/safe-env.sh"
     _phase06_pre_copy_fixture
@@ -1175,6 +1177,7 @@ if (
     SCRIPT_DIR="$ROOT"
     ENABLE_PIXEL_RUNTIME=true
     ai() { :; }
+    _phase06_step() { :; }
     error() { :; return 1; }
     source "$ROOT/lib/safe-env.sh"
     _phase06_pre_copy_fixture
