@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+# This shell is PID 1 until it execs tini below, and PID 1 ignores signals it
+# does not handle, so `docker stop` would otherwise wait out its timeout. A
+# signal that arrives while the start-up step runs takes effect once it ends.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 # Back up n8n's database before a new n8n version migrates it, and decide
 # whether the owner account comes from .env (see n8n-prepare.mjs).
 owner_source="$(node /opt/ods/n8n-prepare.mjs)"

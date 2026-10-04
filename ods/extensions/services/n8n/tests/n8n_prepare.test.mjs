@@ -159,6 +159,34 @@ test("each upgrade is named after the version it replaces and only two sets are 
   ]);
 });
 
+test("a backup stopped part-way leaves nothing that looks like a backup", () => {
+  const { folder } = install();
+  database(folder, true);
+  fs.writeFileSync(path.join(folder, "database.sqlite-wal"), "pending pages");
+  const copy = fs.copyFileSync;
+  // Stop while the database itself is being copied, after its log landed.
+  fs.copyFileSync = (source, target, mode) => {
+    if (source.endsWith("database.sqlite")) {
+      fs.writeFileSync(target, "half a database");
+      throw new Error("stopped");
+    }
+    return copy(source, target, mode);
+  };
+  try {
+    assert.throws(() => backupBeforeUpgrade(folder, "2.41.6", new Date("2026-10-01T00:00:00.000Z")), /stopped/);
+  } finally {
+    fs.copyFileSync = copy;
+  }
+  assert.ok(!backups(folder).some((name) => name.endsWith(".sqlite")), "no database copy may look complete");
+  assert.equal(fs.existsSync(path.join(folder, ".ods-n8n-version")), false, "the version is recorded after the backup");
+  // The next start backs up again and clears what the stopped one left.
+  backupBeforeUpgrade(folder, "2.41.6", new Date("2026-10-02T00:00:00.000Z"));
+  assert.deepEqual(backups(folder), [
+    "2026-10-02T00-00-00-000Z-n8n-unrecorded.sqlite",
+    "2026-10-02T00-00-00-000Z-n8n-unrecorded.sqlite-wal",
+  ]);
+});
+
 test("an empty N8N_PASS refuses to set an owner", () => {
   const { folder } = install();
   assert.throws(
@@ -178,8 +206,13 @@ test("the entrypoint and compose file match the script", () => {
   const compose = fs.readFileSync(path.join(SERVICE, "compose.yaml"), "utf8");
   assert.ok(entrypoint.includes(`N8N_INSTANCE_OWNER_PASSWORD_HASH_FILE=/tmp/.n8n/${OWNER_HASH_FILE}`));
   assert.ok(entrypoint.includes('owner_source="$(node /opt/ods/n8n-prepare.mjs)"'));
-  // The plaintext password never reaches n8n or its task runners.
-  assert.ok(entrypoint.indexOf("unset ODS_N8N_OWNER_PASSWORD") < entrypoint.indexOf("exec /docker-entrypoint.sh"));
+  // The plaintext password never reaches n8n, its task runners or PID 1:
+  // tini becomes PID 1 only after the unset.
+  const unset = entrypoint.indexOf("unset ODS_N8N_OWNER_PASSWORD");
+  assert.ok(unset > 0 && unset < entrypoint.indexOf("exec tini -- /docker-entrypoint.sh"));
+  assert.ok(compose.includes('entrypoint: ["/bin/sh", "/opt/ods/n8n-entrypoint.sh"]'));
+  // Until then the script is PID 1, so it handles stop signals itself.
+  assert.ok(entrypoint.indexOf("trap 'exit 143' TERM") < entrypoint.indexOf("owner_source="));
   assert.ok(compose.includes("./extensions/services/n8n/n8n-prepare.mjs:/opt/ods/n8n-prepare.mjs:ro"));
   assert.ok(!compose.includes("N8N_DEFAULT_ADMIN_"), "n8n has no such settings; they only exposed the password");
   assert.ok(!/^\s+- N8N_[A-Z_]*=\$\{N8N_PASS/m.test(compose), "N8N_PASS must not be passed to n8n directly");

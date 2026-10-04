@@ -24,11 +24,43 @@ const OWNER_FROM_ENV_MARKER = ".ods-owner-from-env";
 const VERSION_MARKER = ".ods-n8n-version";
 const BACKUP_DIR = "ods-backups";
 const BACKUPS_KEPT = 2;
+// Files are written under this suffix and renamed into place when complete.
+const PARTIAL = ".partial";
 // The shape n8n accepts for N8N_INSTANCE_OWNER_PASSWORD_HASH.
 const BCRYPT_HASH = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/;
 
 export function packageVersion(packageDir) {
   return JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8")).version;
+}
+
+// A start-up stopped part-way through a backup leaves *.partial copies, or
+// write-ahead files whose database copy never landed. Neither is a backup.
+function removeIncompleteCopies(directory) {
+  for (const name of fs.readdirSync(directory)) {
+    const sidecar = name.match(/^(.*\.sqlite)-(?:wal|shm)$/);
+    if (name.endsWith(PARTIAL) || (sidecar && !fs.existsSync(path.join(directory, sidecar[1])))) {
+      fs.rmSync(path.join(directory, name), { force: true });
+    }
+  }
+}
+
+function copyIntoPlace(source, target) {
+  if (fs.existsSync(target)) {
+    throw new Error(`refusing to replace the existing backup ${target}`);
+  }
+  fs.copyFileSync(source, target + PARTIAL, fs.constants.COPYFILE_EXCL);
+  const fd = fs.openSync(target + PARTIAL, "r+");
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(target + PARTIAL, target);
+}
+
+function writeAtomically(file, text) {
+  fs.writeFileSync(file + PARTIAL, text);
+  fs.renameSync(file + PARTIAL, file);
 }
 
 function pruneBackups(directory) {
@@ -54,19 +86,20 @@ export function backupBeforeUpgrade(folder, version, now = new Date()) {
   if (fs.existsSync(database)) {
     const directory = path.join(folder, BACKUP_DIR);
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    removeIncompleteCopies(directory);
     // ISO time first, so names sort by age; then the version being replaced.
     const name = `${now.toISOString().replace(/[:.]/g, "-")}-n8n-${previous || "unrecorded"}`;
     // A crash can leave committed pages in the write-ahead log, so copy it too.
-    for (const suffix of ["", "-wal", "-shm"]) {
+    // The database copy lands last: a set is a backup only once it exists.
+    for (const suffix of ["-wal", "-shm", ""]) {
       if (fs.existsSync(database + suffix)) {
-        fs.copyFileSync(database + suffix, path.join(directory, `${name}.sqlite${suffix}`),
-          fs.constants.COPYFILE_EXCL);
+        copyIntoPlace(database + suffix, path.join(directory, `${name}.sqlite${suffix}`));
       }
     }
     saved = path.join(directory, `${name}.sqlite`);
     pruneBackups(directory);
   }
-  fs.writeFileSync(marker, `${version}\n`);
+  writeAtomically(marker, `${version}\n`);
   return saved;
 }
 
