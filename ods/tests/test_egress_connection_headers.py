@@ -231,3 +231,31 @@ def test_missing_gateway_key_fails_closed(egress, monkeypatch):
     assert seen == []
     assert health["ready"] is False
     assert health["reason"] == "missing_caller_key"
+
+
+def test_direct_provider_clients_are_bounded_least_recently_used_first(egress):
+    """Past provider endpoints do not keep connection pools open forever (#2701)."""
+    import asyncio
+
+    def key(number):
+        return f"https:provider-{number}.example:443"
+
+    async def scenario():
+        egress.app.state.direct_http_clients = {}
+        first = [egress._http_client(key(number)) for number in range(4)]
+        # Reusing an endpoint keeps its client and makes it the most recent.
+        assert egress._http_client(key(0)) is first[0]
+        for number in (4, 5):
+            egress._http_client(key(number))
+        while egress._closing_clients:
+            await asyncio.sleep(0)
+        kept = list(egress.app.state.direct_http_clients)
+        closed = [client.is_closed for client in first]
+        for client in egress.app.state.direct_http_clients.values():
+            await client.aclose()
+        return kept, closed
+
+    kept, closed = asyncio.run(scenario())
+    assert len(kept) == egress.MAX_DIRECT_HTTP_CLIENTS == 4
+    assert kept == [key(3), key(0), key(4), key(5)]
+    assert closed == [False, True, True, False]
