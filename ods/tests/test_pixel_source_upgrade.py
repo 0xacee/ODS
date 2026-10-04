@@ -1248,3 +1248,42 @@ def test_hold_reacquires_admission_only_before_the_downstream_boundary(
     plan = dict(phase=plan_phase, hold=None if plan_phase == 'staged' else 'd' * 64)
     status = dict(pending=True, phase=status_phase) if status_phase else {'pending': False}
     assert upgrade.needs_source_begin(plan, status, downstream) is expected
+
+
+@pytest.mark.parametrize('before_ref,version,active,accepted', [
+    ('a' * 40, b'4.3.29\n', '4.3.28', True),
+    ('a' * 40, b'4.10.0\n', '4.9.9', True),  # numeric, not lexical, ordering
+    ('a' * 40, b'4.3.28\n', '4.3.28', False),  # different source with the active version
+    ('a' * 40, b'4.3.27\n', '4.3.28', False),
+    ('a' * 40, b'4.3.29-rc1\n', '4.3.28', False),
+    ('a' * 40, None, '4.3.28', False),  # the incoming source has no VERSION
+    ('a' * 40, b'4.3.29\n', '', False),  # no verified active release to compare against
+    ('b' * 40, b'4.3.28\n', '4.3.28', True),  # the same source needs no new version
+])
+def test_changed_pixel_source_requires_a_strictly_newer_release(tmp_path, monkeypatch, before_ref, version,
+                                                                 active, accepted):
+    install = tmp_path / 'install'
+    marker = dict(schema_version=2, manager='ods', install_dir=str(install), initial_active_state='absent',
+                  state='ready', pixel_source_ref=before_ref, active_release_version=active)
+    files = {'extensions/services/pixel-edge/compose.yaml': b'services: {}\n',
+             'extensions/services/litellm/compose.yaml': b'services: {}\n',
+             'vendor/pixel/VERSION': version}
+
+    def read_file(root, name, uid, *, candidate=False):
+        raw = files.get(name)
+        return (None, None) if raw is None else (dict(sha256=upgrade.sha(raw), mode=0o644), raw)
+
+    monkeypatch.setattr(upgrade, 'read_file', read_file)
+    monkeypatch.setattr(upgrade, '_protected_json', lambda path, uid=0: (marker, 'c' * 64))
+    monkeypatch.setattr(upgrade, 'owner_baseline', lambda home, uid: dict(configSha256='e' * 64, receiptSha256=None))
+    staged = []
+    manager = SimpleNamespace(install=install, state=tmp_path / 'state/source-upgrade', journal=lambda: None,
+                              stage=lambda source, uid, identity, **options: staged.append(identity))
+    account = SimpleNamespace(pw_dir=str(tmp_path / 'home'), pw_uid=1000)
+    if accepted:
+        upgrade._stage(manager, account, str(tmp_path / 'candidate'), 'b' * 40)
+        assert [identity['beforeRef'] for identity in staged] == [before_ref]
+    else:
+        with pytest.raises(upgrade.UpgradeError, match='source-new-version-required'):
+            upgrade._stage(manager, account, str(tmp_path / 'candidate'), 'b' * 40)
+        assert staged == []

@@ -84,6 +84,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   text (maintainer names, test machine names, private workflow terms, personal
   home paths or LAN addresses) would reach the Pixel workspace template or the
   agent and stack templates.
+- Pixel 4.3.29 no longer ships the retired owner-private section in its
+  workspace template. `AGENTS.md` now carries the same neutral model-routing
+  guidance that the installer already wrote into existing workspaces, and the
+  matching `MEMORY.md` entry is gone, so a new workspace starts where a migrated
+  one ends. Existing installations move to 4.3.29 through the held source
+  upgrade; the version changes only so that upgrade accepts the new source. The
+  installer migration still repairs workspaces created from older releases, the
+  Portal bootstrap filter presents an unmigrated 4.3.28 default as the 4.3.29
+  one, and CI fails if the shipped template would ever need the migration again.
 - Support bundles now mask credentials by format wherever they appear (provider
   API keys such as OpenAI, Anthropic, Hugging Face, GitHub, Slack and AWS, JWTs
   and PEM private keys), not only under secret-looking key names, and mask every
