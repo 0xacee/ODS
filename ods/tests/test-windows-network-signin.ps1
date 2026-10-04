@@ -51,6 +51,7 @@ function Start-ODSOpenCodeRuntime { return $true }
 function Stop-ODSOpenCodeRuntime { }
 function Invoke-HermesSoulRefresh { param([switch]$SyncContainer) }
 function Invoke-BootstrapUpgradeResume { }
+function Test-ODSLegacyOpenClawContainer { return $false }
 function Invoke-ODSProxyAuthPreflight { param($ComposeFlags) throw 'Only ods-proxy starts run the proxy preflight' }
 function Invoke-ODSComposeUpWithStartupRetry { param($ComposeFlags, $ComposeArgs, $Services, $Description) throw 'No retry expected' }
 function Invoke-Status { }
