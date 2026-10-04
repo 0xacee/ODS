@@ -601,6 +601,49 @@ if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "${TIER:-}" !=
     fi
 fi
 
+# External Lemonade: Lemonade on the Windows host serves the model the Windows
+# installer chose and loaded. This Linux host cannot see that GPU, so the
+# catalog pick above describes a model nobody serves. Record the catalog model
+# Lemonade's id names instead, at the context Lemonade loaded, so .env
+# describes what is served and the next rerun can verify it
+# (scripts/preserve-active-model.py). Stop rather than record another model.
+if [[ "${LEMONADE_EXTERNAL:-false}" == "true" && -n "${LEMONADE_MODEL:-}" && "${TIER:-}" != "CLOUD" ]]; then
+    _projection_python="${_selector_python:-}"
+    if [[ -z "$_projection_python" ]] && declare -F ods_model_selector_python >/dev/null 2>&1; then
+        _projection_python="$(ods_model_selector_python)"
+    fi
+    if [[ -z "$_projection_python" ]] || ! declare -F load_model_selector_env_from_output >/dev/null 2>&1; then
+        error "Python and the installer's safe env loader are required to record the model Lemonade serves."
+        exit 1
+    fi
+    _projection_args=(--project-external-lemonade "$LEMONADE_MODEL")
+    [[ -z "${LEMONADE_CONTEXT_SIZE:-}" ]] || _projection_args+=(--context "$LEMONADE_CONTEXT_SIZE")
+    if ! _projected_model_env="$("$_projection_python" "$SCRIPT_DIR/scripts/preserve-active-model.py" \
+            --env "$INSTALL_DIR/.env" \
+            --catalog "$SCRIPT_DIR/config/model-library.json" \
+            --imports "$INSTALL_DIR/data/model-imports.json" \
+            --models-dir "$INSTALL_DIR/data/models" \
+            "${_projection_args[@]}" 2>>"$LOG_FILE")"; then
+        error "Lemonade's model ${LEMONADE_MODEL} is not in the ODS model catalog, so ODS cannot record it or verify it on updates. Load a catalog model in Lemonade and rerun."
+        exit 1
+    fi
+    # Drop the CPU pick's runtime settings before loading the served model's
+    # contract (the loader omits unset optional values, as below).
+    unset MODEL_RUNTIME_PROFILE MODEL_RUNTIME_PROFILE_LABEL MODEL_RUNTIME_PROFILE_SOURCE
+    unset LLAMA_SERVER_IMAGE LLAMA_SERVER_MEMORY_LIMIT
+    unset LLAMA_CPP_RELEASE_TAG_OVERRIDE LLAMA_CPP_SERVER_BINARY
+    unset LLAMA_ARG_FLASH_ATTN LLAMA_ARG_CACHE_TYPE_K LLAMA_ARG_CACHE_TYPE_V
+    unset LLAMA_ARG_N_CPU_MOE LLAMA_ARG_NO_CACHE_PROMPT
+    unset LLAMA_ARG_CHECKPOINT_EVERY_NT LLAMA_ARG_SPEC_TYPE
+    unset LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM
+    unset LLAMA_ARG_SPEC_DRAFT_N_MAX LLAMA_ARG_SPLIT_MODE LLAMA_ARG_TENSOR_SPLIT
+    unset MODEL_RECOMMENDED_ALTERNATIVES
+    load_model_selector_env_from_output <<< "$_projected_model_env"
+    MODEL_RECOMMENDATION_REASON="Lemonade on the Windows host serves ${LLM_MODEL}${LEMONADE_GPU_NAME:+ on ${LEMONADE_GPU_NAME}}; the Windows installer chose it for that GPU."
+    log "External Lemonade model recorded from its catalog entry: ${LLM_MODEL} (${GGUF_FILE}) at ${MAX_CONTEXT}"
+    unset _projection_python _projection_args _projected_model_env
+fi
+
 # The tier/catalog result is a recommendation.  A valid local model already
 # activated through the Dashboard is operator state and must survive routine
 # installer reruns.  Keep those two concepts separate so updates can advertise
@@ -674,6 +717,25 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
                 --host-arch "${HOST_ARCH:-unknown}" \
                 "$_preserve_mode" \
                 2>>"$LOG_FILE")" || _preserve_status=$?
+            if [[ "$_preserve_status" -eq 2 && "$_preserve_mode" == "--external-lemonade" ]]; then
+                # Earlier fresh installs recorded this host's own catalog pick
+                # next to the model Lemonade serves. The helper re-records only
+                # that installer-written mismatch, from the served model, and
+                # logs the change; anything else still stops below.
+                _repair_args=(--repair-external-lemonade)
+                [[ -z "${LEMONADE_CONTEXT_SIZE:-}" ]] || _repair_args+=(--context "$LEMONADE_CONTEXT_SIZE")
+                if _preserved_model_env="$("$_selector_python" "$_preserve_script" \
+                    --env "$INSTALL_DIR/.env" \
+                    --catalog "$SCRIPT_DIR/config/model-library.json" \
+                    --imports "$INSTALL_DIR/data/model-imports.json" \
+                    --models-dir "$INSTALL_DIR/data/models" \
+                    "${_repair_args[@]}" \
+                    2>>"$LOG_FILE")"; then
+                    _preserve_status=0
+                    ai_warn "Corrected the saved model details to describe the model Lemonade serves; the served model did not change (details in the install log)."
+                fi
+                unset _repair_args
+            fi
             if [[ "$_preserve_status" -ne 0 && "$_preserve_mode" == "--external-lemonade" ]]; then
                 error "Could not validate the retained external model selection. Repair the saved settings or explicitly use --reselect-model."
                 exit 1

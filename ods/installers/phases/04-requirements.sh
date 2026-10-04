@@ -140,7 +140,10 @@ else
     fi
 fi
 
-if [[ -z "${EXTERNAL_LLM_URL:-}" && "${LLM_MODEL_SIZE_MB:-0}" =~ ^[0-9]+$ && "${LLM_MODEL_SIZE_MB:-0}" -gt 0 && "${TIER:-}" != "CLOUD" ]]; then
+# An external Lemonade keeps its model on the Windows host (phase 11 never
+# downloads it here), so only the images need room on this disk.
+if [[ -z "${EXTERNAL_LLM_URL:-}" && "${LEMONADE_EXTERNAL:-false}" != "true" \
+      && "${LLM_MODEL_SIZE_MB:-0}" =~ ^[0-9]+$ && "${LLM_MODEL_SIZE_MB:-0}" -gt 0 && "${TIER:-}" != "CLOUD" ]]; then
     _model_disk_gb=$(( (LLM_MODEL_SIZE_MB + 1023) / 1024 ))
     _model_needed_gb=$(( _model_disk_gb + 15 ))
     if [[ "${DISK_AVAIL:-0}" -lt "$_model_needed_gb" ]]; then
