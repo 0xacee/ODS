@@ -251,7 +251,8 @@ class RetirementSelection(unittest.TestCase):
         self.assertEqual(removed, [old])
 
     def test_prune_superseded_retirements_keeps_newest_and_incomplete(self):
-        import json, tempfile
+        import json
+        import tempfile
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             def archive(name, receipt):
