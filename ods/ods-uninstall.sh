@@ -410,7 +410,10 @@ if command -v docker &>/dev/null; then
     # "no configuration file provided" even from the correct install dir.
     # Do not pass -v: Compose would delete selected volumes before our
     # postflight custody check can verify their unchanged identity.
-    compose_down_args=(down --remove-orphans)
+    # A disabled profile is still part of this project and may retain a stopped
+    # container. Include all profiles for cleanup after the installation-wide
+    # ownership preflight; do not start services or delegate volume removal.
+    compose_down_args=(--profile '*' down --remove-orphans)
 
     validate_uninstall_compose "${compose_args[@]}" || {
         log_error "Saved extension recipes changed during uninstall; remaining installation retained."
