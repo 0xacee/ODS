@@ -102,13 +102,30 @@ services:
   # Chat UI
   # ============================================
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.7.2@sha256:16d9a3615b45f14a0c89f7ad7a3bf151f923ed32c2e68f9204eb17d1ce40774b
+    image: ghcr.io/open-webui/open-webui:v0.11.4@sha256:9591b13f13843c7721c2b8eaf7382846c81b3ffe126526d1888d1fed50c6a33f
     container_name: ods-webui
     restart: unless-stopped
     logging: *default-logging
     security_opt:
       - no-new-privileges:true
+    # openwebui-prepare.py copies the database aside before a new Open WebUI
+    # version migrates it, and refuses a start that would leave it
+    # half-migrated. The wrapper then runs the image's own start command, which
+    # must be restated because Docker drops the image CMD when `entrypoint:` is
+    # set. The image's working directory (/app/backend) and user are kept.
+    entrypoint: ["/bin/sh", "/opt/ods/openwebui-entrypoint.sh"]
+    command: ["bash", "start.sh"]
     environment:
+      # ODS owns Open WebUI's settings: they are read from this environment at
+      # every start, so mode switches, Pixel, key rotation and the Dashboard
+      # Settings page keep applying. Without this, Open WebUI 0.10 and later
+      # writes every setting into webui.db on its first start and ignores later
+      # changes. Changes made in Open WebUI's admin panel last until it restarts.
+      ENABLE_PERSISTENT_CONFIG: "false"
+      # Nothing stores "signup closed" any more, so it is set here. Open WebUI
+      # still lets the first account sign up and makes it the administrator;
+      # administrators add the other accounts in Admin Panel > Users.
+      ENABLE_SIGNUP: "false"
       ENABLE_OLLAMA_API: "false"
       # ODS pins and updates Open WebUI itself; the upstream "new version"
       # check only calls GitHub and advertises releases ODS has not qualified.
@@ -122,14 +139,9 @@ services:
       # When a user adds ODS to their home screen, this is the label they see
       # next to the ODS icon. Defaults to "ODS"; users can override per-install.
       WEBUI_NAME: "${WEBUI_NAME:-ODS}"
-      # Public URL Open WebUI uses for share links, OAuth callbacks, and PWA
-      # install metadata. This value is persistent inside Open WebUI's config
-      # database (https://docs.openwebui.com/getting-started/env-configuration/#webui_url),
-      # so seeding a URL that doesn't actually resolve will bake bad share
-      # links into the install.
-      #
       # Optional public URL Open WebUI uses for share links, OAuth callbacks,
       # and PWA install metadata. Leave empty for traditional localhost usage.
+      # Share links carry it, so set it only to a URL that actually resolves.
       # Headless/proxy installs should set WEBUI_URL to the real reachable chat
       # origin, usually http://chat.${ODS_DEVICE_NAME:-ods}.local once
       # ods-proxy and mDNS are enabled. Tailscale/Cloudflare/custom domains
@@ -146,8 +158,8 @@ services:
       # Otherwise Open WebUI downloads sentence-transformers/all-MiniLM-L6-v2
       # during app startup, which can block fresh installs before port 8080 binds.
       RAG_EMBEDDING_ENGINE: "${RAG_EMBEDDING_ENGINE:-openai}"
-      # Use the exact model served by bundled TEI as Open WebUI's first-boot
-      # default. Existing Open WebUI ConfigVars remain database-backed.
+      # Use the exact model served by bundled TEI. Open WebUI reads it at every
+      # start (ENABLE_PERSISTENT_CONFIG above).
       RAG_EMBEDDING_MODEL: "${RAG_EMBEDDING_MODEL:-${EMBEDDING_MODEL:-BAAI/bge-base-en-v1.5}}"
       RAG_OPENAI_API_BASE_URL: "${RAG_OPENAI_API_BASE_URL:-http://embeddings:80/v1}"
       RAG_OPENAI_API_KEY: "${RAG_OPENAI_API_KEY:-}"
@@ -193,6 +205,8 @@ services:
       TZ: "${TIMEZONE:-UTC}"
     volumes:
       - ./data/open-webui:/app/backend/data:z
+      - ./extensions/services/open-webui/openwebui-entrypoint.sh:/opt/ods/openwebui-entrypoint.sh:ro,z
+      - ./extensions/services/open-webui/openwebui-prepare.py:/opt/ods/openwebui-prepare.py:ro,z
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEBUI_PORT:-3000}:8080"
     deploy:
