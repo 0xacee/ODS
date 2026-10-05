@@ -2097,7 +2097,26 @@ def _compose_required_variables(extension_dir: Path) -> set[str]:
     return names
 
 
-def _missing_owner_configuration(service_id: str, *, installed: bool, setup_hook_runs: bool) -> tuple[str, list[dict]]:
+# `${NAME:-value}` / `${NAME-value}`: Compose supplies NAME itself when the
+# value is not empty, and that value may already have initialized data.
+_COMPOSE_DEFAULTED_VARIABLE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?-([^}]*)\}")
+
+
+def _compose_defaulted_variables(extension_dir: Path) -> set[str]:
+    """Names the extension's base Compose file gives a non-empty default."""
+    names: set[str] = set()
+    for name in ("compose.yaml", "compose.yaml.disabled"):
+        path = extension_dir / name
+        if path.is_symlink() or not path.is_file():
+            continue
+        for key, default in _COMPOSE_DEFAULTED_VARIABLE_RE.findall(path.read_text(encoding="utf-8")):
+            if default.strip():
+                names.add(key)
+    return names
+
+
+def _missing_owner_configuration(service_id: str, *, installed: bool, setup_hook_runs: bool,
+                                 builtin_dir: Path | None = None) -> tuple[str, list[dict]]:
     """Required settings the owner must supply before ODS starts this extension.
 
     Uses the same definition lookup, declaration rules and presence check as
@@ -2106,6 +2125,10 @@ def _missing_owner_configuration(service_id: str, *, installed: bool, setup_hook
     existing definition may already have initialized data with a Compose
     default, so only the settings its Compose file cannot resolve without are
     requested there. A setup hook that runs first writes its own settings.
+    A built-in (``builtin_dir``) is asked for every missing required setting
+    its Compose file does not give a non-empty default: without one it would
+    start with the setting empty (Brave Search without its API key) or fail
+    Compose for the whole stack.
 
     Presence never depends on the declared formats: an unusable format only
     leaves the dialog without a hint (and the configure endpoint refuses to
@@ -2127,6 +2150,9 @@ def _missing_owner_configuration(service_id: str, *, installed: bool, setup_hook
         if installed and missing:
             enforced = _compose_required_variables(USER_EXTENSIONS_DIR / service_id)
             missing = [field for field in missing if field["key"] in enforced]
+        elif builtin_dir is not None and missing:
+            defaulted = _compose_defaulted_variables(builtin_dir)
+            missing = [field for field in missing if field["key"] not in defaulted]
     except (ValueError, OSError, UnicodeError, yaml.YAMLError):
         return service_id, []
     try:
@@ -2141,10 +2167,10 @@ def _missing_owner_configuration(service_id: str, *, installed: bool, setup_hook
 
 
 def _refuse_missing_owner_configuration(service_id: str, *, installed: bool, setup_hook_runs: bool,
-                                        outcome: str) -> None:
+                                        outcome: str, builtin_dir: Path | None = None) -> None:
     """Fail before any file or container change when required settings are absent."""
     name, missing = _missing_owner_configuration(
-        service_id, installed=installed, setup_hook_runs=setup_hook_runs)
+        service_id, installed=installed, setup_hook_runs=setup_hook_runs, builtin_dir=builtin_dir)
     if not missing:
         return
     keys = [field["key"] for field in missing]
@@ -4715,6 +4741,10 @@ def enable_extension(
         _refuse_missing_owner_configuration(
             service_id, installed=True, setup_hook_runs=_has_error_progress(service_id),
             outcome="started")
+    elif ext_dir.is_relative_to(EXTENSIONS_DIR.resolve()):
+        _refuse_missing_owner_configuration(
+            service_id, installed=False, setup_hook_runs=False, outcome="started",
+            builtin_dir=ext_dir)
 
     already_enabled = enabled_compose.exists()
     # A stopped target still needs the same dependency preflight as a disabled
