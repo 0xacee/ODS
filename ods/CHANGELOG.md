@@ -459,6 +459,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a value saved by an earlier version disappears from `settings.json` on the
   next save. `session-manager.sh` still runs on whatever timer or cron job
   you give it.
+- The AMD GAIA library recipe is removed. GAIA's local models need Lemonade
+  Server, which ODS no longer runs, so the Extensions page no longer offers
+  GAIA.
+  - An installed GAIA keeps running until you disable it. ODS no longer
+    updates it, and once you stop or disable it the Dashboard cannot start it
+    again. Upgraded installs are the exception while they keep the old recipe
+    in `data/extensions-library/gaia`, which installer reruns never delete.
+    The Extensions page does not list that copy, but a direct
+    `POST /api/extensions/gaia/install` still installs GAIA from it.
+  - To remove GAIA, disable it on the Extensions page, choose Purge Data if
+    you no longer need `data/gaia`, then choose Remove. On Linux,
+    `ods disable gaia` and `ods purge gaia` do the first two steps, and
+    `ods purge` also deletes files the GAIA container owns. Purge before you
+    remove it: afterwards ODS no longer knows `gaia`, and `data/gaia` has to
+    be deleted by hand.
+  - An `.env` that still sets the `GAIA_*` keys keeps validating. The
+    Dashboard settings page lists them only when they are present, and
+    clearing one removes it.
 
 ### Fixed
 - A long chat message with many unclosed quotes and backslashes no longer

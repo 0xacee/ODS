@@ -442,8 +442,10 @@ def _extension_build_context(compose_path, build):
 
 
 # The only extra_hosts entry a curated library recipe may declare. Mirrors
-# dashboard-api _scan_compose_content(allowed_trusted_extra_hosts): GAIA needs
-# it to reach a host-run Lemonade Server on Linux Docker.
+# dashboard-api _scan_compose_content(allowed_trusted_extra_hosts). No recipe
+# in the library declares it any more; the route stays for curated recipes
+# installed before GAIA left the library, which still do, so they keep
+# resolving.
 _TRUSTED_LIBRARY_EXTRA_HOSTS = {"host.docker.internal:host-gateway"}
 
 # Accelerator access a curated library recipe may request, only from its own

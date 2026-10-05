@@ -29,17 +29,16 @@ actual built distribution. Container boundaries alone do not answer that questio
 
 ## Recipe provenance coverage
 
-The source contains 171 library recipe directories: 137 include `upstream.json`
-and 34 do not. The latter also lack a local license file. The strict extension
-auditor passes 203 total service definitions; that structural result does not
-close these provenance gaps.
+The source contains 170 library recipe directories: 137 include `upstream.json`
+and 33 do not. The latter also lack a local license file. The strict extension
+auditor's structural checks do not close these provenance gaps.
 
-Recipes missing structured upstream records at the reviewed commit:
+Recipes missing structured upstream records:
 
-`aider`, `anythingllm`, `audiocraft`, `bark`, `baserow`, `chromadb`, `continue`, `crewai`, `dify`, `flowise`, `forge`, `frigate`, `gaia`, `gitea`, `immich`, `invokeai`, `jan`, `jupyter`, `label-studio`, `langflow`, `librechat`, `localai`, `milvus`, `miniflux`, `ntfy`, `ollama`, `open-interpreter`, `paperless-ngx`, `piper-audio`, `rvc`, `sillytavern`, `text-generation-webui`, `weaviate`, `xtts`.
+`aider`, `anythingllm`, `audiocraft`, `bark`, `baserow`, `chromadb`, `continue`, `crewai`, `dify`, `flowise`, `forge`, `frigate`, `gitea`, `immich`, `invokeai`, `jan`, `jupyter`, `label-studio`, `langflow`, `librechat`, `localai`, `milvus`, `miniflux`, `ntfy`, `ollama`, `open-interpreter`, `paperless-ngx`, `piper-audio`, `rvc`, `sillytavern`, `text-generation-webui`, `weaviate`, `xtts`.
 
 The [recipe source register](RECIPE-SOURCE-REGISTER.md) now provides pinned
-upstream license evidence for all 34; image-to-source provenance remains open.
+upstream license evidence for all 33; image-to-source provenance remains open.
 
 Backfill source repository, exact ref/image, application and model license
 distinctions, required notices and any restrictions. Verify against upstream;

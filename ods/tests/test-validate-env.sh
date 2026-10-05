@@ -200,6 +200,29 @@ else
     fail "Retired legacy OpenClaw keys should still validate, got $r"
 fi
 
+# 5c. The AMD GAIA library recipe was removed. An older .env that still sets
+# its keys, which a GAIA copy installed before then still reads, must keep
+# validating.
+cp "$TMP_DIR/valid.env" "$TMP_DIR/retired-gaia.env"
+cat >> "$TMP_DIR/retired-gaia.env" <<'EOF'
+GAIA_PORT=7822
+GAIA_AGENT_UI_VERSION=0.19.0
+GAIA_LEMONADE_BASE_URL=
+GAIA_SKIP_GAIA_INIT=true
+GAIA_UI_SERVE_ONLY=false
+GAIA_DISABLE_UPDATE=1
+EOF
+set +e
+out=$("$VALIDATE_ENV_BASH" "$ROOT_DIR/scripts/validate-env.sh" "$TMP_DIR/retired-gaia.env" "$ROOT_DIR/.env.schema.json" 2>&1)
+r=$?
+set -e
+if [[ $r -eq 0 ]]; then
+    pass "Retired AMD GAIA keys in an older .env still validate"
+else
+    echo "$out"
+    fail "Retired AMD GAIA keys should still validate, got $r"
+fi
+
 # 6. Unknown key (not in schema) → exit 2
 cat > "$TMP_DIR/unknown.env" <<'EOF'
 WEBUI_SECRET=test-secret
