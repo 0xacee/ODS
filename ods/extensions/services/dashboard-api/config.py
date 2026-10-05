@@ -708,6 +708,9 @@ LIBRARY_MANAGEABLE_BUILTINS: frozenset = frozenset({
 })
 
 
+_CATALOG_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+
 def load_extension_catalog() -> list[dict]:
     """Load the static extensions catalog JSON. Returns empty list on failure."""
     if not CATALOG_PATH.exists():
@@ -715,10 +718,19 @@ def load_extension_catalog() -> list[dict]:
         return []
     try:
         data = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
-        return data.get("extensions", [])
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to load extensions catalog: %s", e)
         return []
+    # Catalog ids name folders (progress files, library receipts, installed
+    # trees), so an entry whose id is not a plain extension id is dropped.
+    entries = []
+    for entry in data.get("extensions", []):
+        identifier = entry.get("id") if isinstance(entry, dict) else None
+        if isinstance(identifier, str) and _CATALOG_ID_RE.fullmatch(identifier):
+            entries.append(entry)
+        else:
+            logger.warning("Ignoring extensions catalog entry with invalid id %r", identifier)
+    return entries
 
 
 EXTENSION_CATALOG = load_extension_catalog()

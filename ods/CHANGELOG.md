@@ -16,6 +16,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   through `BIND_ADDRESS` or the ODS proxy, its start-up now refuses, changes
   nothing, and explains in its log how to change that password first. The
   ODS proxy now also counts as exposure for the sign-in rule below.
+- An imported extension can no longer take the name of a folder ODS keeps
+  under `data/` or `config/` (such as `models`, `config-backups` or
+  `persona`). Before, an extension's own `./data/<id>` and `./config/<id>`
+  binds would then have reached ODS's folder. Both extension validators
+  refuse those binds. Purging extension data now refuses those folders and
+  any id that no shipped, listed or installed extension owns, as
+  `ods purge` already did.
 - Open WebUI now starts with sign-in on whenever it is published beyond this
   machine (`BIND_ADDRESS` not loopback), whatever `WEBUI_AUTH` says in `.env`.
   The CLI, `ods.ps1` and the host agent already turn sign-in on in that case.
