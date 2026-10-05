@@ -1407,7 +1407,9 @@ function DownloadProgressBar({ progress, helpers, onRetry }) {
             <AlertCircle size={20} className="shrink-0 text-red-400" />
             <div className="min-w-0">
               <p className="font-medium text-red-300">{cancelled ? 'Download Cancelled' : 'Download Failed'}</p>
-              <p className="break-words text-sm text-red-300/70">{progress.error}</p>
+              <p className="break-words text-sm text-red-300/70">
+                {progress.error}{!cancelled && <> <HelpLink /></>}
+              </p>
             </div>
           </div>
           {onRetry && (

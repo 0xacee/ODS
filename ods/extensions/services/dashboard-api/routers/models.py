@@ -1640,21 +1640,36 @@ def _stale_bootstrap_download_status(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bootstrap_retry_pending_error(model_name: Any) -> str:
+    """Say why downloads wait on the first full model and how to retry it.
+
+    The retry starts with the next ODS start or restart, and nothing else
+    told the owner that (a user hit this on three computers with no way on).
+    """
+    model = str(model_name or "").strip() or "the full model"
+    return (f"ODS's first download of {model} stopped before it finished, and it goes before other "
+            "model downloads. Restart ODS to retry it (ods restart). The reason is in "
+            "logs/model-upgrade.log in your ODS folder.")
+
+
 def _bootstrap_upgrade_download_conflict() -> dict[str, Any] | None:
     """Return a lifecycle-busy payload when bootstrap upgrade owns download priority."""
     bootstrap_status = _read_bootstrap_status_file()
     if _is_stale_active_bootstrap_status(bootstrap_status):
+        target = bootstrap_status.get("model") if bootstrap_status else None
         return {
-            "error": "Cannot start model download while bootstrap full-model upgrade is pending retry",
+            "error": _bootstrap_retry_pending_error(target),
             "code": "model_lifecycle_busy",
             "activeOperation": "bootstrap_upgrade_retry_pending",
-            "activeTarget": bootstrap_status.get("model") if bootstrap_status else None,
+            "activeTarget": target,
         }
 
     bootstrap_info = get_bootstrap_status()
     if bootstrap_info.active:
+        model = str(bootstrap_info.model_name or "").strip() or "the full model"
         return {
-            "error": "Cannot start model download while bootstrap full-model upgrade is in progress",
+            "error": (f"ODS is still downloading {model}, its first full model. "
+                      "Other model downloads can start when it finishes."),
             "code": "model_lifecycle_busy",
             "activeOperation": "bootstrap_upgrade",
             "activeTarget": bootstrap_info.model_name,
@@ -1682,7 +1697,7 @@ def _bootstrap_upgrade_download_conflict() -> dict[str, Any] | None:
         return None
 
     return {
-        "error": "Cannot start model download while bootstrap full-model upgrade is pending retry",
+        "error": _bootstrap_retry_pending_error(model_name),
         "code": "model_lifecycle_busy",
         "activeOperation": "bootstrap_upgrade_retry_pending",
         "activeTarget": model_name,
