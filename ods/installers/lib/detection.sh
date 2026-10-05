@@ -720,6 +720,9 @@ nvidia_kernel_module_flavor() {
 }
 
 validate_nvidia_blackwell_open_modules() {
+    # WSL uses the Windows display driver through /dev/dxg. Linux module
+    # metadata does not apply there, and installing a Linux driver breaks it.
+    ods_is_wsl_host && return 0
     nvidia_blackwell_hardware_detected || return 0
 
     local flavor
