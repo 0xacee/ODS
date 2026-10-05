@@ -64,7 +64,6 @@ ALLOWED = {
     "scripts/ods-doctor.sh": "diagnoses an unmigrated Lemonade-era .env",
     "scripts/resolve-compose-stack.sh": "reads ODS_MODE=lemonade as local; GAIA's own Lemonade Server",
     "scripts/uninstall-compose-volumes.py": "proves custody of the retired Lemonade volumes",
-    "scripts/validate-golden-paths.py": "validates the Windows Lemonade golden path",
 }
 
 # Never again in any compose file or dependency pin.

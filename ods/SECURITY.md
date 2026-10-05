@@ -27,7 +27,8 @@ values. The core credentials are:
 | `ODS_AGENT_KEY` | Bearer key for the host agent API |
 | `ODS_SESSION_SECRET` | Signs ODS session cookies (for example the Hermes gate) |
 | `WEBUI_SECRET` | Session signing for Open WebUI |
-| `LITELLM_KEY`, `LITELLM_LEMONADE_API_KEY` | LiteLLM gateway keys |
+| `LITELLM_KEY` | LiteLLM gateway key |
+| `LLAMA_SERVER_API_KEY` | Key of the Windows AMD `llama-server.exe` (Windows setup generates it) |
 | `QDRANT_API_KEY`, `SHIELD_API_KEY`, `TOKEN_SPY_API_KEY` | Service API keys |
 | `HERMES_DASHBOARD_SESSION_TOKEN`, `OPENCODE_SERVER_PASSWORD` | Agent and coding-tool credentials |
 | `N8N_PASS`, `SEARXNG_SECRET`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DIFY_SECRET_KEY` | Optional-service credentials |
@@ -204,7 +205,8 @@ The host agent (`bin/ods-host-agent.py`) has its own bind address, separate from
 
 | Platform | Default | Behavior |
 |----------|---------|----------|
-| macOS / Windows | `127.0.0.1` | Docker Desktop routes container traffic via loopback — loopback is sufficient |
+| macOS | `127.0.0.1` | Docker Desktop routes container traffic via loopback — loopback is sufficient |
+| Windows (native installer) | `0.0.0.0` | The installer writes it on a new install and keeps a value already set in `.env`, so the dashboard-api container can reach the agent through Docker Desktop's host gateway (`host.docker.internal`). Every `/v1/*` request still needs the bearer key (`ODS_AGENT_KEY`). |
 | Linux | auto-detected | Detects the `ods-network` gateway IP (e.g. `172.18.0.1`) so containers can reach the agent; LAN devices cannot. Falls back to the default Docker bridge gateway (e.g. `172.17.0.1`) for partial/older installs, then `127.0.0.1` if detection fails. |
 
 To override the default, set `ODS_AGENT_BIND` in `.env`:

@@ -95,7 +95,8 @@ Yes. Common use cases:
 ### What about model security?
 
 - The model server runs in a Docker container on Linux; on macOS llama-server
-  runs natively, and on Windows AMD hosts Lemonade runs natively on Windows.
+  runs natively, and on Windows AMD hosts `llama-server.exe` runs natively on
+  Windows.
 - Inference needs no outbound network after the initial download.
 - You control which models to run.
 - The server can be air-gapped if needed.
@@ -261,10 +262,15 @@ To return an existing installation to ODS-managed llama-server:
 ./install.sh --no-external-llm
 ```
 
+For another OpenAI-compatible server, such as a Lemonade Server you run
+yourself, use `--external-llm-provider openai-compatible` with the server's URL
+and exact model id.
+
 This integration routes text/chat inference; it does not import or synchronize
 Ollama/LM Studio model files, VLMs, embedding models, or rerankers. The
-installer flags in this release are Linux-only. Windows Lemonade and macOS
-native llama-server keep their existing platform lifecycle.
+installer flags in this release are Linux-only. The Windows AMD
+`llama-server.exe` and macOS native llama-server keep their existing platform
+lifecycle.
 
 ---
 

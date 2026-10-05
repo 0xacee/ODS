@@ -12,9 +12,10 @@ Frequently asked questions about installing, running, and troubleshooting ODS.
 ### What is ODS?
 ODS installs a local AI stack on your own hardware:
 
-- a local model server (llama.cpp's `llama-server`; Lemonade on Linux AMD;
-  native Metal on macOS) running a model the installer picks from its catalog
-  for your hardware;
+- a local model server (llama.cpp's `llama-server`: in a container on Linux,
+  natively with Metal on macOS, and as `llama-server.exe` for AMD GPUs on
+  Windows) running a model the installer picks from its catalog for your
+  hardware;
 - the ODS Dashboard (http://localhost:3001), with the Portal chat agent on
   qualified Linux hosts and the Models page for downloading and switching
   models;
@@ -126,11 +127,6 @@ Yes. Copy the single `.gguf` file into `~/ods/data/models/`, then load it from
 Dashboard → Models. Editing `GGUF_FILE` and `LLM_MODEL` in `.env` by hand
 bypasses the health check and the automatic rollback; if you do it anyway,
 apply it with `ods restart llama-server`.
-
-On Lemonade installs, load the model through ODS rather than only opening it
-in the Lemonade app. The Lemonade app can load the file for direct testing, but
-Open WebUI uses ODS's persisted LiteLLM route and may switch Lemonade back to
-the configured model on the next chat.
 
 ### Which model will I get?
 The installer measures your GPU memory (or system RAM) and picks a model and
