@@ -446,6 +446,78 @@ class UninstallVolumeTests(unittest.TestCase):
         self.assertNotIn(name, self.fake.removed)
         self.assertIn(name, diagnostic.getvalue())
 
+    RETIRED = ("lemonade-cache", "lemonade-llama", "lemonade-recipe")
+
+    def add_retired_lemonade_volumes(self):
+        """The Lemonade-era AMD overlay's volumes, which no container mounts
+        after the llama.cpp upgrade."""
+        for key in self.RETIRED:
+            self.fake.volumes[f"ods_{key}"] = self.fake._volume(f"ods_{key}", key)
+        return {f"ods_{key}" for key in self.RETIRED}
+
+    def write_retired_record(self, install_dir=None, keys=RETIRED):
+        path = self.root / "data/lemonade-retired-volumes.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "schemaVersion": 1, "installDir": str(install_dir or self.root),
+            "volumeKeys": list(keys),
+        }), encoding="utf-8")
+
+    def test_recorded_retired_lemonade_volumes_are_purged(self):
+        retired = self.add_retired_lemonade_volumes()
+        self.write_retired_record()
+        MODULE.preflight(self.root, self.snapshot, [])
+        captured = json.loads(self.snapshot.read_text(encoding="utf-8"))
+        self.assertTrue(retired <= set(captured["volumes"]))
+        # Completion re-checks trustedUsed against disabled recipes only.
+        self.assertEqual(captured["trustedUsed"], ["perplexica-data", "perplexica-uploads"])
+        self.fake.containers = []
+        MODULE.complete(self.root, self.snapshot)
+        self.assertEqual(self.fake.volumes, {})
+        self.assertTrue(retired <= set(self.fake.removed))
+        self.assertEqual(self.fake.foreign, {"ods-pixel-retired-research", "ods-unrelated"})
+
+    def test_unrecorded_retired_lemonade_volume_is_not_deleted(self):
+        self.add_retired_lemonade_volumes()
+        with self.assertRaisesRegex(ValueError, "retired Lemonade volume this installation did not record"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertFalse(self.fake.removed)
+        self.assertEqual(self.snapshot.stat().st_size, 0)
+
+    def test_retired_record_is_read_only_when_retired_volumes_exist(self):
+        self.write_retired_record(install_dir="/other/ods")
+        # Nothing to prove: a stale record does not block the uninstall.
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.add_retired_lemonade_volumes()
+        with self.assertRaisesRegex(ValueError, "does not belong to this installation"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_retired_record_cannot_name_other_volumes(self):
+        self.add_retired_lemonade_volumes()
+        self.write_retired_record(keys=self.RETIRED + ("perplexica-data",))
+        with self.assertRaisesRegex(ValueError, "does not belong to this installation"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_retired_volume_with_a_foreign_consumer_is_not_deleted(self):
+        self.add_retired_lemonade_volumes()
+        self.write_retired_record()
+        self.fake.foreign_consumers["ods_lemonade-cache"] = ["b" * 64]
+        with self.assertRaisesRegex(ValueError, "outside this installation"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_retired_volume_recreated_after_preflight_is_not_deleted(self):
+        self.add_retired_lemonade_volumes()
+        self.write_retired_record()
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.fake.volumes["ods_lemonade-llama"]["CreatedAt"] = "2026-10-02T00:00:00Z"
+        self.fake.containers = []
+        with self.assertRaisesRegex(ValueError, "changed during uninstall"):
+            MODULE.complete(self.root, self.snapshot)
+        self.assertFalse(self.fake.removed)
+
 
 if __name__ == "__main__":
     unittest.main()
