@@ -43,6 +43,12 @@ grep -qF '$llmApiBasePath = "/v1"' "$win_env_generator" \
   || { echo "[FAIL] Windows native LiteLLM config must use the host /v1 endpoint"; exit 1; }
 grep -qF 'os.environ/LLAMA_SERVER_API_KEY' "$win_env_generator" \
   || { echo "[FAIL] Windows native LiteLLM config must send LLAMA_SERVER_API_KEY from the environment"; exit 1; }
+# LiteLLM may be off on a Windows install, so the key cannot come from an
+# overlay stanza (Compose rejects a service with no image); LiteLLM's own
+# fragment passes it whenever LiteLLM runs.
+awk '$0=="    environment:" {on=1; next} /^    [a-z]/ {on=0} on' extensions/services/litellm/compose.yaml \
+  | grep -qF -- '- LLAMA_SERVER_API_KEY=${LLAMA_SERVER_API_KEY:-}' \
+  || { echo "[FAIL] LiteLLM must receive LLAMA_SERVER_API_KEY for the Windows native config that names it"; exit 1; }
 grep -q 'model_name: "\*"' "$win_env_generator" \
   || { echo "[FAIL] Windows native LiteLLM config must preserve wildcard routing"; exit 1; }
 grep -q 'enable_thinking: false' "$win_env_generator" \
