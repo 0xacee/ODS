@@ -426,10 +426,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   present.
 
 ### Fixed
-- Token Spy, APE, Privacy Shield and Brave Search can be added from
-  Extensions again on installs that started without them. They build their
-  image from their own folder, and the dashboard refused any local build
-  that was not one of two reviewed Langfuse Dockerfiles. It now accepts
+- Enabling Token Spy, APE, Privacy Shield or Brave Search on an install that
+  started without them no longer fails with "uses a local build without a
+  verified source recipe". They build their image from their own folder,
+  and the dashboard refused any local build that was not one of two
+  reviewed Langfuse Dockerfiles. It now accepts
   these four when their folder matches the files this ODS version shipped,
   pinned by digest; a changed, added or removed file, or a link, is still
   refused. Changing one of these folders needs
