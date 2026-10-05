@@ -161,8 +161,13 @@ def test_other_cli_failures_preserve_hold_guidance_without_leaking_exception(mon
     message = cli(monkeypatch, capsys, ['copy', '/fixture', 'fixture'])
     assert 'Preserve any existing admission hold and protected source snapshots' in message
     assert '/private/' not in message
-    assert str(error) not in message
     assert 'clean install' not in message
+    if isinstance(error, upgrade.UpgradeError):
+        # A fixed code is source text, not private data; naming it says what
+        # blocks the update (fleet row 27 hid model-recovery-required).
+        assert f'(reason: {error})' in message
+    else:
+        assert str(error) not in message and '(reason:' not in message
 
 
 def test_cli_mismatched_hold_preserves_actual_journal_and_snapshots(private_root, monkeypatch, capsys):
