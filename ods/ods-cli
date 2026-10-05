@@ -3836,7 +3836,11 @@ cmd_mode() {
     local configured_backend
     configured_backend=$(grep -m1 "^LLM_BACKEND=" .env 2>/dev/null | cut -d= -f2- | tr -d '"\047\r' || true)
     if [[ "${configured_backend,,}" == "external" ]]; then
-        error "External LLM routing is installer-managed. Run './install.sh --no-external-llm' first, then retry 'ods mode $mode'."
+        # Fleet row 4: "installer-managed" did not say what to do or where.
+        echo -e "${RED}✗${NC} ODS is in API mode, which only the installer turns on and off. Nothing was changed." >&2
+        echo "  Rerun the ODS installer with --no-external-llm (Windows: -NoExternalLlm), then run 'ods mode $mode' again." >&2
+        echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+        exit 1
     fi
 
     # Update .env
