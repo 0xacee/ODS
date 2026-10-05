@@ -289,13 +289,28 @@ _doctor_check_external_llm() {
 # The Windows Portal's llama-server runs outside the stack. Its /health needs
 # no API key, so the probe sends none.
 _doctor_check_host_native_llm() {
-    local url="${NATIVE_LLM_BASE_URL%/}"
+    local url="${NATIVE_LLM_BASE_URL%/}" reached=false
     LLM_URL="$url"
     LLM_PROVIDER="llama-server (Windows)"
     LLM_MODEL="${GGUF_FILE:-}"
     LLM_RECOVERY=""
     LLM_LOCAL_WARNING="false"
-    if command -v curl >/dev/null 2>&1 && curl -sf --max-time 5 "${url}/health" >/dev/null 2>&1; then
+    if [[ "${ODS_HOST_LLM_TRANSPORT:-}" == model-router && -n "${NATIVE_LLM_CONTAINER_BASE_URL:-}" ]]; then
+        # Under WSL's default NAT networking this shell cannot reach Windows
+        # loopback; the Portal's route goes through model-router
+        # (host.docker.internal). Probe from that container, as LiteLLM and
+        # the router reach the server.
+        url="${NATIVE_LLM_CONTAINER_BASE_URL%/}"
+        LLM_URL="$url"
+        if [[ "${DOCKER_DAEMON:-false}" == "true" ]] && docker exec ods-model-router python -c \
+            'import sys, urllib.request; urllib.request.urlopen(sys.argv[1] + "/health", timeout=5)' \
+            "$url" >/dev/null 2>&1; then
+            reached=true
+        fi
+    elif command -v curl >/dev/null 2>&1 && curl -sf --max-time 5 "${url}/health" >/dev/null 2>&1; then
+        reached=true
+    fi
+    if $reached; then
         LLM_STATUS="ok"
         log_ok "LLM backend: llama-server on Windows (host-native) — responding"
         log_ok "  Endpoint : $url"
@@ -303,6 +318,9 @@ _doctor_check_host_native_llm() {
     else
         LLM_STATUS="fail"
         LLM_RECOVERY="restart the llama-server task from the ODS Portal on Windows, then rerun setup there"
+        if [[ "${ODS_HOST_LLM_TRANSPORT:-}" == model-router ]]; then
+            LLM_RECOVERY="if ods-model-router is not running, run ods start; otherwise $LLM_RECOVERY"
+        fi
         log_fail "LLM backend: llama-server on Windows (host-native) — not responding"
         log_info "  Endpoint : $url"
         log_info "  Recovery : $LLM_RECOVERY"
