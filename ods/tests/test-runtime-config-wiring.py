@@ -16,26 +16,30 @@ def read(path: str) -> str:
 def test_linux_installer_uses_renderer_as_sole_writer() -> None:
     text = read("installers/phases/06-directories.sh")
     assert "scripts/render-runtime-configs.py" in text
-    assert "--surface litellm-lemonade" in text
+    # AMD serves llama.cpp in the stack (litellm-local); the Windows Portal's
+    # host-native llama-server has its own surface; Lemonade has none.
+    assert "--surface litellm-local --output-root" in text
+    assert "--surface litellm-local-native" in text
+    assert "litellm-lemonade" not in text
     assert "LITELLM_EOF" not in text
     assert "falling back to inline writer" not in text
 
 
-def test_bootstrap_upgrade_uses_renderer_as_sole_writer() -> None:
+def test_bootstrap_upgrade_writes_no_lemonade_route() -> None:
     text = read("scripts/bootstrap-upgrade.sh")
-    assert "scripts/render-runtime-configs.py" in text
-    assert "--surface litellm-lemonade" in text
+    # llama-server serves the GGUF it loaded, so a full-model swap re-renders
+    # nothing; the Lemonade route and its inline writers are gone.
+    assert "litellm-lemonade" not in text
     assert "LITELLM_UPGRADE_EOF" not in text
     assert "LITELLM_WINDOWS_LEMONADE_EOF" not in text
     assert "falling back to inline writer" not in text
 
 
-def test_bootstrap_upgrade_promotes_lemonade_model_id() -> None:
+def test_bootstrap_upgrade_tracks_no_lemonade_model_id() -> None:
     text = read("scripts/bootstrap-upgrade.sh")
-    assert 'write_env_value LEMONADE_MODEL "$_promotion_lemonade_model_id"' in text
-    assert 'lemonade_model_id_matches_gguf "$_loaded_model_id" "$FULL_GGUF_FILE"' in text
-    assert 'resolve_live_lemonade_model_id "${OLLAMA_PORT:-8080}" "$FULL_GGUF_FILE"' in text
-    assert 'json_has_id "$models_json" "$model_id"' in text
+    for retired in ("_promotion_lemonade_model_id", "lemonade_model_id_matches_gguf",
+                    "resolve_live_lemonade_model_id", "json_has_id"):
+        assert retired not in text, retired
 
 
 def test_host_agent_uses_renderer_as_sole_writer() -> None:
@@ -67,20 +71,21 @@ def test_runtime_renderer_callers_keep_credentials_out_of_process_arguments() ->
         read("installers/phases/06-directories.sh"),
         read("installers/macos/install-macos.sh"),
         read("installers/windows/lib/env-generator.ps1"),
-        read("scripts/bootstrap-upgrade.sh"),
         read("bin/ods-host-agent.py"),
     ]
     assert all('"--litellm-key"' not in text for text in callers)
     # A caller that runs the renderer passes the key through the environment;
     # the Windows env generator writes its host-native config itself.
     assert all("ODS_RENDER_LITELLM_KEY" in text for text in callers if "render-runtime-configs.py" in text)
+    # bootstrap-upgrade.sh no longer renders runtime configs at all.
+    assert "render-runtime-configs.py" not in read("scripts/bootstrap-upgrade.sh")
 
 
 def main() -> int:
     for test in (
         test_linux_installer_uses_renderer_as_sole_writer,
-        test_bootstrap_upgrade_uses_renderer_as_sole_writer,
-        test_bootstrap_upgrade_promotes_lemonade_model_id,
+        test_bootstrap_upgrade_writes_no_lemonade_route,
+        test_bootstrap_upgrade_tracks_no_lemonade_model_id,
         test_host_agent_uses_renderer_as_sole_writer,
         test_cloud_callers_do_not_render_local_switchboard,
         test_runtime_renderer_callers_keep_credentials_out_of_process_arguments,

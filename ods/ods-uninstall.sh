@@ -174,7 +174,8 @@ Options:
 
 This will remove:
     - ODS service containers
-    - Verified ODS Docker volumes (unless --keep-data)
+    - Verified ODS Docker volumes, the retired Lemonade ones included (unless --keep-data)
+    - The retired ods-lemonade-server image an upgraded AMD install built
     - Installation directory ($INSTALL_DIR)
     - ODS-managed Pixel host services and private configuration
     - Systemd user services (opencode-web, maintenance timers from older installs)
@@ -184,7 +185,7 @@ This will remove:
     - Backup directory (~/.ods)
 
 Preserved:
-    - Docker images and shared build cache
+    - Other Docker images and shared build cache
     - On macOS, native Pixel recovery archives and stopped, renamed sandboxes
     - The dedicated macOS Pixel Operations identity, verified before reinstall
 
@@ -388,7 +389,7 @@ fi
 
 # Disable and settle the bound Windows login startup before removing Pixel:
 # a sign-in coordinator must not restart services during their retirement.
-# Lemonade itself and its model library remain installed.
+# The Windows-side runtime files and model library remain installed.
 if [[ -n "${_ods_wsl_retire_helper:-}" ]]; then
     if ! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR"; then
         log_error "Windows startup retirement failed; installation files retained; startup may already be disabled"
@@ -497,6 +498,21 @@ if command -v docker &>/dev/null; then
     fi
 
     [[ "$KEEP_DATA" == "true" ]] && log_info "Keeping Docker volumes (--keep-data)"
+
+    # The image this installation built for the retired Lemonade runtime; its
+    # Lemonade migration left the record. Nothing runs it now, and Docker
+    # refuses to remove an image that any container still uses. The
+    # uninstall confirmation is the consent. A missing image is the usual case.
+    _ods_lemonade_record="$INSTALL_DIR/data/lemonade-retired-volumes.json"
+    if [[ -f "$_ods_lemonade_record" && ! -L "$_ods_lemonade_record" ]] &&
+        docker image inspect ods-lemonade-server:latest >/dev/null 2>&1; then
+        if docker image rm ods-lemonade-server:latest >/dev/null; then
+            log_ok "Removed the retired Lemonade image ods-lemonade-server:latest"
+        else
+            log_warn "Could not remove the retired image ods-lemonade-server:latest (non-fatal); remove it later with: docker image rm ods-lemonade-server:latest"
+        fi
+    fi
+    unset _ods_lemonade_record
 
     log_ok "Verified Docker cleanup complete"
     log_info "Docker images and shared build cache retained"

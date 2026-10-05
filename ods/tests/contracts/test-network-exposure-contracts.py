@@ -381,11 +381,16 @@ def test_legacy_openclaw_extension_stays_removed() -> None:
 
 def test_litellm_gateway_auth_is_enforced() -> None:
     compose = read(SERVICES / "litellm" / "compose.yaml")
-    amd_compose = read(ROOT / "docker-compose.amd.yml")
+    host_native_compose = read(ROOT / "docker-compose.host-native-llm.yml")
     policy = json.loads(read(POLICY))["services"]["litellm"]
 
     assert_true("LITELLM_MASTER_KEY=${LITELLM_KEY:-}" in compose, "LiteLLM must keep master-key auth")
-    assert_true("OPENAI_API_KEY=${LITELLM_KEY}" in amd_compose, "AMD clients must present LITELLM_KEY")
+    # A host-native llama-server is reachable only through LiteLLM, so Open
+    # WebUI presents the gateway key there.
+    assert_true(
+        'OPENAI_API_KEY: "${LITELLM_KEY}"' in host_native_compose,
+        "host-native Open WebUI must present LITELLM_KEY",
+    )
     assert_true(policy["auth_required"] is True, "LiteLLM policy must require auth")
 
 

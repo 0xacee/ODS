@@ -196,9 +196,11 @@ def compose_flags(install_dir, process_env):
         # Extension changes invalidate this disposable cache. Resolve the saved
         # selection like ods-cli, without sourcing .env or publishing a new cache.
         environment = helper('pixel-native-env')
+        # The resolver's selection inputs: the saved values replace any
+        # stale process environment.
         keys = {'TIER', 'GPU_BACKEND', 'GPU_COUNT', 'ODS_MODE',
             'ODS_SKIP_GPU_OVERLAYS', 'ODS_SKIP_GPU_OVERLAYS_FOR', 'WHISPER_ACCELERATION',
-            'LEMONADE_EXTERNAL', 'AMD_INFERENCE_RUNTIME', 'AMD_INFERENCE_MANAGED', 'EXTERNAL_LLM_URL'}
+            'NATIVE_LLM_BASE_URL', 'AMD_INFERENCE_BACKEND', 'EXTERNAL_LLM_URL'}
         saved = {}
         for line in environment.snapshot(install_dir / '.env')[0].decode('utf-8').splitlines():
             match = environment.ASSIGNMENT.fullmatch(line)
@@ -213,7 +215,7 @@ def compose_flags(install_dir, process_env):
         if (not re.fullmatch('[a-z][a-z0-9_-]*', backend)
                 or not re.fullmatch('[A-Za-z0-9_]+', tier)
                 or not re.fullmatch('[0-9]+', count)
-                or mode not in {'local', 'cloud', 'hybrid', 'lemonade'}):
+                or mode not in {'local', 'cloud', 'hybrid'}):
             raise ValueError('saved-compose-selection-required')
         resolver = install_dir / 'scripts/resolve-compose-stack.sh'
         if not resolver.is_file() or resolver.resolve(strict=True) != resolver:

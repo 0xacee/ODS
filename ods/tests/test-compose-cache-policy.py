@@ -101,7 +101,7 @@ update_env_value() { printf changed > "$1"; }
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='POSIX bootstrap integration')
 @pytest.mark.parametrize('action', ['llama', 'llama-retry', 'hermes', 'windows-flags',
-                                   'windows-cached', 'windows-recovered', 'lemonade'])
+                                   'windows-cached', 'windows-recovered'])
 @pytest.mark.parametrize('confined', [False, True])
 def test_bootstrap_revalidates_every_compose_entry(installed, action, confined):
     source_recipe(installed, confined=confined)
@@ -127,8 +127,7 @@ def test_bootstrap_revalidates_every_compose_entry(installed, action, confined):
     compose.chmod(0o700)
     source = (ODS / 'scripts/bootstrap-upgrade.sh').read_text()
     names = ['validate_bootstrap_compose_args', 'compose_recreate_llama_server_with_retry',
-             'compose_recreate_hermes', 'load_windows_lemonade_compose_args',
-             'refresh_lemonade_after_bootstrap_cleanup']
+             'compose_recreate_hermes', 'load_windows_lemonade_compose_args']
     functions = '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^}', source,
                                      re.MULTILINE | re.DOTALL).group() for name in names)
     prelude = '''
@@ -159,7 +158,6 @@ cd "$INSTALL_DIR" || exit 1
                            'load_windows_lemonade_compose_args; compose_recreate_hermes'),
         'windows-recovered': ('is_windows_bash() { return 0; }; COMPOSE_ARGS=(); '
                               'rm .compose-flags; compose_recreate_hermes'),
-        'lemonade': 'refresh_lemonade_after_bootstrap_cleanup',
     }
     env = dict(os.environ, PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ['PATH'])
     result = subprocess.run(['bash', '-s', '--', str(installed), sys.executable],

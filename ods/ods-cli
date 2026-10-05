@@ -915,30 +915,35 @@ get_compose_flags() {
                 prev="$tok"
             done
             local _ods_mode="${ODS_MODE:-local}"
-            local _lemonade_external="${LEMONADE_EXTERNAL:-false}"
-            local _amd_runtime="${AMD_INFERENCE_RUNTIME:-}"
-            local _amd_managed="${AMD_INFERENCE_MANAGED:-true}"
-            _lemonade_external="${_lemonade_external,,}"
-            _amd_runtime="${_amd_runtime,,}"
-            _amd_managed="${_amd_managed,,}"
-            local _external_lemonade_active="false"
-            if [[ "$_ods_mode" == "lemonade" ]]; then
-                if [[ "$_lemonade_external" =~ ^(1|true|yes|on)$ ]] || \
-                   { [[ "$_amd_runtime" == "lemonade" ]] && [[ "$_amd_managed" =~ ^(0|false|no|off)$ ]]; }; then
-                    _external_lemonade_active="true"
-                fi
-            fi
+            # An ODS-managed llama-server outside the stack (Windows Portal).
+            local _host_native_active="false"
+            [[ -n "${NATIVE_LLM_BASE_URL:-}" && "$_ods_mode" != "cloud" ]] && _host_native_active="true"
             if [[ "$_ods_mode" == "cloud" ]] && \
                { [[ "$cached" == *"docker-compose.cpu.yml"* ]] || [[ "$cached" == *"compose.local.yaml"* ]] || [[ "$cached" != *"docker-compose.cloud.yml"* ]]; }; then
                 stale=1
             fi
-            if [[ "$_external_lemonade_active" == "true" ]] && \
-               { [[ "$cached" == *"compose.local.yaml"* ]] || [[ "$cached" == *"docker-compose.amd.yml"* ]] || [[ "$cached" == *"docker-compose.cloud.yml"* ]] || [[ "$cached" != *"docker-compose.lemonade-external.yml"* ]]; }; then
+            if [[ "$_host_native_active" == "true" ]] && \
+               { [[ "$cached" == *"compose.local.yaml"* ]] || [[ "$cached" == *"docker-compose.amd.yml"* ]] || [[ "$cached" == *"docker-compose.cloud.yml"* ]] || [[ "$cached" != *"docker-compose.host-native-llm.yml"* ]]; }; then
                 stale=1
             fi
-            if [[ "$_ods_mode" != "cloud" ]] && [[ "$_external_lemonade_active" != "true" ]] && \
-               [[ "$cached" == *"docker-compose.cloud.yml"* ]]; then
+            if [[ "$_host_native_active" != "true" ]] && [[ "$cached" == *"docker-compose.host-native-llm.yml"* ]]; then
                 stale=1
+            fi
+            if [[ "$_ods_mode" != "cloud" ]] && [[ "$cached" == *"docker-compose.cloud.yml"* ]]; then
+                stale=1
+            fi
+            # The retired Lemonade overlay can outlive an update that kept
+            # the old file on disk; the stack must be resolved again.
+            if [[ "$cached" == *"docker-compose.lemonade-external.yml"* ]]; then
+                stale=1
+            fi
+            # The AMD image follows AMD_INFERENCE_BACKEND (vulkan or rocm).
+            if [[ "$cached" == *"docker-compose.amd.yml"* ]]; then
+                if [[ "${AMD_INFERENCE_BACKEND:-vulkan}" == "rocm" ]]; then
+                    [[ "$cached" == *"docker-compose.amd-rocm.yml"* ]] || stale=1
+                else
+                    [[ "$cached" != *"docker-compose.amd-rocm.yml"* ]] || stale=1
+                fi
             fi
             if [[ "$stale" == "0" ]]; then
                 if [[ "$cached" == *user-extensions* || -d "$INSTALL_DIR/data/user-extensions" ]]; then
@@ -1217,7 +1222,6 @@ _check_docker_access() {
 # Always rebuilds: dashboard, dashboard-api, ape, token-spy, privacy-shield.
 # Conditionally rebuilds based on .env state:
 #   - comfyui     (ENABLE_COMFYUI=true)
-#   - llama-server (GPU_BACKEND=amd, e.g. AMD Lemonade)
 # Mirrors the conditional logic in installers/phases/11-services.sh. Unlike that
 # phase's image-inspect fast-path, --rebuild-images is an explicit opt-in so we
 # always rebuild every applicable service from source.
@@ -1225,11 +1229,9 @@ _check_docker_access() {
 _ods_cli_rebuild_images() {
     local flags=("$@")
     local svcs=(dashboard dashboard-api ape token-spy privacy-shield)
-    # Mirror phases/11-services.sh conditional builds: ComfyUI when enabled
-    # and llama-server on AMD (Lemonade builds the binary in the container).
-    # Other GPU backends pull pre-built images.
+    # Mirror phases/11-services.sh conditional builds: ComfyUI when enabled.
+    # llama-server is a pulled upstream image on every GPU backend.
     [[ "${ENABLE_COMFYUI:-}" == "true" ]] && svcs+=(comfyui)
-    [[ "${GPU_BACKEND:-}" == "amd" ]] && svcs+=(llama-server)
     _check_docker_access
     log "Rebuilding local-built images (--rebuild-images)..."
     if ! docker compose "${flags[@]}" build --no-cache "${svcs[@]}"; then
@@ -1243,7 +1245,7 @@ _ods_cli_pull_external_images() {
 
     if ! command -v ods_compose_external_images >/dev/null 2>&1 && [[ -f "$helper" ]]; then
         # Reuse the installer's image discovery contract: pull registry images,
-        # skip local build tags such as ods-lemonade-server:latest.
+        # skip local build tags such as ods-llama-sycl:local.
         . "$helper"
     fi
 
@@ -1415,8 +1417,9 @@ cmd_status() {
     # Launch parallel health checks
     for sid in "${SERVICE_IDS[@]}"; do
         # Cloud and external-model installs intentionally do not start the
-        # managed model stack. Report the active LiteLLM gateway instead.
-        if [[ "$sid" == "llama-server" || "$sid" == "model-router" ]] && ods_preflight_uses_litellm; then
+        # managed model stack; a host-native llama-server (Windows Portal)
+        # keeps model-router. Report the active LiteLLM gateway instead.
+        if ods_status_skips_managed_inference "$sid"; then
             continue
         fi
         _ods_cli_service_not_installed "$sid" && continue
@@ -1529,7 +1532,7 @@ cmd_status_json() {
     trap 'rm -f "$tmp"' RETURN
 
     for sid in "${SERVICE_IDS[@]}"; do
-        if [[ "$sid" == "llama-server" || "$sid" == "model-router" ]] && ods_preflight_uses_litellm; then
+        if ods_status_skips_managed_inference "$sid"; then
             continue
         fi
         _ods_cli_service_not_installed "$sid" && continue
@@ -5851,12 +5854,18 @@ _gpu_reassign_update_amd_arch_env() {
         gfx_ver=""
     fi
 
-    if [[ "$gfx_ver" == "gfx1151" ]]; then
-        _env_set "HSA_OVERRIDE_GFX_VERSION" "11.5.1"
-        _env_set "LEMONADE_LLAMACPP_ROCM_BIN" "/opt/llama-custom/llama-server"
+    # ROCm image only, and only for a GPU it was not built for; the Vulkan
+    # image never reads it (installers/lib/amd-runtime.sh).
+    local hsa_override=""
+    if [[ -f "$INSTALL_DIR/installers/lib/amd-runtime.sh" ]]; then
+        # shellcheck source=installers/lib/amd-runtime.sh
+        . "$INSTALL_DIR/installers/lib/amd-runtime.sh"
+        hsa_override="$(ods_amd_hsa_override_for_target "${AMD_INFERENCE_BACKEND:-vulkan}" "$gfx_ver")"
+    fi
+    if [[ -n "$hsa_override" ]]; then
+        _env_set "HSA_OVERRIDE_GFX_VERSION" "$hsa_override"
     else
         _env_unset "HSA_OVERRIDE_GFX_VERSION"
-        _env_unset "LEMONADE_LLAMACPP_ROCM_BIN"
     fi
 }
 
@@ -5965,7 +5974,7 @@ _gpu_reassign() {
         unset WHISPER_GPU_UUID COMFYUI_GPU_UUID EMBEDDINGS_GPU_UUID
         unset WHISPER_GPU_INDEX COMFYUI_GPU_INDEX EMBEDDINGS_GPU_INDEX
         unset ROCR_VISIBLE_DEVICES HSA_OVERRIDE_GFX_VERSION
-        unset LEMONADE_LLAMACPP_ROCM_BIN VIDEO_GID RENDER_GID
+        unset VIDEO_GID RENDER_GID
         load_env
     }
 
@@ -5995,12 +6004,7 @@ _gpu_reassign() {
             || return 1
 
         local llm_port="${OLLAMA_PORT:-${LLAMA_SERVER_PORT:-11434}}"
-        local llm_base_path="${LLM_API_BASE_PATH:-}"
-        if [[ -z "$llm_base_path" ]]; then
-            [[ "${GPU_BACKEND:-nvidia}" == "amd" ]] \
-                && llm_base_path="/api/v1" \
-                || llm_base_path="/v1"
-        fi
+        local llm_base_path="${LLM_API_BASE_PATH:-/v1}"
         llm_base_path="/${llm_base_path#/}"
         llm_base_path="${llm_base_path%/}"
         local models_response model_id completion_payload completion_response
@@ -6203,13 +6207,10 @@ _gpu_reassign() {
             read -r _para
             case "${_para:-tensor}" in
                 tensor|hybrid)
-                    # NVIDIA: CUDA row split is not fleet-qualified and fails at
-                    # model load from llama.cpp b9890, so use layer split.
-                    if [[ "$backend" == "nvidia" ]]; then
-                        split_mode_m="layer"
-                    else
-                        split_mode_m="row"
-                    fi
+                    # Layer split on every GPU: CUDA row split fails at model
+                    # load from llama.cpp b9890, Vulkan has no row split, and
+                    # the HIP backend shares CUDA's split code.
+                    split_mode_m="layer"
                     parallelism_mode_m="tensor"
                     tensor_split_m=$(printf '1,%.0s' $(seq 1 "$llama_gpu_count"))
                     tensor_split_m="${tensor_split_m%,}"
@@ -6384,10 +6385,10 @@ _gpu_reassign() {
 
     local _para_mode
     _para_mode=$(echo "$assignment_json" | jq -r '.gpu_assignment.services.llama_server.parallelism.mode // "none"')
-    # NVIDIA uses layer split for every multi-GPU mode (CUDA row split fails
-    # at model load from llama.cpp b9890). AMD keeps row for tensor/hybrid.
+    # Layer split for every multi-GPU mode: CUDA row split fails at model load
+    # from llama.cpp b9890, and Vulkan has no row split.
     case "$_para_mode" in
-        tensor|hybrid) if [[ "$backend" == "nvidia" ]]; then split_mode="layer"; else split_mode="row"; fi ;;
+        tensor|hybrid) split_mode="layer" ;;
         pipeline)      split_mode="layer" ;;
         *)             split_mode="none" ;;
     esac

@@ -18,11 +18,16 @@
 #           DISK_AVAIL, BACKEND_ID,
 #           LLM_HEALTHCHECK_URL, LLM_PUBLIC_API_PORT,
 #           GPU_TOPOLOGY_JSON, GPU_HAS_NVLINK, GPU_TOTAL_VRAM,
-#           LLM_MODEL_SIZE_MB
+#           LLM_MODEL_SIZE_MB, AMD_GFX_TARGET, AMD_INFERENCE_BACKEND
 #
 # Modder notes:
 #   Change tier auto-detection thresholds or add new hardware classes here.
 # ============================================================================
+
+# Isolated phase reuse (tests) gets the route predicate installers/lib/
+# native-llm.sh gives install-core: a host-native llama-server is in use.
+declare -F ods_native_llm_requested >/dev/null 2>&1 \
+    || ods_native_llm_requested() { [[ -n "${NATIVE_LLM_BASE_URL:-}" ]]; }
 
 [[ -f "${SCRIPT_DIR:-}/lib/safe-env.sh" ]] && . "$SCRIPT_DIR/lib/safe-env.sh"
 . "$SCRIPT_DIR/installers/lib/wsl-memory.sh"
@@ -38,6 +43,9 @@ GPU_BACKEND_FORCED_CPU=false
 TIER_REQUESTED="${TIER:-}"
 TIER_FORCED=false
 [[ -n "$TIER_REQUESTED" ]] && TIER_FORCED=true
+# An owner choice of the AMD llama.cpp image (vulkan or rocm) from the
+# environment; otherwise the retained .env value, then the hardware decides.
+AMD_INFERENCE_BACKEND_REQUESTED="${AMD_INFERENCE_BACKEND:-}"
 
 # Cloud mode: skip GPU detection entirely
 if [[ "${ODS_MODE:-local}" == "cloud" ]]; then
@@ -144,6 +152,38 @@ else
         [[ -n "${CAP_GPU_COUNT:-}" ]] && GPU_COUNT="${CAP_GPU_COUNT}"
         log "Capabilities override detection: backend=${GPU_BACKEND}, memory=${GPU_MEMORY_TYPE}, tier=${CAP_RECOMMENDED_TIER:-unknown}"
     fi
+
+    # AMD runs the llama.cpp image with Vulkan unless ROCm is requested or the
+    # GPU has no Vulkan driver (Instinct). The choice decides which device
+    # nodes are required (/dev/kfd only for ROCm) and the Compose overlay.
+    AMD_GFX_TARGET=""
+    if [[ "$GPU_BACKEND" == "amd" ]]; then
+        [[ -f "$SCRIPT_DIR/installers/lib/amd-topo.sh" ]] && . "$SCRIPT_DIR/installers/lib/amd-topo.sh"
+        _amd_gfx_targets=()
+        if declare -F amd_gfx_targets >/dev/null 2>&1; then
+            # An unreadable target leaves the choice to the retained value or Vulkan.
+            mapfile -t _amd_gfx_targets < <(amd_gfx_targets 2>>"$LOG_FILE" || true)
+        fi
+        for _amd_target in "${_amd_gfx_targets[@]}"; do
+            AMD_GFX_TARGET="$(ods_amd_normalize_gfx_target "$_amd_target")"
+            [[ -z "$AMD_GFX_TARGET" ]] || break
+        done
+        # No .env (a fresh install) or no saved value: the hardware decides.
+        _amd_retained_backend="$(external_llm_env_value "$INSTALL_DIR/.env" AMD_INFERENCE_BACKEND 2>/dev/null || true)"
+        if ! AMD_INFERENCE_BACKEND="$(ods_amd_select_inference_backend \
+            "$AMD_INFERENCE_BACKEND_REQUESTED" "$_amd_retained_backend" "${_amd_gfx_targets[@]}")"; then
+            error "AMD_INFERENCE_BACKEND must be vulkan or rocm, got: $AMD_INFERENCE_BACKEND_REQUESTED"
+        fi
+        log "AMD llama.cpp backend: $AMD_INFERENCE_BACKEND (gfx target: ${AMD_GFX_TARGET:-unknown})"
+        if [[ "$AMD_INFERENCE_BACKEND" == rocm \
+            && -z "$(ods_amd_hsa_override_for_target rocm "$AMD_GFX_TARGET")" \
+            && -n "$AMD_GFX_TARGET" \
+            && " $ODS_AMD_ROCM_IMAGE_TARGETS " != *" $AMD_GFX_TARGET "* ]]; then
+            ai_warn "The ROCm image is not built for ${AMD_GFX_TARGET}; set AMD_INFERENCE_BACKEND=vulkan if the model does not load."
+        fi
+        unset _amd_gfx_targets _amd_target _amd_retained_backend
+    fi
+    export AMD_GFX_TARGET AMD_INFERENCE_BACKEND
 
     if [[ "$GPU_BACKEND" == "amd" ]] && ! amd_gpu_runtime_devices_available; then
         _amd_missing_devices="$(amd_gpu_missing_devices_csv)"
@@ -541,7 +581,7 @@ if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "${TIER:-}" !=
             if declare -F ods_pixel_resolve_enablement >/dev/null 2>&1 \
                 && [[ "${ODS_MODE:-local}" == "local" ]] \
                 && [[ -z "${EXTERNAL_LLM_URL:-}" ]] \
-                && [[ "${LEMONADE_EXTERNAL:-false}" != "true" ]] \
+                && ! ods_native_llm_requested \
                 && [[ "$(ods_pixel_resolve_enablement "${ENABLE_PIXEL:-auto}" 2>/dev/null || true)" == "pixel" ]]; then
                 _pixel_default_selector=true
             fi
@@ -596,34 +636,37 @@ if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "${TIER:-}" !=
     fi
 fi
 
-# External Lemonade: Lemonade on the Windows host serves the model the Windows
-# installer chose and loaded. This Linux host cannot see that GPU, so the
+# Host-native llama-server: llama-server on the Windows host serves the model
+# Windows setup chose and loaded. This Linux host cannot see that GPU, so the
 # catalog pick above describes a model nobody serves. Record the catalog model
-# Lemonade's id names instead, at the context Lemonade loaded, so .env
-# describes what is served and the next rerun can verify it
-# (scripts/preserve-active-model.py). Stop rather than record another model.
-if [[ "${LEMONADE_EXTERNAL:-false}" == "true" && -n "${LEMONADE_MODEL:-}" && "${TIER:-}" != "CLOUD" ]]; then
-    _projection_python="${_selector_python:-}"
-    if [[ -z "$_projection_python" ]] && declare -F ods_model_selector_python >/dev/null 2>&1; then
-        _projection_python="$(ods_model_selector_python)"
+# the served GGUF names instead, at the context it was loaded with, so .env
+# describes what is served and the next rerun can check it
+# (scripts/native-llm-model.py). Stop rather than record another model.
+_native_python=""
+if ods_native_llm_requested && [[ "${TIER:-}" != "CLOUD" ]]; then
+    _native_python="${_selector_python:-}"
+    if [[ -z "$_native_python" ]] && declare -F ods_model_selector_python >/dev/null 2>&1; then
+        _native_python="$(ods_model_selector_python)"
     fi
-    if [[ -z "$_projection_python" ]] || ! declare -F load_model_selector_env_from_output >/dev/null 2>&1; then
-        error "Python and the installer's safe env loader are required to record the model Lemonade serves."
+    if [[ -z "$_native_python" ]] || ! declare -F load_model_selector_env_from_output >/dev/null 2>&1; then
+        error "Python and the installer's safe env loader are required to record the model llama-server serves on Windows."
         exit 1
     fi
-    _projection_args=(--project-external-lemonade "$LEMONADE_MODEL")
-    [[ -z "${LEMONADE_CONTEXT_SIZE:-}" ]] || _projection_args+=(--context "$LEMONADE_CONTEXT_SIZE")
-    if ! _projected_model_env="$("$_projection_python" "$SCRIPT_DIR/scripts/preserve-active-model.py" \
-            --env "$INSTALL_DIR/.env" \
-            --catalog "$SCRIPT_DIR/config/model-library.json" \
-            --imports "$INSTALL_DIR/data/model-imports.json" \
-            --models-dir "$INSTALL_DIR/data/models" \
-            "${_projection_args[@]}" 2>>"$LOG_FILE")"; then
-        error "Lemonade's model ${LEMONADE_MODEL} is not in the ODS model catalog, so ODS cannot record it or verify it on updates. Load a catalog model in Lemonade and rerun."
+    _native_args=(project --catalog "$SCRIPT_DIR/config/model-library.json"
+        --imports "$INSTALL_DIR/data/model-imports.json")
+    if [[ -n "${NATIVE_LLM_MODEL:-}" ]]; then
+        _native_args+=(--gguf "$NATIVE_LLM_MODEL")
+    else
+        _native_args+=(--lemonade-model-id "${NATIVE_LLM_LEGACY_MODEL_ID:-}")
+    fi
+    [[ -z "${NATIVE_LLM_CONTEXT_SIZE:-}" ]] || _native_args+=(--context "$NATIVE_LLM_CONTEXT_SIZE")
+    if ! _native_model_env="$("$_native_python" "$SCRIPT_DIR/scripts/native-llm-model.py" \
+            "${_native_args[@]}" 2>>"$LOG_FILE")"; then
+        error "llama-server on Windows serves ${NATIVE_LLM_MODEL:-${NATIVE_LLM_LEGACY_MODEL_ID:-an unnamed model}}, which is not in the ODS model catalog, so ODS cannot record it or verify it on updates. Choose a catalog model in the ODS Portal and rerun."
         exit 1
     fi
     # Drop the CPU pick's runtime settings before loading the served model's
-    # contract (the loader omits unset optional values, as below).
+    # contract (the loader omits unset optional values).
     unset MODEL_RUNTIME_PROFILE MODEL_RUNTIME_PROFILE_LABEL MODEL_RUNTIME_PROFILE_SOURCE
     unset LLAMA_SERVER_IMAGE LLAMA_SERVER_MEMORY_LIMIT
     unset LLAMA_CPP_RELEASE_TAG_OVERRIDE LLAMA_CPP_SERVER_BINARY
@@ -633,10 +676,12 @@ if [[ "${LEMONADE_EXTERNAL:-false}" == "true" && -n "${LEMONADE_MODEL:-}" && "${
     unset LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM
     unset LLAMA_ARG_SPEC_DRAFT_N_MAX LLAMA_ARG_SPLIT_MODE LLAMA_ARG_TENSOR_SPLIT
     unset MODEL_RECOMMENDED_ALTERNATIVES
-    load_model_selector_env_from_output <<< "$_projected_model_env"
-    MODEL_RECOMMENDATION_REASON="Lemonade on the Windows host serves ${LLM_MODEL}${LEMONADE_GPU_NAME:+ on ${LEMONADE_GPU_NAME}}; the Windows installer chose it for that GPU."
-    log "External Lemonade model recorded from its catalog entry: ${LLM_MODEL} (${GGUF_FILE}) at ${MAX_CONTEXT}"
-    unset _projection_python _projection_args _projected_model_env
+    load_model_selector_env_from_output <<< "$_native_model_env"
+    # A retired Lemonade id is now the GGUF file name llama-server serves.
+    NATIVE_LLM_MODEL="$GGUF_FILE"
+    MODEL_RECOMMENDATION_REASON="llama-server on the Windows host serves ${LLM_MODEL}${NATIVE_LLM_GPU_NAME:+ on ${NATIVE_LLM_GPU_NAME}}; Windows setup chose it for that GPU."
+    log "Host-native llama-server model recorded from its catalog entry: ${LLM_MODEL} (${GGUF_FILE}) at ${MAX_CONTEXT}"
+    unset _native_args _native_model_env
 fi
 
 # The tier/catalog result is a recommendation.  A valid local model already
@@ -647,45 +692,47 @@ INSTALLER_RECOMMENDED_MODEL="${LLM_MODEL:-}"
 INSTALLER_RECOMMENDED_GGUF="${GGUF_FILE:-}"
 INSTALLER_RECOMMENDED_CONTEXT="${MAX_CONTEXT:-}"
 MODEL_SELECTION_SOURCE="installer"
-ods_verify_retained_external_model_snapshot() {
-    [[ -n "${_retained_external_env_sha:-}" ]] || return 0
-    local current_hash
-    current_hash="$(sha256sum "$INSTALL_DIR/.env" 2>>"$LOG_FILE")" || {
-        error "Could not verify retained external model settings before installation."
-        return 1
-    }
-    current_hash="${current_hash%% *}"
-    if [[ "$current_hash" != "$_retained_external_env_sha" ]]; then
-        error "Retained external model settings changed during installation; rerun to use the current selection."
-        return 1
-    fi
-}
 if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${TIER:-}" != "CLOUD" ]]; then
-    _selected_external="${LEMONADE_EXTERNAL:-false}"
-    _retained_external="$(external_llm_env_value "$INSTALL_DIR/.env" LEMONADE_EXTERNAL || true)"
-    if [[ "${_selected_external,,}" != "true" && "${ODS_MODE_EXPLICIT:-false}" != "true" \
-          && "${_retained_external,,}" == "true" ]]; then
-        error "This retained installation uses external Lemonade. Select it explicitly for this rerun or use --reselect-model."
+    # The model of a host-native llama-server belongs to Windows setup, which
+    # passes it on every run. A rerun without it must not quietly switch the
+    # install to a model in this Linux environment. (The helper fails only
+    # without .env, which the condition above rules out.)
+    _retained_native="$(external_llm_env_value "$INSTALL_DIR/.env" NATIVE_LLM_BASE_URL || true)"
+    if ! ods_native_llm_requested && [[ "${ODS_MODE_EXPLICIT:-false}" != "true" && -n "$_retained_native" ]]; then
+        error "This installation uses a llama-server that Windows setup manages. Rerun Windows setup, pass --native-llm-url, or use --reselect-model to choose a model in this Linux environment."
         exit 1
     fi
-    _must_preserve_external=false
-    if [[ "${_selected_external,,}" == "true" && "${_retained_external,,}" == "true" ]]; then
-        _must_preserve_external=true
-        _retained_lemonade_model="$(external_llm_env_value "$INSTALL_DIR/.env" LEMONADE_MODEL || true)"
-        if [[ -n "${LEMONADE_MODEL:-}" && "$LEMONADE_MODEL" != "$_retained_lemonade_model" ]]; then
-            error "The requested Lemonade model differs from the retained selection. Use --reselect-model to change models."
-            exit 1
-        fi
-        unset _retained_lemonade_model
-        _retained_external_env_sha="$(sha256sum "$INSTALL_DIR/.env" 2>>"$LOG_FILE")" || {
-            error "Could not snapshot retained external model settings."
-            exit 1
-        }
-        _retained_external_env_sha="${_retained_external_env_sha%% *}"
-    fi
-    unset _retained_external
+    unset _retained_native
     _preserve_script="$SCRIPT_DIR/scripts/preserve-active-model.py"
-    if [[ -f "$_preserve_script" ]]; then
+    if ods_native_llm_requested; then
+        # The served model was recorded above. Keep the saved selection's
+        # owner and context when it names the same model; repair only the
+        # mismatch earlier installs wrote (the Linux host's own pick saved
+        # next to the served model); stop on any other difference.
+        _native_status=0
+        _native_args=(rerun --env "$INSTALL_DIR/.env" --gguf "$GGUF_FILE"
+            --catalog "$SCRIPT_DIR/config/model-library.json"
+            --imports "$INSTALL_DIR/data/model-imports.json")
+        [[ -z "${NATIVE_LLM_CONTEXT_SIZE:-}" ]] || _native_args+=(--context "$NATIVE_LLM_CONTEXT_SIZE")
+        _native_model_env="$("$_native_python" "$SCRIPT_DIR/scripts/native-llm-model.py" \
+            "${_native_args[@]}" 2>>"$LOG_FILE")" || _native_status=$?
+        case "$_native_status" in
+            0) ;;
+            3) ai_warn "Corrected the saved model details to describe the model llama-server serves on Windows; the served model did not change (details in the install log)." ;;
+            *)
+                error "The saved model selection differs from the model llama-server serves on Windows (${GGUF_FILE}) and was not written by the installer. Activate the model again in the Dashboard, rerun setup from the ODS Portal, or use --reselect-model."
+                exit 1
+                ;;
+        esac
+        if [[ -n "$_native_model_env" ]]; then
+            unset MODEL_RUNTIME_PROFILE MODEL_RUNTIME_PROFILE_LABEL MODEL_RUNTIME_PROFILE_SOURCE
+            unset LLAMA_SERVER_IMAGE
+            load_model_selector_env_from_output <<< "$_native_model_env"
+            [[ "$_native_status" -ne 0 ]] \
+                || log "Kept the saved host-native model across installer rerun: ${LLM_MODEL} (${GGUF_FILE}) at ${MAX_CONTEXT}, selected by ${MODEL_SELECTION_SOURCE}"
+        fi
+        unset _native_status _native_args _native_model_env
+    elif [[ -f "$_preserve_script" ]]; then
         if [[ -z "${_selector_python:-}" ]]; then
             if [[ -f "$SCRIPT_DIR/lib/python-cmd.sh" ]]; then
                 # shellcheck source=/dev/null
@@ -696,8 +743,6 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
             fi
         fi
         if [[ -n "${_selector_python:-}" ]]; then
-            _preserve_mode=--local-model
-            [[ "${_selected_external,,}" != "true" ]] || _preserve_mode=--external-lemonade
             _preserve_status=0
             _preserved_model_env="$("$_selector_python" "$_preserve_script" \
                 --env "$INSTALL_DIR/.env" \
@@ -710,35 +755,8 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
                 --vram-mb "${GPU_VRAM:-0}" \
                 --ram-gb "${RAM_GB:-0}" \
                 --host-arch "${HOST_ARCH:-unknown}" \
-                "$_preserve_mode" \
+                --local-model \
                 2>>"$LOG_FILE")" || _preserve_status=$?
-            if [[ "$_preserve_status" -eq 2 && "$_preserve_mode" == "--external-lemonade" ]]; then
-                # Earlier fresh installs recorded this host's own catalog pick
-                # next to the model Lemonade serves. The helper re-records only
-                # that installer-written mismatch, from the served model, and
-                # logs the change; anything else still stops below.
-                _repair_args=(--repair-external-lemonade)
-                [[ -z "${LEMONADE_CONTEXT_SIZE:-}" ]] || _repair_args+=(--context "$LEMONADE_CONTEXT_SIZE")
-                if _preserved_model_env="$("$_selector_python" "$_preserve_script" \
-                    --env "$INSTALL_DIR/.env" \
-                    --catalog "$SCRIPT_DIR/config/model-library.json" \
-                    --imports "$INSTALL_DIR/data/model-imports.json" \
-                    --models-dir "$INSTALL_DIR/data/models" \
-                    "${_repair_args[@]}" \
-                    2>>"$LOG_FILE")"; then
-                    _preserve_status=0
-                    ai_warn "Corrected the saved model details to describe the model Lemonade serves; the served model did not change (details in the install log)."
-                fi
-                unset _repair_args
-            fi
-            if [[ "$_preserve_status" -ne 0 && "$_preserve_mode" == "--external-lemonade" ]]; then
-                error "Could not validate the retained external model selection. Repair the saved settings or explicitly use --reselect-model."
-                exit 1
-            fi
-            if [[ "$_must_preserve_external" == true && -z "$_preserved_model_env" ]]; then
-                error "Retained external model selection could not be recovered; refusing to replace it."
-                exit 1
-            fi
             if [[ -n "$_preserved_model_env" ]] && command -v load_model_selector_env_from_output >/dev/null 2>&1; then
                 # Remove every model-selector runtime value before loading the
                 # preserved active contract. The helper omits inactive optional
@@ -755,28 +773,22 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
                 load_model_selector_env_from_output <<< "$_preserved_model_env"
                 log "Preserved active model across installer rerun: ${LLM_MODEL} (${GGUF_FILE})"
             fi
-            unset _preserve_mode _preserve_status
-            ods_verify_retained_external_model_snapshot || exit 1
-        elif [[ "$_must_preserve_external" == true ]]; then
-            error "Python is required to preserve the retained external model selection."
-            exit 1
+            unset _preserve_status
         fi
-    elif [[ "$_must_preserve_external" == true ]]; then
-        error "The retained external model preservation helper is missing."
-        exit 1
     fi
-    unset _selected_external _must_preserve_external
 elif [[ "${ODS_RESELECT_MODEL:-false}" == "true" ]]; then
     log "Active-model preservation disabled by --reselect-model"
 fi
 
+unset _native_python
+
 # Display hardware summary with nice formatting
 CPU_INFO=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs || echo "Unknown")
 if [[ "$INTERACTIVE" == "true" ]]; then
-    # An external Lemonade (Windows under WSL) runs the model on a GPU this
-    # Linux probe cannot see; show that GPU instead of "None".
-    if [[ "${LEMONADE_EXTERNAL:-false}" == "true" && -n "${LEMONADE_GPU_NAME:-}" ]]; then
-        show_hardware_summary "${LEMONADE_GPU_NAME} (Lemonade)" "$(( (${LEMONADE_GPU_VRAM_MB:-0} + 512) / 1024 ))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL"
+    # A host-native llama-server (Windows under WSL) runs the model on a GPU
+    # this Linux probe cannot see; show that GPU instead of "None".
+    if ods_native_llm_requested && [[ -n "${NATIVE_LLM_GPU_NAME:-}" ]]; then
+        show_hardware_summary "${NATIVE_LLM_GPU_NAME} (llama-server on Windows)" "$(( (${NATIVE_LLM_GPU_VRAM_MB:-0} + 512) / 1024 ))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL"
     else
         show_hardware_summary "$GPU_NAME" "$((GPU_VRAM / 1024))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL"
     fi

@@ -7,11 +7,9 @@ therefore has to repeat every flag it still wants, and a flag left out makes
 its documented .env tunable silently inert on that backend only.
 
 This checks that every overlay whose llama-server command is a llama.cpp
-invocation carries the same flag set as docker-compose.base.yml, and that each
-tunable is wired to the .env variable the schema documents.
-
-The AMD overlays are exempt: their llama-server runs Lemonade (`serve ...`),
-a different binary with its own argument surface.
+invocation carries the same flag set as docker-compose.base.yml (the served
+--alias included), and that each tunable is wired to the .env variable the
+schema documents. The AMD overlays inherit the base command.
 """
 
 from __future__ import annotations
@@ -58,7 +56,7 @@ def llama_command(path: Path) -> list[str] | None:
 
 
 def is_llama_cpp_invocation(command: list[str]) -> bool:
-    """Lemonade overlays start with a `serve` subcommand; llama.cpp takes flags."""
+    """llama.cpp takes flags; a command naming another program is not compared."""
     return bool(command) and command[0].startswith("-")
 
 

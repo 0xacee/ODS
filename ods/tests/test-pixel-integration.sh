@@ -400,21 +400,29 @@ fi
 
 section "ods_pixel_model_route_class"
 
+# The third argument says whether a host-native llama-server (the Windows
+# Portal's) serves the model; LiteLLM holds its key, so Pixel uses the gateway.
 for route_case in \
     "local||false|local" \
     "cloud||false|managed-gateway" \
     "hybrid||false|managed-gateway" \
     "local||true|managed-gateway" \
     "local|http://127.0.0.1:1234|false|managed-gateway"; do
-    IFS='|' read -r route_mode route_url route_lemonade route_expected <<<"$route_case"
-    result="$(ods_pixel_model_route_class "$route_mode" "$route_url" "$route_lemonade")"
+    IFS='|' read -r route_mode route_url route_native route_expected <<<"$route_case"
+    result="$(ods_pixel_model_route_class "$route_mode" "$route_url" "$route_native")"
     if [[ "$result" == "$route_expected" ]]; then
-        pass "model route $route_mode/$route_lemonade/$route_url -> $route_expected"
+        pass "model route $route_mode/$route_native/$route_url -> $route_expected"
     else
-        fail "model route $route_mode/$route_lemonade/$route_url expected $route_expected, got $result"
+        fail "model route $route_mode/$route_native/$route_url expected $route_expected, got $result"
     fi
 done
-unset route_case route_mode route_url route_lemonade route_expected
+unset route_case route_mode route_url route_native route_expected
+# install-core reads the retired ODS_MODE=lemonade as local before Pixel runs.
+if ods_pixel_model_route_class lemonade '' false >/dev/null 2>&1; then
+    fail "the retired lemonade mode must not be a Pixel model route"
+else
+    pass "the retired lemonade mode is not a Pixel model route"
+fi
 
 if ! ods_pixel_model_route_class invalid-mode "" false >/dev/null 2>&1; then
     pass "invalid Pixel model route mode is rejected"

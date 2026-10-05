@@ -138,23 +138,25 @@ ods_pixel_resolve_enablement() {
 # Classify only model routes that the Pixel host installer can bind through the
 # authenticated ODS LiteLLM gateway. Phase 02 validates external endpoints and
 # Phase 06 renders their concrete model behind the same authenticated alias.
+# A host-native llama-server (Windows Portal) is reached through that gateway,
+# which holds its key; the in-stack llama-server (any GPU) is local.
 ods_pixel_model_route_class() {
     local mode="${1:-local}"
     local external_url="${2:-}"
-    local lemonade_external="${3:-false}"
+    local host_native="${3:-false}"
     [[ "$external_url" != *$'\n'* && "$external_url" != *$'\r'* ]] || return 1
-    [[ "$lemonade_external" == true || "$lemonade_external" == false ]] || return 1
+    [[ "$host_native" == true || "$host_native" == false ]] || return 1
     if [[ -n "$external_url" ]]; then
         printf '%s\n' managed-gateway
         return 0
     fi
-    if [[ "$lemonade_external" == true ]]; then
+    if [[ "$host_native" == true ]]; then
         printf '%s\n' managed-gateway
         return 0
     fi
     case "$mode" in
         local) printf '%s\n' local ;;
-        cloud|hybrid|lemonade) printf '%s\n' managed-gateway ;;
+        cloud|hybrid) printf '%s\n' managed-gateway ;;
         *) return 1 ;;
     esac
 }

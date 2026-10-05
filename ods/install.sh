@@ -3,8 +3,11 @@
 # Pass-through options (implemented in install-core.sh):
 # --dry-run --skip-docker --force --tier --voice --workflows --rag
 # --hermes --pixel --all --non-interactive --no-bootstrap --bootstrap --offline
-# --use-existing-lemonade --lemonade-url --lemonade-api-key --lemonade-model
-# --lemonade-context-size --lemonade-gpu-name --lemonade-gpu-vram-mb
+# --native-llm-url --native-llm-host-transport --native-llm-model
+# --native-llm-context-size --native-llm-api-key-env --native-llm-gpu-name
+# --native-llm-gpu-vram-mb
+#   (the retired --use-existing-lemonade/--lemonade-* flags map onto these or
+#   onto --external-llm-* for one release)
 # --preflight-only (environment checks only; used by get-ods.sh --force through
 #   installers/reinstall-preflight.sh before an existing install is removed)
 

@@ -115,7 +115,7 @@ run_phase_case() {
     LLM_MODEL="qwen3.5-9b"
     unset EXTERNAL_LLM_URL EXTERNAL_LLM_CONTAINER_URL EXTERNAL_LLM_PROVIDER
     unset EXTERNAL_LLM_MODEL EXTERNAL_LLM_AUTO_REUSE EXTERNAL_LLM_DISABLE
-    unset EXTERNAL_LLM_RESET SKIP_MODEL_DOWNLOAD LEMONADE_EXTERNAL
+    unset EXTERNAL_LLM_RESET SKIP_MODEL_DOWNLOAD NATIVE_LLM_BASE_URL
     unset EXTERNAL_LLM_API_KEY_FILE EXTERNAL_LLM_API_KEY_RESET EXTERNAL_LLM_API_KEY_DISABLE
 
     case "$case_name" in
@@ -169,9 +169,9 @@ run_phase_case() {
             EXTERNAL_LLM_PROVIDER="ollama"
             EXTERNAL_LLM_MODEL="qwen3.5:9b"
             ;;
-        explicit-lemonade)
+        explicit-native)
             MOCK_OLLAMA=up
-            LEMONADE_EXTERNAL=true
+            NATIVE_LLM_BASE_URL=http://localhost:8080
             EXTERNAL_LLM_URL="http://127.0.0.1:11434"
             EXTERNAL_LLM_PROVIDER="ollama"
             EXTERNAL_LLM_MODEL="qwen3.5:9b"
@@ -306,10 +306,10 @@ else
     pass "external reuse rejects hybrid mode without bypassing LiteLLM"
 fi
 
-if run_phase_case explicit-lemonade "$TEMP_DIR/lemonade"; then
+if run_phase_case explicit-native "$TEMP_DIR/native"; then
     fail "external reuse must reject a second host-managed backend"
 else
-    pass "external reuse rejects simultaneous external Lemonade"
+    pass "external reuse rejects a simultaneous host-native llama-server"
 fi
 
 run_phase06_env_cycle() (
@@ -346,7 +346,7 @@ run_phase06_env_cycle() (
     export EXTERNAL_LLM_CONTAINER_URL=http://host.docker.internal:11434
     export EXTERNAL_LLM_PROVIDER=ollama
     export EXTERNAL_LLM_MODEL=qwen3.5:9b
-    export LEMONADE_EXTERNAL=false
+    export NATIVE_LLM_BASE_URL=
 
     # This fixture exercises ONLY external routing/.env generation. The copied
     # tree still contains the real APE compose with its ./data/ape:/data/ape:z
@@ -455,16 +455,15 @@ run_phase06_env_cycle() (
     grep -q 'api_base: http://llama-server:8080/v1' "$install_dir/config/litellm/local.yaml"
     ! grep -q 'host.docker.internal:11434\|openai/qwen3.5:9b' "$install_dir/config/litellm/local.yaml"
 
-    # A Windows external Lemonade reinstall can inherit the local route from
-    # an earlier CPU fallback. Recompute only that obsolete route.
+    # A Windows Portal reinstall (host-native llama-server) can inherit the
+    # local route from an earlier CPU fallback. Recompute only that obsolete
+    # route: the native server is reached through LiteLLM, which holds its key.
     export EXTERNAL_LLM_RESET=false
-    export LEMONADE_EXTERNAL=true
-    export LEMONADE_BASE_URL=http://localhost:13305
-    export LEMONADE_CONTAINER_BASE_URL=http://host.docker.internal:8080
-    export LEMONADE_MODEL=test-lemonade-model
-    export ODS_MODE=lemonade
+    export NATIVE_LLM_BASE_URL=http://localhost:13305
+    export ODS_MODE=local
     source "$install_dir/installers/phases/06-directories.sh"
     grep -qx 'LLM_API_URL=http://litellm:4000' "$install_dir/.env"
+    grep -qx 'NATIVE_LLM_CONTAINER_BASE_URL=http://host.docker.internal:13305' "$install_dir/.env"
 
     sed -i 's#^LLM_API_URL=.*#LLM_API_URL=http://llama-server:8080/v1#' "$install_dir/.env"
     source "$install_dir/installers/phases/06-directories.sh"
@@ -476,9 +475,9 @@ run_phase06_env_cycle() (
 )
 
 if run_phase06_env_cycle; then
-    pass "phase 06 preserves external routing, restores managed inference, and repairs stale Lemonade routes"
+    pass "phase 06 preserves external routing, restores managed inference, and repairs stale host-native routes"
 else
-    fail "phase 06 external routing/reset/Lemonade cycle"
+    fail "phase 06 external routing/reset/host-native cycle"
 fi
 
 run_phase06_amd_external() (
@@ -515,7 +514,7 @@ run_phase06_amd_external() (
     export EXTERNAL_LLM_CONTAINER_URL=http://host.docker.internal:11434
     export EXTERNAL_LLM_PROVIDER=ollama
     export EXTERNAL_LLM_MODEL=qwen3.5:9b
-    export LEMONADE_EXTERNAL=false
+    export NATIVE_LLM_BASE_URL=
 
     # Same isolation as run_phase06_env_cycle: this AMD external-reuse fixture
     # asserts only the .env routing contract, so remove the unrelated APE bind
@@ -567,7 +566,7 @@ run_phase06_amd_external() (
 )
 
 if run_phase06_amd_external; then
-    pass "AMD external reuse writes one coherent non-Lemonade backend contract"
+    pass "AMD external reuse writes one coherent external backend contract"
 else
     fail "AMD external reuse .env contract"
 fi

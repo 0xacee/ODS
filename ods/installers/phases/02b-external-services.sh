@@ -1,6 +1,11 @@
 #!/bin/bash
 # Detect or validate an explicitly selected host Ollama / LM Studio runtime.
 
+# Isolated phase reuse (tests) gets the route predicate installers/lib/
+# native-llm.sh gives install-core: a host-native llama-server is in use.
+declare -F ods_native_llm_requested >/dev/null 2>&1 \
+    || ods_native_llm_requested() { [[ -n "${NATIVE_LLM_BASE_URL:-}" ]]; }
+
 ods_progress 15 "detection" "Checking external LLM services"
 
 _external_disable="${EXTERNAL_LLM_DISABLE:-false}"
@@ -47,7 +52,7 @@ if [[ "$_external_disable" == "true" ]]; then
     return 0
 fi
 
-if [[ -z "$_external_url" && "${ODS_MODE:-local}" == "local" && "${LEMONADE_EXTERNAL:-false}" != "true" ]]; then
+if [[ -z "$_external_url" && "${ODS_MODE:-local}" == "local" ]] && ! ods_native_llm_requested; then
     _detected_provider=""
     _detected_url=""
     _detected_model=""
@@ -105,8 +110,8 @@ if [[ "${ODS_MODE:-local}" != "local" ]]; then
     ai "Use --no-external-llm before selecting cloud or hybrid mode."
     return 1
 fi
-if [[ "${LEMONADE_EXTERNAL:-false}" == "true" ]]; then
-    ai_bad "External Ollama / LM Studio reuse cannot be combined with external Lemonade."
+if ods_native_llm_requested; then
+    ai_bad "External Ollama / LM Studio reuse cannot be combined with the host-native llama-server (--native-llm-url)."
     ai "Select one host-managed inference backend, or use --no-external-llm."
     return 1
 fi

@@ -2733,19 +2733,22 @@ check python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["mod
 check test "$(GGUF_FILE='My Custom Model (Q4_K_M).gguf' \
     LLM_MODEL='friendly-library-alias' GPU_BACKEND=nvidia \
     _ods_pixel_runtime_model_identity)" = 'My Custom Model (Q4_K_M).gguf'
+# AMD runs llama.cpp like every GPU: the served id is the GGUF file name
+# (--alias), with no Lemonade "extra." prefix.
 check test "$(GGUF_FILE='My Custom Model (Q4_K_M).gguf' \
-    LLM_MODEL='friendly-library-alias' GPU_BACKEND=amd LLM_BACKEND=lemonade \
-    AMD_INFERENCE_RUNTIME=lemonade \
-    LEMONADE_MODEL='extra.My Custom Model (Q4_K_M).gguf' \
-    _ods_pixel_runtime_model_identity)" = 'extra.My Custom Model (Q4_K_M).gguf'
-check test "$(GGUF_FILE='stale-local.gguf' GPU_BACKEND=cpu \
-    LEMONADE_EXTERNAL=true LEMONADE_MODEL='Qwen3.6-35B-A3B-GGUF' \
-    _ods_pixel_runtime_model_identity)" = 'Qwen3.6-35B-A3B-GGUF'
-if GGUF_FILE='stale-local.gguf' GPU_BACKEND=cpu LEMONADE_EXTERNAL=true \
-    LEMONADE_MODEL='' _ods_pixel_runtime_model_identity >/dev/null 2>&1; then
-    fail "external Lemonade runtime identity requires the served model"
+    LLM_MODEL='friendly-library-alias' GPU_BACKEND=amd LLM_BACKEND=llama-server \
+    AMD_INFERENCE_RUNTIME=llama-server \
+    _ods_pixel_runtime_model_identity)" = 'My Custom Model (Q4_K_M).gguf'
+# The Windows Portal's host-native llama-server serves the GGUF Windows chose,
+# which phase 02 records in GGUF_FILE.
+check test "$(GGUF_FILE='Qwen3.6-35B-A3B-UD-Q4_K_M.gguf' GPU_BACKEND=cpu \
+    NATIVE_LLM_BASE_URL=http://localhost:8080 \
+    _ods_pixel_runtime_model_identity)" = 'Qwen3.6-35B-A3B-UD-Q4_K_M.gguf'
+if EXTERNAL_LLM_URL='http://10.0.2.2:18080' EXTERNAL_LLM_MODEL='' GGUF_FILE='stale-local.gguf' \
+    _ods_pixel_runtime_model_identity >/dev/null 2>&1; then
+    fail "external runtime identity requires the served model"
 else
-    pass "external Lemonade runtime identity requires the served model"
+    pass "external runtime identity requires the served model"
 fi
 check test "$(EXTERNAL_LLM_URL='http://10.0.2.2:18080' \
     EXTERNAL_LLM_MODEL='org/qwen+tools:remote' GGUF_FILE='stale-local.gguf' \
