@@ -443,6 +443,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the files it replaced, so they kept root's group, and the host agent could
   not rewrite Hermes's configuration template. Replaced files and new
   directories now get the owner's primary group, as on a new installation.
+- A non-interactive rerun on a Tier 0 or Tier 1 machine keeps ComfyUI when it
+  is already running (for example after adding it from the Extensions
+  Library). Its low-memory safety check now applies only when ComfyUI is not
+  installed yet, as the interactive "Keep current selection" already did.
 - Updating a Pixel installation that has Hermes on no longer rewrites Hermes's
   configuration template while the Pixel source update is still in progress.
   That update finishes only over the exact files it installed, so the change

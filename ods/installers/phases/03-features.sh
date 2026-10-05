@@ -100,7 +100,10 @@ fi
 
 # Tier safety net: disable ComfyUI on Tier 0/1 in non-interactive mode.
 # Interactive mode has its own tier checks in the menu — this catches --non-interactive.
-if ! $INTERACTIVE && [[ "$ENABLE_COMFYUI" == "true" ]]; then
+# A rerun keeps a ComfyUI that this install already runs (for example one added
+# from the Extensions Library), as the interactive "Keep current selection" does.
+if ! $INTERACTIVE && [[ "$ENABLE_COMFYUI" == "true" ]] &&
+   [[ "$(ods_installed_service_default "$INSTALL_DIR" comfyui false)" != "true" ]]; then
     case "${TIER:-}" in
         0|1)
             ENABLE_COMFYUI=false

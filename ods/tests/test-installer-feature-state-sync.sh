@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FEATURES_PHASE="$ROOT_DIR/installers/phases/03-features.sh"
 source "$ROOT_DIR/installers/lib/installed-feature-state.sh"
+# Assertions are plain commands under set -e; name the case and the check.
+current_case=""
+trap 'printf "FAIL: run_case %s: %s\n" "$current_case" "$BASH_COMMAND" >&2' ERR
 
 run_case() {
+    current_case="$*"
     local selected="$1" source_state="$2" comfyui_requested="${3:-false}"
     local gpu_backend="${4:-cpu}" comfyui_expected="${5:-false}"
     local brave_requested="${6:-false}" brave_key_mode="${7:-none}"
+    # installed: none (fresh layout), enabled or disabled (a rerun whose
+    # installed ComfyUI is in that state).
+    local tier="${8:-4}" installed="${9:-none}"
     local test_root source_root install_root
     test_root="$(mktemp -d)"
     source_root="$test_root/source"
@@ -36,6 +43,13 @@ run_case() {
     printf 'services: {}\n' >"$install_root/extensions/services/comfyui/compose.yaml"
     printf 'services: {}\n' >"$source_root/extensions/services/brave-search/compose.yaml"
     printf 'services: {}\n' >"$install_root/extensions/services/brave-search/compose.yaml"
+    if [[ "$installed" != none ]]; then
+        printf 'ODS_VERSION=fixture\n' >"$install_root/.env"
+    fi
+    if [[ "$installed" == disabled ]]; then
+        mv "$install_root/extensions/services/comfyui/compose.yaml" \
+            "$install_root/extensions/services/comfyui/compose.yaml.disabled"
+    fi
     if [[ "$brave_key_mode" == file || "$brave_key_mode" == empty-override ]]; then
         printf 'BRAVE_SEARCH_API_KEY="fixture-value"\n' >"$install_root/.env"
     fi
@@ -48,7 +62,7 @@ run_case() {
         INTERACTIVE=false
         DRY_RUN=false
         INSTALL_CHOICE=1
-        TIER=4
+        TIER="$tier"
         ODS_MODE=local
         ENABLE_VOICE=false
         ENABLE_WORKFLOWS=false
@@ -145,5 +159,11 @@ run_case false "" false cpu false true none
 run_case false "" false cpu false true env
 run_case false "" false cpu false true file
 run_case false "" false cpu false true empty-override
+# The non-interactive Tier 0/1 ComfyUI safety net: a rerun keeps a ComfyUI the
+# install already runs (for example one added from the Extensions Library),
+# while a new request on a fresh or ComfyUI-less install is still turned off.
+run_case false "" true nvidia true false none 1 enabled
+run_case false "" true nvidia false false none 1 none
+run_case false "" true nvidia false false none 1 disabled
 
 echo "PASS: feature selection reconciles source and installed compose states"
