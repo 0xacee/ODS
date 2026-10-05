@@ -42,30 +42,15 @@ def test_host_agent_uses_renderer_as_sole_writer() -> None:
     text = read("bin/ods-host-agent.py")
     assert "def _render_runtime_config" in text
     assert "--surface" in text
-    assert '"--lemonade-model-id"' in text
-    assert "litellm-lemonade" in text
     assert "Runtime config renderer failed" in text
-    lemonade_writer = text.split("def _write_lemonade_config(", 1)[1].split(
-        "def _write_windows_native_litellm_config(", 1
-    )[0]
-    assert "model_list:\\n" not in lemonade_writer
-
-
-def test_windows_lemonade_uses_renderer_as_sole_writer() -> None:
-    text = read("installers/windows/lib/env-generator.ps1")
-    assert "scripts" in text
-    assert "render-runtime-configs.py" in text
-    assert '"litellm-lemonade"' in text
-    assert '"--lemonade-model-id"' in text
-    assert "Install-WindowsODSRuntimeConfigPython" in text
-    assert "sys.version_info >= (3, 8)" in text
-    assert "IsNullOrWhiteSpace($env:LOCALAPPDATA)" in text
-    assert 'Join-Path $env:LOCALAPPDATA "Programs\\Python"' in text
-    assert "winget install --exact --id Python.Python.3.12" in text
-    lemonade_writer = text.split("function Write-WindowsODSLemonadeLiteLlmConfig", 1)[
-        1
-    ].split("function Set-WindowsODSLemonadeModelConfiguration", 1)[0]
-    assert "model_list:" not in lemonade_writer
+    # Round F: one llama-server runtime family. A host-native key reaches the
+    # renderer by its env var name only; no Lemonade surface or id remains.
+    assert '"--llm-api-key-env"' in text
+    assert "--lemonade-model-id" not in text
+    assert "litellm-lemonade" not in text
+    native_writer = text.split("def _write_host_native_litellm_config(", 1)[1].split("\ndef ", 1)[0]
+    assert '"litellm-local-native"' in native_writer
+    assert "model_list:" not in native_writer
 
 
 def test_cloud_callers_do_not_render_local_switchboard() -> None:
@@ -86,7 +71,9 @@ def test_runtime_renderer_callers_keep_credentials_out_of_process_arguments() ->
         read("bin/ods-host-agent.py"),
     ]
     assert all('"--litellm-key"' not in text for text in callers)
-    assert all("ODS_RENDER_LITELLM_KEY" in text for text in callers)
+    # A caller that runs the renderer passes the key through the environment;
+    # the Windows env generator writes its host-native config itself.
+    assert all("ODS_RENDER_LITELLM_KEY" in text for text in callers if "render-runtime-configs.py" in text)
 
 
 def main() -> int:
@@ -95,7 +82,6 @@ def main() -> int:
         test_bootstrap_upgrade_uses_renderer_as_sole_writer,
         test_bootstrap_upgrade_promotes_lemonade_model_id,
         test_host_agent_uses_renderer_as_sole_writer,
-        test_windows_lemonade_uses_renderer_as_sole_writer,
         test_cloud_callers_do_not_render_local_switchboard,
         test_runtime_renderer_callers_keep_credentials_out_of_process_arguments,
     ):

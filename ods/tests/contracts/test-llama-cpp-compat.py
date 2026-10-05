@@ -130,7 +130,7 @@ def check_other_backends(errors: list[str]) -> None:
 
     constants = (ROOT_DIR / "installers/windows/lib/constants.ps1").read_text(encoding="utf-8")
     tier_map = (ROOT_DIR / "installers/windows/lib/tier-map.ps1").read_text(encoding="utf-8")
-    installer = (ROOT_DIR / "installers/windows/install-windows.ps1").read_text(encoding="utf-8")
+    runtime = (ROOT_DIR / "installers/windows/lib/native-llama-runtime.ps1").read_text(encoding="utf-8")
     release = re.search(r'^\$script:LLAMA_CPP_RELEASE_TAG = "(b\d+)"', constants, re.M)
     table = re.search(r"\$script:LLAMA_CPP_VULKAN_SHA256 = @\{(.*?)\}", constants, re.S)
     sums = dict(re.findall(r'"(b\d+)"\s*=\s*"([0-9a-f]{64})"', table.group(1))) if table else {}
@@ -141,12 +141,15 @@ def check_other_backends(errors: list[str]) -> None:
     for tag in sorted(windows_tags):
         if tag not in sums:
             errors.append(f"constants.ps1: no SHA-256 for the Windows Vulkan archive of {tag}")
-    verify = installer.find("LLAMA_CPP_VULKAN_SHA256[$script:LLAMA_CPP_RELEASE_TAG]")
-    download = installer.find("Invoke-DownloadWithRetry -Url $script:LLAMA_CPP_VULKAN_URL")
-    hashing = installer.find("Get-FileHash -LiteralPath $llamaZip -Algorithm SHA256", max(download, 0))
-    extract = installer.find("Invoke-ExtractionWithRetry -ZipPath $llamaZip")
-    if not (0 <= verify < download < hashing < extract):
-        errors.append("install-windows.ps1: the pinned SHA-256 must be looked up before the download and checked before extraction")
+    # Both Windows installers acquire llama-server.exe through
+    # Install-ODSNativeLlamaRuntime, whose pin carries the size and SHA-256.
+    install = runtime.partition("function Install-ODSNativeLlamaRuntime")[2]
+    download = install.find("Invoke-ODSNativeLlamaDownload $Pin.Url $zip")
+    size = install.find("-ne $Pin.Size", max(download, 0))
+    hashing = install.find("-cne $Pin.Sha256", max(download, 0))
+    extract = install.find("Expand-ODSNativeLlamaArchive $zip", max(download, 0))
+    if not (0 <= download < size < hashing < extract):
+        errors.append("native-llama-runtime.ps1: the download's pinned size and SHA-256 must be checked before extraction")
 
     for name in ("docker-compose.intel.yml", "docker-compose.arc.yml"):
         text = (ROOT_DIR / name).read_text(encoding="utf-8")

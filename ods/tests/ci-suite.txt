@@ -73,7 +73,6 @@ tests/test-installed-root-group-repair.sh
 tests/test-installer-log-safety.sh
 tests/test-jetson-detection.sh
 tests/test-lean-linux-defaults.sh
-tests/test-lemonade-container-transport.py
 tests/test-lemonade-external-gpu.sh
 tests/test-lifecycle-prompts-noninteractive.sh
 tests/test-linux-cloud-mode.sh
@@ -155,6 +154,7 @@ tests/test-restore-empty-config.sh
 tests/test-restore-safety-ux.sh
 tests/test-rollback-compose-stack.sh
 tests/test-rootless-docker-ownership.sh
+tests/test-router-transport.py
 tests/test-service-registry-cache.sh
 tests/test-service-registry-encoding.py
 tests/test-simulate-installers-exit-codes.sh
@@ -184,9 +184,9 @@ tests/test-windows-whisper-compose-fallback.sh
 tests/test-wsl-bind-recovery-live.py
 tests/test-wsl-docker-desktop-nvidia.sh
 tests/test-wsl-host-ram-fallback.sh
-tests/test-wsl-lemonade-proof.py
 tests/test-wsl-nvidia-detection.sh
 tests/test-wsl-whisper-port-reservation.sh
+tests/test-wsl-runtime-proof.py
 tests/test-wsl-windows-port-detection.sh
 tests/test_bootstrap_pixel_transaction.py
 tests/test_bootstrap_status_checksum.py

@@ -27,8 +27,11 @@ EXTENSIONS_DIR = Path(
 
 DEFAULT_SERVICE_HOST = os.environ.get("SERVICE_HOST", "host.docker.internal")
 GPU_BACKEND = os.environ.get("GPU_BACKEND", "nvidia")
-ODS_MODES = frozenset({"local", "cloud", "hybrid", "lemonade"})
-LOCAL_MODEL_MODES = frozenset({"local", "hybrid", "lemonade"})
+ODS_MODES = frozenset({"local", "cloud", "hybrid"})
+LOCAL_MODEL_MODES = frozenset({"local", "hybrid"})
+# Readable for one release: managed AMD installs written before round F name
+# the retired Lemonade mode until the installer migrates their .env.
+LEGACY_ODS_MODES = {"lemonade": "local"}
 LLM_CONTRACT_ROUTES = frozenset({"gateway", "direct"})
 LLM_CONTRACT_PINNING = frozenset({"none", "dynamic"})
 
@@ -36,7 +39,14 @@ LLM_CONTRACT_PINNING = frozenset({"none", "dynamic"})
 def normalize_ods_mode(value: Any) -> str:
     """Return a supported ODS mode or ``unknown`` for missing/invalid input."""
     mode = str(value or "").strip().lower()
+    mode = LEGACY_ODS_MODES.get(mode, mode)
     return mode if mode in ODS_MODES else "unknown"
+
+
+def normalize_llm_backend(value: Any) -> str:
+    """Every managed runtime is llama-server; ``lemonade`` reads as it for one release."""
+    backend = str(value or "").strip().lower()
+    return "llama-server" if backend == "lemonade" else backend
 
 
 def normalize_llm_contract(value: Any) -> dict[str, Any] | None:
@@ -161,25 +171,28 @@ def _apply_host_native_llm_service_override(
         service["host"] = parsed.hostname
         service["port"] = port
         return
-    lemonade = str(env.get("LLM_BACKEND", "")).strip().lower() == "lemonade"
-    if str(gpu_backend).lower() != "amd" and not lemonade:
+    # A llama-server.exe on the Windows host: the legacy native flow (AMD), or
+    # the WSL Portal (whose WSL side may see no GPU) through host.docker.internal.
+    if str(gpu_backend).lower() not in {"amd", "cpu"}:
         return
-    if str(env.get("AMD_INFERENCE_LOCATION", "")).lower() != "host":
+    if str(env.get("AMD_INFERENCE_LOCATION", "")).strip().lower() != "host":
+        return
+    if str(env.get("LLM_BACKEND", "")).strip().lower() == "external":
         return
     service = services.get("llama-server")
     if not service:
         return
 
     # The generic LLM URL can be LiteLLM. Its model aliases do not identify
-    # the model loaded by Lemonade; use the configured inference endpoint.
-    lemonade_url = (
-        env.get("LEMONADE_CONTAINER_BASE_URL") or env.get("LEMONADE_BASE_URL")
-    ) if lemonade else None
+    # the served model; probe the server's own container-visible origin.
+    # LEMONADE_CONTAINER_BASE_URL is that origin's one-release legacy name.
+    generic_url = str(env.get("LLM_API_URL") or "")
     configured_url = (
-        lemonade_url
+        env.get("NATIVE_LLM_CONTAINER_BASE_URL")
+        or env.get("LEMONADE_CONTAINER_BASE_URL")
         or env.get("OLLAMA_URL")
         or env.get("LLM_URL")
-        or env.get("LLM_API_URL")
+        or (generic_url if "litellm" not in generic_url.lower() else "")
         or f"http://host.docker.internal:{env.get('AMD_INFERENCE_PORT', '8080')}"
     )
     parsed = urlparse(str(configured_url).strip())
@@ -194,7 +207,7 @@ def _apply_host_native_llm_service_override(
 
     service["host"] = parsed.hostname
     service["port"] = port
-    logger.info("Host-native AMD inference detected; routing LLM probes to %s:%d", parsed.hostname, port)
+    logger.info("Host-native llama-server detected; routing LLM probes to %s:%d", parsed.hostname, port)
 
 
 def _apply_external_llm_service_override(
@@ -576,14 +589,9 @@ SERVICES = MANIFEST_SERVICES
 if not SERVICES:
     logger.error("No services loaded from manifests in %s — dashboard will have no services", EXTENSIONS_DIR)
 
-# Lemonade serves at /api/v1 instead of llama.cpp's /v1. Override the
-# health path so the dashboard poll loop hits the correct endpoint.
-LLM_BACKEND = os.environ.get("LLM_BACKEND", "")
+LLM_BACKEND = normalize_llm_backend(os.environ.get("LLM_BACKEND", ""))
 _apply_host_native_llm_service_override(SERVICES, GPU_BACKEND)
 _apply_external_llm_service_override(SERVICES)
-if LLM_BACKEND == "lemonade" and "llama-server" in SERVICES:
-    SERVICES["llama-server"]["health"] = "/api/v1/health"
-    logger.info("Lemonade backend detected — overriding llama-server health to /api/v1/health")
 
 # --- Features ---
 

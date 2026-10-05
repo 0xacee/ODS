@@ -14,10 +14,10 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
-from model_switchboard import wsl_lemonade as bridge
+from model_switchboard import wsl_runtime as bridge
 
 
-ENV = {"LEMONADE_HOST_TRANSPORT": "model-router"}
+ENV = {"ODS_HOST_LLM_TRANSPORT": "model-router"}
 ROOT = Path(tempfile.gettempdir()) / "ods-wsl-control-fixture"
 WINDOWS = bridge._WindowsTools('/drives/d/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',
                               '/drives/d/Windows/System32/whoami.exe',
@@ -25,7 +25,8 @@ WINDOWS = bridge._WindowsTools('/drives/d/Windows/System32/WindowsPowerShell/v1.
 CONTEXT = bridge._Context("Ubuntu", "/home/test/ods", r"\\wsl.localhost\Ubuntu\home\test\ods\installers\windows\portal-model-control.ps1", WINDOWS)
 SOCKET = ("/run/WSL/123_interop", (1, 2))
 DIGEST = "a" * 64
-PLAN = {"ExecutablePath": r"C:\Lemonade\bin\lemonade-server.exe", "Port": 13305,
+PLAN = {"ExecutablePath": r"C:\Users\Test\AppData\Local\ODS\llama.cpp\b9014-win-vulkan-x64\llama-server.exe",
+        "Port": 13305,
         "ModelsDir": r"C:\Users\Test\AppData\Local\ODS\lemonade\models",
         "ContextSize": 65536, "GgufFile": "Qwen-9B.gguf",
         "WslDistro": CONTEXT.distro, "WslInstallDir": CONTEXT.install_dir}
@@ -36,7 +37,7 @@ def response(*, running=True, plan=None, digest=DIGEST):
     return {"ok": True, "managed": True, "running": running,
             "modelStoreWindowsPath": plan["ModelsDir"], "planDigest": digest, "plan": plan,
             "planPathWindows": str(bridge.PureWindowsPath(plan["ModelsDir"]).parent / "portal-runtime" / "runtime.json"),
-            "observation": {"status": "verified", "modelId": "extra." + plan["GgufFile"],
+            "observation": {"status": "verified", "modelId": plan["GgufFile"],
                             "contextLength": plan["ContextSize"]} if running else None}
 
 
@@ -76,22 +77,56 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["environ"]["WSLENV"], "KEEP/p:ANOTHER:PSModulePath/w")
 
     def test_configured_endpoints_must_match_owned_task_before_mutation(self):
-        good = {**ENV, "LEMONADE_BASE_URL": "http://localhost:13305",
-                "LEMONADE_CONTAINER_BASE_URL": "http://host.docker.internal:13305", "AMD_INFERENCE_PORT": "13305"}
+        good = {**ENV, "NATIVE_LLM_BASE_URL": "http://localhost:13305",
+                "NATIVE_LLM_CONTAINER_BASE_URL": "http://host.docker.internal:13305/v1", "AMD_INFERENCE_PORT": "13305"}
         with patch.object(bridge, "_run", return_value=completed(response())):
             self.assertTrue(bridge.status(ROOT, good)["managed"])
-        for key, value in (("LEMONADE_BASE_URL", "http://localhost:8080"),
-                           ("LEMONADE_BASE_URL", "http://someone:secret@localhost:13305"),
-                           ("LEMONADE_BASE_URL", "http://remote.example:13305"),
-                           ("LEMONADE_BASE_URL", "http://localhost:13305/other"),
-                           ("LEMONADE_CONTAINER_BASE_URL", "http://host.docker.internal:13306"),
-                           ("LEMONADE_CONTAINER_BASE_URL", "http://localhost:13305"),
+        for key, value in (("NATIVE_LLM_BASE_URL", "http://localhost:8080"),
+                           ("NATIVE_LLM_BASE_URL", "http://someone:secret@localhost:13305"),
+                           ("NATIVE_LLM_BASE_URL", "http://remote.example:13305"),
+                           ("NATIVE_LLM_BASE_URL", "http://localhost:13305/other"),
+                           # Lemonade's API path is not a llama-server origin.
+                           ("NATIVE_LLM_BASE_URL", "http://localhost:13305/api/v1"),
+                           ("NATIVE_LLM_CONTAINER_BASE_URL", "http://host.docker.internal:13306"),
+                           ("NATIVE_LLM_CONTAINER_BASE_URL", "http://localhost:13305"),
                            ("AMD_INFERENCE_PORT", "8080")):
             with self.subTest(key=key, value=value), patch.object(bridge, "_run", return_value=completed(response())) as run:
                 with self.assertRaises(bridge.BridgeError) as caught:
                     bridge.stop(ROOT, {**good, key: value}, DIGEST)
                 self.assertEqual(caught.exception.code, "endpoint_mismatch")
                 self.assertEqual(run.call_count, 1)
+
+    def test_unmigrated_endpoint_keys_are_read_for_one_release(self):
+        legacy = {"LEMONADE_HOST_TRANSPORT": "model-router",
+                  "LEMONADE_BASE_URL": "http://localhost:13305/api/v1",
+                  "LEMONADE_CONTAINER_BASE_URL": "http://host.docker.internal:13305/api/v1",
+                  "AMD_INFERENCE_PORT": "13305"}
+        with patch.object(bridge, "_run", return_value=completed(response())):
+            self.assertTrue(bridge.status(ROOT, legacy)["managed"])
+        with patch.object(bridge, "_run", return_value=completed(response())) as run:
+            with self.assertRaises(bridge.BridgeError) as caught:
+                bridge.stop(ROOT, {**legacy, "LEMONADE_BASE_URL": "http://localhost:8080/api/v1"}, DIGEST)
+            self.assertEqual(caught.exception.code, "endpoint_mismatch")
+            self.assertEqual(run.call_count, 1)
+        # The migrated key wins over a stale legacy line.
+        mixed = {**legacy, "NATIVE_LLM_BASE_URL": "http://localhost:8080"}
+        with patch.object(bridge, "_run", return_value=completed(response())):
+            with self.assertRaises(bridge.BridgeError):
+                bridge.stop(ROOT, mixed, DIGEST)
+
+    def test_transport_key_and_its_legacy_name(self):
+        self.assertEqual(bridge.env_value(ENV, bridge.TRANSPORT_KEY), ("ODS_HOST_LLM_TRANSPORT", "model-router"))
+        self.assertEqual(bridge.env_value({"LEMONADE_HOST_TRANSPORT": "model-router"}, bridge.TRANSPORT_KEY),
+                         ("LEMONADE_HOST_TRANSPORT", "model-router"))
+        self.assertEqual(bridge.env_value({"ODS_HOST_LLM_TRANSPORT": "direct",
+                                           "LEMONADE_HOST_TRANSPORT": "model-router"}, bridge.TRANSPORT_KEY),
+                         ("ODS_HOST_LLM_TRANSPORT", "direct"))
+        self.assertEqual(bridge.env_value({}, bridge.TRANSPORT_KEY), ("ODS_HOST_LLM_TRANSPORT", None))
+
+    def test_legacy_module_name_is_the_same_bridge(self):
+        # Scripts outside the agent import the old name for one release.
+        from model_switchboard import wsl_lemonade
+        self.assertIs(wsl_lemonade, bridge)
 
     def test_activate_preflights_and_uses_same_socket_with_cas(self):
         target = {**PLAN, "GgufFile": "hf-Qwen-0.6B.gguf", "ContextSize": 16384}

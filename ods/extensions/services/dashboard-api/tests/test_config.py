@@ -118,7 +118,9 @@ def test_manifest_loader_rejects_pathological_nesting(tmp_path):
         (" LOCAL ", "local"),
         ("cloud", "cloud"),
         ("HYBRID", "hybrid"),
-        ("lemonade", "lemonade"),
+        # The retired managed-AMD mode reads as local for one release.
+        ("lemonade", "local"),
+        (" Lemonade ", "local"),
         ("core", "unknown"),
     ],
 )
@@ -246,23 +248,40 @@ class TestHostAgentResolution:
 
 class TestHostNativeLlmResolution:
 
-    @pytest.mark.parametrize("url_key", ["LEMONADE_CONTAINER_BASE_URL", "LEMONADE_BASE_URL"])
-    def test_wsl_cpu_surface_probes_selected_windows_lemonade(self, url_key):
+    @pytest.mark.parametrize(("backend", "url_key"), [
+        ("llama-server", "NATIVE_LLM_CONTAINER_BASE_URL"),
+        # The origin's one-release legacy name, in an unmigrated .env.
+        ("lemonade", "LEMONADE_CONTAINER_BASE_URL"),
+    ])
+    def test_wsl_cpu_surface_probes_the_windows_llama_server(self, backend, url_key):
         services = {"llama-server": {"host": "llama-server", "port": 8080}}
         _apply_host_native_llm_service_override(services, "cpu", {
-            "LLM_BACKEND": "lemonade",
+            "LLM_BACKEND": backend,
             "AMD_INFERENCE_LOCATION": "host",
-            url_key: "http://192.168.50.1:8181",
+            url_key: "http://192.168.50.1:8181/v1",
             "OLLAMA_URL": "http://litellm:4000",
         })
         assert services["llama-server"] == {"host": "192.168.50.1", "port": 8181}
 
-    def test_container_lemonade_does_not_use_host_endpoint(self):
+    def test_host_side_url_and_gateway_are_never_probed(self):
+        services = {"llama-server": {"host": "llama-server", "port": 8080}}
+        _apply_host_native_llm_service_override(services, "amd", {
+            "LLM_BACKEND": "llama-server",
+            "AMD_INFERENCE_LOCATION": "host",
+            "AMD_INFERENCE_PORT": "18080",
+            # Windows loopback is not this container's loopback.
+            "NATIVE_LLM_BASE_URL": "http://localhost:18080",
+            "LEMONADE_BASE_URL": "http://localhost:13305",
+            "LLM_API_URL": "http://litellm:4000",
+        })
+        assert services["llama-server"] == {"host": "host.docker.internal", "port": 18080}
+
+    def test_container_runtime_does_not_use_host_endpoint(self):
         services = {"llama-server": {"host": "llama-server", "port": 8080}}
         _apply_host_native_llm_service_override(services, "cpu", {
-            "LLM_BACKEND": "lemonade",
+            "LLM_BACKEND": "llama-server",
             "AMD_INFERENCE_LOCATION": "container",
-            "LEMONADE_CONTAINER_BASE_URL": "http://192.168.50.1:8181",
+            "NATIVE_LLM_CONTAINER_BASE_URL": "http://192.168.50.1:8181",
         })
         assert services["llama-server"] == {"host": "llama-server", "port": 8080}
 

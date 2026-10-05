@@ -22,11 +22,11 @@
 # every reply). tests/test_macos_runtime_llama_args.py checks the final argv.
 #
 # Native Windows does the same through installers/windows/lib/
-# native-llama-args.ps1 (Get-ODSNativeReasoningArgs), a Bash probe in
-# scripts/bootstrap-upgrade.sh and the host agent: --reasoning on runtimes that
-# list it (b9014), --reasoning-format on older ones (b8248), plus
-# --reasoning-budget 0 for off where the binary has it, which is what disables
-# thinking on b8248.
+# native-llama-args.ps1 (Get-ODSNativeReasoningArgs) and a Bash probe in
+# scripts/bootstrap-upgrade.sh: --reasoning on runtimes that list it (b9014),
+# --reasoning-format on older ones (b8248), plus --reasoning-budget 0 for off
+# where the binary has it, which is what disables thinking on b8248. The host
+# agent relaunches the Windows runtime through "ods.ps1 native-llm-restart".
 # tests/test-windows-native-checkpoint-args.ps1 checks the helper.
 
 set -euo pipefail
@@ -85,10 +85,10 @@ if grep -q 'windows_native_reasoning_flag' "$ROOT_DIR/scripts/bootstrap-upgrade.
 else
     fail "scripts/bootstrap-upgrade.sh must pass --reasoning to Windows runtimes that have it"
 fi
-if grep -q '_windows_llama_reasoning_arguments(llama_bin' "$ROOT_DIR/bin/ods-host-agent.py"; then
-    pass "bin/ods-host-agent.py passes --reasoning to Windows runtimes that have it"
+if grep -q '"native-llm-restart"' "$ROOT_DIR/bin/ods-host-agent.py"; then
+    pass "bin/ods-host-agent.py relaunches Windows runtimes through ods.ps1, which passes --reasoning where it exists"
 else
-    fail "bin/ods-host-agent.py must pass --reasoning to Windows runtimes that have it"
+    fail "bin/ods-host-agent.py must relaunch Windows runtimes through ods.ps1 native-llm-restart, not build their flags"
 fi
 
 # Docker's route is the container environment rather than an argv flag.

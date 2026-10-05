@@ -2,6 +2,7 @@
 
 import copy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -14,11 +15,11 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "bin"))
-from model_switchboard import lemonade_transport as transport
+from model_switchboard import router_transport as transport
 
 
 CONTAINER_ID = "a" * 64
-API_BASE = "http://host.docker.internal:13305/api/v1"
+ORIGIN = "http://host.docker.internal:13305"
 
 
 class OwnershipTests(unittest.TestCase):
@@ -26,6 +27,10 @@ class OwnershipTests(unittest.TestCase):
         compose = (Path(__file__).parents[1] / "docker-compose.base.yml").read_text(encoding="utf-8")
         self.assertIn("${ODS_CONFIG_DIR:-./config}/model-router:/config:ro", compose)
         self.assertIn("${ODS_DATA_DIR:-./data}:/state:ro", compose)
+
+    def test_the_lemonade_transport_module_is_gone(self):
+        self.assertIsNone(importlib.util.find_spec("model_switchboard.lemonade_transport"))
+        self.assertEqual(transport.ENDPOINT_ID, "llama-server-default")
 
     def setUp(self):
         self.root = Path(tempfile.gettempdir(), "ods-transport-fixture").resolve()
@@ -43,7 +48,7 @@ class OwnershipTests(unittest.TestCase):
                    self.process(json.dumps(self.info if info is None else info).encode()),
                    self.process(response)]
         with patch.object(transport.subprocess, "run", side_effect=results) as run:
-            result = transport.request(self.root, API_BASE, path, **kwargs)
+            result = transport.request(self.root, ORIGIN, path, **kwargs)
         return result, run.call_args_list
 
     def test_owned_container_is_pinned_and_secrets_only_use_stdin(self):
@@ -52,23 +57,32 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(calls[1].args[0][-1], CONTAINER_ID)
         self.assertEqual(calls[2].args[0][:8], ["docker", "exec", "-i", CONTAINER_ID, "python", "-I", "-S", "-c"])
         self.assertTrue(all("private-test-key" not in " ".join(call.args[0]) for call in calls))
-        self.assertEqual(json.loads(calls[2].kwargs["input"])["api_key"], "private-test-key")
+        message = json.loads(calls[2].kwargs["input"])
+        self.assertEqual(message["api_key"], "private-test-key")
+        self.assertEqual(message["endpoint_id"], "llama-server-default")
+        self.assertEqual(message["origin"], ORIGIN)
         self.assertEqual(calls[2].kwargs["timeout"], 15)
         self.assertNotIn(".Config.Env", calls[1].args[0][5])
 
-    def test_stats_use_the_owned_container_and_no_post_payload(self):
-        result, calls = self.run_request(path="/stats", response=b'{"tokens_per_second":24.5}')
-        self.assertEqual(json.loads(result), {"tokens_per_second": 24.5})
-        message = json.loads(calls[2].kwargs["input"])
-        self.assertEqual(message["path"], "/stats")
-        self.assertIsNone(message["payload"])
+    def test_proof_and_telemetry_routes_use_the_owned_container(self):
+        for path in ("/health", "/v1/models", "/props", "/metrics"):
+            with self.subTest(path=path):
+                result, calls = self.run_request(path=path, response=b"llamacpp:prompt_tokens_total 1\n")
+                self.assertEqual(result, "llamacpp:prompt_tokens_total 1\n")
+                message = json.loads(calls[2].kwargs["input"])
+                self.assertEqual(message["path"], path)
+                self.assertIsNone(message["payload"])
+        payload = {"model": "Model.gguf", "messages": [{"role": "user", "content": "READY"}]}
+        _result, calls = self.run_request(path="/v1/chat/completions", payload=payload,
+                                          response=b'{"choices":[]}')
+        self.assertEqual(json.loads(calls[2].kwargs["input"])["payload"], payload)
 
     def test_missing_ambiguous_or_short_container_id_stops_before_inspection(self):
         for candidates in (b"", b"abc\n", ((CONTAINER_ID + "\n") * 2).encode()):
             with self.subTest(candidates=candidates), patch.object(
                     transport.subprocess, "run", return_value=self.process(candidates)) as run:
                 with self.assertRaises(OSError):
-                    transport.request(self.root, API_BASE, "/health")
+                    transport.request(self.root, ORIGIN, "/health")
                 self.assertEqual(run.call_count, 1)
 
     def test_changed_identity_labels_state_or_mounts_reject_before_exec(self):
@@ -98,28 +112,33 @@ class OwnershipTests(unittest.TestCase):
                     self.process((CONTAINER_ID + "\n").encode()),
                     self.process(json.dumps(changed).encode())]) as run:
                 with self.assertRaises(OSError):
-                    transport.request(self.root, API_BASE, "/health")
+                    transport.request(self.root, ORIGIN, "/health")
                 self.assertEqual(run.call_count, 2)
 
     def test_unsafe_requests_fail_before_docker(self):
-        requests = [("http://user:pass@host/api/v1", "/health", {}),
-                    ("http://host/api/v1?x=1", "/health", {}),
+        requests = [("http://user:pass@host", "/health", {}),
+                    ("http://host?x=1", "/health", {}),
+                    # An origin never carries an API path; the router appends /v1.
                     ("http://host/v1", "/health", {}),
-                    (API_BASE, "//other/health", {}),
-                    (API_BASE, "/load", {"payload": {"model_name": "other"}}),
-                    (API_BASE, "/stats", {"payload": {}}),
-                    (API_BASE, "/health", {"payload": {}}),
-                    (API_BASE, "/chat/completions", {}),
-                    (API_BASE, "/health", {"api_key": "key\r\ninjected: yes"}),
-                    (API_BASE, "/health", {"timeout": float("inf")}),
-                    (API_BASE, "/health", {"timeout": 0}),
-                    (API_BASE, "/health", {"project": "ods --privileged"}),
-                    (API_BASE, "/chat/completions", {"payload": {"content": "x" * 65536}})]
+                    ("http://host/api/v1", "/health", {}),
+                    (ORIGIN, "//other/health", {}),
+                    # Retired Lemonade routes are not proof routes.
+                    (ORIGIN, "/api/v1/health", {}),
+                    (ORIGIN, "/api/v1/load", {"payload": {"model_name": "other"}}),
+                    (ORIGIN, "/stats", {}),
+                    (ORIGIN, "/metrics", {"payload": {}}),
+                    (ORIGIN, "/health", {"payload": {}}),
+                    (ORIGIN, "/v1/chat/completions", {}),
+                    (ORIGIN, "/health", {"api_key": "key\r\ninjected: yes"}),
+                    (ORIGIN, "/health", {"timeout": float("inf")}),
+                    (ORIGIN, "/health", {"timeout": 0}),
+                    (ORIGIN, "/health", {"project": "ods --privileged"}),
+                    (ORIGIN, "/v1/chat/completions", {"payload": {"content": "x" * 65536}})]
         with patch.object(transport.subprocess, "run") as run:
-            for base, path, arguments in requests:
-                with self.subTest(base=base, path=path, arguments=arguments):
+            for origin, path, arguments in requests:
+                with self.subTest(origin=origin, path=path, arguments=arguments):
                     with self.assertRaises(ValueError):
-                        transport.request(self.root, base, path, **arguments)
+                        transport.request(self.root, origin, path, **arguments)
             run.assert_not_called()
 
     def test_malformed_ownership_metadata_is_rejected(self):
@@ -128,7 +147,7 @@ class OwnershipTests(unittest.TestCase):
                     self.process((CONTAINER_ID + "\n").encode()),
                     self.process(json.dumps(info).encode())]) as run:
                 with self.assertRaises(OSError):
-                    transport.request(self.root, API_BASE, "/health")
+                    transport.request(self.root, ORIGIN, "/health")
                 self.assertEqual(run.call_count, 2)
 
     def test_output_limit_and_process_timeout_fail(self):
@@ -136,7 +155,7 @@ class OwnershipTests(unittest.TestCase):
             self.run_request(response=b"x" * 65537)
         with patch.object(transport.subprocess, "run", side_effect=subprocess.TimeoutExpired("docker", 10)):
             with self.assertRaises(subprocess.TimeoutExpired):
-                transport.request(self.root, API_BASE, "/health")
+                transport.request(self.root, ORIGIN, "/health")
 
 
 class HTTPHandler(BaseHTTPRequestHandler):
@@ -186,8 +205,9 @@ class WorkerTests(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
-        self.api_base = f"http://127.0.0.1:{self.server.server_port}/api/v1"
-        self.endpoint = {"id": "lemonade-default", "baseUrl": self.api_base[:-3]}
+        self.origin = f"http://127.0.0.1:{self.server.server_port}"
+        self.endpoint = {"id": "llama-server-default", "baseUrl": self.origin,
+                         "apiKeyEnv": "LLAMA_SERVER_API_KEY"}
         self.write_endpoints([self.endpoint])
 
     def write_endpoints(self, endpoints):
@@ -195,8 +215,8 @@ class WorkerTests(unittest.TestCase):
 
     def worker(self, path="/health", payload=None, timeout=2):
         code = transport._WORKER.replace('"/config/endpoints.json"', repr(str(self.config)))
-        data = json.dumps(dict(api_base=self.api_base, path=path, payload=payload,
-                               api_key="private-test-key", timeout=timeout)).encode()
+        data = json.dumps(dict(endpoint_id=transport.ENDPOINT_ID, origin=self.origin, path=path,
+                               payload=payload, api_key="private-test-key", timeout=timeout)).encode()
         # A bogus proxy proves the worker does not inherit ambient routing.
         env = dict(os.environ, HTTP_PROXY="http://127.0.0.1:1", http_proxy="http://127.0.0.1:1",
                    NO_PROXY="", no_proxy="")
@@ -207,24 +227,29 @@ class WorkerTests(unittest.TestCase):
         result = self.worker()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"status": "ok"})
-        payload = {"model": "extra.Model.gguf", "messages": [{"role": "user", "content": "READY"}]}
-        result = self.worker("/chat/completions", payload)
+        payload = {"model": "Model.gguf", "messages": [{"role": "user", "content": "READY"}]}
+        result = self.worker("/v1/chat/completions", payload)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.server.requests[-1], ("/api/v1/chat/completions", "Bearer private-test-key", payload))
+        self.assertEqual(self.server.requests[-1], ("/v1/chat/completions", "Bearer private-test-key", payload))
 
-    def test_stats_are_read_only_through_the_same_bounded_worker(self):
-        result = self.worker("/stats")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.server.requests, [("/api/v1/stats", "Bearer private-test-key", None)])
+    def test_props_and_metrics_are_read_only_through_the_same_bounded_worker(self):
+        for path in ("/props", "/metrics"):
+            result = self.worker(path)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.server.requests, [("/props", "Bearer private-test-key", None),
+                                                ("/metrics", "Bearer private-test-key", None)])
 
-    def test_changed_missing_duplicate_endpoint_rejects_before_http(self):
+    def test_changed_missing_duplicate_or_retired_endpoint_rejects_before_http(self):
         for rows in ([], [self.endpoint, self.endpoint],
-                     [dict(self.endpoint, baseUrl="http://127.0.0.1:1/api")]):
+                     [dict(self.endpoint, baseUrl=self.origin + "/v1")],
+                     [dict(self.endpoint, baseUrl="http://127.0.0.1:1")],
+                     # A pre-round-F allowlist row never authorizes a request.
+                     [dict(self.endpoint, id="lemonade-default")]):
             self.write_endpoints(rows)
             result = self.worker()
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, b"")
-            self.assertIn(b"configured Lemonade endpoint does not match", result.stderr)
+            self.assertIn(b"configured runtime endpoint does not match", result.stderr)
         self.assertEqual(self.server.requests, [])
 
     def test_redirect_and_http_error_are_not_followed_or_accepted(self):
