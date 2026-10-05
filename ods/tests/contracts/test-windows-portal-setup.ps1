@@ -54,6 +54,31 @@ exit 23
     Check ($returned -eq 23 -and (@($seen.n) -join '|') -ceq "--no-hermes|it's new" -and (@($seen.a) -join ' ') -ceq '--pixel') 'new-installation flags reach the delegate intact and separate from the Linux flags'
     Set-Content -LiteralPath (Join-Path $delegateRoot 'windows.ps1') -Encoding UTF8 -Value "throw 'delegate failed'"
     Check ((Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @() '' $false) -ne 0) 'delegate that throws is a failure'
+    # The llama.cpp API key reaches the Linux installer through WSLENV only.
+    $envRecord = Join-Path $delegateRoot 'env.json'
+    Set-Content -LiteralPath (Join-Path $delegateRoot 'windows.ps1') -Encoding UTF8 -Value @"
+param([string]`$Distro, [string]`$InstallRoot, [switch]`$OpenPortal, [string[]]`$PassthroughArgs, [string]`$DockerDesktopPath, [string]`$StateRoot)
+[IO.File]::WriteAllText('$envRecord', (ConvertTo-Json -Compress @{ key = `$env:ODS_NATIVE_LLM_API_KEY; wslenv = `$env:WSLENV; command = [Environment]::CommandLine; a = `$PassthroughArgs }))
+exit 0
+"@
+    $fixtureKey = 'f' * 64
+    $previousWslEnv = $env:WSLENV
+    $previousKey = $env:ODS_NATIVE_LLM_API_KEY
+    try {
+        $env:WSLENV = 'PSModulePath/w:ODS_NATIVE_LLM_API_KEY/w:USERPROFILE/p'
+        Remove-Item Env:ODS_NATIVE_LLM_API_KEY -ErrorAction SilentlyContinue
+        $returned = Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel', '--native-llm-api-key-env', 'ODS_NATIVE_LLM_API_KEY') '/home/user/ods' $false '' '' @{ ODS_NATIVE_LLM_API_KEY = $fixtureKey }
+        $seen = Get-Content -LiteralPath $envRecord -Raw | ConvertFrom-Json
+        Check ($returned -eq 0 -and $seen.key -ceq $fixtureKey) 'the API key reaches the delegated installer process as an environment variable'
+        Check (($seen.wslenv -split ':') -contains 'ODS_NATIVE_LLM_API_KEY/u' -and ($seen.wslenv -split ':') -contains 'PSModulePath/w' -and
+            ($seen.wslenv -split ':') -contains 'USERPROFILE/p' -and -not (($seen.wslenv -split ':') -contains 'ODS_NATIVE_LLM_API_KEY/w')) 'WSLENV forwards the key Win32-to-WSL only and keeps the caller''s other entries'
+        Check (-not ([string]$seen.command).Contains($fixtureKey) -and -not ((@($seen.a) -join ' ').Contains($fixtureKey)) -and
+            (@($seen.a) -join ' ') -ceq '--pixel --native-llm-api-key-env ODS_NATIVE_LLM_API_KEY') 'the key is never on any command line; only its variable name is passed'
+        Check ($env:WSLENV -ceq 'PSModulePath/w:ODS_NATIVE_LLM_API_KEY/w:USERPROFILE/p' -and -not (Test-Path Env:ODS_NATIVE_LLM_API_KEY)) 'the setup process environment is restored after the delegate starts'
+    } finally {
+        $env:WSLENV = $previousWslEnv
+        if ($null -eq $previousKey) { Remove-Item Env:ODS_NATIVE_LLM_API_KEY -ErrorAction SilentlyContinue } else { $env:ODS_NATIVE_LLM_API_KEY = $previousKey }
+    }
 } finally { Remove-Item -LiteralPath $delegateRoot -Recurse -Force }
 function Reset-Scenario {
     $script:calls = [Collections.Generic.List[string]]::new()
@@ -82,6 +107,8 @@ function Reset-Scenario {
     $script:installNeedsRestart = $false
     $script:amdPlan = $null
     $script:amdArgs = @()
+    $script:amdEnvironment = @{}
+    $script:capturedEnvironment = @{}
     $script:linuxHome = '/home/user'
     $script:amdBinding = @()
     $script:distroListFailure = $null
@@ -112,10 +139,11 @@ function New-ODSPortalLinuxAccount([string]$Distro, $Account) {
 }
 function Get-ODSPortalWindowsNvidiaDriver { return $script:nvidiaDriver }
 function Get-ODSPortalAmdPlan([string]$SourceRoot) { $script:calls.Add('amd-plan'); return $script:amdPlan }
-function Initialize-ODSPortalAmdLemonade($Plan, [string]$SourceRoot, [bool]$NonInteractive, [string]$WslDistro, [string]$WslInstallDir) {
-    $script:calls.Add('amd-lemonade:' + $Plan.GpuName)
+function Initialize-ODSPortalAmdRuntime($Plan, [string]$SourceRoot, [bool]$NonInteractive, [string]$WslDistro, [string]$WslInstallDir) {
+    $script:calls.Add('amd-runtime:' + $Plan.GpuName)
     $script:amdBinding = @($WslDistro, $WslInstallDir)
-    return $script:amdArgs
+    if (@($script:amdArgs).Count -eq 0) { return $null }
+    return [pscustomobject]@{ Arguments = $script:amdArgs; Environment = $script:amdEnvironment }
 }
 function Test-ODSPortalAdministrator { return $script:scenario -eq 'admin' }
 function Test-ODSNativeWindowsInstall { return $script:scenario -eq 'native' }
@@ -131,13 +159,14 @@ function Initialize-ODSPortalUbuntuUser([string]$Distro) {
     if ($script:scenario -eq 'resume-user') { $script:scenario='ready' }
     return $script:userSetupCode
 }
-function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '', [string]$StateRoot = '', [string[]]$NewInstallationArguments = @()) {
+function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '', [string]$StateRoot = '', [string[]]$NewInstallationArguments = @(), [System.Collections.IDictionary]$ForwardEnvironment = @{}) {
     $script:calls.Add('install:' + $Distro)
     $script:openPortal = $OpenPortal
     $script:capturedArguments = $LinuxArguments
     $script:capturedNewInstallation = $NewInstallationArguments
     $script:capturedRoot = $InstallRoot
     $script:capturedStateRoot = $StateRoot
+    $script:capturedEnvironment = $ForwardEnvironment
     return $script:delegateCode
 }
 function Invoke-ODSPortalWsl([string[]]$Arguments) {
@@ -292,7 +321,7 @@ try {
                 Check ($message -match '0x8007274c' -and $message.Contains("wsl exit $($probe.Code)")) 'failed PID 1 preserves the WSL exit code and diagnostic'
             }
             Check (-not $script:calls.Contains('confirm') -and -not $script:calls.Contains('systemd:Ubuntu-24.04')) 'unknown systemd state never offers or enables systemd'
-            Check (-not ($script:calls -match '^(install:|docker-wait:|amd-lemonade:)')) 'unknown systemd state stops before Docker preparation or installation'
+            Check (-not ($script:calls -match '^(install:|docker-wait:|amd-runtime:)')) 'unknown systemd state stops before Docker preparation or installation'
         }
     }
     Reset-Scenario
@@ -342,23 +371,33 @@ try {
     Check ((Invoke-ODSPortalSetup @{Cloud=$true} 'unused') -eq 0) 'cloud mode does not require local NVIDIA readiness'
     Check (-not ($script:calls -match 'nvidia-smi|Runtimes')) 'cloud mode performs no GPU probes'
     Check (-not $script:calls.Contains('amd-plan')) 'cloud mode does not plan an AMD GPU route'
-    # AMD: the model runs in Lemonade Server on Windows; Linux gets --lemonade-url.
+    # AMD: the model runs in llama.cpp on Windows; Linux gets --native-llm-*.
     $fixturePlan = [pscustomobject]@{ GpuName='AMD Radeon RX 9070 XT'; VramMB=16304; Model='qwen3.5-9b'; LinuxTier='2' }
-    $fixtureLemonadeArgs = @('--lemonade-url', 'http://localhost:8080', '--lemonade-model', 'extra.Qwen3.5-9B-Q4_K_M.gguf', '--lemonade-context-size', '65536', '--lemonade-gpu-name', 'AMD Radeon RX 9070 XT', '--lemonade-gpu-vram-mb', '16304')
+    $fixtureNativeArgs = @('--native-llm-url', 'http://localhost:8080', '--native-llm-host-transport', 'model-router',
+        '--native-llm-model', 'Qwen3.5-9B-Q4_K_M.gguf', '--native-llm-context-size', '65536',
+        '--native-llm-gpu-name', 'AMD Radeon RX 9070 XT', '--native-llm-gpu-vram-mb', '16304', '--native-llm-api-key-env', 'ODS_NATIVE_LLM_API_KEY')
+    $fixtureEnvironment = @{ ODS_NATIVE_LLM_API_KEY = ('e' * 64) }
     Reset-Scenario
     $script:amdPlan = $fixturePlan
-    $script:amdArgs = $fixtureLemonadeArgs
-    Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'AMD host installs through Windows Lemonade'
-    Check (($script:capturedArguments -join ' ') -match '--pixel --lemonade-url http://localhost:8080 --lemonade-model extra\.Qwen3\.5-9B-Q4_K_M\.gguf --lemonade-context-size 65536 --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304 --tier 2$') 'AMD host passes the Lemonade route, its loaded context and GPU tier to Linux'
+    $script:amdArgs = $fixtureNativeArgs
+    $script:amdEnvironment = $fixtureEnvironment
+    Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'AMD host installs through llama.cpp on Windows'
+    Check (($script:capturedArguments -join ' ') -match '--pixel --native-llm-url http://localhost:8080 --native-llm-host-transport model-router --native-llm-model Qwen3\.5-9B-Q4_K_M\.gguf --native-llm-context-size 65536 --native-llm-gpu-name AMD Radeon RX 9070 XT --native-llm-gpu-vram-mb 16304 --native-llm-api-key-env ODS_NATIVE_LLM_API_KEY --tier 2$') 'AMD host passes the native llama.cpp route and GPU tier to Linux'
     Check ((@($script:capturedNewInstallation) -join ' ') -ceq '--no-hermes') 'AMD host keeps the new-installation flag'
-    Check ($script:calls.IndexOf('amd-lemonade:AMD Radeon RX 9070 XT') -lt $script:calls.IndexOf('install:Ubuntu-24.04')) 'Lemonade is ready before the Linux installer starts'
+    Check (-not (($script:capturedArguments -join ' ') -match 'lemonade') -and -not (($script:capturedArguments -join ' ').Contains($fixtureEnvironment.ODS_NATIVE_LLM_API_KEY))) 'no Lemonade flag and no key value reach the Linux arguments'
+    Check ($script:capturedEnvironment['ODS_NATIVE_LLM_API_KEY'] -ceq $fixtureEnvironment.ODS_NATIVE_LLM_API_KEY) 'the key is handed to the Linux installer launch for WSLENV forwarding'
+    Check ($script:calls.IndexOf('amd-runtime:AMD Radeon RX 9070 XT') -lt $script:calls.IndexOf('install:Ubuntu-24.04')) 'the Windows model server is ready before the Linux installer starts'
     Check (($script:amdBinding -join '|') -ceq 'Ubuntu-24.04|/home/user/ods' -and $script:capturedRoot -ceq '/home/user/ods') 'default AMD binding and delegated install use the same explicit Linux path'
     Reset-Scenario
-    $script:amdPlan = $fixturePlan; $script:amdArgs = $fixtureLemonadeArgs; $script:linuxHome = "/home/some user's home"
+    $script:amdPlan = $fixturePlan; $script:amdArgs = $fixtureNativeArgs; $script:amdEnvironment = $fixtureEnvironment; $script:delegateCode = 9
+    $failureNotice = @(& { $script:failedResult = Invoke-ODSPortalSetup @{} 'unused' } 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+    Check ($script:failedResult -eq 9 -and $failureNotice -match 'chat stays unavailable until it does\. Rerun the same install\.ps1 command') 'a failed Linux step after the Windows cutover tells the user to rerun'
+    Reset-Scenario
+    $script:amdPlan = $fixturePlan; $script:amdArgs = $fixtureNativeArgs; $script:linuxHome = "/home/some user's home"
     $null = Invoke-ODSPortalSetup @{} 'unused'
     Check ($script:amdBinding[1] -ceq "/home/some user's home/ods" -and $script:capturedRoot -ceq $script:amdBinding[1]) 'HOME spaces and apostrophes survive binding without shell interpolation'
     Reset-Scenario
-    $script:amdPlan = $fixturePlan; $script:amdArgs = $fixtureLemonadeArgs
+    $script:amdPlan = $fixturePlan; $script:amdArgs = $fixtureNativeArgs
     $null = Invoke-ODSPortalSetup @{InstallDir='/srv/ODS data'} 'unused'
     Check ($script:amdBinding[1] -ceq '/srv/ODS data' -and $script:capturedRoot -ceq '/srv/ODS data' -and
         -not ($script:calls -like '*printenv HOME')) 'custom install directory is bound verbatim without querying HOME'
@@ -367,18 +406,18 @@ try {
         $script:amdPlan = $fixturePlan; $script:linuxHome = $badHome
         $message = ''
         try { $null = Invoke-ODSPortalSetup @{} 'unused' } catch { $message = $_.Exception.Message }
-        Check ($message -and -not ($script:calls -like 'amd-lemonade:*') -and -not ($script:calls -like 'install:*')) 'ambiguous or non-normalized HOME stops before model and Linux installation'
+        Check ($message -and -not ($script:calls -like 'amd-runtime:*') -and -not ($script:calls -like 'install:*')) 'ambiguous or non-normalized HOME stops before model and Linux installation'
     }
     Reset-Scenario
     $script:amdPlan = $fixturePlan
-    $script:amdArgs = $fixtureLemonadeArgs
+    $script:amdArgs = $fixtureNativeArgs
     Check ((Invoke-ODSPortalSetup @{Tier='3'} 'unused') -eq 0) 'AMD host with an explicit tier installs'
     Check ((@($script:capturedArguments | Where-Object { $_ -eq '--tier' })).Count -eq 1 -and ($script:capturedArguments -join ' ') -match '--tier 3') 'explicit -Tier is kept and not duplicated by the AMD route'
     Reset-Scenario
     $script:amdPlan = $fixturePlan
     $script:amdArgs = @()
-    Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'AMD host that declines Lemonade still installs'
-    Check (-not (($script:capturedArguments -join ' ') -match 'lemonade|--tier')) 'declined Lemonade keeps the CPU route'
+    Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'AMD host that keeps the CPU route still installs'
+    Check (-not (($script:capturedArguments -join ' ') -match 'native-llm|lemonade|--tier') -and $script:capturedEnvironment.Count -eq 0) 'the CPU route passes no native flags and no key'
     Reset-Scenario
     $script:nvidiaDriver = 576
     $script:amdPlan = $fixturePlan

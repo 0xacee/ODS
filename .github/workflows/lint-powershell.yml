@@ -133,21 +133,23 @@ jobs:
           ./tests/contracts/test-wsl-lifecycle.ps1
           ./tests/contracts/test-wsl-lifecycle-output.ps1
 
-      - name: Windows AMD Recovery and Model Control Contracts (PowerShell 7)
+      - name: Windows AMD Recovery, Model Control and Migration Contracts (PowerShell 7)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           ./tests/contracts/test-windows-portal-amd-recovery.ps1
-          ./tests/contracts/test-windows-portal-lemonade-restart.ps1
+          ./tests/contracts/test-windows-portal-llama-restart.ps1
           ./tests/contracts/test-windows-portal-model-control.ps1
+          ./tests/contracts/test-windows-portal-llama-migration.ps1
 
-      - name: Windows AMD Recovery and Model Control Contracts (Windows PowerShell)
+      - name: Windows AMD Recovery, Model Control and Migration Contracts (Windows PowerShell)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           ./tests/contracts/test-windows-portal-amd-recovery.ps1
-          ./tests/contracts/test-windows-portal-lemonade-restart.ps1
+          ./tests/contracts/test-windows-portal-llama-restart.ps1
           ./tests/contracts/test-windows-portal-model-control.ps1
+          ./tests/contracts/test-windows-portal-llama-migration.ps1
 
       - name: Windows Lemonade Task Cleanup Contract
         shell: pwsh
