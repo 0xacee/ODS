@@ -42,13 +42,15 @@ def test_host_agent_uses_renderer_as_sole_writer() -> None:
     text = read("bin/ods-host-agent.py")
     assert "def _render_runtime_config" in text
     assert "--surface" in text
-    assert '"--lemonade-model-id"' in text
-    assert "litellm-lemonade" in text
     assert "Runtime config renderer failed" in text
-    lemonade_writer = text.split("def _write_lemonade_config(", 1)[1].split(
-        "def _write_windows_native_litellm_config(", 1
-    )[0]
-    assert "model_list:\\n" not in lemonade_writer
+    # Round F: one llama-server runtime family. A host-native key reaches the
+    # renderer by its env var name only; no Lemonade surface or id remains.
+    assert '"--llm-api-key-env"' in text
+    assert "--lemonade-model-id" not in text
+    assert "litellm-lemonade" not in text
+    native_writer = text.split("def _write_host_native_litellm_config(", 1)[1].split("\ndef ", 1)[0]
+    assert '"litellm-local-native"' in native_writer
+    assert "model_list:" not in native_writer
 
 
 def test_windows_lemonade_uses_renderer_as_sole_writer() -> None:

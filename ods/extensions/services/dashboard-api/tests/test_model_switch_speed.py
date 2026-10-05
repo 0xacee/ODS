@@ -253,7 +253,6 @@ def test_activation_recreates_litellm_only_when_its_inputs_change(
         _mod.load_env(env_path),
         model="old-model",
         gguf_file="old-model.gguf",
-        lemonade_model_id="",
         context_length=2048,
     )
     switchboard = install / "config" / "litellm" / "switchboard.yaml"
@@ -313,7 +312,6 @@ def test_rollback_still_restores_a_kept_litellm(tmp_path, monkeypatch):
         _mod.load_env(env_path),
         model="old-model",
         gguf_file="old-model.gguf",
-        lemonade_model_id="",
         context_length=2048,
     )
     switchboard = install / "config" / "litellm" / "switchboard.yaml"
@@ -363,7 +361,8 @@ class TestReadinessFastWindow:
             return subprocess.CompletedProcess(cmd, 0, _llama_identity_response(identity), "")
 
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-        monkeypatch.setattr(_mod, "_llama_runtime_context_length", lambda *_args: 4096)
+        monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (4096, ""))
         monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
         monkeypatch.setattr(_mod.time, "sleep", sleeps.append)
         return probes, sleeps
@@ -406,29 +405,6 @@ class TestReadinessFastWindow:
         assert len(probes) == 2 + 3
         assert sleeps[:1] == [0.5]
         assert sleeps[-2:] == [5, 5]
-
-    def test_lemonade_ignores_the_fast_window(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(_mod, "_lemonade_runtime_base_url", lambda _env: "http://127.0.0.1:8080")
-        monkeypatch.setattr(_mod.subprocess, "run", lambda cmd, **_kw: (
-            calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "{}", "")
-        ))
-        monkeypatch.setattr(_mod, "_send_lemonade_warmup", lambda *_a, **_k: True)
-        sleeps = []
-        monkeypatch.setattr(_mod.time, "sleep", sleeps.append)
-
-        result = _mod._wait_for_model_readiness(
-            {"GPU_BACKEND": "amd", "LLM_BACKEND": "lemonade", "ODS_MODE": "lemonade"},
-            model_id="target-model",
-            gguf_file="new-model.gguf",
-            llm_model_name="new-model",
-            lemonade_model_id="extra.new-model.gguf",
-            attempts=2,
-            fast_poll_seconds=30,
-        )
-
-        assert result is False
-        assert sleeps == [5, 5]
 
 
 @pytest.mark.parametrize(

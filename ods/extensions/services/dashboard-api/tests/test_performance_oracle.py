@@ -1883,8 +1883,8 @@ def test_windows_amd_host_runtime_uses_install_ram_when_gpu_probe_is_unavailable
     (models_dir / "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf").write_text("placeholder", encoding="utf-8")
     (install_dir / ".env").write_text(
         "GPU_BACKEND=amd\n"
-        "LLM_BACKEND=lemonade\n"
-        "AMD_INFERENCE_RUNTIME=lemonade\n"
+        "LLM_BACKEND=llama-server\n"
+        "AMD_INFERENCE_RUNTIME=llama-server\n"
         "AMD_INFERENCE_LOCATION=host\n"
         "SYSTEM_RAM_GB=128\n"
         "MODEL_RECOMMENDATION_POLICY=context-aware-curated-fit-v2+unified-memory-coder-next-a3b-v1\n",

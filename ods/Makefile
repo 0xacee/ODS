@@ -92,9 +92,9 @@ test: ## Run unit and contract tests
 	@bash tests/contracts/test-amd-lemonade-contracts.sh
 	@bash tests/test-lemonade-host-transport.sh
 	@bash tests/test-wsl-agent-start.sh
-	@python3 tests/test-lemonade-container-transport.py
-	@python3 tests/test-wsl-lemonade-proof.py
-	@python3 tests/test-wsl-lemonade-control.py
+	@python3 tests/test-router-transport.py
+	@python3 tests/test-wsl-runtime-proof.py
+	@python3 tests/test-wsl-runtime-control.py
 	@python3 tests/test-configure-wsl-model-store.py
 	@python3 tests/test-retire-wsl-runtime.py
 	@bash tests/test-litellm-amd-auth-enforced.sh

@@ -1,4 +1,11 @@
-"""Observe host Lemonade through this installation's existing router container."""
+"""Probe a host-native llama-server through this installation's router container.
+
+A WSL host agent cannot reach a Windows loopback-only listener: WSL localhost
+is not Windows localhost. Docker Desktop containers can, through
+``host.docker.internal``. This module runs one bounded stdlib request inside
+the owned, running model-router container, against exactly the
+``llama-server-default`` origin that the router itself serves inference from.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +17,9 @@ import subprocess
 from urllib.parse import urlsplit
 
 
+ENDPOINT_ID = "llama-server-default"
 _LIMIT = 65536
+_PATHS = frozenset({"/health", "/props", "/v1/models", "/v1/chat/completions", "/metrics"})
 _INSPECT = ('{"Id":{{json .Id}},"Running":{{json .State.Running}},'
             '"Project":{{json (index .Config.Labels "com.docker.compose.project")}},'
             '"Service":{{json (index .Config.Labels "com.docker.compose.service")}},'
@@ -37,7 +46,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise urllib.error.HTTPError(req.full_url, code, "redirect rejected", headers, fp)
 
 def deadline():
-    sys.stderr.write("Lemonade request timed out\n")
+    sys.stderr.write("runtime request timed out\n")
     sys.stderr.flush()
     os._exit(124)
 
@@ -56,21 +65,21 @@ def serve():
             raise ProofError("endpoint configuration exceeds 64 KiB")
         endpoints = json.loads(raw)["endpoints"]
         matches = [row for row in endpoints if isinstance(row, dict)
-                   and row.get("id") == "lemonade-default"]
-        if len(matches) != 1 or matches[0].get("baseUrl", "") + "/v1" != message["api_base"]:
-            raise ProofError("configured Lemonade endpoint does not match")
+                   and row.get("id") == message["endpoint_id"]]
+        if len(matches) != 1 or matches[0].get("baseUrl", "") != message["origin"]:
+            raise ProofError("configured runtime endpoint does not match")
         headers = {"Content-Type": "application/json"}
         if message["api_key"]:
             headers["Authorization"] = "Bearer " + message["api_key"]
         payload = message["payload"]
         body = None if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
-        request = urllib.request.Request(message["api_base"] + message["path"],
+        request = urllib.request.Request(message["origin"] + message["path"],
                                          data=body, headers=headers)
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         with opener.open(request, timeout=message["timeout"]) as response:
             body = response.read(LIMIT + 1)
         if len(body) > LIMIT:
-            raise ProofError("Lemonade response exceeds 64 KiB")
+            raise ProofError("runtime response exceeds 64 KiB")
         body.decode("utf-8")
         sys.stdout.buffer.write(body)
         sys.stdout.buffer.flush()
@@ -80,13 +89,13 @@ def serve():
 try:
     serve()
 except urllib.error.HTTPError as exc:
-    sys.stderr.write("Lemonade returned HTTP %d\n" % exc.code)
+    sys.stderr.write("runtime returned HTTP %d\n" % exc.code)
     sys.exit(1)
 except ProofError as exc:
-    sys.stderr.write("Lemonade transport failed: %s\n" % exc)
+    sys.stderr.write("runtime transport failed: %s\n" % exc)
     sys.exit(1)
 except (OSError, ValueError, KeyError, TypeError) as exc:
-    sys.stderr.write("Lemonade transport failed: %s\n" % type(exc).__name__)
+    sys.stderr.write("runtime transport failed: %s\n" % type(exc).__name__)
     sys.exit(1)
 '''
 
@@ -95,10 +104,10 @@ def _docker(arguments: list[str], *, timeout: float, data: bytes | None = None) 
     result = subprocess.run(["docker", *arguments], input=data, capture_output=True,
                             timeout=timeout, check=False)
     if len(result.stdout) > _LIMIT or len(result.stderr) > _LIMIT:
-        raise OSError("Docker Lemonade transport output exceeds 64 KiB")
+        raise OSError("Docker runtime transport output exceeds 64 KiB")
     if result.returncode:
         detail = result.stderr.decode("utf-8", errors="replace").strip()[:512]
-        raise OSError(f"Docker Lemonade transport failed (exit {result.returncode}): {detail}")
+        raise OSError(f"Docker runtime transport failed (exit {result.returncode}): {detail}")
     return result.stdout
 
 
@@ -130,33 +139,35 @@ def _owned_router(install_dir: Path, project: str) -> str:
     return container_id
 
 
-def request(install_dir: Path, api_base: str, path: str,
+def request(install_dir: Path, origin: str, path: str,
             payload: dict | None = None, api_key: str = "", timeout: float = 5,
             *, project: str = "ods") -> str:
-    """Return bounded HTTP text; never grant readiness or publish model state."""
-    parsed = urlsplit(api_base)
+    """Return bounded HTTP text; never grant readiness or publish model state.
+
+    ``origin`` is the router's ``llama-server-default`` base URL without a
+    path; ``path`` is one of the proof and telemetry routes.
+    """
+    parsed = urlsplit(origin)
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username is not None or parsed.password is not None
-            or parsed.query or parsed.fragment or parsed.path != "/api/v1"
-            or any(ord(char) <= 32 or ord(char) == 127 for char in api_base)):
-        raise ValueError("Lemonade API base must be a credential-free HTTP(S) /api/v1 URL")
+            or parsed.query or parsed.fragment or parsed.path != ""
+            or any(ord(char) <= 32 or ord(char) == 127 for char in origin)):
+        raise ValueError("Runtime origin must be a credential-free HTTP(S) origin without a path")
     _ = parsed.port
-    if path not in {"/health", "/models", "/stats", "/chat/completions"}:
-        raise ValueError("Unsupported Lemonade observation route")
-    if (path == "/chat/completions") != isinstance(payload, dict):
+    if path not in _PATHS:
+        raise ValueError("Unsupported runtime observation route")
+    if (path == "/v1/chat/completions") != isinstance(payload, dict):
         raise ValueError("Only a chat-completion proof accepts a JSON payload")
-    if payload is not None and not isinstance(payload, dict):
-        raise ValueError("Lemonade proof payload must be an object")
     if not isinstance(api_key, str) or "\r" in api_key or "\n" in api_key:
-        raise ValueError("Invalid Lemonade API key")
+        raise ValueError("Invalid runtime API key")
     if not math.isfinite(timeout) or not 0 < timeout <= 900:
-        raise ValueError("Lemonade proof timeout must be between 0 and 900 seconds")
+        raise ValueError("Runtime proof timeout must be between 0 and 900 seconds")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project):
         raise ValueError("Invalid Compose project")
-    data = json.dumps(dict(api_base=api_base, path=path, payload=payload,
+    data = json.dumps(dict(endpoint_id=ENDPOINT_ID, origin=origin, path=path, payload=payload,
                            api_key=api_key, timeout=timeout), allow_nan=False).encode("utf-8")
     if len(data) > _LIMIT:
-        raise ValueError("Lemonade proof request exceeds 64 KiB")
+        raise ValueError("Runtime proof request exceeds 64 KiB")
     container_id = _owned_router(install_dir, project)
     body = _docker(["exec", "-i", container_id, "python", "-I", "-S", "-c", _WORKER],
                    data=data, timeout=timeout + 10)
