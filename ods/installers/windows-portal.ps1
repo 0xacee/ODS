@@ -32,7 +32,9 @@ param(
     [string]$ExternalLlmUrl = "",
     [string]$ExternalLlmModel = "",
     [string]$ExternalLlmProvider = "",
-    [string]$ExternalLlmKeyFile = ""
+    [string]$ExternalLlmKeyFile = "",
+    # Leave API mode: the model runs on this computer again.
+    [switch]$NoExternalLlm
 )
 
 $ErrorActionPreference = 'Stop'

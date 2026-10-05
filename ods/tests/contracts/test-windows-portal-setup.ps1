@@ -610,7 +610,13 @@ try {
         $joined.Contains('--external-llm-key-env ODS_EXTERNAL_LLM_API_KEY') -and -not $joined.Contains('api.key')) 'API mode passes the server, model and key variable name, never the key file or key'
     $ollama = (@(Get-ODSPortalLinuxArguments @{ ExternalLlmUrl = 'http://192.168.1.20:11434'; ExternalLlmModel = 'qwen3:8b'; ExternalLlmProvider = 'ollama' }) -join ' ')
     Check ($ollama.Contains('--external-llm-provider ollama') -and -not $ollama.Contains('--external-llm-key-env')) 'API mode accepts Ollama and needs no key'
+    # Back from API mode: -NoExternalLlm drops the API route (fleet row 24:
+    # Windows had no way back short of uninstalling).
+    $local = (@(Get-ODSPortalLinuxArguments @{ NoExternalLlm = $true }) -join ' ')
+    Check ($local.Contains('--no-external-llm') -and -not $local.Contains('--external-llm-url')) '-NoExternalLlm asks the Linux installer to leave API mode'
+    Check (-not ((@(Get-ODSPortalLinuxArguments @{}) -join ' ').Contains('--no-external-llm'))) 'a plain rerun does not leave API mode'
     foreach ($bad in @(
+        @{ ExternalLlmUrl = 'https://api.example.test'; ExternalLlmModel = 'm'; NoExternalLlm = $true },
         @{ ExternalLlmUrl = 'https://api.example.test'; ExternalLlmModel = 'm'; Cloud = $true },
         @{ ExternalLlmModel = 'm' },
         @{ ExternalLlmUrl = 'ftp://api.example.test'; ExternalLlmModel = 'm' },

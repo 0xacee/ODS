@@ -185,6 +185,14 @@ function Get-ODSPortalLinuxArguments([System.Collections.IDictionary]$Options) {
         }
     }
     if ($Options['SummaryJsonPath']) { $linuxArgs += @('--summary-json', [string]$Options['SummaryJsonPath']) }
+    if ($Options['ExternalLlmUrl'] -and $Options['NoExternalLlm']) {
+        throw '-ExternalLlmUrl and -NoExternalLlm are opposite choices; choose one.'
+    }
+    if ($Options['NoExternalLlm']) {
+        # Back from API mode: the Linux installer drops the API route and its
+        # stored key, and this setup prepares the model on this computer.
+        $linuxArgs += @('--no-external-llm')
+    }
     if ($Options['ExternalLlmUrl']) {
         if ($Options['Cloud']) { throw '-ExternalLlmUrl and -Cloud are different model routes; choose one.' }
         $url = [string]$Options['ExternalLlmUrl']
