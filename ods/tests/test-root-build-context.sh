@@ -17,8 +17,14 @@ DOCKERFILES=(
 # directory, so `context: .` in any of them (enabled or .disabled) is the
 # install root. Library extensions are not listed: the resolver rewrites
 # their `context: .` to the extension's own directory.
+# A file that names another Compose project runs on its own, with contexts
+# relative to its own directory (the Windows standalone ComfyUI).
+COMPOSE_FILES=()
 shopt -s nullglob
-COMPOSE_FILES=("$ROOT_DIR"/docker-compose*.yml "$ROOT_DIR"/extensions/services/*/compose*.yaml*)
+for compose_file in "$ROOT_DIR"/docker-compose*.yml "$ROOT_DIR"/extensions/services/*/compose*.yaml*; do
+    project="$(awk '/^name:/ { print $2; exit }' "$compose_file")"
+    [[ -z "$project" || "$project" == ods ]] && COMPOSE_FILES+=("$compose_file")
+done
 shopt -u nullglob
 
 PASSED=0
