@@ -1,3 +1,4 @@
+import HelpLink from '../components/HelpLink'
 import {
   Database, Cpu, Workflow, Plug, Image, MessageSquare, Code,
   FileText, Shield, Globe, Music, Video, Search, Puzzle,
@@ -152,7 +153,9 @@ export default function Extensions({ compact = false }) {
         recoveryTrackers.current[serviceId]?.recordSuccess()
         if (!res.ok) return
         const data = await res.json()
-        if (data.status === 'idle') {
+        // A 'prepared' record is the finished image download that preceded
+        // this enable; it says nothing about the start itself.
+        if (data.status === 'idle' || data.status === 'prepared') {
           setProgressMap(prev => {
             if (!(serviceId in prev)) return prev
             const next = { ...prev }
@@ -169,7 +172,7 @@ export default function Extensions({ compact = false }) {
           setToast({ type: 'error', text: data.error || 'Installation failed' })
           setProgressMap(prev => { const next = { ...prev }; delete next[serviceId]; return next })
           fetchCatalog()
-        } else if (data.status === 'started' || data.status === 'idle') {
+        } else if (data.status === 'started' || data.status === 'idle' || data.status === 'prepared') {
           // Enable can finish without an install-progress record. Keep checking
           // live health even when progress is idle after the selection changed.
           // Refresh catalog — if it shows "enabled" (long-running service)
@@ -312,11 +315,43 @@ export default function Extensions({ compact = false }) {
     }
   }
 
+  // A first image download can outlast any request on a slow link. Services
+  // shipped with ODS download their images first, with progress on the card,
+  // and the enable that follows starts from local images.
+  const prepareImages = async (serviceId, { autoEnableDeps = false } = {}) => {
+    const query = autoEnableDeps ? '?auto_enable_deps=true' : ''
+    const res = await fetch(`/api/extensions/${serviceId}/prepare${query}`, {
+      method: 'POST', signal: AbortSignal.timeout(180000),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(typeof err.detail === 'string' ? err.detail : 'Could not download the images this needs')
+    }
+    if (res.status !== 202) return
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 3000))
+      const progress = await fetchJson(`/api/extensions/${serviceId}/progress`).catch(() => null)
+      if (!progress?.ok) continue
+      const data = await progress.json()
+      if (data.status === 'pulling') {
+        setProgressMap(prev => ({ ...prev, [serviceId]: data }))
+        continue
+      }
+      setProgressMap(prev => { const next = { ...prev }; delete next[serviceId]; return next })
+      if (data.status === 'prepared') return
+      throw new Error(data.status === 'error' && data.error
+        ? data.error : 'The image download stopped. Retry to resume it.')
+    }
+  }
+
   const handleMutation = async (serviceId, action, { autoEnableDeps = false, force = false } = {}) => {
     setMutating(serviceId)
     setConfirm(null)
     setDepConfirm(null)
     try {
+      if (action === 'enable' && extensions.find(e => e.id === serviceId)?.source === 'core') {
+        await prepareImages(serviceId, { autoEnableDeps })
+      }
       let url = action === 'uninstall'
         ? `/api/extensions/${serviceId}`
         : action === 'purge'
@@ -424,6 +459,7 @@ export default function Extensions({ compact = false }) {
     setMutating('open-webui')
     setConfirm(null)
     try {
+      await prepareImages('open-webui')
       const response = await fetch('/api/webui/selection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -594,7 +630,7 @@ export default function Extensions({ compact = false }) {
       {/* Error state */}
       {error && (
         <div className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-200">
-          {error} — <button className="underline" onClick={fetchCatalog}>Retry</button>
+          {error} — <button className="underline" onClick={fetchCatalog}>Retry</button> · <HelpLink />
         </div>
       )}
 
@@ -864,6 +900,11 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
   const isUserExt = ext.source === 'user'
   const isManagedBuiltin = isCore && ext.library_manageable === true
   const isError = status === 'error'
+  // A saved progress record can describe a terminal failure or completion.
+  // Only active phases should keep the installation spinner on screen.
+  const showProgress = !isError && (progressData?.status
+    ? ['pulling', 'starting', 'setup_hook'].includes(progressData.status)
+    : status === 'installing' || status === 'setting_up')
   const isStopped = status === 'stopped'
   const isUnhealthy = status === 'unhealthy'
   const isCliInstalled = status === 'cli_installed'
@@ -937,10 +978,10 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
       </div>
 
       {/* Progress indicator — shows during active install/setup, survives page refresh */}
-      {(progressData || ext.status === 'installing' || ext.status === 'setting_up') && (
+      {showProgress && (
         <div className="px-4 py-2 border-t border-theme-border/40 text-[10px] text-blue-400/80 flex items-center gap-2">
           <Loader2 size={12} className="animate-spin" />
-          <span>{progressData?.phase_label || (ext.status === 'setting_up' ? 'Running setup...' : 'Installing...')}</span>
+          <span>{progressData?.phase_label || (progressData?.status === 'setup_hook' || status === 'setting_up' ? 'Running setup...' : 'Installing...')}</span>
         </div>
       )}
       {/* Error message — expandable when long or multiline so docker-compose
@@ -954,7 +995,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
         if (!needsExpand) {
           return (
             <div className="px-4 py-2 border-t border-red-500/15 text-[10px] text-red-300/80 leading-relaxed">
-              {errorText}
+              {errorText} <HelpLink className="ml-1" />
             </div>
           )
         }
@@ -962,13 +1003,18 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
           ? firstLine.slice(0, 120) + '...'
           : firstLine + (isMultiline ? '...' : '')
         return (
-          <details className="group px-4 py-2 border-t border-red-500/15 text-[10px] text-red-300/80 leading-relaxed">
-            <summary className="cursor-pointer flex items-start gap-1 list-none [&::-webkit-details-marker]:hidden hover:text-red-300">
-              <ChevronDown size={10} className="mt-0.5 shrink-0 transition-transform group-open:rotate-180" />
-              <span className="flex-1 break-words">{summaryText}</span>
-            </summary>
-            <pre className="whitespace-pre-wrap text-[10px] text-red-300/80 mt-2 font-mono break-words">{errorText}</pre>
-          </details>
+          <>
+            <details className="group px-4 py-2 border-t border-red-500/15 text-[10px] text-red-300/80 leading-relaxed">
+              <summary className="cursor-pointer flex items-start gap-1 list-none [&::-webkit-details-marker]:hidden hover:text-red-300">
+                <ChevronDown size={10} className="mt-0.5 shrink-0 transition-transform group-open:rotate-180" />
+                <span className="flex-1 break-words">{summaryText}</span>
+              </summary>
+              <pre className="whitespace-pre-wrap text-[10px] text-red-300/80 mt-2 font-mono break-words">{errorText}</pre>
+            </details>
+            <div className="px-4 pb-2 text-[10px] text-red-300/80">
+              <HelpLink />
+            </div>
+          </>
         )
       })()}
 
@@ -1045,7 +1091,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
               <Terminal size={12} /> Check Logs
             </button>
           )}
-          {isError && (
+          {isError && !showManagedRetry && (
             <button
               disabled={actionDisabled}
               title={disabledTitle}

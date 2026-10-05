@@ -53,7 +53,7 @@ _macos_apply_fresh_feature_defaults
 
 reset_features() {
     ENABLE_RECOMMENDED=false ENABLE_PIXEL=true CLOUD_MODE=false
-    ENABLE_PERPLEXICA=false ENABLE_HERMES=false ENABLE_OPENCLAW=false
+    ENABLE_PERPLEXICA=false ENABLE_HERMES=false
     ENABLE_LITELLM=false ENABLE_SEARXNG=false ENABLE_WEB_SEARCH=false
     ENABLE_VOICE=false ENABLE_WORKFLOWS=false ENABLE_RAG=false
     ENABLE_APE=false ENABLE_PRIVACY_SHIELD=false ENABLE_ODS_PROXY=false

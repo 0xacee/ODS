@@ -205,6 +205,70 @@ HERMES_FALLBACK_EOF
 ) || fail "Linux Hermes fallback patcher did not preserve metacharacters or reject unsafe structure"
 pass "Linux Hermes fallback patcher treats sed metacharacters as data"
 
+# A held Pixel source update (phase 06) finishes only over the exact source
+# bytes it published, and the Hermes template is one of them. Phase 11 must
+# write the Hermes route after ods_pixel_install_default_agent finished that
+# update, and still before Compose starts Hermes.
+apply_template_block="$(function_block _phase11_apply_hermes_template)"
+hermes_setup_block="$(awk '
+    /^    if \[\[ "\$\{ENABLE_HERMES:-false\}" == "true" \]\]; then$/ { in_block=1 }
+    in_block { print }
+    in_block && /^    fi$/ { exit }
+' installers/phases/11-services.sh)"
+[[ -n "$apply_template_block" ]] || fail "could not extract the Linux Hermes template writer"
+[[ -n "$hermes_setup_block" ]] || fail "could not extract the Linux Hermes setup block"
+(
+    held_tmp="$(mktemp -d "${TMPDIR:-/tmp}/ods-hermes-held.XXXXXX")"
+    trap 'rm -rf -- "$held_tmp"' EXIT
+    INSTALL_DIR="$held_tmp/install"
+    LOG_FILE="$held_tmp/install.log"
+    held_template="$INSTALL_DIR/extensions/services/hermes/cli-config.yaml.template"
+    mkdir -p "$(dirname "$held_template")"
+    printf '%s\n' 'model:' '  default: "qwen3.5-9b"' '  context_length: 131072' >"$held_template"
+    cp "$held_template" "$held_tmp/published"
+    ods_detect_python_cmd() { return 1; }
+    _phase11_external_llm() { return 1; }
+    _phase11_external_lemonade() { return 1; }
+    log() { :; }
+    warn() { :; }
+    ai_ok() { :; }
+    eval "$fallback_yaml_block"
+    eval "$fallback_patch_block"
+    eval "$apply_template_block"
+    ENABLE_HERMES=true
+    MAX_CONTEXT=65536
+    ODS_MODEL_SWITCHBOARD=enabled
+
+    ODS_PIXEL_SOURCE_TRANSACTION="$(printf '%064d' 0)"
+    _phase11_hermes_template_route=()
+    eval "$hermes_setup_block"
+    cmp -s "$held_template" "$held_tmp/published" || { echo "held update: template was rewritten" >&2; exit 1; }
+    (( ${#_phase11_hermes_template_route[@]} > 0 )) || { echo "held update: no route kept for later" >&2; exit 1; }
+    unset ODS_PIXEL_SOURCE_TRANSACTION
+    _phase11_apply_hermes_template "${_phase11_hermes_template_route[@]}"
+    grep -Fqx '  default: "ods/current"' "$held_template" || { echo "finished update: route not written" >&2; exit 1; }
+    grep -Fqx '  context_length: 65536' "$held_template" || { echo "finished update: context not written" >&2; exit 1; }
+
+    cp "$held_tmp/published" "$held_template"
+    _phase11_hermes_template_route=()
+    eval "$hermes_setup_block"
+    grep -Fqx '  default: "ods/current"' "$held_template" || { echo "no update held: route not written" >&2; exit 1; }
+    (( ${#_phase11_hermes_template_route[@]} == 0 )) || { echo "no update held: route also kept for later" >&2; exit 1; }
+) || fail "Linux Hermes template changed inside a held Pixel source update, or its route was lost"
+pass "Linux Hermes template keeps a held Pixel source update's bytes and gets its route afterwards"
+hermes_route_order="$(awk '
+    /if ! ods_pixel_install_default_agent; then/ && !pixel { pixel=NR }
+    /_phase11_apply_hermes_template "\$\{_phase11_hermes_template_route\[@\]\}"/ { apply=NR }
+    /"\$\{COMPOSE_FLAGS_ARR\[@\]\}" up -d --remove-orphans/ && !launch { launch=NR }
+    END { print pixel+0, apply+0, launch+0 }
+' installers/phases/11-services.sh)"
+read -r pixel_line apply_line launch_line <<<"$hermes_route_order"
+if (( pixel_line > 0 && pixel_line < apply_line && apply_line < launch_line )); then
+    pass "Linux phase 11 writes a waiting Hermes route after the Pixel update finishes and before Compose starts"
+else
+    fail "Linux phase 11 waiting Hermes route is not between ods_pixel_install_default_agent and Compose up ($hermes_route_order)"
+fi
+
 assert_grep "installers/macos/install-macos.sh" '--context-length "\$MAX_CONTEXT"' \
     "macOS Hermes patcher receives context length"
 assert_grep "installers/macos/ods-macos.sh" 'ENV_CTX_SIZE:-65536' \

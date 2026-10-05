@@ -174,17 +174,18 @@ Options:
 
 This will remove:
     - ODS service containers
-    - Verified ODS Docker volumes (unless --keep-data)
+    - Verified ODS Docker volumes, the retired Lemonade ones included (unless --keep-data)
+    - The retired ods-lemonade-server image an upgraded AMD install built
     - Installation directory ($INSTALL_DIR)
     - ODS-managed Pixel host services and private configuration
-    - Systemd user services (opencode-web, openclaw timers)
+    - Systemd user services (opencode-web, maintenance timers from older installs)
     - Systemd system services (ods-host-agent, ods-mdns)
     - macOS LaunchAgents (com.ods.host-agent, com.ods.opencode-web, legacy agents)
     - CLI symlinks (/usr/local/bin/ods, ~/.local/bin/ods, legacy /usr/local/bin/ods-cli)
     - Backup directory (~/.ods)
 
 Preserved:
-    - Docker images and shared build cache
+    - Other Docker images and shared build cache
     - On macOS, native Pixel recovery archives and stopped, renamed sandboxes
     - The dedicated macOS Pixel Operations identity, verified before reinstall
 
@@ -334,9 +335,61 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -r)" == *[Mm]icrosoft* ]]; then
     fi
 fi
 
+# Validate Pixel before stopping the model upgrade or changing Windows startup,
+# so a refusal leaves everything as it was. Removal below validates again.
+if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ -f "$SCRIPT_DIR/lib/pixel-uninstall.sh" ]]; then
+        # shellcheck source=lib/pixel-uninstall.sh
+        . "$SCRIPT_DIR/lib/pixel-uninstall.sh"
+        if ! ODS_PIXEL_UNINSTALL_VALIDATE_ONLY=true ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME"; then
+            log_error "Pixel validation failed; nothing was changed"
+            exit 1
+        fi
+    elif [[ -e "$HOME/.config/ods/pixel-managed.json" || -L "$HOME/.config/ods/pixel-managed.json" ]]; then
+        log_error "ODS-managed Pixel marker exists but its uninstall helper is missing; nothing was changed"
+        exit 1
+    fi
+fi
+
+# Stop this installation's background full-model upgrade (bootstrap-upgrade.sh
+# and its download) before anything else changes. It runs detached on macOS,
+# and on Linux without a user systemd session, tracked only by a PID file in
+# the tree being removed. A survivor keeps downloading for up to an hour, can
+# swap models or restart services mid-uninstall, and later rewrites the next
+# installation at the same path. Newer installers make it a process-group
+# leader so the group signal also reaches curl; older ones leave a plain child.
+if command -v pgrep >/dev/null 2>&1; then
+    _ods_upgrade_groups=()
+    while IFS= read -r _ods_upgrade_pid; do
+        [[ -n "$_ods_upgrade_pid" ]] || continue
+        _ods_upgrade_pgid="$(ps -o pgid= -p "$_ods_upgrade_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ "$_ods_upgrade_pgid" == "$_ods_upgrade_pid" ]]; then
+            _ods_upgrade_groups+=("-$_ods_upgrade_pid")
+        else
+            while IFS= read -r _ods_upgrade_child; do
+                [[ -n "$_ods_upgrade_child" ]] && _ods_upgrade_groups+=("$_ods_upgrade_child")
+            done < <(pgrep -P "$_ods_upgrade_pid" 2>/dev/null || true)
+            _ods_upgrade_groups+=("$_ods_upgrade_pid")
+        fi
+    done < <(pgrep -f "$INSTALL_DIR/scripts/bootstrap-upgrade.sh" 2>/dev/null || true)
+    if [[ -n "${_ods_upgrade_groups[0]-}" ]]; then
+        log_info "Stopping the background model upgrade: ${_ods_upgrade_groups[*]}"
+        kill -TERM -- "${_ods_upgrade_groups[@]}" 2>/dev/null || true
+        for _ods_upgrade_wait in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 -- "${_ods_upgrade_groups[@]}" 2>/dev/null || break
+            sleep 0.5
+        done
+        if kill -0 -- "${_ods_upgrade_groups[@]}" 2>/dev/null; then
+            log_info "Background model upgrade still running; sending SIGKILL"
+            kill -KILL -- "${_ods_upgrade_groups[@]}" 2>/dev/null || true
+        fi
+    fi
+    unset _ods_upgrade_groups _ods_upgrade_pid _ods_upgrade_pgid _ods_upgrade_child _ods_upgrade_wait
+fi
+
 # Disable and settle the bound Windows login startup before removing Pixel:
 # a sign-in coordinator must not restart services during their retirement.
-# Lemonade itself and its model library remain installed.
+# The Windows-side runtime files and model library remain installed.
 if [[ -n "${_ods_wsl_retire_helper:-}" ]]; then
     if ! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR"; then
         log_error "Windows startup retirement failed; installation files retained; startup may already be disabled"
@@ -410,7 +463,10 @@ if command -v docker &>/dev/null; then
     # "no configuration file provided" even from the correct install dir.
     # Do not pass -v: Compose would delete selected volumes before our
     # postflight custody check can verify their unchanged identity.
-    compose_down_args=(down --remove-orphans)
+    # A disabled profile is still part of this project and may retain a stopped
+    # container. Include all profiles for cleanup after the installation-wide
+    # ownership preflight; do not start services or delegate volume removal.
+    compose_down_args=(--profile '*' down --remove-orphans)
 
     validate_uninstall_compose "${compose_args[@]}" || {
         log_error "Saved extension recipes changed during uninstall; remaining installation retained."
@@ -424,6 +480,16 @@ if command -v docker &>/dev/null; then
         exit 1
     fi
     rm -f -- "$compose_error_log"
+    # Compose can return success while a stopped container from an older
+    # selected stack survives. Check all project containers against the same
+    # exact installation-path proof used before cleanup, including bind-only
+    # containers that the volume postflight cannot see. Keep the installation
+    # tree for recovery if any remain, even with --keep-data.
+    if ! python3 "$SCRIPT_DIR/scripts/uninstall-compose-volumes.py" postflight-containers \
+        "$INSTALL_DIR" "$volume_snapshot" "$SCRIPT_DIR"; then
+        log_error "Docker container cleanup is incomplete after Pixel or host-service retirement; installation files and data retained for recovery."
+        exit 1
+    fi
     if [[ "$KEEP_DATA" != "true" ]] &&
         ! python3 "$SCRIPT_DIR/scripts/uninstall-compose-volumes.py" complete \
             "$INSTALL_DIR" "$volume_snapshot" "$SCRIPT_DIR"; then
@@ -432,6 +498,21 @@ if command -v docker &>/dev/null; then
     fi
 
     [[ "$KEEP_DATA" == "true" ]] && log_info "Keeping Docker volumes (--keep-data)"
+
+    # The image this installation built for the retired Lemonade runtime; its
+    # Lemonade migration left the record. Nothing runs it now, and Docker
+    # refuses to remove an image that any container still uses. The
+    # uninstall confirmation is the consent. A missing image is the usual case.
+    _ods_lemonade_record="$INSTALL_DIR/data/lemonade-retired-volumes.json"
+    if [[ -f "$_ods_lemonade_record" && ! -L "$_ods_lemonade_record" ]] &&
+        docker image inspect ods-lemonade-server:latest >/dev/null 2>&1; then
+        if docker image rm ods-lemonade-server:latest >/dev/null; then
+            log_ok "Removed the retired Lemonade image ods-lemonade-server:latest"
+        else
+            log_warn "Could not remove the retired image ods-lemonade-server:latest (non-fatal); remove it later with: docker image rm ods-lemonade-server:latest"
+        fi
+    fi
+    unset _ods_lemonade_record
 
     log_ok "Verified Docker cleanup complete"
     log_info "Docker images and shared build cache retained"
@@ -451,6 +532,9 @@ if [[ -d "$_ods_uninstall_runtime_dir" && -S "$_ods_uninstall_runtime_dir/bus" ]
     ods_uninstall_systemctl_user stop ods-model-upgrade.service 2>/dev/null || true
     ods_uninstall_systemctl_user reset-failed ods-model-upgrade.service 2>/dev/null || true
 fi
+# The session-cleanup and memory-shepherd timers are no longer installed; they
+# served the removed legacy OpenClaw extension. Older installs may still have
+# them, so remove them when present.
 for unit in opencode-web.service openclaw-session-cleanup.timer \
             memory-shepherd-workspace.timer memory-shepherd-memory.timer \
             openclaw-session-cleanup.service \

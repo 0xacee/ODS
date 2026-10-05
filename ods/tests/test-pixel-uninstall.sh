@@ -853,6 +853,37 @@ else
     fail "valid managed Portal gateway cleanup failed"
 fi
 
+# ods-uninstall.sh validates Pixel before it changes Windows startup. That pass
+# must accept exactly what removal accepts and must not change anything.
+write_fixture
+if ODS_PIXEL_UNINSTALL_VALIDATE_ONLY=true ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    if [[ -e "$HOME_DIR/.config/ods/pixel-managed.json" \
+        && -e "$SYSTEMD_DIR/openclaw-gateway.service" \
+        && -e "$SYSTEMD_DIR/pixel-ingress.service" \
+        && -e "$ETC_DIR/pixel-agent.env" ]] \
+        && ! grep -Eq '(^| )(stop|disable|kill|mask|daemon-reload|reset-failed)( |$)' "$SYSTEMCTL_LOG" \
+        && ! grep -Eq '^(rm|stop|kill|image rm|volume rm|network rm)( |$)' "$DOCKER_LOG"; then
+        pass "validate-only Pixel uninstall accepts a managed deployment and changes nothing"
+    else
+        fail "validate-only Pixel uninstall changed managed state"
+    fi
+else
+    fail "validate-only Pixel uninstall rejected a valid managed deployment"
+fi
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR" \
+    && [[ ! -e "$HOME_DIR/.config/ods/pixel-managed.json" && ! -e "$SYSTEMD_DIR/openclaw-gateway.service" ]]; then
+    pass "Pixel removal still succeeds after a validate-only pass"
+else
+    fail "Pixel removal failed after a validate-only pass"
+fi
+write_fixture
+printf '%s\n' 'PIXEL_STATUS_FILE=/tmp/drifted-status.json' >>"$ETC_DIR/pixel-agent.env"
+if ODS_PIXEL_UNINSTALL_VALIDATE_ONLY=true ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    fail "validate-only Pixel uninstall accepted drifted protected state"
+else
+    pass "validate-only Pixel uninstall refuses drifted protected state"
+fi
+
 for invalid_gateway in foreign-root unexpected-description; do
     write_fixture
     if [[ "$invalid_gateway" == foreign-root ]]; then

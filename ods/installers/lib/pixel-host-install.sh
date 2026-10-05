@@ -2664,6 +2664,32 @@ ods_pixel_reconcile_promoted_model() {
     return 1
 }
 
+_ods_pixel_initial_unconfigured_marker() {
+    local owner="$1" home="$2"
+    [[ -f "$home/.config/ods/pixel-managed.json" && ! -L "$home/.config/ods/pixel-managed.json" ]] || return 1
+    ods_pixel_run_as_owner "$owner" "$home" python3 - \
+        "$home/.config/ods/pixel-managed.json" "$home/.openclaw/openclaw.json" \
+        "${INSTALL_DIR:?}" "$home" "${PIXEL_SOURCE_REF:?}" <<'PY'
+import json, os, pathlib, re, sys
+marker = json.load(open(sys.argv[1]))
+initial = (
+    set(marker) == {"schema_version", "manager", "state", "initial_active_state",
+                    "install_dir", "pixel_source_ref"}
+    and marker.get("schema_version") == 2 and marker.get("manager") == "ods"
+    and marker.get("state") == "installing" and marker.get("initial_active_state") == "absent"
+    and marker.get("install_dir") == sys.argv[3]
+    and isinstance(marker.get("pixel_source_ref"), str)
+    and re.fullmatch(r"[0-9a-f]{40}", marker["pixel_source_ref"])
+    and marker["pixel_source_ref"] == sys.argv[5]
+)
+raise SystemExit(0 if initial and not os.path.lexists(sys.argv[2]) and not any(
+    os.path.lexists(pathlib.Path(sys.argv[4]) / ".local/share/pixel" / name)
+    for name in ("current", "runtime-attestation.json", ".ods-uninstall-current",
+                 ".ods-uninstall-runtime-attestation")
+) else 1)
+PY
+}
+
 _ods_pixel_reprove_access_marker_if_needed() {
     if [[ -n "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
         _ods_pixel_check_source_transaction "$1"
@@ -3376,17 +3402,9 @@ _ods_pixel_runtime_model_identity() {
     if [[ -n "${EXTERNAL_LLM_URL:-}" ]]; then
         model="${EXTERNAL_LLM_MODEL:-}"
         [[ -n "$model" ]] || return 1
-    elif [[ "${LEMONADE_EXTERNAL:-false}" == true ]]; then
-        # WSL can attach to a Windows-hosted Lemonade server while its Linux
-        # hardware detector correctly reports CPU. Bind Pixel to the served
-        # model, not the stale GGUF selected before the external route.
-        model="${LEMONADE_MODEL:-}"
-        [[ -n "$model" ]] || return 1
-    elif [[ "${GPU_BACKEND:-}" == amd \
-        && "${LLM_BACKEND:-}" == lemonade \
-        && "${AMD_INFERENCE_RUNTIME:-}" == lemonade ]]; then
-        model="${LEMONADE_MODEL:-}"
     fi
+    # llama-server serves the GGUF file name (its --alias) on every runtime,
+    # the Windows Portal's host-native server included.
     [[ -n "$model" ]] || model="${GGUF_FILE:-${LLM_MODEL:-default}}"
     printf '%s\n' "$model"
 }
@@ -3433,6 +3451,10 @@ if path.exists():
 gateway = value.setdefault("gateway", {})
 http = gateway.setdefault("http", {})
 endpoints = http.setdefault("endpoints", {})
+if endpoints.get("chatCompletions") == {"enabled": True}:
+    # Nothing to change. A rewrite would only reorder keys, and a held source
+    # upgrade compares the exact config bytes it recorded before this step.
+    raise SystemExit(0)
 endpoints["chatCompletions"] = {"enabled": True}
 fd, temporary = tempfile.mkstemp(prefix=".openclaw.", dir=path.parent)
 try:
@@ -5065,7 +5087,7 @@ ods_pixel_install_default_agent() {
     [[ "${ENABLE_PIXEL_RUNTIME:-false}" == true ]] || return 0
     local owner home source_root pixel_root plugin_root answers operations_policy extension_catalog extension_manager_unit artifact_promoter_unit workspace_preview_unit openclaw_bin plugin_digest contract_sha256 runtime_budget_status gateway_alias pixel_log
     local candidate_runtime_status reuse_active=false same_verified_source=false same_source_resume=false pixel_gateway_port gateway_port_status
-    local web_search_provider parallel_path="" parallel_digest="" apply_attempt=""
+    local web_search_provider parallel_path="" parallel_digest="" apply_attempt="" initial_access_reproved=false
     # The access coordinator's proof ceremony inspects Pixel Edge's durable
     # transition gate. Start the edge before the host ingress is installed;
     # its transition endpoint is independent of upstream chat readiness, and
@@ -5244,6 +5266,17 @@ ods_pixel_install_default_agent() {
             return 1
         fi
     fi
+    # Only a proven first install may reprove before bootstrap creates its
+    # initial config. Retained and partial releases must resume their durable
+    # transition below before access-mode reproof, as they did previously.
+    if [[ -z "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]] \
+        && _ods_pixel_initial_unconfigured_marker "$owner" "$home" >>"$pixel_log" 2>&1; then
+        if ! _ods_pixel_reprove_access_marker_if_needed "$owner" "$home" "" >>"$pixel_log" 2>&1; then
+            ai_bad "Pixel's initial access marker could not be verified before bootstrap. See $pixel_log."
+            return 1
+        fi
+        initial_access_reproved=true
+    fi
     if ! ods_pixel_run_as_owner "$owner" "$home" "$pixel_root/pixel" bootstrap --apply >>"$pixel_log" 2>&1; then
         ai_bad "Pixel bootstrap failed. See $pixel_log for the exact Pixel error."
         return 1
@@ -5298,9 +5331,11 @@ ods_pixel_install_default_agent() {
         ai_bad "Pixel has a pending update that could not be reverified safely. See $pixel_log before retrying."
         return 1
     fi
-    if ! _ods_pixel_reprove_access_marker_if_needed "$owner" "$home" "$openclaw_bin" >>"$pixel_log" 2>&1; then
-        ai_bad "Pixel's existing access mode could not be reverified before upgrade. See $pixel_log."
-        return 1
+    if [[ "$initial_access_reproved" != true ]]; then
+        if ! _ods_pixel_reprove_access_marker_if_needed "$owner" "$home" "$openclaw_bin" >>"$pixel_log" 2>&1; then
+            ai_bad "Pixel's existing access mode could not be reverified before upgrade. See $pixel_log."
+            return 1
+        fi
     fi
     if _ods_pixel_managed_contract_matches "$owner" "$home" "$contract_sha256"; then
         reuse_active=true
@@ -5449,7 +5484,7 @@ ods_pixel_install_default_agent() {
                 fi
             fi
         else
-            local release_transaction=''
+            local release_transaction='' prove_after_apply=true
             local -a release_arguments=()
             release_transaction="$(_ods_pixel_begin_release_transition "$owner" "$home")" || {
                 ai_bad "Could not acquire the existing Pixel access state for release update; resolve any pending transaction before retrying."
@@ -5459,7 +5494,14 @@ ods_pixel_install_default_agent() {
                 release_arguments=(--ods-release-transaction "$release_transaction")
                 if [[ "$release_transaction" == "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]] \
                     && _ods_pixel_source_upgrade status "$owner" | jq -e '.mode == "sandboxed"' >/dev/null; then
-                    release_arguments=(--ods-model-transaction "$release_transaction")
+                    # Pixel's raw candidate lacks the ODS runtime overlay, including
+                    # the exec-control bind the access proof runs through, so a proof
+                    # here always fails. Apply it under Pixel's strict Sandbox
+                    # verifier, as a first install does. The held source transaction
+                    # is proved after the overlay (_ods_pixel_restart_gateway_and_verify)
+                    # and again before release (_ods_pixel_source_upgrade finish).
+                    release_arguments=()
+                    prove_after_apply=false
                 fi
             fi
             apply_attempt="$(ods_pixel_run_as_owner "$owner" "$home" \
@@ -5469,7 +5511,8 @@ ods_pixel_install_default_agent() {
                 ods_pixel_run_as_owner "$owner" "$home" env \
                     PATH="$home/.openclaw/.ods-exec-control:$PATH" \
                     "$pixel_root/pixel" apply --confirm "${release_arguments[@]}" </dev/null &&
-                _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"
+                { [[ "$prove_after_apply" == false ]] \
+                    || _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"; }
             } >"$apply_attempt" 2>&1; then
                 ods_pixel_run_as_owner "$owner" "$home" cat "$apply_attempt" >>"$pixel_log" 2>&1 || return 1
             else
@@ -5482,7 +5525,8 @@ ods_pixel_install_default_agent() {
                         ods_pixel_run_as_owner "$owner" "$home" env \
                             PATH="$home/.openclaw/.ods-exec-control:$PATH" \
                             "$pixel_root/pixel" apply --confirm "${release_arguments[@]}" </dev/null &&
-                        _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"
+                        { [[ "$prove_after_apply" == false ]] \
+                            || _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"; }
                     } >"$apply_attempt" 2>&1; then
                         ods_pixel_run_as_owner "$owner" "$home" cat "$apply_attempt" >>"$pixel_log" 2>&1 || true
                         ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$apply_attempt" || true

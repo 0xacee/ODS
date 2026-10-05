@@ -75,11 +75,31 @@ verified before fresh runtime proof and release. Use the reviewed installer or
 uninstaller that understands this retained coordinator; an older uninstaller
 may correctly refuse it.
 
-After that boundary, recovery is **resume of the same candidate only**. The
-installer does not claim to reverse container, environment, package or native
-service changes. A later failure leaves admission held and requires finishing
-that update. A lost reply after completion can be replayed without applying the
-release again.
+After that boundary, recovery goes **forward only**. The installer does not
+claim to reverse container, environment, package or native service changes. A
+later failure leaves admission held and requires finishing that update. A lost
+reply after completion can be replayed without applying the release again.
+
+Finishing it means re-running either the same candidate or a **corrected
+installer for the same update**, which takes it over. A takeover is for an
+update whose own candidate fails every time, so resuming cannot complete it. It
+is accepted only when all of these hold:
+- the held plan is fully applied;
+- its model transaction still holds admission;
+- the installation tree is exactly that plan's result;
+- the protected coordinator still matches its record;
+- the corrected installer requests the same Pixel source and the same original
+  identity.
+
+The new plan keeps the same hold. It starts from the applied tree and is itself
+past the boundary. The replaced plan stays as content-addressed evidence. After
+copying, the installer installs the corrected coordinator under the hold before
+any other step runs. The update then completes, with its fresh proofs, like any
+resumed one.
+
+A corrected installer cannot take over a Full Access update whose owner
+configuration bytes changed after the transaction started. That update needs
+manual recovery.
 
 Once a transaction is fully released, the next update captures a new baseline,
 including owner-installed extensions. A historical completed update does not

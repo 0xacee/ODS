@@ -70,6 +70,14 @@ class FakeDocker:
                 row for row in self.containers
                 if "--all" in args or row.get("State", {}).get("Status") != "exited"
             ]
+            project_filter = next((arg.split("=", 2)[2] for arg in args
+                                   if arg.startswith("label=com.docker.compose.project=")), None)
+            if project_filter is not None:
+                visible = [row for row in visible if row["Config"]["Labels"].get(
+                    "com.docker.compose.project") == project_filter]
+            elif "label=com.docker.compose.project" in args:
+                visible = [row for row in visible if "com.docker.compose.project" in
+                           row["Config"]["Labels"]]
             volume_filter = next((arg.split("=", 1)[1] for arg in args
                                   if arg.startswith("volume=")), None)
             if volume_filter is not None:
@@ -188,6 +196,58 @@ class UninstallVolumeTests(unittest.TestCase):
         self.assertEqual(set(self.fake.removed), {
             "ods_perplexica-data", "ods_perplexica-uploads",
         })
+
+    def test_bind_only_stopped_container_blocks_uninstall_postflight(self):
+        self.fake.volumes = {}
+        self.fake.containers[0]["State"] = {"Status": "exited"}
+        self.fake.containers[0]["Config"]["Labels"]["com.docker.compose.service"] = "open-webui"
+        self.fake.containers[0]["Mounts"] = [{
+            "Type": "bind", "Source": str(self.root / "data/open-webui"),
+            "Destination": "/app/backend/data",
+        }]
+        MODULE.preflight(self.root, self.snapshot, ["-f", "docker-compose.base.yml"])
+        with self.assertRaisesRegex(ValueError, "ODS containers remain after Compose cleanup"):
+            MODULE.postflight_containers(self.root, self.snapshot)
+        self.fake.containers = []
+        MODULE.postflight_containers(self.root, self.snapshot)
+
+    def test_keep_data_still_checks_owned_containers_after_down(self):
+        self.fake.containers[0]["State"] = {"Status": "exited"}
+        MODULE.preflight(self.root, self.snapshot, [], keep_data=True)
+        with self.assertRaisesRegex(ValueError, "ODS containers remain after Compose cleanup"):
+            MODULE.postflight_containers(self.root, self.snapshot)
+        self.fake.containers = []
+        MODULE.postflight_containers(self.root, self.snapshot)
+
+    def test_container_ownership_drift_blocks_postflight(self):
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.fake.containers[0]["Config"]["Labels"][
+            "com.docker.compose.project.working_dir"] = "/other/ods"
+        with self.assertRaisesRegex(ValueError, "another installation"):
+            MODULE.postflight_containers(self.root, self.snapshot)
+
+    def test_old_project_label_is_caught_before_uninstall_mutation(self):
+        self.fake.containers[0]["Config"]["Labels"]["com.docker.compose.project"] = "ods-old"
+        self.fake.volumes = {}
+        with self.assertRaisesRegex(ValueError, "another project still reference"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertEqual(self.snapshot.stat().st_size, 0)
+
+    def test_project_label_change_after_preflight_blocks_postflight(self):
+        self.fake.volumes = {}
+        self.fake.containers[0]["Mounts"] = []
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.fake.containers[0]["Config"]["Labels"]["com.docker.compose.project"] = "ods-old"
+        with self.assertRaisesRegex(ValueError, "ODS containers remain after Compose cleanup"):
+            MODULE.postflight_containers(self.root, self.snapshot)
+
+    def test_unrelated_compose_project_does_not_block_postflight(self):
+        MODULE.preflight(self.root, self.snapshot, [])
+        other = self.fake._container(Path("/other/ods"))
+        other["Id"] = "b" * 64
+        other["Config"]["Labels"]["com.docker.compose.project"] = "other"
+        self.fake.containers = [other]
+        MODULE.postflight_containers(self.root, self.snapshot)
 
     def test_volume_replacement_after_preflight_is_not_deleted(self):
         MODULE.preflight(self.root, self.snapshot, [])
@@ -317,6 +377,60 @@ class UninstallVolumeTests(unittest.TestCase):
             MODULE.preflight(self.root, self.snapshot, [])
         self.assertFalse(self.fake.removed)
 
+    def interrupt_after_compose_down(self):
+        """A purge preflight passed, Compose down removed the containers, then
+        the uninstall stopped before volume cleanup (e.g. a stray container)."""
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.assertTrue((self.root / MODULE.RESUME_RECORD).is_file())
+        self.assertEqual((self.root / MODULE.RESUME_RECORD).stat().st_mode & 0o777, 0o600)
+        self.fake.containers = []
+        retry = Path(self.temp.name) / "retry-snapshot.json"
+        retry.touch()
+        return retry
+
+    def test_interrupted_purge_resumes_from_verified_record(self):
+        retry = self.interrupt_after_compose_down()
+        MODULE.preflight(self.root, retry, [])
+        self.assertEqual(set(json.loads(retry.read_text())["volumes"]), set(self.fake.volumes))
+        MODULE.complete(self.root, retry)
+        self.assertEqual(self.fake.volumes, {})
+        self.assertEqual(self.fake.foreign, {"ods-pixel-retired-research", "ods-unrelated"})
+
+    def test_interrupted_purge_without_record_still_refuses(self):
+        retry = self.interrupt_after_compose_down()
+        (self.root / MODULE.RESUME_RECORD).unlink()
+        with self.assertRaisesRegex(ValueError, "--keep-data"):
+            MODULE.preflight(self.root, retry, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_resume_refuses_a_volume_whose_identity_changed(self):
+        retry = self.interrupt_after_compose_down()
+        self.fake.volumes["ods_perplexica-data"]["CreatedAt"] = "2026-10-02T00:00:00Z"
+        with self.assertRaisesRegex(ValueError, "no container proves"):
+            MODULE.preflight(self.root, retry, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_resume_refuses_a_volume_with_a_foreign_consumer(self):
+        retry = self.interrupt_after_compose_down()
+        self.fake.foreign_consumers["ods_perplexica-data"] = ["b" * 64]
+        with self.assertRaisesRegex(ValueError, "outside this installation"):
+            MODULE.preflight(self.root, retry, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_resume_record_from_another_installation_is_rejected(self):
+        retry = self.interrupt_after_compose_down()
+        path = self.root / MODULE.RESUME_RECORD
+        record = json.loads(path.read_text())
+        record["installDir"] = "/other/ods"
+        path.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            MODULE.preflight(self.root, retry, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_keep_data_preflight_writes_no_resume_record(self):
+        MODULE.preflight(self.root, self.snapshot, [], keep_data=True)
+        self.assertFalse((self.root / MODULE.RESUME_RECORD).exists())
+
     def test_unknown_same_prefix_volume_is_retained_and_reported(self):
         name = "ods_obsolete-unknown-probe"
         self.fake.volumes[name] = {
@@ -331,6 +445,78 @@ class UninstallVolumeTests(unittest.TestCase):
         self.assertIn(name, self.fake.volumes)
         self.assertNotIn(name, self.fake.removed)
         self.assertIn(name, diagnostic.getvalue())
+
+    RETIRED = ("lemonade-cache", "lemonade-llama", "lemonade-recipe")
+
+    def add_retired_lemonade_volumes(self):
+        """The Lemonade-era AMD overlay's volumes, which no container mounts
+        after the llama.cpp upgrade."""
+        for key in self.RETIRED:
+            self.fake.volumes[f"ods_{key}"] = self.fake._volume(f"ods_{key}", key)
+        return {f"ods_{key}" for key in self.RETIRED}
+
+    def write_retired_record(self, install_dir=None, keys=RETIRED):
+        path = self.root / "data/lemonade-retired-volumes.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "schemaVersion": 1, "installDir": str(install_dir or self.root),
+            "volumeKeys": list(keys),
+        }), encoding="utf-8")
+
+    def test_recorded_retired_lemonade_volumes_are_purged(self):
+        retired = self.add_retired_lemonade_volumes()
+        self.write_retired_record()
+        MODULE.preflight(self.root, self.snapshot, [])
+        captured = json.loads(self.snapshot.read_text(encoding="utf-8"))
+        self.assertTrue(retired <= set(captured["volumes"]))
+        # Completion re-checks trustedUsed against disabled recipes only.
+        self.assertEqual(captured["trustedUsed"], ["perplexica-data", "perplexica-uploads"])
+        self.fake.containers = []
+        MODULE.complete(self.root, self.snapshot)
+        self.assertEqual(self.fake.volumes, {})
+        self.assertTrue(retired <= set(self.fake.removed))
+        self.assertEqual(self.fake.foreign, {"ods-pixel-retired-research", "ods-unrelated"})
+
+    def test_unrecorded_retired_lemonade_volume_is_not_deleted(self):
+        self.add_retired_lemonade_volumes()
+        with self.assertRaisesRegex(ValueError, "retired Lemonade volume this installation did not record"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertFalse(self.fake.removed)
+        self.assertEqual(self.snapshot.stat().st_size, 0)
+
+    def test_retired_record_is_read_only_when_retired_volumes_exist(self):
+        self.write_retired_record(install_dir="/other/ods")
+        # Nothing to prove: a stale record does not block the uninstall.
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.add_retired_lemonade_volumes()
+        with self.assertRaisesRegex(ValueError, "does not belong to this installation"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_retired_record_cannot_name_other_volumes(self):
+        self.add_retired_lemonade_volumes()
+        self.write_retired_record(keys=self.RETIRED + ("perplexica-data",))
+        with self.assertRaisesRegex(ValueError, "does not belong to this installation"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_retired_volume_with_a_foreign_consumer_is_not_deleted(self):
+        self.add_retired_lemonade_volumes()
+        self.write_retired_record()
+        self.fake.foreign_consumers["ods_lemonade-cache"] = ["b" * 64]
+        with self.assertRaisesRegex(ValueError, "outside this installation"):
+            MODULE.preflight(self.root, self.snapshot, [])
+        self.assertFalse(self.fake.removed)
+
+    def test_retired_volume_recreated_after_preflight_is_not_deleted(self):
+        self.add_retired_lemonade_volumes()
+        self.write_retired_record()
+        MODULE.preflight(self.root, self.snapshot, [])
+        self.fake.volumes["ods_lemonade-llama"]["CreatedAt"] = "2026-10-02T00:00:00Z"
+        self.fake.containers = []
+        with self.assertRaisesRegex(ValueError, "changed during uninstall"):
+            MODULE.complete(self.root, self.snapshot)
+        self.assertFalse(self.fake.removed)
 
 
 if __name__ == "__main__":

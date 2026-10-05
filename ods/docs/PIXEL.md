@@ -15,8 +15,8 @@ The rollout is experimental: Hermes, OpenCode, Open WebUI and the other ODS
 applications remain available in parallel while Pixel matures. This integration
 does not require their removal or a Pixel-only core download. Hermes remains
 available; the macOS installer disables it while native Pixel is selected.
-OpenCode and deprecated OpenClaw remain separately selectable. Pixel's
-capability and model-flexibility goals are unchanged.
+OpenCode remains separately selectable. Pixel's capability and
+model-flexibility goals are unchanged.
 
 Pixel does not maintain a model allowlist and ODS does not block chat or tool
 use behind a "Pixel-ready" verdict. Every model or remote provider that is
@@ -33,7 +33,7 @@ retaining the same mechanical authority boundaries, cancellation, receipts,
 verification, and rollback. A small model may need shorter tasks, more focused
 recovery turns, or produce less capable results than a larger model, but the UI
 must remain usable and honest about those limits. ODS-managed cloud, hybrid,
-local, and external Lemonade routes all bind Pixel through the same
+local, and external OpenAI-compatible routes all bind Pixel through the same
 authenticated LiteLLM gateway used by other ODS consumers. Gateway readiness
 proves that the route is callable; it does not claim that every underlying
 model has equal intelligence or tool-use skill.
@@ -104,7 +104,7 @@ The Linux installer selects Pixel on:
 - Ubuntu 24.04/26.04 LTS or Debian 12;
 - Linux with `systemd` as PID 1;
 - a native Linux host or WSL2 (WSL1 is rejected); and
-- an ODS-managed local, cloud, hybrid, Lemonade, or external OpenAI-compatible model route.
+- an ODS-managed local, cloud, hybrid, or external OpenAI-compatible model route.
 
 ODS supports more platforms than this Linux path. The native Windows PowerShell
 installer and other Linux distributions use Hermes. Docker Desktop's WSL2
@@ -416,8 +416,9 @@ Using the Dashboard Models page or `ods model swap <tier>` keeps the stable
 alias while transactionally updating Pixel's concrete-model display metadata,
 context window, output limit, reasoning capability, and model-family
 compatibility policy after the new runtime and downstream routes pass their
-proofs. Cloud, hybrid, and external Lemonade modes can change the route behind
-the same alias without teaching Pixel a provider-specific endpoint. The Pixel
+proofs. Cloud, hybrid, and external OpenAI-compatible routes can change the
+route behind the same alias without teaching Pixel a provider-specific
+endpoint. The Pixel
 gateway is restarted and verified before the transaction commits. The public
 Open WebUI identity remains `portal/default` throughout. Existing clients may
 continue to request the legacy `pixel/default` API alias; it is not listed for

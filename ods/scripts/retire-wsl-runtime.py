@@ -18,8 +18,25 @@ sys.path.insert(0, str(SOURCE / 'extensions/services/dashboard-api'))
 from env_values import parse_env_value
 from model_switchboard import wsl_lemonade
 
-_KEYS = {'LEMONADE_HOST_TRANSPORT', 'LEMONADE_BASE_URL', 'LEMONADE_CONTAINER_BASE_URL',
+# The Lemonade migration writes the round-F keys. The WSL bridge
+# (bin/model_switchboard) still reads the Lemonade-era names, so the bridge
+# gets both, filled from whichever the .env holds (compatibility, one release).
+_BRIDGE_ALIASES = {
+    'ODS_HOST_LLM_TRANSPORT': 'LEMONADE_HOST_TRANSPORT',
+    'NATIVE_LLM_BASE_URL': 'LEMONADE_BASE_URL',
+    'NATIVE_LLM_CONTAINER_BASE_URL': 'LEMONADE_CONTAINER_BASE_URL',
+}
+_KEYS = {*_BRIDGE_ALIASES, *_BRIDGE_ALIASES.values(),
          'AMD_INFERENCE_PORT', 'ODS_WINDOWS_SYSTEM_DIRECTORY', 'ODS_WSL_STATE_ROOT'}
+
+
+def _with_bridge_aliases(values: dict) -> dict:
+    for key, legacy in _BRIDGE_ALIASES.items():
+        if values.get(key) and not values.get(legacy):
+            values[legacy] = values[key]
+        elif values.get(legacy) and not values.get(key):
+            values[key] = values[legacy]
+    return values
 
 
 def _owner(root: Path) -> None:
@@ -54,7 +71,7 @@ def _environment(root: Path) -> dict:
         key, separator, value = line.partition('=')
         if separator and key.strip() in _KEYS:
             values[key.strip()] = parse_env_value(value)
-    return values
+    return _with_bridge_aliases(values)
 
 
 def retire(install_dir: Path, *, validate_only: bool = False) -> dict:

@@ -254,14 +254,16 @@ def test_missing_cache_resolves_saved_selection_fail_closed(tmp_path, monkeypatc
         assert kwargs['env']['WHISPER_ACCELERATION'] == 'cpu'
         for key in ('EXTERNAL_LLM_URL', 'ODS_SKIP_GPU_OVERLAYS', 'ODS_SKIP_GPU_OVERLAYS_FOR'):
             assert kwargs['env'][key] == values.get(key, '')
-        assert kwargs['env']['LEMONADE_EXTERNAL'] == ''
+        assert kwargs['env']['NATIVE_LLM_BASE_URL'] == ''
+        assert kwargs['env']['AMD_INFERENCE_BACKEND'] == ''
         assert 'UNRELATED' not in kwargs['env'] and 'BASH_ENV' not in kwargs['env']
         if fault == 'resolver-error': raise subprocess.CalledProcessError(1, command)
         if fault == 'resolver-timeout': raise subprocess.TimeoutExpired(command, 30)
         return SimpleNamespace(stdout='' if fault == 'empty' else
             '--bad' if fault == 'flags' else '-f base.yaml -f native.yaml')
     monkeypatch.setattr(module.subprocess, 'run', run)
-    process_env = {'GPU_BACKEND': 'nvidia', 'LEMONADE_EXTERNAL': 'true',
+    process_env = {'GPU_BACKEND': 'nvidia', 'NATIVE_LLM_BASE_URL': 'http://stale:8080',
+        'AMD_INFERENCE_BACKEND': 'rocm',
         'EXTERNAL_LLM_URL': 'http://stale:1234', 'ODS_SKIP_GPU_OVERLAYS': 'stale',
         'ODS_SKIP_GPU_OVERLAYS_FOR': 'stale'}
     successes = (None, 'none', 'arc', 'suppressed-env', 'legacy-skip')
