@@ -88,7 +88,7 @@ Windows: open a **normal PowerShell window** (not "Run as administrator"), paste
 2. Offers to enable WSL2 and install Docker Desktop with winget. Windows asks for administrator permission, then **one restart**; setup continues by itself after you sign in again.
 3. Offers to download Ubuntu 24.04 and asks you, in PowerShell, for a new Ubuntu username and password.
 4. Starts Docker Desktop and checks that it is connected to Ubuntu. If not, it shows the one setting to turn on in Docker Desktop and continues as soon as it works.
-5. Installs ODS inside Ubuntu with **`--pixel --no-hermes`**. When Ubuntu asks for your `[sudo] password`, type the Ubuntu password; nothing appears while you type.
+5. Installs ODS inside Ubuntu with **`--pixel --no-hermes`**. A rerun leaves out `--no-hermes`, so a Hermes you added from Extensions stays on. When Ubuntu asks for your `[sudo] password`, type the Ubuntu password; nothing appears while you type.
 6. Verifies Pixel and Portal, then opens Portal in your browser and adds an **ODS Portal** shortcut to your desktop.
 
 Each step asks before changing anything and stops with instructions if it cannot finish; rerun the same command after fixing it. There is no fallback to Hermes or the native Windows installer. On NVIDIA machines, update the Windows driver to 570 or newer first. To use an existing distribution, add `-Distro <name>` (names from `wsl -l -v`).

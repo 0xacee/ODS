@@ -431,6 +431,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   present.
 
 ### Fixed
+- Rerunning `install.ps1` on Windows (an update) no longer turns off Hermes
+  Agent that was added from the Extensions Library. Windows setup passed
+  `--no-hermes` on every run, so the rerun disabled Hermes and its proxy and
+  Compose removed both containers. Only a new installation (no `.env` yet)
+  gets the flag now; a rerun keeps the current choice, and `-NoHermes` turns
+  Hermes off explicitly.
 - After an update of a Pixel installation, adding Hermes back from the
   Extensions Library no longer fails with "Host agent failed to start
   extension." The Pixel source update runs as root and set only the owner of
