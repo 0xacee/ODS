@@ -747,6 +747,28 @@ class TestGetAllServices:
         assert ok.status == "healthy"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("backend", "expected"), [("external", "not_deployed"), ("llama-server", "down")])
+    async def test_api_mode_reports_the_services_it_turns_off_as_not_deployed(self, monkeypatch, backend, expected):
+        # Fleet, Strixy API mode: model-router (off by design) counted as a
+        # core service offline, "6/7" with the API up.
+        monkeypatch.setattr("helpers.load_extension_manifests", lambda *args, **kwargs: ({}, [], []))
+        monkeypatch.setattr("helpers.LLM_BACKEND", backend)
+        monkeypatch.setattr("helpers.SERVICES", {"model-router": {
+            "name": "Model Router", "port": 9099, "external_port": 9099, "health": "/health", "host": "model-router"}})
+        probed = []
+
+        async def fake_health(sid, cfg):
+            probed.append(sid)
+            return ServiceStatus(id=sid, name=cfg["name"], port=cfg["port"],
+                                 external_port=cfg["external_port"], status="down")
+
+        monkeypatch.setattr("helpers.check_service_health", fake_health)
+        monkeypatch.setattr("helpers.request_agent_json", AsyncMock(side_effect=ValueError("no agent")))
+        result = await get_all_services()
+        assert [item.status for item in result] == [expected]
+        assert probed == ([] if backend == "external" else ["model-router"])
+
+    @pytest.mark.asyncio
     async def test_empty_services_returns_empty(self, monkeypatch):
         monkeypatch.setattr("helpers.load_extension_manifests", lambda *args, **kwargs: ({}, [], []))
         monkeypatch.setattr("helpers.SERVICES", {})
