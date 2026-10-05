@@ -25,7 +25,8 @@ function Get-ODSNativeModelSelection {
 function Stop-ODSOpenCodeRuntime { $script:Calls += 'stop-opencode' }
 function Start-ODSOpenCodeRuntime { $script:Calls += 'start-opencode'; return $true }
 function Stop-NativeInferenceServer { $script:Calls += 'stop-model' }
-function Start-NativeInferenceServer { $script:Calls += 'start-model' }
+$script:StartFails = $false
+function Start-NativeInferenceServer { $script:Calls += 'start-model'; if ($script:StartFails) { throw 'llama-server served another model' } }
 function Get-ODSRunningComposeServices { param($ComposeFlags) return @('dashboard') }
 function Invoke-ODSDockerCompose { param($InstallDir, $ComposeFlags, $ComposeArgs) $script:Calls += 'compose'; return 0 }
 function Invoke-BootstrapUpgradeResume { $script:Calls += 'bootstrap' }
@@ -33,8 +34,10 @@ function Invoke-Agent { param($Action) $script:Calls += "agent-$Action" }
 function Write-AI { param($Message) }
 function Write-AISuccess { param($Message) }
 function Write-AIWarn { param($Message) }
+$script:Errors = @()
+function Write-AIError { param($Message) $script:Errors += $Message }
 function Assert-True { param($Value, $Message) if (-not $Value) { throw $Message } }
-foreach ($backend in @('llama-server', 'lemonade')) {
+foreach ($backend in @('llama-server')) {
     $script:Backend = $backend
     foreach ($failure in @('SSD missing', 'Artifact hash changed', 'Runtime flags unsupported')) {
         $script:Calls = @(); $script:Failure = $failure
@@ -46,10 +49,16 @@ foreach ($backend in @('llama-server', 'lemonade')) {
     Invoke-Restart
     Assert-True (($script:Calls -join ',') -eq 'verify,stop-opencode,stop-model,start-model,compose,agent-restart,start-opencode,bootstrap') 'Restart did not preserve verification/stop/start order'
 }
+# A model that fails its proof is reported; the rest of the stack restarts.
+$script:Calls = @(); $script:Failure = ''; $script:StartFails = $true
+Invoke-Restart
+Assert-True (($script:Calls -join ',') -eq 'verify,stop-opencode,stop-model,start-model,compose,agent-restart,start-opencode,bootstrap') 'A failed native start stopped the rest of the restart'
+Assert-True (($script:Errors -join ' ') -match 'Native llama-server did not start: llama-server served another model') 'A failed native start was not reported'
+$script:StartFails = $false
 $script:Backend = 'none'; $script:Calls = @(); $script:Failure = 'No native model should be required'
 Invoke-Restart
 Assert-True ($script:Calls -notcontains 'verify' -and $script:Calls -notcontains 'stop-model') 'Container-only restart required a native model'
 $script:Backend = 'llama-server'; $script:Calls = @()
 Invoke-Restart -Service 'dashboard'
 Assert-True (($script:Calls -join ',') -eq 'compose') 'An unrelated service restart touched native inference'
-Write-Host '[PASS] Windows restart verifies artifacts before stopping either native backend; container and service branches preserved'
+Write-Host '[PASS] Windows restart verifies artifacts before stopping native llama-server, reports a failed start without blocking the stack; container and service branches preserved'

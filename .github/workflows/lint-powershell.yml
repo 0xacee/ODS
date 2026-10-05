@@ -151,9 +151,19 @@ jobs:
           ./tests/contracts/test-windows-portal-model-control.ps1
           ./tests/contracts/test-windows-portal-llama-migration.ps1
 
-      - name: Windows Lemonade Task Cleanup Contract
+      - name: Windows Native llama-server (non-Portal) and Lemonade Retirement Contracts (PowerShell 7)
+        if: runner.os == 'Windows'
         shell: pwsh
-        run: ./tests/contracts/test-windows-lemonade-task-cleanup.ps1
+        run: |
+          ./tests/contracts/test-windows-native-llama-legacy.ps1
+          ./tests/contracts/test-windows-native-lemonade-retire.ps1
+
+      - name: Windows Native llama-server (non-Portal) and Lemonade Retirement Contracts (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          ./tests/contracts/test-windows-native-llama-legacy.ps1
+          ./tests/contracts/test-windows-native-lemonade-retire.ps1
 
       - name: Windows Hermes Config Runtime Contract
         shell: pwsh
