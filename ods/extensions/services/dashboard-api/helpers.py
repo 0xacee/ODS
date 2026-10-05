@@ -1058,18 +1058,16 @@ async def check_service_health(
     )
 
 
-# API mode switches these local-inference services off on purpose
-# (docker-compose.external-llm.yml); llama-server's entry is the API itself.
-_API_MODE_OFF_SERVICES = frozenset({"model-router"})
+def _switched_off_status(service_id: str, config: dict):
+    """An awaitable not-deployed status for a service the install switched off, else None.
 
-
-def _api_mode_off_status(service_id: str, config: dict):
-    """An awaitable not-deployed status for a service API mode turns off, else None.
-
-    Probing it gave a DNS error whose text varies by platform, so Windows
-    counted it as a core service offline (fleet, Strixy: "6/7" with the API up).
+    The Compose resolver leaves Open WebUI out when ENABLE_OPEN_WEBUI is not
+    "true" (docker-compose.gateway-only.yml). Probing it then failed on name
+    resolution, and only two exact DNS error texts count as not deployed;
+    Docker in WSL words it differently, so Windows counted a core service
+    offline (fleet, Strixy: "6/7 core services online").
     """
-    if LLM_BACKEND != "external" or service_id not in _API_MODE_OFF_SERVICES:
+    if service_id != "open-webui" or (read_live_env_value("ENABLE_OPEN_WEBUI") or "true").strip().lower() == "true":
         return None
 
     async def not_deployed():
@@ -1101,7 +1099,7 @@ async def get_all_services() -> list[ServiceStatus]:
                 service_configs.setdefault(service_id, current_optional[service_id])
             else:
                 service_configs.pop(service_id, None)
-    tasks = [_api_mode_off_status(sid, cfg) or check_service_health(sid, cfg)
+    tasks = [_switched_off_status(sid, cfg) or check_service_health(sid, cfg)
              for sid, cfg in service_configs.items()]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 

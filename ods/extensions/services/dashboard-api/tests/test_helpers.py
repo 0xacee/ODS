@@ -747,14 +747,18 @@ class TestGetAllServices:
         assert ok.status == "healthy"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("backend", "expected"), [("external", "not_deployed"), ("llama-server", "down")])
-    async def test_api_mode_reports_the_services_it_turns_off_as_not_deployed(self, monkeypatch, backend, expected):
-        # Fleet, Strixy API mode: model-router (off by design) counted as a
-        # core service offline, "6/7" with the API up.
+    @pytest.mark.parametrize(("flag", "expected"), [
+        ("false", "not_deployed"), ("FALSE", "not_deployed"), ("true", "down"), ("", "down"),
+    ])
+    async def test_open_webui_switched_off_by_its_flag_reads_not_deployed(self, monkeypatch, flag, expected):
+        # Fleet, Strixy: with ENABLE_OPEN_WEBUI=false there is no Open WebUI
+        # container; its probe failed on name resolution worded the WSL way and
+        # counted as a core service offline ("6/7" with everything up).
         monkeypatch.setattr("helpers.load_extension_manifests", lambda *args, **kwargs: ({}, [], []))
-        monkeypatch.setattr("helpers.LLM_BACKEND", backend)
-        monkeypatch.setattr("helpers.SERVICES", {"model-router": {
-            "name": "Model Router", "port": 9099, "external_port": 9099, "health": "/health", "host": "model-router"}})
+        monkeypatch.setattr("helpers.read_live_env_value",
+                            lambda key, default="": flag if key == "ENABLE_OPEN_WEBUI" else default)
+        monkeypatch.setattr("helpers.SERVICES", {"open-webui": {
+            "name": "Open WebUI (Chat)", "port": 8080, "external_port": 3000, "health": "/health", "host": "open-webui"}})
         probed: list[str] = []
 
         async def fake_health(sid, cfg):
@@ -766,7 +770,7 @@ class TestGetAllServices:
         monkeypatch.setattr("helpers.request_agent_json", AsyncMock(side_effect=ValueError("no agent")))
         result = await get_all_services()
         assert [item.status for item in result] == [expected]
-        assert probed == ([] if backend == "external" else ["model-router"])
+        assert probed == ([] if expected == "not_deployed" else ["open-webui"])
 
     @pytest.mark.asyncio
     async def test_empty_services_returns_empty(self, monkeypatch):
