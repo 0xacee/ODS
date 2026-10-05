@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import pwd
 import re
 import stat
 import socket
@@ -642,12 +643,18 @@ class SourceUpgrade:
     state_uid is explicit for isolated unprivileged tests. Production callers
     use root-owned state and a non-root installation owner. The callbacks must
     check the actual coordinator, never a stale verified.json or a caller bool.
+    owner_gid defaults to the owner's primary group; tests may pass another
+    group the test user belongs to.
     """
 
-    def __init__(self, state, install, owner_uid, *, state_uid=0):
+    def __init__(self, state, install, owner_uid, *, state_uid=0, owner_gid=None):
         self.state = Path(state)
         self.install = Path(install)
         self.uid = owner_uid
+        # Root writes every published path. A fresh install's owner-run copy
+        # leaves them in the owner's primary group, so published paths must
+        # not keep root's group (the host agent then cannot replace them).
+        self.gid = pwd.getpwuid(owner_uid).pw_gid if owner_gid is None else owner_gid
         self.state_uid = state_uid
         directory(self.state, state_uid, private=True)
         directory(self.install, owner_uid)
@@ -1123,7 +1130,7 @@ class SourceUpgrade:
                 os.close(fd)
                 fd = child
                 if created:
-                    os.fchown(fd, self.uid, -1)
+                    os.fchown(fd, self.uid, self.gid)
                     os.fsync(fd)
                 info = os.fstat(fd)
                 if info.st_uid != self.uid or info.st_mode & 0o022:
@@ -1153,7 +1160,7 @@ class SourceUpgrade:
                     with os.fdopen(output, "wb") as handle:
                         handle.write(raw)
                         handle.flush()
-                        os.fchown(handle.fileno(), self.uid, -1)
+                        os.fchown(handle.fileno(), self.uid, self.gid)
                         os.fchmod(handle.fileno(), target["mode"])
                         os.fsync(handle.fileno())
                     # Recheck immediately before publication; concurrent owner

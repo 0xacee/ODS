@@ -3,6 +3,7 @@ import importlib.util
 import fcntl
 import os
 import json
+import pwd
 import re
 import socket
 import subprocess
@@ -289,6 +290,32 @@ def test_mode_and_new_nested_directory_preserved_on_rollback(trees):
     manager.publish(verify, rollback=True)
     assert not (old / "bin/nested/new.py").exists()
     assert (old / "bin/a.py").stat().st_mode & 0o777 == 0o500
+
+
+def test_published_paths_take_the_owner_primary_group(trees):
+    """Root publishes the update. Setting only the owner left new files and
+    directories in root's group; a fresh install's owner-run copy leaves them
+    in the owner's primary group, and the host agent keeps a file's group when
+    it rewrites one (a non-root chown to root's group fails)."""
+    manager, old, new, identity = trees
+    uid = os.getuid()
+    assert upgrade.SourceUpgrade(manager.state, old, uid, state_uid=uid).gid == pwd.getpwuid(uid).pw_gid
+    # Unprivileged stand-in for root: this process creates the payloads in
+    # its own group, and the owner's group is another one it may assign.
+    creator = os.getegid()
+    owner_group = next((group for group in os.getgroups() if group != creator), None)
+    if owner_group is None:
+        pytest.skip("needs a supplementary group other than the creating group")
+    manager = upgrade.SourceUpgrade(manager.state, old, uid, state_uid=uid, owner_gid=owner_group)
+    (new / "extensions/services/hermes").mkdir(parents=True)
+    (new / "extensions/services/hermes/compose.yaml.disabled").write_text("services: {}\n")
+    verify, _ = held(manager, new, identity)
+    manager.publish(verify)
+    for path in ("bin/a.py", "bin/added.py", "extensions/services", "extensions/services/hermes",
+                 "extensions/services/hermes/compose.yaml.disabled"):
+        assert (old / path).stat().st_gid == owner_group, path
+    # Paths the update does not change are not rewritten.
+    assert (old / "bin/removed.py").stat().st_gid == creator
 
 
 def test_root_release_gate_requires_exact_completed_source(tmp_path, monkeypatch):

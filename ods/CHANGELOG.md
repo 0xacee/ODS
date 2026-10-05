@@ -431,6 +431,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   present.
 
 ### Fixed
+- After an update of a Pixel installation, adding Hermes back from the
+  Extensions Library no longer fails with "Host agent failed to start
+  extension." The Pixel source update runs as root and set only the owner of
+  the files it replaced, so they kept root's group, and the host agent could
+  not rewrite Hermes's configuration template. Replaced files and new
+  directories now get the owner's primary group, as on a new installation.
 - Rerunning the installer (an update) no longer fails with "Embeddings model
   prefetch failed" after Embeddings was added from Extensions. The Embeddings
   service downloads the model itself, as root, so the installer could not
