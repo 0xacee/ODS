@@ -491,6 +491,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   A host port another program holds is named with the `.env` setting that
   moves it, such as `WHISPER_PORT`; other errors show the end of Docker's
   output, where its error is, with credentials removed.
+- Uninstalling on Windows (WSL) no longer refuses with "Pixel validation
+  failed; nothing was changed" after WSL restarts. WSL attaches its disks in a
+  different order on each start, so a completed Pixel update's private scratch
+  folder came back under a new device number and failed its identity check.
+  Uninstall now accepts exactly that: the same folders, still empty and
+  root-private. Anything else still stops the uninstall.
 - Rerunning the installer (an update) no longer fails with "Embeddings model
   prefetch failed" after Embeddings was added from Extensions. The Embeddings
   service downloads the model itself, as root, so the installer could not

@@ -848,6 +848,51 @@ class SourceUpgrade:
         finally:
             os.close(fd)
 
+    def _completed_scratch_remounted(self):
+        """Accept a completed plan's empty buffer after a device renumbering.
+
+        WSL attaches its virtual disks in a different order on every VM start,
+        and Linux can renumber block devices across reboots, so the same
+        directories come back under a new st_dev. Uninstall only reads the
+        buffer, so it accepts exactly that renumbering: the same parent and
+        buffer inodes, a receipt whose two device numbers agreed, and a
+        buffer that is still root-owned, 0700, empty and on the parent's
+        current device. False leaves every other receipt to the strict
+        checks in _scratch(). Nothing is written.
+        """
+        item, raw = read_file(self.state, 'source-scratch.json', self.state_uid)
+        if item is None:
+            return False
+        record = json.loads(raw)
+        if (type(record) is not dict or set(record) != {'version', 'name', 'parent', 'identity'}
+                or record['version'] != 1 or type(record['name']) is not str
+                or not re.fullmatch(r'\.ods-source-staging-[a-f0-9]{32}', record['name'])
+                or any(type(record[k]) is not list or len(record[k]) != 2
+                       or any(type(n) is not int or n < 0 for n in record[k])
+                       for k in ('parent', 'identity'))):
+            return False
+        root = os.open(self.install, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            parent = os.fstat(root)
+            if (record['parent'][0] == parent.st_dev or record['parent'][1] != parent.st_ino
+                    or record['identity'][0] != record['parent'][0]):
+                return False
+            fd = os.open(record['name'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+            try:
+                info = os.fstat(fd)
+                linked = os.stat(record['name'], dir_fd=root, follow_symlinks=False)
+                if (parent.st_uid != self.uid or parent.st_mode & 0o022
+                        or info.st_dev != parent.st_dev or info.st_ino != record['identity'][1]
+                        or (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino)
+                        or info.st_uid != self.state_uid or stat.S_IMODE(info.st_mode) != 0o700
+                        or os.listdir(fd)):
+                    raise UpgradeError('source-scratch-remount-refused')
+            finally:
+                os.close(fd)
+        finally:
+            os.close(root)
+        return True
+
     def _prepare_scratch(self):
         with self._scratch(prepare=True) as (scratch, validate):
             self._clear_scratch(scratch, validate)
@@ -961,10 +1006,11 @@ class SourceUpgrade:
         # The uninstall validates its protected mirror and install binding;
         # it must not require a mutable source tree to remain a time capsule.
         self.verify_mirror()
-        with self._scratch() as (scratch, validate):
-            validate()
-            if os.listdir(scratch):
-                raise UpgradeError('source-scratch-unexpected')
+        if not self._completed_scratch_remounted():
+            with self._scratch() as (scratch, validate):
+                validate()
+                if os.listdir(scratch):
+                    raise UpgradeError('source-scratch-unexpected')
         total = 0
         for index, path in enumerate(self.state.iterdir()):
             if index >= MAX_FILES * 3:
