@@ -18032,10 +18032,12 @@ def _hermes_config_matches(
             break
         if not in_model_block:
             continue
-        match = re.match(r"^\s+(default|base_url|context_length):\s*(.*?)\s*$", line)
+        # Match the key only and strip the value in Python, so no lazy group
+        # competes with \s*$ for the same whitespace (CodeQL #319).
+        match = re.match(r"^\s+(default|base_url|context_length):(.*)$", line)
         if not match:
             continue
-        value = match.group(2).split(" #", 1)[0].strip().strip("'\"")
+        value = match.group(2).strip().split(" #", 1)[0].strip().strip("'\"")
         values[match.group(1)] = value
 
     if values.get("default") != str(model_name):
