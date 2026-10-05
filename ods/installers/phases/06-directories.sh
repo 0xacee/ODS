@@ -1124,6 +1124,16 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
             EXTERNAL_LLM_API_KEY_FILE="$_external_key_target"
         fi
         unset _external_key_tmp _external_key_target
+    elif [[ "${EXTERNAL_LLM_RESET:-false}" == "true" ]]; then
+        # --no-external-llm turns API mode off and forgets its key (fleet row
+        # 25). The overlay that mounted the key leaves the stack with it, and
+        # a later API setup stores a key again.
+        _external_key_target="$INSTALL_DIR/config/litellm/external-upstream.key"
+        if [[ -f "$_external_key_target" || -L "$_external_key_target" ]]; then
+            rm -f -- "$_external_key_target"
+            log "Removed the stored external LLM key (API mode is off)"
+        fi
+        unset _external_key_target
     fi
     # The AMD overlays pin their own llama.cpp images. A model profile's image
     # for another backend (the gemma4 profile names the CUDA build) must not

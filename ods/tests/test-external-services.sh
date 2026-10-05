@@ -441,9 +441,12 @@ run_phase06_env_cycle() (
     export EXTERNAL_LLM_PROVIDER=
     export EXTERNAL_LLM_MODEL=
     export EXTERNAL_LLM_RESET=true
+    # Turning API mode off forgets the stored key (fleet row 25).
+    printf 'stored-secret\n' >"$install_dir/config/litellm/external-upstream.key"
 
     source "$install_dir/installers/phases/06-directories.sh"
 
+    [[ ! -e "$install_dir/config/litellm/external-upstream.key" ]]
     grep -qx 'LLM_BACKEND=llama-server' "$install_dir/.env"
     grep -qx 'LLM_MODEL=qwen3-1.7b' "$install_dir/.env"
     grep -qx 'LLM_API_URL=http://llama-server:8080' "$install_dir/.env"
