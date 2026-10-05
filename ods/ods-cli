@@ -1729,6 +1729,11 @@ cmd_restart() {
             *) service="$1"; shift ;;
         esac
     done
+    if [[ -n "$service" && "$(resolve_service "$service")" == llama-server ]] \
+        && _ods_cli_macos_native_llama; then
+        _ods_cli_macos_llama restart
+        return 0
+    fi
 
     local flags_str
     flags_str=$(get_compose_flags)
@@ -1906,12 +1911,38 @@ _stop_owned_containers_for_recovery() {
     "$policy_python" "$helper" "${args[@]}"
 }
 
+# On macOS the model runs natively as the launchd job com.ods.llama-server, and
+# the Compose llama-server is a replicas-0 placeholder: Compose would report a
+# stop, start or restart without touching the running model. ods-macos.sh owns
+# that job.
+_ods_cli_macos_native_llama() {
+    [[ "$(uname -s)" == Darwin && "${GPU_BACKEND:-}" == apple ]]
+}
+
+_ods_cli_macos_llama() {
+    local action="$1" macos_cli="$INSTALL_DIR/ods-macos.sh"
+    if [[ ! -f "$macos_cli" ]]; then
+        echo -e "${RED}✗${NC} The macOS service CLI is missing ($macos_cli), so ODS cannot $action the model server on this Mac. Re-run the installer to restore it." >&2
+        echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+        exit 1
+    fi
+    if ! INSTALL_DIR="$INSTALL_DIR" "${BASH:-bash}" "$macos_cli" "$action" llama-server; then
+        echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+        exit 1
+    fi
+}
+
 cmd_stop() {
     check_install
     cd "$INSTALL_DIR"
     load_env
 
     local service="${1:-}"
+    if [[ -n "$service" && "$(resolve_service "$service")" == llama-server ]] \
+        && _ods_cli_macos_native_llama; then
+        _ods_cli_macos_llama stop
+        return 0
+    fi
     local flags_str
     if ! flags_str=$(get_compose_flags); then
         [[ -n "$service" ]] && service=$(resolve_service "$service")
@@ -1973,6 +2004,11 @@ cmd_start() {
     done
     if [[ "$restart_wsl_agent" == false && -n "$service" ]]; then
         error "Deferred WSL agent restart requires a complete stack start."
+    fi
+    if [[ -n "$service" && "$(resolve_service "$service")" == llama-server ]] \
+        && _ods_cli_macos_native_llama; then
+        _ods_cli_macos_llama start
+        return 0
     fi
 
     local flags_str
