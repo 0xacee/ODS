@@ -33,14 +33,45 @@ ods_existing_install_mode() {
     printf '%s\n' "$value"
 }
 
+# An API connected in Settings > Remote model marks the install ODS_MODE=cloud
+# while it is active, because its route goes through the cloud gateway. That
+# is not the install's mode: the route's activation record keeps the mode it
+# replaced. Prints that mode while an active or staging route explains the
+# marker. (An upgrade that took the marker for a --cloud install replaced the
+# local model with hosted defaults and took the Portal down.)
+ods_remote_route_previous_mode() {
+    local record="$1/data/remote-provider/activation-state.json"
+    [[ -f "$record" && ! -L "$record" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$record" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        record = json.load(handle)
+except (OSError, ValueError):
+    sys.exit(1)
+previous = record.get("previous") if isinstance(record, dict) else None
+mode = previous.get("odsMode") if isinstance(previous, dict) else None
+if record.get("phase") not in ("active", "staging") or mode not in ("local", "hybrid"):
+    sys.exit(1)
+print(mode)
+PY
+}
+
 ods_preserve_existing_install_mode() {
-    local current_mode="$1" mode_explicit="$2" env_file="$3" existing_mode
+    local current_mode="$1" mode_explicit="$2" env_file="$3" existing_mode remote_mode
 
     if [[ "$mode_explicit" == "true" ]]; then
         printf '%s\n' "$current_mode"
         return 0
     fi
     if existing_mode="$(ods_existing_install_mode "$env_file")"; then
+        if [[ "$existing_mode" == cloud ]] \
+            && remote_mode="$(ods_remote_route_previous_mode "$(dirname "$env_file")")"; then
+            existing_mode="$remote_mode"
+        fi
         printf '%s\n' "$existing_mode"
     else
         printf '%s\n' "$current_mode"

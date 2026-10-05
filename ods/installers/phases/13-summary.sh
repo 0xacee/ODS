@@ -71,6 +71,10 @@ else
     show_success_card "$_summary_chat_url" "http://localhost:3001" "$_summary_lan_address"
     unset _summary_chat_url _summary_lan_address _summary_bind _summary_remote_port
 fi
+if [[ "${ODS_REMOTE_ROUTE_PAUSED:-false}" == "true" ]]; then
+    ai_warn "Your model API (Settings > Remote model) is paused for this update; ODS uses the model on this computer."
+    ai "  Select Reconnect there to use the API again."
+fi
 
 # Mark the setup wizard as already completed for fresh installs. The
 # dashboard-api reads this file (container path /data/config/setup-complete.json,

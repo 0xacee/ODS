@@ -655,6 +655,13 @@ if [[ "$ODS_MODE_EXPLICIT" != "true" && "$ODS_MODE" != "$_requested_ods_mode" ]]
     log "Existing ODS mode detected; preserving ODS_MODE=$ODS_MODE for this installer rerun"
 fi
 unset _requested_ods_mode
+# A model API connected in Settings was active. This run keeps the install's
+# own mode, which leaves that API route paused until the owner reconnects it.
+ODS_REMOTE_ROUTE_PAUSED=false
+if [[ "$ODS_MODE_EXPLICIT" != "true" ]] && ods_remote_route_previous_mode "$INSTALL_DIR" >/dev/null; then
+    ODS_REMOTE_ROUTE_PAUSED=true
+    log "A model API connected in Settings (Remote model) is active. This run keeps ODS in ${ODS_MODE} mode and pauses the API; select Reconnect in Settings > Remote model afterwards."
+fi
 
 # Exported (an empty value included) so the Compose resolver uses this run's
 # selection instead of a value left in the installation's .env.
