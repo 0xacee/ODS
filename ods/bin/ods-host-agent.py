@@ -6141,12 +6141,12 @@ def _repair_rootless_data_ownership(service_id: str) -> None:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError(
-            f"Rootless ownership repair could not run for {service_id}: {exc}"
+            f"Could not prepare the {service_id} data folder: {exc}"
         ) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "unknown error").strip()
         raise RuntimeError(
-            f"Rootless ownership repair failed for {service_id}: {detail[-500:]}"
+            f"Could not prepare the {service_id} data folder: {detail[-500:]}"
         )
 
 

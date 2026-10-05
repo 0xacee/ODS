@@ -4805,6 +4805,8 @@ def enable_extension(
     agent_ok = True
     warnings: list[str] = []
     failed_services: list[str] = []
+    # The host agent's reason a start was refused, by service.
+    start_failures: dict[str, str] = {}
     for svc_id in enabled_services:
         blocked_deps = _failed_dependency_starts(svc_id, set(failed_services))
         if blocked_deps:
@@ -4821,10 +4823,11 @@ def enable_extension(
             if not _call_agent("start", svc_id):
                 agent_ok = False
                 failed_services.append(svc_id)
-                _write_error_progress(svc_id, _agent_start_failure(
+                start_failures[svc_id] = _agent_start_failure(
                     svc_id,
                     "Host agent failed to start extension. Run 'ods restart' to recover.",
-                ))
+                )
+                _write_error_progress(svc_id, start_failures[svc_id])
             else:
                 _write_started_progress(svc_id)
             continue
@@ -4840,8 +4843,9 @@ def enable_extension(
         if not _call_agent("start", svc_id):
             agent_ok = False
             failed_services.append(svc_id)
-            _write_error_progress(svc_id, _agent_start_failure(
-                svc_id, "Host agent failed to start extension."))
+            start_failures[svc_id] = _agent_start_failure(
+                svc_id, "Host agent failed to start extension.")
+            _write_error_progress(svc_id, start_failures[svc_id])
             continue
         # post_start is non-terminal â€” log failure but don't fail the enable
         if not _call_agent_hook(svc_id, "post_start"):
@@ -4861,9 +4865,29 @@ def enable_extension(
         "warnings": warnings,
         "message": (
             "Extension enabled and started." if agent_ok
-            else "Extension enabled. Run 'ods restart' to start."
+            else _enable_start_failure_message(failed_services, start_failures)
         ),
     }
+
+
+_GENERIC_START_FAILURES = frozenset({
+    "Host agent failed to start extension.",
+    "Host agent failed to start extension. Run 'ods restart' to recover.",
+})
+
+
+def _enable_start_failure_message(failed: list[str], reasons: dict[str, str]) -> str:
+    """Name the first start the host agent refused, with its reason.
+
+    A refusal (for example a state folder the agent will not repair while
+    the container runs) names its own remedy, which a restart would not
+    fix. Other failures keep the restart advice.
+    """
+    for service in failed:
+        reason = reasons.get(service, "")
+        if reason and reason not in _GENERIC_START_FAILURES:
+            return f"Extension enabled, but {service} did not start: {reason}"
+    return "Extension enabled. Run 'ods restart' to start."
 
 
 _DEPENDENCY_COMPOSE_MAX_BYTES = 1024 * 1024
