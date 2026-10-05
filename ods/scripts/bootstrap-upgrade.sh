@@ -1032,59 +1032,6 @@ windows_ps_command() {
     fi
 }
 
-# Print the checkpoint interval llama-server.exe can take, or nothing. Called
-# in a command substitution, so warnings go to stderr (the upgrade log).
-# Mirrors installers/macos/lib/native-checkpoint-args.py and
-# installers/windows/lib/native-llama-args.ps1: llama.cpp removed
-# --checkpoint-every-n-tokens in b9310, and llama-server exits on a flag it
-# does not know. The setting is opt-in, so an unusable value is dropped with a
-# warning rather than failing the swap.
-windows_native_checkpoint_interval() {
-    local llama_exe="$1" value="$2" number="" help_text
-    [[ -n "$value" ]] || return 0
-    if [[ "$value" == "-1" ]]; then
-        number="-1"
-    elif [[ "$value" =~ ^[0-9]{1,12}$ ]] && (( 10#$value >= 1 && 10#$value <= 262144 )); then
-        number="$((10#$value))"
-    else
-        log "WARNING: LLAMA_ARG_CHECKPOINT_EVERY_NT=$value is not an integer from -1 to 262144 (0 is not allowed); starting llama-server without it." >&2
-        return 0
-    fi
-    if command -v timeout >/dev/null 2>&1; then
-        help_text="$(timeout 15 "$llama_exe" --help 2>&1)" || help_text=""
-    else
-        help_text="$("$llama_exe" --help 2>&1)" || help_text=""
-    fi
-    if ! grep -Eq -- '(^|[^[:alnum:]_-])--checkpoint-every-n-tokens([^[:alnum:]_-]|$)' <<< "$help_text"; then
-        log "WARNING: this llama-server has no --checkpoint-every-n-tokens (removed in llama.cpp b9310); starting it without LLAMA_ARG_CHECKPOINT_EVERY_NT." >&2
-        return 0
-    fi
-    printf '%s\n' "$number"
-}
-
-# Print which reasoning switch llama-server.exe takes for LLAMA_REASONING:
-# "reasoning" when it has --reasoning (b9014), "budget" when it lacks it but
-# has --reasoning-budget and the mode is off (b8248: budget 0 disables
-# thinking, and its default -1 leaves it on), or nothing to keep only the
-# --reasoning-format mapping. b9014 defaults --reasoning to auto, which turns
-# Qwen3.5 thinking on, and with --reasoning-format none the reasoning comes
-# back inside the reply. Mirrors installers/windows/lib/native-llama-args.ps1.
-windows_native_reasoning_flag() {
-    local llama_exe="$1" mode="$2" help_text
-    case "$mode" in off|on|auto) ;; *) return 0 ;; esac
-    if command -v timeout >/dev/null 2>&1; then
-        help_text="$(timeout 15 "$llama_exe" --help 2>&1)" || return 0
-    else
-        help_text="$("$llama_exe" --help 2>&1)" || return 0
-    fi
-    if grep -E -- '(^|[^[:alnum:]_-])--reasoning([^[:alnum:]_-]|$)' <<< "$help_text" | grep -qvi 'has been removed'; then
-        printf '%s\n' reasoning
-    elif [[ "$mode" == off ]] \
-        && grep -E -- '(^|[^[:alnum:]_-])--reasoning-budget([^[:alnum:]_-]|$)' <<< "$help_text" | grep -qvi 'has been removed'; then
-        printf '%s\n' budget
-    fi
-}
-
 restart_windows_native_llama_server_with_full_model() {
     is_windows_bash || return 1
 
@@ -1764,7 +1711,6 @@ fi
 # config promotion, compose verification, and bootstrap cleanup.
 acquire_model_lifecycle_lock || fail "Could not serialize background full-model activation."
 
-_windows_lemonade_swap_applies=false
 _windows_native_llama_swap_applies=false
 _docker_llama_swap_applies=false
 if is_windows_bash; then
