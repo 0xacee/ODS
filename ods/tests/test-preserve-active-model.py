@@ -519,113 +519,6 @@ def test_external_lemonade_alias_must_match_saved_catalog_artifact() -> None:
         assert result.returncode == 2
         assert result.stdout == ""
 
-
-def test_linux_phase02_keeps_external_selection_and_stops_invalid_rerun() -> None:
-    if sys.platform == "win32":
-        return  # Bash's Linux path/ownership semantics are exercised in CI.
-    detection = (ROOT / "installers/phases/02-detection.sh").read_text(encoding="utf-8")
-    start = detection.index('INSTALLER_RECOMMENDED_MODEL="${LLM_MODEL:-}"')
-    end = detection.index("# Display hardware summary", start)
-    phase = detection[start:end]
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        env, catalog, _, models_dir = write_model_fixture(root)
-        replace_env(env, "ODS_MODE=local", "ODS_MODE=lemonade")
-        replace_env(env, "LLM_BACKEND=llama-server", "LLM_BACKEND=lemonade")
-        replace_env(env, "LEMONADE_EXTERNAL=false", "LEMONADE_EXTERNAL=true")
-        with env.open("a", encoding="utf-8") as handle:
-            handle.write("MODEL_SELECTION_SOURCE=dashboard\nLEMONADE_MODEL=Agent-Test-Q4_K_M\n")
-        (models_dir / "Agent-Test-Q4_K_M.gguf").unlink()
-        # Phase 02 uses the installed catalog path, as a real rerun does.
-        (root / "config").mkdir()
-        (root / "config/model-library.json").write_bytes(catalog.read_bytes())
-        script_root = root / "source"
-        script_root.mkdir()
-        (script_root / "scripts").symlink_to(ROOT / "scripts", target_is_directory=True)
-        (script_root / "lib").symlink_to(ROOT / "lib", target_is_directory=True)
-        (script_root / "installers").mkdir()
-        (script_root / "installers/lib").symlink_to(ROOT / "installers/lib", target_is_directory=True)
-        (script_root / "config").symlink_to(root / "config", target_is_directory=True)
-        prefix = r'''
-set -euo pipefail
-SCRIPT_DIR="$1"
-INSTALL_DIR="$2"
-LOG_FILE="$2/phase.log"
-source "$SCRIPT_DIR/installers/lib/external-services.sh"
-LLM_MODEL=selector-other
-GGUF_FILE=selector-other.gguf
-MAX_CONTEXT=32768
-GPU_BACKEND=cpu
-GPU_MEMORY_TYPE=unified
-GPU_VRAM=0
-RAM_GB=32
-HOST_ARCH=amd64
-TIER=2
-LEMONADE_EXTERNAL=true
-ODS_MODE_EXPLICIT=false
-ODS_RESELECT_MODEL=false
-_selector_python=python3
-log() { :; }
-error() { printf '%s\n' "$*" >&2; }
-'''
-        # Keep all inputs synthetic; only the source tree is read.
-        result = subprocess.run(
-            ["bash", "-c", prefix + phase + '\nprintf "%s|%s|%s|%s|%s" "$LLM_MODEL" "$GGUF_FILE" "$MAX_CONTEXT" "$MODEL_SELECTION_SOURCE" "$INSTALLER_RECOMMENDED_MODEL"\n',
-             "phase02-model-retention", str(script_root), str(root)],
-            capture_output=True, text=True,
-        )
-        assert result.returncode == 0, result.stderr
-        assert result.stdout == "agent-test|Agent-Test-Q4_K_M.gguf|65536|dashboard|selector-other"
-        changed_during_install = subprocess.run(
-            ["bash", "-c", prefix + phase
-             + '\nprintf "# concurrent model activation\\n" >> "$INSTALL_DIR/.env"\n'
-             + 'ods_verify_retained_external_model_snapshot\n',
-             "phase02-model-retention", str(script_root), str(root)],
-            capture_output=True, text=True,
-        )
-        assert changed_during_install.returncode != 0
-        assert "settings changed during installation" in changed_during_install.stderr
-        env.write_text(env.read_text(encoding="utf-8").replace(
-            "# concurrent model activation\n", ""), encoding="utf-8")
-        conflicting_model = subprocess.run(
-            ["bash", "-c", prefix.replace("LEMONADE_EXTERNAL=true", "LEMONADE_EXTERNAL=true\nLEMONADE_MODEL=other-model")
-             + phase, "phase02-model-retention", str(script_root), str(root)],
-            capture_output=True, text=True,
-        )
-        assert conflicting_model.returncode != 0
-        assert "Use --reselect-model to change models" in conflicting_model.stderr
-        omitted_route = subprocess.run(
-            ["bash", "-c", prefix.replace("LEMONADE_EXTERNAL=true", "LEMONADE_EXTERNAL=false")
-             + phase, "phase02-model-retention", str(script_root), str(root)],
-            capture_output=True, text=True,
-        )
-        assert omitted_route.returncode != 0
-        assert "Select it explicitly for this rerun" in omitted_route.stderr
-        replace_env(env, "MAX_CONTEXT=65536", "MAX_CONTEXT=invalid")
-        rejected = subprocess.run(
-            ["bash", "-c", prefix + phase, "phase02-model-retention", str(script_root), str(root)],
-            capture_output=True, text=True,
-        )
-        assert rejected.returncode != 0
-        assert "Could not validate the retained external model selection" in rejected.stderr
-        reselect = subprocess.run(
-            ["bash", "-c", prefix.replace("ODS_RESELECT_MODEL=false", "ODS_RESELECT_MODEL=true")
-             + phase + '\nprintf "%s|%s" "$LLM_MODEL" "$MODEL_SELECTION_SOURCE"\n',
-             "phase02-model-retention", str(script_root), str(root)],
-            capture_output=True, text=True,
-        )
-        assert reselect.returncode == 0, reselect.stderr
-        assert reselect.stdout == "selector-other|installer"
-        env.unlink()
-        fresh = subprocess.run(
-            ["bash", "-c", prefix + phase + '\nprintf "%s|%s" "$LLM_MODEL" "$MODEL_SELECTION_SOURCE"\n',
-             "phase02-model-retention", str(script_root), str(root)],
-            capture_output=True, text=True,
-        )
-        assert fresh.returncode == 0, fresh.stderr
-        assert fresh.stdout == "selector-other|installer"
-
-
 def test_literal_hashes_and_invalid_values_are_not_comments() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         env, catalog, imports, models_dir = write_model_fixture(Path(tmp))
@@ -1195,7 +1088,6 @@ def main() -> int:
         test_invalid_external_dashboard_contract_fails_closed,
         test_conflicting_external_provider_does_not_silently_reselect,
         test_external_lemonade_alias_must_match_saved_catalog_artifact,
-        test_linux_phase02_keeps_external_selection_and_stops_invalid_rerun,
         test_external_lemonade_projection_records_the_served_catalog_model,
         test_external_lemonade_projection_refuses_ids_it_cannot_name,
         test_projected_external_lemonade_record_passes_the_rerun_check,

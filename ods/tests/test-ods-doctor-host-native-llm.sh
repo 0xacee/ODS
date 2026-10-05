@@ -43,7 +43,7 @@ DOCKER_DAEMON=false
 EXTERNAL_LLM_URL=
 ODS_MODE=local
 LLM_BACKEND=llama-server
-NATIVE_LLM_BASE_URL=http://localhost:8080
+NATIVE_LLM_BASE_URL=http://127.0.0.1:8080
 GGUF_FILE=Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
 LLAMA_SERVER_API_KEY=abababababababababababababababab
 
@@ -52,7 +52,7 @@ _doctor_check_llm_backend
     || fail "the host-native llama-server must be reported as the active, healthy LLM backend ($LLM_STATUS|$LLM_PROVIDER|$LLM_MODEL)"
 [[ "$curl_calls" == 1 && "$local_checks" == 0 ]] \
     || fail 'doctor must probe the host-native server once and skip the in-stack llama-server'
-[[ " ${curl_args[*]} " == *' http://localhost:8080/health '* ]] \
+[[ " ${curl_args[*]} " == *' http://127.0.0.1:8080/health '* ]] \
     || fail "doctor must probe the native server's /health (${curl_args[*]})"
 [[ " ${curl_args[*]} " != *"$LLAMA_SERVER_API_KEY"* && " ${curl_args[*]} " != *Authorization* ]] \
     || fail 'the /health probe needs no key and must not carry one'
