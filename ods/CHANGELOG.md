@@ -454,6 +454,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   you give it.
 
 ### Fixed
+- A long chat message with many unclosed quotes and backslashes no longer
+  stalls Pixel chat. pixel-edge masks quoted text before it looks for
+  workspace directives, and that step took time quadratic in the message
+  length; it is now linear. Quoted text that continues past an escaped line
+  break also stays masked now.
 - Rerunning the installer (an update) no longer fails with "Embeddings model
   prefetch failed" after Embeddings was added from Extensions. The Embeddings
   service downloads the model itself, as root, so the installer could not
