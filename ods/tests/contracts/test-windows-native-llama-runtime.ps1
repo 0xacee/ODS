@@ -348,4 +348,24 @@ try {
     if (-not $resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing to clean a fixture outside the temporary directory.' }
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }
+
+# A stopped llama-server holding a large model can take far longer than five
+# seconds to exit while the driver releases its memory (Strixy: the 22 GB 35B
+# on the 8060S failed one model switch in three). The stop waits for it.
+$slow = [pscustomobject]@{ Id = 4242; HasExited = $false; Killed = $false; LongestWait = 0 }
+$slow | Add-Member -MemberType ScriptMethod -Name Kill -Value { $this.Killed = $true }
+$slow | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+    param($Milliseconds)
+    if ($Milliseconds -gt $this.LongestWait) { $this.LongestWait = $Milliseconds }
+    return ($Milliseconds -ge 30000)
+}
+$stopError = $null
+try { Stop-ODSPortalOwnedProcesses @($slow) } catch { $stopError = $_.Exception.Message }
+Check ($null -eq $stopError -and $slow.Killed -and $slow.LongestWait -ge 30000) 'a killed runtime that needs more than five seconds to exit does not fail the stop'
+$stuck = [pscustomobject]@{ Id = 4243; HasExited = $false }
+$stuck | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+$stuck | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) return $false }
+$stopError = $null
+try { Stop-ODSPortalOwnedProcesses @($stuck) } catch { $stopError = $_.Exception.Message }
+Check ($stopError -match 'did not exit within 60 seconds') 'a runtime that never exits still fails the stop, after a bounded wait'
 Microsoft.PowerShell.Utility\Write-Host "Passed $script:checks Windows native llama.cpp runtime contracts."

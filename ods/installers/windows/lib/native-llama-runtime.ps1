@@ -927,8 +927,12 @@ function Stop-ODSPortalOwnedProcesses($Handles) {
             }
         }
     }
+    # Kill() returns at once, but a llama-server holding a large model in GPU
+    # or shared memory can take well over five seconds to exit while the
+    # driver releases it (Strixy: the 22 GB 35B on the 8060S failed one model
+    # switch in three). The process is already stopping; wait for its exit.
     foreach ($process in $Handles) {
-        if (-not $process.WaitForExit(5000)) { throw 'An owned runtime process did not exit within five seconds.' }
+        if (-not $process.WaitForExit(60000)) { throw 'An owned runtime process did not exit within 60 seconds of being stopped.' }
     }
 }
 
@@ -1049,7 +1053,7 @@ function Invoke-ODSNativeLlamaRuntime($Plan, $Options, [string]$ReadyPath) {
                         # An unproved descendant is deliberately left untouched.
                         if (-not $child.HasExited) {
                             $child.Kill()
-                            if (-not $child.WaitForExit(5000)) { throw 'The launched llama-server did not exit within five seconds.' }
+                            if (-not $child.WaitForExit(60000)) { throw 'The launched llama-server did not exit within 60 seconds of being stopped.' }
                         }
                         $identity.ExitedAt = $child.ExitTime
                         Write-ODSPortalProcessOwnership $ownershipPath $Plan @($identity)

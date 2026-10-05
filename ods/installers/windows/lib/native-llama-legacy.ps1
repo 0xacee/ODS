@@ -302,7 +302,8 @@ function Start-ODSNativeLlamaLegacyProcess {
         $failure = $_.Exception.Message
         if (-not $child.HasExited) {
             $child.Kill()
-            if (-not $child.WaitForExit(5000)) { throw "$failure The launched llama-server did not exit within five seconds." }
+            # A large model can take well over five seconds to leave GPU memory.
+            if (-not $child.WaitForExit(60000)) { throw "$failure The launched llama-server did not exit within 60 seconds of being stopped." }
         }
         Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
         throw $failure

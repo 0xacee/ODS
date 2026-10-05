@@ -463,7 +463,7 @@ function Get-ODSPortalOwnedProcessTree([object[]]$Roots, [object[]]$Nodes) {
     return [pscustomobject]@{ Nodes = $Roots; Handles = @($handle) }
 }
 function Stop-ODSPortalOwnedProcesses($Handles) {
-    if ($harness.StopFails) { throw 'An owned runtime process did not exit within five seconds.' }
+    if ($harness.StopFails) { throw 'An owned runtime process did not exit within 60 seconds of being stopped.' }
     $harness.Running = $false
     $harness.Nodes = @()
 }
@@ -566,7 +566,7 @@ $harness.Returned = $true
 
     Reset-RestartFixture
     $result = Invoke-RestartScenario -StopFails
-    Check ((Test-RestartRefused $result 'Could not stop the running llama-server .*did not exit within five seconds.*nothing else was changed') -and
+    Check ((Test-RestartRefused $result 'Could not stop the running llama-server .*did not exit within 60 seconds.*nothing else was changed') -and
         $result.Running -and -not ($result.Calls -contains 'start') -and ([IO.File]::ReadAllText($rPidFile)).Trim() -eq '5150' -and
         $result.StartLog -notmatch 'ready:') 'restart: a stop that fails exits non-zero, starts nothing and leaves the old server and its PID record'
 
