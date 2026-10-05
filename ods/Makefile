@@ -32,7 +32,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-hermes-context-floor.sh
 	@bash tests/test-install-menu-hermes-flag.sh
 	@bash tests/test-custom-menu-agent-flags.sh
-	@bash tests/test-lemonade-external-gpu.sh
+	@bash tests/test-native-llm-flags.sh
 	@bash tests/test-preflight-external-gpu.sh
 	@bash tests/test-wsl-whisper-port-reservation.sh
 	@echo ""
@@ -88,9 +88,8 @@ test: ## Run unit and contract tests
 	@bash tests/test-macos-status-optional-opencode.sh
 	@python3 tests/test-cli-stt-env.py
 	@echo ""
-	@echo "=== AMD/Lemonade contracts ==="
-	@bash tests/contracts/test-amd-lemonade-contracts.sh
-	@bash tests/test-lemonade-host-transport.sh
+	@echo "=== AMD llama.cpp contracts ==="
+	@bash tests/contracts/test-amd-llamacpp-contracts.sh
 	@bash tests/test-wsl-agent-start.sh
 	@python3 tests/test-lemonade-container-transport.py
 	@python3 tests/test-wsl-lemonade-proof.py

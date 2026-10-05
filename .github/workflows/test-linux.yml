@@ -113,8 +113,6 @@ jobs:
 
       - name: Token Spy proxy persistence and disconnect contracts
         run: python -m pytest extensions/services/token-spy/tests/test_proxy_persistence_io.py extensions/services/token-spy/tests/test_anthropic_cumulative_usage.py -q
-      - name: Lemonade context cache persistence
-        run: sudo env LEMONADE_REQUIRE_NAMESPACE=1 "$(command -v python)" -m pytest tests/test_lemonade_context_persistence.py -q
 
       - name: Settings transaction and access preservation contracts
         run: |
@@ -543,7 +541,7 @@ jobs:
           python3 tests/test-wsl-lemonade-control.py
           python3 tests/test-configure-wsl-model-store.py
           python3 tests/test-retire-wsl-runtime.py
-          bash tests/test-lemonade-host-transport.sh
+          bash tests/test-native-llm-flags.sh
 
       - name: Pixel Public Source and Local Bundle Contract
         run: |

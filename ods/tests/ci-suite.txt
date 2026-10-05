@@ -3,7 +3,9 @@
 # .mjs with node --test, a .py file with test functions with pytest, other .py with python3.
 # Add new tests here, to an existing workflow step, or to ci-not-run.txt with a reason;
 # .github/scripts/list-unwired-tests.py --check fails CI for a test in none of them.
-tests/contracts/test-amd-lemonade-contracts.sh
+tests/contracts/test-amd-llamacpp-contracts.sh
+tests/contracts/test-host-native-llm-contracts.sh
+tests/contracts/test-host-native-llm-cpu-fallback.sh
 tests/contracts/test-installer-hardening.sh
 tests/contracts/test-llama-metrics-flag.sh
 tests/contracts/test-llama-reasoning-format.sh
@@ -20,6 +22,7 @@ tests/contracts/test-wsl-lifecycle.sh
 tests/pixel_settings/test_pixel_settings_store.py
 tests/pixel_settings/test_store_windows.py
 tests/test-agent-restart-nonfatal.sh
+tests/test-amd-igpu-dgpu-selection.sh
 tests/test-amd-topo.sh
 tests/test-ape-data-ownership.sh
 tests/test-backup-delete-status.sh
@@ -74,7 +77,7 @@ tests/test-installer-log-safety.sh
 tests/test-jetson-detection.sh
 tests/test-lean-linux-defaults.sh
 tests/test-lemonade-container-transport.py
-tests/test-lemonade-external-gpu.sh
+tests/test-lemonade-retirement-guard.py
 tests/test-lifecycle-prompts-noninteractive.sh
 tests/test-linux-cloud-mode.sh
 tests/test-linux-host-agent-stop.sh
@@ -103,9 +106,12 @@ tests/test-macos-intel-preflight-blocker.sh
 tests/test-macos-lean-feature-selection.sh
 tests/test-macos-native-llama-port.sh
 tests/test-macos-status-optional-opencode.sh
+tests/test-migrate-lemonade-install.py
 tests/test-model-integrity.sh
 tests/test-model-library-coverage.py
 tests/test-model-library-verdicts.py
+tests/test-native-llm-model.py
+tests/test-native-llm-phase02.sh
 tests/test-network-security.sh
 tests/test-network-timeouts.sh
 tests/test-nonroot-image-source-modes.sh
@@ -119,7 +125,7 @@ tests/test-ods-config-secret-mask.sh
 tests/test-ods-doctor-bash32-guard.sh
 tests/test-ods-doctor-disk-source.sh
 tests/test-ods-doctor-env-reader.sh
-tests/test-ods-doctor-external-lemonade.sh
+tests/test-ods-doctor-host-native-llm.sh
 tests/test-ods-doctor-install-diagnoses.sh
 tests/test-ods-doctor-rootless-subid.sh
 tests/test-ods-list-json-escaping.sh
@@ -163,6 +169,7 @@ tests/test-tier-map-parity.sh
 tests/test-tmpfile-cleanup.sh
 tests/test-token-spy-session-manager.sh
 tests/test-ui-missing-container-fast-fail.sh
+tests/test-uninstall-lemonade-leftovers.sh
 tests/test-unix-restart-recreate-env.sh
 tests/test-update-backup-restore-configs.sh
 tests/test-update-backup-retention-spaces.sh
