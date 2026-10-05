@@ -1485,7 +1485,7 @@ async def test_talk_image_goes_to_the_active_model_over_its_chat_route(monkeypat
 
     monkeypatch.delenv("ODS_TALK_VISION_MODEL", raising=False)
     monkeypatch.setattr(talk, "get_llama_vision_support", AsyncMock(return_value=True))
-    routed = []
+    routed: list = []
 
     def chat_route(default_url):
         routed.append(default_url)
@@ -1524,7 +1524,7 @@ async def test_talk_vision_override_uses_its_own_server_without_probing(monkeypa
 @pytest.mark.asyncio
 async def test_talk_vision_stream_sends_the_image_to_the_given_route(monkeypatch):
     from routers import talk
-    sent = []
+    sent: list = []
 
     def handler(request):
         sent.append((str(request.url), request.headers.get("authorization"), json.loads(request.content)))
@@ -1576,9 +1576,10 @@ def test_talk_message_stream_sets_unbuffered_headers(talk_client, monkeypatch):
 
 
 def test_ods_talk_hermes_timeout_is_env_configurable(monkeypatch):
-    """Lemonade-backed full models can take longer than the generic Talk
-    default before producing the first useful event. The compose overlays
-    set this env var for those modes; the bridge must honor it."""
+    """Full local models, such as one served by llama-server on the Windows
+    host, can take longer than the generic Talk default before producing the
+    first useful event. The compose files set this env var; the bridge must
+    honor it."""
     import hermes_bridge
 
     monkeypatch.setenv("ODS_TALK_HERMES_TIMEOUT", "900")

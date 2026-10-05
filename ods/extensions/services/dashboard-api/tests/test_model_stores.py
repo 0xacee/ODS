@@ -120,7 +120,7 @@ def test_lemonade_measured_fit_never_qualifies_a_native_launch(tmp_path, monkeyp
             'visionProjectorFile':'mmproj.gguf',
             'visionProjectorSha256':hashlib.sha256(b'projector').hexdigest()})
     (tmp_path/'.env').write_text('GGUF_FILE=new.gguf\nODS_ACTIVE_MODEL_STORE=ssd\nCTX_SIZE=32768\n')
-    validations = []
+    validations: list = []
     monkeypatch.setattr(model_stores,'validate_profile_command',lambda *args,**kwargs:validations.append(args))
     # Neither the qualified context nor its (absent) projector binds the
     # launch: the Lemonade-era record stays on disk but is ignored.
@@ -146,10 +146,13 @@ def test_host_launches_the_registered_executable_from_its_store(tmp_path, monkey
     monkeypatch.setattr(agent, 'load_env', lambda _path: env)
     monkeypatch.setattr(agent.platform, 'system', lambda: 'Linux')
     monkeypatch.setattr(agent.subprocess, 'run', lambda *_a, **_k: pytest.fail('a registered profile needs no probe'))
-    launched = []
+    launched: list = []
     class Process:
         pid = 4321
-    monkeypatch.setattr(agent.subprocess, 'Popen', lambda args, **_kwargs: launched.append(args) or Process())
+    def popen(args, **_kwargs):
+        launched.append(args)
+        return Process()
+    monkeypatch.setattr(agent.subprocess, 'Popen', popen)
     agent._launch_native_llama_server(tmp_path/'.env', tmp_path/'bundled-llama-server.exe', tmp_path/'log', tmp_path/'pid')
     command = launched[0]
     # The qualified executable serves the model from its registered store.
@@ -166,12 +169,15 @@ def test_native_launch_loads_exactly_the_memory_qualified_projector(tmp_path, mo
     spec = importlib.util.spec_from_file_location('test_mtp_store_agent_mmproj', agent_path)
     agent = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(agent)
-    launched = []
+    launched: list = []
     class Process:
         pid = 4321
     monkeypatch.setattr(agent.platform, 'system', lambda: 'Linux')
     monkeypatch.setattr(agent.subprocess, 'run', lambda *_a, **_k: pytest.fail('a registered profile needs no probe'))
-    monkeypatch.setattr(agent.subprocess, 'Popen', lambda args, **_kwargs: launched.append(args) or Process())
+    def popen(args, **_kwargs):
+        launched.append(args)
+        return Process()
+    monkeypatch.setattr(agent.subprocess, 'Popen', popen)
     fit = {'runtimeMode':'native','gpuLayers':'auto','contextLength':16384,'visionProjectorFile':'mmproj-F16.gguf',
            'visionProjectorSha256':hashlib.sha256(b'projector').hexdigest()}
     for mode, expected in (('native', True), ('lemonade', False)):

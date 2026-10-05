@@ -555,13 +555,13 @@ class TestCompletionProof:
 class TestRuntimeReadiness:
 
     def test_readiness_reports_a_loading_runtime_without_probing_identity(self, monkeypatch):
-        calls = []
+        calls: list = []
         monkeypatch.setattr(_mod.subprocess, "run", _llama_runtime_run(
             "Model.gguf",
             health={"error": {"code": 503, "message": "Loading model", "type": "unavailable_error"}},
             calls=calls,
         ))
-        diagnosis = {}
+        diagnosis: dict = {}
         assert _mod._wait_for_model_readiness(
             {"GPU_BACKEND": "amd", "OLLAMA_PORT": "8080"},
             model_id="model", gguf_file="Model.gguf", llm_model_name="model",
@@ -572,7 +572,7 @@ class TestRuntimeReadiness:
         assert diagnosis["reason"] == "llama-server is still loading the model"
 
     def test_amd_container_proves_health_identity_props_and_visible_completion(self, monkeypatch):
-        calls = []
+        calls: list = []
         monkeypatch.setattr(_mod.subprocess, "run", _llama_runtime_run(
             "Model.gguf", n_ctx=65536, model_path="/models/Model.gguf", calls=calls,
         ))
@@ -602,7 +602,7 @@ class TestRuntimeReadiness:
         monkeypatch.setattr(_mod.subprocess, "run", _llama_runtime_run(
             "Model.gguf", n_ctx=65536, model_path=r"C:\models\Other.gguf",
         ))
-        diagnosis = {}
+        diagnosis: dict = {}
         assert _mod._wait_for_model_readiness(
             {"GPU_BACKEND": "nvidia", "OLLAMA_PORT": "8080", "CTX_SIZE": "65536"},
             model_id="model", gguf_file="Model.gguf", llm_model_name="model",
@@ -611,7 +611,7 @@ class TestRuntimeReadiness:
         assert diagnosis["reason"] == "Model.gguf is served from Other.gguf, not Model.gguf"
 
     def test_windows_native_readiness_sends_the_key_on_stdin_only(self, monkeypatch):
-        calls = []
+        calls: list = []
         monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
         monkeypatch.setattr(_mod.subprocess, "run", _llama_runtime_run(
             "Model.gguf", n_ctx=65536, model_path=r"C:\ods\data\models\Model.gguf", calls=calls,
@@ -637,7 +637,7 @@ class TestRuntimeReadiness:
         monkeypatch.setattr(_mod.subprocess, "run", lambda *_a, **_k: pytest.fail(
             "WSL localhost is not Windows localhost; never probe it directly"
         ))
-        requests = []
+        requests: list = []
         key = "ef" * 32
 
         def transport(_install, origin, path, payload=None, api_key="", timeout=5):
@@ -1075,7 +1075,7 @@ class TestSwitchboardRuntimeConfig:
         renderer = tmp_path / "scripts" / "render-runtime-configs.py"
         renderer.parent.mkdir(parents=True, exist_ok=True)
         renderer.write_text("# renderer placeholder\n", encoding="utf-8")
-        calls = []
+        calls: list = []
         monkeypatch.setattr(_mod.subprocess, "run", lambda cmd, **kwargs: (
             calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         ))
@@ -2256,7 +2256,7 @@ class TestWindowsNativeLlamaServer:
     def test_model_switch_relaunches_through_ods_native_llm_restart(self, monkeypatch, tmp_path):
         install_dir = self._native_install(monkeypatch, tmp_path)
         key = "9a" * 32
-        calls = []
+        calls: list = []
 
         def fake_run(cmd, **kwargs):
             calls.append((cmd, kwargs))
@@ -4816,7 +4816,7 @@ class TestModelActivateRollback:
             lambda container: container == "ods-litellm",
         )
         monkeypatch.delenv("ODS_HOST_INSTALL_DIR", raising=False)
-        container_images = []
+        container_images: list = []
         if runtime_kind in {"compose-llama", "amd-compose-llama"}:
             monkeypatch.setattr(_mod.platform, "system", lambda: "Linux")
             monkeypatch.setattr(_mod, "_compose_restart_llama_server", record_restart)
@@ -5156,7 +5156,7 @@ class TestModelActivateRollback:
             "ghcr.io/ggml-org/llama.cpp:server-cuda-b9014@sha256:" + "f" * 64
         )
         catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
-        readiness_calls = []
+        readiness_calls: list = []
 
         def readiness(env, **kwargs):
             readiness_calls.append(kwargs)

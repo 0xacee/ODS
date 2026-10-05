@@ -81,7 +81,7 @@ def test_unmigrated_lemonade_env_reads_as_llama_server(monkeypatch, test_client)
     # A pre-round-F .env: the retired runtime name and Lemonade's API path.
     _amd_env(monkeypatch, AMD_INFERENCE_RUNTIME="lemonade", AMD_INFERENCE_BACKEND="rocm",
              AMD_INFERENCE_SUPPORTED_BACKENDS="rocm", LLM_API_BASE_PATH="/api/v1")
-    seen = []
+    seen: list = []
     _patch_probe(monkeypatch, seen=seen)
 
     response = test_client.get("/api/gpu/amd-runtime", headers=test_client.auth_headers)

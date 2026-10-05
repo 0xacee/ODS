@@ -1671,9 +1671,13 @@ def test_api_models_returns_full_catalog_without_fake_tokens(test_client, monkey
 
 def test_api_models_reports_unmatched_external_runtime_without_fake_performance(test_client, monkeypatch, tmp_path):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
-    agent_paths = []
-    monkeypatch.setattr(models_router, "request_agent_json",
-                        lambda _method, path, **_kwargs: agent_paths.append(path) or {})
+    agent_paths: list = []
+
+    def request_agent_json(_method, path, **_kwargs):
+        agent_paths.append(path)
+        return {}
+
+    monkeypatch.setattr(models_router, "request_agent_json", request_agent_json)
     monkeypatch.setattr(models_router, "LLM_BACKEND", "external")
     monkeypatch.setattr(models_router, "read_live_env_values", lambda _keys: {
         "LLM_BACKEND": "external",

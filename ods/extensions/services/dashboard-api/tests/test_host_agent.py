@@ -788,7 +788,7 @@ def _host_llm_runtime_fixture(monkeypatch, tmp_path, responses):
         "LLAMA_SERVER_API_KEY=" + "5e" * 32 + "\n",
         encoding="utf-8",
     )
-    requested = []
+    requested: list = []
 
     def runtime_http(env, path, **_kwargs):
         requested.append(path)
@@ -868,7 +868,7 @@ def test_legacy_route_migration_moves_sharing_grants_with_the_model(monkeypatch,
     monkeypatch.setattr(_mod, "_render_model_router_runtime_configs", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(_mod, "_catalog_model_for_current_env", lambda _env: ("model-x", {}))
     (install / "data" / "pixel-inference").mkdir()
-    moves = []
+    moves: list = []
 
     class FakeSharingStore:
         def __init__(self, directory):
@@ -993,7 +993,7 @@ def test_host_llm_status_carries_the_runtime_key_only_through_the_transport(monk
         "AMD_INFERENCE_PORT=18080\nLLAMA_SERVER_API_KEY=" + key + "\n",
         encoding="utf-8",
     )
-    calls = []
+    calls: list = []
 
     def run(cmd, **kwargs):
         calls.append((cmd, kwargs.get("input")))

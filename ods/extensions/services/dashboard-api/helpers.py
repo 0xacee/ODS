@@ -667,7 +667,7 @@ def _observe_live_output_slots(payload, sampled_at: float):
 
 def _parse_llama_prometheus(body: str) -> dict:
     """Read the llama.cpp counters the dashboard samples from a /metrics body."""
-    metrics = {}
+    metrics: dict = {}
     for line in body.split("\n"):
         line = line.strip()
         if not line or line.startswith("#"):
@@ -693,7 +693,7 @@ async def _fetch_llama_metrics(model_hint: Optional[str] = None, counter_id: Opt
     """
     try:
         slots_url = None
-        params = {}
+        params: dict = {}
         if _host_native_llm():
             # The host agent already parsed llama.cpp's Prometheus counters.
             reported = (await _host_llm_status()).get("metrics")
