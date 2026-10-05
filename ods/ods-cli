@@ -4492,7 +4492,9 @@ _remote_provider_print_status() {
     jq -r '
         "Remote provider: \(.status // "unknown")",
         "Route: " + (if .routeState.enabled == true then "enabled" else "disabled" end),
-        "Saved route: " + (if .routeState.resumeAvailable == true then "available" else "none" end),
+        (if .routeState.enabled == true then empty else
+            "Saved route: " + (if .routeState.resumeAvailable == true then "available (resume it with: ods remote-provider enable)" else "none" end)
+         end),
         (if .routeState.enabled == true and .routeState.provider then
             "Provider: \(.routeState.provider.model // "unknown") via \(.routeState.provider.transport // "unknown") at \(.routeState.provider.baseUrl // "unknown")"
          else empty end),
@@ -4512,7 +4514,7 @@ _remote_provider_print_apply_result() {
             (if .applied == true then "applied" else "completed" end),
         "Mutated state: \(.mutated // false)",
         (if .probe then
-            "Probe: HTTP \(.probe.status // "unknown") at \(.probe.endpoint // "/v1/models")" +
+            "Probe: HTTP \(.probe.httpStatus // .probe.status // "unknown") at \(.probe.endpoint // "/v1/models")" +
             (if (.probe.modelCount // null) != null then " (\(.probe.modelCount) models)" else "" end)
          else empty end),
         (if .rollback.attempted == true then
