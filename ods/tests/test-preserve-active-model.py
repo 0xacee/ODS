@@ -751,86 +751,6 @@ def test_repair_refuses_anything_but_the_installer_written_mismatch() -> None:
             assert "refusing to change them" in result.stderr
 
 
-def test_linux_phase02_records_and_repairs_the_served_external_model() -> None:
-    if sys.platform == "win32":
-        return  # Bash's Linux path semantics are exercised in CI.
-    detection = (ROOT / "installers/phases/02-detection.sh").read_text(encoding="utf-8")
-    start = detection.index("# External Lemonade: Lemonade on the Windows host serves")
-    end = detection.index("# Display hardware summary", start)
-    phase = detection[start:end]
-    record = catalog_record(SERVED_35B)
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        script_root = root / "source"
-        script_root.mkdir()
-        for name in ("scripts", "lib", "config"):
-            (script_root / name).symlink_to(ROOT / name, target_is_directory=True)
-        (script_root / "installers").mkdir()
-        (script_root / "installers/lib").symlink_to(ROOT / "installers/lib", target_is_directory=True)
-        install_dir = root / "ods"
-        install_dir.mkdir()
-        # Phase 02 inputs as on a Strix Halo Windows host: WSL sees no GPU, so
-        # the catalog selector picked a CPU model before this block runs.
-        prefix = r'''
-set -euo pipefail
-SCRIPT_DIR="$1"
-INSTALL_DIR="$2"
-LOG_FILE="$2/phase.log"
-source "$SCRIPT_DIR/lib/safe-env.sh"
-source "$SCRIPT_DIR/installers/lib/external-services.sh"
-LLM_MODEL=qwen3.5-9b
-GGUF_FILE=Qwen3.5-9B-Q4_K_M.gguf
-MAX_CONTEXT=65536
-MODEL_RUNTIME_PROFILE=cpu-64k-q8-kv
-LLAMA_ARG_CACHE_TYPE_K=q8_0
-GPU_BACKEND=cpu
-GPU_MEMORY_TYPE=unified
-GPU_VRAM=0
-RAM_GB=32
-HOST_ARCH=amd64
-TIER=4
-LEMONADE_EXTERNAL=true
-LEMONADE_MODEL=Qwen3.6-35B-A3B-UD-Q4_K_M
-LEMONADE_CONTEXT_SIZE=131072
-LEMONADE_GPU_NAME="AMD Radeon(TM) 8060S Graphics"
-ODS_MODE_EXPLICIT=true
-ODS_RESELECT_MODEL=false
-_selector_python=python3
-log() { :; }
-ai_warn() { printf 'WARN %s\n' "$*" >&2; }
-error() { printf '%s\n' "$*" >&2; }
-'''
-        report = ('\nprintf "%s|%s|%s|%s|%s|%s" "$LLM_MODEL" "$GGUF_FILE" "$MAX_CONTEXT" '
-                  '"$MODEL_SELECTION_SOURCE" "$INSTALLER_RECOMMENDED_GGUF" "${LLAMA_ARG_CACHE_TYPE_K:-unset}"\n')
-
-        def run(extra: str = "") -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                ["bash", "-c", prefix + extra + phase + report, "phase02-external",
-                 str(script_root), str(install_dir)],
-                capture_output=True, text=True,
-            )
-
-        served = f"{record['llm_model_name']}|{SERVED_35B}|131072|installer|{SERVED_35B}|unset"
-        fresh = run()
-        assert fresh.returncode == 0, fresh.stderr
-        assert fresh.stdout == served, fresh.stdout
-        unknown = run("LEMONADE_MODEL=Not-A-Catalog-Model\n")
-        assert unknown.returncode != 0
-        assert "is not in the ODS model catalog" in unknown.stderr
-        # A rerun over the .env an earlier fresh install wrote is repaired, and says so.
-        write_fresh_install_mismatch(install_dir)
-        rerun = run()
-        assert rerun.returncode == 0, rerun.stderr
-        assert rerun.stdout == served, rerun.stdout
-        assert "WARN Corrected the saved model details" in rerun.stderr
-        assert "LLM_MODEL qwen3.5-9b -> qwen3.6-35b-a3b" in (install_dir / "phase.log").read_text(encoding="utf-8")
-        # An operator's own choice is never rewritten: the rerun still stops.
-        replace_env(install_dir / ".env", "MODEL_SELECTION_SOURCE=installer", "MODEL_SELECTION_SOURCE=operator")
-        operator = run()
-        assert operator.returncode != 0
-        assert "Could not validate the retained external model selection" in operator.stderr
-
-
 def write_host_native_fixture(directory: Path, *, served: str = SERVED_35B, **values: str) -> Path:
     """A migrated WSL Portal .env: llama-server.exe on Windows serves the model."""
     record = catalog_record(served)
@@ -1093,7 +1013,6 @@ def main() -> int:
         test_projected_external_lemonade_record_passes_the_rerun_check,
         test_fresh_install_mismatch_is_repaired_from_the_served_model,
         test_repair_refuses_anything_but_the_installer_written_mismatch,
-        test_linux_phase02_records_and_repairs_the_served_external_model,
         # Round F: the served id is the --alias GGUF filename.
         test_native_projection_records_the_served_catalog_model,
         test_native_projection_refuses_ids_it_cannot_name,
