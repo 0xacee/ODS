@@ -2437,6 +2437,19 @@ def _external_llm_runtime(env: dict) -> bool:
     return str(env.get("LLM_BACKEND") or "").strip().casefold() == "external"
 
 
+def _unmigrated_external_lemonade(env: dict) -> bool:
+    """A pre-round-F .env for the owner's own Lemonade (one release).
+
+    Until the installer migrates it to the generic external keys, it names
+    neither an ODS-owned runtime nor a WSL bridge: nothing here may change it.
+    """
+    return (
+        str(env.get("LLM_BACKEND") or "").strip().casefold() == "lemonade"
+        and _env_value_is_true(env.get("LEMONADE_EXTERNAL"))
+        and not _wsl_runtime.candidate(env)
+    )
+
+
 def _current_runtime_model_inputs(
     env: dict,
     identity: dict,
@@ -13154,7 +13167,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
             json_response(self, 409, {'error': 'Windows runtime ownership could not be verified'})
             return
-        if _external_llm_runtime(persisted_env):
+        if _external_llm_runtime(persisted_env) or _unmigrated_external_lemonade(persisted_env):
             # Local GGUF activation owns the inference process and rolls back
             # by restoring the previous physical model. Neither assumption
             # holds for the owner's own OpenAI-compatible server. Reject before

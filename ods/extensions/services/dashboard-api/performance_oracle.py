@@ -47,6 +47,8 @@ _EVIDENCE_PATH = Path(__file__).with_name("performance_evidence.json")
 _DEFAULT_RECOMMENDATION_POLICY = "catalog-fit-pre-download"
 _VRAM_FIT_TOLERANCE_GB = 0.25
 _MODEL_SELECTOR_POLICY = _SHARED_SELECTOR_POLICY
+# Retired Lemonade id forms, still matched for one release so persisted
+# receipts and performance rows keep naming their GGUF.
 _RUNTIME_MODEL_PREFIXES = ("extra.", "user.")
 _AGENT_MIN_LOCAL_TOKENS_PER_SEC = 2.0
 _MODEL_PUBLISHERS = (
@@ -325,6 +327,13 @@ def model_compatibility_runtime_context(
         return os.environ.get(key, "")
 
     llm_backend = runtime or runtime_value("LLM_BACKEND")
+    ods_mode = runtime_value("ODS_MODE")
+    # Round F serves every managed model through llama-server: an unmigrated
+    # Lemonade .env reads as it, and evidence scoped to Lemonade never applies.
+    if normalize_key(llm_backend) == "lemonade":
+        llm_backend = "llama-server"
+    if normalize_key(ods_mode) == "lemonade":
+        ods_mode = "local"
     gpu_backend = (
         getattr(gpu_info, "gpu_backend", None)
         or runtime_value("GPU_BACKEND")
@@ -344,7 +353,7 @@ def model_compatibility_runtime_context(
         "llmBackend": normalize_key(llm_backend),
         "runtime": normalize_key(llm_backend),
         "gpuBackend": normalize_key(gpu_backend),
-        "odsMode": normalize_key(runtime_value("ODS_MODE")),
+        "odsMode": normalize_key(ods_mode),
         "host": sorted(host_values)[0] if host_values else "",
         "hosts": sorted(host_values),
     }

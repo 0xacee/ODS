@@ -236,5 +236,7 @@ class ModelLibraryResponse(BaseModel):
     odsMode: str = "unknown"
     configuredMode: str = "unknown"
     llmBackend: str = "unknown"
-    externalLemonade: bool = False
+    # The model runs on the Windows host (the WSL Portal); modelManagement
+    # carries the host agent's proof of what this installation may control.
+    hostRuntime: bool = False
     modelManagement: Optional[dict[str, Any]] = None

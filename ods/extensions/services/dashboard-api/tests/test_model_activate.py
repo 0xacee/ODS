@@ -276,17 +276,25 @@ def test_runtime_api_key_is_sent_only_to_windows_owned_servers(monkeypatch):
     }) == "ab" * 32
 
 
+@pytest.mark.parametrize("original", [
+    (
+        "ODS_MODE=local\nLLM_BACKEND=external\n"
+        "EXTERNAL_LLM_URL=http://192.168.1.20:13305\n"
+        "EXTERNAL_LLM_MODEL=Qwen3.6-35B-A3B-GGUF\n"
+    ),
+    # An unmigrated .env for the owner's own Lemonade (no WSL bridge): one
+    # release until the installer rewrites it to the generic external keys.
+    (
+        "ODS_MODE=lemonade\nGPU_BACKEND=amd\nLLM_BACKEND=lemonade\nLEMONADE_EXTERNAL=true\n"
+        "LEMONADE_BASE_URL=http://192.168.1.20:13305\nLEMONADE_MODEL=Qwen3.6-35B-A3B-GGUF\n"
+    ),
+])
 def test_external_llm_local_activation_rejects_before_mutation(
-    monkeypatch, tmp_path,
+    monkeypatch, tmp_path, original,
 ):
     install = tmp_path / "ods"
     install.mkdir()
     env_path = install / ".env"
-    original = (
-        "ODS_MODE=local\nLLM_BACKEND=external\n"
-        "EXTERNAL_LLM_URL=http://192.168.1.20:13305\n"
-        "EXTERNAL_LLM_MODEL=Qwen3.6-35B-A3B-GGUF\n"
-    )
     env_path.write_text(original, encoding="utf-8")
     monkeypatch.setattr(_mod, "INSTALL_DIR", install)
     monkeypatch.setattr(_mod, "STARTUP_ODS_MODE", "local")
