@@ -589,6 +589,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     clearing one removes it.
 
 ### Fixed
+- On Windows with an AMD GPU, choosing another model, often the first switch
+  after setup, could be refused with "This installation cannot change the
+  model runtime on the Windows host right now" while the model kept running.
+  The Portal's periodic access check counted as a model operation and
+  invalidated the host agent's ownership proof. It no longer does, a switch
+  that arrives while that check runs waits up to 30 s for it, and every
+  check that cannot be verified is now logged with its cause.
 - A long chat message with many unclosed quotes and backslashes no longer
   stalls Pixel chat. pixel-edge masks quoted text before it looks for
   workspace directives, and that step took time quadratic in the message

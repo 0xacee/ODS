@@ -529,7 +529,18 @@ _model_lifecycle_state_lock = threading.Lock()
 _model_lifecycle_operation: str | None = None
 _model_lifecycle_target: str | None = None
 _model_lifecycle_revision = 0
-# Diagnostics only: the operation that most recently claimed the lifecycle.
+# Lifecycle operations that never change the model runtime; they claim the
+# lifecycle only to serialize with model operations. The Pixel access monitor
+# re-proves every ~45 s, and counting its begin and end made consecutive
+# Windows runtime management proofs fail, so a fresh install's first model
+# switch was refused (Strixy, 2026-10-05).
+_MODEL_RUNTIME_NEUTRAL_OPERATIONS = frozenset({
+    'pixel_startup_reproof', 'pixel_access_mode', 'pixel_open_app',
+    'pixel_providers', 'pixel_settings',
+})
+# Advances only for lifecycle operations that can change the model runtime.
+_model_runtime_revision = 0
+# Diagnostics only: the runtime operation that most recently claimed the lifecycle.
 _model_lifecycle_last_operation: str | None = None
 _model_management_lock = threading.Lock()
 _model_management_cache: tuple | None = None
@@ -555,7 +566,7 @@ def _model_download_thread_alive() -> bool:
 def _begin_model_lifecycle(operation: str, target: str = "") -> tuple[bool, dict]:
     """Claim the process-wide model lifecycle boundary without waiting."""
     global _model_lifecycle_operation, _model_lifecycle_target, _model_lifecycle_revision
-    global _model_lifecycle_last_operation
+    global _model_lifecycle_last_operation, _model_runtime_revision
     with _model_lifecycle_state_lock:
         if not _model_lifecycle_lock.acquire(blocking=False):
             return False, {
@@ -565,13 +576,16 @@ def _begin_model_lifecycle(operation: str, target: str = "") -> tuple[bool, dict
         _model_lifecycle_operation = operation
         _model_lifecycle_target = target or None
         _model_lifecycle_revision += 1
-        _model_lifecycle_last_operation = operation
+        if operation not in _MODEL_RUNTIME_NEUTRAL_OPERATIONS:
+            _model_runtime_revision += 1
+            _model_lifecycle_last_operation = operation
         return True, {"operation": operation, "target": target or None}
 
 
 def _end_model_lifecycle(operation: str) -> None:
     """Release lifecycle ownership held by ``operation``."""
     global _model_lifecycle_operation, _model_lifecycle_target, _model_lifecycle_revision
+    global _model_runtime_revision
     with _model_lifecycle_state_lock:
         if _model_lifecycle_operation != operation:
             logger.error(
@@ -579,6 +593,8 @@ def _end_model_lifecycle(operation: str) -> None:
                 _model_lifecycle_operation,
                 operation,
             )
+        if _model_lifecycle_operation not in _MODEL_RUNTIME_NEUTRAL_OPERATIONS:
+            _model_runtime_revision += 1
         _model_lifecycle_operation = None
         _model_lifecycle_target = None
         _model_lifecycle_revision += 1
@@ -2042,8 +2058,14 @@ def _model_download_directory() -> Path:
 
 
 def _model_management_key(env: dict) -> tuple:
+    # Only operations that can change the model runtime move the key; a Pixel
+    # access re-proof holding the lifecycle leaves a management proof valid.
     with _model_lifecycle_state_lock:
-        lifecycle = (_model_lifecycle_revision, _model_lifecycle_operation, _model_lifecycle_target)
+        operation = _model_lifecycle_operation
+        if operation in _MODEL_RUNTIME_NEUTRAL_OPERATIONS:
+            lifecycle = (_model_runtime_revision, None, None)
+        else:
+            lifecycle = (_model_runtime_revision, operation, _model_lifecycle_target)
     return (str(INSTALL_DIR), lifecycle,
             tuple(env.get(key) for key in (*_SWITCHBOARD_ROUTE_ENV_KEYS, 'AMD_INFERENCE_PORT', 'ODS_WINDOWS_SYSTEM_DIRECTORY')))
 

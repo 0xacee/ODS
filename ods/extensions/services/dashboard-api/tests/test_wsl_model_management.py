@@ -19,6 +19,7 @@ def management(tmp_path, monkeypatch):
     monkeypatch.setattr(host, '_model_lifecycle_operation', None)
     monkeypatch.setattr(host, '_model_lifecycle_target', None)
     monkeypatch.setattr(host, '_model_lifecycle_revision', 0)
+    monkeypatch.setattr(host, '_model_runtime_revision', 0)
     monkeypatch.setattr(host, '_model_lifecycle_last_operation', None)
     path = tmp_path / '.env'
     path.write_text('ODS_HOST_LLM_TRANSPORT=model-router\n')
@@ -108,15 +109,15 @@ def test_lifecycle_change_during_probe_does_not_publish_old_proof(management, mo
 
 
 def test_one_change_during_probe_is_rechecked_instead_of_refusing(management, monkeypatch, caplog):
-    # Strixy: an unrelated Portal action during a multi-second proof made a
-    # model switch fail with 409 and logged nothing.
+    # A model operation that ends during a multi-second proof makes it stale;
+    # one recheck proves the new state instead of refusing a model switch.
     calls = []
 
     def probe(_env):
         calls.append(True)
         if len(calls) == 1:
-            assert host._begin_model_lifecycle('pixel_open_app')[0]
-            host._end_model_lifecycle('pixel_open_app')
+            assert host._begin_model_lifecycle('model_download')[0]
+            host._end_model_lifecycle('model_download')
         return {'managed': True, 'running': True}
 
     monkeypatch.setattr(host, '_managed_wsl_runtime', probe)
@@ -125,8 +126,37 @@ def test_one_change_during_probe_is_rechecked_instead_of_refusing(management, mo
     assert (code, value['canActivate']) == (200, True)
     assert len(calls) == 2
     assert ('changed during verification (lifecycle revision 0 -> 2, '
-            'last operation pixel_open_app); attempt 1 of 2') in caplog.text
+            'last operation model_download); attempt 1 of 2') in caplog.text
     assert host._model_management_cache is not None
+
+
+def test_pixel_only_lifecycle_operations_never_invalidate_a_proof(management, monkeypatch, caplog):
+    # Strixy, fresh install: the Pixel access monitor's re-proof began during
+    # one proof and ended during the recheck, so the first model switch got
+    # 409 "could not be verified". Pixel-only operations leave the key alone.
+    calls = []
+
+    def probe(_env):
+        calls.append(True)
+        for operation in ('pixel_startup_reproof', 'pixel_access_mode', 'pixel_open_app',
+                          'pixel_providers', 'pixel_settings'):
+            assert host._begin_model_lifecycle(operation)[0]
+            host._end_model_lifecycle(operation)
+        return {'managed': True, 'running': True}
+
+    monkeypatch.setattr(host, '_managed_wsl_runtime', probe)
+    with caplog.at_level('INFO', logger=host.logger.name):
+        code, value = host._model_management_snapshot()
+    assert (code, value['canActivate']) == (200, True)
+    assert len(calls) == 1
+    assert 'changed during verification' not in caplog.text
+    # A proof taken while a Pixel re-proof holds the lifecycle stays reusable.
+    assert host._begin_model_lifecycle('pixel_startup_reproof')[0]
+    try:
+        assert host._model_management_snapshot()[0] == 200
+        assert len(calls) == 1
+    finally:
+        host._end_model_lifecycle('pixel_startup_reproof')
 
 
 def test_lock_timeout_and_persistent_change_are_logged(management, monkeypatch, caplog):
