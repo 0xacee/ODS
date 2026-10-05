@@ -168,7 +168,7 @@ while [[ $# -gt 0 ]]; do
         # to connect an API after installing, not "Unknown option".
         --external-llm-url|--external-llm-provider|--external-llm-model|--external-llm-key-file|--external-llm-key-env|--no-external-llm|--reuse-external-llm)
             echo "API mode ($1) is not in the macOS installer yet. Nothing was changed." >&2
-            echo "Install without it, then connect your API in the dashboard (Settings > Remote GPU), or run:" >&2
+            echo "Install without it, then connect your API in the dashboard (Settings > Remote model), or run:" >&2
             echo "  ods remote-provider configure --base-url URL --model MODEL --api-key-file FILE" >&2
             echo "  ods remote-provider test" >&2
             echo "Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
