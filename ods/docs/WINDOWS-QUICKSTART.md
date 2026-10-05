@@ -135,10 +135,14 @@ use **Resume model** there when needed.
 If stop reports that an earlier command is still draining, its stopped preference
 has already been saved; wait for that command to finish and retry stop. If the
 controller reports an unconfirmed Linux completion, it blocks further stack
-changes. Restart Windows using **Restart**, then retry the requested action. A
-new Windows boot proves that the old Linux command has ended; signing out is not
-enough. Do not delete `command-pending.json`. Ordinary completed command errors
-can be corrected and retried without restarting Windows.
+changes until a restart proves that the old Linux command has ended. Follow the
+remedy in the message. Usually that is `wsl --shutdown`, then retry the
+requested action: a new WSL VM boot is proof. Stop, release and uninstall never
+start a stopped distribution for this check, so open the distribution again
+before retrying them. A command recorded by an older ODS version needs a Windows
+restart using **Restart**; signing out is not enough. Do not delete
+`command-pending.json`. Ordinary completed command errors can be corrected and
+retried without restarting Windows.
 
 ## GPU placement
 
