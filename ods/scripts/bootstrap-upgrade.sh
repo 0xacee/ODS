@@ -1177,429 +1177,6 @@ resolve_live_windows_lemonade_model_id() {
     resolve_live_lemonade_model_id "$@"
 }
 
-verify_windows_lemonade_loaded_context() {
-    is_windows_bash || return 0
-
-    local port="$1" model_id="$2" target_gguf="$3" expected_context="$4" ps_cmd output rc
-    [[ -n "$port" && -n "$model_id" && -n "$target_gguf" ]] || return 1
-    case "$expected_context" in ''|*[!0-9]*|0) return 0 ;; esac
-
-    ps_cmd="$(windows_ps_command)"
-    [[ -n "$ps_cmd" ]] || {
-        log "WARNING: no PowerShell executable found; cannot verify native Windows Lemonade context."
-        return 1
-    }
-
-    output="$(ODS_WIN_LEMONADE_PORT="$port" \
-        ODS_WIN_MODEL_ID="$model_id" \
-        ODS_WIN_GGUF_FILE="$target_gguf" \
-        ODS_WIN_EXPECTED_CONTEXT="$expected_context" \
-        "$ps_cmd" -NoProfile -ExecutionPolicy Bypass -Command '
-        $ErrorActionPreference = "Stop"
-
-        $port = [int]$env:ODS_WIN_LEMONADE_PORT
-        $modelId = [string]$env:ODS_WIN_MODEL_ID
-        $ggufFile = [string]$env:ODS_WIN_GGUF_FILE
-        $expectedContext = [int]$env:ODS_WIN_EXPECTED_CONTEXT
-        $targetFile = [IO.Path]::GetFileName($ggufFile)
-        $targetStem = [IO.Path]::GetFileNameWithoutExtension($targetFile)
-
-        function Add-ODSCandidate {
-            param($List, [string]$Value)
-            if ([string]::IsNullOrWhiteSpace($Value)) { return }
-            $List.Add($Value)
-            $normalized = $Value.Replace("\", "/")
-            $leaf = $normalized.Split("/")[-1]
-            if (-not [string]::IsNullOrWhiteSpace($leaf)) {
-                $List.Add($leaf)
-                $List.Add([IO.Path]::GetFileNameWithoutExtension($leaf))
-                if ($leaf.Contains(":")) {
-                    $List.Add($leaf.Split(":")[-1])
-                }
-            }
-        }
-
-        function Test-ODSLoadedModelMatch {
-            param($Entry)
-            $candidates = New-Object System.Collections.Generic.List[string]
-            foreach ($name in @("model_name", "model", "id", "checkpoint", "file")) {
-                if ($Entry.PSObject.Properties[$name]) {
-                    Add-ODSCandidate -List $candidates -Value ([string]$Entry.PSObject.Properties[$name].Value)
-                }
-            }
-            foreach ($candidate in @($candidates)) {
-                if ($candidate -eq $modelId -or
-                    $candidate -eq $targetFile -or
-                    $candidate -eq $targetStem -or
-                    $candidate -eq ("extra.{0}" -f $targetFile)) {
-                    return $true
-                }
-            }
-            return $false
-        }
-
-        $health = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/api/v1/health" -f $port) -TimeoutSec 10 -ErrorAction Stop
-        $entries = @()
-        if ($health.PSObject.Properties["all_models_loaded"] -and $health.all_models_loaded) {
-            $entries = @($health.all_models_loaded)
-        }
-        $match = $entries | Where-Object { Test-ODSLoadedModelMatch $_ } | Select-Object -First 1
-        if (-not $match) {
-            throw "Lemonade health did not report loaded model $modelId."
-        }
-
-        $actualContext = 0
-        if ($match.PSObject.Properties["recipe_options"] -and
-            $match.recipe_options -and
-            $match.recipe_options.PSObject.Properties["ctx_size"]) {
-            $actualContext = [int]$match.recipe_options.ctx_size
-        } elseif ($match.PSObject.Properties["ctx_size"]) {
-            $actualContext = [int]$match.ctx_size
-        }
-        if ($actualContext -le 0) {
-            throw "Lemonade health did not report ctx_size for loaded model $modelId."
-        }
-        if ($actualContext -lt $expectedContext) {
-            throw "Lemonade loaded context is below expected: expected at least $expectedContext, got $actualContext."
-        }
-        Write-Output ("__ODS_LEMONADE_CONTEXT__={0}" -f $actualContext)
-    ' 2>&1)"
-    rc=$?
-    if (( rc != 0 )); then
-        log "WARNING: native Windows Lemonade context verification failed: $(printf '%s' "$output" | tr '\r\n' ' ' | tail -c 800)"
-        return 1
-    fi
-    log "Verified native Windows Lemonade loaded context for ${model_id}: $(printf '%s\n' "$output" | sed -n 's/^__ODS_LEMONADE_CONTEXT__=//p' | tail -1 | tr -d '\r')"
-    return 0
-}
-
-restart_windows_lemonade_with_full_model() {
-    is_windows_bash || return 1
-
-    local target_gguf="${1:-$FULL_GGUF_FILE}" target_label="${2:-full model}"
-    [[ -n "$target_gguf" ]] || return 1
-
-    local runtime llm_backend managed runtime_mode lemonade_external
-    runtime="$(read_env_value AMD_INFERENCE_RUNTIME | tr '[:upper:]' '[:lower:]')"
-    llm_backend="$(read_env_value LLM_BACKEND | tr '[:upper:]' '[:lower:]')"
-    [[ "$runtime" == "lemonade" || "$llm_backend" == "lemonade" ]] || return 1
-    managed="$(read_env_value AMD_INFERENCE_MANAGED | tr '[:upper:]' '[:lower:]')"
-    runtime_mode="$(read_env_value AMD_INFERENCE_RUNTIME_MODE | tr '[:upper:]' '[:lower:]')"
-    lemonade_external="$(read_env_value LEMONADE_EXTERNAL | tr '[:upper:]' '[:lower:]')"
-    if [[ "$managed" == "false" || "$runtime_mode" == "external-lemonade" || "$lemonade_external" == "true" ]]; then
-        log "Skipping native Windows Lemonade restart because the runtime is externally managed."
-        return 1
-    fi
-
-    local ps_cmd
-    ps_cmd="$(windows_ps_command)"
-    [[ -n "$ps_cmd" ]] || {
-        log "WARNING: no PowerShell executable found; cannot restart native Windows Lemonade."
-        return 1
-    }
-
-    local pid_file bind_addr lemonade_port target_context helper_path env_path
-    pid_file="$INSTALL_DIR/data/llama-server.pid"
-    # Model upgrades must preserve the private native inference listener.
-    bind_addr="127.0.0.1"
-    lemonade_port="$(read_env_value AMD_INFERENCE_PORT)"
-    [[ -n "$lemonade_port" ]] || lemonade_port="8080"
-    target_context="$(read_env_value CTX_SIZE)"
-    [[ -n "$target_context" ]] || target_context="$(read_env_value MAX_CONTEXT)"
-    [[ -n "$target_context" ]] || target_context="$FULL_MAX_CONTEXT"
-    case "$target_context" in ''|*[!0-9]*) target_context="$FULL_MAX_CONTEXT" ;; esac
-    helper_path="$INSTALL_DIR/installers/windows/lib/backend-contract.ps1"
-    env_path="$ENV_FILE"
-    if [[ ! -f "$helper_path" ]]; then
-        log "WARNING: Windows Lemonade launch helper is missing: $helper_path"
-        return 1
-    fi
-
-    log "Restarting native Windows Lemonade with ${target_label}: ${target_gguf}"
-    local ps_output model_id ps_rc restart_timeout ps_output_file
-    local -a ps_env_cmd
-    restart_timeout="${ODS_LEMONADE_RESTART_PS_TIMEOUT:-180}"
-    case "$restart_timeout" in ''|*[!0-9]*|0) restart_timeout=180 ;; esac
-    mkdir -p "$INSTALL_DIR/logs" 2>/dev/null || true
-    ps_output_file="$INSTALL_DIR/logs/lemonade-bootstrap-restart.$(date +%Y%m%d-%H%M%S).$$.log"
-    ps_env_cmd=(
-        env
-        "ODS_WIN_PID_FILE=$(windows_path "$pid_file")"
-        "ODS_WIN_MODELS_DIR=$(windows_path "$MODELS_DIR")"
-        "ODS_WIN_BIND_ADDR=$bind_addr"
-        "ODS_WIN_LEMONADE_PORT=$lemonade_port"
-        "ODS_WIN_CONTEXT_SIZE=$target_context"
-        "ODS_WIN_LEMONADE_HELPER=$(windows_path "$helper_path")"
-        "ODS_WIN_ENV_PATH=$(windows_path "$env_path")"
-        "ODS_WIN_LEMONADE_DIAGNOSTIC_LOG=$(windows_path "$INSTALL_DIR/logs/lemonade-launch.log")"
-        "ODS_WIN_LEMONADE_TASK=ODSLemonadeRuntime"
-        "ODS_WIN_GGUF_FILE=$target_gguf"
-    )
-    if command -v timeout >/dev/null 2>&1; then
-        ps_env_cmd+=(timeout --foreground --kill-after=5s "${restart_timeout}s")
-    fi
-    if "${ps_env_cmd[@]}" \
-        "$ps_cmd" -NoProfile -ExecutionPolicy Bypass -Command '
-        $ErrorActionPreference = "Stop"
-
-        $helperPath = $env:ODS_WIN_LEMONADE_HELPER
-        if (-not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
-            throw "Windows Lemonade launch helper not found: $helperPath"
-        }
-        . $helperPath
-        $exe = Resolve-ODSLemonadeExe
-        if (-not $exe) { throw "lemonade-server.exe not found under Program Files roots" }
-        $port = [int]$env:ODS_WIN_LEMONADE_PORT
-        $adminApiKey = Get-ODSLemonadeAdminApiKey -EnvPath $env:ODS_WIN_ENV_PATH
-        $launchContract = Get-ODSLemonadeLaunchContract `
-            -ExecutablePath $exe -Port $port -BindAddress $env:ODS_WIN_BIND_ADDR `
-            -ModelsDir $env:ODS_WIN_MODELS_DIR -AdminApiKey $adminApiKey
-        $taskName = $env:ODS_WIN_LEMONADE_TASK
-        $contextSize = 0
-        $null = [int]::TryParse([string]$env:ODS_WIN_CONTEXT_SIZE, [ref]$contextSize)
-        try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch { }
-
-        $binDir = Split-Path -Parent $exe
-        $userProfile = [Environment]::GetFolderPath("UserProfile")
-        $lemonadeCacheBin = if ($userProfile) { Join-Path (Join-Path (Join-Path $userProfile ".cache") "lemonade") "bin" } else { $null }
-        $odsModelsDir = $env:ODS_WIN_MODELS_DIR
-
-        function Test-ODSLemonadeProcess {
-            param($ProcessInfo)
-            if (-not $ProcessInfo) { return $false }
-            return (
-                ($ProcessInfo.ExecutablePath -and $ProcessInfo.ExecutablePath.StartsWith($binDir, [StringComparison]::OrdinalIgnoreCase)) -or
-                ($lemonadeCacheBin -and $ProcessInfo.ExecutablePath -and $ProcessInfo.ExecutablePath.StartsWith($lemonadeCacheBin, [StringComparison]::OrdinalIgnoreCase)) -or
-                ($odsModelsDir -and $ProcessInfo.CommandLine -and
-                    $ProcessInfo.CommandLine.IndexOf($odsModelsDir, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                    $ProcessInfo.CommandLine.IndexOf("lemonade", [StringComparison]::OrdinalIgnoreCase) -ge 0)
-            )
-        }
-
-        function Stop-ODSProcessId {
-            param([int]$ProcessId)
-            $processInfo = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f $ProcessId) -ErrorAction SilentlyContinue
-            if (-not $processInfo) { return }
-            if (-not (Test-ODSLemonadeProcess $processInfo)) {
-                throw "Refusing to stop unowned process $ProcessId on configured Lemonade port $port"
-            }
-            Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
-            for ($i = 0; $i -lt 30; $i++) {
-                $old = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-                if (-not $old) { return }
-                Start-Sleep -Milliseconds 500
-            }
-            try {
-                $null = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
-                    -Arguments @{ CommandLine = ("cmd.exe /c taskkill.exe /PID {0} /T /F" -f $ProcessId) } `
-                    -ErrorAction Stop
-            } catch {}
-            for ($i = 0; $i -lt 30; $i++) {
-                $old = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-                if (-not $old) { return }
-                Start-Sleep -Milliseconds 500
-            }
-        }
-
-        $pidPath = $env:ODS_WIN_PID_FILE
-        if (Test-Path $pidPath) {
-            $rawPid = (Get-Content -LiteralPath $pidPath -Raw).Trim()
-            if ($rawPid -match "^\d+$") {
-                Stop-ODSProcessId -ProcessId ([int]$rawPid)
-            }
-            Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
-        }
-
-        # Lemonade also has a process-wide router singleton. If the saved PID
-        # is stale or points at a child that has already exited, Start-Process
-        # can report success while the new router immediately exits with
-        # "Another instance of lemonade-router is already running"; the swap
-        # then polls the old bootstrap instance forever. Clear the configured
-        # listener and any Lemonade Server child processes before launching the
-        # full-model instance.
-        $deadline = (Get-Date).AddSeconds(20)
-        do {
-            $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
-            foreach ($listener in $listeners) {
-                if ($listener.OwningProcess -gt 0) {
-                    Stop-ODSProcessId -ProcessId ([int]$listener.OwningProcess)
-                }
-            }
-            if ($listeners.Count -eq 0) { break }
-            Start-Sleep -Milliseconds 500
-        } while ((Get-Date) -lt $deadline)
-
-        $lemonadeChildren = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-            Test-ODSLemonadeProcess $_
-        })
-        foreach ($child in $lemonadeChildren) {
-            Stop-ODSProcessId -ProcessId ([int]$child.ProcessId)
-        }
-
-        $stillListening = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
-        if ($stillListening.Count -gt 0) {
-            throw "port $port is still occupied after stopping the previous Lemonade instance"
-        }
-
-        $logPath = Join-Path $env:TEMP "lemonade-server.log"
-        Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
-
-        $action = New-ODSLemonadeScheduledTaskAction `
-            -Contract $launchContract -EnvPath $env:ODS_WIN_ENV_PATH `
-            -DiagnosticLogPath $env:ODS_WIN_LEMONADE_DIAGNOSTIC_LOG
-        $launchMethod = "scheduled task"
-        $proc = $null
-        try {
-            $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(1))
-            $settings = New-ScheduledTaskSettingsSet `
-                -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-                -ExecutionTimeLimit ([TimeSpan]::Zero)
-            $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
-                -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
-            Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-        } catch {
-            $launchMethod = "direct process"
-            Write-Warning "Could not start Lemonade through Task Scheduler: $_"
-            $proc = Start-ODSLemonadeDirectProcess -Contract $launchContract -DiagnosticLogPath $env:ODS_WIN_LEMONADE_DIAGNOSTIC_LOG
-        }
-
-        $healthy = $false
-        for ($i = 0; $i -lt 45; $i++) {
-            try {
-                $health = Invoke-WebRequest -Uri ("http://127.0.0.1:{0}/api/v1/health" -f $port) -TimeoutSec 3 -UseBasicParsing
-                if ([int]$health.StatusCode -ge 200 -and [int]$health.StatusCode -lt 300) {
-                    $healthy = $true
-                    break
-                }
-            } catch { }
-            Start-Sleep -Seconds 1
-        }
-        if (-not $healthy -and $launchMethod -eq "scheduled task") {
-            $scheduledDiagnostics = Get-ODSLemonadeLaunchDiagnostics -TaskName $taskName
-            Write-Warning "Lemonade scheduled task did not start a healthy router. $(Format-ODSLemonadeLaunchDiagnostics -Diagnostics $scheduledDiagnostics)"
-            try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch { }
-            $launchMethod = "direct process"
-            $proc = Start-ODSLemonadeDirectProcess -Contract $launchContract -DiagnosticLogPath $env:ODS_WIN_LEMONADE_DIAGNOSTIC_LOG
-            for ($i = 0; $i -lt 15; $i++) {
-                try {
-                    $health = Invoke-WebRequest -Uri ("http://127.0.0.1:{0}/api/v1/health" -f $port) -TimeoutSec 3 -UseBasicParsing
-                    if ([int]$health.StatusCode -ge 200 -and [int]$health.StatusCode -lt 300) {
-                        $healthy = $true
-                        break
-                    }
-                } catch { }
-                Start-Sleep -Seconds 1
-            }
-        }
-        if (-not $healthy) {
-            $diagnostics = Get-ODSLemonadeLaunchDiagnostics -TaskName $taskName -ChildProcess $proc
-            throw "Lemonade $launchMethod did not become healthy after restart. $(Format-ODSLemonadeLaunchDiagnostics -Diagnostics $diagnostics)"
-        }
-        $listener = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) | Select-Object -First 1
-        if (-not $listener -or $listener.OwningProcess -le 0) {
-            throw "Lemonade health passed, but no listener process was found on port $port"
-        }
-        New-Item -ItemType Directory -Path (Split-Path -Parent $pidPath) -Force | Out-Null
-        Set-Content -LiteralPath $pidPath -Value $listener.OwningProcess
-        if ($launchContract.RequiresRuntimeConfiguration) {
-            $configArgs = @{
-                Port = $port
-                ModelsDir = $env:ODS_WIN_MODELS_DIR
-                AdminApiKey = $adminApiKey
-            }
-            if ($contextSize -gt 0) {
-                $configArgs.ContextSize = $contextSize
-            }
-            $null = Set-ODSLemonadeModernRuntimeConfig @configArgs
-        }
-        $modelId = Resolve-ODSLemonadeModelId `
-            -Port $port -GgufFile $env:ODS_WIN_GGUF_FILE `
-            -VersionOverride ([string]$launchContract.Version)
-        Write-Output ("__ODS_LEMONADE_MODEL_ID__={0}" -f $modelId)
-    ' >"$ps_output_file" 2>&1; then
-        ps_rc=0
-    else
-        ps_rc=$?
-    fi
-    ps_output="$(tail -c 12000 "$ps_output_file" 2>/dev/null || true)"
-    if (( ps_rc != 0 )); then
-        log "WARNING: native Windows Lemonade restart failed: $(printf '%s' "$ps_output" | tr '\r\n' ' ' | tail -c 800)"
-        if model_id="$(resolve_live_windows_lemonade_model_id "$lemonade_port" "$target_gguf")"; then
-            log "PowerShell restart helper did not finish cleanly, but Lemonade live state matches ${model_id}; continuing with strict route proof."
-        else
-            return 1
-        fi
-    fi
-
-    if [[ -z "${model_id:-}" ]]; then
-        model_id="$(printf '%s\n' "$ps_output" | sed -n 's/^__ODS_LEMONADE_MODEL_ID__=//p' | tail -1 | tr -d '\r')"
-    fi
-    if [[ -z "$model_id" ]]; then
-        if model_id="$(resolve_live_windows_lemonade_model_id "$lemonade_port" "$target_gguf")"; then
-            log "Resolved native Windows Lemonade model ID from live state: ${model_id}"
-        else
-            log "WARNING: native Windows Lemonade restart did not report a model ID."
-            return 1
-        fi
-    fi
-    log "Waiting for native Windows Lemonade to serve ${model_id} ..."
-    local _swap_attempts
-    # A freshly-swapped full model can take several minutes to register in
-    # --extra-models-dir and then load on the first completion. The old 12x10s
-    # (~2 min) budget timed out before a 22 GB MoE (Qwen3.6-35B-A3B) was even
-    # listed, so the swap reverted to bootstrap (#1517). Use the same longer
-    # budget as the llama.cpp warm-up path; override with ODS_LEMONADE_SWAP_ATTEMPTS.
-    _swap_attempts="${ODS_LEMONADE_SWAP_ATTEMPTS:-60}"
-    case "$_swap_attempts" in ''|*[!0-9]*|0) _swap_attempts=60 ;; esac
-    for _i in $(seq 1 "$_swap_attempts"); do
-        if curl -sf --max-time 5 "http://127.0.0.1:${lemonade_port}/api/v1/models" 2>/dev/null \
-            | grep -q "\"id\"[[:space:]]*:[[:space:]]*\"${model_id}\""; then
-            # Loading through chat alone can leave ctx_size absent on Lemonade
-            # 10.0, even when the server was launched with --ctx-size. Use the
-            # same explicit per-model load contract as catalog activation.
-            if ! env "ODS_WIN_LEMONADE_HELPER=$(windows_path "$helper_path")" \
-                "ODS_WIN_ENV_PATH=$(windows_path "$env_path")" \
-                "ODS_WIN_LEMONADE_PORT=$lemonade_port" \
-                "ODS_WIN_MODEL_ID=$model_id" "ODS_WIN_CONTEXT_SIZE=$target_context" \
-                "$ps_cmd" -NoProfile -ExecutionPolicy Bypass -Command '
-                    $ErrorActionPreference = "Stop"
-                    . $env:ODS_WIN_LEMONADE_HELPER
-                    $key = Get-ODSLemonadeAdminApiKey -EnvPath $env:ODS_WIN_ENV_PATH
-                    Set-ODSLemonadeLoadedModel -Port ([int]$env:ODS_WIN_LEMONADE_PORT) `
-                        -ModelId $env:ODS_WIN_MODEL_ID -ContextSize ([int]$env:ODS_WIN_CONTEXT_SIZE) `
-                        -ApiKey $key
-                ' >>"$ps_output_file" 2>&1; then
-                log "Windows Lemonade rejected the explicit model/context load; refusing promotion."
-                return 1
-            fi
-            if curl -sf --max-time 240 -X POST \
-                "http://127.0.0.1:${lemonade_port}/api/v1/chat/completions" \
-                -H "Content-Type: application/json" \
-                -d "{\"model\":\"${model_id}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1,\"temperature\":0,\"stream\":false}" \
-                >/dev/null 2>&1; then
-                if ! verify_windows_lemonade_loaded_context "$lemonade_port" "$model_id" "$target_gguf" "$target_context"; then
-                    log "Windows Lemonade completed with ${model_id}, but loaded context was not verified at ${target_context}."
-                    return 1
-                fi
-                if ! write_env_value LEMONADE_MODEL "$model_id"; then
-                    log "WARNING: ${model_id} completed, but ODS could not persist LEMONADE_MODEL."
-                    return 1
-                fi
-                log "SUCCESS: native Windows Lemonade completed with ${model_id}"
-                return 0
-            fi
-            log "Windows Lemonade lists ${model_id}, but completion is not ready yet (attempt $_i/${_swap_attempts})."
-        else
-            log "Waiting for Windows Lemonade to register ${model_id} (attempt $_i/${_swap_attempts})."
-        fi
-        sleep 10
-    done
-
-    log "WARNING: native Windows Lemonade did not complete with ${model_id} after ${_swap_attempts} attempts."
-    return 1
-}
-
 restart_windows_lemonade_with_previous_model() {
     local previous_gguf="${1:-}"
     restart_windows_lemonade_with_full_model "$previous_gguf" "previous model"
@@ -1675,181 +1252,42 @@ restart_windows_native_llama_server_with_full_model() {
         return 1
     }
 
-    local pid_file llama_exe model_path rollback_model_path log_path bind_addr ctx_size llama_port reasoning reasoning_fmt
-    pid_file="$INSTALL_DIR/data/llama-server.pid"
-    llama_exe="$INSTALL_DIR/llama-server/llama-server.exe"
-    model_path="$MODELS_DIR/$FULL_GGUF_FILE"
-    rollback_model_path="$MODELS_DIR/$BOOTSTRAP_GGUF_FILE"
-    log_path="$INSTALL_DIR/data/llama-server.log"
-    # Model upgrades must preserve the private native inference listener.
-    bind_addr="127.0.0.1"
-    ctx_size="$(read_env_value CTX_SIZE)"
-    [[ -n "$ctx_size" ]] || ctx_size="$(read_env_value MAX_CONTEXT)"
-    [[ -n "$ctx_size" ]] || ctx_size="$FULL_MAX_CONTEXT"
-    llama_port="$(read_env_value AMD_INFERENCE_PORT)"
-    [[ -n "$llama_port" ]] || llama_port="8080"
-    reasoning="$(read_env_value LLAMA_REASONING)"
-    [[ -n "$reasoning" ]] || reasoning="off"
-    case "$reasoning" in
-        off) reasoning_fmt="none" ;;
-        on)  reasoning_fmt="deepseek" ;;
-        *)   reasoning_fmt="$reasoning" ;;
-    esac
-
-    [[ -f "$llama_exe" ]] || {
-        log "WARNING: llama-server.exe not found at $llama_exe. Cannot hot-swap native Windows llama-server."
+    local ods_cli ods_cli_win install_dir_win restart_log
+    ods_cli="$INSTALL_DIR/ods.ps1"
+    [[ -f "$ods_cli" ]] || {
+        log "WARNING: ods.ps1 not found at $ods_cli. Cannot hot-swap native Windows llama-server."
         return 1
     }
-    [[ -f "$model_path" ]] || {
-        log "WARNING: full model not found at $model_path. Cannot hot-swap native Windows llama-server."
+    [[ -f "$MODELS_DIR/$FULL_GGUF_FILE" ]] || {
+        log "WARNING: full model not found at $MODELS_DIR/$FULL_GGUF_FILE. Cannot hot-swap native Windows llama-server."
         return 1
     }
+    ods_cli_win="$(windows_path "$ods_cli")"
+    install_dir_win="$(windows_path "$INSTALL_DIR")"
+    mkdir -p "$INSTALL_DIR/logs"
+    restart_log="$INSTALL_DIR/logs/native-llm-restart.$(date +%Y%m%d-%H%M%S).$$.log"
 
+    # ods.ps1 relaunches from the promoted .env with the Round F launch
+    # contract (--alias, one slot, the qualified Vulkan device, the API key
+    # file, no web UI), verifies pin.json first, stops only the llama-server
+    # its PID record proves, and exits 0 only after /health, /v1/models and
+    # /props proved the model and its context.
     log "Restarting native Windows llama-server with full model..."
-    ODS_WIN_PID_FILE="$(windows_path "$pid_file")" \
-    ODS_WIN_LLAMA_EXE="$(windows_path "$llama_exe")" \
-    ODS_WIN_MODEL_PATH="$(windows_path "$model_path")" \
-    ODS_WIN_ROLLBACK_MODEL_PATH="$(windows_path "$rollback_model_path")" \
-    ODS_WIN_LOG_PATH="$(windows_path "$log_path")" \
-    ODS_WIN_BIND_ADDR="$bind_addr" \
-    ODS_WIN_LLAMA_PORT="$llama_port" \
-    ODS_WIN_CTX_SIZE="$ctx_size" \
-    ODS_WIN_GPU_LAYERS="$(read_env_value N_GPU_LAYERS)" \
-    ODS_WIN_REASONING_FORMAT="$reasoning_fmt" \
-    ODS_WIN_REASONING_MODE="$reasoning" \
-    ODS_WIN_REASONING_FLAG="$(windows_native_reasoning_flag "$llama_exe" "$reasoning")" \
-    ODS_WIN_FLASH_ATTN="$(read_env_value LLAMA_ARG_FLASH_ATTN)" \
-    ODS_WIN_CACHE_TYPE_K="$(read_env_value LLAMA_ARG_CACHE_TYPE_K)" \
-    ODS_WIN_CACHE_TYPE_V="$(read_env_value LLAMA_ARG_CACHE_TYPE_V)" \
-    ODS_WIN_N_CPU_MOE="$(read_env_value LLAMA_ARG_N_CPU_MOE)" \
-    ODS_WIN_PARALLEL="$(read_env_value LLAMA_PARALLEL)" \
-    ODS_WIN_CHECKPOINT_EVERY_N_TOKENS="$(windows_native_checkpoint_interval "$llama_exe" "$(read_env_value LLAMA_ARG_CHECKPOINT_EVERY_NT)")" \
-    ODS_WIN_NO_CACHE_PROMPT="$(read_env_value LLAMA_ARG_NO_CACHE_PROMPT)" \
-    ODS_WIN_SPEC_TYPE="$(read_env_value LLAMA_ARG_SPEC_TYPE)" \
-    ODS_WIN_SPEC_DRAFT_N_MAX="$(read_env_value LLAMA_ARG_SPEC_DRAFT_N_MAX)" \
-    "$ps_cmd" -NoProfile -ExecutionPolicy Bypass -Command '
-        $ErrorActionPreference = "Stop"
+    if "$ps_cmd" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$ods_cli_win" \
+        native-llm-restart "$install_dir_win" >"$restart_log" 2>&1; then
+        log "SUCCESS: native Windows llama-server running with ${FULL_GGUF_FILE}"
+        return 0
+    fi
 
-        function Stop-ODSProcessId {
-            param([int]$ProcessId)
-            Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
-            for ($i = 0; $i -lt 30; $i++) {
-                $old = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-                if (-not $old) { return }
-                Start-Sleep -Milliseconds 500
-            }
-            try {
-                $null = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
-                    -Arguments @{ CommandLine = ("cmd.exe /c taskkill.exe /PID {0} /T /F" -f $ProcessId) } `
-                    -ErrorAction Stop
-            } catch {}
-            for ($i = 0; $i -lt 30; $i++) {
-                $old = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-                if (-not $old) { return }
-                Start-Sleep -Milliseconds 500
-            }
-        }
-
-        function Stop-ODSLlamaListeners {
-            param([int]$Port)
-            $deadline = (Get-Date).AddSeconds(20)
-            do {
-                $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
-                foreach ($listener in $listeners) {
-                    if ($listener.OwningProcess -gt 0) {
-                        $proc = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f [int]$listener.OwningProcess) -ErrorAction SilentlyContinue
-                        if ($proc -and (
-                            ($proc.Name -like "llama-server*") -or
-                            ($proc.ExecutablePath -and $proc.ExecutablePath.Equals($env:ODS_WIN_LLAMA_EXE, [StringComparison]::OrdinalIgnoreCase)) -or
-                            ($proc.CommandLine -and $proc.CommandLine.IndexOf("llama-server", [StringComparison]::OrdinalIgnoreCase) -ge 0)
-                        )) {
-                            Stop-ODSProcessId -ProcessId ([int]$listener.OwningProcess)
-                        }
-                    }
-                }
-                if ($listeners.Count -eq 0) { return }
-                Start-Sleep -Milliseconds 500
-            } while ((Get-Date) -lt $deadline)
-        }
-
-        function Start-ODSLlama {
-            param([string]$ModelPath)
-
-            $gpuLayers = $env:ODS_WIN_GPU_LAYERS
-            if (-not $gpuLayers) { $gpuLayers = "auto" }
-            $args = @(
-                "--model", $ModelPath,
-                "--host", $env:ODS_WIN_BIND_ADDR,
-                "--port", $env:ODS_WIN_LLAMA_PORT,
-                "--n-gpu-layers", $gpuLayers,
-                "--ctx-size", $env:ODS_WIN_CTX_SIZE,
-                "--metrics"
-            )
-            if ($env:ODS_WIN_REASONING_FLAG -eq "reasoning") { $args += @("--reasoning", $env:ODS_WIN_REASONING_MODE) }
-            else {
-                $args += @("--reasoning-format", $env:ODS_WIN_REASONING_FORMAT)
-                if ($env:ODS_WIN_REASONING_FLAG -eq "budget") { $args += @("--reasoning-budget", "0") }
-            }
-            if ($env:ODS_WIN_FLASH_ATTN) { $args += @("--flash-attn", $env:ODS_WIN_FLASH_ATTN) }
-            if ($env:ODS_WIN_CACHE_TYPE_K) { $args += @("--cache-type-k", $env:ODS_WIN_CACHE_TYPE_K) }
-            if ($env:ODS_WIN_CACHE_TYPE_V) { $args += @("--cache-type-v", $env:ODS_WIN_CACHE_TYPE_V) }
-            if ($env:ODS_WIN_N_CPU_MOE) { $args += @("--n-cpu-moe", $env:ODS_WIN_N_CPU_MOE) }
-            if ($env:ODS_WIN_PARALLEL) { $args += @("--parallel", $env:ODS_WIN_PARALLEL) }
-            if ($env:ODS_WIN_CHECKPOINT_EVERY_N_TOKENS) { $args += @("--checkpoint-every-n-tokens", $env:ODS_WIN_CHECKPOINT_EVERY_N_TOKENS) }
-            if ($env:ODS_WIN_NO_CACHE_PROMPT -and $env:ODS_WIN_NO_CACHE_PROMPT -notin @("0", "false", "off", "no")) { $args += @("--no-cache-prompt") }
-            if ($env:ODS_WIN_SPEC_TYPE) { $args += @("--spec-type", $env:ODS_WIN_SPEC_TYPE) }
-            if ($env:ODS_WIN_SPEC_DRAFT_N_MAX) { $args += @("--spec-draft-n-max", $env:ODS_WIN_SPEC_DRAFT_N_MAX) }
-
-            New-Item -ItemType Directory -Path (Split-Path -Parent $env:ODS_WIN_PID_FILE) -Force | Out-Null
-            New-Item -ItemType Directory -Path (Split-Path -Parent $env:ODS_WIN_LOG_PATH) -Force | Out-Null
-            $proc = Start-Process -FilePath $env:ODS_WIN_LLAMA_EXE `
-                -ArgumentList $args -WindowStyle Hidden -RedirectStandardOutput $env:ODS_WIN_LOG_PATH -RedirectStandardError ($env:ODS_WIN_LOG_PATH + ".err") -PassThru
-            Set-Content -LiteralPath $env:ODS_WIN_PID_FILE -Value $proc.Id
-            return $proc
-        }
-
-        function Wait-ODSLlamaHealth {
-            param([int]$ProcessId, [int]$Port)
-            for ($i = 0; $i -lt 60; $i++) {
-                $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-                if (-not $proc) { return $false }
-                try {
-                    $resp = Invoke-WebRequest -Uri ("http://127.0.0.1:{0}/health" -f $Port) -TimeoutSec 5 -UseBasicParsing
-                    if ([int]$resp.StatusCode -eq 200) { return $true }
-                } catch { }
-                Start-Sleep -Seconds 5
-            }
-            return $false
-        }
-
-        $pidPath = $env:ODS_WIN_PID_FILE
-        if (Test-Path $pidPath) {
-            $rawPid = (Get-Content -LiteralPath $pidPath -Raw).Trim()
-            if ($rawPid -match "^\d+$") {
-                Stop-ODSProcessId -ProcessId ([int]$rawPid)
-            }
-            Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
-        }
-
-        $port = [int]$env:ODS_WIN_LLAMA_PORT
-        Stop-ODSLlamaListeners -Port $port
-
-        $fullProc = Start-ODSLlama -ModelPath $env:ODS_WIN_MODEL_PATH
-        if (Wait-ODSLlamaHealth -ProcessId ([int]$fullProc.Id) -Port $port) { exit 0 }
-
-        Stop-ODSProcessId -ProcessId ([int]$fullProc.Id)
-        if ($env:ODS_WIN_ROLLBACK_MODEL_PATH -and (Test-Path $env:ODS_WIN_ROLLBACK_MODEL_PATH)) {
-            $rollbackProc = Start-ODSLlama -ModelPath $env:ODS_WIN_ROLLBACK_MODEL_PATH
-            [void](Wait-ODSLlamaHealth -ProcessId ([int]$rollbackProc.Id) -Port $port)
-        }
-        exit 1
-    ' >/dev/null 2>&1 || {
-        log "WARNING: native Windows llama-server restart failed."
-        return 1
-    }
-
-    log "SUCCESS: native Windows llama-server running with ${FULL_GGUF_FILE}"
-    return 0
+    log "WARNING: native Windows llama-server did not prove ${FULL_GGUF_FILE} (see $restart_log); restarting the previous model."
+    if restore_active_model_config \
+        && "$ps_cmd" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$ods_cli_win" \
+            native-llm-restart "$install_dir_win" >>"$restart_log" 2>&1; then
+        log "Previous native Windows llama-server model restarted."
+    else
+        log "WARNING: the previous native Windows llama-server model did not restart; run 'ods.ps1 start' (see $restart_log)."
+    fi
+    return 1
 }
 
 yaml_double_quoted_scalar_content() {
@@ -2432,6 +1870,8 @@ refresh_windows_native_litellm_local_config_after_swap() {
     native_api_base="http://host.docker.internal:${native_port}/v1"
     model_sed="${FULL_GGUF_FILE//\"/\\\"}"
 
+    # The native Windows llama-server requires LLAMA_SERVER_API_KEY; LiteLLM
+    # reads it from its environment, never from this file.
     log "Updating LiteLLM local config for native Windows llama-server: ${FULL_GGUF_FILE}"
     mkdir -p "$litellm_dir" || return 1
     cat > "$litellm_config" << LITELLM_NATIVE_LOCAL_EOF
@@ -2440,7 +1880,7 @@ model_list:
     litellm_params:
       model: openai/${model_sed}
       api_base: ${native_api_base}
-      api_key: not-needed
+      api_key: os.environ/LLAMA_SERVER_API_KEY
       extra_body:
         chat_template_kwargs:
           enable_thinking: false
@@ -2449,7 +1889,7 @@ model_list:
     litellm_params:
       model: openai/*
       api_base: ${native_api_base}
-      api_key: not-needed
+      api_key: os.environ/LLAMA_SERVER_API_KEY
       extra_body:
         chat_template_kwargs:
           enable_thinking: false
@@ -2875,14 +2315,13 @@ _windows_lemonade_swap_applies=false
 _windows_native_llama_swap_applies=false
 _docker_llama_swap_applies=false
 if is_windows_bash; then
+    # Windows AMD runs ggml-org llama-server.exe natively (Round F); the
+    # installer migrates older runtimes before this script runs.
     _runtime_for_swap="$(read_env_value AMD_INFERENCE_RUNTIME | tr '[:upper:]' '[:lower:]')"
-    _backend_for_swap="$(read_env_value LLM_BACKEND | tr '[:upper:]' '[:lower:]')"
     _managed_for_swap="$(read_env_value AMD_INFERENCE_MANAGED | tr '[:upper:]' '[:lower:]')"
     _runtime_mode_for_swap="$(read_env_value AMD_INFERENCE_RUNTIME_MODE | tr '[:upper:]' '[:lower:]')"
     _location_for_swap="$(read_env_value AMD_INFERENCE_LOCATION | tr '[:upper:]' '[:lower:]')"
-    if [[ "$_runtime_for_swap" == "lemonade" || "$_backend_for_swap" == "lemonade" ]]; then
-        _windows_lemonade_swap_applies=true
-    elif [[ "$_managed_for_swap" != "false" && "$_location_for_swap" != "external" ]] \
+    if [[ "$_managed_for_swap" != "false" && "$_location_for_swap" != "external" ]] \
         && [[ "$_runtime_mode_for_swap" == "windows-llama-server-fallback" || ( "$_runtime_for_swap" == "llama-server" && "$_location_for_swap" == "host" ) ]]; then
         _windows_native_llama_swap_applies=true
     fi

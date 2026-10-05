@@ -88,7 +88,6 @@ $_expectedRegularFiles = @(
     ".env.schema.json",
     "config\llama-server\models.ini",
     "config\litellm\local.yaml",
-    "config\litellm\lemonade.yaml",
     "config\litellm\switchboard.yaml",
     "data\.extensions-lock",
     "extensions\services\litellm\select-config.sh",
@@ -362,18 +361,16 @@ $_amdInferencePort = ""
 $_amdInferenceSupportedBackends = ""
 $_amdInferenceRuntimeMode = ""
 $_amdInferenceManaged = ""
-$_lemonadeServerImage = ""
 if ($gpuInfo.Backend -eq "amd" -and -not $cloudMode) {
-    $_amdInferenceRuntime = "lemonade"
-    $_amdInferenceBackend = $(if ($amdLemonadeRuntime -and $amdLemonadeRuntime.windows_backend) { $amdLemonadeRuntime.windows_backend } else { "vulkan" })
+    # AMD runs ggml-org llama-server.exe (Vulkan) natively on this PC; the
+    # values are written directly (no post-launch .env patching).
+    $_amdInferenceRuntime = "llama-server"
+    $_amdInferenceBackend = "vulkan"
     $_amdInferenceLocation = "host"
-    $_amdInferencePort = [string]$script:LEMONADE_PORT
-    $_amdInferenceSupportedBackends = $_amdInferenceBackend
-    $_amdInferenceRuntimeMode = "windows-legacy-lemonade"
+    $_amdInferencePort = [string]$script:NATIVE_LLM_PORT
+    $_amdInferenceSupportedBackends = "vulkan"
+    $_amdInferenceRuntimeMode = "windows-native-llama-server"
     $_amdInferenceManaged = "true"
-}
-if ($amdLemonadeRuntime -and $amdLemonadeRuntime.container_image) {
-    $_lemonadeServerImage = $amdLemonadeRuntime.container_image
 }
 $_enableWebSearch = Test-ODSWindowsSearxngNeeded `
     -EnableRecommended $enableRecommended `
@@ -393,7 +390,6 @@ $envResult = New-ODSEnv `
     -AmdInferenceSupportedBackends $_amdInferenceSupportedBackends `
     -AmdInferenceRuntimeMode $_amdInferenceRuntimeMode `
     -AmdInferenceManaged $_amdInferenceManaged `
-    -LemonadeServerImage $_lemonadeServerImage `
     -SystemRamGB    $systemRamGB `
     -WhisperCudaEnabled $whisperCudaSupported `
     -EnableLangfuse $enableLangfuse `
@@ -418,8 +414,8 @@ if (Test-Path $_envPath) {
         }
     }
 }
-if ($_amdInferenceRuntime -eq "lemonade") {
-    $_requiredKeys += "LEMONADE_MODEL"
+if ($_amdInferenceRuntimeMode -eq "windows-native-llama-server") {
+    $_requiredKeys += "LLAMA_SERVER_API_KEY"
 }
 $_missingKeys = @()
 foreach ($_k in $_requiredKeys) {
@@ -444,7 +440,7 @@ function Update-HermesConfigFile {
         [int]$ContextLength,
         [int]$RequestTimeoutSeconds = 180,
         [int]$MaxTokens = 1024,
-        [switch]$LemonadeCompact
+        [switch]$CompactToolset
     )
 
     if (-not (Test-Path $Path)) { return $false }
@@ -532,7 +528,7 @@ function Update-HermesConfigFile {
         }
     }
 
-    if ($LemonadeCompact) {
+    if ($CompactToolset) {
         $compactAgent = @"
 agent:
   disabled_toolsets:
@@ -648,8 +644,9 @@ function Invoke-HermesSoulRefresh {
     $_profileArgs = @()
     try {
         $_envText = Get-Content -LiteralPath $_envPath -Raw -ErrorAction Stop
-        if ($_envText -match '(?m)^LLM_BACKEND=lemonade\s*$' -and
-            $_envText -match '(?m)^AMD_INFERENCE_RUNTIME=lemonade\s*$') {
+        # Windows AMD keeps the compact prompt profile. Its name is the
+        # build-installation-context.py interface, not a runtime choice.
+        if ($_envText -match '(?m)^AMD_INFERENCE_RUNTIME_MODE=windows-native-llama-server\s*$') {
             $_profileArgs = @("--profile", "local-lemonade")
         }
     } catch { }
@@ -707,14 +704,9 @@ if ($enableHermes) {
     } else {
         "observe"
     })
+    # llama-server serves the GGUF file name as the model id (--alias).
     $_hermesModel = $(if ($tierConfig.GgufFile) {
-        if ($gpuInfo.Backend -eq "amd" -and
-            $_envLines.ContainsKey("LEMONADE_MODEL") -and
-            -not [string]::IsNullOrWhiteSpace([string]$_envLines["LEMONADE_MODEL"])) {
-            $_envLines["LEMONADE_MODEL"].Trim().Trim('"').Trim("'")
-        } else {
-            $tierConfig.GgufFile
-        }
+        $tierConfig.GgufFile
     } else {
         $tierConfig.LlmModel
     })
@@ -760,8 +752,8 @@ if ($enableHermes) {
         Copy-Item -Path $_hermesTemplate -Destination $_hermesLive -Force
     }
     $_hermesRequestTimeout = $(if ($cloudMode -and $_switchboardMode -ne "enabled") { 180 } else { 900 })
-    $_patchedHermesTemplate = Update-HermesConfigFile -Path $_hermesTemplate -Model $_hermesModel -BaseUrl $_hermesBaseUrl -ApiKey $_hermesApiKey -ContextLength ([int]$tierConfig.MaxContext) -RequestTimeoutSeconds $_hermesRequestTimeout -LemonadeCompact:($gpuInfo.Backend -eq "amd")
-    $_patchedHermesLive = Update-HermesConfigFile -Path $_hermesLive -Model $_hermesModel -BaseUrl $_hermesBaseUrl -ApiKey $_hermesApiKey -ContextLength ([int]$tierConfig.MaxContext) -RequestTimeoutSeconds $_hermesRequestTimeout -LemonadeCompact:($gpuInfo.Backend -eq "amd")
+    $_patchedHermesTemplate = Update-HermesConfigFile -Path $_hermesTemplate -Model $_hermesModel -BaseUrl $_hermesBaseUrl -ApiKey $_hermesApiKey -ContextLength ([int]$tierConfig.MaxContext) -RequestTimeoutSeconds $_hermesRequestTimeout -CompactToolset:($gpuInfo.Backend -eq "amd")
+    $_patchedHermesLive = Update-HermesConfigFile -Path $_hermesLive -Model $_hermesModel -BaseUrl $_hermesBaseUrl -ApiKey $_hermesApiKey -ContextLength ([int]$tierConfig.MaxContext) -RequestTimeoutSeconds $_hermesRequestTimeout -CompactToolset:($gpuInfo.Backend -eq "amd")
     if (-not ($_patchedHermesTemplate -and $_patchedHermesLive)) {
         Write-AIError "Failed to patch Hermes config for Windows runtime (model=$_hermesModel, base_url=$_hermesBaseUrl)"
         throw "ODS_INSTALL_ABORTED"
