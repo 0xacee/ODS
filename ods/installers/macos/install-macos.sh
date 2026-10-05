@@ -392,6 +392,19 @@ _macos_apply_fresh_feature_defaults() {
     fi
 }
 
+_macos_ask_hermes() {
+    # Portal and Hermes are alternative agents, and native Portal always
+    # replaces Hermes. Asking would offer a choice the installer then ignores.
+    if $ENABLE_PIXEL; then
+        ENABLE_HERMES=false
+        ai "Hermes Agent is not offered while Portal is the agent. To use Hermes instead, do a fresh install with --no-pixel."
+        return 0
+    fi
+    local yn
+    read -r -p "  Enable Hermes Agent (default AI agent)? [Y/n] " yn < /dev/tty
+    [[ "$yn" =~ ^[nN] ]] && ENABLE_HERMES=false || ENABLE_HERMES=true
+}
+
 _macos_resolve_webui_selection() {
     [[ -f "${INSTALL_DIR}/.env" ]] || return 0
     WEBUI_RETAINED="$(read_env_value "${INSTALL_DIR}/.env" ENABLE_OPEN_WEBUI)"
@@ -1765,8 +1778,7 @@ if ! $NON_INTERACTIVE && ! $ALL_FEATURES && ! $DRY_RUN; then
             [[ "$yn" =~ ^[yY] ]] && ENABLE_RAG=true
             read -r -p "  Enable extra support (SearXNG + Token Spy)? [Y/n] " yn < /dev/tty
             [[ "$yn" =~ ^[nN] ]] && ENABLE_RECOMMENDED=false || ENABLE_RECOMMENDED=true
-            read -r -p "  Enable Hermes Agent (default AI agent)? [Y/n] " yn < /dev/tty
-            [[ "$yn" =~ ^[nN] ]] && ENABLE_HERMES=false || ENABLE_HERMES=true
+            _macos_ask_hermes
             if ! $OPENCODE_ENABLE_EXPLICIT && ! $OPENCODE_DISABLE_EXPLICIT; then
                 read -r -p "  Enable OpenCode browser IDE? [y/N] " yn < /dev/tty
                 if [[ "$yn" =~ ^[yY] ]]; then
@@ -1908,7 +1920,7 @@ info_box "  RAG:" "$(if $ENABLE_RAG; then echo enabled; else echo disabled; fi)"
 info_box "  SearXNG search:" "$(if $ENABLE_SEARXNG; then echo enabled; else echo disabled; fi)"
 info_box "  Token Spy:" "$(if $ENABLE_RECOMMENDED; then echo enabled; else echo disabled; fi)"
 info_box "  LiteLLM gateway:" "$(if $ENABLE_LITELLM; then echo enabled; else echo disabled; fi)"
-info_box "  Hermes:" "$(if $ENABLE_HERMES; then echo enabled; else echo disabled; fi)"
+info_box "  Hermes:" "$(if $ENABLE_HERMES; then echo enabled; elif $ENABLE_PIXEL; then echo 'disabled (Portal is the agent)'; else echo disabled; fi)"
 info_box "  Portal (native):" "$(if $ENABLE_PIXEL; then echo enabled; else echo disabled; fi)"
 info_box "  OpenCode:" "$(if $ENABLE_OPENCODE; then echo enabled; else echo disabled; fi)"
 info_box "  Perplexica:" "$(if $ENABLE_PERPLEXICA; then echo enabled; else echo disabled; fi)"
