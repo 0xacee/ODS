@@ -67,7 +67,7 @@ exit 0
     try {
         $env:WSLENV = 'PSModulePath/w:ODS_NATIVE_LLM_API_KEY/w:USERPROFILE/p'
         Remove-Item Env:ODS_NATIVE_LLM_API_KEY -ErrorAction SilentlyContinue
-        $returned = Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel', '--native-llm-api-key-env', 'ODS_NATIVE_LLM_API_KEY') '/home/user/ods' $false '' '' @{ ODS_NATIVE_LLM_API_KEY = $fixtureKey }
+        $returned = Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel', '--native-llm-api-key-env', 'ODS_NATIVE_LLM_API_KEY') '/home/user/ods' $false '' '' @() @{ ODS_NATIVE_LLM_API_KEY = $fixtureKey }
         $seen = Get-Content -LiteralPath $envRecord -Raw | ConvertFrom-Json
         Check ($returned -eq 0 -and $seen.key -ceq $fixtureKey) 'the API key reaches the delegated installer process as an environment variable'
         Check (($seen.wslenv -split ':') -contains 'ODS_NATIVE_LLM_API_KEY/u' -and ($seen.wslenv -split ':') -contains 'PSModulePath/w' -and
