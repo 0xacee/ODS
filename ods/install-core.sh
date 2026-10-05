@@ -27,14 +27,25 @@ cleanup_on_error() {
     echo -e "${RED:-}[ERROR] Installation failed during phase: ${INSTALL_PHASE}${NC:-}"
     echo -e "${AMB:-}        Log file: ${LOG_FILE:-/tmp/ods-install.log}${NC:-}"
     echo ""
-    echo "The install did not complete. Partial state may exist at:"
-    echo "  ${INSTALL_DIR:-~/ods}"
-    echo ""
-    echo "Keep this directory and its recovery receipts intact."
-    echo "Review the failed phase and log before retrying; some phases require recovery."
-    echo "For a fresh install, use the installed ods-uninstall.sh and resolve any"
-    echo "cleanup refusal before reinstalling. Do not delete the directory manually:"
-    echo "ODS services and protected Pixel state may exist outside it."
+    case "${INSTALL_PHASE}" in
+        init|01-preflight|02-detection|02b-external-services)
+            # These phases check the host and choose a route; they change no
+            # ODS files or services, so an existing install is as it was.
+            echo "The install stopped before changing any ODS files or services."
+            echo "An existing ODS installation keeps working as it was."
+            echo "Fix the problem above, then run the same command again."
+            ;;
+        *)
+            echo "The install did not complete. Partial state may exist at:"
+            echo "  ${INSTALL_DIR:-~/ods}"
+            echo ""
+            echo "Keep this directory and its recovery receipts intact."
+            echo "Review the failed phase and log before retrying; some phases require recovery."
+            echo "For a fresh install, use the installed ods-uninstall.sh and resolve any"
+            echo "cleanup refusal before reinstalling. Do not delete the directory manually:"
+            echo "ODS services and protected Pixel state may exist outside it."
+            ;;
+    esac
     echo ""
     echo -e "${AMB:-}Need help? Ask on the ODS Discord: ${ODS_HELP_DISCORD_URL:-https://discord.gg/4ntNp9MAwC}${NC:-}"
     echo -e "${AMB:-}Share the phase above and the end of the log file.${NC:-}"

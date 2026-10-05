@@ -623,7 +623,10 @@ if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "${TIER:-}" !=
             if [[ -n "$_selector_env" ]]; then
                 if command -v load_model_selector_env_from_output >/dev/null 2>&1; then
                     load_model_selector_env_from_output <<< "$_selector_env"
-                    log "Catalog model selector: ${MODEL_RECOMMENDATION_REASON:-$LLM_MODEL}"
+                    # With an API selected, the API serves the model; the local
+                    # pick only guides matching a name in phase 02b.
+                    [[ -n "${EXTERNAL_LLM_URL:-}" ]] \
+                        || log "Catalog model selector: ${MODEL_RECOMMENDATION_REASON:-$LLM_MODEL}"
                 else
                     log "Catalog model selector output ignored; safe env loader unavailable"
                 fi
@@ -806,16 +809,27 @@ if [[ "$INTERACTIVE" == "true" ]]; then
         show_hardware_summary "$GPU_NAME" "$((GPU_VRAM / 1024))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL"
     fi
 
-    if [[ "$TIER" == "CLOUD" ]]; then
+    _shown_model="$LLM_MODEL"
+    if [[ -n "${EXTERNAL_LLM_URL:-}" ]]; then
+        # The API serves the model; the local pick is not downloaded.
+        _shown_model="${EXTERNAL_LLM_MODEL:-the API's model} (API)"
+        SPEED_EST="depends on the API"
+        USERS_EST="depends on the API"
+    elif [[ "$TIER" == "CLOUD" ]]; then
         SPEED_EST="cloud API"
         USERS_EST="depends on API tier"
     else
         SPEED_EST="benchmark after first launch"
         USERS_EST="measured after local benchmark"
     fi
-    show_tier_recommendation "$TIER" "$LLM_MODEL" "$SPEED_EST" "$USERS_EST"
+    show_tier_recommendation "$TIER" "$_shown_model" "$SPEED_EST" "$USERS_EST"
+    unset _shown_model
 else
     success "Configuration: Tier $TIER ($TIER_NAME)"
-    log "  Model: $LLM_MODEL"
-    log "  Context: ${MAX_CONTEXT} tokens"
+    if [[ -n "${EXTERNAL_LLM_URL:-}" ]]; then
+        log "  Model: ${EXTERNAL_LLM_MODEL:-the API's model}, served by ${EXTERNAL_LLM_URL}"
+    else
+        log "  Model: $LLM_MODEL"
+        log "  Context: ${MAX_CONTEXT} tokens"
+    fi
 fi
