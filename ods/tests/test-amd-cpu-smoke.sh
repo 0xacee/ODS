@@ -138,8 +138,12 @@ for key, value in (("GGML_VK_VISIBLE_DEVICES", "0,1"), ("ROCR_VISIBLE_DEVICES", 
 # The launch the CPU run below repeats, without devices.
 (work / "image").write_text(vulkan["image"] + "\n")
 (work / "args").write_text("".join(f"{arg}\n" for arg in command))
+# The CPU run has no GPU device. llama.cpp b9014 refuses split mode "none"
+# without one ("invalid value for main_gpu: 0 (available devices: 0)"), so the
+# run omits GPU placement; installs without devices use the CPU stack instead.
 (work / "env").write_text("".join(f"{key}={value}\n" for key, value in env(vulkan).items()
-                                  if value is not None))
+                                  if value is not None
+                                  and key not in {"LLAMA_ARG_SPLIT_MODE", "LLAMA_ARG_MAIN_GPU"}))
 if errors:
     print("\n".join(f"[FAIL] {error}" for error in errors), file=sys.stderr)
     sys.exit(1)

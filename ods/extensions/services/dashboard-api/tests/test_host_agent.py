@@ -7075,10 +7075,12 @@ class TestRootlessDataOwnershipRepair:
         monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
         monkeypatch.setattr(_mod.platform, "system", lambda: "Linux")
         monkeypatch.setattr(_mod, "_find_usable_bash", lambda: "/bin/bash")
-        monkeypatch.setattr(
-            _mod.subprocess, "run",
-            lambda cmd, **kwargs: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""),
-        )
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
 
         _mod._repair_rootless_data_ownership(service_id)
 

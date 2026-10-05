@@ -121,7 +121,16 @@ function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro,
         }
         $process = Start-Process -FilePath $shell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-OutputFormat', 'Text', '-EncodedCommand', $encoded) -NoNewWindow -PassThru
     } finally {
-        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable([string]$name, $saved[$name], 'Process') }
+        foreach ($name in $saved.Keys) {
+            # PowerShell passes $null to a .NET string argument as "", and on
+            # PowerShell 7 (.NET) an empty value is kept as a defined, empty
+            # variable instead of removing it. [NullString]::Value is a real null.
+            if ($null -eq $saved[$name]) {
+                [Environment]::SetEnvironmentVariable([string]$name, [NullString]::Value, 'Process')
+            } else {
+                [Environment]::SetEnvironmentVariable([string]$name, $saved[$name], 'Process')
+            }
+        }
     }
     # Reading Handle keeps ExitCode available; WaitForExit waits for this
     # process only (Start-Process -Wait also waits for a browser it opened).

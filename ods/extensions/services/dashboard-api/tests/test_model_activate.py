@@ -1516,6 +1516,7 @@ class TestDownstreamRouteVerification:
         def fake_run(cmd, **kwargs):
             calls.append((cmd, kwargs))
             url = next((str(part) for part in cmd if str(part).startswith("http")), "")
+            body: dict
             if url.endswith("/health"):
                 body = {"status": "ok"}
             elif url.endswith("/v1/models"):
