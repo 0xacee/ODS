@@ -81,6 +81,18 @@ def test_runtime_renderer_callers_keep_credentials_out_of_process_arguments() ->
     assert "render-runtime-configs.py" not in read("scripts/bootstrap-upgrade.sh")
 
 
+def test_installer_names_the_native_key_for_litellm_and_the_router() -> None:
+    # A host-native llama-server answers 401 without its key. The installer's
+    # renders must name LLAMA_SERVER_API_KEY as the host agent's do, or LiteLLM
+    # and model-router send no key until the first model activation.
+    phase06 = read("installers/phases/06-directories.sh")
+    native = phase06[phase06.index("--surface litellm-local-native"):]
+    native = native[:native.index("--write")]
+    assert "--llm-api-key-env LLAMA_SERVER_API_KEY" in native
+    router = phase06[phase06.index("_router_common_args=("):phase06.index("_router_surfaces=(model-router-endpoints)")]
+    assert '[[ "$NATIVE_LLM_ACTIVE" != "true" ]] || _router_common_args+=(--llm-api-key-env LLAMA_SERVER_API_KEY)' in router
+
+
 def main() -> int:
     for test in (
         test_linux_installer_uses_renderer_as_sole_writer,
@@ -89,6 +101,7 @@ def main() -> int:
         test_host_agent_uses_renderer_as_sole_writer,
         test_cloud_callers_do_not_render_local_switchboard,
         test_runtime_renderer_callers_keep_credentials_out_of_process_arguments,
+        test_installer_names_the_native_key_for_litellm_and_the_router,
     ):
         test()
         print(f"[PASS] {test.__name__}")

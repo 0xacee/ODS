@@ -1782,11 +1782,13 @@ ENV_EOF
         _phase06_step "render-native-litellm-config"
         mkdir -p "$INSTALL_DIR/config/litellm"
         # LiteLLM serves ods/current from the native llama-server and sends
-        # LLAMA_SERVER_API_KEY (compose passes it to the LiteLLM container).
+        # LLAMA_SERVER_API_KEY (compose passes it to the LiteLLM container);
+        # the rendered config names the variable, never the key.
         if ! "${ODS_PYTHON_CMD:-python3}" "$SCRIPT_DIR/scripts/render-runtime-configs.py" \
             --surface litellm-local-native \
             --gguf-file "$GGUF_FILE" \
             --llm-base-url "${NATIVE_LLM_CONTAINER_BASE_URL_VALUE}/v1" \
+            --llm-api-key-env LLAMA_SERVER_API_KEY \
             --output-root "$INSTALL_DIR" \
             --write >> "$LOG_FILE" 2>&1; then
             error "Runtime config renderer failed for the host-native llama-server"
@@ -1831,6 +1833,10 @@ ENV_EOF
         --output-root "$INSTALL_DIR"
         --write
     )
+    # The host-native llama-server requires its key: model-router's endpoint
+    # and the switchboard map name LLAMA_SERVER_API_KEY, as the host agent's
+    # activation render does.
+    [[ "$NATIVE_LLM_ACTIVE" != "true" ]] || _router_common_args+=(--llm-api-key-env LLAMA_SERVER_API_KEY)
     _router_surfaces=(model-router-endpoints)
     if [[ "$_router_ods_mode" != "cloud" ]]; then
         _router_surfaces+=(litellm-switchboard)
