@@ -854,6 +854,34 @@ async def get_llama_context_size(model_hint: Optional[str] = None) -> Optional[i
         return None
 
 
+async def get_llama_vision_support() -> Optional[bool]:
+    """Whether the active llama-server loaded a vision projector.
+
+    llama-server reports it as ``/props`` ``modalities.vision``. None when that
+    cannot be read: the owner's own server, an unreachable runtime, or a build
+    without the field.
+    """
+    if _host_native_llm():
+        try:
+            vision = (await _host_llm_status())["health"].get("vision")
+        except (AgentClientError, OSError, ValueError):
+            return None
+        return vision if type(vision) is bool else None
+    if LLM_BACKEND == "external" or "llama-server" not in SERVICES:
+        return None
+    try:
+        host = SERVICES["llama-server"]["host"]
+        port = SERVICES["llama-server"]["port"]
+        client = await _get_httpx_client()
+        props = (await client.get(f"http://{host}:{port}/props")).json()
+    except (httpx.HTTPError, ValueError) as e:
+        logger.debug("get_llama_vision_support failed: %s", e)
+        return None
+    modalities = props.get("modalities") if isinstance(props, dict) else None
+    vision = modalities.get("vision") if isinstance(modalities, dict) else None
+    return vision if type(vision) is bool else None
+
+
 # --- Service Health Cache ---
 # Written by background poll loop in main.py, read by API endpoints.
 # Keeps health checking decoupled from request handling so slow DNS

@@ -828,7 +828,7 @@ def test_host_llm_status_reads_health_model_context_and_counters(monkeypatch, tm
     assert payload["source"] == "windows-loopback"
     assert payload["health"] == {
         "status": "ok", "version": "b9014-3f0a4c2", "model_loaded": "model.gguf",
-        "context_length": 65536,
+        "context_length": 65536, "vision": None,
     }
     assert payload["metrics"] == {
         "prompt_tokens_total": 120.0, "tokens_predicted_total": 48.0,
@@ -838,6 +838,87 @@ def test_host_llm_status_reads_health_model_context_and_counters(monkeypatch, tm
     assert payload["stats"] is None
     assert requested == ["/health", "/v1/models", "/props", "/metrics"]
     assert "private" not in json.dumps(payload)
+
+
+def test_legacy_route_migration_moves_sharing_grants_with_the_model(monkeypatch, tmp_path):
+    # Inference-sharing grants pin the route's ids. The retired Lemonade id of
+    # the same GGUF becomes its llama-server alias, and the grants move too.
+    install = tmp_path / "ods"
+    (install / "data").mkdir(parents=True)
+    (install / ".env").write_text(
+        "ODS_MODE=local\nLLM_BACKEND=llama-server\nGGUF_FILE=Model.gguf\nLLM_MODEL=model-x\n"
+        "CTX_SIZE=32768\nMAX_CONTEXT=32768\n",
+        encoding="utf-8",
+    )
+    state = _mod._switchboard_state
+    state_path = install / "data" / "model-state.json"
+    state.record_verified_route(
+        state_path, catalog_id="model-x", runtime_model_id="Model.gguf", backend_kind="llama-server",
+        endpoint_id="llama-server-default", context_length=32768,
+        capabilities={"chat": True, "tools": False, "vision": False, "agentViable": False},
+        proof_identity="Model.gguf",
+    )
+    legacy = json.loads(state_path.read_text(encoding="utf-8"))
+    legacy["active"]["backend"] = {"kind": "lemonade", "endpointId": "lemonade-default",
+                                   "nativeRoute": "extra.Model.gguf"}
+    legacy["active"]["runtimeModelId"] = legacy["active"]["proof"]["identity"] = "extra.Model.gguf"
+    state_path.write_text(json.dumps(legacy), encoding="utf-8")
+    monkeypatch.setattr(_mod, "INSTALL_DIR", install)
+    monkeypatch.setattr(_mod, "DATA_DIR", install / "data")
+    monkeypatch.setattr(_mod, "_render_model_router_runtime_configs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_mod, "_catalog_model_for_current_env", lambda _env: ("model-x", {}))
+    (install / "data" / "pixel-inference").mkdir()
+    moves = []
+
+    class FakeSharingStore:
+        def __init__(self, directory):
+            assert directory == install / "data" / "pixel-inference"
+
+        def rebind_model(self, *identities):
+            moves.append(identities)
+            return 2
+
+    import pixel_provider.sharing
+    monkeypatch.setattr(pixel_provider.sharing, "SharingStore", FakeSharingStore)
+
+    assert _mod._migrate_legacy_switchboard_route("startup") is True
+
+    assert moves == [("model-x", "extra.Model.gguf", "model-x", "Model.gguf")]
+    active = state.read_state(state_path)[0]["active"]
+    assert (active["backend"]["kind"], active["runtimeModelId"]) == ("llama-server", "Model.gguf")
+
+
+def test_sharing_grants_stay_put_where_sharing_was_never_turned_on(monkeypatch, tmp_path):
+    import pixel_provider.sharing
+    monkeypatch.setattr(_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(pixel_provider.sharing, "SharingStore",
+                        lambda _directory: pytest.fail("no sharing store exists here"))
+
+    _mod._rebind_pixel_sharing_grants(
+        {"catalogId": "model-x", "runtimeModelId": "extra.Model.gguf"}, "model-x", "Model.gguf",
+    )
+
+
+@pytest.mark.parametrize(("modalities", "vision"), [
+    ({"vision": True, "audio": False}, True),
+    ({"vision": False, "audio": False}, False),
+    ({"vision": "true"}, None),
+    (None, None),
+])
+def test_host_llm_status_reports_whether_a_vision_projector_is_loaded(monkeypatch, tmp_path, modalities, vision):
+    # ODS Talk sends images only to a model whose server loaded a projector;
+    # the dashboard cannot read the keyed server's /props itself.
+    props = {"default_generation_settings": {"n_ctx": 8192}}
+    if modalities is not None:
+        props["modalities"] = modalities
+    _host_llm_runtime_fixture(monkeypatch, tmp_path, {
+        "/health": {"status": "ok"},
+        "/v1/models": {"data": [{"id": "model.gguf"}]},
+        "/props": props,
+        "/metrics": "",
+    })
+
+    assert _mod._host_llm_status()["health"]["vision"] is vision
 
 
 def test_host_llm_status_redacts_a_path_shaped_model_id(monkeypatch, tmp_path):

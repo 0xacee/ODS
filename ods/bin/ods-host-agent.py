@@ -2645,6 +2645,30 @@ def _publish_verified_initial_switchboard_route(
     return True
 
 
+def _rebind_pixel_sharing_grants(legacy: dict, catalog_id: str, runtime_model_id: str) -> None:
+    """Move the owner's inference-sharing grants with a retired route's model.
+
+    Grants pin the route's catalog and runtime model ids. A Lemonade route
+    named the GGUF under a Lemonade id, so without this every grant for the
+    same model would answer 409 until reissued. Only a POSIX host that turned
+    sharing on has this folder.
+    """
+    directory = DATA_DIR / "pixel-inference"
+    if not directory.is_dir():
+        return
+    from pixel_provider.sharing import SharingStore
+    from pixel_provider.store import StoreError
+    try:
+        moved = SharingStore(directory).rebind_model(
+            legacy.get("catalogId"), legacy.get("runtimeModelId"), catalog_id, runtime_model_id,
+        )
+    except StoreError as exc:
+        logger.warning("Inference-sharing grants for %s were not moved (%s); reissue them", catalog_id, exc.code)
+        return
+    if moved:
+        logger.info("Moved %d inference-sharing grant(s) to %s", moved, runtime_model_id)
+
+
 def _migrate_legacy_switchboard_route(reason: str) -> bool:
     """Retire a pre-round-F Lemonade route and its router endpoint together.
 
@@ -2653,6 +2677,7 @@ def _migrate_legacy_switchboard_route(reason: str) -> bool:
     longer lists ``lemonade-default``) and replace the active route with an
     unproven llama-server reconstruction of the configured GGUF. The route
     proof then re-proves and publishes it; until then the router fails closed.
+    Inference-sharing grants pinned to the retired route move with it.
     Returns whether the rewrite happened.
     """
     if _switchboard_state is None:
@@ -2677,13 +2702,14 @@ def _migrate_legacy_switchboard_route(reason: str) -> bool:
         gguf_file, llm_model_name = _current_runtime_model_inputs(env, identity)
         model_id, model = _catalog_model_for_current_env(env)
         context_length = int(identity.get("contextLength") or 0)
+        catalog_id = model_id or llm_model_name or gguf_file
         _render_model_router_runtime_configs(
             INSTALL_DIR, env, model=llm_model_name, gguf_file=gguf_file,
             context_length=context_length or 32768,
         )
         _switchboard_state.record_verified_route(
             state_path,
-            catalog_id=model_id or llm_model_name or gguf_file,
+            catalog_id=catalog_id,
             runtime_model_id=gguf_file,
             backend_kind="llama-server",
             endpoint_id="llama-server-default",
@@ -2698,6 +2724,7 @@ def _migrate_legacy_switchboard_route(reason: str) -> bool:
             proof_completion=False,
             reconstructed=True,
         )
+        _rebind_pixel_sharing_grants(doc["active"], catalog_id, gguf_file)
         logger.info("legacy Lemonade route retired (%s); re-proving %s on llama-server", reason, gguf_file)
         return True
     finally:
@@ -7127,7 +7154,7 @@ def _host_llm_runtime(env: dict) -> str:
 
 
 def _host_llm_status() -> dict | None:
-    """Read a Windows-owned llama-server's health, model, context and counters.
+    """Read a Windows-owned llama-server's health, model, context, vision and counters.
 
     The dashboard runs in a container without the server's API key, which
     llama.cpp requires for /props and /metrics, and a WSL dashboard cannot
@@ -7150,7 +7177,7 @@ def _host_llm_status() -> dict | None:
             health_state = ""
         if health_state:
             health = {"status": health_state, "version": None, "model_loaded": None,
-                      "context_length": None}
+                      "context_length": None, "vision": None}
             metrics = None
             if health_state == "ok":
                 try:
@@ -7164,6 +7191,11 @@ def _host_llm_status() -> dict | None:
                             health["context_length"] = _positive_int(settings.get("n_ctx"))
                         if isinstance(props.get("build_info"), str):
                             health["version"] = props["build_info"][:64]
+                        # Whether the server loaded a vision projector; ODS
+                        # Talk sends images only to such a model.
+                        modalities = props.get("modalities")
+                        if isinstance(modalities, dict) and type(modalities.get("vision")) is bool:
+                            health["vision"] = modalities["vision"]
                     metrics = _parse_llama_metrics(_runtime_http(env, "/metrics")) or None
                 except (OSError, ValueError, subprocess.TimeoutExpired):
                     logger.debug("Host-native inference telemetry unavailable", exc_info=True)
@@ -19364,6 +19396,7 @@ def main():
         logger.error("Neither ODS_AGENT_KEY nor DASHBOARD_API_KEY set in .env")
         sys.exit(1)
     GPU_BACKEND = env.get("GPU_BACKEND", "nvidia")
+    DATA_DIR = Path(env.get("ODS_DATA_DIR", str(INSTALL_DIR / "data")))
     if _switchboard_state is not None:
         try:
             _switchboard_state.initialize_if_missing(
@@ -19381,7 +19414,6 @@ def main():
     TIER = env.get("TIER", "1")
     GPU_COUNT = env.get("GPU_COUNT", "1")
 
-    DATA_DIR = Path(env.get("ODS_DATA_DIR", str(INSTALL_DIR / "data")))
     _repair_remote_provider_secret_permissions()
     USER_EXTENSIONS_DIR = Path(env.get(
         "ODS_USER_EXTENSIONS_DIR",

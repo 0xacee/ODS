@@ -1097,6 +1097,81 @@ class TestGetLlamaContextSize:
         assert result is None
 
 
+# --- get_llama_vision_support ---
+
+
+class TestGetLlamaVisionSupport:
+    """ODS Talk sends an image only to a llama-server that loaded a projector."""
+
+    @staticmethod
+    def _props_client(monkeypatch, props):
+        monkeypatch.setattr("helpers.LLM_BACKEND", "llama-server")
+        monkeypatch.setattr("helpers.read_live_env_value", lambda _key: "")
+        monkeypatch.setattr("helpers.SERVICES", {
+            "llama-server": {"host": "llama-server", "port": 8080, "health": "/health", "name": "llama-server"},
+        })
+        response = MagicMock()
+        response.json = MagicMock(return_value=props)
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=response)
+        monkeypatch.setattr("helpers._get_httpx_client", AsyncMock(return_value=client))
+        return client
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("props", "expected"), [
+        ({"modalities": {"vision": True, "audio": False}}, True),
+        ({"modalities": {"vision": False, "audio": False}}, False),
+        # A build or answer without the field proves nothing.
+        ({"default_generation_settings": {"n_ctx": 8192}}, None),
+        ({"modalities": {"vision": "yes"}}, None),
+        ([], None),
+    ])
+    async def test_container_reads_props_modalities(self, monkeypatch, props, expected):
+        from helpers import get_llama_vision_support
+        client = self._props_client(monkeypatch, props)
+
+        assert await get_llama_vision_support() is expected
+        client.get.assert_awaited_once_with("http://llama-server:8080/props")
+
+    @pytest.mark.asyncio
+    async def test_unreachable_container_is_unknown(self, monkeypatch):
+        from helpers import get_llama_vision_support
+        client = self._props_client(monkeypatch, {})
+        client.get = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
+
+        assert await get_llama_vision_support() is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("health", "expected"), [
+        ({"status": "ok", "vision": True}, True),
+        ({"status": "ok", "vision": False}, False),
+        ({"status": "ok", "vision": None}, None),
+        ({"status": "ok"}, None),
+    ])
+    async def test_host_native_runtime_reports_through_the_agent(self, monkeypatch, health, expected):
+        from helpers import get_llama_vision_support
+        monkeypatch.setattr("helpers.LLM_BACKEND", "llama-server")
+        monkeypatch.setattr("helpers.read_live_env_value", lambda key: {
+            "AMD_INFERENCE_LOCATION": "host",
+        }.get(key, ""))
+        agent = AsyncMock(return_value={"schema_version": "ods.host-llm-status.v1", "health": health})
+        monkeypatch.setattr("helpers.request_agent_json", agent)
+        # The keyed Windows server's /props is never read from this container.
+        monkeypatch.setattr("helpers._get_httpx_client", AsyncMock(side_effect=AssertionError("direct probe")))
+
+        assert await get_llama_vision_support() is expected
+        agent.assert_awaited_once_with("GET", "/v1/llm/status", timeout=6)
+
+    @pytest.mark.asyncio
+    async def test_owner_server_is_unknown_without_a_probe(self, monkeypatch):
+        from helpers import get_llama_vision_support
+        monkeypatch.setattr("helpers.LLM_BACKEND", "external")
+        monkeypatch.setattr("helpers.read_live_env_value", lambda _key: "")
+        monkeypatch.setattr("helpers._get_httpx_client", AsyncMock(side_effect=AssertionError("probe")))
+
+        assert await get_llama_vision_support() is None
+
+
 # --- get_disk_usage ---
 
 
