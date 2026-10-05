@@ -12,7 +12,7 @@ For adding or authoring extensions, see [EXTENSIONS.md](../docs/EXTENSIONS.md) a
 | open-webui      | Open WebUI (Chat)        | core       | 3000        | amd, nvidia    | Chat UI; talks to llama-server or LiteLLM. |
 | dashboard       | Dashboard (Control Center) | core     | 3001        | amd, nvidia    | Operator control center, model management, service health, and setup UI. |
 | dashboard-api   | Dashboard API            | core       | 3002        | amd, nvidia    | FastAPI backend for dashboard, host-agent integration, setup, models, and health. |
-| litellm         | LiteLLM (API Gateway)   | recommended | 4000       | all            | Unified OpenAI-compatible API gateway for local/cloud/hybrid and Lemonade paths. |
+| litellm         | LiteLLM (API Gateway)   | recommended | 4000       | all            | Unified OpenAI-compatible API gateway for local/cloud/hybrid, host-native and external-server paths. |
 | searxng         | SearXNG (Web Search)     | recommended | 8888      | all            | Privacy-respecting metasearch for web research. |
 | token-spy       | Token Spy (Usage Monitor) | recommended | 3005     | all            | Token and usage monitoring for local/proxied traffic. |
 | hermes          | Hermes Agent             | recommended | internal 9119 | all          | Default generalist agent (Nous Research) with tools, memory, and skills. Not host-bound directly. |
