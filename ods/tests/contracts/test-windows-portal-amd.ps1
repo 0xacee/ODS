@@ -3,6 +3,14 @@
 param([switch]$SkipProcessFixtures)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../../installers/windows/lib/wsl-portal-setup.ps1')
+# PowerShell 7 on Linux (CI) has no Windows identities, and setup names its
+# runtime tasks by the caller's SID. A fixed SID stands in for the caller there.
+if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+    function Get-ODSPortalUserSid([string]$UserId) {
+        if ($UserId) { return $UserId }
+        return 'S-1-5-21-1000-1000-1000-1001'
+    }
+}
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $script:checks = 0
 # Setup messages are captured so tests can read them; results print directly.
