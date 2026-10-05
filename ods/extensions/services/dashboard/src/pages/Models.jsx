@@ -70,6 +70,7 @@ export default function Models({ compact = false }) {
     configuredMode,
     llmBackend,
     hostRuntime,
+    externalApi,
     modelManagement,
     modelLifecycle,
     runtimeActionLoading,
@@ -283,7 +284,7 @@ export default function Models({ compact = false }) {
 
   return (
     <div className={compact ? 'models-refined' : 'p-3 sm:p-6 lg:p-8'}>
-      {compact ? <header className="models-toolbar"><h2>Your models</h2><button type="button" className="models-browse-link" onClick={() => { setLibraryScope('recommended'); libraryRef.current?.scrollIntoView?.({ block: 'start' }) }}>Browse {odsCatalogModels.length} {odsCatalogModels.length === 1 ? 'model' : 'models'} ↓</button><span>Runtime: {formatModeLabel(odsMode)}{configuredMode !== odsMode ? ` / configured ${formatModeLabel(configuredMode)}` : ''}</span><button className="pixel-metal-control" title="Refresh models" onClick={refresh}><MetalMetricIcon icon={RefreshCw} size={14}/></button></header> : <header className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      {compact ? <header className="models-toolbar"><h2>Your models</h2><button type="button" className="models-browse-link" onClick={() => { setLibraryScope('recommended'); libraryRef.current?.scrollIntoView?.({ block: 'start' }) }}>Browse {odsCatalogModels.length} {odsCatalogModels.length === 1 ? 'model' : 'models'} ↓</button><span>Runtime: {runtimeLabel(odsMode, configuredMode, externalApi)}</span><button className="pixel-metal-control" title="Refresh models" onClick={refresh}><MetalMetricIcon icon={RefreshCw} size={14}/></button></header> : <header className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           {!compact && <h1 className="text-2xl font-bold text-theme-text">Models</h1>}
           <p className="mt-1 text-sm text-theme-text-muted">
@@ -293,8 +294,7 @@ export default function Models({ compact = false }) {
 
         <div className="flex max-w-full flex-wrap items-center gap-2">
           <span className="inline-flex min-h-9 max-w-full items-center rounded-lg border border-theme-border bg-theme-bg/45 px-3 py-2 text-center text-xs font-medium text-theme-text-secondary">
-            Runtime: {formatModeLabel(odsMode)}
-            {configuredMode !== odsMode ? ` / configured ${formatModeLabel(configuredMode)}` : ''}
+            Runtime: {runtimeLabel(odsMode, configuredMode, externalApi)}
           </span>
           <button
             type="button"
@@ -326,7 +326,7 @@ export default function Models({ compact = false }) {
           <div className="flex min-w-0 items-start gap-3">
             <AlertCircle size={18} className="mt-0.5 shrink-0 text-theme-text-secondary" />
             <div>
-              <p className="text-sm font-semibold text-theme-text-secondary">{llmBackend === 'external' || (hostRuntime && modelManagement?.managed === false) ? 'Model changes managed externally' : hostRuntime && modelManagement?.managed == null ? 'Runtime management unavailable' : 'Local model runtime unavailable'}</p>
+              <p className="text-sm font-semibold text-theme-text-secondary">{llmBackend === 'external' ? 'Using a model API' : hostRuntime && modelManagement?.managed === false ? 'Model changes managed externally' : hostRuntime && modelManagement?.managed == null ? 'Runtime management unavailable' : 'Local model runtime unavailable'}</p>
               <p className="mt-1 text-sm text-theme-text-secondary/75">{activationModeError}</p>
               {!compact && <p className="mt-1 text-xs text-theme-text-secondary/60">Model downloads and deletion remain available.</p>}
             </div>
@@ -366,9 +366,10 @@ export default function Models({ compact = false }) {
         model={activeModel}
         currentModel={currentModel || loadedModel}
         gpu={gpu}
+        externalApi={externalApi}
       />
 
-      {!currentModel && !loadedModel && configuredModel && (
+      {!currentModel && !loadedModel && configuredModel && !externalApi && (
         <section className="mb-4 rounded-xl border border-theme-border bg-theme-text-secondary/10 p-4">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm text-theme-text-secondary">
@@ -497,7 +498,8 @@ export default function Models({ compact = false }) {
   )
 }
 
-function CurrentModelPanel({ model, currentModel, gpu, compact = false }) {
+function CurrentModelPanel({ model, currentModel, gpu, compact = false, externalApi = null }) {
+  if (externalApi) return <ExternalApiPanel compact={compact} externalApi={externalApi} />
   const modelLabel = currentModel || model?.id
   const speed = getSpeedDisplay(model)
   const context = model ? formatContext(model.contextLength) : '--'
@@ -1550,6 +1552,30 @@ function getRunDisabledReason({
   if (activationBusy) return 'Wait for the current model swap to finish.'
   if (loadBusy) return 'Another model action is in progress.'
   return null
+}
+
+// API mode: chat uses the model the API serves, not a model on this computer.
+function ExternalApiPanel({ externalApi, compact = false }) {
+  const name = externalApi.model || 'The API\'s model'
+  const where = externalApi.host ? `Served by the API at ${externalApi.host}` : 'Served by a model API'
+  if (compact) return (
+    <section className="models-active" aria-label="Model runtime">
+      <header><span className="models-live">In use</span><Link to="/dashboard">Dashboard <ChevronRight size={12}/></Link></header>
+      <div className="models-active-name"><MetalMetricIcon icon={Box} size={22}/><strong title={name}>{name}</strong></div>
+      <p className="text-xs text-theme-text-muted">{where}</p>
+    </section>
+  )
+  return (
+    <section className="mb-4 rounded-xl border p-4" style={TECH_TILE_STYLE} aria-label="Model runtime">
+      <h2 className="truncate text-sm font-semibold text-theme-text sm:text-base">In use: {name}</h2>
+      <p className="mt-1 text-xs text-theme-text-muted">{where}</p>
+    </section>
+  )
+}
+
+function runtimeLabel(odsMode, configuredMode, externalApi) {
+  if (externalApi) return externalApi.host ? `API (${externalApi.host})` : 'API'
+  return `${formatModeLabel(odsMode)}${configuredMode !== odsMode ? ` / configured ${formatModeLabel(configuredMode)}` : ''}`
 }
 
 function formatModeLabel(mode) {

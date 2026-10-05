@@ -1491,6 +1491,11 @@ async def list_models(api_key: str = Depends(verify_api_key)):
     payload["odsMode"] = ODS_MODE_EFFECTIVE
     payload["configuredMode"] = _configured_ods_mode()
     payload["llmBackend"] = LLM_BACKEND or "unknown"
+    if LLM_BACKEND == "external":
+        # API mode: name the model and the API's host so the page can say
+        # what serves chat. The installer refuses URLs with credentials.
+        payload["externalModel"] = read_env_value("EXTERNAL_LLM_MODEL", INSTALL_DIR).strip() or None
+        payload["externalHost"] = _external_api_host(read_env_value("EXTERNAL_LLM_URL", INSTALL_DIR))
     payload["hostRuntime"] = _windows_hosted_runtime()
     if payload["hostRuntime"]:
         payload["modelManagement"] = await asyncio.to_thread(_model_management)
@@ -1903,6 +1908,19 @@ def _find_loadable_model(model_id: str) -> Optional[dict]:
 
 def _find_normalized_model(model_id: str) -> Optional[dict]:
     return find_catalog_model(load_model_catalog(INSTALL_DIR), model_id, None)
+
+
+def _external_api_host(url: str) -> str | None:
+    """The host (and port) of the API URL, without anything else."""
+    try:
+        parsed = urlsplit(url.strip())
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if not host or parsed.scheme not in {"http", "https"}:
+        return None
+    return f"{host}:{port}" if port else host
 
 
 async def _fetch_llama_loaded_model(host: str, port: int) -> str | None:
