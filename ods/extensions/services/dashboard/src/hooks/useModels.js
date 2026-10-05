@@ -474,6 +474,12 @@ export function useModels({observe=true} = {}) {
     // committed. Confirm right away instead of waiting out the poll interval;
     // a joined in-flight activation or a dropped connection keeps polling.
     let activationAnswered = false
+    // Set when no answer to this page's request will come: a 409 joined the
+    // activation another request is running, or the connection dropped.
+    // Status reads decide then, and a failed activation ends its lifecycle
+    // without the model.
+    let statusOnly = false
+    let idleReads = 0
     let wakeActivationPoll = () => {}
     let activationWake = new Promise(resolve => { wakeActivationPoll = resolve })
     const activationRequest = fetch(`/api/models/${encodeURIComponent(modelId)}/load`, activationRequestOptions)
@@ -493,7 +499,10 @@ export function useModels({observe=true} = {}) {
             return
           }
           const activeModelId = conflictActiveModelId(body)
-          if (activeModelId === modelId && !requestedContextLength) return
+          if (activeModelId === modelId && !requestedContextLength) {
+            statusOnly = true
+            return
+          }
 
           const detail = errorMessageFromPayload(body, 'Another model activation is in progress')
           activationError = activeModelId
@@ -505,8 +514,9 @@ export function useModels({observe=true} = {}) {
         activationError = errorMessageFromPayload(body, 'Failed to load model')
       })
       // A dropped request does not prove activation failed. Continue polling
-      // until the requested model appears or the explicit UI deadline expires.
-      .catch(() => {})
+      // until the requested model appears, the activation visibly ends, or
+      // the explicit UI deadline expires.
+      .catch(() => { statusOnly = true })
       .then(() => {
         if (activationAnswered || activationError) {
           activationAnswered = true
@@ -528,6 +538,18 @@ export function useModels({observe=true} = {}) {
         if (activationMatches(data)) {
           targetLoaded = true
           break
+        }
+        // Two reads in a row with no model operation running and the model
+        // not running mean the activation ended without it. Waiting out the
+        // deadline cannot change that.
+        if (statusOnly && data && !normalizeModelLifecycle(data.modelLifecycle) && data.currentModel !== modelId) {
+          idleReads += 1
+          if (idleReads >= 2) {
+            activationError = `The activation of ${modelId} ended without loading it. Refresh the model list, then try again.`
+            break
+          }
+        } else {
+          idleReads = 0
         }
       }
 
