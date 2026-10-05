@@ -82,7 +82,7 @@ function Assert-ODSPortalStateRoot([string]$StateRoot) {
     }
 }
 
-function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '', [string]$StateRoot = '') {
+function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '', [string]$StateRoot = '', [string[]]$NewInstallationArguments = @()) {
     # windows.ps1 runs in a child PowerShell that shares this console. Calling
     # it here would route wsl.exe output through this function's pipeline, so
     # the Linux installer would see no terminal: no progress during image
@@ -92,7 +92,9 @@ function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro,
     $passthrough = @($LinuxArguments | ForEach-Object { ConvertTo-ODSPortalLiteral $_ }) -join ', '
     $desktopArgument = if ($DockerDesktopPath) { ' -DockerDesktopPath ' + (ConvertTo-ODSPortalLiteral $DockerDesktopPath) } else { '' }
     $stateArgument = if ($StateRoot) { ' -StateRoot ' + (ConvertTo-ODSPortalLiteral $StateRoot) } else { '' }
-    $command = "`$global:LASTEXITCODE = 0; & $(ConvertTo-ODSPortalLiteral $delegate) -Distro $(ConvertTo-ODSPortalLiteral $Distro) -InstallRoot $(ConvertTo-ODSPortalLiteral $InstallRoot) -OpenPortal:$openFlag$desktopArgument$stateArgument -PassthroughArgs @($passthrough); " +
+    # windows.ps1 adds these only when the root holds no installation yet.
+    $newArgument = if ($NewInstallationArguments) { ' -NewInstallationArgs @(' + (@($NewInstallationArguments | ForEach-Object { ConvertTo-ODSPortalLiteral $_ }) -join ', ') + ')' } else { '' }
+    $command = "`$global:LASTEXITCODE = 0; & $(ConvertTo-ODSPortalLiteral $delegate) -Distro $(ConvertTo-ODSPortalLiteral $Distro) -InstallRoot $(ConvertTo-ODSPortalLiteral $InstallRoot) -OpenPortal:$openFlag$desktopArgument$stateArgument$newArgument -PassthroughArgs @($passthrough); " +
         "`$ok = `$?; if (`$global:LASTEXITCODE -ne 0) { exit `$global:LASTEXITCODE }; if (-not `$ok) { exit 1 }; exit 0"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $shell = (Get-Process -Id $PID).Path
@@ -103,6 +105,12 @@ function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro,
     $process.WaitForExit()
     return $process.ExitCode
 }
+
+# Hermes stays off on a new installation (a root without .env, detected by
+# windows.ps1 before install-core runs). A rerun omits this flag, so
+# install-core keeps the owner's current selection, such as Hermes added from
+# the Extensions Library.
+$script:ODSPortalNewInstallationArguments = @('--no-hermes')
 
 function Get-ODSPortalLinuxArguments([System.Collections.IDictionary]$Options) {
     if ($Options['Hermes']) {
@@ -119,7 +127,8 @@ function Get-ODSPortalLinuxArguments([System.Collections.IDictionary]$Options) {
         Voice='--voice'; Workflows='--workflows'; Rag='--rag';
         Recommended='--recommended'; NoRecommended='--no-recommended'; Cloud='--cloud';
         Comfyui='--comfyui'; NoComfyui='--no-comfyui';
-        Langfuse='--langfuse'; NoLangfuse='--no-langfuse'; NoBootstrap='--no-bootstrap'; Lan='--lan'
+        Langfuse='--langfuse'; NoLangfuse='--no-langfuse'; NoBootstrap='--no-bootstrap'; Lan='--lan';
+        NoHermes='--no-hermes'
     }
     foreach ($key in $flags.Keys) { if ($Options[$key]) { $linuxArgs += $flags[$key] } }
     if ($Options['Tier']) {
@@ -136,7 +145,9 @@ function Get-ODSPortalLinuxArguments([System.Collections.IDictionary]$Options) {
     # Every WSL installation needs a durable Windows executable location for
     # owner-scoped sign-in/uninstall control, including NVIDIA and CPU hosts.
     $linuxArgs += @('--windows-system-directory', [Environment]::SystemDirectory)
-    $linuxArgs += @('--pixel', '--no-hermes')
+    $linuxArgs += '--pixel'
+    # --all turns Hermes on; -All must not, on a new installation or a rerun.
+    if ($Options['All']) { $linuxArgs += $script:ODSPortalNewInstallationArguments }
     return $linuxArgs
 }
 
@@ -358,6 +369,7 @@ function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string
         Write-Host 'Dry run: no features, distributions, tasks, services or files will be changed.'
         Write-Host 'Plan: check disk space and virtualization; prepare WSL2, Ubuntu and Docker Desktop when missing (continuing after a restart); verify the Ubuntu user, systemd, Docker integration and, with an NVIDIA driver, GPU access; with an AMD GPU, install Lemonade Server on Windows and load the model on the GPU; run the Linux installer; verify Pixel ingress and Portal readiness; open Portal.'
         Write-Host ('Linux flags: ' + ($linuxArgs -join ' '))
+        Write-Host ('A new installation also gets: ' + ($script:ODSPortalNewInstallationArguments -join ' ') + '. A rerun keeps the installed Hermes selection.')
         return 0
     }
     if ($env:OS -ne 'Windows_NT') { throw 'Run install.ps1 in Windows PowerShell. Inside Ubuntu use bash install.sh --pixel --no-hermes.' }
@@ -411,5 +423,5 @@ function Invoke-ODSPortalSetup([System.Collections.IDictionary]$Options, [string
     }
     Write-ODSPortalStage 4 'INSTALL PIXEL / PORTAL' "Prerequisites passed for $distro. Starting the Linux installer."
     Write-Host '         When Ubuntu asks for your [sudo] password, type your Ubuntu password and press Enter. Nothing appears while you type.'
-    return Invoke-ODSPortalLinuxInstaller $InstallerRoot $distro $linuxArgs ([string]$Options['InstallDir']) (-not $nonInteractive) (Get-ODSPortalDockerDesktop).Exe ([string]$Options['StateRoot'])
+    return Invoke-ODSPortalLinuxInstaller $InstallerRoot $distro $linuxArgs ([string]$Options['InstallDir']) (-not $nonInteractive) (Get-ODSPortalDockerDesktop).Exe ([string]$Options['StateRoot']) $script:ODSPortalNewInstallationArguments
 }

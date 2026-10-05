@@ -31,9 +31,9 @@ $null = New-Item -ItemType Directory -Path $delegateRoot
 try {
     $record = Join-Path $delegateRoot 'args.json'
     Set-Content -LiteralPath (Join-Path $delegateRoot 'windows.ps1') -Encoding UTF8 -Value @"
-param([string]`$Distro, [string]`$InstallRoot, [switch]`$OpenPortal, [string[]]`$PassthroughArgs, [string]`$DockerDesktopPath, [string]`$StateRoot)
+param([string]`$Distro, [string]`$InstallRoot, [switch]`$OpenPortal, [string[]]`$PassthroughArgs, [string]`$DockerDesktopPath, [string]`$StateRoot, [string[]]`$NewInstallationArgs)
 Write-Output 'delegate stdout'
-[IO.File]::WriteAllText('$record', (ConvertTo-Json -Compress @{ d = `$Distro; r = `$InstallRoot; o = [bool]`$OpenPortal; a = `$PassthroughArgs; docker = `$DockerDesktopPath; s = `$StateRoot }))
+[IO.File]::WriteAllText('$record', (ConvertTo-Json -Compress @{ d = `$Distro; r = `$InstallRoot; o = [bool]`$OpenPortal; a = `$PassthroughArgs; docker = `$DockerDesktopPath; s = `$StateRoot; n = `$NewInstallationArgs }))
 exit 23
 "@
     $returned = @(Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel', "it's `$(x)", 'two words') "/home/o'brien/ODS data" $true 'D:\Custom Docker\Docker Desktop.exe')
@@ -48,6 +48,10 @@ exit 23
     $returned=Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel') '/home/user/ods' $true 'D:\Custom Docker\Docker Desktop.exe' $stateLocation
     $seen=Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
     Check ($returned -eq 23 -and $seen.s -ceq $stateLocation -and $seen.o -eq $true -and $seen.docker -ceq 'D:\Custom Docker\Docker Desktop.exe') 'state location, Docker location and Portal opening coexist in the delegated process'
+    Check ($null -eq $seen.n) 'no new-installation flags reach the delegate unless setup passes them'
+    $returned=Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @('--pixel') '/home/user/ods' $false '' '' @('--no-hermes', "it's new")
+    $seen=Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
+    Check ($returned -eq 23 -and (@($seen.n) -join '|') -ceq "--no-hermes|it's new" -and (@($seen.a) -join ' ') -ceq '--pixel') 'new-installation flags reach the delegate intact and separate from the Linux flags'
     Set-Content -LiteralPath (Join-Path $delegateRoot 'windows.ps1') -Encoding UTF8 -Value "throw 'delegate failed'"
     Check ((Invoke-ODSPortalLinuxInstaller $delegateRoot 'Ubuntu-24.04' @() '' $false) -ne 0) 'delegate that throws is a failure'
 } finally { Remove-Item -LiteralPath $delegateRoot -Recurse -Force }
@@ -59,6 +63,7 @@ function Reset-Scenario {
     $script:featureCode = 0
     $script:allowPreparation = $true
     $script:capturedArguments = @()
+    $script:capturedNewInstallation = @()
     $script:capturedRoot = ''
     $script:capturedStateRoot = ''
     $script:downloadCode = 0
@@ -126,10 +131,11 @@ function Initialize-ODSPortalUbuntuUser([string]$Distro) {
     if ($script:scenario -eq 'resume-user') { $script:scenario='ready' }
     return $script:userSetupCode
 }
-function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '', [string]$StateRoot = '') {
+function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro, [string[]]$LinuxArguments, [string]$InstallRoot, [bool]$OpenPortal, [string]$DockerDesktopPath = '', [string]$StateRoot = '', [string[]]$NewInstallationArguments = @()) {
     $script:calls.Add('install:' + $Distro)
     $script:openPortal = $OpenPortal
     $script:capturedArguments = $LinuxArguments
+    $script:capturedNewInstallation = $NewInstallationArguments
     $script:capturedRoot = $InstallRoot
     $script:capturedStateRoot = $StateRoot
     return $script:delegateCode
@@ -222,6 +228,36 @@ try {
     Check (($script:capturedArguments -join ' ') -match '--all --no-langfuse') 'explicit disable follows all'
     Check ($script:capturedRoot -eq '/home/user/ODS data') 'Linux install path forwarded intact'
     Check ($script:capturedStateRoot -ceq 'C:\ODS private\state' -and ($script:capturedArguments -join ' ') -notmatch 'StateRoot|ODS private') 'setup forwards Windows state location without injecting it into Linux flags'
+    Check ((@($script:capturedNewInstallation) -join ' ') -ceq '--no-hermes') 'a new installation still starts without Hermes'
+    Reset-Scenario
+    Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'ready host without -All delegates successfully'
+    Check ($script:capturedArguments[-1] -ceq '--pixel' -and $script:capturedArguments -notcontains '--no-hermes') 'Linux flags leave --no-hermes out, so a rerun keeps the installed selection'
+    Check ((@($script:capturedNewInstallation) -join ' ') -ceq '--no-hermes') 'Hermes is turned off only through the new-installation flag'
+    Reset-Scenario
+    $null = Invoke-ODSPortalSetup @{NoHermes=$true} 'unused'
+    Check ($script:capturedArguments -contains '--no-hermes') '-NoHermes turns Hermes off on a rerun too'
+    # windows.ps1 owns the new-installation probe (no <root>/.env before
+    # install-core). Run its real flag block for a new installation and a rerun.
+    $windowsAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '../../installers/windows.ps1'), [ref]$null, [ref]$null)
+    $envProbe = $windowsAst.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$newInstallation' }, $true)
+    $flagBlock = $windowsAst.Find({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text -eq '$newInstallation -and $NewInstallationArgs' }, $true)
+    $launch = $windowsAst.Find({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.Extent.Text -eq '& wsl.exe -d $Distro bash -lc $wslCommand' }, $true)
+    Check ($envProbe -and $flagBlock -and $launch -and $envProbe.Extent.EndOffset -lt $flagBlock.Extent.StartOffset -and $flagBlock.Extent.EndOffset -lt $launch.Extent.StartOffset) 'windows.ps1 decides the new-installation flags after its .env probe and before the Linux installer runs'
+    function New-ODSWslInstallerCommand([string]$RepoRoot, [string[]]$Arguments, [string]$ResolvedRoot) { "install-core $($Arguments -join ' ')" }
+    $repoRootWsl = '/mnt/c/source'
+    $lifetimeIdentity = [pscustomobject]@{ installRoot = '/home/user/ods' }
+    $NewInstallationArgs = @('--no-hermes')
+    foreach ($case in @(
+        @{ New=$false; Given=@('--windows-system-directory', 'C:\Windows\system32', '--pixel'); Expected='--windows-system-directory C:\Windows\system32 --pixel'; Command='unchanged'; Name='a rerun omits --no-hermes, so the installed selection stays' },
+        @{ New=$true; Given=@('--windows-system-directory', 'C:\Windows\system32', '--pixel'); Expected='--windows-system-directory C:\Windows\system32 --pixel --no-hermes'; Command='install-core --windows-system-directory C:\Windows\system32 --pixel --no-hermes'; Name='a new installation gets --no-hermes' },
+        @{ New=$true; Given=@('--all', '--pixel', '--no-hermes'); Expected='--all --pixel --no-hermes'; Command='install-core --all --pixel --no-hermes'; Name='a new installation with -All gets the flag once' }
+    )) {
+        $newInstallation = $case.New
+        $PassthroughArgs = $case.Given
+        $wslCommand = 'unchanged'
+        . ([scriptblock]::Create($flagBlock.Extent.Text))
+        Check ((@($PassthroughArgs) -join ' ') -ceq $case.Expected -and $wslCommand -ceq $case.Command) ('windows.ps1: ' + $case.Name)
+    }
     foreach ($badState in @('relative\state','C:\','\\server\share','C:\a\..\state','C:\bad"state')) {
         Reset-Scenario
         $message=''
@@ -313,7 +349,8 @@ try {
     $script:amdPlan = $fixturePlan
     $script:amdArgs = $fixtureLemonadeArgs
     Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'AMD host installs through Windows Lemonade'
-    Check (($script:capturedArguments -join ' ') -match '--pixel --no-hermes --lemonade-url http://localhost:8080 --lemonade-model extra\.Qwen3\.5-9B-Q4_K_M\.gguf --lemonade-context-size 65536 --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304 --tier 2$') 'AMD host passes the Lemonade route, its loaded context and GPU tier to Linux'
+    Check (($script:capturedArguments -join ' ') -match '--pixel --lemonade-url http://localhost:8080 --lemonade-model extra\.Qwen3\.5-9B-Q4_K_M\.gguf --lemonade-context-size 65536 --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304 --tier 2$') 'AMD host passes the Lemonade route, its loaded context and GPU tier to Linux'
+    Check ((@($script:capturedNewInstallation) -join ' ') -ceq '--no-hermes') 'AMD host keeps the new-installation flag'
     Check ($script:calls.IndexOf('amd-lemonade:AMD Radeon RX 9070 XT') -lt $script:calls.IndexOf('install:Ubuntu-24.04')) 'Lemonade is ready before the Linux installer starts'
     Check (($script:amdBinding -join '|') -ceq 'Ubuntu-24.04|/home/user/ods' -and $script:capturedRoot -ceq '/home/user/ods') 'default AMD binding and delegated install use the same explicit Linux path'
     Reset-Scenario
@@ -366,7 +403,7 @@ try {
         $script:engineUp=$false
         Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'resuming after Docker installation reaches Pixel setup'
         Check ($script:calls.Contains('docker-start') -and $script:calls.Contains('install:Ubuntu-24.04')) 'resumed setup starts Docker and delegates to Ubuntu'
-        Check ($script:capturedArguments -contains '--pixel' -and $script:capturedArguments -contains '--no-hermes') 'empty-host recovery retains Pixel and excludes Hermes'
+        Check ($script:capturedArguments -contains '--pixel' -and $script:capturedNewInstallation -contains '--no-hermes') 'empty-host recovery retains Pixel and excludes Hermes from the new installation'
     }
     foreach ($failure in @('Wsl/E_ACCESSDENIED', 'Wsl/WSL_E_SERVICE_NOT_AVAILABLE', 'Wsl/WSL_E_DEFAULT_DISTRO_NOT_FOUND_OTHER', 'Wsl/NOT_WSL_E_DEFAULT_DISTRO_NOT_FOUND', '')) {
         Reset-Scenario

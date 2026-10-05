@@ -497,6 +497,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   folder came back under a new device number and failed its identity check.
   Uninstall now accepts exactly that: the same folders, still empty and
   root-private. Anything else still stops the uninstall.
+- Rerunning `install.ps1` on Windows (an update) no longer turns off Hermes
+  Agent that was added from the Extensions Library. Windows setup passed
+  `--no-hermes` on every run, so the rerun disabled Hermes and its proxy and
+  Compose removed both containers. Only a new installation (no `.env` yet)
+  gets the flag now; a rerun keeps the current choice, and `-NoHermes` turns
+  Hermes off explicitly.
+- After an update of a Pixel installation, adding Hermes back from the
+  Extensions Library no longer fails with "Host agent failed to start
+  extension." The Pixel source update runs as root and set only the owner of
+  the files it replaced, so they kept root's group, and the host agent could
+  not rewrite Hermes's configuration template. Replaced files and new
+  directories now get the owner's primary group, as on a new installation.
+- Installations that an earlier Pixel source update already left with files
+  in group root are repaired by the next installer run. The installer returns
+  its owner's files and folders in `bin`, `lib`, `scripts`, `installers`,
+  `extensions` and `vendor` from group root to the owner's group, without
+  sudo and without following links, and logs how many it changed.
+- A non-interactive rerun on a Tier 0 or Tier 1 machine keeps ComfyUI when it
+  is already running (for example after adding it from the Extensions
+  Library). Its low-memory safety check now applies only when ComfyUI is not
+  installed yet, as the interactive "Keep current selection" already did.
+- Updating a Pixel installation that has Hermes on no longer rewrites Hermes's
+  configuration template while the Pixel source update is still in progress.
+  That update finishes only over the exact files it installed, so the change
+  could stop the update. The installer now writes Hermes's model route after
+  the Pixel update finishes, still before Hermes starts.
 - Rerunning the installer (an update) no longer fails with "Embeddings model
   prefetch failed" after Embeddings was added from Extensions. The Embeddings
   service downloads the model itself, as root, so the installer could not
