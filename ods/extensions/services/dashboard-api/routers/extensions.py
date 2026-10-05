@@ -1455,6 +1455,14 @@ def _fetch_agent_logs(service_id: str, timeout: int) -> str:
     )
 
 
+# Why the host agent refused the last start or stop of each service. Each
+# _call_agent replaces it. _call_agent keeps its boolean contract for its many
+# callers; a failed start reads this, so the extension card shows the host's
+# reason (a host port another program holds, a Hermes route file it could not
+# write) instead of a generic message.
+_agent_refusals: dict[str, str] = {}
+
+
 def _call_agent(action: str, service_id: str) -> bool:
     """Call host agent to start/stop a service. Returns True on success.
 
@@ -1462,6 +1470,7 @@ def _call_agent(action: str, service_id: str) -> bool:
     background retry â€” caller should let the dashboard's progress poll surface
     the eventual outcome). Mirrors _call_agent_install's contract.
     """
+    _agent_refusals.pop(service_id, None)
     try:
         request_agent_json(
             "POST",
@@ -1470,12 +1479,25 @@ def _call_agent(action: str, service_id: str) -> bool:
             timeout=_AGENT_TIMEOUT,
         )
         return True
+    except AgentHTTPError as exc:
+        # The host agent redacts this reason before it answers.
+        _agent_refusals[service_id] = exc.detail[:2000]
+        logger.warning(
+            "Host agent could not %s %s (HTTP %d): %s",
+            action, service_id, exc.status_code, exc.detail,
+        )
+        return False
     except AgentClientError as exc:
         logger.warning(
             "Host agent unreachable at %s â€” fallback to restart_required: %s",
             "shared transport", exc,
         )
         return False
+
+
+def _agent_start_failure(service_id: str, fallback: str) -> str:
+    """The host agent's reason a start just failed, else ``fallback``."""
+    return _agent_refusals.pop(service_id, "") or fallback
 
 
 def _call_agent_invalidate_compose_cache() -> None:
@@ -4719,10 +4741,10 @@ def enable_extension(
             if not _call_agent("start", svc_id):
                 agent_ok = False
                 failed_services.append(svc_id)
-                _write_error_progress(
+                _write_error_progress(svc_id, _agent_start_failure(
                     svc_id,
                     "Host agent failed to start extension. Run 'ods restart' to recover.",
-                )
+                ))
             else:
                 _write_started_progress(svc_id)
             continue
@@ -4738,7 +4760,8 @@ def enable_extension(
         if not _call_agent("start", svc_id):
             agent_ok = False
             failed_services.append(svc_id)
-            _write_error_progress(svc_id, "Host agent failed to start extension.")
+            _write_error_progress(svc_id, _agent_start_failure(
+                svc_id, "Host agent failed to start extension."))
             continue
         # post_start is non-terminal â€” log failure but don't fail the enable
         if not _call_agent_hook(svc_id, "post_start"):

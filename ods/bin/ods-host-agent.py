@@ -6390,9 +6390,80 @@ def docker_compose_action(service_id: str, action: str) -> tuple:
                 max_wait_seconds=min(480, max(0, action_deadline - time.monotonic())),
                 compose_env=compose_env,
             )
-        return (True, "") if result.returncode == 0 else (False, result.stderr[:500])
+        if result.returncode == 0:
+            return True, ""
+        return False, _compose_failure_reason(service_id, result.stderr)
     except subprocess.TimeoutExpired:
         return False, f"Docker compose operation timed out ({timeout}s)"
+
+
+# Docker could not publish a host port that something else already holds.
+# Docker Desktop: "ports are not available: exposing port TCP 127.0.0.1:9000
+# -> 127.0.0.1:0: ...". Docker Engine: "Bind for 127.0.0.1:9000 failed: port
+# is already allocated", "listen tcp4 127.0.0.1:9000: bind: address already
+# in use" and "failed to bind host port for 127.0.0.1:9000:172.18.0.2:8000/tcp:
+# address already in use". The host port follows the bind address.
+_HOST_PORT_TAKEN_MARKERS = (
+    'ports are not available', 'port is already allocated', 'address already in use',
+    'only one usage of each socket address')
+_PUBLISHED_HOST_PORT_RE = re.compile(
+    r'(?i:exposing port (?:tcp|udp) |bind for |listen (?:tcp|udp)[46]? |bind host port for )'
+    r'(?:\[[0-9A-Fa-f:.]*\]|[0-9.]*):([0-9]{1,5})(?![0-9])')
+
+
+def _taken_host_port(output: str) -> tuple[int, str] | None:
+    """The host port Docker could not publish, and Docker's line that says so."""
+    for line in reversed(output.splitlines()):
+        if any(marker in line.lower() for marker in _HOST_PORT_TAKEN_MARKERS):
+            match = _PUBLISHED_HOST_PORT_RE.search(line)
+            if match and 0 < int(match.group(1)) <= 65535:
+                return int(match.group(1)), line.strip()
+    return None
+
+
+def _host_port_setting(service_id: str, port: int) -> str | None:
+    """The .env setting that publishes ``port`` for ``service_id``, if it does."""
+    ext_dir = _find_ext_dir(service_id)
+    manifest = _read_manifest(ext_dir) if ext_dir is not None else None
+    service = manifest.get("service") if manifest else None
+    if not isinstance(service, dict):
+        return None
+    setting = service.get("external_port_env")
+    if not isinstance(setting, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", setting):
+        return None
+    try:
+        configured = load_env(INSTALL_DIR / ".env").get(setting) or service.get("external_port_default")
+    except (OSError, UnicodeError):
+        return None
+    return setting if str(configured).strip() == str(port) else None
+
+
+def _compose_failure_reason(service_id: str, output: str) -> str:
+    """Why ``docker compose`` failed, in the words the owner acts on.
+
+    Compose prints progress first and Docker's error last, so the end of its
+    output is kept, from a whole line. When Docker could not publish a host
+    port because another program holds it, lead with that port and the .env
+    setting that moves it. Credentials are redacted before anything is
+    matched or cut.
+    """
+    output = _redact_credential_text(output).strip()
+    taken = _taken_host_port(output)
+    if taken is None:
+        tail = output[-500:]
+        if len(output) > 500 and "\n" in tail:
+            tail = tail[tail.index("\n") + 1:]
+        return tail
+    port, docker_error = taken
+    setting = _host_port_setting(service_id, port)
+    if setting:
+        remedy = (f"Set {setting} in .env to a free port (ods config edit), "
+                  f"or stop the program using port {port}")
+    else:
+        remedy = (f"Stop the program using port {port}, or move the ODS service "
+                  f"published on it to a free port in .env (ods config edit)")
+    return (f"Host port {port} is already in use, so {service_id} could not start. "
+            f"{remedy}, then retry.\n{docker_error[-BUILD_ERROR_LINE_LIMIT:]}")
 
 
 def _webui_selection_state() -> dict:
@@ -11323,18 +11394,21 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         try:
             ok, err = docker_compose_action(service_id, action)
+            status = 503 if "timed out" in err else 500
         except RuntimeError as exc:
-            json_response(self, 500, {"error": str(exc)})
-            return
+            ok, err, status = False, str(exc), 500
         except subprocess.CalledProcessError as exc:
-            json_response(self, 500, {"error": f"Compose resolution failed: {exc.stderr[:300]}"})
-            return
+            ok, err, status = False, f"Compose resolution failed: {exc.stderr[:300]}", 500
         finally:
             lock.release()
         if ok:
             json_response(self, 200, {"status": "ok", "service_id": service_id, "action": action})
-        else:
-            json_response(self, 503 if "timed out" in err else 500, {"error": err})
+            return
+        # The Dashboard shows this reason on the extension's card. Keep the
+        # same reason in this log, beside the failed request line.
+        err = _redact_credential_text(err)
+        logger.warning("Extension %s failed for %s: %s", action, service_id, err)
+        json_response(self, status, {"error": err})
 
     def _handle_extension_compose_toggle(self, activate: bool):
         """Fail closed for legacy Dashboard marker toggles.
@@ -12096,7 +12170,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 start_result = _run_selected_extension_up(service_id, flags)
                 if start_result.returncode != 0:
                     _write_progress(service_id, "error", "Installation failed",
-                                    error=start_result.stderr[-500:])
+                                    error=_compose_failure_reason(service_id, start_result.stderr))
                     return
 
                 # By default, poll for running state: compose `up -d`
