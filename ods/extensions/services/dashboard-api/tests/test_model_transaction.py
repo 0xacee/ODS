@@ -35,6 +35,23 @@ def test_local_contract_identity_accepts_the_configured_logical_name(monkeypatch
         {'GGUF_FILE': 'Qwen3.5-9B-Q4_K_M.gguf'}, 'Qwen3.5-9B-Q4_K_M.gguf', 'qwen3.5-9b')
 
 
+@pytest.mark.parametrize('status,body,detail', [
+    (403, {'error': 'forbidden'}, '(model-status: HTTP 403 forbidden)'),
+    (409, {'reason': 'busy'}, '(model-status: HTTP 409 busy)'),
+    (400, {'error': 'bad value with spaces'}, '(model-status: HTTP 400)'),
+])
+def test_model_controller_refusal_names_operation_status_and_reason(monkeypatch, status, body, detail):
+    # Fleet, Mac 2026-10-05: one generic sentence hid whether the controller
+    # refused the agent's key or was busy.
+    import pixel_access_relay
+    monkeypatch.setattr(pixel_access_relay, 'request_runtime_model_control',
+                        lambda operation, request=None, *, config: (status, body))
+    with pytest.raises(host._PixelModelTransactionRejected) as refused:
+        host._runtime_model_control('model-status', config={})
+    assert str(refused.value) == ('Managed model controller refused the transition; '
+                                  'its current state must be verified ' + detail)
+
+
 def test_installer_contract_with_logical_name_is_proven_and_mismatches_are_logged(monkeypatch, caplog):
     # Fleet, 2026-10-05: leaving a remote route on a fresh install failed every
     # time, because the saved Portal contract named qwen3.5-9b and the server

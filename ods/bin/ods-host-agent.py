@@ -4192,7 +4192,15 @@ def _runtime_model_control(operation: str, request: dict | None = None, *, confi
     from pixel_access_relay import request_runtime_model_control, public_model_control
     status, value = request_runtime_model_control(operation, request, config=config)
     if status in {400, 403, 409}:
-        raise _PixelModelTransactionRejected('Managed model controller refused the transition; its current state must be verified')
+        # Name the operation, status and the controller's own reason code: a
+        # refused status read (403) and a busy controller (409) need different
+        # next steps, and the generic sentence alone hid which one happened.
+        code = value.get('error') or value.get('reason') if isinstance(value, dict) else None
+        code = code if isinstance(code, str) and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', code) else ''
+        detail = f'{operation}: HTTP {status}' + (f' {code}' if code else '')
+        logger.warning('Managed model controller refused %s', detail)
+        raise _PixelModelTransactionRejected(
+            f'Managed model controller refused the transition; its current state must be verified ({detail})')
     if status != 200:
         raise RuntimeError('Managed model controller is unavailable or refused the transition')
     return public_model_control(value)
