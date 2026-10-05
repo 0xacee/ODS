@@ -338,12 +338,14 @@ def _read_route_state() -> dict[str, Any]:
     except FileNotFoundError:
         return _state_response(exists=False, valid=True)
     except OSError as exc:
-        return _state_response(exists=True, valid=False, errors=[f"read failed: {exc}"])
+        logger.warning("remote-provider routing state read failed: %s", exc)
+        return _state_response(exists=True, valid=False, errors=["read failed"])
 
     try:
         doc = json.loads(raw)
     except ValueError as exc:
-        return _state_response(exists=True, valid=False, errors=[f"not valid JSON: {exc}"])
+        logger.warning("remote-provider routing state is not valid JSON: %s", exc)
+        return _state_response(exists=True, valid=False, errors=["not valid JSON"])
     if not isinstance(doc, Mapping):
         return _state_response(exists=True, valid=False, errors=["state root must be an object"])
     if doc.get("schema") != ROUTE_STATE_SCHEMA:

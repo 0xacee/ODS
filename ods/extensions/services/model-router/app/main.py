@@ -2006,8 +2006,9 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
         ), False
     except httpx.HTTPError as exc:
         _finish_probe_attempt(attempt_handle, "transport-error")
+        logger.warning("Upstream model runtime unavailable: %s", exc)
         return JSONResponse(
-            {"error": {"message": f"Upstream model runtime unavailable: {exc}",
+            {"error": {"message": "Upstream model runtime unavailable",
                        "type": "upstream_unavailable", "code": "502"}},
             status_code=502, headers=ods_headers,
         ), False
@@ -2066,8 +2067,9 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                     }}, status_code=504, headers=ods_headers), False
                 except httpx.HTTPError as exc:
                     _finish_probe_attempt(repair_handle, "transport-error")
+                    logger.warning("Upstream model runtime unavailable during tool protocol repair: %s", exc)
                     return JSONResponse({"error": {
-                        "message": f"Upstream model runtime unavailable during tool protocol repair: {exc}",
+                        "message": "Upstream model runtime unavailable during tool protocol repair",
                         "type": "upstream_unavailable", "code": "502",
                     }}, status_code=502, headers=ods_headers), False
                 if 200 <= upstream.status_code < 300:

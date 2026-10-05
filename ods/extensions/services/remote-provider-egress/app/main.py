@@ -12,6 +12,7 @@ the service still cannot spend the provider key without it.
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,8 @@ POLICY_PATH = Path(
 SECRET_PATH = Path(
     os.environ.get("ODS_REMOTE_PROVIDER_API_KEY_FILE", str(DEFAULT_SECRET_PATH))
 )
+logger = logging.getLogger("ods-remote-provider-egress")
+
 MAX_BODY_BYTES = int(
     os.environ.get("ODS_REMOTE_PROVIDER_MAX_BODY_BYTES", str(DEFAULT_MAX_BODY_BYTES))
 )
@@ -482,12 +485,9 @@ async def forward(full_path: str, request: Request) -> Response:
             EgressError(504, "upstream_timeout", "remote provider timed out")
         )
     except httpx.HTTPError as exc:
+        logger.warning("remote provider unavailable: %s", exc)
         return _error_response(
-            EgressError(
-                502,
-                "upstream_unavailable",
-                f"remote provider unavailable: {exc}",
-            )
+            EgressError(502, "upstream_unavailable", "remote provider unavailable")
         )
     response_headers = _response_headers(upstream.headers)
     if 200 <= upstream.status_code < 300 and len(upstream.content) <= 16 * 1024 * 1024:
