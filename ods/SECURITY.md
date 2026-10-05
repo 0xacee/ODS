@@ -27,7 +27,8 @@ values. The core credentials are:
 | `ODS_AGENT_KEY` | Bearer key for the host agent API |
 | `ODS_SESSION_SECRET` | Signs ODS session cookies (for example the Hermes gate) |
 | `WEBUI_SECRET` | Session signing for Open WebUI |
-| `LITELLM_KEY`, `LITELLM_LEMONADE_API_KEY` | LiteLLM gateway keys |
+| `LITELLM_KEY` | LiteLLM gateway key |
+| `LLAMA_SERVER_API_KEY` | Key of the Windows AMD `llama-server.exe` (Windows setup generates it) |
 | `QDRANT_API_KEY`, `SHIELD_API_KEY`, `TOKEN_SPY_API_KEY` | Service API keys |
 | `HERMES_DASHBOARD_SESSION_TOKEN`, `OPENCODE_SERVER_PASSWORD` | Agent and coding-tool credentials |
 | `N8N_PASS`, `SEARXNG_SECRET`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DIFY_SECRET_KEY` | Optional-service credentials |
