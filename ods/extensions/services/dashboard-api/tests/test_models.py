@@ -1088,6 +1088,64 @@ def test_agent_activation_preserves_preflight_validation_detail(monkeypatch):
     assert exc_info.value.detail == payload
 
 
+def test_agent_activation_waits_out_a_pixel_access_reproof(monkeypatch):
+    # Strixy: a switch that landed while the Pixel access monitor re-proved
+    # (it holds the model lifecycle for a few seconds every ~45 s) got 409.
+    import routers.models as models_router
+
+    calls = 0
+    conflict_payload = {
+        "error": "Cannot activate a model while pixel_startup_reproof is in progress",
+        "code": "model_lifecycle_busy",
+        "activeOperation": "pixel_startup_reproof",
+    }
+
+    def request(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise models_router.AgentHTTPError(409, conflict_payload["error"], json.dumps(conflict_payload))
+        return {"status": "started"}
+
+    monkeypatch.setattr(models_router, "request_agent_json", request)
+    monkeypatch.setattr(models_router.time, "sleep", lambda _seconds: None)
+    assert models_router._call_agent_model(
+        "/v1/model/activate", {"model_id": "qwen3.5-9b-q4"}, timeout=600,
+        retry_pixel_busy_seconds=1.0,
+    ) == {"status": "started"}
+    assert calls == 3
+    assert models_router._MODEL_PIXEL_BUSY_ACTIVATION_GRACE_SECONDS >= 20.0
+
+
+def test_pixel_busy_retry_is_bounded_and_not_granted_to_other_operations(monkeypatch):
+    import routers.models as models_router
+
+    clock = [100.0]
+    calls: list[str] = []
+
+    def busy(operation):
+        def request(*_args, **_kwargs):
+            calls.append(operation)
+            clock[0] += 0.5
+            payload = {"code": "model_lifecycle_busy", "activeOperation": operation}
+            raise models_router.AgentHTTPError(409, "busy", json.dumps(payload))
+        return request
+
+    monkeypatch.setattr(models_router.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(models_router.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(models_router, "request_agent_json", busy("pixel_startup_reproof"))
+    with pytest.raises(models_router.HTTPException) as exc_info:
+        models_router._call_agent_model("/v1/model/activate", {}, retry_pixel_busy_seconds=5.0)
+    assert exc_info.value.status_code == 409
+    assert 5 <= len(calls) <= 12  # Retried within the grace, then surfaced.
+
+    calls.clear()
+    monkeypatch.setattr(models_router, "request_agent_json", busy("model_activation"))
+    with pytest.raises(models_router.HTTPException):
+        models_router._call_agent_model("/v1/model/activate", {}, retry_pixel_busy_seconds=5.0)
+    assert calls == ["model_activation"]  # Another model operation is never waited out.
+
+
 def test_agent_activation_waits_for_download_lifecycle_teardown(monkeypatch):
     import routers.models as models_router
 
@@ -2279,6 +2337,8 @@ def test_load_model_reconfigures_active_model_when_context_changes(
         {
             "retry_download_busy_seconds":
                 models_router._MODEL_DOWNLOAD_BUSY_ACTIVATION_GRACE_SECONDS,
+            "retry_pixel_busy_seconds":
+                models_router._MODEL_PIXEL_BUSY_ACTIVATION_GRACE_SECONDS,
         },
     )]
 
@@ -2590,6 +2650,7 @@ def test_load_model_uses_observed_download_teardown_grace(test_client, monkeypat
         "body": {"model_id": "qwen3.5-35b-a3b-q4"},
         "timeout": 2700,
         "retry_download_busy_seconds": models_router._MODEL_DOWNLOAD_BUSY_ACTIVATION_GRACE_SECONDS,
+        "retry_pixel_busy_seconds": models_router._MODEL_PIXEL_BUSY_ACTIVATION_GRACE_SECONDS,
     }
     assert captured["retry_download_busy_seconds"] >= 120.0
 

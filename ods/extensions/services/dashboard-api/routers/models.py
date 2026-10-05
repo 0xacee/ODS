@@ -1725,6 +1725,14 @@ def _invalidate_agent_model_status_cache() -> None:
 # releases the model_download lifecycle lock. Keep this finite so unrelated
 # conflicts still surface, but cover observed 30s+ multipart teardown lag.
 _MODEL_DOWNLOAD_BUSY_ACTIVATION_GRACE_SECONDS = 120.0
+# The Pixel access monitor re-proves every ~45 s under the model lifecycle lock
+# for a few seconds. A switch that lands in that window waits it out instead of
+# returning 409 to a Models page that keeps waiting (Strixy, 2026-10-05).
+_PIXEL_LIFECYCLE_OPERATIONS = frozenset({
+    "pixel_startup_reproof", "pixel_access_mode", "pixel_open_app",
+    "pixel_providers", "pixel_settings",
+})
+_MODEL_PIXEL_BUSY_ACTIVATION_GRACE_SECONDS = 30.0
 
 
 def _agent_http_detail(exc: AgentHTTPError) -> Any:
@@ -1746,15 +1754,26 @@ def _is_download_lifecycle_busy(detail: Any) -> bool:
     )
 
 
+def _is_pixel_lifecycle_busy(detail: Any) -> bool:
+    return (
+        isinstance(detail, dict)
+        and detail.get("code") == "model_lifecycle_busy"
+        and detail.get("activeOperation") in _PIXEL_LIFECYCLE_OPERATIONS
+    )
+
+
 def _call_agent_model(
     path: str,
     body: dict,
     timeout: int = 30,
     *,
     retry_download_busy_seconds: float = 0.0,
+    retry_pixel_busy_seconds: float = 0.0,
 ) -> dict:
     """Call the host agent model endpoint."""
-    deadline = time.monotonic() + max(float(retry_download_busy_seconds or 0.0), 0.0)
+    started = time.monotonic()
+    deadline = started + max(float(retry_download_busy_seconds or 0.0), 0.0)
+    pixel_deadline = started + max(float(retry_pixel_busy_seconds or 0.0), 0.0)
     try:
         while True:
             try:
@@ -1764,9 +1783,12 @@ def _call_agent_model(
                     raise
                 detail = _agent_http_detail(exc)
                 if (
-                    retry_download_busy_seconds > 0
-                    and _is_download_lifecycle_busy(detail)
-                    and time.monotonic() < deadline
+                    (retry_download_busy_seconds > 0
+                     and _is_download_lifecycle_busy(detail)
+                     and time.monotonic() < deadline)
+                    or (retry_pixel_busy_seconds > 0
+                        and _is_pixel_lifecycle_busy(detail)
+                        and time.monotonic() < pixel_deadline)
                 ):
                     time.sleep(0.5)
                     continue
@@ -2294,6 +2316,7 @@ def load_model(
             activation_body,
             timeout=2700,
             retry_download_busy_seconds=_MODEL_DOWNLOAD_BUSY_ACTIVATION_GRACE_SECONDS,
+            retry_pixel_busy_seconds=_MODEL_PIXEL_BUSY_ACTIVATION_GRACE_SECONDS,
         )
     finally:
         # A status read cached while the activation ran still reports its
