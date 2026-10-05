@@ -5,11 +5,16 @@
 # trees return to the owner's group; files of other owners, files outside
 # those trees and link targets keep their group; a second run changes and
 # logs nothing.
-set -euo pipefail
+#
+# The fixtures need passwordless sudo. Without it the test prints SKIP with
+# the reason and exits 0, the tests/ convention for a skip; any other error
+# is a FAIL.
+set -Eeuo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PHASE06="${ODS_PHASE06_UNDER_TEST:-$ROOT_DIR/installers/phases/06-directories.sh}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
+trap 'echo "FAIL: line $LINENO: $BASH_COMMAND" >&2' ERR
 
 repair="$(sed -n '/^    _phase06_repair_root_group() {$/,/^    }$/p' "$PHASE06")"
 [[ -n "$repair" ]] || fail "phase 06 defines no _phase06_repair_root_group"
@@ -20,11 +25,18 @@ rebind_line="$(awk '/_phase06_step "rebind-pixel-source"/ {print NR; exit}' "$PH
 if grep -Eq '(^|[^_[:alnum:]])(ods_)?sudo([^_[:alnum:]]|$)' <<<"$repair"; then
     fail "the repair must run as the owner, without sudo"
 fi
+
+# Skip only when passwordless sudo is unavailable, and say why.
+if ! sudo_probe="$(sudo -n true 2>&1)"; then
+    sudo_probe="${sudo_probe%%$'\n'*}"
+    echo "SKIP: $(basename -- "$0") requires passwordless sudo (sudo -n true failed${sudo_probe:+: $sudo_probe})"
+    exit 0
+fi
 pass "phase 06 runs the repair as the owner before the Pixel source rebind"
 
 fixture="$(mktemp -d /tmp/ods-root-group.XXXXXXXX)"
 [[ "$fixture" == /tmp/ods-root-group.* && ! -L "$fixture" ]] || fail "unsafe fixture path"
-trap 'sudo -n rm -rf -- "$fixture"' EXIT
+trap 'trap - ERR; sudo -n rm -rf -- "$fixture"' EXIT
 chmod 755 "$fixture"
 
 # The repair returns files to the group it runs with, as a fresh install's
