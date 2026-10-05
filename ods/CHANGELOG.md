@@ -361,6 +361,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Docker Desktop then could not publish the port. A rerun (update) moves a
   9000 written by an earlier installer; a port you set yourself is never
   changed.
+- Rerunning the installer on Windows no longer moves a working Whisper (STT)
+  off port 9000. Docker Desktop serves Whisper's port through a Windows
+  listener, which the installer took for another program. It now checks
+  whether that listener is this installation's running Whisper.
 - When an extension fails to start, its card shows why instead of "Host
   agent failed to start extension", and the host agent logs the same reason.
   A host port another program holds is named with the `.env` setting that

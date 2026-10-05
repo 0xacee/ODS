@@ -181,6 +181,32 @@ _phase04_current_install_owns_docker_port() {
     return 1
 }
 
+# Docker Desktop publishes a running container's port through a listener on
+# the Windows side, so this installation's own Whisper looks like a Windows
+# program holding its host port. Nothing before phase 11 stops or recreates
+# the stack, so on a rerun the previous Whisper is still running here. Read
+# that container's host bindings without changing anything. Its name is fixed
+# by extensions/services/whisper/compose.yaml, and its Compose identity is
+# accepted as in _phase04_current_install_owns_docker_port. That helper cannot
+# find it: Docker's publish filter matches the container side of a published
+# port, which for Whisper is 8000.
+_phase04_own_whisper_publishes() {
+    local port="${1:-}" inspected running project_name host_ports working_dir
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    command -v docker >/dev/null 2>&1 || return 1
+    # A missing container, an unreachable Docker daemon or no Docker at all
+    # finds nothing. The callers then treat a held port as taken, as they did
+    # before this check existed.
+    inspected="$(docker container inspect --format \
+        '{{.State.Running}}|{{ index .Config.Labels "com.docker.compose.project" }}|{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}} {{end}}{{end}}|{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' \
+        ods-whisper 2>/dev/null)" || return 1
+    IFS='|' read -r running project_name host_ports working_dir <<< "$inspected"
+    [[ "$running" == "true" ]] || return 1
+    [[ ( -n "$working_dir" && "$working_dir" == "${INSTALL_DIR:-}" ) \
+        || "$project_name" == "${COMPOSE_PROJECT_NAME:-ods}" ]] || return 1
+    [[ " $host_ports " == *" $port "* ]]
+}
+
 check_port_conflict() {
     local port="$1"
     PORT_CONFLICT=false
@@ -332,11 +358,13 @@ fi
 # when it is also free on both sides of the WSL boundary. Explicit non-default
 # ports remain untouched and are reported by the normal conflict loop below.
 # Choose it with voice off too: Whisper can be added from the Extensions
-# Library later, and it then publishes the port this install writes.
+# Library later, and it then publishes the port this install writes. A rerun
+# keeps 9000 while this installation's own Whisper is the one publishing it.
 _whisper_port_for_check="${WHISPER_PORT:-${SERVICE_PORTS[whisper]:-9000}}"
 if [[ "$_whisper_port_for_check" == "9000" ]] \
     && declare -F ods_windows_host_port_in_use >/dev/null 2>&1 \
-    && ods_windows_host_port_in_use 9000; then
+    && ods_windows_host_port_in_use 9000 \
+    && ! _phase04_own_whisper_publishes 9000; then
     _whisper_alternate=""
     for _whisper_candidate in 9100 9001; do
         if ! check_port_conflict "$_whisper_candidate"; then
@@ -359,7 +387,12 @@ unset _whisper_port_for_check
 PORTS_TO_CHECK=""
 [[ "${ENABLE_OPEN_WEBUI:-true}" != "true" ]] || PORTS_TO_CHECK="${SERVICE_PORTS[open-webui]:-3000}"
 [[ -z "${EXTERNAL_LLM_URL:-}" ]] && PORTS_TO_CHECK="${SERVICE_PORTS[llama-server]:-8080} ${PORTS_TO_CHECK}"
-[[ "$ENABLE_VOICE" == "true" ]] && PORTS_TO_CHECK="$PORTS_TO_CHECK ${SERVICE_PORTS[whisper]:-9000} ${SERVICE_PORTS[tts]:-8880}"
+if [[ "$ENABLE_VOICE" == "true" ]]; then
+    # A rerun's running Whisper holds its own port; that is not a conflict.
+    _phase04_own_whisper_publishes "${SERVICE_PORTS[whisper]:-9000}" \
+        || PORTS_TO_CHECK="$PORTS_TO_CHECK ${SERVICE_PORTS[whisper]:-9000}"
+    PORTS_TO_CHECK="$PORTS_TO_CHECK ${SERVICE_PORTS[tts]:-8880}"
+fi
 [[ "$ENABLE_WORKFLOWS" == "true" ]] && PORTS_TO_CHECK="$PORTS_TO_CHECK ${SERVICE_PORTS[n8n]:-5678}"
 [[ "${ENABLE_QDRANT:-${ENABLE_RAG:-false}}" == "true" ]] && PORTS_TO_CHECK="$PORTS_TO_CHECK ${SERVICE_PORTS[qdrant]:-6333}"
 [[ "$ENABLE_COMFYUI" == "true" ]] && PORTS_TO_CHECK="$PORTS_TO_CHECK ${SERVICE_PORTS[comfyui]:-8188}"
