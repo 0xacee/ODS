@@ -485,10 +485,14 @@ def _workspace_mutation_positions(text: str) -> set[int]:
             return " " + value[1:-1] + " "
         return "".join("\n" if char == "\n" else " " for char in value)
 
+    # A backslash escapes any character, a line break included, and an open
+    # quote may end in one. Every quote can then match to the end of the
+    # text, which keeps the scan linear (a failed match per quote made it
+    # quadratic in the length of the owner text).
     instructions = re.sub(
         r"```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|(?m:^\s*>[^\n]*)|"
-        r"`[^`\n]*`|\"(?:\\.|[^\"\\])*(?:\"|$)|"
-        r"(?<!\w)'(?:\\.|[^'\\])*(?:'|$)|"
+        r"`[^`\n]*`|\"(?:\\[\s\S]|[^\"\\])*(?:\"|\\?\Z)|"
+        r"(?<!\w)'(?:\\[\s\S]|[^'\\])*(?:'|\\?\Z)|"
         r"\u201c[^\u201d]*(?:\u201d|$)|(?<!\w)\u2018[^\u2019]*(?:\u2019|$)",
         mask_content, text,
     )
