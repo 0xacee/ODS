@@ -4090,6 +4090,10 @@ class _PixelModelTransactionUncertain(RuntimeError):
 class _PixelModelTransactionRejected(RuntimeError):
     """The controller definitively refused admission without performing it."""
 
+    def __init__(self, message: str, *, code: str = ''):
+        super().__init__(message)
+        self.code = code
+
 
 def _pixel_model_journal_path() -> Path:
     return INSTALL_DIR / 'data' / 'pixel-model-transaction.json'
@@ -4188,19 +4192,40 @@ def _read_pixel_model_journal() -> dict | None:
     return value
 
 
+# How long a status read waits while another controller operation holds the
+# controller's state lock, and how often it asks again.
+_MODEL_CONTROLLER_BUSY_WAIT_SECONDS = 120
+_MODEL_CONTROLLER_BUSY_POLL_SECONDS = 3
+
+
 def _runtime_model_control(operation: str, request: dict | None = None, *, config: dict) -> dict:
     from pixel_access_relay import request_runtime_model_control, public_model_control
-    status, value = request_runtime_model_control(operation, request, config=config)
+    deadline = time.monotonic() + _MODEL_CONTROLLER_BUSY_WAIT_SECONDS
+    while True:
+        status, value = request_runtime_model_control(operation, request, config=config)
+        code = value.get('error') or value.get('reason') if isinstance(value, dict) else None
+        code = code if isinstance(code, str) and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', code) else ''
+        # transition-busy: another operation holds the controller's state
+        # lock, which every operation takes before doing anything. A status
+        # read waits for it (the Mac controller stays busy for over a minute
+        # after a committed change); a mutation is never sent again.
+        if operation != 'model-status' or status != 409 or code != 'transition-busy':
+            break
+        if time.monotonic() >= deadline:
+            logger.warning('Managed model controller stayed busy for %ss', _MODEL_CONTROLLER_BUSY_WAIT_SECONDS)
+            raise _PixelModelTransactionRejected(
+                'ODS is still finishing the last model change. Wait a minute, then try again.',
+                code=code)
+        time.sleep(_MODEL_CONTROLLER_BUSY_POLL_SECONDS)
     if status in {400, 403, 409}:
         # Name the operation, status and the controller's own reason code: a
         # refused status read (403) and a busy controller (409) need different
         # next steps, and the generic sentence alone hid which one happened.
-        code = value.get('error') or value.get('reason') if isinstance(value, dict) else None
-        code = code if isinstance(code, str) and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', code) else ''
         detail = f'{operation}: HTTP {status}' + (f' {code}' if code else '')
         logger.warning('Managed model controller refused %s', detail)
         raise _PixelModelTransactionRejected(
-            f'Managed model controller refused the transition; its current state must be verified ({detail})')
+            f'Managed model controller refused the transition; its current state must be verified ({detail})',
+            code=code)
     if status != 200:
         raise RuntimeError('Managed model controller is unavailable or refused the transition')
     return public_model_control(value)

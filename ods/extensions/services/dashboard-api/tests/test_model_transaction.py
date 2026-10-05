@@ -1,5 +1,6 @@
 """The model transaction never retries inference mutations or invents recovery."""
 import copy
+from types import SimpleNamespace
 import json
 import subprocess
 import pytest
@@ -50,6 +51,54 @@ def test_model_controller_refusal_names_operation_status_and_reason(monkeypatch,
         host._runtime_model_control('model-status', config={})
     assert str(refused.value) == ('Managed model controller refused the transition; '
                                   'its current state must be verified ' + detail)
+
+
+READY = dict(schemaVersion=1, status='ready', revision='c'*64, contract=OLD, pending=False,
+             transactionId=None, outcome=None)
+BUSY = (409, {'error': 'transition-busy'})
+
+
+def busy_relay(monkeypatch, replies):
+    import pixel_access_relay
+    calls = []
+    def relay(operation, request=None, *, config):
+        calls.append(operation)
+        return replies.pop(0) if len(replies) > 1 else replies[0]
+    monkeypatch.setattr(pixel_access_relay, 'request_runtime_model_control', relay)
+    return calls
+
+
+def test_status_read_waits_while_another_operation_holds_the_controller(monkeypatch):
+    # Fleet, Mac 2026-10-05: right after a committed change the controller
+    # answered model-status with 409 transition-busy for over a minute, and
+    # the next enable failed within a second.
+    calls = busy_relay(monkeypatch, [BUSY, BUSY, (200, copy.deepcopy(READY))])
+    sleeps = []
+    monkeypatch.setattr(host, 'time', SimpleNamespace(monotonic=lambda: 0, sleep=sleeps.append))
+    assert host._runtime_model_control('model-status', config={}) == READY
+    assert calls == ['model-status'] * 3 and sleeps == [3, 3]
+
+
+def test_status_read_stops_waiting_with_a_clear_message(monkeypatch):
+    calls = busy_relay(monkeypatch, [BUSY])
+    clock = iter(range(0, 6000, 60))
+    monkeypatch.setattr(host, 'time', SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _: None))
+    with pytest.raises(host._PixelModelTransactionRejected) as refused:
+        host._runtime_model_control('model-status', config={})
+    assert str(refused.value) == ('ODS is still finishing the last model change. '
+                                  'Wait a minute, then try again.')
+    # The clock reads 60 s per call: asked at 0 s and 60 s, then 120 s is up.
+    assert refused.value.code == 'transition-busy' and calls == ['model-status'] * 2
+
+
+def test_busy_mutation_is_refused_at_once_and_never_sent_again(monkeypatch):
+    calls = busy_relay(monkeypatch, [BUSY])
+    monkeypatch.setattr(host, 'time', SimpleNamespace(
+        monotonic=lambda: 0, sleep=lambda _: pytest.fail('a mutation must not wait and resend')))
+    with pytest.raises(host._PixelModelTransactionRejected) as refused:
+        host._runtime_model_control('model-finish', {'transactionId': 'a'*64, 'outcome': 'rollback'}, config={})
+    assert '(model-finish: HTTP 409 transition-busy)' in str(refused.value)
+    assert refused.value.code == 'transition-busy' and calls == ['model-finish']
 
 
 def test_installer_contract_with_logical_name_is_proven_and_mismatches_are_logged(monkeypatch, caplog):
