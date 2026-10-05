@@ -242,6 +242,20 @@ def test_start_failure_after_preparation_keeps_the_definition_enabled(host):
     assert not (extension / "compose.yaml.disabled").exists()
 
 
+def test_start_failure_on_a_taken_host_port_names_the_setting_that_moves_it(host):
+    host.extension("gotify", manifest={"schema_version": "ods.services.v1", "service": {
+        "id": "gotify", "port": 80, "external_port_env": "GOTIFY_PORT", "external_port_default": 8081}})
+    docker_error = ("Error response from daemon: driver failed programming external connectivity on "
+                    "endpoint ods-gotify (0123abcd): Bind for 127.0.0.1:8081 failed: port is already allocated")
+    host.docker(up_error=" Container ods-gotify  Creating\n" + docker_error + "\n")
+
+    host.install("gotify")
+
+    assert host.progress("gotify")["error"] == (
+        "Host port 8081 is already in use, so gotify could not start. Set GOTIFY_PORT in .env to a "
+        "free port (ods config edit), or stop the program using port 8081, then retry.\n" + docker_error)
+
+
 def test_existing_disabled_copy_is_never_overwritten(host):
     extension = host.extension("gotify")
     (extension / "compose.yaml.disabled").write_text("owner copy\n", encoding="utf-8")

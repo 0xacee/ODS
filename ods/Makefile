@@ -34,6 +34,7 @@ test: ## Run unit and contract tests
 	@bash tests/test-custom-menu-agent-flags.sh
 	@bash tests/test-lemonade-external-gpu.sh
 	@bash tests/test-preflight-external-gpu.sh
+	@bash tests/test-wsl-whisper-port-reservation.sh
 	@echo ""
 	@echo "=== Hermes slash worker prune ==="
 	@bash tests/test-hermes-slash-worker-prune.sh

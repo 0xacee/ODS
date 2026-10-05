@@ -475,6 +475,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refused. Changing one of these folders needs
   `python3 scripts/pin-builtin-build-contexts.py --write`, and CI fails
   until it is run.
+- On Windows, when a native Windows program already listens on port 9000, an
+  install without voice now gives Whisper (STT) a free host port (9100, then
+  9001), so Whisper added later from the Extensions Library starts. The
+  installer used to move Whisper off 9000 only when voice was selected, and
+  Docker Desktop then could not publish the port. A rerun (update) moves a
+  9000 written by an earlier installer; a port you set yourself is never
+  changed.
+- Rerunning the installer on Windows no longer moves a working Whisper (STT)
+  off port 9000. Docker Desktop serves Whisper's port through a Windows
+  listener, which the installer took for another program. It now checks
+  whether that listener is this installation's running Whisper.
+- When an extension fails to start, its card shows why instead of "Host
+  agent failed to start extension", and the host agent logs the same reason.
+  A host port another program holds is named with the `.env` setting that
+  moves it, such as `WHISPER_PORT`; other errors show the end of Docker's
+  output, where its error is, with credentials removed.
 - Rerunning the installer (an update) no longer fails with "Embeddings model
   prefetch failed" after Embeddings was added from Extensions. The Embeddings
   service downloads the model itself, as root, so the installer could not

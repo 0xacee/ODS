@@ -185,6 +185,7 @@ tests/test-wsl-docker-desktop-nvidia.sh
 tests/test-wsl-host-ram-fallback.sh
 tests/test-wsl-lemonade-proof.py
 tests/test-wsl-nvidia-detection.sh
+tests/test-wsl-whisper-port-reservation.sh
 tests/test-wsl-windows-port-detection.sh
 tests/test_bootstrap_pixel_transaction.py
 tests/test_bootstrap_status_checksum.py
