@@ -1,6 +1,8 @@
-# Two images build with the install root as their context
+# Three images build with the install root as their context
 # (remote-provider-egress and remote-provider-ssh-tunnel in
-# docker-compose.base.yml). Send only the paths their Dockerfiles copy.
+# docker-compose.base.yml, and the opt-in pixel-inference overlay). Send only
+# the paths their Dockerfiles copy. BuildKit reads pixel-inference's own
+# Dockerfile.dockerignore instead; the classic builder reads only this file.
 #
 # Without this, the classic builder (what Compose uses when the buildx plugin
 # is missing, as on Arch-family distros without the docker-buildx package)
@@ -11,4 +13,7 @@
 !extensions/services/remote-provider-egress/app
 !extensions/services/remote-provider-ssh-tunnel/app
 !bin/remote_provider
+!extensions/services/pixel-inference/requirements.lock
+!extensions/services/pixel-inference/app
+!bin/pixel_provider
 **/__pycache__

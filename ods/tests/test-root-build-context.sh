@@ -9,9 +9,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DOCKERFILES=(
+    extensions/services/pixel-inference/Dockerfile
     extensions/services/remote-provider-egress/Dockerfile
     extensions/services/remote-provider-ssh-tunnel/Dockerfile
 )
+# Every shipped Compose file is read with the install root as its project
+# directory, so `context: .` in any of them (enabled or .disabled) is the
+# install root. Library extensions are not listed: the resolver rewrites
+# their `context: .` to the extension's own directory.
+shopt -s nullglob
+COMPOSE_FILES=("$ROOT_DIR"/docker-compose*.yml "$ROOT_DIR"/extensions/services/*/compose*.yaml*)
+shopt -u nullglob
 
 PASSED=0
 FAILED=0
@@ -20,10 +28,11 @@ fail() { echo "[FAIL] $1"; FAILED=$((FAILED + 1)); }
 
 # Every Dockerfile built from the install root must be listed above.
 root_context_dockerfiles="$(awk '
+    FNR == 1 { root = 0 }
     /^[[:space:]]+context:[[:space:]]*\.[[:space:]]*$/ { root = 1; next }
     root && /^[[:space:]]+dockerfile:/ { print $2; root = 0; next }
     /^[[:space:]]+[a-z_]+:/ { root = 0 }
-' "$ROOT_DIR/docker-compose.base.yml" | sort)"
+' "${COMPOSE_FILES[@]}" | sort -u)"
 expected="$(printf '%s\n' "${DOCKERFILES[@]}" | sort)"
 if [[ "$root_context_dockerfiles" == "$expected" ]]; then
     pass "the root-context builds are the ones this test covers"
