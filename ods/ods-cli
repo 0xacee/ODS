@@ -4555,6 +4555,9 @@ _remote_provider_print_status() {
     local response_file="$1"
     jq -r '
         "Remote provider: \(.status // "unknown")",
+        (if .status == "paused" then
+            "An update or a mode change paused it; ODS uses the model on this computer. Use it again with: ods remote-provider enable"
+         else empty end),
         "Route: " + (if .routeState.enabled == true then "enabled" else "disabled" end),
         (if .routeState.enabled == true then empty else
             "Saved route: " + (if .routeState.resumeAvailable == true then "available (resume it with: ods remote-provider enable)" else "none" end)

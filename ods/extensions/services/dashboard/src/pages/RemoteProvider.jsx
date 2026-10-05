@@ -37,6 +37,8 @@ const INITIAL_FORM = {
 const STATUS_META = {
   ready: { label: 'Connected', dot: 'bg-emerald-400', text: 'text-emerald-300' },
   disabled: { label: 'Off', dot: 'bg-zinc-500', text: 'text-zinc-400' },
+  // An update (or a mode change) kept ODS on the model on this computer.
+  paused: { label: 'Paused', dot: 'bg-zinc-500', text: 'text-zinc-400' },
   degraded: { label: 'Needs attention', dot: 'bg-theme-text-secondary', text: 'text-theme-text-secondary' },
   invalid: { label: 'Not set up', dot: 'bg-red-400', text: 'text-red-300' },
   unknown: { label: 'Unknown', dot: 'bg-zinc-500', text: 'text-zinc-400' },
@@ -643,7 +645,8 @@ export default function RemoteProvider({ compact = false }) {
   ) && !lifecycleBusy
   const proofReceipt = testResult?.probe || routeStatus.lastProbe
   const proofRecorded = testResult?.routeProof?.recorded
-  const consumerDrift = activation.reason === 'consumer_drift' && !settling
+  const paused = statusData?.status === 'paused' && !settling
+  const consumerDrift = activation.reason === 'consumer_drift' && !settling && !paused
   let enableActionLabel = routeState.enabled ? 'Reconnect' : 'Turn on'
   if (applyingAction === 'enable') {
     enableActionLabel = routeState.enabled ? 'Reconnecting' : 'Turning on'
@@ -652,6 +655,8 @@ export default function RemoteProvider({ compact = false }) {
   let headline = 'Use a model from an API, or from ODS on another computer, instead of the model on this computer.'
   if (routeState.enabled && provider.model && statusData?.status === 'ready') {
     headline = `ODS and Portal use ${provider.model} from ${activeHost}.`
+  } else if (paused && provider.model) {
+    headline = `Paused. ODS uses the model on this computer; ${provider.model} from ${activeHost} is saved.`
   } else if (routeState.enabled && provider.model) {
     headline = `Saved: ${provider.model} from ${activeHost}.`
   } else if (provider.model) {
@@ -744,6 +749,15 @@ export default function RemoteProvider({ compact = false }) {
           <span>
             The API answers, but ODS and Portal are not using it right now. Select Reconnect to switch them
             back to it; the saved key is reused.
+          </span>
+        </div>
+      )}
+      {paused && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-theme-border bg-theme-text-secondary/10 px-4 py-3 text-sm text-theme-text-secondary" role="status">
+          <AlertCircle className="mt-0.5 shrink-0" size={16} />
+          <span>
+            An update or a mode change paused this API, and ODS uses the model on this computer. Select
+            Reconnect to use the API again; the saved key is reused.
           </span>
         </div>
       )}

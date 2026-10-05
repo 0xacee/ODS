@@ -36,6 +36,12 @@ output="$(_remote_provider_print_status "$fixture/on.json")"
 grep -q "Saved route" <<<"$output" && fail "an active route was reported as having no saved route: $output"
 grep -qF "Provider: m via direct at https://api.example.test/v1" <<<"$output" || fail "the active provider was not shown: $output"
 
+printf '%s' '{"status":"paused","routeState":{"enabled":true,"provider":{"model":"m","transport":"direct","baseUrl":"https://api.example.test/v1"}},"egress":{"status":"ok","secret":{"configured":true}},"availableActions":{"enable":true}}' \
+    > "$fixture/paused.json"
+output="$(_remote_provider_print_status "$fixture/paused.json")"
+grep -qF "paused it; ODS uses the model on this computer. Use it again with: ods remote-provider enable" <<<"$output" \
+    || fail "a paused route did not say how to use it again: $output"
+
 printf '%s' '{"status":"disabled","routeState":{"enabled":false,"resumeAvailable":true},"egress":{"status":"ok","secret":{"configured":true}},"availableActions":{"enable":true}}' \
     > "$fixture/off.json"
 output="$(_remote_provider_print_status "$fixture/off.json")"

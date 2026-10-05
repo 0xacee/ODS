@@ -495,6 +495,20 @@ test('offers one-click reconciliation when the active consumer drifted', async (
   expect(screen.getByText('Enable applied')).toBeInTheDocument()
 })
 
+test('a route an update paused reads Paused, not a fault, and offers Reconnect', async () => {
+  // Fleet, laptop: after an installer rerun kept ODS local, Settings said
+  // "Needs attention" for a route the update had paused on purpose.
+  globalThis.fetch.mockResolvedValueOnce(response({ ...driftedStatusPayload, status: 'paused' }))
+
+  render(createElement(RemoteProvider))
+
+  expect(await screen.findByText(/An update or a mode change paused this API/i)).toBeInTheDocument()
+  expect(screen.getAllByText('Paused').length).toBeGreaterThan(0)
+  expect(screen.queryByText(/ODS and Portal are not using it right now/i)).toBeNull()
+  expect(screen.queryByText('Needs attention')).toBeNull()
+  expect(screen.getByRole('button', { name: /^reconnect$/i })).toBeEnabled()
+})
+
 test('confirms remove before deleting route state and stored secrets', async () => {
   const confirmSpy = vi.spyOn(window, 'confirm').mockImplementation(() => true)
   globalThis.fetch
