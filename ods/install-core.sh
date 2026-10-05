@@ -657,8 +657,14 @@ fi
 unset _requested_ods_mode
 # A model API connected in Settings was active. This run keeps the install's
 # own mode, which leaves that API route paused until the owner reconnects it.
+# Pausing it also restores the LLM_API_URL the API replaced, as the agent's
+# own disable does; phase 06 otherwise kept http://litellm:4000, and Portal
+# chat reached LiteLLM without a key (fleet, laptop). An explicit local or
+# hybrid mode pauses it too.
 ODS_REMOTE_ROUTE_PAUSED=false
-if [[ "$ODS_MODE_EXPLICIT" != "true" ]] && ods_remote_route_previous_mode "$INSTALL_DIR" >/dev/null; then
+ODS_REMOTE_ROUTE_PREVIOUS_API_URL=""
+if [[ "$ODS_MODE" != "cloud" ]] \
+    && ODS_REMOTE_ROUTE_PREVIOUS_API_URL="$(ods_remote_route_previous_api_url "$INSTALL_DIR" "$ODS_MODE")"; then
     ODS_REMOTE_ROUTE_PAUSED=true
     log "A model API connected in Settings (Remote model) is active. This run keeps ODS in ${ODS_MODE} mode and pauses the API; select Reconnect in Settings > Remote model afterwards."
 fi

@@ -1200,6 +1200,11 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         OPEN_WEBUI_LLM_API_KEY_VALUE=""
     else
         LLM_API_URL_VALUE=$(_env_get LLM_API_URL "$_default_llm_api_url")
+        # A paused model API (Settings > Remote model) had pointed this at
+        # LiteLLM; restore the URL it replaced (install-core read it).
+        if [[ "${ODS_REMOTE_ROUTE_PAUSED:-false}" == "true" ]]; then
+            LLM_API_URL_VALUE="${ODS_REMOTE_ROUTE_PREVIOUS_API_URL:-$_default_llm_api_url}"
+        fi
         # The in-stack llama-server is off for a host-native route. Preserve
         # other existing values as operator-selected endpoints.
         if [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then

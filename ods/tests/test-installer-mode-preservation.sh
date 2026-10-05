@@ -96,4 +96,22 @@ result="$(ods_preserve_existing_install_mode local false "$env_file")"
 [[ "$result" == "cloud" ]] || fail "a cloud install without an API route was not preserved"
 pass "an API route's cloud marker resolves to the mode it replaced; real cloud installs stay cloud"
 
+# Pausing an API route restores the LLM_API_URL it replaced, only for the mode
+# it replaced (fleet, laptop: http://litellm:4000 stayed and Portal chat failed).
+write_record active local
+url="$(ods_remote_route_previous_api_url "$TMP_ROOT" local)" || fail "an active API route was not reported"
+[[ "$url" == "http://llama-server:8080" ]] || fail "the replaced URL was not returned ($url)"
+url="$(ods_remote_route_previous_api_url "$TMP_ROOT" hybrid)" || fail "an active API route was not reported for another mode"
+[[ -z "$url" ]] || fail "a URL saved for local mode was returned for hybrid ($url)"
+write_record staging local
+ods_remote_route_previous_api_url "$TMP_ROOT" local >/dev/null || fail "a staging API route was not reported"
+printf '{"phase":"active","previous":{"odsMode":"local","llmApiUrl":"file:///etc/passwd"}}\n' >"$record_dir/activation-state.json"
+url="$(ods_remote_route_previous_api_url "$TMP_ROOT" local)" || fail "an active record with a non-HTTP URL was not reported"
+[[ -z "$url" ]] || fail "a non-HTTP URL was returned ($url)"
+write_record released local
+! ods_remote_route_previous_api_url "$TMP_ROOT" local >/dev/null || fail "an inactive API route was reported"
+rm -f "$record_dir/activation-state.json"
+! ods_remote_route_previous_api_url "$TMP_ROOT" local >/dev/null || fail "a missing record was reported"
+pass "a paused API route gives back the URL it replaced, only for the mode it replaced"
+
 printf 'Installer mode preservation tests passed.\n'

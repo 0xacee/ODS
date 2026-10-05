@@ -475,6 +475,20 @@ run_phase06_env_cycle() (
     sed -i 's#^LLM_API_URL=.*#LLM_API_URL=http://custom-litellm:4000#' "$install_dir/.env"
     source "$install_dir/installers/phases/06-directories.sh"
     grep -qx 'LLM_API_URL=http://custom-litellm:4000' "$install_dir/.env"
+
+    # A rerun that pauses a model API (Settings > Remote model) restores the
+    # LLM_API_URL the API replaced (fleet, laptop: http://litellm:4000 stayed
+    # and Portal chat reached LiteLLM without a key), or the mode's default.
+    export NATIVE_LLM_BASE_URL=
+    sed -i 's#^LLM_API_URL=.*#LLM_API_URL=http://litellm:4000#' "$install_dir/.env"
+    export ODS_REMOTE_ROUTE_PAUSED=true ODS_REMOTE_ROUTE_PREVIOUS_API_URL=http://llama-server:8080/v1
+    source "$install_dir/installers/phases/06-directories.sh"
+    grep -qx 'LLM_API_URL=http://llama-server:8080/v1' "$install_dir/.env"
+    sed -i 's#^LLM_API_URL=.*#LLM_API_URL=http://litellm:4000#' "$install_dir/.env"
+    export ODS_REMOTE_ROUTE_PREVIOUS_API_URL=
+    source "$install_dir/installers/phases/06-directories.sh"
+    grep -qx 'LLM_API_URL=http://llama-server:8080' "$install_dir/.env"
+    export ODS_REMOTE_ROUTE_PAUSED=false
 )
 
 if run_phase06_env_cycle; then
