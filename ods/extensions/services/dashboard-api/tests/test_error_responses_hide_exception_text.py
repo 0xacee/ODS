@@ -8,6 +8,7 @@ py/stack-trace-exposure).
 from __future__ import annotations
 
 import asyncio
+import email.message
 import io
 import urllib.error
 from pathlib import Path
@@ -204,7 +205,7 @@ def test_usage_report_names_token_spy_failures_without_error_text(monkeypatch):
     assert report["source"]["detail"] == "Token Spy unavailable"
 
     def rejected(*_args):
-        raise urllib.error.HTTPError("http://token-spy:8080/api/report", 503, "unavailable", {},
+        raise urllib.error.HTTPError("http://token-spy:8080/api/report", 503, "unavailable", email.message.Message(),
                                      io.BytesIO(SENTINEL.encode()))
 
     monkeypatch.setattr(usage, "_request_token_spy_report", rejected)
