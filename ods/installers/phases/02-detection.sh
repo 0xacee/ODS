@@ -90,6 +90,9 @@ load_capability_profile || true
 # actually address, not the Windows host's physical total. Keep a smaller
 # reserved value only for coarse tier selection; system_ram_min_gb profiles and
 # the persisted SYSTEM_RAM_GB contract describe actual addressable VM memory.
+# The hardware summary shows the VM figure; say why it is below the machine's
+# total so a 96GB PC showing 46GB doesn't read as a detection error (#7311).
+_ram_note=""
 if grep -qi microsoft /proc/version 2>/dev/null; then
     _wsl_ram_kb="$(ods_wsl_host_ram_kb)" || _wsl_ram_kb=""
     _wsl_vm_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
@@ -99,8 +102,10 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
     _wsl_headroom_gb=$((RAM_GB - MODEL_TIER_RAM_GB))
     if [[ -n "$_wsl_ram_kb" && "$_wsl_ram_kb" =~ ^[0-9]+$ ]]; then
         _wsl_host_gb=$((_wsl_ram_kb / 1024 / 1024))
+        _ram_note="WSL limit; Windows has ${_wsl_host_gb}GB"
         log "WSL2 detected — Windows host RAM: ${_wsl_host_gb}GB; VM RAM: ${RAM_GB}GB; tier budget: ${MODEL_TIER_RAM_GB}GB (${_wsl_headroom_gb}GB reserved for ODS services)"
     else
+        _ram_note="WSL limit"
         log "WSL2 detected — could not query Windows host RAM; VM RAM: ${RAM_GB}GB; tier budget: ${MODEL_TIER_RAM_GB}GB (${_wsl_headroom_gb}GB reserved for ODS services)"
         log "For correct tier selection: use --tier N or configure .wslconfig"
     fi
@@ -804,9 +809,11 @@ if [[ "$INTERACTIVE" == "true" ]]; then
     # A host-native llama-server (Windows under WSL) runs the model on a GPU
     # this Linux probe cannot see; show that GPU instead of "None".
     if ods_native_llm_requested && [[ -n "${NATIVE_LLM_GPU_NAME:-}" ]]; then
-        show_hardware_summary "${NATIVE_LLM_GPU_NAME} (llama-server on Windows)" "$(( (${NATIVE_LLM_GPU_VRAM_MB:-0} + 512) / 1024 ))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL"
+        show_hardware_summary "${NATIVE_LLM_GPU_NAME} (llama-server on Windows)" "$(( (${NATIVE_LLM_GPU_VRAM_MB:-0} + 512) / 1024 ))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL" "${_ram_note:-}"
     else
-        show_hardware_summary "$GPU_NAME" "$((GPU_VRAM / 1024))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL"
+        # Round to the nearest GB: a 24GB card reports about 24564MiB, which
+        # truncates to 23GB (#7311).
+        show_hardware_summary "$GPU_NAME" "$(( (GPU_VRAM + 512) / 1024 ))" "$CPU_INFO" "$RAM_GB" "$DISK_AVAIL" "${_ram_note:-}"
     fi
 
     _shown_model="$LLM_MODEL"

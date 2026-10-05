@@ -204,6 +204,7 @@ tests/test-windows-stop-native-helpers.sh
 tests/test-windows-whisper-compose-fallback.sh
 tests/test-wsl-bind-recovery-live.py
 tests/test-wsl-docker-desktop-nvidia.sh
+tests/test-wsl-hardware-display.sh
 tests/test-wsl-host-ram-fallback.sh
 tests/test-wsl-nvidia-detection.sh
 tests/test-wsl-runtime-proof.py

@@ -603,6 +603,8 @@ show_hardware_summary() {
     local cpu_info="$3"
     local ram_gb="$4"
     local disk_gb="$5"
+    # Optional: why the RAM figure differs from the machine's total (WSL).
+    local ram_note="${6:-}"
 
     echo ""
     echo -e "${GRN}+-------------------------------------------------------------+${NC}"
@@ -611,7 +613,7 @@ show_hardware_summary() {
     printf "${GRN}|${NC}  GPU:    %-50s ${GRN}|${NC}\n" "${gpu_name:-Not detected}"
     [[ -n "$gpu_vram" ]] && printf "${GRN}|${NC}  VRAM:   %-50s ${GRN}|${NC}\n" "${gpu_vram}GB"
     printf "${GRN}|${NC}  CPU:    %-50s ${GRN}|${NC}\n" "${cpu_info:-Unknown}"
-    printf "${GRN}|${NC}  RAM:    %-50s ${GRN}|${NC}\n" "${ram_gb}GB"
+    printf "${GRN}|${NC}  RAM:    %-50s ${GRN}|${NC}\n" "${ram_gb}GB${ram_note:+ ($ram_note)}"
     printf "${GRN}|${NC}  Disk:   %-50s ${GRN}|${NC}\n" "${disk_gb}GB available"
     echo -e "${GRN}+-------------------------------------------------------------+${NC}"
 }
