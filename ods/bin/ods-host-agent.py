@@ -142,7 +142,9 @@ def _windows_management_shell() -> str:
 # Host Agent component version is independent of the installed ODS product.
 VERSION = "1.0.0"
 ODS_VERSION = "3.0.0"
-SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+# \Z, not $: "$" also matches before a final newline, which would let
+# "n8n\n" through as a folder name and a Compose argument.
+SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 PIXEL_OPS_JOB_ID_RE = re.compile(r"^ops-[0-9]{13}-[a-f0-9]{12}$")
 PIXEL_OPS_PLAN_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 _approval_terminals = None
@@ -6631,7 +6633,7 @@ def validate_core_recreate_ids(service_ids: list[str]) -> tuple[bool, str]:
         return False, "service_ids must be a non-empty list"
 
     for service_id in service_ids:
-        if not isinstance(service_id, str) or not SERVICE_ID_RE.match(service_id):
+        if not isinstance(service_id, str) or not SERVICE_ID_RE.fullmatch(service_id):
             return False, f"Invalid service_id: {service_id!r}"
         if service_id not in CORE_SERVICE_IDS:
             return False, f"Service is not a core ODS service: {service_id}"
@@ -7937,7 +7939,7 @@ def read_optional_json_body(handler) -> dict | None:
 
 def validate_service_id(handler, body: dict) -> str | None:
     sid = body.get("service_id", "")
-    if not isinstance(sid, str) or not SERVICE_ID_RE.match(sid):
+    if not isinstance(sid, str) or not SERVICE_ID_RE.fullmatch(sid):
         json_response(handler, 400, {"error": "Invalid service_id"})
         return None
     if sid in ALWAYS_ON_SERVICES:
@@ -11548,7 +11550,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         sid = body.get("service_id", "")
-        if not isinstance(sid, str) or not SERVICE_ID_RE.match(sid):
+        if not isinstance(sid, str) or not SERVICE_ID_RE.fullmatch(sid):
             json_response(self, 400, {"error": "Invalid service_id"})
             return
         preserve_existing = body.get("preserve_existing", False)
@@ -11792,7 +11794,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         sid = body.get("service_id", "")
-        if not isinstance(sid, str) or not SERVICE_ID_RE.match(sid):
+        if not isinstance(sid, str) or not SERVICE_ID_RE.fullmatch(sid):
             json_response(self, 400, {"error": "Invalid service_id"})
             return
 
@@ -11840,7 +11842,7 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         sid = body.get("service_id", "")
-        if not isinstance(sid, str) or not SERVICE_ID_RE.match(sid):
+        if not isinstance(sid, str) or not SERVICE_ID_RE.fullmatch(sid):
             json_response(self, 400, {"error": "Invalid service_id"})
             return
 
@@ -11957,7 +11959,7 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         # Validate service_id
         sid = body.get("service_id", "")
-        if not isinstance(sid, str) or not SERVICE_ID_RE.match(sid):
+        if not isinstance(sid, str) or not SERVICE_ID_RE.fullmatch(sid):
             json_response(self, 400, {"error": "Invalid service_id"})
             return
 
