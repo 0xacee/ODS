@@ -36,6 +36,10 @@ services:
     command:
       - --model
       - /models/${GGUF_FILE:-Qwen3.5-9B-Q4_K_M.gguf}
+      # The served model id is the GGUF file name on every runtime, so
+      # /v1/models, model-state and every consumer use one identity.
+      - --alias
+      - ${GGUF_FILE:-Qwen3.5-9B-Q4_K_M.gguf}
       - --host
       - 0.0.0.0
       - --port
@@ -77,8 +81,8 @@ services:
       - LLAMA_ARG_CACHE_RAM
       # Per-model speculative decoding (e.g. draft-mtp from a runtime
       # profile). Passed through only when set; the NVIDIA and CPU overlays
-      # default it to ${LLAMA_SPEC_TYPE:-ngram-mod}. The AMD (Lemonade), Intel,
-      # Arc and Apple overlays add no default.
+      # default it to ${LLAMA_SPEC_TYPE:-ngram-mod}. The AMD, Intel, Arc and
+      # Apple overlays add no default.
       - LLAMA_ARG_SPEC_TYPE
       - LLAMA_ARG_SPEC_DRAFT_N_MAX
       # Draft-model KV cache types (--spec-draft-type-k/-v). These are the
@@ -267,8 +271,10 @@ services:
       - LLM_BACKEND=${LLM_BACKEND:-}
       - AMD_INFERENCE_LOCATION=${AMD_INFERENCE_LOCATION:-}
       - AMD_INFERENCE_PORT=${AMD_INFERENCE_PORT:-8080}
-      - LEMONADE_CONTAINER_BASE_URL=${LEMONADE_CONTAINER_BASE_URL:-}
-      - LEMONADE_BASE_URL=${LEMONADE_BASE_URL:-}
+      # Origin of an ODS-managed llama-server outside this stack (Windows
+      # Portal), as seen from containers and from the host. Empty otherwise.
+      - NATIVE_LLM_CONTAINER_BASE_URL=${NATIVE_LLM_CONTAINER_BASE_URL:-}
+      - NATIVE_LLM_BASE_URL=${NATIVE_LLM_BASE_URL:-}
       - OLLAMA_URL=${LLM_API_URL:-http://llama-server:8080}
       - LLM_MODEL=${LLM_MODEL:-qwen3:30b-a3b}
       - GGUF_FILE=${GGUF_FILE:-}
@@ -309,9 +315,9 @@ services:
       # ODS Talk's image-attachment endpoint calls the vision backend
       # directly (bypassing litellm because litellm's wildcard model
       # routing collapses our model id down to whatever's loaded).
-      # Defaults point at the Lemonade/llama-server OpenAI-compatible base URL
-      # on the internal docker network — no auth needed there. Operators with
-      # an external vision server set ODS_TALK_VISION_URL +
+      # Defaults point at the llama-server OpenAI-compatible base URL on the
+      # internal docker network — no auth needed there. Operators with an
+      # external vision server set ODS_TALK_VISION_URL +
       # ODS_TALK_VISION_KEY.
       - ODS_TALK_VISION_URL=${ODS_TALK_VISION_URL:-http://llama-server:8080${LLM_API_BASE_PATH:-/v1}}
       - ODS_TALK_VISION_KEY=${ODS_TALK_VISION_KEY:-}
@@ -328,9 +334,10 @@ services:
       - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH:-}
       - HERMES_DASHBOARD_OAUTH_CLIENT_ID=${HERMES_DASHBOARD_OAUTH_CLIENT_ID:-}
       - HERMES_DASHBOARD_OIDC_CLIENT_ID=${HERMES_DASHBOARD_OIDC_CLIENT_ID:-}
-      # Model id of the vision-capable variant. Defaults to the user.*
-      # name we register on AMD install (Qwen3.6-35B-A3B + mmproj-F16).
-      - ODS_TALK_VISION_MODEL=${ODS_TALK_VISION_MODEL:-user.Qwen3.6-35B-A3B-Vision}
+      # Model id for image attachments. Empty means the active model: there is
+      # no separately registered vision model on any runtime. Set it only
+      # together with ODS_TALK_VISION_URL for an external vision server.
+      - ODS_TALK_VISION_MODEL=${ODS_TALK_VISION_MODEL:-}
     volumes:
       # .env is atomically replaced; mounting the parent keeps updates visible.
       - ./:/ods:ro,z
