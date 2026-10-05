@@ -1068,7 +1068,7 @@ def _collect_inference_contract():
     host_native = bool(native_llm_url.strip())
     native_key_configured = bool(env_get("LLAMA_SERVER_API_KEY", "").strip())
     # Compatibility read for one release: Lemonade-era settings the migration
-    # has not rewritten yet (the installer and `ods update` run it).
+    # has not rewritten yet (the installer runs it; `ods update` does not).
     lemonade_era = (
         ods_mode == "lemonade"
         or llm_backend.strip().lower() == "lemonade"
@@ -1244,7 +1244,7 @@ def _collect_inference_contract():
             "Route ODS services through LiteLLM so hosted, private-cloud, and auth behavior stay consistent.",
         ],
         "ODS-RUNTIME-LEMONADE-RETIRED": [
-            "Run `ods update`, or rerun the installer, to move the Lemonade-era settings to the llama.cpp runtime; your model files and active model are kept.",
+            "Rerun the installer of this release to move the Lemonade-era settings to the llama.cpp runtime (`ods update` only refreshes images); your model files and active model are kept.",
         ],
         "ODS-RUNTIME-HOST-NATIVE-CLOUD-OVERLAY-CONFLICT": [
             "Regenerate compose flags without docker-compose.cloud.yml; docker-compose.host-native-llm.yml disables only the in-stack llama-server and keeps model-router.",
