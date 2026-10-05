@@ -164,6 +164,15 @@ while [[ $# -gt 0 ]]; do
         --all)           ALL_FEATURES=true; shift ;;
         --cloud)         CLOUD_MODE=true; shift ;;
         --no-bootstrap)  NO_BOOTSTRAP=true; shift ;;
+        # API mode is not in this installer yet; say so and name the way
+        # to connect an API after installing, not "Unknown option".
+        --external-llm-url|--external-llm-provider|--external-llm-model|--external-llm-key-file|--external-llm-key-env|--no-external-llm|--reuse-external-llm)
+            echo "API mode ($1) is not in the macOS installer yet. Nothing was changed." >&2
+            echo "Install without it, then connect your API in the dashboard (Settings > Remote GPU), or run:" >&2
+            echo "  ods remote-provider configure --base-url URL --model MODEL --api-key-file FILE" >&2
+            echo "  ods remote-provider test" >&2
+            echo "Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+            exit 1 ;;
         *)               echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -201,6 +210,20 @@ SOURCE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # ── Source libraries ──
 LIB_DIR="${SCRIPT_DIR}/lib"
 source "${LIB_DIR}/constants.sh"
+
+# Any failed install, including a set -e stop, ends with where to get help.
+# The libraries trap EXIT only inside subshells, so this stays in place.
+_macos_help_on_failure() {
+    local status=$?
+    if (( status != 0 )); then
+        echo "" >&2
+        echo "  Need help? Ask on the ODS Discord: ${ODS_HELP_DISCORD_URL}" >&2
+        echo "  Share the messages above and the end of ${ODS_LOG_FILE}." >&2
+    fi
+    return "$status"
+}
+trap _macos_help_on_failure EXIT
+
 source "${LIB_DIR}/opencode-selection.sh"
 source "${LIB_DIR}/ui.sh"
 macos_apply_presentation_mode

@@ -17,6 +17,8 @@ pass "canonical help invite: $url"
 # Surfaces that must show the help link when something fails.
 surfaces=(
     install-core.sh
+    installers/macos/lib/constants.sh
+    installers/macos/install-macos.sh
     scripts/ods-doctor.sh
     installers/windows-portal.ps1
     installers/windows/lib/ui.ps1
@@ -26,6 +28,11 @@ for file in "${surfaces[@]}"; do
     grep -qF "$url" "$file" || fail "$file does not point at the ODS help Discord ($url)"
 done
 pass "installer, doctor, Windows setup and dashboard all link the help Discord"
+
+# The macOS installer prints the link on any failed exit.
+grep -q '^trap _macos_help_on_failure EXIT$' installers/macos/install-macos.sh \
+    || fail "install-macos.sh does not print the help link when it fails"
+pass "the macOS installer prints the help link on a failed exit"
 
 # The native Windows installer stops through the helper that prints the link.
 if grep -nE '^[[:space:]]*exit 1[[:space:]]*$|\{ exit 1 \}' installers/windows/install-windows.ps1; then
