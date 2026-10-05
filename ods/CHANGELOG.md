@@ -437,6 +437,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the files it replaced, so they kept root's group, and the host agent could
   not rewrite Hermes's configuration template. Replaced files and new
   directories now get the owner's primary group, as on a new installation.
+- Updating a Pixel installation that has Hermes on no longer rewrites Hermes's
+  configuration template while the Pixel source update is still in progress.
+  That update finishes only over the exact files it installed, so the change
+  could stop the update. The installer now writes Hermes's model route after
+  the Pixel update finishes, still before Hermes starts.
 - Rerunning the installer (an update) no longer fails with "Embeddings model
   prefetch failed" after Embeddings was added from Extensions. The Embeddings
   service downloads the model itself, as root, so the installer could not
