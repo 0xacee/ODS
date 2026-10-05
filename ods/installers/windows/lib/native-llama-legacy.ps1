@@ -417,6 +417,73 @@ function Get-ODSNativeLlamaLegacyProfileExecutable {
     return ''
 }
 
+function Get-ODSNativeLlamaLegacyRegisteredExecutables {
+    <#
+    .SYNOPSIS
+        Every runtime executable registered for this installation's model
+        stores (data\model-stores.json), read without running anything. The
+        server a model switch replaces may run any one of them.
+    #>
+    param([Parameter(Mandatory = $true)][string]$InstallDir)
+    $registry = Join-Path (Join-Path $InstallDir 'data') 'model-stores.json'
+    if (-not (Test-Path -LiteralPath $registry -PathType Leaf)) { return @() }
+    $document = Read-ODSNativeLlamaJson $registry
+    $paths = foreach ($store in @($document.stores)) {
+        if (-not $store.profiles) { continue }
+        foreach ($entry in $store.profiles.PSObject.Properties) {
+            $executable = [string]$entry.Value.executable
+            if ($executable -and [IO.Path]::IsPathRooted($executable)) { $executable }
+        }
+    }
+    return @($paths | Select-Object -Unique)
+}
+
+function Stop-ODSNativeLlamaLegacyProcess {
+    <#
+    .SYNOPSIS
+        Stop the llama-server ODS launched: the PID-file process or the port
+        listener, only when its executable is one ODS launches. Anything else
+        on the port is left running.
+    .DESCRIPTION
+        Throws when an owned process cannot be proven or does not exit; the
+        PID record is then kept and nothing else changes, so callers can
+        report that the running server keeps serving.
+    .OUTPUTS
+        The number of processes stopped.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$PidFile,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string[]]$ExecutablePaths
+    )
+    $known = @($ExecutablePaths | Where-Object { $_ })
+    $nodes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $isKnown = { param($Node) $path = [string]$Node.ExecutablePath; $path -and @($known | Where-Object { $_ -ieq $path }).Count }
+    $roots = [Collections.Generic.List[object]]::new()
+    $fromPidFile = $false
+    if (Test-Path -LiteralPath $PidFile -PathType Leaf) {
+        $raw = ([string](Get-Content -LiteralPath $PidFile -Raw -ErrorAction Stop)).Trim()
+        if ($raw -match '^\d+$') {
+            $match = @($nodes | Where-Object { $_.ProcessId -eq [int]$raw -and (& $isKnown $_) })
+            if ($match.Count -eq 1) { $roots.Add($match[0]); $fromPidFile = $true }
+        }
+    }
+    foreach ($listener in @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) {
+        $match = @($nodes | Where-Object { $_.ProcessId -eq [int]$listener.OwningProcess -and (& $isKnown $_) })
+        if ($match.Count -eq 1 -and -not @($roots | Where-Object { $_.ProcessId -eq $match[0].ProcessId }).Count) { $roots.Add($match[0]) }
+    }
+    if ($roots.Count) {
+        $owned = Get-ODSPortalOwnedProcessTree @($roots) $nodes
+        try {
+            Stop-ODSPortalOwnedProcesses $owned.Handles
+        } finally {
+            foreach ($process in $owned.Handles) { $process.Dispose() }
+        }
+    }
+    if ($fromPidFile) { Remove-Item -LiteralPath $PidFile -Force }
+    return $roots.Count
+}
+
 function Stop-ODSNativeLlamaLegacyRuntime {
     <#
     .SYNOPSIS
@@ -444,31 +511,7 @@ function Stop-ODSNativeLlamaLegacyRuntime {
     } elseif ($task) {
         Write-AIWarn 'The ODSNativeLlamaRuntime task does not run an ODS launcher; ODS replaces its action but stops no process it started.'
     }
-    $nodes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
-    $isKnown = { param($Node) $path = [string]$Node.ExecutablePath; $path -and @($known | Where-Object { $_ -ieq $path }).Count }
-    $roots = [Collections.Generic.List[object]]::new()
-    $fromPidFile = $false
-    if (Test-Path -LiteralPath $PidFile -PathType Leaf) {
-        $raw = ([string](Get-Content -LiteralPath $PidFile -Raw -ErrorAction Stop)).Trim()
-        if ($raw -match '^\d+$') {
-            $match = @($nodes | Where-Object { $_.ProcessId -eq [int]$raw -and (& $isKnown $_) })
-            if ($match.Count -eq 1) { $roots.Add($match[0]); $fromPidFile = $true }
-        }
-    }
-    foreach ($listener in @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) {
-        $match = @($nodes | Where-Object { $_.ProcessId -eq [int]$listener.OwningProcess -and (& $isKnown $_) })
-        if ($match.Count -eq 1 -and -not @($roots | Where-Object { $_.ProcessId -eq $match[0].ProcessId }).Count) { $roots.Add($match[0]) }
-    }
-    if ($roots.Count) {
-        $owned = Get-ODSPortalOwnedProcessTree @($roots) $nodes
-        try {
-            Stop-ODSPortalOwnedProcesses $owned.Handles
-        } finally {
-            foreach ($process in $owned.Handles) { $process.Dispose() }
-        }
-    }
-    if ($fromPidFile) { Remove-Item -LiteralPath $PidFile -Force }
-    return $roots.Count
+    return (Stop-ODSNativeLlamaLegacyProcess -PidFile $PidFile -Port $Port -ExecutablePaths $known)
 }
 
 function Remove-ODSNativeLlamaLegacyRuntime {

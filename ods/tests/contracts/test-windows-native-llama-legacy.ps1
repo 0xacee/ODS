@@ -6,9 +6,10 @@ param()
 # and qualify, the verified copy at <InstallDir>\llama-server, private launch
 # options and key file, .env tuning and launch arguments (pinned runtime and
 # model-store profiles), proof-gated start, the at-logon task, ownership-proven
-# stops and the installer cutover from ODS's own Lemonade runtime. Task
-# Scheduler, processes, sockets and HTTP are fixtures; nothing executes and
-# only temporary files are written.
+# stops, the installer cutover from ODS's own Lemonade runtime, and the
+# "ods.ps1 native-llm-restart" ordering (validate everything, then stop the
+# proven old server, then start). Task Scheduler, processes, sockets and
+# HTTP are fixtures; nothing executes and only temporary files are written.
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 . (Join-Path $root 'installers/windows/lib/native-llama-runtime.ps1')
@@ -389,6 +390,182 @@ try {
     $script:readyModel = 'Qwen3.6-35B-A3B-Q4_K_M.gguf'
 
     Check (@($script:queried | Where-Object { $_ -ne 'ODSNativeLlamaRuntime' }).Count -eq 0) 'only ODSNativeLlamaRuntime is looked up here; no other task is touched'
+
+    # --- "ods.ps1 native-llm-restart <InstallDir>" (model switches, rollback) ---
+    # Each scenario runs the real ods.ps1 entry point and libraries in its own
+    # runspace, so an "exit" cannot end this test. The running server, process
+    # stops, launches and HTTP proofs are fixtures; files live in temp dirs.
+    $restartHarness = @'
+$ErrorActionPreference = 'Stop'
+$root = $harness.Root
+. (Join-Path $root 'installers/windows/lib/llm-endpoint.ps1')
+. (Join-Path $root 'installers/windows/lib/native-llama-runtime.ps1')
+. (Join-Path $root 'installers/windows/lib/native-llama-args.ps1')
+. (Join-Path $root 'installers/windows/lib/native-llama-legacy.ps1')
+$tokens = $null; $parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'installers/windows/ods.ps1'), [ref]$tokens, [ref]$parseErrors)
+foreach ($name in @('Read-ODSEnv', 'Get-ODSEnvValue', 'Sync-ODSNativeInferenceConfig', 'Get-ODSNativeModelSelection',
+        'Get-ODSConfiguredNativeExecutable', 'Get-NativeInferenceBackend', 'Get-NativeInferenceStatus',
+        'Test-ODSNativeProcessExecutable', 'Get-ODSNativeInferencePortOwnerProcessId', 'Test-ODSNativeInferenceHealth',
+        'Get-ODSNativeLlamaStartPlan', 'Start-ODSNativeLlamaFromPlan', 'Start-NativeInferenceServer',
+        'Stop-NativeInferenceServer', 'Restart-ODSNativeLlamaServer', 'Invoke-NativeLlmCommand')) {
+    $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+    if ($definition) { . ([scriptblock]::Create($definition.Extent.Text)) }
+}
+$InstallDir = $harness.InstallDir
+$script:LLAMA_SERVER_DIR = Join-Path $InstallDir 'llama-server'
+$script:LLAMA_SERVER_EXE = Join-Path $script:LLAMA_SERVER_DIR 'llama-server.exe'
+$script:INFERENCE_PID_FILE = Join-Path (Join-Path $InstallDir 'data') 'llama-server.pid'
+$script:NATIVE_LLM_PORT = 8080
+function Write-AI { param([string]$Message) [void]$harness.Log.Add($Message) }
+function Write-AIWarn { param([string]$Message) [void]$harness.Log.Add('WARN ' + $Message) }
+function Write-AISuccess { param([string]$Message) [void]$harness.Log.Add('OK ' + $Message) }
+function Write-AIError { param([string]$Message) [void]$harness.Log.Add('ERROR ' + $Message) }
+function Get-ODSNativeReasoningArgs { param($Executable, $Mode, $FallbackFormat) return @('--reasoning', $Mode) }
+function Get-ODSNativeCheckpointIntervalArgs { param($Executable, $Value) return [pscustomobject]@{ Arguments = @(); Warning = '' } }
+# The running server (PID 5150, the published llama-server.exe on 18080).
+function Get-CimInstance {
+    param($ClassName, $Filter, $ErrorAction)
+    $nodes = @($harness.Nodes)
+    if ($Filter -match 'ProcessId\s*=\s*(\d+)') { return @($nodes | Where-Object { $_.ProcessId -eq [int]$Matches[1] }) | Select-Object -First 1 }
+    return $nodes
+}
+function Get-NetTCPConnection {
+    param($LocalPort, $State, $ErrorAction)
+    if ($harness.Running) { return [pscustomobject]@{ LocalPort = 18080; OwningProcess = 5150; LocalAddress = '127.0.0.1' } }
+}
+function Invoke-WebRequest {
+    param($Uri, $TimeoutSec, [switch]$UseBasicParsing, $ErrorAction)
+    if ($harness.Running) { return [pscustomobject]@{ StatusCode = 200 } }
+    throw 'nothing listens'
+}
+function Get-Process { param($Id, $ErrorAction) if ($harness.Running) { return [pscustomobject]@{ Id = $Id } } }
+function Get-ODSPortalOwnedProcessTree([object[]]$Roots, [object[]]$Nodes) {
+    [void]$harness.Calls.Add('stop:' + (@($Roots | ForEach-Object { $_.ProcessId }) -join ','))
+    $handle = [pscustomobject]@{ Id = 5150 }
+    $handle | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+    return [pscustomobject]@{ Nodes = $Roots; Handles = @($handle) }
+}
+function Stop-ODSPortalOwnedProcesses($Handles) {
+    if ($harness.StopFails) { throw 'An owned runtime process did not exit within five seconds.' }
+    $harness.Running = $false
+    $harness.Nodes = @()
+}
+function Stop-ODSNativeProcessId {
+    param([int]$ProcessId)
+    [void]$harness.Calls.Add("stop:$ProcessId")
+    if (-not $harness.StopFails) { $harness.Running = $false; $harness.Nodes = @() }
+}
+function Start-Process {
+    param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, [switch]$PassThru)
+    [void]$harness.Calls.Add('start')
+    $harness.StartArguments = [string]$ArgumentList
+    $process = [pscustomobject]@{ Id = 6262; Handle = [IntPtr]1; HasExited = $false; ExitCode = 0; StartTime = [datetime]'2026-10-05T12:00:00' }
+    $process | Add-Member -MemberType ScriptMethod -Name Kill -Value { $this.HasExited = $true }
+    $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) return $true }
+    $process | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+    return $process
+}
+function Wait-ODSNativeLlamaStartup { param($Port, $Process, $TimeoutSeconds) }
+function Assert-ODSNativeLlamaListener { param($Port, $ProcessId, $ExecutablePath) }
+function Get-ODSNativeLlamaModelProof {
+    param($Port, $GgufFile, $ModelPaths, $ContextSize, $ApiKey)
+    return [pscustomobject]@{ ModelId = $GgufFile; RuntimeContext = $ContextSize; ContextVerified = $true; ContextLength = $ContextSize; Message = '' }
+}
+$harness.Code = Invoke-NativeLlmCommand -Restart
+$harness.Returned = $true
+'@
+    $rInstall = Join-Path $fixture 'restart install'
+    $rData = Join-Path $rInstall 'data'
+    $rModels = Join-Path $rData 'models'
+    $rRuntime = Join-Path $rInstall 'llama-server'
+    $rPidFile = Join-Path $rData 'llama-server.pid'
+    $null = New-Item -ItemType Directory -Path $rModels -Force
+    foreach ($name in @('Old.gguf', 'New.gguf')) { [IO.File]::WriteAllText((Join-Path $rModels $name), 'fixture gguf') }
+    function Reset-RestartFixture([hashtable]$Settings = @{}) {
+        if (Test-Path -LiteralPath $rRuntime) { Remove-Item -LiteralPath $rRuntime -Recurse -Force }
+        Copy-Item -LiteralPath $versioned -Destination $rRuntime -Recurse
+        $values = [ordered]@{ GPU_BACKEND = 'amd'; LLM_BACKEND = 'llama-server'; AMD_INFERENCE_PORT = '18080'; GGUF_FILE = 'New.gguf'
+            CTX_SIZE = '8192'; MAX_CONTEXT = '8192'; LLAMA_REASONING = 'off'; LLAMA_SERVER_API_KEY = $key }
+        foreach ($name in @($Settings.Keys)) { $values[$name] = $Settings[$name] }
+        [IO.File]::WriteAllText((Join-Path $rInstall '.env'), ((@($values.Keys | ForEach-Object { "$_=$($values[$_])" }) -join "`n") + "`n"))
+        [IO.File]::WriteAllText($rPidFile, "5150`r`n")
+        $restartOptions = Write-ODSNativeLlamaLegacyOptions -Runtime $runtime -Device ([pscustomobject]@{ Name = 'Vulkan0' })
+        Write-ODSNativeLlamaApiKeyFile ([string]$restartOptions.ApiKeyPath) $key
+        foreach ($leaf in @('ready.json', 'native-llm-start.log')) {
+            $path = Join-Path (Get-ODSNativeRuntimeDir) $leaf
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+        }
+    }
+    function Invoke-RestartScenario([switch]$StopFails) {
+        $harness = [hashtable]::Synchronized(@{ Root = $root; InstallDir = $rInstall; Running = $true; StopFails = [bool]$StopFails
+            Calls = [Collections.ArrayList]::new(); Log = [Collections.ArrayList]::new(); Returned = $false; Code = $null
+            StartArguments = ''; Failure = ''
+            Nodes = @([pscustomobject]@{ ProcessId = 5150; ParentProcessId = 4; ExecutablePath = (Join-Path $rRuntime 'llama-server.exe')
+                    CommandLine = ''; CreationDate = [datetime]'2026-10-05T11:00:00' }) })
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.Open()
+        $shell = [PowerShell]::Create()
+        try {
+            $shell.Runspace = $runspace
+            $runspace.SessionStateProxy.SetVariable('harness', $harness)
+            $null = $shell.AddScript($restartHarness)
+            try { $null = $shell.Invoke() } catch { $harness.Failure = $_.Exception.Message }
+            if ($shell.Streams.Error.Count) { $harness.Failure = [string]$shell.Streams.Error[0] }
+        } finally {
+            $shell.Dispose()
+            $runspace.Dispose()
+        }
+        $harness.StartLog = ''
+        $logPath = Join-Path (Get-ODSNativeRuntimeDir) 'native-llm-start.log'
+        if (Test-Path -LiteralPath $logPath) { $harness.StartLog = [IO.File]::ReadAllText($logPath) }
+        return $harness
+    }
+    function Test-RunningServerUntouched($Result) {
+        return ($Result.Running -and -not @($Result.Calls | Where-Object { $_ -like 'stop:*' -or $_ -eq 'start' }).Count -and
+            ([IO.File]::ReadAllText($rPidFile)).Trim() -eq '5150' -and $Result.StartLog -notmatch 'ready:')
+    }
+    function Test-RestartRefused($Result, [string]$Cause) {
+        return ($Result.Returned -and $Result.Code -eq 1 -and -not $Result.Failure -and
+            (@($Result.Log) -join "`n") -match ('ERROR Native llama-server did not restart: .*' + $Cause))
+    }
+
+    Reset-RestartFixture @{ LLAMA_SERVER_API_KEY = 'not-a-key' }
+    $result = Invoke-RestartScenario
+    Check ((Test-RestartRefused $result 'LLAMA_SERVER_API_KEY') -and (Test-RunningServerUntouched $result)) 'restart: a bad API key exits non-zero and leaves the running server untouched'
+
+    Reset-RestartFixture
+    Remove-Item -LiteralPath (Join-Path $rRuntime 'pin.json') -Force
+    $result = Invoke-RestartScenario
+    Check ((Test-RestartRefused $result 'no pin\.json') -and (Test-RunningServerUntouched $result)) 'restart: a missing pin.json exits non-zero and leaves the running server untouched'
+
+    Reset-RestartFixture @{ GGUF_FILE = 'Missing.gguf' }
+    $result = Invoke-RestartScenario
+    Check ((Test-RestartRefused $result 'missing') -and (Test-RunningServerUntouched $result)) 'restart: a missing GGUF exits non-zero and leaves the running server untouched'
+
+    Reset-RestartFixture
+    [IO.File]::WriteAllText((Join-Path (Get-ODSNativeRuntimeDir) 'runtime-options.json'), '{"schemaVersion":1,"Device":"Vulkan0,CPU"}')
+    $result = Invoke-RestartScenario
+    Check ((Test-RestartRefused $result 'launch options are invalid') -and (Test-RunningServerUntouched $result)) 'restart: invalid launch options exit non-zero and leave the running server untouched'
+
+    Reset-RestartFixture
+    $result = Invoke-RestartScenario -StopFails
+    Check ((Test-RestartRefused $result 'Could not stop the running llama-server .*did not exit within five seconds.*nothing else was changed') -and
+        $result.Running -and -not ($result.Calls -contains 'start') -and ([IO.File]::ReadAllText($rPidFile)).Trim() -eq '5150' -and
+        $result.StartLog -notmatch 'ready:') 'restart: a stop that fails exits non-zero, starts nothing and leaves the old server and its PID record'
+
+    Reset-RestartFixture
+    $result = Invoke-RestartScenario
+    $readyRecord = Read-ODSNativeLlamaJson (Join-Path (Get-ODSNativeRuntimeDir) 'ready.json')
+    Check ((-not $result.Returned -or $result.Code -eq 0) -and -not $result.Failure -and (@($result.Calls) -join ',') -eq 'stop:5150,start' -and
+        -not $result.Running -and ([IO.File]::ReadAllText($rPidFile)).Trim() -eq '6262' -and $readyRecord.ModelId -eq 'New.gguf' -and
+        $result.StartArguments.Contains('"--alias" "New.gguf"') -and $result.StartArguments.Contains('"--port" "18080"') -and
+        $result.StartArguments.Contains('"--api-key-file"') -and -not $result.StartArguments.Contains($key) -and
+        $result.StartLog -match 'ready: New\.gguf on port 18080') 'restart happy path: the proven old server stops, the new model starts with the contract arguments and is proven'
+    Check ($result.Returned -and $result.Code -eq 0) 'restart: the entry point returns its exit code (0 after a proven start)'
+    $odsText = [IO.File]::ReadAllText((Join-Path $root 'installers/windows/ods.ps1'))
+    Check ($odsText -match '"native-llm-restart"\s*\{\s*exit \(\[int\]@\(Invoke-NativeLlmCommand -Restart\)\[-1\]\)\s*\}' -and
+        $odsText -match '"native-llm-start"\s*\{\s*exit \(\[int\]@\(Invoke-NativeLlmCommand\)\[-1\]\)\s*\}') 'the native-llm-start/-restart commands exit with the entry point''s code'
 } finally {
     $env:LOCALAPPDATA = $previousLocalAppData
     Remove-Item -LiteralPath $fixture -Recurse -Force -ErrorAction SilentlyContinue

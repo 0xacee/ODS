@@ -1873,6 +1873,43 @@ function Start-ODSOpenCodeRuntime {
 # Backward-compat alias
 function Get-NativeLlamaStatus { return Get-NativeInferenceStatus }
 
+function Get-ODSNativeLlamaStartPlan {
+    <#
+    .SYNOPSIS
+        Everything a native llama-server launch can fail on, checked before
+        any process is touched: the .env selection and its GGUF, the launch
+        options, pin.json, the API key and the launch arguments.
+    #>
+    Sync-ODSNativeInferenceConfig
+    if ((Get-NativeInferenceBackend) -eq "none") {
+        throw "No native llama-server is installed. Re-run the ODS installer."
+    }
+    $envVars = Read-ODSEnv
+    $selection = Get-ODSNativeModelSelection -VerifyArtifacts
+    $options = Read-ODSNativeLlamaLegacyOptions
+    if (-not $selection.profile) {
+        # Antivirus quarantine or a partial copy must stop here, not mid-load.
+        $null = Test-ODSNativeLlamaInstall -Directory $script:LLAMA_SERVER_DIR `
+            -ExpectedZipSha256 ([string]$options.ZipSha256) -ExpectedReleaseTag ([string]$options.ReleaseTag)
+    }
+    # Brings the key file in line with .env only; a running server keeps the
+    # key it loaded at startup.
+    $apiKey = Sync-ODSNativeLlamaLegacyApiKey -EnvMap $envVars -Path ([string]$options.ApiKeyPath)
+    $launch = New-ODSNativeLlamaLegacyLaunch -EnvMap $envVars -Selection $selection `
+        -Port $script:NATIVE_LLM_PORT -Options $options -PinnedExecutable $script:LLAMA_SERVER_EXE
+    return [pscustomobject]@{ Launch = $launch; ApiKey = $apiKey }
+}
+
+function Start-ODSNativeLlamaFromPlan {
+    # Launch a prepared plan and prove its model and context.
+    param([Parameter(Mandatory = $true)]$Plan)
+    foreach ($warning in @($Plan.Launch.Warnings)) { Write-AIWarn $warning }
+    Write-AI "Starting native llama-server with $($Plan.Launch.GgufFile) (large models can take a few minutes)..."
+    $started = Start-ODSNativeLlamaLegacyProcess -Launch $Plan.Launch -Port $script:NATIVE_LLM_PORT `
+        -ApiKey $Plan.ApiKey -PidFile $script:INFERENCE_PID_FILE
+    Write-AISuccess "Native llama-server ready (PID $($started.ProcessId)): $($started.Proof.ModelId), $($started.Proof.ContextLength) tokens of context"
+}
+
 function Start-NativeInferenceServer {
     <#
     .SYNOPSIS
@@ -1889,27 +1926,30 @@ function Start-NativeInferenceServer {
         Write-AISuccess "Native llama-server already running (PID $($status.Pid))"
         return
     }
-    if ($status.Backend -eq "none") {
-        throw "No native llama-server is installed. Re-run the ODS installer."
-    }
+    Start-ODSNativeLlamaFromPlan -Plan (Get-ODSNativeLlamaStartPlan)
+}
 
-    $envVars = Read-ODSEnv
-    $selection = Get-ODSNativeModelSelection -VerifyArtifacts
-    $options = Read-ODSNativeLlamaLegacyOptions
-    if (-not $selection.profile) {
-        # Antivirus quarantine or a partial copy must stop here, not mid-load.
-        $null = Test-ODSNativeLlamaInstall -Directory $script:LLAMA_SERVER_DIR `
-            -ExpectedZipSha256 ([string]$options.ZipSha256) -ExpectedReleaseTag ([string]$options.ReleaseTag)
+function Restart-ODSNativeLlamaServer {
+    <#
+    .SYNOPSIS
+        Replace the running native llama-server with the .env selection (model
+        switches, the host agent's rollback, the full-model upgrade).
+    .DESCRIPTION
+        The new launch is prepared and validated first, so a bad key, launch
+        option, pin.json or missing GGUF leaves the running server untouched.
+        Only then is the proven old process stopped; a stop that fails leaves
+        it running, keeps its PID record and changes nothing else.
+    #>
+    $plan = Get-ODSNativeLlamaStartPlan
+    # The server being replaced may run the pinned runtime or any registered
+    # model-store runtime of this installation.
+    $known = @($script:LLAMA_SERVER_EXE) + @(Get-ODSNativeLlamaLegacyRegisteredExecutables -InstallDir $InstallDir)
+    try {
+        $null = Stop-ODSNativeLlamaLegacyProcess -PidFile $script:INFERENCE_PID_FILE -Port $script:NATIVE_LLM_PORT -ExecutablePaths $known
+    } catch {
+        throw "Could not stop the running llama-server ($($_.Exception.Message)), so the new model was not started; nothing else was changed."
     }
-    $apiKey = Sync-ODSNativeLlamaLegacyApiKey -EnvMap $envVars -Path ([string]$options.ApiKeyPath)
-    $launch = New-ODSNativeLlamaLegacyLaunch -EnvMap $envVars -Selection $selection `
-        -Port $script:NATIVE_LLM_PORT -Options $options -PinnedExecutable $script:LLAMA_SERVER_EXE
-    foreach ($warning in @($launch.Warnings)) { Write-AIWarn $warning }
-
-    Write-AI "Starting native llama-server with $($launch.GgufFile) (large models can take a few minutes)..."
-    $started = Start-ODSNativeLlamaLegacyProcess -Launch $launch -Port $script:NATIVE_LLM_PORT `
-        -ApiKey $apiKey -PidFile $script:INFERENCE_PID_FILE
-    Write-AISuccess "Native llama-server ready (PID $($started.ProcessId)): $($started.Proof.ModelId), $($started.Proof.ContextLength) tokens of context"
+    Start-ODSNativeLlamaFromPlan -Plan $plan
 }
 
 # Backward-compat alias
@@ -1943,26 +1983,28 @@ function Invoke-NativeLlmCommand {
     <#
     .SYNOPSIS
         Internal entry points without Docker: "native-llm-start" (the
-        ODSNativeLlamaRuntime at-logon task) and "native-llm-restart"
-        (scripts/bootstrap-upgrade.sh after promoting the full model).
-        Exit code 0 only after the model and context were proven.
+        ODSNativeLlamaRuntime at-logon task) and "native-llm-restart" (the
+        host agent's model switches and rollbacks, and
+        scripts/bootstrap-upgrade.sh after promoting the full model).
+    .OUTPUTS
+        The process exit code: 0 only after the model and context were
+        proven, 1 otherwise.
     #>
     param([switch]$Restart)
+    $action = $(if ($Restart) { "restart" } else { "start" })
     try {
         if ($Restart) {
-            # An absent SSD or changed qualification fails before the
-            # running model is stopped.
-            $null = Get-ODSNativeModelSelection -VerifyArtifacts
-            Stop-NativeInferenceServer
+            Restart-ODSNativeLlamaServer
+        } else {
+            Start-NativeInferenceServer
         }
-        Start-NativeInferenceServer
         Write-ODSNativeLlamaLegacyLog "ready: $(Get-ODSEnvValue -Name 'GGUF_FILE') on port $($script:NATIVE_LLM_PORT)"
-        exit 0
+        return 0
     } catch {
         $message = $_.Exception.Message
-        Write-AIError "Native llama-server did not start: $message"
-        Write-ODSNativeLlamaLegacyLog $message
-        exit 1
+        Write-AIError "Native llama-server did not ${action}: $message"
+        Write-ODSNativeLlamaLegacyLog "$action failed: $message"
+        return 1
     }
 }
 
@@ -2353,13 +2395,13 @@ function Invoke-Restart {
                 $null = Get-ODSNativeModelSelection -VerifyArtifacts
             }
             Stop-ODSOpenCodeRuntime
-            # For AMD, also restart native inference server
+            # For AMD, also restart the native llama-server: validated first,
+            # so a failure leaves the running model in place.
             if ($nativeBackend -ne "none") {
-                Stop-NativeInferenceServer
                 try {
-                    Start-NativeInferenceServer
+                    Restart-ODSNativeLlamaServer
                 } catch {
-                    Write-AIError "Native llama-server did not start: $($_.Exception.Message)"
+                    Write-AIError "Native llama-server did not restart: $($_.Exception.Message)"
                 }
             }
             if ($hermesInStack) {
@@ -3716,8 +3758,8 @@ switch ($Command.ToLower()) {
     "version" { Write-Host "ODS v$($script:ODS_VERSION) (Windows)" -ForegroundColor Green }
     "help"    { Show-Help }
     # Internal: the ODSNativeLlamaRuntime task and scripts/bootstrap-upgrade.sh.
-    "native-llm-start"   { Invoke-NativeLlmCommand }
-    "native-llm-restart" { Invoke-NativeLlmCommand -Restart }
+    "native-llm-start"   { exit ([int]@(Invoke-NativeLlmCommand)[-1]) }
+    "native-llm-restart" { exit ([int]@(Invoke-NativeLlmCommand -Restart)[-1]) }
     default   {
         Write-AIWarn "Unknown command: $Command"
         Show-Help

@@ -79,7 +79,7 @@ check 'http://model-router:9099/v1' "$ROOT_DIR/installers/windows/lib/env-genera
 check 'function Invoke-HermesSoulRefresh' "$WINDOWS_CLI" "Windows CLI can refresh Hermes SOUL"
 check 'Invoke-HermesSoulRefresh -SyncContainer' "$WINDOWS_CLI" "Windows CLI syncs SOUL into running Hermes"
 check 'Test-ODSComposeServiceAvailable -ComposeFlags $flags -Service "hermes"' "$WINDOWS_CLI" "Windows CLI gates SOUL refresh on Hermes compose presence"
-check '"native-llm-start"   { Invoke-NativeLlmCommand }' "$WINDOWS_CLI" "Windows CLI exposes the native llama-server logon-task entry point"
+check '"native-llm-start"   { exit ([int]@(Invoke-NativeLlmCommand)[-1]) }' "$WINDOWS_CLI" "Windows CLI exposes the native llama-server logon-task entry point"
 check 'if ((Get-NativeInferenceBackend) -ne "none") {' "$WINDOWS_CLI" "Windows CLI manages native inference without relying on stale pid files"
 
 check 'hermes,persona' "$LINUX_PHASE_06" "Linux installer creates data/persona"

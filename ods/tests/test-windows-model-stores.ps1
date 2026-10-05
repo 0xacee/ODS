@@ -8,7 +8,8 @@ $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'installers/windows/ods.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw $errors[0] }
 $definitions = @{}
-foreach ($name in @('Get-ODSNativeModelSelection','Get-ODSConfiguredNativeExecutable','Get-NativeInferenceBackend','Start-NativeInferenceServer')) {
+foreach ($name in @('Get-ODSNativeModelSelection','Get-ODSConfiguredNativeExecutable','Get-NativeInferenceBackend','Start-NativeInferenceServer',
+    'Get-ODSNativeLlamaStartPlan','Start-ODSNativeLlamaFromPlan')) {
     $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if (-not $function) { throw "Missing function $name" }
     $definitions[$name] = $function.Extent.Text
@@ -171,11 +172,17 @@ def run(command, **kwargs):
     $script:EnvMap.ODS_ACTIVE_MODEL_STORE = 'ssd'
     Write-FixtureEnv
 
-    # A restart verifies the selection before it stops the running model.
-    $restart = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-NativeLlmCommand' }, $true).Extent.Text
-    $verifyAt = $restart.IndexOf('Get-ODSNativeModelSelection -VerifyArtifacts')
-    $stopAt = $restart.IndexOf('Stop-NativeInferenceServer')
-    Assert-True ($verifyAt -ge 0 -and $stopAt -gt $verifyAt) 'native-llm-restart stops the running model before verifying the new selection'
+    # A restart prepares and validates the whole launch (selection, options,
+    # pin.json, key, arguments) before it stops the running model; the
+    # behaviour is covered by contracts/test-windows-native-llama-legacy.ps1.
+    $restart = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Restart-ODSNativeLlamaServer' }, $true).Extent.Text
+    $planAt = $restart.IndexOf('Get-ODSNativeLlamaStartPlan')
+    $stopAt = $restart.IndexOf('Stop-ODSNativeLlamaLegacyProcess')
+    Assert-True ($planAt -ge 0 -and $stopAt -gt $planAt) 'native-llm-restart stops the running model before validating the new launch'
+    $plan = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-ODSNativeLlamaStartPlan' }, $true).Extent.Text
+    $planChecks = @('Get-ODSNativeModelSelection -VerifyArtifacts', 'Read-ODSNativeLlamaLegacyOptions', 'Test-ODSNativeLlamaInstall',
+        'Sync-ODSNativeLlamaLegacyApiKey', 'New-ODSNativeLlamaLegacyLaunch')
+    Assert-True (@($planChecks | Where-Object { -not $plan.Contains($_) }).Count -eq 0) 'the launch plan skips a check'
 
     . (Join-Path $root 'installers/windows/lib/env-generator.ps1')
     function Get-LlamaCpuBudget { return @{ Limit = '4.0'; Reservation = '1.0'; Available = '4.0' } }
