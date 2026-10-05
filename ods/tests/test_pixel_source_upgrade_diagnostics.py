@@ -193,3 +193,22 @@ def test_cli_mismatched_hold_preserves_actual_journal_and_snapshots(private_root
     assert 'Preserve any existing admission hold and protected source snapshots' in message
     assert snapshot(root) == before
     assert manager.journal()['hold'] == 'd' * 64
+
+
+@pytest.mark.parametrize('error,shown', [
+    (upgrade.UpgradeError('source-completion-required'), '(reason: source-completion-required)'),
+    (RuntimeError('model-hold-unconfirmed'), '(reason: model-hold-unconfirmed)'),
+    (RuntimeError('text with spaces and /a/private/path'), None),
+    (OSError(2, 'No such file or directory', '/a/private/path'), None),
+    (ValueError('invalid model transition request'), None),
+])
+def test_incomplete_update_names_only_fixed_reason_codes(error, shown):
+    # Fleet, laptop 2026-10-05: every refusal read only "Pixel source upgrade
+    # is incomplete", which hid the coordinator's own reason.
+    message = upgrade._failure_message(error)
+    assert 'Preserve any existing admission hold' in message
+    assert '/a/private/path' not in message
+    if shown:
+        assert shown in message
+    else:
+        assert '(reason:' not in message
