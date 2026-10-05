@@ -256,7 +256,7 @@ export default function Models({ compact = false }) {
   })
   const retryModelId = catalogModelIdForProgress(models, visibleDownloadProgress?.model)
   const renderModel = model => <ModelTableRow key={model.id} compact={compact} model={model} gpu={gpu}
-    canActivateModels={canActivateModels} activationModeError={activationModeError}
+    canActivateModels={canActivateModels} activationModeError={activationModeError} apiMode={llmBackend === 'external'}
     hermesMinimumContext={hermesMinimumContext} pixelMinimumContext={pixelMinimumContext}
     isCurrentModel={model.id === currentModel} isLoading={pendingModelActions.includes(model.id)}
     loadBusy={pendingModelActions.length > 0} activationBusy={Boolean(activationLoading || runtimeActionLoading)}
@@ -823,6 +823,7 @@ function ModelTableRow({
   gpu,
   canActivateModels,
   activationModeError,
+  apiMode = false,
   hermesMinimumContext,
   pixelMinimumContext,
   isCurrentModel,
@@ -862,7 +863,7 @@ function ModelTableRow({
     <dl className="model-entry-metrics"><div><dt>Context</dt><dd>{formatContext(model.contextLength)}</dd></div><div><dt>VRAM estimate</dt><dd>{memory.value}</dd></div><div className="model-speed-reading"><dt>Speed</dt><dd>{speed.label}</dd></div></dl>
     <div className="model-fit"><span>{compatibility.label}</span><span>{compatibility.detail}</span></div>
     <footer><div className="model-entry-actions">
-      <PrimaryAction model={model} isLoaded={isLoaded} isDownloaded={isDownloaded} isLoading={isLoading} activationBusy={activationBusy} downloadBusy={downloadBusy} downloadStarting={downloadStarting} runDisabledReason={runDisabledReason} hermesMinimumContext={hermesMinimumContext} onDownload={onDownload} onLoad={onLoad} onBenchmark={onBenchmark}/>
+      <PrimaryAction model={model} isLoaded={isLoaded} isDownloaded={isDownloaded} isLoading={isLoading} activationBusy={activationBusy} downloadBusy={downloadBusy} downloadStarting={downloadStarting} runDisabledReason={runDisabledReason} apiMode={apiMode} hermesMinimumContext={hermesMinimumContext} onDownload={onDownload} onLoad={onLoad} onBenchmark={onBenchmark}/>
       {isLoaded && !isRuntimeManaged && <button aria-label={`Configure context for ${model.name}`} title={activationModeError || `Configure context for ${model.name}`} disabled={activationBusy || !canActivateModels} onClick={onLoad}><MetalMetricIcon icon={SlidersHorizontal} size={14}/></button>}
       <DeleteAction model={model} isLoaded={isLoaded} isDownloaded={isDownloaded} isLoading={isLoading} activationBusy={activationBusy} onDelete={onDelete}/>
     </div><details className="model-entry-details"><summary>Details <ChevronRight size={12}/></summary><div><p>{model.description || 'No description available.'}</p><p>{tags.join(' · ')}</p>{performanceBadge && <p>{performanceBadge.label}</p>}<p>{compatibility.label}: {compatibility.detail}</p>{compatibilityNotes.map(note => <p key={note}>{note}</p>)}{runDisabledReason && <p>{runDisabledReason}</p>}</div></details></footer>
@@ -899,6 +900,7 @@ function ModelTableRow({
           downloadBusy={downloadBusy}
           downloadStarting={downloadStarting}
           runDisabledReason={runDisabledReason}
+          apiMode={apiMode}
           hermesMinimumContext={hermesMinimumContext}
           onDownload={onDownload}
           onLoad={onLoad}
@@ -974,6 +976,7 @@ function PrimaryAction({
   downloadBusy,
   downloadStarting,
   runDisabledReason,
+  apiMode = false,
   hermesMinimumContext,
   onDownload,
   onLoad,
@@ -1009,6 +1012,9 @@ function PrimaryAction({
 
   if (isDownloaded) {
     const runDisabled = Boolean(runDisabledReason)
+    // A downloaded model does not run while API mode is on. Say so on the
+    // button: a greyed "Run" read as available (fleet, Strixy).
+    const apiModeBlocked = apiMode && runDisabled
     return (
       <span className="inline-flex" title={runDisabledReason || `Run ${model.name}`}>
         <button
@@ -1022,8 +1028,8 @@ function PrimaryAction({
               : 'cursor-not-allowed border border-theme-border bg-theme-bg/45 text-theme-text-muted'
           }`}
         >
-          <Play size={13} />
-          Run
+          {!apiModeBlocked && <Play size={13} />}
+          {apiModeBlocked ? 'API mode' : 'Run'}
         </button>
       </span>
     )

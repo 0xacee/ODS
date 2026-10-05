@@ -148,6 +148,21 @@ test.each([true, false])('API mode names the API model and host, without local l
   expect(screen.queryByText(/Selected during install/)).toBeNull()
 })
 
+test.each([true, false])('a downloaded model in API mode says API mode instead of offering Run (compact=%s)', (compact) => {
+  // Fleet, Strixy: in API mode a greyed "Run" on installed models read as available.
+  useModelsMock.mockReturnValue(baseState({
+    models: [model({ status: 'downloaded' })], llmBackend: 'external', canActivateModels: false,
+    activationModeError: 'ODS uses a model API at api.example.test.',
+    externalApi: { model: 'deepseek-v4.1-flash', host: 'api.example.test' },
+  }))
+  render(createElement(MemoryRouter, null, createElement(Models, {compact})))
+
+  const button = screen.getByRole('button', { name: 'API mode' })
+  expect(button).toBeDisabled()
+  expect(button).toHaveAttribute('title', 'ODS uses a model API at api.example.test.')
+  expect(screen.queryByRole('button', { name: 'Run' })).toBeNull()
+})
+
 test('compact external mode keeps the catalog visible without promising local activation', () => {
   useModelsMock.mockReturnValue(baseState({
     models: [model()], llmBackend: 'external', canActivateModels: false,
