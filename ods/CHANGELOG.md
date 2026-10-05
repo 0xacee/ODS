@@ -189,6 +189,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Every llama.cpp image is now pinned by tag and sha256 digest, including the
   tier-map, installer, host-agent and catalog copies. The dependency pin check
   rejects a llama.cpp image without a digest.
+- The host agent now accepts only whole, plain extension ids. Its check also
+  passed an id that ends in a line break, such as `n8n` followed by a newline,
+  which then reached extension folder names and Compose arguments.
+- Pixel's provider connection and health probes now require TLS 1.2 or newer.
+  Python 3.10 and later already refuse older protocols; the host side also runs
+  on Python 3.9, whose default context can still allow them.
+- The host agent reads the Hermes model settings in `data/hermes/config.yaml`
+  with a linear-time pattern. The previous pattern slowed down polynomially on
+  a long line of spaces.
 
 ### Changed
 - The unsupported Tauri desktop installer under `installer/` is removed. No CI
@@ -228,9 +237,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   authenticated Portal status API to report the agent available. Existing
   native Windows installs are detected and left untouched; `install.ps1`
   refuses to run beside them. Keep managing them with their own `ods.ps1`, or
-  rerun `ods\installers\windows\install-windows.ps1`. AMD machines that used
-  the native Lemonade path now get a GPU backend detected inside WSL, CPU, or
-  an explicitly configured endpoint. The Linux installer runs on the same
+  rerun `ods\installers\windows\install-windows.ps1`. On AMD machines the model
+  runs on the GPU through llama.cpp's `llama-server.exe` on Windows (see "AMD
+  GPUs now run on llama.cpp" below). The Linux installer runs on the same
   console (download progress and UTF-8 output stay visible), and warnings WSL
   prints on stderr no longer turn a passing check into a failure.
 - Windows: setup now needs only the pasted PowerShell command. It checks disk
@@ -262,54 +271,113 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The installer menu presets (Full Stack, Core Only) no longer override an
   explicit `--hermes` or `--no-hermes`. The Windows Pixel path passes
   `--no-hermes`; choosing Full Stack downloaded and enabled Hermes anyway.
-- Windows (`install.ps1`) with an AMD GPU now runs the model on the GPU through
-  Lemonade Server on Windows instead of on the CPU in WSL. Setup detects the
-  GPU and its memory in Windows, picks the model as the native installer does,
-  installs the pinned Lemonade for the user after asking, downloads the model
-  with checksum verification, runs Lemonade on 127.0.0.1 from a sign-in
-  scheduled task (`ODSLemonadeRuntime`), loads the model, and passes the route
-  to the Linux installer. `install-core.sh` gains `--lemonade-model`,
-  `--lemonade-gpu-name` and `--lemonade-gpu-vram-mb`; the hardware scan shows
-  that GPU instead of "None". An existing Lemonade (including 10.7+) is reused,
-  and Lemonade moves to the next free port when another program holds 8080.
-- Windows/WSL AMD setup now selects `--lemonade-host-transport model-router`.
-  The WSL host agent verifies the Windows Lemonade model through the running
-  model-router container belonging to this installation, where
-  `host.docker.internal` reaches Windows. This avoids probing WSL's own
-  localhost while keeping Lemonade bound to Windows loopback. Model identity,
-  context and completion checks still decide readiness; this transport does
-  not enable LAN access or cloud inference. Other Lemonade installs keep the
-  default `direct` transport.
+- AMD GPUs now run on llama.cpp. ODS no longer uses Lemonade Server: AMD GPUs
+  run upstream llama.cpp's `llama-server` (b9014), like NVIDIA, Apple and CPU
+  installs. ODS never uninstalls or reconfigures a Lemonade Server installed
+  on your computer. Upgrades keep the model files and, on Linux and in the
+  Windows Portal, the selected model and its context;
+  [AMD GPUs now run on llama.cpp](docs/MIGRATION-LEMONADE-TO-LLAMACPP.md)
+  explains what an upgrade does and how to remove what is left.
+  - Linux: the `llama-server` service runs the official
+    `ghcr.io/ggml-org/llama.cpp:server-vulkan-b9014` image, pinned by digest,
+    with `/dev/dri` and the video and render groups, and needs neither ROCm on
+    the host nor an HSA override. `AMD_INFERENCE_BACKEND=rocm` adds
+    `docker-compose.amd-rocm.yml` with the `server-rocm-b9014` image (about
+    7 GB) and `/dev/kfd`. The installer selects ROCm for Instinct (CDNA)
+    cards, which have no Vulkan driver, and sets `HSA_OVERRIDE_GFX_VERSION`
+    only for GPUs that image was not built for (gfx1031 to gfx1036 as 10.3.0,
+    gfx1103 as 11.0.0). One GPU runs with `LLAMA_ARG_SPLIT_MODE=none`; the AMD
+    multi-GPU overlay uses layer split and passes the assigned GPUs as
+    `GGML_VK_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES`. An integrated GPU
+    next to a discrete one is left out of AMD detection and assignment. ODS no
+    longer builds the `ods-lemonade-server` image.
+  - Windows (`install.ps1`): with an AMD GPU the model runs on the GPU through
+    llama.cpp's `llama-server.exe` (Vulkan) on Windows instead of on the CPU in
+    WSL. Setup detects the GPU and its memory in Windows, picks the model as
+    the native installer does, downloads the pinned
+    `llama-b9014-bin-win-vulkan-x64.zip` into `%LOCALAPPDATA%\ODS\llama.cpp`
+    (after asking on a new install; size and SHA-256 are checked before
+    extraction, and every file again before each launch), checks it with
+    `--version` and `--list-devices`, downloads the model with checksum
+    verification, and runs it on 127.0.0.1 with an API key from the sign-in
+    scheduled task `ODSLlamaServerRuntime-<SID>`. llama-server moves to 18080
+    or 28080 when another program holds 8080. The task proves the model and
+    context (`/v1/models`, `/props`) before setup proceeds and at each sign-in,
+    keeps its launcher and plan in `%LOCALAPPDATA%\ODS\lemonade\portal-runtime`
+    instead of a temporary installer checkout, and cleans up the verified
+    process tree after a failed start; separate process ownership records let
+    an interrupted cleanup resume without treating a failed launch as ready.
+    Re-running setup stops only the verified ODS task and its process tree,
+    and keeps the selected model and context, the port and the key. Setup
+    passes the route to the Linux installer with the new `--native-llm-url`,
+    `--native-llm-model`, `--native-llm-context-size`, `--native-llm-gpu-name`,
+    `--native-llm-gpu-vram-mb`, `--native-llm-host-transport` and
+    `--native-llm-api-key-env` options; the key travels in an environment
+    variable, never on a command line. The hardware scan shows that GPU
+    instead of "None". Without a usable Vulkan device a new install stays on
+    the CPU and says so.
+  - Windows/WSL routing: setup selects `--native-llm-host-transport
+    model-router`. The WSL host agent verifies the Windows model through the
+    running model-router container belonging to this installation, where
+    `host.docker.internal` reaches Windows. This avoids probing WSL's own
+    localhost while keeping llama-server bound to Windows loopback. Model
+    identity, context and completion checks still decide readiness; this
+    transport does not enable LAN access or cloud inference. Other installs
+    keep the default `direct` transport. The Dashboard reads the Windows
+    model, its context and llama.cpp's counters through the authenticated host
+    agent (`/v1/llm/status`). Models and the Portal model selector follow the
+    host agent's proof that this installation manages the server; a server it
+    does not manage is shown as managed externally, without incorrectly
+    reporting that the local runtime is unavailable. The hardware scan no
+    longer claims CPU inference immediately after identifying the Windows GPU;
+    Linux services retain their detected backend.
+  - Windows (native installer): `install-windows.ps1` and `ods.ps1` run the
+    same pinned `llama-server.exe` for AMD GPUs. The installer stages and
+    checks it before it changes `.env`, so a failed download, checksum, Visual
+    C++ runtime, policy block or driver changes nothing. It keeps a verified
+    copy at `<install>\llama-server`, which a rerun replaces when it no longer
+    matches the pin, keeps the API key file, launch options and log in
+    `%LOCALAPPDATA%\ODS\native-runtime`, and starts the model at sign-in
+    through the `ODSNativeLlamaRuntime` task (`ods.ps1 native-llm-start`).
+    Model switches and the full-model swap after bootstrap relaunch through
+    `ods.ps1 native-llm-restart`, which validates the new launch before it
+    stops the running model. LiteLLM receives the server's key
+    (`LLAMA_SERVER_API_KEY`) from its own environment. Without a usable Vulkan
+    device a new install runs the model on the CPU and says so. Whisper keeps
+    port 9000 unless a Lemonade router holds it.
+  - Every platform: the Docker `llama-server` and the Windows `llama-server.exe`
+    serve the GGUF file name as the model id (`--alias`), so `/v1/models`,
+    model state, the model router and every consumer use one id. Every
+    managed runtime is proven the same way: `/health` (503 while loading), the
+    served model id, `/props` model path and context, and a completion. The
+    Dashboard samples throughput from llama.cpp's cumulative `/metrics`
+    counters on every runtime.
+  - ODS Talk sends an image to the active model only when its llama-server
+    loaded a vision projector, and otherwise answers 409 with a plain message.
+    `ODS_TALK_VISION_MODEL` with `ODS_TALK_VISION_URL` and `ODS_TALK_VISION_KEY`
+    still names a separate vision server.
+  - A Lemonade Server you run yourself is an external OpenAI-compatible
+    server: `--external-llm-url URL --external-llm-provider openai-compatible
+    --external-llm-model ID`.
+  - Upgrading: rerun the installer on Linux and with the native Windows
+    installer, or `install.ps1` for the Portal. `ods update` only refreshes
+    images and does not move an install off Lemonade. The installer moves
+    Lemonade-era `.env` settings to llama.cpp before anything reads them. The
+    Portal stages and checks llama.cpp while Lemonade keeps serving, stops
+    only the Lemonade task ODS created, and restores and restarts it if the
+    new runtime does not come up. An install that used its own Lemonade moves
+    to the generic external route and keeps the server's address, its model
+    and an API key you gave it (now in `config/litellm/external-upstream.key`);
+    in a git checkout `ods-update.sh update` does this too. The Lemonade
+    container's volumes and the `ods-lemonade-server:latest` image stay until
+    `ods-uninstall.sh` removes them or you run the `docker volume rm` command
+    the upgrade prints. `ods doctor` reports an `.env` that still selects
+    Lemonade as `ODS-RUNTIME-LEMONADE-RETIRED`.
 - On WSL, the host agent identifies Docker Desktop before choosing its bind
   address. A leftover native `docker0` bridge could have the same gateway IP
   as Docker Desktop and make the agent listen where ODS containers could not
   reach it. Docker Desktop now selects WSL loopback regardless of that stale
   bridge, for GPU and CPU installations alike.
-- The Windows AMD startup task restores and verifies the selected Lemonade
-  model and context at each sign-in, including Lemonade 10.0. A healthy API
-  without a loaded model no longer counts as completed setup. The task keeps
-  its launcher and configuration in the user's ODS directory instead of a
-  temporary installer checkout.
-- Re-running Windows AMD setup stops only the verified ODS task and its
-  process descendants, including cached llama.cpp workers. Other Lemonade
-  instances are preserved. Both the former direct task and the Lemonade
-  10.7 task launcher migrate to the durable launcher.
-- Failed Windows AMD startup cleans up the verified process tree, including
-  workers that outlive their parent. Separate process ownership records allow
-  an interrupted cleanup to resume without treating a failed launch as ready.
-- Portal reads the loaded Windows/WSL Lemonade model from the Linux host
-  agent's verified external-model observation instead of calling the
-  Windows-only model-status endpoint on that Linux agent.
-- The Windows/WSL Dashboard reads Lemonade's measured last-completion speed
-  through the authenticated host agent and owned model-router transport.
-  Repeated samples remain the last measurement rather than becoming live
-  throughput or accumulating into an invented token total.
-- Models describes externally managed Lemonade model changes without
-  incorrectly reporting that the local runtime is unavailable. Adoption
-  remains available; model activation still follows the runtime's capabilities.
-- The Windows/WSL hardware scan no longer claims CPU inference immediately
-  after identifying the Windows GPU used by Lemonade. Linux services retain
-  their detected backend.
 - An explicit `--hermes` or `--no-hermes` now takes precedence in the Custom
   feature menu as well as presets. The Windows Pixel path no longer asks to
   enable an agent that its command line explicitly disabled.
@@ -349,16 +417,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `ods-llama-sycl:local`, and b9014 has not been compiled on its oneAPI
     2025.0.0 base. Only its source defaults changed (tag `b9014`, pinned
     commit).
-  - Native Windows: re-running the installer keeps an existing
-    `llama-server.exe`, so installs from before this change stay on b8248.
-    To move to b9014, delete `<install>\llama-server` and re-run the
-    installer. Every Windows launch path now reads the installed binary's
-    `--help`: on b9014 it passes `LLAMA_REASONING` as `--reasoning` (b9014
-    defaults it to `auto`, and `--reasoning-format none` alone returns the
-    reasoning inside the reply); on b8248 it keeps `--reasoning-format` and,
-    for `off`, adds `--reasoning-budget 0`, which is what turns thinking off
-    there. Before this change, b8248 installs returned Qwen3.5's reasoning
-    inside every reply.
+  - Native Windows: an installer rerun on an AMD GPU replaces an older
+    `llama-server.exe` that does not match the pinned b9014 build (see "AMD
+    GPUs now run on llama.cpp"). Every Windows launch path now reads the
+    installed binary's `--help`: on b9014 it passes `LLAMA_REASONING` as
+    `--reasoning` (b9014 defaults it to `auto`, and `--reasoning-format none`
+    alone returns the reasoning inside the reply); on b8248 it keeps
+    `--reasoning-format` and, for `off`, adds `--reasoning-budget 0`, which is
+    what turns thinking off there. Before this change, b8248 installs returned
+    Qwen3.5's reasoning inside every reply.
 - Model selection ranks installable models by a curated priority per memory
   class and checks fit with a memory estimate built from each model's
   attention layout, instead of picking the largest file that fits. Fleet
@@ -392,9 +459,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   runtime profile sets its own `LLAMA_ARG_SPEC_TYPE`. On an RTX 5090 with
   Qwen3.5-27B, a copy-heavy edit fell from 89.5 s to 13.3 s and a whole-file
   rewrite from 70.1 s to 15.6 s. Novel generation and prefill did not change.
-  Set `LLAMA_SPEC_TYPE=none` in `.env` to turn it off. Lemonade, Intel/Arc,
-  Apple Docker and native Windows runtimes are unchanged; native macOS is
-  covered below.
+  Set `LLAMA_SPEC_TYPE=none` in `.env` to turn it off. The AMD, Intel/Arc,
+  Apple Docker and native Windows runtimes get no such default; native macOS
+  is covered below.
 - Native macOS installs llama.cpp b9014 (Metal, `llama-b9014-bin-macos-arm64.tar.gz`,
   SHA-256 `565aecda…4f22d`) instead of b8210, the same release as the Linux
   images. b8210 turns speculative decoding off for hybrid models such as
@@ -459,6 +526,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a value saved by an earlier version disappears from `settings.json` on the
   next save. `session-manager.sh` still runs on whatever timer or cron job
   you give it.
+- Lemonade Server support is removed; AMD GPUs run on llama.cpp (see Changed
+  and [AMD GPUs now run on llama.cpp](docs/MIGRATION-LEMONADE-TO-LLAMACPP.md)).
+  - Linux: the locally built `ods-lemonade-server` image
+    (`extensions/services/llama-server/Dockerfile.amd`,
+    `lemonade-entrypoint.sh`), the external-Lemonade overlay
+    `docker-compose.lemonade-external.yml`,
+    `scripts/select-external-lemonade-model.py` and the Lemonade LiteLLM
+    configs (`config/litellm/lemonade.yaml`,
+    `config/litellm/strix-halo-config.yaml`) are removed. Upgrades delete the
+    copies you never edited, including an unchanged rendered `lemonade.yaml`,
+    and name the edited ones they keep (an edited `lemonade.yaml` in the
+    install log).
+  - Windows: after `llama-server.exe` has proven its model, setup retires the
+    tasks ODS ran Lemonade with (the Portal's `ODSLemonadeRuntime-<SID>`, this
+    user's legacy `ODSLemonadeRuntime` and the native installer's
+    `ODSLemonadeRuntime`, in their direct, 10.7 wrapper and durable launcher
+    forms) and the launcher files ODS wrote, keeps logs, and shows a one-time
+    notice. When ODS installed Lemonade Server itself, the notice says so;
+    uninstall it from Settings > Apps if you do not use it. ODS never runs the
+    Lemonade installer, never touches Lemonade's folders, cache, settings or
+    registry, never changes a task it did not write, and never stops a
+    Lemonade it cannot prove it started. A task that changed or restarted
+    after ODS stopped it stays registered, and setup says so.
+  - The `lemonade` mode, the `--use-existing-lemonade` and `--lemonade-*`
+    installer options and the Lemonade-era `.env` keys (`LEMONADE_*`,
+    `LITELLM_LEMONADE_API_KEY`, `LLAMA_CPP_REF`, `AMDGPU_TARGET`, `HSA_XNACK`)
+    are retired. For one release the options still parse and map to
+    `--external-llm-*` or `--native-llm-*` with a notice, `ODS_MODE=lemonade`
+    reads as `local`, and the keys keep validating. Upgrades rewrite or remove
+    them; the Dashboard settings page lists a retired key only when it is
+    present, and clearing one removes it.
+  - **Adopt loaded model** is removed. The Dashboard API's
+    `/api/models/external-observation` and `/api/models/external-adopt` and
+    the host agent's `/v1/model/external-observation`,
+    `/v1/model/external-adopt` and `/v1/runtime/lemonade/ensure` answer 410
+    (`external_lemonade_removed`) for one release.
+  - MTP memory fits measured through the Lemonade launch stay recorded but no
+    longer qualify a model-store activation; `scripts/qualify-mtp.py` has no
+    Lemonade launch mode.
+  - The external-Lemonade fleet test (`tests/fleet-external-lemonade-e2e.sh`)
+    is removed with the route it exercised. A hosted AMD CPU smoke
+    (`.github/workflows/amd-cpu-smoke.yml`) renders the AMD stacks and serves
+    a tiny model on the pinned Vulkan image.
+- The AMD GAIA library recipe is removed. GAIA's local models need Lemonade
+  Server, which ODS no longer runs, so the Extensions page no longer offers
+  GAIA.
+  - An installed GAIA keeps running until you disable it. ODS no longer
+    updates it, and once you stop or disable it the Dashboard cannot start it
+    again. Upgraded installs are the exception while they keep the old recipe
+    in `data/extensions-library/gaia`, which installer reruns never delete.
+    The Extensions page does not list that copy, but a direct
+    `POST /api/extensions/gaia/install` still installs GAIA from it.
+  - To remove GAIA, disable it on the Extensions page, choose Purge Data if
+    you no longer need `data/gaia`, then choose Remove. On Linux,
+    `ods disable gaia` and `ods purge gaia` do the first two steps, and
+    `ods purge` also deletes files the GAIA container owns. Purge before you
+    remove it: afterwards ODS no longer knows `gaia`, and `data/gaia` has to
+    be deleted by hand.
+  - An `.env` that still sets the `GAIA_*` keys keeps validating. The
+    Dashboard settings page lists them only when they are present, and
+    clearing one removes it.
 
 ### Fixed
 - A long chat message with many unclosed quotes and backslashes no longer
@@ -476,6 +604,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refused. Changing one of these folders needs
   `python3 scripts/pin-builtin-build-contexts.py --write`, and CI fails
   until it is run.
+- APE or Token Spy enabled after install on Linux with rootful Docker now
+  gets its state folder owned by the container's user before the first start,
+  as the installer already does for services enabled at install. APE
+  restarted in a loop with "Permission denied: '/data/ape/state.json'".
+  An APE container that is already restarting must be stopped (disable it)
+  before enabling it again.
+- An installer rerun or upgrade no longer stops at once with "Voice, RAG
+  documents, and ODS proxy currently require Open WebUI" when voice or RAG
+  services were added from Extensions while Open WebUI was off, as on a
+  Portal chat install. It keeps that selection and says so; ODS Talk uses
+  voice without Open WebUI. A new installation, and the ODS proxy, still
+  require Open WebUI.
 - On Windows, when a native Windows program already listens on port 9000, an
   install without voice now gives Whisper (STT) a free host port (9100, then
   9001), so Whisper added later from the Extensions Library starts. The

@@ -20,6 +20,13 @@ VOLUME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 CONTAINER_RE = re.compile(r"[a-f0-9]{64}\Z")
 PROJECT_LABEL = "com.docker.compose.project"
 VOLUME_LABEL = "com.docker.compose.volume"
+# Volumes the AMD overlay declared for the retired Lemonade runtime. No current
+# recipe declares them, so after the llama.cpp upgrade no container mounts
+# them. The Lemonade migration records them in this installation's data
+# directory; that record, the project label and the project-prefixed name
+# stand in for the container mount that proves the other volumes.
+RETIRED_VOLUME_KEYS = frozenset({"lemonade-cache", "lemonade-llama", "lemonade-recipe"})
+RETIRED_VOLUME_RECORD = "data/lemonade-retired-volumes.json"
 
 
 def docker(root: Path, *args: str) -> str:
@@ -139,6 +146,25 @@ def disabled_volume_provenance(root: Path, trusted_root: Path) -> dict[str, set[
 
 def disabled_volume_keys(root: Path, trusted_root: Path) -> set[str]:
     return set(disabled_volume_provenance(root, trusted_root))
+
+
+def retired_volume_keys(root: Path) -> set[str]:
+    """Retired Lemonade volume keys this installation's migration recorded."""
+    path = root / RETIRED_VOLUME_RECORD
+    if not os.path.lexists(path):
+        return set()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{RETIRED_VOLUME_RECORD} is not a regular file")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    keys = record.get("volumeKeys") if isinstance(record, dict) else None
+    if (not isinstance(record, dict) or record.get("schemaVersion") != 1 or
+            record.get("installDir") != str(root) or not isinstance(keys, list) or
+            any(not isinstance(key, str) or key not in RETIRED_VOLUME_KEYS for key in keys)):
+        raise ValueError(
+            f"{RETIRED_VOLUME_RECORD} does not belong to this installation; remove the "
+            "retired Lemonade volumes yourself with 'docker volume rm', or rerun with --keep-data"
+        )
+    return set(keys)
 
 
 def project_containers(
@@ -355,6 +381,10 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
     owned = {}
     anonymous = {}
     trusted_used = set()
+    # Read only when a retired volume exists: without one the record is moot.
+    retired = retired_volume_keys(root) if any(
+        row["Labels"][VOLUME_LABEL] in RETIRED_VOLUME_KEYS for row in volumes.values()
+    ) else set()
     for name, row in volumes.items():
         key = row["Labels"][VOLUME_LABEL]
         if name in external:
@@ -377,10 +407,17 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
             name == f"{project}_{key}" and
             bool(mount_provenance.get(name, set()) & disabled[key])
         )
-        if name in selected or disabled_owned:
+        retired_owned = key in retired and name == f"{project}_{key}"
+        if name in selected or disabled_owned or retired_owned:
             owned[name] = fingerprint(row)
-            if name not in selected:
+            if name not in selected and disabled_owned:
                 trusted_used.add(key)
+        elif key in RETIRED_VOLUME_KEYS and name == f"{project}_{key}":
+            raise ValueError(
+                f"Volume {name} is a retired Lemonade volume this installation did not record; "
+                "purge refused. Remove it yourself with 'docker volume rm' if it is yours, "
+                "or rerun with --keep-data"
+            )
         else:
             raise ValueError(f"Volume {name} is not linked to this installation; purge refused")
     other_mounts = mounted - set(volumes) - set(external)

@@ -16,19 +16,24 @@
 #   Add new container images or change image tags here.
 # ============================================================================
 
+# Isolated phase reuse (tests) gets the route predicate installers/lib/
+# native-llm.sh gives install-core: a host-native llama-server is in use.
+declare -F ods_native_llm_requested >/dev/null 2>&1 \
+    || ods_native_llm_requested() { [[ -n "${NATIVE_LLM_BASE_URL:-}" ]]; }
+
 ods_progress 48 "images" "Downloading container images"
-if [[ "${DRY_RUN:-false}" != true ]] && ods_external_lemonade_requested; then
+if [[ "${DRY_RUN:-false}" != true ]] && ods_native_llm_requested; then
     [[ -n "${COMPOSE_FLAGS:-}" ]] || {
-        ai_bad "External Lemonade Compose selection is unavailable before image pulls."
+        ai_bad "Host-native llama-server Compose selection is unavailable before image pulls."
         exit 1
     }
-    read -ra _external_lemonade_compose_flags <<< "$COMPOSE_FLAGS"
-    if ! ods_external_lemonade_assert_no_managed_llama_before_pixel_identity "${_external_lemonade_compose_flags[@]}" \
+    read -ra _host_native_compose_flags <<< "$COMPOSE_FLAGS"
+    if ! ods_host_native_assert_no_managed_llama_before_pixel_identity "${_host_native_compose_flags[@]}" \
         2>>"$LOG_FILE"; then
-        ai_bad "External Lemonade Compose validation failed before image pulls; inspect $LOG_FILE."
+        ai_bad "Host-native llama-server Compose validation failed before image pulls; inspect $LOG_FILE."
         exit 1
     fi
-    unset _external_lemonade_compose_flags
+    unset _host_native_compose_flags
 fi
 if [[ "${ODS_GATEWAY_ONLY:-false}" == true && "${DRY_RUN:-false}" != true ]]; then
     # Compose merges profile lists from overlays. A caller's inherited
@@ -68,23 +73,19 @@ fi
 # Build image list with cinematic labels
 # Format: "image|friendly_name"
 PULL_LIST=()
-case "${LEMONADE_EXTERNAL:-false}" in
-    true|TRUE|1|yes|YES|on|ON) _lemonade_external=true ;;
-    *) _lemonade_external=false ;;
-esac
-_lemonade_runtime="${AMD_INFERENCE_RUNTIME:-}"
-_lemonade_managed="${AMD_INFERENCE_MANAGED:-}"
-if [[ "${_lemonade_runtime,,}" == lemonade \
-   && "${_lemonade_managed,,}" == false ]]; then
-    _lemonade_external=true
-fi
-if [[ "${ODS_MODE:-local}" != "cloud" && "$_lemonade_external" != "true" && -z "${EXTERNAL_LLM_URL:-}" ]]; then
-    # Cloud and external routes do not run ODS-managed inference. In WSL the
-    # Linux capability probe can report CPU while Windows owns the model, so
-    # selecting this image from GPU_BACKEND alone wastes time and disk.
+if [[ "${ODS_MODE:-local}" != "cloud" && -z "${EXTERNAL_LLM_URL:-}" ]] && ! ods_native_llm_requested; then
+    # Cloud, external and host-native routes do not run in-stack inference.
+    # In WSL the Linux capability probe can report CPU while Windows owns the
+    # model, so selecting this image from GPU_BACKEND alone wastes time and
+    # disk.
     if [[ "$GPU_BACKEND" == "amd" ]]; then
-        _lemonade_image="${LEMONADE_SERVER_IMAGE:-${BACKEND_LEMONADE_CONTAINER_IMAGE:-ghcr.io/lemonade-sdk/lemonade-server:v10.2.0@sha256:08edbf1128a7fd82b39f1de72c2f70c013f2ecfefac6a99c52bcf58eba532a3a}}"
-        PULL_LIST+=("${_lemonade_image}|LEMONADE — downloading the brain (AMD ROCm)")
+        # The AMD overlays pin their images and ignore LLAMA_SERVER_IMAGE,
+        # which a model profile can set to another backend's image.
+        if [[ "${AMD_INFERENCE_BACKEND:-vulkan}" == "rocm" ]]; then
+            PULL_LIST+=("ghcr.io/ggml-org/llama.cpp:server-rocm-b9014@sha256:68403f82fe496302bb1c681bab2ee569a04cc13da8fcf14456376b485562236d|LLAMA-SERVER — downloading the brain (AMD ROCm, about 7 GB)")
+        else
+            PULL_LIST+=("ghcr.io/ggml-org/llama.cpp:server-vulkan-b9014@sha256:15c30b560d61ead1e08bee837503203a776fd968736118e313240c32157fd973|LLAMA-SERVER — downloading the brain (AMD Vulkan)")
+        fi
     elif [[ "$GPU_BACKEND" == "intel" ]]; then
         PULL_LIST+=("${LLAMA_SERVER_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-intel-b9014@sha256:9c7bbaad3663523a3deb8927d3cfbf58d33f00a7634c69843e9eeeda01568c1b}|LLAMA-SERVER — downloading the brain (Intel)")
     elif [[ "$GPU_BACKEND" == "sycl" ]]; then
@@ -146,6 +147,22 @@ fi
 if $DRY_RUN; then
     ai "[DRY RUN] I would download ${#PULL_LIST[@]} modules."
 else
+    if [[ "${ODS_MODE:-local}" != "cloud" && "$GPU_BACKEND" == "amd" ]]; then
+        # Check the pinned AMD image before downloading. There is no fallback:
+        # the AMD overlays run only their own pinned image.
+        for _entry in "${PULL_LIST[@]}"; do
+            [[ "${_entry##*|}" == LLAMA-SERVER* ]] || continue
+            ai "Validating llama-server image tag before download..."
+            if docker_image_available "${_entry%%|*}"; then
+                ai_ok "llama-server image available: ${_entry%%|*}"
+            else
+                ai_bad "llama-server image is unavailable: ${_entry%%|*}"
+                ai "Docker cannot resolve the pinned AMD llama.cpp image. Check registry access and the Docker daemon network."
+                exit 1
+            fi
+        done
+        unset _entry
+    fi
     if [[ "${ODS_MODE:-local}" != "cloud" && ( "$GPU_BACKEND" == "nvidia" || "$GPU_BACKEND" == "cpu" || "$GPU_BACKEND" == "intel" || "$GPU_BACKEND" == "sycl" ) ]]; then
         _llama_image=""
         _llama_label=""

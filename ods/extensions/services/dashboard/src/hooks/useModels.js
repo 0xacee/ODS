@@ -85,8 +85,8 @@ const MODEL_RUNTIME_TIMEOUT_MS = 1225000
 // Activation allows 2700s plus 120s of download-busy retry grace.
 // Keep the UI lock until that budget and a small response margin have elapsed.
 const MODEL_ACTIVATION_TIMEOUT_MS = 2825000
-const ODS_MODES = new Set(['local', 'cloud', 'hybrid', 'lemonade'])
-const LOCAL_MODEL_MODES = new Set(['local', 'hybrid', 'lemonade'])
+const ODS_MODES = new Set(['local', 'cloud', 'hybrid'])
+const LOCAL_MODEL_MODES = new Set(['local', 'hybrid'])
 
 // Named exports for dev-only mocking (explicit opt-in via VITE_USE_MOCK_DATA)
 export { getMockModels, MOCK_MODES }
@@ -187,13 +187,15 @@ function normalizeModelManagement(value) {
   }
 }
 
-function modelActivationModeError(effectiveMode, configuredMode, llmBackend, externalLemonade, management) {
+function modelActivationModeError(effectiveMode, configuredMode, llmBackend, hostRuntime, management) {
   if (llmBackend === 'external') {
     return 'This install routes to a model service outside ODS. Downloading a model here does not switch the active model; reconnect ODS to its supported runtime integration to manage model changes.'
   }
-  if (externalLemonade && !(management?.managed && management.canActivate)) {
+  // A model on the Windows host changes only through the host agent, and
+  // only when it proved the server is the one ODS runs for this install.
+  if (hostRuntime && !(management?.managed && management.canActivate)) {
     return management?.managed === false
-      ? 'Change the loaded model in Lemonade, then use Adopt loaded model here to update ODS and Portal.'
+      ? 'The model server on this computer is not managed by this ODS installation. Change the model in that server, or rerun the ODS installer to manage it here.'
       : management?.reason || 'Model management is temporarily unavailable. Refresh the runtime status.'
   }
   if (effectiveMode === 'unknown' || configuredMode === 'unknown') {
@@ -235,7 +237,7 @@ export function useModels({observe=true} = {}) {
   const [odsMode, setOdsMode] = useState(USE_MOCK_DATA ? MOCK_MODES.odsMode : 'unknown')
   const [configuredMode, setConfiguredMode] = useState(USE_MOCK_DATA ? MOCK_MODES.configuredMode : 'unknown')
   const [llmBackend, setLlmBackend] = useState(USE_MOCK_DATA ? 'llama-server' : 'unknown')
-  const [externalLemonade, setExternalLemonade] = useState(false)
+  const [hostRuntime, setHostRuntime] = useState(false)
   const [modelManagement, setModelManagement] = useState(() => normalizeModelManagement(null))
   const [runtimeActionLoading, setRuntimeActionLoading] = useState(null)
   const [recommendationAlternatives, setRecommendationAlternatives] = useState([])
@@ -334,7 +336,7 @@ export function useModels({observe=true} = {}) {
       setOdsMode(effectiveMode)
       setConfiguredMode(normalizeOdsMode(data.configuredMode ?? data.odsMode))
       setLlmBackend(typeof data.llmBackend === 'string' ? data.llmBackend.trim().toLowerCase() : 'unknown')
-      setExternalLemonade(data.externalLemonade === true)
+      setHostRuntime(data.hostRuntime === true)
       setModelManagement(normalizeModelManagement(data.modelManagement))
       setRecommendationAlternatives(data.recommendationAlternatives ?? [])
       setHermesMinimumContext(Number(data.hermesMinimumContext || DEFAULT_HERMES_MIN_CONTEXT))
@@ -414,7 +416,7 @@ export function useModels({observe=true} = {}) {
   }
 
   const loadModel = async (modelId, options = {}) => {
-    const modeError = modelActivationModeError(odsMode, configuredMode, llmBackend, externalLemonade, modelManagement)
+    const modeError = modelActivationModeError(odsMode, configuredMode, llmBackend, hostRuntime, modelManagement)
     if (modeError) {
       setMutationError(modeError)
       return
@@ -635,7 +637,7 @@ export function useModels({observe=true} = {}) {
     ].filter(Boolean)),
   ]
   const error = mutationError || fetchError
-  const activationModeError = modelActivationModeError(odsMode, configuredMode, llmBackend, externalLemonade, modelManagement)
+  const activationModeError = modelActivationModeError(odsMode, configuredMode, llmBackend, hostRuntime, modelManagement)
 
   return {
     models,
@@ -648,7 +650,7 @@ export function useModels({observe=true} = {}) {
     odsMode,
     configuredMode,
     llmBackend,
-    externalLemonade,
+    hostRuntime,
     modelManagement,
     runtimeActionLoading,
     stopRuntime: () => changeRuntime('stop'),

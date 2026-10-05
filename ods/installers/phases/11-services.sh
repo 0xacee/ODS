@@ -462,13 +462,10 @@ else
         echo "$default"
     }
 
-    _phase11_external_lemonade() {
-        local external managed mode
-        external="${LEMONADE_EXTERNAL:-$(_phase11_env_get LEMONADE_EXTERNAL false)}"
-        managed="${AMD_INFERENCE_MANAGED:-$(_phase11_env_get AMD_INFERENCE_MANAGED "")}"
-        mode="${ODS_MODE:-$(_phase11_env_get ODS_MODE local)}"
-        case "${external,,}" in true|1|yes|on) return 0 ;; esac
-        [[ "${mode,,}" == "lemonade" && "${managed,,}" == "false" ]]
+    # A host-native llama-server (the Windows Portal's llama-server.exe) serves
+    # the model from outside this stack.
+    _phase11_host_native_llm() {
+        [[ -n "${NATIVE_LLM_BASE_URL:-$(_phase11_env_get NATIVE_LLM_BASE_URL "")}" ]]
     }
 
     _phase11_external_llm() {
@@ -509,10 +506,10 @@ else
         fi
 
         _phase11_env_set GPU_BACKEND "cpu"
-        if _phase11_external_lemonade; then
+        if _phase11_host_native_llm; then
             # The Linux container cannot use the GPU, but the selected model
             # is served by Windows. Keep its persisted route and model values.
-            ai_ok "Retained external Lemonade inference during CPU device fallback"
+            ai_ok "Retained the host-native llama-server route during CPU device fallback"
             return 0
         fi
 
@@ -613,30 +610,26 @@ else
             "ods-host-agent"
     }
 
-    _phase11_allow_external_lemonade_firewall() {
-        _phase11_external_lemonade || return 0
+    # LiteLLM and model-router reach the host-native llama-server through the
+    # Docker host gateway; with default-DROP UFW/firewalld that needs a rule
+    # scoped to the Docker subnet, as for the host agent.
+    _phase11_allow_host_native_llm_firewall() {
+        _phase11_host_native_llm || return 0
 
         local network_name="${1:-ods-network}"
-        local port base without_scheme host_port
+        local port base
         port="${AMD_INFERENCE_PORT:-$(_phase11_env_get AMD_INFERENCE_PORT "")}"
-        base="${LEMONADE_BASE_URL:-$(_phase11_env_get LEMONADE_BASE_URL "http://localhost:13305")}"
-        base="${base%/}"
         if [[ -z "$port" ]]; then
-            without_scheme="${base#*://}"
-            host_port="${without_scheme%%/*}"
-            if [[ "$host_port" == *:* ]]; then
-                port="${host_port##*:}"
-            else
-                port="13305"
-            fi
+            base="${NATIVE_LLM_BASE_URL:-$(_phase11_env_get NATIVE_LLM_BASE_URL "")}"
+            port="$(ods_native_llm_origin_port "$base")" || return 0
         fi
 
         _phase11_allow_container_host_firewall \
             "$network_name" \
             "$port" \
-            "ods-external-lemonade" \
+            "ods-native-llm" \
             "" \
-            "external Lemonade"
+            "host-native llama-server"
     }
 
     _phase11_allow_external_llm_firewall() {
@@ -673,16 +666,17 @@ else
         _phase11_apply_cpu_fallback "$_amd_missing_devices"
     fi
 
-    # An owned Windows Lemonade task serves its private Windows model store.
-    # Register that read-only API mount before resolving the Compose overlays.
-    if [[ "${LEMONADE_HOST_TRANSPORT:-$(_phase11_env_get LEMONADE_HOST_TRANSPORT direct)}" == "model-router" ]]; then
+    # An owned Windows llama-server task serves its private Windows model
+    # store. Register that read-only API mount before resolving the Compose
+    # overlays.
+    if [[ "${ODS_HOST_LLM_TRANSPORT:-$(_phase11_env_get ODS_HOST_LLM_TRANSPORT direct)}" == "model-router" ]]; then
         _wsl_store_python="${ODS_PYTHON_CMD:-}"
         if [[ -z "$_wsl_store_python" ]]; then
             _wsl_store_python="$(command -v python3 || command -v python)"
         fi
         if ! "$_wsl_store_python" "$INSTALL_DIR/scripts/configure-wsl-model-store.py" \
             --install-dir "$INSTALL_DIR" >> "$LOG_FILE" 2>&1; then
-            error "The registered Windows Lemonade runtime could not be verified; stopping before service configuration."
+            error "The registered Windows llama-server runtime could not be verified; stopping before service configuration."
             return 1
         fi
     fi
@@ -853,7 +847,7 @@ else
         return 1
     }
 
-    # Cloud/external Lemonade modes skip ODS-managed GGUF downloads and
+    # Cloud and host-native modes skip ODS-managed GGUF downloads and
     # auto-enable LiteLLM because it is the routing surface for both paths.
     if [[ "${ODS_MODE:-local}" == "cloud" ]]; then
         ai "Cloud mode — skipping model download"
@@ -864,13 +858,13 @@ else
             mv "$litellm_disabled" "$litellm_cf"
             ai_ok "Auto-enabled litellm for cloud mode"
         fi
-    elif _phase11_external_lemonade; then
-        ai "Existing Lemonade mode - skipping ODS-managed GGUF download"
+    elif _phase11_host_native_llm; then
+        ai "Host-native llama-server - the model is on Windows; skipping the GGUF download here"
         litellm_cf="$INSTALL_DIR/extensions/services/litellm/compose.yaml"
         litellm_disabled="${litellm_cf}.disabled"
         if [[ -f "$litellm_disabled" && ! -f "$litellm_cf" ]]; then
             mv "$litellm_disabled" "$litellm_cf"
-            ai_ok "Auto-enabled litellm for external Lemonade mode"
+            ai_ok "Auto-enabled litellm for the host-native llama-server"
         fi
     elif _phase11_external_llm; then
         ai "External ${EXTERNAL_LLM_PROVIDER:-LLM} mode - skipping ODS-managed GGUF download"
@@ -884,7 +878,8 @@ else
     # immediately. The full model downloads in the background and hot-swaps.
     [[ -f "$SCRIPT_DIR/installers/lib/bootstrap-model.sh" ]] && . "$SCRIPT_DIR/installers/lib/bootstrap-model.sh"
     _BOOTSTRAP_ACTIVE=false
-    if ! _phase11_external_llm && type bootstrap_needed &>/dev/null && bootstrap_needed; then
+    if ! _phase11_external_llm && ! _phase11_host_native_llm \
+        && type bootstrap_needed &>/dev/null && bootstrap_needed; then
         _BOOTSTRAP_ACTIVE=true
         # Save full model config for the background upgrade
         FULL_GGUF_FILE="$GGUF_FILE"
@@ -908,7 +903,7 @@ else
     ods_progress 76 "services" "Checking AI model"
     GGUF_DIR="$INSTALL_DIR/data/models"
     if [[ "${ODS_MODE:-local}" != "cloud" && -n "$GGUF_URL" ]] \
-        && ! _phase11_external_lemonade \
+        && ! _phase11_host_native_llm \
         && ! _phase11_external_llm; then
         # Check if model exists and verify integrity
         if [[ -f "$GGUF_DIR/$GGUF_FILE" ]]; then
@@ -1047,7 +1042,7 @@ else
 
         # Abort if model download/verification failed
         if [[ "${ODS_MODE:-local}" != "cloud" && -n "$GGUF_URL" && ! -f "$GGUF_DIR/$GGUF_FILE" ]] \
-            && ! _phase11_external_lemonade \
+            && ! _phase11_host_native_llm \
             && ! _phase11_external_llm; then
             ai_bad "Model file missing or verification failed. Cannot proceed without a valid model."
             ai "Re-run the installer to retry the download."
@@ -1155,7 +1150,7 @@ else
 
     # Generate models.ini for llama-server (skip in cloud mode)
     if [[ "${ODS_MODE:-local}" != "cloud" ]] \
-        && ! _phase11_external_lemonade \
+        && ! _phase11_host_native_llm \
         && ! _phase11_external_llm; then
         mkdir -p "$INSTALL_DIR/config/llama-server"
         cat > "$INSTALL_DIR/config/llama-server/models.ini" << MODELS_INI_EOF
@@ -1229,9 +1224,8 @@ MODELS_INI_EOF
         # Two values vary per platform / backend and the template ships
         # placeholders for both:
         #   model.default — Hermes asks the LLM server for this exact name.
-        #                   llama.cpp serves under "<file>.gguf"; Lemonade
-        #                   (AMD) wraps it as "extra.<file>.gguf". Asking
-        #                   for the wrong name 404s every chat completion.
+        #                   llama.cpp serves under "<file>.gguf" (its
+        #                   --alias) on every GPU.
         #   model.base_url — llama-server's URL. The compose bridge name
         #                   "llama-server:8080" works for the Linux installs,
         #                   but on macOS llama-server runs native on the
@@ -1243,8 +1237,8 @@ MODELS_INI_EOF
         _python_cmd="$(ods_detect_python_cmd 2>/dev/null || command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
         _hermes_tpl="$INSTALL_DIR/extensions/services/hermes/cli-config.yaml.template"
         if [[ -f "$_hermes_tpl" ]]; then
-            # Model name: cloud mode uses the routed model id; Lemonade
-            # prefixes GGUF files with "extra."; llama.cpp uses the file name.
+            # Model name: cloud mode uses the routed model id; llama.cpp
+            # serves the GGUF file name.
             _hermes_switchboard_mode="$(printf '%s' "${ODS_MODEL_SWITCHBOARD:-enabled}" | tr '[:upper:]' '[:lower:]')"
             if [[ "$_hermes_switchboard_mode" == "enabled" ]]; then
                 _hermes_model="ods/current"
@@ -1252,18 +1246,13 @@ MODELS_INI_EOF
                 _hermes_model="${LLM_MODEL:-default}"
             elif _phase11_external_llm; then
                 _hermes_model="${EXTERNAL_LLM_MODEL:-$(_phase11_env_get EXTERNAL_LLM_MODEL "${LLM_MODEL:-default}")}"
-            elif _phase11_external_lemonade; then
-                _hermes_model="${LEMONADE_MODEL:-$(_phase11_env_get LEMONADE_MODEL "${LLM_MODEL:-default}")}"
             else
                 _hermes_model="$GGUF_FILE"
             fi
-            if [[ "${GPU_BACKEND:-}" == "amd" && "${ODS_MODE:-local}" != "cloud" ]] && ! _phase11_external_lemonade; then
-                _hermes_model="extra.$GGUF_FILE"
-            fi
             # Local switchboard mode routes Hermes through model-router so a
             # disconnected Talk request cancels the backend operation instead
-            # of leaving LiteLLM retries alive. Cloud/external and legacy AMD
-            # modes retain their authenticated/normalised LiteLLM paths.
+            # of leaving LiteLLM retries alive. Cloud, external and host-native
+            # routes use the authenticated LiteLLM gateway.
             _hermes_base_url=""
             _hermes_api_key=""
             if [[ "$_hermes_switchboard_mode" == "enabled" ]]; then
@@ -1275,7 +1264,7 @@ MODELS_INI_EOF
             elif _phase11_external_llm; then
                 _hermes_base_url="${HERMES_LLM_BASE_URL:-$(_phase11_env_get HERMES_LLM_BASE_URL "")}"
                 _hermes_api_key="${HERMES_LLM_API_KEY:-$(_phase11_env_get HERMES_LLM_API_KEY not-needed)}"
-            elif [[ "${GPU_BACKEND:-}" == "amd" ]] || _phase11_external_lemonade; then
+            elif _phase11_host_native_llm; then
                 _hermes_base_url="http://litellm:4000/v1"
                 _hermes_api_key="${LITELLM_KEY:-}"
             fi
@@ -1283,7 +1272,8 @@ MODELS_INI_EOF
             _hermes_request_timeout=180
             if [[ "$_hermes_switchboard_mode" == "enabled" ]]; then
                 _hermes_request_timeout=900
-            elif [[ "${ODS_MODE:-local}" != "cloud" ]] && { [[ "${GPU_BACKEND:-}" == "amd" ]] || _phase11_external_lemonade; }; then
+            elif [[ "${ODS_MODE:-local}" != "cloud" ]] && { [[ "${GPU_BACKEND:-}" == "amd" ]] || _phase11_host_native_llm; }; then
+                # Large models on AMD APUs take minutes to answer an agent turn.
                 _hermes_request_timeout=900
             elif _phase11_external_llm; then
                 _hermes_request_timeout=900
@@ -1362,9 +1352,9 @@ MODELS_INI_EOF
     fi
     ai_ok "Compose configuration valid"
 
-    if _phase11_external_lemonade &&
-       ! ods_external_lemonade_assert_no_managed_llama "${COMPOSE_FLAGS_ARR[@]}" 2>>"$LOG_FILE"; then
-        ai_bad "External Lemonade Compose could start ODS-managed llama-server; inspect $LOG_FILE and clear COMPOSE_PROFILES."
+    if _phase11_host_native_llm &&
+       ! ods_host_native_assert_no_managed_llama "${COMPOSE_FLAGS_ARR[@]}" 2>>"$LOG_FILE"; then
+        ai_bad "Host-native llama-server Compose could start the in-stack llama-server; inspect $LOG_FILE and clear COMPOSE_PROFILES."
         exit 1
     fi
 
@@ -1420,7 +1410,6 @@ MODELS_INI_EOF
     # installer refuses to launch any potentially stale image.
     _candidate_build_services=(dashboard dashboard-api model-router remote-provider-egress remote-provider-ssh-tunnel ape token-spy privacy-shield brave-search pixel-edge pixel-model-relay pixel-inference langfuse-minio langfuse-minio-init)
     [[ "$ENABLE_COMFYUI" == "true" ]] && _candidate_build_services+=(comfyui)
-    [[ "$GPU_BACKEND" == "amd" ]] && _candidate_build_services+=(llama-server)
     if ! _enabled_compose_services="$($DOCKER_COMPOSE_CMD "${COMPOSE_FLAGS_ARR[@]}" config --services 2>>"$LOG_FILE")"; then
         ai_bad "Could not resolve compose services before local image builds."
         ai "Inspect compose config with: $(_phase11_compose_command_text) config --services"
@@ -1447,8 +1436,7 @@ MODELS_INI_EOF
     # on each retry. --pull never is intentional too: Phase 08 and the preflight
     # below own registry access through pull_with_progress, so compose-up cannot
     # die mid-launch on an unbounded TLS handshake timeout.
-    # Up to 3 attempts with increasing wait between retries — on AMD/Lemonade,
-    # the first boot builds a cached llama-server binary which can take 3-5 min.
+    # Up to 3 attempts with increasing wait between retries.
     if ! _phase11_pre_pull_compose_images; then
         exit 1
     fi
@@ -1534,7 +1522,7 @@ MODELS_INI_EOF
     # traffic. Add a scoped rule only after compose has created ods-network,
     # so we allow the actual Docker subnet instead of a broad RFC1918 range.
     _phase11_allow_host_agent_firewall ods-network
-    _phase11_allow_external_lemonade_firewall ods-network
+    _phase11_allow_host_native_llm_firewall ods-network
     _phase11_allow_external_llm_firewall ods-network
 
     _compose_started_with_delayed_health=false

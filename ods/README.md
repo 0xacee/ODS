@@ -82,17 +82,14 @@ existing binaries. The Custom menu offers the same separate choice.
 
 The installer auto-detects your GPU, picks the right model, generates secure passwords, and starts everything. Open the address it prints when it finishes: **http://localhost:3001** for the ODS Dashboard and Portal, or **http://localhost:3000** for Open WebUI on hosts that use it.
 
-On Linux Docker installs, llama-server is exposed to the host on **http://localhost:11434** (`OLLAMA_PORT`) and runs on `8080` inside Docker. Use `llama-server:8080` only from other containers on the ODS network. macOS native Metal and Windows native/Lemonade paths use **http://localhost:8080** unless overridden.
+On Linux Docker installs, llama-server is exposed to the host on **http://localhost:11434** (`OLLAMA_PORT`) and runs on `8080` inside Docker. Use `llama-server:8080` only from other containers on the ODS network. macOS native Metal and the Windows AMD `llama-server.exe` use **http://localhost:8080** unless overridden; the Windows server requires its API key.
 
-On Linux AMD hosts already running Lemonade SDK, install ODS around it with
-`./install.sh --use-existing-lemonade` so ODS manages the app stack while
-Lemonade keeps owning inference and model storage. The installer auto-detects
-common Lemonade ports and the first served model, then verifies a real completion
-through LiteLLM before declaring success. See
-[docs/LEMONADE-SDK-COMPAT.md](docs/LEMONADE-SDK-COMPAT.md). Existing Lemonade
-mode only reuses Lemonade for LLM inference; Full Stack still enables
-ODS-managed Whisper, Kokoro, and ComfyUI unless you pass `--no-voice` and/or
-`--no-comfyui` or choose alternate ports where supported.
+To use a model server you already run, such as Ollama, LM Studio or Lemonade
+Server, install with `--external-llm-url` and the related options; see
+[Can ODS reuse a model already running in Ollama or LM Studio?](docs/FAQ.md#can-ods-reuse-a-model-already-running-in-ollama-or-lm-studio).
+Installs made with the retired `--use-existing-lemonade` option move to that
+route when the installer runs again; see
+[AMD GPUs now run on llama.cpp](docs/MIGRATION-LEMONADE-TO-LLAMACPP.md).
 
 ### Instant Start (Bootstrap Mode)
 
@@ -241,7 +238,7 @@ The examples below are current catalog-selector outputs for common hardware enve
 
 Unified-memory hosts are routed away from qwen3-coder-next when that model would otherwise be selected, because current repo policy documents correctness issues on those backends. Bootstrap mode uses `qwen3.5-2b` for instant startup; the full model downloads in the background via GGUF from HuggingFace.
 
-**Inference backend:** selected by the platform installer and support matrix. Linux AMD paths use ROCm-capable containers; Windows Strix Halo uses the Windows-specific accelerated path.
+**Inference backend:** llama.cpp's `llama-server`, as on every platform. Linux AMD installs run its Vulkan container image by default (ROCm is optional); Windows AMD installs run `llama-server.exe` (Vulkan) on Windows.
 
 ### NVIDIA (Discrete GPU)
 
@@ -498,7 +495,7 @@ models, lifecycle commands (install, update, backup, uninstall), and an extensio
 
 **Open WebUI shows "Connection error"**
 - llama-server is still loading. On Linux Docker installs, wait for the host health check to pass: `curl localhost:11434/health`
-- On macOS native Metal and Windows native/Lemonade paths, use `curl localhost:8080/health`
+- On macOS native Metal and with the Windows AMD `llama-server.exe`, use `curl localhost:8080/health`
 - From another container on the ODS network, use `http://llama-server:8080/health`
 
 **Port already in use**
@@ -516,9 +513,9 @@ models, lifecycle commands (install, update, backup, uninstall), and an extensio
 
 **AMD Strix Halo: llama-server won't start**
 - Check GGUF model exists: `ls -lh data/models/*.gguf`
-- Watch logs: `docker compose -f docker-compose.base.yml -f docker-compose.amd.yml logs -f llama-server`
-- Verify GPU devices: `ls /dev/kfd /dev/dri/renderD128`
-- Ensure ROCm env: `HSA_OVERRIDE_GFX_VERSION=11.5.1` must be set
+- Watch logs: `ods logs llama-server`
+- Verify the GPU render node: `ls /dev/dri/renderD128`. The ROCm image (`AMD_INFERENCE_BACKEND=rocm`) also needs `/dev/kfd`
+- Leave `HSA_OVERRIDE_GFX_VERSION` unset unless the installer set it: the default Vulkan image ignores it, and the ROCm image is built for Strix Halo (gfx1151)
 
 **AMD: "missing tensor" errors**
 - Use upstream llama.cpp GGUF files (from `unsloth/` on HuggingFace)

@@ -151,12 +151,10 @@ _phase12_curl_bearer() {
     fi
 }
 
-_phase12_external_lemonade() {
-    local external managed mode
-    external="${LEMONADE_EXTERNAL:-$(_phase12_env_get LEMONADE_EXTERNAL false)}"
-    managed="${AMD_INFERENCE_MANAGED:-$(_phase12_env_get AMD_INFERENCE_MANAGED "")}"
-    mode="${ODS_MODE:-$(_phase12_env_get ODS_MODE local)}"
-    [[ "${external,,}" == "true" ]] || [[ "${mode,,}" == "lemonade" && "${managed,,}" == "false" ]]
+# True when the model runs in a host-native llama-server outside the stack
+# (the Windows Portal's llama-server.exe); containers reach it through LiteLLM.
+_phase12_host_native_llm() {
+    [[ -n "${NATIVE_LLM_BASE_URL:-$(_phase12_env_get NATIVE_LLM_BASE_URL "")}" ]]
 }
 
 _phase12_external_llm() {
@@ -180,17 +178,18 @@ _phase12_model_looks_non_chat() {
         || [[ "$model_lc" == *comfy* ]]
 }
 
-_phase12_verify_external_lemonade_completion() {
+_phase12_verify_host_native_llm_completion() {
     local litellm_port="${SERVICE_PORTS[litellm]:-4000}"
     local litellm_key="${LITELLM_KEY:-$(_phase12_env_get LITELLM_KEY "")}"
-    local model="${LEMONADE_MODEL:-$(_phase12_env_get LEMONADE_MODEL default)}"
+    local model="${GGUF_FILE:-$(_phase12_env_get GGUF_FILE default)}"
+    local native_url="${NATIVE_LLM_BASE_URL:-$(_phase12_env_get NATIVE_LLM_BASE_URL "")}"
     [[ -n "$model" ]] || model="default"
     local body response response_file error_file http_status curl_rc curl_error
     body='{"model":"default","messages":[{"role":"user","content":"Reply with exactly OK."}],"max_tokens":16,"temperature":0,"stream":false,"chat_template_kwargs":{"enable_thinking":false}}'
 
-    ai "Verifying external Lemonade completion route through LiteLLM..."
-    response_file="$(mktemp "${TMPDIR:-/tmp}/ods-lemonade-response.XXXXXX")"
-    error_file="$(mktemp "${TMPDIR:-/tmp}/ods-lemonade-error.XXXXXX")"
+    ai "Verifying the host-native llama-server completion route through LiteLLM..."
+    response_file="$(mktemp "${TMPDIR:-/tmp}/ods-native-llm-response.XXXXXX")"
+    error_file="$(mktemp "${TMPDIR:-/tmp}/ods-native-llm-error.XXXXXX")"
     if http_status="$(_phase12_curl_bearer "$litellm_key" -sS --max-time 180 \
         -o "$response_file" \
         -w '%{http_code}' \
@@ -206,21 +205,21 @@ _phase12_verify_external_lemonade_completion() {
     rm -f -- "$response_file" "$error_file"
 
     if (( curl_rc != 0 )); then
-        printf "  ${RED}ERR${NC} External Lemonade completion failed\n"
+        printf "  ${RED}ERR${NC} Host-native llama-server completion failed\n"
         ai_warn "LiteLLM request failed before an HTTP response (curl exit ${curl_rc}, model: ${model})."
-        ai_warn "Check that Lemonade is reachable from Docker containers, is bound to 0.0.0.0 on trusted hosts, and that LEMONADE_MODEL matches /api/v1/models."
-        printf 'External Lemonade curl failure (exit %s):\n%s\n' "$curl_rc" "$curl_error" >> "$LOG_FILE"
+        ai_warn "Check that LiteLLM is running and that llama-server on Windows answers: curl ${native_url:-<NATIVE_LLM_BASE_URL>}/health"
+        printf 'Host-native llama-server curl failure (exit %s):\n%s\n' "$curl_rc" "$curl_error" >> "$LOG_FILE"
         return 1
     fi
 
     case "$http_status" in
         2??) ;;
         *)
-            printf "  ${RED}ERR${NC} External Lemonade completion route returned HTTP %s\n" "$http_status"
-            ai_warn "LiteLLM rejected the external Lemonade completion (HTTP ${http_status}, model: ${model})."
-            ai_warn "Inspect the bounded response recorded in ${LOG_FILE}; restore the active model route, then rerun the installer."
+            printf "  ${RED}ERR${NC} Host-native llama-server completion route returned HTTP %s\n" "$http_status"
+            ai_warn "LiteLLM rejected the host-native llama-server completion (HTTP ${http_status}, model: ${model})."
+            ai_warn "Inspect the bounded response recorded in ${LOG_FILE}; check the llama-server task in the ODS Portal, then rerun setup from the Portal."
             {
-                printf 'External Lemonade completion HTTP %s:\n' "$http_status"
+                printf 'Host-native llama-server completion HTTP %s:\n' "$http_status"
                 printf '%.*s\n' 4096 "$response"
             } >> "$LOG_FILE"
             return 1
@@ -228,22 +227,17 @@ _phase12_verify_external_lemonade_completion() {
     esac
 
     if printf '%s\n' "$response" | grep -Eq '"content"[[:space:]]*:[[:space:]]*"[^"]+'; then
-        printf "  ${BGRN}OK${NC} External Lemonade completion route healthy\n"
+        printf "  ${BGRN}OK${NC} Host-native llama-server completion route healthy\n"
         return 0
     fi
 
-    printf "  ${RED}ERR${NC} External Lemonade returned no assistant content\n"
+    printf "  ${RED}ERR${NC} Host-native llama-server returned no assistant content\n"
     ai_warn "LiteLLM returned HTTP ${http_status} but did not provide non-empty assistant content (model: ${model})."
     if _phase12_model_looks_non_chat "$model"; then
-        ai_warn "The selected Lemonade model looks like an image/non-chat model. ODS needs a text/chat model for the LLM route."
+        ai_warn "The selected model looks like an image/non-chat model. ODS needs a text/chat model for the LLM route."
     fi
-    ai_warn "Run: curl ${LEMONADE_BASE_URL:-$(_phase12_env_get LEMONADE_BASE_URL http://127.0.0.1:13305)}${LEMONADE_API_BASE_PATH:-$(_phase12_env_get LEMONADE_API_BASE_PATH /api/v1)}/models"
-    if [[ -f "${SCRIPT_DIR}/install.sh" ]]; then
-        ai_warn "Then rerun from ${SCRIPT_DIR}: LEMONADE_MODEL=<chat-model-id> ./install.sh --use-existing-lemonade ..."
-    else
-        ai_warn "Then rerun from ${SCRIPT_DIR}: LEMONADE_MODEL=<chat-model-id> bash install-core.sh --use-existing-lemonade ..."
-    fi
-    printf '%s\n' "$response" >> "$LOG_FILE"
+    ai_warn "Check the model loaded by llama-server on Windows: curl ${native_url:-<NATIVE_LLM_BASE_URL>}/health, then rerun setup from the ODS Portal."
+    printf '%.*s\n' 4096 "$response" >> "$LOG_FILE"
     return 1
 }
 
@@ -347,12 +341,12 @@ if _phase12_external_llm; then
     if ! _phase12_verify_external_llm_completion; then
         exit 1
     fi
-elif [[ "${ODS_MODE:-local}" == "cloud" ]] || _phase12_external_lemonade; then
+elif [[ "${ODS_MODE:-local}" == "cloud" ]] || _phase12_host_native_llm; then
     ods_progress 86 "health" "Waiting for LiteLLM gateway"
     _check_health "LiteLLM" "http://127.0.0.1:${SERVICE_PORTS[litellm]:-4000}${SERVICE_HEALTH[litellm]:-/health/readiness}" 60 10 "$(sr_container litellm)"
-    if _phase12_external_lemonade; then
-        ods_progress 87 "health" "Verifying external Lemonade route"
-        if ! _phase12_verify_external_lemonade_completion; then
+    if _phase12_host_native_llm; then
+        ods_progress 87 "health" "Verifying the host-native llama-server route"
+        if ! _phase12_verify_host_native_llm_completion; then
             exit 1
         fi
     fi
@@ -414,17 +408,13 @@ fi
 # cold path inside the installer (where time isn't surprising) so Hermes
 # lands on an already-hot slot. Bounded by curl --max-time so a stalled
 # llama-server doesn't hang phase 12.
-if [[ "${ODS_MODE:-local}" == "cloud" ]] || _phase12_external_lemonade || _phase12_external_llm; then
-    ai "External LLM mode - skipping local llama-server pre-warm"
+if [[ "${ODS_MODE:-local}" == "cloud" ]] || _phase12_host_native_llm || _phase12_external_llm; then
+    ai "The LLM runs outside the stack - skipping local llama-server pre-warm"
 else
     ods_progress 87 "health" "Pre-warming LLM slot"
-    _prewarm_api_path="/v1"
+    # llama-server serves the GGUF file name (--alias) under /v1 on every GPU.
     _prewarm_model="${GGUF_FILE:-${LLM_MODEL:-default}}"
-    if [[ "${GPU_BACKEND:-}" == "amd" ]]; then
-        _prewarm_api_path="/api/v1"
-        [[ -n "${GGUF_FILE:-}" ]] && _prewarm_model="extra.${GGUF_FILE}"
-    fi
-    _prewarm_url="http://127.0.0.1:${SERVICE_PORTS[llama-server]:-8080}${_prewarm_api_path}/chat/completions"
+    _prewarm_url="http://127.0.0.1:${SERVICE_PORTS[llama-server]:-8080}/v1/chat/completions"
     _prewarm_body="{\"model\":\"${_prewarm_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1,\"temperature\":0,\"stream\":false}"
     if curl -sf --max-time 120 -X POST "$_prewarm_url" \
         -H "Content-Type: application/json" \
@@ -479,18 +469,8 @@ if $DOCKER_CMD inspect ods-perplexica &>/dev/null; then
         # selected from the external provider in Perplexica's persisted route.
         PERPLEXICA_MODEL="$EXTERNAL_LLM_MODEL"
     elif [[ -n "${GGUF_FILE:-}" ]]; then
+        # llama-server serves the GGUF file name (--alias) on every runtime.
         PERPLEXICA_MODEL="$GGUF_FILE"
-        # Lemonade serves the model under a separate id. An AMD local install
-        # runs Lemonade while LLM_BACKEND stays "llama-server", so the runtime
-        # and the backend have to be checked independently — same rule as
-        # scripts/bootstrap-upgrade.sh and the container-side
-        # extensions/services/perplexica/sync-model-config.js.
-        _perplexica_runtime="$(printf '%s' "${AMD_INFERENCE_RUNTIME:-}" | tr '[:upper:]' '[:lower:]')"
-        _perplexica_backend="$(printf '%s' "${LLM_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
-        if [[ "$_perplexica_runtime" == "lemonade" || "$_perplexica_backend" == "lemonade" ]]; then
-            PERPLEXICA_MODEL="${LEMONADE_MODEL:-}"
-            [[ -n "$PERPLEXICA_MODEL" ]] || PERPLEXICA_MODEL="extra.$GGUF_FILE"
-        fi
     fi
     PERPLEXICA_LLM_BASE_URL="${LLM_API_URL:-http://llama-server:8080}"
     if [[ "$_perplexica_switchboard_mode" == "enabled" ]]; then

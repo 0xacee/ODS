@@ -26,6 +26,11 @@
 
 # shellcheck source=installers/lib/extensions-library-copy.sh
 source "$SCRIPT_DIR/installers/lib/extensions-library-copy.sh"
+# install-core sources these; isolated phase reuse (tests) may not.
+declare -F ods_native_llm_normalize_origin >/dev/null 2>&1 \
+    || source "$SCRIPT_DIR/installers/lib/native-llm.sh"
+declare -F ods_amd_target_is_cdna >/dev/null 2>&1 \
+    || source "$SCRIPT_DIR/installers/lib/amd-runtime.sh"
 
 ods_progress 38 "directories" "Preparing installation directory"
 chapter "SETTING UP INSTALLATION"
@@ -314,6 +319,39 @@ else
         fi
     }
 
+    _phase06_retire_lemonade_files() {
+        # ODS stopped shipping these with the Lemonade runtime. The source copy
+        # never deletes a file, so an upgraded install still has them. A file
+        # that is byte-identical to a shipped version is not owner data.
+        local manifest="$SCRIPT_DIR/installers/lib/retired-lemonade-files.sha256"
+        local digest relative path kept=""
+        [[ -f "$manifest" ]] || return 0
+        while read -r digest relative; do
+            relative="${relative%$'\r'}"
+            [[ -n "$digest" && "$digest" != \#* && "$relative" != *..* ]] || continue
+            # The rendered LiteLLM map is checked by the helper below.
+            [[ "$relative" != config/litellm/lemonade.yaml ]] || continue
+            path="$INSTALL_DIR/$relative"
+            [[ -f "$path" && ! -L "$path" ]] || continue
+            # An unreadable file has no digest, so it is kept.
+            [[ "$(sha256sum -- "$path" 2>/dev/null | cut -d ' ' -f 1)" == "$digest" ]] || continue
+            rm -f -- "$path" || log "Could not remove the retired Lemonade file $path (non-fatal)"
+        done < "$manifest"
+        for relative in docker-compose.lemonade-external.yml \
+            extensions/services/llama-server/Dockerfile.amd \
+            extensions/services/llama-server/lemonade-entrypoint.sh \
+            scripts/select-external-lemonade-model.py \
+            config/litellm/strix-halo-config.yaml; do
+            [[ ! -e "$INSTALL_DIR/$relative" ]] || kept="${kept:+$kept, }$relative"
+        done
+        [[ -z "$kept" ]] || ai "Kept edited Lemonade-era files: $kept. Nothing uses them now; delete them when you no longer need them."
+        if [[ -f "$INSTALL_DIR/config/litellm/lemonade.yaml" ]]; then
+            "${ODS_PYTHON_CMD:-python3}" "$SCRIPT_DIR/scripts/migrate-lemonade-install.py" retire-render \
+                --install-dir "$INSTALL_DIR" >> "$LOG_FILE" 2>&1 \
+                || log "Could not check config/litellm/lemonade.yaml for retirement (non-fatal; nothing reads it)"
+        fi
+    }
+
     _phase06_prune_retired_services() {
         _phase06_step "prune-retired-services"
         # ODSForge was retired from the shipped stack after Hermes became the
@@ -331,6 +369,7 @@ else
             log "Removed retired OpenClaw service files from extensions/services"
         fi
         _phase06_retire_openclaw_config
+        _phase06_retire_lemonade_files
     }
 
     # A Pixel-to-Hermes rerun must retire the exact ODS-managed host runtime,
@@ -445,7 +484,7 @@ else
         _phase06_prune_retired_services
     fi
     unset _phase06_pixel_marker _phase06_pixel_source_transition _phase06_prune_ready
-    unset -f _phase06_prune_retired_services _phase06_retire_openclaw_config
+    unset -f _phase06_prune_retired_services _phase06_retire_openclaw_config _phase06_retire_lemonade_files
 
     _phase06_rootless=false
     if [[ -f "$SCRIPT_DIR/lib/rootless-ownership.sh" ]]; then
@@ -834,49 +873,6 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         printf '%s\n' "$default"
     }
 
-    _phase06_detect_lemonade_url() {
-        command -v curl >/dev/null 2>&1 || return 1
-        local candidate
-        for candidate in "http://localhost:13305" "http://localhost:8000"; do
-            if curl -fsS --max-time 3 "${candidate}/api/v1/models" >/dev/null 2>&1 || \
-               curl -fsS --max-time 3 "${candidate}/api/v1/health" >/dev/null 2>&1 || \
-               curl -fsS --max-time 3 "${candidate}/health" >/dev/null 2>&1; then
-                printf '%s\n' "$candidate"
-                return 0
-            fi
-        done
-        return 1
-    }
-
-    _phase06_best_model_id_from_json() {
-        local json="$1"
-        local py="${ODS_PYTHON_CMD:-}"
-        if [[ -z "$py" && -f "$SCRIPT_DIR/lib/python-cmd.sh" ]]; then
-            . "$SCRIPT_DIR/lib/python-cmd.sh"
-            py="$(ods_detect_python_cmd 2>/dev/null || true)"
-        fi
-        [[ -n "$py" ]] || py="python3"
-        local selector="$SCRIPT_DIR/scripts/select-external-lemonade-model.py"
-        if command -v "$py" >/dev/null 2>&1 && [[ -f "$selector" ]]; then
-            printf '%s' "$json" | "$py" "$selector" 2>/dev/null && return 0
-        fi
-        # A first-id fallback can silently route Pixel to an embedding, speech,
-        # or tiny catalog entry.  Fail closed and let the explicit override or
-        # phase-12 completion probe provide actionable recovery instead.
-        return 1
-    }
-
-    _phase06_discover_lemonade_model() {
-        local api_base="$1"
-        command -v curl >/dev/null 2>&1 || return 1
-        local models_json model_id
-        models_json="$(curl -fsS --max-time 10 "${api_base%/}/models" 2>/dev/null || true)"
-        [[ -n "$models_json" ]] || return 1
-        model_id="$(_phase06_best_model_id_from_json "$models_json" || true)"
-        [[ -n "$model_id" ]] || return 1
-        printf '%s\n' "$model_id"
-    }
-
     # The local llama-server port may already belong to another owner service
     # (for example a fleet worker). Honor an explicit install override before
     # preserving an older .env value, and reject malformed ports before Compose.
@@ -900,75 +896,40 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     WEBUI_SECRET=$(_phase06_env_hex_secret WEBUI_SECRET 32)
     N8N_PASS=$(_env_get N8N_PASS "$(openssl rand -base64 16 2>/dev/null || head -c 16 /dev/urandom | base64)")
     LITELLM_KEY=$(_phase06_env_hex_secret LITELLM_KEY 16 "sk-ods-")
-    LITELLM_LEMONADE_API_KEY=$(_phase06_env_hex_secret LITELLM_LEMONADE_API_KEY 16 "sk-ods-lemonade-")
-    LEMONADE_EXTERNAL_VALUE="${LEMONADE_EXTERNAL:-false}"
-    [[ "${LEMONADE_EXTERNAL_VALUE,,}" == "true" ]] && LEMONADE_EXTERNAL_VALUE="true" || LEMONADE_EXTERNAL_VALUE="false"
-    LEMONADE_HOST_TRANSPORT="$(_env_get_explicit_first LEMONADE_HOST_TRANSPORT direct)"
     ODS_WINDOWS_SYSTEM_DIRECTORY="$(_env_get_explicit_first ODS_WINDOWS_SYSTEM_DIRECTORY '')"
     ODS_WSL_STATE_ROOT="$(_env_get_explicit_first ODS_WSL_STATE_ROOT '')"
-    case "$LEMONADE_HOST_TRANSPORT" in
-        direct|model-router) ;;
-        *) error "LEMONADE_HOST_TRANSPORT must be direct or model-router"; return 1 ;;
-    esac
-    if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" && -n "${LEMONADE_API_KEY:-}" ]]; then
-        LITELLM_LEMONADE_API_KEY="$LEMONADE_API_KEY"
+    # Host-native llama-server (Windows Portal): the in-stack llama-server is
+    # off, and LiteLLM and model-router reach the native server with
+    # LLAMA_SERVER_API_KEY. install-core.sh validated the flags.
+    NATIVE_LLM_ACTIVE=false
+    NATIVE_LLM_BASE_URL_VALUE=""
+    NATIVE_LLM_CONTAINER_BASE_URL_VALUE=""
+    NATIVE_LLM_PORT_VALUE=""
+    LLAMA_SERVER_API_KEY_VALUE=""
+    ODS_HOST_LLM_TRANSPORT_VALUE=direct
+    if ods_native_llm_requested; then
+        NATIVE_LLM_ACTIVE=true
+        NATIVE_LLM_BASE_URL_VALUE="$(ods_native_llm_normalize_origin "$NATIVE_LLM_BASE_URL")" || {
+            error "NATIVE_LLM_BASE_URL must be an http://host:port origin."
+            return 1
+        }
+        NATIVE_LLM_CONTAINER_BASE_URL_VALUE="$(ods_native_llm_container_origin "$NATIVE_LLM_BASE_URL_VALUE")"
+        NATIVE_LLM_PORT_VALUE="$(ods_native_llm_origin_port "$NATIVE_LLM_BASE_URL_VALUE")"
+        # Windows setup supplies the key on every run; a rerun without it keeps
+        # the saved key, which the Windows runtime still uses.
+        LLAMA_SERVER_API_KEY_VALUE="${LLAMA_SERVER_API_KEY:-$(_env_get LLAMA_SERVER_API_KEY "")}"
+        ODS_HOST_LLM_TRANSPORT_VALUE="$(_env_get_explicit_first ODS_HOST_LLM_TRANSPORT direct)"
+        case "$ODS_HOST_LLM_TRANSPORT_VALUE" in
+            direct|model-router) ;;
+            *) error "ODS_HOST_LLM_TRANSPORT must be direct or model-router"; return 1 ;;
+        esac
     fi
-    LEMONADE_API_BASE_PATH_VALUE="$(_env_get_explicit_first LEMONADE_API_BASE_PATH "/api/v1")"
-    [[ "$LEMONADE_API_BASE_PATH_VALUE" == /* ]] || LEMONADE_API_BASE_PATH_VALUE="/$LEMONADE_API_BASE_PATH_VALUE"
-    LEMONADE_BASE_URL_VALUE=""
-    LEMONADE_CONTAINER_BASE_URL_VALUE=""
-    LEMONADE_PORT_VALUE=""
-    if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then
-        LEMONADE_BASE_URL_VALUE="$(_env_get_explicit_first LEMONADE_BASE_URL "")"
-        if [[ -z "$LEMONADE_BASE_URL_VALUE" ]]; then
-            if LEMONADE_BASE_URL_VALUE="$(_phase06_detect_lemonade_url)"; then
-                ai_ok "Detected existing Lemonade server at ${LEMONADE_BASE_URL_VALUE}"
-            else
-                LEMONADE_BASE_URL_VALUE="http://localhost:13305"
-                warn "Could not auto-detect existing Lemonade; using ${LEMONADE_BASE_URL_VALUE}. Pass --lemonade-url if your server uses another port."
-            fi
-        fi
-        LEMONADE_BASE_URL_VALUE="${LEMONADE_BASE_URL_VALUE%/}"
-        for _lemonade_suffix in "/api/v1" "/v1" "/api"; do
-            if [[ "$LEMONADE_BASE_URL_VALUE" == *"$_lemonade_suffix" ]]; then
-                LEMONADE_BASE_URL_VALUE="${LEMONADE_BASE_URL_VALUE%"$_lemonade_suffix"}"
-            fi
-        done
-        LEMONADE_PORT_VALUE="${AMD_INFERENCE_PORT:-}"
-        if [[ -z "$LEMONADE_PORT_VALUE" ]]; then
-            if [[ "$LEMONADE_BASE_URL_VALUE" =~ ^https?://[^/:]+:([0-9]+)(/|$) ]]; then
-                LEMONADE_PORT_VALUE="${BASH_REMATCH[1]}"
-            else
-                LEMONADE_PORT_VALUE="13305"
-            fi
-        fi
-        LEMONADE_CONTAINER_BASE_URL_VALUE="$(_env_get_explicit_first LEMONADE_CONTAINER_BASE_URL "")"
-        if [[ -z "$LEMONADE_CONTAINER_BASE_URL_VALUE" ]]; then
-            case "$LEMONADE_BASE_URL_VALUE" in
-                http://localhost:*) LEMONADE_CONTAINER_BASE_URL_VALUE="${LEMONADE_BASE_URL_VALUE/http:\/\/localhost:/http:\/\/host.docker.internal:}" ;;
-                http://127.0.0.1:*) LEMONADE_CONTAINER_BASE_URL_VALUE="${LEMONADE_BASE_URL_VALUE/http:\/\/127.0.0.1:/http:\/\/host.docker.internal:}" ;;
-                http://[::1]:*) LEMONADE_CONTAINER_BASE_URL_VALUE="${LEMONADE_BASE_URL_VALUE/http:\/\/[::1]:/http:\/\/host.docker.internal:}" ;;
-                *) LEMONADE_CONTAINER_BASE_URL_VALUE="$LEMONADE_BASE_URL_VALUE" ;;
-            esac
-        fi
-        LEMONADE_CONTAINER_BASE_URL_VALUE="${LEMONADE_CONTAINER_BASE_URL_VALUE%/}"
-    fi
-    LEMONADE_API_BASE_VALUE="${LEMONADE_BASE_URL_VALUE}${LEMONADE_API_BASE_PATH_VALUE}"
-    LEMONADE_CONTAINER_API_BASE_VALUE="$(if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "${LEMONADE_CONTAINER_BASE_URL_VALUE}${LEMONADE_API_BASE_PATH_VALUE}"; else echo "http://llama-server:8080/api/v1"; fi)"
-    LEMONADE_MODEL_VALUE=""
-    if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then
-        LEMONADE_MODEL_VALUE="$(_env_get_explicit_first LEMONADE_MODEL "")"
-        if [[ -z "$LEMONADE_MODEL_VALUE" ]]; then
-            if LEMONADE_MODEL_VALUE="$(_phase06_discover_lemonade_model "$LEMONADE_API_BASE_VALUE")"; then
-                ai_ok "Detected existing Lemonade model: ${LEMONADE_MODEL_VALUE}"
-            elif [[ -n "${GGUF_FILE:-}" ]]; then
-                LEMONADE_MODEL_VALUE="extra.${GGUF_FILE}"
-                warn "Could not auto-detect a Lemonade model from ${LEMONADE_API_BASE_VALUE}/models; using ${LEMONADE_MODEL_VALUE}. Phase 12 will verify the route before declaring install success."
-            else
-                warn "Could not auto-detect a Lemonade model from ${LEMONADE_API_BASE_VALUE}/models. Set LEMONADE_MODEL to the id returned by that endpoint."
-            fi
-        fi
-        LEMONADE_MODEL="$LEMONADE_MODEL_VALUE"
+    ODS_HOST_LLM_TRANSPORT="$ODS_HOST_LLM_TRANSPORT_VALUE"
+    # AMD llama.cpp image backend chosen in phase 02 (vulkan by default).
+    AMD_INFERENCE_BACKEND_VALUE="${AMD_INFERENCE_BACKEND:-vulkan}"
+    AMD_SUPPORTED_BACKENDS_VALUE="vulkan,rocm"
+    if ods_amd_target_is_cdna "${AMD_GFX_TARGET:-}"; then
+        AMD_SUPPORTED_BACKENDS_VALUE="rocm"
     fi
     LIVEKIT_SECRET=$(_env_get LIVEKIT_API_SECRET "$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)")
     LIVEKIT_API_KEY=$(_phase06_env_hex_secret LIVEKIT_API_KEY 16)
@@ -1133,6 +1094,13 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
                 fi
                 mv -f -- "$_external_key_tmp" "$_external_key_target"
             fi
+        elif [[ -n "${EXTERNAL_LLM_API_KEY_VALUE:-}" ]]; then
+            # A key given with the retired --lemonade-api-key flag.
+            _external_key_tmp="$(mktemp "${_external_key_target}.XXXXXX")" || return 1
+            chmod 600 "$_external_key_tmp"
+            printf '%s\n' "$EXTERNAL_LLM_API_KEY_VALUE" >"$_external_key_tmp"
+            mv -f -- "$_external_key_tmp" "$_external_key_target"
+            unset EXTERNAL_LLM_API_KEY_VALUE
         elif [[ "${EXTERNAL_LLM_API_KEY_RESET:-false}" == "true" ]]; then
             (umask 077; : >"$_external_key_target")
         elif [[ ! -e "$_external_key_target" ]]; then
@@ -1143,6 +1111,22 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
             EXTERNAL_LLM_API_KEY_FILE="$_external_key_target"
         fi
         unset _external_key_tmp _external_key_target
+    fi
+    # The AMD overlays pin their own llama.cpp images. A model profile's image
+    # for another backend (the gemma4 profile names the CUDA build) must not
+    # reach .env, where the host agent's container recreate would use it.
+    if [[ "$GPU_BACKEND" == "amd" ]]; then
+        _amd_llama_repo="ghcr.io/ggml-org/llama.cpp"
+        for _amd_image_key in LLAMA_SERVER_IMAGE LLAMA_SERVER_IMAGE_FALLBACK; do
+            case "${!_amd_image_key:-}" in
+                ""|"$_amd_llama_repo":server-vulkan-*|"$_amd_llama_repo":server-rocm-*) ;;
+                *)
+                    log "Not writing $_amd_image_key for AMD: ${!_amd_image_key} is another backend's image"
+                    unset "$_amd_image_key"
+                    ;;
+            esac
+        done
+        unset _amd_image_key _amd_llama_repo
     fi
     LLAMA_SERVER_MEMORY_LIMIT_VALUE=""
     if [[ "$GPU_BACKEND" == "nvidia" && "$EXTERNAL_LLM_ACTIVE" != "true" && "${ODS_MODE:-local}" != "cloud" ]]; then
@@ -1158,7 +1142,13 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         # so docker-compose.cpu.yml's 6G default applies as before.
         LLAMA_SERVER_MEMORY_LIMIT_VALUE="$(_env_get LLAMA_SERVER_MEMORY_LIMIT "${LLAMA_SERVER_MEMORY_LIMIT:-}")"
     fi
-    ODS_MODE_VALUE="$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo "local"; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "lemonade"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "lemonade"; else echo "${ODS_MODE:-local}"; fi)"
+    ODS_MODE_VALUE="$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" || "$NATIVE_LLM_ACTIVE" == "true" ]]; then echo "local"; else echo "${ODS_MODE:-local}"; fi)"
+    # The managed AMD container and the host-native route are both local mode.
+    AMD_LOCAL_RUNTIME=false
+    if [[ "$EXTERNAL_LLM_ACTIVE" != "true" && "$NATIVE_LLM_ACTIVE" != "true" \
+        && "$GPU_BACKEND" == "amd" && "$ODS_MODE_VALUE" == "local" ]]; then
+        AMD_LOCAL_RUNTIME=true
+    fi
     ODS_MODEL_SWITCHBOARD_VALUE=$(_env_get ODS_MODEL_SWITCHBOARD "${ODS_MODEL_SWITCHBOARD:-enabled}")
     case "$ODS_MODEL_SWITCHBOARD_VALUE" in
         legacy|observe|enabled) ;;
@@ -1174,7 +1164,9 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # service is disabled by docker-compose.external-llm.yml.
     ODS_MODEL_SWITCHBOARD="$ODS_MODEL_SWITCHBOARD_VALUE"
     export ODS_MODEL_SWITCHBOARD
-    _default_llm_api_url="$(if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "http://litellm:4000"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "http://litellm:4000"; elif [[ "${ODS_MODE:-local}" == "local" ]]; then echo "http://llama-server:8080"; else echo "http://litellm:4000"; fi)"
+    # A host-native llama-server is reachable only through LiteLLM, which holds
+    # its key; the in-stack llama-server serves every other local install.
+    _default_llm_api_url="$(if [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then echo "http://litellm:4000"; elif [[ "${ODS_MODE:-local}" == "local" ]]; then echo "http://llama-server:8080"; else echo "http://litellm:4000"; fi)"
     if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then
         LLM_API_URL_VALUE="http://litellm:4000"
         OPEN_WEBUI_LLM_BASE_URL_VALUE="http://litellm:4000/v1"
@@ -1185,9 +1177,9 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
         OPEN_WEBUI_LLM_API_KEY_VALUE=""
     else
         LLM_API_URL_VALUE=$(_env_get LLM_API_URL "$_default_llm_api_url")
-        # A retained local route cannot serve an external Lemonade install.
-        # Preserve other existing values as operator-selected endpoints.
-        if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then
+        # The in-stack llama-server is off for a host-native route. Preserve
+        # other existing values as operator-selected endpoints.
+        if [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then
             case "$LLM_API_URL_VALUE" in
                 http://llama-server:8080|http://llama-server:8080/v1)
                     LLM_API_URL_VALUE="$_default_llm_api_url"
@@ -1217,7 +1209,7 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     if [[ "${ODS_MODE:-local}" == "cloud" ]]; then
         _default_hermes_base_url="http://litellm:4000/v1"
         _default_hermes_api_key="${LITELLM_KEY}"
-    elif [[ "$GPU_BACKEND" == "amd" || "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then
+    elif [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then
         _default_hermes_base_url="http://litellm:4000/v1"
         _default_hermes_api_key="${LITELLM_KEY}"
     else
@@ -1251,9 +1243,6 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     LLM_API_URL="$LLM_API_URL_VALUE"
     HERMES_LLM_BASE_URL="$HERMES_LLM_BASE_URL_VALUE"
     HERMES_LLM_API_KEY="$HERMES_LLM_API_KEY_VALUE"
-    if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" && "${LEMONADE_HOST_TRANSPORT:-direct}" != "model-router" && "$LEMONADE_BASE_URL_VALUE" =~ ^http://(localhost|127\.0\.0\.1|\[::1\])(:|/|$) && "$(uname -s 2>/dev/null || echo unknown)" == "Linux" ]]; then
-        warn "Existing Lemonade URL uses loopback ($LEMONADE_BASE_URL_VALUE). Docker containers will use $LEMONADE_CONTAINER_BASE_URL_VALUE; ensure Lemonade is reachable there (for example: lemonade config set host=0.0.0.0 on a trusted host)."
-    fi
 
     _select_auto_cpu_value() {
         local key="$1" detected="$2"
@@ -1406,22 +1395,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # Owner opt-out for the overlay default; empty keeps ngram-mod implicit.
     LLAMA_SPEC_TYPE_VALUE=$(_env_get LLAMA_SPEC_TYPE "${LLAMA_SPEC_TYPE:-}")
 
-    _phase06_lemonade_uses_host_9000() {
-        [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]] && return 0
-        [[ "${AMD_INFERENCE_RUNTIME:-}" =~ ^([Ll][Ee][Mm][Oo][Nn][Aa][Dd][Ee])$ ]] && return 0
-        [[ "${GPU_BACKEND:-}" == "amd" && "${ODS_MODE:-local}" != "cloud" ]] && return 0
-        return 1
-    }
-
+    # A retained port is kept (an AMD install moved to 9100 stays there).
     WHISPER_PORT_VALUE="$(_env_get_explicit_first WHISPER_PORT "9000")"
-    if _phase06_lemonade_uses_host_9000 && [[ "$WHISPER_PORT_VALUE" == "9000" ]]; then
-        # Lemonade's native Linux/Windows router can reserve host port 9000
-        # for websocket traffic. Match the Windows policy: keep Whisper's
-        # container port at 8000, but bind the host side on 9100 unless the
-        # user already selected another non-9000 port.
-        WHISPER_PORT_VALUE="9100"
-        ai_ok "AMD/Lemonade detected; Whisper reassigned to host port ${WHISPER_PORT_VALUE}"
-    fi
     WHISPER_PORT="$WHISPER_PORT_VALUE"
     if declare -p SERVICE_PORTS >/dev/null 2>&1; then
         SERVICE_PORTS[whisper]="$WHISPER_PORT_VALUE"
@@ -1486,28 +1461,26 @@ LLM_API_URL=$(dotenv_value "${LLM_API_URL_VALUE}")
 OPEN_WEBUI_LLM_BASE_URL=$(dotenv_value "${OPEN_WEBUI_LLM_BASE_URL_VALUE}")
 OPEN_WEBUI_LLM_API_KEY=$(dotenv_value "${OPEN_WEBUI_LLM_API_KEY_VALUE}")
 OPEN_WEBUI_TASK_MODEL=$(dotenv_value "${OPEN_WEBUI_TASK_MODEL_VALUE}")
-LLM_BACKEND=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo "external"; elif [[ "$ODS_MODE_VALUE" == "lemonade" ]]; then echo "lemonade"; else echo "llama-server"; fi)
-LLM_API_BASE_PATH=$(if [[ "$ODS_MODE_VALUE" == "lemonade" ]]; then dotenv_value "${LEMONADE_API_BASE_PATH_VALUE}"; else echo "/v1"; fi)
+LLM_BACKEND=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo "external"; else echo "llama-server"; fi)
+LLM_API_BASE_PATH=/v1
 EXTERNAL_LLM_URL=${EXTERNAL_LLM_URL_VALUE}
 EXTERNAL_LLM_CONTAINER_URL=${EXTERNAL_LLM_CONTAINER_URL_VALUE}
 EXTERNAL_LLM_PROVIDER=${EXTERNAL_LLM_PROVIDER_VALUE}
 EXTERNAL_LLM_MODEL=${EXTERNAL_SELECTED_MODEL}
 SKIP_MODEL_DOWNLOAD=${EXTERNAL_LLM_ACTIVE}
-AMD_INFERENCE_RUNTIME=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" || ( "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ) ]]; then echo "lemonade"; else echo ""; fi)
-AMD_INFERENCE_BACKEND=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "${AMD_INFERENCE_BACKEND:-auto}"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "${BACKEND_LEMONADE_LINUX_BACKEND:-rocm}"; else echo ""; fi)
-AMD_INFERENCE_LOCATION=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "host"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "container"; else echo ""; fi)
-AMD_INFERENCE_PORT=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "${LEMONADE_PORT_VALUE}"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "${BACKEND_LEMONADE_API_PORT:-8080}"; else echo ""; fi)
-AMD_INFERENCE_SUPPORTED_BACKENDS=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "${AMD_INFERENCE_SUPPORTED_BACKENDS:-auto}"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "${BACKEND_LEMONADE_LINUX_BACKEND:-rocm}"; else echo ""; fi)
-AMD_INFERENCE_RUNTIME_MODE=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "external-lemonade"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "linux-container"; else echo ""; fi)
-AMD_INFERENCE_MANAGED=$(if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then echo ""; elif [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then echo "false"; elif [[ "$GPU_BACKEND" == "amd" && "${ODS_MODE:-local}" == "local" ]]; then echo "true"; else echo ""; fi)
-LEMONADE_EXTERNAL=${LEMONADE_EXTERNAL_VALUE}
-LEMONADE_HOST_TRANSPORT=$(dotenv_value "${LEMONADE_HOST_TRANSPORT}")
+AMD_INFERENCE_RUNTIME=$(if [[ "$NATIVE_LLM_ACTIVE" == "true" || "$AMD_LOCAL_RUNTIME" == "true" ]]; then echo "llama-server"; fi)
+AMD_INFERENCE_BACKEND=$(if [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then echo "vulkan"; elif [[ "$AMD_LOCAL_RUNTIME" == "true" ]]; then echo "${AMD_INFERENCE_BACKEND_VALUE}"; fi)
+AMD_INFERENCE_LOCATION=$(if [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then echo "host"; elif [[ "$AMD_LOCAL_RUNTIME" == "true" ]]; then echo "container"; fi)
+AMD_INFERENCE_PORT=$(if [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then echo "${NATIVE_LLM_PORT_VALUE}"; elif [[ "$AMD_LOCAL_RUNTIME" == "true" ]]; then echo "8080"; fi)
+AMD_INFERENCE_SUPPORTED_BACKENDS=$(if [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then echo "vulkan"; elif [[ "$AMD_LOCAL_RUNTIME" == "true" ]]; then echo "${AMD_SUPPORTED_BACKENDS_VALUE}"; fi)
+AMD_INFERENCE_RUNTIME_MODE=$(if [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then echo "windows-portal-llama-server"; elif [[ "$AMD_LOCAL_RUNTIME" == "true" ]]; then echo "linux-container"; fi)
+AMD_INFERENCE_MANAGED=$(if [[ "$NATIVE_LLM_ACTIVE" == "true" || "$AMD_LOCAL_RUNTIME" == "true" ]]; then echo "true"; fi)
+ODS_HOST_LLM_TRANSPORT=$(dotenv_value "${ODS_HOST_LLM_TRANSPORT_VALUE}")
+NATIVE_LLM_BASE_URL=$(dotenv_value "${NATIVE_LLM_BASE_URL_VALUE}")
+NATIVE_LLM_CONTAINER_BASE_URL=$(dotenv_value "${NATIVE_LLM_CONTAINER_BASE_URL_VALUE}")
+$(if [[ -n "$LLAMA_SERVER_API_KEY_VALUE" ]]; then printf 'LLAMA_SERVER_API_KEY=%s' "$(dotenv_value "$LLAMA_SERVER_API_KEY_VALUE")"; fi)
 $(if [[ -n "${ODS_WINDOWS_SYSTEM_DIRECTORY}" ]]; then printf 'ODS_WINDOWS_SYSTEM_DIRECTORY=%s' "$(dotenv_value "$ODS_WINDOWS_SYSTEM_DIRECTORY")"; fi)
 $(if [[ -n "${ODS_WSL_STATE_ROOT}" ]]; then printf 'ODS_WSL_STATE_ROOT=%s' "$(dotenv_value "$ODS_WSL_STATE_ROOT")"; fi)
-LEMONADE_BASE_URL=$(dotenv_value "${LEMONADE_BASE_URL_VALUE}")
-LEMONADE_CONTAINER_BASE_URL=$(dotenv_value "${LEMONADE_CONTAINER_BASE_URL_VALUE}")
-LEMONADE_API_BASE_PATH=$(dotenv_value "${LEMONADE_API_BASE_PATH_VALUE}")
-LEMONADE_MODEL=$(if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then dotenv_value "${LEMONADE_MODEL_VALUE:-}"; else echo "${LEMONADE_MODEL:-}"; fi)
 
 #=== Cloud API Keys ===
 ANTHROPIC_API_KEY=$(dotenv_value "${ANTHROPIC_API_KEY:-}")
@@ -1593,53 +1566,20 @@ ODS_UID=${_phase06_compose_uid}
 ODS_GID=${_phase06_compose_gid}
 
 $(if [[ "$GPU_BACKEND" == "amd" ]]; then
-    # Read gfx target from topology detection. Falls back to gfx1151 (Strix Halo)
-    # if the topology probe failed — preserves prior behavior for the OG target.
-    _amd_gfx_detected=$(echo "${GPU_TOPOLOGY_JSON:-{\}}" | jq -r '[.gpus[]?.gfx_version] | unique | .[0] // "gfx1151"' 2>/dev/null || echo "gfx1151")
-    [[ -z "$_amd_gfx_detected" || "$_amd_gfx_detected" == "null" || "$_amd_gfx_detected" == "unknown" ]] && _amd_gfx_detected="gfx1151"
-
-    # HSA_OVERRIDE_GFX_VERSION is a Strix Halo (gfx1151) workaround — that target
-    # is not in ROCm 7.x's official support list, so we coerce HSA to load
-    # gfx1151 kernels by reporting "11.5.1". For natively-supported parts
-    # (gfx942 / MI300X, gfx90a / MI250, gfx1100 / RX 7900, etc.) we MUST NOT set
-    # this — doing so reports the wrong ISA and triggers
-    # HSA_STATUS_ERROR_INVALID_ISA at model-load.
-    case "$_amd_gfx_detected" in
-        gfx1151) _amd_hsa_override="HSA_OVERRIDE_GFX_VERSION=11.5.1" ;;
-        *)       _amd_hsa_override="# HSA_OVERRIDE_GFX_VERSION unset — $_amd_gfx_detected is natively supported" ;;
-    esac
-
-    # The custom llama-server binary at /opt/llama-custom is built with Strix
-    # Halo-specific patches (MMQ tile size reduced from 64 to 48 for gfx1151's
-    # register file). Pointing Lemonade at it from any other architecture either
-    # ISA-faults (kernels compiled for gfx1151) or runs a perf-regressed binary.
-    # Only opt-in when the host is actually Strix Halo; otherwise leave unset so
-    # docker-compose.amd.yml's empty default lets Lemonade use its bundled
-    # ROCm-aware binary.
-    if [[ "$_amd_gfx_detected" == "gfx1151" ]]; then
-        _amd_custom_bin="LEMONADE_LLAMACPP_ROCM_BIN=/opt/llama-custom/llama-server"
-    else
-        _amd_custom_bin="# LEMONADE_LLAMACPP_ROCM_BIN unset — custom binary is gfx1151-only; Lemonade uses bundled binary on $_amd_gfx_detected"
-    fi
+    # HSA_OVERRIDE_GFX_VERSION is read only by the ROCm image, and only a GPU
+    # the image was not built for needs it (a wrong value fails model load or
+    # hangs the GPU). Vulkan never reads it. An owner-set value is kept.
+    _amd_hsa_override="$(_env_get HSA_OVERRIDE_GFX_VERSION \
+        "$(ods_amd_hsa_override_for_target "$AMD_INFERENCE_BACKEND_VALUE" "${AMD_GFX_TARGET:-}")")"
 
     cat << AMD_ENV
 #=== GPU Group IDs (for container device access) ===
 VIDEO_GID=$(getent group video 2>/dev/null | cut -d: -f3 || echo 44)
 RENDER_GID=$(getent group render 2>/dev/null | cut -d: -f3 || echo 992)
-
-#=== AMD ROCm Settings (gfx target detected from topology) ===
-LEMONADE_SERVER_IMAGE=${LEMONADE_SERVER_IMAGE:-${BACKEND_LEMONADE_CONTAINER_IMAGE:-ghcr.io/lemonade-sdk/lemonade-server:v10.2.0@sha256:08edbf1128a7fd82b39f1de72c2f70c013f2ecfefac6a99c52bcf58eba532a3a}}
-${_amd_hsa_override}
-HSA_XNACK=1
-ROCBLAS_USE_HIPBLASLT=1
-AMDGPU_TARGET=${_amd_gfx_detected}
-LLAMA_CPP_REF=b8763
-${_amd_custom_bin}
-
-#=== LiteLLM → Lemonade outbound key (AMD only) ===
-LITELLM_LEMONADE_API_KEY=$(dotenv_value "${LITELLM_LEMONADE_API_KEY}")
+$(if [[ -n "$_amd_hsa_override" ]]; then printf '\n#=== ROCm gfx override (%s) ===\nHSA_OVERRIDE_GFX_VERSION=%s' "${AMD_GFX_TARGET:-unknown target}" "$(dotenv_value "$_amd_hsa_override")"; fi)
+$(if [[ -n "$(_env_get ROCBLAS_USE_HIPBLASLT "")" ]]; then printf 'ROCBLAS_USE_HIPBLASLT=%s' "$(dotenv_value "$(_env_get ROCBLAS_USE_HIPBLASLT "")")"; fi)
 AMD_ENV
-    unset _amd_gfx_detected _amd_hsa_override _amd_custom_bin
+    unset _amd_hsa_override
 fi)
 $(if [[ "$GPU_BACKEND" == "sycl" ]]; then cat << INTEL_ENV
 #=== GPU Group IDs (for container device access) ===
@@ -1669,13 +1609,9 @@ LITELLM_PORT=4000
 LANGFUSE_PORT=$(dotenv_value "${LANGFUSE_PORT}")
 
 #=== Hermes Agent ===
-# On AMD/Lemonade hosts, route Hermes through litellm. Lemonade is strict
-# about model names (returns 404 if model field doesn't exactly match the
-# loaded gguf) and drops concurrent connections during multi-step agent
-# loops (web_search → reason → tool result → reason …) with
-# APIConnectionError. litellm wraps with "*" wildcard normalization +
-# retry logic, hiding both bumps. On non-AMD installs, talk direct to
-# llama-server (native llama.cpp tolerates any model field).
+# Hermes streams through model-router (switchboard) or talks to llama-server
+# directly; llama.cpp serves one model and accepts any model field. A
+# host-native llama-server is reached through LiteLLM, which holds its key.
 HERMES_LLM_BASE_URL=$(dotenv_value "${HERMES_LLM_BASE_URL_VALUE}")
 HERMES_LLM_API_KEY=$(dotenv_value "${HERMES_LLM_API_KEY_VALUE}")
 HERMES_LANGUAGE=${HERMES_LANGUAGE:-en}
@@ -1825,12 +1761,9 @@ ENV_EOF
         unset ODS_ROOTLESS_COMPOSE_FLAGS
     fi
 
-    # Generate LiteLLM config for Lemonade.
-    # Lemonade exposes models as "extra.<GGUF_FILENAME>" — the wildcard
-    # passthrough (openai/*) does NOT work because it forwards the friendly
-    # model name verbatim and lemonade returns 404.  Instead, map all
-    # requests to the concrete model ID that lemonade actually serves.
-    # bootstrap-upgrade.sh regenerates this config when the model swaps.
+    # Generate the LiteLLM route for an external or host-native model server.
+    # The managed container (NVIDIA, AMD, CPU) uses the checked-in local.yaml
+    # or the switchboard map rendered below.
     if [[ "$EXTERNAL_LLM_ACTIVE" == "true" ]]; then
         # Fail installation if the external route cannot be materialized. Pixel
         # must never bind its authenticated gateway to a stale local template.
@@ -1845,65 +1778,23 @@ ENV_EOF
             return 1
         fi
         unset _external_render_auth
-    elif [[ "$GPU_BACKEND" == "amd" || "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then
-        _phase06_step "render-amd-litellm-config"
+    elif [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then
+        _phase06_step "render-native-litellm-config"
         mkdir -p "$INSTALL_DIR/config/litellm"
-        # Source bootstrap-model.sh for BOOTSTRAP_GGUF_FILE and bootstrap_needed().
-        # Pure library (zero side effects), all deps available by phase 06.
-        # Phase 11 re-sources it harmlessly (idempotent).
-        [[ -f "$SCRIPT_DIR/installers/lib/bootstrap-model.sh" ]] && . "$SCRIPT_DIR/installers/lib/bootstrap-model.sh"
-        if type bootstrap_needed &>/dev/null && bootstrap_needed; then
-            _active_gguf="$BOOTSTRAP_GGUF_FILE"
-        else
-            _active_gguf="$GGUF_FILE"
-        fi
-        _lemonade_model_id=""
-        if [[ "$LEMONADE_EXTERNAL_VALUE" == "true" ]]; then
-            _lemonade_model_id="${LEMONADE_MODEL_VALUE:-}"
-        fi
-        # Pass chat_template_kwargs.enable_thinking=false to Lemonade so Qwen3
-        # thinking-mode is OFF by default for every client. Perplexica and any
-        # other consumer that doesn't manually `/no_think` its prompts would
-        # otherwise hang for many minutes per request — the model emits a
-        # <think>...</think> block that, on a long synthesis prompt, can run
-        # past the client timeout before any visible token reaches the UI.
-        # This kwarg is a Qwen3-specific switch and is safely ignored by
-        # non-Qwen3 chat templates, so it's safe to bake into the default
-        # lemonade config regardless of which model the install resolves to.
-        # bootstrap-upgrade.sh mirrors this when it regenerates the file
-        # after a hot-swap.
-        _renderer_py="${ODS_PYTHON_CMD:-}"
-        if [[ -z "$_renderer_py" && -f "$SCRIPT_DIR/lib/python-cmd.sh" ]]; then
-            . "$SCRIPT_DIR/lib/python-cmd.sh"
-            _renderer_py="$(ods_detect_python_cmd 2>/dev/null || true)"
-        fi
-        if [[ -z "$_renderer_py" ]]; then
-            _renderer_py="python3"
-        fi
-        if [[ ! -f "$SCRIPT_DIR/scripts/render-runtime-configs.py" ]] \
-            || ! command -v "$_renderer_py" >/dev/null 2>&1; then
-            error "Runtime config renderer is unavailable for Lemonade"
-            return 1
-        fi
-        if ! ODS_RENDER_LITELLM_KEY="$LITELLM_LEMONADE_API_KEY" \
-            "$_renderer_py" "$SCRIPT_DIR/scripts/render-runtime-configs.py" \
-            --surface litellm-lemonade \
-            --ods-mode lemonade \
-            --gpu-backend amd \
-            --gguf-file "$_active_gguf" \
-            --lemonade-model-id "$_lemonade_model_id" \
-            --lemonade-api-base "$LEMONADE_CONTAINER_API_BASE_VALUE" \
+        # LiteLLM serves ods/current from the native llama-server and sends
+        # LLAMA_SERVER_API_KEY (compose passes it to the LiteLLM container);
+        # the rendered config names the variable, never the key.
+        if ! "${ODS_PYTHON_CMD:-python3}" "$SCRIPT_DIR/scripts/render-runtime-configs.py" \
+            --surface litellm-local-native \
+            --gguf-file "$GGUF_FILE" \
+            --llm-base-url "${NATIVE_LLM_CONTAINER_BASE_URL_VALUE}/v1" \
+            --llm-api-key-env LLAMA_SERVER_API_KEY \
             --output-root "$INSTALL_DIR" \
             --write >> "$LOG_FILE" 2>&1; then
-            error "Runtime config renderer failed for Lemonade"
+            error "Runtime config renderer failed for the host-native llama-server"
             return 1
         fi
-        if [[ -n "$_lemonade_model_id" ]]; then
-            ai_ok "Generated LiteLLM config for external Lemonade (model: ${_lemonade_model_id})"
-        else
-            ai_ok "Generated LiteLLM config for Lemonade (model: extra.${_active_gguf})"
-        fi
-        unset _renderer_py
+        ai_ok "Generated LiteLLM config for the host-native llama-server (model: ${GGUF_FILE})"
     elif [[ "${EXTERNAL_LLM_RESET:-false}" == "true" && "$ODS_MODE_VALUE" == "local" ]]; then
         # A same-directory rerun does not copy the checked-in local map over
         # the old external map. Reset the actual gateway route, not just .env.
@@ -1927,17 +1818,25 @@ ENV_EOF
         return 1
     fi
     _router_ods_mode="${ODS_MODE_VALUE:-${ODS_MODE:-local}}"
+    # model-router's llama-server-default endpoint is the server origin: the
+    # in-stack llama-server, or the host-native server through host-gateway.
+    _router_llm_base_url="${LLM_API_URL:-http://llama-server:8080/v1}"
+    if [[ "$NATIVE_LLM_ACTIVE" == "true" ]]; then
+        _router_llm_base_url="$NATIVE_LLM_CONTAINER_BASE_URL_VALUE"
+    fi
     _router_common_args=(
         --switchboard-mode "${ODS_MODEL_SWITCHBOARD_VALUE:-enabled}"
         --ods-mode "$_router_ods_mode"
         --gpu-backend "${GPU_BACKEND:-nvidia}"
         --gguf-file "${GGUF_FILE:-}"
-        --lemonade-model-id "${LEMONADE_MODEL_VALUE:-}"
-        --lemonade-api-base "${LEMONADE_CONTAINER_API_BASE_VALUE:-http://llama-server:8080/api/v1}"
-        --llm-base-url "${LLM_API_URL:-http://llama-server:8080/v1}"
+        --llm-base-url "$_router_llm_base_url"
         --output-root "$INSTALL_DIR"
         --write
     )
+    # The host-native llama-server requires its key: model-router's endpoint
+    # and the switchboard map name LLAMA_SERVER_API_KEY, as the host agent's
+    # activation render does.
+    [[ "$NATIVE_LLM_ACTIVE" != "true" ]] || _router_common_args+=(--llm-api-key-env LLAMA_SERVER_API_KEY)
     _router_surfaces=(model-router-endpoints)
     if [[ "$_router_ods_mode" != "cloud" ]]; then
         _router_surfaces+=(litellm-switchboard)
@@ -1952,7 +1851,7 @@ ENV_EOF
         fi
     done
     unset _router_renderer_py _router_surface _router_common_args
-    unset _router_ods_mode _router_surfaces
+    unset _router_ods_mode _router_surfaces _router_llm_base_url
 
     # Validate generated .env against schema (fails fast on missing/unknown keys).
     _phase06_step "validate-env"

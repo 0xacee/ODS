@@ -90,7 +90,7 @@ def main() -> int:
     )
     require(r"^cmd_help\(\) \{$", text, "ods-cli must define cmd_help")
     require(
-        r'"\$_ods_mode" != "cloud"[\s\S]*"\$_external_lemonade_active" != "true"[\s\S]*docker-compose\.cloud\.yml',
+        r'"\$_ods_mode" != "cloud" \]\] && \[\[ "\$cached" == \*"docker-compose\.cloud\.yml"\*',
         text,
         "ods-cli must reject stale cloud compose caches in local/managed modes",
     )

@@ -78,13 +78,23 @@ _LIVE_READ_ENV_KEYS = {
     # agent fallback, so recreating services would only add downtime.
     "HF_TOKEN",
 }
-# Read only by the removed legacy OpenClaw extension; marked "deprecated" and
-# described as "Retired:" in .env.schema.json. Nothing consumes them now, so a
-# change needs no restart, and clearing one removes it from .env.
+# Keys of the removed legacy OpenClaw extension, the removed AMD GAIA
+# library recipe and the removed Lemonade runtime; marked "deprecated" and
+# described as "Retired:" in .env.schema.json. ODS reads none of them, so
+# saving one restarts nothing (a GAIA copy installed before the removal
+# picks up its keys when it next starts), and clearing one removes it from
+# .env.
 _RETIRED_ENV_KEYS = frozenset({
     "BOOTSTRAP_MODEL", "HOST_LAN_IP", "OPENCLAW_API_KEY", "OPENCLAW_CONFIG",
     "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH", "OPENCLAW_HTTP_API",
     "OPENCLAW_LLM_URL", "OPENCLAW_PORT", "OPENCLAW_TOKEN",
+    "GAIA_AGENT_UI_VERSION", "GAIA_DISABLE_UPDATE", "GAIA_LEMONADE_BASE_URL",
+    "GAIA_PORT", "GAIA_SKIP_GAIA_INIT", "GAIA_UI_SERVE_ONLY",
+    # Lemonade (round F); scripts/migrate-lemonade-install.py removes them.
+    "AMDGPU_TARGET", "HSA_XNACK", "LEMONADE_API_BASE_PATH", "LEMONADE_API_KEY",
+    "LEMONADE_BASE_URL", "LEMONADE_CONTAINER_BASE_URL", "LEMONADE_EXTERNAL",
+    "LEMONADE_HOST_TRANSPORT", "LEMONADE_LLAMACPP", "LEMONADE_LLAMACPP_ROCM_BIN",
+    "LEMONADE_MODEL", "LEMONADE_SERVER_IMAGE", "LITELLM_LEMONADE_API_KEY", "LLAMA_CPP_REF",
 })
 _READ_ONLY_ENV_FIELDS = {
     "ODS_MODE": "Runtime mode is selected by the installer and cannot be changed from the dashboard.",
@@ -95,7 +105,6 @@ _READ_ONLY_ENV_FIELDS = {
     "GGUF_SHA256": "Model integrity metadata is managed by Model Manager.",
     "CTX_SIZE": "The active context is managed by Model Manager so the runtime and every model consumer remain synchronized.",
     "MAX_CONTEXT": "The active context is managed by Model Manager so the runtime and every model consumer remain synchronized.",
-    "LEMONADE_MODEL": "The Lemonade model identity is resolved and managed during transactional activation.",
     "MODEL_RUNTIME_PROFILE": "The runtime profile is selected and managed during model activation.",
     "MODEL_RUNTIME_PROFILE_LABEL": "The runtime profile is selected and managed during model activation.",
     "MODEL_RUNTIME_PROFILE_SOURCE": "The runtime profile is selected and managed during model activation.",

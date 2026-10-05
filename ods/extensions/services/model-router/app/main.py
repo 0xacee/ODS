@@ -653,6 +653,9 @@ def _validate_state_schema(doc: Any) -> bool:
             backend, {"kind", "endpointId"}, {"kind", "endpointId", "nativeRoute"}
         ):
             return False
+        # A pre-round-F state names the retired "lemonade" kind. It stays
+        # readable for one release so the host agent can replace it (contract
+        # section 6.7); no route path treats it specially.
         if backend["kind"] not in {"llama-server", "lemonade", "hipfire", "unknown"}:
             return False
         if not isinstance(backend["endpointId"], str) or not backend["endpointId"]:
@@ -1190,28 +1193,6 @@ def _completed_chat_as_sse(completion: dict[str, Any]) -> bytes:
     ) + b"data: [DONE]\n\n"
 
 
-def _lemonade_context_error(completion: dict[str, Any]) -> dict[str, Any] | None:
-    """Recognize Lemonade's HTTP-200 wrapper around a llama.cpp 400 error."""
-    outer = completion.get("error")
-    details = outer.get("details") if isinstance(outer, dict) else None
-    response = details.get("response") if isinstance(details, dict) else None
-    inner = response.get("error") if isinstance(response, dict) else None
-    if (not isinstance(inner, dict) or details.get("status_code") != 400
-            or inner.get("type") != "exceed_context_size_error"):
-        return None
-    context = inner.get("n_ctx")
-    prompt = inner.get("n_prompt_tokens")
-    if (type(context) is not int or context <= 0
-            or type(prompt) is not int or prompt <= 0):
-        return None
-    return {"error": {
-        "message": (f"Request ({prompt} tokens) exceeds the available context size "
-                    f"({context} tokens)"),
-        "type": "exceed_context_size_error", "code": "400",
-        "n_ctx": context, "n_prompt_tokens": prompt,
-    }}
-
-
 def _is_terminal_stream_payload(payload: dict[str, Any]) -> bool:
     """Recognize terminal Chat/Completions and Responses API stream events."""
     choices = payload.get("choices")
@@ -1700,7 +1681,7 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
     completed_tool_stream = (
         is_stream
         and path == "/v1/chat/completions"
-        and route["backendKind"] in {"llama-server", "lemonade"}
+        and route["backendKind"] == "llama-server"
         and isinstance(payload.get("tools"), list)
         and bool(payload["tools"])
     )
@@ -1800,12 +1781,6 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                         complete = assemble_chat_completion_sse(
                             raw_stream, route["runtimeModelId"],
                             max_bytes=MAX_COMPLETED_TOOL_STREAM_BYTES,
-                            # Lemonade's GGUF stream names the loaded file;
-                            # the selected route names the same model without
-                            # its extension. Keep every other backend exact.
-                            allow_gguf_filename_alias=(
-                                route["backendKind"] == "lemonade"
-                            ),
                         )
                     except CompletionStreamIdentityError:
                         _finish_probe_attempt(attempt_handle, "stream-error",
@@ -1816,9 +1791,8 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                         }}, status_code=502, headers=ods_headers), False
                     except ValueError:
                         # Some backends ignore stream:true and return a
-                        # completed JSON response, including Lemonade's
-                        # HTTP-200 context error wrapper. Process that one
-                        # response without issuing a second inference.
+                        # completed JSON response. Process that one response
+                        # without issuing a second inference.
                         try:
                             complete = json.loads(raw_stream.decode("utf-8"))
                         except (ValueError, UnicodeDecodeError):
@@ -1905,9 +1879,6 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                 headers=headers, timeout=UPSTREAM_TIMEOUT_SECONDS,
             )
             upstream = await client.send(upstream_request, stream=True)
-            lemonade_route = upstream.headers.get("x-lemonade-route")
-            if lemonade_route:
-                ods_headers["X-Lemonade-Route"] = lemonade_route
 
             async def cleanup_stream():
                 try:
@@ -1961,7 +1932,6 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                             # Never present it as a backend identity when the
                             # stream supplied no model field to observe.
                             "responseModel": rewriter.response_model or "",
-                            "lemonadeRoute": lemonade_route,
                         })
                     if (
                         completed
@@ -2017,7 +1987,7 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
     # tool call. A complete native envelope is a model decision, not an
     # executed action; no host/tool operation is replayed here.
     if (path == "/v1/chat/completions"
-            and route["backendKind"] in {"llama-server", "lemonade"}
+            and route["backendKind"] == "llama-server"
             and _repairable_native_tool_request(payload)
             and isinstance(payload.get("messages"), list)
             and 200 <= upstream.status_code < 300):
@@ -2084,10 +2054,6 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
                             "type": "tool_protocol_invalid", "code": "502",
                         }}, status_code=502, headers=ods_headers), False
 
-    lemonade_route = upstream.headers.get("x-lemonade-route")
-    if lemonade_route:
-        ods_headers["X-Lemonade-Route"] = lemonade_route
-
     response_model = None
     response_usage = {
         "input_tokens": 0,
@@ -2107,22 +2073,9 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
             if "model" in parsed:
                 parsed["model"] = requested_alias
             _sanitize_choice_content(parsed)
-            lemonade_meta = parsed.get("x_lemonade_route")
-            if lemonade_meta is not None:
-                ods_headers.setdefault("X-Lemonade-Route",
-                                       json.dumps(lemonade_meta)
-                                       if not isinstance(lemonade_meta, str)
-                                       else lemonade_meta)
             content = json.dumps(parsed).encode("utf-8")
     except (ValueError, UnicodeDecodeError):
         pass
-
-    if (route["backendKind"] == "lemonade" and 200 <= upstream.status_code < 300
-            and path == "/v1/chat/completions" and parsed is not None):
-        context_error = _lemonade_context_error(parsed)
-        if context_error is not None:
-            return JSONResponse(context_error, status_code=400,
-                                headers=ods_headers), False
 
     if pinned_route and 200 <= upstream.status_code < 300 and response_model != route['runtimeModelId']:
         return JSONResponse({'error': {'message': 'Backend response identity changed',
@@ -2130,7 +2083,7 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
 
     if (parsed is not None and 200 <= upstream.status_code < 300
             and path == "/v1/chat/completions"
-            and route["backendKind"] in {"llama-server", "lemonade"}
+            and route["backendKind"] == "llama-server"
             and isinstance(payload.get("tools"), list) and payload["tools"]
             and _normalize_native_tool_markup(parsed, payload)):
         content = json.dumps(parsed).encode("utf-8")
@@ -2152,8 +2105,7 @@ async def _forward_inner(request: Request, path: str, payload: dict[str, Any],
     if probe_id:
         _record_evidence({**evidence_base,
                           "status": upstream.status_code,
-                          "responseModel": str(response_model or ""),
-                          "lemonadeRoute": lemonade_route})
+                          "responseModel": str(response_model or "")})
 
     if 200 <= upstream.status_code < 300:
         _emit_telemetry(_build_telemetry_event(

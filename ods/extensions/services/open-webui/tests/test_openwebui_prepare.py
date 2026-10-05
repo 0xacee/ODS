@@ -456,7 +456,7 @@ def test_no_overlay_replaces_the_step_or_odss_settings():
     # The overlays that change Open WebUI's environment are all still seen.
     for expected in (
         "docker-compose.amd.yml", "docker-compose.nvidia.yml", "docker-compose.external-llm.yml",
-        "docker-compose.lemonade-external.yml", "docker-compose.gateway-only.yml", "docker-compose.tier0.yml",
+        "docker-compose.host-native-llm.yml", "docker-compose.gateway-only.yml", "docker-compose.tier0.yml",
         "installers/macos/docker-compose.macos.yml", "installers/windows/docker-compose.windows-amd.yml",
         "extensions/services/pixel-edge/compose.yaml.disabled", "extensions/services/ods-proxy/compose.yaml",
     ):

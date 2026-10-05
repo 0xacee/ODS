@@ -152,21 +152,29 @@ def test_partial_host_mutation_cannot_be_recovered_by_a_generic_reset(controller
     assert calls.count('model-begin')==1
 
 
-@pytest.mark.parametrize('drift', ['LEMONADE_MODEL=other-model', 'CTX_SIZE=8192'])
+@pytest.mark.parametrize('drift', ['GGUF_FILE=other-model.gguf', 'CTX_SIZE=8192'])
 def test_commit_recovery_reads_current_env_before_releasing_native_hold(controller,monkeypatch,drift):
     _,state,calls,_=controller
     env_file=host.INSTALL_DIR/'.env'
-    text=('PIXEL_OPENWEBUI_KEY=configured\nLEMONADE_EXTERNAL=true\n'
-          'LEMONADE_MODEL=same-model\nCTX_SIZE=65536\nMAX_CONTEXT=65536\n')
+    text=('PIXEL_OPENWEBUI_KEY=configured\nGGUF_FILE=same-model.gguf\n'
+          'CTX_SIZE=65536\nMAX_CONTEXT=65536\n')
     env_file.write_text(text)
     monkeypatch.setattr(host,'_pixel_model_config_paths',lambda:{'.env':env_file})
-    monkeypatch.setattr(host,'_managed_wsl_lemonade',lambda _env:{'managed':False})
-    monkeypatch.setattr(host,'_read_external_lemonade_observation',lambda _env:{
-        'modelId':'same-model','contextLength':65536,
-    })
+    monkeypatch.setattr(host,'_managed_wsl_runtime',lambda _env:{'managed':False})
+
+    def serving(config,**kwargs):
+        # The runtime serves same-model.gguf at 65536 cells; an exact proof
+        # holds only while .env still names that model and context.
+        assert kwargs['attempts']==1 and kwargs['require_exact_context'] is True
+        if kwargs['gguf_file']!='same-model.gguf' or config.get('CTX_SIZE')!='65536':
+            return {}
+        return {'identity':'same-model.gguf','contextLength':65536,'contextVerified':True}
+
+    monkeypatch.setattr(host,'_wait_for_model_readiness',serving)
     env=host.load_env(env_file)
     transaction=host._begin_pixel_model_transaction(env)
     target={key:value for key,value in NEW.items() if key!='routeFingerprint'}
+    target['model']='same-model.gguf'
     transaction.apply(target)
     transaction._save('committing')
     key=drift.split('=',1)[0]
@@ -238,49 +246,8 @@ def test_unreceived_begin_cannot_clear_hold_when_external_model_changed(controll
     assert host._recover_pixel_model_transaction(env)['outcome']=='rollback'
 
 
-def test_external_adoption_reuses_only_same_confirmed_held_transaction(controller):
-    _,state,calls,_=controller
-    env={'PIXEL_OPENWEBUI_KEY':'configured'}
-    target={'model':'loaded-B','contextLength':65536,'maxTokens':8192,'reasoning':False}
-    transaction=host._begin_or_resume_external_pixel_transaction(env,target)
-    journal=host._read_pixel_model_journal()
-    assert journal['phase']=='held' and journal['target']==target
-    resumed=host._begin_or_resume_external_pixel_transaction(env,target)
-    assert resumed.id==transaction.id==state['transactionId']
-    assert calls.count('model-begin')==1
-    with pytest.raises(host._PixelModelTransactionUncertain):
-        host._begin_or_resume_external_pixel_transaction(env,{**target,'model':'other-C'})
-    assert calls.count('model-begin')==1
-
-
-@pytest.mark.parametrize('journal_phase', ['applying', 'applied'])
-def test_external_adoption_resumes_proved_apply_without_replaying_it(controller, journal_phase):
-    _,state,calls,_=controller
-    env={'PIXEL_OPENWEBUI_KEY':'configured'}
-    target={'model':'loaded-B','contextLength':65536,'maxTokens':8192,'reasoning':False}
-    transaction=host._begin_or_resume_external_pixel_transaction(env,target)
-    transaction.apply(target)
-    if journal_phase=='applying':
-        transaction._save('applying')
-    resumed=host._begin_or_resume_external_pixel_transaction(env,target)
-    assert resumed.id==transaction.id==state['transactionId']
-    assert resumed.journal['phase']=='applied'
-    assert calls.count('model-begin')==1
-    assert calls.count('model-apply')==1
-    resumed.finish('commit')
-    assert calls.count('model-finish')==1
-
-
-def test_external_adoption_does_not_replay_unproved_apply(controller):
-    _,_,calls,_=controller
-    env={'PIXEL_OPENWEBUI_KEY':'configured'}
-    target={'model':'loaded-B','contextLength':65536,'maxTokens':8192,'reasoning':False}
-    transaction=host._begin_or_resume_external_pixel_transaction(env,target)
-    transaction._save('applying')
-    with pytest.raises(host._PixelModelTransactionUncertain):
-        host._begin_or_resume_external_pixel_transaction(env,target)
-    assert calls.count('model-apply')==0
-    assert calls.count('model-finish')==0
+def test_external_adoption_transaction_helper_is_gone():
+    assert not hasattr(host, '_begin_or_resume_external_pixel_transaction')
 
 
 @pytest.mark.parametrize('outcome',['commit','rollback'])
@@ -349,26 +316,25 @@ def test_partial_begin_recovery_only_rolls_back_exact_unchanged_host_state(contr
     assert 'model-begin' not in calls and 'model-apply' not in calls
 
 
-def test_recovery_proof_disables_model_load_warmup(monkeypatch):
+def test_recovery_proof_is_one_exact_probe(monkeypatch):
     def prove(_env,**kwargs):
-        assert kwargs['allow_model_warmup'] is False and kwargs['attempts']==1
-        return {'identity':'local','contextLength':65536,'contextVerified':True}
+        assert kwargs['attempts']==1 and kwargs['require_exact_context'] is True
+        assert 'allow_model_warmup' not in kwargs
+        return {'identity':'local.gguf','contextLength':65536,'contextVerified':True}
     monkeypatch.setattr(host,'_wait_for_model_readiness',prove)
-    contract={key:value for key,value in dict(OLD,model='local').items() if key!='routeFingerprint'}
+    contract={key:value for key,value in dict(OLD,model='local.gguf').items() if key!='routeFingerprint'}
     assert host._prove_pixel_model_contract({'GGUF_FILE':'local.gguf'},contract)
 
 
-def test_readiness_without_warmup_never_loads_an_unloaded_model(monkeypatch):
-    monkeypatch.setattr(host,'_uses_lemonade_runtime',lambda _:True)
-    monkeypatch.setattr(host,'_is_windows_host_llama_server',lambda _:False)
-    monkeypatch.setattr(host,'_lemonade_runtime_base_url',lambda _:'http://127.0.0.1:8080')
-    monkeypatch.setattr(host.subprocess,'run',lambda cmd,**kwargs:subprocess.CompletedProcess(cmd,0,
-        stdout=json.dumps({'status':'ok','all_models_loaded':[]})))
-    monkeypatch.setattr(host,'_send_lemonade_warmup',lambda *a,**k:pytest.fail('recovery must not load'))
+def test_readiness_never_completes_against_a_model_the_runtime_does_not_list(monkeypatch):
+    def run(cmd,**_kwargs):
+        url=cmd[-1]
+        body={'status':'ok'} if url.endswith('/health') else {'object':'list','data':[]}
+        return subprocess.CompletedProcess(cmd,0,stdout=json.dumps(body))
+    monkeypatch.setattr(host.subprocess,'run',run)
     monkeypatch.setattr(host,'_chat_completion_ready',lambda *a,**k:pytest.fail('no confirmed loaded identity'))
     assert host._wait_for_model_readiness({},model_id='local',gguf_file='local.gguf',
-        llm_model_name='local',lemonade_model_id='Local',attempts=1,initial_delay=0,
-        return_proof=True,allow_model_warmup=False)=={}
+        llm_model_name='local',attempts=1,initial_delay=0,return_proof=True)=={}
 
 
 def test_get_recovery_is_cheap_and_does_not_query_native_or_inference(controller,monkeypatch):

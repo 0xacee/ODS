@@ -17,8 +17,9 @@ see [MACOS-QUICKSTART.md](docs/MACOS-QUICKSTART.md),
 
 - Docker with Compose v2+
 - `curl` and `git`
-- NVIDIA Container Toolkit for NVIDIA GPUs, ROCm devices for AMD Strix Halo, or
-  Intel compute runtime for Arc
+- NVIDIA Container Toolkit for NVIDIA GPUs, the AMD GPU render node
+  (`/dev/dri`; also `/dev/kfd` for the optional ROCm image) for AMD, or Intel
+  compute runtime for Arc
 - 40 GB+ free disk space for models and container images
 
 **macOS:**

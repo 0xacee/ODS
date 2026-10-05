@@ -20,7 +20,6 @@ import { Link } from 'react-router-dom'
 import { useModels } from '../hooks/useModels'
 import { useDownloadProgress } from '../hooks/useDownloadProgress'
 import HuggingFaceModelBrowser from '../components/model-library/HuggingFaceModelBrowser'
-import ExternalLemonadeAdoption from '../components/ExternalLemonadeAdoption'
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import FittedLibraryPage from '../components/FittedLibraryPage'
 import './models-refined.css'
@@ -69,7 +68,7 @@ export default function Models({ compact = false }) {
     odsMode,
     configuredMode,
     llmBackend,
-    externalLemonade,
+    hostRuntime,
     modelManagement,
     modelLifecycle,
     runtimeActionLoading,
@@ -326,7 +325,7 @@ export default function Models({ compact = false }) {
           <div className="flex min-w-0 items-start gap-3">
             <AlertCircle size={18} className="mt-0.5 shrink-0 text-theme-text-secondary" />
             <div>
-              <p className="text-sm font-semibold text-theme-text-secondary">{llmBackend === 'external' || (externalLemonade && modelManagement?.managed === false) ? 'Model changes managed externally' : externalLemonade && modelManagement?.managed == null ? 'Runtime management unavailable' : 'Local model runtime unavailable'}</p>
+              <p className="text-sm font-semibold text-theme-text-secondary">{llmBackend === 'external' || (hostRuntime && modelManagement?.managed === false) ? 'Model changes managed externally' : hostRuntime && modelManagement?.managed == null ? 'Runtime management unavailable' : 'Local model runtime unavailable'}</p>
               <p className="mt-1 text-sm text-theme-text-secondary/75">{activationModeError}</p>
               {!compact && <p className="mt-1 text-xs text-theme-text-secondary/60">Model downloads and deletion remain available.</p>}
             </div>
@@ -366,13 +365,6 @@ export default function Models({ compact = false }) {
         model={activeModel}
         currentModel={currentModel || loadedModel}
         gpu={gpu}
-      />
-
-      <ExternalLemonadeAdoption
-        enabled={odsMode === 'lemonade' && externalLemonade === true && modelManagement?.managed === false}
-        minimumContext={pixelMinimumContext}
-        onSettled={refresh}
-        compact={compact}
       />
 
       {!currentModel && !loadedModel && configuredModel && (
@@ -1561,7 +1553,6 @@ function getRunDisabledReason({
 
 function formatModeLabel(mode) {
   if (!mode || mode === 'unknown') return 'Unknown'
-  if (mode === 'lemonade') return 'Lemonade'
   return `${mode.charAt(0).toUpperCase()}${mode.slice(1)}`
 }
 

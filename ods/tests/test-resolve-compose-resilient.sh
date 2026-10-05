@@ -77,7 +77,7 @@ default_root_output=$(
     cd "$TEMP_DIR/unrelated-cwd"
     ODS_MODE=local \
         EXTERNAL_LLM_URL="" \
-        LEMONADE_EXTERNAL=false \
+        NATIVE_LLM_BASE_URL="" \
         AMD_INFERENCE_RUNTIME="" \
         AMD_INFERENCE_MANAGED="" \
         bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
@@ -795,17 +795,17 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
         docker compose $amd_external_flags config > "$amd_compose_config_file"
     ); then
         if grep -Eq '^[[:space:]]+llama-server:$' "$amd_compose_config_file"; then
-            fail "Rendered AMD external stack retained managed Lemonade"
+            fail "Rendered AMD external stack retained the managed llama-server"
         elif ! grep -Fq 'LLM_BACKEND: external' "$amd_compose_config_file"; then
-            fail "Rendered AMD external stack overwrote the API backend with Lemonade"
+            fail "Rendered AMD external stack overwrote the external API backend"
         elif ! grep -Fq 'LLM_API_BASE_PATH: /v1' "$amd_compose_config_file"; then
-            fail "Rendered AMD external stack retained the Lemonade API base path"
+            fail "Rendered AMD external stack lost the /v1 API base path"
         elif ! grep -Fq 'OPENAI_API_KEY: ""' "$amd_compose_config_file"; then
             fail "Rendered AMD external stack leaked the LiteLLM key into Open WebUI"
         elif ! grep -Fq 'AMD_INFERENCE_RUNTIME: ""' "$amd_compose_config_file"; then
             fail "Rendered AMD external stack advertised a managed AMD runtime"
         else
-            pass "Real AMD external stack overrides Lemonade routing without changing GPU telemetry"
+            pass "Real AMD external stack overrides managed AMD routing without changing GPU telemetry"
         fi
     else
         fail "Real AMD external-LLM stack failed docker compose config"

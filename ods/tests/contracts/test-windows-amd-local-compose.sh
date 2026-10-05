@@ -28,18 +28,48 @@ if grep -q 'exec litellm --config /app/config.yaml' extensions/services/litellm/
 fi
 grep -qF 'ODS_AGENT_HOST=$(Get-EnvOrNew "ODS_AGENT_HOST" "host.docker.internal")' installers/windows/lib/env-generator.ps1 \
   || { echo "[FAIL] Windows env generation must provide the Docker Desktop host gateway for host services"; exit 1; }
-grep -q 'config.*litellm' installers/windows/install-windows.ps1 \
-  || { echo "[FAIL] Windows llama-server fallback must update LiteLLM local config"; exit 1; }
-grep -q 'host.docker.internal:.*v1' installers/windows/install-windows.ps1 \
-  || { echo "[FAIL] Windows llama-server fallback LiteLLM config must route to the host /v1 endpoint"; exit 1; }
-grep -q 'openai/\*' installers/windows/install-windows.ps1 \
-  || { echo "[FAIL] Windows llama-server fallback LiteLLM config must preserve wildcard routing"; exit 1; }
-grep -q 'enable_thinking: false' installers/windows/install-windows.ps1 \
-  || { echo "[FAIL] Windows llama-server fallback LiteLLM config must disable Qwen thinking"; exit 1; }
-grep -q 'request_timeout: 900' installers/windows/install-windows.ps1 \
-  || { echo "[FAIL] Windows llama-server fallback LiteLLM config must keep long-model request timeout at 900s"; exit 1; }
-grep -q 'stream_timeout: 900' installers/windows/install-windows.ps1 \
-  || { echo "[FAIL] Windows llama-server fallback LiteLLM config must keep long-model stream timeout at 900s"; exit 1; }
+# Round F: phase 06 renders the native llama-server's LiteLLM config
+# directly (env-generator.ps1); the installer no longer patches it afterwards.
+win_env_generator=installers/windows/lib/env-generator.ps1
+grep -qF '# ODS-CONTRACT-WRITER: litellm-local-native' "$win_env_generator" \
+  || { echo "[FAIL] Windows env generation must own the native LiteLLM local config"; exit 1; }
+if grep -q 'ODS-CONTRACT-WRITER: litellm-local-native' installers/windows/install-windows.ps1; then
+  echo "[FAIL] Windows installer must not patch LiteLLM after the native start (phase 06 renders it)"
+  exit 1
+fi
+grep -qF '"http://host.docker.internal:$nativeInferencePort"' "$win_env_generator" \
+  || { echo "[FAIL] Windows native LiteLLM config must route to the host llama-server port"; exit 1; }
+grep -qF '$llmApiBasePath = "/v1"' "$win_env_generator" \
+  || { echo "[FAIL] Windows native LiteLLM config must use the host /v1 endpoint"; exit 1; }
+grep -qF 'os.environ/LLAMA_SERVER_API_KEY' "$win_env_generator" \
+  || { echo "[FAIL] Windows native LiteLLM config must send LLAMA_SERVER_API_KEY from the environment"; exit 1; }
+# LiteLLM may be off on a Windows install, so the key cannot come from an
+# overlay stanza (Compose rejects a service with no image); LiteLLM's own
+# fragment passes it whenever LiteLLM runs.
+awk '$0=="    environment:" {on=1; next} /^    [a-z]/ {on=0} on' extensions/services/litellm/compose.yaml \
+  | grep -qF -- '- LLAMA_SERVER_API_KEY=${LLAMA_SERVER_API_KEY:-}' \
+  || { echo "[FAIL] LiteLLM must receive LLAMA_SERVER_API_KEY for the Windows native config that names it"; exit 1; }
+grep -q 'model_name: "\*"' "$win_env_generator" \
+  || { echo "[FAIL] Windows native LiteLLM config must preserve wildcard routing"; exit 1; }
+grep -q 'enable_thinking: false' "$win_env_generator" \
+  || { echo "[FAIL] Windows native LiteLLM config must disable Qwen thinking"; exit 1; }
+grep -q 'request_timeout: 900' "$win_env_generator" \
+  || { echo "[FAIL] Windows native LiteLLM config must keep long-model request timeout at 900s"; exit 1; }
+grep -q 'stream_timeout: 900' "$win_env_generator" \
+  || { echo "[FAIL] Windows native LiteLLM config must keep long-model stream timeout at 900s"; exit 1; }
+if grep -q '/api/v1' installers/windows/docker-compose.windows-amd.yml installers/windows/docker-compose.windows-amd.local.yml; then
+  echo "[FAIL] Windows AMD overlays must not probe or route to Lemonade's /api/v1"
+  exit 1
+fi
+for service in dashboard-api model-router; do
+  awk -v svc="  ${service}:" '$0==svc {on=1; next} /^  [a-z]/ {on=0} on' installers/windows/docker-compose.windows-amd.yml \
+    | grep -qF 'LLAMA_SERVER_API_KEY=${LLAMA_SERVER_API_KEY:-}' \
+    || { echo "[FAIL] Windows AMD overlay must give ${service} the native llama-server key"; exit 1; }
+done
+grep -qF 'OPENAI_API_KEY: "${OPEN_WEBUI_LLM_API_KEY:-${LLAMA_SERVER_API_KEY:-' installers/windows/docker-compose.windows-amd.yml \
+  || { echo "[FAIL] Open WebUI must authenticate to the native llama-server when it calls it directly"; exit 1; }
+grep -qF 'LLM_BACKEND=${LLM_BACKEND:-llama-server}' installers/windows/docker-compose.windows-amd.yml \
+  || { echo "[FAIL] Windows AMD overlay must default LLM_BACKEND to llama-server"; exit 1; }
 
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
   echo "[SKIP] docker compose unavailable"
@@ -54,7 +84,8 @@ trap 'rm -f "$tmp_env" "$tmp_custom_port_env" "$tmp_switchboard_env" "$tmp_full_
 cat > "$tmp_env" <<'ENV_EOF'
 WEBUI_SECRET=ci-placeholder
 OLLAMA_PORT=11434
-LLM_API_BASE_PATH=/api/v1
+LLM_API_BASE_PATH=/v1
+LLAMA_SERVER_API_KEY=ci-native-key
 ENV_EOF
 
 cat > "$tmp_custom_port_env" <<'ENV_EOF'
@@ -70,6 +101,7 @@ ODS_MODEL_SWITCHBOARD=enabled
 LITELLM_KEY=ci-litellm-key
 OPEN_WEBUI_LLM_BASE_URL=http://litellm:4000
 OPEN_WEBUI_LLM_API_KEY=ci-litellm-key
+LLAMA_SERVER_API_KEY=ci-native-key
 ENV_EOF
 
 cat > "$tmp_full_stack_env" <<'ENV_EOF'
@@ -91,12 +123,18 @@ rendered="$(
     config
 )"
 
-grep -q 'http://host.docker.internal:8080/api/v1/health' <<<"$rendered" \
-  || { echo "[FAIL] Lemonade readiness probe must use native Windows port 8080"; exit 1; }
 grep -q 'http://host.docker.internal:8080/health' <<<"$rendered" \
   || { echo "[FAIL] llama-server readiness probe must use native Windows port 8080"; exit 1; }
-grep -q 'ODS_TALK_VISION_URL: http://host.docker.internal:8080/api/v1' <<<"$rendered" \
+if grep -q '/api/v1' <<<"$rendered"; then
+  echo "[FAIL] Windows AMD render still references Lemonade's /api/v1"
+  exit 1
+fi
+grep -q 'ODS_TALK_VISION_URL: http://host.docker.internal:8080/v1' <<<"$rendered" \
   || { echo "[FAIL] ODS Talk vision URL must use the Windows AMD host runtime API path"; exit 1; }
+grep -q 'OPENAI_API_KEY: ci-native-key' <<<"$rendered" \
+  || { echo "[FAIL] Open WebUI must send the native llama-server key"; exit 1; }
+grep -q 'LLAMA_SERVER_API_KEY: ci-native-key' <<<"$rendered" \
+  || { echo "[FAIL] dashboard-api and model-router must receive the native llama-server key"; exit 1; }
 grep -q 'ODS_TALK_HERMES_TIMEOUT: "900"' <<<"$rendered" \
   || { echo "[FAIL] Windows AMD ODS Talk Hermes timeout must render as 900s"; exit 1; }
 if grep -q 'host.docker.internal:11434' <<<"$rendered"; then
@@ -115,8 +153,6 @@ custom_port_rendered="$(
     config
 )"
 
-grep -q 'http://host.docker.internal:18080/api/v1/health' <<<"$custom_port_rendered" \
-  || { echo "[FAIL] Lemonade readiness probe must honor AMD_INFERENCE_PORT"; exit 1; }
 grep -q 'http://host.docker.internal:18080/health' <<<"$custom_port_rendered" \
   || { echo "[FAIL] llama-server readiness probe must honor AMD_INFERENCE_PORT"; exit 1; }
 if grep -q 'host.docker.internal:8080' <<<"$custom_port_rendered"; then
@@ -128,12 +164,14 @@ grep -q 'OLLAMA_URL: http://host.docker.internal:18080' <<<"$custom_port_rendere
 grep -q 'OPENAI_API_BASE_URL: http://host.docker.internal:18080/v1' <<<"$custom_port_rendered" \
   || { echo "[FAIL] Open WebUI must honor AMD_INFERENCE_PORT"; exit 1; }
 
-grep -qF '"--port", [string]$script:LEMONADE_PORT' installers/windows/install-windows.ps1 \
-  || { echo "[FAIL] Windows installer must launch native llama-server on the resolved port"; exit 1; }
-grep -qF '$script:LEMONADE_PORT = if ($cloudMode)' installers/windows/install-windows.ps1 \
-  || { echo "[FAIL] AMD cloud installs must retain a valid native-port default"; exit 1; }
-grep -qF '"http://host.docker.internal:$($llmEndpoint['"'"'Port'"'"'])/v1"' installers/windows/install-windows.ps1 \
-  || { echo "[FAIL] Windows Perplexica config must honor the resolved native port"; exit 1; }
+grep -qF "'--port', [string]\$Plan.Port" installers/windows/lib/native-llama-runtime.ps1 \
+  || { echo "[FAIL] Windows native llama-server must launch on its planned port"; exit 1; }
+grep -qF -- '-Port $script:NATIVE_LLM_PORT' installers/windows/ods.ps1 \
+  || { echo "[FAIL] ods.ps1 must launch native llama-server on the resolved port"; exit 1; }
+grep -qF '$script:NATIVE_LLM_PORT = Resolve-WindowsLlmPreflightPort' installers/windows/install-windows.ps1 \
+  || { echo "[FAIL] Windows installer must resolve the persisted native port before rendering .env"; exit 1; }
+grep -qF '$perplexicaUsesLiteLlm = ($cloudMode -or [string]$llmEndpoint["Backend"] -eq "native-llama-server")' installers/windows/install-windows.ps1 \
+  || { echo "[FAIL] Windows Perplexica must reach the keyed native llama-server through LiteLLM"; exit 1; }
 
 switchboard_webui_rendered="$(
   docker compose \

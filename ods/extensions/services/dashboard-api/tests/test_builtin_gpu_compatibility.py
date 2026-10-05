@@ -1,7 +1,7 @@
 """A Library built-in this host's GPU backend cannot run stays incompatible.
 
 ComfyUI is Library-manageable but needs an AMD or NVIDIA backend. On a CPU
-backend (Strixy's WSL side runs Lemonade on Windows, so GPU_BACKEND=cpu) the
+backend (Strixy's WSL side runs its model on Windows, so GPU_BACKEND=cpu) the
 Compose resolver leaves ComfyUI out of the stack. The catalog offered Add anyway
 and the start failed with "Host agent failed to start extension" (fleet run
 2026-10-04). The status and the enable route must both say why instead.

@@ -235,7 +235,7 @@ ods_select_lore_messages() {
   fi
   case "${ODS_MODE:-local}" in
     cloud) LORE_MESSAGES=("${ODS_CLOUD_LORE_MESSAGES[@]}") ;;
-    lemonade|external) LORE_MESSAGES=("${ODS_EXTERNAL_LORE_MESSAGES[@]}") ;;
+    external) LORE_MESSAGES=("${ODS_EXTERNAL_LORE_MESSAGES[@]}") ;;
     *) LORE_MESSAGES=("${ODS_LOCAL_LORE_MESSAGES[@]}") ;;
   esac
 }
@@ -770,7 +770,7 @@ show_success_card() {
             type_line "Cloud mode is active; your configured providers may receive prompts and responses." "$DGRN" 0.04
             type_line "Review provider privacy, retention, and usage terms before sending sensitive data." "$DGRN" 0.04
             ;;
-        lemonade|external)
+        external)
             type_line "Inference uses the external endpoint you configured." "$DGRN" 0.04
             type_line "Traffic handling depends on that endpoint and its operator." "$DGRN" 0.04
             ;;

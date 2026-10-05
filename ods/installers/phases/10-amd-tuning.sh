@@ -36,16 +36,22 @@ elif [[ "$GPU_BACKEND" == "amd" ]] && ! $DRY_RUN; then
             ai_warn "Could not add $USER to render/video groups. Run: sudo usermod -aG render,video $USER"
     fi
 
-    # Verify GPU compute devices exist — containers need /dev/kfd and /dev/dri
+    # Verify GPU devices. The default Vulkan llama-server needs only /dev/dri.
+    # /dev/kfd is the ROCm compute device: the ROCm llama-server image
+    # (AMD_INFERENCE_BACKEND=rocm) and ComfyUI's AMD image need it.
     if [[ ! -e /dev/kfd ]]; then
         ai "ROCm compute device /dev/kfd not found. Loading kernel module..."
+        # A failed modprobe is reported by the /dev/kfd check right below.
         _phase10_privileged modprobe amdkfd 2>/dev/null || true
         if [[ -e /dev/kfd ]]; then
             ai_ok "/dev/kfd loaded successfully"
-        else
+        elif [[ "${AMD_INFERENCE_BACKEND:-vulkan}" == "rocm" ]]; then
             ai_warn "/dev/kfd still not available after modprobe."
-            ai_warn "GPU containers (llama-server, comfyui) will fail without it."
-            ai_warn "Fix: reboot, or run: sudo modprobe amdkfd"
+            ai_warn "The ROCm llama-server (AMD_INFERENCE_BACKEND=rocm) and ComfyUI will fail without it."
+            ai_warn "Fix: reboot, or run: sudo modprobe amdkfd. The Vulkan image (AMD_INFERENCE_BACKEND=vulkan) does not need it."
+        else
+            ai_warn "/dev/kfd still not available after modprobe. The Vulkan llama-server does not need it; ComfyUI on AMD does."
+            ai_warn "Fix for ComfyUI: reboot, or run: sudo modprobe amdkfd"
         fi
     fi
 
@@ -55,8 +61,10 @@ elif [[ "$GPU_BACKEND" == "amd" ]] && ! $DRY_RUN; then
     elif [[ ! -e /dev/dri/renderD128 ]]; then
         ai_warn "/dev/dri exists but renderD128 is missing. GPU compute may not work."
         ai_warn "Check: ls -la /dev/dri/ — you need at least card0/card1 and renderD128."
-    else
+    elif [[ -e /dev/kfd ]]; then
         ai_ok "GPU devices verified (/dev/kfd, /dev/dri/renderD128)"
+    else
+        ai_ok "GPU render node verified (/dev/dri/renderD128)"
     fi
 
     # This phase no longer installs user maintenance timers. They served only
@@ -288,9 +296,6 @@ GTT_EOF
             ai "  sudo ${_inst_cmd[*]} tuned && sudo systemctl enable --now tuned && sudo tuned-adm profile accelerator-performance"
         fi
     fi
-
-    # LiteLLM config already copied by rsync/cp block above
-    [[ -f "$INSTALL_DIR/config/litellm/strix-halo-config.yaml" ]] && ai_ok "LiteLLM Strix Halo routing config installed"
 
     # Reboot notice if kernel-level changes were made
     if [[ "${_amd_needs_reboot:-}" == "true" ]]; then
