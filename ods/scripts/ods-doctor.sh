@@ -252,11 +252,50 @@ _doctor_check_external_llm() {
         *)          health_path="/v1/models" ;;  # OpenAI-compat fallback
     esac
 
-    if command -v curl >/dev/null 2>&1 \
+    # API mode passes the key file the installer stored: a keyed API answers
+    # 401 without it, which is not "down". The key reaches curl as a header
+    # file, never as an argument. Other callers keep the plain probe.
+    local key_file="${4:-}" key="" status="000"
+    LLM_FAILURE=""
+    if [[ -n "$key_file" && -s "$key_file" && ! -r "$key_file" ]]; then
+        LLM_FAILURE="key-unreadable"
+    elif [[ -n "$key_file" ]] && command -v curl >/dev/null 2>&1; then
+        if [[ -s "$key_file" ]]; then
+            IFS= read -r key < "$key_file" || true  # a key without a final newline still reads
+        fi
+        if [[ -n "$key" ]]; then
+            status="$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' \
+                -H @<(printf 'Authorization: Bearer %s\n' "$key") "${url%/}${health_path}" 2>/dev/null)" || true
+        else
+            status="$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' "${url%/}${health_path}" 2>/dev/null)" || true
+        fi
+        case "$status" in
+            2[0-9][0-9]) probe_ok=true ;;
+            401|403) if [[ -n "$key" ]]; then LLM_FAILURE="key-refused"; else LLM_FAILURE="key-required"; fi ;;
+            *) LLM_FAILURE="unreachable" ;;
+        esac
+        key=""
+    elif command -v curl >/dev/null 2>&1 \
         && curl -sf --max-time 5 "${url%/}${health_path}" > /dev/null 2>&1; then
         probe_ok=true
     fi
-    if [[ "$probe_ok" == true ]]; then
+    if [[ "$LLM_FAILURE" == key-unreadable ]]; then
+        LLM_STATUS="unknown"
+        log_warn "LLM backend: ${provider:-external} (external) — not checked: this user cannot read its stored API key"
+        log_info "  Endpoint : $url"
+        log_info "  Recovery : run ods doctor as the user that installed ODS"
+    elif [[ "$LLM_FAILURE" == key-refused || "$LLM_FAILURE" == key-required ]]; then
+        LLM_STATUS="fail"
+        if [[ "$LLM_FAILURE" == key-refused ]]; then
+            log_fail "LLM backend: ${provider:-external} (external) — the API refused the stored key (HTTP $status)"
+            LLM_RECOVERY="replace the API key: rerun the installer with --external-llm-key-file FILE (Windows: -ExternalLlmKeyFile FILE)"
+        else
+            log_fail "LLM backend: ${provider:-external} (external) — the API needs a key, and none is stored (HTTP $status)"
+            LLM_RECOVERY="add the API key: rerun the installer with --external-llm-key-file FILE (Windows: -ExternalLlmKeyFile FILE)"
+        fi
+        log_info "  Endpoint : $url"
+        log_info "  Recovery : $LLM_RECOVERY"
+    elif [[ "$probe_ok" == true ]]; then
         LLM_STATUS="ok"
         log_ok "LLM backend: ${provider:-external} (external) — responding"
         log_ok "  Endpoint : $url"
@@ -394,7 +433,8 @@ _doctor_check_llm_backend() {
 
     if [ -n "$ext_url" ]; then
         # External LLM mode — skip llama-server check
-        _doctor_check_external_llm "$ext_url" "$ext_provider" "$ext_model"
+        _doctor_check_external_llm "$ext_url" "$ext_provider" "$ext_model" \
+            "$ROOT_DIR/config/litellm/external-upstream.key"
     elif [[ -n "${NATIVE_LLM_BASE_URL:-}" ]]; then
         _doctor_check_host_native_llm
     elif [[ "$mode" == "cloud" ]]; then
@@ -457,6 +497,7 @@ export LLM_MODEL
 export LLM_URL
 export LLM_LOCAL_WARNING
 export LLM_RECOVERY
+export LLM_FAILURE
 
 # STT model cache check: a common silent-failure mode is the installer's
 # pre-download failing, so Whisper's /health passes (service up) but the
@@ -1698,9 +1739,12 @@ llm_status = os.environ.get("LLM_STATUS", "unknown")
 llm_recovery = os.environ.get("LLM_RECOVERY", "")
 llm_provider = os.environ.get("LLM_PROVIDER", "")
 llm_local_warn = os.environ.get("LLM_LOCAL_WARNING", "false") == "true"
+llm_failure = os.environ.get("LLM_FAILURE", "")
 
 if llm_status == "fail" and llm_recovery:
-    if llm_provider != "llama-server":
+    if llm_provider != "llama-server" and llm_failure in ("key-refused", "key-required"):
+        fix_hints.append(f"External LLM backend ({llm_provider}) answered but did not accept a stored API key. Hint: {llm_recovery}")
+    elif llm_provider != "llama-server":
         fix_hints.append(f"External LLM backend ({llm_provider}) is unreachable. Hint: {llm_recovery}")
     else:
         fix_hints.append(f"Local llama-server is unreachable. Hint: {llm_recovery}")
