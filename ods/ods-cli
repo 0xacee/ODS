@@ -90,6 +90,12 @@ success() { echo -e "${GREEN}✓${NC} $1"; }
 warn() { echo -e "${YELLOW}⚠${NC} $1" >&2; }
 error() { echo -e "${RED}✗${NC} $1" >&2; exit 1; }
 log_error() { echo -e "${RED}✗${NC} $1" >&2; }
+# A failed remote-provider operation also says where to get help.
+_remote_provider_fail() {
+    echo -e "${RED}✗${NC} $1" >&2
+    echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+    exit 1
+}
 
 # Map cmd_list status string to a colour. Returns an empty string for unknown
 # statuses so future state names don't break formatting.
@@ -1189,6 +1195,7 @@ _compose_run_with_summary() {
     fi
     echo ""
     log "Full compose output: $_compose_log"
+    echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
     trap - INT TERM
     return "$_rc"
 }
@@ -2656,17 +2663,32 @@ cmd_doctor() {
     fi
 
     # Run doctor script. If it fails to generate a report, show the script output
-    # to make failures actionable for operators.
-    local doctor_out
+    # to make failures actionable for operators. Each run writes a new private
+    # report and only that one is shown: a file already at $report_file (an
+    # earlier run, or another user's in the shared /tmp) must never stand in
+    # for this run (fleet: after a failed run, doctor showed an old install's
+    # model and runtime).
+    local doctor_out run_report
     doctor_out=$(mktemp)
-    "$INSTALL_DIR/scripts/ods-doctor.sh" "$report_file" >"$doctor_out" 2>&1 || true
+    run_report=$(mktemp)
+    "$INSTALL_DIR/scripts/ods-doctor.sh" "$run_report" >"$doctor_out" 2>&1 || true
 
-    if [[ ! -f "$report_file" ]]; then
+    if [[ ! -s "$run_report" ]]; then
         cat "$doctor_out" >&2
-        rm -f "$doctor_out"
-        error "Doctor report not generated at $report_file"
+        rm -f "$doctor_out" "$run_report"
+        echo -e "${RED}✗${NC} The doctor stopped before it finished its report; its output is above." >&2
+        echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+        exit 1
     fi
     rm -f "$doctor_out"
+    # cp names its own failure (for example, another user's file at the
+    # default path); this run's report then stays where it is.
+    if cp -- "$run_report" "$report_file"; then
+        rm -f "$run_report"
+    else
+        warn "This run's report is at $run_report"
+        report_file="$run_report"
+    fi
 
     # JSON mode: just output the report
     if [[ "$json_mode" == "true" ]]; then
@@ -2772,7 +2794,8 @@ if amd_runtime.get('available'):
     )
     for warning in amd_runtime.get('warnings', [])[:3]:
         print(f"    {YELLOW}⚠{NC} {warning}")
-elif amd_runtime.get('reason') and amd_runtime.get('reason') != 'not_amd':
+# API mode runs no local AMD runtime: its reason is not a warning (fleet, Strixy).
+elif amd_runtime.get('reason') and amd_runtime.get('reason') not in ('not_amd', 'api_mode'):
     print(f"  {YELLOW}⚠{NC} AMD runtime: {amd_runtime.get('reason')}")
 
 inference_contract = runtime.get('inference_contract') or {}
@@ -3815,7 +3838,11 @@ cmd_mode() {
     local configured_backend
     configured_backend=$(grep -m1 "^LLM_BACKEND=" .env 2>/dev/null | cut -d= -f2- | tr -d '"\047\r' || true)
     if [[ "${configured_backend,,}" == "external" ]]; then
-        error "External LLM routing is installer-managed. Run './install.sh --no-external-llm' first, then retry 'ods mode $mode'."
+        # Fleet row 4: "installer-managed" did not say what to do or where.
+        echo -e "${RED}✗${NC} ODS is in API mode, which only the installer turns on and off. Nothing was changed." >&2
+        echo "  Rerun the ODS installer with --no-external-llm (Windows: -NoExternalLlm), then run 'ods mode $mode' again." >&2
+        echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+        exit 1
     fi
 
     # Update .env
@@ -3998,8 +4025,52 @@ cmd_model() {
             trap - INT TERM HUP
             success "Model activated everywhere: $model (tier ${effective_tier:-$tier}, ctx=${effective_context:-$MAX_CONTEXT})."
             ;;
+        recover)
+            # The dashboard's "Recover model switch" for an interrupted Portal
+            # model switch. --release-unverified releases a switch that
+            # changed nothing when its previous model cannot be proven (fleet
+            # row 27); the agent refuses it for any other switch.
+            command -v curl >/dev/null 2>&1 || error "curl is required for 'ods model recover'"
+            command -v jq >/dev/null 2>&1 || error "jq is required for 'ods model recover'"
+            local body='{}' response_file payload_file http_code phase
+            case "${2:-}" in
+                "") ;;
+                --release-unverified) body='{"releaseUnverified":true}' ;;
+                *) error "Usage: ods model recover [--release-unverified]" ;;
+            esac
+            response_file="$(mktemp)"; payload_file="$(mktemp)"
+            printf '%s' "$body" > "$payload_file"
+            http_code="$(_remote_provider_request POST /api/models/recovery "$response_file" "$payload_file" 410)" || http_code=""
+            rm -f "$payload_file"
+            phase="$(jq -r '.phase // empty' "$response_file" 2>/dev/null || true)"
+            if [[ "$http_code" == 200 ]]; then
+                rm -f "$response_file"
+                if [[ "$phase" == idle ]]; then
+                    success "No model switch is waiting for recovery."
+                else
+                    success "The interrupted model switch was finished; Portal can change models again."
+                fi
+                return 0
+            fi
+            echo -e "${RED}✗${NC} $(
+                if [[ "$http_code" != 409 ]]; then
+                    echo "Recovery could not be confirmed${http_code:+ (HTTP $http_code)}. Run 'ods model recover' again in a minute."
+                elif jq -e '.reason == "model-recovery-proof-required" and .releasable == true' "$response_file" >/dev/null 2>&1; then
+                    echo "ODS could not confirm the model Portal used before this switch, so it cannot finish the switch the usual way."
+                else
+                    echo "The interrupted switch still needs repair. The saved state has been kept."
+                fi)" >&2
+            if [[ "$http_code" == 409 ]] \
+                && jq -e '.reason == "model-recovery-proof-required" and .releasable == true' "$response_file" >/dev/null 2>&1; then
+                echo "  The switch did not change anything. To release it and put Portal back on the model settings it had before, run:" >&2
+                echo "    ods model recover --release-unverified" >&2
+            fi
+            rm -f "$response_file"
+            echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+            exit 1
+            ;;
         *)
-            error "Usage: ods model <current|list|swap>"
+            error "Usage: ods model <current|list|swap|recover>"
             ;;
     esac
 }
@@ -4485,8 +4556,13 @@ _remote_provider_print_status() {
     local response_file="$1"
     jq -r '
         "Remote provider: \(.status // "unknown")",
+        (if .status == "paused" then
+            "An update or a mode change paused it; ODS uses the model on this computer. Use it again with: ods remote-provider enable"
+         else empty end),
         "Route: " + (if .routeState.enabled == true then "enabled" else "disabled" end),
-        "Saved route: " + (if .routeState.resumeAvailable == true then "available" else "none" end),
+        (if .routeState.enabled == true then empty else
+            "Saved route: " + (if .routeState.resumeAvailable == true then "available (resume it with: ods remote-provider enable)" else "none" end)
+         end),
         (if .routeState.enabled == true and .routeState.provider then
             "Provider: \(.routeState.provider.model // "unknown") via \(.routeState.provider.transport // "unknown") at \(.routeState.provider.baseUrl // "unknown")"
          else empty end),
@@ -4506,7 +4582,7 @@ _remote_provider_print_apply_result() {
             (if .applied == true then "applied" else "completed" end),
         "Mutated state: \(.mutated // false)",
         (if .probe then
-            "Probe: HTTP \(.probe.status // "unknown") at \(.probe.endpoint // "/v1/models")" +
+            "Probe: HTTP \(.probe.httpStatus // .probe.status // "unknown") at \(.probe.endpoint // "/v1/models")" +
             (if (.probe.modelCount // null) != null then " (\(.probe.modelCount) models)" else "" end)
          else empty end),
         (if .rollback.attempted == true then
@@ -4597,12 +4673,12 @@ _remote_provider_peer_call() {
     fi
     if [[ $curl_status -ne 0 ]]; then
         rm -f "$response_file"; trap - INT TERM HUP
-        error "Remote-provider peer model request failed before Dashboard API completed"
+        _remote_provider_fail "Remote-provider peer model request failed before Dashboard API completed"
     fi
     if [[ "$http_code" != "200" ]]; then
         detail="$(_remote_provider_response_error "$response_file")"
         rm -f "$response_file"; trap - INT TERM HUP
-        error "Remote-provider peer model request failed (HTTP $http_code): $detail"
+        _remote_provider_fail "Remote-provider peer model request failed (HTTP $http_code): $detail"
     fi
     printf '%s' "$response_file"
     trap - INT TERM HUP
@@ -4673,13 +4749,13 @@ _remote_provider_probe_configured() {
     fi
     if [[ $curl_status -ne 0 ]]; then
         rm -f "$response_file"; trap - INT TERM HUP
-        error "Remote-provider test request failed before Dashboard API completed"
+        _remote_provider_fail "Remote-provider test request failed before Dashboard API completed"
     fi
     if [[ "$http_code" != "200" ]]; then
         local detail
         detail="$(_remote_provider_response_error "$response_file")"
         rm -f "$response_file"; trap - INT TERM HUP
-        error "Remote-provider test failed (HTTP $http_code): $detail"
+        _remote_provider_fail "Remote-provider test failed (HTTP $http_code): $detail"
     fi
     if [[ "$json_mode" == "true" ]]; then
         jq . "$response_file"
@@ -4847,13 +4923,13 @@ cmd_remote_provider() {
             fi
             if [[ $curl_status -ne 0 ]]; then
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider status request failed before Dashboard API completed"
+                _remote_provider_fail "Remote-provider status request failed before Dashboard API completed"
             fi
             if [[ "$http_code" != "200" ]]; then
                 local detail
                 detail="$(_remote_provider_response_error "$response_file")"
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider status failed (HTTP $http_code): $detail"
+                _remote_provider_fail "Remote-provider status failed (HTTP $http_code): $detail"
             fi
             if [[ "$json_mode" == "true" ]]; then
                 jq . "$response_file"
@@ -4886,13 +4962,13 @@ cmd_remote_provider() {
             rm -f "$payload_file"
             if [[ $curl_status -ne 0 ]]; then
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider plan request failed before Dashboard API completed"
+                _remote_provider_fail "Remote-provider plan request failed before Dashboard API completed"
             fi
             if [[ "$http_code" != "200" ]]; then
                 local detail
                 detail="$(_remote_provider_response_error "$response_file")"
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider plan failed (HTTP $http_code): $detail"
+                _remote_provider_fail "Remote-provider plan failed (HTTP $http_code): $detail"
             fi
             jq . "$response_file"
             rm -f "$response_file"; trap - INT TERM HUP
@@ -4917,13 +4993,13 @@ cmd_remote_provider() {
             fi
             if [[ $curl_status -ne 0 ]]; then
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider enable request failed before Dashboard API completed"
+                _remote_provider_fail "Remote-provider enable request failed before Dashboard API completed"
             fi
             if [[ "$http_code" != "200" ]]; then
                 local detail
                 detail="$(_remote_provider_response_error "$response_file")"
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider enable failed (HTTP $http_code): $detail"
+                _remote_provider_fail "Remote-provider enable failed (HTTP $http_code): $detail"
             fi
             if [[ "$json_mode" == "true" ]]; then
                 jq . "$response_file"
@@ -4981,13 +5057,13 @@ cmd_remote_provider() {
             rm -f "$payload_file"
             if [[ $curl_status -ne 0 ]]; then
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider $subcmd request failed before Dashboard API completed"
+                _remote_provider_fail "Remote-provider $subcmd request failed before Dashboard API completed"
             fi
             if [[ "$http_code" != "200" ]]; then
                 local detail
                 detail="$(_remote_provider_response_error "$response_file")"
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider $subcmd failed (HTTP $http_code): $detail"
+                _remote_provider_fail "Remote-provider $subcmd failed (HTTP $http_code): $detail"
             fi
             if [[ "${REMOTE_PROVIDER_JSON_MODE:-false}" == "true" ]]; then
                 jq . "$response_file"
@@ -6806,7 +6882,7 @@ ${CYAN}Commands:${NC}
   preset <action>     Save/load/list/delete/export/import presets
   mode [local|cloud|hybrid]
                       Switch between local/cloud/hybrid modes
-  model [current|list|swap]
+  model [current|list|swap|recover]
                       View or change the local LLM model tier
   remote-provider [status|plan|configure|test|enable|disable|remove|peer-models]
                       Configure, test, disable, or inspect remote GPU provider routing
@@ -6858,6 +6934,7 @@ ${CYAN}Model Commands:${NC}
   model current       Show current model
   model list          List available tiers
   model swap <tier>   Switch to a different model tier
+  model recover       Finish an interrupted Portal model switch
 
 ${CYAN}Dashboard Sign-in:${NC}
   dashboard-login     Set up or recover your dashboard password with a one-time link
