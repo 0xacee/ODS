@@ -1908,7 +1908,7 @@ def test_download_model_rejects_while_bootstrap_upgrade_active(test_client, monk
 
     assert resp.status_code == 409
     assert resp.json()["detail"] == {
-        "error": "Cannot start model download while bootstrap full-model upgrade is in progress",
+        "error": "ODS is still downloading Qwen3.6-35B-A3B-UD-Q4_K_M.gguf, its first full model. Other model downloads can start when it finishes.",
         "code": "model_lifecycle_busy",
         "activeOperation": "bootstrap_upgrade",
         "activeTarget": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
@@ -1958,7 +1958,7 @@ def test_load_model_rejects_while_bootstrap_upgrade_active(test_client, monkeypa
 
     assert resp.status_code == 409
     assert resp.json()["detail"] == {
-        "error": "Cannot start model download while bootstrap full-model upgrade is in progress",
+        "error": "ODS is still downloading Qwen3.5-9B-Q4_K_M.gguf, its first full model. Other model downloads can start when it finishes.",
         "code": "model_lifecycle_busy",
         "activeOperation": "bootstrap_upgrade",
         "activeTarget": "Qwen3.5-9B-Q4_K_M.gguf",
@@ -2012,7 +2012,7 @@ def test_download_model_rejects_while_bootstrap_upgrade_retry_pending(test_clien
 
     assert resp.status_code == 409
     assert resp.json()["detail"] == {
-        "error": "Cannot start model download while bootstrap full-model upgrade is pending retry",
+        "error": "ODS's first download of Qwen3.6-35B-A3B-UD-Q4_K_M.gguf stopped before it finished, and it goes before other model downloads. Restart ODS to retry it (ods restart). The reason is in logs/model-upgrade.log in your ODS folder.",
         "code": "model_lifecycle_busy",
         "activeOperation": "bootstrap_upgrade_retry_pending",
         "activeTarget": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
@@ -2067,7 +2067,7 @@ def test_download_model_rejects_stale_active_bootstrap_upgrade_as_retry_pending(
 
     assert resp.status_code == 409
     assert resp.json()["detail"] == {
-        "error": "Cannot start model download while bootstrap full-model upgrade is pending retry",
+        "error": "ODS's first download of Qwen3.6-35B-A3B-UD-Q4_K_M.gguf stopped before it finished, and it goes before other model downloads. Restart ODS to retry it (ods restart). The reason is in logs/model-upgrade.log in your ODS folder.",
         "code": "model_lifecycle_busy",
         "activeOperation": "bootstrap_upgrade_retry_pending",
         "activeTarget": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",

@@ -1060,6 +1060,9 @@ test('shows terminal download failures with a retry action', async () => {
 
   expect(screen.getByText('Download Failed')).toBeInTheDocument()
   expect(screen.getByText('The download checksum did not match.')).toBeInTheDocument()
+  // A failed download names where to get help, like the page's other errors.
+  expect(screen.getByRole('link', { name: /get help on discord/i }))
+    .toHaveAttribute('href', expect.stringContaining('discord.gg/'))
   fireEvent.click(screen.getByRole('button', { name: /retry/i }))
 
   expect(clearTerminal).toHaveBeenCalled()
