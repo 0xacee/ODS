@@ -547,6 +547,26 @@ def test_imported_recipe_binds_only_its_own_data_and_config(tmp_path, volume, cu
     assert dashboard_ok is allowed
 
 
+# An imported recipe named after a folder ODS keeps under ./data or ./config
+# would otherwise get that folder as its own (./data/config-backups holds the
+# owner's .env backups).
+@pytest.mark.parametrize("folder, identifier", [
+    ("data", "config-backups"), ("data", "models"), ("data", "persona"),
+    ("data", "user-extensions"), ("config", "backends"),
+])
+def test_an_imported_recipe_cannot_take_a_folder_ods_keeps(tmp_path, folder, identifier):
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(svc(f"    volumes:\n      - './{folder}/{identifier}:/mounted'\n"), encoding="utf-8")
+    scan, _ = _resolver_scan(tmp_path)
+    resolver_ok, warnings = scan(compose, False, None, extension_id=identifier)
+    assert resolver_ok is False
+    assert any("folder ODS keeps" in warning for warning in warnings), warnings
+    with pytest.raises(HTTPException) as rejected:
+        extensions._scan_compose_content(compose, trusted=False, extension_id=identifier)
+    assert rejected.value.status_code == 400
+    assert "folder ODS keeps" in str(rejected.value.detail)
+
+
 def test_fixture_ids_are_unique():
     ids = [entry[0] for entry in MUST_REJECT + MUST_ACCEPT]
     assert len(ids) == len(set(ids))

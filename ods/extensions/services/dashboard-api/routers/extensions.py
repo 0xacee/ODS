@@ -730,11 +730,24 @@ def _is_ods_nvidia_gpu_reservation(entry) -> bool:
 #     directory, which is the ODS install directory (the first -f file), not
 #     the extension's own directory: ./.env there is the owner's secrets and
 #     ./scripts is code the ods CLI runs on the host. An imported recipe may
-#     bind only its own ./data/<id> and ./config/<id>.
+#     bind only its own ./data/<id> and ./config/<id>, and never when <id>
+#     names a folder ODS keeps there itself (_COMPOSE_POLICY_RESERVED_NAMES).
 #   * PyYAML keeps the last of two duplicate keys and Compose refuses them;
 #     the loader refuses them too instead of judging a value Compose never
 #     sees.
 _COMPOSE_POLICY_FALSE = frozenset({"false", "no", "n", "off"})
+# Folders under ./data and ./config that belong to ODS itself, or to a
+# shipped extension whose folder differs from its id. No extension may use
+# one of these names as its id, because ./data/<id> and ./config/<id> are
+# where an extension's own files go.
+_COMPOSE_POLICY_RESERVED_NAMES = frozenset({
+    "auth", "backends", "backups", "config", "config-backups", "data",
+    "extension-progress", "extensions-library", "hermes-auth",
+    "installer-backups", "models", "openclaw", "paperless", "persona",
+    "piper", "pixel", "pixel-chat-results", "pixel-native",
+    "pixel-providers", "remote-provider", "state", "system-tuning",
+    "user-extensions",
+})
 # Top-level keys an extension compose file may declare (plus x-* fields).
 _COMPOSE_POLICY_TOP_LEVEL = frozenset({"services", "volumes", "networks", "version"})
 _COMPOSE_POLICY_TOP_LEVEL_REASONS = {
@@ -953,6 +966,9 @@ def _compose_policy_volume_problems(name, volumes, *, builtin, namespace):
             if not parts or parts[0].startswith(".") or parts in (["data"], ["config"]):
                 problems.append(f"service '{name}' bind-mounts the ODS install directory or its "
                                 f"secrets ('{source}')")
+            elif namespace is not None and namespace in _COMPOSE_POLICY_RESERVED_NAMES:
+                problems.append(f"service '{name}' bind-mounts '{source}', but '{namespace}' "
+                                f"names a folder ODS keeps for itself")
             elif namespace is not None and (len(parts) < 2 or parts[0] not in ("data", "config")
                                             or parts[1] != namespace):
                 problems.append(f"service '{name}' bind-mounts '{source}' outside its own "
@@ -2867,7 +2883,8 @@ async def _validated_github_recipe(candidate, api_key, *, replacing=None):
         schema_path = EXTENSIONS_DIR.parent / "schema" / "service-manifest.v1.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         catalog = await extensions_catalog(api_key=api_key)
-        reserved = set(CORE_SERVICE_IDS) | {entry['id'] for entry in catalog['extensions']}
+        reserved = (set(CORE_SERVICE_IDS) | _COMPOSE_POLICY_RESERVED_NAMES
+                    | {entry['id'] for entry in catalog['extensions']})
         roots = (USER_EXTENSIONS_DIR, EXTENSIONS_DIR, EXTENSIONS_LIBRARY_DIR)
         for root in roots:
             if root.is_symlink():
@@ -3650,7 +3667,9 @@ def _staged_library_extension(service_id: str, dest: Path):
                         'compose': yaml.safe_load(staged_compose.read_text(encoding='utf-8'))}
                     verify_package(staged, candidate)
                     schema = json.loads((EXTENSIONS_DIR.parent / 'schema/service-manifest.v1.json').read_text(encoding='utf-8'))
-                    validation = validate_recipe(candidate, schema, set(CORE_SERVICE_IDS), lambda path: True)
+                    validation = validate_recipe(candidate, schema,
+                                                 set(CORE_SERVICE_IDS) | _COMPOSE_POLICY_RESERVED_NAMES,
+                                                 lambda path: True)
                     if not validation['valid']:
                         raise ValueError('Imported recipe changed')
                 except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
@@ -5150,6 +5169,15 @@ class PurgeRequest(BaseModel):
     confirm: bool = False
 
 
+def _is_known_extension(service_id: str) -> bool:
+    """An extension ODS ships, lists in its catalog, or has installed."""
+    if service_id in SERVICES:
+        return True
+    if any(entry.get("id") == service_id for entry in _current_extension_catalog()):
+        return True
+    return (Path(EXTENSIONS_DIR) / service_id).is_dir() or (USER_EXTENSIONS_DIR / service_id).is_dir()
+
+
 @router.delete("/api/extensions/{service_id}/data")
 @_serialize_extension_operation
 def purge_extension_data(
@@ -5163,8 +5191,12 @@ def purge_extension_data(
 
     if service_id in ALWAYS_ON_SERVICES:
         raise HTTPException(status_code=403, detail="Cannot purge always-on service data")
+    if service_id in _COMPOSE_POLICY_RESERVED_NAMES or service_id in CORE_SERVICE_IDS:
+        raise HTTPException(status_code=403, detail=f"data/{service_id} belongs to ODS, not to an extension")
 
     with _extensions_lock():
+        if not _is_known_extension(service_id):
+            raise HTTPException(status_code=404, detail=f"Unknown extension: {service_id}")
         # Check if service is still enabled (built-in or user extension)
         for check_dir in [Path(EXTENSIONS_DIR) / service_id, USER_EXTENSIONS_DIR / service_id]:
             if (check_dir / "compose.yaml").exists():
@@ -5213,10 +5245,7 @@ def orphaned_storage(api_key: str = Depends(verify_api_key)):
     # Known system directories that are not service data.  Includes runtime
     # state created outside the installer: extension-progress (this router)
     # and config-backups (host agent's .env backup writer).
-    system_dirs = {
-        "models", "config", "user-extensions", "extensions-library",
-        "extension-progress", "config-backups",
-    }
+    system_dirs = set(_COMPOSE_POLICY_RESERVED_NAMES)
     known_ids = set(SERVICES.keys()) | system_dirs
 
     orphaned = []
