@@ -261,7 +261,7 @@ _doctor_check_external_llm() {
         if curl -sf --max-time 5 "${url%/}${health_path}" > /dev/null 2>&1; then
             probe_ok=true
         elif [[ "$provider" == lemonade && -n "$lemonade_key" ]] \
-                && curl -sf --max-time 5 -H "Authorization: Bearer ${lemonade_key}" \
+                && curl -sf --max-time 5 -H @<(printf 'Authorization: Bearer %s\n' "$lemonade_key") \
                     "${url%/}${health_path}" > /dev/null 2>&1; then
             probe_ok=true
         fi

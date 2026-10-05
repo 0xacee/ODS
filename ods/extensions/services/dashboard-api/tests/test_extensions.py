@@ -3042,10 +3042,10 @@ class TestScanComposeSkipGpuPassthroughCheck:
 
 class TestScanComposeSkipRootUserCheck:
     """Direct unit tests for the skip_root_user_check parameter that permits
-    built-in extensions (e.g. openclaw, which uses `user: "0:0"` to perform
-    init-time chown before dropping privileges via setpriv) to declare a
-    root user, while user/library extensions cannot. Regression guard for
-    the openclaw init-time chown + setpriv pattern."""
+    built-in extensions (which may use `user: "0:0"` to perform init-time
+    chown before dropping privileges via setpriv) to declare a root user,
+    while user/library extensions cannot. Regression guard for the built-in
+    init-time chown + setpriv pattern."""
 
     _ROOT_COMPOSE = (
         'services:\n  svc:\n    image: test\n    user: "0:0"\n'
@@ -3053,7 +3053,7 @@ class TestScanComposeSkipRootUserCheck:
 
     def test_builtin_with_root_user_accepted(self, tmp_path):
         """A built-in extension with user: 0:0 (init-time chown + setpriv
-        pattern, e.g. openclaw) must be accepted via
+        pattern) must be accepted via
         skip_root_user_check=True. Regression guard: built-ins with
         `user: '0:0'` must be accepted when skip_root_user_check=True.
         """
@@ -4801,7 +4801,7 @@ class TestAssertNotCoreAllowsBuiltins:
     """_assert_not_core blocks only the 4 always-on base-compose services."""
 
     @pytest.mark.parametrize("service_id", [
-        "n8n", "tts", "whisper", "comfyui", "litellm", "openclaw",
+        "n8n", "tts", "whisper", "comfyui", "litellm",
         "perplexica", "searxng", "privacy-shield", "token-spy", "qdrant",
         "embeddings", "ape", "langfuse", "opencode", "hermes", "hermes-proxy",
     ])

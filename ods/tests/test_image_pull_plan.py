@@ -23,7 +23,6 @@ ENABLE_VOICE=false
 ENABLE_WORKFLOWS=false
 ENABLE_RAG=false
 ENABLE_HERMES=false
-ENABLE_OPENCLAW=false
 ENABLE_COMFYUI=false
 source "$1"
 printf '%s\n' "${PULL_LIST[@]}"

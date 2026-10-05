@@ -442,6 +442,21 @@ def test_cli_running_is_not_a_successful_one_shot_exit(monkeypatch):
     assert _mod._verify_one_shot_exit([], 'specific-cli', timeout=1)[0] is False
 
 
+class _FinishedPull:
+    """`docker compose pull` stand-in that has already exited with ``returncode``."""
+
+    def __init__(self, calls, command, returncode=0):
+        calls.append(list(command))
+        self.stdout = iter(())
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 @pytest.mark.parametrize('build_exit', [0, 1])
 def test_install_prepares_only_dependency_images_and_surfaces_build_failure(monkeypatch, build_exit):
     monkeypatch.setenv('BUILD_TEST_TOKEN', 'private')
@@ -459,6 +474,7 @@ def test_install_prepares_only_dependency_images_and_surfaces_build_failure(monk
         return types.SimpleNamespace(returncode=build_exit if 'build' in command else 0,
                                      stdout=json.dumps(config), stderr='private build output')
     monkeypatch.setattr(_mod.subprocess, 'run', run)
+    monkeypatch.setattr(_mod.subprocess, 'Popen', lambda command, **kwargs: _FinishedPull(calls, command))
     monkeypatch.setattr(_mod, '_write_progress', lambda *args: progress.append(args))
     ok, error = _mod._prepare_install_images(['-p', 'ods'], 'demo')
     assert ok is (build_exit == 0)
@@ -469,7 +485,9 @@ def test_install_prepares_only_dependency_images_and_surfaces_build_failure(monk
         assert error.splitlines()[1] == 'Untrusted build diagnostic (tail):'
         assert error.endswith('\n[REDACTED] build output')
     base = ['docker', 'compose', '-p', 'ods']
-    assert calls == [base + ['config', '--format', 'json'], base + ['pull', 'demo-db'],
+    # The pull streams progress; the build keeps the plain Compose command.
+    assert calls == [base + ['config', '--format', 'json'],
+                     ['docker', 'compose', '--progress', 'plain', '-p', 'ods', 'pull', 'demo-db'],
                      base + ['build', '--build-arg', 'BUILDKIT_CONTEXT_KEEP_GIT_DIR=1', 'demo', 'demo-worker']]
     assert progress[-1][2] == 'Building images from source...'
 
@@ -636,12 +654,13 @@ def test_image_preparation_allows_cached_images_and_absent_optional_dependency(m
     config = {'services': {'demo': {'image': 'demo:1', 'depends_on': {'optional': {'required': False}}}}}
     def run(command, **kwargs):
         calls.append(command)
-        return types.SimpleNamespace(returncode=1 if 'pull' in command else 0,
-                                     stdout=json.dumps(config), stderr='')
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(config), stderr='')
     monkeypatch.setattr(_mod.subprocess, 'run', run)
+    # The download fails, but a cached image may still satisfy `up`.
+    monkeypatch.setattr(_mod.subprocess, 'Popen', lambda command, **kwargs: _FinishedPull(calls, command, 1))
     monkeypatch.setattr(_mod, '_write_progress', lambda *args: None)
     assert _mod._prepare_install_images([], 'demo') == (True, '')
-    assert calls[-1] == ['docker', 'compose', 'pull', 'demo']
+    assert calls[-1] == ['docker', 'compose', '--progress', 'plain', 'pull', 'demo']
 
 
 def test_extension_stop_includes_owned_companions_but_not_shared_services(tmp_path, monkeypatch):
@@ -725,7 +744,6 @@ _disable_conflicting_macos_bridge = _mod._disable_conflicting_macos_bridge
 resolve_compose_flags = _mod.resolve_compose_flags
 validate_core_recreate_ids = _mod.validate_core_recreate_ids
 invalidate_compose_cache = _mod.invalidate_compose_cache
-_post_install_core_recreate = _mod._post_install_core_recreate
 _split_nmcli_terse = _mod._split_nmcli_terse
 _request_server_shutdown = _mod._request_server_shutdown
 
@@ -3294,84 +3312,6 @@ class TestInstallStartCommandNoDeps:
             "docker_compose_recreate must keep --no-deps; "
             "core-service recreation (e.g. after a model swap) is intentionally "
             "scoped to the named services only."
-        )
-
-
-# --- _post_install_core_recreate ---
-#
-# openclaw's compose.yaml adds OPENAI_API_BASE_URLS to open-webui as an overlay;
-# `docker compose up -d openclaw` (used by _handle_install) won't pick up
-# overlay changes targeting already-running core services without
-# `--force-recreate`. Hence the post-install recreate of open-webui whenever
-# openclaw is installed.
-
-
-class TestPostInstallCoreRecreate:
-
-    def test_openclaw_triggers_open_webui_recreate(self, monkeypatch):
-        calls = []
-
-        def _fake_recreate(ids):
-            calls.append(list(ids))
-            return True, ""
-
-        monkeypatch.setattr(_mod, "docker_compose_recreate", _fake_recreate)
-        _post_install_core_recreate("openclaw")
-        assert calls == [["open-webui"]]
-
-    def test_non_openclaw_service_is_noop(self, monkeypatch):
-        calls = []
-
-        def _fake_recreate(ids):
-            calls.append(list(ids))
-            return True, ""
-
-        monkeypatch.setattr(_mod, "docker_compose_recreate", _fake_recreate)
-        for svc in ("litellm", "n8n", "perplexica", "whisper", "comfyui"):
-            _post_install_core_recreate(svc)
-        assert calls == []
-
-    def test_recreate_failure_is_swallowed(self, monkeypatch):
-        """Install must not fail if the post-install recreate errors — openclaw
-        is already running; the overlay just won't take effect until a manual
-        core restart."""
-
-        def _fake_recreate(_ids):
-            return False, "docker compose exploded"
-
-        monkeypatch.setattr(_mod, "docker_compose_recreate", _fake_recreate)
-        # Must not raise
-        _post_install_core_recreate("openclaw")
-
-
-class TestRunInstallCallsPostInstallRecreate:
-    """Source-level check that the install closure calls
-    _post_install_core_recreate after the "started" progress write.
-
-    The dynamic flow runs in a daemon thread + nested closure, which makes
-    runtime mocking fragile (see TestInstallHookEnvAllowlist for the same
-    reasoning). Source-level assertion is sufficient to lock the wiring."""
-
-    def _install_source(self):
-        import inspect
-        return inspect.getsource(_mod.AgentHandler._handle_install)
-
-    def test_install_calls_post_install_core_recreate(self):
-        src = self._install_source()
-        assert "_post_install_core_recreate(service_id)" in src, (
-            "_run_install must invoke _post_install_core_recreate(service_id) "
-            "after emitting the 'started' progress record"
-        )
-
-    def test_recreate_is_after_started_progress_write(self):
-        src = self._install_source()
-        started_idx = src.find('"started"')
-        recreate_idx = src.find("_post_install_core_recreate(")
-        assert started_idx != -1, "expected 'started' progress write in _handle_install"
-        assert recreate_idx != -1, "expected _post_install_core_recreate call in _handle_install"
-        assert started_idx < recreate_idx, (
-            "_post_install_core_recreate must run AFTER the 'started' progress "
-            "write so the client sees success even if the recreate fails"
         )
 
 

@@ -17,7 +17,6 @@
 #           COMPOSE_FILE, COMPOSE_FLAGS, RAM_GB, MODEL_TIER_RAM_GB,
 #           DISK_AVAIL, BACKEND_ID,
 #           LLM_HEALTHCHECK_URL, LLM_PUBLIC_API_PORT,
-#           OPENCLAW_PROVIDER_NAME_DEFAULT, OPENCLAW_PROVIDER_URL_DEFAULT,
 #           GPU_TOPOLOGY_JSON, GPU_HAS_NVLINK, GPU_TOTAL_VRAM,
 #           LLM_MODEL_SIZE_MB
 #
@@ -65,8 +64,6 @@ if [[ "${ODS_MODE:-local}" == "cloud" ]]; then
     BACKEND_ID="cpu"
     LLM_HEALTHCHECK_URL="http://127.0.0.1:4000/health/readiness"
     LLM_PUBLIC_API_PORT="4000"
-    OPENCLAW_PROVIDER_NAME_DEFAULT="litellm-cloud"
-    OPENCLAW_PROVIDER_URL_DEFAULT="http://litellm:4000/v1"
     resolve_compose_config
     resolve_tier_config
     if [[ "$INTERACTIVE" == "true" ]]; then
@@ -181,8 +178,6 @@ fi
 load_backend_contract "$BACKEND_ID" || true
 LLM_HEALTHCHECK_URL="${BACKEND_PUBLIC_HEALTH_URL:-http://127.0.0.1:8080/health}"
 LLM_PUBLIC_API_PORT="${BACKEND_PUBLIC_API_PORT:-8080}"
-OPENCLAW_PROVIDER_NAME_DEFAULT="${BACKEND_PROVIDER_NAME:-local-llama}"
-OPENCLAW_PROVIDER_URL_DEFAULT="${BACKEND_PROVIDER_URL:-http://llama-server:8080/v1}"
 
 #-----------------------------------------------------------------------------
 # Host architecture detection

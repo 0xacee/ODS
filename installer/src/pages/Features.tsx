@@ -32,7 +32,7 @@ const FEATURES: FeatureOption[] = [
     id: "workflows",
     name: "Workflows & Agents",
     description:
-      "n8n workflow automation and OpenClaw AI agents for complex tasks.",
+      "n8n workflow automation for complex, multi-step tasks.",
     default: false,
   },
   {

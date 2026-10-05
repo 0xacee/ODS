@@ -177,7 +177,7 @@ This will remove:
     - Verified ODS Docker volumes (unless --keep-data)
     - Installation directory ($INSTALL_DIR)
     - ODS-managed Pixel host services and private configuration
-    - Systemd user services (opencode-web, openclaw timers)
+    - Systemd user services (opencode-web, maintenance timers from older installs)
     - Systemd system services (ods-host-agent, ods-mdns)
     - macOS LaunchAgents (com.ods.host-agent, com.ods.opencode-web, legacy agents)
     - CLI symlinks (/usr/local/bin/ods, ~/.local/bin/ods, legacy /usr/local/bin/ods-cli)
@@ -330,6 +330,22 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -r)" == *[Mm]icrosoft* ]]; then
     if [[ ! -f "$_ods_wsl_retire_helper" || -L "$_ods_wsl_retire_helper" ]] ||
         ! python3 "$_ods_wsl_retire_helper" --install-dir "$INSTALL_DIR" --validate-only; then
         log_error "Windows startup validation failed; Pixel and installation retained"
+        exit 1
+    fi
+fi
+
+# Validate Pixel before stopping the model upgrade or changing Windows startup,
+# so a refusal leaves everything as it was. Removal below validates again.
+if [[ "$(uname -s)" == "Linux" ]]; then
+    if [[ -f "$SCRIPT_DIR/lib/pixel-uninstall.sh" ]]; then
+        # shellcheck source=lib/pixel-uninstall.sh
+        . "$SCRIPT_DIR/lib/pixel-uninstall.sh"
+        if ! ODS_PIXEL_UNINSTALL_VALIDATE_ONLY=true ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME"; then
+            log_error "Pixel validation failed; nothing was changed"
+            exit 1
+        fi
+    elif [[ -e "$HOME/.config/ods/pixel-managed.json" || -L "$HOME/.config/ods/pixel-managed.json" ]]; then
+        log_error "ODS-managed Pixel marker exists but its uninstall helper is missing; nothing was changed"
         exit 1
     fi
 fi
@@ -500,6 +516,9 @@ if [[ -d "$_ods_uninstall_runtime_dir" && -S "$_ods_uninstall_runtime_dir/bus" ]
     ods_uninstall_systemctl_user stop ods-model-upgrade.service 2>/dev/null || true
     ods_uninstall_systemctl_user reset-failed ods-model-upgrade.service 2>/dev/null || true
 fi
+# The session-cleanup and memory-shepherd timers are no longer installed; they
+# served the removed legacy OpenClaw extension. Older installs may still have
+# them, so remove them when present.
 for unit in opencode-web.service openclaw-session-cleanup.timer \
             memory-shepherd-workspace.timer memory-shepherd-memory.timer \
             openclaw-session-cleanup.service \

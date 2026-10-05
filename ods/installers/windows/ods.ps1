@@ -232,6 +232,22 @@ function Test-ODSDockerRunningQuiet {
     }
 }
 
+function Test-ODSLegacyOpenClawContainer {
+    # The legacy OpenClaw extension was removed. Starts never remove orphan
+    # containers, so an upgrade that stopped before its final stack start can
+    # leave the old ods-openclaw container running.
+    $previousPreference = $ErrorActionPreference
+    try {
+        # PowerShell 5.1 turns native stderr into terminating errors under
+        # Stop; a missing container is the normal case here.
+        $ErrorActionPreference = 'Continue'
+        $null = & docker container inspect ods-openclaw 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
 function Get-ODSDockerProjectResourceNames {
     param(
         [Parameter(Mandatory=$true)]
@@ -1314,6 +1330,28 @@ function Set-ODSProxyAuthRequired {
         Write-AI "Network access requires sign-in; set WEBUI_AUTH=true."
     }
     $env:WEBUI_AUTH = "true"
+}
+
+# A BIND_ADDRESS other than loopback publishes Open WebUI beyond this machine,
+# with or without the ODS proxy, so it needs the same sign-in enforcement.
+# Same rule as _bind_address_is_network in bin/ods-host-agent.py.
+function Test-ODSBindAddressIsNetwork {
+    param([string]$BindAddress)
+
+    $bind = $BindAddress.Trim().Trim([char[]]@('"', "'"))
+    if ($bind -eq "") { $bind = "127.0.0.1" }
+    # -notin ignores case, as the host agent's lower() does.
+    return $bind -notin @("127.0.0.1", "::1", "[::1]", "localhost")
+}
+
+# Mirrors _ods_cli_network_access_enabled in ods-cli.
+function Test-ODSNetworkAccessEnabled {
+    param([string[]]$ComposeFlags)
+
+    if (Test-ODSBindAddressIsNetwork -BindAddress (Get-ODSEnvValue -Name "BIND_ADDRESS")) {
+        return $true
+    }
+    return [bool](Test-ODSComposeServiceAvailable -ComposeFlags $ComposeFlags -Service "ods-proxy")
 }
 
 function Invoke-ODSProxyAuthPreflight {
@@ -2594,7 +2632,7 @@ function Invoke-Start {
         if ($Service -eq "ods-proxy") {
             Invoke-ODSProxyAuthPreflight -ComposeFlags $flags
         } elseif ((-not $Service -or $Service -eq "open-webui") -and
-            (Test-ODSComposeServiceAvailable -ComposeFlags $flags -Service "ods-proxy")) {
+            (Test-ODSNetworkAccessEnabled -ComposeFlags $flags)) {
             Set-ODSProxyAuthRequired
         }
         if ($Service) {
@@ -2631,6 +2669,9 @@ function Invoke-Start {
                 exit 1
             }
             Write-AISuccess "All services started"
+            if (Test-ODSLegacyOpenClawContainer) {
+                Write-AIWarn "The removed legacy OpenClaw container ods-openclaw still exists. Remove it with: docker rm -f ods-openclaw (see docs/MIGRATION-OPENCLAW-TO-HERMES.md)"
+            }
             if ($hermesInStack) {
                 Invoke-HermesSoulRefresh -SyncContainer
             }
@@ -2739,7 +2780,7 @@ function Invoke-Restart {
         if ($Service -eq "ods-proxy") {
             Invoke-ODSProxyAuthPreflight -ComposeFlags $flags
         } elseif ((-not $Service -or $Service -eq "open-webui") -and
-            (Test-ODSComposeServiceAvailable -ComposeFlags $flags -Service "ods-proxy")) {
+            (Test-ODSNetworkAccessEnabled -ComposeFlags $flags)) {
             Set-ODSProxyAuthRequired
         }
         if ($Service) {
@@ -2926,6 +2967,10 @@ function Invoke-Update {
             Write-AIError "docker compose pull failed (exit code: $pullExit)"
             Write-ODSComposeDiagnostics -InstallDir $InstallDir -ComposeFlags $flags -Phase "ods.ps1 update (pull)"
             exit 1
+        }
+        # Recreating everything recreates Open WebUI too.
+        if (Test-ODSNetworkAccessEnabled -ComposeFlags $flags) {
+            Set-ODSProxyAuthRequired
         }
         Write-AI "Recreating containers..."
         $upExit = Invoke-ODSDockerCompose -InstallDir $InstallDir -ComposeFlags $flags `

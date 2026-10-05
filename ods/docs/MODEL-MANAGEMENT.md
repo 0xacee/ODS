@@ -144,7 +144,7 @@ from Windows localhost, and the installer may select another Lemonade port.
 Dashboard activation, Unix `ods model swap <tier>`, and Windows
 `.\ods.ps1 model swap <tier>` use the same authenticated host-agent transaction.
 The transaction updates `.env`, `models.ini`, the
-native or container inference runtime, LiteLLM, Hermes, OpenClaw, OpenCode, and
+native or container inference runtime, LiteLLM, Hermes, OpenCode, and
 Perplexica when those consumers are installed. On a qualified ODS-managed
 Pixel installation it also updates Pixel's model ID, context, output limit,
 reasoning and model-family compatibility policy, then restarts and verifies the

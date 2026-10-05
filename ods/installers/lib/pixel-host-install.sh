@@ -3459,6 +3459,10 @@ if path.exists():
 gateway = value.setdefault("gateway", {})
 http = gateway.setdefault("http", {})
 endpoints = http.setdefault("endpoints", {})
+if endpoints.get("chatCompletions") == {"enabled": True}:
+    # Nothing to change. A rewrite would only reorder keys, and a held source
+    # upgrade compares the exact config bytes it recorded before this step.
+    raise SystemExit(0)
 endpoints["chatCompletions"] = {"enabled": True}
 fd, temporary = tempfile.mkstemp(prefix=".openclaw.", dir=path.parent)
 try:
@@ -5488,7 +5492,7 @@ ods_pixel_install_default_agent() {
                 fi
             fi
         else
-            local release_transaction=''
+            local release_transaction='' prove_after_apply=true
             local -a release_arguments=()
             release_transaction="$(_ods_pixel_begin_release_transition "$owner" "$home")" || {
                 ai_bad "Could not acquire the existing Pixel access state for release update; resolve any pending transaction before retrying."
@@ -5498,7 +5502,14 @@ ods_pixel_install_default_agent() {
                 release_arguments=(--ods-release-transaction "$release_transaction")
                 if [[ "$release_transaction" == "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]] \
                     && _ods_pixel_source_upgrade status "$owner" | jq -e '.mode == "sandboxed"' >/dev/null; then
-                    release_arguments=(--ods-model-transaction "$release_transaction")
+                    # Pixel's raw candidate lacks the ODS runtime overlay, including
+                    # the exec-control bind the access proof runs through, so a proof
+                    # here always fails. Apply it under Pixel's strict Sandbox
+                    # verifier, as a first install does. The held source transaction
+                    # is proved after the overlay (_ods_pixel_restart_gateway_and_verify)
+                    # and again before release (_ods_pixel_source_upgrade finish).
+                    release_arguments=()
+                    prove_after_apply=false
                 fi
             fi
             apply_attempt="$(ods_pixel_run_as_owner "$owner" "$home" \
@@ -5508,7 +5519,8 @@ ods_pixel_install_default_agent() {
                 ods_pixel_run_as_owner "$owner" "$home" env \
                     PATH="$home/.openclaw/.ods-exec-control:$PATH" \
                     "$pixel_root/pixel" apply --confirm "${release_arguments[@]}" </dev/null &&
-                _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"
+                { [[ "$prove_after_apply" == false ]] \
+                    || _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"; }
             } >"$apply_attempt" 2>&1; then
                 ods_pixel_run_as_owner "$owner" "$home" cat "$apply_attempt" >>"$pixel_log" 2>&1 || return 1
             else
@@ -5521,7 +5533,8 @@ ods_pixel_install_default_agent() {
                         ods_pixel_run_as_owner "$owner" "$home" env \
                             PATH="$home/.openclaw/.ods-exec-control:$PATH" \
                             "$pixel_root/pixel" apply --confirm "${release_arguments[@]}" </dev/null &&
-                        _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"
+                        { [[ "$prove_after_apply" == false ]] \
+                            || _ods_pixel_verify_current_runtime "$owner" "$home" "$pixel_root" "$release_transaction"; }
                     } >"$apply_attempt" 2>&1; then
                         ods_pixel_run_as_owner "$owner" "$home" cat "$apply_attempt" >>"$pixel_log" 2>&1 || true
                         ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$apply_attempt" || true

@@ -205,7 +205,6 @@ source checkout with `.\ods\installers\windows\ods.ps1 uninstall --force`.
 | **SearXNG** | Self-hosted web search | 8888 | Recommended |
 | **Portal** | Core conversational assistant in Dashboard; default chat on fresh qualified Linux installs | Private Unix socket; no host TCP port | Core feature on qualified hosts |
 | **Hermes Agent** | Independent general-purpose agent | 9120 via auth proxy; 9119 internal | Optional |
-| **OpenClaw** | Deprecated legacy autonomous agent, opt-in during migration | 7860 | Deprecated optional |
 | **APE** | Agent Policy Engine for policy/audit controls | 7890 | Optional |
 | **OpenCode** | Browser IDE / coding assistant | 3003 | Optional host service |
 | **Perplexica** | Deep research engine | 3004 | Optional |
@@ -465,7 +464,6 @@ ods stop                       # Stop everything
 ods start                      # Start everything
 
 # Management scripts
-./scripts/session-cleanup.sh             # Clean up bloated agent sessions
 ./scripts/llm-cold-storage.sh --status   # Check model hot/cold storage
 ods mode                               # Show current mode
 ```

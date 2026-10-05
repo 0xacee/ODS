@@ -12,6 +12,8 @@ param(
     [switch]$NoRecommended,
     [switch]$Hermes,
     [switch]$NoHermes,
+    # Ignored: the legacy OpenClaw extension was removed. Still accepted so
+    # existing commands keep working; the setup prints a notice.
     [switch]$OpenClaw,
     [switch]$All,
     [switch]$Cloud,

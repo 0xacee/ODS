@@ -15,8 +15,8 @@ The rollout is experimental: Hermes, OpenCode, Open WebUI and the other ODS
 applications remain available in parallel while Pixel matures. This integration
 does not require their removal or a Pixel-only core download. Hermes remains
 available; the macOS installer disables it while native Pixel is selected.
-OpenCode and deprecated OpenClaw remain separately selectable. Pixel's
-capability and model-flexibility goals are unchanged.
+OpenCode remains separately selectable. Pixel's capability and
+model-flexibility goals are unchanged.
 
 Pixel does not maintain a model allowlist and ODS does not block chat or tool
 use behind a "Pixel-ready" verdict. Every model or remote provider that is

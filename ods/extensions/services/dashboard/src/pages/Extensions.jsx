@@ -152,7 +152,9 @@ export default function Extensions({ compact = false }) {
         recoveryTrackers.current[serviceId]?.recordSuccess()
         if (!res.ok) return
         const data = await res.json()
-        if (data.status === 'idle') {
+        // A 'prepared' record is the finished image download that preceded
+        // this enable; it says nothing about the start itself.
+        if (data.status === 'idle' || data.status === 'prepared') {
           setProgressMap(prev => {
             if (!(serviceId in prev)) return prev
             const next = { ...prev }
@@ -169,7 +171,7 @@ export default function Extensions({ compact = false }) {
           setToast({ type: 'error', text: data.error || 'Installation failed' })
           setProgressMap(prev => { const next = { ...prev }; delete next[serviceId]; return next })
           fetchCatalog()
-        } else if (data.status === 'started' || data.status === 'idle') {
+        } else if (data.status === 'started' || data.status === 'idle' || data.status === 'prepared') {
           // Enable can finish without an install-progress record. Keep checking
           // live health even when progress is idle after the selection changed.
           // Refresh catalog — if it shows "enabled" (long-running service)
@@ -312,11 +314,43 @@ export default function Extensions({ compact = false }) {
     }
   }
 
+  // A first image download can outlast any request on a slow link. Services
+  // shipped with ODS download their images first, with progress on the card,
+  // and the enable that follows starts from local images.
+  const prepareImages = async (serviceId, { autoEnableDeps = false } = {}) => {
+    const query = autoEnableDeps ? '?auto_enable_deps=true' : ''
+    const res = await fetch(`/api/extensions/${serviceId}/prepare${query}`, {
+      method: 'POST', signal: AbortSignal.timeout(180000),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(typeof err.detail === 'string' ? err.detail : 'Could not download the images this needs')
+    }
+    if (res.status !== 202) return
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, 3000))
+      const progress = await fetchJson(`/api/extensions/${serviceId}/progress`).catch(() => null)
+      if (!progress?.ok) continue
+      const data = await progress.json()
+      if (data.status === 'pulling') {
+        setProgressMap(prev => ({ ...prev, [serviceId]: data }))
+        continue
+      }
+      setProgressMap(prev => { const next = { ...prev }; delete next[serviceId]; return next })
+      if (data.status === 'prepared') return
+      throw new Error(data.status === 'error' && data.error
+        ? data.error : 'The image download stopped. Retry to resume it.')
+    }
+  }
+
   const handleMutation = async (serviceId, action, { autoEnableDeps = false, force = false } = {}) => {
     setMutating(serviceId)
     setConfirm(null)
     setDepConfirm(null)
     try {
+      if (action === 'enable' && extensions.find(e => e.id === serviceId)?.source === 'core') {
+        await prepareImages(serviceId, { autoEnableDeps })
+      }
       let url = action === 'uninstall'
         ? `/api/extensions/${serviceId}`
         : action === 'purge'
@@ -424,6 +458,7 @@ export default function Extensions({ compact = false }) {
     setMutating('open-webui')
     setConfirm(null)
     try {
+      await prepareImages('open-webui')
       const response = await fetch('/api/webui/selection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -491,7 +491,6 @@ run_phase03_rag_guard() {
     ENABLE_PIXEL=false
     ENABLE_RAG=true
     ENABLE_HERMES=false
-    ENABLE_OPENCLAW=false
     ENABLE_COMFYUI=false
     ENABLE_WORKFLOWS=false
     ENABLE_VOICE=false
@@ -616,7 +615,6 @@ for spec in \
   'ENABLE_RECOMMENDED:token-spy' \
   'ENABLE_HERMES:hermes' \
   'ENABLE_HERMES:hermes-proxy' \
-  'ENABLE_OPENCLAW:openclaw' \
   'ENABLE_APE:ape' \
   'ENABLE_PERPLEXICA:perplexica' \
   'ENABLE_PRIVACY_SHIELD:privacy-shield' \
@@ -654,8 +652,10 @@ grep -qE 'ENABLE_PERPLEXICA:-false' "$features_phase" \
   || { echo "[FAIL] ENABLE_SEARXNG derivation must consult ENABLE_PERPLEXICA"; exit 1; }
 grep -qE 'ENABLE_HERMES:-false' "$features_phase" \
   || { echo "[FAIL] ENABLE_SEARXNG derivation must consult ENABLE_HERMES"; exit 1; }
-grep -qE 'ENABLE_OPENCLAW:-false' "$features_phase" \
-  || { echo "[FAIL] ENABLE_SEARXNG derivation must consult ENABLE_OPENCLAW"; exit 1; }
+if grep -q 'ENABLE_OPENCLAW' "$features_phase"; then
+  echo "[FAIL] feature selection must not consult the removed legacy OpenClaw flag"
+  exit 1
+fi
 grep -Fq 'ENABLE_WEB_SEARCH="$ENABLE_SEARXNG"' "$features_phase" \
   || { echo "[FAIL] ENABLE_WEB_SEARCH must track ENABLE_SEARXNG"; exit 1; }
 grep -Fq 'ENABLE_WEB_SEARCH: "${ENABLE_WEB_SEARCH:-false}"' docker-compose.base.yml \
@@ -673,7 +673,7 @@ grep -Fq 'ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-true}' installers/macos/lib/env
 
 windows_plan="installers/windows/lib/service-plan.ps1"
 test -f "$windows_plan" || { echo "[FAIL] missing $windows_plan"; exit 1; }
-for svc in litellm searxng token-spy hermes hermes-proxy openclaw ape pixel-edge perplexica privacy-shield ods-proxy tailscale brave-search; do
+for svc in litellm searxng token-spy hermes hermes-proxy ape pixel-edge perplexica privacy-shield ods-proxy tailscale brave-search; do
   grep -q "\"$svc\"" "$windows_plan" \
     || { echo "[FAIL] Windows service plan missing '$svc'"; exit 1; }
 done
@@ -702,18 +702,15 @@ echo "[contract] failed requested local builds cannot reuse stale images"
 bash tests/test-phase11-local-build-failure.sh
 bash tests/test-phase11-litellm-reload.sh
 
-echo "[contract] OpenClaw deprecation preserves actual installs only"
+echo "[contract] legacy OpenClaw removal: flags are no-ops and upgrades prune its service files"
+bash tests/test-legacy-openclaw-removal.sh
 for installer in install-core.sh installers/macos/install-macos.sh; do
-  grep -Fq 'name=^/ods-openclaw$' "$installer" \
-    || { echo "[FAIL] $installer must preserve OpenClaw when a prior container exists"; exit 1; }
-  grep -Fq 'data/openclaw' "$installer" \
-    || { echo "[FAIL] $installer must preserve OpenClaw when persisted data exists"; exit 1; }
-  installer_code="$(sed '/^[[:space:]]*#/d' "$installer")"
-  if grep -Fq 'extensions/services/openclaw/compose.yaml' <<<"$installer_code"; then
-    echo "[FAIL] $installer must not auto-enable OpenClaw just because the bundled compose file exists"
+  # Upgrades must not re-enable the removed extension from an old container
+  # or from retained data/openclaw.
+  if grep -Eq 'ENABLE_OPENCLAW=|ods-openclaw\$' "$installer"; then
+    echo "[FAIL] $installer must not select the removed legacy OpenClaw extension"
     exit 1
   fi
-  unset installer_code
 done
 
 echo "[contract] Token Spy dashboard ships offline chart assets"
