@@ -61,6 +61,15 @@ grep -q 'refused this request from the ODS Docker network (HTTP 403)' <<<"$outpu
     || fail "HTTP 403 gave no refusal hint: $output"
 grep -q 'error code: 1010' "$LOG_FILE" || fail "the API reply was not saved to the log"
 
+# A LiteLLM proxy's refusal echoes the key's end and its hash; the log keeps
+# neither (fleet, DSV4.1 drill proxy).
+hash="$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+probe "API answered HTTP 401: {\"error\":{\"message\":\"Authentication Error, Invalid proxy server token passed. Received API Key = sk-...wxyz, Key Hash (Token) = $hash. Unable to find token in cache\"}}" 1
+grep -q 'wxyz' "$LOG_FILE" && fail "the log kept the end of the refused key: $(cat "$LOG_FILE")"
+grep -q "$hash" "$LOG_FILE" && fail "the log kept the refused key's hash"
+grep -qF 'Received API Key = [redacted], Key Hash (Token) = [redacted]. Unable to find token' "$LOG_FILE" \
+    || fail "the redacted reply was not saved to the log: $(cat "$LOG_FILE")"
+
 probe "API answered HTTP 429: slow down" 1
 grep -q 'rate-limiting this key (HTTP 429)' <<<"$output" || fail "HTTP 429 gave no rate-limit hint: $output"
 

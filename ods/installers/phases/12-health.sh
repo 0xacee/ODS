@@ -341,7 +341,11 @@ else:
         else
             ai "Check the saved probe error for provider response or connectivity problems before changing network settings."
         fi
-        printf '%s\n' "$response" >> "$LOG_FILE"
+        # A LiteLLM proxy in front of the API echoes the end of a refused key
+        # and the key's hash; neither belongs in a log people share for help.
+        printf '%s\n' "$response" | sed -E \
+            -e 's/(Received API Key[[:space:]]*=[[:space:]]*)[^,[:space:]"]+/\1[redacted]/g' \
+            -e 's/(Key Hash \(Token\)[[:space:]]*=[[:space:]]*)[0-9A-Fa-f]+/\1[redacted]/g' >> "$LOG_FILE"
         return 1
     }
 
