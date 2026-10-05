@@ -374,7 +374,7 @@ _macos_ask_hermes() {
     # replaces Hermes. Asking would offer a choice the installer then ignores.
     if $ENABLE_PIXEL; then
         ENABLE_HERMES=false
-        ai "Hermes Agent is not offered while Portal is the agent (rerun with --no-pixel to choose Hermes)."
+        ai "Hermes Agent is not offered while Portal is the agent. To use Hermes instead, do a fresh install with --no-pixel."
         return 0
     fi
     local yn
