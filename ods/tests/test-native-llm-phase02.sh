@@ -147,6 +147,8 @@ fi
 #    Windows reports the context it loaded.
 mkdir -p "$TMP_DIR/kept"
 cat > "$TMP_DIR/kept/.env" <<EOF
+ODS_MODE=local
+LLM_BACKEND=llama-server
 NATIVE_LLM_BASE_URL=http://127.0.0.1:8080
 EXTERNAL_LLM_URL=
 LLM_MODEL=$SERVED_MODEL

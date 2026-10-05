@@ -392,7 +392,9 @@ def is_retained_host_native(env: dict[str, str]) -> bool:
     """A ``.env`` whose model the ODS-owned llama-server.exe on Windows serves.
 
     The WSL Portal family: its stack reaches the Windows task through the
-    owned model-router. Retired ``LEMONADE_*`` lines never decide this.
+    owned model-router, or directly at ``NATIVE_LLM_BASE_URL``, the origin
+    every host-native install records. Retired ``LEMONADE_*`` lines never
+    decide this.
     """
     transport = env.get("ODS_HOST_LLM_TRANSPORT", env.get("LEMONADE_HOST_TRANSPORT", ""))
     return (
@@ -401,6 +403,7 @@ def is_retained_host_native(env: dict[str, str]) -> bool:
         and (
             env.get("AMD_INFERENCE_RUNTIME_MODE", "").lower() == "windows-portal-llama-server"
             or transport.lower() == "model-router"
+            or bool(env.get("NATIVE_LLM_BASE_URL", "").strip())
         )
     )
 
@@ -662,6 +665,12 @@ def preserved_contract(args: argparse.Namespace) -> dict[str, str] | None:
     # of turning a catalog advisory into an upgrade-time hard limit.
     if context < 1024 or context > 9_007_199_254_740_991:
         return None
+    # A host-native llama-server reports the context it actually loaded the
+    # retained model with; that is what is served, so it replaces the saved
+    # value. The owner stays, and the cap below still applies.
+    loaded_context = getattr(args, "context", None)
+    if host_native and loaded_context is not None:
+        context = int(loaded_context)
     # The owner's choice is honored up to the model's declared native
     # maximum only. Above it llama.cpp caps the slot at the training context,
     # so the recorded value is never served and the activation's context

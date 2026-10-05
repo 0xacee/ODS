@@ -641,7 +641,8 @@ fi
 # catalog pick above describes a model nobody serves. Record the catalog model
 # the served GGUF names instead, at the context it was loaded with, so .env
 # describes what is served and the next rerun can check it
-# (scripts/native-llm-model.py). Stop rather than record another model.
+# (scripts/preserve-active-model.py --project-native-llm). Stop rather than
+# record another model.
 _native_python=""
 if ods_native_llm_requested && [[ "${TIER:-}" != "CLOUD" ]]; then
     _native_python="${_selector_python:-}"
@@ -652,15 +653,15 @@ if ods_native_llm_requested && [[ "${TIER:-}" != "CLOUD" ]]; then
         error "Python and the installer's safe env loader are required to record the model llama-server serves on Windows."
         exit 1
     fi
-    _native_args=(project --catalog "$SCRIPT_DIR/config/model-library.json"
-        --imports "$INSTALL_DIR/data/model-imports.json")
-    if [[ -n "${NATIVE_LLM_MODEL:-}" ]]; then
-        _native_args+=(--gguf "$NATIVE_LLM_MODEL")
-    else
-        _native_args+=(--lemonade-model-id "${NATIVE_LLM_LEGACY_MODEL_ID:-}")
-    fi
+    # The helper takes the GGUF file name, or a retired Lemonade model id
+    # from an older Windows setup, and matches exactly one catalog model.
+    _native_args=(--env "$INSTALL_DIR/.env"
+        --catalog "$SCRIPT_DIR/config/model-library.json"
+        --imports "$INSTALL_DIR/data/model-imports.json"
+        --models-dir "$INSTALL_DIR/data/models"
+        --project-native-llm "${NATIVE_LLM_MODEL:-${NATIVE_LLM_LEGACY_MODEL_ID:-}}")
     [[ -z "${NATIVE_LLM_CONTEXT_SIZE:-}" ]] || _native_args+=(--context "$NATIVE_LLM_CONTEXT_SIZE")
-    if ! _native_model_env="$("$_native_python" "$SCRIPT_DIR/scripts/native-llm-model.py" \
+    if ! _native_model_env="$("$_native_python" "$SCRIPT_DIR/scripts/preserve-active-model.py" \
             "${_native_args[@]}" 2>>"$LOG_FILE")"; then
         error "llama-server on Windows serves ${NATIVE_LLM_MODEL:-${NATIVE_LLM_LEGACY_MODEL_ID:-an unnamed model}}, which is not in the ODS model catalog, so ODS cannot record it or verify it on updates. Choose a catalog model in the ODS Portal and rerun."
         exit 1
@@ -710,20 +711,28 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
         # mismatch earlier installs wrote (the Linux host's own pick saved
         # next to the served model); stop on any other difference.
         _native_status=0
-        _native_args=(rerun --env "$INSTALL_DIR/.env" --gguf "$GGUF_FILE"
+        _native_args=(--env "$INSTALL_DIR/.env"
             --catalog "$SCRIPT_DIR/config/model-library.json"
-            --imports "$INSTALL_DIR/data/model-imports.json")
+            --imports "$INSTALL_DIR/data/model-imports.json"
+            --models-dir "$INSTALL_DIR/data/models"
+            --state "$INSTALL_DIR/data/model-state.json")
+        # The context Windows loaded is what is served, so it wins over the
+        # saved one; without it the saved context stays.
         [[ -z "${NATIVE_LLM_CONTEXT_SIZE:-}" ]] || _native_args+=(--context "$NATIVE_LLM_CONTEXT_SIZE")
-        _native_model_env="$("$_native_python" "$SCRIPT_DIR/scripts/native-llm-model.py" \
-            "${_native_args[@]}" 2>>"$LOG_FILE")" || _native_status=$?
-        case "$_native_status" in
-            0) ;;
-            3) ai_warn "Corrected the saved model details to describe the model llama-server serves on Windows; the served model did not change (details in the install log)." ;;
-            *)
+        _native_model_env="$("$_native_python" "$_preserve_script" "${_native_args[@]}" \
+            --native-llm --served-model "$GGUF_FILE" 2>>"$LOG_FILE")" || _native_status=$?
+        if [[ "$_native_status" -ne 0 ]]; then
+            # Earlier installs saved this host's own catalog pick next to the
+            # served model. The helper re-records only that installer-written
+            # mismatch, from the served model, and logs the change.
+            _native_status=3
+            if ! _native_model_env="$("$_native_python" "$_preserve_script" "${_native_args[@]}" \
+                    --repair-native-llm "$GGUF_FILE" 2>>"$LOG_FILE")"; then
                 error "The saved model selection differs from the model llama-server serves on Windows (${GGUF_FILE}) and was not written by the installer. Activate the model again in the Dashboard, rerun setup from the ODS Portal, or use --reselect-model."
                 exit 1
-                ;;
-        esac
+            fi
+            ai_warn "Corrected the saved model details to describe the model llama-server serves on Windows; the served model did not change (details in the install log)."
+        fi
         if [[ -n "$_native_model_env" ]]; then
             unset MODEL_RUNTIME_PROFILE MODEL_RUNTIME_PROFILE_LABEL MODEL_RUNTIME_PROFILE_SOURCE
             unset LLAMA_SERVER_IMAGE

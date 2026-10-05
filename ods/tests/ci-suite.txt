@@ -109,7 +109,6 @@ tests/test-migrate-lemonade-install.py
 tests/test-model-integrity.sh
 tests/test-model-library-coverage.py
 tests/test-model-library-verdicts.py
-tests/test-native-llm-model.py
 tests/test-native-llm-phase02.sh
 tests/test-network-security.sh
 tests/test-network-timeouts.sh

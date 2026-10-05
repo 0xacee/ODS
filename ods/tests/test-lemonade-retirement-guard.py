@@ -61,11 +61,9 @@ ALLOWED = {
     "scripts/configure-wsl-model-store.py": "uses the WSL bridge's Lemonade-era module and keys",
     "scripts/retire-wsl-runtime.py": "uses the WSL bridge's Lemonade-era module and keys",
     "scripts/migrate-lemonade-install.py": "the settings migration",
-    "scripts/native-llm-model.py": "resolves a retired --lemonade-model id",
     "scripts/ods-doctor.sh": "diagnoses an unmigrated Lemonade-era .env",
     "scripts/resolve-compose-stack.sh": "reads ODS_MODE=lemonade as local; GAIA's own Lemonade Server",
     "scripts/uninstall-compose-volumes.py": "proves custody of the retired Lemonade volumes",
-    "scripts/validate-generated-configs.py": "validates the host agent's litellm-lemonade surface",
     "scripts/validate-golden-paths.py": "validates the Windows Lemonade golden path",
 }
 
