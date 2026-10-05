@@ -72,13 +72,27 @@ check "Open WebUI runs with ENABLE_PERSISTENT_CONFIG=false" test "$persistent" =
 # Published beyond loopback, the server must run with sign-in on whatever .env
 # says. Only these two variables are printed.
 published="$(in_container sh -c 'tr "\0" "\n" < /proc/1/environ | sed -n "s/^ODS_WEBUI_BIND_ADDRESS=//p"')"
+proxied="$(in_container sh -c 'tr "\0" "\n" < /proc/1/environ | sed -n "s/^ODS_WEBUI_PROXY_BIND=//p"')"
 signin="$(in_container sh -c 'tr "\0" "\n" < /proc/1/environ | sed -n "s/^WEBUI_AUTH=//p"' | tr '[:upper:]' '[:lower:]')"
-case "$(printf '%s' "$published" | tr -d " \t\"'" | tr '[:upper:]' '[:lower:]')" in
-    ''|127.0.0.1|::1|'[::1]'|localhost)
-        pass "Open WebUI is published on loopback (${published:-127.0.0.1}); sign-in follows .env" ;;
-    *)
-        check "Open WebUI published on $published runs with sign-in on" test "$signin" = true ;;
-esac
+reachable=""
+for address in "$published" "$proxied"; do
+    case "$(printf '%s' "$address" | tr -d " \t\"'" | tr '[:upper:]' '[:lower:]')" in
+        ''|127.0.0.1|::1|'[::1]'|localhost) ;;
+        *) reachable="$address" ;;
+    esac
+done
+if [[ -z "$reachable" ]]; then
+    pass "Open WebUI is reachable only from this machine; sign-in follows .env"
+else
+    check "Open WebUI reachable on $reachable runs with sign-in on" test "$signin" = true
+    # The same check the start-up step runs, from the copy mounted in the container.
+    default_admin="$(in_container python3 -c 'import importlib.util, pathlib
+spec = importlib.util.spec_from_file_location("prepare", "/opt/ods/openwebui-prepare.py")
+step = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(step)
+print("yes" if step.default_administrator_active(pathlib.Path("/app/backend/data/webui.db")) else "no")')"
+    check "admin@localhost no longer has the default password while Open WebUI is reachable" test "$default_admin" = no
+fi
 
 read -r revision head stored_keys users chats <<< "$(python_in_container <<'PY'
 import pathlib, re, sqlite3

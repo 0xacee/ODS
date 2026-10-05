@@ -7,6 +7,7 @@ on:
     paths:
       - 'ods/extensions/services/open-webui/**'
       - 'ods/extensions/services/pixel-edge/compose.yaml.disabled'
+      - 'ods/extensions/services/ods-proxy/compose.yaml'
       - 'ods/docker-compose.*.yml'
       - 'ods/installers/macos/docker-compose.macos.yml'
       - 'ods/installers/windows/docker-compose.windows-amd*.yml'
@@ -18,6 +19,7 @@ on:
     paths:
       - 'ods/extensions/services/open-webui/**'
       - 'ods/extensions/services/pixel-edge/compose.yaml.disabled'
+      - 'ods/extensions/services/ods-proxy/compose.yaml'
       - 'ods/docker-compose.*.yml'
       - 'ods/installers/macos/docker-compose.macos.yml'
       - 'ods/installers/windows/docker-compose.windows-amd*.yml'
@@ -38,7 +40,9 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: '3.11'
-      - name: Install pytest
-        run: python -m pip install 'pytest>=8,<9'
+      # bcrypt and argon2-cffi at the versions Open WebUI v0.11.4 ships, for the
+      # built-in administrator's password check.
+      - name: Install pytest and Open WebUI's password hashing
+        run: python -m pip install 'pytest>=8,<9' 'bcrypt==5.0.0' 'argon2-cffi==25.1.0'
       - name: Pre-upgrade backup, upgrade refusals and compose wiring
         run: python -m pytest -q ods/extensions/services/open-webui/tests
