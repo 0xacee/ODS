@@ -60,7 +60,7 @@ BUSY = (409, {'error': 'transition-busy'})
 
 def busy_relay(monkeypatch, replies):
     import pixel_access_relay
-    calls = []
+    calls: list[str] = []
     def relay(operation, request=None, *, config):
         calls.append(operation)
         return replies.pop(0) if len(replies) > 1 else replies[0]
@@ -73,7 +73,7 @@ def test_status_read_waits_while_another_operation_holds_the_controller(monkeypa
     # answered model-status with 409 transition-busy for over a minute, and
     # the next enable failed within a second.
     calls = busy_relay(monkeypatch, [BUSY, BUSY, (200, copy.deepcopy(READY))])
-    sleeps = []
+    sleeps: list[float] = []
     monkeypatch.setattr(host, 'time', SimpleNamespace(monotonic=lambda: 0, sleep=sleeps.append))
     assert host._runtime_model_control('model-status', config={}) == READY
     assert calls == ['model-status'] * 3 and sleeps == [3, 3]

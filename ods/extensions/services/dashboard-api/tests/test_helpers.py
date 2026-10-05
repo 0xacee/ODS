@@ -755,7 +755,7 @@ class TestGetAllServices:
         monkeypatch.setattr("helpers.LLM_BACKEND", backend)
         monkeypatch.setattr("helpers.SERVICES", {"model-router": {
             "name": "Model Router", "port": 9099, "external_port": 9099, "health": "/health", "host": "model-router"}})
-        probed = []
+        probed: list[str] = []
 
         async def fake_health(sid, cfg):
             probed.append(sid)

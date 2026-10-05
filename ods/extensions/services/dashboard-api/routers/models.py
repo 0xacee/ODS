@@ -2151,7 +2151,7 @@ def _model_recovery_projection(value):
     return result
 
 
-_RECOVERY_REQUESTS = ({}, {'releaseUnverified': True})
+_RECOVERY_REQUESTS: tuple[dict[str, bool], ...] = ({}, {'releaseUnverified': True})
 
 
 def _model_recovery_request(method, body=None):
@@ -2179,8 +2179,8 @@ def model_recovery_status(api_key: str = Depends(verify_api_key)):
 
 @router.post('/api/models/recovery')
 def recover_model_switch(body: dict | None = Body(default=None), api_key: str = Depends(verify_api_key)):
-    if not any(body == allowed and all(type(body[key]) is type(value) for key, value in allowed.items())
-               for allowed in _RECOVERY_REQUESTS):
+    if body is None or not any(body == allowed and all(type(body[key]) is type(value) for key, value in allowed.items())
+                               for allowed in _RECOVERY_REQUESTS):
         raise HTTPException(status_code=400, detail='Recovery accepts {} or {"releaseUnverified": true} only.')
     value = _model_recovery_request('POST', dict(body))
     return value if isinstance(value, JSONResponse) else JSONResponse(value, headers={'Cache-Control': 'no-store'})

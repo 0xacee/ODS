@@ -46,7 +46,7 @@ def client(monkeypatch):
 
 
 def relay_answers(monkeypatch, *, status_code=200, body=None, error=None):
-    seen = []
+    seen: list[tuple[str, dict]] = []
 
     class Client:
         def __init__(self, **_):
