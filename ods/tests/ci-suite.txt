@@ -216,6 +216,7 @@ tests/test_pixel_extension_catalog.py
 tests/test_pixel_onboarding_upgrade.py
 tests/test_pixel_ops_broker_custody.py
 tests/test_pixel_provider_boundaries.py
+tests/test_pixel_provider_tls.py
 tests/test_pixel_provider_config.py
 tests/test_pixel_provider_credentials.py
 tests/test_pixel_provider_host_api.py
