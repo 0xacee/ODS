@@ -24,18 +24,17 @@ export INSTALL_PHASE="init"
 cleanup_on_error() {
     local exit_code=$?
     echo ""
-    echo -e "${RED:-}[ERROR] Installation failed during phase: ${INSTALL_PHASE}${NC:-}"
-    echo -e "${AMB:-}        Log file: ${LOG_FILE:-/tmp/ods-install.log}${NC:-}"
-    echo ""
     case "${INSTALL_PHASE}" in
         init|01-preflight|02-detection|02b-external-services)
             # These phases check the host and choose a route; they change no
-            # ODS files or services, so an existing install is as it was.
-            echo "The install stopped before changing any ODS files or services."
+            # ODS files or services, so an existing install is as it was. Say
+            # that first, not "Installation failed" (fleet row 30).
+            echo -e "${AMB:-}[!] Nothing was changed: the install stopped during its checks (${INSTALL_PHASE}).${NC:-}"
             echo "An existing ODS installation keeps working as it was."
             echo "Fix the problem above, then run the same command again."
             ;;
         *)
+            echo -e "${RED:-}[ERROR] Installation failed during phase: ${INSTALL_PHASE}${NC:-}"
             echo "The install did not complete. Partial state may exist at:"
             echo "  ${INSTALL_DIR:-~/ods}"
             echo ""
@@ -47,6 +46,12 @@ cleanup_on_error() {
             ;;
     esac
     echo ""
+    printf '        Log file: %s\n' "${LOG_FILE:-/tmp/ods-install.log}"
+    if [[ -n "${WSL_DISTRO_NAME:-}" && "${LOG_FILE:-}" == /* ]]; then
+        # Windows setup runs this installer in WSL; its /tmp path means
+        # nothing in Windows (fleet row 30). printf keeps the backslashes.
+        printf '        From Windows: \\\\wsl$\\%s%s\n' "$WSL_DISTRO_NAME" "${LOG_FILE//\//\\}"
+    fi
     echo -e "${AMB:-}Need help? Ask on the ODS Discord: ${ODS_HELP_DISCORD_URL:-https://discord.gg/4ntNp9MAwC}${NC:-}"
     echo -e "${AMB:-}Share the phase above and the end of the log file.${NC:-}"
     exit "$exit_code"

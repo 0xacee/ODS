@@ -73,6 +73,16 @@ expect_stop "Could not reach https://api.example.test." unreachable openai-compa
 expect_stop "Could not reach https://api.example.test." unreachable auto model-a
 expect_stop "https://api.example.test needs an API key." 401 openai-compatible model-a
 expect_stop "https://api.example.test refused the API key." 403 openai-compatible model-a fixture-key
+# The key hint names the flag of the installer the owner ran (fleet row 30:
+# Windows owners were told to chmod).
+output="$(run_case 401 openai-compatible model-a)" || true
+grep -qF "(chmod 600), then rerun with --external-llm-key-file FILE." <<<"$output" \
+    || fail "the Linux key hint changed: $output"
+grep -qF "ExternalLlmKeyFile" <<<"$output" && fail "a Linux run was told the Windows flag: $output"
+output="$(ODS_WINDOWS_SYSTEM_DIRECTORY='C:\Windows\system32' run_case 401 openai-compatible model-a)" || true
+grep -qF "in a text file only you can read, then rerun with -ExternalLlmKeyFile FILE." <<<"$output" \
+    || fail "a Windows run did not get the Windows key hint: $output"
+grep -qF "chmod" <<<"$output" && fail "a Windows run was told to chmod: $output"
 expect_stop "is rate-limiting requests (HTTP 429)" 429 openai-compatible model-a
 expect_stop "answered HTTP 404 instead of a model list" 404 openai-compatible model-a
 expect_stop "does not serve the model missing-model" 200 openai-compatible missing-model

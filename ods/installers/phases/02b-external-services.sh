@@ -135,11 +135,21 @@ _external_llm_explain_failure() {
             ;;
         key-required)
             ai_bad "${2} needs an API key."
-            ai "Save the key as one line in a private file (chmod 600), then rerun with --external-llm-key-file FILE (Windows: -ExternalLlmKeyFile FILE)."
+            # Windows setup always passes its System32 path; its owner runs
+            # install.ps1, where chmod means nothing (fleet row 30).
+            if [[ -n "${ODS_WINDOWS_SYSTEM_DIRECTORY:-}" ]]; then
+                ai "Save the key as one line in a text file only you can read, then rerun with -ExternalLlmKeyFile FILE."
+            else
+                ai "Save the key as one line in a private file (chmod 600), then rerun with --external-llm-key-file FILE."
+            fi
             ;;
         key-refused)
             ai_bad "${2} refused the API key."
-            ai "Check that the key is current for this server, then rerun with it: --external-llm-key-file FILE (Windows: -ExternalLlmKeyFile FILE)."
+            if [[ -n "${ODS_WINDOWS_SYSTEM_DIRECTORY:-}" ]]; then
+                ai "Check that the key is current for this server, then rerun with it: -ExternalLlmKeyFile FILE."
+            else
+                ai "Check that the key is current for this server, then rerun with it: --external-llm-key-file FILE."
+            fi
             ;;
         http-429)
             ai_bad "${2} is rate-limiting requests (HTTP 429)."
