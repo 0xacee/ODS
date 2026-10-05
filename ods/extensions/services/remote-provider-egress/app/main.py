@@ -61,6 +61,8 @@ MAX_BODY_BYTES = int(
 UPSTREAM_TIMEOUT_SECONDS = float(
     os.environ.get("ODS_REMOTE_PROVIDER_UPSTREAM_TIMEOUT", "600")
 )
+# Direct-provider HTTP clients kept open, one per provider endpoint.
+MAX_DIRECT_HTTP_CLIENTS = 4
 SSH_TUNNEL_HEALTH_URL = os.environ.get(
     "ODS_REMOTE_PROVIDER_SSH_TUNNEL_HEALTH_URL",
     "http://remote-provider-ssh-tunnel:18090/health",
@@ -114,16 +116,32 @@ def _load_route() -> dict[str, Any]:
     return route
 
 
+# Clients closing in the background, referenced until they finish.
+_closing_clients: set[asyncio.Task] = set()
+
+
+def _close_later(client: httpx.AsyncClient) -> None:
+    task = asyncio.get_running_loop().create_task(client.aclose())
+    _closing_clients.add(task)
+    task.add_done_callback(_closing_clients.discard)
+
+
 def _http_client(connection_key: str = "") -> httpx.AsyncClient:
     if connection_key:
         clients = getattr(app.state, "direct_http_clients", None)
         if clients is None:
             clients = {}
             app.state.direct_http_clients = clients
-        client = clients.get(connection_key)
+        # Least recently used first: a reused endpoint moves to the end.
+        client = clients.pop(connection_key, None)
         if client is None or client.is_closed:
             client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
-            clients[connection_key] = client
+        clients[connection_key] = client
+        # Endpoints change only when the operator reconfigures the remote
+        # provider. Keep the most recent ones and close the rest, rather than
+        # holding every past endpoint's connection pool forever (#2701).
+        while len(clients) > MAX_DIRECT_HTTP_CLIENTS:
+            _close_later(clients.pop(next(iter(clients))))
         return client
     client = getattr(app.state, "http", None)
     if client is None or client.is_closed:
