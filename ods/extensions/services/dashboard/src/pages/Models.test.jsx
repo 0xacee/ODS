@@ -143,25 +143,22 @@ test('compact external mode keeps the catalog visible without promising local ac
   expect(screen.queryByText(/--no-external-llm/)).not.toBeInTheDocument()
 })
 
-test.each([false, true])('loaded external Lemonade describes managed model changes without claiming runtime failure (compact=%s)', async (compact) => {
+test.each([false, true])('an unmanaged Windows-hosted server describes model changes as external, with nothing to adopt (compact=%s)', async (compact) => {
   const state = baseState({
-    odsMode: 'lemonade', configuredMode: 'lemonade', llmBackend: 'lemonade',
-    externalLemonade: true, canActivateModels: false,
+    odsMode: 'local', configuredMode: 'local', llmBackend: 'llama-server',
+    hostRuntime: true, canActivateModels: false,
     modelManagement: { managed: false, canActivate: false, canUnload: false, running: false },
-    activationModeError: 'Change the loaded model in Lemonade, then adopt it here.',
-    currentModel: 'qwen3.5-9b-q4', loadedModel: 'extra.Qwen3.5-9B-Q4_K_M.gguf',
+    activationModeError: 'The model server on this computer is not managed by this ODS installation.',
+    currentModel: 'qwen3.5-9b-q4', loadedModel: 'Qwen3.5-9B-Q4_K_M.gguf',
     models: [model({ status: 'loaded' }), model({ id: 'another-model', name: 'Another model', status: 'downloaded' })],
   })
   useModelsMock.mockReturnValue(state)
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-    ok: true, status: 200, json: async () => ({
-      status: 'verified', modelId: state.loadedModel, contextLength: 65536,
-    }),
-  }))
+  vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('no adoption probe') }))
   try {
     render(createElement(MemoryRouter, null, createElement(Models, { compact })))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Adopt loaded model in ODS' })).toBeEnabled())
     expect(screen.getByText('Model changes managed externally')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Adopt loaded model in ODS' })).toBeNull()
+    expect(fetch).not.toHaveBeenCalled()
     expect(screen.queryByText('Local model runtime unavailable')).not.toBeInTheDocument()
     const notice = screen.getByText('Model changes managed externally').closest('section')
     expect(within(notice).getByText(state.activationModeError)).toBeVisible()
@@ -178,7 +175,7 @@ test.each([false, true])('loaded external Lemonade describes managed model chang
 test.each([true, false])('only managed runtimes expose unload/resume and hide adoption (running=%s)', async running => {
   const state = baseState({
     models: [model({ status: running ? 'loaded' : 'downloaded' })],
-    odsMode: 'lemonade', configuredMode: 'lemonade', llmBackend: 'lemonade', externalLemonade: true,
+    odsMode: 'local', configuredMode: 'local', llmBackend: 'llama-server', hostRuntime: true,
     modelManagement: { managed: true, canActivate: running, canUnload: true, running },
     canActivateModels: running,
     stopRuntime: vi.fn(), startRuntime: vi.fn(),
@@ -194,10 +191,10 @@ test.each([true, false])('only managed runtimes expose unload/resume and hide ad
 
 test.each([false, true])('unavailable management proof never offers adoption and recovers to managed controls (compact=%s)', compact => {
   const state = baseState({
-    odsMode: 'lemonade', configuredMode: 'lemonade', llmBackend: 'lemonade', externalLemonade: true,
+    odsMode: 'local', configuredMode: 'local', llmBackend: 'llama-server', hostRuntime: true,
     modelManagement: { managed: null, canActivate: false, canUnload: false, running: false },
     canActivateModels: false, activationModeError: 'Runtime management could not be verified',
-    currentModel: 'qwen3.5-9b-q4', loadedModel: 'extra.Qwen3.5-9B-Q4_K_M.gguf',
+    currentModel: 'qwen3.5-9b-q4', loadedModel: 'Qwen3.5-9B-Q4_K_M.gguf',
     models: [model({ status: 'loaded' }), model({ id: 'next', name: 'Next model', status: 'downloaded' })],
   })
   useModelsMock.mockReturnValue(state)
