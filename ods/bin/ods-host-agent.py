@@ -6118,6 +6118,15 @@ def _repair_rootless_data_ownership(service_id: str) -> None:
             bash, "-c", 'source "$1"; ods_prepare_whisper_cache_ownership "$2"',
             "ods-whisper-cache", str(helper), str(INSTALL_DIR),
         ]
+    elif service_id in ("ape", "token-spy"):
+        # Phase 06 prepares these fixed-UID state directories only for
+        # services enabled at install. On rootful Docker an add-back left
+        # data/ape owned by the installer, and APE crash-looped on
+        # state.json (Tower3, 2026-10-05).
+        command = [
+            bash, "-c", 'source "$1"; ods_prepare_service_state_ownership "$2" "$3"',
+            "ods-service-state", str(helper), str(INSTALL_DIR), service_id,
+        ]
     try:
         result = subprocess.run(
             command,
