@@ -604,6 +604,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refused. Changing one of these folders needs
   `python3 scripts/pin-builtin-build-contexts.py --write`, and CI fails
   until it is run.
+- APE or Token Spy enabled after install on Linux with rootful Docker now
+  gets its state folder owned by the container's user before the first start,
+  as the installer already does for services enabled at install. APE
+  restarted in a loop with "Permission denied: '/data/ape/state.json'".
+  An APE container that is already restarting must be stopped (disable it)
+  before enabling it again.
 - On Windows, when a native Windows program already listens on port 9000, an
   install without voice now gives Whisper (STT) a free host port (9100, then
   9001), so Whisper added later from the Extensions Library starts. The

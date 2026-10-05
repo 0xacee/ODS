@@ -7064,6 +7064,30 @@ class TestRootlessDataOwnershipRepair:
             "ods-whisper-cache", str(helper), str(tmp_path),
         ]]
 
+    @pytest.mark.parametrize("service_id", ["ape", "token-spy"])
+    def test_fixed_uid_state_uses_rootful_or_rootless_preparation(
+        self, tmp_path, monkeypatch, service_id,
+    ):
+        helper = tmp_path / "lib" / "rootless-ownership.sh"
+        helper.parent.mkdir()
+        helper.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        calls = []
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(_mod, "_find_usable_bash", lambda: "/bin/bash")
+        monkeypatch.setattr(
+            _mod.subprocess, "run",
+            lambda cmd, **kwargs: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""),
+        )
+
+        _mod._repair_rootless_data_ownership(service_id)
+
+        assert calls == [[
+            "/bin/bash", "-c",
+            'source "$1"; ods_prepare_service_state_ownership "$2" "$3"',
+            "ods-service-state", str(helper), str(tmp_path), service_id,
+        ]]
+
     def test_runs_targeted_helper_for_builtin_linux_service(
         self, tmp_path, monkeypatch,
     ):
