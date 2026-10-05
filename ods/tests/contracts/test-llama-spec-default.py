@@ -113,8 +113,8 @@ CHECKPOINT_READERS = (
     "installers/macos/lib/native-model.sh",
     "installers/phases/02-detection.sh",
     "installers/phases/06-directories.sh",
-    "installers/windows/install-windows.ps1",
-    "installers/windows/ods.ps1",
+    # The Windows legacy launch (installer logon task and ods.ps1) reads .env here.
+    "installers/windows/lib/native-llama-legacy.ps1",
     "installers/windows/lib/env-generator.ps1",
     "lib/safe-env.sh",
     "scripts/bootstrap-upgrade.sh",
