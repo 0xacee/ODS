@@ -308,12 +308,12 @@ try {
     Check (-not $script:calls.Contains('amd-plan')) 'cloud mode does not plan an AMD GPU route'
     # AMD: the model runs in Lemonade Server on Windows; Linux gets --lemonade-url.
     $fixturePlan = [pscustomobject]@{ GpuName='AMD Radeon RX 9070 XT'; VramMB=16304; Model='qwen3.5-9b'; LinuxTier='2' }
-    $fixtureLemonadeArgs = @('--lemonade-url', 'http://localhost:8080', '--lemonade-model', 'extra.Qwen3.5-9B-Q4_K_M.gguf', '--lemonade-gpu-name', 'AMD Radeon RX 9070 XT', '--lemonade-gpu-vram-mb', '16304')
+    $fixtureLemonadeArgs = @('--lemonade-url', 'http://localhost:8080', '--lemonade-model', 'extra.Qwen3.5-9B-Q4_K_M.gguf', '--lemonade-context-size', '65536', '--lemonade-gpu-name', 'AMD Radeon RX 9070 XT', '--lemonade-gpu-vram-mb', '16304')
     Reset-Scenario
     $script:amdPlan = $fixturePlan
     $script:amdArgs = $fixtureLemonadeArgs
     Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'AMD host installs through Windows Lemonade'
-    Check (($script:capturedArguments -join ' ') -match '--pixel --no-hermes --lemonade-url http://localhost:8080 --lemonade-model extra\.Qwen3\.5-9B-Q4_K_M\.gguf --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304 --tier 2$') 'AMD host passes the Lemonade route and GPU tier to Linux'
+    Check (($script:capturedArguments -join ' ') -match '--pixel --no-hermes --lemonade-url http://localhost:8080 --lemonade-model extra\.Qwen3\.5-9B-Q4_K_M\.gguf --lemonade-context-size 65536 --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304 --tier 2$') 'AMD host passes the Lemonade route, its loaded context and GPU tier to Linux'
     Check ($script:calls.IndexOf('amd-lemonade:AMD Radeon RX 9070 XT') -lt $script:calls.IndexOf('install:Ubuntu-24.04')) 'Lemonade is ready before the Linux installer starts'
     Check (($script:amdBinding -join '|') -ceq 'Ubuntu-24.04|/home/user/ods' -and $script:capturedRoot -ceq '/home/user/ods') 'default AMD binding and delegated install use the same explicit Linux path'
     Reset-Scenario

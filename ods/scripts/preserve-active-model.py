@@ -6,7 +6,10 @@ operator has activated.  A rerun must not silently replace that active model.
 The default mode accepts only an installed, catalog-pinned local GGUF. The
 explicit external-Lemonade mode preserves a retained, catalog-pinned
 projection without pretending the Linux host owns the Windows model artifact.
-Both modes emit a small allowlisted dotenv fragment without ``eval``.
+Two more external-Lemonade modes record that projection: one for a fresh
+install (from the model Lemonade serves), one to repair the mismatched fields
+earlier fresh installs wrote. Every mode emits a small allowlisted dotenv
+fragment without ``eval``.
 """
 
 from __future__ import annotations
@@ -373,6 +376,97 @@ def is_retained_external_lemonade(env: dict[str, str]) -> bool:
     )
 
 
+def lemonade_model_ids(gguf_file: str) -> set[str]:
+    """The Lemonade model ids that name a catalog GGUF: its stem or ``extra.`` alias."""
+    return {Path(gguf_file).stem, f"extra.{gguf_file}"}
+
+
+def external_lemonade_projection(
+    records: list[dict[str, Any]], model_id: str, context: int | None
+) -> dict[str, str] | None:
+    """Describe, for .env, the catalog model an external Lemonade id names.
+
+    The Windows installer chooses and loads the model Lemonade serves; this
+    host only records it. The id must name exactly one catalog GGUF, by the
+    rule the rerun check applies, so the record always passes that check.
+    The context is the one Lemonade loaded when given, else the catalog's,
+    and never above the model's native maximum.
+    """
+    matches = [
+        item
+        for item in records
+        if isinstance(item.get("gguf_file"), str)
+        and Path(item["gguf_file"]).name == item["gguf_file"]
+        and model_id in lemonade_model_ids(item["gguf_file"])
+    ]
+    if len(matches) != 1:
+        return None
+    model = matches[0]
+    manifest = manifest_for(model)
+    llm_model = str(model.get("llm_model_name") or model.get("id") or "").strip()
+    if manifest is None or not llm_model:
+        return None
+    primary = next(item for item in manifest if item["file"] == model["gguf_file"])
+    if context is None:
+        context = positive_int(model.get("context_length"))
+    if context is None or context < 1024 or context > 9_007_199_254_740_991:
+        return None
+    native_max = positive_int(model.get("max_context_length"))
+    if native_max and context > native_max:
+        context = native_max
+    image = str(model.get("llama_server_image") or "")
+    if image and not re.fullmatch(r"[A-Za-z0-9._/@:+-]{1,300}", image):
+        return None
+    return {
+        "LLM_MODEL": llm_model,
+        "GGUF_FILE": model["gguf_file"],
+        "GGUF_URL": str(primary["url"]),
+        "GGUF_SHA256": str(primary["sha256"]),
+        "MAX_CONTEXT": str(context),
+        # The rerun check records at least 1 MB when the file is not on this host.
+        "LLM_MODEL_SIZE_MB": str(max(positive_int(model.get("size_mb")) or 0, 1)),
+        "MODEL_RUNTIME_PROFILE": "",
+        "MODEL_RUNTIME_PROFILE_LABEL": "",
+        "MODEL_RUNTIME_PROFILE_SOURCE": "",
+        "MODEL_SELECTION_SOURCE": "installer",
+        "LLAMA_SERVER_IMAGE": image,
+    }
+
+
+def repaired_external_lemonade_contract(
+    args: argparse.Namespace,
+) -> tuple[dict[str, str], dict[str, str]] | None:
+    """Re-record the mismatched model fields an earlier fresh install wrote.
+
+    Fresh external-Lemonade installs recorded this host's own catalog pick, a
+    model nobody serves, next to the model Lemonade serves; the rerun check
+    rightly refuses that. Repair only that exact shape: the saved pick is
+    still the installer's own recommendation (no Dashboard or operator choice
+    is overwritten) and the Lemonade id names exactly one catalog model. The
+    served model does not change, only its description.
+    """
+    env = parse_dotenv(args.env)
+    model_id = env.get("LEMONADE_MODEL", "")
+    active_file = env.get("GGUF_FILE", "").strip()
+    if not (
+        is_retained_external_lemonade(env)
+        and not env.get("EXTERNAL_LLM_URL")
+        and env.get("MODEL_SELECTION_SOURCE") == "installer"
+        and env.get("ODS_ACTIVE_MODEL_STORE", "default") == "default"
+        and model_id
+        and active_file
+        and Path(active_file).name == active_file
+        and model_id not in lemonade_model_ids(active_file)
+        and env.get("MODEL_RECOMMENDED_GGUF") == active_file
+        and env.get("MODEL_RECOMMENDED_MODEL", env.get("LLM_MODEL")) == env.get("LLM_MODEL")
+    ):
+        return None
+    contract = external_lemonade_projection(load_records(args.catalog, args.imports), model_id, args.context)
+    if contract is None:
+        return None
+    return env, contract
+
+
 def preserved_contract(args: argparse.Namespace) -> dict[str, str] | None:
     env = parse_dotenv(args.env)
     external_lemonade = getattr(args, "external_lemonade", False)
@@ -411,9 +505,7 @@ def preserved_contract(args: argparse.Namespace) -> dict[str, str] | None:
         active_file = env.get("GGUF_FILE", "").strip()
         if not active_file or Path(active_file).name != active_file:
             return None
-        if external_lemonade and env["LEMONADE_MODEL"] not in {
-            Path(active_file).stem, f"extra.{active_file}",
-        }:
+        if external_lemonade and env["LEMONADE_MODEL"] not in lemonade_model_ids(active_file):
             # Lemonade's explicit model id must identify the saved catalog
             # artifact, not an unrelated native model left in the same .env.
             return None
@@ -620,6 +712,13 @@ def preserved_contract(args: argparse.Namespace) -> dict[str, str] | None:
     return contract
 
 
+def context_tokens(value: str) -> int:
+    number = positive_int(value) if re.fullmatch(r"[0-9]{1,16}", value) else None
+    if number is None or number < 1024:
+        raise argparse.ArgumentTypeError("a whole number of tokens from 1024")
+    return number
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", type=Path, required=True)
@@ -634,14 +733,43 @@ def main() -> int:
     parser.add_argument("--host-arch", default=platform.machine())
     parser.add_argument("--local-model", action="store_true")
     parser.add_argument("--external-lemonade", action="store_true")
+    parser.add_argument("--project-external-lemonade", metavar="LEMONADE_MODEL_ID")
+    parser.add_argument("--repair-external-lemonade", action="store_true")
+    parser.add_argument("--context", type=context_tokens, help="the context Lemonade loaded the model with")
     args = parser.parse_args()
+    modes = [args.external_lemonade, args.project_external_lemonade is not None, args.repair_external_lemonade]
+    if sum(modes) > 1:
+        parser.error("choose one of --external-lemonade, --project-external-lemonade, --repair-external-lemonade")
 
-    contract = preserved_contract(args)
-    if contract is None:
-        if args.external_lemonade and is_retained_external_lemonade(parse_dotenv(args.env)):
-            print("Invalid retained external Lemonade model contract; refusing to replace it.", file=sys.stderr)
+    if args.project_external_lemonade is not None:
+        contract = external_lemonade_projection(
+            load_records(args.catalog, args.imports), args.project_external_lemonade, args.context
+        )
+        if contract is None:
+            print(f"Lemonade model {args.project_external_lemonade!r} names no single ODS catalog model; "
+                  "refusing to record a different model.", file=sys.stderr)
             return 2
-        return 0
+    elif args.repair_external_lemonade:
+        repaired = repaired_external_lemonade_contract(args)
+        if repaired is None:
+            print("The saved external Lemonade model settings are not the installer-written mismatch "
+                  "this release repairs; refusing to change them.", file=sys.stderr)
+            return 2
+        env, contract = repaired
+        changes = ", ".join(
+            f"{key} {env.get(key, '')} -> {contract[key]}"
+            for key in ("LLM_MODEL", "GGUF_FILE", "MAX_CONTEXT")
+            if env.get(key, "") != contract[key]
+        )
+        print(f"Repairing the saved description of the model Lemonade serves ({env['LEMONADE_MODEL']}): "
+              f"{changes}. The served model is unchanged.", file=sys.stderr)
+    else:
+        contract = preserved_contract(args)
+        if contract is None:
+            if args.external_lemonade and is_retained_external_lemonade(parse_dotenv(args.env)):
+                print("Invalid retained external Lemonade model contract; refusing to replace it.", file=sys.stderr)
+                return 2
+            return 0
     for key, value in contract.items():
         # Compose's list-form environment entries inherit exported host values.
         # Emitting an empty optional LLAMA_* key would therefore turn "unset"

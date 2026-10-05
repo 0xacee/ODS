@@ -214,6 +214,12 @@ if [[ "${ENABLE_HERMES:-false}" == "true" && "${ODS_MODE:-local}" != "cloud" ]];
             && [[ -f "$SCRIPT_DIR/scripts/select-model.py" && -f "$SCRIPT_DIR/config/model-library.json" ]]; then
             _hermes_python="$(ods_model_selector_python)"
         fi
+        if [[ "${LEMONADE_EXTERNAL:-false}" == "true" ]]; then
+            # Lemonade on the Windows host loaded this model at this context;
+            # this run can neither pick another model nor resize it.
+            _hermes_floor_action="cap"
+            _hermes_python=""
+        fi
         if [[ -n "$_hermes_python" ]]; then
             _hermes_fit_status=0
             ods_catalog_fit_check "$_hermes_python" "${GGUF_FILE:-${LLM_MODEL:-}}" \

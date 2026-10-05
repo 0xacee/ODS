@@ -749,10 +749,13 @@ function Initialize-ODSPortalAmdLemonade($Plan, [string]$SourceRoot, [bool]$NonI
     Write-Host '         Restoring the configured GPU model (the first load also downloads the GPU runtime)...'
     $modelId = Wait-ODSPortalLemonadeReady $registration
     Write-Host "         GPU model ready: $modelId ($($Plan.ContextSize) tokens of context)."
+    # Linux records the catalog model this id names at this context, so its
+    # .env describes the model Lemonade serves (the WSL side cannot see the GPU).
     return @(
         '--lemonade-url', "http://localhost:$port",
         '--lemonade-host-transport', 'model-router',
         '--lemonade-model', $modelId,
+        '--lemonade-context-size', [string]$Plan.ContextSize,
         '--lemonade-gpu-name', $Plan.GpuName,
         '--lemonade-gpu-vram-mb', [string]$Plan.VramMB
     )

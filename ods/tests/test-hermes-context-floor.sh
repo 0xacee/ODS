@@ -208,6 +208,18 @@ if command -v python3 >/dev/null 2>&1; then
     out="$(run_fit_case 49140 128 4 deepseek-r1-distill-llama-70b DeepSeek-R1-Distill-Llama-70B-Q4_K_M.gguf 65536 installer         qwen3.6-35b-a3b Qwen3.6-35B-A3B-UD-Q4_K_M.gguf 131072)"
     [[ "$(field "$out" INSTALLER_RECOMMENDED_CONTEXT)" == "131072" ]]         || fail "the recommended Qwen3.6-35B-A3B must keep its 131072, not the preserved R1-70B 65536: $out"
     pass "Linux phase 03 records the served context only for this run's own pick"
+
+    # (h) External Lemonade: the Windows host loaded the model at this context,
+    # so this run can neither re-pick (no 64K fit here) nor raise it (a fit
+    # here says nothing about the Windows GPU). It caps and says so.
+    for vram in 2048 49140; do
+        out="$(LEMONADE_EXTERNAL=true run_fit_case "$vram" 64 4 qwen3.6-35b-a3b Qwen3.6-35B-A3B-UD-Q4_K_M.gguf 32768 installer)"
+        [[ "$(field "$out" LLM_MODEL)" == "qwen3.6-35b-a3b" ]] || fail "the external Lemonade model must not be re-picked ($vram MB): $out"
+        [[ "$(field "$out" MAX_CONTEXT)" == "32768" ]] || fail "the external Lemonade context must not be raised ($vram MB): $out"
+        [[ "$(field "$out" HERMES_CONTEXT_BELOW_FLOOR)" == "true" ]] || fail "below-floor state must be exported ($vram MB): $out"
+        [[ "$(field "$out" WARNINGS)" == *"ODS Talk stays unavailable"* ]] || fail "the cap must say Talk is unavailable ($vram MB): $out"
+    done
+    pass "Linux Hermes floor keeps an external Lemonade model at the context Lemonade loaded"
 else
     echo "  SKIP: python3 unavailable; fit re-check cases need the real selector"
 fi

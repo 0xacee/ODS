@@ -143,7 +143,7 @@ function Wait-ODSPortalLemonadeReady($Registration) {
 }
 $env:AMD_INFERENCE_PORT = ''
 $result = @(Initialize-ODSPortalAmdLemonade $plan $sourceRoot $false)
-Check (($result -join ' ') -eq "--lemonade-url http://localhost:8080 --lemonade-host-transport model-router --lemonade-model extra.$($plan.GgufFile) --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304") 'ready Lemonade returns the Linux route and explicit host probe transport'
+Check (($result -join ' ') -eq "--lemonade-url http://localhost:8080 --lemonade-host-transport model-router --lemonade-model extra.$($plan.GgufFile) --lemonade-context-size $($plan.ContextSize) --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304") 'ready Lemonade returns the Linux route, the loaded context and explicit host probe transport'
 Check (($script:calls -join ',') -eq 'model,stop,task:8080,await-ready') 'old Lemonade is released before choosing its port, then its durable task proves the loaded model before Linux runs'
 $script:calls.Clear()
 $script:busy = @{ 8080 = 'AgentService' }
