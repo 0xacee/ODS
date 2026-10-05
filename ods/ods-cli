@@ -1195,6 +1195,7 @@ _compose_run_with_summary() {
     fi
     echo ""
     log "Full compose output: $_compose_log"
+    echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
     trap - INT TERM
     return "$_rc"
 }
