@@ -190,7 +190,7 @@ _MACOS_HOST_AGENT_BRIDGE_LABEL = "com.ods.host-agent-bridge"
 # the API key to stop core services like llama-server or dashboard-api.
 _FALLBACK_CORE_IDS = frozenset({
     "dashboard-api", "dashboard", "llama-server", "model-router", "open-webui",
-    "litellm", "langfuse", "hermes", "hermes-proxy", "n8n", "openclaw", "opencode",
+    "litellm", "langfuse", "hermes", "hermes-proxy", "n8n", "opencode",
     "perplexica", "searxng", "qdrant", "remote-provider-egress",
     "remote-provider-ssh-tunnel", "tts", "whisper",
     "embeddings", "token-spy", "comfyui", "ape", "privacy-shield",
@@ -270,7 +270,7 @@ _MIN_MANAGED_PIXEL_CONTEXT = 4096
 _service_locks: dict[str, threading.Lock] = collections.defaultdict(threading.Lock)
 _ALLOWED_CORE_RECREATE_IDS = frozenset({
     "llama-server", "open-webui", "litellm", "langfuse", "n8n",
-    "hermes", "hermes-proxy", "openclaw", "opencode", "perplexica", "searxng", "qdrant",
+    "hermes", "hermes-proxy", "opencode", "perplexica", "searxng", "qdrant",
     "tts", "whisper", "embeddings", "token-spy", "comfyui",
     "ape", "privacy-shield", "model-router",
 })
@@ -3273,7 +3273,7 @@ def _reconcile_ods_managed_pixel_model(
     owner, home = identity
     env_values = load_env(INSTALL_DIR / ".env")
     configured_ref = str(env_values.get("PIXEL_SOURCE_REF") or "")
-    bundled_ref = "9f3b6ecd25db3ab51bef4091473d88ee5824bc3b"
+    bundled_ref = "f2d71d31e8cebac691d109de994c1b4636504cd3"
     source_url = str(env_values.get("PIXEL_SOURCE_URL") or "bundled")
     if any(character in source_url for character in "\r\n\x00"):
         raise RuntimeError("The configured Pixel source URL is invalid")
@@ -5814,6 +5814,17 @@ def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> lis
                 flags.extend(["-f", str(active_mount)])
             return _macos_native_pixel_compose_flags(flags)
 
+    return _run_compose_resolver()
+
+
+def _run_compose_resolver(*, assume_enabled: tuple[str, ...] = (),
+                          selector_overrides: dict[str, str] | None = None) -> list:
+    """Run the Compose resolver against the installed state.
+
+    ``assume_enabled`` and ``selector_overrides`` serve image preparation only:
+    they resolve the stack as it will be once those bundled services (or Open
+    WebUI) are selected, without changing what is selected.
+    """
     script = INSTALL_DIR / "scripts" / "resolve-compose-stack.sh"
     # Contract note: every resolver launch below must include --gpu-count and
     # the persisted ODS_MODE. Extension toggles invalidate the cache while the
@@ -5851,6 +5862,7 @@ def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> lis
     env["ODS_EXTERNAL_LLM_SELECTED"] = (
         "true" if install_env.get("EXTERNAL_LLM_URL", "").strip() else "false"
     )
+    env.update(selector_overrides or {})
     cmd = [
         bash, _to_bash_path(script),
         "--script-dir", _to_bash_path(INSTALL_DIR),
@@ -5861,6 +5873,8 @@ def resolve_compose_flags(*, recovery_disable_service: str | None = None) -> lis
     ]
     if platform.system() == "Windows" and not _windows_whisper_cuda_supported(install_env):
         cmd.extend(["--skip-gpu-overlays", "whisper"])
+    if assume_enabled:
+        cmd.extend(["--assume-enabled", ",".join(assume_enabled)])
     try:
         result = subprocess.run(
             cmd,
@@ -6714,29 +6728,6 @@ def docker_compose_recreate(service_ids: list[str], *, force_recreate: bool = Tr
         return (True, "") if result.returncode == 0 else (False, result.stderr[:500] or result.stdout[:500])
     except subprocess.TimeoutExpired:
         return False, f"Docker compose operation timed out ({SUBPROCESS_TIMEOUT_START}s)"
-
-
-def _post_install_core_recreate(service_id: str) -> None:
-    """Force-recreate core services whose env was overridden by ``service_id``'s
-    compose.yaml overlay.
-
-    ``docker compose up -d <ext>`` (how _handle_install starts the extension)
-    will not pick up overlay changes targeting already-running core services
-    without ``--force-recreate``. openclaw's compose.yaml appends an
-    OPENAI_API_BASE_URLS entry to open-webui; without this post-install
-    recreate that overlay is silently ignored until the next core restart.
-
-    Failure is logged and swallowed — the extension itself is already running;
-    the overlay will apply on the next manual restart of the core service.
-    """
-    if service_id != "openclaw":
-        return
-    ok, err = docker_compose_recreate(["open-webui"])
-    if not ok:
-        logger.warning(
-            "Post-install recreate of open-webui failed after openclaw install: %s",
-            err,
-        )
 
 
 def _parse_mem_value(s: str) -> float:
@@ -8611,6 +8602,136 @@ def _disable_unprepared_install(service_id: str) -> str:
             "settings and data were kept. Resolve the error above, then retry or remove it.")
 
 
+# A first image download can take far longer than the 600 s start allowance on
+# a slow link, so downloads report progress and stop only when Docker reports
+# nothing for the stall window, or after the overall cap.
+IMAGE_PULL_STALL_SECONDS = int(os.environ.get("ODS_IMAGE_PULL_STALL_SECONDS", "900"))
+IMAGE_PULL_MAX_SECONDS = int(os.environ.get("ODS_IMAGE_PULL_MAX_SECONDS", "21600"))
+_IMAGE_PULL_PROGRESS_SECONDS = 15
+_IMAGE_PREPARE_MAX_SERVICES = 16
+# Compose selectors that decide which services exist; mirrors the Open WebUI
+# add-back so a preview resolves exactly the stack its enable will run.
+_PREPARE_COMPOSE_SELECTORS = (
+    "ENABLE_OPEN_WEBUI", "ODS_GATEWAY_ONLY", "EXTERNAL_LLM_URL",
+    "LEMONADE_EXTERNAL", "AMD_INFERENCE_RUNTIME",
+    "AMD_INFERENCE_MANAGED", "WHISPER_ACCELERATION",
+    "ODS_SKIP_GPU_OVERLAYS", "BIND_ADDRESS", "WEBUI_AUTH", "ENABLE_ODS_PROXY",
+)
+
+
+def _is_bundled_service(service_id: str) -> bool:
+    """True for an extension shipped with ODS that has a Compose definition."""
+    service_dir = EXTENSIONS_DIR / service_id
+    if service_dir.is_symlink() or not service_dir.is_dir():
+        return False
+    return any((service_dir / name).is_file() and not (service_dir / name).is_symlink()
+               for name in ("compose.yaml", "compose.yaml.disabled"))
+
+
+def _image_prepare_context(service_ids: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Compose flags and environment for the stack these services are about to join.
+
+    Nothing is selected: bundled services resolve through the resolver's
+    ``--assume-enabled`` and Open WebUI through its selector, exactly as their
+    enable will run them.
+    """
+    installed = load_env(INSTALL_DIR / ".env")
+    overrides = {"ENABLE_OPEN_WEBUI": "true"} if "open-webui" in service_ids else {}
+    flags = _run_compose_resolver(
+        assume_enabled=tuple(s for s in service_ids if s != "open-webui"),
+        selector_overrides=overrides,
+    )
+    env = os.environ.copy()
+    env.pop("COMPOSE_PROFILES", None)
+    for selector in _PREPARE_COMPOSE_SELECTORS:
+        env.pop(selector, None)
+        if selector in installed:
+            env[selector] = installed[selector]
+    env.update(overrides)
+    return flags, env
+
+
+def _services_missing_images(flags: list[str], service_ids: list[str],
+                             env: dict[str, str]) -> list[str]:
+    """The services among ``service_ids`` whose Compose image is not on this host.
+
+    Locally built images are left to their own build step. The resolved
+    configuration carries credential values, so it is parsed and never logged.
+    """
+    command = ["docker", "compose", *flags, "config", "--format", "json"]
+    result = subprocess.run(command, cwd=str(INSTALL_DIR), env=env,
+                            capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError("Could not resolve the Compose configuration for these services")
+    services = json.loads(result.stdout).get("services")
+    if not isinstance(services, dict):
+        raise RuntimeError("Invalid Compose configuration")
+    missing = []
+    for service_id in service_ids:
+        definition = services.get(service_id)
+        if not isinstance(definition, dict):
+            raise RuntimeError(f"The Compose stack does not define {service_id}")
+        image = definition.get("image")
+        if definition.get("build") or not isinstance(image, str) or not image:
+            continue
+        inspected = subprocess.run(["docker", "image", "inspect", image],
+                                   capture_output=True, text=True, timeout=30)
+        if inspected.returncode:
+            missing.append(service_id)
+    return missing
+
+
+def _pull_compose_images(flags: list[str], service_ids: list[str], progress_id: str,
+                         *, env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """Download the images of ``service_ids`` with live progress under ``progress_id``.
+
+    Compose resolves each image from the same files and pinned digests that
+    ``up`` uses. Returns ``(ok, error)``; the pull is stopped only when Docker
+    reports nothing for IMAGE_PULL_STALL_SECONDS or IMAGE_PULL_MAX_SECONDS pass.
+    """
+    command = ["docker", "compose", "--progress", "plain", *flags, "pull", *service_ids]
+    proc = subprocess.Popen(command, cwd=str(INSTALL_DIR), env=env, text=True, errors="replace",
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    tail: collections.deque = collections.deque(maxlen=40)
+    seen = {"last": time.monotonic(), "layers": 0}
+
+    def _read_output() -> None:
+        for line in proc.stdout:
+            tail.append(line.rstrip())
+            seen["last"] = time.monotonic()
+            if "Pull complete" in line or "Already exists" in line:
+                seen["layers"] += 1
+
+    reader = threading.Thread(target=_read_output, daemon=True)
+    reader.start()
+    started = reported = time.monotonic()
+    _write_progress(progress_id, "pulling", "Downloading images...")
+    failure = ""
+    while proc.poll() is None:
+        time.sleep(1)
+        now = time.monotonic()
+        if now - seen["last"] > IMAGE_PULL_STALL_SECONDS:
+            failure = f"Image download made no progress for {IMAGE_PULL_STALL_SECONDS // 60} minutes."
+        elif now - started > IMAGE_PULL_MAX_SECONDS:
+            failure = f"Image download did not finish within {IMAGE_PULL_MAX_SECONDS // 3600} hours."
+        if failure:
+            proc.kill()
+            break
+        if now - reported >= _IMAGE_PULL_PROGRESS_SECONDS:
+            reported = now
+            minutes, seconds = divmod(int(now - started), 60)
+            _write_progress(progress_id, "pulling",
+                            f"Downloading images... {minutes}:{seconds:02d} elapsed, "
+                            f"{seen['layers']} layers done")
+    proc.wait()
+    reader.join(timeout=5)
+    if failure:
+        return False, failure
+    if proc.returncode:
+        return False, "Image download failed:\n" + "\n".join(list(tail)[-12:])
+    return True, ""
+
+
 def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, str]:
     """Prepare only the requested service's effective Compose dependency graph.
 
@@ -8654,10 +8775,8 @@ def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, st
     except (ValueError, KeyError, TypeError):
         return False, "Invalid installation Compose dependency graph"
     if pulls:
-        _write_progress(service_id, "pulling", "Downloading images...")
-        result = subprocess.run(base + ["pull", *sorted(pulls)], cwd=str(INSTALL_DIR),
-                                capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_START)
-        if result.returncode:
+        pulled, _pull_error = _pull_compose_images(flags, sorted(pulls), service_id)
+        if not pulled:
             # A cached image may still satisfy Compose up. Startup remains the
             # authority; this does not report installation as successful.
             logger.warning("Image pull failed for %s; checking cached images at startup", service_id)
@@ -9802,6 +9921,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_logs()
         elif self.path == "/v1/extension/install":
             self._handle_install()
+        elif self.path == "/v1/extension/prepare-images":
+            self._handle_prepare_images()
         elif self.path == "/v1/extension/setup-hook":
             self._handle_setup_hook()
         elif self.path == "/v1/extension/hooks":
@@ -12168,18 +12289,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                 # Step 4: Success
                 _write_progress(service_id, "started", "Service started", exit_verified=one_shot)
 
-                # Step 5: Post-install core recreate (best-effort, non-fatal).
-                # Some extensions (e.g. openclaw) add overlay env to already-
-                # running core services; `up -d <ext>` (without --force-recreate)
-                # won't apply those changes. Failure here must not fail the install.
-                try:
-                    _post_install_core_recreate(service_id)
-                except Exception:
-                    logger.exception(
-                        "Post-install core recreate raised for %s (ignored)",
-                        service_id,
-                    )
-
             except subprocess.TimeoutExpired:
                 # Docker can continue daemon-side after its CLI times out.
                 _install_operation_context.value = {**_install_operation_context.value,
@@ -12207,6 +12316,79 @@ class AgentHandler(BaseHTTPRequestHandler):
         # A disconnected observer must not cancel or replay an accepted worker.
         json_response(self, 202, {"status": "accepted", "service_id": service_id,
                                  "action": "install", 'operation_id': operation_id})
+
+    def _handle_prepare_images(self):
+        """Download the images a planned enable needs before anything is selected.
+
+        Takes service ids only: bundled extensions and Open WebUI, whose images
+        Compose resolves from their shipped files and pinned digests. Answers
+        200 when every image is already here, otherwise 202 and downloads in
+        the background, reporting progress under ``progress_id`` until it
+        records ``prepared`` or ``error``. Each service allows one operation.
+        """
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+        service_ids = body.get("service_ids")
+        progress_id = body.get("progress_id")
+        if (not isinstance(service_ids, list)
+                or not 1 <= len(service_ids) <= _IMAGE_PREPARE_MAX_SERVICES
+                or not all(isinstance(s, str) and SERVICE_ID_RE.fullmatch(s) for s in service_ids)
+                or len(set(service_ids)) != len(service_ids) or progress_id not in service_ids):
+            json_response(self, 400, {"error": "service_ids must list distinct service ids, including progress_id"})
+            return
+        for service_id in service_ids:
+            if service_id != "open-webui" and not _is_bundled_service(service_id):
+                json_response(self, 400, {"error": f"Images can be prepared only for bundled services: {service_id}"})
+                return
+        held: list[threading.Lock] = []
+        for service_id in service_ids:
+            lock = _service_locks[service_id]
+            if not lock.acquire(blocking=False):
+                for acquired in held:
+                    acquired.release()
+                json_response(self, 409, {"error": f"Operation in progress for {service_id}"})
+                return
+            held.append(lock)
+
+        def _release() -> None:
+            for acquired in held:
+                acquired.release()
+
+        try:
+            flags, env = _image_prepare_context(service_ids)
+            missing = _services_missing_images(flags, service_ids, env)
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            _release()
+            logger.warning("Image preparation could not resolve %s: %s", progress_id, type(exc).__name__)
+            json_response(self, 503, {"error": str(exc)[:300]})
+            return
+        if not missing:
+            _release()
+            json_response(self, 200, {"status": "ready", "service_ids": service_ids})
+            return
+
+        def _download() -> None:
+            try:
+                pulled, error = _pull_compose_images(flags, missing, progress_id, env=env)
+                if pulled:
+                    _write_progress(progress_id, "prepared", "Images downloaded")
+                else:
+                    _write_progress(progress_id, "error", "Image download failed", error=error)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                logger.exception("Image preparation failed for %s", progress_id)
+                _write_progress(progress_id, "error", "Image download failed", error=str(exc)[:500])
+            finally:
+                _release()
+
+        try:
+            threading.Thread(target=_download, daemon=True).start()
+        except Exception:
+            _release()
+            raise
+        json_response(self, 202, {"status": "accepted", "service_ids": service_ids, "pulling": missing})
 
 
     # ── Model management handlers ──
@@ -13553,7 +13735,6 @@ class AgentHandler(BaseHTTPRequestHandler):
         litellm_restart_attempted = False
         hermes_config_mutated = False
         hermes_restart_attempted = False
-        openclaw_recreate_attempted = False
         perplexica_mutated = False
         pixel_reconcile_attempted = False
         pixel_status = "not_installed"
@@ -13762,13 +13943,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                         container_states["ods-hermes"],
                         recreate=True,
                     )
-                openclaw_recreated = False
-                if openclaw_recreate_attempted:
-                    openclaw_recreated = _restore_container_state(
-                        "ods-openclaw",
-                        container_states["ods-openclaw"],
-                        recreate=True,
-                    )
                 if perplexica_mutated and perplexica_snapshot is not None:
                     _restore_perplexica_config(perplexica_snapshot)
                 if opencode_config_mutated and opencode_runtime_state and opencode_runtime_state.get("active"):
@@ -13811,9 +13985,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                 if litellm_restarted:
                     _wait_for_container_health("ods-litellm")
                     _verify_litellm_route(rollback_env)
-                if openclaw_recreated:
-                    _verify_openclaw_model_env(previous_hermes_model)
-                    _wait_for_container_health("ods-openclaw")
                 if pixel_transaction is not None:
                     # The coordinator restores its exact captured bytes,
                     # including remote identity and output/reasoning limits.
@@ -14031,7 +14202,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                 for name in (
                     "ods-litellm",
                     "ods-hermes",
-                    "ods-openclaw",
                     "ods-perplexica",
                 )
             }
@@ -14045,7 +14215,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                 litellm_inputs_before = _dependent_bind_inputs("ods-litellm")
             active_litellm_consumers = [
                 name
-                for name in ("ods-hermes", "ods-openclaw", "ods-perplexica")
+                for name in ("ods-hermes", "ods-perplexica")
                 if container_states[name]["running"]
             ]
             if (
@@ -14550,10 +14720,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                         hermes_base_url,
                         int(context_length),
                     )
-                openclaw_recreate_attempted = container_states["ods-openclaw"]["running"]
-                openclaw_recreated = _recreate_openclaw_if_present(
-                    container_states["ods-openclaw"]
-                )
                 if perplexica_snapshot is not None:
                     perplexica_mutated = True
                     _update_perplexica_model(
@@ -14562,9 +14728,6 @@ class AgentHandler(BaseHTTPRequestHandler):
                         gguf_file=gguf_file,
                         lemonade_model_id=lemonade_model_id,
                     )
-                if openclaw_recreated:
-                    _verify_openclaw_model_env(hermes_model_name)
-                    _wait_for_container_health("ods-openclaw")
                 if opencode_snapshot is not None and opencode_runtime_state is not None:
                     opencode_restarted = _restart_managed_opencode(opencode_runtime_state)
 
@@ -14637,12 +14800,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                         if hermes_config_mutated
                         else "unchanged"
                     ),
+                    # Pixel's host OpenClaw gateway; the legacy ods-openclaw
+                    # container this key also reported was removed.
                     "openclaw": (
-                        "recreated"
-                        if openclaw_recreated
-                        else "stopped"
-                        if container_states["ods-openclaw"]["exists"]
-                        else "host_gateway_reconciled"
+                        "host_gateway_reconciled"
                         if pixel_status == "reconciled"
                         else "not_installed"
                     ),
@@ -15599,8 +15760,7 @@ def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
     opencode_snapshot = _capture_opencode_config()
     opencode_state = _capture_managed_opencode_state() if opencode_snapshot is not None else None
     states = {name: _capture_container_state(name) for name in (
-        "ods-model-router", "ods-litellm", "ods-hermes", "ods-openclaw",
-        "ods-perplexica",
+        "ods-model-router", "ods-litellm", "ods-hermes", "ods-perplexica",
     )}
     if not states["ods-model-router"]["running"]:
         raise RuntimeError("Model router must be running to adopt an external model")
@@ -15697,10 +15857,6 @@ def _adopt_external_lemonade_model(expected_model_id: str) -> dict:
             _restart_existing_container("ods-hermes", states["ods-hermes"], recreate=True)
             _wait_for_container_health("ods-hermes")
             _verify_running_hermes_route(expected_model_id, hermes_base_url, context_length)
-        if states["ods-openclaw"]["running"]:
-            _recreate_openclaw_if_present(states["ods-openclaw"])
-            _verify_openclaw_model_env(expected_model_id)
-            _wait_for_container_health("ods-openclaw")
         if opencode_state and opencode_state.get("active"):
             _restart_managed_opencode(opencode_state)
 
@@ -19315,25 +19471,6 @@ def _restore_perplexica_config(snapshot: dict) -> None:
         raise RuntimeError("Perplexica rollback could not be verified")
 
 
-def _recreate_openclaw_if_present(
-    expected_state: dict[str, bool] | None = None,
-) -> bool:
-    """Recreate OpenClaw only when the optional service is already running."""
-    state = expected_state or _capture_container_state("ods-openclaw")
-    if not state["exists"]:
-        return False
-    if not state["running"]:
-        logger.info("Preserving stopped optional container ods-openclaw")
-        return False
-    current = _capture_container_state("ods-openclaw")
-    if not current["exists"] or not current["running"]:
-        raise RuntimeError("ods-openclaw stopped during model activation")
-    ok, error = docker_compose_recreate(["openclaw"])
-    if not ok:
-        raise RuntimeError(f"Could not recreate OpenClaw after model change: {error}")
-    return True
-
-
 def _verify_litellm_route(env: dict, *, model: str = "default") -> None:
     """Prove one active LiteLLM public route can serve a completion."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", model):
@@ -19349,41 +19486,6 @@ def _verify_litellm_route(env: dict, *, model: str = "default") -> None:
     raise RuntimeError(
         f"LiteLLM did not serve a completion through the active {model} route"
     )
-
-
-def _verify_openclaw_model_env(expected_model: str) -> None:
-    """Verify recreated OpenClaw received the active persisted model identity."""
-    result = subprocess.run(
-        [
-            "docker", "inspect", "--type", "container", "--format",
-            "{{range .Config.Env}}{{println .}}{{end}}", "ods-openclaw",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(f"Could not verify OpenClaw model environment: {detail[:300]}")
-    values = {}
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            values[key] = value
-    actual_model = (
-        values.get("LEMONADE_MODEL")
-        or values.get("GGUF_FILE")
-        or values.get("LLM_MODEL")
-        or ""
-    )
-    if not _runtime_model_identity_matches(
-        actual_model,
-        model_id=expected_model,
-        gguf_file=expected_model,
-    ):
-        raise RuntimeError(
-            f"OpenClaw recreated with model {actual_model or '<empty>'}, expected {expected_model}"
-        )
 
 
 def _read_hermes_container_config() -> str:

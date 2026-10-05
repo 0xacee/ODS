@@ -138,7 +138,6 @@ if restore_bootstrap_model_after_windows_swap_failure; then exit 12; fi
 acquire_bootstrap_pixel_model_transaction
 BOOTSTRAP_PIXEL_CONFIG_MUTATED=true
 BOOTSTRAP_GGUF_FILE=bootstrap2b.gguf
-WINDOWS_LEMONADE_OPENCLAW_PRESENT=false
 snapshot_env_value() { case "$1" in GGUF_FILE) echo bootstrap2b.gguf ;; LLM_MODEL) echo bootstrap2b ;; LEMONADE_MODEL) echo bootstrap2b ;; esac; }
 restore_bootstrap_model_after_windows_swap_failure() { :; }
 restore_active_model_config() { :; }

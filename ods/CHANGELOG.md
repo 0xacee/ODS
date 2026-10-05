@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Open WebUI now starts with sign-in on whenever it is published beyond this
+  machine (`BIND_ADDRESS` not loopback), whatever `WEBUI_AUTH` says in `.env`.
+  The CLI, `ods.ps1` and the host agent already turn sign-in on in that case.
+  The check now also runs inside the container, so paths that skip those
+  tools cannot publish Open WebUI on the network without sign-in: the
+  Dashboard's update, a rollback, or a plain `docker compose up`.
 - Other containers can no longer spend a remote LLM provider's API key
   (GHSA-4rpc-g4mc-jm9c). The remote-provider egress, which adds the
   provider key to outbound requests, accepted unauthenticated requests from
@@ -60,6 +66,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a crafted name could run script in the browser of whoever opened the
   dashboard, where the Token Spy API key is held for the session. The reset
   button also no longer places the agent name inside inline JavaScript.
+- On native Windows, `.\ods.ps1 start`, `restart` and `update` now turn Open
+  WebUI sign-in on whenever `BIND_ADDRESS` publishes Open WebUI beyond this
+  machine, as `ods start` and `ods restart` already did on Linux, WSL and macOS
+  (GHSA-69cg-cxxf-jc6m). Before, a localhost-only Windows install whose `.env`
+  was edited to `BIND_ADDRESS=0.0.0.0` restarted Open WebUI with sign-in off,
+  reachable from the network. `ods update` on Linux, WSL and macOS now applies
+  the same rule before it recreates the containers.
+- Installer, update, health-check and CLI scripts no longer put API keys on a
+  command line. Fifteen curl calls passed `Authorization: Bearer <key>` as an
+  argument, which any local user can read with `ps` while the call runs. The
+  background model upgrade polls repeatedly, so its keys were exposed for
+  long stretches. Keys now reach curl through a header file descriptor, or on
+  stdin when curl runs inside a container through `docker exec`. The affected
+  keys were the LiteLLM key, the host-agent key, the dashboard API key, the
+  Lemonade key and an optional `GITHUB_TOKEN`. A CI check now fails on any
+  shipped script that puts a credential header on a command line.
 - The Portal Full Access confirmation now says what it turns off. It disables
   the sandbox and per-command approval, so commands run directly as the owner
   account, while web search and page fetching stay on. It also notes that
@@ -84,6 +106,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   text (maintainer names, test machine names, private workflow terms, personal
   home paths or LAN addresses) would reach the Pixel workspace template or the
   agent and stack templates.
+- Pixel 4.3.29 no longer ships the retired owner-private section in its
+  workspace template. `AGENTS.md` now carries the same neutral model-routing
+  guidance that the installer already wrote into existing workspaces, and the
+  matching `MEMORY.md` entry is gone, so a new workspace starts where a migrated
+  one ends. Existing installations move to 4.3.29 through the held source
+  upgrade; the version changes only so that upgrade accepts the new source. The
+  installer migration still repairs workspaces created from older releases, the
+  Portal bootstrap filter presents an unmigrated 4.3.28 default as the 4.3.29
+  one, and CI fails if the shipped template would ever need the migration again.
 - Support bundles now mask credentials by format wherever they appear (provider
   API keys such as OpenAI, Anthropic, Hugging Face, GitHub, Slack and AWS, JWTs
   and PEM private keys), not only under secret-looking key names, and mask every
@@ -165,7 +196,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   write access. A CI contract keeps them out until a reviewed redesign, and
   `docs/AI_WORKFLOW_GUARDRAILS.md` sets the policy for AI-assisted PRs.
 - Windows: `install.ps1` now installs ODS inside Ubuntu/WSL2 with Pixel
-  (`--pixel --no-hermes --no-openclaw`) instead of the native Windows stack.
+  (`--pixel --no-hermes`) instead of the native Windows stack.
   It prepares WSL and Ubuntu 24.04 when needed, and stops with instructions,
   before changing anything in Ubuntu, when WSL2, systemd, a non-root user,
   Docker Desktop's WSL integration or, on NVIDIA machines, a Windows driver
@@ -256,9 +287,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The Windows/WSL hardware scan no longer claims CPU inference immediately
   after identifying the Windows GPU used by Lemonade. Linux services retain
   their detected backend.
-- Explicit Hermes and OpenClaw flags now take precedence in the Custom
+- An explicit `--hermes` or `--no-hermes` now takes precedence in the Custom
   feature menu as well as presets. The Windows Pixel path no longer asks to
-  enable agents that its command line explicitly disabled.
+  enable an agent that its command line explicitly disabled.
 - Every curated catalog download URL now names a Hugging Face commit instead
   of `resolve/main`, so an upstream rewrite cannot change or remove a catalog
   file. The 48 other re-pinned models download the same bytes: each sha256 was
@@ -358,12 +389,85 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--reasoning`, as Docker does. Without it, b9014 turned Qwen3.5 thinking on
   and put `<think>` blocks in replies.
 
+### Removed
+- The legacy OpenClaw extension, deprecated since 2026-05-12, is removed: the
+  `ods-openclaw` container (image `ghcr.io/openclaw/openclaw:2026.3.8`, port
+  7860), its configuration templates, its session-cleanup script and timer,
+  the n8n OpenClaw trigger workflow and the dashboard API's
+  `/api/service-tokens` endpoint, which only served the OpenClaw sidebar link.
+  The extension still pinned OpenClaw 2026.3.8, an older release than the
+  2026.6.33 runtime that Pixel qualifies. Portal (Pixel) and Hermes Agent are
+  the supported agents. Pixel's own OpenClaw runtime
+  (`openclaw-gateway.service`) is separate and unchanged.
+- Installer reruns on Linux, macOS and Windows delete
+  `extensions/services/openclaw` from the install directory and remove the
+  `ods-openclaw` container when they start the stack. They also delete the
+  OpenClaw templates in `config/openclaw` that are unchanged from a shipped
+  version. Files the owner changed or added there, and `data/openclaw`, stay
+  on disk; the installer names what it kept, and the
+  [removal notice](docs/MIGRATION-OPENCLAW-TO-HERMES.md) explains how to
+  delete it. On Linux, this cleanup waits while an unfinished Pixel source
+  upgrade is pending, so the release that started it can still finish or roll
+  it back. The installers no longer re-enable OpenClaw when they find its
+  container or data.
+- On installs where OpenClaw was the only feature that needed SearXNG or APE,
+  an upgrade turns those services off and removes their containers.
+- Git checkouts updated with `ods-update.sh update` must run
+  `ods disable openclaw` first when OpenClaw is enabled, and move a modified
+  `config/openclaw/openclaw.json` out of the checkout (see the removal
+  notice). The updater of the previous release restarts the stack with its old
+  file list, which fails once the pull deletes the OpenClaw files; running
+  `ods-update.sh update` again then finishes the update. From this release on,
+  the updater resolves the stack again after the pull and during a rollback.
+- `--openclaw` and `--no-openclaw` (Linux and macOS) and `-OpenClaw` (Windows)
+  are still accepted, but only print a notice. Installers no longer write
+  `OPENCLAW_TOKEN`, `OPENCLAW_PORT` or `HOST_LAN_IP`. An `.env` that still has
+  these or the other retired OpenClaw keys keeps validating; the Dashboard
+  settings page lists them only when they are present, and clearing one
+  removes it. AMD reruns retire the `openclaw-session-cleanup` user timer
+  while it still carries the shipped definition, and new AMD installs no
+  longer install the memory-shepherd timers that maintained OpenClaw's
+  workspace. `ods start` warns when an `ods-openclaw` container is still
+  present.
+
 ### Fixed
 - Rerunning the installer (an update) no longer fails with "Embeddings model
   prefetch failed" after Embeddings was added from Extensions. The Embeddings
   service downloads the model itself, as root, so the installer could not
   write into that cache. The installer now leaves a cache owned by the service
   alone; fresh installs still prefetch the model and still stop if that fails.
+- Two defects stopped Pixel's held source upgrade, which installs a new Pixel
+  release over an existing one on Linux and WSL. No release has used that path
+  yet; its first live run found both.
+  - In Sandbox mode, the installer proved access on Pixel's raw candidate
+    before ODS's runtime settings were back in place. The proof's command
+    wrapper is mounted only by those settings, so it always failed. The proof
+    now runs after the settings, and again before admission reopens, as
+    intended.
+  - With Full Access, the installer rewrote the OpenClaw config with its keys
+    sorted even when nothing changed. The upgrade compares the exact bytes it
+    recorded at the start, so it refused to continue. The config is now left
+    alone when the chat endpoint is already enabled.
+  - A held upgrade that failed after its point of no return could only resume
+    the same candidate. When that candidate failed every time, the machine
+    stayed stuck: Portal was paused, another installer was refused, and so was
+    uninstall. A corrected installer for the same update can now take it over
+    under the same hold, and the update completes normally. The takeover is
+    refused unless the installed tree exactly matches the stuck plan and the
+    protected coordinator is intact. A Full Access update whose configuration
+    bytes changed still needs manual recovery
+    (`docs/pixel/SOURCE-UPGRADE-RECOVERY.md`).
+- `ods-uninstall.sh` now validates Pixel before it stops the background model
+  upgrade or turns off Windows startup. A Pixel refusal used to leave start-up
+  at sign-in disabled; now it changes nothing.
+- Adding a bundled extension or Open WebUI from Extensions no longer fails on a slow
+  link. A first image download (several GB for Hermes Agent or Open WebUI) ran
+  inside a 600-second start allowance, and the Dashboard gave up on adding Open
+  WebUI after 180 seconds, while the host kept going and the card lost its Add
+  button. The Extensions page now downloads the images first, showing elapsed time
+  and completed layers on the card, and enables once they are local. A download
+  stops only when Docker makes no progress for 15 minutes (or after 6 hours);
+  Library installs download the same way.
 - Model compatibility verdicts recorded on named test machines now apply only
   to an install that sets `ODS_FLEET_HOST_ID` or `ODS_COMPATIBILITY_HOST`. The
   Dashboard used to fall back to the computer's own name, so a machine called

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-30T11:32:07Z",
+  "generated_at": "2026-10-04T16:56:10Z",
   "schema_version": "1.0.0",
   "extensions": [
     {
@@ -240,7 +240,7 @@
     {
       "id": "ape",
       "name": "APE (Agent Policy Engine)",
-      "description": "Lightweight policy engine that intercepts and audits agent tool calls before execution. Enforces configurable allow/deny rules (command allowlists, path guards, rate limits) and maintains a tamper-evident audit log of every decision. Drop-in governance layer for OpenClaw and any OpenAI-compatible agent framework.\n",
+      "description": "Lightweight policy engine that intercepts and audits agent tool calls before execution. Enforces configurable allow/deny rules (command allowlists, path guards, rate limits) and maintains a tamper-evident audit log of every decision. Drop-in governance layer for Hermes and any OpenAI-compatible agent framework.\n",
       "category": "optional",
       "gpu_backends": [
         "all"
@@ -7574,48 +7574,6 @@
           "kind": "chat",
           "path": "/openai/v1/chat/completions",
           "auth": "webui-session"
-        }
-      },
-      "catalog_source": "builtin",
-      "configuration_scope": "declared-environment-keys"
-    },
-    {
-      "id": "openclaw",
-      "name": "OpenClaw (Agents — DEPRECATED)",
-      "description": "OpenClaw (Agents — DEPRECATED)",
-      "category": "optional",
-      "gpu_backends": [
-        "all"
-      ],
-      "compose_file": "compose.yaml",
-      "depends_on": [
-        "llama-server",
-        "searxng"
-      ],
-      "port": 18789,
-      "external_port_default": 7860,
-      "health_endpoint": "/",
-      "env_vars": [
-        {
-          "key": "OPENCLAW_TOKEN",
-          "required": true,
-          "description": "OpenClaw gateway token",
-          "pattern": "^[!-~]+$",
-          "format_description": "printable ASCII without spaces",
-          "min_length": 10
-        }
-      ],
-      "tags": [],
-      "features": [],
-      "llm": {
-        "consumes": true,
-        "route": "gateway",
-        "pinning": "none",
-        "min_context": 65536,
-        "probe": {
-          "kind": "custom",
-          "path": "/",
-          "auth": "env:OPENCLAW_TOKEN"
         }
       },
       "catalog_source": "builtin",

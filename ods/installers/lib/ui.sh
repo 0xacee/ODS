@@ -683,7 +683,6 @@ show_install_menu() {
             # --hermes/--no-hermes on the command line wins over the preset
             # (the Windows Pixel path passes --no-hermes).
             [[ "${HERMES_EXPLICIT:-false}" == true ]] || ENABLE_HERMES=true
-            [[ "${OPENCLAW_EXPLICIT:-false}" == true ]] || ENABLE_OPENCLAW=false
             ENABLE_OPENCODE=true
             [[ "${DEVTOOLS_EXPLICIT:-false}" == true ]] || ENABLE_DEVTOOLS=true
             ENABLE_COMFYUI=true
@@ -711,7 +710,6 @@ show_install_menu() {
             ENABLE_RAG=false
             ENABLE_RECOMMENDED=false
             [[ "${HERMES_EXPLICIT:-false}" == true ]] || ENABLE_HERMES=false
-            [[ "${OPENCLAW_EXPLICIT:-false}" == true ]] || ENABLE_OPENCLAW=false
             ENABLE_OPENCODE=false
             [[ "${DEVTOOLS_EXPLICIT:-false}" == true ]] || ENABLE_DEVTOOLS=false
             ENABLE_COMFYUI=false

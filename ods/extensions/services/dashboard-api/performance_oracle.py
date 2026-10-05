@@ -447,7 +447,6 @@ _COMPATIBILITY_USER_COPY = {
 _COMPATIBILITY_APP_NAMES = {
     "litellm": "LiteLLM",
     "openWebui": "Open WebUI",
-    "openclaw": "OpenClaw",
     "opencode": "OpenCode",
     "perplexica": "Perplexica",
 }

@@ -218,7 +218,7 @@ try {
     Reset-Scenario
     $options = @{All=$true; NoLangfuse=$true; Tier='2'; InstallDir='/home/user/ODS data'; SummaryJsonPath='/home/user/result.json'; StateRoot='C:\ODS private\state'}
     Check ((Invoke-ODSPortalSetup $options 'unused') -eq 0) 'ready host delegates successfully'
-    Check (($script:capturedArguments[-3..-1] -join ' ') -eq '--pixel --no-hermes --no-openclaw') 'mandatory Pixel policy wins after --all'
+    Check (($script:capturedArguments[-2..-1] -join ' ') -eq '--pixel --no-hermes') 'mandatory Pixel policy wins after --all'
     Check (($script:capturedArguments -join ' ') -match '--all --no-langfuse') 'explicit disable follows all'
     Check ($script:capturedRoot -eq '/home/user/ODS data') 'Linux install path forwarded intact'
     Check ($script:capturedStateRoot -ceq 'C:\ODS private\state' -and ($script:capturedArguments -join ' ') -notmatch 'StateRoot|ODS private') 'setup forwards Windows state location without injecting it into Linux flags'
@@ -313,7 +313,7 @@ try {
     $script:amdPlan = $fixturePlan
     $script:amdArgs = $fixtureLemonadeArgs
     Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'AMD host installs through Windows Lemonade'
-    Check (($script:capturedArguments -join ' ') -match '--pixel --no-hermes --no-openclaw --lemonade-url http://localhost:8080 --lemonade-model extra\.Qwen3\.5-9B-Q4_K_M\.gguf --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304 --tier 2$') 'AMD host passes the Lemonade route and GPU tier to Linux'
+    Check (($script:capturedArguments -join ' ') -match '--pixel --no-hermes --lemonade-url http://localhost:8080 --lemonade-model extra\.Qwen3\.5-9B-Q4_K_M\.gguf --lemonade-gpu-name AMD Radeon RX 9070 XT --lemonade-gpu-vram-mb 16304 --tier 2$') 'AMD host passes the Lemonade route and GPU tier to Linux'
     Check ($script:calls.IndexOf('amd-lemonade:AMD Radeon RX 9070 XT') -lt $script:calls.IndexOf('install:Ubuntu-24.04')) 'Lemonade is ready before the Linux installer starts'
     Check (($script:amdBinding -join '|') -ceq 'Ubuntu-24.04|/home/user/ods' -and $script:capturedRoot -ceq '/home/user/ods') 'default AMD binding and delegated install use the same explicit Linux path'
     Reset-Scenario
@@ -429,12 +429,20 @@ try {
     Reset-Scenario
     $script:delegateCode=17
     Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 17) 'delegated install/health failure remains failure'
-    foreach ($bad in @(@{Hermes=$true}, @{OpenClaw=$true}, @{InstallDir='D:\ODS'}, @{InstallDir='/'}, @{SummaryJsonPath='/tmp/../secret'}, @{Tier='9'}, @{Distro='x --user root'})) {
+    foreach ($bad in @(@{Hermes=$true}, @{InstallDir='D:\ODS'}, @{InstallDir='/'}, @{SummaryJsonPath='/tmp/../secret'}, @{Tier='9'}, @{Distro='x --user root'})) {
         Reset-Scenario
         $rejected=$false
         try { $null=Invoke-ODSPortalSetup $bad 'unused' } catch { $rejected=$true }
         Check ($rejected -and $script:calls.Count -eq 0) 'invalid options fail before system operations'
     }
+    # The legacy OpenClaw extension was removed. Existing commands that still
+    # pass -OpenClaw keep working: the switch prints a notice and is ignored.
+    Reset-Scenario
+    # Join the host records directly; Out-String would wrap at console width.
+    $legacyNotice = @(& { $script:legacyResult = Invoke-ODSPortalSetup @{OpenClaw=$true} 'unused' } 6>&1 | ForEach-Object { [string]$_ }) -join "`n"
+    Check ($script:legacyResult -eq 0 -and $script:calls.Contains('install:Ubuntu-24.04')) 'legacy -OpenClaw is accepted'
+    Check (($script:capturedArguments -join ' ') -notmatch 'openclaw') 'legacy -OpenClaw passes nothing to the Linux installer'
+    Check ($legacyNotice -match 'The legacy OpenClaw extension was removed; -OpenClaw is ignored\.') 'legacy -OpenClaw prints the removal notice'
     Reset-Scenario
     Check ((Invoke-ODSPortalSetup @{} 'unused') -eq 0) 'ready host installs'
     Check ($script:openPortal) 'interactive install opens Portal at the end'

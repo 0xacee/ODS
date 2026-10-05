@@ -105,8 +105,12 @@ function Invoke-ODSPortalLinuxInstaller([string]$InstallerRoot, [string]$Distro,
 }
 
 function Get-ODSPortalLinuxArguments([System.Collections.IDictionary]$Options) {
-    if ($Options['Hermes'] -or $Options['OpenClaw']) {
-        throw 'Portal setup requires Pixel. -Hermes and the deprecated -OpenClaw are not supported by this entry point.'
+    if ($Options['Hermes']) {
+        throw 'Portal setup requires Pixel. -Hermes is not supported by this entry point.'
+    }
+    if ($Options['OpenClaw']) {
+        # Kept accepted so existing install commands keep working.
+        Write-Host '[WARN] The legacy OpenClaw extension was removed; -OpenClaw is ignored. Portal (Pixel) and Hermes are the supported agents.' -ForegroundColor Yellow
     }
     $linuxArgs = @()
     # --all must precede explicit disable overrides.
@@ -132,7 +136,7 @@ function Get-ODSPortalLinuxArguments([System.Collections.IDictionary]$Options) {
     # Every WSL installation needs a durable Windows executable location for
     # owner-scoped sign-in/uninstall control, including NVIDIA and CPU hosts.
     $linuxArgs += @('--windows-system-directory', [Environment]::SystemDirectory)
-    $linuxArgs += @('--pixel', '--no-hermes', '--no-openclaw')
+    $linuxArgs += @('--pixel', '--no-hermes')
     return $linuxArgs
 }
 

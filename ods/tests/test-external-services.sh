@@ -342,7 +342,6 @@ run_phase06_env_cycle() (
     export ENABLE_WORKFLOWS=false
     export ENABLE_RAG=false
     export ENABLE_HERMES=false
-    export ENABLE_OPENCLAW=false
     export EXTERNAL_LLM_URL=http://127.0.0.1:11434
     export EXTERNAL_LLM_CONTAINER_URL=http://host.docker.internal:11434
     export EXTERNAL_LLM_PROVIDER=ollama
@@ -512,7 +511,6 @@ run_phase06_amd_external() (
     export ENABLE_WORKFLOWS=false
     export ENABLE_RAG=false
     export ENABLE_HERMES=false
-    export ENABLE_OPENCLAW=false
     export EXTERNAL_LLM_URL=http://127.0.0.1:11434
     export EXTERNAL_LLM_CONTAINER_URL=http://host.docker.internal:11434
     export EXTERNAL_LLM_PROVIDER=ollama

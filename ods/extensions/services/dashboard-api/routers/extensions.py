@@ -3524,10 +3524,10 @@ def _scan_installed_compose(service_id: str, ext_dir: Path, compose_path: Path, 
 
     Built-in extensions legitimately declare their own service name in their
     compose file, so skip the CORE_SERVICE_IDS name-collision check for them.
-    User extensions still get the full anti-shadowing scan. Some built-ins
+    User extensions still get the full anti-shadowing scan. A built-in may
     also legitimately need `user: "0:0"` to perform init-time chown before
-    dropping privileges via setpriv (e.g. openclaw), so skip the root-user
-    check for built-ins only. The `trusted` flag is separate: a curated
+    dropping privileges via setpriv, so skip the root-user check for
+    built-ins only. The `trusted` flag is separate: a curated
     library recipe keeps install's privileges (local `build:`, the
     host-gateway route) only while its installed files still match the
     library recipe it was installed from. When it lost them, a rejection
@@ -4573,6 +4573,70 @@ def _failed_dependency_starts(service_id: str, failed: set[str], seen=None) -> l
     return list(dict.fromkeys(blockers))
 
 
+# The agent resolves Compose and inspects the images before it answers.
+_PREPARE_AGENT_TIMEOUT = 120
+
+
+def _enable_plan_companions(service_id: str, missing_deps: list[str]) -> list[str]:
+    """Feature companions an enable of ``service_id`` starts after it."""
+    return [
+        companion for companion in _feature_companions(service_id)
+        if companion not in missing_deps and not _is_dep_satisfied(companion)
+        and set(_get_missing_deps_transitive(companion)) <= set(missing_deps) | {service_id}
+    ]
+
+
+@router.post("/api/extensions/{service_id}/prepare")
+def prepare_extension_images(
+    service_id: str,
+    auto_enable_deps: bool = Query(False),
+    api_key: str = Depends(verify_api_key),
+):
+    """Download the images an enable will need, before anything is selected.
+
+    A first download can take far longer on a slow link than an enable request
+    may stay open. The Extensions page calls this first and follows the
+    download through /progress; the enable that follows starts from local
+    images. Answers 200 when every image is already here, 202 while they
+    download. Library recipes prepare their images in their own install.
+    """
+    _validate_service_id(service_id)
+    if service_id == "open-webui":
+        plan = ["open-webui"]
+    else:
+        _assert_not_core(service_id)
+        entry = next((e for e in EXTENSION_CATALOG if e.get("id") == service_id), {})
+        if service_id in LIBRARY_MANAGEABLE_BUILTINS and not _gpu_compatible(entry):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{entry.get('name', service_id)} is not available on this hardware.",
+            )
+        bundled = EXTENSIONS_DIR.resolve()
+        if not _resolve_extension_dir(service_id).is_relative_to(bundled):
+            raise HTTPException(status_code=400, detail="Only services shipped with ODS prepare images ahead of enabling")
+        missing_deps = _get_missing_deps_transitive(service_id) if auto_enable_deps else []
+        companions = _enable_plan_companions(service_id, missing_deps)
+        # A dependency installed from the Library pulls its own image when it starts.
+        plan = [svc for svc in (*missing_deps, service_id, *companions)
+                if _resolve_extension_dir(svc).is_relative_to(bundled)]
+    try:
+        result = request_agent_json(
+            "POST", "/v1/extension/prepare-images",
+            payload={"service_ids": plan, "progress_id": service_id},
+            timeout=_PREPARE_AGENT_TIMEOUT,
+        )
+    except AgentHTTPError as exc:
+        if exc.status_code == 409:
+            raise HTTPException(status_code=409, detail="This extension is being changed; wait for that to finish") from None
+        raise HTTPException(status_code=502, detail="ODS could not prepare this extension's images") from None
+    except AgentClientError:
+        raise HTTPException(status_code=503, detail="Host agent unavailable") from None
+    if not isinstance(result, dict) or result.get("status") not in {"ready", "accepted"}:
+        raise HTTPException(status_code=502, detail="Image preparation could not be verified")
+    return JSONResponse({"status": result["status"], "service_ids": plan},
+                        status_code=202 if result["status"] == "accepted" else 200)
+
+
 @router.post("/api/extensions/{service_id}/enable")
 @_serialize_extension_operation
 def enable_extension(
@@ -4651,11 +4715,7 @@ def enable_extension(
     # Feature companions start after the target in the same plan (Hermes
     # Agent with its hermes-proxy). A companion whose own dependencies this
     # plan does not satisfy stays off instead of failing the request.
-    companions = [
-        companion for companion in _feature_companions(service_id)
-        if companion not in missing_deps and not _is_dep_satisfied(companion)
-        and set(_get_missing_deps_transitive(companion)) <= set(missing_deps) | {service_id}
-    ]
+    companions = _enable_plan_companions(service_id, missing_deps)
 
     enabled_services: list[str] = []
     expected_sha256: dict[str, str] = {}

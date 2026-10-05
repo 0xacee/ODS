@@ -134,13 +134,10 @@ ENABLE_RAG="$(ods_installed_service_default "$INSTALL_DIR" qdrant "$ODS_EXISTING
 ENABLE_RECOMMENDED="$(ods_installed_service_default "$INSTALL_DIR" token-spy "$ODS_EXISTING_INSTALL")"
 # Pixel is the core conversational experience on qualified Linux hosts after a separate
 # written license agreement is acknowledged. Existing ODS tools remain available.
-# OpenClaw is deprecated and remains explicit opt-in.
 ENABLE_HERMES="$(ods_installed_service_default "$INSTALL_DIR" hermes "$ODS_EXISTING_INSTALL")"
 ENABLE_PIXEL="${ENABLE_PIXEL:-auto}"
 PIXEL_EXPLICIT=false
 HERMES_EXPLICIT=false
-ENABLE_OPENCLAW=false
-OPENCLAW_EXPLICIT=false
 ENABLE_OPENCODE=false
 if $ODS_EXISTING_INSTALL && command -v systemctl >/dev/null 2>&1 \
     && ods_systemctl_user is-enabled --quiet opencode-web.service 2>/dev/null; then
@@ -255,8 +252,8 @@ Options:
     --no-hermes       Disable Hermes Agent
     --pixel           Require Pixel alongside the existing ODS tools on a qualified Linux host
     --no-pixel        Disable Pixel; keep the other configured ODS tools
-    --openclaw        Enable OpenClaw (DEPRECATED — see docs/MIGRATION-OPENCLAW-TO-HERMES.md)
-    --no-openclaw     Disable OpenClaw
+    --openclaw        Ignored; the legacy OpenClaw extension was removed
+    --no-openclaw     Ignored; the legacy OpenClaw extension was removed
     --opencode        Enable the optional OpenCode browser IDE
     --no-opencode     Disable the optional OpenCode browser IDE (default)
     --with-devtools   Install Claude Code and Codex CLI on this host
@@ -345,8 +342,11 @@ while [[ $# -gt 0 ]]; do
         --no-hermes) ENABLE_HERMES=false; HERMES_EXPLICIT=true; shift ;;
         --pixel) ENABLE_PIXEL=true; PIXEL_EXPLICIT=true; shift ;;
         --no-pixel) ENABLE_PIXEL=false; PIXEL_EXPLICIT=true; shift ;;
-        --openclaw) ENABLE_OPENCLAW=true; OPENCLAW_EXPLICIT=true; shift ;;
-        --no-openclaw) ENABLE_OPENCLAW=false; OPENCLAW_EXPLICIT=true; shift ;;
+        # Kept parseable so existing scripts and automation that still pass
+        # these flags keep working after the removal.
+        --openclaw|--no-openclaw)
+            printf '[WARN] The legacy OpenClaw extension was removed; %s is ignored. Portal (Pixel) and Hermes are the supported agents.\n' "$1" >&2
+            shift ;;
         --opencode) ENABLE_OPENCODE=true; shift ;;
         --no-opencode) ENABLE_OPENCODE=false; shift ;;
         --with-devtools) ENABLE_DEVTOOLS=true; DEVTOOLS_EXPLICIT=true; shift ;;
@@ -359,16 +359,14 @@ while [[ $# -gt 0 ]]; do
         # NOTE: with --all, --no-langfuse must appear AFTER --all on the command
         # line (flag processing is case-loop ordered, matching comfyui).
         --no-langfuse) ENABLE_LANGFUSE=false; shift ;;
-        # --all enables the Hermes fallback but NOT deprecated OpenClaw —
-        # the deprecated agent is opt-in via --openclaw for the deprecation
-        # release. Will be dropped entirely in the removal release.
+        # --all enables the Hermes fallback alongside the other optional services.
         # ENABLE_ODS_PROXY is included so magic-link invite URLs
         # (http://auth.<device>.local/magic-link/<token>) actually resolve.
         # Without ods-proxy on host :80, mDNS publishes the hostname but
         # nothing serves it, and a phone clicking the invite gets
         # "site can't be reached." Operators who don't want the LAN-facing
         # surface can set ENABLE_ODS_PROXY=false in .env after install.
-        --all) ENABLE_VOICE=true; ENABLE_WORKFLOWS=true; ENABLE_RAG=true; ENABLE_RECOMMENDED=true; ENABLE_HERMES=true; ENABLE_OPENCLAW=false; ENABLE_OPENCODE=true; ENABLE_DEVTOOLS=true; ENABLE_COMFYUI=true; ENABLE_APE=true; ENABLE_PERPLEXICA=true; ENABLE_PRIVACY_SHIELD=true; ENABLE_LANGFUSE=true; ENABLE_ODS_PROXY=true; ENABLE_OPEN_WEBUI=true; WEBUI_EXPLICIT=true; shift ;;
+        --all) ENABLE_VOICE=true; ENABLE_WORKFLOWS=true; ENABLE_RAG=true; ENABLE_RECOMMENDED=true; ENABLE_HERMES=true; ENABLE_OPENCODE=true; ENABLE_DEVTOOLS=true; ENABLE_COMFYUI=true; ENABLE_APE=true; ENABLE_PERPLEXICA=true; ENABLE_PRIVACY_SHIELD=true; ENABLE_LANGFUSE=true; ENABLE_ODS_PROXY=true; ENABLE_OPEN_WEBUI=true; WEBUI_EXPLICIT=true; shift ;;
         --non-interactive) INTERACTIVE=false; shift ;;
         --offline) OFFLINE_MODE=true; shift ;;
         --lan) BIND_ADDRESS="0.0.0.0"; BIND_ADDRESS_EXPLICIT=true; shift ;;
@@ -462,38 +460,6 @@ fi
 
 export EXTERNAL_LLM_URL EXTERNAL_LLM_PROVIDER EXTERNAL_LLM_MODEL
 export EXTERNAL_LLM_AUTO_REUSE EXTERNAL_LLM_DISABLE ODS_RESELECT_MODEL
-
-# OpenClaw deprecation back-compat: preserve OpenClaw on UPGRADES of installs
-# that previously had it enabled. The earlier heuristic — "does the compose
-# file exist on disk?" — was wrong: extensions/services/openclaw/compose.yaml
-# is part of the source tree, so every fresh install (including `--all` which
-# explicitly sets ENABLE_OPENCLAW=false) was being silently re-enabled. That
-# tacked ~20 minutes onto every install (a slow OpenClaw container blocking
-# the phase-12 health-link loop) and contradicted both the deprecation policy
-# AND what `--all` claims to do.
-#
-# Correct heuristic: there's an actual OpenClaw container on this host (running
-# or stopped from a prior install), OR there's persisted OpenClaw data on disk.
-# Either signal means the user already opted in once, so preserve their choice
-# through the deprecation window. A fresh install matches neither and leaves
-# ENABLE_OPENCLAW at its --no-openclaw / --all / default-false value.
-if [[ "$OPENCLAW_EXPLICIT" != "true" ]]; then
-    _existing_openclaw=false
-    if command -v docker >/dev/null 2>&1 \
-       && docker ps -a --filter "name=^/ods-openclaw$" --format '{{.Names}}' 2>/dev/null \
-            | grep -q '^ods-openclaw$'; then
-        _existing_openclaw=true
-    fi
-    if [[ -d "$INSTALL_DIR/data/openclaw" ]] \
-       && [[ -n "$(ls -A "$INSTALL_DIR/data/openclaw" 2>/dev/null)" ]]; then
-        _existing_openclaw=true
-    fi
-    if $_existing_openclaw; then
-        ENABLE_OPENCLAW=true
-        log "Existing OpenClaw install detected; preserving it for this deprecation release"
-    fi
-    unset _existing_openclaw
-fi
 
 # Detect distro + package manager (after arg parsing so --help still shows
 # the correct VERSION before /etc/os-release overwrites it)

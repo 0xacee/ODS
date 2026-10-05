@@ -69,6 +69,17 @@ check "signup is closed (ENABLE_SIGNUP=false)" test "$signup" = False
 persistent="$(in_container sh -c 'tr "\0" "\n" < /proc/1/environ | sed -n "s/^ENABLE_PERSISTENT_CONFIG=//p"')"
 check "Open WebUI runs with ENABLE_PERSISTENT_CONFIG=false" test "$persistent" = false
 
+# Published beyond loopback, the server must run with sign-in on whatever .env
+# says. Only these two variables are printed.
+published="$(in_container sh -c 'tr "\0" "\n" < /proc/1/environ | sed -n "s/^ODS_WEBUI_BIND_ADDRESS=//p"')"
+signin="$(in_container sh -c 'tr "\0" "\n" < /proc/1/environ | sed -n "s/^WEBUI_AUTH=//p"' | tr '[:upper:]' '[:lower:]')"
+case "$(printf '%s' "$published" | tr -d " \t\"'" | tr '[:upper:]' '[:lower:]')" in
+    ''|127.0.0.1|::1|'[::1]'|localhost)
+        pass "Open WebUI is published on loopback (${published:-127.0.0.1}); sign-in follows .env" ;;
+    *)
+        check "Open WebUI published on $published runs with sign-in on" test "$signin" = true ;;
+esac
+
 read -r revision head stored_keys users chats <<< "$(python_in_container <<'PY'
 import pathlib, re, sqlite3
 

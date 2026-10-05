@@ -53,7 +53,6 @@ _SERVICE_CAPABILITIES: dict[str, tuple[str, str]] = {
     "n8n": ("n8n", "visual no-code workflow + automation engine on port 5678. Operators wire scheduled jobs and integrations here"),
     "ape": ("APE", "agentic prompt engineering surface"),
     "opencode": ("OpenCode", "coding agent (an alternative to me for code work)"),
-    "openclaw": ("OpenClaw", "older Claude-style agent (being deprecated in favor of me)"),
     "privacy-shield": ("Privacy Shield", "PII scrubber that can sit in front of LLM calls"),
     "token-spy": ("Token Spy", "inference traffic introspection"),
     "tailscale": ("Tailscale", "mesh VPN — the operator can reach this whole stack remotely without exposing ports to the public internet"),

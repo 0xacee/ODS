@@ -370,7 +370,13 @@ eval "$(extract_installer_function _verify_macos_dashboard_host_agent)"
     readiness_key="agent-readiness-secret"
     readiness_log="$TMP_DIR/readiness-ui.log"
     HOST_AGENT_BRIDGE_LOG="$TMP_DIR/host-agent-bridge.log"
-    probe_calls=0
+    # The probe runs on the receiving end of a pipe, in a subshell, so it
+    # records its calls and findings in files rather than variables.
+    probe_log="$TMP_DIR/readiness-probes.log"
+    probe_errors="$TMP_DIR/readiness-probe-errors.log"
+    : > "$probe_log"
+    : > "$probe_errors"
+    probe_calls() { wc -l < "$probe_log" | tr -d ' '; }
     : > "$readiness_log"
     read_env_value() {
         case "$2" in
@@ -390,11 +396,14 @@ eval "$(extract_installer_function _verify_macos_dashboard_host_agent)"
                 esac
                 ;;
             exec)
-                probe_calls=$((probe_calls + 1))
-                [[ "$*" == *"Authorization: Bearer ${readiness_key}"* ]] \
-                    || fail "authenticated readiness omitted the bearer key"
+                printf 'probe\n' >> "$probe_log"
+                # The key arrives on stdin; argv is readable by any local user.
+                [[ "$(cat)" == "Authorization: Bearer ${readiness_key}" && "$*" == *"-H @-"* ]] \
+                    || printf 'authenticated readiness omitted the bearer key\n' >> "$probe_errors"
+                [[ "$*" != *"${readiness_key}"* ]] \
+                    || printf 'authenticated readiness put the bearer key in argv\n' >> "$probe_errors"
                 [[ "$*" == *'/v1/model/status'* ]] \
-                    || fail "authenticated readiness used an unauthenticated endpoint"
+                    || printf 'authenticated readiness used an unauthenticated endpoint\n' >> "$probe_errors"
                 [[ "$readiness_mode" == "probe-ok" ]]
                 ;;
             *) return 2 ;;
@@ -409,26 +418,26 @@ eval "$(extract_installer_function _verify_macos_dashboard_host_agent)"
     if _verify_macos_dashboard_host_agent "$TMP_DIR/fake.env"; then
         fail "missing dashboard-api container passed authenticated readiness"
     fi
-    [[ "$probe_calls" -eq 0 ]] || fail "missing dashboard-api container was probed"
+    [[ "$(probe_calls)" -eq 0 ]] || fail "missing dashboard-api container was probed"
 
     readiness_mode="crashed"
     if _verify_macos_dashboard_host_agent "$TMP_DIR/fake.env"; then
         fail "crashed dashboard-api container passed authenticated readiness"
     fi
-    [[ "$probe_calls" -eq 0 ]] || fail "crashed dashboard-api container was probed"
+    [[ "$(probe_calls)" -eq 0 ]] || fail "crashed dashboard-api container was probed"
 
     readiness_mode="probe-fails"
     readiness_key=""
     if _verify_macos_dashboard_host_agent "$TMP_DIR/fake.env"; then
         fail "empty ODS_AGENT_KEY passed authenticated readiness"
     fi
-    [[ "$probe_calls" -eq 0 ]] || fail "empty ODS_AGENT_KEY reached the host-agent probe"
+    [[ "$(probe_calls)" -eq 0 ]] || fail "empty ODS_AGENT_KEY reached the host-agent probe"
 
     readiness_key="agent-readiness-secret"
     if _verify_macos_dashboard_host_agent "$TMP_DIR/fake.env"; then
         fail "failed authenticated host-agent probe passed readiness"
     fi
-    [[ "$probe_calls" -eq 20 ]] || fail "authenticated readiness did not exhaust its bounded retry budget"
+    [[ "$(probe_calls)" -eq 20 ]] || fail "authenticated readiness did not exhaust its bounded retry budget"
 
     readiness_mode="probe-ok"
     _verify_macos_dashboard_host_agent "$TMP_DIR/fake.env" \
@@ -436,6 +445,7 @@ eval "$(extract_installer_function _verify_macos_dashboard_host_agent)"
     if grep -Fq "$readiness_key" "$readiness_log"; then
         fail "authenticated readiness leaked ODS_AGENT_KEY into installer output"
     fi
+    [[ ! -s "$probe_errors" ]] || fail "$(sort -u "$probe_errors" | paste -sd ';' -)"
 )
 grep -Fq 'if ! _verify_macos_dashboard_host_agent "$INSTALL_DIR/.env"; then' "$INSTALLER" \
     || fail "installer does not require authenticated dashboard-api readiness"

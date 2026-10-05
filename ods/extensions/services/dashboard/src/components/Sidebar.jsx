@@ -12,12 +12,6 @@ import PixelConversationNavigation from './PixelConversationNavigation'
 import {useLocalProfile} from '../lib/localProfile'
 import UserAvatar from './UserAvatar'
 
-function withServiceToken(rawUrl, token) {
-  const url = new URL(rawUrl, window.location.origin)
-  url.searchParams.set('token', token)
-  return url.toString()
-}
-
 export default function Sidebar({ status, collapsed, onToggle }) {
   const profile = useLocalProfile()
   const { pathname } = useLocation()
@@ -30,14 +24,10 @@ export default function Sidebar({ status, collapsed, onToggle }) {
     if (collapsed) { setSearchOpen(false); setQuery('') }
   }, [collapsed])
   const [apiLinks, setApiLinks] = useState([])
-  const [serviceTokens, setServiceTokens] = useState({})
   useEffect(() => {
     let active = true
     fetch('/api/external-links').then(r => r.ok ? r.json() : []).then(value => {
       if (active && Array.isArray(value)) setApiLinks(value)
-    }).catch(() => {})
-    fetch('/api/service-tokens').then(r => r.ok ? r.json() : {}).then(value => {
-      if (active && value && typeof value === 'object') setServiceTokens(value)
     }).catch(() => {})
     return () => { active = false }
   }, [])
@@ -82,8 +72,7 @@ export default function Sidebar({ status, collapsed, onToggle }) {
           if (internalPath) {
             return <NavLink key={key} to={internalPath} onClick={closeSearch} className={({ isActive }) => `pixel-nav-item ${isActive ? 'is-active' : ''}`} title={stateLabel ? `${label} · ${stateLabel}` : label} aria-label={label}><Icon size={16} /><span>{label}</span>{stateLabel && !collapsed && <small>{stateLabel}</small>}</NavLink>
           }
-          const href = key === 'openclaw' && serviceTokens.openclaw ? withServiceToken(url, serviceTokens.openclaw) : url
-          return <a key={key} className="pixel-nav-item" title={healthy ? label : `${label} · Offline`} aria-label={label} aria-disabled={!healthy} href={healthy ? href : undefined} target={healthy ? '_blank' : undefined} rel="noopener noreferrer"><Icon size={16} /><span>{label}</span>{!healthy && !collapsed && <small>Offline</small>}</a>
+          return <a key={key} className="pixel-nav-item" title={healthy ? label : `${label} · Offline`} aria-label={label} aria-disabled={!healthy} href={healthy ? url : undefined} target={healthy ? '_blank' : undefined} rel="noopener noreferrer"><Icon size={16} /><span>{label}</span>{!healthy && !collapsed && <small>Offline</small>}</a>
         })}
       </details>}
       <PixelConversationNavigation collapsed={collapsed} />
