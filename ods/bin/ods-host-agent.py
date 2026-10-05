@@ -529,6 +529,8 @@ _model_lifecycle_state_lock = threading.Lock()
 _model_lifecycle_operation: str | None = None
 _model_lifecycle_target: str | None = None
 _model_lifecycle_revision = 0
+# Diagnostics only: the operation that most recently claimed the lifecycle.
+_model_lifecycle_last_operation: str | None = None
 _model_management_lock = threading.Lock()
 _model_management_cache: tuple | None = None
 _model_activation_target: str | None = None
@@ -553,6 +555,7 @@ def _model_download_thread_alive() -> bool:
 def _begin_model_lifecycle(operation: str, target: str = "") -> tuple[bool, dict]:
     """Claim the process-wide model lifecycle boundary without waiting."""
     global _model_lifecycle_operation, _model_lifecycle_target, _model_lifecycle_revision
+    global _model_lifecycle_last_operation
     with _model_lifecycle_state_lock:
         if not _model_lifecycle_lock.acquire(blocking=False):
             return False, {
@@ -562,6 +565,7 @@ def _begin_model_lifecycle(operation: str, target: str = "") -> tuple[bool, dict
         _model_lifecycle_operation = operation
         _model_lifecycle_target = target or None
         _model_lifecycle_revision += 1
+        _model_lifecycle_last_operation = operation
         return True, {"operation": operation, "target": target or None}
 
 
@@ -2044,34 +2048,54 @@ def _model_management_key(env: dict) -> tuple:
             tuple(env.get(key) for key in (*_SWITCHBOARD_ROUTE_ENV_KEYS, 'AMD_INFERENCE_PORT', 'ODS_WINDOWS_SYSTEM_DIRECTORY')))
 
 
+def _model_management_key_change(before: tuple, after: tuple) -> str:
+    """Name what moved during a management proof, for the agent log."""
+    if before[1] != after[1]:
+        with _model_lifecycle_state_lock:
+            last = _model_lifecycle_last_operation
+        return f'lifecycle revision {before[1][0]} -> {after[1][0]}, last operation {last or "none"}'
+    return 'model route settings in .env'
+
+
 def _model_management_snapshot() -> tuple[int, dict]:
     """Coalesce dashboard polling only; mutations always prove ownership fresh."""
     global _model_management_cache
     unavailable = (503, {'error': 'Windows runtime management could not be verified'})
     if not _model_management_lock.acquire(timeout=19):
+        logger.warning('Windows runtime management check waited 19 s for another check; reporting it unverified')
         return unavailable
     try:
-        env = load_env(INSTALL_DIR / '.env')
-        key = _model_management_key(env)
-        cached = _model_management_cache
-        if cached is not None and cached[0] == key and time.monotonic() < cached[1]:
-            return cached[2], dict(cached[3])
-        try:
-            value = _managed_wsl_runtime(env)
-            managed = value.get('managed') is True
-            running = managed and value.get('running') is True
-            result = (200, {'managed': managed, 'canActivate': running,
-                            'canUnload': managed, 'running': running})
-        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
-            logger.warning('Windows runtime management verification failed: %s', exc)
-            result = unavailable
-        if _model_management_key(load_env(INSTALL_DIR / '.env')) != key:
-            _model_management_cache = None
-            return unavailable  # A completed lifecycle cannot reuse its earlier proof.
-        # Cache failures as failures too, preventing a burst of polls from
-        # launching another expensive controller for each waiting request.
-        _model_management_cache = (key, time.monotonic() + 1, *result)
-        return result[0], dict(result[1])
+        # A proof takes seconds on Windows. A lifecycle step or route change
+        # that lands meanwhile makes its result describe the earlier state, so
+        # prove the new state once more before reporting "unverified": one
+        # unrelated Portal action must not make a model switch fail with 409
+        # (Strixy, 2026-10-05). Two proofs stay within dashboard-api's 20 s.
+        for attempt in (1, 2):
+            env = load_env(INSTALL_DIR / '.env')
+            key = _model_management_key(env)
+            cached = _model_management_cache
+            if cached is not None and cached[0] == key and time.monotonic() < cached[1]:
+                return cached[2], dict(cached[3])
+            try:
+                value = _managed_wsl_runtime(env)
+                managed = value.get('managed') is True
+                running = managed and value.get('running') is True
+                result = (200, {'managed': managed, 'canActivate': running,
+                                'canUnload': managed, 'running': running})
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                logger.warning('Windows runtime management verification failed: %s', exc)
+                result = unavailable
+            current = _model_management_key(load_env(INSTALL_DIR / '.env'))
+            if current == key:
+                # Cache failures as failures too, preventing a burst of polls
+                # from launching another expensive controller for each waiting request.
+                _model_management_cache = (key, time.monotonic() + 1, *result)
+                return result[0], dict(result[1])
+            _model_management_cache = None  # A completed lifecycle cannot reuse its earlier proof.
+            logger.info('Windows runtime management changed during verification (%s); attempt %d of 2',
+                        _model_management_key_change(key, current), attempt)
+        logger.warning('Windows runtime management kept changing during verification; reporting it unverified')
+        return unavailable
     finally:
         _model_management_lock.release()
 

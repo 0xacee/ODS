@@ -19,6 +19,7 @@ def management(tmp_path, monkeypatch):
     monkeypatch.setattr(host, '_model_lifecycle_operation', None)
     monkeypatch.setattr(host, '_model_lifecycle_target', None)
     monkeypatch.setattr(host, '_model_lifecycle_revision', 0)
+    monkeypatch.setattr(host, '_model_lifecycle_last_operation', None)
     path = tmp_path / '.env'
     path.write_text('ODS_HOST_LLM_TRANSPORT=model-router\n')
     return path
@@ -92,7 +93,10 @@ def test_configuration_and_completed_lifecycle_invalidate_cache(management, monk
 
 
 def test_lifecycle_change_during_probe_does_not_publish_old_proof(management, monkeypatch):
+    calls = []
+
     def probe(_env):
+        calls.append(True)
         assert host._begin_model_lifecycle('model_runtime')[0]
         host._end_model_lifecycle('model_runtime')
         return {'managed': True, 'running': True}
@@ -100,6 +104,61 @@ def test_lifecycle_change_during_probe_does_not_publish_old_proof(management, mo
     monkeypatch.setattr(host, '_managed_wsl_runtime', probe)
     assert host._model_management_snapshot()[0] == 503
     assert host._model_management_cache is None
+    assert len(calls) == 2  # One recheck, then "unverified"; never an unbounded loop.
+
+
+def test_one_change_during_probe_is_rechecked_instead_of_refusing(management, monkeypatch, caplog):
+    # Strixy: an unrelated Portal action during a multi-second proof made a
+    # model switch fail with 409 and logged nothing.
+    calls = []
+
+    def probe(_env):
+        calls.append(True)
+        if len(calls) == 1:
+            assert host._begin_model_lifecycle('pixel_open_app')[0]
+            host._end_model_lifecycle('pixel_open_app')
+        return {'managed': True, 'running': True}
+
+    monkeypatch.setattr(host, '_managed_wsl_runtime', probe)
+    with caplog.at_level('INFO', logger=host.logger.name):
+        code, value = host._model_management_snapshot()
+    assert (code, value['canActivate']) == (200, True)
+    assert len(calls) == 2
+    assert ('changed during verification (lifecycle revision 0 -> 2, '
+            'last operation pixel_open_app); attempt 1 of 2') in caplog.text
+    assert host._model_management_cache is not None
+
+
+def test_lock_timeout_and_persistent_change_are_logged(management, monkeypatch, caplog):
+    class BusyLock:
+        waits = []
+
+        def acquire(self, timeout=-1):
+            self.waits.append(timeout)
+            return False
+
+        def release(self):
+            raise AssertionError('a lock that was never acquired was released')
+
+    busy = BusyLock()
+    monkeypatch.setattr(host, '_model_management_lock', busy)
+    with caplog.at_level('WARNING', logger=host.logger.name):
+        assert host._model_management_snapshot()[0] == 503
+    assert busy.waits == [19]
+    assert 'waited 19 s for another check' in caplog.text
+
+    monkeypatch.setattr(host, '_model_management_lock', threading.Lock())
+
+    def probe(_env):
+        assert host._begin_model_lifecycle('model_runtime')[0]
+        host._end_model_lifecycle('model_runtime')
+        return {'managed': True, 'running': True}
+
+    monkeypatch.setattr(host, '_managed_wsl_runtime', probe)
+    caplog.clear()
+    with caplog.at_level('WARNING', logger=host.logger.name):
+        assert host._model_management_snapshot()[0] == 503
+    assert 'kept changing during verification' in caplog.text
 
 
 def test_handler_authenticates_before_cache_and_preserves_no_store(management, monkeypatch):
