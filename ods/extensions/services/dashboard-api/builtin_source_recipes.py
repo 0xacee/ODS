@@ -69,13 +69,19 @@ def _read_recipe(path: Path, limit: int = _MAX_RECIPE_BYTES) -> bytes:
         os.close(fd)
 
 
+def _normalized_sha256(data: bytes) -> str:
+    """SHA-256 of file content with CRLF line endings read as LF."""
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+
+
 def files_digest(files: Iterable[tuple[str, bytes]]) -> str:
     """SHA-256 over (relative path, content) pairs, in path order.
 
     CRLF checkouts are normalized to LF, as for the reviewed Dockerfiles.
+    The dashboard-api image runs Python 3.11, where an f-string expression
+    cannot hold a backslash, so the hash is computed outside the braces.
     """
-    lines = sorted(f"{relative}\0{hashlib.sha256(data.replace(b'\r\n', b'\n')).hexdigest()}\n"
-                   for relative, data in files)
+    lines = sorted(f"{relative}\0{_normalized_sha256(data)}\n" for relative, data in files)
     return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
 
 
