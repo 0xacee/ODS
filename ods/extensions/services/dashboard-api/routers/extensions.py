@@ -50,7 +50,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["extensions"])
 
-_SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+# \Z, not $: "$" also matches before a final newline, which would admit "n8n\n".
+_SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 _MAX_EXTENSION_BYTES = 50 * 1024 * 1024  # 50 MB
 _LIBRARY_RECEIPT = ".ods-library-receipt.json"
 _LIBRARY_RECEIPT_SCHEMA = 1
