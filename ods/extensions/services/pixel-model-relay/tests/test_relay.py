@@ -71,6 +71,39 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         await self.relay_runner.cleanup()
         await self.fake_runner.cleanup()
 
+    async def test_upstream_error_reaches_openclaw_without_the_key_echo(self):
+        # Fleet: a LiteLLM proxy's refusal echoed the key's end and its hash,
+        # and OpenClaw kept that text in Pixel's session history.
+        key_hash = "0123456789abcdef" * 4
+        echo = ('{"error":{"message":"Authentication Error, Invalid proxy server token passed. '
+                'Received API Key = sk-...wxyz, Key Hash (Token) = ' + key_hash + '. Unable to find token"}}')
+
+        async def refused(_request):
+            return web.Response(status=401, text=echo, content_type="application/json")
+
+        fake = web.Application()
+        fake.router.add_post("/v1/chat/completions", refused)
+        runner, url = await start(fake)
+        previous, relay.UPSTREAM = relay.UPSTREAM, url
+        try:
+            async with ClientSession() as client:
+                async with client.post(self.url + "/v1/chat/completions",
+                                       headers={"Authorization": "Bearer test-only-pixel-relay-key"},
+                                       json={"model": "ods/current", "stream": True, "messages": []}) as response:
+                    status, body = response.status, await response.text()
+        finally:
+            relay.UPSTREAM = previous
+            await runner.cleanup()
+        self.assertEqual(status, 401)
+        self.assertNotIn("wxyz", body)
+        self.assertNotIn(key_hash, body)
+        self.assertIn("Invalid proxy server token passed. Received API Key = [redacted], "
+                      "Key Hash (Token) = [redacted]. Unable to find token", body)
+
+    def test_key_echo_redaction_keeps_ordinary_error_text(self):
+        text = b'{"error":{"message":"key not allowed to access model. This key can only access models=[\'m\']"}}'
+        self.assertEqual(relay._redact_key_echo(text), text)
+
     async def test_auth_and_scope(self):
         async with ClientSession() as client:
             async with client.get(self.url + "/v1/models") as response:
