@@ -2793,7 +2793,8 @@ if amd_runtime.get('available'):
     )
     for warning in amd_runtime.get('warnings', [])[:3]:
         print(f"    {YELLOW}⚠{NC} {warning}")
-elif amd_runtime.get('reason') and amd_runtime.get('reason') != 'not_amd':
+# API mode runs no local AMD runtime: its reason is not a warning (fleet, Strixy).
+elif amd_runtime.get('reason') and amd_runtime.get('reason') not in ('not_amd', 'api_mode'):
     print(f"  {YELLOW}⚠{NC} AMD runtime: {amd_runtime.get('reason')}")
 
 inference_contract = runtime.get('inference_contract') or {}
