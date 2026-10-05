@@ -99,6 +99,38 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(key_hash, body)
         self.assertIn("Invalid proxy server token passed. Received API Key = [redacted], "
                       "Key Hash (Token) = [redacted]. Unable to find token", body)
+        self.assertEqual((await self.last_generation())["status"], 401)
+
+    async def last_generation(self, key="test-only-pixel-relay-key"):
+        async with ClientSession() as client:
+            async with client.get(self.url + "/v1/ods/last-generation",
+                                  headers={"Authorization": "Bearer " + key}) as response:
+                return response.status if response.status != 200 else await response.json()
+
+    async def test_last_generation_needs_the_key_and_reports_only_status_and_age(self):
+        self.assertEqual(await self.last_generation("wrong"), 401)
+        value = await self.last_generation()
+        self.assertEqual(set(value), {"status", "ageSeconds"})
+
+    async def test_a_dead_route_is_a_502_that_says_so(self):
+        # model-router or LiteLLM not answering at all was an aiohttp 500.
+        fake = web.Application()
+        runner, url = await start(fake)
+        await runner.cleanup()
+        previous, relay.UPSTREAM = relay.UPSTREAM, url
+        try:
+            async with ClientSession() as client:
+                async with client.post(self.url + "/v1/chat/completions",
+                                       headers={"Authorization": "Bearer test-only-pixel-relay-key"},
+                                       json={"model": "ods/current", "messages": []}) as response:
+                    status, body = response.status, await response.json()
+        finally:
+            relay.UPSTREAM = previous
+        self.assertEqual(status, 502)
+        self.assertEqual(body["error"]["type"], "ods_route_unavailable")
+        value = await self.last_generation()
+        self.assertEqual(value["status"], 502)
+        self.assertLess(value["ageSeconds"], 30)
 
     def test_key_echo_redaction_keeps_ordinary_error_text(self):
         text = b'{"error":{"message":"key not allowed to access model. This key can only access models=[\'m\']"}}'

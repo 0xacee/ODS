@@ -15,7 +15,7 @@ import time
 import uuid
 from contextlib import suppress
 
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 KEY = os.environ.get("PIXEL_MODEL_RELAY_KEY", "")
 LITELLM_KEY = os.environ.get("LITELLM_KEY", "")
@@ -43,6 +43,10 @@ _KEY_ECHO = (
     (re.compile(rb"(Key Hash \(Token\)\s*=\s*)[0-9A-Fa-f]+", re.IGNORECASE), rb"\1[redacted]"),
 )
 LOG = logging.getLogger("pixel-model-relay")
+# The latest model call's outcome, so the dashboard can say why a Portal turn
+# failed: its HTTP status and when it ended, never a body (fleet drills: every
+# failure looked the same in Portal).
+_LAST_GENERATION = {"status": None, "at": None}
 
 
 def _redact_key_echo(body):
@@ -131,7 +135,14 @@ async def _inference(request):
                 with suppress(asyncio.CancelledError):
                     await upstream_task
                 return web.Response(status=499)
-            upstream = await upstream_task
+            try:
+                upstream = await upstream_task
+            except ClientError:
+                # The route itself (model-router or LiteLLM) did not answer.
+                upstream_status = 502
+                return web.json_response({"error": {
+                    "message": "The ODS model route did not answer.", "type": "ods_route_unavailable"}},
+                    status=502, headers={"Cache-Control": "no-store"})
             upstream_status = upstream.status
             async with upstream:
                 if upstream.status >= 400:
@@ -177,6 +188,8 @@ async def _inference(request):
                         await response.write_eof()
                 return response
         finally:
+            if diagnostic_id and upstream_status is not None:
+                _LAST_GENERATION.update(status=upstream_status, at=time.time())
             if diagnostic_id:
                 LOG.info("generation_end %s", json.dumps({
                     "id": diagnostic_id, "status": upstream_status,
@@ -193,6 +206,17 @@ async def _health(_request):
     return web.json_response({"status": "ok"})
 
 
+async def _last_generation(request):
+    """The latest model call's status and age, for the dashboard only."""
+    if not hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + KEY):
+        raise web.HTTPUnauthorized()
+    at = _LAST_GENERATION["at"]
+    return web.json_response({
+        "status": _LAST_GENERATION["status"],
+        "ageSeconds": round(max(0.0, time.time() - at), 1) if at is not None else None,
+    }, headers={"Cache-Control": "no-store"})
+
+
 def create_app():
     if not KEY or not KEY.isascii() or len(KEY) > 4096 \
             or any(ord(c) < 32 or ord(c) == 127 for c in KEY):
@@ -204,6 +228,7 @@ def create_app():
         raise RuntimeError("invalid LiteLLM model relay key")
     app = web.Application(client_max_size=MAX_BODY + 1)
     app.router.add_get("/health", _health)
+    app.router.add_get("/v1/ods/last-generation", _last_generation)
     app.router.add_route("*", "/v1/models", _inference)
     app.router.add_route("*", "/v1/chat/completions", _inference)
     return app
