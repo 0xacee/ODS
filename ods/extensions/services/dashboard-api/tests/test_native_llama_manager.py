@@ -225,33 +225,3 @@ def test_darwin_profile_launch_gets_no_macos_defaults(managed, monkeypatch):
     assert '--apply-defaults' not in qualify
     assert not any(part.startswith(('--spec-default=', '--reasoning-mode=')) for part in qualify)
     assert start[start.index('--reasoning-format') + 1] == 'none'
-
-
-def test_windows_launch_keeps_its_direct_flags(tmp_path, monkeypatch):
-    monkeypatch.setattr(host, 'INSTALL_DIR', tmp_path)
-    monkeypatch.setattr(host.platform, 'system', lambda: 'Windows')
-    monkeypatch.setattr(host, 'load_env', lambda _: {'GGUF_FILE': 'test.gguf', 'LLAMA_ARG_SPEC_DRAFT_N_MAX': '3'})
-    monkeypatch.setattr(host._model_stores, 'registered_runtime_profile', lambda *_: None)
-    monkeypatch.setattr(host, '_active_model_directory', lambda _: tmp_path / 'models')
-    monkeypatch.setattr(host, '_disable_conflicting_macos_bridge', lambda *_: None)
-    probes = []
-
-    def run(args, **_k):
-        # Only the --help probe for --reasoning may run; never the macOS qualifier.
-        if list(args[1:]) != ['--help']:
-            pytest.fail('macOS qualifier ran on Windows')
-        probes.append(list(args))
-        return subprocess.CompletedProcess(args, 0, '--reasoning-format FORMAT\n', '')
-
-    monkeypatch.setattr(host.subprocess, 'run', run)
-    launched = []
-    class Process:
-        pid = 99
-    monkeypatch.setattr(host.subprocess, 'Popen', lambda args, **_k: launched.append(args) or Process())
-    host._launch_native_llama_server(tmp_path / '.env', tmp_path / 'llama-server.exe', tmp_path / 'log', tmp_path / 'pid')
-    assert probes == [[str(tmp_path / 'llama-server.exe'), '--help']]
-    assert launched[0][launched[0].index('--spec-draft-n-max') + 1] == '3'
-    assert '--ctx-checkpoints' not in launched[0]
-    # A runtime without --reasoning (b8248) keeps the format mapping.
-    assert launched[0][launched[0].index('--reasoning-format') + 1] == 'none'
-    assert '--reasoning' not in launched[0]

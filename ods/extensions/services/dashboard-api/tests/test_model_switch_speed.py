@@ -412,6 +412,8 @@ class TestReadinessFastWindow:
     [
         ("compose-llama", True),
         ("container-llama", True),
+        # ods.ps1 native-llm-restart returns only after the new model proved itself.
+        ("windows-native-llama", True),
         ("macos-native-llama", False),
     ],
 )
@@ -420,7 +422,7 @@ def test_activation_uses_fast_readiness_only_for_replaced_containers(
 ):
     install, env_path, env_text, *_ = _write_model_activation_fixture(
         tmp_path,
-        gpu_backend="apple" if runtime_kind == "macos-native-llama" else "nvidia",
+        gpu_backend={"macos-native-llama": "apple", "windows-native-llama": "amd"}.get(runtime_kind, "nvidia"),
     )
     monkeypatch.setattr(_mod, "INSTALL_DIR", install)
     monkeypatch.delenv("ODS_HOST_INSTALL_DIR", raising=False)
@@ -434,6 +436,15 @@ def test_activation_uses_fast_readiness_only_for_replaced_containers(
         monkeypatch.setattr(_mod.platform, "system", lambda: "Linux")
         monkeypatch.setenv("ODS_HOST_INSTALL_DIR", str(install))
         monkeypatch.setattr(_mod, "_recreate_llama_server", lambda _env, override_image="": None)
+    elif runtime_kind == "windows-native-llama":
+        env_path.write_text(env_text + (
+            "LLM_BACKEND=llama-server\nAMD_INFERENCE_RUNTIME=llama-server\n"
+            "AMD_INFERENCE_RUNTIME_MODE=windows-native-llama-server\nAMD_INFERENCE_LOCATION=host\n"
+            "AMD_INFERENCE_MANAGED=true\nAMD_INFERENCE_PORT=8080\n"
+        ), encoding="utf-8")
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
+        monkeypatch.setattr(_mod, "_restart_windows_native_llama_server", lambda *_args: None)
     else:
         llama_bin = install / "bin" / "llama-server"
         llama_bin.parent.mkdir(parents=True)

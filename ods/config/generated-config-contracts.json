@@ -140,10 +140,6 @@
           "path": "scripts/render-runtime-configs.py"
         },
         {
-          "platform": "windows-installer",
-          "path": "installers/windows/install-windows.ps1"
-        },
-        {
           "platform": "windows-env-generator",
           "path": "installers/windows/lib/env-generator.ps1"
         },

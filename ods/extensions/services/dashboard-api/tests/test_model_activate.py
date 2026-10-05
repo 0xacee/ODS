@@ -2162,9 +2162,6 @@ class TestLaunchNativeLlamaServer:
 
         monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
         monkeypatch.setattr(subprocess, "Popen", fake_popen)
-        # This fixture tests launch arguments, not the runtime help probe.
-        monkeypatch.setattr(_mod, "_windows_llama_reasoning_arguments",
-                            lambda binary, mode, fmt: ["--reasoning-format", fmt])
 
         _launch_native_llama_server(env_path, llama_bin, llama_log, pid_file)
 
@@ -2180,66 +2177,8 @@ class TestLaunchNativeLlamaServer:
         assert "deepseek" in cmd
         assert _kwargs["cwd"] == str(tmp_path)
 
-    @pytest.mark.parametrize(
-        ("help_text", "help_rc", "reasoning", "expected"),
-        [
-            # b9014 has --reasoning (default auto): pass the mode itself.
-            ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "off", ["--reasoning", "off"]),
-            ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "", ["--reasoning", "off"]),
-            ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "on", ["--reasoning", "on"]),
-            # b8248 has no --reasoning: keep the format, and for off add
-            # --reasoning-budget 0, which disables thinking there.
-            ("--reasoning-format FORMAT\n--reasoning-budget N\n", 0, "off",
-             ["--reasoning-format", "none", "--reasoning-budget", "0"]),
-            ("--reasoning-format FORMAT\n--reasoning-budget N\n", 0, "on", ["--reasoning-format", "deepseek"]),
-            ("--reasoning-format FORMAT\n", 0, "off", ["--reasoning-format", "none"]),
-            # A mode that is not off/on/auto keeps the format mapping.
-            ("-rea, --reasoning [on|off|auto]\n", 0, "deepseek", ["--reasoning-format", "deepseek"]),
-            # An unreadable --help keeps the previous behaviour.
-            ("-rea, --reasoning [on|off|auto]\n", 1, "off", ["--reasoning-format", "none"]),
-        ],
-    )
-    def test_windows_passes_reasoning_where_the_runtime_has_it(
-        self, monkeypatch, tmp_path, help_text, help_rc, reasoning, expected,
-    ):
-        env_path = tmp_path / ".env"
-        env_path.write_text(
-            f"GGUF_FILE=test-model.gguf\nLLAMA_REASONING={reasoning}\n",
-            encoding="utf-8",
-        )
-        (tmp_path / "data" / "models").mkdir(parents=True)
-        llama_bin = tmp_path / "llama-server" / "llama-server.exe"
-        llama_bin.parent.mkdir(parents=True)
-        llama_bin.write_text("", encoding="utf-8")
-        calls = []
-
-        class _FakeProc:
-            pid = 4321
-
-        def fake_run(cmd, **_kwargs):
-            assert cmd == [str(llama_bin), "--help"]
-            return subprocess.CompletedProcess(cmd, help_rc, help_text, "")
-
-        def fake_popen(cmd, **kwargs):
-            calls.append(cmd)
-            return _FakeProc()
-
-        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
-        monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
-        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-        monkeypatch.setattr(_mod.subprocess, "Popen", fake_popen)
-
-        _launch_native_llama_server(
-            env_path, llama_bin, tmp_path / "data" / "llama-server.log", tmp_path / "data" / "llama-server.pid",
-        )
-
-        cmd = calls[0]
-        start = cmd.index(expected[0])
-        assert cmd[start:start + len(expected)] == expected
-        for flag in ("--reasoning", "--reasoning-format", "--reasoning-budget"):
-            assert (flag in cmd) == (flag in expected), flag
-
-    @pytest.mark.parametrize('system', ['Windows', 'Darwin', 'Linux'])
+    # Windows launches through ods.ps1 native-llm-restart, which binds loopback.
+    @pytest.mark.parametrize('system', ['Darwin', 'Linux'])
     def test_ui_lan_preference_does_not_publish_native_inference(self, monkeypatch, tmp_path, system):
         env = {
             "GGUF_FILE": "test-model.gguf",
@@ -2262,8 +2201,6 @@ class TestLaunchNativeLlamaServer:
         monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
         monkeypatch.setattr(_mod, "load_env", lambda _path: env)
         monkeypatch.setattr(_mod.platform, "system", lambda: system)
-        monkeypatch.setattr(_mod, "_windows_llama_reasoning_arguments",
-                            lambda binary, mode, fmt: ["--reasoning-format", fmt])
         monkeypatch.setattr(_mod, "_disable_conflicting_macos_bridge", fake_disable)
         monkeypatch.setattr(_mod.subprocess, "Popen", fake_popen)
 
@@ -2307,156 +2244,92 @@ class TestWindowsNativeLlamaServer:
             "AMD_INFERENCE_LOCATION": "host",
         }) is False
 
-    def test_launch_follows_the_native_contract_on_windows(self, monkeypatch, tmp_path):
-        env_path = tmp_path / ".env"
-        key = "0f" * 32
-        env_path.write_text(
-            "GGUF_FILE=Qwen3.6-35B-A3B-Q4_K_M.gguf\nCTX_SIZE=131072\nLLAMA_PARALLEL=4\n"
-            "AMD_INFERENCE_PORT=18080\nLLAMA_ARG_DEVICE=Vulkan1\n"
-            f"LLAMA_SERVER_API_KEY={key}\n",
-            encoding="utf-8",
-        )
-        (tmp_path / "data" / "models").mkdir(parents=True)
-        llama_bin = tmp_path / "llama.cpp" / "llama-server.exe"
-        llama_bin.parent.mkdir(parents=True)
-        llama_bin.write_text("", encoding="utf-8")
+    @staticmethod
+    def _native_install(monkeypatch, tmp_path):
+        install_dir = tmp_path / "ODS Install"
+        (install_dir / "data" / "models").mkdir(parents=True)
+        (install_dir / "data" / "models" / "model.gguf").write_text("model", encoding="utf-8")
+        (install_dir / "ods.ps1").write_text("# ods.ps1\n", encoding="utf-8")
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        return install_dir
+
+    def test_model_switch_relaunches_through_ods_native_llm_restart(self, monkeypatch, tmp_path):
+        install_dir = self._native_install(monkeypatch, tmp_path)
+        key = "9a" * 32
         calls = []
 
-        class _FakeProc:
-            pid = 4321
-
-        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
-        monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
-        monkeypatch.setattr(_mod, "_windows_llama_reasoning_arguments",
-                            lambda binary, mode, fmt: ["--reasoning", "off"])
-        monkeypatch.setattr(_mod.subprocess, "Popen", lambda cmd, **kwargs: (
-            calls.append((cmd, kwargs)) or _FakeProc()
-        ))
-
-        _launch_native_llama_server(
-            env_path, llama_bin, tmp_path / "data" / "llama-server.log", tmp_path / "data" / "llama-server.pid",
-        )
-
-        cmd, kwargs = calls[0]
-        assert cmd[cmd.index("--alias") + 1] == "Qwen3.6-35B-A3B-Q4_K_M.gguf"
-        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
-        assert cmd[cmd.index("--port") + 1] == "18080"
-        assert cmd[cmd.index("--parallel") + 1] == "1"
-        assert cmd[cmd.index("--device") + 1] == "Vulkan1"
-        assert "--metrics" in cmd and "--no-webui" in cmd
-        assert cmd[cmd.index("--api-key-file") + 1] == str(tmp_path / "data" / "llama-server.api-key")
-        assert key not in " ".join(cmd)
-        assert "--api-key" not in cmd
-        assert key not in json.dumps(kwargs.get("env") or {})
-
-        # The same .env on another host keeps that host's own launch contract.
-        monkeypatch.setattr(_mod.platform, "system", lambda: "Linux")
-        monkeypatch.setattr(_mod, "_disable_conflicting_macos_bridge", lambda *_args: False)
-        calls.clear()
-        _launch_native_llama_server(
-            env_path, llama_bin, tmp_path / "data" / "llama-server.log", tmp_path / "data" / "llama-server.pid",
-        )
-        cmd = calls[0][0]
-        assert cmd[cmd.index("--parallel") + 1] == "4"
-        assert "--api-key-file" not in cmd and "--no-webui" not in cmd and "--device" not in cmd
-
-    def test_pinned_binary_is_preferred_over_the_pre_round_f_copy(self, monkeypatch, tmp_path):
-        install = tmp_path / "install"
-        (install / "config" / "backends").mkdir(parents=True)
-        (install / "config" / "backends" / "amd.json").write_text(json.dumps({
-            "runtime": {"llama_server": {"windows": {"release_tag": "b9014"}}},
-        }), encoding="utf-8")
-        local_app_data = tmp_path / "LocalAppData"
-        pinned_dir = local_app_data / "ODS" / "llama.cpp" / "b9014-win-vulkan-x64"
-        monkeypatch.setattr(_mod, "INSTALL_DIR", install)
-        monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
-        legacy = install / "llama-server" / "llama-server.exe"
-
-        launched, owned = _mod._windows_native_llama_binaries()
-        assert launched == legacy
-        assert owned == [pinned_dir / "llama-server.exe", legacy]
-
-        pinned_dir.mkdir(parents=True)
-        (pinned_dir / "llama-server.exe").write_text("", encoding="utf-8")
-        launched, _owned = _mod._windows_native_llama_binaries()
-        # pin.json is the installer's proof the folder was qualified.
-        assert launched == legacy
-        (pinned_dir / "pin.json").write_text("{}", encoding="utf-8")
-        launched, _owned = _mod._windows_native_llama_binaries()
-        assert launched == pinned_dir / "llama-server.exe"
-
-    def test_native_restart_stops_only_owned_processes_and_writes_a_private_key(
-        self, monkeypatch, tmp_path,
-    ):
-        install_dir = tmp_path / "install"
-        env_path = install_dir / ".env"
-        model_dir = install_dir / "data" / "models"
-        llama_bin = install_dir / "llama-server" / "llama-server.exe"
-        model_dir.mkdir(parents=True)
-        llama_bin.parent.mkdir(parents=True)
-        model_dir.joinpath("model.gguf").write_text("model", encoding="utf-8")
-        llama_bin.write_text("", encoding="utf-8")
-        key = "9a" * 32
-        env_path.write_text("GGUF_FILE=model.gguf\nAMD_INFERENCE_PORT=9090\n", encoding="utf-8")
-
-        captured = {}
-
         def fake_run(cmd, **kwargs):
-            captured["cmd"] = cmd
-            captured["script"] = cmd[-1]
-            captured["env"] = kwargs["env"]
-            captured["creationflags"] = kwargs.get("creationflags")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0, stdout="Native llama-server ready", stderr="")
 
-        launch_calls = []
-        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
-        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
         monkeypatch.setattr(_mod, "_windows_management_shell", lambda: "selected-pwsh.exe")
         monkeypatch.setattr(_mod.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
         monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-        monkeypatch.setattr(_mod, "_launch_native_llama_server", lambda *args: launch_calls.append(args))
+        monkeypatch.setattr(_mod.subprocess, "Popen", lambda *_a, **_k: pytest.fail("the agent launched llama-server.exe"))
 
-        _restart_windows_native_llama_server(env_path, {
+        _restart_windows_native_llama_server(install_dir / ".env", {
             "GGUF_FILE": "model.gguf",
             "AMD_INFERENCE_PORT": "9090",
             "LLAMA_SERVER_API_KEY": key,
         })
 
-        script = captured["script"]
-        # Ownership is the exact ODS executable, never a process name.
-        assert '-like "llama-server*"' not in script
-        assert 'IndexOf("llama-server"' not in script
-        assert "$Proc.ExecutablePath.Equals([string]$exe, [StringComparison]::OrdinalIgnoreCase)" in script
-        assert "which ODS does not own" in script
-        assert "Stop-Process -Id $ProcId -Force" in script
-        assert "taskkill.exe /PID $ProcId /F" in script
-        assert "taskkill.exe /PID $ProcId /T /F" not in script
-        assert "Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Ignore" in script
-        assert "SetAccessRuleProtection($true, $false)" in script
-        assert script.rstrip().endswith("exit 0")
-        assert captured["env"]["ODS_WIN_LLAMA_PORT"] == "9090"
-        assert captured["env"]["ODS_WIN_LLAMA_API_KEY"] == key
-        assert captured["env"]["ODS_WIN_LLAMA_KEY_FILE"] == str(install_dir / "data" / "llama-server.api-key")
-        assert str(llama_bin) in json.loads(captured["env"]["ODS_WIN_LLAMA_OWNED_EXES"])
-        assert key not in " ".join(captured["cmd"])
-        assert captured["cmd"][0] == "selected-pwsh.exe"
-        assert "-NonInteractive" in captured["cmd"]
-        assert captured["creationflags"] == 0x08000000
-        assert launch_calls and launch_calls[0][1] == llama_bin
+        # The Windows installer's entry point stops only the llama-server it
+        # proves, relaunches from .env and proves the model; nothing else runs.
+        assert len(calls) == 1
+        cmd, kwargs = calls[0]
+        assert cmd == [
+            "selected-pwsh.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", str(install_dir / "ods.ps1"), "native-llm-restart", str(install_dir),
+        ]
+        assert kwargs["creationflags"] == 0x08000000
+        assert kwargs["timeout"] > 900
+        # The key stays in .env and ods.ps1's private key file.
+        assert key not in " ".join(cmd)
+        assert key not in json.dumps(kwargs.get("env") or {})
+        assert not (install_dir / "data" / "llama-server.api-key").exists()
 
-    def test_malformed_key_is_refused_before_any_process_change(self, monkeypatch, tmp_path):
-        install_dir = tmp_path / "install"
-        (install_dir / "data" / "models").mkdir(parents=True)
-        (install_dir / "data" / "models" / "model.gguf").write_text("model", encoding="utf-8")
-        (install_dir / "llama-server").mkdir()
-        (install_dir / "llama-server" / "llama-server.exe").write_text("", encoding="utf-8")
-        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
-        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    def test_failed_restart_reports_its_reason_without_the_key(self, monkeypatch, tmp_path):
+        install_dir = self._native_install(monkeypatch, tmp_path)
+        key = "5c" * 32
+        output = (
+            "Starting native llama-server with model.gguf\n"
+            "Native llama-server did not start: the model reported 4096 tokens of context, not 8192\n"
+            f"sent {key}\n"
+        )
+        monkeypatch.setattr(_mod.subprocess, "run", lambda cmd, **_k: subprocess.CompletedProcess(
+            cmd, 1, stdout=output, stderr="",
+        ))
+
+        with pytest.raises(RuntimeError, match="did not restart") as raised:
+            _restart_windows_native_llama_server(install_dir / ".env", {
+                "GGUF_FILE": "model.gguf", "LLAMA_SERVER_API_KEY": key,
+            })
+
+        assert "4096 tokens of context, not 8192" in str(raised.value)
+        assert key not in str(raised.value)
+
+    @pytest.mark.parametrize(("key", "missing", "reason"), [
+        ("not a key\nX-Injected: 1", "", "64 hex characters"),
+        ("", "", "64 hex characters"),
+        # ods.ps1 refuses these too, but only after it stopped the server.
+        ("9A" * 32, "", "64 hex characters"),
+        ("9a" * 16, "", "64 hex characters"),
+        ("9a" * 32, "ods.ps1", "ods.ps1 not found"),
+        ("9a" * 32, "model", "Model file not ready"),
+    ])
+    def test_preconditions_are_refused_before_any_process_change(
+        self, monkeypatch, tmp_path, key, missing, reason,
+    ):
+        install_dir = self._native_install(monkeypatch, tmp_path)
+        if missing == "ods.ps1":
+            (install_dir / "ods.ps1").unlink()
+        elif missing == "model":
+            (install_dir / "data" / "models" / "model.gguf").unlink()
         monkeypatch.setattr(_mod.subprocess, "run", lambda *_a, **_k: pytest.fail("no process may be stopped"))
 
-        with pytest.raises(RuntimeError, match="hex secret"):
+        with pytest.raises(RuntimeError, match=reason):
             _restart_windows_native_llama_server(install_dir / ".env", {
-                "GGUF_FILE": "model.gguf", "LLAMA_SERVER_API_KEY": "not a key\nX-Injected: 1",
+                "GGUF_FILE": "model.gguf", "LLAMA_SERVER_API_KEY": key,
             })
 
     def test_windows_agent_launcher_detaches_from_host_agent(self):

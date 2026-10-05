@@ -144,7 +144,7 @@ def test_host_launches_the_registered_executable_from_its_store(tmp_path, monkey
     env = {'GGUF_FILE':'new.gguf', 'ODS_ACTIVE_MODEL_STORE':'ssd', 'CTX_SIZE':'8192',
            'LLAMA_ARG_SPEC_TYPE':'draft-mtp', 'LLAMA_ARG_SPEC_DRAFT_N_MAX':'2'}
     monkeypatch.setattr(agent, 'load_env', lambda _path: env)
-    monkeypatch.setattr(agent.platform, 'system', lambda: 'Windows')
+    monkeypatch.setattr(agent.platform, 'system', lambda: 'Linux')
     monkeypatch.setattr(agent.subprocess, 'run', lambda *_a, **_k: pytest.fail('a registered profile needs no probe'))
     launched = []
     class Process:
@@ -169,7 +169,7 @@ def test_native_launch_loads_exactly_the_memory_qualified_projector(tmp_path, mo
     launched = []
     class Process:
         pid = 4321
-    monkeypatch.setattr(agent.platform, 'system', lambda: 'Windows')
+    monkeypatch.setattr(agent.platform, 'system', lambda: 'Linux')
     monkeypatch.setattr(agent.subprocess, 'run', lambda *_a, **_k: pytest.fail('a registered profile needs no probe'))
     monkeypatch.setattr(agent.subprocess, 'Popen', lambda args, **_kwargs: launched.append(args) or Process())
     fit = {'runtimeMode':'native','gpuLayers':'auto','contextLength':16384,'visionProjectorFile':'mmproj-F16.gguf',

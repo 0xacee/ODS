@@ -13974,10 +13974,12 @@ class AgentHandler(BaseHTTPRequestHandler):
 
             def _activation_readiness_cadence() -> dict:
                 # Both container restart helpers return only after Docker has
-                # replaced the previous llama-server, so no stale runtime can
-                # answer an early probe. Native runtimes keep the original
-                # fixed-delay cadence.
-                if runtime_restart_strategy in {"compose-llama", "container-llama"}:
+                # replaced the previous llama-server, and ods.ps1
+                # native-llm-restart only after it stopped the previous
+                # Windows server and proved the new one, so no stale runtime
+                # can answer an early probe. The other native runtimes keep
+                # the original fixed-delay cadence.
+                if runtime_restart_strategy in {"compose-llama", "container-llama", "windows-native-llama"}:
                     return {"fast_poll_seconds": _MODEL_READINESS_FAST_POLL_SECONDS}
                 return {}
 
@@ -15556,195 +15558,64 @@ def _is_windows_host_llama_server(env: dict) -> bool:
     )
 
 
-_WINDOWS_LLAMA_API_KEY_RE = re.compile(r"[0-9A-Fa-f]{32,256}")
-
-
-def _windows_llama_release_tag() -> str:
-    """Return the pinned Windows llama.cpp release tag from the AMD contract."""
-    try:
-        contract = json.loads((INSTALL_DIR / "config" / "backends" / "amd.json").read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return ""
-    runtime = contract.get("runtime") if isinstance(contract, dict) else None
-    llama = runtime.get("llama_server") if isinstance(runtime, dict) else None
-    windows = llama.get("windows") if isinstance(llama, dict) else None
-    tag = windows.get("release_tag") if isinstance(windows, dict) else None
-    return tag if isinstance(tag, str) and re.fullmatch(r"b[0-9]{3,6}", tag) else ""
-
-
-def _windows_native_llama_binaries() -> tuple[Path, list[Path]]:
-    r"""Return the llama-server.exe to launch and every ODS-owned copy.
-
-    The pinned build lives in ``%LOCALAPPDATA%\ODS\llama.cpp\<tag>-win-vulkan-x64``
-    with its ``pin.json`` (contract section 5). An installation the Windows
-    installer has not migrated yet keeps its pre-round-F copy for one release.
-    """
-    legacy = INSTALL_DIR / "llama-server" / "llama-server.exe"
-    owned = [legacy]
-    tag = _windows_llama_release_tag()
-    local_app_data = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    if tag:
-        pinned_dir = Path(local_app_data) / "ODS" / "llama.cpp" / f"{tag}-win-vulkan-x64"
-        pinned = pinned_dir / "llama-server.exe"
-        owned.insert(0, pinned)
-        if pinned.is_file() and (pinned_dir / "pin.json").is_file():
-            return pinned, owned
-    return legacy, owned
-
-
-def _windows_llama_api_key(env: dict) -> str:
-    """Return the configured host-native key, refusing a malformed value."""
-    key = str(env.get("LLAMA_SERVER_API_KEY") or "").strip()
-    if key and not _WINDOWS_LLAMA_API_KEY_RE.fullmatch(key):
-        raise RuntimeError("LLAMA_SERVER_API_KEY must be a hex secret; rerun the Windows installer")
-    return key
-
-
-def _windows_llama_api_key_file() -> Path:
-    return INSTALL_DIR / "data" / "llama-server.api-key"
+# ods.ps1 keeps its --api-key-file equal to this key and refuses any other
+# shape (native-llama-legacy.ps1), but only after it stopped the running
+# server; the same rule is checked here before anything is stopped.
+_WINDOWS_NATIVE_LLAMA_KEY_RE = re.compile(r"[0-9a-f]{64}")
+# native-llm-restart resolves the model, stops the previous server and then
+# waits up to 900 s (ODSNativeLlamaStartupSeconds) for the proof.
+_WINDOWS_NATIVE_RESTART_TIMEOUT_SECONDS = 1200
 
 
 def _restart_windows_native_llama_server(env_path: Path, env: dict):
-    """Restart the ODS-owned native Windows llama-server.exe with the active .env.
+    r"""Relaunch the installation's native Windows llama-server from its .env.
 
-    Only a process whose executable is an ODS-owned llama-server.exe is
-    stopped (its PID file or the planned port's listener). Any other owner of
-    the port is refused rather than killed or silently left to fail the
-    launch. The API key is written to an owner-only file for
-    ``--api-key-file``; it never appears on a command line.
+    ``ods.ps1 native-llm-restart <InstallDir>`` owns this runtime (contract
+    section 5): it verifies the model the .env selects before it stops
+    anything, stops only the process its PID record or listener proves is
+    ``<InstallDir>\llama-server\llama-server.exe`` (or the active registered
+    model-store runtime), relaunches with ``--alias`` and ``--api-key-file``,
+    and exits 0 only after it proved the model and context. This agent never
+    starts, stops or kills the process and never writes the key file; it
+    proves the result again through ``_wait_for_model_readiness``.
     """
-    llama_bin, owned_binaries = _windows_native_llama_binaries()
-    profile = _model_stores.registered_runtime_profile(INSTALL_DIR / "data", env.get("GGUF_FILE", ""))
-    if profile:
-        llama_bin = Path(profile["executable"])
-    for store in _model_stores.registered_stores(INSTALL_DIR / "data"):
-        profiles = store.get("profiles", {})
-        if not isinstance(profiles, dict):
-            continue
-        for filename in profiles:
-            try:
-                registered = _model_stores.registered_runtime_profile(INSTALL_DIR / "data", filename)
-            except ValueError:
-                continue
-            if registered:
-                owned_binaries.append(Path(registered["executable"]))
-    llama_log = INSTALL_DIR / "data" / "llama-server.log"
-    pid_file = INSTALL_DIR / "data" / "llama-server.pid"
-    gguf_file = env.get("GGUF_FILE", "")
-    model_path = _active_model_directory(env) / gguf_file
-    port = _host_native_runtime_port(env)
-    api_key = _windows_llama_api_key(env)
-
-    if not llama_bin.exists():
-        raise RuntimeError(f"llama-server.exe not found at {llama_bin}; rerun the Windows installer")
+    install_dir = env_path.parent
+    cli = install_dir / "ods.ps1"
+    if not cli.is_file():
+        raise RuntimeError(f"ods.ps1 not found at {cli}; rerun the Windows installer")
+    model_path = _active_model_directory(env) / env.get("GGUF_FILE", "")
     if not _model_file_ready(model_path):
         raise RuntimeError(f"Model file not ready for native llama-server: {model_path}")
-
-    ps_env = os.environ.copy()
-    ps_env.update({
-        "ODS_WIN_LLAMA_OWNED_EXES": json.dumps(sorted({str(path) for path in owned_binaries})),
-        "ODS_WIN_LLAMA_PID_FILE": str(pid_file),
-        "ODS_WIN_LLAMA_PORT": str(port),
-        "ODS_WIN_LLAMA_KEY_FILE": str(_windows_llama_api_key_file()),
-        "ODS_WIN_LLAMA_API_KEY": api_key,
-    })
-    script = r"""
-$ErrorActionPreference = "Stop"
-$owned = @(ConvertFrom-Json $env:ODS_WIN_LLAMA_OWNED_EXES)
-$pidPath = $env:ODS_WIN_LLAMA_PID_FILE
-$port = [int]$env:ODS_WIN_LLAMA_PORT
-$keyPath = $env:ODS_WIN_LLAMA_KEY_FILE
-$apiKey = $env:ODS_WIN_LLAMA_API_KEY
-
-function Test-ODSOwnedLlamaProcess {
-    param($Proc)
-    if (-not $Proc -or -not $Proc.ExecutablePath) { return $false }
-    foreach ($exe in $owned) {
-        if ($Proc.ExecutablePath.Equals([string]$exe, [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    }
-    return $false
-}
-
-function Stop-ODSLlamaProcessId {
-    param([int]$ProcId)
-    Stop-Process -Id $ProcId -Force -ErrorAction SilentlyContinue
-    for ($i = 0; $i -lt 30; $i++) {
-        if (-not (Get-Process -Id $ProcId -ErrorAction SilentlyContinue)) { return }
-        Start-Sleep -Milliseconds 500
-    }
-    & taskkill.exe /PID $ProcId /F | Out-Null
-    for ($i = 0; $i -lt 30; $i++) {
-        if (-not (Get-Process -Id $ProcId -ErrorAction SilentlyContinue)) { return }
-        Start-Sleep -Milliseconds 500
-    }
-    throw "Could not stop native llama-server process $ProcId"
-}
-
-function Write-ODSPrivateKeyFile {
-    param([string]$Path, [string]$Key)
-    # llama.cpp reads --api-key-file line by line: no BOM, CR or newline.
-    $parent = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    $temporary = Join-Path $parent ('.ods-llama-key-' + [guid]::NewGuid().ToString('N'))
-    $security = [Security.AccessControl.FileSecurity]::new()
-    $security.SetAccessRuleProtection($true, $false)
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow'))
-    $stream = $null
-    try {
-        if ($PSVersionTable.PSEdition -eq 'Core') {
-            $stream = [IO.FileSystemAclExtensions]::Create([IO.FileInfo]::new($temporary),
-                [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]::FullControl,
-                [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)
-        } else {
-            $stream = [IO.FileStream]::new($temporary, [IO.FileMode]::CreateNew,
-                [Security.AccessControl.FileSystemRights]::FullControl,
-                [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)
-        }
-        $bytes = [Text.Encoding]::ASCII.GetBytes($Key)
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush($true)
-        $stream.Dispose()
-        $stream = $null
-        Move-Item -LiteralPath $temporary -Destination $Path -Force
-    } finally {
-        if ($null -ne $stream) { $stream.Dispose() }
-        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
-    }
-}
-
-if (Test-Path $pidPath) {
-    $rawPid = (Get-Content -LiteralPath $pidPath -Raw).Trim()
-    if ($rawPid -match "^\d+$") {
-        $proc = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f [int]$rawPid) -ErrorAction SilentlyContinue
-        if (Test-ODSOwnedLlamaProcess $proc) { Stop-ODSLlamaProcessId -ProcId ([int]$rawPid) }
-    }
-    Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
-}
-
-foreach ($listener in @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Ignore)) {
-    if ($listener.OwningProcess -le 0) { continue }
-    $proc = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f [int]$listener.OwningProcess) -ErrorAction SilentlyContinue
-    if (-not $proc) { continue }
-    if (-not (Test-ODSOwnedLlamaProcess $proc)) {
-        throw ("Port {0} is held by {1} (PID {2}), which ODS does not own; stop it or choose another port" -f $port, $proc.Name, $proc.ProcessId)
-    }
-    Stop-ODSLlamaProcessId -ProcId ([int]$listener.OwningProcess)
-}
-
-if ($apiKey) { Write-ODSPrivateKeyFile -Path $keyPath -Key $apiKey }
-exit 0
-"""
-    ps_cmd = [_windows_management_shell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]
-    result = subprocess.run(ps_cmd, capture_output=True, text=True, timeout=90, env=ps_env,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    if result.returncode != 0:
+    api_key = str(env.get("LLAMA_SERVER_API_KEY") or "")
+    if not _WINDOWS_NATIVE_LLAMA_KEY_RE.fullmatch(api_key):
         raise RuntimeError(
-            "Windows native llama-server stop failed: "
-            f"{(result.stderr or result.stdout).strip()[:500]}"
+            "LLAMA_SERVER_API_KEY in .env is missing or is not 64 hex characters; "
+            "rerun the Windows installer"
         )
-
-    _launch_native_llama_server(env_path, llama_bin, llama_log, pid_file)
+    command = [
+        _windows_management_shell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(cli), "native-llm-restart", str(install_dir),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_WINDOWS_NATIVE_RESTART_TIMEOUT_SECONDS,
+            cwd=str(install_dir),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "The Windows llama-server restart did not finish within "
+            f"{_WINDOWS_NATIVE_RESTART_TIMEOUT_SECONDS} seconds"
+        ) from exc
+    if result.returncode != 0:
+        output = _redact_credential_text(f"{result.stdout or ''}\n{result.stderr or ''}", known_values=(api_key,))
+        detail = _runtime_log_excerpt(output) or "no output"
+        raise RuntimeError(f"The Windows llama-server did not restart: {detail}")
 
 
 def _render_runtime_config(
@@ -18507,47 +18378,6 @@ def _restart_macos_native_llama_server(
     _launch_native_llama_server(env_path, llama_bin, llama_log, pid_file)
 
 
-def _windows_llama_reasoning_arguments(llama_bin: Path, reasoning: str, reasoning_fmt: str) -> list[str]:
-    """--reasoning on Windows runtimes that have it, else --reasoning-format.
-
-    Same rule as installers/windows/lib/native-llama-args.ps1 and the macOS
-    helper: llama.cpp b9014 defaults --reasoning to auto, which turns Qwen3.5
-    thinking on, and with --reasoning-format none the reasoning comes back
-    inside the reply. b8248 has no --reasoning and keeps the format mapping;
-    for off it also gets --reasoning-budget 0, which disables thinking there
-    (its default, -1, leaves thinking on).
-    """
-    mode = str(reasoning or "").strip().strip("\"'") or "off"
-    help_text = ""
-    if mode in {"off", "on", "auto"}:
-        try:
-            result = subprocess.run(
-                [str(llama_bin), "--help"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=15,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except (OSError, subprocess.SubprocessError):
-            result = None
-        if result is not None and result.returncode == 0:
-            help_text = (result.stdout or "") + (result.stderr or "")
-
-    def listed(flag: str) -> bool:
-        pattern = re.compile(r"(?<![\w-])" + re.escape(flag) + r"(?![\w-])")
-        return any(pattern.search(line) and "has been removed" not in line.lower()
-                   for line in help_text.splitlines())
-
-    if listed("--reasoning"):
-        return ["--reasoning", mode]
-    arguments = ["--reasoning-format", reasoning_fmt]
-    if mode == "off" and listed("--reasoning-budget"):
-        arguments += ["--reasoning-budget", "0"]
-    return arguments
-
-
 def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path, pid_file: Path):
     """Launch the native (Metal) llama-server process and write its PID file.
 
@@ -18559,7 +18389,6 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
     profile = _model_stores.registered_runtime_profile(INSTALL_DIR / "data", gguf_file)
     if profile:
         llama_bin = Path(profile["executable"])
-    windows = platform.system() == "Windows"
     ctx_size = env.get("CTX_SIZE", "32768")
     gpu_layers = env.get("N_GPU_LAYERS", "").strip() or "auto"
     model_path = _active_model_directory(env) / gguf_file
@@ -18581,9 +18410,7 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         "--alias", gguf_file,
         "--ctx-size", ctx_size,
         "--n-gpu-layers", gpu_layers,
-        # Windows launches follow the native contract: one slot, so /props
-        # n_ctx is the whole planned context.
-        "--parallel", "1" if windows else env.get("LLAMA_PARALLEL", "1"),
+        "--parallel", env.get("LLAMA_PARALLEL", "1"),
     ]
     fit = profile.get("memoryQualification") if profile else None
     if isinstance(fit, dict):
@@ -18593,23 +18420,11 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         if projector is None:
             raise RuntimeError("The memory-qualified vision projector is unavailable")
         args.extend(["--mmproj", str(projector)])
-    if windows:
-        device = env.get("LLAMA_ARG_DEVICE", "").strip()
-        if device:
-            # A named Vulkan device fails closed instead of llama.cpp's silent
-            # CPU fallback when the GPU is unusable.
-            args.extend(["--device", device])
-        # No second chat UI on loopback; the key file never reaches argv.
-        args.append("--no-webui")
-        if _windows_llama_api_key(env):
-            args.extend(["--api-key-file", str(_windows_llama_api_key_file())])
     # On macOS the default runtime gets its reasoning flags from the tuning
     # helper below (--reasoning on b9014, where --reasoning-format none put an
     # empty think block into every reply). Everything else passes the format.
     helper_reasoning = platform.system() == "Darwin" and profile is None
-    if not helper_reasoning and platform.system() == "Windows" and profile is None:
-        args.extend(_windows_llama_reasoning_arguments(llama_bin, reasoning, reasoning_fmt))
-    elif not helper_reasoning:
+    if not helper_reasoning:
         args.extend(["--reasoning-format", reasoning_fmt])
     args.append("--metrics")
     optional_args = {
@@ -18670,16 +18485,11 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         logger.info("Native llama-server LaunchAgent started (pid %d, model %s)", managed_pid, gguf_file)
         return
 
-    popen_kwargs = {}
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    if platform.system().lower() == "windows" and creationflags:
-        popen_kwargs["creationflags"] = creationflags
     with open(llama_log, "a") as log_f:
         proc = subprocess.Popen(
             args,
             stdout=log_f, stderr=log_f,
             cwd=str(INSTALL_DIR),
-            **popen_kwargs,
         )
     pid_file.write_text(str(proc.pid), encoding="utf-8")
     logger.info("Native llama-server launched (pid %d, model %s)", proc.pid, gguf_file)
