@@ -996,7 +996,12 @@ async def check_service_health(
             raise ValueError("HTTP health port must be positive")
     except (ValueError, TypeError):
         return _service_status_from_config(service_id, config, "down")
-    url = f"http://{host}:{health_port}{health_path}"
+    # A model API (API mode) is not a local service: probe it with its own
+    # scheme and Host header. The probe carries no key (only LiteLLM holds
+    # it), so an API that answers 401/403 is up; this checks reachability.
+    external_api = config.get("external_api") is True
+    scheme = config.get("scheme") if external_api and config.get("scheme") in ("http", "https") else "http"
+    url = f"{scheme}://{host}:{health_port}{health_path}"
     status = "unknown"
     response_time = None
 
@@ -1004,8 +1009,9 @@ async def check_service_health(
         session = await _get_aio_session()
         start = asyncio.get_event_loop().time()
         # Send Host header so reverse-proxy services (e.g. Caddy in Baserow)
-        # route the request correctly instead of returning 404.
-        headers = {"Host": "localhost"}
+        # route the request correctly instead of returning 404. Some API
+        # front ends refuse a library User-Agent (Cloudflare error 1010).
+        headers = {"User-Agent": "ODS-Dashboard"} if external_api else {"Host": "localhost"}
         get_kwargs: dict = {"headers": headers}
         health_auth_env = config.get("health_auth_env")
         if health_auth_env is not None:
@@ -1025,7 +1031,10 @@ async def check_service_health(
             get_kwargs["timeout"] = timeout
         async with session.get(url, **get_kwargs) as resp:
             response_time = (asyncio.get_event_loop().time() - start) * 1000
-            status = "healthy" if resp.status < (300 if health_auth_env is not None else 400) else "unhealthy"
+            if external_api:
+                status = "healthy" if resp.status < 400 or resp.status in (401, 403) else "unhealthy"
+            else:
+                status = "healthy" if resp.status < (300 if health_auth_env is not None else 400) else "unhealthy"
     except asyncio.TimeoutError:
         # Service is reachable but slow — report degraded rather than down
         # to avoid false "offline" flashes during startup or heavy load.
