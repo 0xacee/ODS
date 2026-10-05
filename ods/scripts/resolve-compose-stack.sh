@@ -10,6 +10,7 @@ SKIP_BROKEN="false"
 GPU_COUNT="1"
 ODS_MODE="${ODS_MODE:-local}"
 SKIP_GPU_OVERLAYS="${ODS_SKIP_GPU_OVERLAYS:-${ODS_SKIP_GPU_OVERLAYS_FOR:-}}"
+ASSUME_ENABLED=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -49,6 +50,12 @@ while [[ $# -gt 0 ]]; do
             SKIP_GPU_OVERLAYS="${2:-$SKIP_GPU_OVERLAYS}"
             shift 2
             ;;
+        --assume-enabled)
+            # Comma-separated bundled services resolved as if already selected,
+            # so the host agent can download their images before an enable.
+            ASSUME_ENABLED="${2:-}"
+            shift 2
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 1
@@ -73,6 +80,7 @@ if ! "$PYTHON_CMD" -c 'import yaml' >/dev/null 2>&1; then
     exit 2
 fi
 
+ODS_RESOLVE_ASSUME_ENABLED="$ASSUME_ENABLED" \
 "$PYTHON_CMD" - "$SCRIPT_DIR" "$TIER" "$GPU_BACKEND" "$PROFILE_OVERLAYS" "$ENV_MODE" "$SKIP_BROKEN" "$GPU_COUNT" "$ODS_MODE" "$SKIP_GPU_OVERLAYS" <<'PY'
 import os
 import pathlib
@@ -95,6 +103,11 @@ skip_gpu_overlays = {
 }
 if os.environ.get("WHISPER_ACCELERATION", "").strip().lower() == "cpu":
     skip_gpu_overlays.add("whisper")
+# Bundled services the caller is about to select. Only image preparation asks
+# for this; the selected stack never includes an unselected service.
+assume_enabled = {
+    x.strip() for x in os.environ.get("ODS_RESOLVE_ASSUME_ENABLED", "").split(",") if x.strip()
+}
 lemonade_external = (
     os.environ.get("LEMONADE_EXTERNAL", "").lower() in {"1", "true", "yes", "on"}
     or (
@@ -247,7 +260,7 @@ except (OSError, ValueError):
     _CORE_SERVICE_IDS = {
         "ape", "comfyui", "dashboard", "dashboard-api",
         "embeddings", "langfuse", "litellm", "llama-server", "n8n",
-        "open-webui", "openclaw", "perplexica", "privacy-shield", "qdrant",
+        "open-webui", "perplexica", "privacy-shield", "qdrant",
         "remote-provider-egress", "remote-provider-ssh-tunnel",
         "searxng", "token-spy", "tts", "whisper",
     }
@@ -1086,8 +1099,12 @@ def _source_runtime_merge_problems(entries):
     return problems
 
 
-def _extension_base_path(service_dir, service, label):
-    """Return an enabled extension base path, or None when it is disabled."""
+def _extension_base_path(service_dir, service, label, assumed=frozenset()):
+    """Return an enabled extension base path, or None when it is disabled.
+
+    ``assumed`` names bundled services the caller is about to select; only
+    the bundled-service discovery passes it.
+    """
     compose_rel = service.get("compose_file", "compose.yaml")
     if not isinstance(compose_rel, str) or not compose_rel:
         print(f"WARNING: {label}: manifest has no usable compose_file, skipping overlays", file=sys.stderr)
@@ -1107,8 +1124,11 @@ def _extension_base_path(service_dir, service, label):
 
     if compose_path.exists():
         return compose_path
-    if (service_dir / f"{compose_rel}.disabled").exists():
-        return None
+    disabled_path = service_dir / f"{compose_rel}.disabled"
+    if disabled_path.exists():
+        # A bundled service about to be selected resolves with the file its
+        # selection will restore, so its images match what `up` will use.
+        return disabled_path if service_dir.name in assumed else None
 
     print(
         f"WARNING: {label}: compose_file '{compose_rel}' not found, skipping overlays",
@@ -1265,7 +1285,7 @@ if ext_dir.exists():
                 continue
             compose_rel = service.get("compose_file")
             if compose_rel:
-                compose_path = _extension_base_path(service_dir, service, service_dir.name)
+                compose_path = _extension_base_path(service_dir, service, service_dir.name, assume_enabled)
                 if compose_path is None:
                     continue
                 resolved.append(str(compose_path.relative_to(script_dir)))

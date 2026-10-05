@@ -22,10 +22,19 @@ log_warn() { :; }
 curl_calls=0
 curl_rc=0
 curl_args=()
+curl_headers=""
 curl() {
     curl_calls=$((curl_calls + 1))
     curl_args=("$@")
-    if [[ " ${curl_args[*]} " == *' Authorization: Bearer sk-fixture-not-real '* ]]; then
+    # Credentials reach curl in a header file (-H @file), never as an argument.
+    curl_headers=""
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == @* && "$arg" != @- ]]; then
+            curl_headers+="$(cat "${arg#@}")"$'\n'
+        fi
+    done
+    if [[ "$curl_headers" == *'Authorization: Bearer sk-fixture-not-real'* ]]; then
         return 0
     fi
     return "$curl_rc"
@@ -53,8 +62,10 @@ _doctor_check_llm_backend
     || fail 'doctor must retry a protected external Lemonade route with its configured key'
 [[ " ${curl_args[*]} " == *' http://127.0.0.1:8080/api/v1/models '* ]] \
     || fail 'doctor must probe the versioned Lemonade models endpoint'
-[[ " ${curl_args[*]} " == *' Authorization: Bearer sk-fixture-not-real '* ]] \
+[[ "$curl_headers" == *'Authorization: Bearer sk-fixture-not-real'* ]] \
     || fail 'doctor must authenticate a protected Lemonade endpoint'
+[[ " ${curl_args[*]} " != *'sk-fixture-not-real'* ]] \
+    || fail 'doctor must not put the Lemonade key on the curl command line'
 
 unset LEMONADE_API_KEY
 unset LEMONADE_ADMIN_API_KEY LITELLM_LEMONADE_API_KEY

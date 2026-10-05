@@ -80,7 +80,8 @@ canonical source and treat older recipes as context.
 - Pixel is the preferred agent on qualified Ubuntu 24.04/26.04 or Debian 12
   PID1-systemd hosts without a separate acceptance step. Hermes plus
   `hermes-proxy` remains the portable default and rollback path everywhere
-  else. OpenClaw is deprecated and explicit opt-in.
+  else. The legacy OpenClaw extension was removed; see
+  [MIGRATION-OPENCLAW-TO-HERMES.md](MIGRATION-OPENCLAW-TO-HERMES.md).
 - Linux Docker installs expose llama-server on host `OLLAMA_PORT=11434` by
   default while containers use `llama-server:8080`. macOS native Metal and
   Windows native/Lemonade paths use host port `8080` unless overridden.
@@ -132,7 +133,7 @@ canonical source and treat older recipes as context.
 | [HERMES.md](HERMES.md) | Developers / operators | Default Hermes Agent packaging, security posture, and operations |
 | [PIXEL.md](PIXEL.md) | Developers / operators | Pixel eligibility, legal boundary, architecture, default routing, bounded ODS tools, operations, rollback, and qualification |
 | [OAUTH_PROVIDER_SETUP.md](OAUTH_PROVIDER_SETUP.md) | Operators / maintainers | OAuth provider registry, private credential bundles, and BYOC setup |
-| [OPENCLAW-INTEGRATION.md](OPENCLAW-INTEGRATION.md) | Developers | Deprecated OpenClaw setup and migration reference |
+| [MIGRATION-OPENCLAW-TO-HERMES.md](MIGRATION-OPENCLAW-TO-HERMES.md) | Operators | Removal notice for the legacy OpenClaw extension: what stays on disk and how to clean it up |
 
 ## Hardware & Configuration
 

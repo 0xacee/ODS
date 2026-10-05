@@ -15,21 +15,21 @@ run_case() {
     install_root="$test_root/install"
     trap 'rm -rf -- "$test_root"' RETURN
 
-    mkdir -p "$source_root/extensions/services/openclaw" \
-        "$install_root/extensions/services/openclaw" \
+    mkdir -p "$source_root/extensions/services/privacy-shield" \
+        "$install_root/extensions/services/privacy-shield" \
         "$source_root/extensions/services/comfyui" \
         "$install_root/extensions/services/comfyui" \
         "$source_root/extensions/services/brave-search" \
         "$install_root/extensions/services/brave-search"
     printf 'services: {}\n' \
-        >"$source_root/extensions/services/openclaw/compose.yaml${source_state}"
+        >"$source_root/extensions/services/privacy-shield/compose.yaml${source_state}"
 
     # Reproduce an interrupted/non-pruning upgrade with both the old enabled
     # file and the newly copied disabled state present in the install tree.
     printf 'services: {}\n' \
-        >"$install_root/extensions/services/openclaw/compose.yaml"
+        >"$install_root/extensions/services/privacy-shield/compose.yaml"
     printf 'services: {}\n' \
-        >"$install_root/extensions/services/openclaw/compose.yaml.disabled"
+        >"$install_root/extensions/services/privacy-shield/compose.yaml.disabled"
     # An upgrade may retain an enabled ComfyUI fragment even though the
     # current WSL backend exposes no Docker GPU. Selection must reconcile it.
     printf 'services: {}\n' >"$source_root/extensions/services/comfyui/compose.yaml"
@@ -54,7 +54,6 @@ run_case() {
         ENABLE_WORKFLOWS=false
         ENABLE_RAG=false
         ENABLE_HERMES=false
-        ENABLE_OPENCLAW="$selected"
         ENABLE_OPENCODE=false
         ENABLE_COMFYUI="$comfyui_requested"
         ENABLE_LANGFUSE=false
@@ -63,7 +62,7 @@ run_case() {
         ENABLE_PIXEL_RUNTIME=false
         ENABLE_APE=false
         ENABLE_PERPLEXICA=false
-        ENABLE_PRIVACY_SHIELD=false
+        ENABLE_PRIVACY_SHIELD="$selected"
         ENABLE_ODS_PROXY=false
         ENABLE_TAILSCALE=false
         ENABLE_BRAVE_SEARCH="$brave_requested"
@@ -113,8 +112,8 @@ run_case() {
         brave_expected=true
     fi
     for root in "$source_root" "$install_root"; do
-        test -f "$root/extensions/services/openclaw/compose.yaml${expected_suffix}"
-        test ! -e "$root/extensions/services/openclaw/compose.yaml${unexpected_suffix}"
+        test -f "$root/extensions/services/privacy-shield/compose.yaml${expected_suffix}"
+        test ! -e "$root/extensions/services/privacy-shield/compose.yaml${unexpected_suffix}"
         if [[ "$comfyui_expected" == true ]]; then
             test -f "$root/extensions/services/comfyui/compose.yaml"
             test ! -e "$root/extensions/services/comfyui/compose.yaml.disabled"

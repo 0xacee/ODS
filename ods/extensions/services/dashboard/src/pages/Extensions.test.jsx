@@ -72,7 +72,12 @@ it('adds Open WebUI from the available library without offering generic core con
   const fetchMock = vi.fn(async (url, options = {}) => {
     const target = String(url)
     if (target === '/api/extensions/catalog') return makeJsonResponse(catalog)
+    if (target === '/api/extensions/open-webui/prepare' && options.method === 'POST') {
+      return makeJsonResponse({ status: 'ready', service_ids: ['open-webui'] })
+    }
     if (target === '/api/webui/selection' && options.method === 'POST') {
+      // The image is downloaded first; adding then starts from the local image.
+      expect(fetchMock).toHaveBeenCalledWith('/api/extensions/open-webui/prepare', expect.objectContaining({ method: 'POST' }))
       expect(JSON.parse(options.body)).toEqual({ enabled: true })
       enabled = true
       return makeJsonResponse({ enabled: true, action: 'enabled' })
@@ -163,6 +168,9 @@ it('shows bundled Perplexica in Available and asks before adding SearXNG', async
     if (target === '/api/extensions/catalog') return makeJsonResponse(catalog)
     if (target === '/api/webui/selection') return makeJsonResponse({enabled:true,supported:false})
     if (target === '/api/templates') return makeJsonResponse({templates:[]})
+    if (target.startsWith('/api/extensions/perplexica/prepare') && options.method === 'POST') {
+      return makeJsonResponse({status:'ready',service_ids:['perplexica']})
+    }
     if (target === '/api/extensions/perplexica/enable' && options.method === 'POST') {
       return makeJsonResponse({detail:{missing_dependencies:['searxng']}}, {ok:false,status:400})
     }
@@ -207,6 +215,9 @@ it('refreshes healthy dependency cards after Enable All when progress is idle', 
     }
     if (target === '/api/webui/selection') return makeJsonResponse({ enabled: false, supported: false })
     if (target === '/api/templates') return makeJsonResponse({ templates: [] })
+    if (target.startsWith('/api/extensions/perplexica/prepare') && options.method === 'POST') {
+      return makeJsonResponse({ status: 'ready', service_ids: ['perplexica'] })
+    }
     if (target === '/api/extensions/perplexica/enable' && options.method === 'POST') {
       return makeJsonResponse({ detail: { missing_dependencies: ['searxng'] } }, { ok: false, status: 400 })
     }
@@ -280,6 +291,7 @@ it('reports a failed bundled n8n start and refreshes to a retryable card', async
         summary:baseSummary({total:1,error:ext.status === 'error' ? 1 : 0})})
     }
     if (u.includes('/api/templates')) return makeJsonResponse({templates:[]})
+    if (u.endsWith('/api/extensions/n8n/prepare')) return makeJsonResponse({status:'ready',service_ids:['n8n']})
     if (u.endsWith('/api/extensions/n8n/enable')) {
       Object.assign(ext,{status:'error',library_selected:true,error_message:'Host agent failed to start extension.'})
       return makeJsonResponse({enabled_services:['n8n'],failed_services:['n8n'],restart_required:true})

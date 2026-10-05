@@ -29,7 +29,7 @@ values. The core credentials are:
 | `WEBUI_SECRET` | Session signing for Open WebUI |
 | `LITELLM_KEY`, `LITELLM_LEMONADE_API_KEY` | LiteLLM gateway keys |
 | `QDRANT_API_KEY`, `SHIELD_API_KEY`, `TOKEN_SPY_API_KEY` | Service API keys |
-| `HERMES_DASHBOARD_SESSION_TOKEN`, `OPENCLAW_TOKEN`, `OPENCODE_SERVER_PASSWORD` | Agent and coding-tool credentials |
+| `HERMES_DASHBOARD_SESSION_TOKEN`, `OPENCODE_SERVER_PASSWORD` | Agent and coding-tool credentials |
 | `N8N_PASS`, `SEARXNG_SECRET`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `DIFY_SECRET_KEY` | Optional-service credentials |
 
 Each of these is marked `"secret": true` in `.env.schema.json`. Library
@@ -89,7 +89,9 @@ For headless servers accessible from other machines on the same network:
 `--lan` sets `BIND_ADDRESS=0.0.0.0` and turns on Open WebUI sign-in
 (`WEBUI_AUTH=true`). If you change `BIND_ADDRESS` in the Dashboard Settings
 tab instead, saving a non-loopback address turns sign-in on as well, and
-`ods restart` applies it.
+`ods restart` applies it. If you edit `BIND_ADDRESS` in `.env` directly,
+`ods start`, `ods restart` and `ods update` (`.\ods.ps1` on native Windows)
+turn sign-in on before they recreate Open WebUI.
 
 This publishes the Dashboard (sign-in required from the network) and Open WebUI
 on the selected interface. Backend APIs, native inference and extension ports

@@ -1931,6 +1931,15 @@ _ods_cli_repair_rootless_ownership() {
     ods_fix_rootless_ownership "$INSTALL_DIR" "$service"
 }
 
+# The legacy OpenClaw extension was removed. Starts never remove orphan
+# containers, so an upgrade that stopped before its final stack start can leave
+# the old ods-openclaw container running; say how to remove it.
+_ods_cli_warn_legacy_openclaw_container() {
+    if docker container inspect ods-openclaw >/dev/null 2>&1; then
+        warn "The removed legacy OpenClaw container ods-openclaw still exists. Remove it with: docker rm -f ods-openclaw (see docs/MIGRATION-OPENCLAW-TO-HERMES.md)"
+    fi
+}
+
 cmd_start() {
     check_install
     cd "$INSTALL_DIR"
@@ -2016,6 +2025,7 @@ cmd_start() {
 
     if [[ -z "$resolved_service" ]]; then
         _compose_run_with_summary "Starting all services" "${flags[@]}" up -d
+        _ods_cli_warn_legacy_openclaw_container
     else
         _run_hook "$resolved_service" "pre_start"
         _compose_run_with_summary "Starting $resolved_service" "${flags[@]}" up -d "$resolved_service"
@@ -2062,8 +2072,9 @@ cmd_dry_run() {
         api_key=$(cat "$INSTALL_DIR/data/dashboard-api-key.txt" | tr -d '\r\n ' || true)
     fi
     if [[ -n "$api_key" ]]; then
+        # A header file keeps the key out of argv, which any local user can read.
         api_json=$(curl -sf --max-time 5 \
-            -H "Authorization: Bearer ${api_key}" \
+            -H @<(printf 'Authorization: Bearer %s\n' "$api_key") \
             "http://127.0.0.1:${dashboard_api_port}/api/update/dry-run" 2>/dev/null || true)
     fi
 
@@ -2258,6 +2269,11 @@ cmd_update() {
     read -ra flags <<< "$flags_str"
 
     [[ "$rebuild_images" == "true" ]] && _ods_cli_rebuild_images "${flags[@]}"
+
+    # Recreating everything recreates Open WebUI too.
+    if _ods_cli_network_access_enabled; then
+        _ods_cli_require_proxy_auth
+    fi
 
     if ! _compose_run_with_summary "Recreating containers with new images" "${flags[@]}" up -d --force-recreate; then
         error "Failed to recreate containers. Run 'ods rollback' to restore previous state."

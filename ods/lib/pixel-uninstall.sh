@@ -2295,6 +2295,12 @@ PY
         done
     fi
 
+    # Nothing above changes the deployment. ods-uninstall.sh runs this pass
+    # before it changes Windows startup, then calls again to validate and remove.
+    if [[ "${ODS_PIXEL_UNINSTALL_VALIDATE_ONLY:-false}" == true ]]; then
+        return 0
+    fi
+
     log_info "Removing the ODS-managed Pixel host deployment..."
     # Inspection has a separate root-only Docker broker. Validate its fixed
     # artifacts before stopping anything, and retire it before its publisher.

@@ -13,6 +13,7 @@ function Test-Install { }
 function Ensure-LlamaCpuBudget { }
 function Get-ComposeFlags { return @('-f', 'compose.fixture.yml') }
 function Test-ODSComposeServiceAvailable { param($ComposeFlags, $Service) return $Service -eq 'dashboard' }
+function Test-ODSNetworkAccessEnabled { param($ComposeFlags) return $false }
 function Get-NativeInferenceBackend { return $script:Backend }
 function Get-ODSNativeModelSelection {
     param([switch]$VerifyArtifacts)

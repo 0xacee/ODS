@@ -68,14 +68,6 @@ def test_windows_lemonade_uses_renderer_as_sole_writer() -> None:
     assert "model_list:" not in lemonade_writer
 
 
-def test_openclaw_receives_persisted_lemonade_model_id() -> None:
-    compose = read("extensions/services/openclaw/compose.yaml")
-    injector = read("config/openclaw/inject-token.js")
-    assert "LEMONADE_MODEL=${LEMONADE_MODEL:-}" in compose
-    assert "LEMONADE_MODEL ||" in injector
-    assert "`extra.${GGUF_FILE}`" in injector
-
-
 def test_cloud_callers_do_not_render_local_switchboard() -> None:
     linux = read("installers/phases/06-directories.sh")
     macos = read("installers/macos/install-macos.sh")
@@ -104,7 +96,6 @@ def main() -> int:
         test_bootstrap_upgrade_promotes_lemonade_model_id,
         test_host_agent_uses_renderer_as_sole_writer,
         test_windows_lemonade_uses_renderer_as_sole_writer,
-        test_openclaw_receives_persisted_lemonade_model_id,
         test_cloud_callers_do_not_render_local_switchboard,
         test_runtime_renderer_callers_keep_credentials_out_of_process_arguments,
     ):

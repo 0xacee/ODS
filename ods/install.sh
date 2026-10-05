@@ -2,7 +2,7 @@
 # ODS Installer entrypoint (PR-1 dispatcher)
 # Pass-through options (implemented in install-core.sh):
 # --dry-run --skip-docker --force --tier --voice --workflows --rag
-# --openclaw --all --non-interactive --no-bootstrap --bootstrap --offline
+# --hermes --pixel --all --non-interactive --no-bootstrap --bootstrap --offline
 # --use-existing-lemonade --lemonade-url --lemonade-api-key --lemonade-model
 # --lemonade-gpu-name --lemonade-gpu-vram-mb
 # --preflight-only (environment checks only; used by get-ods.sh --force through

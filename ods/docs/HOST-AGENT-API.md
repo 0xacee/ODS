@@ -248,6 +248,47 @@ Start an extension container. Runs `docker compose up -d <service_id>` using the
 | 500 | Docker Compose operation failed |
 | 503 | Docker Compose operation timed out (120s) |
 
+### `POST /v1/extension/prepare-images`
+
+Download the images that enabling bundled services (or adding Open WebUI) will use, before anything is selected. A first download can take far longer on a slow link than an enable request may stay open, so the Dashboard calls this first and follows the download through the extension's progress record.
+
+Compose resolves the images from the services' shipped files and pinned digests. Bundled services that are not selected yet resolve through `resolve-compose-stack.sh --assume-enabled`, and Open WebUI through its `ENABLE_OPEN_WEBUI` selector. Nothing is selected and `.env` is not changed.
+
+**Authentication:** Required
+
+**Request body:**
+```json
+{
+  "service_ids": ["searxng", "hermes", "hermes-proxy"],
+  "progress_id": "hermes"
+}
+```
+
+**Validation rules:**
+- `service_ids` lists 1-16 distinct ids matching `^[a-z0-9][a-z0-9_-]*$`; `progress_id` is one of them
+- Each id is a bundled extension with a Compose file, or `open-webui`. Library recipes download their images in their own install.
+- Every listed service must be free: one operation per service (409 otherwise)
+
+**Response (200)** when every image is already on the host:
+```json
+{"status": "ready", "service_ids": ["searxng", "hermes", "hermes-proxy"]}
+```
+
+**Response (202)** while the missing images download in the background:
+```json
+{"status": "accepted", "service_ids": ["searxng", "hermes", "hermes-proxy"], "pulling": ["hermes"]}
+```
+
+The progress record under `progress_id` shows `pulling`, with an elapsed time and completed layer count in `phase_label`, then `prepared` or `error`. The download stops only when Docker reports nothing for `ODS_IMAGE_PULL_STALL_SECONDS` (default 900) or after `ODS_IMAGE_PULL_MAX_SECONDS` (default 21600), not after a fixed request timeout. The Library install path downloads its images the same way.
+
+**Error responses:**
+| Code | Condition |
+|------|-----------|
+| 400 | Invalid ids, or a service that is not bundled |
+| 401/403 | Missing or invalid API key |
+| 409 | An operation is already in progress for one of the services |
+| 503 | The Compose configuration for these services could not be resolved |
+
 ### `POST /v1/extension/stop`
 
 Stop an extension container. Runs `docker compose stop <service_id>`.

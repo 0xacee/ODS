@@ -26,7 +26,7 @@ Intent classes:
 
 Default policy (policy.yaml):
   - ExecuteCommand: allowlist of safe commands; deny everything else
-  - WriteFile: deny writes outside /home/node/.openclaw/workspace
+  - WriteFile: deny writes outside the Hermes data folders under /opt/data
   - Rate limit: 60 requests/minute per session
   - Windowed limits: per-intent sliding-window caps (5m/1h/1d) that can
     hard-deny or escalate to human approval
@@ -134,8 +134,15 @@ DEFAULT_POLICY = {
         },
         "WriteFile": {
             "mode": "path_guard",
+            # The Hermes paths from config/ape/policy.yaml (HERMES_HOME=/opt/data)
+            # plus /tmp, as before; used only when that file is missing.
             "allowed_paths": [
-                "/home/node/.openclaw/workspace",
+                "/opt/data/workspace",
+                "/opt/data/skills",
+                "/opt/data/memories",
+                "/opt/data/sessions",
+                "/opt/data/cron",
+                "/opt/data/plans",
                 "/tmp",
             ],
         },

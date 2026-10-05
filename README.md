@@ -88,7 +88,7 @@ Windows: open a **normal PowerShell window** (not "Run as administrator"), paste
 2. Offers to enable WSL2 and install Docker Desktop with winget. Windows asks for administrator permission, then **one restart**; setup continues by itself after you sign in again.
 3. Offers to download Ubuntu 24.04 and asks you, in PowerShell, for a new Ubuntu username and password.
 4. Starts Docker Desktop and checks that it is connected to Ubuntu. If not, it shows the one setting to turn on in Docker Desktop and continues as soon as it works.
-5. Installs ODS inside Ubuntu with **`--pixel --no-hermes --no-openclaw`**. When Ubuntu asks for your `[sudo] password`, type the Ubuntu password; nothing appears while you type.
+5. Installs ODS inside Ubuntu with **`--pixel --no-hermes`**. When Ubuntu asks for your `[sudo] password`, type the Ubuntu password; nothing appears while you type.
 6. Verifies Pixel and Portal, then opens Portal in your browser and adds an **ODS Portal** shortcut to your desktop.
 
 Each step asks before changing anything and stops with instructions if it cannot finish; rerun the same command after fixing it. There is no fallback to Hermes or the native Windows installer. On NVIDIA machines, update the Windows driver to 570 or newer first. To use an existing distribution, add `-Distro <name>` (names from `wsl -l -v`).
@@ -278,7 +278,6 @@ See the [macOS Quickstart](ods/docs/MACOS-QUICKSTART.md) for details.
 ### Agents & Automation
 - **Portal** — bundled core conversational assistant on Apple Silicon macOS and qualified Ubuntu 24.04/26.04 or Debian 12 systemd hosts, including qualified WSL2 installations through the Linux installer. No private repository access or separate license flag is required; available in the Dashboard and through a compatible Open WebUI model route. The native PowerShell installer does not install the Portal host runtime.
 - **Hermes Agent** — independent general-purpose agent, available alongside Portal; includes memory, skills, and a proxy with optional owner-card gating; direct access by default
-- **OpenClaw** — deprecated legacy autonomous agent, still opt-in during the migration window
 - **n8n** — workflow automation with 400+ integrations (Slack, email, databases, APIs)
 - **APE** — Agent Policy Engine for auditing and governing autonomous tool calls
 - **OpenCode** — browser-based AI coding assistant wired to the local stack

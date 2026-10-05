@@ -327,10 +327,7 @@ if ($enableRag) {
 if ($enableHermes) {
     $_portsToCheck["Hermes auth proxy"] = 9120
 }
-if ($enableOpenClaw) {
-    $_portsToCheck["OpenClaw (agents)"] = 7860
-}
-if ($enableHermes -or $enableOpenClaw) {
+if ($enableHermes) {
     $_portsToCheck["APE (agent policy engine)"] = 7890
 }
 if ($enableComfyui) {
