@@ -867,7 +867,19 @@ def _amd_runtime_report():
     version = "unknown"
     health_url = None
     reason = None
-    if runtime == "llama-server":
+    if runtime == "llama-server" and location == "host" \
+            and _clean_env("ODS_HOST_LLM_TRANSPORT") == "model-router" \
+            and _clean_env("NATIVE_LLM_CONTAINER_BASE_URL"):
+        # Under WSL's default NAT networking this host cannot reach Windows
+        # loopback. The LLM backend check above already probed the server
+        # through ods-model-router, the path the stack uses; report that.
+        health_url = _join_url(_clean_env("NATIVE_LLM_CONTAINER_BASE_URL").rstrip("/"), "health")
+        if _clean_env("LLM_STATUS") == "ok":
+            health = "reachable"
+        else:
+            health = "unreachable"
+            warnings.append("health_unreachable")
+    elif runtime == "llama-server":
         health_url = _amd_health_url(location, port)
         health, version, health_warning = _probe_health(health_url)
         if health_warning:
