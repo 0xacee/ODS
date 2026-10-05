@@ -854,10 +854,13 @@ def _amd_runtime_report():
             "AMD_INFERENCE_SUPPORTED_BACKENDS",
         )
     )
-    if gpu_backend != "amd" and not amd_env_present:
+    # In API mode the API serves the model and no AMD runtime runs here, so
+    # there is nothing to probe (Strixy in API mode reported it unreachable).
+    api_mode = bool(_clean_env("EXTERNAL_LLM_URL")) or _clean_env("LLM_BACKEND").lower() == "external"
+    if (gpu_backend != "amd" and not amd_env_present) or api_mode:
         return {
             "available": False,
-            "reason": "not_amd",
+            "reason": "api_mode" if api_mode else "not_amd",
             "runtime": "none",
             "location": "none",
             "runtimeMode": "none",
@@ -1882,7 +1885,7 @@ if amd_runtime.get("available"):
         f"{amd_runtime.get('runtime')} / {amd_runtime.get('selectedBackend')} / "
         f"{amd_runtime.get('location')} / {amd_runtime.get('health')}"
     )
-elif amd_runtime.get("reason") and amd_runtime.get("reason") != "not_amd":
+elif amd_runtime.get("reason") not in (None, "", "not_amd", "api_mode"):
     print(f"  AMD Runtime:   {amd_runtime.get('reason')}")
 
 hermes_workers = data.get("runtime", {}).get("hermes_slash_workers", {})
