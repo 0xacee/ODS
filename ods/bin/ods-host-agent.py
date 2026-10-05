@@ -4529,13 +4529,17 @@ def _read_remote_provider_activation_state() -> dict | None:
     return value
 
 
-def _active_remote_provider_pixel_runtime() -> dict[str, object] | None:
+def _active_remote_provider_pixel_runtime(*, fresh: bool = False) -> dict[str, object] | None:
     """Return the active remote runtime only when every custody join matches.
 
     The local switchboard remains a rollback route, but it is not the model
     serving Pixel while a proven remote-provider transaction is active. This
     projection does no network I/O because Dashboard polls model status often;
     activation already proved LiteLLM and reconciled Pixel before commit.
+    An action passes fresh=True to read Pixel's runtime now: the poll cache
+    is empty after configure rewrites the route state, so the first enable
+    after configure missed its no-op and started a model transaction the Mac
+    controller refused (fleet row 6).
     """
     try:
         route = _read_remote_provider_route_state_for_update()
@@ -4571,7 +4575,8 @@ def _active_remote_provider_pixel_runtime() -> dict[str, object] | None:
             != "http://litellm:4000"
         ):
             return None
-        observed = _cached_managed_pixel_runtime_contract() if env.get('PIXEL_OPENWEBUI_KEY') else _managed_pixel_runtime_contract()
+        observed = (_cached_managed_pixel_runtime_contract()
+                    if env.get('PIXEL_OPENWEBUI_KEY') and not fresh else _managed_pixel_runtime_contract())
         if (isinstance(observed, dict) and "imageInput" not in runtime
                 and observed.get("imageInput") == "unknown"):
             # An installer can explicitly migrate the previous implicit unknown
@@ -5237,7 +5242,7 @@ def _apply_remote_provider_lifecycle_operation(payload: dict, plan: dict) -> dic
             route = plan.get("route") if isinstance(plan.get("route"), dict) else {}
             route_status = saved_state.get("status")
             runtime = _remote_provider_runtime_contract(route)
-            active_runtime = _active_remote_provider_pixel_runtime()
+            active_runtime = _active_remote_provider_pixel_runtime(fresh=True)
             if (
                 isinstance(route_status, dict)
                 and route_status.get("proven") is True
