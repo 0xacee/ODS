@@ -294,3 +294,17 @@ def test_direct_provider_clients_are_bounded_least_recently_used_first(egress):
     assert len(kept) == egress.MAX_DIRECT_HTTP_CLIENTS == 4
     assert kept == [key(3), key(0), key(4), key(5)]
     assert closed == [False, True, True, False]
+
+
+def test_a_provider_transport_error_is_not_echoed_to_the_caller(egress, monkeypatch):
+    def refuse(request):
+        raise httpx.ConnectError("provider-side detail 203.0.113.7:443", request=request)
+
+    with TestClient(egress.app) as client:
+        transport = httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+        monkeypatch.setattr(egress, "_http_client", lambda key="": transport)
+        response = client.post("/v1/chat/completions", json={"model": "ods/current"}, headers=CALLER)
+        client.portal.call(transport.aclose)
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "upstream_unavailable"
+    assert "203.0.113.7" not in response.text and "provider-side detail" not in response.text

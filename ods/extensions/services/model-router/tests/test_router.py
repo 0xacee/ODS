@@ -864,6 +864,34 @@ class TestForwarding:
                   if frame and frame != "data: [DONE]"]
         assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "web_fetch"
 
+    def test_repair_transport_error_hides_the_error_text(self, router):
+        mod, client, write_state, _calls = router
+        write_state()
+        sent = []
+        def handler(request):
+            body = json.loads(request.content)
+            sent.append(body)
+            if len(sent) > 1:
+                raise httpx.ConnectError("private backend detail", request=request)
+            native = ("<tool_call>\n<function=pixel_ods_web_fetch>\n"
+                      "<parameter=url>\nhttps://example.org\n</parameter>\n"
+                      "</function>\n</tool_call>")
+            return httpx.Response(200, json={"model": "Concrete.gguf", "choices": [{"index": 0,
+                "message": {"role": "assistant", "content": native}, "finish_reason": "stop"}]})
+        asyncio.run(mod.app.state.http.aclose())
+        mod.app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        response = client.post("/v1/chat/completions", json={
+            "model": "ods/current", "stream": False,
+            "messages": [{"role": "user", "content": "fetch the URL"}],
+            "tools": [{"type": "function", "function": {"name": "web_fetch",
+                "parameters": {"type": "object", "required": ["url"],
+                    "properties": {"url": {"type": "string"}}}}}],
+        })
+        assert len(sent) == 2
+        assert response.status_code == 502
+        assert response.json()["error"]["type"] == "upstream_unavailable"
+        assert "private backend detail" not in response.text
+
     def test_second_invalid_native_decision_returns_typed_error(self, router):
         mod, client, write_state, _calls = router
         write_state()

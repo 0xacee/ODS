@@ -189,6 +189,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   matched the current installers. Its build dependencies carried the
   repository's last four open Dependabot alerts. Install with the commands in
   the README.
+- Error responses no longer repeat internal exception text. The dashboard API
+  (model state, OAuth, remote-provider status, setup diagnostics, update
+  check, usage report, the owner-card check and extension manifest errors),
+  model-router, the remote-provider egress and APE now report a fixed
+  failure category, such as "not valid JSON" or "Could not reach GitHub". The
+  exception detail goes to that service's log. Manifest errors name the
+  extension folder instead of the container path.
 - Privacy defaults: bundled services no longer phone home. Open WebUI's
   upstream version check, Qdrant usage telemetry, LiteLLM's start-up cost-map
   fetch from GitHub, n8n diagnostics and version notifications, and the
