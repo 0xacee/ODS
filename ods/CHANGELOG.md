@@ -610,6 +610,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   restarted in a loop with "Permission denied: '/data/ape/state.json'".
   An APE container that is already restarting must be stopped (disable it)
   before enabling it again.
+- An installer rerun or upgrade no longer stops at once with "Voice, RAG
+  documents, and ODS proxy currently require Open WebUI" when voice or RAG
+  services were added from Extensions while Open WebUI was off, as on a
+  Portal chat install. It keeps that selection and says so; ODS Talk uses
+  voice without Open WebUI. A new installation, and the ODS proxy, still
+  require Open WebUI.
 - On Windows, when a native Windows program already listens on port 9000, an
   install without voice now gives Whisper (STT) a free host port (9100, then
   9001), so Whisper added later from the Extensions Library starts. The
