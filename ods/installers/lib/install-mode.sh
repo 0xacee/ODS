@@ -27,6 +27,9 @@ ods_existing_install_mode() {
     done <"$env_file"
 
     [[ "$found" == "true" ]] || return 1
+    # Compatibility read for one release: "lemonade" was the managed AMD local
+    # mode. The Lemonade migration rewrites it; an unmigrated value is local.
+    [[ "$value" != lemonade ]] || value=local
     printf '%s\n' "$value"
 }
 

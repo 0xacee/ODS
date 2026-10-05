@@ -18,6 +18,11 @@
 #   Change minimum RAM/disk thresholds per tier here.
 # ============================================================================
 
+# Isolated phase reuse (tests) gets the route predicate installers/lib/
+# native-llm.sh gives install-core: a host-native llama-server is in use.
+declare -F ods_native_llm_requested >/dev/null 2>&1 \
+    || ods_native_llm_requested() { [[ -n "${NATIVE_LLM_BASE_URL:-}" ]]; }
+
 ods_progress 25 "requirements" "Checking system requirements"
 chapter "REQUIREMENTS CHECK"
 
@@ -29,10 +34,9 @@ TIER_RANK="$(tier_rank "$TIER")"
 
 # Capability-aware preflight checks
 if [[ -x "$SCRIPT_DIR/scripts/preflight-engine.sh" ]]; then
-    PREFLIGHT_ENV="$(LEMONADE_EXTERNAL="${LEMONADE_EXTERNAL:-false}" \
-        LEMONADE_BASE_URL="${LEMONADE_BASE_URL:-}" \
-        LEMONADE_GPU_NAME="${LEMONADE_GPU_NAME:-}" \
-        LEMONADE_GPU_VRAM_MB="${LEMONADE_GPU_VRAM_MB:-0}" \
+    PREFLIGHT_ENV="$(NATIVE_LLM_BASE_URL="${NATIVE_LLM_BASE_URL:-}" \
+        NATIVE_LLM_GPU_NAME="${NATIVE_LLM_GPU_NAME:-}" \
+        NATIVE_LLM_GPU_VRAM_MB="${NATIVE_LLM_GPU_VRAM_MB:-0}" \
         "$SCRIPT_DIR/scripts/preflight-engine.sh" \
         --report "$PREFLIGHT_REPORT_FILE" \
         --tier "$TIER" \
@@ -142,10 +146,10 @@ else
     fi
 fi
 
-# An external Lemonade keeps its model on the Windows host (phase 11 never
-# downloads it here), so only the images need room on this disk.
-if [[ -z "${EXTERNAL_LLM_URL:-}" && "${LEMONADE_EXTERNAL:-false}" != "true" \
-      && "${LLM_MODEL_SIZE_MB:-0}" =~ ^[0-9]+$ && "${LLM_MODEL_SIZE_MB:-0}" -gt 0 && "${TIER:-}" != "CLOUD" ]]; then
+# A host-native llama-server keeps its model on the Windows host (phase 11
+# never downloads it here), so only the images need room on this disk.
+if [[ -z "${EXTERNAL_LLM_URL:-}" ]] && ! ods_native_llm_requested \
+      && [[ "${LLM_MODEL_SIZE_MB:-0}" =~ ^[0-9]+$ && "${LLM_MODEL_SIZE_MB:-0}" -gt 0 && "${TIER:-}" != "CLOUD" ]]; then
     _model_disk_gb=$(( (LLM_MODEL_SIZE_MB + 1023) / 1024 ))
     _model_needed_gb=$(( _model_disk_gb + 15 ))
     if [[ "${DISK_AVAIL:-0}" -lt "$_model_needed_gb" ]]; then
@@ -325,36 +329,17 @@ if $OLLAMA_RUNNING && [[ "${EXTERNAL_LLM_PROVIDER:-}" != "ollama" ]]; then
     fi
 fi
 
-_phase04_lemonade_uses_host_9000() {
-    [[ "${LEMONADE_EXTERNAL:-false}" =~ ^([Tt][Rr][Uu][Ee]|1|yes|on)$ ]] && return 0
-    [[ "${AMD_INFERENCE_RUNTIME:-}" =~ ^([Ll][Ee][Mm][Oo][Nn][Aa][Dd][Ee])$ ]] && return 0
-    [[ "${GPU_BACKEND:-}" == "amd" && "${ODS_MODE:-local}" != "cloud" ]] && return 0
-    return 1
-}
-
 # Phase 06 writes WHISPER_PORT from this shell first, then from the installed
 # .env, then 9000. Decide and check with that same port, so a rerun leaves a
-# port the owner chose untouched. A retained 9000 is the generated default:
-# earlier installers wrote it whenever no port was chosen.
+# port the owner chose, or the 9100 earlier AMD installs moved Whisper to,
+# untouched. A retained 9000 is the generated default: earlier installers
+# wrote it whenever no port was chosen.
 _whisper_configured_port="${WHISPER_PORT:-}"
 if [[ -z "$_whisper_configured_port" && -f "${INSTALL_DIR:-}/.env" ]]; then
     _whisper_configured_port="$(external_llm_env_value "$INSTALL_DIR/.env" WHISPER_PORT)"
 fi
 [[ -z "$_whisper_configured_port" ]] || SERVICE_PORTS[whisper]="$_whisper_configured_port"
 unset _whisper_configured_port
-
-if [[ "${ENABLE_VOICE:-false}" == "true" ]] && _phase04_lemonade_uses_host_9000; then
-    _whisper_port_for_check="${WHISPER_PORT:-${SERVICE_PORTS[whisper]:-9000}}"
-    if [[ "$_whisper_port_for_check" == "9000" ]]; then
-        # Lemonade's native router can reserve host port 9000 on AMD systems.
-        # Keep Whisper's container port unchanged, but check/use 9100 on the host
-        # unless the user explicitly selected another non-9000 port.
-        WHISPER_PORT=9100
-        SERVICE_PORTS[whisper]=9100
-        log "AMD/Lemonade detected; reserving host port 9000 for Lemonade and checking Whisper on 9100"
-    fi
-    unset _whisper_port_for_check
-fi
 
 # A native Windows application can own 9000 even when WSL reports it free.
 # For the generated Whisper default, select ODS's established alternate only
@@ -389,7 +374,11 @@ unset _whisper_port_for_check
 # Port conflict detection with detailed process information
 PORTS_TO_CHECK=""
 [[ "${ENABLE_OPEN_WEBUI:-true}" != "true" ]] || PORTS_TO_CHECK="${SERVICE_PORTS[open-webui]:-3000}"
-[[ -z "${EXTERNAL_LLM_URL:-}" ]] && PORTS_TO_CHECK="${SERVICE_PORTS[llama-server]:-8080} ${PORTS_TO_CHECK}"
+# A host-native llama-server (Windows Portal) owns its own port; the in-stack
+# llama-server does not run then.
+if [[ -z "${EXTERNAL_LLM_URL:-}" ]] && ! ods_native_llm_requested; then
+    PORTS_TO_CHECK="${SERVICE_PORTS[llama-server]:-8080} ${PORTS_TO_CHECK}"
+fi
 if [[ "$ENABLE_VOICE" == "true" ]]; then
     # A rerun's running Whisper holds its own port; that is not a conflict.
     _phase04_own_whisper_publishes "${SERVICE_PORTS[whisper]:-9000}" \

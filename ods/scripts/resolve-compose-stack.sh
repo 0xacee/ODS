@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The tree this resolver ships in; --script-dir may name another install.
+RESOLVER_ROOT="$SCRIPT_DIR"
 TIER="1"
 GPU_BACKEND="nvidia"
 PROFILE_OVERLAYS=""
@@ -81,7 +83,7 @@ if ! "$PYTHON_CMD" -c 'import yaml' >/dev/null 2>&1; then
 fi
 
 ODS_RESOLVE_ASSUME_ENABLED="$ASSUME_ENABLED" \
-"$PYTHON_CMD" - "$SCRIPT_DIR" "$TIER" "$GPU_BACKEND" "$PROFILE_OVERLAYS" "$ENV_MODE" "$SKIP_BROKEN" "$GPU_COUNT" "$ODS_MODE" "$SKIP_GPU_OVERLAYS" <<'PY'
+"$PYTHON_CMD" - "$SCRIPT_DIR" "$TIER" "$GPU_BACKEND" "$PROFILE_OVERLAYS" "$ENV_MODE" "$SKIP_BROKEN" "$GPU_COUNT" "$ODS_MODE" "$SKIP_GPU_OVERLAYS" "$RESOLVER_ROOT" <<'PY'
 import os
 import pathlib
 import platform
@@ -89,6 +91,8 @@ import sys
 import json
 
 script_dir = pathlib.Path(sys.argv[1])
+# The source tree of this resolver; --script-dir may name another directory.
+resolver_root = pathlib.Path(sys.argv[10])
 tier = (sys.argv[2] or "1").upper()
 gpu_backend = (sys.argv[3] or "nvidia").lower()
 profile_overlays = [x.strip() for x in (sys.argv[4] or "").split(",") if x.strip()]
@@ -96,6 +100,10 @@ env_mode = (sys.argv[5] or "false").lower() == "true"
 skip_broken = (sys.argv[6] or "false").lower() == "true"
 gpu_count = int(sys.argv[7] or "1")
 ods_mode = (sys.argv[8] or os.environ.get("ODS_MODE", "local")).lower()
+# Compatibility read for one release: "lemonade" is the retired name of the
+# managed AMD local mode. Installer reruns and updates migrate it to "local".
+if ods_mode == "lemonade":
+    ods_mode = "local"
 skip_gpu_overlays = {
     x.strip().lower()
     for x in (sys.argv[9] or os.environ.get("ODS_SKIP_GPU_OVERLAYS", "")).split(",")
@@ -108,13 +116,33 @@ if os.environ.get("WHISPER_ACCELERATION", "").strip().lower() == "cpu":
 assume_enabled = {
     x.strip() for x in os.environ.get("ODS_RESOLVE_ASSUME_ENABLED", "").split(",") if x.strip()
 }
-lemonade_external = (
-    os.environ.get("LEMONADE_EXTERNAL", "").lower() in {"1", "true", "yes", "on"}
-    or (
-        os.environ.get("AMD_INFERENCE_RUNTIME", "").lower() == "lemonade"
-        and os.environ.get("AMD_INFERENCE_MANAGED", "").lower() == "false"
-    )
-)
+def _install_env_value(name):
+    """Return a selector from the caller, else from the installation's .env.
+
+    Installer phases export their current choice (an empty value included)
+    before .env is rewritten; ods-cli exports .env. The host agent passes only
+    a fixed selector list, so a selector missing from the environment is read
+    from the installed .env.
+    """
+    if name in os.environ:
+        return os.environ[name].strip()
+    env_path = script_dir / ".env"
+    if not env_path.is_file():
+        return ""
+    sys.path.insert(0, str(resolver_root / "extensions/services/dashboard-api"))
+    from env_values import parse_env_value
+    value = ""
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        key, separator, raw = line.partition("=")
+        if separator and key.strip() == name:
+            value = parse_env_value(raw).strip()
+    return value
+
+
+# An ODS-managed llama-server outside this stack (the Windows Portal runs
+# llama-server.exe while this stack runs in WSL). Its origin, not the
+# credential, selects the overlay.
+host_native = bool(_install_env_value("NATIVE_LLM_BASE_URL"))
 # The host agent passes only a presence marker, keeping an upstream URL that
 # may contain credentials out of the resolver child process. Installer calls
 # without the marker retain their existing EXTERNAL_LLM_URL behavior.
@@ -136,22 +164,17 @@ def existing(overlays):
 resolved = []
 primary = "docker-compose.yml"
 
-# An explicit external runtime owns inference selection, even when hardware
-# detection supplied a local CPU/AMD/NVIDIA profile to the installer.
-if lemonade_external and ods_mode == "lemonade":
-    # External Lemonade is still a local, switchable runtime. The cloud
-    # overlay profiles model-router out and can leave a stale router container
-    # serving Pixel after reinstall. The external overlay disables only the
-    # managed llama-server, preserving a freshly built model-router.
-    if existing(["docker-compose.base.yml", "docker-compose.lemonade-external.yml"]):
-        resolved = ["docker-compose.base.yml", "docker-compose.lemonade-external.yml"]
-        primary = "docker-compose.lemonade-external.yml"
-    elif existing(["docker-compose.base.yml", "docker-compose.cloud.yml"]):
-        resolved = ["docker-compose.base.yml", "docker-compose.cloud.yml"]
-        primary = "docker-compose.cloud.yml"
-    elif existing(["docker-compose.base.yml"]):
-        resolved = ["docker-compose.base.yml"]
-        primary = "docker-compose.base.yml"
+# An ODS-managed host-native runtime owns inference selection, even when
+# hardware detection supplied a local CPU/AMD/NVIDIA profile to the installer.
+if host_native and ods_mode != "cloud" and not external_llm:
+    # The model stays local and switchable. The cloud overlay would profile
+    # model-router out and can leave a stale router container serving Pixel
+    # after reinstall; this overlay disables only the in-stack llama-server.
+    if not existing(["docker-compose.base.yml", "docker-compose.host-native-llm.yml"]):
+        print("ERROR: NATIVE_LLM_BASE_URL is set but docker-compose.host-native-llm.yml is missing", file=sys.stderr)
+        sys.exit(1)
+    resolved = ["docker-compose.base.yml", "docker-compose.host-native-llm.yml"]
+    primary = "docker-compose.host-native-llm.yml"
 elif profile_overlays and existing(profile_overlays):
     resolved = profile_overlays
     primary = profile_overlays[-1]
@@ -211,6 +234,20 @@ else:
 
 if not resolved:
     resolved = [primary]
+
+# The ROCm image replaces the Vulkan default when selected. It is layered after
+# docker-compose.amd.yml (also when a hardware profile chose that overlay) so
+# /dev/dri and the GPU groups still come from there.
+if "docker-compose.amd.yml" in resolved:
+    amd_inference_backend = _install_env_value("AMD_INFERENCE_BACKEND").lower() or "vulkan"
+    if amd_inference_backend not in {"vulkan", "rocm"}:
+        print(f"ERROR: AMD_INFERENCE_BACKEND must be vulkan or rocm, got {amd_inference_backend!r}", file=sys.stderr)
+        sys.exit(1)
+    if amd_inference_backend == "rocm" and "docker-compose.amd-rocm.yml" not in resolved:
+        if not (script_dir / "docker-compose.amd-rocm.yml").exists():
+            print("ERROR: AMD_INFERENCE_BACKEND=rocm but docker-compose.amd-rocm.yml is missing", file=sys.stderr)
+            sys.exit(1)
+        resolved.insert(resolved.index("docker-compose.amd.yml") + 1, "docker-compose.amd-rocm.yml")
 
 # A generated auth file is an override, never a primary/profile input. Remove
 # stale cached occurrences before extension discovery so it cannot make a
@@ -447,8 +484,8 @@ def _extension_build_context(compose_path, build):
 _TRUSTED_LIBRARY_EXTRA_HOSTS = {"host.docker.internal:host-gateway"}
 
 # Accelerator access a curated library recipe may request, only from its own
-# backend overlay and only in the shapes ODS core uses for GPU workloads:
-# docker-compose.amd.yml passes /dev/kfd and /dev/dri through unchanged, and
+# backend overlay and only in the shapes ODS core uses for GPU workloads: the
+# AMD overlays pass /dev/dri (and /dev/kfd for ROCm) through unchanged, and
 # docker-compose.nvidia.yml plus the comfyui/whisper overlays reserve driver
 # nvidia with capabilities [gpu] by count or device_ids. Mirrors dashboard-api
 # _TRUSTED_LIBRARY_AMD_DEVICES / _is_ods_nvidia_gpu_reservation.
@@ -1178,8 +1215,8 @@ def _compose_requires_local_inference(compose_path):
     Backend-named user overlays predate mode-specific overlays. Some of them
     use ``compose.nvidia.yaml`` or ``compose.cpu.yaml`` only to add a
     ``depends_on: llama-server`` readiness edge, not to request accelerator
-    access. Retaining that edge in cloud, external-LLM, or external Lemonade
-    mode makes the complete Compose project invalid because managed local
+    access. Retaining that edge in cloud, external-LLM, or host-native mode
+    makes the complete Compose project invalid because managed local
     inference is profiled out.
     """
     data = _load_compose_mapping(compose_path, f"Compose file {compose_path}")
@@ -1324,11 +1361,11 @@ if ext_dir.exists():
             # service_healthy` inside compose.local.yaml overlays can never be
             # satisfied and deadlocks the stack. The real LLM-ready gate on macOS
             # is the `llama-server-ready` sidecar defined in the macOS overlay.
-            # External Lemonade is also a host process. Its stack layers the
-            # cloud overlay to profile out ODS's managed llama-server, so
-            # local-mode overlays that wait on `llama-server: service_healthy`
-            # would point at a disabled service and break lifecycle commands.
-            if ods_mode in ("local", "hybrid", "lemonade") and tier != "CLOUD" and gpu_backend != "apple" and not lemonade_external and not external_llm:
+            # A host-native runtime is also a host process. Its overlay
+            # profiles out ODS's in-stack llama-server, so local-mode overlays
+            # that wait on `llama-server: service_healthy` would point at a
+            # disabled service and break lifecycle commands.
+            if ods_mode in ("local", "hybrid") and tier != "CLOUD" and gpu_backend != "apple" and not host_native and not external_llm:
                 local_mode_overlay = service_dir / "compose.local.yaml"
                 if local_mode_overlay.exists():
                     resolved.append(str(local_mode_overlay.relative_to(script_dir)))
@@ -1457,7 +1494,7 @@ if user_ext_dir.exists():
                         managed_local_inference = (
                             ods_mode in ("local", "hybrid")
                             and tier != "CLOUD"
-                            and not lemonade_external
+                            and not host_native
                             and not external_llm
                         )
                         if (
@@ -1479,11 +1516,11 @@ if user_ext_dir.exists():
                 # service_healthy` inside compose.local.yaml overlays can never be
                 # satisfied and deadlocks the stack. The real LLM-ready gate on macOS
                 # is the `llama-server-ready` sidecar defined in the macOS overlay.
-                # External Lemonade likewise runs on the host and uses the cloud
-                # overlay to disable ODS's managed llama-server, so user-local
-                # overlays must not add local llama-server health dependencies.
-                # Mirrors the same guard in the built-in loop above (PR #1004).
-                if ods_mode in ("local", "hybrid", "lemonade") and tier != "CLOUD" and gpu_backend != "apple" and not lemonade_external and not external_llm:
+                # A host-native runtime likewise disables ODS's in-stack
+                # llama-server, so user-local overlays must not add local
+                # llama-server health dependencies. Mirrors the same guard in
+                # the built-in loop above (PR #1004).
+                if ods_mode in ("local", "hybrid") and tier != "CLOUD" and gpu_backend != "apple" and not host_native and not external_llm:
                     local_mode_overlay = service_dir / "compose.local.yaml"
                     if local_mode_overlay.exists():
                         # Same content scan as compose.yaml/gpu overlay above —

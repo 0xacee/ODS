@@ -1726,7 +1726,9 @@ def test_production_schema_only_allows_explicit_rag_and_retired_secret_removal()
         if definition.get("secret") is True
         and definition.get("description", "").startswith("Retired:")
     }
-    assert retired_secrets == {"OPENCLAW_API_KEY", "OPENCLAW_TOKEN"}
+    assert retired_secrets == {
+        "OPENCLAW_API_KEY", "OPENCLAW_TOKEN", "LEMONADE_API_KEY", "LITELLM_LEMONADE_API_KEY",
+    }
     assert clearable == {"RAG_OPENAI_API_KEY"} | retired_secrets
 
 

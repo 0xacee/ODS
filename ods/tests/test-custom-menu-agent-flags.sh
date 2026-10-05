@@ -29,7 +29,7 @@ phase_source="${phase_source//< \/dev\/tty/}"
 run_case() (
     local label="$1" explicit="$2" selected="$3" answer="$4" expected="$5"
     shift 5
-    INTERACTIVE=true DRY_RUN=false INSTALL_CHOICE=3 TIER=2 ODS_MODE=lemonade
+    INTERACTIVE=true DRY_RUN=false INSTALL_CHOICE=3 TIER=2 ODS_MODE=local
     ENABLE_VOICE=false ENABLE_WORKFLOWS=false ENABLE_RAG=false
     ENABLE_HERMES="$selected"
     HERMES_EXPLICIT=false ENABLE_PIXEL=auto
@@ -58,7 +58,7 @@ run_case() (
     warn() { :; }; success() { :; }; chapter() { :; }; bootline() { :; }
     signal() { :; }
     ods_pixel_resolve_enablement() { printf 'pixel\n'; }
-    ods_pixel_model_route_class() { printf 'lemonade\n'; }
+    ods_pixel_model_route_class() { printf 'managed-gateway\n'; }
     # Phase 03 resolves Pixel's web search provider and asks whether Portal
     # should be the default chat; both live in libraries this fixture omits.
     ods_pixel_resolve_search_provider() { printf 'searxng\n'; }

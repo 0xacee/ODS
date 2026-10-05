@@ -152,7 +152,7 @@ bootline
 # Core services always shown
 [[ "${ENABLE_OPEN_WEBUI:-true}" != "true" ]] || echo "  • Chat UI:       http://localhost:${SERVICE_PORTS[open-webui]:-3000}"
 echo "  • Dashboard:     http://localhost:${SERVICE_PORTS[dashboard]:-3001}"
-if [[ -n "${EXTERNAL_LLM_URL:-}" || "${ODS_MODE:-local}" == "cloud" || "${ODS_MODE:-local}" == "lemonade" || "${LEMONADE_EXTERNAL:-false}" == "true" ]]; then
+if [[ -n "${EXTERNAL_LLM_URL:-}" || "${ODS_MODE:-local}" == "cloud" || -n "${NATIVE_LLM_BASE_URL:-}" ]]; then
     echo "  • LLM API:       http://localhost:${SERVICE_PORTS[litellm]:-4000}/v1  (managed LiteLLM gateway)"
 else
     echo "  • LLM API:       http://localhost:${SERVICE_PORTS[llama-server]:-11434}/v1  (llama-server)"
@@ -378,19 +378,8 @@ if ! $DRY_RUN; then
         if [[ -n "${EXTERNAL_LLM_URL:-}" && -n "${EXTERNAL_LLM_MODEL:-}" ]]; then
             _perplexica_model="$EXTERNAL_LLM_MODEL"
         elif [[ -n "${GGUF_FILE:-}" ]]; then
+            # llama-server serves the GGUF file name (--alias) on every runtime.
             _perplexica_model="$GGUF_FILE"
-            # Lemonade serves the model under a separate id, so the expected
-            # route differs from the bare GGUF name. An AMD local install runs
-            # Lemonade while LLM_BACKEND stays "llama-server", so both
-            # variables have to be consulted independently — same rule as
-            # scripts/bootstrap-upgrade.sh and the container-side
-            # extensions/services/perplexica/sync-model-config.js.
-            _perplexica_runtime="$(printf '%s' "${AMD_INFERENCE_RUNTIME:-}" | tr '[:upper:]' '[:lower:]')"
-            _perplexica_backend="$(printf '%s' "${LLM_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
-            if [[ "$_perplexica_runtime" == "lemonade" || "$_perplexica_backend" == "lemonade" ]]; then
-                _perplexica_model="${LEMONADE_MODEL:-}"
-                [[ -n "$_perplexica_model" ]] || _perplexica_model="extra.$GGUF_FILE"
-            fi
         fi
         _perplexica_status=$(curl -sf --max-time 5 "http://127.0.0.1:${SERVICE_PORTS[perplexica]:-3004}/api/config" 2>>"$LOG_FILE" | \
             PERPLEXICA_MODEL="$_perplexica_model" "$PYTHON_CMD" -c '

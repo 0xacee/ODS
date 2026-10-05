@@ -9,7 +9,9 @@ import unittest
 from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().parents[1]
-ENV = {'LEMONADE_HOST_TRANSPORT': 'model-router', 'ODS_WINDOWS_SYSTEM_DIRECTORY': r'C:\Windows\System32'}
+# The bridge gets the round-F key and its Lemonade-era alias (one release).
+ENV = {'LEMONADE_HOST_TRANSPORT': 'model-router', 'ODS_HOST_LLM_TRANSPORT': 'model-router',
+       'ODS_WINDOWS_SYSTEM_DIRECTORY': r'C:\Windows\System32'}
 spec = importlib.util.spec_from_file_location('retire_wsl_runtime', SOURCE / 'scripts/retire-wsl-runtime.py')
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
@@ -72,6 +74,19 @@ class RetirementTests(unittest.TestCase):
         self.assertEqual(helper.retire(self.root)['state'], 'retired')
         self.assertEqual(operations, ['status', 'check', 'disable', 'stop'])
         self.stop.assert_called_once_with(self.root, ENV, 'a' * 64)
+
+    def test_migrated_environment_reaches_the_bridge_under_both_names(self):
+        (self.root / '.env').write_text('ODS_HOST_LLM_TRANSPORT=model-router\n'
+                                      'NATIVE_LLM_BASE_URL=http://localhost:8080\n'
+                                      'NATIVE_LLM_CONTAINER_BASE_URL=http://host.docker.internal:8080\n'
+                                      'ODS_WINDOWS_SYSTEM_DIRECTORY="C:\\Windows\\System32"\n')
+        helper.retire(self.root, validate_only=True)
+        self.status.assert_called_once_with(self.root, {
+            'ODS_HOST_LLM_TRANSPORT': 'model-router', 'LEMONADE_HOST_TRANSPORT': 'model-router',
+            'NATIVE_LLM_BASE_URL': 'http://localhost:8080', 'LEMONADE_BASE_URL': 'http://localhost:8080',
+            'NATIVE_LLM_CONTAINER_BASE_URL': 'http://host.docker.internal:8080',
+            'LEMONADE_CONTAINER_BASE_URL': 'http://host.docker.internal:8080',
+            'ODS_WINDOWS_SYSTEM_DIRECTORY': r'C:\Windows\System32'})
 
     def test_owner_failure_precedes_any_windows_probe(self):
         self._owner.side_effect = ValueError('wrong Linux owner')

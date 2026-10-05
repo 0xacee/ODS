@@ -40,10 +40,10 @@ echo "[contract] cross-platform installed footprint"
 python3 tests/test-install-footprint-contract.py
 bash tests/contracts/test-install-footprint-macos.sh
 
-echo "[contract] AMD phase-06 env keys exist in schema"
+echo "[contract] retired Lemonade-era AMD keys still validate, as deprecated, for one release"
 for key in HSA_XNACK AMDGPU_TARGET LLAMA_CPP_REF; do
-  jq -e --arg key "$key" '.properties[$key]' .env.schema.json >/dev/null \
-    || { echo "[FAIL] .env.schema.json missing AMD installer key: $key"; exit 1; }
+  jq -e --arg key "$key" '.properties[$key].deprecated == true' .env.schema.json >/dev/null \
+    || { echo "[FAIL] .env.schema.json must keep the retired AMD key $key as deprecated"; exit 1; }
 done
 
 echo "[contract] canonical port contract parity"
@@ -56,9 +56,9 @@ bash tests/contracts/test-windows-amd-local-compose.sh
 echo "[contract] Windows restart recreates env-backed containers"
 bash tests/test-windows-restart-recreate-env.sh
 
-echo "[contract] external Lemonade compose overlay readiness"
-bash tests/contracts/test-external-lemonade-contracts.sh
-bash tests/contracts/test-external-lemonade-cpu-fallback.sh
+echo "[contract] host-native llama-server compose overlay readiness"
+bash tests/contracts/test-host-native-llm-contracts.sh
+bash tests/contracts/test-host-native-llm-cpu-fallback.sh
 
 echo "[contract] bootstrap hot-swap force-recreate"
 bash tests/test-bootstrap-upgrade-hotswap-contract.sh
@@ -348,17 +348,25 @@ bash tests/test-macos-colima-profile.sh
 echo "[contract] macOS port conflicts include root-hidden listeners"
 bash tests/test-macos-port-detection.sh
 
-echo "[contract] AMD reassign keeps HSA override Strix-only"
-grep -q '_env_set "HSA_OVERRIDE_GFX_VERSION" "11.5.1"' ods-cli \
-  || { echo "[FAIL] ods-cli must set HSA override to 11.5.1 for gfx1151"; exit 1; }
+echo "[contract] AMD reassign sets an HSA override only for ROCm on a target the image lacks"
+grep -qF 'ods_amd_hsa_override_for_target "${AMD_INFERENCE_BACKEND:-vulkan}" "$gfx_ver"' ods-cli \
+  || { echo "[FAIL] ods-cli must derive the HSA override from installers/lib/amd-runtime.sh"; exit 1; }
 grep -q '_env_unset "HSA_OVERRIDE_GFX_VERSION"' ods-cli \
-  || { echo "[FAIL] ods-cli must remove HSA override for non-Strix AMD GPUs"; exit 1; }
-grep -q '_env_unset "LEMONADE_LLAMACPP_ROCM_BIN"' ods-cli \
-  || { echo "[FAIL] ods-cli must remove gfx1151-only custom binary for non-Strix AMD GPUs"; exit 1; }
+  || { echo "[FAIL] ods-cli must remove the HSA override when none applies"; exit 1; }
 if grep -q '_env_set "HSA_OVERRIDE_GFX_VERSION" "\$gfx_ver"' ods-cli; then
   echo "[FAIL] ods-cli must not write raw gfx ids such as gfx942 to HSA_OVERRIDE_GFX_VERSION"
   exit 1
 fi
+hsa_cases="$(
+  source installers/lib/amd-runtime.sh
+  printf '%s|' "$(ods_amd_hsa_override_for_target vulkan gfx1031)" \
+    "$(ods_amd_hsa_override_for_target rocm gfx1151)" \
+    "$(ods_amd_hsa_override_for_target rocm gfx1100)" \
+    "$(ods_amd_hsa_override_for_target rocm gfx1031)" \
+    "$(ods_amd_hsa_override_for_target rocm gfx1103)"
+)"
+[[ "$hsa_cases" == "|||10.3.0|11.0.0|" ]] \
+  || { echo "[FAIL] HSA override must be ROCm-only and only for targets the image lacks, got: $hsa_cases"; exit 1; }
 
 echo "[contract] AMD ComfyUI uses native gfx architecture"
 bash tests/contracts/test-amd-comfyui-architecture.sh

@@ -467,7 +467,8 @@ collect_compose_validation() {
     local tier
     local gpu_count
     local ods_mode
-    local lemonade_external
+    local native_llm_url
+    local amd_backend
     local amd_runtime
     local amd_managed
     local flags_file="$BUNDLE_DIR/validation/compose-flags.txt"
@@ -479,7 +480,8 @@ collect_compose_validation() {
     tier="$(read_env_value TIER 1)"
     gpu_count="$(read_env_value GPU_COUNT 1)"
     ods_mode="$(read_env_value ODS_MODE local)"
-    lemonade_external="$(read_env_value LEMONADE_EXTERNAL false)"
+    native_llm_url="$(read_env_value NATIVE_LLM_BASE_URL "")"
+    amd_backend="$(read_env_value AMD_INFERENCE_BACKEND "")"
     amd_runtime="$(read_env_value AMD_INFERENCE_RUNTIME "")"
     amd_managed="$(read_env_value AMD_INFERENCE_MANAGED "")"
 
@@ -492,9 +494,8 @@ collect_compose_validation() {
     set +e
     flags="$(
         cd "$ROOT_DIR" && \
-        LEMONADE_EXTERNAL="$lemonade_external" \
-        AMD_INFERENCE_RUNTIME="$amd_runtime" \
-        AMD_INFERENCE_MANAGED="$amd_managed" \
+        NATIVE_LLM_BASE_URL="$native_llm_url" \
+        AMD_INFERENCE_BACKEND="$amd_backend" \
         run_bounded "$BASH_CMD" scripts/resolve-compose-stack.sh \
             --script-dir "$ROOT_DIR" \
             --tier "$tier" \
@@ -512,7 +513,8 @@ collect_compose_validation() {
         printf 'TIER=%s\n' "$tier"
         printf 'GPU_COUNT=%s\n' "$gpu_count"
         printf 'ODS_MODE=%s\n' "$ods_mode"
-        printf 'LEMONADE_EXTERNAL=%s\n' "$lemonade_external"
+        printf 'NATIVE_LLM_BASE_URL=%s\n' "$native_llm_url"
+        printf 'AMD_INFERENCE_BACKEND=%s\n' "$amd_backend"
         printf 'AMD_INFERENCE_RUNTIME=%s\n' "$amd_runtime"
         printf 'AMD_INFERENCE_MANAGED=%s\n' "$amd_managed"
         printf 'COMPOSE_FLAGS=%s\n' "$flags"
@@ -790,7 +792,7 @@ config_hash_targets = [
     "config/ports.json",
     "config/golden-paths.json",
     "config/generated-config-contracts.json",
-    "config/litellm/lemonade.yaml",
+    "config/litellm/local.yaml",
     "extensions/services/hermes/cli-config.yaml.template",
 ]
 

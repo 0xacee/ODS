@@ -23,6 +23,11 @@
 #   Add new optional features to the Custom menu here.
 # ============================================================================
 
+# Isolated phase reuse (tests) gets the route predicate installers/lib/
+# native-llm.sh gives install-core: a host-native llama-server is in use.
+declare -F ods_native_llm_requested >/dev/null 2>&1 \
+    || ods_native_llm_requested() { [[ -n "${NATIVE_LLM_BASE_URL:-}" ]]; }
+
 # Require Bash 4+ (associative arrays used for GPU topology/link maps)
 if (( BASH_VERSINFO[0] < 4 )); then
     echo "ERROR: $(basename "${BASH_SOURCE[0]}") requires Bash 4.0+ (current: $BASH_VERSION)" >&2
@@ -113,8 +118,9 @@ if ! $INTERACTIVE && [[ "$ENABLE_COMFYUI" == "true" ]] &&
 fi
 
 # The ComfyUI extension has only AMD and NVIDIA Docker overlays. A host GPU
-# served by an external runtime does not make those devices available inside
-# this install (for example, AMD Lemonade on Windows with a CPU-only WSL VM).
+# served by a runtime outside the stack does not make those devices available
+# inside this install (for example, the Windows Portal's llama-server with a
+# CPU-only WSL VM).
 # Resolve this before compose selection and the later ComfyUI health gate.
 if [[ "${ENABLE_COMFYUI:-false}" == "true" ]]; then
     case "${GPU_BACKEND:-cpu}" in
@@ -137,7 +143,8 @@ fi
 ENABLE_PIXEL_RUNTIME=false
 if [[ "$PIXEL_AGENT_MODE" == "pixel" ]]; then
     _pixel_model_route_class="$(ods_pixel_model_route_class \
-        "${ODS_MODE:-local}" "${EXTERNAL_LLM_URL:-}" "${LEMONADE_EXTERNAL:-false}")" || {
+        "${ODS_MODE:-local}" "${EXTERNAL_LLM_URL:-}" \
+        "$(ods_native_llm_requested && echo true || echo false)")" || {
         ai_bad "Pixel received an unsupported ODS model route."
         return 1 2>/dev/null || exit 1
     }
@@ -217,9 +224,9 @@ if [[ "${ENABLE_HERMES:-false}" == "true" && "${ODS_MODE:-local}" != "cloud" ]];
             && [[ -f "$SCRIPT_DIR/scripts/select-model.py" && -f "$SCRIPT_DIR/config/model-library.json" ]]; then
             _hermes_python="$(ods_model_selector_python)"
         fi
-        if [[ "${LEMONADE_EXTERNAL:-false}" == "true" ]]; then
-            # Lemonade on the Windows host loaded this model at this context;
-            # this run can neither pick another model nor resize it.
+        if ods_native_llm_requested; then
+            # llama-server on the Windows host loaded this model at this
+            # context; this run can neither pick another model nor resize it.
             _hermes_floor_action="cap"
             _hermes_python=""
         fi
@@ -940,19 +947,23 @@ if [[ "$VENDOR" == "nvidia" ]]; then
     EMBEDDINGS_GPU_UUID=$(echo "$GPU_ASSIGNMENT_JSON" | jq -r '.gpu_assignment.services.embeddings.gpus[0]?')
 elif [[ "$VENDOR" == "amd" ]]; then
     LLAMA_SERVER_GPU_INDICES=$(echo "$GPU_ASSIGNMENT_JSON" | jq -r '.gpu_assignment.services.llama_server.gpu_indices // [] | map(tostring) | join(",")')
+    # docker-compose.multigpu-amd.yml scopes llama-server to these indices; an
+    # empty list would hide every GPU from the Vulkan image.
+    if [[ -z "$LLAMA_SERVER_GPU_INDICES" ]]; then
+        error "GPU assignment did not select any AMD device for llama-server"
+    fi
     WHISPER_GPU_INDEX=$(echo "$GPU_ASSIGNMENT_JSON" | jq -r '.gpu_assignment.services.whisper.gpu_indices[0] // 0')
     COMFYUI_GPU_INDEX=$(echo "$GPU_ASSIGNMENT_JSON" | jq -r '.gpu_assignment.services.comfyui.gpu_indices[0] // 0')
     EMBEDDINGS_GPU_INDEX=$(echo "$GPU_ASSIGNMENT_JSON" | jq -r '.gpu_assignment.services.embeddings.gpu_indices[0] // 0')
 fi
 
 _mode=$(echo "$GPU_ASSIGNMENT_JSON" | jq -r '.gpu_assignment.services.llama_server.parallelism.mode // "none"')
-# NVIDIA: layer split for every multi-GPU mode. CUDA row split is not
-# fleet-qualified and fails at model load from llama.cpp b9890 ("does not
-# support split buffers"). AMD (Lemonade) keeps row for tensor/hybrid.
+# Layer split for every multi-GPU mode. CUDA row split is not fleet-qualified
+# and fails at model load from llama.cpp b9890 ("does not support split
+# buffers"); Vulkan has no row split, and the HIP backend shares CUDA's code.
 case "$_mode" in
-  tensor|hybrid) if [[ "$VENDOR" == "nvidia" ]]; then LLAMA_ARG_SPLIT_MODE="layer"; else LLAMA_ARG_SPLIT_MODE="row"; fi ;;
-  pipeline)      LLAMA_ARG_SPLIT_MODE="layer" ;;
-  *)             LLAMA_ARG_SPLIT_MODE="none"  ;;
+  tensor|hybrid|pipeline) LLAMA_ARG_SPLIT_MODE="layer" ;;
+  *)                      LLAMA_ARG_SPLIT_MODE="none"  ;;
 esac
 unset _mode
 
