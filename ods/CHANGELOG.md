@@ -466,6 +466,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   workspace directives, and that step took time quadratic in the message
   length; it is now linear. Quoted text that continues past an escaped line
   break also stays masked now.
+- Token Spy, APE, Privacy Shield and Brave Search can be added from
+  Extensions again on installs that started without them. They build their
+  image from their own folder, and the dashboard refused any local build
+  that was not one of two reviewed Langfuse Dockerfiles. It now accepts
+  these four when their folder matches the files this ODS version shipped,
+  pinned by digest; a changed, added or removed file, or a link, is still
+  refused. Changing one of these folders needs
+  `python3 scripts/pin-builtin-build-contexts.py --write`, and CI fails
+  until it is run.
 - Rerunning the installer (an update) no longer fails with "Embeddings model
   prefetch failed" after Embeddings was added from Extensions. The Embeddings
   service downloads the model itself, as root, so the installer could not
