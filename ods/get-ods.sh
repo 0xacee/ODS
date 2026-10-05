@@ -641,6 +641,15 @@ git sparse-checkout set ods 2>/dev/null || {
 # environment preflight). Running those checks only after the uninstaller left
 # hosts that could never take the new install with no working ODS and no .env.
 if [[ "$BOOTSTRAP_REINSTALL" == "true" || "$BOOTSTRAP_RECOVER_STRANDED" == "true" ]]; then
+    # The uninstaller removes data/, so a model API connected in Settings >
+    # Remote model does not survive a reinstall. Say so now, and have the
+    # installer's summary say it again (fleet row 26: it vanished silently).
+    if [[ "$BOOTSTRAP_REINSTALL" == "true" ]] \
+        && [[ -f "$INSTALL_DIR/data/remote-provider/provider-profile.json" \
+            || -f "$INSTALL_DIR/data/remote-provider/routing-state.json" ]]; then
+        warn "This reinstall removes your model API connection (Settings > Remote model). Connect it again there after the install."
+        export ODS_REINSTALL_REMOTE_ROUTE_REMOVED=true
+    fi
     candidate_uninstaller="$TEMP_DIR/repo/ods/ods-uninstall.sh"
     [[ -f "$candidate_uninstaller" && ! -L "$candidate_uninstaller" ]] \
         || error "Requested ODS source does not contain a safe candidate uninstaller. Existing installation was not replaced."

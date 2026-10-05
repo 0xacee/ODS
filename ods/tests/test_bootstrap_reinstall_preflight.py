@@ -66,6 +66,7 @@ pathlib.Path(os.environ['RESULT']).write_text(json.dumps({
     'oldRuntime': (root / 'old-runtime').exists(),
     'leftover': (root / 'stranded-leftover').exists(),
     'env': (root / '.env').exists(),
+    'remoteRouteRemoved': os.environ.get('ODS_REINSTALL_REMOTE_ROUTE_REMOVED'),
 }))
 PY
 '''
@@ -277,6 +278,27 @@ esac
         self.assertEqual(value['model'], MODEL.hex())
         self.assertEqual(value['modelInode'], inode)
         self.assertFalse(value['oldRuntime'])
+
+    def test_reinstall_says_it_removes_a_saved_model_api_connection(self):
+        # Fleet row 26 (Mac): the reinstall dropped the Settings > Remote model
+        # connection without a word.
+        self.make_installed()
+        write(self.install / 'data/remote-provider/provider-profile.json', '{}\n')
+        result, output = self.bootstrap()
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn('This reinstall removes your model API connection (Settings > Remote model)', output)
+        self.assertEqual(json.loads(self.result.read_text())['remoteRouteRemoved'], 'true')
+        for summary in ('installers/phases/13-summary.sh', 'installers/macos/install-macos.sh'):
+            text = (ROOT / summary).read_text()
+            self.assertIn('ODS_REINSTALL_REMOTE_ROUTE_REMOVED', text, summary)
+            self.assertIn('This reinstall removed your model API connection', text, summary)
+
+    def test_reinstall_without_a_model_api_connection_says_nothing_about_it(self):
+        self.make_installed()
+        result, output = self.bootstrap()
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotIn('model API connection', output)
+        self.assertIsNone(json.loads(self.result.read_text())['remoteRouteRemoved'])
 
     def test_disk_credit_counts_reclaimed_space_but_not_retained_models(self):
         self.make_installed()

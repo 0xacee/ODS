@@ -3770,4 +3770,10 @@ fi
     fi
 } | ods_readiness_summary "./ods-macos.sh status" "$ODS_LOG_FILE" "http://localhost:3001"
 
+# get-ods.sh --force exports this when the reinstall removed a saved one.
+if [[ "${ODS_REINSTALL_REMOTE_ROUTE_REMOVED:-false}" == "true" ]]; then
+    ai_warn "This reinstall removed your model API connection; ODS uses the model on this computer."
+    ai "To use the API again, connect it in Settings > Remote model."
+fi
+
 show_success_card
