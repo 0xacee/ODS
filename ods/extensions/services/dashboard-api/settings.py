@@ -78,13 +78,17 @@ _LIVE_READ_ENV_KEYS = {
     # agent fallback, so recreating services would only add downtime.
     "HF_TOKEN",
 }
-# Read only by the removed legacy OpenClaw extension; marked "deprecated" and
-# described as "Retired:" in .env.schema.json. Nothing consumes them now, so a
-# change needs no restart, and clearing one removes it from .env.
+# Keys of the removed legacy OpenClaw extension and the removed AMD GAIA
+# library recipe; marked "deprecated" and described as "Retired:" in
+# .env.schema.json. ODS reads none of them, so saving one restarts nothing (a
+# GAIA copy installed before the removal picks up its keys when it next
+# starts), and clearing one removes it from .env.
 _RETIRED_ENV_KEYS = frozenset({
     "BOOTSTRAP_MODEL", "HOST_LAN_IP", "OPENCLAW_API_KEY", "OPENCLAW_CONFIG",
     "OPENCLAW_DANGEROUSLY_DISABLE_DEVICE_AUTH", "OPENCLAW_HTTP_API",
     "OPENCLAW_LLM_URL", "OPENCLAW_PORT", "OPENCLAW_TOKEN",
+    "GAIA_AGENT_UI_VERSION", "GAIA_DISABLE_UPDATE", "GAIA_LEMONADE_BASE_URL",
+    "GAIA_PORT", "GAIA_SKIP_GAIA_INIT", "GAIA_UI_SERVE_ONLY",
 })
 _READ_ONLY_ENV_FIELDS = {
     "ODS_MODE": "Runtime mode is selected by the installer and cannot be changed from the dashboard.",
