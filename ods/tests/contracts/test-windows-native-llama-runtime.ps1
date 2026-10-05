@@ -260,7 +260,11 @@ try {
         Check ((Get-Failure { $null = New-ODSNativeLlamaLaunchArguments $plan $options }) -match 'not allowed') "tuning option '$($extra -join ' ')' cannot widen the launch contract"
     }
     $options.ExtraArguments = @()
-    foreach ($case in @(@{ Name = 'device'; Value = 'Vulkan0,CPU' }, @{ Name = 'device'; Value = 'none' }, @{ Name = 'gpu'; Value = '99999' })) {
+    $options.NGpuLayers = '99999'
+    Check ((@(New-ODSNativeLlamaLaunchArguments $plan $options) -join '|') -match '\|--n-gpu-layers\|99999\|') 'any N_GPU_LAYERS count .env.schema.json allows reaches llama-server'
+    $options.NGpuLayers = 'auto'
+    foreach ($case in @(@{ Name = 'device'; Value = 'Vulkan0,CPU' }, @{ Name = 'device'; Value = 'none' },
+            @{ Name = 'gpu'; Value = '12345678901' }, @{ Name = 'gpu'; Value = '-1' }, @{ Name = 'gpu'; Value = '8 --host 0.0.0.0' })) {
         $saved = $options.Device; $savedLayers = $options.NGpuLayers
         if ($case.Name -eq 'device') { $options.Device = $case.Value } else { $options.NGpuLayers = $case.Value }
         Check ((Get-Failure { $null = New-ODSNativeLlamaLaunchArguments $plan $options }) -match 'launch options are invalid') "an invalid $($case.Name) option ($($case.Value)) is refused"

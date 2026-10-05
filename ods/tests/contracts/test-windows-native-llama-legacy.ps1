@@ -119,6 +119,22 @@ try {
     Check ($launch.Pinned -and $launch.ExecutablePath -eq $pinnedExe -and $launch.GgufFile -eq 'Qwen3.6-35B-A3B-Q4_K_M.gguf' -and $launch.ContextSize -eq 131072) 'the launch proves the .env model and context'
     Check (@(@($launch.Warnings) -match 'LLAMA_PARALLEL=4 is ignored').Count -eq 1) 'LLAMA_PARALLEL cannot add slots: one slot keeps the context proof valid'
     Check (-not (ConvertTo-ODSNativeLlamaArgumentString $launch.Arguments).Contains($key)) 'the key never appears on the command line'
+    # Every .env tunable the Windows launchers passed before round F still
+    # reaches the pinned launch with its value (LLAMA_PARALLEL excepted, above).
+    $parity = [ordered]@{ N_GPU_LAYERS = @('--n-gpu-layers', '99999'); LLAMA_ARG_FLASH_ATTN = @('--flash-attn', 'off')
+        LLAMA_ARG_CACHE_TYPE_K = @('--cache-type-k', 'q8_0'); LLAMA_ARG_CACHE_TYPE_V = @('--cache-type-v', 'q4_0')
+        LLAMA_ARG_N_CPU_MOE = @('--n-cpu-moe', '12'); LLAMA_ARG_CHECKPOINT_EVERY_NT = @('--checkpoint-every-n-tokens', '4096')
+        LLAMA_ARG_CTX_CHECKPOINTS = @('--ctx-checkpoints', '8'); LLAMA_ARG_CACHE_RAM = @('--cache-ram', '-1')
+        LLAMA_ARG_SPEC_TYPE = @('--spec-type', 'ngram-mod'); LLAMA_ARG_SPEC_DRAFT_N_MAX = @('--spec-draft-n-max', '3')
+        LLAMA_ARG_SPEC_DRAFT_TYPE_K = @('--spec-draft-type-k', 'q8_0'); LLAMA_ARG_SPEC_DRAFT_TYPE_V = @('--spec-draft-type-v', 'q8_0') }
+    $parityEnv = @{ CTX_SIZE = '131072'; LLAMA_REASONING = 'on'; LLAMA_ARG_NO_CACHE_PROMPT = '1' }
+    foreach ($name in $parity.Keys) { $parityEnv[$name] = $parity[$name][1] }
+    $parityLaunch = New-ODSNativeLlamaLegacyLaunch -EnvMap $parityEnv -Selection $selection -Port 8080 -Options $options -PinnedExecutable $pinnedExe
+    $parityArgs = '|' + (@($parityLaunch.Arguments) -join '|') + '|'
+    foreach ($name in $parity.Keys) {
+        Check ($parityArgs.Contains('|' + ($parity[$name] -join '|') + '|')) "$name from .env reaches the pinned launch as $($parity[$name] -join ' ')"
+    }
+    Check ($parityArgs.Contains('|--reasoning|on|') -and $parityArgs.Contains('|--no-cache-prompt|')) 'LLAMA_REASONING and LLAMA_ARG_NO_CACHE_PROMPT from .env reach the pinned launch'
     $envMap.LLAMA_ARG_FLASH_ATTN = 'on --host 0.0.0.0'
     Check ((Get-Failure { $null = New-ODSNativeLlamaLegacyLaunch -EnvMap $envMap -Selection $selection -Port 8080 -Options $options -PinnedExecutable $pinnedExe }) -match 'not allowed') 'a .env tunable cannot smuggle a listener or another flag'
     $envMap.LLAMA_ARG_FLASH_ATTN = 'on'

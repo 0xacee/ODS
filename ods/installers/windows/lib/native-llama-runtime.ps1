@@ -696,12 +696,14 @@ function Assert-ODSNativeLlamaPlan($Plan) {
 
 function Assert-ODSNativeLlamaOptions($Options) {
     # Device 'none' is the explicit CPU route (no usable Vulkan device), and
-    # only with zero GPU layers; never a silent fallback.
+    # only with zero GPU layers; never a silent fallback. NGpuLayers takes
+    # every N_GPU_LAYERS value .env.schema.json allows: auto, all or a layer
+    # count, which llama.cpp range-checks itself.
     $cpuRoute = [string]$Options.Device -ceq 'none'
     if ($Options.schemaVersion -ne 1 -or
         ([string]$Options.Device -cnotmatch '^Vulkan[0-9]{1,2}$' -and -not $cpuRoute) -or
         ($cpuRoute -and [string]$Options.NGpuLayers -cne '0') -or
-        [string]$Options.NGpuLayers -cnotmatch '^(auto|all|[0-9]{1,4})$' -or
+        [string]$Options.NGpuLayers -cnotmatch '^(auto|all|[0-9]{1,10})$' -or
         -not [IO.Path]::IsPathRooted([string]$Options.ApiKeyPath) -or
         -not [IO.Path]::IsPathRooted([string]$Options.LogPath) -or
         [string]$Options.ReleaseTag -cnotmatch '^b[0-9]{3,6}$' -or
