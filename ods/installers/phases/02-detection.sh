@@ -699,7 +699,11 @@ if [[ -f "$INSTALL_DIR/.env" && "${ODS_RESELECT_MODEL:-false}" != "true" && "${T
     # install to a model in this Linux environment. (The helper fails only
     # without .env, which the condition above rules out.)
     _retained_native="$(external_llm_env_value "$INSTALL_DIR/.env" NATIVE_LLM_BASE_URL || true)"
-    if ! ods_native_llm_requested && [[ "${ODS_MODE_EXPLICIT:-false}" != "true" && -n "$_retained_native" ]]; then
+    # An API selected for this run (--external-llm-url, Windows
+    # -ExternalLlmUrl) is the owner's explicit switch away from the Windows
+    # llama-server; phase 06 then writes the route without it.
+    if ! ods_native_llm_requested && [[ "${ODS_MODE_EXPLICIT:-false}" != "true" && -n "$_retained_native" \
+            && -z "${EXTERNAL_LLM_URL:-}" ]]; then
         error "This installation uses a llama-server that Windows setup manages. Rerun Windows setup, pass --native-llm-url, or use --reselect-model to choose a model in this Linux environment."
         exit 1
     fi
