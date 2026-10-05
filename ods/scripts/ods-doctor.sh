@@ -1862,4 +1862,9 @@ if hints:
     print("  Suggested fixes:")
     for hint in hints[:10]:
         print(f"    - {hint}")
+
+# The ODS community Discord (ODS_HELP_DISCORD_URL in installers/lib/constants.sh).
+if diagnoses or hints:
+    print("  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC")
+    print("    Attach a redacted support bundle: scripts/ods-support-bundle.sh")
 PY

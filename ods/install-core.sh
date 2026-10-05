@@ -35,6 +35,9 @@ cleanup_on_error() {
     echo "For a fresh install, use the installed ods-uninstall.sh and resolve any"
     echo "cleanup refusal before reinstalling. Do not delete the directory manually:"
     echo "ODS services and protected Pixel state may exist outside it."
+    echo ""
+    echo -e "${AMB:-}Need help? Ask on the ODS Discord: ${ODS_HELP_DISCORD_URL:-https://discord.gg/4ntNp9MAwC}${NC:-}"
+    echo -e "${AMB:-}Share the phase above and the end of the log file.${NC:-}"
     exit "$exit_code"
 }
 trap cleanup_on_error ERR

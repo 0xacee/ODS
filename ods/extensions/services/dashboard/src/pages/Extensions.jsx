@@ -1,3 +1,4 @@
+import HelpLink from '../components/HelpLink'
 import {
   Database, Cpu, Workflow, Plug, Image, MessageSquare, Code,
   FileText, Shield, Globe, Music, Video, Search, Puzzle,
@@ -629,7 +630,7 @@ export default function Extensions({ compact = false }) {
       {/* Error state */}
       {error && (
         <div className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-200">
-          {error} — <button className="underline" onClick={fetchCatalog}>Retry</button>
+          {error} — <button className="underline" onClick={fetchCatalog}>Retry</button> · <HelpLink />
         </div>
       )}
 

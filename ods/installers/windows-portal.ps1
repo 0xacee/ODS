@@ -30,11 +30,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows/lib/wsl-portal-setup.ps1')
+# The ODS community Discord. Keep in sync with ODS_HELP_DISCORD_URL in
+# installers/lib/constants.sh (tests/test-help-links.sh checks every surface).
+$helpLine = 'Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC (share the messages above).'
 try {
     $result = Invoke-ODSPortalSetup -Options $PSBoundParameters -InstallerRoot $PSScriptRoot
+    if ($result -ne 0) { Write-Host $helpLine -ForegroundColor Yellow }
     exit $result
 } catch {
     Write-Host ("ODS Portal setup stopped: " + $_.Exception.Message) -ForegroundColor Red
     Write-Host 'Correct the reported prerequisite, then rerun the same install.ps1 command. No native Windows or Hermes fallback was started.'
+    Write-Host $helpLine -ForegroundColor Yellow
     exit 1
 }

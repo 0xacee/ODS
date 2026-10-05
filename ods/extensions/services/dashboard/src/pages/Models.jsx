@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import HelpLink from '../components/HelpLink'
 import {
   AlertCircle,
   Box,
@@ -1453,13 +1454,13 @@ function DownloadProgressBar({ progress, helpers, onRetry }) {
 
       {cancelError && (
         <p role="alert" className="mb-3 text-sm text-red-300">
-          {cancelError}
+          {cancelError} <HelpLink />
         </p>
       )}
 
       {statusError && (
         <p role="alert" className="mb-3 text-sm text-theme-text-secondary">
-          {statusError}
+          {statusError} <HelpLink />
         </p>
       )}
 
