@@ -142,7 +142,6 @@ SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "data", "settings.json")
 
 _DEFAULT_SETTINGS = {
     "session_char_limit": 200_000,
-    "poll_interval_minutes": 5,
     "agents": {},
     "filters": {
         "enabled": False,
@@ -187,8 +186,22 @@ def _ensure_agent_in_settings(settings: dict, agent_name: str):
     if "agents" not in settings:
         settings["agents"] = {}
     if agent_name not in settings["agents"]:
-        settings["agents"][agent_name] = {"session_char_limit": None, "poll_interval_minutes": None}
+        settings["agents"][agent_name] = {"session_char_limit": None}
     return settings
+
+
+# Earlier versions stored the interval of the OpenClaw session-cleanup timer,
+# which was removed with that extension. Nothing reads it, so it is dropped
+# when settings load and disappears from disk on the next save.
+_RETIRED_SETTING_KEYS = ("poll_interval_minutes",)
+
+
+def _drop_retired_settings(settings: dict):
+    for key in _RETIRED_SETTING_KEYS:
+        settings.pop(key, None)
+        for agent_cfg in settings.get("agents", {}).values():
+            if isinstance(agent_cfg, dict):
+                agent_cfg.pop(key, None)
 
 
 def load_settings() -> dict:
@@ -200,6 +213,7 @@ def load_settings() -> dict:
         for k, v in _DEFAULT_SETTINGS.items():
             if k not in data:
                 data[k] = v
+        _drop_retired_settings(data)
         # Ensure current agent exists in settings
         data = _ensure_agent_in_settings(data, AGENT_NAME)
         return data
@@ -1691,7 +1705,6 @@ def api_get_settings():
     settings = load_settings()
     for agent_name, agent_cfg in settings.get("agents", {}).items():
         agent_cfg["_effective_session_char_limit"] = get_agent_setting(agent_name, "session_char_limit")
-        agent_cfg["_effective_poll_interval_minutes"] = get_agent_setting(agent_name, "poll_interval_minutes")
     return settings
 
 
@@ -1702,7 +1715,6 @@ async def api_update_settings(request: Request):
     Example body:
       {"session_char_limit": 150000}
       {"agents": {"my-agent": {"session_char_limit": 100000}}}
-      {"poll_interval_minutes": 3}
     """
     body = await request.json()
     settings = load_settings()
@@ -1714,14 +1726,6 @@ async def api_update_settings(request: Request):
             if val < 10000:
                 return JSONResponse({"error": "session_char_limit must be >= 10000"}, status_code=400)
         settings["session_char_limit"] = val
-
-    if "poll_interval_minutes" in body:
-        val = body["poll_interval_minutes"]
-        if val is not None:
-            val = int(val)
-            if val < 1 or val > 60:
-                return JSONResponse({"error": "poll_interval_minutes must be 1-60"}, status_code=400)
-        settings["poll_interval_minutes"] = val
 
     # Deep-merge filter settings (hot-reloadable)
     if "filters" in body:
@@ -1738,12 +1742,11 @@ async def api_update_settings(request: Request):
         for agent_name, agent_updates in body["agents"].items():
             if agent_name not in settings.get("agents", {}):
                 settings.setdefault("agents", {})[agent_name] = {}
-            for key in ("session_char_limit", "poll_interval_minutes"):
-                if key in agent_updates:
-                    val = agent_updates[key]
-                    if val is not None:
-                        val = int(val)
-                    settings["agents"][agent_name][key] = val
+            if "session_char_limit" in agent_updates:
+                val = agent_updates["session_char_limit"]
+                if val is not None:
+                    val = int(val)
+                settings["agents"][agent_name]["session_char_limit"] = val
             # Per-agent filter overrides
             if "filters" in agent_updates:
                 settings["agents"][agent_name]["filters"] = agent_updates["filters"]
@@ -1962,10 +1965,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="setting-row">
         <label>Session char limit</label>
         <div><input type="number" id="set-global-limit" step="10000" min="10000" oninput="updateTokenHint(this,'set-global-limit-tok')"> <span class="unit">chars</span> <span id="set-global-limit-tok" class="unit" style="color:#58a6ff"></span></div>
-      </div>
-      <div class="setting-row">
-        <label>Poll frequency</label>
-        <div><input type="number" id="set-global-poll" step="1" min="1" max="60"> <span class="unit">min</span></div>
       </div>
     </div>
     <!-- Agent-specific settings will be inserted here dynamically -->
@@ -2375,7 +2374,6 @@ async function loadSettingsUI() {
     const res = await _authFetch('/api/settings');
     const s = await res.json();
     document.getElementById('set-global-limit').value = s.session_char_limit || '';
-    document.getElementById('set-global-poll').value = s.poll_interval_minutes || '';
     window._scl = s.session_char_limit || 200000;
     // Dynamically build agent-specific settings
     const grid = document.getElementById('settings-grid');
@@ -2396,16 +2394,11 @@ async function loadSettingsUI() {
         '<div class="setting-row">' +
           '<label>Session char limit</label>' +
           '<div><input type="number" data-setting="limit" id="set-' + safeId + '-limit" step="10000" min="10000" placeholder="inherit" > <span class="unit">chars</span> <span id="set-' + safeId + '-limit-tok" class="unit" style="color:#58a6ff"></span></div>' +
-        '</div>' +
-        '<div class="setting-row">' +
-          '<label>Poll frequency</label>' +
-          '<div><input type="number" data-setting="poll" id="set-' + safeId + '-poll" step="1" min="1" max="60" placeholder="inherit"> <span class="unit">min</span></div>' +
         '</div>';
       div.querySelector('h4').textContent = agent + ' Override';
       grid.appendChild(div);
       // Set values
       document.getElementById('set-' + safeId + '-limit').value = cfg.session_char_limit != null ? cfg.session_char_limit : '';
-      document.getElementById('set-' + safeId + '-poll').value = cfg.poll_interval_minutes != null ? cfg.poll_interval_minutes : '';
       if (cfg.session_char_limit != null) {
         updateTokenHint(document.getElementById('set-' + safeId + '-limit'), 'set-' + safeId + '-limit-tok');
       }
@@ -2437,13 +2430,11 @@ async function saveSettings() {
     const agent = g.dataset.agent;
     agents[agent] = {
       session_char_limit: inputValue(g.querySelector('[data-setting="limit"]')),
-      poll_interval_minutes: inputValue(g.querySelector('[data-setting="poll"]')),
     };
   });
 
   const body = {
     session_char_limit: getVal('set-global-limit'),
-    poll_interval_minutes: getVal('set-global-poll'),
     agents: agents,
   };
 
