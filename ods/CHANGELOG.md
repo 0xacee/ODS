@@ -189,6 +189,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Every llama.cpp image is now pinned by tag and sha256 digest, including the
   tier-map, installer, host-agent and catalog copies. The dependency pin check
   rejects a llama.cpp image without a digest.
+- The host agent now accepts only whole, plain extension ids. Its check also
+  passed an id that ends in a line break, such as `n8n` followed by a newline,
+  which then reached extension folder names and Compose arguments.
+- Pixel's provider connection and health probes now require TLS 1.2 or newer.
+  Python 3.10 and later already refuse older protocols; the host side also runs
+  on Python 3.9, whose default context can still allow them.
+- The host agent reads the Hermes model settings in `data/hermes/config.yaml`
+  with a linear-time pattern. The previous pattern slowed down polynomially on
+  a long line of spaces.
 
 ### Changed
 - The unsupported Tauri desktop installer under `installer/` is removed. No CI
