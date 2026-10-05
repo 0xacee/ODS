@@ -1688,6 +1688,36 @@ _ods_cli_wait_for_hermes_ready() {
     return 1
 }
 
+# `docker compose up -d` returns before LiteLLM serves, and its Docker
+# healthcheck runs every 30 s. Portal chat goes through LiteLLM, so a chat sent
+# right after a start or restart failed once (fleet F58: 6-16 s after the
+# Windows lifecycle restart returned). Probe its readiness endpoint directly.
+# A slow gateway only warns: the start itself succeeded.
+_ods_cli_wait_for_litellm_ready() {
+    local timeout interval attempts i
+    timeout="${ODS_LITELLM_READY_TIMEOUT:-90}"
+    interval="${ODS_LITELLM_READY_INTERVAL:-2}"
+    [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || timeout=90
+    [[ "$interval" =~ ^[1-9][0-9]*$ ]] || interval=2
+
+    # Not every stack runs LiteLLM.
+    docker inspect ods-litellm >/dev/null 2>&1 || return 0
+    log "Waiting for the model gateway (LiteLLM)..."
+
+    attempts=$(( (timeout + interval - 1) / interval ))
+    for (( i=1; i<=attempts; i++ )); do
+        if docker exec ods-litellm python3 -c \
+            "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/readiness', timeout=5)" \
+            >/dev/null 2>&1; then
+            success "Model gateway — ready"
+            return 0
+        fi
+        (( i < attempts )) && sleep "$interval"
+    done
+    warn "The model gateway (LiteLLM) is still starting after ${timeout}s; chat can fail until it is ready. Check it with: ods status"
+    return 0
+}
+
 _ods_cli_wait_for_hermes_ready_with_retry() {
     local flags=("$@")
     local state
@@ -1788,6 +1818,10 @@ cmd_restart() {
     # needing the Docker Desktop-hostile nested bind mount.
     if [[ "$refresh_soul" == "true" ]]; then
         _ods_cli_refresh_soul || true
+    fi
+
+    if [[ -z "$resolved_service" || "$resolved_service" == "litellm" ]]; then
+        _ods_cli_wait_for_litellm_ready
     fi
 
     # `docker compose up -d` only proves that container creation was accepted.
@@ -2080,6 +2114,10 @@ cmd_start() {
 
     if [[ "$refresh_soul" == "true" ]]; then
         _ods_cli_refresh_soul || true
+    fi
+
+    if [[ -z "$resolved_service" || "$resolved_service" == "litellm" ]]; then
+        _ods_cli_wait_for_litellm_ready
     fi
 
     if [[ -z "$resolved_service" || "$resolved_service" == "llama-server" ]]; then

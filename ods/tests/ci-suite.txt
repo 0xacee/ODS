@@ -116,6 +116,7 @@ tests/test-network-timeouts.sh
 tests/test-nonroot-image-source-modes.sh
 tests/test-ods-cli-bootstrap-env-refresh.sh
 tests/test-ods-cli-host-cpu-fallback.sh
+tests/test-ods-cli-litellm-ready.sh
 tests/test-ods-cli-pipefail-tolerance.sh
 tests/test-ods-cli-restart-hermes-ready.sh
 tests/test-ods-cli-rollback-delegation.sh
