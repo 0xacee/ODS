@@ -48,6 +48,13 @@ $script:LLAMA_CPP_VULKAN_URL = "https://github.com/ggml-org/llama.cpp/releases/d
 $script:LLAMA_CPP_VULKAN_SHA256 = @{
     "b9014" = "6cd4bc7a44256e674458b0c5ea2ae3461dca29ee87876c8d410ecc78652a3b0f"
 }
+# Exact byte size of each archive above (GitHub's asset size), checked with
+# the SHA-256 before extraction. config/backends/amd.json
+# runtime.llama_server.windows is the primary pin; native-llama-runtime.ps1
+# falls back to these two tables only while amd.json does not carry it.
+$script:LLAMA_CPP_VULKAN_SIZE = @{
+    "b9014" = 33541404
+}
 
 # Docker
 $script:DOCKER_COMPOSE_CMD = "docker compose"
