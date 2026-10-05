@@ -4292,7 +4292,15 @@ def _pixel_local_identity_matches(config: dict, identity: str, expected: str) ->
     if identity == expected:
         return True
     gguf = str(config.get('GGUF_FILE') or '')
-    if not gguf or expected != gguf or Path(gguf).name != gguf:
+    if not gguf or Path(gguf).name != gguf:
+        return False
+    served = identity in (gguf, str(_active_model_directory(config) / gguf))
+    # The installer's Portal contract names the model by its configured
+    # logical id (LLM_MODEL), while llama-server serves it under the GGUF
+    # file name. That configured pair is one model; any other name is not.
+    if expected == str(config.get('LLM_MODEL') or '') and expected:
+        return served
+    if expected != gguf:
         return False
     return identity == str(_active_model_directory(config) / gguf)
 
@@ -4307,11 +4315,13 @@ def _prove_pixel_model_contract(config: dict, contract: dict) -> bool:
         expected.pop('imageInput', None)
         observed.pop('imageInput', None)
         if not _valid_managed_pixel_runtime_contract(contract) or expected != observed:
+            logger.warning("Portal model contract proof failed: the contract does not match the saved remote route")
             return False
         _verify_litellm_route(config, model='ods/current')
         return True
     gguf = str(config.get('GGUF_FILE') or '')
     if not gguf:
+        logger.warning("Portal model contract proof failed: GGUF_FILE is not set")
         return False
     # A Windows-owned runtime is proven twice: its durable plan must name the
     # contract, and the live server must serve it (through the router).
@@ -4320,12 +4330,24 @@ def _prove_pixel_model_contract(config: dict, contract: dict) -> bool:
             managed.get('running') is not True
             or managed['plan']['GgufFile'] != gguf
             or managed['plan']['ContextSize'] != contract['contextLength']):
+        logger.warning("Portal model contract proof failed: the Windows runtime is not running %s at %s tokens",
+                       gguf, contract['contextLength'])
         return False
     proof = _wait_for_model_readiness(config,model_id=str(config.get('LLM_MODEL') or gguf),
         gguf_file=gguf,llm_model_name=str(config.get('LLM_MODEL') or gguf),
         attempts=1,initial_delay=0,interval=0,return_proof=True,require_exact_context=True)
-    return (isinstance(proof,dict) and _pixel_local_identity_matches(config, proof.get('identity'), contract['model'])
-            and proof.get('contextVerified') is True and proof.get('contextLength')==contract['contextLength'])
+    if not isinstance(proof, dict) or not proof:
+        logger.warning("Portal model contract proof failed: %s did not pass the readiness check", gguf)
+        return False
+    if not _pixel_local_identity_matches(config, proof.get('identity'), contract['model']):
+        logger.warning("Portal model contract proof failed: the runtime serves %s, the contract names %s",
+                       proof.get('identity'), contract['model'])
+        return False
+    if proof.get('contextVerified') is not True or proof.get('contextLength') != contract['contextLength']:
+        logger.warning("Portal model contract proof failed: the runtime context is %s, the contract needs %s",
+                       proof.get('contextLength'), contract['contextLength'])
+        return False
+    return True
 
 
 def _recover_pixel_model_transaction(config: dict) -> dict:
@@ -4990,6 +5012,11 @@ def _deactivate_remote_provider_route(*, transaction=None) -> dict[str, object]:
         detail = f"Remote provider deactivation failed: {exc}"
         if rollback_errors:
             detail += "; rollback failed: " + "; ".join(rollback_errors)
+        else:
+            # The rollback above put the remote route back: say where that
+            # leaves the owner, not only what failed.
+            detail += (". ODS still uses the remote provider, and the local model was not changed."
+                       " Try again with 'ods remote-provider disable'; 'ods doctor' checks the local model.")
         raise RuntimeError(detail) from exc
 
 

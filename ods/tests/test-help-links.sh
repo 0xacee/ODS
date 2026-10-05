@@ -20,6 +20,7 @@ surfaces=(
     installers/macos/lib/constants.sh
     installers/macos/install-macos.sh
     scripts/ods-doctor.sh
+    ods-cli
     installers/windows-portal.ps1
     installers/windows/lib/ui.ps1
     extensions/services/dashboard/src/lib/support.js

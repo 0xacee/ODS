@@ -90,6 +90,12 @@ success() { echo -e "${GREEN}✓${NC} $1"; }
 warn() { echo -e "${YELLOW}⚠${NC} $1" >&2; }
 error() { echo -e "${RED}✗${NC} $1" >&2; exit 1; }
 log_error() { echo -e "${RED}✗${NC} $1" >&2; }
+# A failed remote-provider operation also says where to get help.
+_remote_provider_fail() {
+    echo -e "${RED}✗${NC} $1" >&2
+    echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+    exit 1
+}
 
 # Map cmd_list status string to a colour. Returns an empty string for unknown
 # statuses so future state names don't break formatting.
@@ -4597,12 +4603,12 @@ _remote_provider_peer_call() {
     fi
     if [[ $curl_status -ne 0 ]]; then
         rm -f "$response_file"; trap - INT TERM HUP
-        error "Remote-provider peer model request failed before Dashboard API completed"
+        _remote_provider_fail "Remote-provider peer model request failed before Dashboard API completed"
     fi
     if [[ "$http_code" != "200" ]]; then
         detail="$(_remote_provider_response_error "$response_file")"
         rm -f "$response_file"; trap - INT TERM HUP
-        error "Remote-provider peer model request failed (HTTP $http_code): $detail"
+        _remote_provider_fail "Remote-provider peer model request failed (HTTP $http_code): $detail"
     fi
     printf '%s' "$response_file"
     trap - INT TERM HUP
@@ -4673,13 +4679,13 @@ _remote_provider_probe_configured() {
     fi
     if [[ $curl_status -ne 0 ]]; then
         rm -f "$response_file"; trap - INT TERM HUP
-        error "Remote-provider test request failed before Dashboard API completed"
+        _remote_provider_fail "Remote-provider test request failed before Dashboard API completed"
     fi
     if [[ "$http_code" != "200" ]]; then
         local detail
         detail="$(_remote_provider_response_error "$response_file")"
         rm -f "$response_file"; trap - INT TERM HUP
-        error "Remote-provider test failed (HTTP $http_code): $detail"
+        _remote_provider_fail "Remote-provider test failed (HTTP $http_code): $detail"
     fi
     if [[ "$json_mode" == "true" ]]; then
         jq . "$response_file"
@@ -4847,13 +4853,13 @@ cmd_remote_provider() {
             fi
             if [[ $curl_status -ne 0 ]]; then
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider status request failed before Dashboard API completed"
+                _remote_provider_fail "Remote-provider status request failed before Dashboard API completed"
             fi
             if [[ "$http_code" != "200" ]]; then
                 local detail
                 detail="$(_remote_provider_response_error "$response_file")"
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider status failed (HTTP $http_code): $detail"
+                _remote_provider_fail "Remote-provider status failed (HTTP $http_code): $detail"
             fi
             if [[ "$json_mode" == "true" ]]; then
                 jq . "$response_file"
@@ -4886,13 +4892,13 @@ cmd_remote_provider() {
             rm -f "$payload_file"
             if [[ $curl_status -ne 0 ]]; then
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider plan request failed before Dashboard API completed"
+                _remote_provider_fail "Remote-provider plan request failed before Dashboard API completed"
             fi
             if [[ "$http_code" != "200" ]]; then
                 local detail
                 detail="$(_remote_provider_response_error "$response_file")"
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider plan failed (HTTP $http_code): $detail"
+                _remote_provider_fail "Remote-provider plan failed (HTTP $http_code): $detail"
             fi
             jq . "$response_file"
             rm -f "$response_file"; trap - INT TERM HUP
@@ -4917,13 +4923,13 @@ cmd_remote_provider() {
             fi
             if [[ $curl_status -ne 0 ]]; then
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider enable request failed before Dashboard API completed"
+                _remote_provider_fail "Remote-provider enable request failed before Dashboard API completed"
             fi
             if [[ "$http_code" != "200" ]]; then
                 local detail
                 detail="$(_remote_provider_response_error "$response_file")"
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider enable failed (HTTP $http_code): $detail"
+                _remote_provider_fail "Remote-provider enable failed (HTTP $http_code): $detail"
             fi
             if [[ "$json_mode" == "true" ]]; then
                 jq . "$response_file"
@@ -4981,13 +4987,13 @@ cmd_remote_provider() {
             rm -f "$payload_file"
             if [[ $curl_status -ne 0 ]]; then
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider $subcmd request failed before Dashboard API completed"
+                _remote_provider_fail "Remote-provider $subcmd request failed before Dashboard API completed"
             fi
             if [[ "$http_code" != "200" ]]; then
                 local detail
                 detail="$(_remote_provider_response_error "$response_file")"
                 rm -f "$response_file"; trap - INT TERM HUP
-                error "Remote-provider $subcmd failed (HTTP $http_code): $detail"
+                _remote_provider_fail "Remote-provider $subcmd failed (HTTP $http_code): $detail"
             fi
             if [[ "${REMOTE_PROVIDER_JSON_MODE:-false}" == "true" ]]; then
                 jq . "$response_file"

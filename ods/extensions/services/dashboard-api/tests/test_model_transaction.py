@@ -21,6 +21,43 @@ def test_local_contract_identity_accepts_only_exact_active_store_path(monkeypatc
     assert not host._pixel_local_identity_matches({}, str(tmp_path / 'model.gguf'), 'model.gguf')
 
 
+def test_local_contract_identity_accepts_the_configured_logical_name(monkeypatch, tmp_path):
+    # The installer's Portal contract names the model by LLM_MODEL, while
+    # llama-server serves it under the GGUF file name (--alias GGUF_FILE).
+    monkeypatch.setattr(host, '_active_model_directory', lambda _: tmp_path)
+    config = {'GGUF_FILE': 'Qwen3.5-9B-Q4_K_M.gguf', 'LLM_MODEL': 'qwen3.5-9b'}
+    assert host._pixel_local_identity_matches(config, 'Qwen3.5-9B-Q4_K_M.gguf', 'qwen3.5-9b')
+    assert host._pixel_local_identity_matches(config, str(tmp_path / 'Qwen3.5-9B-Q4_K_M.gguf'), 'qwen3.5-9b')
+    assert not host._pixel_local_identity_matches(config, 'Other-9B-Q4_K_M.gguf', 'qwen3.5-9b')
+    assert not host._pixel_local_identity_matches(config, '/other/Qwen3.5-9B-Q4_K_M.gguf', 'qwen3.5-9b')
+    assert not host._pixel_local_identity_matches(config, 'Qwen3.5-9B-Q4_K_M.gguf', 'qwen3.5-27b')
+    assert not host._pixel_local_identity_matches(
+        {'GGUF_FILE': 'Qwen3.5-9B-Q4_K_M.gguf'}, 'Qwen3.5-9B-Q4_K_M.gguf', 'qwen3.5-9b')
+
+
+def test_installer_contract_with_logical_name_is_proven_and_mismatches_are_logged(monkeypatch, caplog):
+    # Fleet, 2026-10-05: leaving a remote route on a fresh install failed every
+    # time, because the saved Portal contract named qwen3.5-9b and the server
+    # serves Qwen3.5-9B-Q4_K_M.gguf.
+    config = {'GGUF_FILE': 'Qwen3.5-9B-Q4_K_M.gguf', 'LLM_MODEL': 'qwen3.5-9b', 'CTX_SIZE': '65536'}
+    contract = {'model': 'qwen3.5-9b', 'contextLength': 65536, 'maxTokens': 8192, 'reasoning': False}
+    monkeypatch.setattr(host, '_managed_wsl_runtime', lambda _config: {'managed': False})
+    proof = {'identity': 'Qwen3.5-9B-Q4_K_M.gguf', 'contextLength': 65536, 'contextVerified': True}
+    monkeypatch.setattr(host, '_wait_for_model_readiness', lambda *_args, **_kwargs: dict(proof))
+    assert _real_prove_pixel_model_contract(config, contract) is True
+
+    proof['contextLength'] = 32768
+    with caplog.at_level('WARNING'):
+        assert _real_prove_pixel_model_contract(config, contract) is False
+    assert 'the runtime context is 32768, the contract needs 65536' in caplog.text
+
+    proof.update(identity='Other-9B-Q4_K_M.gguf', contextLength=65536)
+    caplog.clear()
+    with caplog.at_level('WARNING'):
+        assert _real_prove_pixel_model_contract(config, contract) is False
+    assert 'the runtime serves Other-9B-Q4_K_M.gguf, the contract names qwen3.5-9b' in caplog.text
+
+
 @pytest.fixture
 def controller(tmp_path,monkeypatch):
     monkeypatch.setattr(host,'INSTALL_DIR',tmp_path)
