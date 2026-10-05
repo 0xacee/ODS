@@ -32,10 +32,10 @@ _RECIPES = {
 #     python3 scripts/pin-builtin-build-contexts.py --write
 # (service: (folder, image, dockerfile, digest))
 _CONTEXT_BUILDS = {
-    "ape": ("ape", None, "Dockerfile", "b4474c384c6bcdc7b9a177cd523bd8a049d2aacd9f6e16cdab6d28e9a50c096e"),
+    "ape": ("ape", None, "Dockerfile", "088871f355fb73f2ca036eeb5e1f22cf3bb7882f7be87ee70b190c87886386cd"),
     "brave-search": ("brave-search", "ods-brave-search:local", "Dockerfile", "6f785938be3c27b7dacb45028e7ce9a2a14b313dc4d53d8b745f078fa9075e90"),
     "privacy-shield": ("privacy-shield", None, "Dockerfile", "1a176804603adcea6ee4d9dc505441c5dc8bb8ac2b1475746489388a50bac001"),
-    "token-spy": ("token-spy", None, "Dockerfile", "b080a1e4394c52ce7327fa7ee13db36481b23b4a4dfbd958f51bbdc9d5952a8e"),
+    "token-spy": ("token-spy", None, "Dockerfile", "6af1b5694bbde7894592fb9eac55b988ac46cc3afe85e5240a4f5b056ec575ea"),
 }
 _MAX_CONTEXT_FILE_BYTES = 8 * 1024 * 1024
 _MAX_CONTEXT_FILES = 512
