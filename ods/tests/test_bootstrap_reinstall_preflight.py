@@ -279,6 +279,21 @@ esac
         self.assertEqual(value['modelInode'], inode)
         self.assertFalse(value['oldRuntime'])
 
+    def test_keep_models_names_an_existing_backup_and_the_choices(self):
+        # Fleet row 29 (Tower3): the refusal named no path and no choices.
+        self.make_installed()
+        backup = Path(str(self.install) + '.models-backup')
+        backup.mkdir()
+        result, output = self.bootstrap()
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn(f'A model backup already exists at {backup}', output)
+        self.assertIn('rerun without --keep-models', output)
+        self.assertIn('Cannot preserve models', output)
+        self.assertIn('https://discord.gg/4ntNp9MAwC', output)
+        self.assertFalse(self.uninstall_args.exists(), output)
+        self.assertTrue(backup.is_dir(), output)
+        self.assertTrue((self.install / 'old-runtime').exists(), output)
+
     def test_reinstall_says_it_removes_a_saved_model_api_connection(self):
         # Fleet row 26 (Mac): the reinstall dropped the Settings > Remote model
         # connection without a word.
