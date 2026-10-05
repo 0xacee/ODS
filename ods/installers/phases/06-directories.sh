@@ -1095,7 +1095,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
                 mv -f -- "$_external_key_tmp" "$_external_key_target"
             fi
         elif [[ -n "${EXTERNAL_LLM_API_KEY_VALUE:-}" ]]; then
-            # A key given with the retired --lemonade-api-key flag.
+            # A key from --external-llm-key-env (Windows setup) or the
+            # retired --lemonade-api-key flag.
             _external_key_tmp="$(mktemp "${_external_key_target}.XXXXXX")" || return 1
             chmod 600 "$_external_key_tmp"
             printf '%s\n' "$EXTERNAL_LLM_API_KEY_VALUE" >"$_external_key_tmp"

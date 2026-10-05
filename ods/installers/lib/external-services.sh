@@ -125,7 +125,8 @@ external_llm_curl() {
         key="$(external_llm_read_api_key "$key_file")" || return 1
         curl -H @<(printf 'Authorization: Bearer %s\n' "$key") "$@"
     elif [[ -n "${EXTERNAL_LLM_API_KEY_VALUE:-}" ]]; then
-        # A key given with a retired flag; phase 06 stores it as the key file.
+        # A key from --external-llm-key-env or a retired flag; phase 06
+        # stores it as the key file.
         curl -H @<(printf 'Authorization: Bearer %s\n' "$EXTERNAL_LLM_API_KEY_VALUE") "$@"
     else
         curl "$@"
