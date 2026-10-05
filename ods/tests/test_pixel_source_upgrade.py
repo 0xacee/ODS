@@ -711,6 +711,64 @@ def test_completed_uninstall_inventory_rejects_unknown_or_changed_state(mirrored
         manager.uninstall_inventory()
 
 
+def _completed(mirrored):
+    manager, old, _new, _identity, _mirror = mirrored
+    manager.bind('d' * 64, lambda _: None)
+    manager.publish(lambda _: None)
+    manager.finish(lambda *_: None)
+    return manager, old
+
+
+def _renumbered_receipt(manager):
+    """The receipt as a WSL VM restart leaves it: same inodes, a new device."""
+    record = json.loads((manager.state / 'source-scratch.json').read_text())
+    record['parent'][0] += 100
+    record['identity'][0] += 100
+    return record
+
+
+def test_completed_uninstall_inventory_accepts_a_renumbered_device(mirrored):
+    manager, old = _completed(mirrored)
+    expected = manager.uninstall_inventory()
+    record = _renumbered_receipt(manager)
+    raw = upgrade.encoded(record)
+    manager._write('source-scratch.json', raw)
+    with pytest.raises(upgrade.UpgradeError, match='source-scratch-invalid'):
+        with manager._scratch():
+            pass
+
+    assert manager.uninstall_inventory() == expected
+    # Validation only reads: the receipt and the buffer stay as they were.
+    assert (manager.state / 'source-scratch.json').read_bytes() == raw
+    assert (old / record['name']).is_dir() and list((old / record['name']).iterdir()) == []
+
+
+@pytest.mark.parametrize('condition', ['buffer-inode', 'content', 'mode', 'parent-inode',
+                                       'split-device', 'pending'])
+def test_completed_uninstall_inventory_refuses_anything_but_a_renumbered_device(mirrored, condition):
+    manager, old = _completed(mirrored)
+    record = _renumbered_receipt(manager)
+    buffer = old / record['name']
+    if condition == 'buffer-inode':
+        record['identity'][1] += 1
+    elif condition == 'content':
+        (buffer / 'payload').write_text('never adopt')
+    elif condition == 'mode':
+        buffer.chmod(0o755)
+    elif condition == 'parent-inode':
+        record['parent'][1] += 1
+    elif condition == 'split-device':
+        record['identity'][0] += 1
+    else:
+        (manager.state.parent / 'transition.json').write_text('{}')
+    raw = upgrade.encoded(record)
+    manager._write('source-scratch.json', raw)
+
+    with pytest.raises(upgrade.UpgradeError):
+        manager.uninstall_inventory()
+    assert (manager.state / 'source-scratch.json').read_bytes() == raw
+
+
 def test_source_begin_protocol_has_no_caller_supplied_authority():
     import sys
     sys.path.insert(0, str(MODULE.parent))
