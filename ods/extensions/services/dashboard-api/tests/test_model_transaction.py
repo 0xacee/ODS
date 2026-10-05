@@ -249,7 +249,10 @@ def test_partial_host_mutation_cannot_be_recovered_by_a_generic_reset(controller
     tx=host._begin_pixel_model_transaction(env)
     config.write_text('half-written')
     result=host._recover_pixel_model_transaction(env)
-    assert result=={'pending':True,'phase':'held','transactionId':tx.id,'reason':'model-recovery-proof-required'}
+    assert result=={'pending':True,'phase':'held','transactionId':tx.id,'reason':'model-recovery-proof-required',
+                    'releasable':False}
+    # A host changed mid-switch is never released without the proof either.
+    assert host._recover_pixel_model_transaction(env,release_unverified=True)['pending'] is True
     assert state['pending'] and 'model-finish' not in calls
     with pytest.raises(host._PixelModelTransactionUncertain):host._begin_pixel_model_transaction(env)
     assert calls.count('model-begin')==1
@@ -455,7 +458,9 @@ def test_recovery_routes_require_owner_authentication(monkeypatch,method):
     getattr(host.AgentHandler,method)(fixtures._ResponseHandler())
 
 
-@pytest.mark.parametrize('body,pending,status',[({},False,200),({},True,409),({'transactionId':'a'*64},True,400)])
+@pytest.mark.parametrize('body,pending,status',[
+    ({},False,200),({},True,409),({'releaseUnverified':True},False,200),
+    ({'transactionId':'a'*64},True,400),({'releaseUnverified':False},True,400),({'releaseUnverified':'yes'},True,400)])
 def test_recovery_endpoint_uses_only_owned_journal_and_releases_lifecycle_lock(monkeypatch,body,pending,status):
     actions=[]
     monkeypatch.setattr(host,'check_auth',lambda _:True)
@@ -463,15 +468,75 @@ def test_recovery_endpoint_uses_only_owned_journal_and_releases_lifecycle_lock(m
     monkeypatch.setattr(host,'_begin_model_lifecycle',lambda kind:(actions.append(('begin',kind)) or True,None))
     monkeypatch.setattr(host,'_end_model_lifecycle',lambda kind:actions.append(('end',kind)))
     monkeypatch.setattr(host,'load_env',lambda _: {'fixture':'env'})
-    def recover(env):
+    def recover(env,*,release_unverified=False):
         assert env=={'fixture':'env'}
-        actions.append(('recover',None))
+        actions.append(('recover',release_unverified))
         return {'pending':pending,'phase':'held' if pending else 'completed','transactionId':'a'*64}
     monkeypatch.setattr(host,'_recover_pixel_model_transaction',recover)
     handler=fixtures._ResponseHandler()
     host.AgentHandler._handle_model_recover(handler)
     assert handler.response_code==status
-    assert actions==([('begin','model_recovery'),('recover',None),('end','model_recovery')] if body=={} else [])
+    accepted=body in ({},{'releaseUnverified':True})
+    assert actions==([('begin','model_recovery'),('recover',body=={'releaseUnverified':True}),
+                      ('end','model_recovery')] if accepted else [])
+
+
+def held_unproven_switch(controller,monkeypatch):
+    """A switch that applied nothing and whose previous model cannot be proven."""
+    env={'PIXEL_OPENWEBUI_KEY':'configured'}
+    tx=host._begin_pixel_model_transaction(env)
+    monkeypatch.setattr(host,'_prove_pixel_model_contract',lambda *_:False)
+    return env,tx
+
+
+def test_owner_can_release_a_switch_that_changed_nothing_without_the_live_proof(controller,monkeypatch):
+    # Fleet row 27 (laptop): the previous contract was a cloud default with no
+    # local model, so recovery waited forever for a proof that cannot pass.
+    _,state,calls,_=controller
+    env,tx=held_unproven_switch(controller,monkeypatch)
+    result=host._recover_pixel_model_transaction(env)
+    assert result['pending'] is True and result['releasable'] is True
+    before=list(calls)
+    result=host._recover_pixel_model_transaction(env,release_unverified=True)
+    assert result=={'pending':False,'phase':'completed','transactionId':tx.id,'outcome':'rollback'}
+    assert calls[len(before):]==['model-status','model-status','model-finish']
+    assert state['status']=='completed' and state['contract']==OLD and not host._pixel_model_recovery_status()['pending']
+
+
+def test_release_without_proof_refuses_a_controller_on_another_contract(controller,monkeypatch):
+    _,state,calls,_=controller
+    env,_=held_unproven_switch(controller,monkeypatch)
+    state['contract']=copy.deepcopy(NEW)
+    assert host._recover_pixel_model_transaction(env)['releasable'] is False
+    assert host._recover_pixel_model_transaction(env,release_unverified=True)['pending'] is True
+    assert 'model-finish' not in calls
+
+
+def test_release_without_proof_refuses_an_applied_target(controller,monkeypatch):
+    config,_,calls,_=controller
+    env={'PIXEL_OPENWEBUI_KEY':'configured'}
+    tx=host._begin_pixel_model_transaction(env)
+    config.write_text('new')
+    tx.apply(NEW)
+    monkeypatch.setattr(host,'_prove_pixel_model_contract',lambda *_:False)
+    assert host._recover_pixel_model_transaction(env,release_unverified=True)['pending'] is True
+    assert 'model-finish' not in calls
+
+
+def test_interrupted_release_without_proof_completes_on_rerun(controller,monkeypatch):
+    _,state,calls,call=controller
+    env,_=held_unproven_switch(controller,monkeypatch)
+    def lose_finish(operation,request=None,*,config):
+        if operation=='model-finish':
+            calls.append(operation)
+            raise TimeoutError()
+        return call(operation,request,config=config)
+    monkeypatch.setattr(host,'_runtime_model_control',lose_finish)
+    assert host._recover_pixel_model_transaction(env,release_unverified=True)['pending'] is True
+    assert host._pixel_model_recovery_status()['phase']=='rolling-back'
+    monkeypatch.setattr(host,'_runtime_model_control',call)
+    result=host._recover_pixel_model_transaction(env,release_unverified=True)
+    assert result['pending'] is False and result['outcome']=='rollback' and state['status']=='completed'
 
 
 @pytest.fixture

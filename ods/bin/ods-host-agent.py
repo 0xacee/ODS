@@ -4383,18 +4383,39 @@ def _prove_pixel_model_contract(config: dict, contract: dict) -> bool:
     return True
 
 
-def _recover_pixel_model_transaction(config: dict) -> dict:
+def _pixel_model_release_unverified_allowed(journal: dict, status: dict | None, current: dict) -> bool:
+    """Whether an owner may release a switch without the live proof.
+
+    Only a switch that never applied a target and changed nothing qualifies:
+    the controller holds this same transaction on the previous contract, and
+    every captured host file is as it was before. Releasing it restores
+    nothing. The proof can be impossible there: a cloud-mode default with no
+    local model can never be proven, which held a laptop indefinitely (fleet
+    row 27).
+    """
+    return (journal['target'] is None and journal['phase'] in {'held', 'rolling-back'}
+            and status is not None and status['transactionId'] == journal['transactionId']
+            and status['contract'] == journal['previous']
+            and (status['status'] == 'held'
+                 or (status['status'] == 'completed' and status['outcome'] == 'rollback'))
+            and 'unavailable' not in journal['before'].values() and current == journal['before'])
+
+
+def _recover_pixel_model_transaction(config: dict, *, release_unverified: bool = False) -> dict:
     """Release only a provably committed or unchanged/fully restored state.
 
     Recovery never loads a model or rewrites inference settings. The native
     coordinator may restore/requalify its gateway contract while completing
     the same transaction. An intermediate crash requires explicit repair.
+    With release_unverified (an explicit owner request), a switch that
+    changed nothing is released even when its previous model cannot be
+    proven live; nothing else is waived.
     """
     journal = _read_pixel_model_journal()
     if journal is None or journal['phase']=='completed':
         return {'pending':False,'phase':'idle','transactionId':None}
     pending = {'pending':True,'phase':journal['phase'],'transactionId':journal['transactionId'],
-               'reason':'model-recovery-proof-required'}
+               'reason':'model-recovery-proof-required','releasable':False}
     try:
         try:
             status = _runtime_model_control('model-status',config=config)
@@ -4480,8 +4501,15 @@ def _recover_pixel_model_transaction(config: dict) -> dict:
         # unrelated values. Prove the current file instead of the caller's
         # earlier snapshot before allowing the env-only drift exception.
         proof_config=load_env(INSTALL_DIR / '.env') if env_only_drift else config
-        if not _prove_pixel_model_contract(proof_config,expected):
-            return pending
+        unverified = (release_unverified and outcome == 'rollback'
+                      and _pixel_model_release_unverified_allowed(journal, status, current))
+        if unverified:
+            logger.warning('Releasing managed model transaction %s without proving the previous model, at the owner\'s request',
+                           journal['transactionId'][:12])
+        elif not _prove_pixel_model_contract(proof_config,expected):
+            # Offer the owner a release only where one would go through.
+            return {**pending,'releasable':outcome == 'rollback'
+                    and _pixel_model_release_unverified_allowed(journal, status, current)}
         if _pixel_model_config_digests()!=current:
             return pending
         transaction=_PixelModelTransaction(proof_config)
@@ -13208,15 +13236,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
         body=read_json_body(self)
         if body is None:return
-        if body!={}:
-            json_response(self,400,{'error':'Recovery accepts an empty request only'})
+        # {"releaseUnverified": true} is the owner's explicit request to
+        # release a switch that changed nothing without the live proof.
+        if body not in ({}, {'releaseUnverified':True}):
+            json_response(self,400,{'error':'Recovery accepts {} or {"releaseUnverified": true} only'})
             return
         acquired,_active=_begin_model_lifecycle('model_recovery')
         if not acquired:
             json_response(self,409,{'error':'Model lifecycle is busy'})
             return
         try:
-            result=_recover_pixel_model_transaction(load_env(INSTALL_DIR/'.env'))
+            result=_recover_pixel_model_transaction(load_env(INSTALL_DIR/'.env'),
+                                                     release_unverified=body.get('releaseUnverified') is True)
             json_response(self,409 if result['pending'] else 200,result,no_store=True)
         except Exception:
             json_response(self,503,{'pending':True,'phase':'unavailable','reason':'model-recovery-unavailable'},no_store=True)
