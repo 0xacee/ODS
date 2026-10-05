@@ -12,7 +12,7 @@
 #
 # Never: msiexec, Lemonade's install folder, cache, configuration or
 # registry, a kill by executable folder or name, or a task ODS did not write
-# (DreamServerLemonadeRuntime included). Remove one release after Round F.
+# (another tool's Lemonade task included). Remove one release after Round F.
 # Requires native-llama-runtime.ps1 (process-tree helpers) in scope.
 # ============================================================================
 

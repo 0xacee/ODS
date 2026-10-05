@@ -119,15 +119,15 @@ try {
         Arguments = 'serve --port 13305 --host 127.0.0.1 --no-tray --llamacpp vulkan --extra-models-dir "' + (Get-ODSPortalModelsDir) + '"' }
     $legacy = [pscustomobject]@{ TaskName = 'ODSLemonadeRuntime'; TaskPath = '\'; Principal = @{ UserId = $script:currentSid }; Actions = @($direct); State = 'Ready' }
     $current = [pscustomobject]@{ TaskName = (Get-ODSPortalLemonadeTaskName); TaskPath = '\'; Principal = @{ UserId = $script:currentSid }; Actions = @($direct); State = 'Ready' }
-    $foreign = [pscustomobject]@{ TaskName = 'DreamServerLemonadeRuntime'; TaskPath = '\'; Principal = @{ UserId = $script:currentSid }; Actions = @($direct); State = 'Running' }
+    $foreign = [pscustomobject]@{ TaskName = 'ForeignLemonadeRuntime'; TaskPath = '\'; Principal = @{ UserId = $script:currentSid }; Actions = @($direct); State = 'Running' }
     $script:tasks.Clear(); $script:queried.Clear()
     $script:tasks['ODSLemonadeRuntime'] = $legacy
     $script:tasks[$current.TaskName] = $current
-    $script:tasks['DreamServerLemonadeRuntime'] = $foreign
+    $script:tasks['ForeignLemonadeRuntime'] = $foreign
     $launches = @(Get-ODSPortalLemonadeLaunches)
     Assert-Recovery ($launches.Count -eq 2 -and $launches[0].Launch.TaskName -ceq $current.TaskName -and $launches[1].Launch.TaskName -ceq 'ODSLemonadeRuntime') 'both ODS Lemonade names of this user are recognized, per-user name first'
     Assert-Recovery ($launches[0].Launch.ExecutablePath -ceq $lemonadeExe -and $launches[0].Launch.Port -eq 13305) 'the former executable and port come from the ODS task action'
-    Assert-Recovery (-not $script:queried.Contains('DreamServerLemonadeRuntime')) 'a Lemonade task ODS never owned (DreamServerLemonadeRuntime) is never examined'
+    Assert-Recovery (-not $script:queried.Contains('ForeignLemonadeRuntime')) 'a Lemonade task ODS never owned (ForeignLemonadeRuntime) is never examined'
     $legacy.Principal = @{ UserId = 'S-1-5-21-100-200-300-1002' }
     $launches = @(Get-ODSPortalLemonadeLaunches)
     Assert-Recovery ($launches.Count -eq 1 -and $launches[0].Launch.TaskName -ceq $current.TaskName) 'another account''s legacy task is preserved and never adopted'

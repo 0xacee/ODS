@@ -148,7 +148,7 @@ try {
     $null = New-Item -ItemType Directory -Path (Split-Path -Parent $userLemonade) -Force
     [IO.File]::WriteAllText($userLemonade, 'user lemonade binary')
     $userLemonadeHash = (Get-FileHash -LiteralPath $userLemonade -Algorithm SHA256).Hash
-    $dreamServer = [pscustomobject]@{ TaskName = 'DreamServerLemonadeRuntime'; TaskPath = '\'; State = 'Running'
+    $foreignTask = [pscustomobject]@{ TaskName = 'ForeignLemonadeRuntime'; TaskPath = '\'; State = 'Running'
         Principal = [pscustomobject]@{ UserId = $script:sid }
         Actions = @([pscustomobject]@{ Execute = $userLemonade; Arguments = 'serve --port 9000'; WorkingDirectory = (Split-Path -Parent $userLemonade) }) }
 
@@ -191,7 +191,7 @@ try {
     $saved = Get-Content -LiteralPath (Join-Path $runtimeDir 'runtime.json') -Raw | ConvertFrom-Json
     Check ($saved.ExecutablePath -ceq (Join-Path (Join-Path (Get-ODSNativeLlamaRoot) 'b9014-win-vulkan-x64') 'llama-server.exe') -and $saved.Port -eq 8080 -and
         $saved.GgufFile -ceq 'Recommended-Q4.gguf' -and $saved.ContextSize -eq 65536 -and $saved.WslDistro -ceq 'Ubuntu-24.04') 'the plan names the versioned llama-server.exe, port 8080 and the recommended model'
-    Check (-not ($script:queried -contains 'DreamServerLemonadeRuntime')) 'a fresh install never looks at tasks ODS does not own'
+    Check (-not ($script:queried -contains 'ForeignLemonadeRuntime')) 'a fresh install never looks at tasks ODS does not own'
 
     # --- Rerun: keep the user's selection, key and port (fixes the 5.7 reset) --
     Reset-Scenario
@@ -261,7 +261,7 @@ try {
         $script:tasks[$lemonadeTask] = [pscustomobject]@{ TaskName = $lemonadeTask; TaskPath = '\'; State = 'Running'
             Principal = [pscustomobject]@{ UserId = $script:sid }
             Actions = @([pscustomobject]@{ Execute = $script:shellPath; Arguments = (Get-ODSPortalLauncherArguments); WorkingDirectory = $runtimeDir }) }
-        $script:tasks['DreamServerLemonadeRuntime'] = $dreamServer
+        $script:tasks['ForeignLemonadeRuntime'] = $foreignTask
     }
     Reset-Scenario
     New-LemonadeInstall
@@ -281,8 +281,8 @@ try {
     Check (-not $script:tasks.ContainsKey($lemonadeTask) -and $script:tasks.ContainsKey($llamaTask)) 'the ODS Lemonade task is replaced by the llama.cpp task'
     Check (-not (Test-Path -LiteralPath (Join-Path $runtimeDir 'backend-contract.ps1')) -and -not (Test-Path -LiteralPath (Join-Path $runtimeDir 'env-generator.ps1')) -and
         (Test-Path -LiteralPath (Join-Path $runtimeDir 'lemonade-launch.log'))) 'ODS-owned Lemonade launcher copies are removed and logs are kept'
-    Check ($script:tasks.ContainsKey('DreamServerLemonadeRuntime') -and $script:tasks['DreamServerLemonadeRuntime'].State -eq 'Running' -and
-        -not ($script:events -match 'DreamServerLemonadeRuntime') -and -not ($script:queried -contains 'DreamServerLemonadeRuntime')) 'a Lemonade task ODS never owned is never examined, stopped or removed'
+    Check ($script:tasks.ContainsKey('ForeignLemonadeRuntime') -and $script:tasks['ForeignLemonadeRuntime'].State -eq 'Running' -and
+        -not ($script:events -match 'ForeignLemonadeRuntime') -and -not ($script:queried -contains 'ForeignLemonadeRuntime')) 'a Lemonade task ODS never owned is never examined, stopped or removed'
     Check ((Get-FileHash -LiteralPath $userLemonade -Algorithm SHA256).Hash -eq $userLemonadeHash -and (Test-Path -LiteralPath $userLemonade)) 'the Lemonade installation itself is left unchanged'
     Check ((($script:output -join ' ') -match 'ODS installed Lemonade Server 10\.0\.0 on .+ no longer uses it') -and
         (($script:output -join ' ') -match 'Settings > Apps')) 'a one-time notice explains that ODS left its former Lemonade installed'

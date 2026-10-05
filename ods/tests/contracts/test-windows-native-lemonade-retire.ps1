@@ -7,7 +7,7 @@ param()
 # launcher ODS wrote for this installation, stops only the process tree it
 # proves, and unregisters the task only after llama-server proved its model.
 # Lemonade's folders, cache, registry and MSI are never touched, and the
-# separate DreamServerLemonadeRuntime task is never even looked up. Task
+# separate ForeignLemonadeRuntime task is never even looked up. Task
 # Scheduler, processes and sockets are fixtures; only temporary files are
 # written. Replaces test-windows-lemonade-task-cleanup.ps1, whose kill-by-
 # folder cleanup Round F deleted.
@@ -207,11 +207,11 @@ try {
 
     # --- Only ODSLemonadeRuntime at the root folder was ever looked up ---
     $names = @($script:queried | ForEach-Object { $_[0] } | Sort-Object -Unique)
-    Check (($names -join ',') -eq 'ODSLemonadeRuntime' -and @($script:queried | Where-Object { $_[1] -ne '\' }).Count -eq 0) 'no other task (DreamServerLemonadeRuntime included) is looked up, and nothing is enumerated'
+    Check (($names -join ',') -eq 'ODSLemonadeRuntime' -and @($script:queried | Where-Object { $_[1] -ne '\' }).Count -eq 0) 'no other task (ForeignLemonadeRuntime included) is looked up, and nothing is enumerated'
     $tokens = $null; $parseErrors = $null
     $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'installers/windows/lib/native-lemonade-retire.ps1'), [ref]$tokens, [ref]$parseErrors)
     $code = (@($tokens | Where-Object { $_.Kind -ne 'Comment' } | ForEach-Object { $_.Text }) -join ' ')
-    Check ($parseErrors.Count -eq 0 -and $code -notmatch '(?i)DreamServer|msiexec|Stop-Process|lemonade_server|\.cache|Program Files') 'the retire code never names DreamServerLemonadeRuntime, runs msiexec, kills by name, or touches Lemonade''s folders'
+    Check ($parseErrors.Count -eq 0 -and $code -notmatch '(?i)msiexec|Stop-Process|lemonade_server|\.cache|Program Files') 'the retire code never runs msiexec, kills by name, or touches Lemonade''s folders'
 } finally {
     Remove-Item -LiteralPath $fixture -Recurse -Force -ErrorAction SilentlyContinue
 }

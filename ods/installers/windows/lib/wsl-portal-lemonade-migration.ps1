@@ -7,7 +7,7 @@
 # launcher files. It never runs msiexec, never touches Lemonade's install
 # folders, cache, registry or configuration, and never stops a Lemonade that
 # ODS cannot prove it started. Tasks ODS never owned (for example
-# DreamServerLemonadeRuntime) are not examined. Remove one release after Round F.
+# another tool's Lemonade runtime task) are not examined. Remove one release after Round F.
 #
 # The durable Lemonade launcher used the same portal-runtime files as the
 # llama.cpp runtime (launch.ps1, runtime.json, intent.json). Every Lemonade
