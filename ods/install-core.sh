@@ -392,8 +392,17 @@ fi
 if [[ "$ENABLE_OPEN_WEBUI" != true ]] &&
    { [[ "$ENABLE_VOICE" == true ]] || [[ "$ENABLE_RAG" == true ]] ||
      [[ "$ENABLE_ODS_PROXY" == true ]]; }; then
-    echo "Voice, RAG documents, and ODS proxy currently require Open WebUI; use --with-webui or leave those services off" >&2
-    exit 1
+    # The Extensions Library adds voice and RAG documents without Open WebUI
+    # (ODS Talk uses voice directly). Refusing that installed selection made
+    # every later rerun and upgrade exit before it started (Strixy,
+    # 2026-10-05), so an existing installation keeps it. The ODS proxy routes
+    # to Open WebUI and still needs it.
+    if $ODS_EXISTING_INSTALL && [[ "$ENABLE_ODS_PROXY" != true ]]; then
+        echo "[WARN] Keeping the installed voice and RAG services without Open WebUI. ODS Talk uses voice; documents need Open WebUI (add it from Extensions, or rerun with --with-webui)." >&2
+    else
+        echo "Voice, RAG documents, and ODS proxy currently require Open WebUI; use --with-webui or leave those services off" >&2
+        exit 1
+    fi
 fi
 
 if $ODS_GATEWAY_ONLY; then
