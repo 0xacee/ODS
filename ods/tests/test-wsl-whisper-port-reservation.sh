@@ -35,7 +35,7 @@ export PATH="$tmp/bin:$PATH"
 phase06_resolver="$(sed -n \
     -e '/^    _env_get() {$/,/^    }$/p' \
     -e '/^    _env_get_explicit_first() {$/,/^    }$/p' \
-    -e '/^    _phase06_lemonade_uses_host_9000() {$/,/^    WHISPER_PORT="\$WHISPER_PORT_VALUE"$/p' \
+    -e '/^    WHISPER_PORT_VALUE="\$(_env_get_explicit_first WHISPER_PORT "9000")"$/,/^    WHISPER_PORT="\$WHISPER_PORT_VALUE"$/p' \
     "$ROOT/installers/phases/06-directories.sh")"
 if [[ "$phase06_resolver" != *'WHISPER_PORT_VALUE="$(_env_get_explicit_first WHISPER_PORT "9000")"'* ]]; then
     printf 'FAIL: phase 06 no longer resolves WHISPER_PORT where this test reads it\n' >&2
@@ -134,8 +134,10 @@ expect 'Voice rerun keeps and checks a retained owner port' 'unset 9500 9500 tru
 expect 'An explicit WHISPER_PORT is used as given' '9500 9500 9500 true' windows=9000 explicit=9500
 expect 'Voice install still moves the generated default' '9100 9100 9100 true' voice=true windows=9000
 expect 'A native Linux host never consults Windows' 'unset 9000 9000 true' windows=9000 wsl=false
-expect 'Native AMD lean install still gets 9100 from phase 06' 'unset 9000 9100 true' gpu=amd wsl=false
-expect 'WSL Lemonade lean install keeps a free alternate' '9001 9001 9001 true' \
+# AMD no longer runs Lemonade, whose router held host port 9000, so an AMD
+# install keeps Whisper's default; a retired LEMONADE_EXTERNAL changes nothing.
+expect 'Native AMD lean install keeps the default 9000' 'unset 9000 9000 true' gpu=amd wsl=false
+expect 'WSL AMD lean install keeps a free alternate' '9001 9001 9001 true' \
     windows='9000 9100' gpu=amd lemonade=true
 
 # The installation's own running Whisper is the Windows listener on its port.
@@ -155,7 +157,7 @@ expect 'A Whisper that is not running does not hold 9000' '9100 9100 9100 true' 
     voice=true windows=9000 retained=9000 whisper='false|ods|9000 |@install'
 expect "Another Compose project's Whisper is not this installation's" '9100 9100 9100 true' \
     windows=9000 retained=9000 whisper='true|other|9000 |/srv/other-ods'
-expect 'Lemonade hosts still move a running Whisper off 9000' '9100 9100 9100 true' \
+expect 'AMD hosts keep a running Whisper on 9000' 'unset 9000 9000 true' \
     voice=true windows=9000 retained=9000 gpu=amd wsl=false whisper='true|ods|9000 |@install'
 
 run_case windows='9000 9100 9001' >/dev/null
