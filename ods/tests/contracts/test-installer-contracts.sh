@@ -514,6 +514,10 @@ run_phase03_rag_guard() {
     show_phase() { :; }
     show_install_menu() { :; }
 
+    # Phase 03 asks this library whether Portal replaces Open WebUI as chat;
+    # install-core sources it before the phase.
+    # shellcheck source=/dev/null
+    source "${features_phase%/phases/03-features.sh}/lib/installed-feature-state.sh"
     # shellcheck source=/dev/null
     source "$features_phase" >/dev/null
 
