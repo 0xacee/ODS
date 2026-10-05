@@ -2858,6 +2858,33 @@ def _write_bound_env_text(path: Path, text: str) -> None:
     _write_bound_env_bytes(path, text.encode("utf-8"))
 
 
+class BindSourceRefused(RuntimeError):
+    """A single-file bind-mount source that ODS will not rewrite."""
+
+
+def _write_bound_file_in_place(path: Path, content: bytes) -> None:
+    """Rewrite a single-file bind-mount source without replacing its inode.
+
+    Docker Desktop serves a container's single-file bind through the inode it
+    first saw. A rename leaves an existing container without that source, and
+    its next start fails. Only the install owner's regular file is rewritten.
+    """
+    metadata = path.lstat()
+    if stat_mod.S_ISLNK(metadata.st_mode) or not stat_mod.S_ISREG(metadata.st_mode):
+        raise BindSourceRefused(f"{path.name} is not a regular file")
+    if os.name != "nt" and metadata.st_uid != os.geteuid():
+        raise BindSourceRefused(f"{path.name} is not owned by the ODS install owner")
+    descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    with os.fdopen(descriptor, "r+b") as handle:
+        opened = os.fstat(handle.fileno())
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise BindSourceRefused(f"{path.name} changed while it was being opened")
+        handle.write(content)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def _restore_bound_env_file(path: Path, snapshot: dict) -> None:
     """Restore .env content while preserving an existing Docker bind inode."""
     if not snapshot.get("exists"):
@@ -17661,7 +17688,10 @@ def _patch_hermes_config_text(
             model_fields.add("max_tokens")
             new_lines.append(line)
             continue
-        if context_length and current_key_path == ("auxiliary", "compression", "context_length"):
+        # Only the key line itself. Blank, comment and list lines keep the
+        # previous key's path and must stay as they are.
+        if (context_length and key_match
+                and current_key_path == ("auxiliary", "compression", "context_length")):
             indent = line[:len(line) - len(line.lstrip())]
             new_line = f"{indent}context_length: {int(context_length)}"
             new_lines.append(new_line)
@@ -17752,19 +17782,25 @@ def _prepare_hermes_route_for_start() -> tuple[bool, str]:
         if live.is_symlink() or (live.exists() and not stat_mod.S_ISREG(live.lstat().st_mode)):
             return False, "Hermes route config path is not a regular file"
 
-        def patch(path: Path, *, private_key: str | None = None) -> str:
+        def patch(path: Path, *, private_key: str | None = None, bound: bool = False) -> str:
             original = path.read_text(encoding="utf-8")
             updated, changed = _patch_hermes_config_text(
                 original, model_name, base_url=base_url,
                 context_length=context_length, api_key=private_key,
             )
+            if bound:
+                if changed:
+                    _write_bound_file_in_place(path, updated.encode("utf-8"))
+                return updated
             private_mode = private_key is not None and os.name != "nt"
             mode_needs_repair = private_mode and stat_mod.S_IMODE(path.stat().st_mode) != 0o600
             if changed or mode_needs_repair:
                 _atomic_write_text(path, updated, mode=0o600 if private_mode else None)
             return updated
 
-        template_text = patch(template)  # Never put the private key in product source.
+        # Never put the private key in product source. An existing Hermes
+        # container binds this file by itself, so keep its inode.
+        template_text = patch(template, bound=True)
         if not live.exists():
             live.parent.mkdir(parents=True, exist_ok=True)
             live_text, _ = _patch_hermes_config_text(
@@ -17777,6 +17813,9 @@ def _prepare_hermes_route_for_start() -> tuple[bool, str]:
             # unrelated owner settings, sessions, skills, and other data.
             patch(live, private_key=api_key)
         return True, ""
+    except BindSourceRefused as exc:
+        logger.warning("Refused to update the Hermes configuration template: %s", exc)
+        return False, f"Refused to update the Hermes configuration template: {exc}"
     except ValueError as exc:
         logger.warning("Hermes route configuration is ambiguous: %s", type(exc).__name__)
         return False, "Hermes route configuration is invalid or has duplicate keys"
@@ -17845,11 +17884,13 @@ def _patch_hermes_model_config(
     if not changed:
         return False
     try:
-        _atomic_write_text(path, patched)
+        # Callers patch the Hermes template, which a stopped Hermes container
+        # may still bind by inode; a rename would break its next start.
+        _write_bound_file_in_place(path, patched.encode("utf-8"))
         logger.info("Patched Hermes model.default in %s to %s", path, model_name)
         return True
-    except OSError:
-        logger.warning("Could not write Hermes config model patch: %s", path)
+    except (OSError, BindSourceRefused) as exc:
+        logger.warning("Could not write Hermes config model patch: %s (%s)", path, exc)
         return False
 
 

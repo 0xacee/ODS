@@ -498,6 +498,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   folder came back under a new device number and failed its identity check.
   Uninstall now accepts exactly that: the same folders, still empty and
   root-private. Anything else still stops the uninstall.
+- Turning Hermes off and on again from the Extensions Library after an
+  installer update no longer leaves it unable to start on Docker Desktop
+  ("error mounting ... cli-config.yaml.example ... no such file or
+  directory").
+  - The host agent's patch of Hermes's configuration template replaced every
+    comment and blank line that followed the compression `context_length`
+    with another `context_length` line. Its template never matched the
+    installer's, so the next start rewrote it.
+  - That rewrite replaced the file. Docker Desktop keeps an existing
+    container's single-file mount on the file it replaced, so the Hermes
+    container could no longer start.
+  - The agent now writes the same template as the installer for the same
+    model route, so a start after an update changes nothing. When the
+    template must change, the agent updates the file in place. It refuses
+    when the file is not a regular file that the ODS user owns.
 - Rerunning `install.ps1` on Windows (an update) no longer turns off Hermes
   Agent that was added from the Extensions Library. Windows setup passed
   `--no-hermes` on every run, so the rerun disabled Hermes and its proxy and
