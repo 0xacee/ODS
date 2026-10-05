@@ -3520,6 +3520,7 @@ class TestPurgeExtensionData:
     def test_purge_happy_path(self, test_client, monkeypatch, tmp_path):
         """Purge succeeds for disabled extension with existing data dir."""
         _patch_mutation_config(monkeypatch, tmp_path)
+        (tmp_path / "user" / "my-ext").mkdir()
         data_dir = tmp_path / "my-ext"
         data_dir.mkdir()
         (data_dir / "some-file.db").write_text("data")
@@ -3543,6 +3544,7 @@ class TestPurgeExtensionData:
         """Purge also deletes the per-service install-progress entry so the UI
         does not keep showing a stale 'installing' status."""
         _patch_mutation_config(monkeypatch, tmp_path)
+        (tmp_path / "user" / "my-ext").mkdir()
         data_dir = tmp_path / "my-ext"
         data_dir.mkdir()
         (data_dir / "some-file.db").write_text("data")
@@ -3631,6 +3633,7 @@ class TestPurgeExtensionData:
     def test_purge_404_no_data_dir(self, test_client, monkeypatch, tmp_path):
         """404 when valid ID but no data directory exists."""
         _patch_mutation_config(monkeypatch, tmp_path)
+        (tmp_path / "user" / "my-ext").mkdir()
 
         with patch("routers.extensions._extensions_lock", return_value=contextlib.nullcontext()):
             resp = test_client.request(
@@ -3645,6 +3648,7 @@ class TestPurgeExtensionData:
     def test_purge_400_confirm_false(self, test_client, monkeypatch, tmp_path):
         """400 when data exists but confirm is false."""
         _patch_mutation_config(monkeypatch, tmp_path)
+        (tmp_path / "user" / "my-ext").mkdir()
         data_dir = tmp_path / "my-ext"
         data_dir.mkdir()
 
@@ -3659,6 +3663,47 @@ class TestPurgeExtensionData:
         assert "Confirmation required" in resp.json()["detail"]
         # Data dir should still exist
         assert data_dir.exists()
+
+    @pytest.mark.parametrize("folder", [
+        "models", "config-backups", "user-extensions", "extensions-library",
+        "persona", "auth", "remote-provider",
+    ])
+    def test_purge_refuses_folders_that_belong_to_ods(self, test_client, monkeypatch, tmp_path, folder):
+        """An extension named like an ODS folder (an imported recipe could be)
+        still cannot purge it."""
+        _patch_mutation_config(monkeypatch, tmp_path)
+        (tmp_path / "user" / folder).mkdir()
+        data_dir = tmp_path / folder
+        data_dir.mkdir()
+        (data_dir / "keep").write_text("ODS state")
+
+        with patch("routers.extensions._extensions_lock", return_value=contextlib.nullcontext()):
+            resp = test_client.request(
+                "DELETE", f"/api/extensions/{folder}/data",
+                headers=test_client.auth_headers,
+                json={"confirm": True},
+            )
+
+        assert resp.status_code == 403
+        assert (data_dir / "keep").read_text() == "ODS state"
+
+    def test_purge_404_for_a_folder_no_extension_owns(self, test_client, monkeypatch, tmp_path):
+        """A data folder that no shipped, listed or installed extension owns is
+        not purgeable through the extensions API."""
+        _patch_mutation_config(monkeypatch, tmp_path)
+        data_dir = tmp_path / "stray-folder"
+        data_dir.mkdir()
+        (data_dir / "keep").write_text("unknown")
+
+        with patch("routers.extensions._extensions_lock", return_value=contextlib.nullcontext()):
+            resp = test_client.request(
+                "DELETE", "/api/extensions/stray-folder/data",
+                headers=test_client.auth_headers,
+                json={"confirm": True},
+            )
+
+        assert resp.status_code == 404
+        assert (data_dir / "keep").read_text() == "unknown"
 
     def test_purge_path_traversal(self, test_client, monkeypatch, tmp_path):
         """Path traversal attempts are blocked by regex or path check."""

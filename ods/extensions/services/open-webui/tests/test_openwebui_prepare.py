@@ -458,6 +458,106 @@ def test_no_overlay_replaces_the_step_or_odss_settings():
         "docker-compose.amd.yml", "docker-compose.nvidia.yml", "docker-compose.external-llm.yml",
         "docker-compose.lemonade-external.yml", "docker-compose.gateway-only.yml", "docker-compose.tier0.yml",
         "installers/macos/docker-compose.macos.yml", "installers/windows/docker-compose.windows-amd.yml",
-        "extensions/services/pixel-edge/compose.yaml.disabled",
+        "extensions/services/pixel-edge/compose.yaml.disabled", "extensions/services/ods-proxy/compose.yaml",
     ):
         assert expected in checked
+
+
+def test_the_ods_proxy_tells_open_webui_where_it_is_published():
+    compose = (SERVICE.parent / "ods-proxy/compose.yaml").read_text(encoding="utf-8")
+    # The same address the proxy's own port is published on.
+    assert '      - "${ODS_PROXY_BIND:-0.0.0.0}:${ODS_PROXY_PORT:-80}:80"\n' in service_block(compose, "ods-proxy")
+    assert service_block(compose) == (
+        "    environment:\n"
+        '      ODS_WEBUI_PROXY_BIND: "${ODS_PROXY_BIND:-0.0.0.0}"\n')
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX wrapper with sh")
+@pytest.mark.parametrize("bind,proxy,auth,expected,published", [
+    (None, None, "false", "false", False),
+    ("127.0.0.1", None, "false", "false", False),
+    ("0.0.0.0", None, "false", "true", True),
+    ("0.0.0.0", None, "true", "true", True),
+    # Through the ODS proxy, published beyond loopback.
+    ("127.0.0.1", "0.0.0.0", "false", "true", True),
+    ("127.0.0.1", "0.0.0.0", "True", "True", True),
+    (None, "192.168.1.5", None, "unset", True),
+    # A proxy kept on loopback publishes nothing.
+    ("127.0.0.1", "127.0.0.1", "false", "false", False),
+    ("127.0.0.1", " localhost ", "false", "false", False),
+])
+def test_the_wrapper_checks_the_built_in_administrator_whenever_other_devices_can_reach_open_webui(
+        tmp_path, bind, proxy, auth, expected, published):
+    stand_in = tmp_path / "python3"
+    stand_in.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$STEP_LOG"\nexit 0\n')
+    stand_in.chmod(0o755)
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("ODS_WEBUI_BIND_ADDRESS", "ODS_WEBUI_PROXY_BIND", "WEBUI_AUTH")}
+    environment.update(PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}", STEP_LOG=str(tmp_path / "step.log"))
+    for key, value in (("ODS_WEBUI_BIND_ADDRESS", bind), ("ODS_WEBUI_PROXY_BIND", proxy), ("WEBUI_AUTH", auth)):
+        if value is not None:
+            environment[key] = value
+    started = subprocess.run(["sh", str(WRAPPER), "sh", "-c", 'printf "%s" "${WEBUI_AUTH-unset}"'],
+                             capture_output=True, text=True, env=environment, check=False)
+    assert started.returncode == 0, started.stderr
+    assert started.stdout == expected
+    step = (tmp_path / "step.log").read_text().splitlines()
+    assert step == ["/opt/ods/openwebui-prepare.py" + (" --published-on-network" if published else "")]
+
+
+def add_account(database: Path, email: str, password_hash: str, active: bool = True) -> None:
+    """Open WebUI's credential table, as v0.11.4 defines it (models/auths.py)."""
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS auth (id TEXT PRIMARY KEY, email TEXT, password TEXT, active BOOLEAN)")
+        connection.execute("INSERT INTO auth VALUES (?, ?, ?, ?)", (email, email, password_hash, active))
+        connection.commit()
+
+
+def run_published(data: Path, app: Path) -> int:
+    return prepare.main(["--data-dir", str(data), "--app-dir", str(app), "--published-on-network"], now=NOW)
+
+
+@pytest.mark.parametrize("email", ["admin@localhost", "Admin@LocalHost"])
+def test_a_published_start_is_refused_while_the_built_in_administrator_has_the_default_password(tmp_path, email):
+    bcrypt = pytest.importorskip("bcrypt")
+    app = new_image(tmp_path)
+    data = data_dir(tmp_path, recorded="0.11.4", revision=V0114_HEAD)
+    add_account(data / prepare.DATABASE, email, bcrypt.hashpw(b"admin", bcrypt.gensalt(4)).decode())
+    before = digest(data / prepare.DATABASE)
+    with pytest.raises(SystemExit) as refused:
+        run_published(data, app)
+    message = str(refused.value)
+    assert "Open WebUI was not started" in message and "admin@localhost" in message
+    assert "BIND_ADDRESS=127.0.0.1" in message and "Nothing was changed" in message
+    # Nothing changed: the database, the recorded version, no backup.
+    assert digest(data / prepare.DATABASE) == before
+    assert (data / prepare.VERSION_MARKER).read_text() == "0.11.4\n"
+    assert not (data / prepare.BACKUP_DIR).exists()
+
+
+@pytest.mark.parametrize("case", ["changed-password", "inactive", "local-only", "no-auth-table", "no-database"])
+def test_a_start_proceeds_when_the_default_administrator_cannot_be_used_from_the_network(tmp_path, case):
+    bcrypt = pytest.importorskip("bcrypt")
+    app = new_image(tmp_path)
+    data = data_dir(tmp_path, recorded="0.11.4", revision=V0114_HEAD, database=case != "no-database")
+    if case in ("changed-password", "inactive", "local-only"):
+        password = b"a better one" if case == "changed-password" else b"admin"
+        add_account(data / prepare.DATABASE, "admin@localhost", bcrypt.hashpw(password, bcrypt.gensalt(4)).decode(),
+                    active=case != "inactive")
+    assert (run(data, app) if case == "local-only" else run_published(data, app)) == 0
+
+
+def test_an_argon2_hash_of_the_default_password_is_recognized(tmp_path):
+    argon2 = pytest.importorskip("argon2")
+    app = new_image(tmp_path)
+    data = data_dir(tmp_path, recorded="0.11.4", revision=V0114_HEAD)
+    add_account(data / prepare.DATABASE, "admin@localhost", argon2.PasswordHasher().hash("admin"))
+    with pytest.raises(SystemExit, match="admin@localhost"):
+        run_published(data, app)
+
+
+def test_a_malformed_hash_is_not_the_default_password():
+    pytest.importorskip("bcrypt")
+    assert prepare.is_default_password("not a hash") is False
+    assert prepare.is_default_password("") is False
+    assert prepare.is_default_password(None) is False

@@ -139,6 +139,39 @@ else
     # shellcheck source=../../lib/safe-env.sh
     source "$SCRIPT_DIR/lib/safe-env.sh"
 
+    # Older Pixel source updates (bin/pixel_source_upgrade.py, run as root) set
+    # only the owner of the files and folders they wrote, so those kept root's
+    # group. The host agent keeps a file's group when it rewrites one, which
+    # the owner cannot do for root's group, so adding Hermes back from the
+    # Extensions Library failed. Return them to the owner's group, as a fresh
+    # install leaves them: the owner's own files and folders in the six source
+    # trees those updates write, as the owner, never through a link. A pending
+    # Pixel source plan records file contents and modes, not groups, so this
+    # cannot disturb one.
+    _phase06_repair_root_group() {
+        local uid gid name count
+        local -a roots=()
+        uid="$(id -u)"
+        gid="$(id -g)"
+        # Files that root owns belong in group root.
+        [[ "$uid" != 0 && "$gid" != 0 ]] || return 0
+        for name in bin lib scripts installers extensions vendor; do
+            [[ -d "$INSTALL_DIR/$name" && ! -L "$INSTALL_DIR/$name" ]] || continue
+            roots+=("$INSTALL_DIR/$name")
+        done
+        (( ${#roots[@]} > 0 )) || return 0
+        count="$(find -P "${roots[@]}" \( -type f -o -type d \) -user "$uid" -group 0 -print0 \
+            | tr -cd '\0' | wc -c)" \
+            || error "Could not check the installed source trees for files in group root."
+        (( count > 0 )) || return 0
+        find -P "${roots[@]}" \( -type f -o -type d \) -user "$uid" -group 0 \
+            -exec chgrp -h "$gid" {} + \
+            || error "Could not return installed source files from group root to group $gid."
+        log "Returned $((count)) installed source files and folders from group root to group $gid"
+    }
+    _phase06_repair_root_group
+    unset -f _phase06_repair_root_group
+
     _env_existing=""
     [[ -f "$INSTALL_DIR/.env" ]] && _env_existing="$INSTALL_DIR/.env"
 

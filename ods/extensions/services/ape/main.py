@@ -102,7 +102,7 @@ logger = logging.getLogger("ape")
 API_KEY = _API_KEY or secrets.token_hex(32)
 
 if not _API_KEY:
-    logger.warning(f"APE_API_KEY not set - auto-generated key: {API_KEY[:16]}... (set APE_API_KEY env var to use a fixed key)")
+    logger.warning("APE_API_KEY not set - generated a random key for this run (set APE_API_KEY to use a fixed key)")
 
 if not STRICT_MODE:
     logger.warning("WARNING: APE is running in advisory mode. Tool calls are logged but NOT blocked. Set APE_STRICT_MODE=true to enforce policies.")
@@ -1072,8 +1072,9 @@ async def audit(last_n: int = 50, api_key: str = Depends(verify_api_key)):
                         entries.pop(0)
                     entries.append(json.loads(line))
         return {"entries": entries, "total": total_lines}
-    except Exception as e:
-        return {"entries": [], "error": str(e)}
+    except (OSError, ValueError) as e:
+        logger.warning("audit log read failed: %s", e)
+        return {"entries": [], "error": "audit log unreadable"}
 
 
 @app.get("/policy")

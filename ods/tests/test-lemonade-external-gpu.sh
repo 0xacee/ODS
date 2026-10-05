@@ -18,23 +18,44 @@ parse_source="$(sed -n '/^while \[\[ \$# -gt 0 \]\]; do$/,/^done$/p' "$ROOT/inst
 [[ -n "$parse_source" ]] || { echo "FAIL: argument loop not found" >&2; exit 1; }
 vram_source="$(sed -n '/^# Validate external Lemonade VRAM/,/^unset _lemonade_vram$/p' "$ROOT/install-core.sh")"
 [[ -n "$vram_source" ]] || { echo "FAIL: VRAM validation block not found" >&2; exit 1; }
+context_source="$(sed -n '/^# Validate the external Lemonade context/,/^fi$/p' "$ROOT/install-core.sh")"
+[[ -n "$context_source" ]] || { echo "FAIL: context validation block not found" >&2; exit 1; }
 exports="$(sed -n '/^if \[\[ "\${LEMONADE_EXTERNAL,,}" == "true" \]\]; then$/,/^fi$/p' "$ROOT/install-core.sh")"
 [[ -n "$exports" ]] || { echo "FAIL: Lemonade export block not found" >&2; exit 1; }
 parsed="$(
     set -- --pixel --lemonade-url http://localhost:8080 --lemonade-model extra.Qwen3.5-9B-Q4_K_M.gguf \
+        --lemonade-context-size 131072 \
         --lemonade-gpu-name 'AMD Radeon RX 9070 XT' --lemonade-gpu-vram-mb 16304 --tier 2
-    LEMONADE_EXTERNAL=false LEMONADE_MODEL='' LEMONADE_GPU_NAME='' LEMONADE_GPU_VRAM_MB=''
+    LEMONADE_EXTERNAL=false LEMONADE_MODEL='' LEMONADE_CONTEXT_SIZE='' LEMONADE_GPU_NAME='' LEMONADE_GPU_VRAM_MB=''
     eval "$parse_source"
     eval "$vram_source"
+    eval "$context_source"
     eval "$exports"
-    bash -c 'printf "%s|%s|%s|%s|%s" "$LEMONADE_EXTERNAL" "$LEMONADE_BASE_URL" "$LEMONADE_MODEL" "$LEMONADE_GPU_NAME" "$LEMONADE_GPU_VRAM_MB"'
+    bash -c 'printf "%s|%s|%s|%s|%s|%s" "$LEMONADE_EXTERNAL" "$LEMONADE_BASE_URL" "$LEMONADE_MODEL" "$LEMONADE_CONTEXT_SIZE" "$LEMONADE_GPU_NAME" "$LEMONADE_GPU_VRAM_MB"'
     printf '|%s|%s' "$ODS_MODE" "$TIER"
 )"
-check '[[ "$parsed" == "true|http://localhost:8080|extra.Qwen3.5-9B-Q4_K_M.gguf|AMD Radeon RX 9070 XT|16304|lemonade|2" ]]' \
+check '[[ "$parsed" == "true|http://localhost:8080|extra.Qwen3.5-9B-Q4_K_M.gguf|131072|AMD Radeon RX 9070 XT|16304|lemonade|2" ]]' \
     "Lemonade route flags are parsed and exported ($parsed)"
 bad_vram_rc=0
 ( set -- --lemonade-gpu-vram-mb 16GB; eval "$parse_source"; eval "$vram_source" ) >/dev/null 2>&1 || bad_vram_rc=$?
 check '[[ "$bad_vram_rc" -ne 0 ]]' "non-numeric --lemonade-gpu-vram-mb is rejected"
+
+# The loaded context reaches phase 02 only as a whole number of tokens.
+validate_context() (
+    LEMONADE_CONTEXT_SIZE="$1"
+    eval "$context_source"
+    printf '%s' "$LEMONADE_CONTEXT_SIZE"
+)
+for bad in 1023 0 -1 128k 1+1 0131072 '65536 ' 99999999999999999 'a[0]'; do
+    bad_context_rc=0
+    validate_context "$bad" >/dev/null 2>&1 || bad_context_rc=$?
+    check '[[ "$bad_context_rc" -ne 0 ]]' "Lemonade context rejects '$bad'"
+done
+accepted="$(validate_context 1024)|$(validate_context 131072)|$(validate_context '')"
+check '[[ "$accepted" == "1024|131072|" ]]' "Lemonade context accepts 1024 and up; empty keeps the catalog's ($accepted)"
+missing_context_rc=0
+( set -- --lemonade-context-size; eval "$parse_source" ) >/dev/null 2>&1 || missing_context_rc=$?
+check '[[ "$missing_context_rc" -ne 0 ]]' "--lemonade-context-size without a value is rejected"
 
 normalize_vram() (
     LEMONADE_GPU_VRAM_MB="$1"

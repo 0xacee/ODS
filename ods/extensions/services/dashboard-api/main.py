@@ -156,6 +156,18 @@ _host_agent_probe_state: dict[str, Optional[str]] = {
 logger = logging.getLogger(__name__)
 
 
+def _public_manifest_errors() -> list[dict[str, str]]:
+    """Manifest load errors without exception text; config.py logs the detail."""
+    return [
+        {
+            "file": Path(entry["file"]).parent.name,
+            "error": ("Unsupported schema_version" if entry["error"] == "Unsupported schema_version"
+                      else "manifest could not be loaded"),
+        }
+        for entry in MANIFEST_ERRORS
+    ]
+
+
 def _resolve_install_root() -> Path:
     host_root = Path("/ods")
     if host_root.exists():
@@ -1502,7 +1514,7 @@ async def api_status(api_key: str = Depends(verify_api_key)):
                           "throughputModel": last_inference.get("throughput_model"),
                           "inferenceActive": None,
                           "loadedModel": None, "contextSize": None},
-            "manifest_errors": MANIFEST_ERRORS,
+            "manifest_errors": _public_manifest_errors(),
         }
 
 
@@ -1676,7 +1688,7 @@ async def _build_api_status() -> dict:
             "loadedModel": loaded_model_name,
             "contextSize": context_size or (model_data["contextLength"] if model_data else None),
         },
-        "manifest_errors": MANIFEST_ERRORS,
+        "manifest_errors": _public_manifest_errors(),
     }
     return result
 
@@ -1767,7 +1779,7 @@ async def api_settings_summary(api_key: str = Depends(verify_api_key)):
             "uptime": uptime,
             "hostname": os.environ.get("HOSTNAME", "ods"),
         },
-        "manifest_errors": MANIFEST_ERRORS,
+        "manifest_errors": _public_manifest_errors(),
     }
     _cache.set("settings_summary", result, _SETTINGS_SUMMARY_CACHE_TTL)
     return result

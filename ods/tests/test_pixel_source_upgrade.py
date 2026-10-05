@@ -3,6 +3,7 @@ import importlib.util
 import fcntl
 import os
 import json
+import pwd
 import re
 import socket
 import subprocess
@@ -289,6 +290,32 @@ def test_mode_and_new_nested_directory_preserved_on_rollback(trees):
     manager.publish(verify, rollback=True)
     assert not (old / "bin/nested/new.py").exists()
     assert (old / "bin/a.py").stat().st_mode & 0o777 == 0o500
+
+
+def test_published_paths_take_the_owner_primary_group(trees):
+    """Root publishes the update. Setting only the owner left new files and
+    directories in root's group; a fresh install's owner-run copy leaves them
+    in the owner's primary group, and the host agent keeps a file's group when
+    it rewrites one (a non-root chown to root's group fails)."""
+    manager, old, new, identity = trees
+    uid = os.getuid()
+    assert upgrade.SourceUpgrade(manager.state, old, uid, state_uid=uid).gid == pwd.getpwuid(uid).pw_gid
+    # Unprivileged stand-in for root: this process creates the payloads in
+    # its own group, and the owner's group is another one it may assign.
+    creator = os.getegid()
+    owner_group = next((group for group in os.getgroups() if group != creator), None)
+    if owner_group is None:
+        pytest.skip("needs a supplementary group other than the creating group")
+    manager = upgrade.SourceUpgrade(manager.state, old, uid, state_uid=uid, owner_gid=owner_group)
+    (new / "extensions/services/hermes").mkdir(parents=True)
+    (new / "extensions/services/hermes/compose.yaml.disabled").write_text("services: {}\n")
+    verify, _ = held(manager, new, identity)
+    manager.publish(verify)
+    for path in ("bin/a.py", "bin/added.py", "extensions/services", "extensions/services/hermes",
+                 "extensions/services/hermes/compose.yaml.disabled"):
+        assert (old / path).stat().st_gid == owner_group, path
+    # Paths the update does not change are not rewritten.
+    assert (old / "bin/removed.py").stat().st_gid == creator
 
 
 def test_root_release_gate_requires_exact_completed_source(tmp_path, monkeypatch):
@@ -709,6 +736,64 @@ def test_completed_uninstall_inventory_rejects_unknown_or_changed_state(mirrored
         (mirror / 'pixel_access_bridge.py').write_bytes(b'not the reviewed guard')
     with pytest.raises((upgrade.UpgradeError, OSError)):
         manager.uninstall_inventory()
+
+
+def _completed(mirrored):
+    manager, old, _new, _identity, _mirror = mirrored
+    manager.bind('d' * 64, lambda _: None)
+    manager.publish(lambda _: None)
+    manager.finish(lambda *_: None)
+    return manager, old
+
+
+def _renumbered_receipt(manager):
+    """The receipt as a WSL VM restart leaves it: same inodes, a new device."""
+    record = json.loads((manager.state / 'source-scratch.json').read_text())
+    record['parent'][0] += 100
+    record['identity'][0] += 100
+    return record
+
+
+def test_completed_uninstall_inventory_accepts_a_renumbered_device(mirrored):
+    manager, old = _completed(mirrored)
+    expected = manager.uninstall_inventory()
+    record = _renumbered_receipt(manager)
+    raw = upgrade.encoded(record)
+    manager._write('source-scratch.json', raw)
+    with pytest.raises(upgrade.UpgradeError, match='source-scratch-invalid'):
+        with manager._scratch():
+            pass
+
+    assert manager.uninstall_inventory() == expected
+    # Validation only reads: the receipt and the buffer stay as they were.
+    assert (manager.state / 'source-scratch.json').read_bytes() == raw
+    assert (old / record['name']).is_dir() and list((old / record['name']).iterdir()) == []
+
+
+@pytest.mark.parametrize('condition', ['buffer-inode', 'content', 'mode', 'parent-inode',
+                                       'split-device', 'pending'])
+def test_completed_uninstall_inventory_refuses_anything_but_a_renumbered_device(mirrored, condition):
+    manager, old = _completed(mirrored)
+    record = _renumbered_receipt(manager)
+    buffer = old / record['name']
+    if condition == 'buffer-inode':
+        record['identity'][1] += 1
+    elif condition == 'content':
+        (buffer / 'payload').write_text('never adopt')
+    elif condition == 'mode':
+        buffer.chmod(0o755)
+    elif condition == 'parent-inode':
+        record['parent'][1] += 1
+    elif condition == 'split-device':
+        record['identity'][0] += 1
+    else:
+        (manager.state.parent / 'transition.json').write_text('{}')
+    raw = upgrade.encoded(record)
+    manager._write('source-scratch.json', raw)
+
+    with pytest.raises(upgrade.UpgradeError):
+        manager.uninstall_inventory()
+    assert (manager.state / 'source-scratch.json').read_bytes() == raw
 
 
 def test_source_begin_protocol_has_no_caller_supplied_authority():

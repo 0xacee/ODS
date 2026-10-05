@@ -11,7 +11,9 @@ the service still cannot spend the provider key without it.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,12 +56,16 @@ POLICY_PATH = Path(
 SECRET_PATH = Path(
     os.environ.get("ODS_REMOTE_PROVIDER_API_KEY_FILE", str(DEFAULT_SECRET_PATH))
 )
+logger = logging.getLogger("ods-remote-provider-egress")
+
 MAX_BODY_BYTES = int(
     os.environ.get("ODS_REMOTE_PROVIDER_MAX_BODY_BYTES", str(DEFAULT_MAX_BODY_BYTES))
 )
 UPSTREAM_TIMEOUT_SECONDS = float(
     os.environ.get("ODS_REMOTE_PROVIDER_UPSTREAM_TIMEOUT", "600")
 )
+# Direct-provider HTTP clients kept open, one per provider endpoint.
+MAX_DIRECT_HTTP_CLIENTS = 4
 SSH_TUNNEL_HEALTH_URL = os.environ.get(
     "ODS_REMOTE_PROVIDER_SSH_TUNNEL_HEALTH_URL",
     "http://remote-provider-ssh-tunnel:18090/health",
@@ -113,16 +119,32 @@ def _load_route() -> dict[str, Any]:
     return route
 
 
+# Clients closing in the background, referenced until they finish.
+_closing_clients: set[asyncio.Task] = set()
+
+
+def _close_later(client: httpx.AsyncClient) -> None:
+    task = asyncio.get_running_loop().create_task(client.aclose())
+    _closing_clients.add(task)
+    task.add_done_callback(_closing_clients.discard)
+
+
 def _http_client(connection_key: str = "") -> httpx.AsyncClient:
     if connection_key:
         clients = getattr(app.state, "direct_http_clients", None)
         if clients is None:
             clients = {}
             app.state.direct_http_clients = clients
-        client = clients.get(connection_key)
+        # Least recently used first: a reused endpoint moves to the end.
+        client = clients.pop(connection_key, None)
         if client is None or client.is_closed:
             client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
-            clients[connection_key] = client
+        clients[connection_key] = client
+        # Endpoints change only when the operator reconfigures the remote
+        # provider. Keep the most recent ones and close the rest, rather than
+        # holding every past endpoint's connection pool forever (#2701).
+        while len(clients) > MAX_DIRECT_HTTP_CLIENTS:
+            _close_later(clients.pop(next(iter(clients))))
         return client
     client = getattr(app.state, "http", None)
     if client is None or client.is_closed:
@@ -367,7 +389,11 @@ async def probe() -> Response:
         if route.get("transport") == "ssh":
             tunnel = await _ssh_tunnel_status()
         secret = read_provider_secret(SECRET_PATH)
-        payload = probe_route_response(
+        # The probe makes blocking HTTP calls (urllib) for up to its timeout.
+        # Run it on a worker thread so inference requests and streams keep
+        # being served meanwhile.
+        payload = await asyncio.to_thread(
+            probe_route_response,
             route,
             provider_secret=secret,
             verified_at=_iso_now(),
@@ -482,12 +508,9 @@ async def forward(full_path: str, request: Request) -> Response:
             EgressError(504, "upstream_timeout", "remote provider timed out")
         )
     except httpx.HTTPError as exc:
+        logger.warning("remote provider unavailable: %s", exc)
         return _error_response(
-            EgressError(
-                502,
-                "upstream_unavailable",
-                f"remote provider unavailable: {exc}",
-            )
+            EgressError(502, "upstream_unavailable", "remote provider unavailable")
         )
     response_headers = _response_headers(upstream.headers)
     if 200 <= upstream.status_code < 300 and len(upstream.content) <= 16 * 1024 * 1024:

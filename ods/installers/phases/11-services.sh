@@ -396,6 +396,42 @@ _phase11_patch_hermes_with_sed() {
         && grep -Fqx "  context_length: ${context_length}" "$template_path"
 }
 
+# Write the selected model route into the Hermes template, then verify it.
+# Arguments: python, template, model, context, request timeout, base URL, API key.
+_phase11_apply_hermes_template() {
+    local _python_cmd="$1" _hermes_tpl="$2" _hermes_model="$3" _hermes_context="$4"
+    local _hermes_request_timeout="$5" _hermes_base_url="$6" _hermes_api_key="$7"
+    local _hermes_patcher="$INSTALL_DIR/scripts/patch-hermes-config.py"
+    local _hermes_model_yaml _hermes_model_yaml_valid=false
+    local -a _hermes_patcher_args
+    if [[ -n "$_python_cmd" && -f "$_hermes_patcher" ]]; then
+        _hermes_patcher_args=("$_hermes_tpl" --model "$_hermes_model" --context-length "$_hermes_context")
+        if [[ -n "$_hermes_base_url" ]]; then
+            _hermes_patcher_args+=(--base-url "$_hermes_base_url")
+        fi
+        if [[ -n "$_hermes_api_key" ]]; then
+            _hermes_patcher_args+=(--api-key "$_hermes_api_key")
+        fi
+        _hermes_patcher_args+=(--request-timeout-seconds "$_hermes_request_timeout")
+        "$_python_cmd" "$_hermes_patcher" "${_hermes_patcher_args[@]}" >>"$LOG_FILE" 2>&1 || \
+            warn "Hermes config patcher failed for $_hermes_tpl"
+    else
+        _phase11_patch_hermes_with_sed \
+            "$_hermes_tpl" "$_hermes_model" "$_hermes_context" "$_hermes_request_timeout" \
+            2>>"$LOG_FILE" || warn "Hermes fallback config patcher failed for $_hermes_tpl"
+    fi
+    if _hermes_model_yaml="$(_phase11_yaml_double_quoted_scalar_content "$_hermes_model")"; then
+        _hermes_model_yaml_valid=true
+    fi
+    if $_hermes_model_yaml_valid && \
+       grep -Fqx "  default: \"$_hermes_model_yaml\"" "$_hermes_tpl" && \
+       grep -Fqx "  context_length: ${_hermes_context}" "$_hermes_tpl"; then
+        ai_ok "Patched Hermes template: model.default=$_hermes_model, context=$_hermes_context"
+    else
+        warn "Hermes template substitution didn't take effect — Hermes may 404 every chat completion. Hand-edit $_hermes_tpl after install if Hermes prompts hang."
+    fi
+}
+
 ods_progress 75 "services" "Starting services"
 show_phase 5 6 "Starting Services" "~2-3 minutes"
 
@@ -1180,6 +1216,7 @@ MODELS_INI_EOF
         fi
     fi
 
+    _phase11_hermes_template_route=()
     if [[ "${ENABLE_HERMES:-false}" == "true" ]]; then
         # The Hermes Agent extension ships a config template at
         # extensions/services/hermes/cli-config.yaml.template which is
@@ -1251,33 +1288,17 @@ MODELS_INI_EOF
             elif _phase11_external_llm; then
                 _hermes_request_timeout=900
             fi
-            _hermes_patcher="$INSTALL_DIR/scripts/patch-hermes-config.py"
-            if [[ -n "$_python_cmd" && -f "$_hermes_patcher" ]]; then
-                _hermes_patcher_args=("$_hermes_tpl" --model "$_hermes_model" --context-length "$_hermes_context")
-                if [[ -n "$_hermes_base_url" ]]; then
-                    _hermes_patcher_args+=(--base-url "$_hermes_base_url")
-                fi
-                if [[ -n "$_hermes_api_key" ]]; then
-                    _hermes_patcher_args+=(--api-key "$_hermes_api_key")
-                fi
-                _hermes_patcher_args+=(--request-timeout-seconds "$_hermes_request_timeout")
-                "$_python_cmd" "$_hermes_patcher" "${_hermes_patcher_args[@]}" >>"$LOG_FILE" 2>&1 || \
-                    warn "Hermes config patcher failed for $_hermes_tpl"
+            _phase11_hermes_template_route=("$_python_cmd" "$_hermes_tpl" "$_hermes_model" \
+                "$_hermes_context" "$_hermes_request_timeout" "$_hermes_base_url" "$_hermes_api_key")
+            if [[ -n "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+                # Phase 06 published this template in the Pixel source update
+                # it still holds, and that update finishes only over the exact
+                # bytes it published. The route is written once the Pixel
+                # install below has finished the update, before Compose.
+                log "Hermes template route waits for the held Pixel source update to finish"
             else
-                _phase11_patch_hermes_with_sed \
-                    "$_hermes_tpl" "$_hermes_model" "$_hermes_context" "$_hermes_request_timeout" \
-                    2>>"$LOG_FILE" || warn "Hermes fallback config patcher failed for $_hermes_tpl"
-            fi
-            _hermes_model_yaml_valid=false
-            if _hermes_model_yaml="$(_phase11_yaml_double_quoted_scalar_content "$_hermes_model")"; then
-                _hermes_model_yaml_valid=true
-            fi
-            if $_hermes_model_yaml_valid && \
-               grep -Fqx "  default: \"$_hermes_model_yaml\"" "$_hermes_tpl" && \
-               grep -Fqx "  context_length: ${_hermes_context}" "$_hermes_tpl"; then
-                ai_ok "Patched Hermes template: model.default=$_hermes_model, context=$_hermes_context"
-            else
-                warn "Hermes template substitution didn't take effect — Hermes may 404 every chat completion. Hand-edit $_hermes_tpl after install if Hermes prompts hang."
+                _phase11_apply_hermes_template "${_phase11_hermes_template_route[@]}"
+                _phase11_hermes_template_route=()
             fi
         fi
 
@@ -1440,6 +1461,11 @@ MODELS_INI_EOF
     if ! ods_pixel_install_default_agent; then
         ai_bad "Pixel default-agent setup failed before the ODS stack launch."
         exit 1
+    fi
+    # The Pixel source update is finished now; Hermes has not started yet.
+    # (":-" keeps set -u safe where tests run this block without the setup.)
+    if [[ -n "${_phase11_hermes_template_route[*]:-}" ]]; then
+        _phase11_apply_hermes_template "${_phase11_hermes_template_route[@]}"
     fi
     _phase11_write_compose_launch_record
     for _attempt in 1 2 3; do
@@ -1646,6 +1672,14 @@ MODELS_INI_EOF
         if command -v systemd-run >/dev/null 2>&1 \
             && [[ -d "$_upgrade_runtime_dir" && -S "$_upgrade_runtime_dir/bus" ]] \
             && "${_upgrade_systemd_env[@]}" systemctl --user show-environment >/dev/null 2>&1; then
+            # Without lingering, the user manager stops when the installer's
+            # login session ends and takes this unit with it. OpenCode (phase
+            # 07) and AMD tuning (phase 10) enable it already; default NVIDIA
+            # and CPU installs reach this point without it. Each attempt's
+            # error output is dropped because the next step covers it.
+            loginctl enable-linger "$(whoami)" 2>/dev/null \
+                || { ods_sudo_available && ods_sudo loginctl enable-linger "$(whoami)" 2>/dev/null; } \
+                || ai_warn "Could not enable linger. The background model download may stop after logout. Run: loginctl enable-linger $(whoami)"
             "${_upgrade_systemd_env[@]}" systemctl --user stop "$_upgrade_unit" >/dev/null 2>&1 || true
             "${_upgrade_systemd_env[@]}" systemctl --user reset-failed "$_upgrade_unit" >/dev/null 2>&1 || true
             if "${_upgrade_systemd_env[@]}" systemd-run --user --unit="${_upgrade_unit%.service}" --no-block \

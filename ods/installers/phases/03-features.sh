@@ -100,7 +100,10 @@ fi
 
 # Tier safety net: disable ComfyUI on Tier 0/1 in non-interactive mode.
 # Interactive mode has its own tier checks in the menu — this catches --non-interactive.
-if ! $INTERACTIVE && [[ "$ENABLE_COMFYUI" == "true" ]]; then
+# A rerun keeps a ComfyUI that this install already runs (for example one added
+# from the Extensions Library), as the interactive "Keep current selection" does.
+if ! $INTERACTIVE && [[ "$ENABLE_COMFYUI" == "true" ]] &&
+   [[ "$(ods_installed_service_default "$INSTALL_DIR" comfyui false)" != "true" ]]; then
     case "${TIER:-}" in
         0|1)
             ENABLE_COMFYUI=false
@@ -213,6 +216,12 @@ if [[ "${ENABLE_HERMES:-false}" == "true" && "${ODS_MODE:-local}" != "cloud" ]];
             && [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" ]] \
             && [[ -f "$SCRIPT_DIR/scripts/select-model.py" && -f "$SCRIPT_DIR/config/model-library.json" ]]; then
             _hermes_python="$(ods_model_selector_python)"
+        fi
+        if [[ "${LEMONADE_EXTERNAL:-false}" == "true" ]]; then
+            # Lemonade on the Windows host loaded this model at this context;
+            # this run can neither pick another model nor resize it.
+            _hermes_floor_action="cap"
+            _hermes_python=""
         fi
         if [[ -n "$_hermes_python" ]]; then
             _hermes_fit_status=0

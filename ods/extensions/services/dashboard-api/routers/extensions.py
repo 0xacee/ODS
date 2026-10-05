@@ -50,7 +50,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["extensions"])
 
-_SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+# \Z, not $: "$" also matches before a final newline, which would admit "n8n\n".
+_SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 _MAX_EXTENSION_BYTES = 50 * 1024 * 1024  # 50 MB
 _LIBRARY_RECEIPT = ".ods-library-receipt.json"
 _LIBRARY_RECEIPT_SCHEMA = 1
@@ -730,11 +731,24 @@ def _is_ods_nvidia_gpu_reservation(entry) -> bool:
 #     directory, which is the ODS install directory (the first -f file), not
 #     the extension's own directory: ./.env there is the owner's secrets and
 #     ./scripts is code the ods CLI runs on the host. An imported recipe may
-#     bind only its own ./data/<id> and ./config/<id>.
+#     bind only its own ./data/<id> and ./config/<id>, and never when <id>
+#     names a folder ODS keeps there itself (_COMPOSE_POLICY_RESERVED_NAMES).
 #   * PyYAML keeps the last of two duplicate keys and Compose refuses them;
 #     the loader refuses them too instead of judging a value Compose never
 #     sees.
 _COMPOSE_POLICY_FALSE = frozenset({"false", "no", "n", "off"})
+# Folders under ./data and ./config that belong to ODS itself, or to a
+# shipped extension whose folder differs from its id. No extension may use
+# one of these names as its id, because ./data/<id> and ./config/<id> are
+# where an extension's own files go.
+_COMPOSE_POLICY_RESERVED_NAMES = frozenset({
+    "auth", "backends", "backups", "config", "config-backups", "data",
+    "extension-progress", "extensions-library", "hermes-auth",
+    "installer-backups", "models", "openclaw", "paperless", "persona",
+    "piper", "pixel", "pixel-chat-results", "pixel-native",
+    "pixel-providers", "remote-provider", "state", "system-tuning",
+    "user-extensions",
+})
 # Top-level keys an extension compose file may declare (plus x-* fields).
 _COMPOSE_POLICY_TOP_LEVEL = frozenset({"services", "volumes", "networks", "version"})
 _COMPOSE_POLICY_TOP_LEVEL_REASONS = {
@@ -953,6 +967,9 @@ def _compose_policy_volume_problems(name, volumes, *, builtin, namespace):
             if not parts or parts[0].startswith(".") or parts in (["data"], ["config"]):
                 problems.append(f"service '{name}' bind-mounts the ODS install directory or its "
                                 f"secrets ('{source}')")
+            elif namespace is not None and namespace in _COMPOSE_POLICY_RESERVED_NAMES:
+                problems.append(f"service '{name}' bind-mounts '{source}', but '{namespace}' "
+                                f"names a folder ODS keeps for itself")
             elif namespace is not None and (len(parts) < 2 or parts[0] not in ("data", "config")
                                             or parts[1] != namespace):
                 problems.append(f"service '{name}' bind-mounts '{source}' outside its own "
@@ -1455,6 +1472,14 @@ def _fetch_agent_logs(service_id: str, timeout: int) -> str:
     )
 
 
+# Why the host agent refused the last start or stop of each service. Each
+# _call_agent replaces it. _call_agent keeps its boolean contract for its many
+# callers; a failed start reads this, so the extension card shows the host's
+# reason (a host port another program holds, a Hermes route file it could not
+# write) instead of a generic message.
+_agent_refusals: dict[str, str] = {}
+
+
 def _call_agent(action: str, service_id: str) -> bool:
     """Call host agent to start/stop a service. Returns True on success.
 
@@ -1462,6 +1487,7 @@ def _call_agent(action: str, service_id: str) -> bool:
     background retry â€” caller should let the dashboard's progress poll surface
     the eventual outcome). Mirrors _call_agent_install's contract.
     """
+    _agent_refusals.pop(service_id, None)
     try:
         request_agent_json(
             "POST",
@@ -1470,12 +1496,25 @@ def _call_agent(action: str, service_id: str) -> bool:
             timeout=_AGENT_TIMEOUT,
         )
         return True
+    except AgentHTTPError as exc:
+        # The host agent redacts this reason before it answers.
+        _agent_refusals[service_id] = exc.detail[:2000]
+        logger.warning(
+            "Host agent could not %s %s (HTTP %d): %s",
+            action, service_id, exc.status_code, exc.detail,
+        )
+        return False
     except AgentClientError as exc:
         logger.warning(
             "Host agent unreachable at %s â€” fallback to restart_required: %s",
             "shared transport", exc,
         )
         return False
+
+
+def _agent_start_failure(service_id: str, fallback: str) -> str:
+    """The host agent's reason a start just failed, else ``fallback``."""
+    return _agent_refusals.pop(service_id, "") or fallback
 
 
 def _call_agent_invalidate_compose_cache() -> None:
@@ -2867,7 +2906,8 @@ async def _validated_github_recipe(candidate, api_key, *, replacing=None):
         schema_path = EXTENSIONS_DIR.parent / "schema" / "service-manifest.v1.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         catalog = await extensions_catalog(api_key=api_key)
-        reserved = set(CORE_SERVICE_IDS) | {entry['id'] for entry in catalog['extensions']}
+        reserved = (set(CORE_SERVICE_IDS) | _COMPOSE_POLICY_RESERVED_NAMES
+                    | {entry['id'] for entry in catalog['extensions']})
         roots = (USER_EXTENSIONS_DIR, EXTENSIONS_DIR, EXTENSIONS_LIBRARY_DIR)
         for root in roots:
             if root.is_symlink():
@@ -3650,7 +3690,9 @@ def _staged_library_extension(service_id: str, dest: Path):
                         'compose': yaml.safe_load(staged_compose.read_text(encoding='utf-8'))}
                     verify_package(staged, candidate)
                     schema = json.loads((EXTENSIONS_DIR.parent / 'schema/service-manifest.v1.json').read_text(encoding='utf-8'))
-                    validation = validate_recipe(candidate, schema, set(CORE_SERVICE_IDS), lambda path: True)
+                    validation = validate_recipe(candidate, schema,
+                                                 set(CORE_SERVICE_IDS) | _COMPOSE_POLICY_RESERVED_NAMES,
+                                                 lambda path: True)
                     if not validation['valid']:
                         raise ValueError('Imported recipe changed')
                 except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
@@ -4779,10 +4821,10 @@ def enable_extension(
             if not _call_agent("start", svc_id):
                 agent_ok = False
                 failed_services.append(svc_id)
-                _write_error_progress(
+                _write_error_progress(svc_id, _agent_start_failure(
                     svc_id,
                     "Host agent failed to start extension. Run 'ods restart' to recover.",
-                )
+                ))
             else:
                 _write_started_progress(svc_id)
             continue
@@ -4798,7 +4840,8 @@ def enable_extension(
         if not _call_agent("start", svc_id):
             agent_ok = False
             failed_services.append(svc_id)
-            _write_error_progress(svc_id, "Host agent failed to start extension.")
+            _write_error_progress(svc_id, _agent_start_failure(
+                svc_id, "Host agent failed to start extension."))
             continue
         # post_start is non-terminal â€” log failure but don't fail the enable
         if not _call_agent_hook(svc_id, "post_start"):
@@ -5150,6 +5193,15 @@ class PurgeRequest(BaseModel):
     confirm: bool = False
 
 
+def _is_known_extension(service_id: str) -> bool:
+    """An extension ODS ships, lists in its catalog, or has installed."""
+    if service_id in SERVICES:
+        return True
+    if any(entry.get("id") == service_id for entry in _current_extension_catalog()):
+        return True
+    return (Path(EXTENSIONS_DIR) / service_id).is_dir() or (USER_EXTENSIONS_DIR / service_id).is_dir()
+
+
 @router.delete("/api/extensions/{service_id}/data")
 @_serialize_extension_operation
 def purge_extension_data(
@@ -5163,8 +5215,12 @@ def purge_extension_data(
 
     if service_id in ALWAYS_ON_SERVICES:
         raise HTTPException(status_code=403, detail="Cannot purge always-on service data")
+    if service_id in _COMPOSE_POLICY_RESERVED_NAMES or service_id in CORE_SERVICE_IDS:
+        raise HTTPException(status_code=403, detail=f"data/{service_id} belongs to ODS, not to an extension")
 
     with _extensions_lock():
+        if not _is_known_extension(service_id):
+            raise HTTPException(status_code=404, detail=f"Unknown extension: {service_id}")
         # Check if service is still enabled (built-in or user extension)
         for check_dir in [Path(EXTENSIONS_DIR) / service_id, USER_EXTENSIONS_DIR / service_id]:
             if (check_dir / "compose.yaml").exists():
@@ -5213,10 +5269,7 @@ def orphaned_storage(api_key: str = Depends(verify_api_key)):
     # Known system directories that are not service data.  Includes runtime
     # state created outside the installer: extension-progress (this router)
     # and config-backups (host agent's .env backup writer).
-    system_dirs = {
-        "models", "config", "user-extensions", "extensions-library",
-        "extension-progress", "config-backups",
-    }
+    system_dirs = set(_COMPOSE_POLICY_RESERVED_NAMES)
     known_ids = set(SERVICES.keys()) | system_dirs
 
     orphaned = []

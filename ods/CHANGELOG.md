@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- Open WebUI no longer starts for other devices while its built-in
+  administrator, `admin@localhost`, still has the password `admin`. Open WebUI
+  creates that account while it runs without sign-in, the default for a
+  localhost-only install, and the account keeps working after sign-in is
+  turned on. So anyone on the network could sign in as administrator once the
+  install was exposed. When Open WebUI would be reachable from other devices,
+  through `BIND_ADDRESS` or the ODS proxy, its start-up now refuses, changes
+  nothing, and explains in its log how to change that password first. The
+  ODS proxy now also counts as exposure for the sign-in rule below.
+- An imported extension can no longer take the name of a folder ODS keeps
+  under `data/` or `config/` (such as `models`, `config-backups` or
+  `persona`). Before, an extension's own `./data/<id>` and `./config/<id>`
+  binds would then have reached ODS's folder. Both extension validators
+  refuse those binds. Purging extension data now refuses those folders and
+  any id that no shipped, listed or installed extension owns, as
+  `ods purge` already did.
 - Open WebUI now starts with sign-in on whenever it is published beyond this
   machine (`BIND_ADDRESS` not loopback), whatever `WEBUI_AUTH` says in `.env`.
   The CLI, `ods.ps1` and the host agent already turn sign-in on in that case.
@@ -180,6 +196,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   matched the current installers. Its build dependencies carried the
   repository's last four open Dependabot alerts. Install with the commands in
   the README.
+- Error responses no longer repeat internal exception text. The dashboard API
+  (model state, OAuth, remote-provider status, setup diagnostics, update
+  check, usage report, the owner-card check and extension manifest errors),
+  model-router, the remote-provider egress and APE now report a fixed
+  failure category, such as "not valid JSON" or "Could not reach GitHub". The
+  exception detail goes to that service's log. Manifest errors name the
+  extension folder instead of the container path.
 - Privacy defaults: bundled services no longer phone home. Open WebUI's
   upstream version check, Qdrant usage telemetry, LiteLLM's start-up cost-map
   fetch from GitHub, n8n diagnostics and version notifications, and the
@@ -429,8 +452,93 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   longer install the memory-shepherd timers that maintained OpenClaw's
   workspace. `ods start` warns when an `ods-openclaw` container is still
   present.
+- Token Spy no longer has a poll-frequency setting
+  (`poll_interval_minutes`). It only rewrote the OpenClaw session-cleanup
+  timer, which was removed with that extension. The Token Spy dashboard no
+  longer shows the field, `/api/settings` no longer reports or stores it, and
+  a value saved by an earlier version disappears from `settings.json` on the
+  next save. `session-manager.sh` still runs on whatever timer or cron job
+  you give it.
 
 ### Fixed
+- A long chat message with many unclosed quotes and backslashes no longer
+  stalls Pixel chat. pixel-edge masks quoted text before it looks for
+  workspace directives, and that step took time quadratic in the message
+  length; it is now linear. Quoted text that continues past an escaped line
+  break also stays masked now.
+- Enabling Token Spy, APE, Privacy Shield or Brave Search on an install that
+  started without them no longer fails with "uses a local build without a
+  verified source recipe". They build their image from their own folder,
+  and the dashboard refused any local build that was not one of two
+  reviewed Langfuse Dockerfiles. It now accepts
+  these four when their folder matches the files this ODS version shipped,
+  pinned by digest; a changed, added or removed file, or a link, is still
+  refused. Changing one of these folders needs
+  `python3 scripts/pin-builtin-build-contexts.py --write`, and CI fails
+  until it is run.
+- On Windows, when a native Windows program already listens on port 9000, an
+  install without voice now gives Whisper (STT) a free host port (9100, then
+  9001), so Whisper added later from the Extensions Library starts. The
+  installer used to move Whisper off 9000 only when voice was selected, and
+  Docker Desktop then could not publish the port. A rerun (update) moves a
+  9000 written by an earlier installer; a port you set yourself is never
+  changed.
+- Rerunning the installer on Windows no longer moves a working Whisper (STT)
+  off port 9000. Docker Desktop serves Whisper's port through a Windows
+  listener, which the installer took for another program. It now checks
+  whether that listener is this installation's running Whisper.
+- When an extension fails to start, its card shows why instead of "Host
+  agent failed to start extension", and the host agent logs the same reason.
+  A host port another program holds is named with the `.env` setting that
+  moves it, such as `WHISPER_PORT`; other errors show the end of Docker's
+  output, where its error is, with credentials removed.
+- Uninstalling on Windows (WSL) no longer refuses with "Pixel validation
+  failed; nothing was changed" after WSL restarts. WSL attaches its disks in a
+  different order on each start, so a completed Pixel update's private scratch
+  folder came back under a new device number and failed its identity check.
+  Uninstall now accepts exactly that: the same folders, still empty and
+  root-private. Anything else still stops the uninstall.
+- Turning Hermes off and on again from the Extensions Library after an
+  installer update no longer leaves it unable to start on Docker Desktop
+  ("error mounting ... cli-config.yaml.example ... no such file or
+  directory").
+  - The host agent's patch of Hermes's configuration template replaced every
+    comment and blank line that followed the compression `context_length`
+    with another `context_length` line. Its template never matched the
+    installer's, so the next start rewrote it.
+  - That rewrite replaced the file. Docker Desktop keeps an existing
+    container's single-file mount on the file it replaced, so the Hermes
+    container could no longer start.
+  - The agent now writes the same template as the installer for the same
+    model route, so a start after an update changes nothing. When the
+    template must change, the agent updates the file in place. It refuses
+    when the file is not a regular file that the ODS user owns.
+- Rerunning `install.ps1` on Windows (an update) no longer turns off Hermes
+  Agent that was added from the Extensions Library. Windows setup passed
+  `--no-hermes` on every run, so the rerun disabled Hermes and its proxy and
+  Compose removed both containers. Only a new installation (no `.env` yet)
+  gets the flag now; a rerun keeps the current choice, and `-NoHermes` turns
+  Hermes off explicitly.
+- After an update of a Pixel installation, adding Hermes back from the
+  Extensions Library no longer fails with "Host agent failed to start
+  extension." The Pixel source update runs as root and set only the owner of
+  the files it replaced, so they kept root's group, and the host agent could
+  not rewrite Hermes's configuration template. Replaced files and new
+  directories now get the owner's primary group, as on a new installation.
+- Installations that an earlier Pixel source update already left with files
+  in group root are repaired by the next installer run. The installer returns
+  its owner's files and folders in `bin`, `lib`, `scripts`, `installers`,
+  `extensions` and `vendor` from group root to the owner's group, without
+  sudo and without following links, and logs how many it changed.
+- A non-interactive rerun on a Tier 0 or Tier 1 machine keeps ComfyUI when it
+  is already running (for example after adding it from the Extensions
+  Library). Its low-memory safety check now applies only when ComfyUI is not
+  installed yet, as the interactive "Keep current selection" already did.
+- Updating a Pixel installation that has Hermes on no longer rewrites Hermes's
+  configuration template while the Pixel source update is still in progress.
+  That update finishes only over the exact files it installed, so the change
+  could stop the update. The installer now writes Hermes's model route after
+  the Pixel update finishes, still before Hermes starts.
 - Rerunning the installer (an update) no longer fails with "Embeddings model
   prefetch failed" after Embeddings was added from Extensions. The Embeddings
   service downloads the model itself, as root, so the installer could not

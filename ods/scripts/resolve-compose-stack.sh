@@ -495,11 +495,24 @@ def _is_ods_nvidia_gpu_reservation(entry):
 #     directory, which is the ODS install directory (the first -f file), not
 #     the extension's own directory: ./.env there is the owner's secrets and
 #     ./scripts is code the ods CLI runs on the host. An imported recipe may
-#     bind only its own ./data/<id> and ./config/<id>.
+#     bind only its own ./data/<id> and ./config/<id>, and never when <id>
+#     names a folder ODS keeps there itself (_COMPOSE_POLICY_RESERVED_NAMES).
 #   * PyYAML keeps the last of two duplicate keys and Compose refuses them;
 #     the loader refuses them too instead of judging a value Compose never
 #     sees.
 _COMPOSE_POLICY_FALSE = frozenset({"false", "no", "n", "off"})
+# Folders under ./data and ./config that belong to ODS itself, or to a
+# shipped extension whose folder differs from its id. No extension may use
+# one of these names as its id, because ./data/<id> and ./config/<id> are
+# where an extension's own files go.
+_COMPOSE_POLICY_RESERVED_NAMES = frozenset({
+    "auth", "backends", "backups", "config", "config-backups", "data",
+    "extension-progress", "extensions-library", "hermes-auth",
+    "installer-backups", "models", "openclaw", "paperless", "persona",
+    "piper", "pixel", "pixel-chat-results", "pixel-native",
+    "pixel-providers", "remote-provider", "state", "system-tuning",
+    "user-extensions",
+})
 # Top-level keys an extension compose file may declare (plus x-* fields).
 _COMPOSE_POLICY_TOP_LEVEL = frozenset({"services", "volumes", "networks", "version"})
 _COMPOSE_POLICY_TOP_LEVEL_REASONS = {
@@ -718,6 +731,9 @@ def _compose_policy_volume_problems(name, volumes, *, builtin, namespace):
             if not parts or parts[0].startswith(".") or parts in (["data"], ["config"]):
                 problems.append(f"service '{name}' bind-mounts the ODS install directory or its "
                                 f"secrets ('{source}')")
+            elif namespace is not None and namespace in _COMPOSE_POLICY_RESERVED_NAMES:
+                problems.append(f"service '{name}' bind-mounts '{source}', but '{namespace}' "
+                                f"names a folder ODS keeps for itself")
             elif namespace is not None and (len(parts) < 2 or parts[0] not in ("data", "config")
                                             or parts[1] != namespace):
                 problems.append(f"service '{name}' bind-mounts '{source}' outside its own "

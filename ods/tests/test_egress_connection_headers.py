@@ -231,3 +231,80 @@ def test_missing_gateway_key_fails_closed(egress, monkeypatch):
     assert seen == []
     assert health["ready"] is False
     assert health["reason"] == "missing_caller_key"
+
+
+def test_a_provider_probe_does_not_stall_other_requests(egress, monkeypatch):
+    """The probe's blocking HTTP calls must run off the event loop (#2699)."""
+    import asyncio
+    import threading
+    import time
+
+    probed = {}
+
+    def slow_probe(route, **options):
+        # Stands in for the real probe's blocking urllib calls.
+        probed["thread"] = threading.get_ident()
+        probed["start"] = time.monotonic()
+        time.sleep(0.4)
+        probed["end"] = time.monotonic()
+        return {"ok": True, "verifiedAt": options["verified_at"]}
+
+    monkeypatch.setattr(egress, "probe_route_response", slow_probe)
+    ticks = []
+
+    async def scenario():
+        async def other_work():
+            for _ in range(30):
+                await asyncio.sleep(0.02)
+                ticks.append(time.monotonic())
+
+        response, _ = await asyncio.gather(egress.probe(), other_work())
+        return threading.get_ident(), response
+
+    loop_thread, response = asyncio.run(scenario())
+    assert response.status_code == 200
+    assert probed["thread"] != loop_thread
+    # The event loop kept serving other work while the probe was blocked.
+    assert sum(probed["start"] < tick < probed["end"] for tick in ticks) >= 5
+
+
+def test_direct_provider_clients_are_bounded_least_recently_used_first(egress):
+    """Past provider endpoints do not keep connection pools open forever (#2701)."""
+    import asyncio
+
+    def key(number):
+        return f"https:provider-{number}.example:443"
+
+    async def scenario():
+        egress.app.state.direct_http_clients = {}
+        first = [egress._http_client(key(number)) for number in range(4)]
+        # Reusing an endpoint keeps its client and makes it the most recent.
+        assert egress._http_client(key(0)) is first[0]
+        for number in (4, 5):
+            egress._http_client(key(number))
+        while egress._closing_clients:
+            await asyncio.sleep(0)
+        kept = list(egress.app.state.direct_http_clients)
+        closed = [client.is_closed for client in first]
+        for client in egress.app.state.direct_http_clients.values():
+            await client.aclose()
+        return kept, closed
+
+    kept, closed = asyncio.run(scenario())
+    assert len(kept) == egress.MAX_DIRECT_HTTP_CLIENTS == 4
+    assert kept == [key(3), key(0), key(4), key(5)]
+    assert closed == [False, True, True, False]
+
+
+def test_a_provider_transport_error_is_not_echoed_to_the_caller(egress, monkeypatch):
+    def refuse(request):
+        raise httpx.ConnectError("provider-side detail 203.0.113.7:443", request=request)
+
+    with TestClient(egress.app) as client:
+        transport = httpx.AsyncClient(transport=httpx.MockTransport(refuse))
+        monkeypatch.setattr(egress, "_http_client", lambda key="": transport)
+        response = client.post("/v1/chat/completions", json={"model": "ods/current"}, headers=CALLER)
+        client.portal.call(transport.aclose)
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "upstream_unavailable"
+    assert "203.0.113.7" not in response.text and "provider-side detail" not in response.text

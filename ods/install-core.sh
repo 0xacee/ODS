@@ -175,6 +175,8 @@ LEMONADE_MODEL="${LEMONADE_MODEL:-}"
 # Display only: the GPU that runs an external Lemonade (e.g. Windows under WSL).
 LEMONADE_GPU_NAME="${LEMONADE_GPU_NAME:-}"
 LEMONADE_GPU_VRAM_MB="${LEMONADE_GPU_VRAM_MB:-}"
+# The context the existing Lemonade loaded its model with; empty: the catalog's.
+LEMONADE_CONTEXT_SIZE="${LEMONADE_CONTEXT_SIZE:-}"
 OFFLINE_MODE=false   # M1 integration: fully air-gapped operation
 NO_BOOTSTRAP=false  # Skip bootstrap fast-start, download full model in foreground
 BIND_ADDRESS_EXPLICIT=false
@@ -218,6 +220,8 @@ Options:
                       API key LiteLLM should send to the existing Lemonade server
     --lemonade-model M
                       Exact model id the existing Lemonade server serves
+    --lemonade-context-size TOKENS
+                      Context the existing Lemonade server loaded that model with
     --lemonade-gpu-name N, --lemonade-gpu-vram-mb MB
                       GPU that runs the existing Lemonade, shown in the hardware scan
     --external-llm-url U
@@ -314,6 +318,9 @@ while [[ $# -gt 0 ]]; do
             shift 2 ;;
         --lemonade-api-key) LEMONADE_API_KEY="$2"; shift 2 ;;
         --lemonade-model) LEMONADE_MODEL="$2"; shift 2 ;;
+        --lemonade-context-size)
+            [[ -n "${2:-}" ]] || { echo "--lemonade-context-size needs a number of tokens" >&2; exit 1; }
+            LEMONADE_CONTEXT_SIZE="$2"; shift 2 ;;
         --lemonade-gpu-name) LEMONADE_GPU_NAME="$2"; shift 2 ;;
         --lemonade-gpu-vram-mb)
             [[ -n "${2:-}" ]] || { echo "--lemonade-gpu-vram-mb needs a number of megabytes" >&2; exit 1; }
@@ -434,6 +441,15 @@ if [[ -n "$LEMONADE_GPU_VRAM_MB" ]]; then
 fi
 unset _lemonade_vram
 
+# Validate the external Lemonade context the same way, before phase 02 records
+# it with the model. Empty uses the catalog's context.
+if [[ -n "$LEMONADE_CONTEXT_SIZE" ]]; then
+    if [[ ! "$LEMONADE_CONTEXT_SIZE" =~ ^[1-9][0-9]{3,15}$ ]] || (( LEMONADE_CONTEXT_SIZE < 1024 )); then
+        echo "LEMONADE_CONTEXT_SIZE must be a whole number of tokens from 1024" >&2
+        exit 1
+    fi
+fi
+
 # Help and malformed options exit without creating a log. Every remaining
 # path prepares a private diagnostic file before the first logging call.
 if ! ods_prepare_install_log "$LOG_FILE"; then
@@ -455,7 +471,7 @@ if [[ "${LEMONADE_EXTERNAL,,}" == "true" ]]; then
     ODS_MODE="lemonade"
     ENABLE_RECOMMENDED=true
     # An empty LEMONADE_MODEL still lets phase 06 discover the model.
-    export LEMONADE_EXTERNAL LEMONADE_BASE_URL LEMONADE_HOST_TRANSPORT ODS_WINDOWS_SYSTEM_DIRECTORY LEMONADE_API_KEY LEMONADE_MODEL LEMONADE_GPU_NAME LEMONADE_GPU_VRAM_MB
+    export LEMONADE_EXTERNAL LEMONADE_BASE_URL LEMONADE_HOST_TRANSPORT ODS_WINDOWS_SYSTEM_DIRECTORY LEMONADE_API_KEY LEMONADE_MODEL LEMONADE_CONTEXT_SIZE LEMONADE_GPU_NAME LEMONADE_GPU_VRAM_MB
 fi
 
 export EXTERNAL_LLM_URL EXTERNAL_LLM_PROVIDER EXTERNAL_LLM_MODEL
