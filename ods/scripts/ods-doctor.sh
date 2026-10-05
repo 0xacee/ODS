@@ -53,8 +53,13 @@ fi
 
 REPORT_FILE="${1:-/tmp/ods-doctor-report.json}"
 
-CAP_FILE="/tmp/ods-doctor-capabilities.json"
-PREFLIGHT_FILE="/tmp/ods-doctor-preflight.json"
+# Scratch files live in a private directory for this run only. Fixed names in
+# the shared /tmp let an earlier run by another user (sudo ods doctor) make
+# every later run fail before it wrote its report.
+DOCTOR_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ods-doctor.XXXXXX")"
+trap 'rm -rf -- "$DOCTOR_WORK_DIR"' EXIT
+CAP_FILE="$DOCTOR_WORK_DIR/capabilities.json"
+PREFLIGHT_FILE="$DOCTOR_WORK_DIR/preflight.json"
 DOCTOR_BASH_CMD="${BASH:-}"
 if [[ -z "$DOCTOR_BASH_CMD" || ! -x "$DOCTOR_BASH_CMD" ]]; then
     DOCTOR_BASH_CMD="$(command -v bash 2>/dev/null || printf '%s\n' bash)"

@@ -2662,17 +2662,32 @@ cmd_doctor() {
     fi
 
     # Run doctor script. If it fails to generate a report, show the script output
-    # to make failures actionable for operators.
-    local doctor_out
+    # to make failures actionable for operators. Each run writes a new private
+    # report and only that one is shown: a file already at $report_file (an
+    # earlier run, or another user's in the shared /tmp) must never stand in
+    # for this run (fleet: after a failed run, doctor showed an old install's
+    # model and runtime).
+    local doctor_out run_report
     doctor_out=$(mktemp)
-    "$INSTALL_DIR/scripts/ods-doctor.sh" "$report_file" >"$doctor_out" 2>&1 || true
+    run_report=$(mktemp)
+    "$INSTALL_DIR/scripts/ods-doctor.sh" "$run_report" >"$doctor_out" 2>&1 || true
 
-    if [[ ! -f "$report_file" ]]; then
+    if [[ ! -s "$run_report" ]]; then
         cat "$doctor_out" >&2
-        rm -f "$doctor_out"
-        error "Doctor report not generated at $report_file"
+        rm -f "$doctor_out" "$run_report"
+        echo -e "${RED}✗${NC} The doctor stopped before it finished its report; its output is above." >&2
+        echo "  Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC" >&2
+        exit 1
     fi
     rm -f "$doctor_out"
+    # cp names its own failure (for example, another user's file at the
+    # default path); this run's report then stays where it is.
+    if cp -- "$run_report" "$report_file"; then
+        rm -f "$run_report"
+    else
+        warn "This run's report is at $run_report"
+        report_file="$run_report"
+    fi
 
     # JSON mode: just output the report
     if [[ "$json_mode" == "true" ]]; then
