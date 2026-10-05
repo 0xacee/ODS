@@ -37,6 +37,7 @@ tests/test-bootstrap-upgrade-sha-retry.sh
 tests/test-bootstrap-upgrade-windows-native-llama.sh
 tests/test-catalog-invalid-manifest.py
 tests/test-cli-bootstrap-compose-wait.sh
+tests/test-cli-macos-native-llama.sh
 tests/test-cli-preset-restore-user-extensions.sh
 tests/test-cli-prompts-noninteractive.sh
 tests/test-cli-status-docker-error.sh
@@ -116,6 +117,7 @@ tests/test-no-credentials-in-argv.sh
 tests/test-nonroot-image-source-modes.sh
 tests/test-ods-cli-bootstrap-env-refresh.sh
 tests/test-ods-cli-host-cpu-fallback.sh
+tests/test-ods-cli-litellm-ready.sh
 tests/test-ods-cli-pipefail-tolerance.sh
 tests/test-ods-cli-restart-hermes-ready.sh
 tests/test-ods-cli-rollback-delegation.sh
