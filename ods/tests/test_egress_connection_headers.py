@@ -231,3 +231,38 @@ def test_missing_gateway_key_fails_closed(egress, monkeypatch):
     assert seen == []
     assert health["ready"] is False
     assert health["reason"] == "missing_caller_key"
+
+
+def test_a_provider_probe_does_not_stall_other_requests(egress, monkeypatch):
+    """The probe's blocking HTTP calls must run off the event loop (#2699)."""
+    import asyncio
+    import threading
+    import time
+
+    probed = {}
+
+    def slow_probe(route, **options):
+        # Stands in for the real probe's blocking urllib calls.
+        probed["thread"] = threading.get_ident()
+        probed["start"] = time.monotonic()
+        time.sleep(0.4)
+        probed["end"] = time.monotonic()
+        return {"ok": True, "verifiedAt": options["verified_at"]}
+
+    monkeypatch.setattr(egress, "probe_route_response", slow_probe)
+    ticks = []
+
+    async def scenario():
+        async def other_work():
+            for _ in range(30):
+                await asyncio.sleep(0.02)
+                ticks.append(time.monotonic())
+
+        response, _ = await asyncio.gather(egress.probe(), other_work())
+        return threading.get_ident(), response
+
+    loop_thread, response = asyncio.run(scenario())
+    assert response.status_code == 200
+    assert probed["thread"] != loop_thread
+    # The event loop kept serving other work while the probe was blocked.
+    assert sum(probed["start"] < tick < probed["end"] for tick in ticks) >= 5
