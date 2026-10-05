@@ -12,7 +12,8 @@
 #     are checked before extraction; pin.json is re-verified at every launch.
 #   - Qualification: --version (build number) and --list-devices. No Vulkan
 #     device means the CPU route with a driver message; never a silent CPU
-#     fallback, because the launch always names --device VulkanN.
+#     fallback, because the launch always names --device (VulkanN, or none
+#     with zero GPU layers for the legacy installer's explicit CPU route).
 #   - Launch: loopback only, --alias <GGUF>, --parallel 1, --metrics,
 #     --no-webui and --api-key-file <owner-only file>. The key is never on
 #     the command line.
@@ -358,6 +359,58 @@ function Install-ODSNativeLlamaRuntime {
     return (Test-ODSNativeLlamaInstall -Directory $target -ExpectedZipSha256 $Pin.Sha256 -ExpectedReleaseTag $Pin.ReleaseTag)
 }
 
+function Publish-ODSNativeLlamaRuntimeCopy {
+    <#
+    .SYNOPSIS
+        Publish a verified runtime at a fixed path. The legacy native installer
+        keeps <InstallDir>\llama-server, which ods.ps1, bootstrap-upgrade.sh and
+        the host agent's restart path launch. Only a copy whose pin.json no
+        longer verifies (an older tag, a damaged or unpinned copy) is replaced,
+        with one directory swap; the caller stops that copy's process first.
+    #>
+    param([Parameter(Mandatory = $true)]$Runtime, [Parameter(Mandatory = $true)][string]$Destination)
+    if (Test-Path -LiteralPath $Destination) {
+        try {
+            $current = Test-ODSNativeLlamaInstall -Directory $Destination -ExpectedZipSha256 $Runtime.ZipSha256 -ExpectedReleaseTag $Runtime.ReleaseTag
+            return [pscustomobject]@{ Directory = $current.Directory; ExecutablePath = $current.ExecutablePath; Changed = $false }
+        } catch { }
+    }
+    $parent = Split-Path -Parent $Destination
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $leaf = Split-Path -Leaf $Destination
+    $staging = Join-Path $parent (".$leaf.staging-" + [guid]::NewGuid().ToString('N'))
+    try {
+        Copy-Item -LiteralPath $Runtime.Directory -Destination $staging -Recurse
+        $null = Test-ODSNativeLlamaInstall -Directory $staging -ExpectedZipSha256 $Runtime.ZipSha256 -ExpectedReleaseTag $Runtime.ReleaseTag
+        if (Test-Path -LiteralPath $Destination) {
+            $previous = Join-Path $parent (".$leaf.previous-" + [guid]::NewGuid().ToString('N'))
+            try {
+                [IO.Directory]::Move($Destination, $previous)
+            } catch {
+                throw "Cannot replace $Destination while a program still uses it; stop llama-server and rerun. ($($_.Exception.Message))"
+            }
+            try {
+                [IO.Directory]::Move($staging, $Destination)
+            } catch {
+                [IO.Directory]::Move($previous, $Destination)
+                throw
+            }
+            Remove-Item -LiteralPath $previous -Recurse -Force
+        } else {
+            [IO.Directory]::Move($staging, $Destination)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    }
+    return [pscustomobject]@{ Directory = $Destination; ExecutablePath = (Join-Path $Destination 'llama-server.exe'); Changed = $true }
+}
+
+function Get-ODSNativeRuntimeDir {
+    # Private files of the legacy native runtime (API key file, launch options,
+    # log). Outside the install folder, which containers mount.
+    return (Join-Path (Split-Path -Parent (Get-ODSNativeLlamaRoot)) 'native-runtime')
+}
+
 function Remove-ODSNativeLlamaOldRuntimes {
     # Keep the active runtime and one previous one (rollback); remove older
     # ODS-created versioned, staging and damaged copies only.
@@ -642,7 +695,12 @@ function Assert-ODSNativeLlamaPlan($Plan) {
 }
 
 function Assert-ODSNativeLlamaOptions($Options) {
-    if ($Options.schemaVersion -ne 1 -or [string]$Options.Device -cnotmatch '^Vulkan[0-9]{1,2}$' -or
+    # Device 'none' is the explicit CPU route (no usable Vulkan device), and
+    # only with zero GPU layers; never a silent fallback.
+    $cpuRoute = [string]$Options.Device -ceq 'none'
+    if ($Options.schemaVersion -ne 1 -or
+        ([string]$Options.Device -cnotmatch '^Vulkan[0-9]{1,2}$' -and -not $cpuRoute) -or
+        ($cpuRoute -and [string]$Options.NGpuLayers -cne '0') -or
         [string]$Options.NGpuLayers -cnotmatch '^(auto|all|[0-9]{1,4})$' -or
         -not [IO.Path]::IsPathRooted([string]$Options.ApiKeyPath) -or
         -not [IO.Path]::IsPathRooted([string]$Options.LogPath) -or
@@ -660,7 +718,8 @@ function Assert-ODSNativeLlamaOptions($Options) {
     }
     $extra = @($Options.ExtraArguments)
     $allowed = @('--flash-attn', '--cache-type-k', '--cache-type-v', '--n-cpu-moe', '--ctx-checkpoints',
-        '--cache-ram', '--checkpoint-every-n-tokens', '--spec-type', '--spec-draft-n-max')
+        '--cache-ram', '--checkpoint-every-n-tokens', '--spec-type', '--spec-draft-n-max',
+        '--spec-draft-type-k', '--spec-draft-type-v')
     for ($index = 0; $index -lt $extra.Count; $index++) {
         $flag = [string]$extra[$index]
         if ($flag -ceq '--no-cache-prompt') { continue }

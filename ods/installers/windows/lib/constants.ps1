@@ -24,18 +24,13 @@ $script:ODS_PREFLIGHT_REPORT = Join-Path $env:TEMP "ods-windows-preflight.json"
 # PID file is shared -- only one native inference server runs at a time
 $script:INFERENCE_PID_FILE = Join-Path (Join-Path $script:ODS_INSTALL_DIR "data") "llama-server.pid"
 
-# AMD Lemonade (preferred AMD backend: Vulkan + NPU + ROCm)
-$script:LEMONADE_VERSION     = "10.0.0"
-$script:LEMONADE_MSI_FILE    = "lemonade-server-minimal.msi"
-$script:LEMONADE_MSI_URL     = "https://github.com/lemonade-sdk/lemonade/releases/download/v$($script:LEMONADE_VERSION)/$($script:LEMONADE_MSI_FILE)"
-# Default path; install-windows.ps1 resolves both Program Files roots at runtime.
-$script:LEMONADE_INSTALL_DIR = Join-Path $env:ProgramFiles "Lemonade Server"
-$script:LEMONADE_EXE         = Join-Path (Join-Path $script:LEMONADE_INSTALL_DIR "bin") "lemonade-server.exe"
-$script:LEMONADE_PORT        = 8080
-$script:LEMONADE_API_KEY     = "lemonade"
-$script:LEMONADE_HEALTH_URL  = "http://127.0.0.1:8080/api/v1/health"
+# Native llama-server (ggml-org llama.cpp, Vulkan) for AMD GPUs. Default host
+# port; .env AMD_INFERENCE_PORT is authoritative once written.
+$script:NATIVE_LLM_PORT = 8080
 
-# llama-server fallback (Vulkan build, used if Lemonade install is declined/fails)
+# The qualified runtime from %LOCALAPPDATA%\ODS\llama.cpp\<tag>-win-vulkan-x64
+# is published here, where ods.ps1, bootstrap-upgrade.sh and the host agent
+# launch it. pin.json inside is verified before every launch.
 $script:LLAMA_SERVER_DIR = Join-Path $script:ODS_INSTALL_DIR "llama-server"
 $script:LLAMA_SERVER_EXE = Join-Path $script:LLAMA_SERVER_DIR "llama-server.exe"
 $script:LLAMA_CPP_RELEASE_TAG = "b9014"
