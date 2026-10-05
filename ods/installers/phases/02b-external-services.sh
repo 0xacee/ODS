@@ -20,7 +20,8 @@ if [[ -n "$_external_url" && "$(external_llm_strip_url "$_external_url")" != "$(
     # A new endpoint must never inherit a credential from the old endpoint.
     EXTERNAL_LLM_API_KEY_RESET=true
 fi
-if [[ -z "${EXTERNAL_LLM_API_KEY_FILE:-}" && "$EXTERNAL_LLM_API_KEY_RESET" != "true" && -s "${INSTALL_DIR:-}/config/litellm/external-upstream.key" ]]; then
+# A key passed for this run (--external-llm-key-env) replaces the stored one.
+if [[ -z "${EXTERNAL_LLM_API_KEY_FILE:-}" && -z "${EXTERNAL_LLM_API_KEY_VALUE:-}" && "$EXTERNAL_LLM_API_KEY_RESET" != "true" && -s "${INSTALL_DIR:-}/config/litellm/external-upstream.key" ]]; then
     EXTERNAL_LLM_API_KEY_FILE="$INSTALL_DIR/config/litellm/external-upstream.key"
 fi
 unset _previous_external_url

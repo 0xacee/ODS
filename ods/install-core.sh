@@ -206,6 +206,7 @@ EXTERNAL_LLM_URL="${EXTERNAL_LLM_URL:-}"
 EXTERNAL_LLM_PROVIDER="${EXTERNAL_LLM_PROVIDER:-auto}"
 EXTERNAL_LLM_MODEL="${EXTERNAL_LLM_MODEL:-}"
 EXTERNAL_LLM_API_KEY_FILE="${EXTERNAL_LLM_API_KEY_FILE:-}"
+EXTERNAL_LLM_API_KEY_ENV=""
 EXTERNAL_LLM_API_KEY_DISABLE=false
 EXTERNAL_LLM_AUTO_REUSE="${EXTERNAL_LLM_AUTO_REUSE:-false}"
 EXTERNAL_LLM_DISABLE=false
@@ -259,6 +260,9 @@ Options:
     --no-gateway-only Return a gateway install to the ordinary UI selection
     --external-llm-key-file PATH
                       Owner-only API key file for an authenticated external model
+    --external-llm-key-env VAR
+                      Read that key from environment variable VAR instead of a file
+                      (Windows setup passes it this way, never on a command line)
     --no-external-llm-key
                       Stop sending the saved key to the selected external model
     --reuse-external-llm
@@ -374,6 +378,9 @@ while [[ $# -gt 0 ]]; do
         --no-webui) ENABLE_OPEN_WEBUI=false; WEBUI_EXPLICIT=true; shift ;;
         --no-gateway-only) ODS_GATEWAY_ONLY=false; ENABLE_OPEN_WEBUI=true; WEBUI_EXPLICIT=true; shift ;;
         --external-llm-key-file) EXTERNAL_LLM_API_KEY_FILE="$2"; EXTERNAL_LLM_API_KEY_DISABLE=false; shift 2 ;;
+        --external-llm-key-env)
+            [[ "${2:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "--external-llm-key-env requires an environment variable name" >&2; exit 1; }
+            EXTERNAL_LLM_API_KEY_ENV="$2"; EXTERNAL_LLM_API_KEY_DISABLE=false; shift 2 ;;
         --no-external-llm-key) EXTERNAL_LLM_API_KEY_FILE=""; EXTERNAL_LLM_API_KEY_DISABLE=true; shift ;;
         --reuse-external-llm) EXTERNAL_LLM_AUTO_REUSE=true; shift ;;
         --no-external-llm) EXTERNAL_LLM_DISABLE=true; shift ;;
@@ -569,6 +576,19 @@ elif [[ -n "$NATIVE_LLM_MODEL$NATIVE_LLM_CONTEXT_SIZE$NATIVE_LLM_API_KEY_ENV" ]]
     exit 1
 fi
 unset NATIVE_LLM_API_KEY_ENV
+if [[ -n "$EXTERNAL_LLM_API_KEY_ENV" ]]; then
+    # The key travels through the environment (WSLENV on Windows), never argv.
+    # It stays in this unexported variable until phase 06 stores it as the
+    # owner-only key file, so no copy is written anywhere else.
+    EXTERNAL_LLM_API_KEY_VALUE="${!EXTERNAL_LLM_API_KEY_ENV:-}"
+    [[ -n "$EXTERNAL_LLM_API_KEY_VALUE" && ${#EXTERNAL_LLM_API_KEY_VALUE} -le 4096 && "$EXTERNAL_LLM_API_KEY_VALUE" =~ ^[[:graph:]]+$ ]] || {
+        echo "--external-llm-key-env $EXTERNAL_LLM_API_KEY_ENV must name a variable holding one API key (printable, no spaces)" >&2
+        exit 1
+    }
+    EXTERNAL_LLM_API_KEY_FILE=""
+    unset "$EXTERNAL_LLM_API_KEY_ENV"
+fi
+unset EXTERNAL_LLM_API_KEY_ENV
 
 # Validate the native GPU VRAM from the flags before any phase can evaluate it
 # as Bash arithmetic. Empty retains auto-detection.

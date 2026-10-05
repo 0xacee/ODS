@@ -126,6 +126,7 @@ tests/test-ods-doctor-env-reader.sh
 tests/test-ods-doctor-host-native-llm.sh
 tests/test-ods-doctor-install-diagnoses.sh
 tests/test-help-links.sh
+tests/test-external-llm-key-env.sh
 tests/test-ods-doctor-rootless-subid.sh
 tests/test-ods-list-json-escaping.sh
 tests/test-ods-test-complete-run.sh
