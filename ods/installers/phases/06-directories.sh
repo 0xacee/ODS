@@ -1462,7 +1462,8 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # need world-traverse (e.g. SearXNG runs as uid 977).
     # The chmod 600 below is belt-and-braces.
     # The template only knows ODS's own keys. Snapshot the previous .env so the
-    # settings installed extensions own can be carried over after the rewrite.
+    # settings bundled and installed extensions own can be carried over after
+    # the rewrite.
     _phase06_previous_env=""
     if [[ -f "$INSTALL_DIR/.env" ]]; then
         _phase06_previous_env="$(mktemp)" || return 1
@@ -1779,7 +1780,7 @@ ENV_EOF
         # shellcheck source=../lib/extension-env-carry.sh
         . "$SCRIPT_DIR/installers/lib/extension-env-carry.sh"
         ods_carry_extension_env_keys "$_phase06_previous_env" "$INSTALL_DIR/.env" \
-            "$INSTALL_DIR/data/user-extensions"
+            "$SCRIPT_DIR/extensions/services" "$INSTALL_DIR/data/user-extensions"
         rm -f "$_phase06_previous_env"
     fi
     unset _phase06_previous_env

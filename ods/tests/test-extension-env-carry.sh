@@ -10,6 +10,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PHASE="$ROOT_DIR/installers/phases/06-directories.sh"
 LIB="$ROOT_DIR/installers/lib/extension-env-carry.sh"
 LIBRARY="$ROOT_DIR/extensions/library/services"
+BUNDLED="$ROOT_DIR/extensions/services"
 
 FAILED=0
 pass() { echo "[PASS] $1"; }
@@ -69,6 +70,34 @@ ods_carry_extension_env_keys "$tmp/previous.env" "$tmp/bare.env" "$tmp/no-extens
 [[ "$(cat "$tmp/bare.env")" == "WEBUI_SECRET=x" ]] \
     && pass "no installed extensions: .env untouched" || fail "carry-over wrote without installed extensions"
 
+# Bundled extensions declare owner settings the template never writes either.
+bundled="$tmp/extensions/services"
+for service in brave-search tailscale n8n remote-provider-egress remote-provider-ssh-tunnel; do
+    mkdir -p "$bundled/$service"
+    cp "$BUNDLED/$service/manifest.yaml" "$bundled/$service/manifest.yaml"
+done
+cat > "$tmp/owner.env" <<'ENV'
+BRAVE_SEARCH_API_KEY=brave-owner-token
+TS_HOSTNAME=owner-node
+TS_EXTRA_ARGS=--advertise-tags=tag:ods
+N8N_PROXY_HOPS=1
+ODS_REMOTE_PROVIDER_ROUTE_PATH=/owner/route.json
+FLOWISE_PASSWORD=flowise-owner
+ENV
+printf 'WEBUI_SECRET=new-webui\n' > "$tmp/owner-new.env"
+ods_carry_extension_env_keys "$tmp/owner.env" "$tmp/owner-new.env" "$bundled" "$ext"
+for line in BRAVE_SEARCH_API_KEY=brave-owner-token TS_HOSTNAME=owner-node \
+            TS_EXTRA_ARGS=--advertise-tags=tag:ods N8N_PROXY_HOPS=1 \
+            ODS_REMOTE_PROVIDER_ROUTE_PATH=/owner/route.json FLOWISE_PASSWORD=flowise-owner; do
+    if [[ "$(grep -cxF "$line" "$tmp/owner-new.env")" == 1 ]]; then
+        pass "carried once from bundled and installed extensions: ${line%%=*}"
+    else
+        fail "not carried exactly once: ${line%%=*}"
+    fi
+done
+[[ "$(grep -c '^#=== ' "$tmp/owner-new.env")" == 1 ]] \
+    && pass "one carry-over header across extension directories" || fail "carry-over header repeated"
+
 # Phase 06 must snapshot the previous .env before its rewrite and carry the
 # keys over after it.
 line_of() { awk -v needle="$1" 'index($0, needle) { print NR; exit }' "$PHASE"; }
@@ -79,6 +108,12 @@ if [[ -n "$snapshot" && -n "$rewrite" && -n "$carry" && "$snapshot" -lt "$rewrit
     pass "phase 06 snapshots .env before the rewrite and carries extension keys after it"
 else
     fail "phase 06 does not carry installed extensions' keys across its .env rewrite"
+fi
+dirs="$(line_of '"$SCRIPT_DIR/extensions/services" "$INSTALL_DIR/data/user-extensions"')"
+if [[ -n "$carry" && "$dirs" == $((carry + 1)) ]]; then
+    pass "phase 06 carries both bundled and installed extensions' keys"
+else
+    fail "phase 06 does not pass the bundled extensions to the carry-over"
 fi
 
 [[ $FAILED -eq 0 ]] || { echo "$FAILED check(s) failed" >&2; exit 1; }
