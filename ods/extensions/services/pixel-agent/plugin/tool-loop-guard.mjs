@@ -5911,12 +5911,13 @@ function workspacePreviewInstructionText(text, {preserveFileTargets = false} = {
   let projected = text
     .replace(/(`{3,}|~{3,})[\s\S]*?\1/g, " ")
     .replace(/^[ \t]*>[^\n]*/gm, " ");
-  // An explicit payload can be delimited or one unquoted sentence. Preserve
-  // independent instructions after its closing quote or sentence boundary.
+  // An explicit payload can be delimited or one unquoted sentence, with or
+  // without a colon. Preserve independent instructions after its closing
+  // quote, sentence boundary, or a conjunction introducing another action.
   // Undelimited multi-sentence prose remains ambiguous; this is not a parser
   // for every way an owner can express a task.
   projected = projected.replace(
-    /\b(?:containing|with\s+(?:the\s+)?(?:contents?|text))\s*(?:exactly\s*)?:\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[^\n]*?(?=[!?;\n]|\.(?=\s|$)|$))/gi,
+    /\b(?:containing|with\s+(?:the\s+)?(?:contents?|text))(?:\s+exactly)?(?:\s*:\s*|\s+)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[^\n]*?(?=\b(?:and(?:\s+then)?|then|but|instead)\s+(?:build|create|develop|design|generate|implement|make|write|publish|republish|preview|serve)\b|[!?;\n]|\.(?=\s|$)|$))/gi,
     " "
   );
   const quotedTarget = (value) =>
