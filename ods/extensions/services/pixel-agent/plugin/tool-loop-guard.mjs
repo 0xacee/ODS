@@ -7299,7 +7299,7 @@ export function createToolLoopGuard({
       state.workspaceRenderedInspection = undefined;
       state.workspaceInspectionGeneration = (state.workspaceInspectionGeneration ?? 0) + 1;
     }
-    // First-attempt obligation: record the model's attempted behavior plan
+    // First-attempt obligation: record the duty to check an interaction
     // once per run, bound to the current preview snapshot. Never overwritten.
     // Explicit show/hide duties already bind a requested transition. A model's
     // extra exploratory clicks must not expand that owner-bound requirement.
@@ -11530,7 +11530,7 @@ export function createToolLoopGuard({
             !workspaceBehaviorInspectionPassed(state) &&
             !state.workspaceVisibilityInspectionUnavailable) return {
           stage: 'workspace-preview-behavior',
-          instruction: previewBehaviorInstruction(state.workspacePreview, state.workspaceBehaviorAttempt,
+          instruction: previewBehaviorInstruction(state.workspacePreview,
             state.workspaceInspectionPageErrors),
         };
         if (controlNamesUninspected(state) && !state.workspaceVisibilityInspectionUnavailable) return {
@@ -11863,7 +11863,7 @@ export function createToolLoopGuard({
             !workspaceBehaviorInspectionPassed(state)) {
           return '[ODS Pixel next step] ' + (state.workspaceVisibilityInspectionUnavailable
             ? 'Keep the published preview, but report the attempted interaction checks as unverified because inspection is unavailable. Do not claim they work.'
-            : previewBehaviorInstruction(state.workspacePreview, state.workspaceBehaviorAttempt,
+            : previewBehaviorInstruction(state.workspacePreview,
               state.workspaceInspectionPageErrors));
         }
         // Any inspection of this snapshot reports its load-time names.

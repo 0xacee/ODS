@@ -678,7 +678,7 @@ test('comma-separated initial control state case 8',()=>{
 
 // --- Strixy current-main 29c25961: attempted behavior plan obligation -------------------
 // A first bounded action plan (fill/click/select) is remembered per run and
-// snapshot. A plan retaining its action counts and postconditions must pass before delivery; a static
+// snapshot. A plan with an interaction and postconditions must pass before delivery; a static
 // heading-only inspection cannot substitute for them.
 
 function behaviorReceipt(params,{pageErrors}={}) {
@@ -710,7 +710,7 @@ function behaviorInspection(guard,params,{wrapped=false,id='behavior',runContext
 
 // The fleet's packing-checklist prompt: add a checklist with an Add button and
 // a packed checkbox. The model's first plan used fill+click but omitted the
-// exact/expectedText fields, so the guard must remember the attempted actions
+// exact/expectedText fields, so the guard must remember the interaction duty
 // and refuse to accept a later heading-only static inspection as proof.
 const packingPrompt='Create and publish a website in a new workspace directory site. Add a packing checklist with a text field, an Add button, and a packed checkbox.';
 
@@ -722,7 +722,7 @@ function packingPlan(preview) { return {siteId:preview.siteId,sha256:preview.sha
   {action:'assert-visible',locator:{selector:'#packed'}},
 ]}; }
 
-for (const wrapped of [false,true]) test(`attempted behavior plan survives a static heading pass and requires the attempted actions and postconditions (${wrapped?'deferred':'direct'})`,()=>{
+for (const wrapped of [false,true]) test(`attempted behavior plan survives a static heading pass and requires a corrected interaction and postconditions (${wrapped?'deferred':'direct'})`,()=>{
   const {guard,preview}=setup({prompt:packingPrompt});
   // First attempt: fill+click but the assert-text step is missing expectedText,
   // so normalization rejects it. The guard must still remember the attempt.
@@ -744,7 +744,7 @@ for (const wrapped of [false,true]) test(`attempted behavior plan survives a sta
   assert.match(guard.verificationForRun('run').text,/attempted preview interaction checks/);
   const retry=guard.beforeAgentFinalize({},context)?.retry;
   assert.equal(retry?.idempotencyKey,'pixel-ods-workspace-preview-behavior');
-  assert.match(retry.instruction,/1 fill, 2 click/);
+  assert.match(retry.instruction,/Correct mistaken locators or action types/);
   assert.match(retry.instruction,/do not replace the behavior checks with a heading-only assertion/);
   // The corrected plan keeps the same actions and adds the missing postcondition.
   const corrected=behaviorInspection(guard,packingPlan(preview),{wrapped,id:'corrected'});
@@ -785,7 +785,7 @@ for (const wrapped of [false,true]) for (const fault of ['failed','newsha','page
   assert.equal(guard.verificationForRun('run').status,'failed');
 });
 
-for (const wrapped of [false,true]) test(`fewer actions than the attempted plan cannot pass (${wrapped?'deferred':'direct'})`,()=>{
+for (const wrapped of [false,true]) test(`a smaller corrected interaction proves only its submitted checks (${wrapped?'deferred':'direct'})`,()=>{
   const {guard,preview}=setup({prompt:packingPrompt});
   const invalid={...packingPlan(preview)};
   delete invalid.steps[2].expectedText;
@@ -799,8 +799,8 @@ for (const wrapped of [false,true]) test(`fewer actions than the attempted plan 
   const fewer={...packingPlan(preview),steps:[{action:'click',locator:{role:'button',name:'Add',exact:true}},{action:'assert-visible',locator:{selector:'#list'}}]};
   const check=behaviorInspection(guard,fewer,{wrapped,id:'fewer'});
   guard.afterToolCall({...check.event,result:check.result},check.ctx);
-  assert.equal(guard.verificationForRun('run').status,'failed');
-  assert.match(guard.verificationForRun('run').text,/attempted preview interaction checks/);
+  assert.equal(guard.verificationForRun('run').status,'passed');
+  assert.match(guard.verificationForRun('run').text,/submitted interaction checks only; this does not verify all requested behavior/);
 });
 
 test('a different run and session cannot inherit the behavior obligation',()=>{
@@ -848,14 +848,14 @@ test('attemptedPreviewBehavior ignores plans with no click/fill/select and unsup
   assert.equal(attemptedPreviewBehavior(pureParams(preview,[{action:'click',locator:{selector:'#b'}},{action:'download',locator:{selector:'#dl'},path:'a.pdf',expectedBytes:1,expectedSha256:'a'.repeat(64)}]),preview),undefined);
 });
 
-test('attemptedPreviewBehavior counts actions and binds to the snapshot',()=>{
+test('attemptedPreviewBehavior records an interaction duty bound to the snapshot',()=>{
   const preview=purePreview();
-  const counts=attemptedPreviewBehavior(pureParams(preview,[
+  const duty=attemptedPreviewBehavior(pureParams(preview,[
     {action:'fill',locator:{selector:'#i'},value:'x'},
     {action:'click',locator:{selector:'#b'}},
     {action:'click',locator:{selector:'#c'}},
   ]),preview);
-  assert.deepEqual(counts,{fill:1,click:2,'select-option':0});
+  assert.deepEqual(duty,{requiresInteraction:true});
   assert.equal(attemptedPreviewBehavior(pureParams({...preview,sha256:'b'.repeat(64)},[{action:'click',locator:{selector:'#b'}}]),preview),undefined);
 });
 
@@ -916,7 +916,7 @@ test('real invalid inspection followed by static pass coaches preserved behavior
   const started=call(guard,PREVIEW_INSPECTION_TOOL,invalid,'invalid-real');
   const result=await createWorkspacePreviewInspectTool({request:async()=>assert.fail('invalid request must not reach capsule')}).execute('invalid-real',invalid);
   assert.equal(result.details.errorCode,'invalid_request');
-  assert.match(result.content[0].text,/Preserve the attempted actions and their postconditions/);
+  assert.match(result.content[0].text,/Retain an interaction and its visible postcondition/);
   guard.afterToolCall({...started.event,result},started.ctx);
   guard.toolResultPersist({toolName:PREVIEW_INSPECTION_TOOL,toolCallId:'invalid-real',
     message:{role:'toolResult',toolName:PREVIEW_INSPECTION_TOOL,toolCallId:'invalid-real',...result}},started.ctx);
@@ -924,7 +924,7 @@ test('real invalid inspection followed by static pass coaches preserved behavior
   guard.afterToolCall({...staticCheck.event,result:staticCheck.result},staticCheck.ctx);
   const coached=guard.toolResultPersist({toolName:PREVIEW_INSPECTION_TOOL,toolCallId:'static-real',
     message:{role:'toolResult',toolName:PREVIEW_INSPECTION_TOOL,toolCallId:'static-real',...staticCheck.result}},staticCheck.ctx);
-  assert.match(JSON.stringify(coached),/1 fill, 2 click/);
+  assert.match(JSON.stringify(coached),/Correct mistaken locators or action types/);
   assert.match(JSON.stringify(coached),/heading-only assertion/);
   assert.equal(guard.verificationForRun('run').status,'failed');
 });
@@ -1020,4 +1020,28 @@ test('browser-load gate does not require unavailable capability or pre-existing 
   guard.observeRun(context,'pixel',{prompt:'Publish the existing website from site without changing any files.'});
   call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'publish-existing',{details:preview});
   assert.equal(guard.verificationForRun('run').status,'passed');
+});
+
+for(const wrapped of [false,true]) for(const first of ['checkbox-select','too-many-actions'])
+test(`repairable interaction obligation: ${first}, wrapped=${wrapped}`,()=>{
+  const {guard,preview}=setup({prompt:packingPrompt});
+  const steps=first==='checkbox-select'
+    ? [{action:'select-option',locator:{selector:'input[type="checkbox"]'},value:'true'}]
+    : [...Array.from({length:3},()=>({action:'fill',locator:{selector:'#item'},value:'Socks'})),
+       ...Array.from({length:5},()=>({action:'click',locator:{selector:'#add'}})),
+       ...Array.from({length:4},()=>({action:'assert-visible',locator:{selector:'#list'}}))];
+  const attempted={...plan(preview),steps};
+  const name=wrapped?'tool_call':PREVIEW_INSPECTION_TOOL;
+  const args=wrapped?{id:'openclaw:pixel-ods:'+PREVIEW_INSPECTION_TOOL,args:attempted}:attempted;
+  const started=call(guard,name,args,'wrong-first-plan');
+  const inner={isError:true,details:{errorCode:'invalid_request'}};
+  const result=wrapped?{details:{tool:{id:args.id,name:PREVIEW_INSPECTION_TOOL,source:'openclaw',sourceName:'pixel-ods'},result:inner}}:inner;
+  guard.afterToolCall({...started.event,result},started.ctx);
+  const heading=inspection(guard,loadPlan(preview),{wrapped,id:'heading'});
+  guard.afterToolCall({...heading.event,result:heading.result},heading.ctx);
+  assert.equal(guard.verificationForRun('run').status,'failed','a static check cannot replace interaction testing');
+  const corrected=behaviorInspection(guard,packingPlan(preview),{wrapped,id:'corrected-controls'});
+  guard.afterToolCall({...corrected.event,result:corrected.result},corrected.ctx);
+  assert.equal(guard.verificationForRun('run').status,'passed');
+  assert.match(guard.verificationForRun('run').text,/submitted interaction checks only; this does not verify all requested behavior/);
 });
