@@ -116,6 +116,64 @@ class FakeDocker:
         raise AssertionError(f"Unexpected Docker operation: {args}")
 
 
+NATIVE_KEYS = ("pixel-native-preview-runtime", "pixel-native-previews", "pixel-native-runtime")
+
+
+class NativePixelStackVolumeTests(unittest.TestCase):
+    """#7071: a macOS native-Pixel install that stops after starting its stack
+    leaves ODS-owned volumes before the recipe reaches .compose-flags."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="ods-native-volume-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve() / "ods"
+        (self.root / "installers/macos").mkdir(parents=True)
+        (self.root / "docker-compose.base.yml").write_text("services: {}\n", encoding="utf-8")
+        self.native = self.root / "installers/macos/pixel-native.compose.yaml.disabled"
+        shutil.copyfile(ROOT / "installers/macos/pixel-native.compose.yaml.disabled", self.native)
+        self.snapshot = Path(self.temp.name) / "snapshot.json"
+        self.snapshot.touch()
+        self.fake = FakeDocker(self.root)
+        self.fake.volumes = {f"ods_{key}": FakeDocker._volume(f"ods_{key}", key) for key in NATIVE_KEYS}
+        patcher = patch.object(MODULE, "docker", self.fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _native_container(self, service="pixel-native-ingress", recipe=None):
+        recipe = recipe or self.native
+        return {
+            "Id": CONTAINER_ID,
+            "Config": {"Labels": {
+                "com.docker.compose.project": "ods",
+                "com.docker.compose.service": service,
+                "com.docker.compose.project.working_dir": str(self.root),
+                "com.docker.compose.project.config_files":
+                    str(self.root / "docker-compose.base.yml") + "," + str(recipe),
+            }},
+            "Mounts": [{"Type": "volume", "Name": name} for name in self.fake.volumes],
+        }
+
+    def test_failed_native_install_volumes_are_owned_and_purged(self):
+        self.fake.containers = [self._native_container()]
+        MODULE.preflight(self.root, self.snapshot, ["-f", "docker-compose.base.yml"])
+        self.fake.containers = []
+        MODULE.complete(self.root, self.snapshot)
+        self.assertEqual(self.fake.volumes, {})
+
+    def test_service_not_declared_by_the_native_recipe_cannot_claim_its_volumes(self):
+        self.fake.containers = [self._native_container(service="perplexica")]
+        with self.assertRaisesRegex(ValueError, "not linked to this installation"):
+            MODULE.preflight(self.root, self.snapshot, ["-f", "docker-compose.base.yml"])
+
+    def test_copy_of_the_native_recipe_elsewhere_cannot_claim_its_volumes(self):
+        copy = self.root / "data/user-extensions/look-alike/pixel-native.compose.yaml.disabled"
+        copy.parent.mkdir(parents=True)
+        shutil.copyfile(self.native, copy)
+        self.fake.containers = [self._native_container(recipe=copy)]
+        with self.assertRaisesRegex(ValueError, "not linked to this installation"):
+            MODULE.preflight(self.root, self.snapshot, ["-f", "docker-compose.base.yml"])
+
+
 class UninstallVolumeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="ods-uninstall-volume-test-")
