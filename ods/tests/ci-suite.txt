@@ -254,3 +254,4 @@ tests/test_portal_identity.py
 tests/test_preview_inspection_delayed_entrance.py
 tests/test_remote_completion_telemetry.py
 tests/test_todo_fixes.py
+tests/test-linux-service-port-rerun.py
