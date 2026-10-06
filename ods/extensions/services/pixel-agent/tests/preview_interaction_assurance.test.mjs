@@ -1105,3 +1105,18 @@ test('verification follow-up cannot discover another session publication',()=>{
   assert.ok(!decision?.retry?.instruction.includes(preview.relativeDirectory+'/index.html'));
   assert.notEqual(guard.verificationForRun(next.runId).status,'passed');
 });
+
+for (const wrapped of [false,true]) test(`verification follow-up conditional repair cannot pass a failed check: wrapped=${wrapped}`,()=>{
+  const {guard,preview}=setup({prompt:'Build a packing checklist website in site and show me a working preview.'});
+  const next={...context,runId:'conditional-repair'};
+  guard.observeRun(next,'pixel',{prompt:'Verify the preview: fix it if the check fails.'});
+  call(guard,'read',{path:preview.relativeDirectory+'/index.html'},'read-current',{content:[{type:'text',text:'<!doctype html><button>Show details</button><p hidden>Details</p>'}]},next);
+  call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'fresh-publish',{details:preview},next);
+  const checked=inspection(guard,plan(preview),{id:'failing-check',wrapped,runContext:next});
+  (wrapped?checked.result.details.result:checked.result).details.pageErrors={count:1,messages:['SecurityError: storage unavailable']};
+  guard.afterToolCall({...checked.event,result:checked.result},checked.ctx);
+  assert.equal(guard.verificationForRun(next.runId).status,'failed');
+  assert.equal(guard.beforeAgentFinalize({},next)?.retry?.instruction,PAGE_ERROR_REPAIR_INSTRUCTION);
+  call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'unchanged-republish',{details:preview},next);
+  assert.equal(guard.verificationForRun(next.runId).status,'failed','republication cannot substitute for a passing browser check');
+});
