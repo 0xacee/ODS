@@ -315,7 +315,9 @@ test('tower2 round 102 update turn: the refused edit, repairs and both plans rep
   // every observation, failed step, snapshot and plan hash must still replay.
   assert.equal(failed.isError, true);
   assert.equal(failed.details.status, 'failed');
-  assert.deepEqual(failed.details, TOWER2_UPDATE_NO_MATCH.details);
+  const {ok: recordedOk, ...recordedReceipt} = TOWER2_UPDATE_NO_MATCH.details;
+  assert.equal(recordedOk, false, 'the historical host envelope also reported failure');
+  assert.deepEqual(failed.details, recordedReceipt);
   const failedText = failed.content[0].text;
   assert.equal(failedText.slice(failedText.indexOf(INSPECTION_SCOPE)),
     TOWER2_UPDATE_NO_MATCH.text.slice(TOWER2_UPDATE_NO_MATCH.text.indexOf(INSPECTION_SCOPE)),
