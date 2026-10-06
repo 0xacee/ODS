@@ -350,3 +350,20 @@ test('the tool states load-time names only to explain a missed exact name, never
  assert.match(text,/^Preview inspection failed\. Step 3 \(click\) matched no element, so nothing was measured and later steps did not run\. At load, after the page scripts ran, the rendered button whose text is "Show sold out" has the accessible name "Show the sold out midnight concert card", set by its aria-label attribute, which replaces its text as the name\./);
  assert.equal(JSON.parse(text.slice(text.indexOf(' Evidence: ')+11)).controls,undefined);
 });
+
+test('metadata and rendered-control visibility failures retain exact evidence without inferring script execution',async()=>{
+ for (const selector of ['script','head meta[name="viewport"]','#hidden-card','script + button']) {
+  const p=params();p.steps=[{action:'assert-visible',locator:{selector}}];
+  const request=normalize(p), value=receipt(request);
+  value.status='failed';value.steps=[{index:0,...request.steps[0],before:state(false),stable:true,status:'failed',errorCode:'visibility_mismatch'}];
+  const original=structuredClone(value);
+  const result=await createWorkspacePreviewInspectTool({request:async()=>value}).execute('visibility',p);
+  assert.equal(result.isError,true);
+  assert.deepEqual(value,original,'guidance must not mutate browser evidence');
+  assert.deepEqual(result.details,original,'failed observations remain the complete receipt');
+  const text=result.content[0].text.split(' Evidence: ')[0];
+  assert.match(text,/their visibility says nothing about whether page JavaScript executed/);
+  assert.match(text,/requested behavior after any repair/);
+  assert.doesNotMatch(text,/The matched element is|scripts are disabled|JavaScript does not execute/);
+ }
+});
