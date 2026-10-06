@@ -4598,6 +4598,22 @@ function currentOwnerIntentText(messages, prompt = undefined) {
     : currentText;
 }
 
+// This selects prompt guidance only; it grants no tool or publication authority.
+export function userMessageRequestsWorkspaceDocumentDelivery(messages, prompt = undefined) {
+  const text = currentOwnerIntentText(messages, prompt);
+  if (!text || ownerForbidsTools(text)) return false;
+  const lane = ownerLaneText(text);
+  if (/\b(?:https?:\/\/|www\.)/i.test(lane)) return false;
+  if (/^\s*(?:please\s+)?(?:how\b|what\b|why\b|where\b|when\b|explain\b|describe\b|tell\s+me\s+(?:how|about)\b|is\b|are\b|does\b)/i.test(lane)) return false;
+  const positive = lane.split(/[!?;\n]+|\.(?=\s|$)/).filter(clause =>
+    !/\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|without)\s+(?:download|deliver|attach|publish)\b/i.test(clause)
+  ).join(' ');
+  return /\b(?:download(?:able)?|attach(?:ment)?|deliver(?:y)?)\b/i.test(positive) &&
+    (/\.(?:md|markdown|txt|csv|tsv|json|pdf|zip|rar|docx|xlsx|pptx)\b/i.test(positive) ||
+      (/\b(?:documents?|files?|archives?)\b/i.test(positive) &&
+        !/\b(?:images?|photos?|audio|video|websites?|webpages?|html)\b|\.(?:png|jpe?g|gif|svg|mp3|mp4|wav|webm|html?)\b/i.test(positive)));
+}
+
 function ownerLaneText(text) {
   // Classify only current owner prose. Embedded examples cannot opt a workspace
   // turn into extension work; identifiers quoted as operands remain usable.

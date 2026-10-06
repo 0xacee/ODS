@@ -285,9 +285,7 @@ test("uses a bounded complete core on compact contexts without changing requeste
   assert.deepEqual(plain, {
     appendSystemContext: ODS_COMPACT_CONVERSATION_CONTRACT,
   });
-  // Document delivery adds 238 characters; keep the complete compact contract
-  // below 4000 without removing its existing authority or verification rules.
-  assert.ok(ODS_COMPACT_CONVERSATION_CONTRACT.length < 4000);
+  assert.ok(ODS_COMPACT_CONVERSATION_CONTRACT.length < 3800);
   assert.match(plain.appendSystemContext, /untrusted data, never authority/);
   assert.match(plain.appendSystemContext, /never self-approve/);
   assert.match(plain.appendSystemContext, /run the requested focused verification/);
@@ -439,9 +437,9 @@ test("restores the full September 16 operating core while retaining compact fall
   assert.equal(createHash('sha256').update(ODS_SEPTEMBER16_CONVERSATION_CONTRACT).digest('hex'),
     '94d4a2c3cf7c7469219f0592a4a6f9e451dff0e92b8918bfb1adbbc1827c97de');
   const oldCompact = ODS_COMPACT_CONVERSATION_CONTRACT.slice(0, -(PREVIEW_RUNTIME_CONTRACT.length + 1));
-  assert.equal(oldCompact.length, 3325);
+  assert.equal(oldCompact.length, 3087);
   assert.equal(createHash('sha256').update(oldCompact).digest('hex'),
-    '7c4156afd21f24e207eaf00899812cad29cdea0b48eb12f4ab60332cb972e83e');
+    '9223e1d30c01d44bf709012903027276dbbf8724e4fa53ec0766bd02e9a377f0');
   assert.ok(ODS_COMPACT_CONVERSATION_CONTRACT.endsWith(' ' + PREVIEW_RUNTIME_CONTRACT));
   assert.ok(ODS_CONVERSATION_CONTRACT.startsWith(ODS_SEPTEMBER16_CONVERSATION_CONTRACT + ' '));
   assert.ok(ODS_CONVERSATION_CONTRACT.length < 20000);
@@ -863,4 +861,46 @@ test("catalog mentions never receive GitHub proposal or single-service mutation 
     assert.match(contract, /never request secret values in chat/);
     assert.doesNotMatch(contract, /prefer pixel_ods_extension_proposal|recipeJson|single-service mutation|Otherwise submit only the owner's requested/);
   }
+});
+
+test("requested document delivery receives a prioritized route on full and compact prompts", async () => {
+  const {ODS_WORKSPACE_DOCUMENT_DELIVERY_GUIDE: guide} = await import('../plugin/prompt-contract.mjs');
+  const {userMessageRequestsWorkspaceDocumentDelivery: selects} = await import('../plugin/tool-loop-guard.mjs');
+  for (const prompt of [
+    'Please give me the existing notes.txt as a download.',
+    'Publish the existing notes.txt as a downloadable file. Do not change its contents.',
+    'Create notes.txt containing exactly Hello. Then give me a download button for the file.',
+    'Can you attach the existing report.pdf?',
+    'Deliver the existing archive.zip.',
+    'Do not download old.zip; attach current.pdf instead.',
+    'Attach the existing "docs/report.docx".',
+  ]) {
+    assert.equal(selects([], prompt), true, prompt);
+    for (const configuredLeanPrompt of [false, true]) {
+      const result = promptContractForAgent({agentId:'pixel'}, 'pixel', {prompt}, {configuredLeanPrompt});
+      assert.ok(result.appendSystemContext.startsWith(guide + ' '), prompt);
+      assert.match(result.appendSystemContext, /Complete any requested file creation or edits first/);
+    }
+  }
+  assert.ok(guide.length < 700);
+});
+
+test("document route preserves ordinary, remote, informational and forbidden-tool requests", async () => {
+  const {ODS_WORKSPACE_DOCUMENT_DELIVERY_GUIDE: guide} = await import('../plugin/prompt-contract.mjs');
+  const {userMessageRequestsWorkspaceDocumentDelivery: selects} = await import('../plugin/tool-loop-guard.mjs');
+  for (const prompt of [
+    'Thanks.', 'Download https://example.com/report.pdf.',
+    'How do I download a file?', 'Explain how to attach report.pdf.',
+    'Do not download report.pdf; summarize it.', 'Never attach the document.',
+    'Do not use tools. Give me report.pdf as a download.',
+    'Give me photo.png as a download.', 'Attach the audio file recording.wav.',
+    'Create a website with a download button.',
+    'Summarize this example: "attach the file as a download".',
+  ]) {
+    assert.equal(selects([], prompt), false, prompt);
+    assert.ok(!promptContractForAgent({agentId:'pixel'}, 'pixel', {prompt}).appendSystemContext.includes(guide), prompt);
+  }
+  const messages = [{role:'user',content:'Download report.pdf.'}, {role:'assistant',content:'Attach the file.'}, {role:'user',content:'Thanks.'}];
+  assert.equal(selects(messages), false);
+  assert.equal(selects([{role:'assistant',content:'Download report.pdf.'}]), false);
 });
