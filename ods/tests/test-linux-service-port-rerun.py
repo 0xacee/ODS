@@ -29,7 +29,8 @@ def run(tmp_path, saved, overrides=None):
     if marker in PHASE:
         block = PHASE[PHASE.index(marker):PHASE.index("    # The local llama-server port", PHASE.index(marker))]
     template = PHASE.split('cat > "$INSTALL_DIR/.env" << ENV_EOF', 1)[1].split("\nENV_EOF", 1)[0]
-    lines = [line for line in template.splitlines() if line.split("=", 1)[0] in PORTS]
+    lines = [line for line in template.splitlines()
+             if line.split("=", 1)[0] in {*PORTS, "N8N_WEBHOOK_URL"}]
     payload = f'''set -e
 source "$1/lib/safe-env.sh"
 source "$1/lib/dotenv-quote.sh"
@@ -46,7 +47,8 @@ cat > "$3" << ENV_EOF
 ENV_EOF
 for key in "${{!SERVICE_PORTS[@]}}"; do printf '%s=%s\\n' "$key" "${{SERVICE_PORTS[$key]}}"; done
 '''
-    environment = {key: value for key, value in os.environ.items() if key not in PORTS}
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in {*PORTS, "N8N_WEBHOOK_URL"}}
     environment.update(overrides or {})
     result = subprocess.run(["bash", "-c", payload, "port-rerun", str(ROOT), str(existing), str(output)],
                             env=environment, text=True, capture_output=True)
@@ -64,6 +66,7 @@ def test_saved_ports_survive_serialization_and_reach_registry(tmp_path):
         service = PORTS[key][0]
         if service:
             assert registry[service] == value
+    assert generated["N8N_WEBHOOK_URL"] == f'http://localhost:{saved["N8N_PORT"]}'
 
     # Render the actual n8n port mapping without starting a container.
     import json
@@ -86,6 +89,13 @@ def test_explicit_override_wins_and_missing_values_use_defaults(tmp_path):
     generated = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert generated["N8N_PORT"] == "5900"
     assert generated["WEBUI_PORT"] == "3000"
+    assert generated["N8N_WEBHOOK_URL"] == "http://localhost:5900"
+
+
+def test_owner_webhook_url_survives_rerun(tmp_path):
+    result, output = run(tmp_path, "N8N_PORT=5778\nN8N_WEBHOOK_URL=https://workflow.owner.test\n")
+    assert result.returncode == 0, result.stderr
+    assert "N8N_WEBHOOK_URL=https://workflow.owner.test" in output.read_text()
 
 
 def test_invalid_saved_or_explicit_port_refuses_before_serialization(tmp_path):
