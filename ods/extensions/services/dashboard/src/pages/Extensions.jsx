@@ -736,7 +736,7 @@ export default function Extensions({ compact = false }) {
               onAction={requestAction}
               webuiSelection={webuiSelection}
               mutating={mutating}
-              progressData={progressMap[ext.id]}
+              progressData={progressMap[ext.id] || (ext.id === 'hermes' ? progressMap['hermes-proxy'] : null)}
             />
           ))}
         </div>
