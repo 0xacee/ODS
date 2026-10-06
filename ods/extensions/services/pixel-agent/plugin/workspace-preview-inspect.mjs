@@ -81,8 +81,8 @@ function presentName(step, controls, clickedBefore) {
   return controls.items.some(item => item.role === step.locator.role && item.visible && item.name === want) ? want : undefined;
 }
 // A locator that matched no element, or several, produced no measurement. Say
-// which, and how to fix the locator; never suggest changing the site for it,
-// unless the page's own control names show the requested name is not there.
+// which, without treating a missing post-click assertion as proof of a bad
+// locator or a broken handler. Concrete name diagnostics take precedence.
 function locatorFeedback(step, controls, clickedBefore = false) {
   const at = `Step ${step.index + 1} (${step.action})`, count = step.before.count;
   const retry = 'retry the inspection on the same published snapshot. Do not change the site only to satisfy a locator. Requested behavior remains unverified.';
@@ -96,6 +96,9 @@ function locatorFeedback(step, controls, clickedBefore = false) {
     ? ` For ${step.action}, role/name locators match only rendered elements, so a hidden element is not matched.`
     : step.errorCode === 'no_match' ? ' Hidden elements were searched too, so no element has exactly that role and accessible name.'
       : ' This inspector cannot match a hidden element by role/name; use a CSS selector such as an id for it.';
+  if (clickedBefore && ['assert-visible', 'assert-hidden', 'assert-text'].includes(step.action)) {
+    return `${at} matched no element, so this assertion was not measured and later steps did not run.${scope} An earlier click passed, but the requested result remains unverified. A missing assertion target can mean either a locator mismatch or that the interaction did not create or render the expected state. Read both the actual selector and the handler, state and rendering path. If the selector matches the source, repair the behavior, republish, and rerun the same requested assertions. Check that optional storage failures do not prevent rendering the in-memory state. If the selector differs from the source, correct it and retry the same published snapshot. Do not weaken or remove the behavior checks or claim success.`;
+  }
   return `${at} matched no element, so nothing was measured and later steps did not run.${scope} Copy the exact role and accessible name (case, spacing, punctuation) or a CSS selector such as an id from your source, and ${retry}`;
 }
 function transitionCoverageFeedback(request, result) {
@@ -104,7 +107,7 @@ function transitionCoverageFeedback(request, result) {
   if (result.blockedRequests?.includes('download')) return 'The inspector blocked an unexpected download attempt by policy. This is an inspection limitation, not evidence that the website download is broken or that its handler completed. Downloads are supported only by an explicit final download step bound to one immutable snapshot PDF or ZIP. That step performs the click itself: retry the same snapshot with visibility/text assertions followed directly by download, without an ordinary click on that control. Keep the published interface unchanged and report this download as unverified; do not repeat the same blocked click or replace it with a simulated implementation.';
   const unmatched = result.steps?.find(step => step.errorCode === 'no_match' || step.errorCode === 'selector_not_unique');
   if (unmatched) return locatorFeedback(unmatched, inspectionControls(result),
-    result.steps.some(step => step.index < unmatched.index && step.action === 'click'));
+    result.steps.some(step => step.index < unmatched.index && step.action === 'click' && step.status === 'passed'));
   const syntaxFailure = result.steps?.find(step => step.errorCode === 'invalid_selector');
   if (syntaxFailure) return `Step ${syntaxFailure.index + 1} has invalid CSS selector syntax; that step produced no visibility measurement and later steps were not executed. Use a standard CSS selector from the actual source, or a supported role with the exact accessible name and exact:true. Text-matching extensions such as :contains() are not CSS selectors. Correct the locator and retry the inspection on the same published snapshot; do not remove the requested behavior checks. For show/hide behavior, keep assertions of opposite visibility for the same affected element around the control click. Requested behavior remains unverified.`;
   const visibilityFailure = result.steps?.find(step => step.errorCode === 'visibility_mismatch');
