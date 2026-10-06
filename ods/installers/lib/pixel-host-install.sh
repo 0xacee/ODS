@@ -5251,6 +5251,7 @@ ods_pixel_install_default_agent() {
         && -f "$plugin_root/host/openclaw-yield-usage.json" \
         && -f "$plugin_root/host/openclaw-compaction-empty.json" \
         && -f "$plugin_root/host/openclaw-compaction-no-work.json" \
+        && -f "$plugin_root/host/openclaw-subagent-admission.json" \
         && -f "$plugin_root/host/openclaw-hook-provenance.json" \
         && -f "$plugin_root/host/openclaw-run-id-redaction.json" \
         && -f "$plugin_root/host/pixel-ops-broker-ods.conf" \
@@ -5661,7 +5662,7 @@ ods_pixel_install_default_agent() {
         --restore-foreign "$home/.openclaw/ods-runtime-patches" \
         --known tool-recovery completion-recovery image-envelope compaction-export \
             compaction-idle compaction-resume read-range tool-result-projection \
-            diagnostic-stream-writes command-attempt-warning compaction-budget context-usage yield-usage compaction-empty compaction-no-work hook-provenance run-id-redaction sandbox-mkdir-bridge sandbox-mkdir-secure \
+            diagnostic-stream-writes command-attempt-warning compaction-budget context-usage yield-usage compaction-empty compaction-no-work subagent-admission hook-provenance run-id-redaction sandbox-mkdir-bridge sandbox-mkdir-secure \
         >>"$pixel_log" 2>&1; then
         ai_bad "Pixel could not restore OpenClaw runtime patches left by another ODS build. See $pixel_log."
         return 1
@@ -5801,6 +5802,15 @@ ods_pixel_install_default_agent() {
         --state-dir "$home/.openclaw/ods-runtime-patches/run-id-redaction" \
         >>"$pixel_log" 2>&1; then
         ai_bad "Pixel's run identity redaction repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Child announcements must enter admission even while an owner turn is active.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --subagent-admission \
+        --state-dir "$home/.openclaw/ods-runtime-patches/subagent-admission" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's subagent admission repair could not verify its package bytes. See $pixel_log."
         return 1
     fi
     # Preserve trusted inter-session provenance in native prompt-hook contexts.
