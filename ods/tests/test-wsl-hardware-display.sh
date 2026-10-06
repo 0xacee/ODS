@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The installer's hardware summary must not read as a detection error on
-# Windows (#7311): VRAM rounds to the nearest GB (a 24GB card reports about
-# 24564MiB), and the WSL RAM limit is named next to the RAM figure. The
+# Windows (#7311): VRAM reports rounded GiB and exact MiB (a 24GiB card reports
+# about 24564MiB), and the WSL RAM limit is distinguished from host memory. The
 # Linux-only NVIDIA Blackwell module check is skipped under WSL, where the
 # Windows driver serves the GPU.
 set -euo pipefail
@@ -17,17 +17,22 @@ summary="$(extract show_hardware_summary "$ROOT/installers/lib/ui.sh")"
 [[ -n "$summary" ]] || fail "show_hardware_summary was not found"
 eval "$summary"
 GRN="" NC="" BGRN=""
+source "$ROOT/installers/lib/wsl-memory.sh"
 
-out="$(show_hardware_summary "NVIDIA RTX 3090 Ti" "24" "Ryzen 9" "46" "500" "WSL limit; Windows has 96GB")"
-grep -qF "46GB (WSL limit; Windows has 96GB)" <<< "$out" || fail "the WSL RAM note is missing: $out"
-out="$(show_hardware_summary "NVIDIA RTX 3090 Ti" "24" "Ryzen 9" "64" "500")"
-grep -qE 'RAM: +64GB +\|' <<< "$out" || fail "RAM without a note changed: $out"
+out="$(show_hardware_summary "NVIDIA RTX 3090 Ti" "$(ods_format_vram_mib 24564)" \
+    "Ryzen 9" "46.9 GiB" "500" "96.0 GiB" true)"
+grep -qE 'WSL RAM: +46\.9 GiB' <<< "$out" || fail "the WSL RAM limit is missing: $out"
+grep -qE 'Windows RAM: +96\.0 GiB' <<< "$out" || fail "Windows host RAM is missing: $out"
+grep -qF '24.0 GiB (24564 MiB)' <<< "$out" || fail "rounded VRAM must preserve exact MiB: $out"
+out="$(show_hardware_summary "NVIDIA RTX 3090 Ti" "$(ods_format_vram_mib 24564)" \
+    "Ryzen 9" "64.0 GiB" "500")"
+grep -qE 'RAM: +64\.0 GiB +\|' <<< "$out" || fail "native RAM changed: $out"
 
-grep -qF 'show_hardware_summary "$GPU_NAME" "$(( (GPU_VRAM + 512) / 1024 ))"' \
+grep -qF 'show_hardware_summary "$GPU_NAME" "$(ods_format_vram_mib "$GPU_VRAM")"' \
     "$ROOT/installers/phases/02-detection.sh" \
-    || fail "the GPU summary must round VRAM to the nearest GB"
-grep -qF '"$DISK_AVAIL" "${_ram_note:-}"' "$ROOT/installers/phases/02-detection.sh" \
-    || fail "the hardware summary must receive the WSL RAM note"
+    || fail "the GPU summary must use the rounded display without changing exact VRAM"
+grep -qF '"$DISK_AVAIL" "$_host_ram_display" "$RAM_IS_WSL"' "$ROOT/installers/phases/02-detection.sh" \
+    || fail "the hardware summary must receive Windows RAM and the WSL boundary"
 
 check="$(extract validate_nvidia_blackwell_open_modules "$ROOT/installers/lib/detection.sh")"
 [[ -n "$check" ]] || fail "validate_nvidia_blackwell_open_modules was not found"
