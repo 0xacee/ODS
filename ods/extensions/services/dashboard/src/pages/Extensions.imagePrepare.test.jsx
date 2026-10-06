@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { render } from '../test/test-utils'
 import Extensions from './Extensions' // eslint-disable-line no-unused-vars
@@ -70,7 +70,8 @@ it('shows the image download on the card and enables only after it finishes', as
   fireEvent.click(screen.getByRole('button', { name: 'Enable' }))
   await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
 
-  expect(screen.getByText(DOWNLOADING)).toBeVisible()
+  const agentCard = within(screen.getByRole('heading', { name: 'Hermes Agent' }).closest('article'))
+  expect(agentCard.getByText(DOWNLOADING)).toBeVisible()
   expect(posted(calls, '/api/extensions/hermes-proxy/prepare?auto_enable_deps=true')).toBe(true)
   expect(posted(calls, '/api/extensions/hermes-proxy/enable?auto_enable_deps=true')).toBe(false)
 
