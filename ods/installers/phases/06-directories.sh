@@ -910,6 +910,7 @@ HERMES_PROXY_PORT 9120
 SERVICE_PORT_DEFAULTS
     declare -F sr_resolve_ports >/dev/null 2>&1 && sr_resolve_ports
     unset _port_key _port_default _port_value
+    N8N_WEBHOOK_URL_VALUE="$(_env_get_explicit_first N8N_WEBHOOK_URL "http://localhost:${N8N_PORT_VALUE}")"
 
     # The local llama-server port may already belong to another owner service
     # (for example a fleet worker). Honor an explicit install override before
@@ -1749,7 +1750,7 @@ WEB_SEARCH_ENGINE=searxng
 
 #=== n8n Settings ===
 N8N_HOST=localhost
-N8N_WEBHOOK_URL=http://localhost:5678
+N8N_WEBHOOK_URL=$(dotenv_value "${N8N_WEBHOOK_URL_VALUE}")
 TIMEZONE=${SYSTEM_TZ:-UTC}
 
 #=== Langfuse (LLM Observability) ===

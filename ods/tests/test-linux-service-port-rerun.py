@@ -65,6 +65,20 @@ def test_saved_ports_survive_serialization_and_reach_registry(tmp_path):
         if service:
             assert registry[service] == value
 
+    # Render the actual n8n port mapping without starting a container.
+    import json
+    import shutil
+    if shutil.which("docker"):
+        with output.open("a") as handle:
+            handle.write("N8N_USER=owner@example.net\nN8N_PASS=test-only-password\n")
+        rendered = subprocess.run(["docker", "compose", "--env-file", str(output),
+            "-f", str(ROOT / "extensions/services/n8n/compose.yaml"), "config", "--format", "json"],
+            text=True, capture_output=True)
+        assert rendered.returncode == 0, rendered.stderr
+        ports = json.loads(rendered.stdout)["services"]["n8n"]["ports"]
+        assert ports[0]["published"] == saved["N8N_PORT"]
+        assert ports[0]["target"] == 5678
+
 
 def test_explicit_override_wins_and_missing_values_use_defaults(tmp_path):
     result, output = run(tmp_path, "N8N_PORT=5778\n", {"N8N_PORT": "5900"})
@@ -88,3 +102,14 @@ def test_failure_can_be_corrected_and_rerun(tmp_path):
     result, output = run(tmp_path, "N8N_PORT=5878\n")
     assert result.returncode == 0, result.stderr
     assert "N8N_PORT=5878" in output.read_text()
+
+
+def test_summary_uses_resolved_webui_port(tmp_path):
+    summary = (ROOT / "installers/phases/13-summary.sh").read_text()
+    start = summary.index('    _summary_chat_url=""')
+    end = summary.index('    _summary_lan_address=""', start)
+    script = 'declare -A SERVICE_PORTS=([open-webui]=3100); ENABLE_OPEN_WEBUI=true\n'
+    script += summary[start:end] + '\nprintf "%s" "$_summary_chat_url"\n'
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "http://localhost:3100"
