@@ -914,12 +914,14 @@ test("document route preserves ordinary, remote, informational and forbidden-too
 
 test("verification follow-up guidance permits unchanged republication without a dummy edit", () => {
   const prompt = "Please finish verifying the preview: add an item, mark it packed, and check that the progress counter updates correctly. Fix anything that fails.";
+  for (const request of [prompt, "Verify the current preview."]) {
   const result = promptContractForAgent(
-    { agentId: "pixel", contextTokenBudget: 16384 }, "pixel", { prompt },
+    { agentId: "pixel", contextTokenBudget: 16384 }, "pixel", { prompt: request },
     { configuredLeanPrompt: true }
   );
   assert.ok(result.appendSystemContext.includes(ODS_WORKSPACE_VERIFICATION_CONTINUATION_CONTRACT));
   assert.ok(!result.appendSystemContext.includes(ODS_WORKSPACE_VISUAL_CONTINUATION_CONTRACT));
   assert.match(result.appendSystemContext, /do not make a dummy edit/);
   assert.match(result.appendSystemContext, /exact new siteId and full sha256/);
+  }
 });
