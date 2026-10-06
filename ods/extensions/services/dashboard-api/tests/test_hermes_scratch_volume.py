@@ -1,6 +1,5 @@
 """Retained Hermes homes must be able to use a newly mounted scratch volume."""
 import os
-from pathlib import Path
 import stat
 
 import pytest
