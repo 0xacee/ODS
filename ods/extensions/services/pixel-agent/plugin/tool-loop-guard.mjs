@@ -9787,7 +9787,9 @@ export function createToolLoopGuard({
         );
         // Verification intent survives a gateway restart; it requires fresh
         // evidence but cannot confer a previous project's continuation scope.
-        state.workspacePreviewVerificationRequested = verificationContinuationRequested;
+        // A host-authored delivery retry in this same run must not erase the
+        // original owner's verification obligation.
+        state.workspacePreviewVerificationRequested ||= verificationContinuationRequested;
         const trustedSessionPreview =
           (visualContinuationRequested || verificationContinuationRequested) && typeof sessionId === "string" && sessionId
             ? sessionPreviews.get(sessionId)
@@ -9807,7 +9809,7 @@ export function createToolLoopGuard({
         // With no verified previous preview, ordinary tools must remain usable
         // to locate the requested files. Only a real preview binds its scope.
         state.workspacePreviewRequired = !state.workspacePreviewForbidden && (
-          verificationContinuationRequested || Boolean(trustedSessionPreview) || state.workspaceVisualArtifactProduced ||
+          state.workspacePreviewVerificationRequested || Boolean(trustedSessionPreview) || state.workspaceVisualArtifactProduced ||
           ((!visualContinuationRequested || explicitDelivery) && previewRequested)
         );
         const visibilityObligation = sessionPreviewVisibilityObligations.get(sessionId);

@@ -1130,7 +1130,9 @@ test('verification after gateway restart requires fresh publication and browser 
     {role:'assistant',content:'The previous preview passed all six checks.'}
   ]});
   assert.equal(guard.verificationForRun(next.runId).status,'failed','prior prose cannot satisfy a new verification request');
-  assert.ok(guard.beforeAgentFinalize({},next)?.retry,'no-tool answer must request fresh work');
+  const retry=guard.beforeAgentFinalize({},next)?.retry;
+  assert.ok(retry,'no-tool answer must request fresh work');
+  guard.observeRun(next,'pixel',{prompt:retry.instruction});
   call(guard,'read',{path:preview.relativeDirectory+'/index.html'},'read-current',{content:[{type:'text',text:'<!doctype html><button>Show details</button><p hidden>Details</p>'}]},next);
   call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'fresh-publish',{details:preview},next);
   assert.equal(guard.verificationForRun(next.runId).status,'failed','HTTP readback alone is insufficient after restart');
