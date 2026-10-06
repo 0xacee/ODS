@@ -151,7 +151,54 @@ export function boundVisibilityInspection(params, result, preview) {
 // establish that evidence, and a click plan without a transition is not static.
 export function boundStaticPreviewInspection(params, result, preview) {
   return boundInspection(params, result, preview,
-    request => request.steps.every(step => step.action !== 'click'));
+    request => request.steps.every(step => !['click', 'fill', 'select-option', 'download'].includes(step.action)));
+}
+
+const BEHAVIOR_ACTIONS = ['fill', 'click', 'select-option'];
+const BEHAVIOR_ASSERTIONS = ['assert-text', 'assert-visible', 'assert-hidden'];
+
+// Remember the first bounded action plan, even if its locator schema was bad.
+// This is the model's attempted check, not a natural-language interpretation
+// of the owner's entire request. It grants no execution or passing evidence.
+export function attemptedPreviewBehavior(params, preview) {
+  if (!preview || params?.siteId !== preview.siteId || params?.sha256 !== preview.sha256 ||
+      !Array.isArray(params.steps) || params.steps.length < 1 || params.steps.length > 12 ||
+      params.steps.some(step => step?.action === 'download')) return undefined;
+  const counts = Object.fromEntries(BEHAVIOR_ACTIONS.map(action =>
+    [action, params.steps.filter(step => step?.action === action).length]));
+  return BEHAVIOR_ACTIONS.some(action => counts[action] > 0) ? Object.freeze(counts) : undefined;
+}
+
+export function boundPreviewBehavior(params, result, preview, attempted) {
+  if (!attempted) return undefined;
+  return boundInspection(params, result, preview, request => {
+    if (request.steps.some(step => step.action === 'download')) return false;
+    if (BEHAVIOR_ACTIONS.some(action =>
+      request.steps.filter(step => step.action === action).length < attempted[action])) return false;
+    // Fill/select can prepare a click, but each click needs a postcondition
+    // before another action. A value change without a click needs one too.
+    let pending;
+    for (const step of request.steps) {
+      if (BEHAVIOR_ASSERTIONS.includes(step.action)) pending = undefined;
+      else if (BEHAVIOR_ACTIONS.includes(step.action)) {
+        if (pending === 'click') return false;
+        pending = step.action;
+      }
+    }
+    return pending === undefined;
+  });
+}
+
+export function previewBehaviorInstruction(preview, attempted, pageErrors) {
+  return pageErrorRepairInstruction(preview, pageErrors) ??
+    `Your attempted preview interaction checks remain unverified. Keep their actions: ${BEHAVIOR_ACTIONS
+      .filter(action => attempted[action] > 0).map(action => `${attempted[action]} ${action}`).join(', ')}. ` +
+    `Read the actual controls and affected elements from the source; do not replace the behavior checks with a heading-only assertion. ` +
+    `Call ${PREVIEW_INSPECTION_TOOL} with siteId ${JSON.stringify(preview.siteId)}, sha256 ${JSON.stringify(preview.sha256)}, viewport {width,height}, and valid steps. ` +
+    'Use {selector:"#actual-id"} or {role:"button",name:"Exact accessible name",exact:true}. Every assert-text needs both locator and expectedText. ' +
+    'After filling or selecting, click the relevant control and assert its visible result before another action. Each click needs a postcondition; a value change without a click needs one too. ' +
+    'Correct invalid arguments from the tool schema without dropping the attempted actions. If a check fails, repair the page, republish and rerun the behavior checks within the existing turn budget. ' +
+    'If unfinished or unavailable, keep the preview and report these checks as unverified. A pass covers only the submitted checks, not all requested behavior.';
 }
 
 export function visibilityInspectionMatches(proof, preview) {
