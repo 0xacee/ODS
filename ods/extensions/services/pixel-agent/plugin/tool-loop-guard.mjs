@@ -6268,18 +6268,20 @@ function directBasicSiteCreation(text) {
     .replace(/^\s*>[^\n]*/gm, " ").replace(/"[^"\n]*"|`[^`\n]*`/g, " ")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   let creation = false;
+  // A short subject such as "reading-list" can modify the site noun.
+  // Stack, source, and input prerequisites are still checked by the caller.
   const clauses = prose.split(/[!?;\n]+|\.(?=\s|$)/).filter(clause => clause.trim());
   for (const clause of clauses) {
     const request = clause.trim().replace(/^please[,\s]+/i, "")
       .replace(/^(?:can|could|would)\s+you\s+(?:please\s+)?/i, "")
       .replace(/^por\s+favor[,\s]+/i, "");
-    const match = request.match(/^(?:build|create|make|design|generate)\s+(?:(?:me|us)\s+)?(?:a|an)\s+(?:new\s+)?(?:(?:polished|responsive|accessible|clean|modern|small)[,\s]+){0,4}(?:basic|simple|one[- ]page|single[- ]page)[,\s]+(?:(?:polished|responsive|accessible|clean|modern|small|one[- ]page|single[- ]page)[,\s]+){0,4}(?:website|site|web\s*page|landing\s+page)\b/i)
+    const match = request.match(/^(?:build|create|make|design|generate)\s+(?:(?:me|us)\s+)?(?:a|an)\s+(?:new\s+)?(?:(?:polished|responsive|accessible|clean|modern|small)[,\s]+){0,4}(?:basic|simple|one[- ]page|single[- ]page)[,\s]+(?:(?:polished|responsive|accessible|clean|modern|small|one[- ]page|single[- ]page)[,\s]+){0,4}(?:[a-z][a-z0-9-]*\s+){0,3}(?:website|site|web\s*page|landing\s+page)\b/i)
       ?? request.match(/^(?:crie|criar|faca|fazer|construa|construir)\s+(?:para\s+mim\s+)?(?:um|uma)\s+(?:(?:novo|nova)\s+)?(?:site|website|pagina\s+web|landing\s+page)\s+(?:simples|basico|basica|de\s+uma\s+pagina)\b/i);
     if (match) {
       const tail = request.slice(match[0].length).trim();
       // A bare noun after "website" may be the real object (crawler, content
       // analyzer, or an unknown future tool). Do not force HTML by guessing.
-      if (tail && !/^(?:[,:(]|(?:for|with|without|in|on|about|from|using|via|leveraging|and|then|that|which|to|called|named|para|com|sem|em|e)\b)/i.test(tail)) return false;
+      if (tail && !/^(?:[,:(]|(?:for|with|without|in|on|about|from|using|via|leveraging|and|then|that|which|where|to|called|named|para|com|sem|em|e)\b)/i.test(tail)) return false;
       creation = true;
     } else if (!/^(?:(?:and|then|now|e|depois)\s+)?(?:publish|preview|show|display|serve|publique|mostre)\b/i.test(request)) {
       // Unknown additional instructions can contain prerequisites. Preserve
