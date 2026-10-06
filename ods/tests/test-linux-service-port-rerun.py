@@ -98,6 +98,12 @@ def test_owner_webhook_url_survives_rerun(tmp_path):
     assert "N8N_WEBHOOK_URL=https://workflow.owner.test" in output.read_text()
 
 
+def test_saved_inline_comment_is_decoded_as_a_port(tmp_path):
+    result, output = run(tmp_path, 'N8N_PORT="5878" # owner-selected port\n')
+    assert result.returncode == 0, result.stderr
+    assert "N8N_PORT=5878" in output.read_text()
+
+
 def test_invalid_saved_or_explicit_port_refuses_before_serialization(tmp_path):
     for value in ("0", "65536", "-1", "3000; touch unwanted", "03"):
         result, output = run(tmp_path, "N8N_PORT=5778\n", {"N8N_PORT": value})
@@ -123,3 +129,24 @@ def test_summary_uses_resolved_webui_port(tmp_path):
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout == "http://localhost:3100"
+
+
+def test_operator_diagnostics_honor_selected_environment_file(tmp_path):
+    # Keep BASH_SOURCE self-location real while executing the diagnostics'
+    # shipped initialization without starting its network probes.
+    import shutil
+    fake = tmp_path / "source"
+    (fake / "scripts").mkdir(parents=True)
+    (fake / "lib").symlink_to(ROOT / "lib", target_is_directory=True)
+    shutil.copy(ROOT / "manifest.json", fake / "manifest.json")
+    (fake / "extensions").symlink_to(ROOT / "extensions", target_is_directory=True)
+    (fake / ".env").write_text("OLLAMA_PORT=11434\n")
+    selected = tmp_path / "selected.env"
+    selected.write_text("OLLAMA_PORT=12534\n")
+    script = (ROOT / "scripts/ods-test.sh").read_text().split("# Colors", 1)[0]
+    driver = fake / "scripts/diagnostic-init.sh"
+    driver.write_text(script + '\nprintf "%s" "$LLM_URL"\n')
+    result = subprocess.run(["bash", str(driver)], env={**os.environ, "ENV_FILE": str(selected)},
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "http://localhost:12534"
