@@ -143,6 +143,18 @@ export function boundInspectionControls(params, result, preview) {
   } catch { return undefined; }
 }
 
+// Any valid passed inspection establishes this limited browser-load evidence.
+// The receipt protocol omits pageErrors when none were observed. It does not
+// certify other interactions or errors outside this inspection's time window.
+export function boundRenderedPreviewInspection(params, result, preview) {
+  return boundInspection(params, result, preview, () => true);
+}
+
+export function renderedInspectionInstruction(preview, pageErrors) {
+  return pageErrorRepairInstruction(preview, pageErrors) ??
+    `The published files passed HTTP readback, but the page has not passed browser inspection. Before replying, call ${PREVIEW_INSPECTION_TOOL} with siteId ${JSON.stringify(preview.siteId)}, sha256 ${JSON.stringify(preview.sha256)}, viewport {width,height}, and steps that check the actual page. Inspect the controls and results needed for the owner's request; a heading-only assertion checks page load only, not functionality. If the page throws, fix the script, republish, and inspect the new snapshot. If inspection is unavailable or unfinished, keep the preview and report the browser check as unverified.`;
+}
+
 export function boundVisibilityInspection(params, result, preview) {
   return boundInspection(params, result, preview, hasVisibilityTransitionPlan);
 }

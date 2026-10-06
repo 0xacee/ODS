@@ -172,7 +172,7 @@ test('visibility gate only requests checks supported by the installed capability
   for(const text of ['A button shows details.','Click to hide the section.','Add a button that toggles visibility of the details panel.']) assert.equal(requestsVisibilityInteraction(text),true,text);
   for(const text of ['Create a contact form.','Make a beautiful static website.','Implement a toggle.','Explain a toggle.','Do not add a show button.']) assert.equal(requestsVisibilityInteraction(text),false,text);
   for(const config of [{enabled:false},{prompt:'Create and publish a static website in a new workspace directory site.'},{prompt:'Create and publish a website in a new workspace directory site.\n> A button shows details.'}]) {
-    const {guard}=setup(config);assert.equal(guard.verificationForRun('run').status,'passed');
+    const {guard}=setup(config);assert.equal(guard.verificationForRun('run').status,config.enabled===false?'passed':'failed');
   }
 });
 
@@ -185,7 +185,8 @@ test('static page contents beside form controls do not request show/hide inspect
     'Add a Submit button and show the page title.',
   ]) assert.equal(requestsVisibilityInteraction(text), false, text);
   const {guard}=setup({prompt});
-  assert.equal(guard.verificationForRun('run').status,'passed');
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  assert.match(guard.verificationForRun('run').text,/browser check remains unverified/);
   assert.doesNotMatch(guard.verificationForRun('run').text,/show\/hide interaction/);
   for (const text of [
     'Show a title and a contact form with a button that reveals hidden help.',
@@ -209,7 +210,8 @@ test('initial control-state corrections do not imply a new visibility transition
     'The "Show details" button starts with aria-pressed=true.',
   ]) {
     const {guard} = setup({prompt:`Create and publish a website in a new workspace directory site. ${text}`});
-    assert.equal(guard.verificationForRun('run').status, 'passed', text);
+    assert.equal(guard.verificationForRun('run').status, 'failed', text);
+    assert.match(guard.verificationForRun('run').text, /browser check remains unverified/, text);
     assert.doesNotMatch(guard.verificationForRun('run').text, /show\/hide interaction/, text);
   }
 });
@@ -554,9 +556,9 @@ test('a static inspection that records page errors cannot preserve earlier inter
   assert.equal(guard.beforeAgentFinalize({},context)?.retry?.instruction,PAGE_ERROR_REPAIR_INSTRUCTION);
 });
 
-test('page errors without an interaction duty replace completion coaching but never block delivery',()=>{
+test('page errors without an interaction duty withhold verification while preserving the preview',()=>{
   const {guard,preview}=setup({prompt:'Create and publish a static website in a new workspace directory site.'});
-  assert.equal(guard.verificationForRun('run').status,'passed');
+  assert.equal(guard.verificationForRun('run').status,'failed');
   const staticPlan={...plan(preview),steps:[{action:'assert-visible',locator:{selector:'button'}}]};
   const errored=erroredInspection(guard,staticPlan,{id:'static-errors'});
   guard.afterToolCall({...errored.event,result:errored.result},errored.ctx);
@@ -564,7 +566,7 @@ test('page errors without an interaction duty replace completion coaching but ne
   assert.ok(persisted.includes('[ODS Pixel next step] '+PAGE_ERROR_REPAIR_INSTRUCTION),persisted);
   assert.ok(!persisted.includes(WORKSPACE_PREVIEW_COMPLETE_REASON),'no conflicting "give the final result" step');
   const outcome=guard.verificationForRun('run');
-  assert.equal(outcome.status,'passed');assert.equal(outcome.preview.sha256,preview.sha256);
+  assert.equal(outcome.status,'failed');assert.equal(outcome.preview.sha256,preview.sha256);
   const clean=inspection(guard,staticPlan,{id:'static-clean'});
   guard.afterToolCall({...clean.event,result:clean.result},clean.ctx);
   assert.ok(persistResult(guard,clean).includes(WORKSPACE_PREVIEW_COMPLETE_REASON),'a clean receipt restores ordinary coaching');
@@ -586,7 +588,8 @@ test("visibility duty matches requested behavior: Please add a Pause motion / Re
   assert.equal(requestsVisibilityInteraction("Please add a Pause motion / Resume motion toggle to this page so I can quiet the animated effects. Keep the design and publish the updated preview."),false);
   const {guard}=setup({prompt});
   const delivery=guard.verificationForRun('run');
-  assert.equal(delivery.status,'passed');
+  assert.equal(delivery.status,'failed');
+  assert.match(delivery.text,/browser check remains unverified/);
   assert.doesNotMatch(delivery.text,/show\/hide interaction/);
 });
 test("visibility duty matches requested behavior: Add a dark mode toggle to the header.",()=>{
@@ -594,7 +597,8 @@ test("visibility duty matches requested behavior: Add a dark mode toggle to the 
   assert.equal(requestsVisibilityInteraction("Add a dark mode toggle to the header."),false);
   const {guard}=setup({prompt});
   const delivery=guard.verificationForRun('run');
-  assert.equal(delivery.status,'passed');
+  assert.equal(delivery.status,'failed');
+  assert.match(delivery.text,/browser check remains unverified/);
   assert.doesNotMatch(delivery.text,/show\/hide interaction/);
 });
 test("visibility duty matches requested behavior: Add a button that toggles the accent color between blue and green.",()=>{
@@ -602,7 +606,8 @@ test("visibility duty matches requested behavior: Add a button that toggles the 
   assert.equal(requestsVisibilityInteraction("Add a button that toggles the accent color between blue and green."),false);
   const {guard}=setup({prompt});
   const delivery=guard.verificationForRun('run');
-  assert.equal(delivery.status,'passed');
+  assert.equal(delivery.status,'failed');
+  assert.match(delivery.text,/browser check remains unverified/);
   assert.doesNotMatch(delivery.text,/show\/hide interaction/);
 });
 test("visibility duty matches requested behavior: Add a mute toggle for the background audio.",()=>{
@@ -610,7 +615,8 @@ test("visibility duty matches requested behavior: Add a mute toggle for the back
   assert.equal(requestsVisibilityInteraction("Add a mute toggle for the background audio."),false);
   const {guard}=setup({prompt});
   const delivery=guard.verificationForRun('run');
-  assert.equal(delivery.status,'passed');
+  assert.equal(delivery.status,'failed');
+  assert.match(delivery.text,/browser check remains unverified/);
   assert.doesNotMatch(delivery.text,/show\/hide interaction/);
 });
 test("visibility duty matches requested behavior: Add a button that toggles the visibility of the details panel.",()=>{
@@ -632,7 +638,8 @@ test("visibility duty matches requested behavior: Do not add a toggle that shows
   assert.equal(requestsVisibilityInteraction("Do not add a toggle that shows or hides anything."),false);
   const {guard}=setup({prompt});
   const delivery=guard.verificationForRun('run');
-  assert.equal(delivery.status,'passed');
+  assert.equal(delivery.status,'failed');
+  assert.match(delivery.text,/browser check remains unverified/);
   assert.doesNotMatch(delivery.text,/show\/hide interaction/);
 });
 test("visibility duty matches requested behavior: Add a Pause motion toggle to quiet the animated effects, and also add a button that shows the hidden details panel.",()=>{
@@ -807,7 +814,8 @@ test('a different run and session cannot inherit the behavior obligation',()=>{
   guard.observeRun(nextContext,'pixel',{prompt:packingPrompt});
   call(guard,'write',{path:preview.relativeDirectory+'/index.html',content:'<!doctype html><button>Show details</button><p hidden>Details</p>'},'next-write',{content:[{type:'text',text:'Successfully wrote file.'}]},nextContext);
   call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'next-publish',{details:preview},nextContext);
-  assert.equal(guard.verificationForRun('next').status,'passed');
+  assert.equal(guard.verificationForRun('next').status,'failed');
+  assert.match(guard.verificationForRun('next').text,/browser check remains unverified/);
   assert.doesNotMatch(guard.verificationForRun('next').text,/attempted preview interaction checks/);
 });
 
@@ -941,4 +949,75 @@ test('several fields may prepare one click, but two clicks cannot share a final 
   assert.ok(boundPreviewBehavior(params,{details:pureReceipt(params)},preview,attempted));
   const noPostcondition=pureParams(preview,[...steps.slice(0,3),{action:'click',locator:{selector:'#toggle'}},steps[3]]);
   assert.equal(boundPreviewBehavior(noPostcondition,{details:pureReceipt(noPostcondition)},preview,attempted),undefined);
+});
+
+// A live laptop page was published with unguarded localStorage and called
+// functional despite a sandbox SecurityError. HTTP readback alone must not
+// certify model-authored pages when browser inspection is installed.
+const loadPrompt='Create and publish a static website in a new workspace directory site.';
+function loadPlan(preview) { return {...plan(preview),steps:[{action:'assert-visible',locator:{selector:'button'}}]}; }
+
+test('browser-load gate requests current identifiers before model-authored page completion',()=>{
+  const {guard,preview}=setup({prompt:loadPrompt});
+  const outcome=guard.verificationForRun('run');
+  assert.equal(outcome.status,'failed');
+  assert.equal(outcome.preview.sha256,preview.sha256);
+  assert.match(outcome.text,/browser check remains unverified/);
+  const retry=guard.beforeAgentFinalize({},context)?.retry;
+  assert.equal(retry?.idempotencyKey,'pixel-ods-workspace-preview-rendered');
+  assert.equal(retry?.maxAttempts,1);
+  assert.ok(retry.instruction.includes(preview.sha256));
+  assert.ok(retry.instruction.includes(preview.siteId));
+  const persisted=guard.toolResultPersist({message:{role:'toolResult',toolName:'pixel_ods_workspace_preview',toolCallId:'publish',content:[{type:'text',text:'published'}]}},{...context,toolCallId:'publish'});
+  assert.match(JSON.stringify(persisted),/page has not passed browser inspection/);
+});
+
+for(const wrapped of [false,true]) for(const fault of ['none','page-errors','session','receipt-sha','outer-error','pending'])
+test(`browser-load evidence requires the bound current receipt: wrapped=${wrapped}, fault=${fault}`,()=>{
+  const {guard,preview}=setup({prompt:loadPrompt});
+  const observed=inspection(guard,loadPlan(preview),{wrapped});
+  const inner=wrapped?observed.result.details.result:observed.result;
+  if(fault==='page-errors')inner.details.pageErrors={count:1,messages:['SecurityError: storage unavailable']};
+  if(fault==='receipt-sha')inner.details.sha256='b'.repeat(64);
+  if(fault==='outer-error')observed.result.isError=true;
+  if(fault!=='pending')guard.afterToolCall({...observed.event,result:observed.result},fault==='session'?{...observed.ctx,sessionId:'foreign'}:observed.ctx);
+  const outcome=guard.verificationForRun('run');
+  assert.equal(outcome.status,fault==='none'?'passed':'failed');
+  if(fault==='none')assert.doesNotMatch(outcome.text,/interaction checks.*passed|show\/hide checks.*passed/);
+  if(fault==='page-errors')assert.equal(guard.beforeAgentFinalize({},context)?.retry?.instruction,PAGE_ERROR_REPAIR_INSTRUCTION);
+});
+
+test('browser-load proof is revoked by a later failed inspection and by same-byte republication',()=>{
+  const {guard,preview}=setup({prompt:loadPrompt});
+  const first=inspection(guard,loadPlan(preview));
+  guard.afterToolCall({...first.event,result:first.result},first.ctx);
+  assert.equal(guard.verificationForRun('run').status,'passed');
+  const failed=erroredInspection(guard,loadPlan(preview),{id:'later-errors'});
+  guard.afterToolCall({...failed.event,result:failed.result},failed.ctx);
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  const fresh=inspection(guard,loadPlan(preview),{id:'fresh'});
+  guard.afterToolCall({...fresh.event,result:fresh.result},fresh.ctx);
+  assert.equal(guard.verificationForRun('run').status,'passed');
+  call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'republish',{details:preview});
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  guard.afterToolCall({...fresh.event,result:fresh.result},fresh.ctx);
+  assert.equal(guard.verificationForRun('run').status,'failed','late consumed receipt cannot restore proof');
+});
+
+test('browser-load unavailable result preserves an unverified preview without another retry',()=>{
+  const {guard,preview}=setup({prompt:loadPrompt});
+  const observed=inspection(guard,loadPlan(preview));
+  guard.afterToolCall({...observed.event,result:{isError:true,details:{errorCode:'unavailable'}}},observed.ctx);
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  assert.equal(guard.verificationForRun('run').preview.sha256,preview.sha256);
+  assert.notEqual(guard.beforeAgentFinalize({},context)?.retry?.idempotencyKey,'pixel-ods-workspace-preview-rendered');
+});
+
+test('browser-load gate does not require unavailable capability or pre-existing owner files',()=>{
+  assert.equal(setup({prompt:loadPrompt,enabled:false}).guard.verificationForRun('run').status,'passed');
+  const {preview}=setup({prompt:loadPrompt});
+  const guard=createToolLoopGuard({workspacePreviewInspectionAvailable:true});
+  guard.observeRun(context,'pixel',{prompt:'Publish the existing website from site without changing any files.'});
+  call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'publish-existing',{details:preview});
+  assert.equal(guard.verificationForRun('run').status,'passed');
 });
