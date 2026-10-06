@@ -4571,7 +4571,7 @@ PY
 _ods_pixel_write_onboarding() {
     local owner="$1" home="$2" answers="$3" openclaw_bin="$4" plugin_path="$5" plugin_digest="$6"
     local web_search_provider="${7:-searxng}" parallel_path="${8:-}" parallel_digest="${9:-}"
-    local context="${MAX_CONTEXT:-16384}" max_tokens reasoning=false
+    local context="${MAX_CONTEXT:-16384}" max_tokens reasoning=default
     local gateway_alias gateway_label runtime_model model_gateway_port="${PIXEL_MODEL_RELAY_PORT:-4006}" pixel_gateway_port gateway_key="${PIXEL_MODEL_RELAY_KEY:-}"
     local gateway_key_file write_status=0
     if [[ "$context" =~ ^[0-9]+$ && "$context" -ge 4096 ]]; then
@@ -4584,13 +4584,6 @@ _ods_pixel_write_onboarding() {
         ai_bad "Pixel received an invalid model context budget."
         return 1
     }
-    # This field controls the active OpenClaw reasoning path, not merely the
-    # model family's theoretical capability. Keep the default no-think setting
-    # false even for reasoning-capable models; an explicit operator setting
-    # enables it and is reconciled transactionally on model swaps.
-    if [[ ! "${LLAMA_REASONING:-off}" =~ ^(off|none|false|0)$ ]]; then
-        reasoning=true
-    fi
     gateway_alias="$(_ods_pixel_gateway_model_alias)" || {
         ai_bad "Pixel received an unsupported ODS model Switchboard mode."
         return 1
@@ -4598,6 +4591,24 @@ _ods_pixel_write_onboarding() {
     gateway_label="Default"
     [[ "$gateway_alias" == "ods/current" ]] && gateway_label="Current"
     runtime_model="$(_ods_pixel_runtime_model_identity)" || return 1
+    # This field controls the active OpenClaw reasoning path, not merely the
+    # model family's theoretical capability. An explicit operator setting
+    # (including an empty value) always wins. When unset, the renderer decides:
+    # a local built-in Qwen3.5-2B bootstrap route defaults to reasoning on so
+    # the Portal can complete simple tasks without tool loops; every other
+    # route keeps the historical no-think default. The renderer preserves a
+    # previously validated reasoning preference for the same model route.
+    if [[ -n "${LLAMA_REASONING+x}" ]]; then
+        if [[ "${LLAMA_REASONING:-off}" =~ ^(off|none|false|0)$ ]]; then
+            reasoning=false
+        else
+            reasoning=true
+        fi
+    elif [[ -z "${EXTERNAL_LLM_URL:-}" ]]; then
+        case "$(printf '%s' "$runtime_model" | tr '[:upper:]' '[:lower:]')" in
+            qwen3.5-2b|qwen3.5-2b-q4_k_m.gguf) reasoning=bootstrap ;;
+        esac
+    fi
     if [[ ! "$model_gateway_port" =~ ^[0-9]+$ ]] || (( model_gateway_port < 1 || model_gateway_port > 65535 )); then
         ai_bad "Pixel requires a valid loopback model relay port."
         return 1
