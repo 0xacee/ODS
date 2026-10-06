@@ -7289,7 +7289,10 @@ export function createToolLoopGuard({
     }
     // First-attempt obligation: record the model's attempted behavior plan
     // once per run, bound to the current preview snapshot. Never overwritten.
-    if (selectedToolName === PREVIEW_INSPECTION_TOOL && state && !workspaceBehaviorAttempt(state)) {
+    // Explicit show/hide duties already bind a requested transition. A model's
+    // extra exploratory clicks must not expand that owner-bound requirement.
+    if (selectedToolName === PREVIEW_INSPECTION_TOOL && state &&
+        !state.workspaceVisibilityInteractionRequired && !workspaceBehaviorAttempt(state)) {
       const attempt = attemptedPreviewBehavior(selectedParams, state.workspacePreview);
       if (attempt) state.workspaceBehaviorAttempt = Object.freeze({...attempt,
         sessionId: state.currentSessionId, sessionKey: state.currentSessionKey});
