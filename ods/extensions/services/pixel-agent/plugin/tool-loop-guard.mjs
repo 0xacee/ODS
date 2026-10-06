@@ -7080,7 +7080,7 @@ export function createToolLoopGuard({
 
   function workspaceRenderedInspectionRequired(state) {
     return workspacePreviewInspectionAvailable &&
-      (state.workspacePreviewModelAuthored || state.workspacePreviewVerificationContinuation);
+      (state.workspacePreviewModelAuthored || state.workspacePreviewVerificationRequested);
   }
 
   function workspaceRenderedInspectionPassed(state) {
@@ -7493,6 +7493,7 @@ export function createToolLoopGuard({
         workspacePreviewAuthorshipRequired: false,
         workspacePreviewModelAuthored: false,
         workspaceVisualContinuationRequested: false,
+        workspacePreviewVerificationRequested: false,
         workspacePreviewVerificationContinuation: false,
         workspaceVisualContinuationEdited: false,
         workspaceVisualContinuationOriginalSha256: undefined,
@@ -9784,6 +9785,9 @@ export function createToolLoopGuard({
         const verificationContinuationRequested = userMessageRequestsWorkspaceVerificationContinuation(
           event?.messages, event?.prompt
         );
+        // Verification intent survives a gateway restart; it requires fresh
+        // evidence but cannot confer a previous project's continuation scope.
+        state.workspacePreviewVerificationRequested = verificationContinuationRequested;
         const trustedSessionPreview =
           (visualContinuationRequested || verificationContinuationRequested) && typeof sessionId === "string" && sessionId
             ? sessionPreviews.get(sessionId)
@@ -9803,7 +9807,7 @@ export function createToolLoopGuard({
         // With no verified previous preview, ordinary tools must remain usable
         // to locate the requested files. Only a real preview binds its scope.
         state.workspacePreviewRequired = !state.workspacePreviewForbidden && (
-          Boolean(trustedSessionPreview) || state.workspaceVisualArtifactProduced ||
+          verificationContinuationRequested || Boolean(trustedSessionPreview) || state.workspaceVisualArtifactProduced ||
           ((!visualContinuationRequested || explicitDelivery) && previewRequested)
         );
         const visibilityObligation = sessionPreviewVisibilityObligations.get(sessionId);

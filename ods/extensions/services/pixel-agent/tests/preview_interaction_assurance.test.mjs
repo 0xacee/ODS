@@ -1120,3 +1120,22 @@ for (const wrapped of [false,true]) test(`verification follow-up conditional rep
   call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'unchanged-republish',{details:preview},next);
   assert.equal(guard.verificationForRun(next.runId).status,'failed','republication cannot substitute for a passing browser check');
 });
+
+
+test('verification after gateway restart requires fresh publication and browser evidence',()=>{
+  const {preview}=setup({prompt:'Build a packing checklist website in site and show me a working preview.'});
+  const guard=createToolLoopGuard({workspacePreviewInspectionAvailable:true});
+  const next={...context,runId:'after-restart'};
+  guard.observeRun(next,'pixel',{prompt:verifyFollowup,messages:[
+    {role:'assistant',content:'The previous preview passed all six checks.'}
+  ]});
+  assert.equal(guard.verificationForRun(next.runId).status,'failed','prior prose cannot satisfy a new verification request');
+  assert.ok(guard.beforeAgentFinalize({},next)?.retry,'no-tool answer must request fresh work');
+  call(guard,'read',{path:preview.relativeDirectory+'/index.html'},'read-current',{content:[{type:'text',text:'<!doctype html><button>Show details</button><p hidden>Details</p>'}]},next);
+  call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'fresh-publish',{details:preview},next);
+  assert.equal(guard.verificationForRun(next.runId).status,'failed','HTTP readback alone is insufficient after restart');
+  const fresh=inspection(guard,plan(preview),{id:'fresh-browser-check',runContext:next});
+  guard.afterToolCall({...fresh.event,result:fresh.result},fresh.ctx);
+  assert.equal(guard.verificationForRun(next.runId).status,'passed');
+  assert.equal(guard.beforeAgentFinalize({},next),undefined);
+});
