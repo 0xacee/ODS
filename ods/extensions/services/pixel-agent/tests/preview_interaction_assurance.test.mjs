@@ -668,3 +668,277 @@ test('comma-separated initial control state case 7',()=>{
 test('comma-separated initial control state case 8',()=>{
   assert.equal(requestsVisibilityInteraction("The button, \"Read\", starts unpressed and clicking it shows \"Results card\"."),true);
 });
+
+// --- Strixy current-main 29c25961: attempted behavior plan obligation -------------------
+// A first bounded action plan (fill/click/select) is remembered per run and
+// snapshot. A plan retaining its action counts and postconditions must pass before delivery; a static
+// heading-only inspection cannot substitute for them.
+
+function behaviorReceipt(params,{pageErrors}={}) {
+  const request=normalizeWorkspacePreviewInspectionParams(params);
+  const state=visible=>({count:1,visible,display:visible?'block':'none',visibility:'visible',opacity:'1',hidden:!visible,hiddenUntilFound:false,rectCount:visible?1:0});
+  const inputState=value=>({...state(true),input:{eligible:true,disabled:false,readOnly:false,matches:true}});
+  const steps=params.steps.map((s,index)=>{
+    const base={index,...s,before:state(s.action!=='assert-hidden'),stable:true,status:'passed'};
+    if(s.action==='click') base.after=state(true);
+    if(s.action==='fill') { base.before=inputState(); base.after=inputState(); }
+    if(s.action==='assert-text') base.before={...state(true),text:{actual:s.expectedText,truncated:false}};
+    return base;
+  });
+  const receipt={schemaVersion:1,kind:INSPECTION_KIND,status:'passed',siteId:params.siteId,sha256:params.sha256,
+    planSha256:inspectionPlanHash(request),viewport:params.viewport,steps,
+    diagnostics:{renderedHiddenAttributeCount:0,hiddenUntilFoundCount:0},blockedRequests:[],scope:INSPECTION_SCOPE+(params.steps.some(s=>s.action==='fill')?FILL_INSPECTION_SCOPE:'')};
+  if(pageErrors) receipt.pageErrors=pageErrors;
+  return receipt;
+}
+
+function behaviorInspection(guard,params,{wrapped=false,id='behavior',runContext=context,pageErrors}={}) {
+  const name=wrapped?'tool_call':PREVIEW_INSPECTION_TOOL;
+  const args=wrapped?{id:'openclaw:pixel-ods:'+PREVIEW_INSPECTION_TOOL,args:params}:params;
+  const started=call(guard,name,args,id,undefined,runContext);
+  const inner={details:behaviorReceipt(params,{pageErrors})};
+  const result=wrapped?{details:{tool:{id:args.id,name:PREVIEW_INSPECTION_TOOL,source:'openclaw',sourceName:'pixel-ods'},result:inner}}:inner;
+  return {...started,result};
+}
+
+// The fleet's packing-checklist prompt: add a checklist with an Add button and
+// a packed checkbox. The model's first plan used fill+click but omitted the
+// exact/expectedText fields, so the guard must remember the attempted actions
+// and refuse to accept a later heading-only static inspection as proof.
+const packingPrompt='Create and publish a website in a new workspace directory site. Add a packing checklist with a text field, an Add button, and a packed checkbox.';
+
+function packingPlan(preview) { return {siteId:preview.siteId,sha256:preview.sha256,viewport:{width:800,height:600},steps:[
+  {action:'fill',locator:{selector:'#item'},value:'Socks'},
+  {action:'click',locator:{role:'button',name:'Add',exact:true}},
+  {action:'assert-text',locator:{selector:'#list'},expectedText:'Socks'},
+  {action:'click',locator:{role:'checkbox',name:'Packed',exact:true}},
+  {action:'assert-visible',locator:{selector:'#packed'}},
+]}; }
+
+for (const wrapped of [false,true]) test(`attempted behavior plan survives a static heading pass and requires the attempted actions and postconditions (${wrapped?'deferred':'direct'})`,()=>{
+  const {guard,preview}=setup({prompt:packingPrompt});
+  // First attempt: fill+click but the assert-text step is missing expectedText,
+  // so normalization rejects it. The guard must still remember the attempt.
+  const invalid={...packingPlan(preview)};
+  delete invalid.steps[2].expectedText;
+  const name=wrapped?'tool_call':PREVIEW_INSPECTION_TOOL;
+  const args=wrapped?{id:'openclaw:pixel-ods:'+PREVIEW_INSPECTION_TOOL,args:invalid}:invalid;
+  const started=call(guard,name,args,'invalid-attempt');
+  const inner={isError:true,details:{schemaVersion:1,kind:INSPECTION_KIND,status:'failed',errorCode:'invalid_request',scope:INSPECTION_SCOPE}};
+  const result=wrapped?{details:{tool:{id:args.id,name:PREVIEW_INSPECTION_TOOL,source:'openclaw',sourceName:'pixel-ods'},result:inner}}:inner;
+  guard.afterToolCall({...started.event,result},started.ctx);
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  // A static heading-only inspection passes the capsule but cannot satisfy the
+  // remembered behavior obligation.
+  const staticPlan={...packingPlan(preview),steps:[{action:'assert-visible',locator:{selector:'h1'}}]};
+  const staticCheck=behaviorInspection(guard,staticPlan,{wrapped,id:'static-heading'});
+  guard.afterToolCall({...staticCheck.event,result:staticCheck.result},staticCheck.ctx);
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  assert.match(guard.verificationForRun('run').text,/attempted preview interaction checks/);
+  const retry=guard.beforeAgentFinalize({},context)?.retry;
+  assert.equal(retry?.idempotencyKey,'pixel-ods-workspace-preview-behavior');
+  assert.match(retry.instruction,/1 fill, 2 click/);
+  assert.match(retry.instruction,/do not replace the behavior checks with a heading-only assertion/);
+  // The corrected plan keeps the same actions and adds the missing postcondition.
+  const corrected=behaviorInspection(guard,packingPlan(preview),{wrapped,id:'corrected'});
+  guard.afterToolCall({...corrected.event,result:corrected.result},corrected.ctx);
+  assert.equal(guard.verificationForRun('run').status,'passed');
+  assert.equal(guard.beforeAgentFinalize({},context),undefined);
+});
+
+for (const wrapped of [false,true]) test(`a later static inspection retains the behavior proof for the same snapshot (${wrapped?'deferred':'direct'})`,()=>{
+  const {guard,preview}=setup({prompt:packingPrompt});
+  const first=behaviorInspection(guard,packingPlan(preview),{wrapped,id:'behavior'});
+  guard.afterToolCall({...first.event,result:first.result},first.ctx);
+  assert.equal(guard.verificationForRun('run').status,'passed');
+  const staticPlan={...packingPlan(preview),viewport:{width:1024,height:768},steps:[{action:'assert-visible',locator:{selector:'h1'}}]};
+  const staticCheck=behaviorInspection(guard,staticPlan,{wrapped,id:'static'});
+  guard.afterToolCall({...staticCheck.event,result:staticCheck.result},staticCheck.ctx);
+  assert.equal(guard.verificationForRun('run').status,'passed');
+});
+
+for (const wrapped of [false,true]) for (const fault of ['failed','newsha','pageerrors','inflight','unbound']) test(`behavior proof is revoked by ${fault} (${wrapped?'deferred':'direct'})`,()=>{
+  const {guard,preview}=setup({prompt:packingPrompt});
+  const first=behaviorInspection(guard,packingPlan(preview),{wrapped,id:'behavior'});
+  guard.afterToolCall({...first.event,result:first.result},first.ctx);
+  assert.equal(guard.verificationForRun('run').status,'passed');
+  if(fault==='newsha') {
+    const next=republish(guard,preview,'<!doctype html><h1>Changed</h1>','newsha');
+    assert.notEqual(next.sha256,preview.sha256);
+    assert.equal(guard.verificationForRun('run').status,'failed');
+    return;
+  }
+  const params=packingPlan(preview);
+  const next=behaviorInspection(guard,params,{wrapped,id:'next',pageErrors:fault==='pageerrors'?{count:1,messages:['boom']}:undefined});
+  const result=structuredClone(next.result),event={...next.event},ctx={...next.ctx};
+  const inner=wrapped?result.details.result:result;
+  if(fault==='failed') { inner.details.status='failed'; inner.details.steps[0].status='failed'; inner.details.steps[0].errorCode='no_match'; inner.details.steps[0].before={count:0}; }
+  if(fault==='unbound') { ctx.toolCallId='unbound'; event.toolCallId='unbound'; }
+  if(fault!=='inflight') guard.afterToolCall({...event,result},ctx);
+  assert.equal(guard.verificationForRun('run').status,'failed');
+});
+
+for (const wrapped of [false,true]) test(`fewer actions than the attempted plan cannot pass (${wrapped?'deferred':'direct'})`,()=>{
+  const {guard,preview}=setup({prompt:packingPrompt});
+  const invalid={...packingPlan(preview)};
+  delete invalid.steps[2].expectedText;
+  const name=wrapped?'tool_call':PREVIEW_INSPECTION_TOOL;
+  const args=wrapped?{id:'openclaw:pixel-ods:'+PREVIEW_INSPECTION_TOOL,args:invalid}:invalid;
+  const started=call(guard,name,args,'invalid-attempt');
+  const inner={isError:true,details:{schemaVersion:1,kind:INSPECTION_KIND,status:'failed',errorCode:'invalid_request',scope:INSPECTION_SCOPE}};
+  const result=wrapped?{details:{tool:{id:args.id,name:PREVIEW_INSPECTION_TOOL,source:'openclaw',sourceName:'pixel-ods'},result:inner}}:inner;
+  guard.afterToolCall({...started.event,result},started.ctx);
+  // Only one click, no fill, no assert-text: fewer than the attempted plan.
+  const fewer={...packingPlan(preview),steps:[{action:'click',locator:{role:'button',name:'Add',exact:true}},{action:'assert-visible',locator:{selector:'#list'}}]};
+  const check=behaviorInspection(guard,fewer,{wrapped,id:'fewer'});
+  guard.afterToolCall({...check.event,result:check.result},check.ctx);
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  assert.match(guard.verificationForRun('run').text,/attempted preview interaction checks/);
+});
+
+test('a different run and session cannot inherit the behavior obligation',()=>{
+  const {guard,preview}=setup({prompt:packingPrompt});
+  const invalid={...packingPlan(preview)};
+  delete invalid.steps[2].expectedText;
+  const started=call(guard,PREVIEW_INSPECTION_TOOL,invalid,'invalid-attempt');
+  guard.afterToolCall({...started.event,result:{isError:true,details:{schemaVersion:1,kind:INSPECTION_KIND,status:'failed',errorCode:'invalid_request',scope:INSPECTION_SCOPE}}},started.ctx);
+  assert.equal(guard.verificationForRun('run').status,'failed');
+  const nextContext={...context,runId:'next',sessionId:'next-session',sessionKey:'next-key'};
+  guard.observeRun(nextContext,'pixel',{prompt:packingPrompt});
+  call(guard,'write',{path:preview.relativeDirectory+'/index.html',content:'<!doctype html><button>Show details</button><p hidden>Details</p>'},'next-write',{content:[{type:'text',text:'Successfully wrote file.'}]},nextContext);
+  call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'next-publish',{details:preview},nextContext);
+  assert.equal(guard.verificationForRun('next').status,'passed');
+  assert.doesNotMatch(guard.verificationForRun('next').text,/attempted preview interaction checks/);
+});
+
+// --- Pure helper tests for attemptedPreviewBehavior/boundPreviewBehavior ---
+import {FILL_INSPECTION_SCOPE} from '../plugin/workspace-preview-inspect.mjs';
+import {attemptedPreviewBehavior, boundPreviewBehavior} from '../plugin/preview-interaction-assurance.mjs';
+
+function purePreview(sha='a'.repeat(64)) { return {siteId:'site-'+sha.slice(0,24),sha256:sha}; }
+
+function pureParams(preview,steps) { return {siteId:preview.siteId,sha256:preview.sha256,viewport:{width:800,height:600},steps}; }
+
+function pureReceipt(params) {
+  const request=normalizeWorkspacePreviewInspectionParams(params);
+  const state=visible=>({count:1,visible,display:visible?'block':'none',visibility:'visible',opacity:'1',hidden:!visible,hiddenUntilFound:false,rectCount:visible?1:0});
+  const inputState=()=>({...state(true),input:{eligible:true,disabled:false,readOnly:false,matches:true}});
+  return {schemaVersion:1,kind:INSPECTION_KIND,status:'passed',siteId:params.siteId,sha256:params.sha256,
+    planSha256:inspectionPlanHash(request),viewport:params.viewport,steps:params.steps.map((s,index)=>{
+      const base={index,...s,before:state(s.action!=='assert-hidden'),stable:true,status:'passed'};
+      if(s.action==='click') base.after=state(true);
+      if(s.action==='fill') { base.before=inputState(); base.after=inputState(); }
+      if(s.action==='assert-text') base.before={...state(true),text:{actual:s.expectedText,truncated:false}};
+      return base;
+    }),diagnostics:{renderedHiddenAttributeCount:0,hiddenUntilFoundCount:0},blockedRequests:[],scope:INSPECTION_SCOPE+(params.steps.some(s=>s.action==='fill')?FILL_INSPECTION_SCOPE:'')};
+}
+
+test('attemptedPreviewBehavior ignores plans with no click/fill/select and unsupported downloads',()=>{
+  const preview=purePreview();
+  assert.equal(attemptedPreviewBehavior(pureParams(preview,[{action:'assert-visible',locator:{selector:'h1'}}]),preview),undefined);
+  assert.equal(attemptedPreviewBehavior(pureParams(preview,[{action:'download',locator:{selector:'#dl'},path:'a.pdf',expectedBytes:1,expectedSha256:'a'.repeat(64)}]),preview),undefined);
+  assert.equal(attemptedPreviewBehavior(pureParams(preview,[{action:'click',locator:{selector:'#b'}},{action:'download',locator:{selector:'#dl'},path:'a.pdf',expectedBytes:1,expectedSha256:'a'.repeat(64)}]),preview),undefined);
+});
+
+test('attemptedPreviewBehavior counts actions and binds to the snapshot',()=>{
+  const preview=purePreview();
+  const counts=attemptedPreviewBehavior(pureParams(preview,[
+    {action:'fill',locator:{selector:'#i'},value:'x'},
+    {action:'click',locator:{selector:'#b'}},
+    {action:'click',locator:{selector:'#c'}},
+  ]),preview);
+  assert.deepEqual(counts,{fill:1,click:2,'select-option':0});
+  assert.equal(attemptedPreviewBehavior(pureParams({...preview,sha256:'b'.repeat(64)},[{action:'click',locator:{selector:'#b'}}]),preview),undefined);
+});
+
+test('boundPreviewBehavior rejects wrong sha, unknown actions and malformed steps',()=>{
+  const preview=purePreview();
+  const attempted={fill:0,click:1,'select-option':0};
+  const params=pureParams(preview,[{action:'click',locator:{selector:'#b'}},{action:'assert-visible',locator:{selector:'#b'}}]);
+  const receipt=pureReceipt(params);
+  assert.ok(boundPreviewBehavior(params,{details:receipt},preview,attempted));
+  const wrongSha=structuredClone(receipt); wrongSha.sha256='b'.repeat(64);
+  assert.equal(boundPreviewBehavior(params,{details:wrongSha},preview,attempted),undefined);
+  const unknown=structuredClone(receipt); unknown.steps[0].action='teleport';
+  assert.equal(boundPreviewBehavior(params,{details:unknown},preview,attempted),undefined);
+  const malformed=structuredClone(receipt); malformed.steps[0].before={count:2};
+  assert.equal(boundPreviewBehavior(params,{details:malformed},preview,attempted),undefined);
+});
+
+test('boundPreviewBehavior requires a postcondition after each action',()=>{
+  const preview=purePreview();
+  const attempted={fill:1,click:1,'select-option':0};
+  const params=pureParams(preview,[
+    {action:'fill',locator:{selector:'#i'},value:'x'},
+    {action:'click',locator:{selector:'#b'}},
+    {action:'assert-text',locator:{selector:'#o'},expectedText:'ok'},
+  ]);
+  assert.ok(boundPreviewBehavior(params,{details:pureReceipt(params)},preview,attempted));
+  const trailing=pureParams(preview,[
+    {action:'fill',locator:{selector:'#i'},value:'x'},
+    {action:'click',locator:{selector:'#b'}},
+    {action:'assert-text',locator:{selector:'#o'},expectedText:'ok'},
+    {action:'click',locator:{selector:'#b'}},
+  ]);
+  assert.equal(boundPreviewBehavior(trailing,{details:pureReceipt(trailing)},preview,attempted),undefined);
+});
+
+test('Tool Search child hooks bind behavior proof and preserve it through a nested static check',()=>{
+  const {guard,preview}=setup({prompt:packingPrompt});
+  const nested=(params,id)=>{
+    const outer=behaviorInspection(guard,params,{wrapped:true,id});
+    const childId=`tool_search_code:${id}:${PREVIEW_INSPECTION_TOOL}:1`;
+    const child=call(guard,PREVIEW_INSPECTION_TOOL,params,childId);
+    guard.afterToolCall({...child.event,result:outer.result.details.result},child.ctx);
+    guard.afterToolCall({...outer.event,result:outer.result},outer.ctx);
+    return guard.toolResultPersist({toolName:'tool_call',toolCallId:id,
+      message:{role:'toolResult',toolName:'tool_call',toolCallId:id,...outer.result}},outer.ctx);
+  };
+  nested(packingPlan(preview),'nested-behavior');
+  assert.equal(guard.verificationForRun('run').status,'passed');
+  nested({...packingPlan(preview),steps:[{action:'assert-visible',locator:{selector:'h1'}}]},'nested-static');
+  assert.equal(guard.verificationForRun('run').status,'passed');
+});
+
+test('real invalid inspection followed by static pass coaches preserved behavior before finalization',async()=>{
+  const {guard,preview}=setup({prompt:packingPrompt});
+  const invalid=packingPlan(preview);
+  delete invalid.steps[1].locator.exact;
+  delete invalid.steps[2].expectedText;
+  const started=call(guard,PREVIEW_INSPECTION_TOOL,invalid,'invalid-real');
+  const result=await createWorkspacePreviewInspectTool({request:async()=>assert.fail('invalid request must not reach capsule')}).execute('invalid-real',invalid);
+  assert.equal(result.details.errorCode,'invalid_request');
+  assert.match(result.content[0].text,/Preserve the attempted actions and their postconditions/);
+  guard.afterToolCall({...started.event,result},started.ctx);
+  guard.toolResultPersist({toolName:PREVIEW_INSPECTION_TOOL,toolCallId:'invalid-real',
+    message:{role:'toolResult',toolName:PREVIEW_INSPECTION_TOOL,toolCallId:'invalid-real',...result}},started.ctx);
+  const staticCheck=behaviorInspection(guard,{...packingPlan(preview),steps:[{action:'assert-visible',locator:{selector:'h1'}}]},{id:'static-real'});
+  guard.afterToolCall({...staticCheck.event,result:staticCheck.result},staticCheck.ctx);
+  const coached=guard.toolResultPersist({toolName:PREVIEW_INSPECTION_TOOL,toolCallId:'static-real',
+    message:{role:'toolResult',toolName:PREVIEW_INSPECTION_TOOL,toolCallId:'static-real',...staticCheck.result}},staticCheck.ctx);
+  assert.match(JSON.stringify(coached),/1 fill, 2 click/);
+  assert.match(JSON.stringify(coached),/heading-only assertion/);
+  assert.equal(guard.verificationForRun('run').status,'failed');
+});
+
+test('bundle invalidation revokes behavior proof even when republishing identical bytes',()=>{
+  const {guard,preview}=setup({prompt:packingPrompt});
+  const first=behaviorInspection(guard,packingPlan(preview));
+  guard.afterToolCall({...first.event,result:first.result},first.ctx);
+  assert.equal(guard.verificationForRun('run').status,'passed');
+  assert.equal(guard.invalidateWorkspaceBundle(context),true);
+  call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'republished',{details:preview});
+  assert.equal(guard.verificationForRun('run').status,'failed');
+});
+
+test('several fields may prepare one click, but two clicks cannot share a final assertion',()=>{
+  const preview=purePreview();
+  const steps=[{action:'fill',locator:{selector:'#first'},value:'one'},
+    {action:'fill',locator:{selector:'#second'},value:'two'},
+    {action:'click',locator:{selector:'#submit'}},
+    {action:'assert-text',locator:{selector:'#result'},expectedText:'one two'}];
+  const params=pureParams(preview,steps),attempted=attemptedPreviewBehavior(params,preview);
+  assert.ok(boundPreviewBehavior(params,{details:pureReceipt(params)},preview,attempted));
+  const noPostcondition=pureParams(preview,[...steps.slice(0,3),{action:'click',locator:{selector:'#toggle'}},steps[3]]);
+  assert.equal(boundPreviewBehavior(noPostcondition,{details:pureReceipt(noPostcondition)},preview,attempted),undefined);
+});
