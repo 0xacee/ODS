@@ -28,6 +28,8 @@ const basic = [
   'Construa uma página web simples.',
 ];
 const flexible = [
+  ...['Django','django','Flask','Rails','Laravel','Blazor','Qwik','Phoenix','SolidStart','FastAPI','Express'].map(stack =>
+    [`Build a simple ${stack} reading-list website.`, 'read', {path:'README.md'}]),
   ['Build a simple reading-list website using React.','exec',{command:'npm --version'}],
   ['Build a simple reading-list website with a database.','read',{path:'README.md'}],
   ['Create a basic household chores website where I can check off chores, then write a Python CLI.','write',{path:'cli.py',content:'print(1)'}],

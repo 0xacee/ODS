@@ -6301,7 +6301,7 @@ export function workspacePreviewMode(messages, prompt = undefined) {
   // work and a real build. The deterministic entry-file fast path is only for
   // a fresh static artifact where those steps add failure modes, not value.
   const frameworkOrBuild =
-    /\b(?:angular|astro|bun|gatsby|jsx|next(?:\.js)?|node(?:\.js)?|npm|nuxt|parcel|pnpm|react|remix|rollup|svelte|tsx|typescript|vite|vue|webpack|yarn)\b/i.test(text) ||
+    /\b(?:angular|astro|blazor|bun|django|express|fastapi|flask|gatsby|jsx|laravel|next(?:\.js)?|node(?:\.js)?|npm|nuxt|parcel|phoenix|pnpm|qwik|rails|react|remix|rollup|solid(?:start)?|svelte|tsx|typescript|vite|vue|webpack|yarn)\b/i.test(text) ||
     /\b(?:build\s+command|build\s+output|compile|dependencies|package\.json|source\s+tree)\b/i.test(text);
   const existingProject =
     /\b(?:existing|current|previous|prior|already[- ]created|updated|revised|corrected|repair|fix|debug|migrate|upgrade|rename|move)\b/i.test(text) ||
