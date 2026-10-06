@@ -48,7 +48,7 @@ def test_preflight_retained_identity_requires_root_proof(tmp_path, monkeypatch, 
     if verified:
         assert module.preflight(tmp_path / 'fresh-ods') == tmp_path / 'fresh-ods'
     else:
-        with pytest.raises(ValueError, match='existing-native-pixel'):
+        with pytest.raises(ValueError, match='retained-pixel-identity-rejected'):
             module.preflight(tmp_path / 'fresh-ods')
     assert calls == [{'empty_home': False, 'prompt_for_sudo': False}]
     assert not list(tmp_path.iterdir())
@@ -84,7 +84,10 @@ def test_preflight_allows_only_root_verified_empty_retained_home(
     if receipt and verified:
         assert module.preflight(tmp_path / 'fresh-ods') == tmp_path / 'fresh-ods'
     else:
-        with pytest.raises(ValueError, match='existing-native-pixel'):
+        # A home without the identity receipt is leftover state; a receipt
+        # whose proof fails is a rejected identity, not existing Pixel state.
+        with pytest.raises(ValueError, match='retained-pixel-identity-rejected' if receipt
+                else 'existing-native-pixel'):
             module.preflight(tmp_path / 'fresh-ods')
     assert calls == ([{'empty_home': True, 'prompt_for_sudo': False}] if receipt else [])
 
@@ -104,7 +107,7 @@ def test_retained_identity_proof_is_read_only_and_fails_closed(monkeypatch):
     assert module.retained_identity_only(empty_home=True) is True
     assert calls[1][0][-1] == '--verify-empty-home-only'
     monkeypatch.setattr(module.subprocess, 'run',
-        lambda *args, **kwargs: SimpleNamespace(returncode=os.EX_DATAERR))
+        lambda *args, **kwargs: SimpleNamespace(returncode=os.EX_DATAERR, stderr=None))
     assert module.retained_identity_only() is False
 
 
@@ -124,6 +127,18 @@ def test_identity_prompt_requires_explicit_opt_in_and_terminal(
     assert kw['stdin'] == (None if interactive else subprocess.DEVNULL)
     assert kw['stderr'] == (None if interactive else subprocess.PIPE)
     assert argv[-1] == '--verify-identity-only'
+
+
+def test_identity_rejection_relays_only_the_helper_reason_line(monkeypatch, capsys):
+    stderr = (b'unrelated diagnostic\n'
+        b'Native Pixel Operations identity verification rejected: operations-identity-process-active.\n')
+    monkeypatch.setattr(module.subprocess, 'run', lambda *args, **kw:
+        SimpleNamespace(returncode=os.EX_DATAERR, stderr=stderr))
+    assert module.retained_identity_only() is False
+    assert capsys.readouterr().err == (
+        'Native Pixel Operations identity verification rejected: operations-identity-process-active.\n')
+    guidance = module.ERROR_GUIDANCE['retained-pixel-identity-rejected']
+    assert 'launchctl bootout user/' in guidance and 'Existing native Pixel state' not in guidance
 
 
 @pytest.mark.parametrize('result', [1, 127, -9])
