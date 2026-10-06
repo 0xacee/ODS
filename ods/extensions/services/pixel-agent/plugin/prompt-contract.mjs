@@ -375,7 +375,7 @@ export function promptContractForAgent(
       : ODS_EXTENSION_LIFECYCLE_CONTRACT)
     : "";
   const documentDelivery = userMessageRequestsWorkspaceDocumentDelivery(event?.messages, event?.prompt)
-    ? `${ODS_WORKSPACE_DOCUMENT_DELIVERY_GUIDE} ` : "";
+    ? ODS_WORKSPACE_DOCUMENT_DELIVERY_GUIDE : "";
   const exactDownload = userMessageRequestsExactByteDownload(
     event?.messages,
     event?.prompt
@@ -417,7 +417,10 @@ export function promptContractForAgent(
   const project = !workspacePreview && workspaceToolsRequested
     ? ` ${PLAYGROUND_PROJECT_CONTRACT}` : "";
   return {
+    // Keep the current delivery action beside the owner turn, outside the
+    // reusable system contract. The registration hook retains cancel context.
+    ...(documentDelivery ? {prependContext: documentDelivery} : {}),
     appendSystemContext:
-      `${extensionLifecycle ? `${extensionLifecycle} ` : ""}${documentDelivery}${conversationContract}${githubSource}${githubExtension}${extensionInventory}${extensionCatalog}${operationsContinuation}${operationsInventory}${operationsRequest}${exactDownload}${repositoryAcquisition}${workspaceDownload}${workspacePreview}${workspaceGuide}${project}${recovery}${verification}${privateUrl}`,
+      `${extensionLifecycle ? `${extensionLifecycle} ` : ""}${conversationContract}${githubSource}${githubExtension}${extensionInventory}${extensionCatalog}${operationsContinuation}${operationsInventory}${operationsRequest}${exactDownload}${repositoryAcquisition}${workspaceDownload}${workspacePreview}${workspaceGuide}${project}${recovery}${verification}${privateUrl}`,
   };
 }

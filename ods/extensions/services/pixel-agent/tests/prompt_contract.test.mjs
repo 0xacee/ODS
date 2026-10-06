@@ -878,8 +878,11 @@ test("requested document delivery receives a prioritized route on full and compa
     assert.equal(selects([], prompt), true, prompt);
     for (const configuredLeanPrompt of [false, true]) {
       const result = promptContractForAgent({agentId:'pixel'}, 'pixel', {prompt}, {configuredLeanPrompt});
-      assert.ok(result.appendSystemContext.startsWith(guide + ' '), prompt);
-      assert.match(result.appendSystemContext, /Complete any requested file creation or edits first/);
+      assert.equal(result.prependContext, guide, prompt);
+      assert.ok(!result.appendSystemContext.includes(guide), prompt);
+      assert.ok(result.appendSystemContext.startsWith(configuredLeanPrompt
+        ? ODS_COMPACT_CONVERSATION_CONTRACT : ODS_CONVERSATION_CONTRACT), prompt);
+      assert.match(result.prependContext, /Complete any requested file creation or edits first/);
     }
   }
   assert.ok(guide.length < 700);
@@ -898,7 +901,9 @@ test("document route preserves ordinary, remote, informational and forbidden-too
     'Summarize this example: "attach the file as a download".',
   ]) {
     assert.equal(selects([], prompt), false, prompt);
-    assert.ok(!promptContractForAgent({agentId:'pixel'}, 'pixel', {prompt}).appendSystemContext.includes(guide), prompt);
+    const result = promptContractForAgent({agentId:'pixel'}, 'pixel', {prompt});
+    assert.equal(result.prependContext, undefined, prompt);
+    assert.ok(!result.appendSystemContext.includes(guide), prompt);
   }
   const messages = [{role:'user',content:'Download report.pdf.'}, {role:'assistant',content:'Attach the file.'}, {role:'user',content:'Thanks.'}];
   assert.equal(selects(messages), false);
