@@ -6424,6 +6424,28 @@ export function userMessageRequestsWorkspaceVisualContinuation(
     );
 }
 
+
+// An explicit check of an existing page may exercise controls without asking
+// for source edits. Keep this narrow: ambiguous or independent edit requests
+// retain the ordinary read/edit continuation contract.
+export function userMessageRequestsWorkspaceVerificationContinuation(messages, prompt = undefined) {
+  const text = currentOwnerIntentText(messages, prompt).trim();
+  if (!text || freshWorkspaceCreationRequested(text) || ownerForbidsWorkspacePreview([], text)) return false;
+  const command = /^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:finish\s+)?(?:verif(?:y|ying)|test(?:ing)?|inspect(?:ing)?|check(?:ing)?)\s+(?:(?:the|this|that|my|our|existing|current|previous|prior|same)\s+)+(?:preview|page|site|website|app|artifact)\b/i.exec(text);
+  if (!command) return false;
+  // Conditional repairs remain possible after a failed check; they are not a
+  // requirement to change healthy files. Other repair/edit commands still are.
+  const rest = text.slice(command[0].length).replace(
+    /\b(?:fix|repair|correct)\s+(?:anything|any\s+(?:issue|issues|error|errors))\s+(?:(?:that|which)\s+)?(?:fails?|breaks?|is\s+broken)\b/gi, ' '
+  ).replace(/\b(?:fix|repair|correct)\s+(?:it|them)\s+if\s+(?:it|they|a\s+check|any\s+check|the\s+checks?)\s+(?:fails?|breaks?)\b/gi, ' ');
+  if (/\b(?:animate|build|change|create|design|develop|edit|generate|implement|improve|make|modify|overwrite|patch|polish|refresh|restyle|rework|save|tweak|update|write|fix|repair|correct)\b/i.test(rest)) return false;
+  // Add/remove in an explicitly introduced test sequence can mean interacting
+  // with data. Adding interface/source elements is still an edit request.
+  if (/\b(?:add|remove)\b/i.test(rest) && !/^\s*:/.test(rest)) return false;
+  if (/\b(?:add|remove)\b[^.!?;\n,:]{0,64}\b(?:button|control|feature|component|panel|section|page|file|toggle|handler|function|style)s?\b/i.test(rest)) return false;
+  return true;
+}
+
 function workspacePreviewDirectoryFromState(state) {
   const indexDirectories = new Set(
     [...(state?.successfulWritePaths ?? []), ...(state?.successfulReadPaths ?? [])]
@@ -6581,6 +6603,7 @@ function workspacePreviewOutcome(event, expectedDirectory, state) {
   }
   if (
     state?.workspaceVisualContinuationRequested &&
+    !state.workspacePreviewVerificationContinuation &&
     details.sha256 === state.workspaceVisualContinuationOriginalSha256
   ) return undefined;
   // The trusted host verifies the complete snapshot, including preserved
@@ -7056,7 +7079,8 @@ export function createToolLoopGuard({
   }
 
   function workspaceRenderedInspectionRequired(state) {
-    return workspacePreviewInspectionAvailable && state.workspacePreviewModelAuthored;
+    return workspacePreviewInspectionAvailable &&
+      (state.workspacePreviewModelAuthored || state.workspacePreviewVerificationContinuation);
   }
 
   function workspaceRenderedInspectionPassed(state) {
@@ -7469,6 +7493,7 @@ export function createToolLoopGuard({
         workspacePreviewAuthorshipRequired: false,
         workspacePreviewModelAuthored: false,
         workspaceVisualContinuationRequested: false,
+        workspacePreviewVerificationContinuation: false,
         workspaceVisualContinuationEdited: false,
         workspaceVisualContinuationOriginalSha256: undefined,
         workspacePreviewInspectionRequested: false,
@@ -8413,9 +8438,13 @@ export function createToolLoopGuard({
           blockReason: visualContinuationReadInstruction(state, selectedPath),
         };
       }
+      if (selectedToolName === WORKSPACE_PREVIEW_TOOL && state.workspacePreviewVerificationContinuation &&
+          !state.successfulReadPaths.has(`${continuationDirectory}/index.html`)) {
+        return {block: true, blockReason: visualContinuationReadInstruction(state)};
+      }
       if (
         selectedToolName === WORKSPACE_PREVIEW_TOOL &&
-        !state.workspaceVisualContinuationEdited
+        !state.workspaceVisualContinuationEdited && !state.workspacePreviewVerificationContinuation
       ) {
         return {
           block: true,
@@ -9752,8 +9781,11 @@ export function createToolLoopGuard({
             event?.messages,
             event?.prompt
           );
+        const verificationContinuationRequested = userMessageRequestsWorkspaceVerificationContinuation(
+          event?.messages, event?.prompt
+        );
         const trustedSessionPreview =
-          visualContinuationRequested && typeof sessionId === "string" && sessionId
+          (visualContinuationRequested || verificationContinuationRequested) && typeof sessionId === "string" && sessionId
             ? sessionPreviews.get(sessionId)
             : undefined;
         const previewRequested = namedPreviewRequested || userMessageRequestsWorkspacePreview(
@@ -9763,6 +9795,7 @@ export function createToolLoopGuard({
           currentOwnerIntentText(event?.messages, event?.prompt)
         ));
         state.workspaceVisualContinuationRequested = Boolean(trustedSessionPreview);
+        state.workspacePreviewVerificationContinuation = Boolean(trustedSessionPreview) && verificationContinuationRequested;
         if (trustedSessionPreview) {
           state.workspaceVisualContinuationOriginalSha256 ??= trustedSessionPreview.sha256;
         }
@@ -11420,9 +11453,10 @@ export function createToolLoopGuard({
   function visualContinuationPrerequisite(state) {
     if (!state?.workspaceVisualContinuationRequested || state.workspaceVisualContinuationEdited) return undefined;
     const directory = state.workspaceTaskDirectory;
-    const hasRead = typeof directory === "string" && [...state.successfulReadPaths].some(
-      path => path.startsWith(`${directory}/`)
-    );
+    const hasRead = typeof directory === "string" && (state.workspacePreviewVerificationContinuation
+      ? state.successfulReadPaths.has(`${directory}/index.html`)
+      : [...state.successfulReadPaths].some(path => path.startsWith(`${directory}/`)));
+    if (state.workspacePreviewVerificationContinuation && hasRead) return undefined;
     return {
       stage: hasRead ? "workspace-visual-continuation-edit" : "workspace-visual-continuation-read",
       instruction: hasRead ? WORKSPACE_VISUAL_CONTINUATION_REQUIRES_EDIT_REASON

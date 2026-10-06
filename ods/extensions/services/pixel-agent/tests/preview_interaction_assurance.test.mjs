@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {createToolLoopGuard, WORKSPACE_PREVIEW_COMPLETE_REASON} from '../plugin/tool-loop-guard.mjs';
+import {createToolLoopGuard, userMessageRequestsWorkspaceVerificationContinuation, WORKSPACE_PREVIEW_COMPLETE_REASON} from '../plugin/tool-loop-guard.mjs';
 import {PREVIEW_INSPECTION_TOOL, PAGE_ERROR_REPAIR_INSTRUCTION, requestsVisibilityInteraction, requestsBehaviorPreservation, boundVisibilityInspection,
   boundStaticPreviewInspection} from '../plugin/preview-interaction-assurance.mjs';
 import {INSPECTION_KIND, INSPECTION_SCOPE, inspectionPlanHash, normalizeWorkspacePreviewInspectionParams, createWorkspacePreviewInspectTool} from '../plugin/workspace-preview-inspect.mjs';
@@ -1044,4 +1044,64 @@ test(`repairable interaction obligation: ${first}, wrapped=${wrapped}`,()=>{
   guard.afterToolCall({...corrected.event,result:corrected.result},corrected.ctx);
   assert.equal(guard.verificationForRun('run').status,'passed');
   assert.match(guard.verificationForRun('run').text,/submitted interaction checks only; this does not verify all requested behavior/);
+});
+
+
+const verifyFollowup = 'Please finish verifying the preview: add an item, mark it packed, and fix anything that fails.';
+for (const prompt of [verifyFollowup, 'Verify the current preview.', 'Please test the existing app: fill the form and click Submit.'])
+test(`verification follow-up classifier accepts explicit check: ${prompt}`, () => {
+  assert.equal(userMessageRequestsWorkspaceVerificationContinuation([], prompt), true);
+});
+for (const prompt of [
+  'Add a dark mode toggle to the preview and republish it.', 'Make it blue.',
+  'Verify the preview and change the background.', 'Verify the preview: change the background.',
+  'Verify the preview. Add a new feature.', 'Verify the preview: add a dark mode toggle.',
+  'Verify the preview: fix the broken button.', 'Do not verify the preview.',
+  'The document says "verify the preview".', '"Verify the preview"',
+  'Verify the preview. Create a new website.', 'Verify the preview, but do not publish anything.',
+]) test(`verification follow-up classifier preserves other intent: ${prompt}`, () => {
+  assert.equal(userMessageRequestsWorkspaceVerificationContinuation([], prompt), false);
+});
+
+test('verification follow-up reads and freshly republishes unchanged files before inspecting', () => {
+  const {guard, preview}=setup({prompt:'Build a packing checklist website in site and show me a working preview.'});
+  const next={...context,runId:'verify-followup'};
+  guard.observeRun(next,'pixel',{prompt:verifyFollowup});
+  assert.equal(guard.verificationForRun(next.runId).status,'failed');
+  assert.equal(guard.beforeAgentFinalize({},next)?.retry?.idempotencyKey,'pixel-ods-workspace-visual-continuation-read');
+  const attempted=guard.beforeToolCall({toolName:'pixel_ods_workspace_preview',toolCallId:'too-early',params:{relativeDirectory:preview.relativeDirectory}}, {...next,toolName:'pixel_ods_workspace_preview',toolCallId:'too-early'});
+  assert.equal(attempted?.block,true,'publication still requires current entry readback');
+  const historical=inspection(guard,plan(preview),{id:'historical-check',runContext:next});
+  guard.afterToolCall({...historical.event,result:historical.result},historical.ctx);
+  assert.equal(guard.verificationForRun(next.runId).status,'failed','immutable old inspection never certifies current files');
+  call(guard,'read',{path:preview.relativeDirectory+'/index.html'},'read-current',{content:[{type:'text',text:'<!doctype html><button>Show details</button><p hidden>Details</p>'}]},next);
+  const decision=guard.beforeAgentFinalize({},next);
+  assert.equal(decision?.retry?.idempotencyKey,'pixel-ods-workspace-preview');
+  call(guard,'pixel_ods_workspace_preview',{relativeDirectory:preview.relativeDirectory},'fresh-publish',{details:preview},next);
+  assert.equal(guard.verificationForRun(next.runId).status,'failed','new publication must receive its own browser check');
+  const fresh=inspection(guard,plan(preview),{id:'fresh-check',runContext:next});
+  guard.afterToolCall({...fresh.event,result:fresh.result},fresh.ctx);
+  assert.equal(guard.verificationForRun(next.runId).status,'passed');
+  assert.equal(guard.beforeAgentFinalize({},next),undefined);
+});
+
+for (const prompt of ['Add a dark mode toggle to the preview and republish it.','Make it blue.','Verify the preview and change the background.'])
+test(`verification follow-up does not waive requested source edits: ${prompt}`,()=>{
+  const {guard,preview}=setup();const next={...context,runId:'edit-followup'};
+  guard.observeRun(next,'pixel',{prompt});
+  call(guard,'read',{path:preview.relativeDirectory+'/index.html'},'read-current',{content:[{type:'text',text:'<!doctype html><button>Show details</button><p hidden>Details</p>'}]},next);
+  const event={toolName:'pixel_ods_workspace_preview',toolCallId:'unchanged',params:{relativeDirectory:preview.relativeDirectory}};
+  const ctx={...next,toolName:event.toolName,toolCallId:event.toolCallId};
+  assert.equal(guard.beforeToolCall(event,ctx)?.block,true);
+  guard.afterToolCall({...event,result:{details:preview}},ctx);
+  assert.equal(guard.verificationForRun(next.runId).status,'failed');
+});
+
+test('verification follow-up cannot discover another session publication',()=>{
+  const {guard,preview}=setup();const next={...context,runId:'foreign',sessionId:'foreign-session',sessionKey:'foreign-key'};
+  guard.observeRun(next,'pixel',{prompt:verifyFollowup});
+  const decision=guard.beforeAgentFinalize({},next);
+  assert.notEqual(decision?.retry?.idempotencyKey,'pixel-ods-workspace-visual-continuation-read');
+  assert.ok(!decision?.retry?.instruction.includes(preview.relativeDirectory+'/index.html'));
+  assert.notEqual(guard.verificationForRun(next.runId).status,'passed');
 });
