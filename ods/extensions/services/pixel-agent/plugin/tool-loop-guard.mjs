@@ -7419,6 +7419,7 @@ export function createToolLoopGuard({
         workspaceVerificationRequested: false,
         workspacePreviewRequired: false,
         workspacePreviewForbidden: false,
+        workspaceDocumentDeliveryRequested: false,
         workspacePreviewMode: undefined,
         workspacePreviewAuthorshipRequired: false,
         workspacePreviewModelAuthored: false,
@@ -8172,6 +8173,10 @@ export function createToolLoopGuard({
         ? pendingParams.id.split(":").at(-1)
         : toolName;
     if (pendingSelectedName === WORKSPACE_PREVIEW_TOOL) {
+      if (state?.workspaceDocumentDeliveryRequested && !state.workspacePreviewRequired) {
+        return {block:true, blockReason:
+          'The owner requested a downloadable document. Do not call pixel_ods_workspace_preview for documents. Call tool_call with id pixel_ods_workspace_artifact and args {"relativePath":"<exact existing workspace-relative document path>"} instead.'};
+      }
       if (!state?.ownerIntentObserved || state.workspacePreviewForbidden) {
         return {
           block: true,
@@ -9686,6 +9691,7 @@ export function createToolLoopGuard({
       if (currentUserText(event?.messages, event?.prompt)) {
         state.ownerIntentObserved = true;
         state.workspacePreviewForbidden = ownerForbidsWorkspacePreview(event?.messages, event?.prompt);
+        state.workspaceDocumentDeliveryRequested = userMessageRequestsWorkspaceDocumentDelivery(event?.messages, event?.prompt);
         const previousPreview = typeof sessionId === "string" && sessionId
           ? sessionPreviews.get(sessionId)
           : undefined;
@@ -10608,7 +10614,12 @@ export function createToolLoopGuard({
     // reject an unexpected success receipt instead of accepting publication.
     const declinedPreviewError = state.ownerIntentObserved &&
       state.workspacePreviewForbidden && previewEvent?.result?.isError === true;
-    if (previewEvent && !declinedPreviewError) {
+    // A rejected website tool cannot create a website-delivery obligation for
+    // a document-only request. Unexpected successes still follow receipt checks.
+    const documentPreviewError = state.ownerIntentObserved &&
+      state.workspaceDocumentDeliveryRequested && !state.workspacePreviewRequired &&
+      previewEvent?.result?.isError === true;
+    if (previewEvent && !declinedPreviewError && !documentPreviewError) {
       state.workspacePreviewAttempted = true;
       const requestedDirectory = normalizeWorkspaceFilePath(
         previewEvent?.params?.relativeDirectory
