@@ -803,10 +803,47 @@ def _preflight_file(path, data, *, mode, uid=0, gid=0):
     _check_existing(path, data, mode=mode, uid=uid, gid=gid)
 
 
+def _mkdir_deployment_directories(path):
+    """Apply the intended 0755 mode only to directories created by this call."""
+    missing = []
+    ancestor = Path(path)
+    while not ancestor.exists() and not ancestor.is_symlink():
+        missing.append(ancestor.name)
+        ancestor = ancestor.parent
+    _check_directory(ancestor)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(ancestor, flags)
+    try:
+        for name in reversed(missing):
+            created = False
+            try:
+                os.mkdir(name, 0o755, dir_fd=parent)
+                created = True
+            except FileExistsError:
+                pass
+            child = os.open(name, flags, dir_fd=parent)
+            try:
+                info = os.fstat(child)
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                        or info.st_mode & 0o022):
+                    raise InstallError('access-directory-custody-unavailable')
+                if created:
+                    # mkdir's mode is filtered by umask. Public service code
+                    # must remain traversable by its unprivileged consumers.
+                    os.fchmod(child, 0o755)
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(parent)
+            parent = child
+    finally:
+        os.close(parent)
+
+
 def _write_exact(path, data, *, mode, uid=0, gid=0):
     path = _destination(path)
     _preflight_file(path, data, mode=mode, uid=uid, gid=gid)
-    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    _mkdir_deployment_directories(path.parent)
     _check_directory(path.parent)
     if _check_existing(path, data, mode=mode, uid=uid, gid=gid):
         return
