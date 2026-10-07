@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # PR #899 moved launchd plist log paths from $INSTALL_DIR/data/ to
 # $HOME/Library/Logs/ODS/ to avoid xpcproxy sandbox denials.
-# This test validates the two plist heredocs in install-macos.sh.
+# This test validates the installer and shared host-agent plist heredocs.
 #
 # Run: bash tests/contracts/test-plist-log-paths.sh
 # ============================================================================
@@ -54,7 +54,7 @@ echo "[contract] launchd plist log paths"
 
 # --- Extract plist heredocs ---
 opencode_plist="$(awk '/<<PLIST_EOF$/,/^PLIST_EOF$/' "$INSTALL_MACOS")"
-agent_plist="$(awk '/<<AGENT_PLIST_EOF$/,/^AGENT_PLIST_EOF$/' "$INSTALL_MACOS")"
+agent_plist="$(awk '/<<AGENT_PLIST_EOF$/,/^AGENT_PLIST_EOF$/' installers/macos/lib/host-agent-install.sh)"
 
 [[ -n "$opencode_plist" ]] || { echo "[FAIL] could not extract opencode-web plist heredoc"; exit 1; }
 [[ -n "$agent_plist" ]]    || { echo "[FAIL] could not extract ods-host-agent plist heredoc"; exit 1; }
