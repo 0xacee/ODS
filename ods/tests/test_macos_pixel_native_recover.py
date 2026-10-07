@@ -23,6 +23,7 @@ module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(module)
 continuation = module.helper('pixel-native-continuation')
 readiness = module.helper('pixel-native-readiness')
+acceptance = module.helper('pixel-native-acceptance')
 
 
 @pytest.fixture
@@ -1253,3 +1254,146 @@ def test_combined_readiness_only_removes_verified_pending_gates(readiness_instal
     assert result['installerComplete'] is False
     assert 'protected-recovery' in result['pendingVerification']
     assert result['status'] == ('api-checks-passed' if healthy else 'needs-attention')
+
+
+@pytest.mark.parametrize('url,valid', [
+    ('http://site-abc.localhost:9437/site-abc/', True),
+    ('http://site-abc.localhost:9437/site-abc/index.html', True),
+    ('http://site-abc.localhost:9437/site-def/', False),
+    ('http://site-abc.localhost:9437/site-abc/?token=private', False),
+    ('http://site-abc.localhost:9437/site-abc/#fragment', False),
+    ('http://site-abc.localhost:9438/site-abc/', False),
+    ('http://site-abc.localhost:bad/site-abc/', False),
+    ('http://site-abc.localhost.evil:9437/site-abc/', False),
+    ('http://user:private@site-abc.localhost:9437/site-abc/', False),
+    ('http://127.0.0.1:9437/site-abc/', False),
+    ('https://site-abc.localhost:9437/site-abc/', False),
+])
+def test_acceptance_preview_destination_never_uses_arbitrary_model_host(url, valid):
+    assert (acceptance.preview_target(url, 9437) is not None) is valid
+
+
+@pytest.mark.parametrize('mode,fault,passed', [
+    ('chat', None, True), ('chat', 'no-done', False), ('chat', 'error', False),
+    ('chat', 'empty-error', False),
+    ('chat', 'wrong-answer', False), ('chat', 'malformed', False), ('chat', 'redirect', False),
+    ('chat', 'wrong-type', False), ('chat', 'oversize', False), ('chat', 'stall', False),
+    ('preview', None, True), ('preview', 'wrong-page', False), ('preview', 'preview-redirect', False),
+    ('cancel', None, True),
+])
+def test_acceptance_worker_bounds_stream_and_keeps_credentials_on_api(mode, fault, passed, monkeypatch):
+    requests, release = [], Event()
+    marker = 'ODS_ACCEPT_' + 'a' * 32
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            requests.append(('POST', self.path, self.headers.get('Authorization'), body))
+            try:
+                self.send_response(302 if fault == 'redirect' else 200)
+                if fault == 'redirect': self.send_header('Location', 'http://must-not-follow.invalid/')
+                self.send_header('Content-Type', 'application/json' if mode == 'cancel' or fault == 'wrong-type' else 'text/event-stream')
+                self.end_headers()
+                if mode == 'cancel':
+                    self.wfile.write(b'{"aborted":true}')
+                    return
+                if fault == 'stall':
+                    self.wfile.write(b'data: ')
+                    self.wfile.flush()
+                    release.wait(3)
+                    return
+                answer = marker if fault != 'wrong-answer' else 'wrong'
+                if mode == 'preview': answer = f'http://site-abc.localhost:{self.server.server_port}/site-abc/'
+                packet = {'choices': [{'delta': {'content': answer}}]}
+                if fault == 'error': packet['error'] = 'private-upstream-detail'
+                if fault == 'empty-error': packet['error'] = {}
+                data = b'not-json' if fault == 'malformed' else json.dumps(packet).encode()
+                if fault == 'oversize': data = b'x' * (acceptance.LIMIT + 1)
+                self.wfile.write(b'data: ' + data + b'\n\n')
+                if fault != 'no-done': self.wfile.write(b'data: [DONE]\n\n')
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        def do_GET(self):
+            requests.append(('GET', self.path, self.headers.get('Authorization'), self.headers.get('Host')))
+            self.send_response(302 if fault == 'preview-redirect' else 200)
+            self.send_header('Location', 'http://must-not-follow.invalid/')
+            self.end_headers()
+            self.wfile.write(('wrong' if fault == 'wrong-page' else '<h1>' + marker + '</h1>').encode())
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    original = acceptance.subprocess.run
+    def run(command, **kwargs):
+        assert 'd' * 64 not in ' '.join(command)
+        assert json.loads(kwargs['input'])['key'] == 'd' * 64
+        return original(command, **kwargs)
+    monkeypatch.setattr(acceptance.subprocess, 'run', run)
+    try:
+        payload = {'port': server.server_port, 'previewPort': server.server_port, 'mode': mode,
+            'key': 'd' * 64, 'chatId': 'b' * 32, 'marker': marker}
+        started = time.monotonic()
+        result = acceptance.worker(payload, 0.4 if fault == 'stall' else 3)
+        assert result.get('aborted' if mode == 'cancel' else 'passed') is passed
+        assert time.monotonic() - started < 4
+        assert requests[0][:3] == ('POST', '/api/pixel/chat/' + ('cancel' if mode == 'cancel' else 'stream'), 'Bearer ' + 'd' * 64)
+        assert len(requests) == (2 if mode == 'preview' else 1)
+        if mode == 'preview':
+            assert requests[1] == ('GET', '/site-abc/', None, f'site-abc.localhost:{server.server_port}')
+        assert 'private-upstream-detail' not in json.dumps(result) and 'd' * 64 not in json.dumps(result)
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+@pytest.mark.parametrize('fault', [None, 'readiness', 'chat', 'timeout', 'bad-done', 'preview', 'env', 'env-after-answer', 'after', 'after-error'])
+def test_acceptance_records_before_dispatch_never_retries_and_cancels_only_its_chat(readiness_install, monkeypatch, fault):
+    installed = readiness_install
+    preparation = installed / 'data/pixel-native/preparation'
+    preparation.mkdir(parents=True, mode=0o700)
+    observed, dispatched, announcements = [], [], []
+    def observe(*args, **kwargs):
+        observed.append(True)
+        assert kwargs['include_services'] is True
+        if fault == 'after-error' and len(observed) > 1:
+            raise ValueError('upstream-private-error')
+        return {'status': 'needs-attention' if fault == 'readiness' or fault == 'after' and len(observed) > 1 else 'api-checks-passed',
+                'installerComplete': False,
+                'pendingVerification': ['protected-recovery', 'selected-optional-state', 'model-completion', 'portal-chat-and-preview']}
+    original = acceptance.load
+    monkeypatch.setattr(acceptance, 'load', lambda name: SimpleNamespace(observe_apis=observe, port=readiness.port)
+        if name == 'pixel-native-readiness' else original(name))
+    def run(payload, timeout):
+        records = list(preparation.glob('acceptance-*.json'))
+        assert len(records) == 1 and records[0].stat().st_mode & 0o777 == 0o600
+        record = json.loads(records[0].read_text())
+        assert any(item['chatId'] == payload['chatId'] for item in record['attempts'])
+        assert 'd' * 64 not in records[0].read_text()
+        dispatched.append(payload)
+        if payload['mode'] == 'cancel':
+            assert timeout == 30 and payload['chatId'] == dispatched[0]['chatId']
+            return {'aborted': True}
+        assert timeout == 600
+        if fault in ('env', 'env-after-answer'):
+            path = installed / '.env'
+            path.write_text(path.read_text() + 'WHISPER_PORT=9100\n')
+        failed = fault == payload['mode'] or fault in ('timeout', 'bad-done', 'env')
+        return {'passed': fault == 'bad-done' or not failed, 'done': fault not in ('timeout', 'bad-done')}
+    if fault == 'readiness':
+        with pytest.raises(ValueError, match='acceptance-readiness-required'):
+            acceptance.exercise(installed, run=run, announce=announcements.append)
+        assert not dispatched and not list(preparation.glob('acceptance-*.json'))
+        return
+    result = acceptance.exercise(installed, run=run, announce=announcements.append)
+    assert len(announcements) == 1
+    assert result['status'] == ('functional-checks-passed' if fault is None else 'needs-attention')
+    assert result['installerComplete'] is False
+    assert [item['mode'] for item in dispatched] == (
+        ['chat', 'cancel'] if fault in ('timeout', 'bad-done') else
+        ['chat'] if fault in ('chat', 'env', 'env-after-answer') else ['chat', 'preview'])
+    assert result == json.loads(next(preparation.glob('acceptance-*.json')).read_text())
+    assert 'protected-recovery' in result['pendingVerification']
+    assert 'selected-optional-state' in result['pendingVerification']
+    assert ('model-completion' in result['pendingVerification']) is (fault is not None)

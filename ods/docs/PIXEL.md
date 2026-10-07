@@ -255,6 +255,41 @@ that none of OpenCode, Whisper or Perplexica was chosen, optional setup has no
 pending state to verify. Selected optional tools still require their setup and
 functional checks; container health alone does not certify those tools.
 
+Once the combined inspector passes, maintainers can explicitly exercise a
+visible answer and an actual tool-produced preview:
+
+```bash
+python3 /path/to/reviewed-ODS/ods/installers/macos/lib/pixel-native-acceptance.py \
+  --run --install-dir "$HOME/ods" --timeout 600
+```
+
+For a missing historical OpenCode choice, add the same confirmed
+`--opencode-choice disabled` or `enabled`. This test is **not read-only**: it
+creates two test conversation IDs and requests one uniquely named workspace
+directory with an HTML file and published preview. The prompts prohibit
+dependency installation and edits to other files. Use it when no other
+installation/model change is in progress. It does not run automatically after
+recovery or retry failed model actions.
+
+Before dispatch, the test saves an owner-only `acceptance-<id>.json` under
+`data/pixel-native/preparation` and prints its conversation IDs and markers.
+Each request has the specified wall-clock limit (1-900 seconds). An incomplete
+stream triggers one bounded cancellation request for that test conversation
+only; `cancelConfirmed: false` means the server's stop was not established.
+Preserve the record and inspect its conversation/workspace before another test.
+Partial work is never deleted. API credentials and model transcripts are not
+printed, and preview links are fetched only through the local preview port
+without forwarding API credentials or following redirects.
+
+`functional-checks-passed` requires a visible marker answer, a completed stream
+without errors, and HTTP 200 containing the unique marker from the published
+page, with matching configuration and readiness observations before/after.
+It remains `installerComplete: false`: this does not verify protected recovery,
+release identity, optional-tool inference or the reporter's original failure.
+The report removes only the model-completion and Portal chat/preview pending
+gates when both tests and the final stability observation pass. Other pending
+verification is retained, including protected recovery.
+
 `--restore-optional-tools` executes the same OpenCode, Whisper model and
 Perplexica setup functions as the normal installer, for the retained choices
 only. Historical installations missing the OpenCode choice require the
