@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import urllib.request  # noqa: F401 - initialize before emulating Darwin
 
@@ -12,6 +13,126 @@ SPEC = importlib.util.spec_from_file_location('native_recover',
     ROOT / 'installers/macos/lib/pixel-native-recover.py')
 module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(module)
+continuation = module.helper('pixel-native-continuation')
+
+
+@pytest.fixture
+def recommended_model():
+    bootstrap = dict(bootstrap_file='starter.gguf', bootstrap_model='starter', bootstrap_context=65536)
+    saved = dict(ODS_MODE='local', GPU_BACKEND='apple', LLM_BACKEND='llama-server',
+        GGUF_FILE='starter.gguf', LLM_MODEL='starter', MAX_CONTEXT='65536', CTX_SIZE='65536',
+        MODEL_RECOMMENDED_GGUF='chosen.gguf', MODEL_RECOMMENDED_MODEL='chosen',
+        MODEL_RECOMMENDED_CONTEXT='32768')
+    record = dict(id='chosen-q4', llm_model_name='chosen', gguf_file='chosen.gguf',
+        gguf_url='https://huggingface.co/org/model/resolve/' + 'a' * 40 + '/chosen.gguf',
+        gguf_sha256='b' * 64, size_bytes=1000, context_length=32768, max_context_length=65536)
+    return saved, dict(models=[record]), bootstrap
+
+
+def test_continuation_reuses_recommendation_not_hardware(recommended_model):
+    saved, catalog, bootstrap = recommended_model
+    before = json.dumps([saved, catalog, bootstrap], sort_keys=True)
+    plan = continuation.model_upgrade_plan(saved, catalog, **bootstrap)
+    assert plan == dict(status='upgrade-required', modelId='chosen-q4',
+        arguments=['chosen.gguf', catalog['models'][0]['gguf_url'], 'b' * 64,
+                   'chosen', '32768', 'starter.gguf'])
+    assert json.dumps([saved, catalog, bootstrap], sort_keys=True) == before
+    # No memory/tier input participates; a later hardware policy cannot repick.
+    assert continuation.model_upgrade_plan(dict(saved, HOST_RAM_GB='128', TIER='4'),
+        catalog, **bootstrap) == plan
+
+
+@pytest.mark.parametrize('change', [
+    {'ODS_MODE': 'hybrid'}, {'GPU_BACKEND': 'nvidia'}, {'LLM_BACKEND': 'external'},
+    {'EXTERNAL_LLM_URL': 'http://another-model'}, {'LEMONADE_EXTERNAL': 'true'},
+    {'ODS_ACTIVE_MODEL_STORE': 'external-drive'}, {'MODEL_RECOMMENDED_GGUF': '../chosen.gguf'},
+    {'MODEL_RECOMMENDED_GGUF': ''}, {'MODEL_RECOMMENDED_MODEL': 'different'},
+    {'MODEL_RECOMMENDED_CONTEXT': '0'}, {'MODEL_RECOMMENDED_CONTEXT': '65537'},
+    {'MODEL_RECOMMENDED_CONTEXT': '32768\nextra'}, {'MODEL_RECOMMENDED_CONTEXT': 'True'},
+    {'GGUF_FILE': 'operator-choice.gguf'}, {'LLM_MODEL': 'operator-choice'},
+    {'CTX_SIZE': '8192'}, {'MAX_CONTEXT': '8192'}, {'MODEL_SELECTION_SOURCE': 'dashboard'},
+])
+def test_continuation_refuses_changed_model_or_route(recommended_model, change):
+    saved, catalog, bootstrap = recommended_model
+    with pytest.raises(ValueError):
+        continuation.model_upgrade_plan(dict(saved, **change), catalog, **bootstrap)
+
+
+@pytest.mark.parametrize('fault', ['missing', 'duplicate', 'parts', 'digest', 'floating-url',
+    'host', 'file', 'query', 'context-bool', 'context-missing'])
+def test_continuation_requires_unambiguous_pinned_catalog(recommended_model, fault):
+    saved, catalog, bootstrap = recommended_model
+    record = catalog['models'][0]
+    if fault == 'missing': catalog['models'] = []
+    if fault == 'duplicate': catalog['models'].append(dict(record))
+    if fault == 'parts':
+        record['gguf_parts'] = [
+            dict(file=name, url=record['gguf_url'], sha256='b' * 64)
+            for name in ('chosen.gguf', 'part2.gguf')]
+    if fault == 'digest': record['gguf_sha256'] = ''
+    if fault == 'floating-url': record['gguf_url'] = record['gguf_url'].replace('a' * 40, 'main')
+    if fault == 'host': record['gguf_url'] = record['gguf_url'].replace('huggingface.co', 'huggingface.co.invalid')
+    if fault == 'file': record['gguf_url'] = record['gguf_url'].replace('/chosen.gguf', '/different.gguf')
+    if fault == 'query': record['gguf_url'] += '?token=do-not-publish'
+    if fault == 'context-bool': record['max_context_length'] = True
+    if fault == 'context-missing':
+        del record['max_context_length']
+        del record['context_length']
+    with pytest.raises(ValueError):
+        continuation.model_upgrade_plan(saved, catalog, **bootstrap)
+
+
+def test_continuation_does_not_download_for_selected_or_cloud_model(recommended_model):
+    saved, catalog, bootstrap = recommended_model
+    saved.update(GGUF_FILE='chosen.gguf', LLM_MODEL='chosen', MAX_CONTEXT='32768', CTX_SIZE='32768')
+    assert continuation.model_upgrade_plan(saved, catalog, **bootstrap) == dict(
+        status='selected-model', modelId='chosen-q4', arguments=[])
+    assert continuation.model_upgrade_plan({'ODS_MODE': 'cloud'}, {}, **bootstrap) == dict(
+        status='cloud-model', arguments=[])
+
+
+def test_model_continuation_reads_private_inputs_without_mutation(tmp_path, recommended_model):
+    saved, catalog, bootstrap = recommended_model
+    (tmp_path / 'config').mkdir()
+    (tmp_path / 'config/model-library.json').write_text(json.dumps(catalog))
+    env = tmp_path / '.env'
+    env.write_text('\n'.join(key + '=' + json.dumps(value) for key, value in saved.items())
+        + '\nDASHBOARD_API_KEY=do-not-publish\n')
+    env.chmod(0o600)
+    before = env.read_bytes()
+    plan, snapshot = continuation.inspect_model_upgrade(tmp_path, **bootstrap)
+    assert snapshot[0] == before == env.read_bytes()
+    assert 'do-not-publish' not in json.dumps(plan)
+    assert plan['status'] == 'upgrade-required'
+    env.write_text(env.read_text() + 'GGUF_FILE=other.gguf\n')
+    with pytest.raises(ValueError, match='duplicate-retained-model-setting'):
+        continuation.inspect_model_upgrade(tmp_path, **bootstrap)
+    env.chmod(0o644)
+    with pytest.raises(ValueError, match='private-owner-environment-required'):
+        continuation.inspect_model_upgrade(tmp_path, **bootstrap)
+
+
+@pytest.mark.parametrize('profile', ['qwen', 'gemma4'])
+@pytest.mark.parametrize('tier', ['1', '2', '3', '4'])
+def test_continuation_accepts_real_mac_tier_recommendations(profile, tier):
+    # Exercise installed-format recommendations, including the reporter's high
+    # memory tiers, without running hardware detection or starting any service.
+    output = subprocess.run(['/bin/bash', '-c',
+        'source "$1"; "set_${2}_tier_config" "$3"; '
+        'printf "%s\\n" "$BOOTSTRAP_GGUF_FILE" "$BOOTSTRAP_LLM_MODEL" "$BOOTSTRAP_MAX_CONTEXT" '
+        '"$GGUF_FILE" "$LLM_MODEL" "$MAX_CONTEXT"',
+        'test-tier', str(ROOT / 'installers/macos/lib/tier-map.sh'), profile, tier],
+        check=True, capture_output=True, text=True, timeout=10).stdout.splitlines()
+    starter_file, starter_model, starter_context, filename, model_name, context = output
+    saved = dict(ODS_MODE='local', GPU_BACKEND='apple', LLM_BACKEND='llama-server',
+        GGUF_FILE=starter_file, LLM_MODEL=starter_model, MAX_CONTEXT=starter_context, CTX_SIZE=starter_context,
+        MODEL_RECOMMENDED_GGUF=filename, MODEL_RECOMMENDED_MODEL=model_name, MODEL_RECOMMENDED_CONTEXT=context)
+    catalog = json.loads((ROOT / 'config/model-library.json').read_text())
+    plan = continuation.model_upgrade_plan(saved, catalog,
+        bootstrap_file=starter_file, bootstrap_model=starter_model, bootstrap_context=starter_context)
+    assert plan['status'] == 'upgrade-required'
+    assert plan['arguments'][0] == filename
+    assert plan['arguments'][3:] == [model_name, context, starter_file]
 
 
 @pytest.fixture
