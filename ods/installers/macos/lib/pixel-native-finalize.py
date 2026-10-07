@@ -198,7 +198,7 @@ def compose_flags(install_dir, process_env):
         environment = helper('pixel-native-env')
         # The resolver's selection inputs: the saved values replace any
         # stale process environment.
-        keys = {'TIER', 'GPU_BACKEND', 'GPU_COUNT', 'ODS_MODE',
+        keys = {'TIER', 'GPU_BACKEND', 'GPU_COUNT', 'ODS_MODE', 'ENABLE_OPEN_WEBUI',
             'ODS_SKIP_GPU_OVERLAYS', 'ODS_SKIP_GPU_OVERLAYS_FOR', 'WHISPER_ACCELERATION',
             'NATIVE_LLM_BASE_URL', 'AMD_INFERENCE_BACKEND', 'EXTERNAL_LLM_URL'}
         saved = {}
@@ -208,6 +208,11 @@ def compose_flags(install_dir, process_env):
                 if match[1] in saved:
                     raise ValueError('duplicate-compose-selection')
                 saved[match[1]] = environment.values.parse_env_value(match[2])
+        # Initial failure can precede the Compose cache; retain Core's no-WebUI
+        # choice instead of inheriting the recovery shell's stale selection.
+        saved['ENABLE_OPEN_WEBUI'] = saved.get('ENABLE_OPEN_WEBUI', 'true').strip().lower()
+        if saved['ENABLE_OPEN_WEBUI'] not in {'true', 'false'}:
+            raise ValueError('saved-compose-selection-required')
         backend = saved.get('GPU_BACKEND', '').strip().lower()
         tier = saved.get('TIER', '').strip() or '1'
         count = saved.get('GPU_COUNT', '').strip() or '1'
