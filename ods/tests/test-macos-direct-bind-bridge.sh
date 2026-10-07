@@ -491,11 +491,11 @@ pass "dashboard-api readiness fails closed and never logs the host-agent key"
         || fail "macOS CLI does not use the shared LLM bridge manager"
     grep -Fq 'macos_bind_uses_direct_gateway "$bind_address" "$listen_host"' "$BRIDGE_MANAGER" \
         || fail "shared LLM bridge manager does not use the direct-bind decision"
-    grep -Fq 'macos_bind_uses_direct_gateway "$agent_bind" "$listen_host"' "$INSTALLER" \
+    grep -Fq 'macos_bind_uses_direct_gateway "$agent_bind" "$listen_host"' "$ROOT_DIR/installers/macos/lib/host-agent-install.sh" \
         || fail "installer host-agent bridge does not use the shared direct-bind decision"
     grep -Fq 'upsert_env_value "$env_file" "ODS_MACOS_LLM_BRIDGE_ENABLED" "$enabled"' "$BRIDGE_MANAGER" \
         || fail "shared LLM bridge manager does not persist its decision"
-    grep -Fq 'upsert_env_value "$env_file" "ODS_MACOS_HOST_AGENT_BRIDGE_ENABLED" "false"' "$INSTALLER" \
+    grep -Fq 'upsert_env_value "$env_file" "ODS_MACOS_HOST_AGENT_BRIDGE_ENABLED" "false"' "$ROOT_DIR/installers/macos/lib/host-agent-install.sh" \
         || fail "installer does not persist the disabled host-agent bridge state"
     pass "installer bridge configuration uses and persists the shared decision"
 

@@ -1,8 +1,12 @@
 """Recovery publishes readiness only after protected and consumer readback."""
 import importlib.util
 import json
+import os
+import plistlib
 from pathlib import Path
 import subprocess
+import shlex
+import sys
 from types import SimpleNamespace
 import urllib.request  # noqa: F401 - initialize before emulating Darwin
 
@@ -258,3 +262,178 @@ def test_recovery_refuses_concurrent_publication(retained):
             module.finish(preparation=preparation, receipt=receipt, run=None,
                 verify=None, compose=None, selected_services={})
     assert not (preparation / 'selection-update.json').exists()
+
+
+@pytest.mark.parametrize('fault', [None, 'proof', 'host', 'reproof', 'changed'])
+def test_host_agent_continuation_is_between_proofs_and_before_publication(retained, fault):
+    preparation, receipt, activation = retained
+    calls = []
+    def verify():
+        calls.append('proof')
+        failed = fault == 'proof' or fault == 'reproof' and calls.count('proof') == 2
+        return dict(status='unknown' if failed else 'active',
+            runtimeDigest=receipt['runtimeDigest'], serviceDigest=receipt['serviceDigest'])
+    def run(*args, **kwargs):
+        calls.append(args[0])
+        return SimpleNamespace(returncode=0)
+    def restore():
+        calls.append('host')
+        assert calls[:4] == ['proof', 'up', 'exec', 'host']
+        assert not (preparation / 'selection-update.json').exists()
+        assert json.loads((preparation / 'activation.json').read_text()) == activation
+        if fault == 'host': raise ValueError('native-recovery-host-agent-failed')
+        if fault == 'changed':
+            (preparation / 'activation.json').write_text(json.dumps(dict(activation, phase='changed')))
+    def finish():
+        return module.finish(preparation=preparation, receipt=receipt, run=run, verify=verify,
+            compose=SimpleNamespace(wait_ready=lambda run: None),
+            selected_services={'dashboard-api': {}}, restore_host_agent=restore)
+    if fault:
+        with pytest.raises(ValueError): finish()
+        assert not (preparation / 'selection-update.json').exists()
+        if fault == 'proof': assert calls == ['proof']
+    else:
+        assert finish() == preparation / 'selection-update.json'
+        assert calls == ['proof', 'up', 'exec', 'host', 'proof']
+    if fault != 'changed':
+        assert json.loads((preparation / 'activation.json').read_text()) == activation
+
+
+@pytest.mark.parametrize('fault', [None, 'process', 'symlink', 'hardlink', 'public-log'])
+def test_host_setup_uses_bound_transport_and_private_logs(tmp_path, monkeypatch, fault):
+    preparation = tmp_path / 'data/pixel-native/preparation'
+    preparation.mkdir(parents=True, mode=0o700)
+    log = preparation / 'continuation-host-agent.log'
+    other = tmp_path / 'untouched'
+    other.write_text('untouched')
+    other.chmod(0o600)
+    if fault == 'symlink': log.symlink_to(other)
+    if fault == 'hardlink': os.link(other, log)
+    if fault == 'public-log':
+        log.write_text('untouched')
+        log.chmod(0o644)
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command[:2] == ['/bin/bash', '-c']
+        assert 'ods_macos_install_host_agent' in command[2]
+        assert kwargs['env']['DOCKER_HOST'] == 'unix:///verified.sock'
+        assert set(kwargs['env']) == {'HOME', 'PATH', 'DOCKER_HOST', 'DOCKER_CONFIG', 'ODS_CONTINUATION_LOG_FD'}
+        assert kwargs['cwd'] == tmp_path and kwargs['close_fds'] is True
+        assert kwargs['stdin'] == subprocess.DEVNULL and kwargs['stderr'] == subprocess.STDOUT
+        fd = kwargs['stdout'].fileno()
+        assert kwargs['pass_fds'] == (fd,)
+        assert os.fstat(fd).st_mode & 0o777 == 0o600
+        os.write(fd, b'private diagnostic that must not be printed')
+        return SimpleNamespace(returncode=int(fault == 'process'))
+    monkeypatch.setattr(continuation.subprocess, 'run', run)
+    environment = dict(HOME=str(tmp_path), PATH='/usr/bin:/bin', DOCKER_HOST='unix:///verified.sock',
+        DOCKER_CONFIG=str(tmp_path / 'docker'), BASH_ENV='must-not-run', ODS_AGENT_KEY='must-not-forward')
+    if fault:
+        with pytest.raises((ValueError, OSError)) as error:
+            continuation.restore_host_agent(tmp_path, environment)
+        assert 'private diagnostic' not in str(error.value)
+        if fault != 'process': assert not calls
+    else:
+        continuation.restore_host_agent(tmp_path, environment)
+        assert len(calls) == 1
+    assert other.read_text() == 'untouched'
+
+
+@pytest.mark.parametrize('requested', [False, True])
+def test_cli_host_agent_success_does_not_claim_complete_install(monkeypatch, capsys, requested):
+    def recover(install_dir, ods_source, **kwargs):
+        assert kwargs == ({'restore_host_agent': True} if requested else {})
+        return Path('/fixture/selection-update.json')
+    monkeypatch.setattr(module, 'recover', recover)
+    monkeypatch.setattr(module.sys, 'argv', ['recover', '--install-dir', '/fixture',
+        *(['--restore-host-agent'] if requested else [])])
+    assert module.main() == 0
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert result['installerComplete'] is False
+    assert result.get('hostAgentReady') is (True if requested else None)
+    assert 'full-model download' in output.err
+
+
+@pytest.mark.parametrize('authenticated', [True, False])
+def test_real_host_setup_subprocess_uses_shared_library_in_isolated_home(tmp_path, monkeypatch, authenticated):
+    installed = tmp_path / 'retained ods'
+    preparation = installed / 'data/pixel-native/preparation'
+    preparation.mkdir(parents=True, mode=0o700)
+    home, library, binaries = (tmp_path / name for name in ('home', 'lib', 'bin'))
+    for path in (home, library, binaries, installed / 'bin', installed / '.venv/host-agent/bin'):
+        path.mkdir(parents=True, exist_ok=True)
+    (installed / 'bin/ods-host-agent.py').touch()
+    runtime = installed / '.venv/host-agent/bin/python'
+    runtime.write_text('#!/bin/sh\nif [ "$1" = "-c" ]; then exit 0; fi\nexec '
+        + shlex.quote(sys.executable) + ' "$@"\n')
+    runtime.chmod(0o700)
+    (library / 'host-agent-install.sh').write_bytes((ROOT / 'installers/macos/lib/host-agent-install.sh').read_bytes())
+    (library / 'constants.sh').write_text("""
+ODS_AGENT_PLIST_LABEL=com.ods.host-agent
+ODS_AGENT_PLIST="$HOME/Library/LaunchAgents/$ODS_AGENT_PLIST_LABEL.plist"
+HOST_AGENT_BRIDGE_PLIST_LABEL=com.ods.host-agent-bridge
+HOST_AGENT_BRIDGE_PLIST="$HOME/bridge.plist"
+HOST_AGENT_BRIDGE_LOG="$HOME/bridge.log"
+macos_normalize_agent_bind() { printf '%s\\n' "$1"; }
+macos_bind_probe_host() { printf '%s\\n' "$1"; }
+macos_bind_uses_direct_gateway() { return 1; }
+""")
+    (library / 'env-generator.sh').write_text("""
+read_env_value() {
+    case "$2" in
+        ODS_AGENT_BIND) printf '127.0.0.1\\n' ;;
+        ODS_AGENT_PORT) printf '7710\\n' ;;
+        ODS_AGENT_KEY) printf 'fixture-private-key\\n' ;;
+        ODS_AGENT_HOST) printf 'host.docker.internal\\n' ;;
+        ODS_MACOS_HOST_AGENT_BRIDGE_ENABLED) printf 'false\\n' ;;
+        *) printf '\\n' ;;
+    esac
+}
+""")
+    (library / 'bridge-manager.sh').write_text('macos_configure_port_bridge() { test "$1" = false; }\n')
+    (library / 'host-agent-listener.sh').write_text('macos_retire_owned_host_agent_listener() { return 0; }\n')
+    scripts = {
+        'launchctl': 'printf "%s\\n" "$*" >> "$HOME/launchctl.calls"\n',
+        'curl': 'exit 0\n',
+        'sleep': 'exit 0\n',
+        'docker': """
+case "$1" in
+    inspect) printf 'running\\n' ;;
+    exec)
+        IFS= read -r header
+        test "$header" = 'Authorization: Bearer fixture-private-key' || exit 2
+        printf '%s\\n' "$*" >> "$HOME/docker.calls"
+        test "$DOCKER_HOST" = 'unix:///verified.sock' || exit 3
+        """ + ('exit 0' if authenticated else 'exit 1') + """
+        ;;
+    *) exit 4 ;;
+esac
+""",
+    }
+    for name, body in scripts.items():
+        path = binaries / name
+        path.write_text('#!/bin/sh\n' + body)
+        path.chmod(0o700)
+    monkeypatch.setattr(continuation, 'HERE', library)
+    environment = dict(HOME=str(home), PATH=str(binaries) + ':/usr/bin:/bin',
+        DOCKER_HOST='unix:///verified.sock', DOCKER_CONFIG=str(home / 'docker-config'))
+    if authenticated:
+        continuation.restore_host_agent(installed, environment)
+    else:
+        with pytest.raises(ValueError, match='native-recovery-host-agent-failed'):
+            continuation.restore_host_agent(installed, environment)
+    plist_path = home / 'Library/LaunchAgents/com.ods.host-agent.plist'
+    plist = plistlib.loads(plist_path.read_bytes())
+    assert plist['ProgramArguments'][-2:] == ['--install-dir', str(installed)]
+    assert plist['ProgramArguments'][0] == str(runtime)
+    assert plist['EnvironmentVariables']['DOCKER_HOST'] == 'unix:///verified.sock'
+    assert plist['EnvironmentVariables']['DOCKER_CONFIG'] == str(home / 'docker-config')
+    assert plist['EnvironmentVariables']['DOCKER_CONTEXT'] == ''
+    calls = (home / 'docker.calls').read_text()
+    assert 'fixture-private-key' not in calls
+    assert len(calls.splitlines()) == (1 if authenticated else 20)
+    diagnostic = (preparation / 'continuation-host-agent.log').read_text()
+    assert 'fixture-private-key' not in diagnostic
+    assert ('Dashboard container reached the authenticated host agent' in diagnostic) is authenticated

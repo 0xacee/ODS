@@ -173,6 +173,21 @@ management need a working host agent; do not infer that they work from Pixel
 health alone. Older failed installs may retain only the starter model because
 the selected full-model download arguments had not yet been persisted.
 
+For maintainer-assisted recovery, `--restore-host-agent` additionally runs the
+same isolated Python runtime and login LaunchAgent setup used by the normal
+installer. It uses the verified native Docker transport, configures the host
+bridge where needed, and requires an authenticated Dashboard-to-host-agent
+request to succeed. This runs between the protected readbacks; a setup failure
+does not publish a new successful selection. Success includes
+`hostAgentReady: true`, but still reports `installerComplete: false`.
+Private diagnostics are retained at
+`data/pixel-native/preparation/continuation-host-agent.log`; review them before
+sharing. A failed operation can leave the owner-level host agent partially
+configured, so preserve the installation and retry only after diagnosis.
+The flag does not install optional tools or launch the full-model download.
+Older attempts did not persist the OpenCode choice before the Pixel stage;
+do not infer that choice from a missing binary or LaunchAgent.
+
 For the preview crash loop reported in #7448, the old generic logs cannot
 establish the original startup exception. Recovery of services after the
 timeout does not prove that the underlying startup problem has been fixed.

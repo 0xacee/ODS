@@ -1,8 +1,11 @@
 """Validate retained installer inputs without changing the active installation."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
+import stat
+import subprocess
 from urllib.parse import unquote, urlsplit
 
 
@@ -100,3 +103,46 @@ def inspect_model_upgrade(install_dir, **bootstrap):
     saved, snapshot = saved_model_environment(install_dir)
     catalog = json.loads((install_dir / 'config/model-library.json').read_text(encoding='utf-8'))
     return model_upgrade_plan(saved, catalog, **bootstrap), snapshot
+
+
+def restore_host_agent(install_dir, process_env):
+    """Run shared owner-level setup only after the caller's protected readback.
+
+    Keep subprocess diagnostics in the private preparation directory, not in
+    the shareable CLI output. The caller rechecks protected state afterwards.
+    """
+    install_dir = Path(install_dir).resolve(strict=True)
+    preparation = install_dir / 'data/pixel-native/preparation'
+    info = preparation.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_mode & 0o077 or preparation.resolve(strict=True) != preparation):
+        raise ValueError('private-native-preparation-required')
+    log = preparation / 'continuation-host-agent.log'
+    fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    with os.fdopen(fd, 'ab', buffering=0) as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise ValueError('private-native-continuation-log-required')
+        environment = {key: process_env[key] for key in ('HOME', 'PATH', 'DOCKER_HOST', 'DOCKER_CONFIG')}
+        environment['ODS_CONTINUATION_LOG_FD'] = str(stream.fileno())
+        result = subprocess.run(['/bin/bash', '-c', """
+set -euo pipefail
+LIB_DIR="$1"
+INSTALL_DIR="$2"
+export ODS_HOME="$INSTALL_DIR"
+ai() { printf '%s\\n' "$*"; }
+ai_ok() { ai "[OK] $*"; }
+ai_warn() { ai "[WARN] $*"; }
+ai_err() { ai "[ERROR] $*"; }
+for library in constants env-generator bridge-manager host-agent-listener host-agent-install; do
+    source "$LIB_DIR/$library.sh"
+done
+ODS_LOG_FILE="/dev/fd/$ODS_CONTINUATION_LOG_FD"
+ods_macos_install_host_agent
+""", 'ods-recovery-host-agent', str(HERE), str(install_dir)],
+            cwd=install_dir, env=environment, stdin=subprocess.DEVNULL,
+            stdout=stream, stderr=subprocess.STDOUT, close_fds=True,
+            pass_fds=(stream.fileno(),), timeout=600, check=False)
+        if result.returncode:
+            raise ValueError('native-recovery-host-agent-failed')

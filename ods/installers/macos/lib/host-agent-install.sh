@@ -1,6 +1,53 @@
 #!/bin/bash
 # Shared host-agent setup for macOS installation and retained-install recovery.
-# Callers provide logging, environment/bind helpers, bridge setup and launchd paths.
+# Callers provide logging, environment/bind helpers and bridge-manager.sh.
+
+# launchd does not inherit the login shell PATH. Include Docker and Homebrew.
+_compute_launchd_path() {
+    local extra="${1:-}"
+    local docker_bin="" docker_dir="" brew_prefix=""
+    if command -v docker >/dev/null 2>&1; then
+        docker_bin="$(command -v docker)"
+        docker_dir="$(cd "$(dirname "$docker_bin")" && pwd)"
+    fi
+    if command -v brew >/dev/null 2>&1; then
+        brew_prefix="$(brew --prefix)"
+    fi
+    local entries=()
+    [[ -n "$extra" ]]                && entries+=("$extra")
+    [[ -n "$docker_dir" ]]           && entries+=("$docker_dir")
+    [[ -n "$brew_prefix" ]]          && entries+=("${brew_prefix}/bin")
+    entries+=("/opt/homebrew/bin" "/usr/local/bin" "/usr/bin" "/bin")
+    local seen=":" path_out="" d
+    for d in "${entries[@]}"; do
+        case "$seen" in
+            *":${d}:"*) ;;
+            *) seen="${seen}${d}:"; path_out="${path_out:+${path_out}:}${d}" ;;
+        esac
+    done
+    printf '%s' "$path_out"
+}
+
+
+_configure_macos_host_agent_bridge() {
+    local env_file="${INSTALL_DIR}/.env"
+    local enabled listen_host allowed_peer agent_port agent_bind
+    enabled="$(read_env_value "$env_file" "ODS_MACOS_HOST_AGENT_BRIDGE_ENABLED")"
+    listen_host="$(read_env_value "$env_file" "ODS_MACOS_HOST_GATEWAY")"
+    allowed_peer="$(read_env_value "$env_file" "ODS_MACOS_VM_IP")"
+    agent_port="$(read_env_value "$env_file" "ODS_AGENT_PORT")"
+    agent_bind="$(read_env_value "$env_file" "ODS_AGENT_BIND")"
+    [[ -n "$agent_bind" ]] || agent_bind="127.0.0.1"
+    if [[ "$enabled" == "true" ]] && macos_bind_uses_direct_gateway "$agent_bind" "$listen_host"; then
+        ai "Host-agent bind ${agent_bind} already covers the Colima gateway; disabling the host-agent bridge"
+        enabled="false"
+        upsert_env_value "$env_file" "ODS_MACOS_HOST_AGENT_BRIDGE_ENABLED" "false"
+    fi
+    [[ "$agent_port" =~ ^[0-9]+$ ]] || agent_port="7710"
+    macos_configure_port_bridge "$enabled" "$HOST_AGENT_BRIDGE_PLIST_LABEL" \
+        "$HOST_AGENT_BRIDGE_PLIST" "$HOST_AGENT_BRIDGE_LOG" "Colima host-agent bridge" \
+        "$listen_host" "$agent_port" "$agent_port" "$allowed_peer" "$INSTALL_DIR"
+}
 
 _ensure_macos_agent_python() {
     local bootstrap_python="$1"
@@ -123,6 +170,36 @@ AGENT_PLIST_EOF
     then
         ai_err "Could not write the ODS host-agent LaunchAgent."
         return 1
+    fi
+
+    # Recovery pins a verified socket. launchd does not inherit that environment;
+    # without this, model/extension actions could use a different Docker engine.
+    if [[ -n "${DOCKER_HOST:-}" ]]; then
+        if ! "$AGENT_PYTHON" - "$ODS_AGENT_PLIST" <<'AGENT_DOCKER_ENV_PY'
+import os
+from pathlib import Path
+import plistlib
+import sys
+import tempfile
+
+path = Path(sys.argv[1])
+document = plistlib.loads(path.read_bytes())
+environment = document["EnvironmentVariables"]
+for key in ("DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"):
+    environment[key] = os.environ.get(key, "")
+with tempfile.TemporaryDirectory(prefix=".ods-host-agent-", dir=path.parent) as temporary:
+    staged = Path(temporary) / "agent.plist"
+    with staged.open("xb") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        plistlib.dump(document, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(staged, path)
+AGENT_DOCKER_ENV_PY
+        then
+            ai_err "Could not preserve the selected Docker transport for the host agent."
+            return 1
+        fi
     fi
 
     launchctl bootout "gui/$(id -u)/${ODS_AGENT_PLIST_LABEL}" >/dev/null 2>&1 || true

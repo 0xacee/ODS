@@ -936,7 +936,7 @@ assert_contains "installers/macos/install-macos.sh" 'refusing to launch stale im
 assert_not_contains "installers/macos/install-macos.sh" 'wait .*\|\| ai_warn "Build failed' "macOS installer still treats required local build failures as warnings"
 assert_contains "installers/macos/install-macos.sh" '_active_colima start --network-address --network-preferred-route' "macOS installer does not preserve the active profile while enabling the private Colima vmnet route"
 assert_contains "installers/macos/install-macos.sh" 'ODS_MACOS_HOST_GATEWAY' "macOS installer does not persist the private Colima host gateway"
-assert_contains "installers/macos/install-macos.sh" '_configure_macos_host_agent_bridge' "macOS installer does not bridge host-agent actions over private Colima networking"
+assert_contains "installers/macos/lib/host-agent-install.sh" '_configure_macos_host_agent_bridge' "macOS installer does not bridge host-agent actions over private Colima networking"
 assert_contains "installers/macos/install-macos.sh" 'source "\$\{LIB_DIR\}/bridge-manager\.sh"' "macOS installer does not source shared bridge lifecycle code"
 assert_contains "installers/macos/ods-macos.sh" 'source "\$\{LIB_DIR\}/bridge-manager\.sh"' "macOS CLI does not source shared bridge lifecycle code"
 assert_contains "installers/macos/lib/bridge-manager.sh" 'macos_configure_llm_bridge_from_env' "shared macOS bridge manager does not derive bridge state from .env"

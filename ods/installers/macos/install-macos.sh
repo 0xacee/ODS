@@ -267,34 +267,6 @@ _close_inherited_fds_for_daemon() {
     done
 }
 
-# Build a launchd-friendly PATH that includes Docker and Homebrew prefixes.
-# launchd does NOT inherit the user's login shell PATH, so any path containing
-# `docker` or `brew`-installed tools must be baked into the plist explicitly.
-# Pass an optional leading directory (e.g. ~/.opencode/bin) as $1.
-_compute_launchd_path() {
-    local extra="${1:-}"
-    local docker_bin="" docker_dir="" brew_prefix=""
-    if command -v docker >/dev/null 2>&1; then
-        docker_bin="$(command -v docker)"
-        docker_dir="$(cd "$(dirname "$docker_bin")" && pwd)"
-    fi
-    if command -v brew >/dev/null 2>&1; then
-        brew_prefix="$(brew --prefix)"
-    fi
-    local entries=()
-    [[ -n "$extra" ]]                && entries+=("$extra")
-    [[ -n "$docker_dir" ]]           && entries+=("$docker_dir")
-    [[ -n "$brew_prefix" ]]          && entries+=("${brew_prefix}/bin")
-    entries+=("/opt/homebrew/bin" "/usr/local/bin" "/usr/bin" "/bin")
-    local seen=":" path_out="" d
-    for d in "${entries[@]}"; do
-        case "$seen" in
-            *":${d}:"*) ;;
-            *) seen="${seen}${d}:"; path_out="${path_out:+${path_out}:}${d}" ;;
-        esac
-    done
-    printf '%s' "$path_out"
-}
 
 _write_macos_cloud_auth_overlay() {
     local overlay_path="$1"
@@ -1063,25 +1035,6 @@ _configure_macos_llm_bridge() {
     macos_configure_llm_bridge_from_env "${INSTALL_DIR}/.env" "$INSTALL_DIR"
 }
 
-_configure_macos_host_agent_bridge() {
-    local env_file="${INSTALL_DIR}/.env"
-    local enabled listen_host allowed_peer agent_port agent_bind
-    enabled="$(read_env_value "$env_file" "ODS_MACOS_HOST_AGENT_BRIDGE_ENABLED")"
-    listen_host="$(read_env_value "$env_file" "ODS_MACOS_HOST_GATEWAY")"
-    allowed_peer="$(read_env_value "$env_file" "ODS_MACOS_VM_IP")"
-    agent_port="$(read_env_value "$env_file" "ODS_AGENT_PORT")"
-    agent_bind="$(read_env_value "$env_file" "ODS_AGENT_BIND")"
-    [[ -n "$agent_bind" ]] || agent_bind="127.0.0.1"
-    if [[ "$enabled" == "true" ]] && macos_bind_uses_direct_gateway "$agent_bind" "$listen_host"; then
-        ai "Host-agent bind ${agent_bind} already covers the Colima gateway; disabling the host-agent bridge"
-        enabled="false"
-        upsert_env_value "$env_file" "ODS_MACOS_HOST_AGENT_BRIDGE_ENABLED" "false"
-    fi
-    [[ "$agent_port" =~ ^[0-9]+$ ]] || agent_port="7710"
-    macos_configure_port_bridge "$enabled" "$HOST_AGENT_BRIDGE_PLIST_LABEL" \
-        "$HOST_AGENT_BRIDGE_PLIST" "$HOST_AGENT_BRIDGE_LOG" "Colima host-agent bridge" \
-        "$listen_host" "$agent_port" "$agent_port" "$allowed_peer" "$INSTALL_DIR"
-}
 
 _opencode_candidate_is_file() {
     local candidate="$1"

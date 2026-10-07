@@ -27,9 +27,11 @@ def helper(filename):
 
 
 def activate(*, preparation, install_dir, ods_source, compose_files, configure_stack=False,
-             resume_final_health=False):
+             resume_final_health=False, restore_host_agent=False):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
+    if restore_host_agent and not resume_final_health:
+        raise ValueError('host-agent-continuation-requires-recovery')
     config = helper('pixel-native-config.py')
     installer = helper('pixel-macos-access-install.py')
     compose = helper('pixel-native-compose.py')
@@ -125,8 +127,12 @@ def activate(*, preparation, install_dir, ods_source, compose_files, configure_s
             if result.returncode or len(result.stdout) > 4096:
                 raise ValueError('native-initial-recovery-proof-failed')
             return json.loads(result.stdout)
+        continuation = {}
+        if restore_host_agent:
+            continuation['restore_host_agent'] = lambda: helper('pixel-native-continuation.py').restore_host_agent(
+                install_dir, process_env)
         return helper('pixel-native-recover.py').finish(preparation=preparation, receipt=receipt,
-            run=run, verify=verify, compose=compose, selected_services=selected_services)
+            run=run, verify=verify, compose=compose, selected_services=selected_services, **continuation)
     record = {'schemaVersion': 1, 'phase': 'infrastructure', 'status': 'activating',
         'runtimeDigest': receipt['runtimeDigest'], 'serviceDigest': receipt['serviceDigest']}
     def checkpoint():

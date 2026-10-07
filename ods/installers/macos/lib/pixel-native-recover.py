@@ -27,6 +27,7 @@ GUIDANCE = {
     'native-initial-recovery-proof-failed': 'Protected activation could not be verified. The failed attempt remains intact.',
     'native-recovery-client-routing-failed': 'The native Dashboard/Portal route is not ready.',
     'native-client-has-legacy-edge-route': 'The selected client configuration still routes to a legacy Pixel Edge.',
+    'native-recovery-host-agent-failed': 'Host-agent setup did not pass. Inspect the private continuation-host-agent.log; do not reinstall.',
 }
 
 
@@ -55,7 +56,7 @@ def selection(receipt, activation):
             'activation': dict(activation, status='ready', phase='services-ready', requiresRecovery=False)}
 
 
-def finish(*, preparation, receipt, run, verify, compose, selected_services):
+def finish(*, preparation, receipt, run, verify, compose, selected_services, restore_host_agent=None):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     config = helper('pixel-native-config')
@@ -112,6 +113,9 @@ def finish(*, preparation, receipt, run, verify, compose, selected_services):
         if run('exec', '-T', 'dashboard-api', 'python3', '-c', probe, timeout=30).returncode:
             raise ValueError('native-recovery-client-routing-failed')
         compose.wait_ready(run)
+        if restore_host_agent is not None:
+            unchanged()
+            restore_host_agent()
         prove()
         # Publish only after routing and protected readback succeed. An earlier
         # interruption retains the error receipt and is safe to retry explicitly.
@@ -134,7 +138,7 @@ def finish(*, preparation, receipt, run, verify, compose, selected_services):
         os.close(lock)
 
 
-def recover(install_dir, ods_source):
+def recover(install_dir, ods_source, *, restore_host_agent=False):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     install_dir = Path(install_dir).expanduser().resolve(strict=True)
@@ -153,16 +157,19 @@ def recover(install_dir, ods_source):
             files.append(path)
     return helper('pixel-native-activate').activate(preparation=preparation, install_dir=install_dir,
         ods_source=Path(ods_source).resolve(strict=True), compose_files=[*files, *fragments],
-        resume_final_health=True)
+        resume_final_health=True, **({'restore_host_agent': True} if restore_host_agent else {}))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--install-dir', required=True)
     parser.add_argument('--ods-source', default=str(HERE.parents[2]))
+    parser.add_argument('--restore-host-agent', action='store_true',
+        help='Also install the login host agent and verify its authenticated Dashboard route; not a full installer continuation')
     args = parser.parse_args()
     try:
-        path = recover(args.install_dir, args.ods_source)
+        path = recover(args.install_dir, args.ods_source,
+            **({'restore_host_agent': True} if args.restore_host_agent else {}))
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         detail = helper('pixel-native-compose').health_diagnostic(error)
         code = str(error) if isinstance(error, ValueError) else None
@@ -171,10 +178,13 @@ def main():
         print('Native Pixel recovery stopped. Keep the original receipts and services intact.'
               + (' ' + detail if detail else ''), file=sys.stderr)
         return 1
-    print(json.dumps({'status': 'native-pixel-ready', 'selection': str(path),
-                     'installerComplete': False}))
-    print('Pixel recovery completed. Remaining installer steps (host agent, optional tools '
-          'and full-model download) still need verification before declaring ODS installed.', file=sys.stderr)
+    result = {'status': 'native-pixel-ready', 'selection': str(path), 'installerComplete': False}
+    if args.restore_host_agent:
+        result['hostAgentReady'] = True
+    print(json.dumps(result))
+    remaining = 'optional tools and full-model download' if args.restore_host_agent else 'host agent, optional tools and full-model download'
+    print('Pixel recovery completed. Remaining installer steps (' + remaining
+          + ') still need verification before declaring ODS installed.', file=sys.stderr)
     return 0
 
 
