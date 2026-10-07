@@ -159,7 +159,8 @@ live process identity, access readiness and released admission, then checks
 Docker health and refreshes Dashboard/Open WebUI's native route. It verifies
 protected readiness again before publishing `selection-update.json`. The
 original preparation and activation receipts are preserved. A rejected check
-does not publish readiness; an identical completed recovery can be retried.
+before publication does not publish readiness; an identical completed recovery
+can be retried. The optional model handoff described below runs after publication.
 Do not edit the receipts, replay activation, uninstall, or clear volumes to
 bypass a rejection. This helper does not repair an unfinished protected
 activation, perform a native migration, or extend the health timeout.
@@ -187,6 +188,37 @@ configured, so preserve the installation and retry only after diagnosis.
 The flag does not install optional tools or launch the full-model download.
 Older attempts did not persist the OpenCode choice before the Pixel stage;
 do not infer that choice from a missing binary or LaunchAgent.
+
+The separate `--resume-model` option saves the verified Compose file selection
+and resumes the original full-model choice using the installed
+`bootstrap-upgrade.sh`. It matches the saved recommendation against the
+installed catalog, including context, pinned artifact URL and checksum; it
+does not reselect a model from current hardware policy. A different active
+model/store, ambiguous recommendation or conflicting retry metadata is refused.
+If the saved model is already selected, it only restores the missing Compose
+cache; this configuration check is not a live inference proof.
+
+For a qualifying retained failure, both options can be supplied together:
+
+```bash
+python3 /path/to/reviewed-ODS/ods/installers/macos/lib/pixel-native-recover.py \
+  --install-dir "$HOME/ods" --ods-source "$HOME/ods" \
+  --restore-host-agent --resume-model
+```
+
+The model handoff occurs **after** Pixel readiness is published. A later
+handoff failure therefore leaves that successful Pixel selection intact.
+Original activation receipts are never rewritten. Existing same-owner upgrade
+processes are checked before starting a new one; do not delete PID/status files
+to bypass an in-progress worker. Retry arguments and the new PID are saved
+atomically. If starting the worker fails before it exists, a new failed status
+allows the normal `ods start`/`ods restart` retry path.
+
+The returned `modelUpgrade.status: download-started` means only that the
+background worker started. Inspect `logs/model-upgrade.log` and
+`data/bootstrap-status.json`, then verify the active model and Portal after
+the swap. The helper still reports `installerComplete: false`: selected
+optional tools and final full-install readiness remain separate release gates.
 
 For the preview crash loop reported in #7448, the old generic logs cannot
 establish the original startup exception. Recovery of services after the

@@ -27,11 +27,13 @@ def helper(filename):
 
 
 def activate(*, preparation, install_dir, ods_source, compose_files, configure_stack=False,
-             resume_final_health=False, restore_host_agent=False):
+             resume_final_health=False, restore_host_agent=False, resume_model=False):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     if restore_host_agent and not resume_final_health:
         raise ValueError('host-agent-continuation-requires-recovery')
+    if resume_model and not resume_final_health:
+        raise ValueError('model-continuation-requires-recovery')
     config = helper('pixel-native-config.py')
     installer = helper('pixel-macos-access-install.py')
     compose = helper('pixel-native-compose.py')
@@ -131,6 +133,16 @@ def activate(*, preparation, install_dir, ods_source, compose_files, configure_s
         if restore_host_agent:
             continuation['restore_host_agent'] = lambda: helper('pixel-native-continuation.py').restore_host_agent(
                 install_dir, process_env)
+        if resume_model:
+            def continue_model(unchanged):
+                def verify_selection():
+                    unchanged()
+                    current = run('config', '--format', 'json')
+                    if current.returncode or json.loads(current.stdout).get('services') != selected_services:
+                        raise ValueError('native-recovery-compose-selection-changed')
+                return helper('pixel-native-continuation.py').resume_model_upgrade(
+                    install_dir, paths, process_env, verify_selection=verify_selection)
+            continuation['resume_model'] = continue_model
         return helper('pixel-native-recover.py').finish(preparation=preparation, receipt=receipt,
             run=run, verify=verify, compose=compose, selected_services=selected_services, **continuation)
     record = {'schemaVersion': 1, 'phase': 'infrastructure', 'status': 'activating',

@@ -23,14 +23,14 @@ def test_host_agent_continuation_cannot_be_used_as_initial_activation(monkeypatc
 
 
 @pytest.mark.parametrize('fault', [None, 'no-webui', 'configure', 'environment', 'keys', 'files', 'config', 'existing',
-    'prerequisites', 'infrastructure', 'protected', 'health', 'webui-routing', 'unsafe-recipe', 'recipe-alias', 'resume', 'resume-host'])
+    'prerequisites', 'infrastructure', 'protected', 'health', 'webui-routing', 'unsafe-recipe', 'recipe-alias', 'resume', 'resume-host', 'resume-model'])
 def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, monkeypatch, fault):
     monkeypatch.setattr(module.sys, 'platform', 'darwin')
     monkeypatch.setattr(module.os, 'geteuid', lambda: 501)
     owner = SimpleNamespace(pw_name='fixture', pw_uid=501, pw_dir=str(tmp_path))
     monkeypatch.setattr(module.pwd, 'getpwuid', lambda uid: owner)
     preparation, install_dir, home = [tmp_path / name for name in ('prepared', 'ods', 'native-home')]
-    if fault in ('resume', 'resume-host'):
+    if fault in ('resume', 'resume-host', 'resume-model'):
         preparation = install_dir / 'data/pixel-native/preparation'
         home = install_dir / 'data/pixel-native/home'
     for path in (preparation, install_dir, home / '.openclaw'): path.mkdir(parents=True, exist_ok=True)
@@ -88,7 +88,7 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
             wait_ready=lambda run: event('health'),
             validate_stack=module.helper('pixel-native-compose.py').validate_stack),
     }
-    if fault in ('resume', 'resume-host'):
+    if fault in ('resume', 'resume-host', 'resume-model'):
         def finish(**kwargs):
             events.append('recover')
             assert kwargs['receipt'] == receipt
@@ -98,6 +98,9 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
                 kwargs['restore_host_agent']()
             else:
                 assert 'restore_host_agent' not in kwargs
+            if fault == 'resume-model':
+                return {'selection': str(preparation / 'selection-update.json'),
+                        'modelUpgrade': kwargs['resume_model'](lambda: events.append('unchanged'))}
             return preparation / 'selection-update.json'
         modules['pixel-native-recover.py'] = SimpleNamespace(finish=finish)
         def restore(path, environment):
@@ -105,7 +108,14 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
             assert environment == dict(HOME=str(tmp_path), PATH='/usr/bin:/bin',
                 DOCKER_HOST='unix:///socket', DOCKER_CONFIG=str(home / 'docker-config'))
             events.append('host-agent')
-        modules['pixel-native-continuation.py'] = SimpleNamespace(restore_host_agent=restore)
+        def resume_model(path, selected_files, environment, *, verify_selection):
+            assert path == install_dir and selected_files == files
+            assert environment['DOCKER_HOST'] == 'unix:///socket'
+            verify_selection()
+            events.append('model-upgrade')
+            return {'status': 'download-started', 'pid': 12345}
+        modules['pixel-native-continuation.py'] = SimpleNamespace(
+            restore_host_agent=restore, resume_model_upgrade=resume_model)
     if fault == 'configure':
         native_env = module.helper('pixel-native-env.py')
         for key in list(env):
@@ -123,7 +133,7 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
     def run(argv, **kw):
         assert all(key not in ' '.join(argv) for key in (env['DASHBOARD_API_KEY'], env['PIXEL_OPENWEBUI_KEY']))
         if argv[0] == '/usr/bin/sudo':
-            if fault in ('resume', 'resume-host'):
+            if fault in ('resume', 'resume-host', 'resume-model'):
                 events.append('verify-initial')
                 assert '--verify-initial' in argv and '--install' not in argv
                 assert '--initial-install' in argv
@@ -158,14 +168,19 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
     monkeypatch.setattr(module.subprocess, 'run', run)
     journal = preparation / 'activation.json'
     if fault == 'existing': journal.write_text('do not overwrite')
-    if fault in ('resume', 'resume-host'): journal.write_text('retained failed attempt')
+    if fault in ('resume', 'resume-host', 'resume-model'): journal.write_text('retained failed attempt')
     def activate():
         return module.activate(preparation=preparation, install_dir=install_dir, ods_source=install_dir,
-            compose_files=files, configure_stack=fault == 'configure', resume_final_health=fault in ('resume', 'resume-host'), restore_host_agent=fault == 'resume-host')
-    if fault in ('resume', 'resume-host'):
-        assert activate() == preparation / 'selection-update.json'
+            compose_files=files, configure_stack=fault == 'configure', resume_final_health=fault in ('resume', 'resume-host', 'resume-model'), restore_host_agent=fault == 'resume-host', resume_model=fault == 'resume-model')
+    if fault in ('resume', 'resume-host', 'resume-model'):
+        expected_result = preparation / 'selection-update.json'
+        if fault == 'resume-model':
+            expected_result = {'selection': str(expected_result),
+                'modelUpgrade': {'status': 'download-started', 'pid': 12345}}
+        assert activate() == expected_result
         assert events == ['plan', 'bind', 'config', 'services', 'recover', 'verify-initial'] + (
-            ['host-agent'] if fault == 'resume-host' else [])
+            ['host-agent'] if fault == 'resume-host' else
+            ['unchanged', 'services', 'model-upgrade'] if fault == 'resume-model' else [])
         assert journal.read_text() == 'retained failed attempt'
         return
     if fault not in (None, 'no-webui', 'configure'):

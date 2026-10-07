@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import shlex
 import sys
+import time
 from types import SimpleNamespace
 import urllib.request  # noqa: F401 - initialize before emulating Darwin
 
@@ -437,3 +438,175 @@ esac
     diagnostic = (preparation / 'continuation-host-agent.log').read_text()
     assert 'fixture-private-key' not in diagnostic
     assert ('Dashboard container reached the authenticated host agent' in diagnostic) is authenticated
+
+
+@pytest.fixture
+def model_handoff(tmp_path, recommended_model):
+    saved, catalog, bootstrap = recommended_model
+    installed = tmp_path / 'retained ods'
+    for relative in ('config', 'data', 'scripts', 'installers/macos/lib'):
+        (installed / relative).mkdir(parents=True, exist_ok=True)
+    env = installed / '.env'
+    env.write_text(''.join(key + '=' + value + '\n' for key, value in saved.items()))
+    env.chmod(0o600)
+    (installed / 'config/model-library.json').write_text(json.dumps(catalog))
+    (installed / 'installers/macos/lib/tier-map.sh').write_text(
+        'BOOTSTRAP_GGUF_FILE=' + bootstrap['bootstrap_file'] + '\n'
+        'BOOTSTRAP_LLM_MODEL=' + bootstrap['bootstrap_model'] + '\n'
+        'BOOTSTRAP_MAX_CONTEXT=' + str(bootstrap['bootstrap_context']) + '\n')
+    script = installed / 'scripts/bootstrap-upgrade.sh'
+    script.write_text('#!/bin/bash\nexit 0\n')
+    compose = installed / 'docker-compose.yml'
+    compose.write_text('services: {}\n')
+    environment = dict(HOME=str(tmp_path), PATH='/usr/bin:/bin',
+        DOCKER_HOST='unix:///verified.sock', DOCKER_CONFIG=str(tmp_path / 'docker-config'))
+    return installed, [compose], environment
+
+
+@pytest.mark.parametrize('fault', [None, 'running', 'process-check', 'different-args',
+    'environment', 'selection', 'spawn', 'metadata', 'pid-publish', 'cache-link', 'args-link', 'pid-link', 'log-link'])
+def test_model_handoff_preserves_selection_and_refuses_unsafe_retries(model_handoff, monkeypatch, fault):
+    installed, files, environment = model_handoff
+    before = (installed / '.env').read_bytes()
+    target = installed / 'untouched'
+    target.write_text('untouched')
+    target.chmod(0o600)
+    links = {'cache-link': '.compose-flags', 'args-link': 'data/bootstrap-upgrade.args',
+             'pid-link': 'data/bootstrap-upgrade.pid', 'log-link': 'logs/model-upgrade.log'}
+    if fault in links:
+        link = installed / links[fault]
+        link.parent.mkdir(exist_ok=True)
+        link.symlink_to(target)
+    if fault == 'different-args':
+        (installed / 'data/bootstrap-upgrade.args').write_text('another selection\n')
+    def check(argv, **kwargs):
+        assert argv[:3] == ['/usr/bin/pgrep', '-u', str(os.getuid())]
+        return SimpleNamespace(returncode=0 if fault == 'running' else 2 if fault == 'process-check' else 1)
+    monkeypatch.setattr(continuation.subprocess, 'run', check)
+    calls = []
+    def spawn(argv, **kwargs):
+        calls.append(argv)
+        assert argv[:3] == ['/bin/bash', str(installed / 'scripts/bootstrap-upgrade.sh'), str(installed)]
+        assert kwargs['cwd'] == installed and kwargs['start_new_session'] and kwargs['close_fds']
+        assert kwargs['env']['DOCKER_HOST'] == environment['DOCKER_HOST']
+        assert (installed / 'data/bootstrap-upgrade.args').read_text().splitlines() == argv[3:]
+        assert (installed / '.compose-flags').read_text() == '-f docker-compose.yml\n'
+        if fault == 'spawn': raise OSError('fixture launch failure')
+        return SimpleNamespace(pid=54321)
+    monkeypatch.setattr(continuation.subprocess, 'Popen', spawn)
+    publish = continuation.publish_metadata
+    def publish_record(path, body, expected):
+        if fault == 'pid-publish' and path.name == 'bootstrap-upgrade.pid':
+            raise OSError('fixture tracking failure')
+        return publish(path, body, expected)
+    monkeypatch.setattr(continuation, 'publish_metadata', publish_record)
+    verifications = []
+    def verify():
+        verifications.append(True)
+        if fault == 'environment': (installed / '.env').write_bytes(before + b'# concurrent owner edit\n')
+        if fault == 'selection': raise ValueError('native-recovery-selection-changed')
+        if fault == 'metadata' and len(verifications) == 2:
+            (installed / 'data/bootstrap-upgrade.args').write_text('concurrent owner selection\n')
+    if fault:
+        with pytest.raises((ValueError, OSError)):
+            continuation.resume_model_upgrade(installed, files, environment, verify_selection=verify)
+        assert len(calls) == int(fault in ('spawn', 'pid-publish'))
+        if fault == 'spawn':
+            status = json.loads((installed / 'data/bootstrap-status.json').read_text())
+            assert status['status'] == 'failed' and status['model'] == 'chosen.gguf'
+            assert not (installed / 'data/bootstrap-upgrade.pid').exists()
+        if fault == 'metadata':
+            assert (installed / 'data/bootstrap-upgrade.args').read_text() == 'concurrent owner selection\n'
+    else:
+        result = continuation.resume_model_upgrade(installed, files, environment, verify_selection=verify)
+        assert result == dict(status='download-started', modelId='chosen-q4', pid=54321)
+        assert len(calls) == 1 and len(verifications) == 2
+        assert (installed / 'data/bootstrap-upgrade.pid').read_text() == '54321\n'
+        for path in ('.compose-flags', 'data/bootstrap-upgrade.args', 'data/bootstrap-upgrade.pid'):
+            assert (installed / path).stat().st_mode & 0o777 == 0o600
+    assert target.read_text() == 'untouched'
+    if fault != 'environment': assert (installed / '.env').read_bytes() == before
+
+
+def test_real_model_handoff_tracks_worker_and_refuses_duplicate(model_handoff, monkeypatch):
+    installed, files, environment = model_handoff
+    script = installed / 'scripts/bootstrap-upgrade.sh'
+    script.write_text('''#!/bin/bash
+printf '%s\\n' "$@" > "$1/data/observed.args"
+while [[ ! -f "$1/data/release-fixture" ]]; do sleep 0.05; done
+''')
+    children = []
+    popen = subprocess.Popen
+    def capture(argv, **kwargs):
+        process = popen(argv, **kwargs)
+        if argv[:2] == ['/bin/bash', str(script)]: children.append(process)
+        return process
+    monkeypatch.setattr(continuation.subprocess, 'Popen', capture)
+    try:
+        result = continuation.resume_model_upgrade(installed, files, environment, verify_selection=lambda: None)
+        assert len(children) == 1 and result['pid'] == children[0].pid
+        deadline = time.monotonic() + 5
+        while not (installed / 'data/observed.args').exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        observed = (installed / 'data/observed.args').read_text().splitlines()
+        assert observed[0] == str(installed)
+        assert observed[1:] == (installed / 'data/bootstrap-upgrade.args').read_text().splitlines()
+        assert children[0].poll() is None
+        with pytest.raises(ValueError, match='native-model-upgrade-already-running'):
+            continuation.resume_model_upgrade(installed, files, environment, verify_selection=lambda: None)
+        assert len(children) == 1
+    finally:
+        (installed / 'data/release-fixture').touch()
+        for child in children:
+            child.wait(timeout=5)
+
+
+def test_model_handoff_runs_only_after_ready_selection_publication(retained):
+    preparation, receipt, activation = retained
+    calls = []
+    def verify():
+        calls.append('proof')
+        return dict(status='active', runtimeDigest=receipt['runtimeDigest'], serviceDigest=receipt['serviceDigest'])
+    def resume(unchanged):
+        calls.append('model')
+        unchanged()
+        assert json.loads((preparation / 'selection-update.json').read_text())['activation']['status'] == 'ready'
+        assert json.loads((preparation / 'activation.json').read_text()) == activation
+        return {'status': 'download-started', 'pid': 12345}
+    result = module.finish(preparation=preparation, receipt=receipt,
+        run=lambda *args, **kwargs: SimpleNamespace(returncode=0), verify=verify,
+        compose=SimpleNamespace(wait_ready=lambda run: None),
+        selected_services={'dashboard-api': {}}, resume_model=resume)
+    assert calls == ['proof', 'proof', 'model']
+    assert result['modelUpgrade']['status'] == 'download-started'
+
+
+def test_selected_model_still_publishes_missing_compose_cache_without_spawning(model_handoff, monkeypatch):
+    installed, files, environment = model_handoff
+    env = installed / '.env'
+    env.write_text(env.read_text().replace('GGUF_FILE=starter.gguf', 'GGUF_FILE=chosen.gguf')
+        .replace('LLM_MODEL=starter', 'LLM_MODEL=chosen').replace('CONTEXT=65536', 'CONTEXT=32768')
+        .replace('CTX_SIZE=65536', 'CTX_SIZE=32768'))
+    def forbidden(*args, **kwargs): pytest.fail('already selected model must not launch a worker')
+    monkeypatch.setattr(continuation.subprocess, 'Popen', forbidden)
+    monkeypatch.setattr(continuation.subprocess, 'run', forbidden)
+    result = continuation.resume_model_upgrade(installed, files, environment, verify_selection=lambda: None)
+    assert result['status'] == 'selected-model'
+    assert (installed / '.compose-flags').read_text() == '-f docker-compose.yml\n'
+    assert not (installed / 'data/bootstrap-upgrade.args').exists()
+
+
+def test_cli_reports_model_handoff_but_not_installer_completion(monkeypatch, capsys):
+    def recover(install_dir, ods_source, **kwargs):
+        assert kwargs == {'restore_host_agent': True, 'resume_model': True}
+        return {'selection': '/fixture/selection-update.json',
+                'modelUpgrade': {'status': 'download-started', 'pid': 12345}}
+    monkeypatch.setattr(module, 'recover', recover)
+    monkeypatch.setattr(module.sys, 'argv', ['recover', '--install-dir', '/fixture',
+        '--restore-host-agent', '--resume-model'])
+    assert module.main() == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['hostAgentReady'] is True
+    assert result['modelUpgrade']['status'] == 'download-started'
+    assert result['selection'] == '/fixture/selection-update.json'
+    assert result['installerComplete'] is False

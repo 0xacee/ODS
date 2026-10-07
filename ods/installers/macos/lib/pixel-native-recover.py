@@ -28,6 +28,22 @@ GUIDANCE = {
     'native-recovery-client-routing-failed': 'The native Dashboard/Portal route is not ready.',
     'native-client-has-legacy-edge-route': 'The selected client configuration still routes to a legacy Pixel Edge.',
     'native-recovery-host-agent-failed': 'Host-agent setup did not pass. Inspect the private continuation-host-agent.log; do not reinstall.',
+    'native-model-upgrade-already-running': 'An existing full-model worker is running. Inspect its progress; do not start another download.',
+    'retained-upgrade-arguments-conflict': 'Existing retry metadata names a different model. Preserve it and review the selection.',
+    'native-model-upgrade-launch-failed': 'The downloader could not start. Retry metadata was preserved; review the local setup before retrying.',
+    'native-model-worker-tracking-failed': 'A downloader was started but its PID could not be recorded. Inspect existing workers and the model-upgrade log before retrying.',
+    'native-model-upgrade-process-check-failed': 'Existing downloader processes could not be checked; no new worker was started.',
+    'native-recovery-compose-selection-changed': 'The Docker service selection changed during recovery. Review it before retrying.',
+    'retained-model-environment-changed': 'Model configuration changed during recovery. No new worker was started.',
+    'retained-bootstrap-model-required': 'The active model no longer matches the retained starter. Recovery will not replace an operator choice.',
+    'saved-model-recommendation-required': 'The saved full-model recommendation is incomplete or malformed.',
+    'saved-model-recommendation-mismatch': 'The saved recommendation does not match exactly one installed catalog model.',
+    'saved-model-context-invalid': 'The saved context exceeds the installed catalog contract or is invalid.',
+    'pinned-bootstrap-model-required': 'The full model lacks a matching pinned URL and checksum; automatic download was refused.',
+    'single-file-bootstrap-model-required': 'The existing bootstrap downloader cannot safely handle this model artifact set.',
+    'continuation-metadata-changed': 'Continuation metadata changed concurrently. Preserve the files and inspect any existing worker before retrying.',
+    'owned-continuation-metadata-required': 'Continuation metadata has unsafe ownership, links, permissions or size; it was not replaced.',
+    'retained-local-model-route-required': 'The saved inference route or model store is outside this initial-install continuation.',
 }
 
 
@@ -56,7 +72,8 @@ def selection(receipt, activation):
             'activation': dict(activation, status='ready', phase='services-ready', requiresRecovery=False)}
 
 
-def finish(*, preparation, receipt, run, verify, compose, selected_services, restore_host_agent=None):
+def finish(*, preparation, receipt, run, verify, compose, selected_services, restore_host_agent=None,
+           resume_model=None):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     config = helper('pixel-native-config')
@@ -133,12 +150,14 @@ def finish(*, preparation, receipt, run, verify, compose, selected_services, res
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+        if resume_model is not None:
+            return {'selection': str(destination), 'modelUpgrade': resume_model(unchanged)}
         return destination
     finally:
         os.close(lock)
 
 
-def recover(install_dir, ods_source, *, restore_host_agent=False):
+def recover(install_dir, ods_source, *, restore_host_agent=False, resume_model=False):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     install_dir = Path(install_dir).expanduser().resolve(strict=True)
@@ -157,7 +176,8 @@ def recover(install_dir, ods_source, *, restore_host_agent=False):
             files.append(path)
     return helper('pixel-native-activate').activate(preparation=preparation, install_dir=install_dir,
         ods_source=Path(ods_source).resolve(strict=True), compose_files=[*files, *fragments],
-        resume_final_health=True, **({'restore_host_agent': True} if restore_host_agent else {}))
+        resume_final_health=True, **({'restore_host_agent': True} if restore_host_agent else {}),
+        **({'resume_model': True} if resume_model else {}))
 
 
 def main():
@@ -166,10 +186,13 @@ def main():
     parser.add_argument('--ods-source', default=str(HERE.parents[2]))
     parser.add_argument('--restore-host-agent', action='store_true',
         help='Also install the login host agent and verify its authenticated Dashboard route; not a full installer continuation')
+    parser.add_argument('--resume-model', action='store_true',
+        help='After verified recovery, save Compose selection and resume the saved full-model download; starting is not completion')
     args = parser.parse_args()
     try:
         path = recover(args.install_dir, args.ods_source,
-            **({'restore_host_agent': True} if args.restore_host_agent else {}))
+            **({'restore_host_agent': True} if args.restore_host_agent else {}),
+            **({'resume_model': True} if args.resume_model else {}))
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         detail = helper('pixel-native-compose').health_diagnostic(error)
         code = str(error) if isinstance(error, ValueError) else None
@@ -179,6 +202,8 @@ def main():
               + (' ' + detail if detail else ''), file=sys.stderr)
         return 1
     result = {'status': 'native-pixel-ready', 'selection': str(path), 'installerComplete': False}
+    if args.resume_model:
+        result.update(path)
     if args.restore_host_agent:
         result['hostAgentReady'] = True
     print(json.dumps(result))
