@@ -1405,7 +1405,7 @@ def _ready_access(service, *, upgrade_guard=False):
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o660:
         raise InstallError('native-access-socket-unavailable')
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(20)
+        connection.settimeout(340)
         connection.connect(str(address))
         connection.sendall(b'{"operation":"status"}\n')
         with connection.makefile('rb') as stream:
