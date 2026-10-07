@@ -133,6 +133,50 @@ or disabling it; use the managed native update/migration path and preserve
 `data/pixel-native` and its receipts. Do not delete protected state or use force
 to work around that guard. See [MACOS-QUICKSTART.md](MACOS-QUICKSTART.md).
 
+### Retained initial installation stopped at final health
+
+A healthy gateway alone does not complete initial activation. The installer
+also waits for `pixel-native-ingress`, `pixel-workspace-preview`, and
+`pixel-edge`. A timeout reports each service's last observed state; preview
+startup errors report a fixed stage and reason without paths or configuration
+values. These diagnostics are also written to the install log.
+
+For an initial attempt with `activation.json` reporting `status: error`,
+`requiresRecovery: true`, and `phase: final-health` (or `webui-routing`), the
+maintainer recovery helper can finish the **Pixel stage** once the underlying
+services are healthy. Use a reviewed ODS source tree containing the helper,
+and run as the same signed-in Mac user who installed ODS:
+
+```bash
+python3 /path/to/reviewed-ODS/ods/installers/macos/lib/pixel-native-recover.py \
+  --install-dir "$HOME/ods" --ods-source "$HOME/ods"
+```
+
+Replace the source path and installation directory with their actual paths.
+The helper requests sudo for read-only verification of the protected initial
+activation. It checks the protected journals, exact runtime/service selection,
+live process identity, access readiness and released admission, then checks
+Docker health and refreshes Dashboard/Open WebUI's native route. It verifies
+protected readiness again before publishing `selection-update.json`. The
+original preparation and activation receipts are preserved. A rejected check
+does not publish readiness; an identical completed recovery can be retried.
+Do not edit the receipts, replay activation, uninstall, or clear volumes to
+bypass a rejection. This helper does not repair an unfinished protected
+activation, perform a native migration, or extend the health timeout.
+
+**This is not a whole-installer resume.** Success prints `native-pixel-ready`.
+The original installer may also have stopped before the host-agent setup,
+optional OpenCode setup, background full-model download, and final readiness
+summary. Those remaining steps need a separate maintainer-reviewed continuation
+before declaring ODS fully installed. In particular, model and extension
+management need a working host agent; do not infer that they work from Pixel
+health alone. Older failed installs may retain only the starter model because
+the selected full-model download arguments had not yet been persisted.
+
+For the preview crash loop reported in #7448, the old generic logs cannot
+establish the original startup exception. Recovery of services after the
+timeout does not prove that the underlying startup problem has been fixed.
+
 ## Linux host architecture
 
 The following systemd/socket layout describes Linux and WSL2. macOS uses native

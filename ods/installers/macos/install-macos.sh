@@ -3194,7 +3194,8 @@ for service in (data.get("services") or {}).values():
             [[ "${COMPOSE_FLAGS[_pixel_i]}" == -f ]] || { ai_err "Unexpected Compose selection"; exit 1; }
             _pixel_install_args+=(--compose-file "$INSTALL_DIR/${COMPOSE_FLAGS[_pixel_i+1]}")
         done
-        if ! /usr/bin/python3 "$LIB_DIR/pixel-native-install.py" "${_pixel_install_args[@]}"; then
+        if ! /usr/bin/python3 "$LIB_DIR/pixel-native-install.py" "${_pixel_install_args[@]}" \
+            2>&1 | tee -a "$ODS_LOG_FILE"; then
             ai_err "Native Pixel setup stopped. Keep data/pixel-native and its private receipts for diagnosis."
             exit 1
         fi

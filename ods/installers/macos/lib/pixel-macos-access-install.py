@@ -1417,6 +1417,7 @@ def _ready_access(service, *, upgrade_guard=False):
             or not _access_response_ready(value.get('body'), upgrade_guard=upgrade_guard)
             or service.pid(require_running=True) != pid):
         raise InstallError('native-access-readiness-failed')
+    return value['body']
 
 
 def _migration_phase(plan, journal, value):
@@ -2729,6 +2730,94 @@ def _execute_upgrade_install(plan, source):
     return 'active'
 
 
+def verify_initial_install(plan):
+    """Read back a completed protected initial install without activating it.
+
+    Owner-side final-health failure is not authority to replay root activation.
+    Require its existing protected journals, exact configuration/bundle binding,
+    live process custody and controller readiness before allowing finalization.
+    No service starts, stops, policy transitions or receipt writes occur here.
+    """
+    if sys.platform != 'darwin' or os.geteuid() != 0:
+        raise InstallError('macos-root-install-required')
+    if not plan.get('initial_install') or not plan.get('runtime_bundle') or not plan.get('native_services'):
+        raise InstallError('complete-initial-service-selection-required')
+    sys.path.insert(0, str(HERE.parents[2] / 'bin'))
+    from pixel_access_bridge import private_json
+    from pixel_macos_custody import protected_bytes
+    state = Path(_launchd.ACCESS_STATE)
+    pending = ('runtime-upgrade.json', 'transition.json', 'policy-activation.json')
+    def no_transition():
+        if any(os.path.lexists(state / name) for name in pending):
+            raise InstallError('native-initial-recovery-transition-pending')
+    no_transition()
+    journal = state / 'installation.json'
+    record = private_json(journal, 0, 65536)
+    if (type(record) is not dict or type(record.get('schemaVersion')) is not int
+            or record != {'schemaVersion': 1, 'phase': 'active', 'source': str(plan['source']),
+                   'owner': plan['owner'].pw_uid, 'operation': 'initial-install'}):
+        raise InstallError('native-initial-activation-not-complete')
+    edge_path = _edge_hold_journal(plan)
+    edge = private_json(edge_path, 0, 65536)
+    if type(edge) is not dict or edge.get('phase') != 'released':
+        raise InstallError('native-initial-admission-not-released')
+    settings_path = _destination(_launchd.ACCESS_CONFIG)
+    settings = protected_bytes(settings_path)
+    if json.loads(settings) != plan['access_settings']:
+        raise InstallError('native-initial-configuration-changed')
+    _verify_bundle_selection(plan)
+    services = _activation_services(plan)[1:]
+    if len(services) != 3:
+        raise InstallError('complete-initial-service-selection-required')
+    for service in services:
+        service.verify()
+        if _job_disabled(service.target):
+            raise InstallError('native-migration-disabled-job')
+    identities = [_upgrade_service_identity(service) for service in services]
+    _ready_gateway(services[0], plan['access_settings']['gateway_port'])
+    def access_ready():
+        value = _ready_access(services[1])
+        mode = _policy.policy_state(plan['access_settings']['gateway_policy'])['activeMode']
+        if (not _repair.access_ready(value) or value.get('surface') != 'darwin'
+                or value.get('effective_mode') != mode):
+            raise InstallError('native-runtime-access-reproof-required')
+    access_ready()
+    _ready_access_relay(services[2], plan)
+    def admission_ready():
+        value = _migration_edge_request(plan, edge['container'])
+        if (value.get('capability') != 'available' or value.get('phase') != 'idle'
+                or value.get('admission_blocked') is not False):
+            raise InstallError('native-initial-admission-not-ready')
+    admission_ready()
+    service_path = state / 'service-installation.json'
+    service_record = private_json(service_path, 0, 2 * 1024 * 1024)
+    if (type(service_record) is not dict or service_record.get('requiresRecovery') or service_record.get('stopWitnesses')
+            or service_record.get('attempted') != ['manager', 'promoter', 'operations']):
+        raise InstallError('native-managed-service-not-ready')
+    _verify_new_services(plan)
+    # Each readiness check can take time. Check the protected bindings and
+    # process births again; a replacement is not the verified activation.
+    no_transition()
+    if (private_json(journal, 0, 65536) != record
+            or private_json(edge_path, 0, 65536) != edge
+            or private_json(service_path, 0, 2 * 1024 * 1024) != service_record
+            or protected_bytes(settings_path) != settings
+            or [_upgrade_service_identity(service) for service in services] != identities):
+        raise InstallError('native-initial-activation-changed')
+    _verify_bundle_selection(plan)
+    for service in services:
+        service.verify()
+        if _job_disabled(service.target):
+            raise InstallError('native-migration-disabled-job')
+    admission_ready()
+    access_ready()
+    if [_upgrade_service_identity(service) for service in services] != identities:
+        raise InstallError('native-initial-activation-changed')
+    no_transition()
+    return {'status': 'active', 'runtimeDigest': plan['runtime_bundle']['digest'],
+            'serviceDigest': plan['native_services']['expected_digest']}
+
+
 def install(plan, source):
     if plan.get('migration_qualification'):
         raise InstallError('joint-native-migration-activation-required')
@@ -3001,6 +3090,8 @@ def main(argv=None):
     parser.add_argument('--upgrade-kind', choices=('stream-progress', 'workspace-root'),
                         help='Exact reviewed change to qualify; requires --current-bundle-digest')
     parser.add_argument("--install", action="store_true")
+    parser.add_argument('--verify-initial', action='store_true',
+                        help='Read-only proof of an already active initial installation')
     parser.add_argument('--initial-install', action='store_true',
                         help='Plan a new deployment from an unloaded --gateway-plist template, not a migration')
     parser.add_argument('--activate-upgrade', action='store_true',
@@ -3008,6 +3099,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         service_options = (args.services_bundle, args.services_digest, args.pixel_source_ref)
+        if args.verify_initial and (not args.initial_install or not all(service_options)
+                                    or args.install or args.activate_upgrade or args.current_bundle_digest):
+            raise InstallError('initial-verification-conflicts-with-activation')
         if any(service_options) and (not all(service_options) or not args.initial_install):
             raise InstallError('complete-initial-service-selection-required')
         if args.initial_install and (args.current_bundle_digest or args.activate_upgrade or not args.gateway_plist):
@@ -3035,7 +3129,9 @@ def main(argv=None):
         if args.services_bundle:
             bind_initial_services(plan, bundle=args.services_bundle, digest=args.services_digest,
                 source_ref=args.pixel_source_ref)
-        if args.activate_upgrade:
+        if args.verify_initial:
+            print(json.dumps(verify_initial_install(plan), sort_keys=True, separators=(',', ':')))
+        elif args.activate_upgrade:
             outcome = upgrade_install(plan, args.source)
             print(json.dumps({'operation': 'runtime-upgrade', 'status': outcome,
                               'runtimeBundleDigest': plan['runtime_bundle']['digest']},
@@ -3071,6 +3167,11 @@ def main(argv=None):
         print("error: native-service-command-failed", file=sys.stderr)
         return 1
     except (InstallError, KeyError, OSError, ValueError) as error:
+        if args.verify_initial:
+            # This command is consumed by the owner recovery coordinator.
+            # Detailed configuration/OS errors must not become public logs.
+            print('error: native-initial-recovery-proof-failed', file=sys.stderr)
+            return 1
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0

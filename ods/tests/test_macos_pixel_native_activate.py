@@ -15,14 +15,17 @@ SPEC.loader.exec_module(module)
 
 
 @pytest.mark.parametrize('fault', [None, 'no-webui', 'configure', 'environment', 'keys', 'files', 'config', 'existing',
-    'prerequisites', 'infrastructure', 'protected', 'health', 'webui-routing', 'unsafe-recipe', 'recipe-alias'])
+    'prerequisites', 'infrastructure', 'protected', 'health', 'webui-routing', 'unsafe-recipe', 'recipe-alias', 'resume'])
 def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, monkeypatch, fault):
     monkeypatch.setattr(module.sys, 'platform', 'darwin')
     monkeypatch.setattr(module.os, 'geteuid', lambda: 501)
     owner = SimpleNamespace(pw_name='fixture', pw_uid=501, pw_dir=str(tmp_path))
     monkeypatch.setattr(module.pwd, 'getpwuid', lambda uid: owner)
     preparation, install_dir, home = [tmp_path / name for name in ('prepared', 'ods', 'native-home')]
-    for path in (preparation, install_dir, home / '.openclaw'): path.mkdir(parents=True)
+    if fault == 'resume':
+        preparation = install_dir / 'data/pixel-native/preparation'
+        home = install_dir / 'data/pixel-native/home'
+    for path in (preparation, install_dir, home / '.openclaw'): path.mkdir(parents=True, exist_ok=True)
     receipt = {'status': 'prepared', 'phase': 'awaiting-protected-activation', 'requiresActivation': True,
         'home': str(home), 'template': str(home / 'gateway.plist'), 'runtimeDigest': 'a' * 64,
         'serviceDigest': 'b' * 64, 'pixelSourceRef': 'c' * 40}
@@ -77,6 +80,14 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
             wait_ready=lambda run: event('health'),
             validate_stack=module.helper('pixel-native-compose.py').validate_stack),
     }
+    if fault == 'resume':
+        def finish(**kwargs):
+            events.append('recover')
+            assert kwargs['receipt'] == receipt
+            assert kwargs['preparation'] == preparation
+            assert kwargs['verify']() == {'status': 'active', 'runtimeDigest': 'a' * 64, 'serviceDigest': 'b' * 64}
+            return preparation / 'selection-update.json'
+        modules['pixel-native-recover.py'] = SimpleNamespace(finish=finish)
     if fault == 'configure':
         native_env = module.helper('pixel-native-env.py')
         for key in list(env):
@@ -94,6 +105,13 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
     def run(argv, **kw):
         assert all(key not in ' '.join(argv) for key in (env['DASHBOARD_API_KEY'], env['PIXEL_OPENWEBUI_KEY']))
         if argv[0] == '/usr/bin/sudo':
+            if fault == 'resume':
+                events.append('verify-initial')
+                assert '--verify-initial' in argv and '--install' not in argv
+                assert '--initial-install' in argv
+                assert kw['stdout'] == module.subprocess.PIPE and kw['timeout'] == 300
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    'status': 'active', 'runtimeDigest': 'a' * 64, 'serviceDigest': 'b' * 64}))
             events.append('protected')
             assert argv[1] == '/usr/bin/python3'
             assert '--initial-install' in argv and '--install' in argv
@@ -122,9 +140,15 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
     monkeypatch.setattr(module.subprocess, 'run', run)
     journal = preparation / 'activation.json'
     if fault == 'existing': journal.write_text('do not overwrite')
+    if fault == 'resume': journal.write_text('retained failed attempt')
     def activate():
         return module.activate(preparation=preparation, install_dir=install_dir, ods_source=install_dir,
-            compose_files=files, configure_stack=fault == 'configure')
+            compose_files=files, configure_stack=fault == 'configure', resume_final_health=fault == 'resume')
+    if fault == 'resume':
+        assert activate() == preparation / 'selection-update.json'
+        assert events == ['plan', 'bind', 'config', 'services', 'recover', 'verify-initial']
+        assert journal.read_text() == 'retained failed attempt'
+        return
     if fault not in (None, 'no-webui', 'configure'):
         with pytest.raises(ValueError): activate()
     else:
