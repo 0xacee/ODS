@@ -146,11 +146,14 @@ def disabled_volume_provenance(root: Path, trusted_root: Path) -> dict[str, set[
     return found
 
 
-# install-macos.sh runs the native-Pixel stack with this ODS-shipped recipe in
-# its .disabled form, so the stack's containers name this file and their own
-# services. A native install that stops after starting them never adds the
-# recipe to .compose-flags, so without this its volumes look foreign.
-NATIVE_STACK_RECIPES = ("installers/macos/pixel-native.compose.yaml.disabled",)
+# install-macos.sh runs the native-Pixel stack with these ODS-shipped recipes
+# in their .disabled form, including the shared edge transition-state volume.
+# A native install that stops after starting the stack never adds these files
+# to .compose-flags, so ownership must also use the containers' recipe paths.
+NATIVE_STACK_RECIPES = (
+    "installers/macos/pixel-native.compose.yaml.disabled",
+    "extensions/services/pixel-edge/compose.yaml.disabled",
+)
 SERVICE_DECLARATION_RE = re.compile(r"^  ([a-z0-9][a-z0-9_-]*):\s*$")
 
 
