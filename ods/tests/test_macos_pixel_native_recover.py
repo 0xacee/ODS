@@ -717,6 +717,7 @@ def test_inspection_cli_never_reports_recovery_success(monkeypatch, capsys):
 
 @pytest.mark.parametrize('extra', [
     ['--inspect-continuation', '--restore-host-agent'], ['--inspect-continuation', '--resume-model'],
+    ['--inspect-continuation', '--restore-optional-tools'],
     ['--opencode-choice', 'disabled'],
 ])
 def test_inspection_cli_rejects_mutating_options_before_recovery(monkeypatch, extra):
@@ -727,3 +728,204 @@ def test_inspection_cli_rejects_mutating_options_before_recovery(monkeypatch, ex
     with pytest.raises(SystemExit) as error:
         module.main()
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize('fault', [None, 'setup', 'changed', 'proof'])
+def test_optional_setup_runs_between_proofs_and_before_publication(retained, fault):
+    preparation, receipt, activation = retained
+    calls = []
+    def run(*args, **kwargs):
+        calls.append(args[0])
+        return SimpleNamespace(returncode=0)
+    compose = SimpleNamespace(wait_ready=lambda run: None)
+    proofs = []
+    def proof():
+        proofs.append(True)
+        calls.append('proof')
+        if fault == 'proof' and len(proofs) == 2:
+            raise ValueError('proof-failed')
+        return {'status': 'active', 'runtimeDigest': receipt['runtimeDigest'],
+                'serviceDigest': receipt['serviceDigest']}
+    def optional(unchanged):
+        assert not (preparation / 'selection-update.json').exists()
+        unchanged()
+        calls.append('optional')
+        if fault == 'setup': raise ValueError('optional-failed')
+        if fault == 'changed':
+            (preparation / 'activation.json').write_text(json.dumps(dict(activation, phase='changed')))
+        return {'status': 'ready'}
+    def finish():
+        return module.finish(preparation=preparation, receipt=receipt, run=run, verify=proof,
+            compose=compose, selected_services={'dashboard-api': {}}, restore_optional_tools=optional,
+            restore_host_agent=lambda: calls.append('host'))
+    if fault:
+        with pytest.raises(ValueError): finish()
+        assert not (preparation / 'selection-update.json').exists()
+    else:
+        assert finish() == {'selection': str(preparation / 'selection-update.json'),
+                            'optionalTools': {'status': 'ready'}}
+        assert calls == ['proof', 'up', 'exec', 'optional', 'host', 'proof']
+
+
+def test_optional_core_does_not_execute_setup_and_unknown_requires_confirmation(model_handoff, monkeypatch):
+    installed, _, environment = model_handoff
+    def forbidden(*args, **kwargs): pytest.fail('Core must not install unselected optional tools')
+    monkeypatch.setattr(continuation, '_run_owner_setup', forbidden)
+    with pytest.raises(ValueError, match='retained-opencode-choice-required'):
+        continuation.restore_optional_tools(installed, {'dashboard-api': {}}, environment,
+            verify_selection=lambda: None)
+    before = (installed / '.env').read_bytes()
+    result = continuation.restore_optional_tools(installed, {'dashboard-api': {}}, environment,
+        opencode_choice='disabled', verify_selection=lambda: None)
+    assert result['status'] == 'not-selected'
+    assert result['selection']['opencode'] == {'selected': False, 'source': 'confirmed'}
+    assert (installed / '.env').read_bytes() == before
+
+
+@pytest.mark.parametrize('fault', ['changed-before', 'changed-after', 'proof', 'context', 'port', 'mode'])
+def test_optional_setup_preserves_bound_environment_and_never_claims_partial_success(model_handoff, monkeypatch, fault):
+    installed, _, environment = model_handoff
+    path = installed / '.env'
+    path.write_text(path.read_text() + 'ENABLE_OPENCODE=true\n')
+    _, before = continuation.optional_setup_selection(installed, {'dashboard-api': {}})
+    if fault == 'changed-before': path.write_text(path.read_text() + 'WHISPER_PORT=9100\n')
+    if fault == 'context': path.write_text(path.read_text().replace('MAX_CONTEXT=65536', 'MAX_CONTEXT=invalid'))
+    if fault == 'port': path.write_text(path.read_text() + 'WHISPER_PORT=70000\n')
+    if fault == 'mode': path.write_text(path.read_text().replace('ODS_MODE=local', 'ODS_MODE=invalid'))
+    calls = []
+    def setup(*args, **kwargs):
+        calls.append('setup')
+        assert kwargs['extra_env']['ENABLE_OPENCODE'] == 'true'
+        if fault == 'changed-after': path.write_text(path.read_text() + 'WHISPER_PORT=9100\n')
+    def verify():
+        if fault == 'proof': raise ValueError('changed-selection')
+    monkeypatch.setattr(continuation, '_run_owner_setup', setup)
+    with pytest.raises(ValueError):
+        continuation.restore_optional_tools(installed, {'dashboard-api': {}}, environment,
+            verify_selection=verify, expected_snapshot=before if fault == 'changed-before' else None)
+    assert calls == (['setup'] if fault == 'changed-after' else [])
+
+
+def test_cli_combined_setup_keeps_completion_pending(monkeypatch, capsys):
+    def recover(install_dir, ods_source, **kwargs):
+        assert kwargs == {'restore_host_agent': True, 'resume_model': True,
+            'restore_optional_tools': True, 'opencode_choice': 'disabled'}
+        return {'selection': '/fixture/selection-update.json', 'optionalTools': {'status': 'not-selected'},
+                'modelUpgrade': {'status': 'download-started', 'pid': 12345}}
+    monkeypatch.setattr(module, 'recover', recover)
+    monkeypatch.setattr(module.sys, 'argv', ['recover', '--install-dir', '/fixture',
+        '--restore-host-agent', '--restore-optional-tools', '--resume-model', '--opencode-choice', 'disabled'])
+    assert module.main() == 0
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert result['hostAgentReady'] is True and result['installerComplete'] is False
+    assert result['optionalTools']['status'] == 'not-selected'
+    assert 'final service/Portal checks' in output.err
+
+
+@pytest.mark.parametrize('fault', [None, 'download', 'foreign', 'launch', 'health', 'voice',
+                                  'voice-download', 'voice-cache', 'perplexica'])
+def test_optional_setup_real_shared_shell_preserves_selection_and_fails_closed(tmp_path, monkeypatch, fault):
+    installed, home, library, binaries = (tmp_path / name for name in ('retained ods', 'home', 'mac/lib', 'bin'))
+    preparation = installed / 'data/pixel-native/preparation'
+    preparation.mkdir(parents=True, mode=0o700)
+    for path in (home, library, binaries, library.parent / 'lib'):
+        path.mkdir(parents=True, exist_ok=True)
+    environment_file = installed / '.env'
+    environment_file.write_text('ENABLE_OPENCODE=true\nODS_MODE=local\nLLM_MODEL=starter\n'
+        'GGUF_FILE=starter.gguf\nMAX_CONTEXT=32768\nWHISPER_PORT=9100\n'
+        'ODS_NATIVE_LLAMA_PORT=18080\nODS_MODEL_SWITCHBOARD=enabled\nLITELLM_KEY=fixture-private-key\n')
+    environment_file.chmod(0o600)
+    before = environment_file.read_bytes()
+    original_load = continuation.load
+    def load(name, path):
+        if path.name == 'pixel-native-env.py': path = ROOT / 'installers/macos/lib' / path.name
+        return original_load(name, path)
+    monkeypatch.setattr(continuation, 'load', load)
+    monkeypatch.setattr(continuation, 'HERE', library)
+    (library / 'post-pixel-install.sh').write_bytes((ROOT / 'installers/macos/lib/post-pixel-install.sh').read_bytes())
+    (library / 'host-agent-install.sh').write_bytes((ROOT / 'installers/macos/lib/host-agent-install.sh').read_bytes())
+    (library / 'constants.sh').write_text('''
+ODS_LOG_FILE=/must-not-write-global-log
+OPENCODE_BIN="$HOME/opencode"
+OPENCODE_CONFIG_DIR="$HOME/config"
+OPENCODE_PORT=3003
+OPENCODE_PLIST_LABEL=com.ods.opencode-web
+OPENCODE_PLIST="$HOME/Library/LaunchAgents/$OPENCODE_PLIST_LABEL.plist"
+OPENCODE_BUN_TMPDIR="$HOME/bun-tmp"
+ODS_STT_CACHE_WAIT_SECONDS=1
+macos_bind_probe_host() { printf '%s\\n' "$1"; }
+''')
+    (library / 'env-generator.sh').write_text('''
+read_env_value() { awk -F= -v key="$2" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$1"; }
+configure_perplexica() {
+    test "$2" = ods/current && test "$3" = http://litellm:4000 && test "$4" = fixture-private-key || return 2
+    printf 'perplexica\\n' >> "$HOME/setup.calls"
+    ''' + ('return 1' if fault == 'perplexica' else 'return 0') + '\n}\n')
+    (library / 'opencode-selection.sh').write_text('''
+ods_macos_opencode_plist_owned() { return 0; }
+ods_macos_opencode_loaded_owned() { ''' + ('return 1' if fault == 'foreign' else 'return 0') + '; }\n')
+    runtime = library.parent.parent / 'lib/opencode-runtime.sh'
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text('ods_install_opencode() { printf "download\\n" >> "$HOME/setup.calls"; '
+        + ('return 1' if fault == 'download' else 'printf "%s\\n" "$HOME/opencode"') + '; }\n')
+    (home / 'opencode').write_text('#!/bin/sh\nexit 0\n')
+    (home / 'opencode').chmod(0o700)
+    scripts = {
+        'sleep': 'exit 0\n',
+        'launchctl': '''
+case "$1" in
+    print) test -f "$HOME/loaded" || exit 1; printf 'state = running\\n' ;;
+    bootstrap) ''' + ('exit 1' if fault == 'launch' else 'touch "$HOME/loaded"') + ''' ;;
+    enable|bootout) : ;;
+    *) exit 2 ;;
+esac
+''',
+        'curl': '''
+printf '%s\\n' "$*" >> "$HOME/curl.calls"
+case "$*" in
+    *:3003*) ''' + ('exit 1' if fault == 'health' else 'exit 0') + ''' ;;
+    *'-X POST'*) touch "$HOME/stt-triggered"; ''' + (
+        'exit 28' if fault == 'voice-cache' else 'touch "$HOME/stt-cached"; exit 28') + ''' ;;
+    *:9100/v1/models/Systran*) ''' + (
+        'test -f "$HOME/stt-cached"' if fault in ('voice-download', 'voice-cache') else 'exit 0') + ''' ;;
+    *:9100/v1/models*) ''' + ('exit 1' if fault == 'voice' else 'exit 0') + ''' ;;
+    *) exit 2 ;;
+esac
+''',
+    }
+    if fault == 'foreign': (home / 'loaded').touch()
+    for name, body in scripts.items():
+        path = binaries / name
+        path.write_text('#!/bin/sh\n' + body)
+        path.chmod(0o700)
+    environment = dict(HOME=str(home), PATH=str(binaries) + ':/usr/bin:/bin',
+        DOCKER_HOST='unix:///verified.sock', DOCKER_CONFIG=str(home / 'docker-config'),
+        BASH_ENV='/must-not-source', ENABLE_OPENCODE='false')
+    proofs = []
+    def restore():
+        return continuation.restore_optional_tools(installed,
+            {'dashboard-api': {}, 'whisper': {}, 'perplexica': {}}, environment,
+            verify_selection=lambda: proofs.append('verify'))
+    if fault not in (None, 'voice-download'):
+        with pytest.raises(ValueError, match='native-recovery-optional-tools-failed'): restore()
+        assert proofs == ['verify']
+    else:
+        result = restore()
+        assert result['status'] == 'ready' and proofs == ['verify', 'verify']
+        config = json.loads((home / 'config/opencode.json').read_text())
+        assert config['model'] == 'llama-server/ods/current'
+        assert config['provider']['llama-server']['options']['apiKey'] == 'fixture-private-key'
+        document = plistlib.loads((home / 'Library/LaunchAgents/com.ods.opencode-web.plist').read_bytes())
+        assert document['WorkingDirectory'] == str(installed)
+        assert document['ProgramArguments'][-4:] == ['--port', '3003', '--hostname', '127.0.0.1']
+        assert (home / 'setup.calls').read_text().splitlines() == ['download', 'perplexica']
+        assert ':9100/v1/models/Systran%2Ffaster-whisper-base' in (home / 'curl.calls').read_text()
+    if fault in ('voice-download', 'voice-cache'):
+        assert (home / 'stt-triggered').exists()
+        assert (home / 'stt-cached').exists() is (fault == 'voice-download')
+    if fault == 'foreign': assert not (home / 'setup.calls').exists()
+    assert environment_file.read_bytes() == before
+    log = preparation / 'continuation-optional-tools.log'
+    assert log.stat().st_mode & 0o777 == 0o600
+    assert 'fixture-private-key' not in log.read_text()

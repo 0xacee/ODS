@@ -28,17 +28,19 @@ def helper(filename):
 
 def activate(*, preparation, install_dir, ods_source, compose_files, configure_stack=False,
              resume_final_health=False, restore_host_agent=False, resume_model=False,
-             inspect_continuation=False, opencode_choice=None):
+             inspect_continuation=False, opencode_choice=None, restore_optional_tools=False):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     if restore_host_agent and not resume_final_health:
         raise ValueError('host-agent-continuation-requires-recovery')
     if resume_model and not resume_final_health:
         raise ValueError('model-continuation-requires-recovery')
-    if inspect_continuation and (not resume_final_health or configure_stack or restore_host_agent or resume_model):
+    if restore_optional_tools and not resume_final_health:
+        raise ValueError('optional-tools-continuation-requires-recovery')
+    if inspect_continuation and (not resume_final_health or configure_stack or restore_host_agent or resume_model or restore_optional_tools):
         raise ValueError('continuation-inspection-cannot-mutate')
-    if opencode_choice is not None and not inspect_continuation:
-        raise ValueError('opencode-choice-requires-inspection')
+    if opencode_choice is not None and not (inspect_continuation or restore_optional_tools):
+        raise ValueError('opencode-choice-requires-optional-operation')
     config = helper('pixel-native-config.py')
     installer = helper('pixel-macos-access-install.py')
     compose = helper('pixel-native-compose.py')
@@ -131,6 +133,11 @@ def activate(*, preparation, install_dir, ods_source, compose_files, configure_s
         '--services-bundle', str(preparation / 'services'), '--services-digest', receipt['serviceDigest'],
         '--pixel-source-ref', receipt['pixelSourceRef'], '--initial-install']
     if resume_final_health:
+        def verify_selection(unchanged):
+            unchanged()
+            current = run('config', '--format', 'json')
+            if current.returncode or json.loads(current.stdout).get('services') != selected_services:
+                raise ValueError('native-recovery-compose-selection-changed')
         def verify():
             result = subprocess.run([*protected, '--verify-initial'], cwd='/',
                 stdout=subprocess.PIPE, text=True, timeout=300, check=False)
@@ -141,15 +148,18 @@ def activate(*, preparation, install_dir, ods_source, compose_files, configure_s
         if restore_host_agent:
             continuation['restore_host_agent'] = lambda: helper('pixel-native-continuation.py').restore_host_agent(
                 install_dir, process_env)
+        if restore_optional_tools:
+            optional, optional_snapshot = helper('pixel-native-continuation.py').optional_setup_selection(
+                install_dir, selected_services, opencode_choice=opencode_choice)
+            if optional['opencode']['selected'] is None:
+                raise ValueError('retained-opencode-choice-required')
+            continuation['restore_optional_tools'] = lambda unchanged: helper('pixel-native-continuation.py').restore_optional_tools(
+                install_dir, selected_services, process_env, opencode_choice=opencode_choice,
+                verify_selection=lambda: verify_selection(unchanged), expected_snapshot=optional_snapshot)
         if resume_model:
             def continue_model(unchanged):
-                def verify_selection():
-                    unchanged()
-                    current = run('config', '--format', 'json')
-                    if current.returncode or json.loads(current.stdout).get('services') != selected_services:
-                        raise ValueError('native-recovery-compose-selection-changed')
                 return helper('pixel-native-continuation.py').resume_model_upgrade(
-                    install_dir, paths, process_env, verify_selection=verify_selection)
+                    install_dir, paths, process_env, verify_selection=lambda: verify_selection(unchanged))
             continuation['resume_model'] = continue_model
         return helper('pixel-native-recover.py').finish(preparation=preparation, receipt=receipt,
             run=run, verify=verify, compose=compose, selected_services=selected_services, **continuation)

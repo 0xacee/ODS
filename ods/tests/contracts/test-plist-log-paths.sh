@@ -53,7 +53,7 @@ assert_not_contains() {
 echo "[contract] launchd plist log paths"
 
 # --- Extract plist heredocs ---
-opencode_plist="$(awk '/<<PLIST_EOF$/,/^PLIST_EOF$/' "$INSTALL_MACOS")"
+opencode_plist="$(awk '/<<PLIST_EOF$/,/^PLIST_EOF$/' installers/macos/lib/post-pixel-install.sh)"
 agent_plist="$(awk '/<<AGENT_PLIST_EOF$/,/^AGENT_PLIST_EOF$/' installers/macos/lib/host-agent-install.sh)"
 
 [[ -n "$opencode_plist" ]] || { echo "[FAIL] could not extract opencode-web plist heredoc"; exit 1; }

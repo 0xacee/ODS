@@ -47,6 +47,12 @@ GUIDANCE = {
     'invalid-retained-opencode-selection': 'The saved OpenCode choice must be true or false; it was not changed.',
     'duplicate-retained-opencode-setting': 'The saved OpenCode choice is duplicated; review the private environment without sharing it.',
     'confirmed-opencode-selection-conflict': 'The confirmed OpenCode choice conflicts with the retained choice; neither was changed.',
+    'retained-opencode-choice-required': 'This older installation has no saved OpenCode choice. Confirm the original selection with --opencode-choice enabled or disabled; do not infer it from a missing binary.',
+    'native-recovery-optional-tools-failed': 'Selected optional setup did not pass. Inspect the private continuation-optional-tools.log; preserve partial work and do not reinstall.',
+    'retained-optional-route-required': 'The retained inference mode is not a supported local or cloud choice.',
+    'retained-optional-context-invalid': 'The retained context is invalid for optional-tool configuration.',
+    'retained-optional-port-invalid': 'A retained native or voice port is invalid; no optional setup was started.',
+    'duplicate-retained-optional-setting': 'Optional-tool route settings are duplicated; review the private environment without sharing it.',
 }
 
 
@@ -76,7 +82,7 @@ def selection(receipt, activation):
 
 
 def finish(*, preparation, receipt, run, verify, compose, selected_services, restore_host_agent=None,
-           resume_model=None):
+           resume_model=None, restore_optional_tools=None):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     config = helper('pixel-native-config')
@@ -133,6 +139,12 @@ def finish(*, preparation, receipt, run, verify, compose, selected_services, res
         if run('exec', '-T', 'dashboard-api', 'python3', '-c', probe, timeout=30).returncode:
             raise ValueError('native-recovery-client-routing-failed')
         compose.wait_ready(run)
+        optional_result = None
+        if restore_optional_tools is not None:
+            unchanged()
+            optional_result = restore_optional_tools(unchanged)
+        # Host setup may normalize its own Colima bridge setting in .env.
+        # Finish optional setup's exact retained-environment checks first.
         if restore_host_agent is not None:
             unchanged()
             restore_host_agent()
@@ -153,21 +165,26 @@ def finish(*, preparation, receipt, run, verify, compose, selected_services, res
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
-        if resume_model is not None:
-            return {'selection': str(destination), 'modelUpgrade': resume_model(unchanged)}
+        if resume_model is not None or restore_optional_tools is not None:
+            result = {'selection': str(destination)}
+            if optional_result is not None:
+                result['optionalTools'] = optional_result
+            if resume_model is not None:
+                result['modelUpgrade'] = resume_model(unchanged)
+            return result
         return destination
     finally:
         os.close(lock)
 
 
 def recover(install_dir, ods_source, *, restore_host_agent=False, resume_model=False,
-            inspect_continuation=False, opencode_choice=None):
+            inspect_continuation=False, opencode_choice=None, restore_optional_tools=False):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
-    if inspect_continuation and (restore_host_agent or resume_model):
+    if inspect_continuation and (restore_host_agent or resume_model or restore_optional_tools):
         raise ValueError('continuation-inspection-cannot-mutate')
-    if opencode_choice is not None and not inspect_continuation:
-        raise ValueError('opencode-choice-requires-inspection')
+    if opencode_choice is not None and not (inspect_continuation or restore_optional_tools):
+        raise ValueError('opencode-choice-requires-optional-operation')
     install_dir = Path(install_dir).expanduser().resolve(strict=True)
     preparation = install_dir / 'data/pixel-native/preparation'
     config = helper('pixel-native-config')
@@ -186,7 +203,9 @@ def recover(install_dir, ods_source, *, restore_host_agent=False, resume_model=F
         ods_source=Path(ods_source).resolve(strict=True), compose_files=[*files, *fragments],
         resume_final_health=True, **({'restore_host_agent': True} if restore_host_agent else {}),
         **({'resume_model': True} if resume_model else {}),
-        **({'inspect_continuation': True, 'opencode_choice': opencode_choice} if inspect_continuation else {}))
+        **({'inspect_continuation': True} if inspect_continuation else {}),
+        **({'restore_optional_tools': True} if restore_optional_tools else {}),
+        **({'opencode_choice': opencode_choice} if inspect_continuation or restore_optional_tools else {}))
 
 
 def main():
@@ -199,19 +218,23 @@ def main():
         help='After verified recovery, save Compose selection and resume the saved full-model download; starting is not completion')
     parser.add_argument('--inspect-continuation', action='store_true',
         help='Inspect retained choices and required checks without sudo, service changes or readiness publication')
+    parser.add_argument('--restore-optional-tools', action='store_true',
+        help='Run selected OpenCode, Whisper model and Perplexica setup after verified Pixel recovery; not final install readiness')
     parser.add_argument('--opencode-choice', choices=('enabled', 'disabled'),
-        help='Confirm a missing historical OpenCode choice for inspection only; never overrides a saved choice')
+        help='Confirm a missing historical OpenCode choice for inspection or optional setup; never overrides a saved choice')
     args = parser.parse_args()
-    if args.inspect_continuation and (args.restore_host_agent or args.resume_model):
+    if args.inspect_continuation and (args.restore_host_agent or args.resume_model or args.restore_optional_tools):
         parser.error('--inspect-continuation cannot be combined with setup options')
-    if args.opencode_choice is not None and not args.inspect_continuation:
-        parser.error('--opencode-choice requires --inspect-continuation')
+    if args.opencode_choice is not None and not (args.inspect_continuation or args.restore_optional_tools):
+        parser.error('--opencode-choice requires --inspect-continuation or --restore-optional-tools')
     try:
         path = recover(args.install_dir, args.ods_source,
             **({'restore_host_agent': True} if args.restore_host_agent else {}),
             **({'resume_model': True} if args.resume_model else {}),
-            **({'inspect_continuation': True, 'opencode_choice': args.opencode_choice}
-               if args.inspect_continuation else {}))
+            **({'inspect_continuation': True} if args.inspect_continuation else {}),
+            **({'restore_optional_tools': True} if args.restore_optional_tools else {}),
+            **({'opencode_choice': args.opencode_choice}
+               if args.inspect_continuation or args.restore_optional_tools else {}))
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         detail = helper('pixel-native-compose').health_diagnostic(error)
         code = str(error) if isinstance(error, ValueError) else None
@@ -224,13 +247,16 @@ def main():
         print(json.dumps(path))
         return 0
     result = {'status': 'native-pixel-ready', 'selection': str(path), 'installerComplete': False}
-    if args.resume_model:
+    if args.resume_model or args.restore_optional_tools:
         result.update(path)
     if args.restore_host_agent:
         result['hostAgentReady'] = True
     print(json.dumps(result))
-    remaining = 'optional tools and full-model download' if args.restore_host_agent else 'host agent, optional tools and full-model download'
-    print('Pixel recovery completed. Remaining installer steps (' + remaining
+    remaining = ([] if args.restore_host_agent else ['host agent'])
+    if not args.restore_optional_tools:
+        remaining.append('optional tools')
+    remaining.append('full-model download/activation and final service/Portal checks')
+    print('Pixel recovery completed. Remaining installer steps (' + ', '.join(remaining)
           + ') still need verification before declaring ODS installed.', file=sys.stderr)
     return 0
 

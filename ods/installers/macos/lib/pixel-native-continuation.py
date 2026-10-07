@@ -45,8 +45,8 @@ def saved_model_environment(install_dir):
     return _saved_environment(install_dir, MODEL_KEYS, 'duplicate-retained-model-setting')
 
 
-def inspect_remaining_setup(install_dir, selected_services, *, opencode_choice=None):
-    """Describe retained choices only, without executing setup or proving health."""
+def optional_setup_selection(install_dir, selected_services, *, opencode_choice=None):
+    """Resolve saved or explicitly confirmed choices without changing them."""
     if (type(selected_services) is not dict or not selected_services
             or any(type(name) is not str or type(value) is not dict
                    for name, value in selected_services.items())):
@@ -65,18 +65,24 @@ def inspect_remaining_setup(install_dir, selected_services, *, opencode_choice=N
             raise ValueError('confirmed-opencode-selection-conflict')
         if choice is None:
             choice, source = confirmed, 'confirmed'
+    return {'opencode': {'selected': None if choice is None else choice == 'true', 'source': source},
+        'whisperModel': 'whisper' in selected_services, 'perplexica': 'perplexica' in selected_services}, snapshot
+
+
+def inspect_remaining_setup(install_dir, selected_services, *, opencode_choice=None):
+    """Describe retained choices only, without executing setup or proving health."""
+    optional, snapshot = optional_setup_selection(install_dir, selected_services, opencode_choice=opencode_choice)
+    choice = optional['opencode']['selected']
     plan, model_snapshot = inspect_model_upgrade(install_dir, **bootstrap_settings(install_dir))
     if snapshot != model_snapshot or saved_model_environment(install_dir)[1] != snapshot:
         raise ValueError('retained-model-environment-changed')
     # Do not print the environment, rendered Compose definitions or download
     # arguments: these are a configuration summary, not shareable diagnostics.
-    optional = {'opencode': {'selected': None if choice is None else choice == 'true', 'source': source},
-        'whisperModel': 'whisper' in selected_services, 'perplexica': 'perplexica' in selected_services}
     checks = ['protected-activation', 'pixel-services', 'selected-service-health',
               'host-agent', 'active-model', 'portal']
     if plan['status'] == 'upgrade-required':
         checks.append('full-model-download')
-    if choice == 'true':
+    if choice is True:
         checks.append('opencode')
     if optional['whisperModel']:
         checks.append('whisper-model-cache')
@@ -318,7 +324,7 @@ def resume_model_upgrade(install_dir, compose_files, process_env, *, verify_sele
     return {'status': 'download-started', 'modelId': plan['modelId'], 'pid': process.pid}
 
 
-def restore_host_agent(install_dir, process_env):
+def _run_owner_setup(install_dir, process_env, *, stage, script, extra_env=None, timeout=600):
     """Run shared owner-level setup only after the caller's protected readback.
 
     Keep subprocess diagnostics in the private preparation directory, not in
@@ -330,7 +336,7 @@ def restore_host_agent(install_dir, process_env):
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
             or info.st_mode & 0o077 or preparation.resolve(strict=True) != preparation):
         raise ValueError('private-native-preparation-required')
-    log = preparation / 'continuation-host-agent.log'
+    log = preparation / ('continuation-' + stage + '.log')
     fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     with os.fdopen(fd, 'ab', buffering=0) as stream:
         info = os.fstat(stream.fileno())
@@ -339,6 +345,7 @@ def restore_host_agent(install_dir, process_env):
             raise ValueError('private-native-continuation-log-required')
         environment = {key: process_env[key] for key in ('HOME', 'PATH', 'DOCKER_HOST', 'DOCKER_CONFIG')}
         environment['ODS_CONTINUATION_LOG_FD'] = str(stream.fileno())
+        environment.update(extra_env or {})
         result = subprocess.run(['/bin/bash', '-c', """
 set -euo pipefail
 LIB_DIR="$1"
@@ -348,14 +355,73 @@ ai() { printf '%s\\n' "$*"; }
 ai_ok() { ai "[OK] $*"; }
 ai_warn() { ai "[WARN] $*"; }
 ai_err() { ai "[ERROR] $*"; }
+chapter() { ai "$*"; }
+ODS_LOG_FILE="/dev/fd/$ODS_CONTINUATION_LOG_FD"
+""" + script, 'ods-recovery-' + stage, str(HERE), str(install_dir)],
+            cwd=install_dir, env=environment, stdin=subprocess.DEVNULL,
+            stdout=stream, stderr=subprocess.STDOUT, close_fds=True,
+            pass_fds=(stream.fileno(),), timeout=timeout, check=False)
+        if result.returncode:
+            raise ValueError('native-recovery-' + stage + '-failed')
+
+
+def restore_host_agent(install_dir, process_env):
+    _run_owner_setup(install_dir, process_env, stage='host-agent', script="""
 for library in constants env-generator bridge-manager host-agent-listener host-agent-install; do
     source "$LIB_DIR/$library.sh"
 done
 ODS_LOG_FILE="/dev/fd/$ODS_CONTINUATION_LOG_FD"
 ods_macos_install_host_agent
-""", 'ods-recovery-host-agent', str(HERE), str(install_dir)],
-            cwd=install_dir, env=environment, stdin=subprocess.DEVNULL,
-            stdout=stream, stderr=subprocess.STDOUT, close_fds=True,
-            pass_fds=(stream.fileno(),), timeout=600, check=False)
-        if result.returncode:
-            raise ValueError('native-recovery-host-agent-failed')
+""")
+
+
+def restore_optional_tools(install_dir, selected_services, process_env, *,
+                           opencode_choice=None, verify_selection, expected_snapshot=None):
+    optional, snapshot = optional_setup_selection(install_dir, selected_services, opencode_choice=opencode_choice)
+    if expected_snapshot is not None and snapshot != expected_snapshot:
+        raise ValueError('retained-model-environment-changed')
+    if optional['opencode']['selected'] is None:
+        raise ValueError('retained-opencode-choice-required')
+    verify_selection()
+    values, current = _saved_environment(install_dir, {
+        'ODS_MODE', 'LLM_MODEL', 'GGUF_FILE', 'MAX_CONTEXT', 'LLM_API_URL', 'WHISPER_PORT',
+        'ODS_NATIVE_LLAMA_PORT'}, 'duplicate-retained-optional-setting')
+    if current != snapshot:
+        raise ValueError('retained-model-environment-changed')
+    if not any((optional['opencode']['selected'], optional['whisperModel'], optional['perplexica'])):
+        return {'status': 'not-selected', 'selection': optional}
+    if values.get('ODS_MODE') not in ('local', 'cloud'):
+        raise ValueError('retained-optional-route-required')
+    context = values.get('MAX_CONTEXT', '32768')
+    if not re.fullmatch(r'[1-9][0-9]{0,8}', context) or int(context) < 1024:
+        raise ValueError('retained-optional-context-invalid')
+    for name, default in (('WHISPER_PORT', '9000'), ('ODS_NATIVE_LLAMA_PORT', '8080')):
+        value = values.get(name, default)
+        if not re.fullmatch(r'[1-9][0-9]{0,4}', value) or int(value) > 65535:
+            raise ValueError('retained-optional-port-invalid')
+        values[name] = value
+    extra = {'ENABLE_OPENCODE': str(optional['opencode']['selected']).lower(),
+        'ENABLE_VOICE': str(optional['whisperModel']).lower(),
+        'ENABLE_PERPLEXICA': str(optional['perplexica']).lower(),
+        'CLOUD_MODE': str(values['ODS_MODE'] == 'cloud').lower(),
+        'LLM_MODEL': values.get('LLM_MODEL', ''), 'GGUF_FILE': values.get('GGUF_FILE', ''),
+        'MAX_CONTEXT': context, 'WHISPER_PORT': values['WHISPER_PORT'],
+        'CONTAINER_LLM_URL': values.get('LLM_API_URL') or
+            'http://host.docker.internal:' + values['ODS_NATIVE_LLAMA_PORT']}
+    _run_owner_setup(install_dir, process_env, stage='optional-tools', extra_env=extra, timeout=1800, script="""
+SCRIPT_DIR="$(cd "$LIB_DIR/.." && pwd)"
+for library in constants env-generator opencode-selection host-agent-install post-pixel-install; do
+    source "$LIB_DIR/$library.sh"
+done
+ODS_LOG_FILE="/dev/fd/$ODS_CONTINUATION_LOG_FD"
+# A retained disabled choice is not permission to stop a current user session.
+OPENCODE_DISABLE_EXPLICIT=false
+OPENCODE_DISABLE_SELECTED=false
+ods_macos_install_opencode true
+ods_macos_prepare_voice true
+ods_macos_configure_perplexica
+""")
+    verify_selection()
+    if saved_model_environment(install_dir)[1] != snapshot:
+        raise ValueError('retained-model-environment-changed')
+    return {'status': 'ready', 'selection': optional}

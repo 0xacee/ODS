@@ -204,11 +204,34 @@ live readiness. Output distinguishes saved choices from unknown historical
 choices, lists checks still required, and omits credentials and download
 arguments. Missing `ENABLE_OPENCODE` yields `requiresChoice: ["opencode"]`.
 After confirming the user's original choice, add `--opencode-choice disabled`
-or `enabled` to the inspection command. This confirmation is not persisted and
+or `enabled` to the inspection command or optional-setup command below. This
+confirmation is not persisted and
 cannot override a saved choice. Whisper model setup and Perplexica configuration
 are listed only when those services are in the retained Compose selection.
-Inspection cannot be combined with either setup option and never reports a
+Inspection cannot be combined with setup options and never reports a
 completed installation.
+
+`--restore-optional-tools` executes the same OpenCode, Whisper model and
+Perplexica setup functions as the normal installer, for the retained choices
+only. Historical installations missing the OpenCode choice require the
+explicit confirmation above before setup begins. Core with a confirmed or
+saved opt-out reports `optionalTools.status: not-selected` and starts no extra
+tools. A disabled choice does not stop a current user OpenCode session.
+
+Selected OpenCode must use the reviewed release, retain its inference route,
+and pass owned LaunchAgent plus local HTTP readiness checks. Foreign plists or
+jobs are not replaced. Selected Whisper requires a cached model, including
+after a bounded download trigger; an accepted trigger alone is not success.
+Perplexica must pass the existing endpoint, credential and model configuration
+readback.
+
+Optional setup runs inside the recovery selection lock, between protected
+readbacks and before readiness publication. It rechecks the retained
+environment and rendered Compose selection around setup. Failure preserves
+the original receipts and can leave partial owner-level configuration; inspect
+the private `data/pixel-native/preparation/continuation-optional-tools.log`
+before retrying. `optionalTools.status: ready` confirms this setup step, not
+completion of the full installer or the later model swap.
 
 The separate `--resume-model` option saves the verified Compose file selection
 and resumes the original full-model choice using the installed
@@ -219,12 +242,13 @@ model/store, ambiguous recommendation or conflicting retry metadata is refused.
 If the saved model is already selected, it only restores the missing Compose
 cache; this configuration check is not a live inference proof.
 
-For a qualifying retained failure, both options can be supplied together:
+For a qualifying retained failure, the setup options can be supplied together
+(add the confirmed OpenCode choice if the historical installation lacks it):
 
 ```bash
 python3 /path/to/reviewed-ODS/ods/installers/macos/lib/pixel-native-recover.py \
   --install-dir "$HOME/ods" --ods-source "$HOME/ods" \
-  --restore-host-agent --resume-model
+  --restore-host-agent --restore-optional-tools --resume-model
 ```
 
 The model handoff occurs **after** Pixel readiness is published. A later
@@ -238,8 +262,9 @@ allows the normal `ods start`/`ods restart` retry path.
 The returned `modelUpgrade.status: download-started` means only that the
 background worker started. Inspect `logs/model-upgrade.log` and
 `data/bootstrap-status.json`, then verify the active model and Portal after
-the swap. The helper still reports `installerComplete: false`: selected
-optional tools and final full-install readiness remain separate release gates.
+the swap. The helper still reports `installerComplete: false`: final
+full-install readiness remains a separate release gate, as does optional setup
+when `--restore-optional-tools` was not requested.
 
 For the preview crash loop reported in #7448, the old generic logs cannot
 establish the original startup exception. Recovery of services after the
