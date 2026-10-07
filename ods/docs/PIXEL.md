@@ -234,6 +234,27 @@ and Portal chat plus preview delivery. Release identity remains unverified
 unless a separate release attestation establishes it. This command does not
 activate services, resume setup or replace the genuine failed-install test.
 
+Add `--include-services` to also inspect the retained Docker selection after
+Pixel has reached its ready selection. This uses the installed native gateway's
+Docker socket/project, not the shell's current Docker context or Compose
+profiles. The existing native-selection and Compose security validators run
+before inspection; a missing or unrecovered selection is not bypassed.
+
+The inspector accepts init jobs only when their selected dependencies require
+successful completion and they exited with code zero. It requires every
+selected running replica to pass its configured healthcheck, respects disabled
+profiles as filtered by Compose, and checks profiles enabled in the retained
+environment rather than skipping services with a profile annotation. It
+rejects a running Docker model when that service is scaled to
+zero for native Metal inference. Configuration and selection are rechecked
+around Docker observations. No `up`, restart, setup or download is performed.
+Per-service booleans appear in `serviceChecks`; no container configuration or
+credentials are printed. Successful observations remove only the
+`selected-service-health` pending gate. If the resolved selection also confirms
+that none of OpenCode, Whisper or Perplexica was chosen, optional setup has no
+pending state to verify. Selected optional tools still require their setup and
+functional checks; container health alone does not certify those tools.
+
 `--restore-optional-tools` executes the same OpenCode, Whisper model and
 Perplexica setup functions as the normal installer, for the retained choices
 only. Historical installations missing the OpenCode choice require the

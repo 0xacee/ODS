@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import subprocess
 import sys
@@ -77,7 +78,121 @@ def port(values, name, default):
     return int(value)
 
 
-def observe_apis(install_dir, *, opencode_choice=None, request=probe):
+def service_checks(services, rows):
+    """Interpret the rendered selection, including init jobs and scale-to-zero."""
+    if (type(services) is not dict or not services or len(services) > 512
+            or any(type(name) is not str or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}', name)
+                   or type(value) is not dict for name, value in services.items())
+            or type(rows) is not list or len(rows) > 1024 or any(type(row) is not dict for row in rows)):
+        raise ValueError('native-readiness-services-invalid')
+    completed_jobs = set()
+    for definition in services.values():
+        if type(definition.get('deploy', {})) is not dict:
+            raise ValueError('native-readiness-services-invalid')
+        if definition.get('deploy', {}).get('replicas', definition.get('scale', 1)) == 0:
+            continue
+        dependencies = definition.get('depends_on', {})
+        if type(dependencies) is not dict:
+            raise ValueError('native-readiness-services-invalid')
+        for name, dependency in dependencies.items():
+            if type(dependency) is not dict:
+                raise ValueError('native-readiness-services-invalid')
+            if dependency.get('condition') == 'service_completed_successfully':
+                completed_jobs.add(name)
+    checks = []
+    for name, definition in services.items():
+        # Compose config already filters inactive profiles. A retained profile
+        # present in this rendering must be checked like every other service.
+        deploy = definition.get('deploy', {})
+        if type(deploy) is not dict:
+            raise ValueError('native-readiness-services-invalid')
+        replicas = deploy.get('replicas', definition.get('scale', 1))
+        health = definition.get('healthcheck', {})
+        if type(replicas) is not int or not 0 <= replicas <= 512 or type(health) is not dict:
+            raise ValueError('native-readiness-services-invalid')
+        matches = [row for row in rows if row.get('Service') == name]
+        if replicas == 0:
+            passed = all(row.get('State') in ('exited', 'dead') for row in matches)
+        elif name in completed_jobs:
+            passed = len(matches) == replicas and all(row.get('State') == 'exited'
+                and type(row.get('ExitCode')) is int and row['ExitCode'] == 0 for row in matches)
+        else:
+            requires_health = bool(health) and health.get('disable') is not True and health.get('test') != ['NONE']
+            passed = len(matches) == replicas and all(row.get('State') == 'running'
+                and (row.get('Health') == 'healthy' if requires_health else row.get('Health') in ('', 'none', None))
+                for row in matches)
+        checks.append({'name': name, 'passed': passed})
+    if not checks:
+        raise ValueError('native-readiness-services-invalid')
+    return checks
+
+
+def observe_services(install_dir):
+    """Read the installed gateway's Docker transport; never start a service."""
+    continuation = load('pixel-native-continuation')
+    values, snapshot = continuation._saved_environment(install_dir, {'PIXEL_NATIVE_GATEWAY_PORT'},
+        'duplicate-retained-readiness-setting')
+    gateway_port = port(values, 'PIXEL_NATIVE_GATEWAY_PORT', 18789)
+    installer, compose = load('pixel-macos-access-install'), load('pixel-native-compose')
+    stack, finalize = load('pixel-native-stack'), load('pixel-native-finalize')
+    owner = pwd.getpwuid(os.getuid())
+    document, environment, *_ = installer._source_gateway(installer._launchd.GATEWAY_PLIST, owner.pw_name, gateway_port)
+    transport = {key: environment[name] for key, name in (
+        ('docker', 'PIXEL_HISTORY_DOCKER'), ('project', 'PIXEL_HISTORY_PROJECT'),
+        ('image', 'PIXEL_HISTORY_IMAGE'), ('user', 'PIXEL_HISTORY_USER'))}
+    installer._native_transport_environment(transport, owner)
+    endpoint = environment.get('DOCKER_HOST', '')
+    if not endpoint.startswith('unix:///') or not Path(endpoint[7:]).is_socket():
+        raise ValueError('installed-local-docker-socket-required')
+    process_env = {'HOME': owner.pw_dir, 'PATH': environment['PATH'],
+        'DOCKER_HOST': endpoint, 'DOCKER_CONFIG': environment['DOCKER_CONFIG']}
+    tokens = finalize.compose_flags(install_dir, process_env)
+    original = [install_dir / value for value in tokens[1::2]]
+    compose.validate_stack(install_dir, original)
+    paths = [install_dir / value for value in stack.resolve_files(install_dir, tokens[1::2])]
+    compose.validate_stack(install_dir, paths)
+    command = [transport['docker'], 'compose', '--project-directory', str(install_dir),
+        '--project-name', transport['project'], '--env-file', str(install_dir / '.env')]
+    for path in paths:
+        if not path.is_file() or path.resolve(strict=True) != path or install_dir not in path.parents:
+            raise ValueError('installed-compose-file-required')
+        command.extend(['-f', str(path)])
+
+    def unchanged():
+        if (continuation.saved_model_environment(install_dir)[1] != snapshot
+                or finalize.compose_flags(install_dir, process_env) != tokens
+                or [install_dir / value for value in stack.resolve_files(install_dir, tokens[1::2])] != paths
+                or installer._source_gateway(installer._launchd.GATEWAY_PLIST, owner.pw_name, gateway_port)[0] != document):
+            raise ValueError('native-readiness-selection-changed')
+        compose.validate_stack(install_dir, original)
+        compose.validate_stack(install_dir, paths)
+
+    def read(*args):
+        unchanged()
+        result = subprocess.run([*command, *args], cwd=install_dir, env=process_env,
+            capture_output=True, text=True, timeout=30, check=False)
+        if result.returncode or len(result.stdout) > 4 * MAX_RESPONSE:
+            raise ValueError('native-readiness-compose-unavailable')
+        return result.stdout
+
+    rendered = json.loads(read('config', '--format', 'json'))
+    if type(rendered) is not dict or rendered.get('name') != transport['project']:
+        raise ValueError('native-compose-project-mismatch')
+    body = read('ps', '--all', '--format', 'json').strip()
+    rows = json.loads(body) if body.startswith('[') else [json.loads(line) for line in body.splitlines()]
+    services = rendered.get('services')
+    checks = service_checks(services, rows)
+    if any(row.get('Project') != transport['project'] for row in rows):
+        raise ValueError('native-compose-project-mismatch')
+    if json.loads(read('config', '--format', 'json')) != rendered:
+        raise ValueError('native-readiness-selection-changed')
+    unchanged()
+    selected = {name: value for name, value in services.items()
+                if value.get('deploy', {}).get('replicas', value.get('scale', 1)) != 0}
+    return selected, checks
+
+
+def observe_apis(install_dir, *, opencode_choice=None, request=probe, include_services=False):
     continuation = load('pixel-native-continuation')
     values, snapshot = continuation._saved_environment(install_dir, continuation.MODEL_KEYS | {
         'DASHBOARD_API_KEY', 'DASHBOARD_API_PORT', 'DASHBOARD_PORT', 'ODS_NATIVE_LLAMA_PORT',
@@ -88,13 +203,18 @@ def observe_apis(install_dir, *, opencode_choice=None, request=probe):
         raise ValueError('native-readiness-dashboard-key-required')
     api_port = port(values, 'DASHBOARD_API_PORT', 3002)
     dashboard_port = port(values, 'DASHBOARD_PORT', 3001)
+    selected_services, docker_checks = ({'dashboard-api': {}}, None)
+    if include_services:
+        selected_services, docker_checks = observe_services(install_dir)
     optional, optional_snapshot = continuation.optional_setup_selection(
-        install_dir, {'dashboard-api': {}}, opencode_choice=opencode_choice)
+        install_dir, selected_services, opencode_choice=opencode_choice)
     plan, model_snapshot = continuation.inspect_model_upgrade(
         install_dir, **continuation.bootstrap_settings(install_dir))
     if snapshot != optional_snapshot or snapshot != model_snapshot:
         raise ValueError('native-readiness-environment-changed')
     checks = []
+    if docker_checks is not None:
+        checks.append({'name': 'selected-service-health', 'passed': all(item['passed'] for item in docker_checks)})
 
     def check(name, operation):
         try:
@@ -173,10 +293,16 @@ def observe_apis(install_dir, *, opencode_choice=None, request=probe):
     check('portal-access', portal)
     if continuation.saved_model_environment(install_dir)[1] != snapshot:
         raise ValueError('native-readiness-environment-changed')
+    pending = ['protected-recovery', 'selected-optional-state', 'model-completion', 'portal-chat-and-preview']
+    if docker_checks is None or not all(item['passed'] for item in docker_checks):
+        pending.insert(1, 'selected-service-health')
+    if (docker_checks is not None and optional['opencode']['selected'] is False
+            and not optional['whisperModel'] and not optional['perplexica']):
+        pending.remove('selected-optional-state')
     return {'status': 'api-checks-passed' if all(c['passed'] for c in checks) else 'needs-attention',
         'checks': checks, 'installerComplete': False, 'releaseState': release_state,
-        'pendingVerification': ['protected-recovery', 'selected-service-health',
-                                'selected-optional-state', 'model-completion', 'portal-chat-and-preview']}
+        **({'serviceChecks': docker_checks} if docker_checks is not None else {}),
+        'pendingVerification': pending}
 
 
 def main():
@@ -184,6 +310,8 @@ def main():
     parser.add_argument('--http-probe', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--install-dir')
     parser.add_argument('--opencode-choice', choices=('enabled', 'disabled'))
+    parser.add_argument('--include-services', action='store_true',
+        help='Also inspect the retained Compose selection using the installed native Docker transport; no service changes')
     args = parser.parse_args()
     if args.http_probe:
         try:
@@ -198,7 +326,7 @@ def main():
         parser.error('run as the signed-in macOS owner')
     try:
         result = observe_apis(Path(args.install_dir).expanduser().resolve(strict=True),
-                              opencode_choice=args.opencode_choice)
+                              opencode_choice=args.opencode_choice, include_services=args.include_services)
     except (ValueError, OSError, KeyError, subprocess.SubprocessError):
         print(json.dumps({'status': 'inspection-unavailable', 'installerComplete': False}))
         return 1

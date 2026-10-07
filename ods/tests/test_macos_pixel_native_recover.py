@@ -6,6 +6,7 @@ import plistlib
 from pathlib import Path
 import subprocess
 import shlex
+import socket
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1106,3 +1107,149 @@ def test_live_api_observer_rejects_invalid_endpoint_before_requests(readiness_in
         pytest.fail('invalid configuration must not issue HTTP requests')
     with pytest.raises(ValueError):
         readiness.observe_apis(readiness_install, request=request)
+
+
+@pytest.mark.parametrize('definition,rows,passed', [
+    ({'healthcheck': {'test': ['CMD', 'true']}}, [{'State': 'running', 'Health': 'healthy'}], True),
+    ({'healthcheck': {'test': ['CMD', 'true']}}, [{'State': 'running', 'Health': 'unhealthy'}], False),
+    ({'healthcheck': {'test': ['CMD', 'true']}}, [{'State': 'running', 'Health': 'starting'}], False),
+    ({'healthcheck': {'test': ['CMD', 'true']}}, [{'State': 'running', 'Health': ''}], False),
+    ({}, [{'State': 'running', 'Health': ''}], True),
+    ({'healthcheck': {'disable': True}}, [{'State': 'running', 'Health': ''}], True),
+    ({'healthcheck': {'test': ['NONE']}}, [{'State': 'running', 'Health': ''}], True),
+    ({}, [{'State': 'restarting'}], False),
+    ({}, [{'State': 'paused'}], False),
+    ({}, [], False),
+    ({}, [{'State': 'running'}, {'State': 'running'}], False),
+    ({'deploy': {'replicas': 2}}, [{'State': 'running'}, {'State': 'running'}], True),
+    ({'scale': 2}, [{'State': 'running'}], False),
+    ({'deploy': {'replicas': 0}}, [], True),
+    ({'deploy': {'replicas': 0}}, [{'State': 'exited', 'ExitCode': 1}], True),
+    ({'deploy': {'replicas': 0}}, [{'State': 'running'}], False),
+])
+def test_selected_service_health_interprets_compose_not_just_running_count(definition, rows, passed):
+    assert readiness.service_checks({'service': definition}, [dict(row, Service='service') for row in rows]) == [
+        {'name': 'service', 'passed': passed}]
+
+
+@pytest.mark.parametrize('state,code,passed', [('exited', 0, True), ('exited', 1, False),
+    ('exited', False, False), ('exited', '0', False), ('running', 0, False)])
+def test_selected_service_health_requires_completed_init_exit_zero(state, code, passed):
+    services = {'preview': {'depends_on': {'init': {'condition': 'service_completed_successfully'}}}, 'init': {}}
+    rows = [{'Service': 'preview', 'State': 'running'}, {'Service': 'init', 'State': state, 'ExitCode': code}]
+    assert readiness.service_checks(services, rows) == [
+        {'name': 'preview', 'passed': True}, {'name': 'init', 'passed': passed}]
+
+
+def test_rendered_profile_must_not_be_skipped_by_health_inspection():
+    services = {'selected': {'profiles': ['manual'],
+        'depends_on': {'service': {'condition': 'service_completed_successfully'}}}, 'service': {}}
+    assert readiness.service_checks(services, [{'Service': 'service', 'State': 'exited', 'ExitCode': 0}]) == [
+        {'name': 'selected', 'passed': False},
+        {'name': 'service', 'passed': True}]
+
+
+@pytest.mark.parametrize('services,rows', [({}, []), ({'bad name': {}}, []), ({'service': []}, []),
+    ({'service': {'deploy': {'replicas': True}}}, []), ({'service': {'healthcheck': []}}, []),
+    ({'service': {'deploy': []}}, []),
+    ({'service': {}}, {}), ({'service': {}}, [None])])
+def test_selected_service_health_rejects_ambiguous_shapes(services, rows):
+    with pytest.raises(ValueError, match='native-readiness-services-invalid'):
+        readiness.service_checks(services, rows)
+
+
+@pytest.mark.parametrize('fault', [None, 'array', 'env', 'cache', 'gateway', 'config', 'project',
+    'row-project', 'command', 'oversize', 'timeout', 'socket', 'alias'])
+def test_service_observer_binds_installed_transport_and_never_mutates(readiness_install, monkeypatch, fault):
+    installed = readiness_install
+    compose_file = installed / 'compose.yml'
+    compose_file.write_text('fixture')
+    if fault == 'alias':
+        original = installed / 'original.yml'
+        compose_file.rename(original)
+        compose_file.symlink_to(original)
+    # Keep AF_UNIX paths short on macOS, independently of pytest's temp root.
+    import tempfile
+    with tempfile.TemporaryDirectory(dir='/private/tmp' if sys.platform == 'darwin' else '/tmp') as directory:
+        endpoint = Path(directory) / 'docker.sock'
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.bind(str(endpoint))
+            environment = {'PIXEL_HISTORY_DOCKER': '/qualified/docker', 'PIXEL_HISTORY_PROJECT': 'ods',
+                'PIXEL_HISTORY_IMAGE': 'sha256:' + 'a' * 64, 'PIXEL_HISTORY_USER': '501:20',
+                'PATH': '/usr/bin:/bin', 'DOCKER_HOST': 'unix://' + str(endpoint),
+                'DOCKER_CONFIG': str(installed / 'docker-config')}
+            if fault == 'socket': environment['DOCKER_HOST'] = 'tcp://remote:2375'
+            calls, events = [], []
+            changed = False
+            def gateway(*args):
+                return ({'fixture': 'changed' if changed and fault == 'gateway' else 'same'}, environment)
+            def flags(*args):
+                return ['-f', 'other.yml' if changed and fault == 'cache' else 'compose.yml']
+            def validate(*args):
+                events.append('validate')
+            original_load = readiness.load
+            modules = {
+                'pixel-macos-access-install': SimpleNamespace(
+                    _launchd=SimpleNamespace(GATEWAY_PLIST='/qualified/gateway'), _source_gateway=gateway,
+                    _native_transport_environment=lambda *args: events.append('transport')),
+                'pixel-native-finalize': SimpleNamespace(compose_flags=flags),
+                'pixel-native-stack': SimpleNamespace(resolve_files=lambda root, paths: paths),
+                'pixel-native-compose': SimpleNamespace(validate_stack=validate),
+            }
+            monkeypatch.setattr(readiness, 'load', lambda name: modules[name] if name in modules else original_load(name))
+            monkeypatch.setenv('DOCKER_HOST', 'tcp://must-not-use:2375')
+            monkeypatch.setenv('COMPOSE_PROFILES', '*')
+            monkeypatch.setenv('BASH_ENV', '/must-not-source')
+            def run(command, **kwargs):
+                nonlocal changed
+                assert command[:2] == ['/qualified/docker', 'compose']
+                assert command[command.index('--project-name') + 1] == 'ods'
+                assert kwargs['env'] == {'HOME': readiness.pwd.getpwuid(os.getuid()).pw_dir,
+                    'PATH': '/usr/bin:/bin', 'DOCKER_HOST': environment['DOCKER_HOST'],
+                    'DOCKER_CONFIG': environment['DOCKER_CONFIG']}
+                assert kwargs['timeout'] == 30 and kwargs['cwd'] == installed
+                action = command[command.index('-f') + 2:]
+                calls.append(action)
+                assert action in (['config', '--format', 'json'], ['ps', '--all', '--format', 'json'])
+                if fault == 'timeout': raise subprocess.TimeoutExpired(command, 30)
+                if fault == 'command': return SimpleNamespace(returncode=1, stdout='private-token')
+                if fault == 'oversize': return SimpleNamespace(returncode=0, stdout='x' * (4 * readiness.MAX_RESPONSE + 1))
+                if action[0] == 'ps':
+                    rows = [{'Project': 'wrong' if fault == 'row-project' else 'ods',
+                             'Service': 'dashboard-api', 'State': 'running', 'Health': 'healthy'}]
+                    changed = True
+                    if fault == 'env':
+                        path = installed / '.env'
+                        path.write_text(path.read_text() + 'WHISPER_PORT=9100\n')
+                    body = json.dumps(rows if fault == 'array' else rows[0])
+                else:
+                    body = json.dumps({'name': 'other' if fault == 'project' else 'ods', 'services': {
+                        'dashboard-api': {'healthcheck': {'test': ['CMD', 'false' if changed and fault == 'config' else 'true']}}}})
+                return SimpleNamespace(returncode=0, stdout=body)
+            monkeypatch.setattr(readiness.subprocess, 'run', run)
+            if fault not in (None, 'array'):
+                with pytest.raises((ValueError, subprocess.TimeoutExpired)):
+                    readiness.observe_services(installed)
+            else:
+                selected, checks = readiness.observe_services(installed)
+                assert set(selected) == {'dashboard-api'}
+                assert checks == [{'name': 'dashboard-api', 'passed': True}]
+                assert [call[0] for call in calls] == ['config', 'ps', 'config']
+            assert events[0] == 'transport'
+            if fault in ('socket', 'alias'): assert not calls
+
+
+@pytest.mark.parametrize('healthy,optional', [(True, False), (False, False), (True, True)])
+def test_combined_readiness_only_removes_verified_pending_gates(readiness_install, monkeypatch, healthy, optional):
+    services = {'dashboard-api': {}}
+    if optional: services['whisper'] = {}
+    monkeypatch.setattr(readiness, 'observe_services', lambda path: (
+        services, [{'name': 'dashboard-api', 'passed': healthy}]))
+    replies = readiness_responses()
+    result = readiness.observe_apis(readiness_install, include_services=True,
+        request=lambda p, path, **kwargs: replies[(p, path)])
+    assert ('selected-service-health' in result['pendingVerification']) is not healthy
+    assert ('selected-optional-state' in result['pendingVerification']) is optional
+    assert result['installerComplete'] is False
+    assert 'protected-recovery' in result['pendingVerification']
+    assert result['status'] == ('api-checks-passed' if healthy else 'needs-attention')
