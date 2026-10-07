@@ -28,11 +28,16 @@ def check_platform(runner=_run, release=None):
     release = platform.release() if release is None else release
     if 'microsoft' not in release.lower():
         return False
-    if 'docker desktop' not in runner(
-        ['docker', 'info', '--format', '{{.OperatingSystem}}'], timeout=20
-    ).lower():
+    # A stopped engine, an absent CLI, or a socket this user cannot read is an
+    # ordinary WSL state, not an internal failure. Only a Docker Desktop engine
+    # reaches the managed NAT route; anything else stays unmanaged and leaves
+    # the environment untouched, so the caller reports the real reason instead
+    # of an opaque {'error': 'internal'}.
+    try:
+        os_name = runner(['docker', 'info', '--format', '{{.OperatingSystem}}'], timeout=20)
+    except (OSError, subprocess.SubprocessError):
         return False
-    return True
+    return 'docker desktop' in os_name.lower()
 
 
 def check_root(root, uid=None):
