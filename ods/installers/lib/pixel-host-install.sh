@@ -3907,7 +3907,7 @@ _ods_pixel_write_operations_policy() {
     ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "${policy%/*}" || return 1
     ods_pixel_run_as_owner "$owner" "$home" python3 - "$policy" "$install_root" "$workspace" \
         "$system_observer_source" <<'PY'
-import json, os, pathlib, re, shutil, socket, stat, sys, tempfile
+import json, os, pathlib, re, shutil, socket, stat, subprocess, sys, tempfile
 
 out, install_root, workspace, system_observer_source_raw = sys.argv[1:]
 path = pathlib.Path(out)
@@ -3955,6 +3955,14 @@ def required_binary(name):
     return str(pathlib.Path(candidate).resolve(strict=True))
 
 python_binary = str(pathlib.Path("/usr/bin/python3").resolve(strict=True))
+if native_macos:
+    probe = "import ctypes,os; b=ctypes.create_string_buffer(4096); assert ctypes.CDLL(None).proc_pidpath(os.getpid(),b,len(b))>0; print(b.value.decode())"
+    res = subprocess.run(["/usr/bin/python3", "-I", "-B", "-c", probe], cwd="/", env={"PATH": "/usr/bin:/bin", "HOME": "/var/empty", "TMPDIR": "/private/tmp"}, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+    if not res.returncode and len(res.stdout.splitlines()) == 1:
+        cand = pathlib.Path(res.stdout.strip())
+        st = cand.lstat() if cand.exists() else None
+        if st and stat.S_ISREG(st.st_mode) and not stat.S_ISLNK(st.st_mode) and st.st_uid == 0 and not (st.st_mode & 0o022) and os.access(cand, os.X_OK):
+            python_binary = str(cand.resolve(strict=True))
 hostname_binary = required_binary("hostname")
 uname_binary = required_binary("uname")
 cat_binary = required_binary("cat")
@@ -5251,6 +5259,7 @@ ods_pixel_install_default_agent() {
         && -f "$plugin_root/host/openclaw-yield-usage.json" \
         && -f "$plugin_root/host/openclaw-compaction-empty.json" \
         && -f "$plugin_root/host/openclaw-compaction-no-work.json" \
+        && -f "$plugin_root/host/openclaw-subagent-admission.json" \
         && -f "$plugin_root/host/openclaw-hook-provenance.json" \
         && -f "$plugin_root/host/openclaw-run-id-redaction.json" \
         && -f "$plugin_root/host/pixel-ops-broker-ods.conf" \
@@ -5661,7 +5670,7 @@ ods_pixel_install_default_agent() {
         --restore-foreign "$home/.openclaw/ods-runtime-patches" \
         --known tool-recovery completion-recovery image-envelope compaction-export \
             compaction-idle compaction-resume read-range tool-result-projection \
-            diagnostic-stream-writes command-attempt-warning compaction-budget context-usage yield-usage compaction-empty compaction-no-work hook-provenance run-id-redaction sandbox-mkdir-bridge sandbox-mkdir-secure \
+            diagnostic-stream-writes command-attempt-warning compaction-budget context-usage yield-usage compaction-empty compaction-no-work subagent-admission hook-provenance run-id-redaction sandbox-mkdir-bridge sandbox-mkdir-secure \
         >>"$pixel_log" 2>&1; then
         ai_bad "Pixel could not restore OpenClaw runtime patches left by another ODS build. See $pixel_log."
         return 1
@@ -5801,6 +5810,15 @@ ods_pixel_install_default_agent() {
         --state-dir "$home/.openclaw/ods-runtime-patches/run-id-redaction" \
         >>"$pixel_log" 2>&1; then
         ai_bad "Pixel's run identity redaction repair could not verify its package bytes. See $pixel_log."
+        return 1
+    fi
+    # Child announcements must enter admission even while an owner turn is active.
+    if ! ods_pixel_run_as_owner "$owner" "$home" python3 \
+        "$plugin_root/host/openclaw_tool_recovery.py" \
+        --openclaw-bin "$openclaw_bin" --subagent-admission \
+        --state-dir "$home/.openclaw/ods-runtime-patches/subagent-admission" \
+        >>"$pixel_log" 2>&1; then
+        ai_bad "Pixel's subagent admission repair could not verify its package bytes. See $pixel_log."
         return 1
     fi
     # Preserve trusted inter-session provenance in native prompt-hook contexts.
