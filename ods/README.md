@@ -186,6 +186,10 @@ still deletes `.env` (your settings and generated secrets) and `config/`, and
 on Linux and macOS the backups in `~/.ods`. If you plan to reinstall over the
 kept data, copy those somewhere safe first and put `.env` back before running
 the installer; without it, the installer generates new secrets.
+On Linux and macOS, `--keep-models` moves models to `<install>.models-backup`
+(for example `~/ods.models-backup`), and no installer restores them: after
+reinstalling, move the models you still need into `data/models`, then delete
+the backup, or the next `--keep-models` uninstall stops.
 
 If a
 Windows runtime is partial and `.\ods.ps1` is missing, run the cleanup from a

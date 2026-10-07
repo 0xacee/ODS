@@ -117,6 +117,14 @@ preserve_model_cache() {
     log_info "Models preserved at: $MODELS_BACKUP"
 }
 
+# No installer restores the backup (#7425): say what to do with it before the
+# next --keep-models uninstall refuses while it exists.
+print_model_retention_summary() {
+    local backup="${INSTALL_DIR%/}.models-backup"
+    echo "Retained model files: $backup/models"
+    echo "No installer restores them. After you reinstall, move any models you still need into $INSTALL_DIR/data/models, then delete $backup (or move it aside): the next --keep-models uninstall stops while it exists."
+}
+
 KEEP_MODELS=false
 KEEP_DATA=false
 FORCE=false
@@ -758,9 +766,7 @@ echo -e "${GREEN}║     ODS has been uninstalled.           ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
 if $KEEP_MODELS; then
-    echo "Retained model files: ${INSTALL_DIR%/}.models-backup/models"
-    echo "Restore destination: $INSTALL_DIR/data/models"
-    echo "Keep custody.json beside the retained models for validated recovery; do not overwrite an existing destination."
+    print_model_retention_summary
 fi
 if $KEEP_DATA; then
     echo "Your user data was preserved at: $INSTALL_DIR/data/"
