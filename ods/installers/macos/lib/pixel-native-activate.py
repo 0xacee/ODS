@@ -27,13 +27,18 @@ def helper(filename):
 
 
 def activate(*, preparation, install_dir, ods_source, compose_files, configure_stack=False,
-             resume_final_health=False, restore_host_agent=False, resume_model=False):
+             resume_final_health=False, restore_host_agent=False, resume_model=False,
+             inspect_continuation=False, opencode_choice=None):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     if restore_host_agent and not resume_final_health:
         raise ValueError('host-agent-continuation-requires-recovery')
     if resume_model and not resume_final_health:
         raise ValueError('model-continuation-requires-recovery')
+    if inspect_continuation and (not resume_final_health or configure_stack or restore_host_agent or resume_model):
+        raise ValueError('continuation-inspection-cannot-mutate')
+    if opencode_choice is not None and not inspect_continuation:
+        raise ValueError('opencode-choice-requires-inspection')
     config = helper('pixel-native-config.py')
     installer = helper('pixel-macos-access-install.py')
     compose = helper('pixel-native-compose.py')
@@ -115,6 +120,9 @@ def activate(*, preparation, install_dir, ods_source, compose_files, configure_s
     selected_services = json.loads(selected_stack.stdout).get('services', {})
     if not isinstance(selected_services, dict):
         raise ValueError('native-compose-services-invalid')
+    if inspect_continuation:
+        return helper('pixel-native-continuation.py').inspect_remaining_setup(
+            install_dir, selected_services, opencode_choice=opencode_choice)
     protected = ['/usr/bin/sudo', '/usr/bin/python3', str(HERE / 'pixel-macos-access-install.py'),
         '--source', str(ods_source), '--install-dir', str(install_dir), '--owner', owner.pw_name,
         '--gateway-plist', str(template), '--openclaw-bin', str(home / 'openclaw'),

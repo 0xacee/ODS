@@ -44,6 +44,9 @@ GUIDANCE = {
     'continuation-metadata-changed': 'Continuation metadata changed concurrently. Preserve the files and inspect any existing worker before retrying.',
     'owned-continuation-metadata-required': 'Continuation metadata has unsafe ownership, links, permissions or size; it was not replaced.',
     'retained-local-model-route-required': 'The saved inference route or model store is outside this initial-install continuation.',
+    'invalid-retained-opencode-selection': 'The saved OpenCode choice must be true or false; it was not changed.',
+    'duplicate-retained-opencode-setting': 'The saved OpenCode choice is duplicated; review the private environment without sharing it.',
+    'confirmed-opencode-selection-conflict': 'The confirmed OpenCode choice conflicts with the retained choice; neither was changed.',
 }
 
 
@@ -157,9 +160,14 @@ def finish(*, preparation, receipt, run, verify, compose, selected_services, res
         os.close(lock)
 
 
-def recover(install_dir, ods_source, *, restore_host_agent=False, resume_model=False):
+def recover(install_dir, ods_source, *, restore_host_agent=False, resume_model=False,
+            inspect_continuation=False, opencode_choice=None):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
+    if inspect_continuation and (restore_host_agent or resume_model):
+        raise ValueError('continuation-inspection-cannot-mutate')
+    if opencode_choice is not None and not inspect_continuation:
+        raise ValueError('opencode-choice-requires-inspection')
     install_dir = Path(install_dir).expanduser().resolve(strict=True)
     preparation = install_dir / 'data/pixel-native/preparation'
     config = helper('pixel-native-config')
@@ -177,7 +185,8 @@ def recover(install_dir, ods_source, *, restore_host_agent=False, resume_model=F
     return helper('pixel-native-activate').activate(preparation=preparation, install_dir=install_dir,
         ods_source=Path(ods_source).resolve(strict=True), compose_files=[*files, *fragments],
         resume_final_health=True, **({'restore_host_agent': True} if restore_host_agent else {}),
-        **({'resume_model': True} if resume_model else {}))
+        **({'resume_model': True} if resume_model else {}),
+        **({'inspect_continuation': True, 'opencode_choice': opencode_choice} if inspect_continuation else {}))
 
 
 def main():
@@ -188,11 +197,21 @@ def main():
         help='Also install the login host agent and verify its authenticated Dashboard route; not a full installer continuation')
     parser.add_argument('--resume-model', action='store_true',
         help='After verified recovery, save Compose selection and resume the saved full-model download; starting is not completion')
+    parser.add_argument('--inspect-continuation', action='store_true',
+        help='Inspect retained choices and required checks without sudo, service changes or readiness publication')
+    parser.add_argument('--opencode-choice', choices=('enabled', 'disabled'),
+        help='Confirm a missing historical OpenCode choice for inspection only; never overrides a saved choice')
     args = parser.parse_args()
+    if args.inspect_continuation and (args.restore_host_agent or args.resume_model):
+        parser.error('--inspect-continuation cannot be combined with setup options')
+    if args.opencode_choice is not None and not args.inspect_continuation:
+        parser.error('--opencode-choice requires --inspect-continuation')
     try:
         path = recover(args.install_dir, args.ods_source,
             **({'restore_host_agent': True} if args.restore_host_agent else {}),
-            **({'resume_model': True} if args.resume_model else {}))
+            **({'resume_model': True} if args.resume_model else {}),
+            **({'inspect_continuation': True, 'opencode_choice': args.opencode_choice}
+               if args.inspect_continuation else {}))
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         detail = helper('pixel-native-compose').health_diagnostic(error)
         code = str(error) if isinstance(error, ValueError) else None
@@ -201,6 +220,9 @@ def main():
         print('Native Pixel recovery stopped. Keep the original receipts and services intact.'
               + (' ' + detail if detail else ''), file=sys.stderr)
         return 1
+    if args.inspect_continuation:
+        print(json.dumps(path))
+        return 0
     result = {'status': 'native-pixel-ready', 'selection': str(path), 'installerComplete': False}
     if args.resume_model:
         result.update(path)

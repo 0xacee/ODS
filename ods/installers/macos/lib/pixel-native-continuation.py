@@ -27,18 +27,66 @@ def load(name, path):
     return module
 
 
-def saved_model_environment(install_dir):
+def _saved_environment(install_dir, keys, duplicate_error):
     environment = load('continuation_env', HERE / 'pixel-native-env.py')
     snapshot = environment.snapshot(Path(install_dir) / '.env')
     selected = {}
     for line in snapshot[0].decode('utf-8').splitlines():
         match = environment.ASSIGNMENT.fullmatch(line)
-        if match and match[1] in MODEL_KEYS:
+        if match and match[1] in keys:
             key, value = match.groups()
             if key in selected:
-                raise ValueError('duplicate-retained-model-setting')
+                raise ValueError(duplicate_error)
             selected[key] = environment.values.parse_env_value(value)
     return selected, snapshot
+
+
+def saved_model_environment(install_dir):
+    return _saved_environment(install_dir, MODEL_KEYS, 'duplicate-retained-model-setting')
+
+
+def inspect_remaining_setup(install_dir, selected_services, *, opencode_choice=None):
+    """Describe retained choices only, without executing setup or proving health."""
+    if (type(selected_services) is not dict or not selected_services
+            or any(type(name) is not str or type(value) is not dict
+                   for name, value in selected_services.items())):
+        raise ValueError('native-compose-services-invalid')
+    saved, snapshot = _saved_environment(install_dir, {'ENABLE_OPENCODE'},
+        'duplicate-retained-opencode-setting')
+    choice = saved.get('ENABLE_OPENCODE')
+    if choice is not None and choice not in ('true', 'false'):
+        raise ValueError('invalid-retained-opencode-selection')
+    if opencode_choice not in (None, 'enabled', 'disabled'):
+        raise ValueError('invalid-confirmed-opencode-selection')
+    source = 'saved' if choice is not None else 'missing'
+    if opencode_choice is not None:
+        confirmed = 'true' if opencode_choice == 'enabled' else 'false'
+        if choice is not None and choice != confirmed:
+            raise ValueError('confirmed-opencode-selection-conflict')
+        if choice is None:
+            choice, source = confirmed, 'confirmed'
+    plan, model_snapshot = inspect_model_upgrade(install_dir, **bootstrap_settings(install_dir))
+    if snapshot != model_snapshot or saved_model_environment(install_dir)[1] != snapshot:
+        raise ValueError('retained-model-environment-changed')
+    # Do not print the environment, rendered Compose definitions or download
+    # arguments: these are a configuration summary, not shareable diagnostics.
+    optional = {'opencode': {'selected': None if choice is None else choice == 'true', 'source': source},
+        'whisperModel': 'whisper' in selected_services, 'perplexica': 'perplexica' in selected_services}
+    checks = ['protected-activation', 'pixel-services', 'selected-service-health',
+              'host-agent', 'active-model', 'portal']
+    if plan['status'] == 'upgrade-required':
+        checks.append('full-model-download')
+    if choice == 'true':
+        checks.append('opencode')
+    if optional['whisperModel']:
+        checks.append('whisper-model-cache')
+    if optional['perplexica']:
+        checks.append('perplexica-inference-route')
+    return {'status': 'continuation-inspection', 'installerComplete': False,
+        'protectedActivationVerified': False,
+        'model': {key: plan[key] for key in ('status', 'modelId') if key in plan},
+        'optionalSetup': optional, 'requiresChoice': ['opencode'] if choice is None else [],
+        'checksRequired': checks}
 
 
 def model_upgrade_plan(saved, catalog, *, bootstrap_file, bootstrap_model, bootstrap_context):

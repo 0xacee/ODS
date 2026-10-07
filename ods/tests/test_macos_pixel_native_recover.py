@@ -610,3 +610,120 @@ def test_cli_reports_model_handoff_but_not_installer_completion(monkeypatch, cap
     assert result['modelUpgrade']['status'] == 'download-started'
     assert result['selection'] == '/fixture/selection-update.json'
     assert result['installerComplete'] is False
+
+
+@pytest.mark.parametrize('saved,confirmed,selected,source', [
+    (None, None, None, 'missing'), ('true', None, True, 'saved'),
+    ('false', None, False, 'saved'), ('"false"', None, False, 'saved'),
+    (None, 'enabled', True, 'confirmed'), (None, 'disabled', False, 'confirmed'),
+    ('true', 'enabled', True, 'saved'), ('false', 'disabled', False, 'saved'),
+])
+def test_optional_inspection_preserves_choices_and_never_runs_setup(
+        model_handoff, monkeypatch, saved, confirmed, selected, source):
+    installed, _, _ = model_handoff
+    environment = installed / '.env'
+    if saved is not None:
+        environment.write_text(environment.read_text() + 'ENABLE_OPENCODE=' + saved + '\n')
+    before = environment.read_bytes()
+    def forbidden(*args, **kwargs):
+        pytest.fail('inspection must not execute setup, download or service commands')
+    monkeypatch.setattr(continuation.subprocess, 'run', forbidden)
+    monkeypatch.setattr(continuation.subprocess, 'Popen', forbidden)
+    services = {'dashboard-api': {'environment': {'SECRET': 'do-not-print'}},
+                'whisper': {}, 'perplexica': {}}
+    result = continuation.inspect_remaining_setup(installed, services, opencode_choice=confirmed)
+    assert result['status'] == 'continuation-inspection'
+    assert result['installerComplete'] is False and result['protectedActivationVerified'] is False
+    assert result['optionalSetup'] == {'opencode': {'selected': selected, 'source': source},
+        'whisperModel': True, 'perplexica': True}
+    assert result['requiresChoice'] == (['opencode'] if selected is None else [])
+    assert ('opencode' in result['checksRequired']) == (selected is True)
+    assert 'whisper-model-cache' in result['checksRequired']
+    assert 'perplexica-inference-route' in result['checksRequired']
+    assert result['model'] == {'status': 'upgrade-required', 'modelId': 'chosen-q4'}
+    assert all(private not in json.dumps(result) for private in ('do-not-print', 'huggingface.co', str(installed)))
+    assert environment.read_bytes() == before
+    assert not (installed / '.compose-flags').exists()
+    assert not (installed / 'data/bootstrap-upgrade.args').exists()
+    core = continuation.inspect_remaining_setup(installed, {'dashboard-api': {}}, opencode_choice=confirmed)
+    assert core['optionalSetup']['whisperModel'] is False
+    assert core['optionalSetup']['perplexica'] is False
+
+
+@pytest.mark.parametrize('body,confirmed,code', [
+    ('ENABLE_OPENCODE=yes\n', None, 'invalid-retained-opencode-selection'),
+    ('ENABLE_OPENCODE=\n', None, 'invalid-retained-opencode-selection'),
+    ('ENABLE_OPENCODE=false\nENABLE_OPENCODE=true\n', None, 'duplicate-retained-opencode-setting'),
+    ('ENABLE_OPENCODE=false\n', 'enabled', 'confirmed-opencode-selection-conflict'),
+    ('ENABLE_OPENCODE=true\n', 'disabled', 'confirmed-opencode-selection-conflict'),
+    ('', 'true', 'invalid-confirmed-opencode-selection'),
+])
+def test_optional_inspection_rejects_ambiguous_or_overridden_choices(model_handoff, body, confirmed, code):
+    installed, _, _ = model_handoff
+    environment = installed / '.env'
+    environment.write_text(environment.read_text() + body)
+    before = environment.read_bytes()
+    with pytest.raises(ValueError, match=code):
+        continuation.inspect_remaining_setup(installed, {'dashboard-api': {}}, opencode_choice=confirmed)
+    assert environment.read_bytes() == before
+
+
+def test_optional_inspection_refuses_environment_changed_during_model_planning(model_handoff, monkeypatch):
+    installed, _, _ = model_handoff
+    inspect = continuation.inspect_model_upgrade
+    def change(*args, **kwargs):
+        result = inspect(*args, **kwargs)
+        path = installed / '.env'
+        path.write_text(path.read_text() + 'ENABLE_OPENCODE=true\n')
+        return result
+    monkeypatch.setattr(continuation, 'inspect_model_upgrade', change)
+    with pytest.raises(ValueError, match='retained-model-environment-changed'):
+        continuation.inspect_remaining_setup(installed, {'dashboard-api': {}})
+
+
+@pytest.mark.parametrize('choice', ['true', 'false'])
+def test_installer_persists_opencode_before_pixel_can_fail(tmp_path, choice):
+    installer = (ROOT / 'installers/macos/install-macos.sh').read_text()
+    line = '    upsert_env_value "${INSTALL_DIR}/.env" "ENABLE_OPENCODE" "$ENABLE_OPENCODE"'
+    assert installer.count(line) == 1
+    assert installer.index(line) < installer.index('if ! /usr/bin/python3 "$LIB_DIR/pixel-native-install.py"')
+    environment = tmp_path / '.env'
+    environment.write_text('DASHBOARD_API_KEY=private-value\nENABLE_OPENCODE=' +
+        ('false' if choice == 'true' else 'true') + '\n')
+    environment.chmod(0o600)
+    command = 'set -e; source "$1"; INSTALL_DIR="$2"; ENABLE_OPENCODE="$3";\n' + line + '\nexit 1'
+    result = subprocess.run(['/bin/bash', '-c', command, 'test-retained-choice',
+        str(ROOT / 'installers/macos/lib/env-generator.sh'), str(tmp_path), choice],
+        capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1
+    assert 'private-value' not in result.stdout + result.stderr
+    assert not result.stderr
+    assert environment.read_text() == 'DASHBOARD_API_KEY=private-value\nENABLE_OPENCODE=' + choice + '\n'
+
+
+def test_inspection_cli_never_reports_recovery_success(monkeypatch, capsys):
+    def recover(install_dir, ods_source, **kwargs):
+        assert kwargs == {'inspect_continuation': True, 'opencode_choice': 'disabled'}
+        return {'status': 'continuation-inspection', 'installerComplete': False,
+                'protectedActivationVerified': False}
+    monkeypatch.setattr(module, 'recover', recover)
+    monkeypatch.setattr(module.sys, 'argv', ['recover', '--install-dir', '/fixture',
+        '--inspect-continuation', '--opencode-choice', 'disabled'])
+    assert module.main() == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)['status'] == 'continuation-inspection'
+    assert output.err == '' and 'native-pixel-ready' not in output.out
+
+
+@pytest.mark.parametrize('extra', [
+    ['--inspect-continuation', '--restore-host-agent'], ['--inspect-continuation', '--resume-model'],
+    ['--opencode-choice', 'disabled'],
+])
+def test_inspection_cli_rejects_mutating_options_before_recovery(monkeypatch, extra):
+    def forbidden(*args, **kwargs):
+        pytest.fail('invalid inspection arguments must be rejected before recovery')
+    monkeypatch.setattr(module, 'recover', forbidden)
+    monkeypatch.setattr(module.sys, 'argv', ['recover', '--install-dir', '/fixture', *extra])
+    with pytest.raises(SystemExit) as error:
+        module.main()
+    assert error.value.code == 2

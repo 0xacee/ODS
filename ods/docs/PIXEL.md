@@ -189,6 +189,27 @@ The flag does not install optional tools or launch the full-model download.
 Older attempts did not persist the OpenCode choice before the Pixel stage;
 do not infer that choice from a missing binary or LaunchAgent.
 
+New macOS installations save `ENABLE_OPENCODE=true` or `false` before Pixel
+activation. For a retained failed installation, maintainers can inspect the
+remaining choices without running recovery or setup:
+
+```bash
+python3 /path/to/reviewed-ODS/ods/installers/macos/lib/pixel-native-recover.py \
+  --install-dir "$HOME/ods" --ods-source "$HOME/ods" --inspect-continuation
+```
+
+This reads the retained configuration and renders the selected Compose stack;
+it does not request sudo, start services, write selection receipts or verify
+live readiness. Output distinguishes saved choices from unknown historical
+choices, lists checks still required, and omits credentials and download
+arguments. Missing `ENABLE_OPENCODE` yields `requiresChoice: ["opencode"]`.
+After confirming the user's original choice, add `--opencode-choice disabled`
+or `enabled` to the inspection command. This confirmation is not persisted and
+cannot override a saved choice. Whisper model setup and Perplexica configuration
+are listed only when those services are in the retained Compose selection.
+Inspection cannot be combined with either setup option and never reports a
+completed installation.
+
 The separate `--resume-model` option saves the verified Compose file selection
 and resumes the original full-model choice using the installed
 `bootstrap-upgrade.sh`. It matches the saved recommendation against the

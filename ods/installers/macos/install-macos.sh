@@ -2072,6 +2072,8 @@ else
     # generate_ods_env preserves existing .env without --force. Persist an
     # explicit addback or opt-out there too, so cache rebuilds keep the choice.
     upsert_env_value "${INSTALL_DIR}/.env" "ENABLE_OPEN_WEBUI" "$ENABLE_OPEN_WEBUI"
+    # Pixel can stop before OpenCode setup; retain the choice for continuation.
+    upsert_env_value "${INSTALL_DIR}/.env" "ENABLE_OPENCODE" "$ENABLE_OPENCODE"
     # Reinstalls preserve .env, including an earlier AirPlay port remap.
     # Use that same port for Compose, model downloads and readiness checks.
     WHISPER_PORT="$(read_env_value "$INSTALL_DIR/.env" "WHISPER_PORT")"
