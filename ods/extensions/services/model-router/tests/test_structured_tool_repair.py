@@ -3,7 +3,7 @@ import asyncio
 import json
 import httpx
 import pytest
-from test_router import router
+from test_router import router as router
 
 TOOLS = [{"type": "function", "function": {"name": "lookup", "parameters": {
     "type": "object", "properties": {"key": {"type": "string"}},
