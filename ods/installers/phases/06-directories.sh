@@ -382,6 +382,12 @@ else
     _phase06_prune_ready=true
     if [[ "${ENABLE_PIXEL_RUNTIME:-false}" == "true" \
         && ( -e "$_phase06_pixel_marker" || -L "$_phase06_pixel_marker" ) ]]; then
+        # Fail before source restoration, pruning or staging. Rootless fallback
+        # is supported for optional extras, not an existing Pixel deployment.
+        if [[ ${EUID:-$(id -u)} -ne 0 && "${ODS_SUDO_AVAILABLE:-true}" == false ]]; then
+            error "source-upgrade-sudo-required: Updating the existing Pixel installation requires sudo. Preserve the installation and any pending upgrade state."
+            return 1
+        fi
         _phase06_pixel_owner="$(ods_pixel_install_owner)" || {
             error "Could not identify the ODS owner for a Pixel source transition."
             return 1
@@ -390,11 +396,10 @@ else
             error "Could not resolve the ODS owner home for a Pixel source transition."
             return 1
         }
-        # A failed source-update step prints its own reason (fixed text, never
-        # paths) above; name the step too, so the install never stops without
-        # a cause (fleet: a laptop stopped in phase 06 with none).
+        # Name the failed step even if the child was interrupted before it
+        # could emit a diagnostic. Do not promise a reason was printed.
         _phase06_source_failed() {
-            error "The Pixel source update stopped at its '$1' step; the reason is printed above."
+            error "The Pixel source update stopped at its '$1' step. Preserve the installation and any pending upgrade state."
             return 1
         }
         _ods_pixel_source_transition_required \
@@ -457,7 +462,10 @@ else
                 unset _phase06_source_status
                 ODS_PIXEL_SOURCE_TRANSACTION="$(_ods_pixel_source_upgrade hold "$_phase06_pixel_owner")" \
                     || _phase06_source_failed hold || return 1
-                [[ "$ODS_PIXEL_SOURCE_TRANSACTION" =~ ^[a-f0-9]{64}$ ]] || _phase06_source_failed hold || return 1
+                if [[ ! "$ODS_PIXEL_SOURCE_TRANSACTION" =~ ^[a-f0-9]{64}$ ]]; then
+                    error "source-hold-response-invalid: The Pixel source hold did not return a valid transaction identifier. Preserve any existing admission hold and upgrade state; no source copy was started."
+                    return 1
+                fi
                 export ODS_PIXEL_SOURCE_TRANSACTION
                 _ods_pixel_source_upgrade copy "$_phase06_pixel_owner" || _phase06_source_failed copy || return 1
                 # Everything after this boundary can update Compose/env/data
