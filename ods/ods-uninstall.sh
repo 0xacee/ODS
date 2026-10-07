@@ -117,12 +117,12 @@ preserve_model_cache() {
     log_info "Models preserved at: $MODELS_BACKUP"
 }
 
-# No installer restores the backup (#7425): say what to do with it before the
-# next --keep-models uninstall refuses while it exists.
+# A later install does not automatically restore this standalone backup (#7425).
+# Bootstrap's same-run --force --keep-models restoration is a separate path.
 print_model_retention_summary() {
     local backup="${INSTALL_DIR%/}.models-backup"
     echo "Retained model files: $backup/models"
-    echo "No installer restores them. After you reinstall, move any models you still need into $INSTALL_DIR/data/models, then delete $backup (or move it aside): the next --keep-models uninstall stops while it exists."
+    echo "A later install does not automatically restore this backup. After you reinstall, recover needed models into $INSTALL_DIR/data/models without overwriting existing files. Verify the recovered models, then delete $backup (or move it aside): the next --keep-models uninstall stops while it exists."
 }
 
 KEEP_MODELS=false
