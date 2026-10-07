@@ -3907,7 +3907,7 @@ _ods_pixel_write_operations_policy() {
     ods_pixel_run_as_owner "$owner" "$home" install -d -m 0700 -- "${policy%/*}" || return 1
     ods_pixel_run_as_owner "$owner" "$home" python3 - "$policy" "$install_root" "$workspace" \
         "$system_observer_source" <<'PY'
-import json, os, pathlib, re, shutil, socket, stat, sys, tempfile
+import json, os, pathlib, re, shutil, socket, stat, subprocess, sys, tempfile
 
 out, install_root, workspace, system_observer_source_raw = sys.argv[1:]
 path = pathlib.Path(out)
@@ -3955,6 +3955,14 @@ def required_binary(name):
     return str(pathlib.Path(candidate).resolve(strict=True))
 
 python_binary = str(pathlib.Path("/usr/bin/python3").resolve(strict=True))
+if native_macos:
+    probe = "import ctypes,os; b=ctypes.create_string_buffer(4096); assert ctypes.CDLL(None).proc_pidpath(os.getpid(),b,len(b))>0; print(b.value.decode())"
+    res = subprocess.run(["/usr/bin/python3", "-I", "-B", "-c", probe], cwd="/", env={"PATH": "/usr/bin:/bin", "HOME": "/var/empty", "TMPDIR": "/private/tmp"}, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+    if not res.returncode and len(res.stdout.splitlines()) == 1:
+        cand = pathlib.Path(res.stdout.strip())
+        st = cand.lstat() if cand.exists() else None
+        if st and stat.S_ISREG(st.st_mode) and not stat.S_ISLNK(st.st_mode) and st.st_uid == 0 and not (st.st_mode & 0o022) and os.access(cand, os.X_OK):
+            python_binary = str(cand.resolve(strict=True))
 hostname_binary = required_binary("hostname")
 uname_binary = required_binary("uname")
 cat_binary = required_binary("cat")
