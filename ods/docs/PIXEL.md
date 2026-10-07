@@ -211,6 +211,29 @@ are listed only when those services are in the retained Compose selection.
 Inspection cannot be combined with setup options and never reports a
 completed installation.
 
+For observational checks against a running native installation, maintainers
+can run the separate API inspector as the signed-in owner (not with sudo):
+
+```bash
+python3 /path/to/reviewed-ODS/ods/installers/macos/lib/pixel-native-readiness.py \
+  --install-dir "$HOME/ods"
+```
+
+For an old installation without a saved OpenCode choice, confirm the original
+choice using `--opencode-choice disabled` or `enabled`. This does not change
+the saved configuration. The inspector checks Dashboard, authenticated host
+access, the selected model's live identity/context, extensions and Portal
+access. Cloud mode checks route discovery, not successful provider inference.
+Requests have bounded response sizes and wall-clock deadlines; credentials
+stay on loopback and are not printed or forwarded through redirects.
+
+Exit zero and `api-checks-passed` mean only these observations passed. Output
+always retains `installerComplete: false` and lists outstanding verification:
+protected recovery, selected service/optional-tool health, model completion,
+and Portal chat plus preview delivery. Release identity remains unverified
+unless a separate release attestation establishes it. This command does not
+activate services, resume setup or replace the genuine failed-install test.
+
 `--restore-optional-tools` executes the same OpenCode, Whisper model and
 Perplexica setup functions as the normal installer, for the retained choices
 only. Historical installations missing the OpenCode choice require the

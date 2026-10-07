@@ -8,6 +8,8 @@ import subprocess
 import shlex
 import sys
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Event, Thread
 from types import SimpleNamespace
 import urllib.request  # noqa: F401 - initialize before emulating Darwin
 
@@ -19,6 +21,7 @@ SPEC = importlib.util.spec_from_file_location('native_recover',
 module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(module)
 continuation = module.helper('pixel-native-continuation')
+readiness = module.helper('pixel-native-readiness')
 
 
 @pytest.fixture
@@ -929,3 +932,177 @@ esac
     log = preparation / 'continuation-optional-tools.log'
     assert log.stat().st_mode & 0o777 == 0o600
     assert 'fixture-private-key' not in log.read_text()
+
+
+@pytest.mark.parametrize('fault', [None, 'redirect', 'unauthorized', 'malformed', 'oversize', 'slow-headers', 'slow-body'])
+def test_readiness_http_is_bounded_and_never_redirects_local_credentials(monkeypatch, fault):
+    requests = []
+    release = Event()
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append((self.path, self.headers.get('Authorization')))
+            try:
+                if fault == 'slow-headers':
+                    self.connection.sendall(b'HTTP/1.1 200 OK\r\nX-Slow: ')
+                    release.wait(3)
+                    return
+                self.send_response(302 if fault == 'redirect' else 401 if fault == 'unauthorized' else 200)
+                if fault == 'redirect':
+                    self.send_header('Location', 'http://127.0.0.1:' + str(self.server.server_port) + '/stolen')
+                self.end_headers()
+                if fault == 'slow-body':
+                    self.wfile.write(b'{')
+                    self.wfile.flush()
+                    release.wait(3)
+                    return
+                self.wfile.write(b'x' * (readiness.MAX_RESPONSE + 1) if fault == 'oversize' else
+                    b'fixture-private-key invalid-json' if fault == 'malformed' else b'{"ok":true}')
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    run = readiness.subprocess.run
+    children = []
+    def observed(command, **kwargs):
+        children.append(command)
+        assert 'fixture-private-key' not in ' '.join(command)
+        assert json.loads(kwargs['input'])['key'] == 'fixture-private-key'
+        return run(command, **kwargs)
+    monkeypatch.setattr(readiness.subprocess, 'run', observed)
+    try:
+        started = time.monotonic()
+        if fault:
+            with pytest.raises(ValueError, match='^native-readiness-http-failed$'):
+                readiness.probe(server.server_port, '/probe', key='fixture-private-key', timeout=0.4)
+        else:
+            assert readiness.probe(server.server_port, '/probe', key='fixture-private-key', timeout=2) == {'ok': True}
+        assert time.monotonic() - started < 2.5
+        assert requests == [('/probe', 'Bearer fixture-private-key')]
+        assert len(children) == 1
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=3)
+
+
+@pytest.fixture
+def readiness_install(model_handoff):
+    installed, _, _ = model_handoff
+    path = installed / '.env'
+    text = path.read_text().replace('GGUF_FILE=starter.gguf', 'GGUF_FILE=chosen.gguf')
+    text = text.replace('LLM_MODEL=starter', 'LLM_MODEL=chosen').replace('=65536', '=32768')
+    path.write_text(text + 'ENABLE_OPENCODE=false\nDASHBOARD_API_KEY=' + 'd' * 64 + '\n')
+    return installed
+
+
+def readiness_responses():
+    return {
+        (3001, '/'): {'httpStatus': 200},
+        (3002, '/health'): {'status': 'ok'},
+        (3002, '/api/apps/opencode'): {'id': 'opencode', 'state': 'not_installed', 'platform': 'darwin'},
+        (8080, '/health'): {'status': 'ok'},
+        (8080, '/v1/models'): {'data': [{'id': 'chosen.gguf'}]},
+        (8080, '/props'): {'model_path': '/private/model-store/chosen.gguf', 'default_generation_settings': {'n_ctx': 32768}},
+        (3002, '/api/models'): {'currentModel': 'chosen-q4'},
+        (3002, '/api/extensions/catalog'): {'extensions': [{}], 'agent_available': True, 'library_available': True},
+        (3002, '/api/pixel/status'): {'available': True, 'readiness': {'routeAvailable': True,
+            'accessState': 'verified', 'effectiveMode': 'sandboxed', 'releaseState': 'unverified'}},
+    }
+
+
+@pytest.mark.parametrize('fault,failed', [
+    (None, None), ('host', 'authenticated-host-agent'), ('model-file', 'selected-native-model'),
+    ('context', 'selected-native-model'), ('context-bool', 'selected-native-model'),
+    ('props-null', 'selected-native-model'), ('model-id', 'selected-native-model'),
+    ('catalog', 'dashboard-model-selection'), ('extensions', 'extensions-catalog'),
+    ('access', 'portal-access'), ('release-mismatch', 'portal-access'),
+    ('portal-null', 'portal-access'), ('api-error', 'dashboard-api'),
+])
+def test_live_api_observer_requires_actual_identity_and_does_not_claim_complete_install(readiness_install, fault, failed):
+    installed = readiness_install
+    replies = readiness_responses()
+    if fault == 'host': replies[(3002, '/api/apps/opencode')] = {'detail': 'not-reachable'}
+    if fault == 'model-file': replies[(8080, '/props')]['model_path'] = '/private/starter.gguf'
+    if fault == 'context': replies[(8080, '/props')]['default_generation_settings']['n_ctx'] = 8192
+    if fault == 'context-bool': replies[(8080, '/props')]['default_generation_settings']['n_ctx'] = True
+    if fault == 'props-null': replies[(8080, '/props')]['default_generation_settings'] = None
+    if fault == 'model-id': replies[(8080, '/v1/models')]['data'] = [{'id': 'unchosen.gguf'}]
+    if fault == 'catalog': replies[(3002, '/api/models')]['currentModel'] = 'starter'
+    if fault == 'extensions': replies[(3002, '/api/extensions/catalog')]['agent_available'] = False
+    if fault == 'access': replies[(3002, '/api/pixel/status')]['readiness']['accessState'] = 'transitioning'
+    if fault == 'release-mismatch': replies[(3002, '/api/pixel/status')]['readiness']['releaseState'] = 'mismatch'
+    if fault == 'portal-null': replies[(3002, '/api/pixel/status')]['readiness'] = None
+    if fault == 'api-error': replies[(3002, '/health')] = {'error': 'fixture-private-body'}
+    def request(port, path, **kwargs):
+        assert kwargs.get('key', '') == ('d' * 64 if port == 3002 else '')
+        return replies[(port, path)]
+    before = continuation.saved_model_environment(installed)[1]
+    result = readiness.observe_apis(installed, request=request)
+    assert result['status'] == ('api-checks-passed' if fault is None else 'needs-attention')
+    assert [item['name'] for item in result['checks'] if not item['passed']] == ([] if failed is None else [failed])
+    assert result['installerComplete'] is False
+    assert 'portal-chat-and-preview' in result['pendingVerification']
+    assert 'd' * 64 not in json.dumps(result) and '/private/' not in json.dumps(result)
+    assert continuation.saved_model_environment(installed)[1] == before
+
+
+def test_live_api_observer_refuses_changed_environment(readiness_install):
+    installed = readiness_install
+    replies = readiness_responses()
+    def request(port, path, **kwargs):
+        if path == '/api/pixel/status':
+            env = installed / '.env'
+            env.write_text(env.read_text() + 'WHISPER_PORT=9100\n')
+        return replies[(port, path)]
+    with pytest.raises(ValueError, match='native-readiness-environment-changed'):
+        readiness.observe_apis(installed, request=request)
+
+
+@pytest.mark.parametrize('choice,state,passed', [
+    ('true', 'running', True), ('true', 'stopped', False), (None, 'running', False),
+])
+def test_live_api_observer_requires_selected_opencode(readiness_install, choice, state, passed):
+    env = readiness_install / '.env'
+    env.write_text(env.read_text().replace('ENABLE_OPENCODE=false\n',
+        '' if choice is None else 'ENABLE_OPENCODE=' + choice + '\n'))
+    replies = readiness_responses()
+    replies[(3002, '/api/apps/opencode')].update(
+        state=state, installed=True, running=state == 'running')
+    result = readiness.observe_apis(readiness_install, request=lambda p, path, **kw: replies[(p, path)])
+    assert (result['status'] == 'api-checks-passed') is passed
+    assert result['installerComplete'] is False
+
+
+@pytest.mark.parametrize('alias,passed', [('ods/current', True), ('wrong-model', False)])
+def test_live_api_observer_cloud_route_does_not_claim_inference(readiness_install, alias, passed):
+    env = readiness_install / '.env'
+    env.write_text(env.read_text().replace('ODS_MODE=local', 'ODS_MODE=cloud') +
+        'LITELLM_KEY=fixture-cloud-key\n')
+    replies = readiness_responses()
+    replies[(4000, '/v1/models')] = {'data': [{'id': alias}]}
+    def request(p, path, **kwargs):
+        assert p != 8080
+        if p == 4000:
+            assert kwargs['key'] == 'fixture-cloud-key'
+        return replies[(p, path)]
+    result = readiness.observe_apis(readiness_install, request=request)
+    assert (result['status'] == 'api-checks-passed') is passed
+    assert 'model-completion' in result['pendingVerification']
+    assert 'fixture-cloud-key' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('setting', ['DASHBOARD_API_PORT=0', 'DASHBOARD_PORT=65536',
+    'DASHBOARD_API_PORT=not-a-port', 'DASHBOARD_API_KEY=invalid'])
+def test_live_api_observer_rejects_invalid_endpoint_before_requests(readiness_install, setting):
+    env = readiness_install / '.env'
+    key = setting.split('=', 1)[0]
+    lines = [line for line in env.read_text().splitlines() if not line.startswith(key + '=')]
+    env.write_text('\n'.join(lines + [setting]) + '\n')
+    def request(*args, **kwargs):
+        pytest.fail('invalid configuration must not issue HTTP requests')
+    with pytest.raises(ValueError):
+        readiness.observe_apis(readiness_install, request=request)
