@@ -1194,6 +1194,83 @@ def test_write_checks_parent_again_after_creation(monkeypatch, tmp_path):
 
 
 @pytest.fixture
+def deployment_directory_custody(monkeypatch, tmp_path):
+    """Map root ownership to the test owner; retain real modes and symlinks."""
+    def check(path, *, private=False):
+        path = Path(path)
+        for item in (path, *path.parents):
+            info = item.lstat()
+            forbidden = 0o077 if item == path and private else 0o022
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_mode & forbidden):
+                raise installer.InstallError('access-directory-custody-unavailable')
+            if item == tmp_path:
+                return
+        pytest.fail('test escaped its temporary root')
+    real_fstat = os.fstat
+    def root_directory_info(fd):
+        info = real_fstat(fd)
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
+            values = list(info)
+            values[4] = 0
+            return os.stat_result(values)
+        return info
+    monkeypatch.setattr(installer, '_check_directory', check)
+    monkeypatch.setattr(installer.os, 'fstat', root_directory_info)
+
+
+def test_write_exact_directories_survive_private_umask(deployment_directory_custody, tmp_path):
+    destination = tmp_path / 'services' / 'operations' / 'broker.sb'
+    previous = os.umask(0o077)
+    try:
+        installer._write_exact(destination, b'profile', mode=0o644,
+                               uid=os.getuid(), gid=os.getgid())
+        assert os.umask(0o077) == 0o077
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(destination.parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(destination.parent.parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o644
+    assert destination.read_bytes() == b'profile'
+
+
+def test_directory_creation_preserves_existing_private_parent(deployment_directory_custody, tmp_path):
+    parent = tmp_path / 'private'
+    parent.mkdir(mode=0o700)
+    installer._mkdir_deployment_directories(parent / 'new')
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE((parent / 'new').stat().st_mode) == 0o755
+
+
+@pytest.mark.parametrize('raced', ['private', 'writable', 'symlink'])
+def test_raced_directory_is_checked_and_never_chmodded(deployment_directory_custody, tmp_path, monkeypatch, raced):
+    target = tmp_path / 'race'
+    other = tmp_path / 'other'
+    other.mkdir(mode=0o700)
+    mkdir = os.mkdir
+    def race(name, mode=0o777, *, dir_fd=None):
+        if name != 'race':
+            return mkdir(name, mode, dir_fd=dir_fd)
+        if raced == 'symlink':
+            os.symlink(other, name, dir_fd=dir_fd)
+        else:
+            mkdir(name, 0o700, dir_fd=dir_fd)
+            if raced == 'writable':
+                target.chmod(0o777)
+        raise FileExistsError(name)
+    monkeypatch.setattr(installer.os, 'mkdir', race)
+    if raced == 'private':
+        installer._mkdir_deployment_directories(target / 'child')
+        assert stat.S_IMODE(target.stat().st_mode) == 0o700
+        assert stat.S_IMODE((target / 'child').stat().st_mode) == 0o755
+    else:
+        with pytest.raises((installer.InstallError, OSError)):
+            installer._mkdir_deployment_directories(target / 'child')
+        assert not (target / 'child').exists()
+        assert stat.S_IMODE(other.stat().st_mode) == 0o700
+
+
+@pytest.fixture
 def migration(deployment, tmp_path, monkeypatch):
     plan = installer.make_plan(**deployment)
     events, failures, applied_failures = [], set(), set()

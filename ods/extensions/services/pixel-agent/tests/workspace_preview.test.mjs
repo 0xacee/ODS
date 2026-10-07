@@ -48,6 +48,15 @@ function succeededResponse(overrides = {}) {
   };
 }
 
+test('publication reports temporary inputs without claiming durable browser storage', async()=>{
+  const tool=createWorkspacePreviewTool({request:async()=>succeededResponse()});
+  const result=await tool.execute('storage-expectations',{relativeDirectory:'demo-site'});
+  assert.equal(result.isError,undefined);
+  assert.match(result.content[0].text,/Preview inputs are temporary and may be lost on reload/);
+  assert.match(result.content[0].text,/try\/catch only keeps the app working when storage fails/);
+  assert.deepEqual(result.details,succeededResponse());
+});
+
 test('published feedback accepts literal framework route assets but rejects reserved routes',async()=>{
   for(const [path,accepted] of [['_next/static/app/[slug]/page.js',true],
     ['__ods_manifest__.json',false],['app/../file.js',false],['app/.env',false]]) {
