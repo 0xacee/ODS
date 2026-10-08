@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from host_agent_client import AgentUnavailable
 
@@ -427,6 +427,10 @@ def test_edge_abort_ack_survives_empty_done_during_cancel_round_trip(store, monk
 @pytest.mark.parametrize("ack", [True, False, "raises", "cancelled"])
 def test_edge_abort_ack_survives_upstream_error_during_cancel_round_trip(store, monkeypatch, ack):
     """The producer can commit interrupted before native Stop returns its ack."""
+    class ConnectedCancellationRequest(Request):
+        async def is_disconnected(self) -> bool:
+            return False
+
     async def run():
         started = asyncio.Event()
         release_error = asyncio.Event()
@@ -451,7 +455,7 @@ def test_edge_abort_ack_survives_upstream_error_during_cancel_round_trip(store, 
                 pixel.ChatResultRequest(chat_id="chat-test", request_id="attempt-one"), OWNER)
             assert pending == {"state": "active", "events": ""}
             with pytest.raises(HTTPException):
-                await pixel.pixel_chat_stream(ConnectedRequest(), body("successor"), OWNER)
+                await pixel.pixel_chat_stream(ConnectedCancellationRequest({"type": "http"}), body("successor"), OWNER)
             if ack == "raises":
                 raise RuntimeError("native cancellation failed")
             if ack == "cancelled":
@@ -459,7 +463,7 @@ def test_edge_abort_ack_survives_upstream_error_during_cancel_round_trip(store, 
             return ack
 
         monkeypatch.setattr(pixel, "_cancel_edge_run", cancel)
-        await pixel.pixel_chat_stream(ConnectedRequest(), body(), OWNER)
+        await pixel.pixel_chat_stream(ConnectedCancellationRequest({"type": "http"}), body(), OWNER)
         await started.wait()
         query = pixel.ChatCancelRequest(chat_id="chat-test", request_id="attempt-one")
         if ack in {"raises", "cancelled"}:
