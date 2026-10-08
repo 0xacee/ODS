@@ -188,6 +188,15 @@ If you plan to reinstall over the kept data, copy those somewhere safe first
 and put `.env` back before running the installer; without it, the installer
 generates new secrets.
 
+On Linux and macOS, `--keep-models` moves models to `<install>.models-backup`
+(for example `~/ods.models-backup`). A later install does not automatically
+restore a backup left by a standalone uninstall. After reinstalling, recover
+needed models into `data/models` without overwriting existing files. Verify
+the recovered models before deleting the backup, or move the backup aside;
+the next `--keep-models` uninstall stops while it exists.
+This is separate from `get-ods.sh --force --keep-models`, which restores the
+backup it creates during that reinstall and refuses a pre-existing backup.
+
 If a
 Windows runtime is partial and `.\ods.ps1` is missing, run the cleanup from a
 source checkout with `.\ods\installers\windows\ods.ps1 uninstall --force`.

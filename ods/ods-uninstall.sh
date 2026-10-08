@@ -117,6 +117,14 @@ preserve_model_cache() {
     log_info "Models preserved at: $MODELS_BACKUP"
 }
 
+# A later install does not automatically restore this standalone backup (#7425).
+# Bootstrap's same-run --force --keep-models restoration is a separate path.
+print_model_retention_summary() {
+    local backup="${INSTALL_DIR%/}.models-backup"
+    echo "Retained model files: $backup/models"
+    echo "A later install does not automatically restore this backup. After you reinstall, recover needed models into $INSTALL_DIR/data/models without overwriting existing files. Verify the recovered models, then delete $backup (or move it aside): the next --keep-models uninstall stops while it exists."
+}
+
 KEEP_MODELS=false
 KEEP_DATA=false
 FORCE=false
@@ -775,9 +783,7 @@ echo -e "${GREEN}║     ODS has been uninstalled.           ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
 if $KEEP_MODELS; then
-    echo "Retained model files: ${INSTALL_DIR%/}.models-backup/models"
-    echo "Restore destination: $INSTALL_DIR/data/models"
-    echo "Keep custody.json beside the retained models for validated recovery; do not overwrite an existing destination."
+    print_model_retention_summary
 fi
 if $KEEP_DATA; then
     echo "Your user data was preserved at: $INSTALL_DIR/data/"
