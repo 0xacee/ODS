@@ -16,6 +16,29 @@ Check ((Get-ODSPortalDistroLauncherName 'Ubuntu-24.04') -eq 'ubuntu2404.exe') 'm
 Check ((Get-ODSPortalDistroLauncherName 'Ubuntu') -eq 'ubuntu.exe') 'maps Ubuntu to its launcher'
 Check ($null -eq (Get-ODSPortalDistroLauncherName 'Debian')) 'no launcher guess for other distros'
 
+foreach ($case in @(
+    @('Ubuntu-24.04', 'Ubuntu-24.04'),
+    @('Ubuntu Dev', '"Ubuntu Dev"'),
+    @('', '""'),
+    @('a"b', '"a\"b"'),
+    @('C:\with space\', '"C:\with space\\"'))) {
+    Check ((ConvertTo-ODSPortalProcessArgument $case[0]) -ceq $case[1]) 'process arguments preserve spaces, quotes and trailing backslashes'
+}
+
+$capturedConfig = & {
+    function Invoke-ODSPortalWslInput([string]$Distro, [string[]]$Command, [string]$Text) {
+        [pscustomobject]@{ Distro = $Distro; Command = $Command; Text = $Text }
+    }
+    Set-ODSPortalWslConf 'Ubuntu Dev' @('user', 'default', 'maria', 'boot', 'systemd', 'true')
+}
+Check ($capturedConfig.Distro -ceq 'Ubuntu Dev' -and ($capturedConfig.Command -join '|') -ceq '/bin/sh|-s|--|/etc/wsl.conf|user|default|maria|boot|systemd|true') 'first-account configuration uses the fixed shell writer before Python exists'
+Check ($capturedConfig.Text -match '^#!/bin/sh' -and $capturedConfig.Text -notmatch 'python3') 'shell writer is loaded from the installer bundle'
+foreach ($settings in @(@('boot', 'systemd'), @('user', 'default', "maria`nroot"), @('boot', 'command', 'anything'))) {
+    $rejected = $false
+    try { Set-ODSPortalWslConf 'Ubuntu Dev' $settings } catch { $rejected = $true }
+    Check $rejected 'configuration rejects unsupported or malformed settings before calling WSL'
+}
+
 # The resume script must re-run the same entry point with the same options,
 # and hostile-looking values must stay literal strings.
 $options = [ordered]@{ Distro='Ubuntu-24.04'; Voice=[switch]$true; NoLangfuse=$true; DryRun=$true; InstallDir="/home/o'brien/ods `$(x)"; Tier=''; Rag=$false }
@@ -58,6 +81,60 @@ $script:answers.Clear(); $script:slept = 0; $script:answers.Enqueue(1)
 Check (-not (Wait-ODSPortalDistroDocker 'Ubuntu-24.04' 0) -and $script:slept -eq 0) 'a zero-second wait checks once and gives up'
 Remove-Item Function:\Start-Sleep
 
+# Direct --exec does not load a login shell's sbin PATH. Exercise the real
+# account helper with transports that cannot resolve either bare admin command.
+$accountPassword = 'fixture password: "quoted"'
+foreach ($mode in @('create', 'existing', 'create-fails', 'password-fails')) {
+    $accountResult = & {
+        param($Mode, $Password)
+        $calls = [Collections.Generic.List[object]]::new()
+        function Invoke-ODSPortalWsl([string[]]$Arguments) {
+            $program = if ($Arguments[0] -eq '--terminate') { '--terminate' } else { $Arguments[5] }
+            $calls.Add([pscustomobject]@{ Program = $program; Arguments = $Arguments; Text = $null })
+            $code = 0
+            if ($program -eq 'id') { $code = [int]($Mode -ne 'existing') }
+            elseif ($program -eq 'useradd') { $code = 127 }
+            elseif ($program -eq '/usr/sbin/useradd') { $code = [int]($Mode -eq 'create-fails') }
+            elseif ($program -ne '--terminate') { throw "Unexpected mock command: $program" }
+            return [pscustomobject]@{ Code = $code; Output = ''; Error = 'fixture command failed' }
+        }
+        function Invoke-ODSPortalWslInput([string]$Distro, [string[]]$Command, [string]$Text) {
+            $calls.Add([pscustomobject]@{ Program = $Command[0]; Distro = $Distro; Arguments = $Command; Text = $Text })
+            $code = 0
+            if ($Command[0] -eq 'chpasswd') { $code = 127 }
+            elseif ($Command[0] -eq '/usr/sbin/chpasswd') { $code = [int]($Mode -eq 'password-fails') }
+            elseif ($Command[0] -ne '/bin/sh') { throw "Unexpected mock stdin command: $($Command[0])" }
+            return [pscustomobject]@{ Code = $code; Output = '' }
+        }
+        $failure = ''
+        try { New-ODSPortalLinuxAccount 'Ubuntu Dev' ([pscustomobject]@{ Name = 'maria'; Password = $Password }) }
+        catch { $failure = $_.Exception.Message }
+        [pscustomobject]@{ Calls = $calls.ToArray(); Failure = $failure }
+    } $mode $accountPassword
+
+    $expected = switch ($mode) {
+        'create' { 'id|/usr/sbin/useradd|/usr/sbin/chpasswd|/bin/sh|--terminate' }
+        'existing' { 'id|/usr/sbin/chpasswd|/bin/sh|--terminate' }
+        'create-fails' { 'id|/usr/sbin/useradd' }
+        'password-fails' { 'id|/usr/sbin/useradd|/usr/sbin/chpasswd' }
+    }
+    Check (($accountResult.Calls.Program -join '|') -ceq $expected) "$mode uses fixed admin paths and stops before later steps on failure"
+    Check (($accountResult.Calls[0].Arguments -join '|') -ceq '--distribution|Ubuntu Dev|--user|root|--exec|id|-u|maria') "$mode checks the exact account as root in the selected distro"
+    if ($mode -ne 'existing') {
+        Check (($accountResult.Calls[1].Arguments -join '|') -ceq '--distribution|Ubuntu Dev|--user|root|--exec|/usr/sbin/useradd|--create-home|--shell|/bin/bash|--groups|sudo|--|maria') "$mode preserves separate useradd arguments without a UID override"
+    }
+    if ($mode -ne 'create-fails') {
+        $passwordCall = $accountResult.Calls | Where-Object { $_.Program -eq '/usr/sbin/chpasswd' }
+        Check ($passwordCall.Distro -ceq 'Ubuntu Dev' -and ($passwordCall.Arguments -join '|') -ceq '/usr/sbin/chpasswd' -and $passwordCall.Text -ceq ('maria:' + $accountPassword)) "$mode sends the password only through the fixed stdin command"
+    }
+    Check (-not (($accountResult.Calls | ForEach-Object { $_.Arguments -join '|' }) -join ' ').Contains($accountPassword)) "$mode never puts the password in command arguments"
+    if ($mode -in @('create', 'existing')) {
+        Check ($accountResult.Failure -ceq '' -and ($accountResult.Calls[-1].Arguments -join '|') -ceq '--terminate|Ubuntu Dev') "$mode restarts only the selected distro after configuration succeeds"
+    } else {
+        Check ($accountResult.Failure -match $(if ($mode -eq 'create-fails') { 'Could not create the Ubuntu user maria' } else { 'Could not set the Ubuntu password for maria' })) "$mode reports the failing account step"
+    }
+}
+
 # A failed restart after writing the default user must stop setup: otherwise
 # Ubuntu keeps opening as root and the user is sent to the wrong fix.
 $failedRestart = & {
@@ -77,24 +154,24 @@ if ($IsLinux) {
         chmod +x (Join-Path $fake 'wsl.exe')
         $previousPath = $env:PATH
         $env:PATH = $fake + [IO.Path]::PathSeparator + $env:PATH
-        try { $result = Invoke-ODSPortalWslInput 'Ubuntu-24.04' @('chpasswd') 'maria:Senha çã:1 "x"' } finally { $env:PATH = $previousPath }
+        try { $result = Invoke-ODSPortalWslInput 'Ubuntu-24.04' @('/usr/sbin/chpasswd') 'maria:Senha çã:1 "x"' } finally { $env:PATH = $previousPath }
         $bytes = [IO.File]::ReadAllBytes((Join-Path $fake 'stdin'))
         Check ($result.Code -eq 0) 'stdin helper reports the command exit code'
         Check ([Text.Encoding]::UTF8.GetString($bytes) -ceq "maria:Senha çã:1 `"x`"`n") 'password is sent as UTF-8 with a single LF'
         Check (-not ($bytes -contains 13)) 'password stdin contains no carriage return'
-        Check ((Get-Content -LiteralPath (Join-Path $fake 'args') -Raw).Trim() -eq '--distribution Ubuntu-24.04 --user root --exec chpasswd') 'password never appears in arguments'
+        Check ((Get-Content -LiteralPath (Join-Path $fake 'args') -Raw).Trim() -eq '--distribution Ubuntu-24.04 --user root --exec /usr/sbin/chpasswd') 'password never appears in arguments'
 
         # Turning on systemd for an existing Ubuntu keeps its other wsl.conf settings.
         $env:PATH = $fake + [IO.Path]::PathSeparator + $env:PATH
         try { $null = Set-ODSPortalWslConf 'Ubuntu-24.04' @('boot', 'systemd', 'true') } finally { $env:PATH = $previousPath }
-        Check ((Get-Content -LiteralPath (Join-Path $fake 'args') -Raw).Trim() -eq '--distribution Ubuntu-24.04 --user root --exec python3 - boot systemd true') 'wsl.conf writer runs as root with fixed arguments'
+        Check ((Get-Content -LiteralPath (Join-Path $fake 'args') -Raw).Trim() -eq '--distribution Ubuntu-24.04 --user root --exec /bin/sh -s -- /etc/wsl.conf boot systemd true') 'wsl.conf writer runs as root without Python'
         $conf = Join-Path $fake 'wsl.conf'
         Set-Content -LiteralPath $conf -Value "[user]`ndefault=maria`n`n[network]`nhostname=pc`n" -NoNewline
-        $writer = (Get-Content -LiteralPath (Join-Path $fake 'stdin') -Raw).Replace("'/etc/wsl.conf'", "'" + $conf + "'")
-        $writer | python3 - boot systemd true
+        $writer = Get-Content -LiteralPath (Join-Path $fake 'stdin') -Raw
+        $writer | /bin/sh -s -- $conf boot systemd true
         Check ($LASTEXITCODE -eq 0) 'wsl.conf writer succeeds on an existing file'
         $written = Get-Content -LiteralPath $conf -Raw
-        Check ($written -match '(?m)^default = maria$' -and $written -match '(?m)^hostname = pc$' -and $written -match '(?ms)^\[boot\]\s+systemd = true') 'wsl.conf writer adds systemd and keeps existing settings'
+        Check ($written -match '(?m)^default=maria$' -and $written -match '(?m)^hostname=pc$' -and $written -match '(?ms)^\[boot\]\s+systemd = true') 'wsl.conf writer adds systemd and keeps existing settings'
     } finally { Remove-Item -LiteralPath $fake -Recurse -Force }
 }
 

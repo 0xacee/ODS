@@ -351,7 +351,7 @@ def _apply_template_services(template, service_list):
                 try:
                     _install_with_lock(svc_id)
                     library_installed.append(svc_id)
-                    config_synced = _sync_extension_config(svc_id)
+                    config_synced = _sync_extension_config(svc_id, preserve_existing=True)
                     if not config_synced:
                         message = "extension config sync failed; retry template apply after restoring the host agent"
                         _write_error_progress(svc_id, message)
