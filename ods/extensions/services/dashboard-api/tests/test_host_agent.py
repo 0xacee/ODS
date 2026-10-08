@@ -2112,6 +2112,34 @@ class TestValidateCoreRecreateIds:
         assert "not eligible" in error.lower()
 
 
+class TestHandleCoreRecreate:
+
+    @pytest.mark.parametrize("service_ids", [
+        [1, "llama-server"],
+        [["llama-server"]],
+        [{"id": "llama-server"}],
+    ])
+    def test_malformed_service_ids_are_rejected_with_400(
+        self, monkeypatch, service_ids,
+    ):
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
+        monkeypatch.setattr(_mod, "CORE_SERVICE_IDS", {"llama-server"})
+        compose_calls = []
+
+        def fake_recreate(service_ids):
+            compose_calls.append(service_ids)
+            return True, ""
+
+        monkeypatch.setattr(_mod, "docker_compose_recreate", fake_recreate)
+        handler = _FakeHandler(json.dumps({"service_ids": service_ids}).encode())
+
+        _mod.AgentHandler._handle_core_recreate(handler)
+
+        assert handler.response_code == 400
+        assert "Invalid service_id" in handler.parse_response()["error"]
+        assert compose_calls == []
+
+
 class TestResolveComposeFlagsCache:
 
     def test_cached_recipe_is_checked_before_any_docker_command(self, tmp_path, monkeypatch):
@@ -5460,6 +5488,19 @@ class TestHandleEnvUpdate:
         assert handler.response_code == 200
         assert "WEBUI_AUTH=false" in (install_dir / ".env").read_text(encoding="utf-8")
         assert handler.parse_response()["enforced_values"] == {}
+
+    @pytest.mark.parametrize("payload", [b"[]", b'"KEY=value"', b"42", b"null"])
+    def test_non_object_json_is_rejected_without_writing(self, env_update_env, payload):
+        # read_json_body() rejects these; this handler parses its own body.
+        install_dir, _ = env_update_env
+        before = (install_dir / ".env").read_bytes()
+        handler = _FakeHandler(payload)
+
+        _mod.AgentHandler._handle_env_update(handler)
+
+        assert handler.response_code == 400
+        assert handler.parse_response()["error"] == "JSON body must be an object"
+        assert (install_dir / ".env").read_bytes() == before
 
     def test_413_oversize_body(self, env_update_env):
         # Construct headers claiming body is too large; rfile content is irrelevant.
