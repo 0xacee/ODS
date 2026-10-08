@@ -205,6 +205,7 @@ tests/test-windows-phase-abort.sh
 tests/test-windows-port-preflight.sh
 tests/test-windows-stop-native-helpers.sh
 tests/test-windows-whisper-compose-fallback.sh
+tests/test-wsl-agent-address-reason.sh
 tests/test-wsl-bind-recovery-live.py
 tests/test-wsl-docker-desktop-nvidia.sh
 tests/test-wsl-hardware-display.sh
