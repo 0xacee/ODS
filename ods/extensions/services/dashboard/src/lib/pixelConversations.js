@@ -66,11 +66,14 @@ function persistenceRevision() {
 }
 
 const snapshotHash = snapshot => Array.from(sha256(new TextEncoder().encode(snapshot)), byte => byte.toString(16).padStart(2, '0')).join('')
-function recoveryContext(chat) {
+function recoveryContext(chat, includeWorkspace = false) {
   return conversationSnapshot({...Object.fromEntries(Object.entries(chat)
-    .filter(([key]) => !['requestId', 'inFlight', 'interrupted', 'preview', 'workspaceOpen'].includes(key))),
+    .filter(([key]) => !['requestId', 'inFlight', 'interrupted', ...(includeWorkspace ? [] : ['preview', 'workspaceOpen'])].includes(key))),
   messages:chat.messages.slice(0, -1)})
 }
+
+const terminalOutcome = message => JSON.stringify({status:message?.status,
+  content:message?.content || (message?.status === 'done' ? 'Completed without a text response.' : '')})
 
 const EMPTY_DRAFT_KEYS = new Set(['schema', 'chatId', 'messages', 'draft', 'requestId', 'inFlight',
   'interrupted', 'contextStart', 'compactionRequestId', 'preview', 'workspaceOpen', 'updatedAt', 'persistenceVersion', 'persistenceRevision', 'draftImages'])
@@ -107,9 +110,22 @@ export function createConversationWriter(initial = null) {
     && current.recoverySource?.sourceHash === snapshotHash(expected)
     && current.recoverySource?.resultHash === snapshotHash(conversationSnapshot(current)))
   const write = chat => saveConversation(chat, {
-    matches: current => conversationSnapshot(current) === (chat.chatId === chatId ? expected : null)
-      || (chat.chatId === chatId && current === null && omitted)
-      || (chat.chatId === chatId && recoveryOfExpected(current)),
+    matches: current => {
+      if (conversationSnapshot(current) === (chat.chatId === chatId ? expected : null)
+        || (chat.chatId === chatId && current === null && omitted)) return true
+      if (chat.chatId !== chatId || !recoveryOfExpected(current)) return false
+      const pending = chat.inFlight || chat.interrupted || chat.requestId
+      // Only response progress may be ignored while this reader drains. A
+      // sender-side edit must report a conflict immediately, and must not regain
+      // permission to replace the recovery when a later DONE reaches the UI.
+      if (chat.messages.at(-1)?.role !== 'assistant'
+        || (pending ? recoveryContext(record, true) !== recoveryContext({...record, ...chat}, true)
+          : terminalOutcome(current.messages.at(-1)) !== terminalOutcome(chat.messages.at(-1)))) {
+        ownsPending = false
+        return false
+      }
+      return true
+    },
     // A retained terminal response can arrive before the originating SSE
     // reader drains. Never replace it with that reader's remaining partials.
     skip: current => recoveryOfExpected(current) && (chat.inFlight || chat.interrupted || chat.requestId),

@@ -104,6 +104,45 @@ it('rejects the late sender after a real user edit in the recovered observer',as
   expect(stored().messages.at(-1).content).toBe('Final two-tab answer')
 })
 
+it('reports an original sender workspace edit while recovered SSE is still pending',async()=>{
+  const {sender,completeBackend,deliver} = await startDeferredSender()
+  completeBackend()
+  const observer = render(<Pixel/>)
+  await within(observer.container).findByText('Final two-tab answer')
+  const recovered = localStorage.getItem(CHAT_KEY)
+  const workspace = within(sender.container).getByRole('button',{name:'Workspace'})
+  fireEvent.click(workspace)
+  try {
+    expect(workspace).toHaveAttribute('aria-expanded','true')
+    expect(await within(sender.container).findByRole('button',{name:'Download recovery copy'})).toBeEnabled()
+    expect(localStorage.getItem(CHAT_KEY)).toBe(recovered)
+  } finally {await deliver(resultEvents)}
+  // Finishing the SSE cannot silently reactivate a handoff rejected for an edit.
+  expect(within(sender.container).getByRole('button',{name:'Download recovery copy'})).toBeEnabled()
+  expect(localStorage.getItem(CHAT_KEY)).toBe(recovered)
+})
+
+it('does not rewrite a recovered completion when the original sender presses Stop',async()=>{
+  const {sender,completeBackend,deliver} = await startDeferredSender()
+  const requestId = stored().requestId
+  const originalFetch = fetch.getMockImplementation()
+  // The cancellation API explicitly returns false for a completed receipt.
+  fetch.mockImplementation(async(url,options)=>url==='/api/pixel/chat/cancel'
+    ? {ok:true,json:async()=>({aborted:false})} : originalFetch(url,options))
+  completeBackend()
+  const observer = render(<Pixel/>)
+  await within(observer.container).findByText('Final two-tab answer')
+  const recovered = localStorage.getItem(CHAT_KEY)
+  fireEvent.click(within(sender.container).getByTitle('Stop'))
+  expect(await within(sender.container).findByText('Stop was not confirmed. Portal is still connected; retry Stop.')).toBeVisible()
+  expect(JSON.parse(fetch.mock.calls.find(([url])=>url==='/api/pixel/chat/cancel')[1].body)).toEqual({chat_id:'shared-chat',request_id:requestId})
+  expect(localStorage.getItem(CHAT_KEY)).toBe(recovered)
+  await deliver(resultEvents)
+  expect(stored().messages.at(-1)).toMatchObject({content:'Final two-tab answer',status:'done'})
+  expect(within(sender.container).queryByText(/Stopped by you/)).not.toBeInTheDocument()
+  expect(within(sender.container).queryByRole('button',{name:'Download recovery copy'})).not.toBeInTheDocument()
+})
+
 it('persists recovery after the original mounted sender closes and survives another reload',async()=>{
   const {sender,completeBackend} = await startDeferredSender()
   sender.unmount()

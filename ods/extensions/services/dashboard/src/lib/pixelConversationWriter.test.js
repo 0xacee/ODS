@@ -151,3 +151,38 @@ it('can activate a recovered conversation without granting ownership or removing
   sender(terminal(source))
   expect(current().messages.at(-1).content).toBe('Finished')
 })
+
+it.each([
+  {draft:'Edited in sender'}, {contextStart:1}, {compactionRequestId:'new-context-operation'},
+  {workspaceOpen:true}, {preview:{siteId:'another-preview'}},
+  {draftImages:[{id:'img-'+'a'.repeat(32),sha256:'b'.repeat(64),media_type:'image/png',bytes:10,width:1,height:1}]},
+])('rejects a pending sender edit instead of silently skipping it (%j)',edit=>{
+  const {sender,source} = recoverBeforeSenderFinishes()
+  const before = localStorage.getItem(CHAT_KEY)
+  expect(()=>sender({...source,...edit})).toThrow(/changed in another tab/)
+  expect(()=>sender(terminal(source))).toThrow(/changed in another tab/)
+  expect(localStorage.getItem(CHAT_KEY)).toBe(before)
+})
+
+it('does not let a delayed Stop acknowledgement replace a fuller recovered cancelled result',()=>{
+  const sender = createConversationWriter()
+  sender(pending)
+  const source = current()
+  createConversationWriter(source).recover({...terminal(source),
+    messages:[source.messages[0],{role:'assistant',content:'All completed steps. Stopped by you.',status:'stopped'}]})
+  const before = localStorage.getItem(CHAT_KEY)
+  expect(()=>sender({...terminal(source),
+    messages:[source.messages[0],{role:'assistant',content:'First step. Stopped by you.',status:'stopped'}]})).toThrow(/changed in another tab/)
+  expect(localStorage.getItem(CHAT_KEY)).toBe(before)
+})
+
+it('keeps unknown saved metadata when checking an otherwise unchanged late partial',()=>{
+  const sender = createConversationWriter()
+  sender({...pending,futureMetadata:{retain:true}})
+  createConversationWriter(current()).recover(terminal(current()))
+  const before = localStorage.getItem(CHAT_KEY)
+  sender({...pending,messages:[pending.messages[0],{role:'assistant',content:'Draining'}]})
+  expect(localStorage.getItem(CHAT_KEY)).toBe(before)
+  sender(terminal(pending))
+  expect(current().futureMetadata).toEqual({retain:true})
+})
