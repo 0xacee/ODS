@@ -445,7 +445,9 @@ _ods_apply_deferred_feature_state() {
         fi
     done
     if [[ -n "${_ODS_DEFERRED_GPU_TOPOLOGY:-}" ]]; then
-        if _ods_feature_source_managed && [[ -z "${ODS_PIXEL_SOURCE_TRANSACTION:-}" ]]; then
+        # The same rechecked inert bootstrap authority covers its generated
+        # topology; deployed runtimes still require the authenticated hold.
+        if _ods_feature_source_managed && [[ -z "${ODS_PIXEL_SOURCE_TRANSACTION:-}" && "$initial_copy" != true ]]; then
             error "GPU topology changes require the authenticated source transaction."
             return 1
         fi

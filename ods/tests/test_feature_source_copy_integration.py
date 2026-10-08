@@ -46,7 +46,7 @@ def shell_fixture(tmp_path, home, old, new):
     return source, args
 
 
-def feature_copy_flow(trees, tmp_path, runtime, previous, enabled, after_copy='', deferred_ref=None):
+def feature_copy_flow(trees, tmp_path, runtime, previous, enabled, after_copy='', deferred_ref=None, topology=False):
     manager, old, new, identity = trees
     identity['afterRef'] = identity['beforeRef']
     # No unrelated source change should force a same-release held transition.
@@ -73,6 +73,16 @@ def feature_copy_flow(trees, tmp_path, runtime, previous, enabled, after_copy=''
     for relative in ([selected] if previous == 'same' else [opposite] if previous == 'opposite' else [selected, opposite]):
         (old / relative).write_text('selected candidate\n')
     source, args = shell_fixture(tmp_path, home, old, new)
+    if topology:
+        (old / 'config').mkdir()
+        (old / 'config/gpu-topology.json').write_text('{"retained":"old topology"}\n')
+        phase = (ROOT / 'installers/phases/03-features.sh').read_text()
+        tail = '# Keep generated topology outside' + phase.split('# Keep generated topology outside', 1)[1]
+        # Both shell invocations carry the state produced by the exact Phase03
+        # deferral code. No fabricated hold or direct assignment of its state.
+        source += ('\nDRY_RUN=false\nTOPOLOGY_FILE="$HOME/generated-topology.json"\n'
+                   'printf \'{"gpu_count":2,"fixture":true}\\n\' > "$TOPOLOGY_FILE"\n'
+                   + tail + '\n')
     selection = f'_sync_extension_compose {str(enabled).lower()} whisper fixture fixture\n'
     args[2] = source + selection + (
         'decision=0\n_ods_pixel_source_transition_required "$INSTALL_USER" "$HOME" '
@@ -80,7 +90,7 @@ def feature_copy_flow(trees, tmp_path, runtime, previous, enabled, after_copy=''
         'printf "%s\\n" "$decision"\n')
     chosen = subprocess.run(args, capture_output=True, text=True, check=True)
     decision = int(chosen.stdout.strip())
-    expected = 0 if runtime == 'ready' and previous != 'same' else 1
+    expected = 0 if runtime == 'ready' and (previous != 'same' or topology) else 1
     assert decision == expected
     assert (new / selected).exists() and not (new / opposite).exists()
     # The managed installed pair must stay untouched until Phase06's choice.
@@ -140,3 +150,40 @@ def test_initial_counterpart_removal_rechecks_inert_state_and_copied_bytes(trees
     assert 'Feature source was not reconciled' in result.stderr
     assert (old / opposite).exists()
     assert manager.journal() is None
+
+
+@pytest.mark.parametrize('runtime', ['ready', 'installing'])
+@pytest.mark.parametrize('enabled', [True, False])
+def test_deferred_topology_and_feature_selection_share_the_verified_copy_path(trees, tmp_path, runtime, enabled):
+    result, manager, old, _, selected, opposite, decision = feature_copy_flow(
+        trees, tmp_path, runtime, 'opposite', enabled, topology=True)
+    assert result.returncode == 0, result.stderr
+    assert (old / selected).read_text() == 'selected candidate\n'
+    assert not (old / opposite).exists()
+    target = old / 'config/gpu-topology.json'
+    assert json.loads(target.read_text()) == {'gpu_count': 2, 'fixture': True}
+    assert target.stat().st_mode & 0o777 == 0o644
+    if decision == 0:
+        assert upgrade.inventory(old, os.getuid()) == manager.journal()['after']
+    else:
+        assert manager.journal() is None
+
+
+@pytest.mark.parametrize('change', ['native', 'ready', 'configured', 'wrong-ref', 'empty-ref', 'config-link', 'topology-link', 'revoked-hold'])
+def test_deferred_topology_keeps_prior_bytes_when_authority_or_path_is_invalid(trees, tmp_path, change):
+    after_copy = {
+        'native': 'touch "${HOME%/home}/protected-0"',
+        'ready': 'sed -i \'s/"installing"/"ready"/\' "$HOME/.config/ods/pixel-managed.json"',
+        'configured': 'mkdir -p "$HOME/.local/share/pixel"; touch "$HOME/.local/share/pixel/current"',
+        'wrong-ref': '',
+        'empty-ref': '',
+        'config-link': 'mv "$INSTALL_DIR/config" "$HOME/owner-config"; ln -s "$HOME/owner-config" "$INSTALL_DIR/config"',
+        'topology-link': 'mv "$INSTALL_DIR/config/gpu-topology.json" "$HOME/owner-topology"; ln -s "$HOME/owner-topology" "$INSTALL_DIR/config/gpu-topology.json"',
+        'revoked-hold': 'sed -i \'s/"applied"/"held"/\' "$HOME/status.json"',
+    }[change]
+    result, _, old, _, _, _, _ = feature_copy_flow(
+        trees, tmp_path, 'ready' if change == 'revoked-hold' else 'installing', 'same', True,
+        after_copy, deferred_ref='b' * 40 if change == 'wrong-ref' else '' if change == 'empty-ref' else None,
+        topology=True)
+    assert result.returncode != 0
+    assert (old / 'config/gpu-topology.json').read_text() == '{"retained":"old topology"}\n'
