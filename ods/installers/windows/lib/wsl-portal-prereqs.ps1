@@ -214,12 +214,20 @@ function Register-ODSPortalDistro([string]$Distro) {
     if ($code -ne 0) { throw "$Distro could not finish its first start (exit $code). Open $Distro once from the Start menu, then rerun this command." }
 }
 
+function ConvertTo-ODSPortalProcessArgument([string]$Value) {
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
+    # Win32 command-line quoting also works with Windows PowerShell 5.1,
+    # where ProcessStartInfo.ArgumentList is unavailable.
+    return '"' + [regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
+}
+
 function Invoke-ODSPortalWslInput([string]$Distro, [string[]]$Command, [string]$Text) {
     # Runs a fixed root command in the distro with $Text on stdin. Bytes are
     # written directly: Windows PowerShell pipes add CRLF and use the console
     # code page, which would change passwords.
     $info = [Diagnostics.ProcessStartInfo]::new((Get-Command wsl.exe -CommandType Application | Select-Object -First 1).Source)
-    $info.Arguments = '--distribution ' + $Distro + ' --user root --exec ' + ($Command -join ' ')
+    $target = @('--distribution', $Distro, '--user', 'root', '--exec') + $Command
+    $info.Arguments = ($target | ForEach-Object { ConvertTo-ODSPortalProcessArgument $_ }) -join ' '
     $info.UseShellExecute = $false
     $info.RedirectStandardInput = $true
     $info.RedirectStandardOutput = $true
@@ -241,11 +249,13 @@ function Invoke-ODSPortalWslInput([string]$Distro, [string[]]$Command, [string]$
 function New-ODSPortalLinuxAccount([string]$Distro, $Account) {
     $exists = Invoke-ODSPortalWsl -Arguments @('--distribution', $Distro, '--user', 'root', '--exec', 'id', '-u', $Account.Name)
     if ($exists.Code -ne 0) {
-        $created = Invoke-ODSPortalWsl -Arguments @('--distribution', $Distro, '--user', 'root', '--exec', 'useradd', '--create-home', '--shell', '/bin/bash', '--groups', 'sudo', '--', $Account.Name)
+        # --exec bypasses the login shell; its PATH need not include /usr/sbin.
+        # Ubuntu's account tools must also work before the first interactive boot.
+        $created = Invoke-ODSPortalWsl -Arguments @('--distribution', $Distro, '--user', 'root', '--exec', '/usr/sbin/useradd', '--create-home', '--shell', '/bin/bash', '--groups', 'sudo', '--', $Account.Name)
         if ($created.Code -ne 0) { throw "Could not create the Ubuntu user $($Account.Name): $($created.Output) $($created.Error)" }
     }
     # The password travels only on chpasswd's stdin, never in arguments or logs.
-    $password = Invoke-ODSPortalWslInput $Distro @('chpasswd') ($Account.Name + ':' + $Account.Password)
+    $password = Invoke-ODSPortalWslInput $Distro @('/usr/sbin/chpasswd') ($Account.Name + ':' + $Account.Password)
     if ($password.Code -ne 0) { throw "Could not set the Ubuntu password for $($Account.Name). Open $Distro, run: sudo passwd $($Account.Name), then rerun this command." }
     $written = Set-ODSPortalWslConf $Distro @('user', 'default', $Account.Name, 'boot', 'systemd', 'true')
     if ($written.Code -ne 0) { throw "Could not make $($Account.Name) the default Ubuntu user: $($written.Output)" }
@@ -255,23 +265,16 @@ function New-ODSPortalLinuxAccount([string]$Distro, $Account) {
 
 function Set-ODSPortalWslConf([string]$Distro, [string[]]$Settings) {
     # $Settings is section, key, value triples. Other /etc/wsl.conf settings
-    # are kept; WSL reads the file only when the distro starts again.
-    $config = @'
-import configparser, sys
-path = '/etc/wsl.conf'
-parser = configparser.ConfigParser(interpolation=None)
-parser.optionxform = str
-parser.read(path)
-values = sys.argv[1:]
-for index in range(0, len(values), 3):
-    section, key, value = values[index:index + 3]
-    if not parser.has_section(section):
-        parser.add_section(section)
-    parser.set(section, key, value)
-with open(path, 'w') as handle:
-    parser.write(handle)
-'@
-    return (Invoke-ODSPortalWslInput $Distro (@('python3', '-') + $Settings) $config)
+    # are kept. Fresh Ubuntu has not passed ODS preflight yet, so Python must
+    # not be a prerequisite for creating its first normal Linux account.
+    if ($Settings.Count -eq 0 -or $Settings.Count % 3 -ne 0) { throw 'Invalid WSL settings.' }
+    for ($index = 0; $index -lt $Settings.Count; $index += 3) {
+        $userSetting = $Settings[$index] -ceq 'user' -and $Settings[$index + 1] -ceq 'default' -and (Test-ODSPortalLinuxUsername $Settings[$index + 2])
+        $bootSetting = $Settings[$index] -ceq 'boot' -and $Settings[$index + 1] -ceq 'systemd' -and $Settings[$index + 2] -ceq 'true'
+        if (-not ($userSetting -or $bootSetting)) { throw 'Unsupported WSL account or boot setting.' }
+    }
+    $config = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'wsl-conf.sh') -Raw
+    return (Invoke-ODSPortalWslInput $Distro (@('/bin/sh', '-s', '--', '/etc/wsl.conf') + $Settings) $config)
 }
 
 function Enable-ODSPortalSystemd([string]$Distro) {
