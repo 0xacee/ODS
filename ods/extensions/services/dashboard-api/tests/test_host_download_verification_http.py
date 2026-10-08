@@ -1,6 +1,7 @@
 """Existing-artifact verification remains an acknowledged, cancellable operation."""
 import hashlib
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
 from threading import Event, Thread
@@ -9,6 +10,31 @@ import httpx
 import pytest
 
 from test_host_agent import _mod as host
+
+
+@pytest.mark.parametrize("raise_on_error", [False, True])
+def test_transient_stat_error_is_not_reported_as_missing(tmp_path, monkeypatch, raise_on_error):
+    """Python 3.14's is_file() hides OSError; verification must retain it."""
+    target = tmp_path / "existing.gguf"
+    payload = b"GGUFvalid-existing-model"
+    target.write_bytes(payload)
+    real_stat = os.stat
+
+    def unreadable_stat(path, *args, **kwargs):
+        if path == target:
+            raise OSError("Transient artifact stat failure")
+        return real_stat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "stat", unreadable_stat)
+        if raise_on_error:
+            with pytest.raises(RuntimeError, match="file could not be inspected"):
+                host._verify_model_artifact(target, {"size_bytes": len(payload)}, raise_on_error=True)
+        else:
+            valid, reason = host._verify_model_artifact(target, {"size_bytes": len(payload)})
+            assert not valid
+            assert "file could not be inspected" in reason
+    assert target.read_bytes() == payload
 
 
 @pytest.mark.parametrize("outcome", ["cancel", "hash-failure", "read-failure"])

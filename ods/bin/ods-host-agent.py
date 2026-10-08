@@ -1850,10 +1850,14 @@ def _verify_model_artifact(
         return False, reason
 
     try:
-        if not path.is_file():
-            return False, "file is missing"
+        # is_file() suppresses inspection errors on Python 3.14. Only a
+        # successful stat can distinguish content from an unreadable artifact.
         initial_stat = path.stat()
+        if not stat_mod.S_ISREG(initial_stat.st_mode):
+            return False, "file is missing"
         actual_size = initial_stat.st_size
+    except (FileNotFoundError, NotADirectoryError):
+        return False, "file is missing"
     except OSError as exc:
         return verification_error(f"file could not be inspected: {exc}")
     if actual_size <= 0:
