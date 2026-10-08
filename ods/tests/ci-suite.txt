@@ -22,6 +22,7 @@ tests/contracts/test-wsl-lifecycle.sh
 tests/pixel_settings/test_pixel_settings_store.py
 tests/pixel_settings/test_store_windows.py
 tests/test-agent-restart-nonfatal.sh
+tests/test_flowise_setup.py
 tests/test-amd-igpu-dgpu-selection.sh
 tests/test-amd-topo-locale.sh
 tests/test-amd-topo.sh
@@ -59,6 +60,7 @@ tests/test-embeddings-prefetch-service-cache.sh
 tests/test-enable-gpu-validation.sh
 tests/test-env-example-inline-comments.sh
 tests/test-env-set-literal-key.sh
+tests/test-extension-env-carry.sh
 tests/test-extension-integration.sh
 tests/test-external-llm-auth.sh
 tests/test-external-llm-switchboard-env.sh
@@ -204,6 +206,7 @@ tests/test-windows-phase-abort.sh
 tests/test-windows-port-preflight.sh
 tests/test-windows-stop-native-helpers.sh
 tests/test-windows-whisper-compose-fallback.sh
+tests/test-wsl-agent-address-reason.sh
 tests/test-wsl-bind-recovery-live.py
 tests/test-wsl-docker-desktop-nvidia.sh
 tests/test-wsl-hardware-display.sh

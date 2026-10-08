@@ -117,6 +117,14 @@ preserve_model_cache() {
     log_info "Models preserved at: $MODELS_BACKUP"
 }
 
+# A later install does not automatically restore this standalone backup (#7425).
+# Bootstrap's same-run --force --keep-models restoration is a separate path.
+print_model_retention_summary() {
+    local backup="${INSTALL_DIR%/}.models-backup"
+    echo "Retained model files: $backup/models"
+    echo "A later install does not automatically restore this backup. After you reinstall, recover needed models into $INSTALL_DIR/data/models without overwriting existing files. Verify the recovered models, then delete $backup (or move it aside): the next --keep-models uninstall stops while it exists."
+}
+
 KEEP_MODELS=false
 KEEP_DATA=false
 FORCE=false
@@ -166,7 +174,8 @@ Usage: $(basename "$0") [OPTIONS]
 
 Options:
     --keep-models   Keep models beside the install in <install>.models-backup
-    --keep-data     Keep user data (chat history, n8n workflows, etc.)
+    --keep-data     Keep user data (chat history, n8n workflows, etc.), backups
+                    in .backups/, presets, and update snapshots in ~/.ods
     --force         Skip confirmation prompts
     --non-interactive  Never prompt for sudo; require cached or passwordless sudo
     --install-dir   Uninstall a separately located, fingerprinted ODS installation
@@ -182,7 +191,7 @@ This will remove:
     - Systemd system services (ods-host-agent, ods-mdns)
     - macOS LaunchAgents (com.ods.host-agent, com.ods.opencode-web, legacy agents)
     - CLI symlinks (/usr/local/bin/ods, ~/.local/bin/ods, legacy /usr/local/bin/ods-cli)
-    - Backup directory (~/.ods)
+    - Backups in .backups/ and update snapshots in ~/.ods (unless --keep-data)
 
 Preserved:
     - Other Docker images and shared build cache
@@ -242,6 +251,18 @@ if [[ -z "${PIXEL_INGRESS_GID:-}" ]]; then
     fi
     export PIXEL_INGRESS_GID="$_ods_cleanup_gid"
     unset _ods_cleanup_gid
+fi
+
+if ! $KEEP_DATA; then
+    _ods_backup_count=0
+    for _ods_backup in "$INSTALL_DIR"/.backups/*/ "$HOME"/.ods/backups/*/; do
+        [[ -d "$_ods_backup" ]] && _ods_backup_count=$((_ods_backup_count + 1))
+    done
+    if (( _ods_backup_count > 0 )); then
+        log_warn "This also deletes ${_ods_backup_count} backup(s) and update snapshot(s) in $INSTALL_DIR/.backups and $HOME/.ods/backups."
+        log_warn "Re-run with --keep-data to keep them, or copy them elsewhere first."
+    fi
+    unset _ods_backup _ods_backup_count
 fi
 
 if [[ "$FORCE" != "true" ]]; then
@@ -698,9 +719,11 @@ if $KEEP_MODELS && ! preserve_model_cache; then
 fi
 
 if $KEEP_DATA; then
-    # Remove everything except data/. Container-UID files under data/ stay
-    # untouched (--keep-data implies preserving them anyway).
-    find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name 'data' -exec rm -rf {} + 2>/dev/null || true
+    # Remove everything except data/ and the owner's backups and presets.
+    # Container-UID files under data/ stay untouched (--keep-data implies
+    # preserving them anyway); ods-backup.sh writes to .backups/ by default.
+    find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name 'data' ! -name '.backups' ! -name 'presets' \
+        -exec rm -rf {} + 2>/dev/null || true
     log_info "User data preserved at: $INSTALL_DIR/data/"
 else
     # Containers (open-webui, qdrant, baserow, searxng, ...) write into
@@ -733,8 +756,10 @@ else
     log_warn "Installation directory cleanup incomplete"
 fi
 
-# 6. Remove backup directory
-if [[ -d "$HOME/.ods" ]]; then
+# 6. Remove backup directory (update snapshots). --keep-data keeps them.
+if $KEEP_DATA && [[ -d "$HOME/.ods" ]]; then
+    log_info "Update snapshots preserved at: $HOME/.ods/"
+elif [[ -d "$HOME/.ods" ]]; then
     log_info "Removing backup directory..."
     rm -rf "$HOME/.ods"
     log_ok "Backups removed"
@@ -758,10 +783,14 @@ echo -e "${GREEN}║     ODS has been uninstalled.           ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
 if $KEEP_MODELS; then
-    echo "Retained model files: ${INSTALL_DIR%/}.models-backup/models"
-    echo "Restore destination: $INSTALL_DIR/data/models"
-    echo "Keep custody.json beside the retained models for validated recovery; do not overwrite an existing destination."
+    print_model_retention_summary
 fi
 if $KEEP_DATA; then
     echo "Your user data was preserved at: $INSTALL_DIR/data/"
+    if [[ -d "$INSTALL_DIR/.backups" ]]; then
+        echo "Your backups were preserved at: $INSTALL_DIR/.backups/"
+    fi
+    if [[ -d "$INSTALL_DIR/presets" ]]; then
+        echo "Your presets were preserved at: $INSTALL_DIR/presets/"
+    fi
 fi

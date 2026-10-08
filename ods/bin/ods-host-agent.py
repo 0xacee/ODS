@@ -6537,6 +6537,8 @@ def docker_compose_action(service_id: str, action: str) -> tuple:
                 compose_env=compose_env,
             )
         if result.returncode == 0:
+            if action == "start" and service_id == "hermes":
+                return _refresh_running_hermes_persona()
             return True, ""
         return False, _compose_failure_reason(service_id, result.stderr)
     except subprocess.TimeoutExpired:
@@ -9459,6 +9461,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_service_stats()
         elif path == "/v1/model/list":
             self._handle_model_list()
+        elif path == "/v1/model/config" and not parsed.query:
+            self._handle_model_config()
         elif path == "/v1/model/status":
             self._handle_model_status()
         elif path == "/v1/model/management":
@@ -11468,6 +11472,12 @@ class AgentHandler(BaseHTTPRequestHandler):
             logger.warning("env_update rejected: invalid JSON from %s: %s", client_ip, exc)
             json_response(self, 400, {"error": f"Invalid JSON: {exc}"})
             return
+        # read_json_body() rejects non-object JSON; this handler bypasses it
+        # for the larger size limit, so apply the same check here.
+        if not isinstance(body, dict):
+            logger.warning("env_update rejected: JSON body is not an object from %s", client_ip)
+            json_response(self, 400, {"error": "JSON body must be an object"})
+            return
 
         raw_text = body.get("raw_text")
         if not isinstance(raw_text, str) or not raw_text.strip():
@@ -11568,11 +11578,14 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         requested = body.get("service_ids", [])
-        unique_service_ids = sorted(set(requested)) if isinstance(requested, list) else requested
-        ok, error = validate_core_recreate_ids(unique_service_ids)
+        # Validate before deduplicating: set() and sorted() raise on
+        # unhashable or mixed-type elements, which drops the connection
+        # instead of answering 400.
+        ok, error = validate_core_recreate_ids(requested)
         if not ok:
             json_response(self, 400, {"error": error})
             return
+        unique_service_ids = sorted(set(requested))
 
         locks = []
         try:
@@ -12473,6 +12486,12 @@ class AgentHandler(BaseHTTPRequestHandler):
                                         error=msg)
                         return
 
+                if service_id == "hermes":
+                    persona_ready, persona_error = _refresh_running_hermes_persona()
+                    if not persona_ready:
+                        _write_progress(service_id, "error", "Installation failed", error=persona_error)
+                        return
+
                 # Step 4: Success
                 _write_progress(service_id, "started", "Service started", exit_verified=one_shot)
 
@@ -12616,6 +12635,16 @@ class AgentHandler(BaseHTTPRequestHandler):
             })
         except Exception as exc:
             json_response(self, 500, {"error": f"Failed to list models: {exc}"})
+
+    def _handle_model_config(self):
+        """Expose only the fresh persisted mode, never private .env values."""
+        if not check_auth(self):
+            return
+        try:
+            mode = _normalize_ods_mode(load_env(INSTALL_DIR / ".env").get("ODS_MODE"))
+        except (OSError, UnicodeError):
+            mode = "unknown"
+        json_response(self, 200, {"configuredMode": mode}, no_store=True)
 
     def _handle_model_status(self):
         """Return current model download progress."""
@@ -16285,6 +16314,58 @@ def _prepare_hermes_persona_for_start() -> tuple[bool, str]:
     except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired) as exc:
         logger.warning("Could not prepare Hermes persona: %s", type(exc).__name__)
         return False, "Could not prepare Hermes persona; check installation data permissions"
+
+
+def _refresh_running_hermes_persona() -> tuple[bool, str]:
+    """Refresh generated install facts after a Library start, preserving custom personas."""
+    output = INSTALL_DIR / "data" / "persona" / "SOUL.md"
+    builder = INSTALL_DIR / "scripts" / "build-installation-context.py"
+    copier = INSTALL_DIR / "scripts" / "sync-hermes-persona.py"
+    template = INSTALL_DIR / "extensions" / "services" / "hermes" / "SOUL.md.template"
+    try:
+        output.parent.resolve().relative_to(INSTALL_DIR.resolve())
+        if output.is_symlink() or not output.is_file():
+            return False, "Hermes persona source is not a regular file"
+        if any(not path.is_file() or path.is_symlink() for path in (builder, copier, template)):
+            return False, "Hermes persona refresh scripts or template are missing"
+        previous = output.read_bytes()
+        env = load_env(INSTALL_DIR / ".env")
+        uid, gid = env.get("ODS_UID") or "10000", env.get("ODS_GID") or "10000"
+        if not all(re.fullmatch(r"[0-9]{1,10}", value) for value in (uid, gid)):
+            return False, "Hermes container user configuration is invalid"
+        # Stage the new snapshot without changing the old source. A failed
+        # Docker copy can then retry against the same old generated hash.
+        with tempfile.TemporaryDirectory(prefix=".hermes-persona-", dir=output.parent) as staging:
+            candidate = Path(staging) / "SOUL.md"
+            cmd = [sys.executable, str(builder), "--template", str(template),
+                   "--env", str(INSTALL_DIR / ".env"), "--output", str(candidate)]
+            if _runtime_uses_router_transport(env) or _is_windows_host_llama_server(env):
+                cmd.extend(["--profile", "local-lemonade"])
+            rendered = subprocess.run(cmd, cwd=str(INSTALL_DIR), capture_output=True, text=True, timeout=60)
+            if rendered.returncode != 0 or candidate.is_symlink() or not candidate.is_file():
+                return False, "Could not refresh Hermes installation persona"
+            content = candidate.read_text(encoding="utf-8")
+            if output.is_symlink() or output.read_bytes() != previous:
+                return False, "Hermes persona changed during refresh; retry the start"
+            synced = subprocess.run(
+                ["docker", "exec", "-i", "--user", f"{uid}:{gid}", "ods-hermes",
+                 "python3", "-c", copier.read_text(encoding="utf-8")],
+                input=json.dumps({"old_sha256": hashlib.sha256(previous).hexdigest(), "content": content}),
+                capture_output=True, text=True, timeout=30,
+            )
+            if synced.returncode != 0 or synced.stdout.strip() not in {"updated", "current", "preserved"}:
+                return False, "Could not refresh Hermes runtime persona; retry the start"
+            if output.is_symlink() or output.read_bytes() != previous:
+                return False, "Hermes persona changed during refresh; retry the start"
+            updated = content.encode("utf-8")
+            if previous != updated:
+                _write_bound_file_in_place(output, updated)
+            if synced.stdout.strip() == "preserved":
+                logger.info("Preserved the owner's customized Hermes runtime persona")
+        return True, ""
+    except (OSError, ValueError, UnicodeError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Could not refresh Hermes persona: %s", type(exc).__name__)
+        return False, "Could not refresh Hermes persona; check installation data permissions"
 
 
 def _patch_hermes_model_config(
