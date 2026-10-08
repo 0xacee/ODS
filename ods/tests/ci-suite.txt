@@ -22,6 +22,7 @@ tests/contracts/test-wsl-lifecycle.sh
 tests/pixel_settings/test_pixel_settings_store.py
 tests/pixel_settings/test_store_windows.py
 tests/test-agent-restart-nonfatal.sh
+tests/test_flowise_setup.py
 tests/test-amd-igpu-dgpu-selection.sh
 tests/test-amd-topo-locale.sh
 tests/test-amd-topo.sh
