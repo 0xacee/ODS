@@ -190,7 +190,7 @@ def recover(install_dir, ods_source, *, restore_host_agent=False, resume_model=F
     config = helper('pixel-native-config')
     selection(config.private_json(preparation / 'preparation.json'),
               config.private_json(preparation / 'activation.json'))
-    tokens = helper('pixel-native-finalize').compose_flags(install_dir, dict(os.environ))
+    tokens = helper('pixel-native-finalize').compose_flags(install_dir, dict(os.environ), recovery=True)
     fragments = [install_dir / path for path in helper('pixel-native-install').FRAGMENTS]
     files = []
     for value in tokens[1::2]:

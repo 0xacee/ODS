@@ -188,9 +188,9 @@ def update_selection_records(previous, activation, prepared, proof, install_dir)
         'activation': {**activation, **identities}}
 
 
-def compose_flags(install_dir, process_env):
+def compose_flags(install_dir, process_env, *, recovery=False):
     cache = install_dir / '.compose-flags'
-    if os.path.lexists(cache):
+    if not recovery and os.path.lexists(cache):
         raw = cache.read_text()
     else:
         # Extension changes invalidate this disposable cache. Resolve the saved
@@ -222,12 +222,17 @@ def compose_flags(install_dir, process_env):
                 or not re.fullmatch('[0-9]+', count)
                 or mode not in {'local', 'cloud', 'hybrid'}):
             raise ValueError('saved-compose-selection-required')
-        resolver = install_dir / 'scripts/resolve-compose-stack.sh'
+        # The retained installation can predate recovery support. Use the
+        # reviewed helper's resolver only for explicit recovery; do not modify
+        # installed source or trust a disposable cache from the failed attempt.
+        resolver_root = Path(__file__).resolve().parents[3] if recovery else install_dir
+        resolver = resolver_root / 'scripts/resolve-compose-stack.sh'
         if not resolver.is_file() or resolver.resolve(strict=True) != resolver:
             raise ValueError('installed-compose-resolver-required')
         resolver_env = {**process_env, **{key: saved.get(key, '') for key in keys}}
         raw = subprocess.run(['/bin/bash', str(resolver), '--script-dir', str(install_dir),
-            '--tier', tier, '--gpu-backend', backend, '--gpu-count', count, '--ods-mode', mode],
+            '--tier', tier, '--gpu-backend', backend, '--gpu-count', count, '--ods-mode', mode,
+            *(['--native-recovery'] if recovery else [])],
             cwd=install_dir, env=resolver_env, capture_output=True, text=True,
             check=True, timeout=30).stdout
     tokens = shlex.split(raw)
