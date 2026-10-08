@@ -90,7 +90,6 @@ def assemble_chat_completion_sse(
     expected_model: str,
     *,
     max_bytes: int = _MAX_BYTES,
-    allow_gguf_filename_alias: bool = False,
 ) -> dict:
     if not isinstance(raw, (bytes, bytearray)):
         raise _err("raw must be bytes")
@@ -115,7 +114,6 @@ def assemble_chat_completion_sse(
     saw_done = False
     saw_any = False
     saw_model = False
-    wire_model: str | None = None
     choice_index: int | None = None
 
     for ev in events:
@@ -160,14 +158,8 @@ def assemble_chat_completion_sse(
         if model is not None:
             if not isinstance(model, str):
                 raise _err("model not string")
-            filename_alias = (allow_gguf_filename_alias
-                              and not expected_model.endswith(".gguf")
-                              and model == expected_model + ".gguf")
-            if model != expected_model and not filename_alias:
+            if model != expected_model:
                 raise CompletionStreamIdentityError("sse: model mismatch")
-            if wire_model is not None and model != wire_model:
-                raise CompletionStreamIdentityError("sse: model changed within stream")
-            wire_model = model
             saw_model = True
 
         choices = obj.get("choices")
