@@ -12,8 +12,8 @@ The visible source is duplicated into `vendor/pixel.bundle` solely so existing
 Pixel installation code can use exact-commit Git verification without network
 or private credentials. The bundle contains one new synthetic root commit with
 public Osmantic release identity and no ancestors. Its commit is
-`f2d71d31e8cebac691d109de994c1b4636504cd3`, and its SHA-256 is
-`5fa764dd1b11e71eebaae193a6bba22cb9743bf6e854dbd9c7e7dd63b2ec6163`.
+`655a5b0205a92afce33d45cad1d05d48b661b996`, and its SHA-256 is
+`63dd4ad238c65f072d523c89ab54b04dd6f200b1066ecfcbfca1340fafaeac81`.
 Run `python3 scripts/verify-pixel-bundle.py` to check the bundle against the
 visible source, tracked executable modes, and those pins. The `pixel` launcher
 and the install/bootstrap scripts must retain executable Git modes.
@@ -160,3 +160,21 @@ verified every blob and Git executable mode against the public source. No
 release signature was generated and no private repository was accessed. Clients
 prepared with the 4.3.28 bundle remain readable through their exact retained
 receipt identity.
+
+## ODS-maintained 4.3.30 Operations startup candidate
+
+This candidate waits for the Operations Broker inventory before applying
+the existing reader ACL checks. A real WSL clean install exposed the
+missing projection; a controlled delayed-file test reproduces the old
+failure and accepts the new wait. `pixel/ODS-QUALIFICATION-4.3.30.md`
+records the evidence and remaining live qualification. The version
+advance preserves the existing strictly increasing source-upgrade gate.
+
+The public vendor tree is `b4a2db3cfc6d3d6388c57f94dc6befaf2ed5a292`. Two independent empty bare
+repositories used the same alternates-based procedure documented above
+with the retained synthetic identity, timestamp and root message. The
+two bundles were byte-identical. Only the single public root is advertised;
+no private history or signing credentials were accessed. Runtime and
+dependency versions, image digests, policies and trust anchors are unchanged.
+Current source/bundle pins above identify this candidate; prior release
+sections remain historical evidence.
