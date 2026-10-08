@@ -1432,28 +1432,82 @@ def _access_response_ready(value, *, upgrade_guard=False):
             and value.get('reason') == 'runtime-upgrade-recovery-required')
 
 
-def _ready_access(service, *, upgrade_guard=False):
-    pid = service.pid(require_running=True)
-    address = _launchd.ACCESS_SOCKET
-    deadline = time.monotonic() + 10
-    while not address.exists() and time.monotonic() < deadline:
-        time.sleep(0.25)
-    info = address.lstat()
-    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o660:
-        raise InstallError('native-access-socket-unavailable')
+def _read_access_readiness(address, deadline):
+    """Bound the entire status exchange, including a trickled response."""
+    def remaining():
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise TimeoutError('access readiness deadline exhausted')
+        return budget
+
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(20)
+        connection.settimeout(remaining())
         connection.connect(str(address))
+        connection.settimeout(remaining())
         connection.sendall(b'{"operation":"status"}\n')
-        with connection.makefile('rb') as stream:
-            raw = stream.readline(65537)
+        raw = bytearray()
+        while len(raw) <= 65536:
+            connection.settimeout(remaining())
+            chunk = connection.recv(min(4096, 65537 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if b'\n' in chunk:
+                break
+        remaining()
     if len(raw) > 65536 or not raw.endswith(b'\n'):
         raise InstallError('native-access-readiness-failed')
-    value = json.loads(raw)
-    if (type(value) is not dict or value.get('status') != 200
-            or not _access_response_ready(value.get('body'), upgrade_guard=upgrade_guard)
-            or service.pid(require_running=True) != pid):
-        raise InstallError('native-access-readiness-failed')
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeError):
+        raise InstallError('native-access-readiness-failed') from None
+
+
+def _ready_access(service, *, upgrade_guard=False, timeout=300):
+    """Retry transient startup status while retaining the same trusted service."""
+    pid = service.pid(require_running=True)
+    address = _launchd.ACCESS_SOCKET
+    deadline = time.monotonic() + timeout
+    socket_deadline = min(deadline, time.monotonic() + 10)
+    while not address.exists() and time.monotonic() < socket_deadline:
+        time.sleep(min(0.25, max(0, socket_deadline - time.monotonic())))
+
+    def socket_identity():
+        try:
+            info = address.lstat()
+        except OSError:
+            raise InstallError('native-access-socket-unavailable') from None
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o660:
+            raise InstallError('native-access-socket-unavailable')
+        return info.st_dev, info.st_ino
+
+    identity = socket_identity()
+    while time.monotonic() < deadline:
+        if service.pid(require_running=True) != pid or socket_identity() != identity:
+            raise InstallError('native-access-readiness-failed')
+        retry = False
+        try:
+            # Status may take longer than the former 20-second socket limit.
+            # Reserve time for retries rather than one 340-second stalled read.
+            value = _read_access_readiness(address, min(deadline, time.monotonic() + 60))
+        except (TimeoutError, ConnectionRefusedError):
+            retry = True
+            value = None
+        if service.pid(require_running=True) != pid or socket_identity() != identity:
+            raise InstallError('native-access-readiness-failed')
+        if not retry:
+            if type(value) is not dict or value.get('status') != 200:
+                raise InstallError('native-access-readiness-failed')
+            body = value.get('body')
+            if _access_response_ready(body, upgrade_guard=upgrade_guard):
+                if time.monotonic() >= deadline:
+                    break
+                return
+            if (type(body) is not dict or body.get('available') is not False
+                    or body.get('reason') != 'runtime-unavailable-or-busy'):
+                raise InstallError('native-access-readiness-failed')
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    raise InstallError('native-access-readiness-failed')
 
 
 def _migration_phase(plan, journal, value):
