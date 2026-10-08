@@ -1821,6 +1821,7 @@ ENV_EOF
         . "$SCRIPT_DIR/installers/lib/extension-env-carry.sh"
         ods_carry_extension_env_keys "$_phase06_previous_env" "$INSTALL_DIR/.env" \
             "$SCRIPT_DIR/extensions/services" "$INSTALL_DIR/data/user-extensions"
+        ods_carry_public_url_env_keys "$_phase06_previous_env" "$INSTALL_DIR/.env"
         rm -f "$_phase06_previous_env"
     fi
     unset _phase06_previous_env
