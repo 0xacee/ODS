@@ -1471,6 +1471,14 @@ Fix with: sudo chown -R \$(id -u):\$(id -g) $INSTALL_DIR/config $INSTALL_DIR/dat
     # subsequent phases — later mkdirs create container-bind-mount dirs that
     # need world-traverse (e.g. SearXNG runs as uid 977).
     # The chmod 600 below is belt-and-braces.
+    # The template only knows ODS's own keys. Snapshot the previous .env so the
+    # settings bundled and installed extensions own can be carried over after
+    # the rewrite.
+    _phase06_previous_env=""
+    if [[ -f "$INSTALL_DIR/.env" ]]; then
+        _phase06_previous_env="$(mktemp)" || return 1
+        cp "$INSTALL_DIR/.env" "$_phase06_previous_env" || return 1
+    fi
     (
         umask 077
         cat > "$INSTALL_DIR/.env" << ENV_EOF
@@ -1778,6 +1786,14 @@ ENV_EOF
     )
 
     chmod 600 "$INSTALL_DIR/.env"  # Secure secrets file
+    if [[ -n "$_phase06_previous_env" ]]; then
+        # shellcheck source=../lib/extension-env-carry.sh
+        . "$SCRIPT_DIR/installers/lib/extension-env-carry.sh"
+        ods_carry_extension_env_keys "$_phase06_previous_env" "$INSTALL_DIR/.env" \
+            "$SCRIPT_DIR/extensions/services" "$INSTALL_DIR/data/user-extensions"
+        rm -f "$_phase06_previous_env"
+    fi
+    unset _phase06_previous_env
     # Docker Desktop's daemon is outside the installing WSL namespace.
     # Prepare its authenticated control address before phase 07 starts the
     # host agent and before Compose inherits dashboard-api's environment.
