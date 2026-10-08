@@ -627,8 +627,9 @@ else
     if ! $_phase06_rootless; then
         for _data_dir in "$INSTALL_DIR"/data/*/; do
             [[ "${ENABLE_HERMES:-false}" == "true" && "$_data_dir" == "$INSTALL_DIR/data/hermes/" ]] && continue
-            # Private retained chat results belong to Dashboard UID 1000.
+            # Private chat results and image history belong to Dashboard UID 1000.
             [[ "$_data_dir" == "$INSTALL_DIR/data/pixel-chat-results/" ]] && continue
+            [[ "$_data_dir" == "$INSTALL_DIR/data/pixel-images/" ]] && continue
             # Token Spy's persistent directory intentionally belongs to its
             # container UID 1000; phase 06 verifies that identity below.
             [[ "$_data_dir" == "$INSTALL_DIR/data/token-spy/" ]] && continue
@@ -656,6 +657,7 @@ else
             for _d in "$INSTALL_DIR/$_root"/*/; do
                 [[ "${ENABLE_HERMES:-false}" == "true" && "$_d" == "$INSTALL_DIR/data/hermes/" ]] && continue
                 [[ "$_d" == "$INSTALL_DIR/data/pixel-chat-results/" ]] && continue
+                [[ "$_d" == "$INSTALL_DIR/data/pixel-images/" ]] && continue
                 [[ "$_d" == "$INSTALL_DIR/data/token-spy/" ]] && continue
                 [[ "$_d" == "$INSTALL_DIR/data/ape/" ]] && continue
                 [[ -d "$_d" ]] && ! [[ -w "$_d" ]] && _cant_write="$_cant_write ${_d#"$INSTALL_DIR"/}"
