@@ -11472,6 +11472,12 @@ class AgentHandler(BaseHTTPRequestHandler):
             logger.warning("env_update rejected: invalid JSON from %s: %s", client_ip, exc)
             json_response(self, 400, {"error": f"Invalid JSON: {exc}"})
             return
+        # read_json_body() rejects non-object JSON; this handler bypasses it
+        # for the larger size limit, so apply the same check here.
+        if not isinstance(body, dict):
+            logger.warning("env_update rejected: JSON body is not an object from %s", client_ip)
+            json_response(self, 400, {"error": "JSON body must be an object"})
+            return
 
         raw_text = body.get("raw_text")
         if not isinstance(raw_text, str) or not raw_text.strip():
@@ -11572,11 +11578,14 @@ class AgentHandler(BaseHTTPRequestHandler):
             return
 
         requested = body.get("service_ids", [])
-        unique_service_ids = sorted(set(requested)) if isinstance(requested, list) else requested
-        ok, error = validate_core_recreate_ids(unique_service_ids)
+        # Validate before deduplicating: set() and sorted() raise on
+        # unhashable or mixed-type elements, which drops the connection
+        # instead of answering 400.
+        ok, error = validate_core_recreate_ids(requested)
         if not ok:
             json_response(self, 400, {"error": error})
             return
+        unique_service_ids = sorted(set(requested))
 
         locks = []
         try:
