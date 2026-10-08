@@ -21,6 +21,7 @@ import {
   ODS_WORKSPACE_NEW_STATIC_CONTRACT,
   ODS_WORKSPACE_PREVIEW_CONTRACT,
   ODS_WORKSPACE_VISUAL_CONTINUATION_CONTRACT,
+  ODS_WORKSPACE_VERIFICATION_CONTINUATION_CONTRACT,
   githubSourceContract,
   needsLoopRecovery,
   operationsRequestContract,
@@ -908,4 +909,19 @@ test("document route preserves ordinary, remote, informational and forbidden-too
   const messages = [{role:'user',content:'Download report.pdf.'}, {role:'assistant',content:'Attach the file.'}, {role:'user',content:'Thanks.'}];
   assert.equal(selects(messages), false);
   assert.equal(selects([{role:'assistant',content:'Download report.pdf.'}]), false);
+});
+
+
+test("verification follow-up guidance permits unchanged republication without a dummy edit", () => {
+  const prompt = "Please finish verifying the preview: add an item, mark it packed, and check that the progress counter updates correctly. Fix anything that fails.";
+  for (const request of [prompt, "Verify the current preview."]) {
+  const result = promptContractForAgent(
+    { agentId: "pixel", contextTokenBudget: 16384 }, "pixel", { prompt: request },
+    { configuredLeanPrompt: true }
+  );
+  assert.ok(result.appendSystemContext.includes(ODS_WORKSPACE_VERIFICATION_CONTINUATION_CONTRACT));
+  assert.ok(!result.appendSystemContext.includes(ODS_WORKSPACE_VISUAL_CONTINUATION_CONTRACT));
+  assert.match(result.appendSystemContext, /do not make a dummy edit/);
+  assert.match(result.appendSystemContext, /exact new siteId and full sha256/);
+  }
 });

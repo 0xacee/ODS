@@ -141,6 +141,52 @@ def disabled_volume_provenance(root: Path, trusted_root: Path) -> dict[str, set[
                     found.setdefault(key, set()).add(
                         (path.parent.name, str(enabled_path.resolve()))
                     )
+    for key, owners in native_stack_volume_provenance(root, trusted_root).items():
+        found.setdefault(key, set()).update(owners)
+    return found
+
+
+# install-macos.sh runs the native-Pixel stack with these ODS-shipped recipes
+# in their .disabled form, including the shared edge transition-state volume.
+# A native install that stops after starting the stack never adds these files
+# to .compose-flags, so ownership must also use the containers' recipe paths.
+NATIVE_STACK_RECIPES = (
+    "installers/macos/pixel-native.compose.yaml.disabled",
+    "extensions/services/pixel-edge/compose.yaml.disabled",
+)
+SERVICE_DECLARATION_RE = re.compile(r"^  ([a-z0-9][a-z0-9_-]*):\s*$")
+
+
+def compose_service_names(path: Path) -> set[str]:
+    """Top-level service names declared in a plain Compose recipe."""
+    names: set[str] = set()
+    in_services = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line == "services:":
+            in_services = True
+            continue
+        if in_services and line and not line[0].isspace():
+            break
+        match = SERVICE_DECLARATION_RE.fullmatch(line) if in_services else None
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+def native_stack_volume_provenance(root: Path, trusted_root: Path) -> dict[str, set[tuple[str, str]]]:
+    found: dict[str, set[tuple[str, str]]] = {}
+    for relative in NATIVE_STACK_RECIPES:
+        path = root / relative
+        if path.is_symlink() or not path.is_file():
+            continue
+        services = compose_service_names(path)
+        for key in trusted_plain_volume_keys(root, only_file=path):
+            if (trusted_root != root and
+                    key not in trusted_plain_volume_keys(trusted_root, only_file=trusted_root / relative)):
+                continue
+            found.setdefault(key, set()).update(
+                (service, str(path.resolve())) for service in services
+            )
     return found
 
 
