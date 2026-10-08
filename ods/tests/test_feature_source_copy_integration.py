@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from test_feature_source_hold import feature_functions
-from test_pixel_source_upgrade import trees, held, upgrade
+from test_pixel_source_upgrade import trees as trees, held, upgrade
 
 
 ROOT = Path(__file__).resolve().parents[1]
