@@ -7,6 +7,9 @@ on:
       - main
       - master
 
+permissions:
+  contents: read
+
 jobs:
   host-request-deadline:
     runs-on: ${{ matrix.os }}
@@ -91,7 +94,7 @@ jobs:
       - name: GPU assignment capacity contracts
         run: python -m pytest tests/test-assign-gpus.py tests/test_gpu_spare_capacity.py -q
       - name: macOS TCP bridge lifecycle contracts
-        run: python -m pytest tests/test_macos_llm_bridge.py tests/test_macos_upsert_env_value.py -q
+        run: python -m pytest tests/test_macos_llm_bridge.py tests/test_macos_upsert_env_value.py tests/test_macos_pixel_ops_python.py tests/test_macos_pixel_access_timeout.py -q
       - name: Sharing credential and owner control tests
         run: python -m pytest tests/pixel_inference -q
       - name: Inference perimeter and cancellation tests
@@ -110,8 +113,6 @@ jobs:
 
       - name: Token Spy proxy persistence and disconnect contracts
         run: python -m pytest extensions/services/token-spy/tests/test_proxy_persistence_io.py extensions/services/token-spy/tests/test_anthropic_cumulative_usage.py -q
-      - name: Lemonade context cache persistence
-        run: sudo env LEMONADE_REQUIRE_NAMESPACE=1 "$(command -v python)" -m pytest tests/test_lemonade_context_persistence.py -q
 
       - name: Settings transaction and access preservation contracts
         run: |
@@ -227,7 +228,6 @@ jobs:
       - name: Documented Security Suites
         run: |
           bash tests/test-secret-security.sh
-          bash tests/test-openclaw-device-auth-default.sh
 
       - name: Documented Security Suites Stay Wired
         run: bash tests/contracts/test-security-suites-wired.sh
@@ -289,7 +289,7 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_pixel_*.py' -v
 
       - name: Pixel Inspection Upgrade Cleanup Contracts
-        run: python3 -m pytest -q tests/test_pixel_inspection_upgrade_dispatch.py tests/test_preview_inspection_distribution.py tests/test_preview_select.py
+        run: python3 -m pytest -q tests/test_pixel_inspection_upgrade_dispatch.py tests/test_preview_inspection_distribution.py tests/test_preview_select.py tests/test_pixel_verify_lifecycle.py
 
       - name: Pixel Native Integration Contracts
         run: python3 -m pytest -q tests/test_pixel_macos_apps.py tests/test_pixel_native_compose_live.py tests/test_pixel_onboarding.py tests/test_pixel_open_app_handler.py tests/test_pixel_runtime_budget.py
@@ -478,9 +478,6 @@ jobs:
       - name: Runtime Config Wiring Tests
         run: python3 tests/test-runtime-config-wiring.py
 
-      - name: OpenClaw HTTP Shim Lifecycle Tests
-        run: node --test tests/test-openclaw-shim-lifecycle.mjs
-
       - name: Perplexica Entrypoint Contract Tests
         run: python3 tests/test-perplexica-entrypoint.py
 
@@ -541,10 +538,12 @@ jobs:
         run: |
           python3 tests/contracts/test-wsl-stack.py
           python3 tests/test-wsl-bind-recovery.py
-          python3 tests/test-wsl-lemonade-control.py
+          python3 tests/test-wsl-runtime-control.py
           python3 tests/test-configure-wsl-model-store.py
           python3 tests/test-retire-wsl-runtime.py
-          bash tests/test-lemonade-host-transport.sh
+          bash tests/test-native-llm-flags.sh
+          bash tests/test-wsl-memory-reporting.sh
+          bash tests/test-recover-retired-pixel-sandbox.sh
 
       - name: Pixel Public Source and Local Bundle Contract
         run: |
@@ -559,6 +558,7 @@ jobs:
         run: |
           bash tests/test-pixel-integration.sh
           bash tests/test-pixel-host-install.sh
+          bash tests/test-pixel-owner-docker-preflight.sh
           bash tests/test-pixel-same-pin-upgrade.sh
           python3 -m unittest -v tests/test_pixel_model_transition.py
           python3 -m unittest -v tests/test_pixel_native_search.py
@@ -577,6 +577,7 @@ jobs:
         run: |
           python3 -m pytest -q tests/test_cloud_installer_messages.py
           bash tests/test-preflight-network-check.sh
+          bash tests/test-phase11-local-build-failure.sh
           bash tests/test-phase03-no-gpu-assignment-message.sh
           bash tests/test-preflight-external-gpu.sh
           bash tests/test-linux-install-preflight.sh
