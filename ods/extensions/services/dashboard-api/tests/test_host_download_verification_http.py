@@ -11,7 +11,7 @@ import pytest
 from test_host_agent import _mod as host
 
 
-@pytest.mark.parametrize("outcome", ["cancel", "hash-failure"])
+@pytest.mark.parametrize("outcome", ["cancel", "hash-failure", "read-failure"])
 def test_existing_artifact_verification_can_be_cancelled_and_retried(tmp_path, monkeypatch, test_client, outcome):
     from routers import models as api
     import host_agent_client
@@ -49,6 +49,8 @@ def test_existing_artifact_verification_can_be_cancelled_and_retried(tmp_path, m
             assert release.wait(5), "Test must release verification"
             if outcome == "hash-failure":
                 raise RuntimeError("Hash provider failed during verification")
+            if outcome == "read-failure":
+                raise OSError("Transient read failed during verification")
             self.digest.update(chunk)
 
         def hexdigest(self):
@@ -96,7 +98,8 @@ def test_existing_artifact_verification_can_be_cancelled_and_retried(tmp_path, m
             assert terminal["lastTerminalStatus"]["status"] == "cancelled"
         else:
             assert terminal["status"] == "failed"
-            assert "Hash provider failed" in terminal["error"]
+            expected_error = "Transient read failed" if outcome == "read-failure" else "Hash provider failed"
+            assert expected_error in terminal["error"]
         monkeypatch.setattr(host.hashlib, "sha256", real_sha256)
         retry = test_client.post("/api/models/existing/download", headers=test_client.auth_headers)
         assert retry.status_code == 200

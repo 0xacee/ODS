@@ -1838,15 +1838,24 @@ def _verify_model_artifact(
     path: Path,
     artifact: dict,
     cancel_event: threading.Event | None = None,
+    *,
+    raise_on_error: bool = False,
 ) -> tuple[bool, str]:
     """Verify one model artifact against exact catalog integrity metadata."""
+    def verification_error(reason: str) -> tuple[bool, str]:
+        # A failed inspection is not proof of corrupt content. Callers that
+        # replace existing artifacts must stop without deleting those files.
+        if raise_on_error:
+            raise RuntimeError(reason)
+        return False, reason
+
     try:
         if not path.is_file():
             return False, "file is missing"
         initial_stat = path.stat()
         actual_size = initial_stat.st_size
     except OSError as exc:
-        return False, f"file could not be inspected: {exc}"
+        return verification_error(f"file could not be inspected: {exc}")
     if actual_size <= 0:
         return False, "file is empty"
 
@@ -1857,11 +1866,11 @@ def _verify_model_artifact(
     expected_sha = str(artifact.get("sha256") or "").strip().lower()
     if expected_sha:
         if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
-            return False, "catalog SHA256 is malformed"
+            return verification_error("catalog SHA256 is malformed")
         try:
             resolved_path = str(path.resolve(strict=True))
         except (OSError, RuntimeError) as exc:
-            return False, f"file could not be resolved: {exc}"
+            return verification_error(f"file could not be resolved: {exc}")
         verification_signature = (
             initial_stat.st_dev,
             initial_stat.st_ino,
@@ -1907,11 +1916,11 @@ def _verify_model_artifact(
                         return False, "verification cancelled"
                     digest.update(chunk)
         except OSError as exc:
-            return False, f"file could not be hashed: {exc}"
+            return verification_error(f"file could not be hashed: {exc}")
         try:
             final_stat = path.stat()
         except OSError as exc:
-            return False, f"file could not be inspected after hashing: {exc}"
+            return verification_error(f"file could not be inspected after hashing: {exc}")
         final_signature = (
             final_stat.st_dev,
             final_stat.st_ino,
@@ -1924,7 +1933,7 @@ def _verify_model_artifact(
         if final_signature != verification_signature:
             with _model_artifact_verification_cache_lock:
                 _model_artifact_verification_cache.pop(resolved_path, None)
-            return False, "file changed during verification"
+            return verification_error("file changed during verification")
         actual_sha = digest.hexdigest()
         if actual_sha != expected_sha:
             with _model_artifact_verification_cache_lock:
@@ -1939,7 +1948,7 @@ def _verify_model_artifact(
             )
             sampled_stat = path.stat()
         except OSError as exc:
-            return False, f"file could not be sampled after hashing: {exc}"
+            return verification_error(f"file could not be sampled after hashing: {exc}")
         sampled_signature = (
             sampled_stat.st_dev,
             sampled_stat.st_ino,
@@ -1950,14 +1959,14 @@ def _verify_model_artifact(
             expected_sha,
         )
         if sampled_signature != verification_signature:
-            return False, "file changed after verification"
+            return verification_error("file changed after verification")
         with _model_artifact_verification_cache_lock:
             _model_artifact_verification_cache[resolved_path] = (
                 verification_signature,
                 sampled_digest,
             )
     elif expected_size is None:
-        return False, "catalog has no exact size or SHA256"
+        return verification_error("catalog has no exact size or SHA256")
 
     if cancel_event is not None and cancel_event.is_set():
         return False, "verification cancelled"
@@ -12861,6 +12870,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                             _write_model_status(status_path, "verifying", filename, 0, target.stat().st_size)
                         valid, reason = _verify_model_artifact(
                             target, artifact_by_file[filename], _model_download_cancel,
+                            raise_on_error=True,
                         )
                         if _model_download_cancel.is_set():
                             _finish_cancelled_download()
