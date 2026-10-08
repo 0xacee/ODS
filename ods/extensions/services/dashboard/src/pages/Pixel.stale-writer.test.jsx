@@ -143,6 +143,43 @@ it('does not rewrite a recovered completion when the original sender presses Sto
   expect(within(sender.container).queryByRole('button',{name:'Download recovery copy'})).not.toBeInTheDocument()
 })
 
+it.each(['ack-first','stream-first'])('recovers observer Stop without stale conflicts or lost partial work (%s)',async order=>{
+  const {sender,deliver} = await startDeferredSender()
+  const first = 'data: {"choices":[{"delta":{"content":"First saved step. "}}]}\n\n'
+  const second = 'data: {"choices":[{"delta":{"content":"Later saved step."}}]}\n\n'
+  const ending = 'data: {"error":"upstream error"}\n\ndata: [DONE]\n\n'
+  let cancelled = false, finishCancel
+  const originalFetch = fetch.getMockImplementation()
+  fetch.mockImplementation(async(url,options)=>{
+    if(url==='/api/pixel/chat/result')return {ok:true,json:async()=>({state:cancelled?'cancelled':'active',events:cancelled?first+second+ending:''})}
+    if(url==='/api/pixel/chat/cancel')return new Promise(resolve=>{finishCancel=()=>resolve({ok:true,json:async()=>({aborted:true})})})
+    return originalFetch(url,options)
+  })
+  await deliver(first)
+  const observer = render(<Pixel/>)
+  await within(observer.container).findByText(/previous request is still active/)
+  // The source advances after observer hydration; Stop must retain that work.
+  await deliver(second)
+  fireEvent.click(within(observer.container).getByTitle('Stop'))
+  await waitFor(()=>expect(finishCancel).toBeTypeOf('function'))
+  if(order==='stream-first')await deliver(ending)
+  cancelled = true
+  await act(async()=>finishCancel())
+  if(order==='ack-first') {
+    await within(observer.container).findByText('Response stopped')
+    await deliver(ending)
+  }
+  for(const view of [sender,observer]) {
+    expect(await within(view.container).findByText('Response stopped',{}, {timeout:4000})).toBeVisible()
+    expect(within(view.container).queryByRole('button',{name:'Download recovery copy'})).not.toBeInTheDocument()
+    expect(within(view.container).queryByText(/Portal could not complete the response/)).not.toBeInTheDocument()
+  }
+  expect(stored()).toMatchObject({requestId:null,inFlight:false,interrupted:false})
+  expect(stored().messages.at(-1)).toMatchObject({status:'stopped'})
+  expect(stored().messages.at(-1).content).toContain('First saved step. Later saved step.')
+  expect(fetch.mock.calls.filter(([url])=>url==='/api/pixel/chat/stream')).toHaveLength(1)
+})
+
 it('persists recovery after the original mounted sender closes and survives another reload',async()=>{
   const {sender,completeBackend} = await startDeferredSender()
   sender.unmount()

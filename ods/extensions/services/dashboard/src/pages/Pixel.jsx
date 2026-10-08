@@ -1429,6 +1429,14 @@ export default function Pixel({ systemStatus = null }) {
       // rewrite that completed answer as owner-stopped.
       if (stopRequestRef.current !== stopRequest || chatIdRef.current !== chatId || requestIdRef.current !== requestId || abortRef.current !== controller
         || (restored && !['active', 'unknown'].includes(restoredActivityRef.current))) return
+      if (restored && requestId) {
+        // The observer's partial transcript can predate the sender's latest
+        // save. Settle the acknowledged request through retained-result
+        // recovery, which preserves that work and grants an exact handoff.
+        updateRestoredActivity('checking')
+        setActivityRefresh(value => value + 1)
+        return
+      }
       controller?.abort()
       abortRef.current = null
       requestIdRef.current = null
