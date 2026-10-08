@@ -40,7 +40,19 @@ ods_carry_extension_env_keys() {
                 fi
                 printf '%s\n' "$line" >> "$new_env"
             done < <(awk '
+                /^[[:space:]]*($|#)/ { next }
+                {
+                    match($0, /^[[:space:]]*/)
+                    indent = RLENGTH
+                    if (in_env && indent <= env_indent) in_env = 0
+                }
+                /^[[:space:]]*env_vars:[[:space:]]*($|#)/ {
+                    in_env = 1
+                    env_indent = indent
+                    next
+                }
                 /^[[:space:]]*-[[:space:]]*key:[[:space:]]*/ {
+                    if (!in_env) next
                     k = $0
                     sub(/^[[:space:]]*-[[:space:]]*key:[[:space:]]*/, "", k)
                     gsub(/["\047[:space:]]/, "", k)

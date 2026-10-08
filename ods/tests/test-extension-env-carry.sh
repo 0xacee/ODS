@@ -116,5 +116,46 @@ else
     fail "phase 06 does not pass the bundled extensions to the carry-over"
 fi
 
+mkdir -p "$tmp/scoped/sample"
+cat > "$tmp/scoped/sample/manifest.yaml" <<'YAML'
+service:
+  unrelated:
+    - key: DECOY_KEY
+    - key: SHARED_KEY
+  env_vars:
+    # Comments and blank lines must not terminate the declared settings.
+
+    - key: SHARED_KEY
+    - key: "QUOTED_KEY"
+    - key: BAD.KEY
+  later_section:
+    - key: LATER_KEY
+YAML
+cat > "$tmp/scoped-old.env" <<'ENV'
+DECOY_KEY=unrelated
+SHARED_KEY=declared
+QUOTED_KEY=quoted
+BAD.KEY=invalid
+LATER_KEY=unrelated
+ENV
+printf 'WEBUI_SECRET=current\n' > "$tmp/scoped-new.env"
+chmod 600 "$tmp/scoped-new.env"
+ods_carry_extension_env_keys "$tmp/scoped-old.env" "$tmp/scoped-new.env" "$tmp/scoped"
+if grep -Eq '^(DECOY_KEY|LATER_KEY|BAD.KEY)=' "$tmp/scoped-new.env"; then
+    fail "unrelated sections or invalid identifiers were carried"
+else
+    pass "only env_vars declarations with valid identifiers are carried"
+fi
+if grep -qx 'SHARED_KEY=declared' "$tmp/scoped-new.env" && grep -qx 'QUOTED_KEY=quoted' "$tmp/scoped-new.env"; then
+    pass "declared and quoted keys survive comments and blank lines"
+else
+    fail "declared or quoted key missing"
+fi
+if [[ "$(stat -c %a "$tmp/scoped-new.env" 2>/dev/null || stat -f %Lp "$tmp/scoped-new.env")" == 600 ]]; then
+    pass "carrying extension settings preserves private env permissions"
+else
+    fail "carrying extension settings changed private env permissions"
+fi
+
 [[ $FAILED -eq 0 ]] || { echo "$FAILED check(s) failed" >&2; exit 1; }
 echo "All extension .env carry-over checks passed"
