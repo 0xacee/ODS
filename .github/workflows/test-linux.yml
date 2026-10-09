@@ -500,6 +500,7 @@ jobs:
           docker run --rm --network none --entrypoint cat caddy:2.11.3-alpine /usr/bin/caddy > "$RUNNER_TEMP/ods-test-caddy"
           chmod 700 "$RUNNER_TEMP/ods-test-caddy"
           python3 tests/test-hermes-proxy-access.py --caddy-bin "$RUNNER_TEMP/ods-test-caddy" -v
+          python3 tests/test-ods-proxy-port-redirect.py --caddy-bin "$RUNNER_TEMP/ods-test-caddy" -v
 
       - name: Hermes Slash Worker Prune Tests
         run: |
