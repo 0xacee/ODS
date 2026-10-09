@@ -3318,7 +3318,11 @@ cmd_purge() {
 
     # Check if container is still running (disable may have failed to stop it)
     local _container="${SERVICE_CONTAINERS[$service_id]:-ods-$service_id}"
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${_container}$"; then
+    local _running_containers
+    if ! _running_containers=$(docker ps --format '{{.Names}}'); then
+        error "Cannot verify whether $service_id is running. Restore Docker connectivity and retry; data was not deleted."
+    fi
+    if grep -Fxq -- "$_container" <<< "$_running_containers"; then
         error "$service_id container is still running. Run 'ods stop $service_id' first."
     fi
 
