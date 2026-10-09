@@ -204,7 +204,9 @@ class HTTPHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     time.sleep(0.04)
             else:
-                self.wfile.write(b"x" * 65537 if self.server.mode == "large" else b'{"status":"ok"}')
+                sizes = {"large": 65537, "stream": 400000, "huge": 2097153}
+                size = sizes.get(self.server.mode)
+                self.wfile.write(b"x" * size if size else b'{"status":"ok"}')
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass  # The timeout and size-limit tests intentionally close early.
 
@@ -311,13 +313,20 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result.stdout, b"")
 
     def test_envelope_still_refuses_redirects_and_oversized_answers(self):
-        for mode, needle in (("redirect", b"HTTP 302"), ("large", b"response exceeds 64 KiB")):
+        for mode, needle in (("redirect", b"HTTP 302"), ("huge", b"response exceeds 2 MiB")):
             self.server.mode = mode
             result = self.worker(envelope=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, b"")
             self.assertIn(needle, result.stderr)
         self.assertNotIn("/should-never-be-requested", [request[0] for request in self.server.requests])
+
+    def test_envelope_carries_a_streamed_probe_answer(self):
+        # One JSON event per token: a thinking model's 1,000 tokens are ~400 KB.
+        self.server.mode = "stream"
+        result = self.worker(envelope=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(json.loads(result.stdout)["body"]), 400000)
 
     def test_oversized_response_produces_no_partial_output(self):
         self.server.mode = "large"

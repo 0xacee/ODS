@@ -44,6 +44,9 @@ class _Server(http.server.BaseHTTPRequestHandler):
             self._send(200, PROPS)
         elif self.path == "/redirect":
             self._send(302, "", {"Location": "http://example.invalid/"})
+        elif self.path in ("/stream", "/huge"):
+            # A streamed answer is one JSON event per token.
+            self._send(200, "x" * (400000 if self.path == "/stream" else runner.RESPONSE_LIMIT + 1))
         else:
             self._send(404, {"error": "not found"})
 
@@ -93,3 +96,10 @@ def test_runner_refuses_redirects_and_a_missing_key(server, monkeypatch):
     monkeypatch.delenv("FIXTURE_LLAMA_KEY", raising=False)
     with pytest.raises(SystemExit):
         runner.main(["--url", server, "--api-key-env", "FIXTURE_LLAMA_KEY"])
+
+
+def test_runner_takes_a_streamed_answer_and_bounds_a_larger_one(server):
+    exchange = runner.http_exchange(server)
+    assert len(exchange("/stream", None, 5)[1]) == 400000
+    with pytest.raises(OSError, match="exceeds"):
+        exchange("/huge", None, 5)

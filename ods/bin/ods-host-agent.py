@@ -15499,7 +15499,9 @@ class _RefuseRedirects(urllib_request.HTTPRedirectHandler):
 
 
 # Probe answers are small; a streamed tool call with its deltas stays far below this.
-_RUNTIME_EXCHANGE_LIMIT = 262144
+# A streamed probe answer is one JSON event per token: about 400 KB for the
+# 1,000 tokens a thinking model may use (Tower3, 2026-10-09).
+_RUNTIME_EXCHANGE_LIMIT = 2097152
 
 
 def _runtime_exchange(

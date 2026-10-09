@@ -20,7 +20,7 @@ from urllib import request as urllib_request
 
 from . import probes
 
-RESPONSE_LIMIT = 256 * 1024  # the host agent's bound for one probe answer
+RESPONSE_LIMIT = 2 * 1024 * 1024  # the host agent's bound for one probe answer
 
 
 class _RefuseRedirects(urllib_request.HTTPRedirectHandler):
