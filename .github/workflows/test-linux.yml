@@ -317,6 +317,7 @@ jobs:
       - name: Validate Manifests Tests
         run: |
           bash tests/test-validate-manifests.sh
+          python3 tests/test-cli-config-validation.py -v
           bash tests/test-validate-manifest-schema.sh
 
       - name: Health Check Tests
