@@ -15115,15 +15115,30 @@ class AgentHandler(BaseHTTPRequestHandler):
                 cleanup_pending = True
 
             status_path = INSTALL_DIR / "data" / "model-download-status.json"
-            if status_path.exists():
-                try:
-                    status_data = json.loads(status_path.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    status_path.unlink(missing_ok=True)
-                else:
-                    status_model = _download_status_model_token(status_data.get("model"))
-                    if status_model in deleted_names:
-                        _write_model_status(status_path, "idle", "", 0, 0)
+            try:
+                if status_path.exists():
+                    try:
+                        status_data = json.loads(status_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        status_path.unlink(missing_ok=True)
+                    else:
+                        if not isinstance(status_data, dict):
+                            raise ValueError("Model download status must be an object")
+                        status_model = _download_status_model_token(status_data.get("model"))
+                        if status_model in deleted_names:
+                            _write_model_status(status_path, "idle", "", 0, 0)
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                # Retirement already committed. A metadata error must not hide
+                # that fact or the location of bytes still awaiting cleanup.
+                payload = {
+                    "error": "Model was removed from the library, but download status could not be updated",
+                    "code": "model_delete_status_update_failed",
+                    "deletionCommitted": True,
+                }
+                if cleanup_pending:
+                    payload.update(cleanupPending=True, recoveryDirectory=staging.name)
+                json_response(self, 500, payload)
+                return
             if cleanup_pending:
                 json_response(self, 500, {
                     "error": "Model was removed from the library, but disk cleanup is incomplete; remove the remaining recovery directory",

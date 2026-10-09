@@ -8568,6 +8568,44 @@ class TestModelDeleteSafety:
         assert status.read_bytes() == before
         assert not list(models.glob(".ods-model-delete-*"))
 
+    @pytest.mark.parametrize("cleanup_fails", [False, True])
+    @pytest.mark.parametrize("status_failure", ["helper", "invalid_status_unlink", "status_list", "status_null"])
+    def test_split_status_failure_reports_committed_deletion(
+        self, tmp_path, monkeypatch, cleanup_fails, status_failure,
+    ):
+        models, parts, status = self._split_fixture(tmp_path, monkeypatch)
+        original_unlink = Path.unlink
+        if status_failure == "invalid_status_unlink":
+            status.write_text("{invalid status", encoding="utf-8")
+        elif status_failure in {"status_list", "status_null"}:
+            status.write_text("[]" if status_failure == "status_list" else "null", encoding="utf-8")
+        else:
+            def fail_status_write(*_args, **_kwargs):
+                raise OSError("status writer failed")
+            monkeypatch.setattr(_mod, "_write_model_status", fail_status_write)
+
+        def fail_cleanup_or_status(path, *args, **kwargs):
+            if status_failure == "invalid_status_unlink" and path == status:
+                raise PermissionError("status file cannot be removed")
+            if cleanup_fails and path.parent.name.startswith(".ods-model-delete-") and path.name == parts[1].name:
+                raise PermissionError("staged cleanup unavailable")
+            return original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", fail_cleanup_or_status)
+        handler = _FakeHandler(json.dumps({"gguf_file": parts[0].name}).encode())
+        _mod.AgentHandler._handle_model_delete(handler)
+        response = handler.parse_response()
+        assert handler.response_code == 500
+        assert response["code"] == "model_delete_status_update_failed"
+        assert response["deletionCommitted"] is True
+        assert not any(part.exists() for part in parts)
+        if cleanup_fails:
+            assert response["cleanupPending"] is True
+            assert (models / response["recoveryDirectory"] / parts[1].name).read_bytes() == b"part-1"
+        else:
+            assert "recoveryDirectory" not in response
+            assert not list(models.glob(".ods-model-delete-*"))
+
     def test_split_restore_does_not_overwrite_recreated_name(self, tmp_path, monkeypatch):
         models, parts, _status = self._split_fixture(tmp_path, monkeypatch)
         original = Path.rename
