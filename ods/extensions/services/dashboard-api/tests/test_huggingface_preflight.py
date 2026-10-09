@@ -381,3 +381,68 @@ def test_storage_check_allows_for_a_windows_managed_model_store(monkeypatch):
     # the old 5 s budget dropped the disk check there on every preflight.
     assert seen == [("GET", "/v1/model/storage", models_router._MODEL_STORAGE_TIMEOUT_SECONDS)]
     assert models_router._MODEL_STORAGE_TIMEOUT_SECONDS >= 15
+
+
+def _busy(operation):
+    from fastapi import HTTPException
+
+    return HTTPException(status_code=409, detail={
+        "error": f"Cannot start model download while {operation} is in progress",
+        "code": "model_lifecycle_busy", "activeOperation": operation, "activeTarget": "x.gguf"})
+
+
+def test_import_waits_out_a_short_lifecycle_hold(test_client, preflight_env, monkeypatch):
+    models_router, _state = preflight_env
+    calls = []
+
+    def agent(path, payload):
+        calls.append(path)
+        if len(calls) < 3:
+            # The integrity check a restarted agent runs, then a Pixel re-proof.
+            raise _busy("artifact_verification" if len(calls) == 1 else "pixel_access_mode")
+        return {"status": "started"}
+
+    monkeypatch.setattr(models_router, "_call_agent_model", agent)
+    monkeypatch.setattr(models_router.time, "sleep", lambda _seconds: None)
+
+    response = _import(test_client)
+
+    assert response.status_code == 200
+    assert calls == ["/v1/model/download"] * 3
+
+
+def test_a_busy_host_refuses_the_import_in_words_without_starting_it(test_client, preflight_env, monkeypatch):
+    models_router, _state = preflight_env
+    calls = []
+
+    def agent(path, payload):
+        calls.append(path)
+        raise _busy("model_activation")
+
+    monkeypatch.setattr(models_router, "_call_agent_model", agent)
+
+    response = _import(test_client)
+
+    assert response.status_code == 409
+    assert response.headers["X-ODS-Import-Started"] == "false"
+    assert response.json()["detail"]["message"] == (
+        "ODS is switching models right now, so this download cannot start yet. Try again in a minute.")
+    assert len(calls) == 1  # a model switch is not a short hold
+
+
+def test_a_short_hold_that_outlasts_the_grace_still_ends_in_words(test_client, preflight_env, monkeypatch):
+    models_router, _state = preflight_env
+    clock = [1000.0]
+
+    def agent(path, payload):
+        clock[0] += 20.0
+        raise _busy("artifact_verification")
+
+    monkeypatch.setattr(models_router, "_call_agent_model", agent)
+    monkeypatch.setattr(models_router.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(models_router.time, "sleep", lambda _seconds: None)
+
+    response = _import(test_client)
+
+    assert response.status_code == 409
+    assert "checking a downloaded model file" in response.json()["detail"]["message"]

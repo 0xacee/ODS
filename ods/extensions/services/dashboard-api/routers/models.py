@@ -1628,13 +1628,11 @@ async def import_huggingface_model(
     if record.get("gguf_parts"):
         payload["gguf_parts"] = record["gguf_parts"]
     try:
-        result = await asyncio.to_thread(
-            _call_agent_model,
-            "/v1/model/download",
-            payload,
-        )
+        result = await asyncio.to_thread(_request_agent_download, payload)
     except HTTPException as exc:
-        if exc.status_code == 507:
+        busy = exc.status_code == 409 and isinstance(exc.detail, dict) \
+            and exc.detail.get("code") == "model_lifecycle_busy"
+        if exc.status_code == 507 or busy:
             # The host refused before starting: a definitive, retryable refusal.
             exc.headers = {**(exc.headers or {}), "X-ODS-Import-Started": "false"}
         raise
@@ -2031,6 +2029,25 @@ _PIXEL_LIFECYCLE_OPERATIONS = frozenset({
     "pixel_providers", "pixel_settings",
 })
 _MODEL_PIXEL_BUSY_ACTIVATION_GRACE_SECONDS = 30.0
+# Short holds a download or import waits out instead of refusing: the Pixel
+# access re-proof above, and the integrity check a restarted host agent runs
+# when it finds a download status left "verifying" (minutes after an install,
+# Mac, 2026-10-09). Kept inside the Models page's 45 s import deadline.
+_DOWNLOAD_SHORT_HOLD_OPERATIONS = _PIXEL_LIFECYCLE_OPERATIONS | {"artifact_verification"}
+_DOWNLOAD_SHORT_HOLD_GRACE_SECONDS = 30.0
+_LIFECYCLE_BUSY_WORDS = {
+    "model_download": "downloading another model",
+    "artifact_verification": "checking a downloaded model file",
+    "model_activation": "switching models",
+    "model_delete": "deleting a model",
+    "model_recovery": "restoring the previous model",
+    "model_runtime": "changing the model runtime",
+    "route_migration": "updating the model route",
+    "system_update": "installing an update",
+    "opencode_setup": "setting up OpenCode",
+    "opencode_start": "starting OpenCode",
+    **{operation: "checking Pixel" for operation in _PIXEL_LIFECYCLE_OPERATIONS},
+}
 
 
 def _agent_http_detail(exc: AgentHTTPError) -> Any:
@@ -2086,6 +2103,23 @@ def _is_pixel_lifecycle_busy(detail: Any) -> bool:
     )
 
 
+def _is_short_lifecycle_hold(detail: Any) -> bool:
+    return (
+        isinstance(detail, dict)
+        and detail.get("code") == "model_lifecycle_busy"
+        and detail.get("activeOperation") in _DOWNLOAD_SHORT_HOLD_OPERATIONS
+    )
+
+
+def _lifecycle_busy_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    """A busy refusal in words; nothing was started, so retrying is safe."""
+    doing = _LIFECYCLE_BUSY_WORDS.get(str(detail.get("activeOperation") or ""), "finishing another model task")
+    return {
+        **detail,
+        "message": f"ODS is {doing} right now, so this download cannot start yet. Try again in a minute.",
+    }
+
+
 def _call_agent_model(
     path: str,
     body: dict,
@@ -2132,6 +2166,23 @@ def _call_agent_model(
         raise HTTPException(status_code=503, detail=f"Host agent unreachable: {exc}") from exc
     except AgentProtocolError as exc:
         raise HTTPException(status_code=502, detail=f"Invalid host agent response: {exc}") from exc
+
+
+def _request_agent_download(payload: dict) -> dict:
+    """Start a host-agent download; wait out short holds, refuse longer ones in words."""
+    deadline = time.monotonic() + _DOWNLOAD_SHORT_HOLD_GRACE_SECONDS
+    while True:
+        try:
+            return _call_agent_model("/v1/model/download", payload)
+        except HTTPException as exc:
+            detail = exc.detail
+            if exc.status_code != 409 or not isinstance(detail, dict) \
+                    or detail.get("code") != "model_lifecycle_busy":
+                raise
+            if _is_short_lifecycle_hold(detail) and time.monotonic() < deadline:
+                time.sleep(0.5)
+                continue
+            raise HTTPException(status_code=409, detail=_lifecycle_busy_detail(detail)) from exc
 
 
 def _find_model_in_library(model_id: str) -> Optional[dict]:
@@ -2442,8 +2493,7 @@ def download_model(model_id: str, api_key: str = Depends(verify_api_key)):
     if model.get("gguf_parts"):
         payload["gguf_parts"] = model["gguf_parts"]
 
-    result = _call_agent_model("/v1/model/download", payload)
-    return result
+    return _request_agent_download(payload)
 
 
 @router.post("/api/models/download/cancel")
