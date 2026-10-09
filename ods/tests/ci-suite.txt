@@ -268,3 +268,4 @@ tests/test-backup-publication.sh
 tests/test-restore-compose-flags.sh
 
 tests/test-model-lifecycle-lock-wait-bound.sh
+tests/test-cli-purge-docker-inspection.sh
