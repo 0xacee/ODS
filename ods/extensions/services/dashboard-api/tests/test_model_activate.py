@@ -604,11 +604,14 @@ class TestCompletionProof:
                 "choices": [{"message": {"content": "", "reasoning_content": "thinking..."}}],
             },
         ))
+        diagnosis: dict = {}
         assert _mod._wait_for_model_readiness(
             {"GPU_BACKEND": "nvidia", "OLLAMA_PORT": "8080", "CTX_SIZE": "65536"},
             model_id="model", gguf_file="Model.gguf", llm_model_name="model",
-            attempts=1, initial_delay=0, interval=0,
+            attempts=1, initial_delay=0, interval=0, diagnosis=diagnosis,
         ) is False
+        # The loaded model is named as loaded, not "still loading".
+        assert diagnosis["reason"] == "Model.gguf is loaded but did not answer a test message with visible text"
 
 
 class TestRuntimeReadiness:

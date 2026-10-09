@@ -16366,6 +16366,12 @@ def _wait_for_model_readiness(
                         "verifiedAt": _iso_now(),
                     }
                 return runtime_identity if return_identity else True
+            if runtime_identity:
+                # Loaded and serving, yet no visible answer: never leave the
+                # earlier "still loading" in place (Tower3, 2026-10-09).
+                diagnosis["reason"] = (
+                    f"{runtime_identity} is loaded but did not answer a test message with visible text"
+                )
             if attempt % 6 == 0:
                 logger.info(
                     "Model %s readiness incomplete (attempt %d, identity=%s)%s",
