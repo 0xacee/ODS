@@ -854,9 +854,20 @@ def _hf_nonnegative_int(value: Any) -> int:
         return 0
 
 
+# Speculative-decoding heads published beside a model's weights: EAGLE-3
+# drafts (ggml-org's "eagle3-*.gguf"), multi-token-prediction heads
+# (unsloth's "MTP/mtp-*.gguf") and DFlash drafts. None runs on its own, and
+# read as the repository's header one misdescribes the model: gpt-oss-20b
+# was refused as "eagle3" on b9014 and gemma-4-E4B shown without a chat
+# template (fleet, 2026-10-09).
+_HF_SPECULATIVE_HEAD_RE = re.compile(r"(?:^|[/._-])(?:eagle3|mtp|dflash)(?:[/._-]|$)")
+
+
 def _hf_supported_gguf_filename(filename: str) -> bool:
     basename = Path(filename).name.lower()
     if not basename.endswith(".gguf"):
+        return False
+    if _HF_SPECULATIVE_HEAD_RE.search(filename.lower()):
         return False
     # imatrix: llama.cpp importance-matrix calibration data that quantizers
     # publish next to the weights (bartowski's "*-imatrix.gguf"); not a model.
