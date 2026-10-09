@@ -249,6 +249,27 @@ def test_imatrix_calibration_files_are_not_offered_as_models():
     assert models_router._hf_supported_gguf_filename("Nanbeige_Nanbeige4.2-3B-Q4_K_M.gguf") is True
 
 
+def test_speculative_decoding_heads_are_not_offered_or_read_as_the_model():
+    import routers.models as models_router
+
+    # ggml-org/gpt-oss-20b-GGUF and unsloth/gemma-4-E4B-it-GGUF as listed on 2026-10-09.
+    for name in ("eagle3-gpt-oss-20b-Q8_0.gguf", "eagle3-gpt-oss-20b-BF16.gguf",
+                 "MTP/mtp-gemma-4-E4B-it-Q8_0.gguf", "Qwen3-8B-DFlash-Q8_0.gguf"):
+        assert models_router._hf_supported_gguf_filename(name) is False, name
+    for name in ("gpt-oss-20b-MXFP4.gguf", "gemma-4-E4B-it-Q4_K_M.gguf", "Smtp-Assistant-7B-Q4_K_M.gguf"):
+        assert models_router._hf_supported_gguf_filename(name) is True, name
+
+    sha = "a" * 64
+    payload = {"siblings": [
+        {"rfilename": name, "lfs": {"size": size, "sha256": sha}}
+        for name, size in (("eagle3-gpt-oss-20b-Q8_0.gguf", 921488000), ("gpt-oss-20b-MXFP4.gguf", 12109566624))
+    ]}
+    artifacts = models_router._hf_gguf_artifacts(payload)
+    assert [artifact["label"] for artifact in artifacts] == ["gpt-oss-20b-MXFP4.gguf"]
+    # The header that speaks for the repository is the model's own.
+    assert models_router._preflight_header_source(artifacts)["filename"] == "gpt-oss-20b-MXFP4.gguf"
+
+
 def _import(test_client, **extra):
     return test_client.post(
         "/api/models/huggingface/import",
