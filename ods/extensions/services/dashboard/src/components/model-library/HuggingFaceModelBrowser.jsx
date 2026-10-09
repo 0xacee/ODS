@@ -24,8 +24,13 @@ import HelpLink from '../HelpLink'
 const SEARCH_DELAY_MS = 350
 const SEARCH_TIMEOUT_MS = 30000
 const IMPORT_TIMEOUT_MS = 45000
+// The check reads the repository and one file's header from the Hub, then
+// this machine's storage; on a slow link that outlasts a search (Mac mini,
+// 2026-10-09). It never blocks an import.
+const PREFLIGHT_TIMEOUT_MS = 90000
 
-async function boundedJsonRequest(url, options = {}, timeout = SEARCH_TIMEOUT_MS) {
+async function boundedJsonRequest(url, options = {}, timeout = SEARCH_TIMEOUT_MS,
+  timeoutMessage = 'The request timed out. Check download status before retrying.') {
   const controller = new AbortController()
   let timer
   try {
@@ -44,7 +49,7 @@ async function boundedJsonRequest(url, options = {}, timeout = SEARCH_TIMEOUT_MS
       })(),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
-          reject(new Error('The request timed out. Check download status before retrying.'))
+          reject(new Error(timeoutMessage))
           controller.abort()
         }, timeout)
       }),
@@ -87,7 +92,8 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
     setPreflightError(null)
     setPreflightLoading(true)
     try {
-      const body = await boundedJsonRequest(`/api/models/huggingface/preflight/${encodeURI(modelId)}`)
+      const body = await boundedJsonRequest(`/api/models/huggingface/preflight/${encodeURI(modelId)}`, {},
+        PREFLIGHT_TIMEOUT_MS, 'the check took longer than 90 seconds')
       if (detailsRequestRef.current !== requestId) return
       if (body?.id !== modelId || !body.artifacts || typeof body.artifacts !== 'object'
           || Array.isArray(body.artifacts) || typeof body.modelKind !== 'string') {
