@@ -139,8 +139,9 @@ def test_p1_turns_thinking_off_only_through_the_models_own_control():
     (_, qwen), (_, always), (_, plain) = runtime.requests
     assert qwen["chat_template_kwargs"] == {"enable_thinking": False}
     assert "chat_template_kwargs" not in always and "chat_template_kwargs" not in plain
-    # An always-thinking model gets room to reason before it answers.
-    assert always["max_tokens"] > qwen["max_tokens"]
+    # An always-thinking model gets room to reason before it answers: an
+    # R1 distill needs about 440 tokens for this prompt.
+    assert always["max_tokens"] >= probes.ALWAYS_THINKING_MIN_TOKENS > qwen["max_tokens"]
     assert all(payload["temperature"] == 0 and payload["seed"] == probes.SEED for _, payload in runtime.requests)
 
 
@@ -331,7 +332,7 @@ def test_an_exhausted_budget_leaves_the_rest_unknown_and_drops_speed_first():
 def test_full_battery_on_a_well_behaved_qwen_style_model():
     profile = probes.run_battery(Runtime(), _props(), clock=lambda: 0.0)
     assert profile["status"] == "complete"
-    assert profile["suite"] == "1"
+    assert profile["suite"] == probes.SUITE_VERSION == "2"
     assert {name: result["status"] for name, result in profile["probes"].items()} == {
         "P1": "pass", "P2": "pass", "P3": "pass", "P4": "pass", "P5": "pass", "P6": "skipped", "P8": "pass"}
     assert profile["summary"] == {

@@ -110,9 +110,15 @@ def thinking_kwargs(control: str, *, on: bool) -> dict:
     return {}
 
 
+# Models that always think need room for their reasoning before the answer:
+# DeepSeek-R1-Distill-Qwen-1.5B spends about 440 tokens before "Ready", so a
+# 96-token chat probe recorded it as unable to chat on one GPU and able on
+# another (Tower3 and tower2, 2026-10-09).
+ALWAYS_THINKING_MIN_TOKENS = 1024
+
+
 def _chat_request(messages: list, control: str, *, max_tokens: int, think: bool = False, **extra) -> dict:
-    # Models that always think need room for their reasoning before the answer.
-    budget = max_tokens * 4 if control == "always" else max_tokens
+    budget = max(max_tokens * 4, ALWAYS_THINKING_MIN_TOKENS) if control == "always" else max_tokens
     return {
         "messages": messages,
         "temperature": 0,

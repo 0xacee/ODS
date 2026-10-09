@@ -7,4 +7,5 @@ the first switch; ``store`` persists results in ``data/model-profiles.json``.
 Stdlib only: the standalone host agent imports this from the installed tree.
 """
 
-SUITE_VERSION = "1"
+# 2: always-thinking models get at least 1024 tokens per probe (2026-10-09).
+SUITE_VERSION = "2"
