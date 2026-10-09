@@ -2188,10 +2188,11 @@ _PIXEL_LIFECYCLE_OPERATIONS = frozenset({
     "pixel_providers", "pixel_settings",
 })
 _MODEL_PIXEL_BUSY_ACTIVATION_GRACE_SECONDS = 30.0
-# Short holds a download or import waits out instead of refusing: the Pixel
-# access re-proof above, and the integrity check a restarted host agent runs
-# when it finds a download status left "verifying" (minutes after an install,
-# Mac, 2026-10-09). Kept inside the Models page's 45 s import deadline.
+# Short holds a download, import or delete waits out instead of refusing: the
+# Pixel access re-proof above (about every 45 s; a delete that landed on one
+# was refused on Strixy, 2026-10-09), and the integrity check a restarted host
+# agent runs when it finds a download status left "verifying" (minutes after an
+# install, Mac, 2026-10-09). Kept inside the Models page's 45 s deadline.
 _DOWNLOAD_SHORT_HOLD_OPERATIONS = _PIXEL_LIFECYCLE_OPERATIONS | {"artifact_verification"}
 _DOWNLOAD_SHORT_HOLD_GRACE_SECONDS = 30.0
 _LIFECYCLE_BUSY_WORDS = {
@@ -2271,12 +2272,12 @@ def _is_short_lifecycle_hold(detail: Any) -> bool:
     )
 
 
-def _lifecycle_busy_detail(detail: dict[str, Any]) -> dict[str, Any]:
+def _lifecycle_busy_detail(detail: dict[str, Any], blocked: str = "this download cannot start yet") -> dict[str, Any]:
     """A busy refusal in words; nothing was started, so retrying is safe."""
     doing = _LIFECYCLE_BUSY_WORDS.get(str(detail.get("activeOperation") or ""), "finishing another model task")
     return {
         **detail,
-        "message": f"ODS is {doing} right now, so this download cannot start yet. Try again in a minute.",
+        "message": f"ODS is {doing} right now, so {blocked}. Try again in a minute.",
     }
 
 
@@ -2330,10 +2331,16 @@ def _call_agent_model(
 
 def _request_agent_download(payload: dict) -> dict:
     """Start a host-agent download; wait out short holds, refuse longer ones in words."""
-    deadline = time.monotonic() + _DOWNLOAD_SHORT_HOLD_GRACE_SECONDS
+    return _request_agent_waiting_short_holds("/v1/model/download", payload, "this download cannot start yet")
+
+
+def _request_agent_waiting_short_holds(path: str, payload: dict, blocked: str,
+                                       grace_seconds: float = _DOWNLOAD_SHORT_HOLD_GRACE_SECONDS) -> dict:
+    """Call a host-agent model route; wait out short holds, refuse longer ones in words."""
+    deadline = time.monotonic() + grace_seconds
     while True:
         try:
-            return _call_agent_model("/v1/model/download", payload)
+            return _call_agent_model(path, payload)
         except HTTPException as exc:
             detail = exc.detail
             if exc.status_code != 409 or not isinstance(detail, dict) \
@@ -2342,7 +2349,7 @@ def _request_agent_download(payload: dict) -> dict:
             if _is_short_lifecycle_hold(detail) and time.monotonic() < deadline:
                 time.sleep(0.5)
                 continue
-            raise HTTPException(status_code=409, detail=_lifecycle_busy_detail(detail)) from exc
+            raise HTTPException(status_code=409, detail=_lifecycle_busy_detail(detail, blocked)) from exc
 
 
 def _find_model_in_library(model_id: str) -> Optional[dict]:
@@ -2935,5 +2942,6 @@ def delete_model(model_id: str, api_key: str = Depends(verify_api_key)):
     }
     if model.get("gguf_parts"):
         payload["gguf_parts"] = model["gguf_parts"]
-    result = _call_agent_model("/v1/model/delete", payload)
-    return result
+    # 20 s leaves the delete itself inside the Models page's 35 s deadline.
+    return _request_agent_waiting_short_holds("/v1/model/delete", payload, "this model cannot be deleted yet",
+                                              grace_seconds=20.0)

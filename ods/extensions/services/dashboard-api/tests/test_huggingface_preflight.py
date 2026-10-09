@@ -641,3 +641,35 @@ def test_the_docker_desktop_windows_runtime_imports_the_weights_alone(monkeypatc
     monkeypatch.setattr(models_router, "read_live_env_values", lambda keys: {"AMD_INFERENCE_RUNTIME_MODE": "linux-container"})
     monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: False)
     assert models_router._projector_unavailable_reason() is None
+
+
+def test_delete_waits_out_a_short_hold_and_refuses_a_long_one_in_words(test_client, monkeypatch):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "_find_model_in_library", lambda model_id: {"id": model_id, "gguf_file": "x.gguf"})
+    monkeypatch.setattr(models_router.time, "sleep", lambda _seconds: None)
+    calls = []
+
+    def agent(path, payload):
+        calls.append((path, payload["gguf_file"]))
+        if len(calls) == 1:
+            raise _busy("pixel_access_mode")  # the periodic Pixel re-proof
+        return {"status": "deleted"}
+
+    monkeypatch.setattr(models_router, "_call_agent_model", agent)
+    response = test_client.delete("/api/models/some-import", headers=test_client.auth_headers)
+    assert response.status_code == 200
+    assert calls == [("/v1/model/delete", "x.gguf")] * 2
+
+    calls.clear()
+
+    def switching(path, payload):
+        calls.append((path, payload["gguf_file"]))
+        raise _busy("model_activation")  # not a short hold
+
+    monkeypatch.setattr(models_router, "_call_agent_model", switching)
+    response = test_client.delete("/api/models/some-import", headers=test_client.auth_headers)
+    assert response.status_code == 409
+    assert response.json()["detail"]["message"] == (
+        "ODS is switching models right now, so this model cannot be deleted yet. Try again in a minute.")
+    assert calls == [("/v1/model/delete", "x.gguf")]
