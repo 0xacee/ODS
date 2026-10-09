@@ -22,8 +22,11 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse, JSONResponse
 
 from env_values import parse_env_value
+import hf_gguf_header
+import model_preflight
 from config import (
     DATA_DIR,
+    GPU_BACKEND,
     INSTALL_DIR,
     LLM_BACKEND,
     LOCAL_MODEL_MODES,
@@ -59,6 +62,7 @@ from performance_oracle import (
     find_catalog_model,
     load_model_catalog,
     model_files_dir as model_files_dir,
+    planned_model_context,
     read_env_file_value,
     read_env_value,
 )
@@ -873,6 +877,7 @@ def _hf_llm_runtime_compatibility(payload: dict[str, Any]) -> tuple[bool, str | 
         "image-classification",
         "image-to-image",
         "sentence-similarity",
+        "text-ranking",
         "text-to-image",
         "text-to-speech",
         "zero-shot-image-classification",
@@ -883,6 +888,7 @@ def _hf_llm_runtime_compatibility(payload: dict[str, Any]) -> tuple[bool, str | 
         "automatic-speech-recognition",
         "feature-extraction",
         "sentence-transformers",
+        "text-ranking",
         "text-to-image",
         "text-to-speech",
     }
@@ -1083,9 +1089,15 @@ async def _hf_repo_details(repo_id: str) -> dict[str, Any]:
             artifact["installed"] = False
     context_length, context_source = _hf_context_length(payload)
     runtime_compatible, runtime_reason = _hf_llm_runtime_compatibility(payload)
+    raw_gguf = payload.get("gguf") if isinstance(payload.get("gguf"), dict) else {}
+    raw_tags = payload.get("tags")
     return {
         "id": repo_id,
         "sha": str(payload.get("sha") or ""),
+        # The Hub summary describes one file only; the per-file header read
+        # in the preflight is authoritative.
+        "ggufArchitecture": raw_gguf.get("architecture") if isinstance(raw_gguf.get("architecture"), str) else None,
+        "tags": [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else [],
         "downloads": _hf_nonnegative_int(payload.get("downloads")),
         "likes": _hf_nonnegative_int(payload.get("likes")),
         "lastModified": payload.get("lastModified"),
@@ -1101,6 +1113,190 @@ async def _hf_repo_details(repo_id: str) -> dict[str, Any]:
         "authenticated": bool(_hf_token()),
         "url": f"{_HF_API_BASE}/{repo_id}",
     }
+
+
+_ARCHITECTURES_PATH = Path(INSTALL_DIR) / "config" / "llama-cpp-architectures.json"
+
+
+def _preflight_header_source(artifacts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The file whose header speaks for the repository: the smallest artifact's first part.
+
+    Every quantization of one model shares its metadata (architecture, layout,
+    template); reading one header per repository keeps Hub download counts low.
+    """
+    candidates = [artifact for artifact in artifacts if artifact.get("files")]
+    if not candidates:
+        return None
+    smallest = min(candidates, key=lambda artifact: (_hf_artifact_size(artifact), str(artifact.get("label") or "")))
+    return smallest["files"][0]
+
+
+def _hf_artifact_size(artifact: dict[str, Any]) -> int:
+    """Total bytes of one artifact (all split parts)."""
+    declared = artifact.get("sizeBytes")
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared > 0:
+        return declared
+    return sum(
+        int(item.get("sizeBytes") or 0)
+        for item in artifact.get("files") or []
+        if isinstance(item, dict)
+    )
+
+
+async def _hf_preflight_gate(details: dict[str, Any], *, read_header: bool = True) -> dict[str, Any]:
+    """The header read and the two hard refusals, shared by preflight and import.
+
+    The import passes ``read_header=False`` and uses only a header the
+    preflight already read, so a slow Hub never delays an import; without one
+    the gate falls back to the Hub summary's architecture and tags.
+    """
+    header = None
+    header_status: dict[str, Any] = {"status": "unavailable", "reason": "no_artifact"}
+    source = _preflight_header_source(details.get("artifacts") or [])
+    if source is not None and not read_header:
+        header = hf_gguf_header.cached_gguf_header(details["id"], details["sha"], source["filename"])
+        header_status = (
+            {"status": "read", "file": source["filename"], "bytesRead": header.get("bytes_read")}
+            if header else {"status": "unavailable", "file": source["filename"], "reason": "not_read"}
+        )
+    elif source is not None:
+        try:
+            header = await hf_gguf_header.fetch_gguf_header(
+                details["id"],
+                details["sha"],
+                source["filename"],
+                expected_size=source.get("sizeBytes"),
+                token=_hf_token(),
+            )
+            header_status = {
+                "status": "read",
+                "file": source["filename"],
+                "bytesRead": header.get("bytes_read"),
+            }
+        except hf_gguf_header.HeaderUnavailable as exc:
+            header_status = {
+                "status": "unavailable",
+                "file": source["filename"],
+                "reason": exc.code,
+                "message": exc.message,
+            }
+    policy = model_preflight.load_runtime_policy(_ARCHITECTURES_PATH)
+    runtime_key, build = model_preflight.effective_build(
+        policy,
+        GPU_BACKEND,
+        windows_hosted=_windows_hosted_runtime(),
+    )
+    header_architecture = (header or {}).get("architecture")
+    architecture = (
+        header_architecture
+        if isinstance(header_architecture, str) and header_architecture not in {"", "unknown"}
+        else details.get("ggufArchitecture")
+    )
+    kind = model_preflight.model_kind(header, details.get("pipelineTag"), details.get("tags"))
+    supported = (
+        model_preflight.architecture_supported(policy, build, architecture)
+        if kind == "chat" else None
+    )
+    return {
+        "header": header,
+        "headerStatus": header_status,
+        "architecture": architecture,
+        "runtime": {"key": runtime_key, "build": build, "architectureSupported": supported},
+        "modelKind": kind,
+        "refusal": model_preflight.refusal(kind, supported, architecture, build),
+    }
+
+
+async def _model_storage_status() -> dict[str, Any] | None:
+    """Free space where downloads land, from the host agent; None when unknown."""
+    try:
+        value = await asyncio.to_thread(request_agent_json, "GET", "/v1/model/storage", timeout=5)
+    except AgentClientError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    return {key: value.get(key) for key in ("freeBytes", "totalBytes", "marginBytes")}
+
+
+def _hf_default_context(declared: int | None) -> int:
+    """The context an import starts at: min(declared, 32K), or 8K when unknown."""
+    if isinstance(declared, int) and 512 <= declared <= _MAX_MODEL_CONTEXT:
+        return min(declared, 32768)
+    return 8192
+
+
+def _hf_artifact_fit(
+    artifact: dict[str, Any],
+    layout: dict[str, Any],
+    declared_context: int | None,
+    gpu_info: Any,
+) -> dict[str, Any]:
+    """Will this quantization fit, and at what context, on this machine?"""
+    estimate = "architecture" if "recurrent_state_bytes" in layout else "rough"
+    if gpu_info is None:
+        return {"status": "unknown", "estimate": estimate}
+    size = _hf_artifact_size(artifact)
+    model = {
+        "id": f"hf-preflight-{artifact['id']}",
+        "gguf_file": artifact["files"][0]["filename"],
+        "size_bytes": size,
+        "size_mb": round(size / (1024 ** 2), 2),
+        "context_length": _hf_default_context(declared_context),
+        **layout,
+    }
+    plan = planned_model_context(model, gpu_info)
+    if not plan["fits"]:
+        status = "too_large"
+    elif plan["meets_min_context"]:
+        status = "fits"
+    else:
+        status = "fits_short_context"
+    return {
+        "status": status,
+        "contextLength": plan["context_length"],
+        "requiredGb": plan["required_gb"],
+        "capacityGb": plan["capacity_gb"],
+        "estimate": estimate,
+    }
+
+
+async def _hf_preflight(details: dict[str, Any]) -> dict[str, Any]:
+    gate = await _hf_preflight_gate(details)
+    header = gate["header"]
+    layout = model_preflight.memory_fields(header)
+    declared_context = layout.get("max_context_length") or details.get("contextLength")
+    gpu_info = await asyncio.to_thread(get_gpu_info)
+    storage = await _model_storage_status()
+    artifacts = {}
+    for artifact in details.get("artifacts") or []:
+        needed = 0 if artifact.get("installed") else _hf_artifact_size(artifact)
+        artifacts[artifact["id"]] = {
+            "fit": _hf_artifact_fit(artifact, layout, declared_context, gpu_info),
+            "disk": model_preflight.disk_status(needed, storage),
+        }
+    return {
+        "id": details["id"],
+        "sha": details["sha"],
+        "header": gate["headerStatus"],
+        "architecture": gate["architecture"],
+        "runtime": gate["runtime"],
+        "modelKind": gate["modelKind"],
+        "contextLength": declared_context,
+        "template": model_preflight.template_signals(header),
+        "storage": storage,
+        "artifacts": artifacts,
+        "refusal": gate["refusal"],
+    }
+
+
+@router.get("/api/models/huggingface/preflight/{repo_id:path}")
+async def huggingface_repository_preflight(
+    repo_id: str,
+    api_key: str = Depends(verify_api_key),
+):
+    """What ODS can tell about a repository's GGUFs before downloading one."""
+    details = await _hf_repo_details(repo_id)
+    return await _hf_preflight(details)
 
 
 def _hf_local_filename(repo_id: str, remote_filename: str, revision: str) -> str:
@@ -1126,7 +1322,29 @@ def _hf_local_filename(repo_id: str, remote_filename: str, revision: str) -> str
     return filename
 
 
-def _hf_import_record(details: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+def _hf_import_record(
+    details: dict[str, Any],
+    artifact: dict[str, Any],
+    *,
+    gate: dict[str, Any] | None = None,
+    runtime_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    header = (gate or {}).get("header")
+    layout = model_preflight.memory_fields(header)
+    if layout.get("max_context_length"):
+        # The selected repository's own GGUF header outranks the Hub summary.
+        details = {**details, "contextLength": layout["max_context_length"], "contextSource": "gguf_header"}
+    record = _hf_import_record_base(details, artifact)
+    if header:
+        record.update({key: value for key, value in layout.items() if key != "max_context_length"})
+        record["architecture"] = (gate or {}).get("architecture")
+        record["template_signals"] = model_preflight.template_signals(header)
+    if runtime_override:
+        record["runtime_override"] = runtime_override
+    return record
+
+
+def _hf_import_record_base(details: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
     repo_id = details["id"]
     revision = details["sha"]
     if not re.fullmatch(r"[0-9a-fA-F]{40,64}", revision):
@@ -1301,7 +1519,27 @@ async def _prepare_huggingface_import(body: dict[str, Any]):
             status_code=403,
             detail="Private or gated repositories require HF_TOKEN",
         )
-    record = _hf_import_record(details, artifact)
+    gate = await _hf_preflight_gate(details, read_header=False)
+    refusal = gate["refusal"]
+    runtime_override = None
+    if refusal is not None:
+        if not (refusal["overridable"] and body.get("allowUnsupportedRuntime") is True):
+            raise HTTPException(status_code=422, detail={
+                "code": refusal["code"],
+                "message": refusal["message"],
+                "overridable": refusal["overridable"],
+            })
+        runtime_override = {
+            "code": refusal["code"],
+            "architecture": gate["architecture"],
+            "build": gate["runtime"]["build"],
+            "acknowledgedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        logger.warning(
+            "Hugging Face import of %s acknowledged an architecture (%s) that llama.cpp %s does not list",
+            repo_id, gate["architecture"], gate["runtime"]["build"],
+        )
+    record = _hf_import_record(details, artifact, gate=gate, runtime_override=runtime_override)
 
     bootstrap_conflict = _bootstrap_upgrade_download_conflict()
     if bootstrap_conflict is not None:

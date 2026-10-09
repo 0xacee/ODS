@@ -13,6 +13,8 @@ REPO = "org/model-GGUF"
 REVISION = "a" * 40
 FILENAME = "model-Q4_K_M.gguf"
 CDN = "https://us.aws.cdn.hf.co/xet-bridge-us/abc/def?Expires=1&Signature=x"
+# conftest stubs fetch_gguf_header for every other test; this module tests the real one.
+fetch_gguf_header = hf_gguf_header.fetch_gguf_header
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +69,7 @@ class _Hub:
 def _fetch(hub: _Hub, *, expected_size=None, token=""):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(hub)) as client:
-            return await hf_gguf_header.fetch_gguf_header(
+            return await fetch_gguf_header(
                 REPO, REVISION, FILENAME,
                 expected_size=expected_size, token=token, client=client,
             )
@@ -227,7 +229,7 @@ def test_network_failure_is_unreachable():
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(fail)) as client:
-            return await hf_gguf_header.fetch_gguf_header(REPO, REVISION, FILENAME, client=client)
+            return await fetch_gguf_header(REPO, REVISION, FILENAME, client=client)
 
     with pytest.raises(hf_gguf_header.HeaderUnavailable) as raised:
         asyncio.run(run())
@@ -246,3 +248,14 @@ def test_network_failure_is_unreachable():
 ])
 def test_redirect_allowlist(url, allowed):
     assert hf_gguf_header.redirect_allowed(url) is allowed
+
+
+def test_cached_header_is_returned_without_a_request():
+    hub = _Hub(_model_bytes())
+
+    assert hf_gguf_header.cached_gguf_header(REPO, REVISION, FILENAME) is None
+    first = _fetch(hub)
+    calls = len(hub.requests)
+
+    assert hf_gguf_header.cached_gguf_header(REPO, REVISION, FILENAME) == first
+    assert len(hub.requests) == calls

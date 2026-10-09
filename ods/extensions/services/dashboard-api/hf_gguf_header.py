@@ -155,6 +155,12 @@ async def _read_metadata(
         return parsed
 
 
+def cached_gguf_header(repo_id: str, revision: str, filename: str) -> dict[str, Any] | None:
+    """A header this process already read, without any network request."""
+    with _CACHE_LOCK:
+        return _CACHE.get((repo_id, revision, filename))
+
+
 async def fetch_gguf_header(
     repo_id: str,
     revision: str,

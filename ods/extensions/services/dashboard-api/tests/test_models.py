@@ -797,6 +797,7 @@ def test_agent_disk_refusal_becomes_a_plain_507(monkeypatch):
 
     assert raised.value.status_code == 507
     detail = raised.value.detail
+    assert isinstance(detail, dict)
     assert detail["code"] == "insufficient_disk_space"
     assert detail["requiredBytes"] == agent_body["requiredBytes"]
     assert detail["message"] == (
