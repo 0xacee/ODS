@@ -359,3 +359,25 @@ def test_import_without_a_cached_header_gates_on_the_hub_summary(test_client, pr
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "runtime_architecture_unsupported"
     assert state["reads"] == []
+
+
+def test_storage_check_allows_for_a_windows_managed_model_store(monkeypatch):
+    import asyncio
+
+    import routers.models as models_router
+
+    seen = []
+
+    def fake_agent(method, path, *, timeout):
+        seen.append((method, path, timeout))
+        return {"freeBytes": 9, "totalBytes": 10, "marginBytes": 1, "extra": "dropped"}
+
+    monkeypatch.setattr(models_router, "request_agent_json", fake_agent)
+
+    status = asyncio.run(models_router._model_storage_status())
+
+    assert status == {"freeBytes": 9, "totalBytes": 10, "marginBytes": 1}
+    # Strix Halo's WSL agent needs ~5 s to resolve its Windows model store;
+    # the old 5 s budget dropped the disk check there on every preflight.
+    assert seen == [("GET", "/v1/model/storage", models_router._MODEL_STORAGE_TIMEOUT_SECONDS)]
+    assert models_router._MODEL_STORAGE_TIMEOUT_SECONDS >= 15

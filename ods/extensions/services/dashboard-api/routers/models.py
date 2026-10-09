@@ -1215,10 +1215,17 @@ async def _hf_preflight_gate(details: dict[str, Any], *, read_header: bool = Tru
     }
 
 
+# Resolving a Windows-managed model store from WSL asks Windows first (about 5 s
+# on the fleet's Strix Halo host), the same cost /v1/model/management carries.
+_MODEL_STORAGE_TIMEOUT_SECONDS = 20
+
+
 async def _model_storage_status() -> dict[str, Any] | None:
     """Free space where downloads land, from the host agent; None when unknown."""
     try:
-        value = await asyncio.to_thread(request_agent_json, "GET", "/v1/model/storage", timeout=5)
+        value = await asyncio.to_thread(
+            request_agent_json, "GET", "/v1/model/storage", timeout=_MODEL_STORAGE_TIMEOUT_SECONDS,
+        )
     except AgentClientError:
         return None
     if not isinstance(value, dict):
@@ -1269,13 +1276,17 @@ def _hf_artifact_fit(
 
 
 async def _hf_preflight(details: dict[str, Any]) -> dict[str, Any]:
-    gate = await _hf_preflight_gate(details)
+    # The Hub header read and the host's own answers are independent: wait for
+    # the slowest, not their sum.
+    gate, gpu_info, storage = await asyncio.gather(
+        _hf_preflight_gate(details),
+        asyncio.to_thread(get_gpu_info),
+        _model_storage_status(),
+    )
     header = gate["header"]
     layout = model_preflight.memory_fields(header)
     declared_context = layout.get("max_context_length") or details.get("contextLength")
     context_source = "gguf_header" if layout.get("max_context_length") else details.get("contextSource")
-    gpu_info = await asyncio.to_thread(get_gpu_info)
-    storage = await _model_storage_status()
     artifacts = {}
     for artifact in details.get("artifacts") or []:
         needed = 0 if artifact.get("installed") else _hf_artifact_size(artifact)
