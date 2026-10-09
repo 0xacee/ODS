@@ -17,6 +17,7 @@ import atexit
 import base64
 import collections
 import hashlib
+import http.client
 import importlib
 import importlib.util
 import json
@@ -50,7 +51,18 @@ _SWITCHBOARD_BIN_DIR = str(Path(__file__).resolve().parent)
 if _SWITCHBOARD_BIN_DIR not in sys.path:
     sys.path.insert(0, _SWITCHBOARD_BIN_DIR)
 from model_switchboard.router_transport import request as _router_transport_request
+from model_switchboard.router_transport import exchange as _router_transport_exchange
 from model_switchboard import wsl_runtime as _wsl_runtime
+# Model profiles (WP3): measured capabilities per GGUF x llama.cpp build x host.
+# Fail-open like the switchboard: without the package a switch runs as before.
+try:
+    import model_profile as _model_profile
+    from model_profile import probes as _model_profile_probes
+    from model_profile import store as _model_profile_store
+except ImportError:  # pragma: no cover - import environment dependent
+    _model_profile = None
+    _model_profile_probes = None
+    _model_profile_store = None
 
 try:
     from model_switchboard import state as _switchboard_state
@@ -537,6 +549,8 @@ _model_lifecycle_revision = 0
 _MODEL_RUNTIME_NEUTRAL_OPERATIONS = frozenset({
     'pixel_startup_reproof', 'pixel_access_mode', 'pixel_open_app',
     'pixel_providers', 'pixel_settings',
+    # Re-measuring the running model reads it; the runtime does not change.
+    'model_profile_recheck',
 })
 # Advances only for lifecycle operations that can change the model runtime.
 _model_runtime_revision = 0
@@ -551,7 +565,7 @@ _model_activation_failure_code: str | None = None
 # restart. Neutral status/reproof work preserves it; a new runtime operation
 # invalidates it. Restored outcomes are recorded only after rollback proof.
 _model_activation_result: dict | None = None
-_MODEL_ACTIVATION_PHASES = frozenset({'preparing', 'loading', 'verifying', 'rolling_back', 'rollback_verifying'})
+_MODEL_ACTIVATION_PHASES = frozenset({'preparing', 'loading', 'profiling', 'verifying', 'rolling_back', 'rollback_verifying'})
 _MODEL_ACTIVATION_FAILURE_CODES = frozenset({'runtime_load_failed', 'runtime_readiness_failed', 'consumer_verification_failed', 'rollback_unconfirmed'})
 _model_status_verify_thread: threading.Thread | None = None
 _switchboard_initial_verify_lock = threading.Lock()
@@ -9679,6 +9693,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_model_management()
         elif path == "/v1/model/storage":
             self._handle_model_storage()
+        elif path == "/v1/model/profile":
+            self._handle_model_profile()
         elif path == "/v1/model/external-observation":
             self._handle_retired_lemonade_endpoint()
         elif path == "/v1/model/recovery":
@@ -10341,6 +10357,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_service_restart()
         elif self.path == "/v1/model/download":
             self._handle_model_download()
+        elif self.path == "/v1/model/profile/recheck":
+            self._handle_model_profile_recheck()
         elif self.path == "/v1/model/download/cancel":
             self._handle_model_download_cancel()
         elif self.path == "/v1/model/activate":
@@ -12813,6 +12831,65 @@ class AgentHandler(BaseHTTPRequestHandler):
 
     # ── Model management handlers ──
 
+    def _handle_model_profile(self):
+        """The stored profile for ``?model=<id>`` (default: the last activated model)."""
+        if not check_auth(self):
+            return
+        requested = (parse_qs(urlparse(self.path).query).get("model") or [""])[0].strip()
+        env = load_env(INSTALL_DIR / ".env")
+        mode = _model_profiles_mode(env)
+        if _model_profile_store is None:
+            json_response(self, 200, {"mode": "off", "modelId": requested or None, "profile": None})
+            return
+        try:
+            doc = _model_profile_store.load(_model_profile_path())
+        except _model_profile_store.StoreError as exc:
+            logger.warning("Model profile store unreadable: %s", exc)
+            doc = _model_profile_store.empty()
+        last = doc.get("lastActivation") or {}
+        model_id = requested or str(last.get("modelId") or "")
+        profile = None
+        if model_id and model_id == last.get("modelId"):
+            profile = next((entry for entry in doc["profiles"] if entry["keyHash"] == last.get("keyHash")), None)
+        if profile is None and model_id:
+            profile = _model_profile_store.latest_for_model(doc, model_id)
+        json_response(self, 200, {"mode": mode, "modelId": model_id or None, "profile": profile})
+
+    def _handle_model_profile_recheck(self):
+        """Measure the running model again, ignoring its stored profile."""
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+        model_id = str(body.get("model") or "").strip()
+        env = load_env(INSTALL_DIR / ".env")
+        if _model_profiles_mode(env) == "off" or _model_profile_store is None:
+            json_response(self, 409, {"error": "Model profiles are turned off on this machine", "code": "profiles_off"})
+            return
+        try:
+            library = _load_model_library_records()
+        except RuntimeError as exc:
+            json_response(self, 500, {"error": str(exc)})
+            return
+        model = next((entry for entry in library if entry.get("id") == model_id), None)
+        if model is None:
+            json_response(self, 404, {"error": "Unknown model"})
+            return
+        if str(model.get("gguf_file") or "") != str(env.get("GGUF_FILE") or ""):
+            json_response(self, 409, {"error": "Only the running model can be checked; run it first", "code": "not_running"})
+            return
+        acquired, active = _begin_model_lifecycle("model_profile_recheck", model_id)
+        if not acquired:
+            json_response(self, 409, _model_lifecycle_conflict("a model check", active))
+            return
+        try:
+            result = _profile_model_advisory(env, model, model_id=model_id,
+                                             gguf_file=str(model.get("gguf_file")), force=True)
+        finally:
+            _end_model_lifecycle("model_profile_recheck")
+        json_response(self, 200, result)
+
     def _handle_model_storage(self):
         """Report free space where model downloads land, for download preflight."""
         if not check_auth(self):
@@ -14663,6 +14740,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                 healthy = bool(runtime_identity)
 
             if healthy:
+                # WP3: measure what the new model can do before any consumer
+                # is touched (first switch per file x build x host only).
+                model_profile_status = _profile_model_advisory(
+                    env, model, model_id=model_id, gguf_file=gguf_file)
                 _set_model_activation_phase('verifying')
                 if host_native_llama:
                     _write_host_native_litellm_config(env, gguf_file, llm_model_name)
@@ -14989,6 +15070,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                         "context_length": int(context_length),
                         "gpu_assignment_changed": bool(gpu_assignment_plan),
                         "consumers": consumers,
+                        "profile": model_profile_status,
                     },
                 )
             else:
@@ -15339,6 +15421,154 @@ def _runtime_http(
     if result.returncode != 0:
         raise OSError(f"llama-server {path} is unreachable (curl exit {result.returncode})")
     return result.stdout
+
+
+class _RefuseRedirects(urllib_request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib_error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
+# Probe answers are small; a streamed tool call with its deltas stays far below this.
+_RUNTIME_EXCHANGE_LIMIT = 262144
+
+
+def _runtime_exchange(
+    env: dict,
+    path: str,
+    *,
+    payload: dict | None = None,
+    timeout: float = 30,
+) -> tuple[int, str]:
+    """``(http_status, text)`` from the runtime, error statuses included.
+
+    For capability probes (WP3), which classify llama-server's own error text
+    such as a 400 "Unable to generate parser for this template". Same
+    endpoint and key handling as ``_runtime_http``: the key travels in a
+    request header (never argv), no proxy, no redirects, bounded body.
+    Raises OSError when the runtime cannot be reached or does not answer in time.
+    """
+    origin, transport = _runtime_endpoint(env)
+    api_key = _runtime_api_key(env)
+    if transport == "router":
+        return _router_transport_exchange(
+            INSTALL_DIR, origin, path, payload=payload, api_key=api_key, timeout=timeout,
+        )
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib_request.Request(f"{origin}{path}", data=data, headers=headers)
+    opener = urllib_request.build_opener(urllib_request.ProxyHandler({}), _RefuseRedirects())
+    try:
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                status, body = response.status, response.read(_RUNTIME_EXCHANGE_LIMIT + 1)
+        except urllib_error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise OSError(f"llama-server {path} redirected; refusing") from exc
+            status, body = exc.code, exc.read(_RUNTIME_EXCHANGE_LIMIT + 1)
+    except http.client.HTTPException as exc:
+        raise OSError(f"llama-server {path} answered incompletely: {exc}") from exc
+    if len(body) > _RUNTIME_EXCHANGE_LIMIT:
+        raise OSError(f"llama-server {path} answer exceeds {_RUNTIME_EXCHANGE_LIMIT} bytes")
+    return status, body.decode("utf-8", errors="replace")
+
+
+_MODEL_PROFILE_MODES = frozenset({"off", "observe", "enabled"})
+_MODEL_PROFILE_DEFAULT_MODE = "observe"  # PLAN D5: observe in the first release
+
+
+def _model_profiles_mode(env: dict) -> str:
+    """``ODS_MODEL_PROFILES``: off, observe (default) or enabled."""
+    value = str(env.get("ODS_MODEL_PROFILES") or _MODEL_PROFILE_DEFAULT_MODE).strip().lower()
+    if value not in _MODEL_PROFILE_MODES:
+        logger.warning("ODS_MODEL_PROFILES=%r is not off, observe or enabled; using %s",
+                       value, _MODEL_PROFILE_DEFAULT_MODE)
+        return _MODEL_PROFILE_DEFAULT_MODE
+    return value
+
+
+def _model_profile_path() -> Path:
+    return INSTALL_DIR / "data" / "model-profiles.json"
+
+
+def _model_profile_backend(env: dict) -> str:
+    if _runtime_uses_router_transport(env) or _is_windows_host_llama_server(env):
+        return "windows-native"
+    return str(env.get("GPU_BACKEND") or "cpu").strip().lower() or "cpu"
+
+
+def _model_profile_digests(model: dict, gguf_file: str) -> list[str]:
+    """Every GGUF part's SHA-256 from the model's integrity manifest, else a file marker."""
+    manifest = _model_download_manifest(model) if isinstance(model, dict) else None
+    digests = [str(artifact["sha256"]) for artifact in (manifest or {}).get("artifacts", [])
+               if artifact.get("sha256")]
+    return digests or [f"file:{gguf_file}"]
+
+
+def _profile_model(env: dict, model: dict, *, model_id: str, gguf_file: str, force: bool = False) -> dict:
+    """Measure the loaded model once per GGUF x llama.cpp build x host (PLAN WP3).
+
+    A stored profile with the same key is reused unless ``force``. Inside an
+    activation this runs after the runtime proof and before any consumer is
+    touched (D1), under one total budget (D2), shown as the "profiling" phase.
+    """
+    if _model_profiles_mode(env) == "off" or _model_profile_probes is None or _model_profile_store is None:
+        return {"status": "off"}
+    if str(env.get("ODS_MODE") or "local").lower() == "cloud":
+        return {"status": "skipped", "reason": "cloud"}
+    status, text = _runtime_exchange(env, "/props", timeout=15)
+    props = json.loads(text) if status == 200 else None
+    if not isinstance(props, dict):
+        return {"status": "unavailable", "reason": f"props-http-{status}"}
+    facts = _model_profile_probes.static_facts(props)
+    key = _model_profile_store.profile_key(
+        gguf_sha256=_model_profile_digests(model, gguf_file),
+        projector_sha256=None,
+        build_info=facts["buildInfo"],
+        backend=_model_profile_backend(env),
+        template_sha256=facts["templateSha256"],
+        template_source="embedded",
+        suite=_model_profile.SUITE_VERSION,
+        host=_model_profile_store.host_id(),
+    )
+    path = _model_profile_path()
+    try:
+        doc = _model_profile_store.load(path)
+    except _model_profile_store.StoreError as exc:
+        logger.warning("Model profile store unreadable; starting a new one: %s", exc)
+        doc = _model_profile_store.empty()
+    profile = None if force else _model_profile_store.find(doc, key)
+    cached = profile is not None
+    if profile is None:
+        _set_model_activation_phase("profiling")
+        result = _model_profile_probes.run_battery(
+            lambda probe_path, probe_payload, probe_timeout: _runtime_exchange(
+                env, probe_path, payload=probe_payload, timeout=probe_timeout),
+            props,
+        )
+        profile = _model_profile_store.recorded_profile(
+            key, model_id=model_id, gguf_file=gguf_file, result=result, product_version=ODS_VERSION)
+        doc = _model_profile_store.with_profile(doc, profile)
+        logger.info("Model profile for %s took %d ms: %s", model_id, result["elapsedMs"],
+                    json.dumps(result["summary"], sort_keys=True))
+    _model_profile_store.atomic_write(
+        path, _model_profile_store.with_last_activation(doc, model_id, profile["keyHash"]))
+    return {"status": "cached" if cached else "recorded", "keyHash": profile["keyHash"],
+            "summary": profile["result"]["summary"]}
+
+
+def _profile_model_advisory(env: dict, model: dict, *, model_id: str, gguf_file: str, force: bool = False) -> dict:
+    """``_profile_model`` that can never fail a switch (PLAN D4, the no-lockout rule).
+
+    These are the I/O and response-shape failures a probe run can meet; each
+    is logged with its trace and reported as the profile's status instead.
+    """
+    try:
+        return _profile_model(env, model, model_id=model_id, gguf_file=gguf_file, force=force)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
+        logger.exception("Model profile for %s did not complete", model_id)
+        return {"status": "error", "reason": type(exc).__name__}
 
 
 def _runtime_health(env: dict) -> str:

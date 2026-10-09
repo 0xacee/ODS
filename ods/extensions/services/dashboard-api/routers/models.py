@@ -2046,6 +2046,7 @@ _LIFECYCLE_BUSY_WORDS = {
     "system_update": "installing an update",
     "opencode_setup": "setting up OpenCode",
     "opencode_start": "starting OpenCode",
+    "model_profile_recheck": "checking what the running model can do",
     **{operation: "checking Pixel" for operation in _PIXEL_LIFECYCLE_OPERATIONS},
 }
 
@@ -2724,6 +2725,31 @@ def load_model(
         # sent as soon as this response lands, sees the settled state.
         _invalidate_agent_model_status_cache()
     return result
+
+
+@router.get("/api/models/{model_id}/profile")
+async def model_profile(model_id: str, api_key: str = Depends(verify_api_key)):
+    """What a model was measured to do on this machine (PLAN WP3); advisory."""
+    try:
+        return await asyncio.to_thread(
+            request_agent_json, "GET", "/v1/model/profile", params={"model": model_id}, timeout=10,
+        )
+    except AgentHTTPError as exc:
+        raise HTTPException(status_code=502, detail=_agent_http_detail(exc)) from exc
+    except AgentClientError as exc:
+        raise HTTPException(status_code=503, detail=f"Host agent unreachable: {exc}") from exc
+
+
+# The probe battery's own budget (120 s) plus the runtime's /props read.
+_MODEL_PROFILE_RECHECK_TIMEOUT_SECONDS = 180
+
+
+@router.post("/api/models/{model_id}/profile/recheck")
+def recheck_model_profile(model_id: str, api_key: str = Depends(verify_api_key)):
+    """Measure the running model again, ignoring its stored profile."""
+    return _call_agent_model(
+        "/v1/model/profile/recheck", {"model": model_id}, timeout=_MODEL_PROFILE_RECHECK_TIMEOUT_SECONDS,
+    )
 
 
 @router.post("/api/models/{model_id}/benchmark")

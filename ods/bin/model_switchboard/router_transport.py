@@ -76,11 +76,22 @@ def serve():
         request = urllib.request.Request(message["origin"] + message["path"],
                                          data=body, headers=headers)
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-        with opener.open(request, timeout=message["timeout"]) as response:
-            body = response.read(LIMIT + 1)
+        try:
+            with opener.open(request, timeout=message["timeout"]) as response:
+                status, body = response.status, response.read(LIMIT + 1)
+        except urllib.error.HTTPError as exc:
+            # Redirects are never followed. Only an envelope request reports an
+            # error status, with its bounded body, instead of failing.
+            if not message.get("envelope") or 300 <= exc.code < 400:
+                raise
+            status, body = exc.code, exc.read(LIMIT + 1)
         if len(body) > LIMIT:
             raise ProofError("runtime response exceeds 64 KiB")
-        body.decode("utf-8")
+        text = body.decode("utf-8")
+        if message.get("envelope"):
+            body = json.dumps({"status": status, "body": text}, ensure_ascii=False).encode("utf-8")
+            if len(body) > LIMIT:
+                raise ProofError("runtime response exceeds 64 KiB")
         sys.stdout.buffer.write(body)
         sys.stdout.buffer.flush()
     finally:
@@ -145,8 +156,36 @@ def request(install_dir: Path, origin: str, path: str,
     """Return bounded HTTP text; never grant readiness or publish model state.
 
     ``origin`` is the router's ``llama-server-default`` base URL without a
-    path; ``path`` is one of the proof and telemetry routes.
+    path; ``path`` is one of the proof and telemetry routes. An HTTP error
+    status fails the request.
     """
+    return _send(install_dir, origin, path, payload, api_key, timeout, project, envelope=False)
+
+
+def exchange(install_dir: Path, origin: str, path: str,
+             payload: dict | None = None, api_key: str = "", timeout: float = 5,
+             *, project: str = "ods") -> tuple[int, str]:
+    """Return ``(http_status, text)``, error statuses included, for capability probes.
+
+    Same ownership, route and size rules as ``request``. A model's own error
+    text (llama-server's 400 "Unable to generate parser for this template")
+    is evidence a probe classifies, so it comes back instead of failing.
+    Redirects are still refused.
+    """
+    raw = _send(install_dir, origin, path, payload, api_key, timeout, project, envelope=True)
+    try:
+        envelope = json.loads(raw)
+    except ValueError as exc:
+        raise OSError("Runtime transport returned a malformed envelope") from exc
+    status = envelope.get("status") if isinstance(envelope, dict) else None
+    text = envelope.get("body") if isinstance(envelope, dict) else None
+    if not isinstance(status, int) or isinstance(status, bool) or not isinstance(text, str):
+        raise OSError("Runtime transport returned a malformed envelope")
+    return status, text
+
+
+def _send(install_dir: Path, origin: str, path: str, payload: dict | None, api_key: str,
+          timeout: float, project: str, *, envelope: bool) -> str:
     parsed = urlsplit(origin)
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username is not None or parsed.password is not None
@@ -164,8 +203,11 @@ def request(install_dir: Path, origin: str, path: str,
         raise ValueError("Runtime proof timeout must be between 0 and 900 seconds")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project):
         raise ValueError("Invalid Compose project")
-    data = json.dumps(dict(endpoint_id=ENDPOINT_ID, origin=origin, path=path, payload=payload,
-                           api_key=api_key, timeout=timeout), allow_nan=False).encode("utf-8")
+    message = dict(endpoint_id=ENDPOINT_ID, origin=origin, path=path, payload=payload,
+                   api_key=api_key, timeout=timeout)
+    if envelope:
+        message["envelope"] = True
+    data = json.dumps(message, allow_nan=False).encode("utf-8")
     if len(data) > _LIMIT:
         raise ValueError("Runtime proof request exceeds 64 KiB")
     container_id = _owned_router(install_dir, project)

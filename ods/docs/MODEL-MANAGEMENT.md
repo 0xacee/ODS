@@ -225,6 +225,29 @@ context-scaled recent tail and uses extra headroom
 for 8K-31K profiles so recovery occurs before a dense tool transcript exhausts
 the model window.
 
+### What a model can do (model profiles)
+
+The first time a model runs on this machine, ODS checks what it can actually
+do before Portal and the other apps switch to it. The Models page shows
+**Checking what this model can do (first time only)** while it runs. The check
+takes up to two minutes and happens once per model file, llama.cpp build and
+machine. ODS:
+
+- asks for a plain answer;
+- asks the model to call a tool, hands back the tool's result, and repeats the
+  call as a stream;
+- turns thinking on and off, where the model's template allows it;
+- shows it a small image, when the model was imported with its vision projector;
+- measures its generation speed.
+
+The result appears under the running model on the Models page, with
+**Check again**. Everything stays on the machine: the check talks only to the
+local model, and results are stored in `data/model-profiles.json`. A failed or
+unfinished check never blocks a switch.
+
+In this release profiles are advisory (`ODS_MODEL_PROFILES=observe` in `.env`,
+the default): apps keep working exactly as before. `off` skips the check.
+
 ### Choosing the runtime context
 
 Before loading a model, the Dashboard offers context presets derived from the

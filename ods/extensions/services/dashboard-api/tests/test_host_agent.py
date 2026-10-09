@@ -3505,6 +3505,7 @@ class _FakeHandler:
         self.rfile = io.BytesIO(body)
         self.wfile = io.BytesIO()
         self.client_address = ("127.0.0.1", 12345)
+        self.path = "/"
         self.response_code = None
         self.response_headers = []
 
@@ -10284,3 +10285,120 @@ class TestWslServiceInterop:
         _mod._wsl_sensor_run(['powershell.exe'])
         assert calls == ['/run/WSL/1973_interop', '/run/WSL/2_interop']
         assert _mod._wsl_metrics_interop == ('/run/WSL/2_interop', (1, 2))
+
+
+class TestModelProfileRoutes:
+    """WP3.5: GET /v1/model/profile and POST /v1/model/profile/recheck."""
+
+    RESULT = {"suite": "1", "status": "complete", "probes": {"P1": {"status": "pass"}},
+              "summary": {"chat": True, "tools": False}}
+
+    def _setup(self, tmp_path, monkeypatch, env_text="GGUF_FILE=running.gguf\n"):
+        install_dir = tmp_path / "install"
+        (install_dir / "data").mkdir(parents=True)
+        (install_dir / ".env").write_text(env_text, encoding="utf-8")
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
+        return install_dir
+
+    def _seed(self, install_dir, *entries, last=None):
+        store = _mod._model_profile_store
+        doc = store.empty()
+        for model_id, build in entries:
+            key = store.profile_key(gguf_sha256=["a" * 64], projector_sha256=None, build_info=build,
+                                    backend="nvidia", template_sha256=None, template_source="embedded",
+                                    suite="1", host="0123456789abcdef")
+            if model_id != "running":
+                key["ggufSha256"] = [model_id.encode().hex().ljust(64, "0")[:64]]
+            doc = store.with_profile(doc, store.recorded_profile(
+                key, model_id=model_id, gguf_file=f"{model_id}.gguf", result=self.RESULT, product_version="t"))
+        if last:
+            doc = store.with_last_activation(doc, last, next(p["keyHash"] for p in doc["profiles"] if p["modelId"] == last))
+        store.atomic_write(install_dir / "data" / "model-profiles.json", doc)
+
+    def _get(self, query=""):
+        handler = _FakeHandler(b"")
+        handler.path = "/v1/model/profile" + query
+        _mod.AgentHandler._handle_model_profile(handler)
+        return handler
+
+    def _recheck(self, model_id):
+        handler = _FakeHandler(json.dumps({"model": model_id}).encode())
+        handler.path = "/v1/model/profile/recheck"
+        _mod.AgentHandler._handle_model_profile_recheck(handler)
+        return handler
+
+    def test_get_returns_the_last_activated_models_profile(self, tmp_path, monkeypatch):
+        install_dir = self._setup(tmp_path, monkeypatch)
+        self._seed(install_dir, ("running", "b11429-x"), ("other", "b11429-x"), last="running")
+
+        handler = self._get()
+
+        assert handler.response_code == 200
+        body = handler.parse_response()
+        assert body["mode"] == "observe" and body["modelId"] == "running"
+        assert body["profile"]["modelId"] == "running"
+
+    def test_get_for_a_named_model_returns_its_newest_profile(self, tmp_path, monkeypatch):
+        install_dir = self._setup(tmp_path, monkeypatch)
+        self._seed(install_dir, ("running", "b11429-x"), ("other", "b9014-y"), last="running")
+
+        body = self._get("?model=other").parse_response()
+
+        assert body["profile"]["modelId"] == "other"
+        assert body["profile"]["key"]["buildInfo"] == "b9014-y"
+
+    def test_get_without_a_store_or_with_profiles_off(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch, env_text="ODS_MODEL_PROFILES=off\n")
+
+        body = self._get("?model=x").parse_response()
+
+        assert body == {"mode": "off", "modelId": "x", "profile": None}
+
+    def test_recheck_measures_the_running_model_under_its_own_lifecycle(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(_mod, "_load_model_library_records",
+                            lambda: [{"id": "running", "gguf_file": "running.gguf"}])
+        seen = []
+
+        def advisory(env, model, *, model_id, gguf_file, force=False):
+            seen.append((model_id, gguf_file, force, _mod._model_lifecycle_status().get("activeOperation")))
+            return {"status": "recorded", "keyHash": "f" * 64, "summary": {}}
+
+        monkeypatch.setattr(_mod, "_profile_model_advisory", advisory)
+
+        handler = self._recheck("running")
+
+        assert handler.response_code == 200
+        assert handler.parse_response()["status"] == "recorded"
+        assert seen == [("running", "running.gguf", True, "model_profile_recheck")]
+        assert _mod._model_lifecycle_status() == {} or not _mod._model_lifecycle_status().get("lifecycleActive")
+
+    @pytest.mark.parametrize("env_text, model_id, code", [
+        ("GGUF_FILE=running.gguf\n", "stopped", "not_running"),
+        ("GGUF_FILE=running.gguf\nODS_MODEL_PROFILES=off\n", "running", "profiles_off"),
+    ])
+    def test_recheck_refuses_a_model_that_is_not_running_or_profiles_off(
+            self, tmp_path, monkeypatch, env_text, model_id, code):
+        self._setup(tmp_path, monkeypatch, env_text=env_text)
+        monkeypatch.setattr(_mod, "_load_model_library_records", lambda: [
+            {"id": "running", "gguf_file": "running.gguf"}, {"id": "stopped", "gguf_file": "stopped.gguf"}])
+        monkeypatch.setattr(_mod, "_profile_model_advisory", lambda *_a, **_k: pytest.fail("no probe"))
+
+        handler = self._recheck(model_id)
+
+        assert handler.response_code == 409
+        assert handler.parse_response()["code"] == code
+
+    def test_recheck_waits_for_no_one_when_another_model_task_holds_the_lifecycle(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(_mod, "_load_model_library_records",
+                            lambda: [{"id": "running", "gguf_file": "running.gguf"}])
+        monkeypatch.setattr(_mod, "_begin_model_lifecycle",
+                            lambda *_a, **_k: (False, {"operation": "model_download", "target": "x.gguf"}))
+        monkeypatch.setattr(_mod, "_profile_model_advisory", lambda *_a, **_k: pytest.fail("no probe"))
+
+        handler = self._recheck("running")
+
+        assert handler.response_code == 409
+        assert handler.parse_response()["activeOperation"] == "model_download"
