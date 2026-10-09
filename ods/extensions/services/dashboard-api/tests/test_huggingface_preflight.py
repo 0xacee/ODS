@@ -598,7 +598,7 @@ def test_a_windows_launcher_without_vision_support_imports_the_weights_alone(tes
     monkeypatch.setattr(models_router, "_hf_get_json", hub)
     monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: True)
     management = {"managed": True, "canActivate": True, "canUnload": True, "running": True, "vision": False}
-    monkeypatch.setattr(models_router, "_model_management", lambda: dict(management))
+    monkeypatch.setattr(models_router, "_model_management_proof", lambda: dict(management))
 
     details = test_client.get(f"/api/models/huggingface/repositories/{REPO}", headers=test_client.auth_headers).json()
 
@@ -618,7 +618,7 @@ def test_a_windows_launcher_without_vision_support_imports_the_weights_alone(tes
     assert "could not confirm" in details["visionUnavailableReason"]
 
 
-def test_management_projects_vision_only_for_a_managed_runtime(monkeypatch):
+def test_vision_support_is_read_only_from_a_managed_proof_and_never_projected(monkeypatch):
     import routers.models as models_router
 
     monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: True)
@@ -627,7 +627,8 @@ def test_management_projects_vision_only_for_a_managed_runtime(monkeypatch):
                             ({"managed": True, "canActivate": True, "canUnload": True, "running": True, "vision": "yes"}, False),
                             ({"managed": False, "canActivate": False, "canUnload": False, "running": False, "vision": True}, False)):
         monkeypatch.setattr(models_router, "request_agent_json", lambda *_args, value=value, **_kwargs: dict(value))
-        assert models_router._model_management()["vision"] is expected
+        assert models_router._model_management_proof()["vision"] is expected
+        assert "vision" not in models_router._model_management()
 
 
 def test_the_docker_desktop_windows_runtime_imports_the_weights_alone(monkeypatch):
@@ -635,7 +636,7 @@ def test_the_docker_desktop_windows_runtime_imports_the_weights_alone(monkeypatc
 
     monkeypatch.setattr(models_router, "read_live_env_values",
                         lambda keys: {"AMD_INFERENCE_RUNTIME_MODE": "windows-native-llama-server"})
-    monkeypatch.setattr(models_router, "_model_management", lambda: pytest.fail("no management proof is needed"))
+    monkeypatch.setattr(models_router, "_model_management_proof", lambda: pytest.fail("no management proof is needed"))
     assert "does not load vision files" in models_router._projector_unavailable_reason()
     monkeypatch.setattr(models_router, "read_live_env_values", lambda keys: {"AMD_INFERENCE_RUNTIME_MODE": "linux-container"})
     monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: False)

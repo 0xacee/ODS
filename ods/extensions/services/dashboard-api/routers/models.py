@@ -1785,10 +1785,10 @@ def _newly_measured_tps(metrics: dict, loaded_model: str | None) -> float:
     return float(metrics.get("tokens_per_second") or 0)
 
 
-def _model_management() -> dict:
-    """Project capability evidence; a network topology flag grants no control."""
+def _model_management_proof() -> dict:
+    """The host agent's management proof, with whether its launcher loads a vision projector."""
     if not _windows_hosted_runtime():
-        return {"managed": False, "canActivate": False, "canUnload": False, "running": False}
+        return {"managed": False, "canActivate": False, "canUnload": False, "running": False, "vision": False}
     try:
         value = request_agent_json("GET", "/v1/model/management", timeout=20)
         if not isinstance(value, dict) or any(type(value.get(key)) is not bool for key in (
@@ -1799,15 +1799,22 @@ def _model_management() -> dict:
                 or value['canActivate'] and not value['running']):
             raise ValueError("Inconsistent model management response")
         result = {key: value[key] for key in ("managed", "canActivate", "canUnload", "running")}
-        # Whether the owned Windows launcher loads a vision projector (WP2).
         result["vision"] = value["managed"] and value.get("vision") is True
         if isinstance(value.get('reason'), str):
             result['reason'] = value['reason'][:500]
         return result
     except (AgentClientError, ValueError):
         # A failed proof is unknown, not evidence of an independently managed service.
-        return {"managed": None, "canActivate": False, "canUnload": False, "running": False,
+        return {"managed": None, "canActivate": False, "canUnload": False, "running": False, "vision": False,
                 "reason": "Runtime management could not be verified"}
+
+
+def _model_management() -> dict:
+    """Project capability evidence; a network topology flag grants no control."""
+    proof = _model_management_proof()
+    if not _windows_hosted_runtime():
+        return {key: proof[key] for key in ("managed", "canActivate", "canUnload", "running")}
+    return {key: value for key, value in proof.items() if key != "vision"}
 
 
 # Docker Desktop installs whose host agent launches llama-server.exe on
@@ -1823,7 +1830,7 @@ def _projector_unavailable_reason() -> str | None:
         return "The Windows llama.cpp runtime of this installation does not load vision files, so the model imports without one"
     if not _windows_hosted_runtime():
         return None
-    management = _model_management()
+    management = _model_management_proof()
     if management.get("vision") is True:
         return None
     if management.get("managed") is True:
