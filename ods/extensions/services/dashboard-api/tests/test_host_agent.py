@@ -8527,6 +8527,8 @@ class TestModelDeleteSafety:
         assert handler.response_code == 500
         response = handler.parse_response()
         assert response["code"] == "model_delete_recovery_required"
+        assert response["recoveryDirectory"] in response["error"]
+        assert "Restore" in response["error"]
         recovery = models / response["recoveryDirectory"]
         assert (recovery / parts[0].name).read_bytes() == b"part-0"
         assert parts[1].read_bytes() == b"part-1"
@@ -8547,6 +8549,8 @@ class TestModelDeleteSafety:
         assert handler.response_code == 500
         response = handler.parse_response()
         assert response["code"] == "model_delete_cleanup_pending"
+        assert response["recoveryDirectory"] in response["error"]
+        assert "free disk space" in response["error"]
         assert response["deletionCommitted"] is True
         recovery = models / response["recoveryDirectory"]
         assert (recovery / parts[1].name).read_bytes() == b"part-1"
@@ -8601,6 +8605,8 @@ class TestModelDeleteSafety:
         assert not any(part.exists() for part in parts)
         if cleanup_fails:
             assert response["cleanupPending"] is True
+            assert response["recoveryDirectory"] in response["error"]
+            assert "free disk space" in response["error"]
             assert (models / response["recoveryDirectory"] / parts[1].name).read_bytes() == b"part-1"
         else:
             assert "recoveryDirectory" not in response
@@ -8622,6 +8628,8 @@ class TestModelDeleteSafety:
         assert handler.response_code == 500
         response = handler.parse_response()
         assert response["code"] == "model_delete_recovery_required"
+        assert response["recoveryDirectory"] in response["error"]
+        assert "Restore" in response["error"]
         assert parts[0].read_bytes() == b"foreign replacement"
         assert (models / response["recoveryDirectory"] / parts[0].name).read_bytes() == b"part-0"
         assert parts[1].read_bytes() == b"part-1"
@@ -8650,6 +8658,8 @@ class TestModelDeleteSafety:
         assert parts[0].read_bytes() == b"racing foreign model"
         response = handler.parse_response()
         assert response["code"] == "model_delete_recovery_required"
+        assert response["recoveryDirectory"] in response["error"]
+        assert "Restore" in response["error"]
         assert (models / response["recoveryDirectory"] / parts[0].name).read_bytes() == b"part-0"
         assert parts[1].read_bytes() == b"part-1"
 
@@ -8675,6 +8685,8 @@ class TestModelDeleteSafety:
         assert handler.response_code == 500
         response = handler.parse_response()
         assert response["code"] == "model_delete_recovery_required"
+        assert response["recoveryDirectory"] in response["error"]
+        assert "Restore" in response["error"]
         assert [p.read_bytes() for p in parts] == [b"part-0", b"part-1"]
         retained = models / response["recoveryDirectory"] / parts[0].name
         assert retained.read_bytes() == b"part-0"

@@ -15096,7 +15096,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                         restore_failed = True
                 if restore_failed:
                     json_response(self, 500, {
-                        "error": "Model deletion stopped and some shards need manual restoration from the recovery directory",
+                        "error": (f"Model deletion stopped. Restore the preserved shards from '{staging.name}' "
+                                  "inside this model's store directory before retrying; do not overwrite existing files."),
                         "code": "model_delete_recovery_required",
                         "recoveryDirectory": staging.name,
                     })
@@ -15136,12 +15137,19 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "deletionCommitted": True,
                 }
                 if cleanup_pending:
-                    payload.update(cleanupPending=True, recoveryDirectory=staging.name)
+                    payload.update(
+                        cleanupPending=True,
+                        recoveryDirectory=staging.name,
+                        error=("Model was removed from the library, but download status could not be updated. "
+                               f"Disk cleanup is also incomplete. Remove the remaining files in '{staging.name}' "
+                               "inside this model's store directory to free disk space."),
+                    )
                 json_response(self, 500, payload)
                 return
             if cleanup_pending:
                 json_response(self, 500, {
-                    "error": "Model was removed from the library, but disk cleanup is incomplete; remove the remaining recovery directory",
+                    "error": (f"Model was removed from the library, but disk cleanup is incomplete. Remove the remaining "
+                              f"files in '{staging.name}' inside this model's store directory to free disk space."),
                     "code": "model_delete_cleanup_pending",
                     "deletionCommitted": True,
                     "recoveryDirectory": staging.name,
