@@ -505,3 +505,85 @@ def test_import_refuses_a_file_this_build_cannot_read_unless_acknowledged(test_c
     record = json.loads((models_router.Path(models_router.DATA_DIR) / "model-imports.json").read_text(encoding="utf-8"))["models"][0]
     assert record["runtime_override"]["tensorTypes"] == ["Q2_0"]
     assert record["runtime_override"]["build"] == "b9014"
+
+
+def _sibling(filename, size=100, sha="a" * 64):
+    return {"rfilename": filename, "size": size, "lfs": {"size": size, "sha256": sha}}
+
+
+@pytest.mark.parametrize("names, default", [
+    (["mmproj-BF16.gguf", "mmproj-F16.gguf", "mmproj-F32.gguf"], "mmproj-F16.gguf"),
+    (["mmproj-BF16.gguf", "mmproj-F32.gguf"], "mmproj-BF16.gguf"),
+    (["mmproj-model.gguf"], "mmproj-model.gguf"),          # the only one
+    (["mmproj-a.gguf", "mmproj-b.gguf"], None),            # nothing to prefer: no guess
+    ([], None),
+])
+def test_projectors_are_listed_and_the_default_is_llama_cpps_closest_pick(names, default):
+    import routers.models as models_router
+
+    payload = {"siblings": [_sibling("model-Q4_K_M.gguf")] + [_sibling(name) for name in names]}
+    projectors = models_router._hf_gguf_projectors(payload)
+    chosen = models_router._hf_default_projector(projectors)
+
+    assert sorted(item["label"] for item in projectors) == sorted(names)
+    assert (chosen or {}).get("label") == default
+    # Projectors are never offered as weights.
+    assert [artifact["label"] for artifact in models_router._hf_gguf_artifacts(payload)] == ["model-Q4_K_M.gguf"]
+
+
+_PROJECTOR = {"id": "p" * 20, "label": "mmproj-F16.gguf", "filename": "mmproj-F16.gguf",
+              "sizeBytes": 1 * GIB, "sha256": "9" * 64, "precision": "F16"}
+
+
+def _vision_details():
+    return _details(projectors=[_PROJECTOR], defaultProjectorId=_PROJECTOR["id"])
+
+
+@pytest.mark.parametrize("extra, expect_projector", [({}, True), ({"includeVision": False}, False)])
+def test_import_brings_the_projector_unless_vision_is_unticked(test_client, preflight_env, monkeypatch,
+                                                              extra, expect_projector):
+    models_router, state = preflight_env
+    state["details"] = _vision_details()
+    sent: list[dict] = []
+
+    def agent(path, payload):
+        sent.append(payload)
+        return {"status": "started"}
+
+    monkeypatch.setattr(models_router, "_call_agent_model", agent)
+
+    response = _import(test_client, **extra)
+
+    assert response.status_code == 200
+    record = json.loads((models_router.Path(models_router.DATA_DIR) / "model-imports.json").read_text(encoding="utf-8"))["models"][0]
+    if expect_projector:
+        assert record["mmproj_file"].startswith("hf-org-model-GGUF-mmproj-F16-") and record["mmproj_file"].endswith(".gguf")
+        assert record["mmproj_sha256"] == "9" * 64 and record["mmproj_size_bytes"] == GIB
+        assert record["mmproj_url"].endswith("/resolve/" + "c" * 40 + "/mmproj-F16.gguf")
+        assert sent[0]["mmproj"] == {"file": record["mmproj_file"], "url": record["mmproj_url"], "sha256": "9" * 64}
+    else:
+        assert "mmproj_file" not in record and "mmproj" not in sent[0]
+
+
+def test_an_unknown_projector_choice_is_refused(test_client, preflight_env, monkeypatch):
+    models_router, state = preflight_env
+    state["details"] = _vision_details()
+    monkeypatch.setattr(models_router, "_call_agent_model", lambda *_a, **_k: pytest.fail("not dispatched"))
+
+    response = _import(test_client, projectorId="q" * 20)
+
+    assert response.status_code == 409
+
+
+def test_preflight_counts_the_projector_in_fit_and_disk(test_client, preflight_env):
+    _router, state = preflight_env
+    state["details"] = _vision_details()
+    # 20 GiB free, 5 GiB margin: the 4 GiB weights fit alone, 15 GiB weights + 1 GiB projector do not.
+    state["details"]["artifacts"][1]["sizeBytes"] = 15 * GIB
+    state["details"]["artifacts"][1]["files"][0]["sizeBytes"] = 15 * GIB
+
+    body = _preflight(test_client).json()
+
+    assert body["projector"] == {"id": "p" * 20, "label": "mmproj-F16.gguf", "sizeBytes": GIB, "precision": "F16"}
+    assert body["artifacts"]["a" * 20]["disk"] == "ok"
+    assert body["artifacts"]["b" * 20]["disk"] == "insufficient"

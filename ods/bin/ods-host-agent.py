@@ -1108,10 +1108,58 @@ def _model_download_manifest(model: dict) -> dict | None:
             "size_bytes": _artifact_expected_size(model),
         })
 
+    projector = _model_projector_artifact(model)
+    if projector is not None:
+        artifacts.append(projector)
     filenames = [artifact["file"] for artifact in artifacts]
     if gguf_file not in filenames or len(filenames) != len(set(filenames)):
         return None
     return {"gguf_file": gguf_file, "artifacts": artifacts}
+
+
+def _library_record_for_gguf(gguf_file: str) -> dict | None:
+    """The catalog or import record whose weights are ``gguf_file``, if any."""
+    try:
+        library = _load_model_library_records()
+    except RuntimeError:
+        logger.warning("Model library unavailable; launching %s without library extras", gguf_file)
+        return None
+    return next((entry for entry in library if entry.get("gguf_file") == gguf_file), None)
+
+
+def _model_projector_file(model: dict | None, models_dir: Path) -> Path | None:
+    """The downloaded vision projector of a model record, if it has one on disk."""
+    filename = str((model or {}).get("mmproj_file") or "").strip()
+    if not filename:
+        return None
+    projector = _safe_model_artifact_path(models_dir, filename)
+    return projector if projector is not None and projector.is_file() else None
+
+
+def _projector_shared(library: list[dict], owner: dict, projector: Path, models_dir: Path) -> bool:
+    """Does another installed model use this projector? Quantizations of one repo share it."""
+    for entry in library:
+        if entry is owner or str(entry.get("mmproj_file") or "") != projector.name:
+            continue
+        weights = _safe_model_artifact_path(models_dir, entry.get("gguf_file"))
+        if weights is not None and weights.exists():
+            return True
+    return False
+
+
+def _model_projector_artifact(model: dict) -> dict | None:
+    """The vision projector (mmproj) an import downloads and verifies with its weights (WP2)."""
+    filename = str(model.get("mmproj_file") or "").strip()
+    url = str(model.get("mmproj_url") or "").strip()
+    if not filename or not url:
+        return None
+    return {
+        "file": filename,
+        "url": url,
+        "sha256": str(model.get("mmproj_sha256") or "").strip().lower(),
+        "size_bytes": _artifact_expected_size({"size_bytes": model.get("mmproj_size_bytes")}),
+        "role": "projector",
+    }
 
 
 def _load_model_library_records() -> list[dict]:
@@ -13020,6 +13068,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                 return
         else:
             download_plan = [(gguf_file, gguf_url)]
+        # A vision import brings its projector (WP2) as the plan's last file.
+        mmproj = body.get("mmproj")
+        if isinstance(mmproj, dict) and mmproj.get("file") and mmproj.get("url"):
+            download_plan.append((mmproj["file"], mmproj["url"]))
 
         # Validate the complete request against the library. A split request
         # must include every catalog part; accepting a subset can otherwise
@@ -13038,18 +13090,11 @@ class AgentHandler(BaseHTTPRequestHandler):
             candidate_manifest = _model_download_manifest(m)
             if candidate_manifest is None:
                 break
-            if gguf_parts:
-                catalog_plan = [
-                    (artifact["file"], artifact["url"])
-                    for artifact in candidate_manifest["artifacts"]
-                ]
-                if download_plan == catalog_plan:
-                    allowed = True
-                    manifest = candidate_manifest
-            elif (
-                len(candidate_manifest["artifacts"]) == 1
-                and candidate_manifest["artifacts"][0]["url"] == gguf_url
-            ):
+            catalog_plan = [
+                (artifact["file"], artifact["url"])
+                for artifact in candidate_manifest["artifacts"]
+            ]
+            if download_plan == catalog_plan:
                 allowed = True
                 manifest = candidate_manifest
             break
@@ -14525,6 +14570,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                     # runs the backend default again; a host or owner image that
                     # no catalog model names is kept.
                     remove_keys.add("LLAMA_SERVER_IMAGE")
+                # A vision import loads its projector in the container (WP2);
+                # any other model clears the previous one's. Host-native
+                # runtimes take the projector as an argument instead.
+                projector_file = _model_projector_file(model, target.parent)
+                if projector_file is not None and not host_native_llama and gpu_backend != "apple":
+                    updates["LLAMA_ARG_MMPROJ"] = f"/models/{projector_file.name}"
+                else:
+                    remove_keys.add("LLAMA_ARG_MMPROJ")
                 new_lines = []
                 seen = set()
                 for line in lines:
@@ -15174,13 +15227,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             except RuntimeError:
                 library = []
             for entry in library:
-                if entry.get("gguf_file") == gguf_file and entry.get("gguf_parts"):
+                if entry.get("gguf_file") != gguf_file:
+                    continue
+                if entry.get("gguf_parts"):
                     parts_to_delete = []
                     for part in entry["gguf_parts"]:
                         part_file = _safe_model_artifact_path(models_dir, part.get("file"))
                         if part_file is not None and part_file.exists():
                             parts_to_delete.append(part_file)
-                    break
+                projector = _model_projector_file(entry, models_dir)
+                if projector is not None and not _projector_shared(library, entry, projector, models_dir):
+                    parts_to_delete.append(projector)
+                break
 
             deleted_names = {path.name for path in parts_to_delete}
             deleted_names.add(gguf_file)
@@ -15502,7 +15560,7 @@ def _model_profile_digests(model: dict, gguf_file: str) -> list[str]:
     """Every GGUF part's SHA-256 from the model's integrity manifest, else a file marker."""
     manifest = _model_download_manifest(model) if isinstance(model, dict) else None
     digests = [str(artifact["sha256"]) for artifact in (manifest or {}).get("artifacts", [])
-               if artifact.get("sha256")]
+               if artifact.get("sha256") and artifact.get("role") != "projector"]
     return digests or [f"file:{gguf_file}"]
 
 
@@ -15522,9 +15580,10 @@ def _profile_model(env: dict, model: dict, *, model_id: str, gguf_file: str, for
     if not isinstance(props, dict):
         return {"status": "unavailable", "reason": f"props-http-{status}"}
     facts = _model_profile_probes.static_facts(props)
+    projector_sha = str(model.get("mmproj_sha256") or "").strip().lower() if isinstance(model, dict) else ""
     key = _model_profile_store.profile_key(
         gguf_sha256=_model_profile_digests(model, gguf_file),
-        projector_sha256=None,
+        projector_sha256=projector_sha if projector_sha and facts["vision"] else None,
         build_info=facts["buildInfo"],
         backend=_model_profile_backend(env),
         template_sha256=facts["templateSha256"],
@@ -19272,6 +19331,11 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         if projector is None:
             raise RuntimeError("The memory-qualified vision projector is unavailable")
         args.extend(["--mmproj", str(projector)])
+    else:
+        # A vision import's own projector (WP2), downloaded with its weights.
+        imported_projector = _model_projector_file(_library_record_for_gguf(gguf_file), model_path.parent)
+        if imported_projector is not None:
+            args.extend(["--mmproj", str(imported_projector)])
     # On macOS the default runtime gets its reasoning flags from the tuning
     # helper below (--reasoning on b9014, where --reasoning-format none put an
     # empty think block into every reply). Everything else passes the format.

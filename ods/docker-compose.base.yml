@@ -79,6 +79,10 @@ services:
       # 8192). CPU runtime profiles cap both; unset keeps llama.cpp defaults.
       - LLAMA_ARG_CTX_CHECKPOINTS
       - LLAMA_ARG_CACHE_RAM
+      # Vision projector of an imported model (/models/<mmproj file>). Set by
+      # model activation for models that bring one and removed otherwise;
+      # passed through only when set, so text models load without it.
+      - LLAMA_ARG_MMPROJ
       # Per-model speculative decoding (e.g. draft-mtp from a runtime
       # profile). Passed through only when set; the NVIDIA and CPU overlays
       # default it to ${LLAMA_SPEC_TYPE:-ngram-mod}. The AMD, Intel, Arc and

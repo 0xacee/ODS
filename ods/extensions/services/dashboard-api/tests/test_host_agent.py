@@ -10402,3 +10402,70 @@ class TestModelProfileRoutes:
 
         assert handler.response_code == 409
         assert handler.parse_response()["activeOperation"] == "model_download"
+
+
+class TestVisionProjectorFiles:
+    """WP2: the projector is downloaded, verified and deleted with the weights."""
+
+    RECORD = {
+        "id": "hf-vision", "gguf_file": "hf-vision-Q4.gguf", "gguf_url": "https://huggingface.co/o/m/resolve/r/m-Q4.gguf",
+        "gguf_sha256": "a" * 64, "size_bytes": 100,
+        "mmproj_file": "hf-vision-mmproj-F16.gguf", "mmproj_url": "https://huggingface.co/o/m/resolve/r/mmproj-F16.gguf",
+        "mmproj_sha256": "b" * 64, "mmproj_size_bytes": 50,
+    }
+
+    def test_the_manifest_carries_the_projector_last(self):
+        manifest = _mod._model_download_manifest(dict(self.RECORD))
+        assert [artifact["file"] for artifact in manifest["artifacts"]] == ["hf-vision-Q4.gguf", "hf-vision-mmproj-F16.gguf"]
+        assert manifest["artifacts"][1]["role"] == "projector"
+        assert manifest["artifacts"][1]["size_bytes"] == 50
+        assert _mod._model_profile_digests(dict(self.RECORD), "hf-vision-Q4.gguf") == ["a" * 64]
+
+    @pytest.mark.parametrize("with_projector, expected", [(True, 409), (False, 403)])
+    def test_a_download_must_bring_exactly_the_records_projector(self, tmp_path, monkeypatch, with_projector, expected):
+        install_dir = tmp_path / "install"
+        (install_dir / "config").mkdir(parents=True)
+        (install_dir / "data" / "models").mkdir(parents=True)
+        (install_dir / "config" / "model-library.json").write_text(json.dumps({"models": [self.RECORD]}), encoding="utf-8")
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
+        monkeypatch.setattr(_mod, "_model_download_directory", lambda: install_dir / "data" / "models")
+        monkeypatch.setattr(_mod, "_model_storage_status",
+                            lambda _path: {"freeBytes": 10 ** 12, "totalBytes": 10 ** 12, "marginBytes": 0})
+        # Past validation the request meets a busy lifecycle: 409 proves it was accepted.
+        monkeypatch.setattr(_mod, "_begin_model_lifecycle",
+                            lambda *_a, **_k: (False, {"operation": "model_activation", "target": "x"}))
+        body = {"gguf_file": self.RECORD["gguf_file"], "gguf_url": self.RECORD["gguf_url"]}
+        if with_projector:
+            body["mmproj"] = {"file": self.RECORD["mmproj_file"], "url": self.RECORD["mmproj_url"]}
+        handler = _FakeHandler(json.dumps(body).encode("utf-8"))
+
+        _mod.AgentHandler._handle_model_download(handler)
+
+        assert handler.response_code == expected
+
+    def test_delete_keeps_a_projector_another_installed_quantization_uses(self, tmp_path, monkeypatch):
+        install_dir = tmp_path / "install"
+        models = install_dir / "data" / "models"
+        (install_dir / "config").mkdir(parents=True)
+        models.mkdir(parents=True)
+        (install_dir / ".env").write_text("GPU_BACKEND=nvidia\nGGUF_FILE=other.gguf\nOLLAMA_PORT=8080\n", encoding="utf-8")
+        q4 = dict(self.RECORD)
+        q8 = {**self.RECORD, "id": "hf-vision-q8", "gguf_file": "hf-vision-Q8.gguf"}
+        (install_dir / "config" / "model-library.json").write_text(json.dumps({"models": [q4, q8]}), encoding="utf-8")
+        for name in ("hf-vision-Q4.gguf", "hf-vision-Q8.gguf", "hf-vision-mmproj-F16.gguf"):
+            (models / name).write_bytes(b"x")
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
+        monkeypatch.setattr(_mod, "_live_runtime_has_model", lambda *_args: False)
+
+        first = _FakeHandler(json.dumps({"gguf_file": "hf-vision-Q4.gguf"}).encode())
+        _mod.AgentHandler._handle_model_delete(first)
+        assert first.response_code == 200, first.parse_response()
+        assert (models / "hf-vision-mmproj-F16.gguf").exists()
+
+        second = _FakeHandler(json.dumps({"gguf_file": "hf-vision-Q8.gguf"}).encode())
+        _mod.AgentHandler._handle_model_delete(second)
+        assert second.response_code == 200, second.parse_response()
+        assert not (models / "hf-vision-mmproj-F16.gguf").exists()
+        assert sorted(path.name for path in models.iterdir()) == []

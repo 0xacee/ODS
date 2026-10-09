@@ -187,3 +187,34 @@ test('a file stored in a tensor type this runtime cannot read needs an explicit 
   await act(async () => { fireEvent.click(dialog.getByRole('button', {name: 'Import anyway'})) })
   expect(importBodies()).toEqual([{repoId: 'org/model', artifactId: 'q8', allowUnsupportedRuntime: true}])
 })
+
+test('a repository with a vision projector imports it unless Include vision is unticked', async () => {
+  detailsBody = {
+    ...repo, artifacts,
+    projectors: [{id: 'p1', label: 'mmproj-F16.gguf', sizeBytes: 9e8, precision: 'F16'}],
+    defaultProjectorId: 'p1',
+  }
+  const dialog = await open()
+  const vision = dialog.getByRole('checkbox', {name: /Include vision/})
+  expect(vision).toBeChecked()
+  expect(vision.closest('label')).toHaveTextContent('mmproj-F16.gguf')
+  await act(async () => { fireEvent.click(dialog.getAllByRole('button', {name: /^Import$/})[0]) })
+  expect(importBodies()[0]).toEqual({repoId: 'org/model', artifactId: 'q4', includeVision: true})
+})
+
+test('unticking Include vision imports the weights alone', async () => {
+  detailsBody = {
+    ...repo, artifacts,
+    projectors: [{id: 'p1', label: 'mmproj-F16.gguf', sizeBytes: 9e8, precision: 'F16'}],
+    defaultProjectorId: 'p1',
+  }
+  const dialog = await open()
+  await act(async () => { fireEvent.click(dialog.getByRole('checkbox', {name: /Include vision/})) })
+  await act(async () => { fireEvent.click(dialog.getAllByRole('button', {name: /^Import$/})[0]) })
+  expect(importBodies()[0]).toEqual({repoId: 'org/model', artifactId: 'q4', includeVision: false})
+})
+
+test('a repository without a projector shows no vision choice', async () => {
+  const dialog = await open()
+  expect(dialog.queryByRole('checkbox', {name: /Include vision/})).toBeNull()
+})

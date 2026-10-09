@@ -955,6 +955,42 @@ def _hf_gguf_artifacts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return groups
 
 
+_HF_PROJECTOR_PRECISION_ORDER = ("F16", "BF16", "F32", "Q8_0")
+
+
+def _hf_gguf_projectors(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Vision projector files (mmproj) a repository publishes next to its weights."""
+    siblings = payload.get("siblings") if isinstance(payload.get("siblings"), list) else []
+    projectors = []
+    for sibling in siblings:
+        filename = str(sibling.get("rfilename") or "") if isinstance(sibling, dict) else ""
+        basename = Path(filename).name.lower()
+        if not basename.endswith(".gguf") or "mmproj" not in basename:
+            continue
+        size, sha = _hf_file_metadata(sibling)
+        if size is None or sha is None:
+            continue
+        projectors.append({
+            "id": _hf_artifact_id([filename]),
+            "label": Path(filename).name,
+            "filename": filename,
+            "sizeBytes": size,
+            "sha256": sha,
+            "precision": _hf_quantization(filename),
+        })
+    projectors.sort(key=lambda item: str(item["label"]).lower())
+    return projectors
+
+
+def _hf_default_projector(projectors: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """F16, then BF16 (then F32, Q8_0), else the only one: llama.cpp -hf's closest-name pick."""
+    for precision in _HF_PROJECTOR_PRECISION_ORDER:
+        matches = [item for item in projectors if str(item.get("precision") or "").upper() == precision]
+        if matches:
+            return matches[0]
+    return projectors[0] if len(projectors) == 1 else None
+
+
 def _hf_search_item(payload: dict[str, Any]) -> dict[str, Any] | None:
     repo_id = str(payload.get("id") or payload.get("modelId") or "")
     if not _HF_REPO_RE.fullmatch(repo_id):
@@ -1067,6 +1103,8 @@ async def _hf_repo_details(repo_id: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=502, detail="Hugging Face returned an invalid repository record")
     artifacts = _hf_gguf_artifacts(payload)
+    projectors = _hf_gguf_projectors(payload)
+    default_projector = _hf_default_projector(projectors)
     imported_by_artifact = {
         str(record.get("source_artifact_id") or ""): record
         for record in _read_model_records(_imported_library_path(), required=False)
@@ -1112,6 +1150,9 @@ async def _hf_repo_details(repo_id: str) -> dict[str, Any]:
         "runtimeCompatible": runtime_compatible,
         "runtimeReason": runtime_reason,
         "artifacts": artifacts,
+        # Vision projectors (WP2): one is imported with the chosen weights by default.
+        "projectors": projectors,
+        "defaultProjectorId": default_projector["id"] if default_projector else None,
         "authenticated": bool(_hf_token()),
         "url": f"{_HF_API_BASE}/{repo_id}",
     }
@@ -1246,12 +1287,16 @@ def _hf_artifact_fit(
     layout: dict[str, Any],
     declared_context: int | None,
     gpu_info: Any,
+    extra_bytes: int = 0,
 ) -> dict[str, Any]:
-    """Will this quantization fit, and at what context, on this machine?"""
+    """Will this quantization fit, and at what context, on this machine?
+
+    ``extra_bytes`` is the vision projector loaded with the weights (WP2).
+    """
     estimate = "architecture" if "recurrent_state_bytes" in layout else "rough"
     if gpu_info is None:
         return {"status": "unknown", "estimate": estimate}
-    size = _hf_artifact_size(artifact)
+    size = _hf_artifact_size(artifact) + max(int(extra_bytes or 0), 0)
     model = {
         "id": f"hf-preflight-{artifact['id']}",
         "gguf_file": artifact["files"][0]["filename"],
@@ -1308,11 +1353,14 @@ async def _hf_preflight(details: dict[str, Any]) -> dict[str, Any]:
     layout = model_preflight.memory_fields(header)
     declared_context = layout.get("max_context_length") or details.get("contextLength")
     context_source = "gguf_header" if layout.get("max_context_length") else details.get("contextSource")
+    projector = next((item for item in details.get("projectors") or []
+                      if item["id"] == details.get("defaultProjectorId")), None)
+    projector_bytes = int(projector["sizeBytes"]) if projector else 0
     artifacts = {}
     for artifact in details.get("artifacts") or []:
-        needed = 0 if artifact.get("installed") else _hf_artifact_size(artifact)
+        needed = 0 if artifact.get("installed") else _hf_artifact_size(artifact) + projector_bytes
         artifacts[artifact["id"]] = {
-            "fit": _hf_artifact_fit(artifact, layout, declared_context, gpu_info),
+            "fit": _hf_artifact_fit(artifact, layout, declared_context, gpu_info, projector_bytes),
             "disk": model_preflight.disk_status(needed, storage),
             "tensors": _hf_artifact_tensors(gate, artifact),
         }
@@ -1328,6 +1376,7 @@ async def _hf_preflight(details: dict[str, Any]) -> dict[str, Any]:
         "template": model_preflight.template_signals(header),
         "storage": storage,
         "artifacts": artifacts,
+        "projector": {key: projector[key] for key in ("id", "label", "sizeBytes", "precision")} if projector else None,
         "refusal": gate["refusal"],
     }
 
@@ -1365,12 +1414,54 @@ def _hf_local_filename(repo_id: str, remote_filename: str, revision: str) -> str
     return filename
 
 
+def _hf_projector_fields(details: dict[str, Any], projector: dict[str, Any]) -> dict[str, Any]:
+    """The import record's vision projector: downloaded, verified and deleted with the weights."""
+    repo_id, revision = details["id"], details["sha"]
+    return {
+        "mmproj_file": _hf_local_filename(repo_id, projector["filename"], revision),
+        "mmproj_url": f"{_HF_API_BASE}/{quote(repo_id, safe='/')}/resolve/{revision}/{quote(projector['filename'], safe='/')}",
+        "mmproj_sha256": projector["sha256"],
+        "mmproj_size_bytes": projector["sizeBytes"],
+        "mmproj_source_file": projector["filename"],
+    }
+
+
+def _hf_requested_projector(details: dict[str, Any], body: dict[str, Any]) -> dict[str, Any] | None:
+    """The projector an import brings: the chosen one, else the default, unless vision is off."""
+    if body.get("includeVision") is False or not details.get("projectors"):
+        return None
+    wanted = str(body.get("projectorId") or details.get("defaultProjectorId") or "")
+    projector = next((item for item in details["projectors"] if item["id"] == wanted), None)
+    if body.get("projectorId") and projector is None:
+        raise HTTPException(status_code=409, detail="The selected vision projector is no longer available at this revision")
+    return projector
+
+
+def _hf_download_payload(record: dict[str, Any]) -> dict[str, Any]:
+    """The host-agent download request for a model record, projector included."""
+    payload: dict[str, Any] = {
+        "gguf_file": record["gguf_file"],
+        "gguf_url": record.get("gguf_url", ""),
+        "gguf_sha256": record.get("gguf_sha256", ""),
+    }
+    if record.get("gguf_parts"):
+        payload["gguf_parts"] = record["gguf_parts"]
+    if record.get("mmproj_file"):
+        payload["mmproj"] = {
+            "file": record["mmproj_file"],
+            "url": record.get("mmproj_url", ""),
+            "sha256": record.get("mmproj_sha256", ""),
+        }
+    return payload
+
+
 def _hf_import_record(
     details: dict[str, Any],
     artifact: dict[str, Any],
     *,
     gate: dict[str, Any] | None = None,
     runtime_override: dict[str, Any] | None = None,
+    projector: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     header = (gate or {}).get("header")
     layout = model_preflight.memory_fields(header)
@@ -1384,6 +1475,8 @@ def _hf_import_record(
         record["template_signals"] = model_preflight.template_signals(header)
     if runtime_override:
         record["runtime_override"] = runtime_override
+    if projector:
+        record.update(_hf_projector_fields(details, projector))
     return record
 
 
@@ -1598,7 +1691,8 @@ async def _prepare_huggingface_import(body: dict[str, Any]):
             "Hugging Face import of %s (%s) acknowledged tensor types %s that llama.cpp %s cannot read",
             repo_id, artifact["label"], tensors["unknown"], gate["runtime"]["build"],
         )
-    record = _hf_import_record(details, artifact, gate=gate, runtime_override=runtime_override)
+    projector = _hf_requested_projector(details, body)
+    record = _hf_import_record(details, artifact, gate=gate, runtime_override=runtime_override, projector=projector)
 
     bootstrap_conflict = _bootstrap_upgrade_download_conflict()
     if bootstrap_conflict is not None:
@@ -1658,13 +1752,7 @@ async def import_huggingface_model(
             headers={"X-ODS-Import-Started": "false"},
         ) from exc
 
-    payload = {
-        "gguf_file": record["gguf_file"],
-        "gguf_url": record["gguf_url"],
-        "gguf_sha256": record["gguf_sha256"],
-    }
-    if record.get("gguf_parts"):
-        payload["gguf_parts"] = record["gguf_parts"]
+    payload = _hf_download_payload(record)
     try:
         result = await asyncio.to_thread(_request_agent_download, payload)
     except HTTPException as exc:
@@ -2523,16 +2611,8 @@ def download_model(model_id: str, api_key: str = Depends(verify_api_key)):
             detail={**bootstrap_conflict, "requestedModelId": model_id},
         )
 
-    payload = {
-        "gguf_file": model["gguf_file"],
-        "gguf_url": model.get("gguf_url", ""),
-        "gguf_sha256": model.get("gguf_sha256", ""),
-    }
-    # Split-file models provide gguf_parts array
-    if model.get("gguf_parts"):
-        payload["gguf_parts"] = model["gguf_parts"]
-
-    return _request_agent_download(payload)
+    # Split-file models provide gguf_parts; imports may carry a vision projector.
+    return _request_agent_download(_hf_download_payload(model))
 
 
 @router.post("/api/models/download/cancel")

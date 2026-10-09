@@ -7717,3 +7717,68 @@ class TestModelProfileInActivation:
         assert handler.response_code == 200
         assert handler.parse_response()["profile"] == {"status": "off"}
         assert [path for path in order if path != "consumers"] == [] and "profiling" not in phases
+
+
+class TestVisionProjectorActivation:
+    """WP2: a vision import loads its projector in the container; any other model clears it."""
+
+    @pytest.fixture(autouse=True)
+    def _quiet_runtime(self, monkeypatch):
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, ""))
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
+        monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
+        monkeypatch.setattr(_mod, "_verify_hermes_dashboard_ready", lambda: None)
+        monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
+        monkeypatch.setattr(_mod, "_wait_for_model_readiness", _mock_verified_readiness)
+
+    def _fixture(self, tmp_path, *, vision, env_extra=""):
+        install_dir, env_path, *_ = _write_model_activation_fixture(tmp_path)
+        library = json.loads((install_dir / "config" / "model-library.json").read_text(encoding="utf-8"))
+        if vision:
+            (install_dir / "data" / "models" / "mmproj-test.gguf").write_bytes(b"projector")
+            library["models"][0].update({
+                "mmproj_file": "mmproj-test.gguf",
+                "mmproj_url": "https://example.test/mmproj-test.gguf",
+                "mmproj_sha256": hashlib.sha256(b"projector").hexdigest(),
+            })
+        (install_dir / "config" / "model-library.json").write_text(json.dumps(library), encoding="utf-8")
+        if env_extra:
+            env_path.write_text(env_path.read_text(encoding="utf-8") + env_extra, encoding="utf-8")
+        return install_dir, env_path
+
+    def _activate(self, install_dir, monkeypatch):
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        handler = _ResponseHandler()
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+        return handler
+
+    def test_a_vision_import_loads_its_projector(self, tmp_path, monkeypatch):
+        install_dir, env_path = self._fixture(tmp_path, vision=True)
+
+        handler = self._activate(install_dir, monkeypatch)
+
+        assert handler.response_code == 200, handler.parse_response()
+        assert "LLAMA_ARG_MMPROJ=/models/mmproj-test.gguf" in env_path.read_text(encoding="utf-8").splitlines()
+
+    def test_the_next_model_without_a_projector_clears_it(self, tmp_path, monkeypatch):
+        install_dir, env_path = self._fixture(
+            tmp_path, vision=False, env_extra="LLAMA_ARG_MMPROJ=/models/mmproj-old.gguf\n")
+
+        handler = self._activate(install_dir, monkeypatch)
+
+        assert handler.response_code == 200, handler.parse_response()
+        assert "LLAMA_ARG_MMPROJ" not in env_path.read_text(encoding="utf-8")
+
+    def test_a_vision_import_with_its_projector_missing_does_not_start(self, tmp_path, monkeypatch):
+        install_dir, env_path = self._fixture(tmp_path, vision=True)
+        (install_dir / "data" / "models" / "mmproj-test.gguf").unlink()
+        before = env_path.read_text(encoding="utf-8")
+
+        handler = self._activate(install_dir, monkeypatch)
+
+        assert handler.response_code == 400
+        assert "verification" in handler.parse_response()["error"]
+        assert env_path.read_text(encoding="utf-8") == before

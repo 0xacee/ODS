@@ -289,3 +289,35 @@ def test_normal_stack_resolution_recreates_active_mount_after_restart(tmp_path):
     restored = subprocess.run(command,env=environment,capture_output=True,text=True,check=True).stdout
     assert '.active-model-store.compose.json' not in restored
     assert '.model-stores.compose.json' in restored
+
+
+def test_native_launch_loads_a_vision_imports_own_projector(tmp_path, monkeypatch):
+    agent_path = Path(__file__).resolve().parents[4] / 'bin/ods-host-agent.py'
+    spec = importlib.util.spec_from_file_location('test_native_launch_import_mmproj', agent_path)
+    agent = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(agent)
+    launched: list = []
+
+    class Process:
+        pid = 4321
+
+    def popen(args, **_kwargs):
+        launched.append(args)
+        return Process()
+
+    models = tmp_path / 'data' / 'models'
+    models.mkdir(parents=True)
+    (models / 'hf-vision-Q4.gguf').write_bytes(b'weights')
+    (models / 'hf-vision-mmproj-F16.gguf').write_bytes(b'projector')
+    monkeypatch.setattr(agent, 'INSTALL_DIR', tmp_path)
+    monkeypatch.setattr(agent.platform, 'system', lambda: 'Linux')
+    monkeypatch.setattr(agent.subprocess, 'Popen', popen)
+    monkeypatch.setattr(agent, 'load_env', lambda _path: {'GGUF_FILE': 'hf-vision-Q4.gguf', 'CTX_SIZE': '8192'})
+    for record, expected in (({'gguf_file': 'hf-vision-Q4.gguf', 'mmproj_file': 'hf-vision-mmproj-F16.gguf'}, True),
+                             ({'gguf_file': 'hf-vision-Q4.gguf'}, False)):
+        monkeypatch.setattr(agent, '_library_record_for_gguf', lambda _gguf, _record=record: _record)
+        agent._launch_native_llama_server(tmp_path / '.env', tmp_path / 'llama-server', tmp_path / 'log', tmp_path / 'pid')
+        command = launched.pop()
+        assert ('--mmproj' in command) is expected
+        if expected:
+            assert command[command.index('--mmproj') + 1] == str(models / 'hf-vision-mmproj-F16.gguf')

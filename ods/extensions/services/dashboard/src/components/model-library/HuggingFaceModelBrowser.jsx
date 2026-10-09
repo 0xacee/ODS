@@ -79,6 +79,8 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
   const [preflightLoading, setPreflightLoading] = useState(false)
   const [preflightError, setPreflightError] = useState(null)
   const [overrideOffer, setOverrideOffer] = useState(null)
+  // WP2: a repository's vision projector is imported with the weights unless unticked.
+  const [includeVision, setIncludeVision] = useState(true)
 
   // Facts about the repository's GGUFs before any download: whether this
   // machine's llama.cpp can load it, whether it is a chat model, fit and disk.
@@ -141,6 +143,7 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
     const requestId = detailsRequestRef.current + 1
     detailsRequestRef.current = requestId
     setSelectedRepo(model)
+    setIncludeVision(true)
     setDetails(null)
     setDetailsError(null)
     setPreflight(null)
@@ -178,6 +181,7 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
     if (!details?.id || downloadBusy || pendingImport || importLock.current) return
     importLock.current = true
     const request = { repoId: details.id, artifactId: artifact.id }
+    if (details.defaultProjectorId) request.includeVision = includeVision
     if (allowUnsupportedRuntime) request.allowUnsupportedRuntime = true
     setOverrideOffer(null)
     setPendingImport({ ...request, startedAt: Date.now() })
@@ -377,6 +381,8 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
           downloadBusy={downloadBusy || Boolean(pendingImport)}
           importingArtifact={importingArtifact}
           importStatus={importStatus}
+          includeVision={includeVision}
+          onIncludeVisionChange={setIncludeVision}
           onClose={closeRepository}
           onImport={importArtifact}
           onRetry={() => openRepository(selectedRepo)}
@@ -445,7 +451,8 @@ function RepositoryRow({ model, onInspect }) {
   )
 }
 
-function ArtifactDialog({ model, details, loading, error, preflight, preflightLoading, preflightError, gpu, downloadBusy, importingArtifact, importStatus, onClose, onImport, onRetry }) {
+function ArtifactDialog({ model, details, loading, error, preflight, preflightLoading, preflightError, gpu, downloadBusy, importingArtifact, importStatus, includeVision = true, onIncludeVisionChange, onClose, onImport, onRetry }) {
+  const projector = (details?.projectors || []).find(item => item.id === details?.defaultProjectorId) || null
   const refusal = preflight?.refusal || null
   const [artifactFilter, setArtifactFilter] = useState('')
   const filteredArtifacts = useMemo(() => {
@@ -509,6 +516,13 @@ function ArtifactDialog({ model, details, loading, error, preflight, preflightLo
 
               {details.runtimeCompatible !== false && details.artifacts.length > 0 && (
                 <PreflightSummary preflight={preflight} loading={preflightLoading} error={preflightError} />
+              )}
+
+              {details.runtimeCompatible !== false && projector && (
+                <label className="mb-4 flex items-start gap-2 rounded-lg border border-white/[0.07] bg-black/20 px-4 py-3 text-xs text-theme-text-secondary">
+                  <input type="checkbox" className="mt-0.5" checked={includeVision} onChange={event => onIncludeVisionChange?.(event.target.checked)} />
+                  <span>Include vision: also download {projector.label} ({formatBytes(projector.sizeBytes)}) so this model can read images. Memory estimates below include it.</span>
+                </label>
               )}
 
               {details.artifacts.length === 0 ? (
