@@ -535,6 +535,65 @@ class TestCompletionProof:
 
         assert _mod._chat_completion_ready("127.0.0.1", "8080", "model.gguf") is False
 
+    def test_an_answer_cut_off_while_thinking_earns_one_longer_probe(self, monkeypatch):
+        # DeepSeek-R1 distills ignore enable_thinking: 64 tokens end inside the
+        # reasoning; with room they answer (R1-Distill-Qwen-1.5B: 441 tokens).
+        calls: list = []
+        answers = [
+            {"model": "R1.gguf", "choices": [{"finish_reason": "length",
+                                              "message": {"content": "", "reasoning_content": "Okay, so I need to"}}]},
+            {"model": "R1.gguf", "choices": [{"finish_reason": "stop",
+                                              "message": {"content": "Ready", "reasoning_content": "Okay..."}}]},
+        ]
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(answers[len(calls) - 1]), stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert _mod._chat_completion_ready(
+            "", "", "R1.gguf", "/v1", base_url="http://127.0.0.1:8080",
+            disable_thinking=True, require_visible_content=True, expected_gguf_file="R1.gguf",
+        ) is True
+        budgets = [json.loads(cmd[cmd.index("-d") + 1])["max_tokens"] for cmd, _ in calls]
+        assert budgets == [64, 1024]
+        assert calls[1][0][calls[1][0].index("--max-time") + 1] == "120"
+        assert calls[1][1]["timeout"] == 125
+
+    @pytest.mark.parametrize("first", [
+        # Not cut short: an empty answer that stopped on its own, and visible text.
+        {"choices": [{"finish_reason": "stop", "message": {"content": "", "reasoning_content": "hm"}}]},
+        {"choices": [{"finish_reason": "length", "message": {"content": "READY", "reasoning_content": "x"}}]},
+    ])
+    def test_only_an_answer_cut_off_inside_its_reasoning_is_probed_again(self, monkeypatch, first):
+        calls: list = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(first), stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        _mod._chat_completion_ready("", "", "M.gguf", "/v1", base_url="http://127.0.0.1:8080",
+                                    disable_thinking=True, require_visible_content=True)
+        assert len(calls) == 1
+
+    def test_the_router_proof_gives_a_thinking_model_the_same_longer_probe(self, monkeypatch):
+        requests: list = []
+        answers = [
+            json.dumps({"model": "R1.gguf", "choices": [{"finish_reason": "length",
+                        "message": {"content": "", "reasoning_content": "Okay, so"}}]}),
+            json.dumps({"model": "R1.gguf", "choices": [{"finish_reason": "stop", "message": {"content": "Ready"}}]}),
+        ]
+        monkeypatch.setattr(_mod, "_runtime_endpoint", lambda env: ("http://host.docker.internal:13305", "router"))
+
+        def runtime_http(env, path, *, payload=None, timeout=5):
+            requests.append((payload["max_tokens"], timeout))
+            return answers[len(requests) - 1]
+
+        monkeypatch.setattr(_mod, "_runtime_http", runtime_http)
+        assert _mod._runtime_completion_ready({}, "R1.gguf", expected_gguf_file="R1.gguf") is True
+        assert requests == [(64, 30), (1024, 120)]
+
     def test_runtime_proof_rejects_reasoning_only_output_on_every_runtime(self, monkeypatch):
         # Contract section 1.4: a reasoning-only answer does not prove a
         # runtime can serve consumers. NVIDIA's container proof included.

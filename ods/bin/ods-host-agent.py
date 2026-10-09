@@ -15906,7 +15906,18 @@ def _meaningful_completion(data: object, *, include_reasoning: bool = True) -> b
     return bool(non_space) and set(non_space) != {"?"}
 
 
-def _completion_probe_payload(model_name: str, *, disable_thinking: bool) -> dict:
+_COMPLETION_PROBE_TOKENS = 64
+# A model that always thinks (the DeepSeek-R1 distills ignore enable_thinking)
+# spends the short probe inside its reasoning and never reaches visible
+# content, so every switch to one rolled back: R1-Distill-Qwen-1.5B needs 441
+# tokens to answer (Tower3, 2026-10-09). An answer cut off while thinking earns
+# one longer probe; visible content is still required.
+_COMPLETION_PROBE_THINKING_TOKENS = 1024
+_COMPLETION_PROBE_THINKING_SECONDS = 120
+
+
+def _completion_probe_payload(model_name: str, *, disable_thinking: bool,
+                              max_tokens: int = _COMPLETION_PROBE_TOKENS) -> dict:
     payload = {
         "model": model_name,
         "messages": [{
@@ -15915,12 +15926,21 @@ def _completion_probe_payload(model_name: str, *, disable_thinking: bool) -> dic
         }],
         # A few reasoning-capable servers ignore enable_thinking. Leave enough
         # room for them to reach visible output while still bounding the probe.
-        "max_tokens": 64,
+        "max_tokens": max_tokens,
         "temperature": 0,
     }
     if disable_thinking:
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     return payload
+
+
+def _reasoning_cut_short(response: object) -> bool:
+    """The answer hit max_tokens inside its reasoning: thinking, but no visible text yet."""
+    choices = response.get("choices") if isinstance(response, dict) else None
+    first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    return (first.get("finish_reason") == "length"
+            and _meaningful_completion(response, include_reasoning=True)
+            and not _meaningful_completion(response, include_reasoning=False))
 
 
 def _completion_response_ready(
@@ -15965,10 +15985,12 @@ def _chat_completion_ready(
     prefix = "/" + api_prefix.strip("/")
     origin = base_url.rstrip("/") if base_url else f"http://{host}:{port}"
     url = f"{origin}{prefix}/chat/completions"
-    payload = json.dumps(_completion_probe_payload(model_name, disable_thinking=disable_thinking))
-    try:
+
+    def probe(max_tokens: int, seconds: int):
+        payload = json.dumps(_completion_probe_payload(
+            model_name, disable_thinking=disable_thinking, max_tokens=max_tokens))
         command = [
-            "curl", "-sf", "--max-time", "30", "--max-filesize", "65536",
+            "curl", "-sf", "--max-time", str(seconds), "--max-filesize", "65536",
             "-X", "POST", url,
             "-H", "Content-Type: application/json",
         ]
@@ -15985,11 +16007,16 @@ def _chat_completion_ready(
             capture_output=True,
             text=True,
             input=header_input,
-            timeout=35,
+            timeout=seconds + 5,
         )
-        if result.returncode != 0:
+        return json.loads(result.stdout or "{}") if result.returncode == 0 else None
+
+    try:
+        response = probe(_COMPLETION_PROBE_TOKENS, 30)
+        if response is not None and require_visible_content and _reasoning_cut_short(response):
+            response = probe(_COMPLETION_PROBE_THINKING_TOKENS, _COMPLETION_PROBE_THINKING_SECONDS)
+        if response is None:
             return False
-        response = json.loads(result.stdout or "{}")
     except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
         return False
     return _completion_response_ready(
@@ -16035,6 +16062,15 @@ def _runtime_completion_ready(
             timeout=30,
         )
         response = json.loads(body or "{}")
+        if _reasoning_cut_short(response):
+            body = _runtime_http(
+                env,
+                "/v1/chat/completions",
+                payload=_completion_probe_payload(
+                    model_name, disable_thinking=True, max_tokens=_COMPLETION_PROBE_THINKING_TOKENS),
+                timeout=_COMPLETION_PROBE_THINKING_SECONDS,
+            )
+            response = json.loads(body or "{}")
     except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
         return False
     return _completion_response_ready(response, require_visible_content=True, **expected)
