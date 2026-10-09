@@ -1810,8 +1810,17 @@ def _model_management() -> dict:
                 "reason": "Runtime management could not be verified"}
 
 
+# Docker Desktop installs whose host agent launches llama-server.exe on
+# Windows itself (the host agent's _WINDOWS_NATIVE_RUNTIME_MODES); that
+# launch takes no projector.
+_LEGACY_WINDOWS_NATIVE_MODES = frozenset({"windows-native-llama-server", "windows-llama-server-fallback"})
+
+
 def _projector_unavailable_reason() -> str | None:
     """Why this runtime cannot load a vision projector, or None when it can."""
+    mode = read_live_env_values(("AMD_INFERENCE_RUNTIME_MODE",)).get("AMD_INFERENCE_RUNTIME_MODE")
+    if str(mode or "").strip().casefold() in _LEGACY_WINDOWS_NATIVE_MODES:
+        return "The Windows llama.cpp runtime of this installation does not load vision files, so the model imports without one"
     if not _windows_hosted_runtime():
         return None
     management = _model_management()

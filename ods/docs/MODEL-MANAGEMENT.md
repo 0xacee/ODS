@@ -125,7 +125,9 @@ cached prompt chunks (`--cache-reuse`).
 
 On Windows the projector is loaded by the llama.cpp launcher that Windows setup
 installs. An installation set up before vision support says so in the import
-dialog and imports the weights alone until Windows setup is run again.
+dialog and imports the weights alone until Windows setup is run again. Docker
+Desktop installations whose llama.cpp runs on Windows itself import the weights
+alone.
 
 These checks never block on missing information: when Hugging Face does not
 answer (for example a rate limit), the dialog says which checks could not run

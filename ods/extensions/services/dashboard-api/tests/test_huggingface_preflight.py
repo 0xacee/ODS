@@ -628,3 +628,15 @@ def test_management_projects_vision_only_for_a_managed_runtime(monkeypatch):
                             ({"managed": False, "canActivate": False, "canUnload": False, "running": False, "vision": True}, False)):
         monkeypatch.setattr(models_router, "request_agent_json", lambda *_args, value=value, **_kwargs: dict(value))
         assert models_router._model_management()["vision"] is expected
+
+
+def test_the_docker_desktop_windows_runtime_imports_the_weights_alone(monkeypatch):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "read_live_env_values",
+                        lambda keys: {"AMD_INFERENCE_RUNTIME_MODE": "windows-native-llama-server"})
+    monkeypatch.setattr(models_router, "_model_management", lambda: pytest.fail("no management proof is needed"))
+    assert "does not load vision files" in models_router._projector_unavailable_reason()
+    monkeypatch.setattr(models_router, "read_live_env_values", lambda keys: {"AMD_INFERENCE_RUNTIME_MODE": "linux-container"})
+    monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: False)
+    assert models_router._projector_unavailable_reason() is None
