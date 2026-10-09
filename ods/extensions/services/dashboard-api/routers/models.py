@@ -1374,7 +1374,10 @@ async def import_huggingface_model(
             "/v1/model/download",
             payload,
         )
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code == 507:
+            # The host refused before starting: a definitive, retryable refusal.
+            exc.headers = {**(exc.headers or {}), "X-ODS-Import-Started": "false"}
         raise
     return {
         **result,
@@ -1782,6 +1785,32 @@ def _agent_http_detail(exc: AgentHTTPError) -> Any:
     return detail
 
 
+def _format_gb(value: Any) -> str:
+    try:
+        return f"{max(int(value), 0) / (1024 ** 3):.1f} GB"
+    except (TypeError, ValueError, OverflowError):
+        return "an unknown amount"
+
+
+def _insufficient_disk_detail(agent_detail: Any) -> dict[str, Any]:
+    """Explain a host-agent disk refusal in words; no download was started."""
+    detail = agent_detail if isinstance(agent_detail, dict) else {}
+    required = detail.get("requiredBytes")
+    free = detail.get("freeBytes")
+    margin = detail.get("marginBytes")
+    return {
+        "code": "insufficient_disk_space",
+        "message": (
+            f"Not enough free disk space for this model. It needs {_format_gb(required)}, "
+            f"ODS keeps {_format_gb(margin)} free, and {_format_gb(free)} is free now. "
+            "Delete models you no longer use or free up space on this drive, then retry."
+        ),
+        "requiredBytes": required,
+        "freeBytes": free,
+        "marginBytes": margin,
+    }
+
+
 def _is_download_lifecycle_busy(detail: Any) -> bool:
     return (
         isinstance(detail, dict)
@@ -1834,6 +1863,11 @@ def _call_agent_model(
             raise HTTPException(status_code=409, detail=_agent_http_detail(exc)) from exc
         if exc.status_code == 400:
             raise HTTPException(status_code=400, detail=_agent_http_detail(exc)) from exc
+        if exc.status_code == 507:
+            raise HTTPException(
+                status_code=507,
+                detail=_insufficient_disk_detail(_agent_http_detail(exc)),
+            ) from exc
         raise HTTPException(status_code=502, detail=exc.detail) from exc
     except AgentUnavailable as exc:
         raise HTTPException(status_code=503, detail=f"Host agent unreachable: {exc}") from exc
