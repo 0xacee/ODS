@@ -8,4 +8,5 @@ Stdlib only: the standalone host agent imports this from the installed tree.
 """
 
 # 2: always-thinking models get at least 1024 tokens per probe (2026-10-09).
-SUITE_VERSION = "2"
+# 3: a streamed probe answer may be 2 MiB, so long streams are measured.
+SUITE_VERSION = "3"
