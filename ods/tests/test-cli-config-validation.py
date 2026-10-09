@@ -8,7 +8,6 @@ import subprocess
 import tempfile
 import unittest
 
-import jsonschema  # Required: the Linux CI job installs both schema dependencies.
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
