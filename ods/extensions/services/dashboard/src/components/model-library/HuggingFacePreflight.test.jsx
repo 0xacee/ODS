@@ -116,6 +116,19 @@ test('a failed check never blocks an import', async () => {
   expect(dialog.getAllByRole('button', {name: 'Import', exact: true})).toHaveLength(2)
 })
 
+test('a slow check says so in its own words and leaves the import available', async () => {
+  const pending = new Promise(() => {})
+  const answer = fetch.getMockImplementation()
+  fetch.mockImplementation(async (url, options) => (url.includes('/preflight/') ? pending : answer(url, options)))
+  const dialog = await open()
+  await act(async () => { vi.advanceTimersByTime(30000) })
+  expect(dialog.getByText(/Checking this repository before download/)).toBeVisible()
+  await act(async () => { vi.advanceTimersByTime(60000) })
+  expect(dialog.getByText(/Could not check this repository before download \(the check took longer than 90 seconds\)/)).toBeVisible()
+  expect(dialog.queryByText(/Check download status/)).toBeNull()
+  expect(dialog.getAllByRole('button', {name: 'Import', exact: true})).toHaveLength(2)
+})
+
 test('a server-side runtime refusal offers Import anyway once', async () => {
   preflightBody = {status: 'idle'}
   importResponse = {ok: false, status: 422, body: {detail: {
