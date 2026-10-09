@@ -858,7 +858,9 @@ def _hf_supported_gguf_filename(filename: str) -> bool:
     basename = Path(filename).name.lower()
     if not basename.endswith(".gguf"):
         return False
-    unsupported_markers = ("mmproj", "projector", "adapter", "lora", "tokenizer")
+    # imatrix: llama.cpp importance-matrix calibration data that quantizers
+    # publish next to the weights (bartowski's "*-imatrix.gguf"); not a model.
+    unsupported_markers = ("mmproj", "projector", "adapter", "lora", "tokenizer", "imatrix")
     return not any(marker in basename for marker in unsupported_markers)
 
 
@@ -1197,13 +1199,19 @@ async def _hf_preflight_gate(details: dict[str, Any], *, read_header: bool = Tru
         model_preflight.architecture_supported(policy, build, architecture)
         if kind == "chat" else None
     )
+    # The Hub serves a gated repository's files only with a token whose
+    # account accepted the license: refuse when no token is set, or when the
+    # header read with the token was itself refused as gated.
+    gated = bool(details.get("gated")) and (
+        not _hf_token() or header_status.get("reason") == "gated"
+    )
     return {
         "header": header,
         "headerStatus": header_status,
         "architecture": architecture,
         "runtime": {"key": runtime_key, "build": build, "architectureSupported": supported},
         "modelKind": kind,
-        "refusal": model_preflight.refusal(kind, supported, architecture, build),
+        "refusal": model_preflight.refusal(kind, supported, architecture, build, gated=gated),
     }
 
 
@@ -1265,6 +1273,7 @@ async def _hf_preflight(details: dict[str, Any]) -> dict[str, Any]:
     header = gate["header"]
     layout = model_preflight.memory_fields(header)
     declared_context = layout.get("max_context_length") or details.get("contextLength")
+    context_source = "gguf_header" if layout.get("max_context_length") else details.get("contextSource")
     gpu_info = await asyncio.to_thread(get_gpu_info)
     storage = await _model_storage_status()
     artifacts = {}
@@ -1282,6 +1291,7 @@ async def _hf_preflight(details: dict[str, Any]) -> dict[str, Any]:
         "runtime": gate["runtime"],
         "modelKind": gate["modelKind"],
         "contextLength": declared_context,
+        "contextSource": context_source,
         "template": model_preflight.template_signals(header),
         "storage": storage,
         "artifacts": artifacts,

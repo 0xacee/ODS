@@ -494,7 +494,7 @@ function ArtifactDialog({ model, details, loading, error, preflight, preflightLo
                   icon={Gauge}
                   label="Context metadata"
                   value={formatContext(preflight?.contextLength || details.contextLength)}
-                  detail={contextSourceLabel(preflight?.contextLength ? 'gguf_header' : details.contextSource)}
+                  detail={contextSourceLabel(preflight?.contextLength ? preflight.contextSource : details.contextSource)}
                 />
                 <Metric icon={HardDrive} label="Available artifacts" value={`${details.artifacts.length} choices`} />
                 <Metric icon={CheckCircle2} label="Pinned revision" value={details.sha?.slice(0, 10) || 'Unknown'} mono />
@@ -502,7 +502,8 @@ function ArtifactDialog({ model, details, loading, error, preflight, preflightLo
 
               {details.runtimeCompatible === false && (
                 <div className="mb-4 rounded-lg border border-theme-border bg-theme-text-secondary/8 px-4 py-3 text-sm text-theme-text-secondary">
-                  {details.runtimeReason}. You can inspect its artifacts here, but ODS will not route it through the LLM runtime.
+                  <p>{details.runtimeReason}. You can inspect its artifacts here, but ODS will not route it through the LLM runtime.</p>
+                  <HelpLink className="mt-1 text-xs" />
                 </div>
               )}
 
@@ -576,7 +577,7 @@ function ArtifactRow({ artifact, gpu, check, checking, refusal, busy, importing,
   const needsOverride = Boolean(refusal?.overridable) && !blocked
   const label = importing ? 'Starting'
     : artifact.installed ? 'Installed'
-      : blocked ? 'Not supported'
+      : blocked ? (refusal?.code === 'gated' ? 'Needs access' : 'Not supported')
         : diskShort ? 'Not enough disk'
           : needsOverride ? 'Import anyway…'
             : artifact.importedModelId ? 'Retry' : 'Import'
@@ -700,7 +701,7 @@ function PreflightSummary({ preflight, loading, error }) {
           {' · '}{THINKING_TEXT[template.thinking] || 'Thinking unknown'}
         </p>
       )}
-      {header?.status === 'unavailable' && header.message && (
+      {header?.status === 'unavailable' && header.message && refusal?.code !== 'gated' && (
         <p className="text-theme-text-muted">Some checks could not run: {header.message}.</p>
       )}
       <p className="text-[10px] text-theme-text-muted">From the repository’s own files. How a model actually behaves shows only once you use it.</p>

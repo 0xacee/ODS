@@ -193,6 +193,60 @@ def test_preflight_without_a_header_uses_the_hub_hint(test_client, preflight_env
     assert body["refusal"] is None
 
 
+def test_preflight_reports_where_the_context_came_from(test_client, preflight_env):
+    _router, state = preflight_env
+
+    assert _preflight(test_client).json()["contextSource"] == "gguf_header"
+
+    state["header"] = hf_gguf_header.HeaderUnavailable("rate_limited", "Hugging Face rate limit reached")
+    body = _preflight(test_client).json()
+    assert body["contextLength"] == 8192
+    assert body["contextSource"] == "hub_config"
+
+
+_GATED = hf_gguf_header.HeaderUnavailable("gated", "This repository is gated")
+
+
+@pytest.mark.parametrize("token, header", [
+    ("", _GATED),                     # no token: the Hub will not serve the files
+    ("test-read-token", _GATED),      # a token whose account has not accepted the license
+])
+def test_preflight_refuses_a_gated_repository_this_host_cannot_download(
+    test_client, preflight_env, monkeypatch, token, header,
+):
+    models_router, state = preflight_env
+    monkeypatch.setattr(models_router, "_hf_token", lambda: token)
+    state["details"] = _details(gated=True)
+    state["header"] = header
+
+    body = _preflight(test_client).json()
+
+    assert body["refusal"]["code"] == "gated"
+    assert body["refusal"]["overridable"] is False
+    assert "accept its license" in body["refusal"]["message"]
+    assert "HF_TOKEN in Settings" in body["refusal"]["message"]
+
+
+def test_preflight_allows_a_gated_repository_the_token_can_read(test_client, preflight_env, monkeypatch):
+    models_router, state = preflight_env
+    monkeypatch.setattr(models_router, "_hf_token", lambda: "test-read-token")
+    state["details"] = _details(gated=True)
+
+    body = _preflight(test_client).json()
+
+    assert body["header"]["status"] == "read"
+    assert body["refusal"] is None
+
+
+def test_imatrix_calibration_files_are_not_offered_as_models():
+    import routers.models as models_router
+
+    # bartowski publishes the quantization's importance matrix next to the weights.
+    assert models_router._hf_supported_gguf_filename("Nanbeige_Nanbeige4.2-3B-imatrix.gguf") is False
+    assert models_router._hf_supported_gguf_filename("imatrix_unsloth.gguf") is False
+    assert models_router._hf_supported_gguf_filename("Nanbeige_Nanbeige4.2-3B-Q4_K_M.gguf") is True
+
+
 def _import(test_client, **extra):
     return test_client.post(
         "/api/models/huggingface/import",

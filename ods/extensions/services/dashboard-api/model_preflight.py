@@ -207,10 +207,30 @@ def disk_status(needed_bytes: int, storage: dict[str, Any] | None) -> str:
     return "ok" if free >= needed_bytes + margin else "insufficient"
 
 
-def refusal(kind: str, supported: bool | None, architecture: Any, build: str | None) -> dict[str, Any] | None:
-    """The repository-level hard refusal, if any (positive evidence only)."""
+GATED_MESSAGE = (
+    "This model is gated on Hugging Face. Sign in at huggingface.co and accept its license on the "
+    "model page, then add your Hugging Face access token as HF_TOKEN in Settings (Open Environment "
+    "Editor) and open this model again."
+)
+
+
+def refusal(
+    kind: str,
+    supported: bool | None,
+    architecture: Any,
+    build: str | None,
+    *,
+    gated: bool = False,
+) -> dict[str, Any] | None:
+    """The repository-level hard refusal, if any (positive evidence only).
+
+    ``gated`` means the Hub will not serve this repository's files to this
+    host: it is gated and either no token is set or the token was refused.
+    """
     if kind != "chat":
         return {"code": f"not_a_chat_model:{kind}", "message": KIND_MESSAGES[kind], "overridable": False}
+    if gated:
+        return {"code": "gated", "message": GATED_MESSAGE, "overridable": False}
     if supported is False:
         return {
             "code": "runtime_architecture_unsupported",

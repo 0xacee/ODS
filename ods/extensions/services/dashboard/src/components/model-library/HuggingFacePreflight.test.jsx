@@ -21,6 +21,7 @@ function preflight(overrides = {}) {
     runtime: {key: 'nvidia', build: 'b11429', architectureSupported: true},
     modelKind: 'chat',
     contextLength: 40960,
+    contextSource: 'gguf_header',
     template: {present: true, tools: true, thinking: 'toggle'},
     storage: {freeBytes: 1e11, totalBytes: 1e12, marginBytes: 5e10},
     artifacts: {q4: okCheck, q8: {...okCheck, fit: {...okCheck.fit, status: 'too_large'}}},
@@ -30,10 +31,12 @@ function preflight(overrides = {}) {
 }
 
 let preflightBody
+let detailsBody
 let importResponse
 beforeEach(() => {
   vi.useFakeTimers()
   preflightBody = preflight()
+  detailsBody = {...repo, artifacts}
   importResponse = {ok: true, status: 200, body: {modelId: 'hf-fixture', status: 'downloading'}}
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     if (url.includes('/search?')) return {ok: true, status: 200, json: async () => ({models: [repo]})}
@@ -42,15 +45,15 @@ beforeEach(() => {
       const {ok, status, body} = importResponse
       return {ok, status, headers: {get: name => (name === 'X-ODS-Import-Started' ? 'false' : null)}, json: async () => body}
     }
-    return {ok: true, status: 200, json: async () => ({...repo, artifacts})}
+    return {ok: true, status: 200, json: async () => detailsBody}
   }))
 })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
-async function open() {
+async function open(buttonName = 'Choose file') {
   render(<HuggingFaceModelBrowser/>)
   await act(async () => { vi.advanceTimersByTime(350) })
-  await act(async () => { fireEvent.click(screen.getByRole('button', {name: 'Choose file'})) })
+  await act(async () => { fireEvent.click(screen.getByRole('button', {name: buttonName})) })
   return within(screen.getByRole('dialog'))
 }
 
@@ -130,4 +133,40 @@ test('a server-side runtime refusal offers Import anyway once', async () => {
     {repoId: 'org/model', artifactId: 'q4'},
     {repoId: 'org/model', artifactId: 'q4', allowUnsupportedRuntime: true},
   ])
+})
+
+test('a gated repository says how to get access, once, and cannot be imported yet', async () => {
+  preflightBody = preflight({
+    header: {status: 'unavailable', file: 'model-Q4_K_M.gguf', reason: 'gated', message: 'This repository is gated'},
+    template: {present: null, tools: null, thinking: 'unknown'},
+    refusal: {code: 'gated', message: 'This model is gated on Hugging Face. Accept its license.', overridable: false},
+  })
+  const dialog = await open()
+  const alert = dialog.getByRole('alert')
+  expect(alert).toHaveTextContent('This model is gated on Hugging Face. Accept its license.')
+  expect(within(alert).getByRole('link', {name: 'Get help on Discord'})).toBeVisible()
+  expect(dialog.queryByText(/Some checks could not run/)).toBeNull()
+  for (const button of dialog.getAllByRole('button', {name: /Needs access/})) expect(button).toBeDisabled()
+  expect(dialog.queryByRole('button', {name: /^Import/})).toBeNull()
+})
+
+test('a repository ODS does not run as a chat model links to help without a pre-download check', async () => {
+  repo.runtimeCompatible = false
+  detailsBody = {...repo, artifacts, runtimeCompatible: false, runtimeReason: 'Text Ranking requires a dedicated ODS runtime'}
+  try {
+    const dialog = await open('Inspect')
+    expect(dialog.getByText(/ODS will not route it through the LLM runtime/)).toBeVisible()
+    expect(dialog.getByRole('link', {name: 'Get help on Discord'})).toBeVisible()
+    expect(fetch.mock.calls.filter(([url]) => url.includes('/preflight/'))).toHaveLength(0)
+  } finally {
+    delete repo.runtimeCompatible
+  }
+})
+
+test('the context label names where the number came from', async () => {
+  detailsBody = {...repo, artifacts, contextLength: 32768, contextSource: 'gguf_metadata'}
+  preflightBody = preflight({contextLength: 32768, contextSource: 'gguf_metadata', header: {status: 'unavailable', reason: 'rate_limited', message: 'rate limited'}})
+  const dialog = await open()
+  expect(dialog.getByText('GGUF metadata')).toBeVisible()
+  expect(dialog.queryByText('This file’s GGUF header')).toBeNull()
 })

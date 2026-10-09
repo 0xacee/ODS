@@ -201,3 +201,10 @@ def test_refusals_need_positive_evidence():
         "message": preflight.KIND_MESSAGES["reranker"],
         "overridable": False,
     }
+
+
+def test_a_gated_repository_is_refused_before_the_runtime_check():
+    gated = preflight.refusal("chat", False, "nanbeige", "b9014", gated=True)
+    assert gated == {"code": "gated", "message": preflight.GATED_MESSAGE, "overridable": False}
+    # Not being a chat model outranks access: a token would not make an embedding model chat-capable.
+    assert preflight.refusal("embedding", None, "nomic-bert", "b9014", gated=True)["code"] == "not_a_chat_model:embedding"
