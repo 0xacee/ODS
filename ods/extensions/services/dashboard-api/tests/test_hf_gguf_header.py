@@ -259,3 +259,53 @@ def test_cached_header_is_returned_without_a_request():
 
     assert hf_gguf_header.cached_gguf_header(REPO, REVISION, FILENAME) == first
     assert len(hub.requests) == calls
+
+
+def _model_with_tensor_table(types=(12, 14, 0)) -> bytes:
+    from test_gguf_inspector import tensor_info
+
+    kvs = [("general.architecture", STR, "qwen3"), ("general.file_type", U32, 15)]
+    kvs += [(f"padding.key{index}", STR, "x" * 64) for index in range(20)]
+    table = b"".join(tensor_info(f"blk.{index}.weight", (1024, 1024), ggml_type)
+                     for index, ggml_type in enumerate(types))
+    return build_gguf(kvs, tensor_count=len(types)) + table + b"\1" * 8192
+
+
+def test_reads_on_for_the_tensor_table_after_the_metadata(monkeypatch):
+    body = _model_with_tensor_table()
+    metadata_end = parse_gguf_metadata(body)["metadata_bytes"]
+    # The first read ends just past the metadata, inside the tensor table.
+    monkeypatch.setattr(hf_gguf_header, "FIRST_READ_BYTES", metadata_end + 8)
+    hub = _Hub(body)
+
+    result = _fetch(hub, expected_size=len(body))
+
+    assert result["tensor_types"] == [0, 12, 14]
+    ranges = [request.headers["range"] for request in hub.requests if request.method == "GET"]
+    assert len(ranges) == 2
+
+
+def test_a_failed_read_past_the_metadata_keeps_the_metadata(monkeypatch):
+    body = _model_with_tensor_table()
+    metadata_end = parse_gguf_metadata(body)["metadata_bytes"]
+    monkeypatch.setattr(hf_gguf_header, "FIRST_READ_BYTES", metadata_end + 8)
+    hub = _Hub(body)
+    served: list[httpx.Request] = []
+
+    def flaky(request):
+        if request.method == "GET" and served:
+            return httpx.Response(503)
+        if request.method == "GET":
+            served.append(request)
+        return hub(request)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(flaky)) as client:
+            # The real reader (conftest stubs the module attribute for every other test).
+            return await fetch_gguf_header(
+                REPO, REVISION, FILENAME, expected_size=len(body), token="", client=client)
+
+    result = asyncio.run(run())
+
+    assert result["architecture"] == "qwen3"
+    assert result["tensor_types"] is None

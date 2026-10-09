@@ -1208,6 +1208,7 @@ async def _hf_preflight_gate(details: dict[str, Any], *, read_header: bool = Tru
     return {
         "header": header,
         "headerStatus": header_status,
+        "policy": policy,
         "architecture": architecture,
         "runtime": {"key": runtime_key, "build": build, "architectureSupported": supported},
         "modelKind": kind,
@@ -1275,6 +1276,26 @@ def _hf_artifact_fit(
     }
 
 
+def _hf_artifact_tensors(gate: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    """WP1.6: can this host's llama.cpp read the artifact's tensor types?
+
+    The header read for the repository speaks for its own file only; every
+    other quantization is judged by a label that names a ggml type outright.
+    """
+    header = gate.get("header") or {}
+    files = artifact.get("files") or []
+    same_file = bool(files) and files[0].get("filename") == (gate.get("headerStatus") or {}).get("file")
+    check = model_preflight.artifact_tensor_check(
+        gate.get("policy"),
+        gate["runtime"]["build"],
+        artifact.get("quantization"),
+        header.get("tensor_types") if same_file else None,
+    )
+    if check["status"] == "unsupported":
+        check["refusal"] = model_preflight.tensor_refusal(gate["runtime"]["build"], check["unknown"])
+    return check
+
+
 async def _hf_preflight(details: dict[str, Any]) -> dict[str, Any]:
     # The Hub header read and the host's own answers are independent: wait for
     # the slowest, not their sum.
@@ -1293,6 +1314,7 @@ async def _hf_preflight(details: dict[str, Any]) -> dict[str, Any]:
         artifacts[artifact["id"]] = {
             "fit": _hf_artifact_fit(artifact, layout, declared_context, gpu_info),
             "disk": model_preflight.disk_status(needed, storage),
+            "tensors": _hf_artifact_tensors(gate, artifact),
         }
     return {
         "id": details["id"],
@@ -1559,6 +1581,22 @@ async def _prepare_huggingface_import(body: dict[str, Any]):
         logger.warning(
             "Hugging Face import of %s acknowledged an architecture (%s) that llama.cpp %s does not list",
             repo_id, gate["architecture"], gate["runtime"]["build"],
+        )
+    tensors = _hf_artifact_tensors(gate, artifact)
+    if tensors["status"] == "unsupported":
+        tensor_refusal = tensors["refusal"]
+        if body.get("allowUnsupportedRuntime") is not True:
+            raise HTTPException(status_code=422, detail=tensor_refusal)
+        runtime_override = {
+            **(runtime_override or {}),
+            "code": tensor_refusal["code"] if runtime_override is None else runtime_override["code"],
+            "tensorTypes": tensors["unknown"],
+            "build": gate["runtime"]["build"],
+            "acknowledgedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        logger.warning(
+            "Hugging Face import of %s (%s) acknowledged tensor types %s that llama.cpp %s cannot read",
+            repo_id, artifact["label"], tensors["unknown"], gate["runtime"]["build"],
         )
     record = _hf_import_record(details, artifact, gate=gate, runtime_override=runtime_override)
 

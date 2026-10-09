@@ -10,11 +10,13 @@ import hf_gguf_header
 from models import GPUInfo
 
 REPO = "org/model-GGUF"
+_TYPES_B9014 = {"F32": 0, "F16": 1, "Q8_0": 8, "Q4_K": 12, "Q6_K": 14}
 POLICY = {
     "backendBuilds": {"nvidia": "b11429", "cpu": "b9014", "amd": "b9014"},
     "builds": {
-        "b9014": {"commit": "1" * 40, "architectures": ["llama", "qwen3"]},
-        "b11429": {"commit": "2" * 40, "architectures": ["llama", "nanbeige", "qwen3"]},
+        "b9014": {"commit": "1" * 40, "architectures": ["llama", "qwen3"], "tensorTypes": _TYPES_B9014},
+        "b11429": {"commit": "2" * 40, "architectures": ["llama", "nanbeige", "qwen3"],
+                   "tensorTypes": {**_TYPES_B9014, "Q2_0": 42}},
     },
 }
 GIB = 1024 ** 3
@@ -446,3 +448,60 @@ def test_a_short_hold_that_outlasts_the_grace_still_ends_in_words(test_client, p
 
     assert response.status_code == 409
     assert "checking a downloaded model file" in response.json()["detail"]["message"]
+
+
+def _two_quantizations():
+    return _details(artifacts=[
+        {
+            "id": "a" * 20, "label": "model-Q4_K_M.gguf", "quantization": "Q4_K_M", "sizeBytes": 4 * GIB,
+            "files": [{"filename": "model-Q4_K_M.gguf", "sizeBytes": 4 * GIB, "sha256": "e" * 64}],
+            "installed": False,
+        },
+        {
+            "id": "c" * 20, "label": "model-Q2_0.gguf", "quantization": "Q2_0", "sizeBytes": 5 * GIB,
+            "files": [{"filename": "model-Q2_0.gguf", "sizeBytes": 5 * GIB, "sha256": "d" * 64}],
+            "installed": False,
+        },
+    ])
+
+
+@pytest.mark.parametrize("backend, q2_status", [("amd", "unsupported"), ("nvidia", "ok")])
+def test_preflight_judges_each_files_tensor_types(test_client, preflight_env, monkeypatch, backend, q2_status):
+    models_router, state = preflight_env
+    monkeypatch.setattr(models_router, "GPU_BACKEND", backend)
+    state["details"] = _two_quantizations()
+    state["header"] = {**_dense_header(), "tensor_types": [0, 12, 14]}
+
+    body = _preflight(test_client).json()
+
+    # The header read was the smallest file's: it speaks for that file only.
+    assert body["artifacts"]["a" * 20]["tensors"] == {"status": "ok", "unknown": [], "source": "header"}
+    q2 = body["artifacts"]["c" * 20]["tensors"]
+    assert (q2["status"], q2["source"]) == (q2_status, "name")
+    assert body["refusal"] is None  # the repository itself is fine
+    if q2_status == "unsupported":
+        assert q2["unknown"] == ["Q2_0"]
+        assert q2["refusal"]["code"] == "runtime_tensor_type_unsupported"
+        assert q2["refusal"]["overridable"] is True
+
+
+def test_import_refuses_a_file_this_build_cannot_read_unless_acknowledged(test_client, preflight_env, monkeypatch):
+    models_router, state = preflight_env
+    monkeypatch.setattr(models_router, "GPU_BACKEND", "amd")
+    monkeypatch.setattr(models_router, "_call_agent_model", lambda path, payload: {"status": "started"})
+    state["details"] = _two_quantizations()
+
+    refused = test_client.post("/api/models/huggingface/import", headers=test_client.auth_headers,
+                               json={"repoId": REPO, "artifactId": "c" * 20})
+
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["code"] == "runtime_tensor_type_unsupported"
+    assert not (models_router.Path(models_router.DATA_DIR) / "model-imports.json").exists()
+
+    accepted = test_client.post("/api/models/huggingface/import", headers=test_client.auth_headers,
+                                json={"repoId": REPO, "artifactId": "c" * 20, "allowUnsupportedRuntime": True})
+
+    assert accepted.status_code == 200
+    record = json.loads((models_router.Path(models_router.DATA_DIR) / "model-imports.json").read_text(encoding="utf-8"))["models"][0]
+    assert record["runtime_override"]["tensorTypes"] == ["Q2_0"]
+    assert record["runtime_override"]["build"] == "b9014"

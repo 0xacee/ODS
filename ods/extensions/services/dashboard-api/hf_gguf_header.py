@@ -128,14 +128,25 @@ async def _read_metadata(
 ) -> dict[str, Any]:
     data = b""
     want = FIRST_READ_BYTES
+    parsed: dict[str, Any] | None = None
     while True:
         end = want - 1
         if expected_size:
             end = min(end, expected_size - 1)
         if end < len(data):
+            if parsed is not None:
+                break
             raise HeaderUnavailable("unreadable", "The file ends before its GGUF metadata does")
-        chunk = await _read_range(client, location, len(data), end)
+        try:
+            chunk = await _read_range(client, location, len(data), end)
+        except HeaderUnavailable:
+            # Past the metadata, a failed read only leaves the tensor types unknown.
+            if parsed is not None:
+                break
+            raise
         if not chunk:
+            if parsed is not None:
+                break
             raise HeaderUnavailable("unreadable", "The model file returned no data")
         data += chunk
         try:
@@ -151,8 +162,15 @@ async def _read_metadata(
             raise HeaderUnavailable("not_gguf", "This file is not a GGUF model") from exc
         except (ValueError, UnicodeDecodeError, struct.error) as exc:
             raise HeaderUnavailable("unreadable", "The GGUF metadata could not be read") from exc
-        parsed["bytes_read"] = len(data)
-        return parsed
+        # The tensor table after the metadata names each tensor's ggml type
+        # (the tensor-type gate): read on for it within the same cap. Past the
+        # cap the types stay unknown and the gate makes no claim.
+        if parsed.get("tensor_types") is None and len(data) < MAX_READ_BYTES:
+            want = min(max(len(data) * 2, want), MAX_READ_BYTES)
+            continue
+        break
+    parsed["bytes_read"] = len(data)
+    return parsed
 
 
 def cached_gguf_header(repo_id: str, revision: str, filename: str) -> dict[str, Any] | None:

@@ -204,7 +204,7 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
       const detail = requestError.detail
       setOverrideOffer(
         requestError.rejected && !allowUnsupportedRuntime && detail?.overridable === true
-          && detail?.code === 'runtime_architecture_unsupported' ? artifact : null,
+          && ['runtime_architecture_unsupported', 'runtime_tensor_type_unsupported'].includes(detail?.code) ? artifact : null,
       )
     } finally {
       setImportingArtifact(null)
@@ -569,7 +569,9 @@ function ArtifactDialog({ model, details, loading, error, preflight, preflightLo
   )
 }
 
-function ArtifactRow({ artifact, gpu, check, checking, refusal, busy, importing, runtimeCompatible, onImport }) {
+function ArtifactRow({ artifact, gpu, check, checking, refusal: repositoryRefusal, busy, importing, runtimeCompatible, onImport }) {
+  // A repository refusal applies to every file; a tensor-type refusal to this file only.
+  const refusal = repositoryRefusal || check?.tensors?.refusal || null
   const [confirmingOverride, setConfirmingOverride] = useState(false)
   const memory = artifactMemory(artifact, gpu, check, checking)
   const diskShort = check?.disk === 'insufficient' && !artifact.installed
@@ -600,6 +602,9 @@ function ArtifactRow({ artifact, gpu, check, checking, refusal, busy, importing,
         <p className={`text-xs font-semibold ${memory.ok === false ? 'text-theme-text-secondary' : 'text-emerald-300'}`}>{memory.value}</p>
         <p className="mt-0.5 text-[10px] text-theme-text-muted">{memory.detail}</p>
         {diskShort && <p className="mt-0.5 text-[10px] font-semibold text-amber-300">Not enough free disk space</p>}
+        {check?.tensors?.status === 'unsupported' && (
+          <p className="mt-0.5 text-[10px] font-semibold text-amber-300">Stored as {check.tensors.unknown.join(', ')}: needs a newer llama.cpp</p>
+        )}
       </div>
       <button type="button" onClick={startImport} disabled={busy || artifact.installed || blocked || diskShort} className="inline-flex h-8 items-center justify-center gap-2 rounded-md bg-theme-accent px-3 text-xs font-semibold text-white transition-colors hover:bg-theme-accent-light disabled:cursor-not-allowed disabled:opacity-45">
         {importing ? <Loader2 size={13} className="animate-spin" /> : artifact.installed ? <CheckCircle2 size={13} /> : <ArrowDownToLine size={13} />}

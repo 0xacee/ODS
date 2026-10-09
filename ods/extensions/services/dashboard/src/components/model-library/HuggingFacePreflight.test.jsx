@@ -170,3 +170,20 @@ test('the context label names where the number came from', async () => {
   expect(dialog.getByText('GGUF metadata')).toBeVisible()
   expect(dialog.queryByText('This file’s GGUF header')).toBeNull()
 })
+
+test('a file stored in a tensor type this runtime cannot read needs an explicit Import anyway, other files do not', async () => {
+  const refusal = {code: 'runtime_tensor_type_unsupported', message: 'This file stores weights as Q2_0, which this machine’s llama.cpp (build b9014) cannot read.', overridable: true}
+  preflightBody = preflight({
+    artifacts: {
+      q4: {...okCheck, tensors: {status: 'ok', unknown: [], source: 'header'}},
+      q8: {...okCheck, tensors: {status: 'unsupported', unknown: ['Q2_0'], source: 'name', refusal}},
+    },
+  })
+  const dialog = await open()
+  expect(dialog.getByText('Stored as Q2_0: needs a newer llama.cpp')).toBeVisible()
+  expect(dialog.getByRole('button', {name: /^Import$/})).toBeEnabled()
+  await act(async () => { fireEvent.click(dialog.getByRole('button', {name: 'Import anyway…'})) })
+  expect(dialog.getByRole('alertdialog', {name: 'Import anyway'})).toHaveTextContent('stores weights as Q2_0')
+  await act(async () => { fireEvent.click(dialog.getByRole('button', {name: 'Import anyway'})) })
+  expect(importBodies()).toEqual([{repoId: 'org/model', artifactId: 'q8', allowUnsupportedRuntime: true}])
+})
