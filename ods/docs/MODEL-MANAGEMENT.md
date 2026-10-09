@@ -81,8 +81,8 @@ NVIDIA and macOS retain their existing model-management paths.
 The **Hugging Face** source searches the live Hub and only offers complete GGUF
 artifacts with exact byte-size and SHA-256 metadata. Before download, ODS
 re-reads the selected repository, pins its immutable revision, rejects
-projectors, adapters, incomplete split files, and repositories intended for a
-different runtime, then asks the host agent to download and verify every file.
+adapters, incomplete split files, and repositories intended for a different
+runtime, then asks the host agent to download and verify every file.
 Community imports are labelled as unvalidated until they have been benchmarked
 on the local machine; they are not added to the ODS recommended catalog.
 
@@ -111,6 +111,21 @@ reports, before anything is downloaded:
   shows only once you use it.
 - **Disk space.** An import is refused before it starts when the model store
   would keep less than 2 GB or 5% of its drive, whichever is larger.
+
+#### Vision models
+
+A repository that ships a vision projector (an `mmproj` GGUF) beside its
+weights offers **Include vision**. ODS then downloads the projector with the
+chosen weights (F16 first, then BF16, F32 or Q8_0, or the repository's only
+one), verifies it like the weights, and loads it with the model so the model
+can read images; the memory and disk checks include it. Unticking it imports
+the weights alone. Deleting the model also removes its projector unless another
+installed model uses it. While a projector is loaded, llama.cpp does not reuse
+cached prompt chunks (`--cache-reuse`).
+
+On Windows the projector is loaded by the llama.cpp launcher that Windows setup
+installs. An installation set up before vision support says so in the import
+dialog and imports the weights alone until Windows setup is run again.
 
 These checks never block on missing information: when Hugging Face does not
 answer (for example a rate limit), the dialog says which checks could not run

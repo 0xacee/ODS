@@ -587,3 +587,44 @@ def test_preflight_counts_the_projector_in_fit_and_disk(test_client, preflight_e
     assert body["projector"] == {"id": "p" * 20, "label": "mmproj-F16.gguf", "sizeBytes": GIB, "precision": "F16"}
     assert body["artifacts"]["a" * 20]["disk"] == "ok"
     assert body["artifacts"]["b" * 20]["disk"] == "insufficient"
+
+
+def test_a_windows_launcher_without_vision_support_imports_the_weights_alone(test_client, monkeypatch):
+    import routers.models as models_router
+
+    async def hub(path, **_kwargs):
+        return {"id": REPO, "sha": "c" * 40, "siblings": [_sibling("model-Q4_K_M.gguf"), _sibling("mmproj-F16.gguf")]}, {}
+
+    monkeypatch.setattr(models_router, "_hf_get_json", hub)
+    monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: True)
+    management = {"managed": True, "canActivate": True, "canUnload": True, "running": True, "vision": False}
+    monkeypatch.setattr(models_router, "_model_management", lambda: dict(management))
+
+    details = test_client.get(f"/api/models/huggingface/repositories/{REPO}", headers=test_client.auth_headers).json()
+
+    assert [item["label"] for item in details["projectors"]] == ["mmproj-F16.gguf"]
+    assert details["defaultProjectorId"] is None
+    assert "Run Windows setup again" in details["visionUnavailableReason"]
+    assert models_router._hf_requested_projector(details, {"includeVision": True}) is None
+
+    management["vision"] = True
+    details = test_client.get(f"/api/models/huggingface/repositories/{REPO}", headers=test_client.auth_headers).json()
+    assert details["defaultProjectorId"] is not None
+    assert details["visionUnavailableReason"] is None
+
+    management.update(managed=None, vision=False)
+    details = test_client.get(f"/api/models/huggingface/repositories/{REPO}", headers=test_client.auth_headers).json()
+    assert details["defaultProjectorId"] is None
+    assert "could not confirm" in details["visionUnavailableReason"]
+
+
+def test_management_projects_vision_only_for_a_managed_runtime(monkeypatch):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: True)
+    for value, expected in (({"managed": True, "canActivate": True, "canUnload": True, "running": True, "vision": True}, True),
+                            ({"managed": True, "canActivate": True, "canUnload": True, "running": True}, False),
+                            ({"managed": True, "canActivate": True, "canUnload": True, "running": True, "vision": "yes"}, False),
+                            ({"managed": False, "canActivate": False, "canUnload": False, "running": False, "vision": True}, False)):
+        monkeypatch.setattr(models_router, "request_agent_json", lambda *_args, value=value, **_kwargs: dict(value))
+        assert models_router._model_management()["vision"] is expected

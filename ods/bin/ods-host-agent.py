@@ -2272,8 +2272,10 @@ def _model_management_snapshot() -> tuple[int, dict]:
                 value = _managed_wsl_runtime(env)
                 managed = value.get('managed') is True
                 running = managed and value.get('running') is True
+                # vision: the owned launcher loads a projector with its model.
                 result = (200, {'managed': managed, 'canActivate': running,
-                                'canUnload': managed, 'running': running})
+                                'canUnload': managed, 'running': running,
+                                'vision': _wsl_runtime.supports_projector(value)})
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 logger.warning('Windows runtime management verification failed: %s', exc)
                 result = unavailable
@@ -14655,13 +14657,22 @@ class AgentHandler(BaseHTTPRequestHandler):
             if wsl_managed.get('managed') is True:
                 runtime_restart_strategy = 'wsl-native-llama'
 
+                # A launcher from before vision support (Windows setup not
+                # rerun since) runs the weights alone.
+                wsl_projector = _model_projector_file(model, target.parent)
+                if wsl_projector is not None and not _wsl_runtime.supports_projector(wsl_managed):
+                    logger.warning('The Windows model runtime predates vision support; %s runs without %s',
+                                   gguf_file, wsl_projector.name)
+                    wsl_projector = None
+
                 def _bridge_activate(_e):
                     # The CAS digest the controller reports, even on failure,
                     # decides whether rollback restores or restarts the plan.
                     nonlocal wsl_changed_digest
                     try:
                         switched = _wsl_runtime.activate(INSTALL_DIR, _e, gguf_file,
-                                                          int(context_length), wsl_managed['planDigest'])
+                                                          int(context_length), wsl_managed['planDigest'],
+                                                          mmproj=wsl_projector.name if wsl_projector else None)
                     except _wsl_runtime.BridgeError as exc:
                         wsl_changed_digest = exc.new_plan_digest
                         raise
@@ -15256,7 +15267,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                     'code': 'model_store_read_only',
                 })
                 return
-            if managed.get('managed') is True and managed['plan']['GgufFile'] in deleted_names:
+            if managed.get('managed') is True and (managed['plan']['GgufFile'] in deleted_names
+                                                    or managed['plan'].get('MmprojFile') in deleted_names):
                 json_response(self, 409, {'error': 'Cannot delete the model selected in the Windows startup plan'})
                 return
             if str(env.get("GGUF_FILE") or "") in deleted_names:

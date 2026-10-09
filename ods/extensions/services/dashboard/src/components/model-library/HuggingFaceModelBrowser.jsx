@@ -525,6 +525,13 @@ function ArtifactDialog({ model, details, loading, error, preflight, preflightLo
                 </label>
               )}
 
+              {details.runtimeCompatible !== false && !projector && details.visionUnavailableReason && (
+                <div className="mb-4 rounded-lg border border-white/[0.07] bg-black/20 px-4 py-3 text-xs text-theme-text-secondary">
+                  <p>{details.visionUnavailableReason}.</p>
+                  <HelpLink className="mt-1" />
+                </div>
+              )}
+
               {details.artifacts.length === 0 ? (
                 <div className="rounded-lg border border-theme-border bg-theme-text-secondary/8 px-4 py-8 text-center text-sm text-theme-text-secondary">
                   This repository has no complete GGUF artifact with exact size and SHA-256 metadata.

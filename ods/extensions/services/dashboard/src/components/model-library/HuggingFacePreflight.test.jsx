@@ -218,3 +218,18 @@ test('a repository without a projector shows no vision choice', async () => {
   const dialog = await open()
   expect(dialog.queryByRole('checkbox', {name: /Include vision/})).toBeNull()
 })
+
+test('a runtime that cannot load vision says why and imports the weights alone', async () => {
+  detailsBody = {
+    ...repo, artifacts,
+    projectors: [{id: 'p1', label: 'mmproj-F16.gguf', sizeBytes: 9e8, precision: 'F16'}],
+    defaultProjectorId: null,
+    visionUnavailableReason: 'This Windows model runtime was set up before vision support, so the model imports without its vision file. Run Windows setup again to add vision',
+  }
+  const dialog = await open()
+  expect(dialog.queryByRole('checkbox', {name: /Include vision/})).toBeNull()
+  expect(dialog.getByText(/set up before vision support/)).toBeInTheDocument()
+  expect(dialog.getByText(/set up before vision support/).closest('div').querySelector('a[href^="https://discord.gg/"]')).not.toBeNull()
+  await act(async () => { fireEvent.click(dialog.getAllByRole('button', {name: /^Import$/})[0]) })
+  expect(importBodies()[0]).toEqual({repoId: 'org/model', artifactId: 'q4'})
+})

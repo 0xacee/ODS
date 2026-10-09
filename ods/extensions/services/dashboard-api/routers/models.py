@@ -1104,7 +1104,8 @@ async def _hf_repo_details(repo_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail="Hugging Face returned an invalid repository record")
     artifacts = _hf_gguf_artifacts(payload)
     projectors = _hf_gguf_projectors(payload)
-    default_projector = _hf_default_projector(projectors)
+    vision_unavailable = await asyncio.to_thread(_projector_unavailable_reason) if projectors else None
+    default_projector = None if vision_unavailable else _hf_default_projector(projectors)
     imported_by_artifact = {
         str(record.get("source_artifact_id") or ""): record
         for record in _read_model_records(_imported_library_path(), required=False)
@@ -1153,6 +1154,7 @@ async def _hf_repo_details(repo_id: str) -> dict[str, Any]:
         # Vision projectors (WP2): one is imported with the chosen weights by default.
         "projectors": projectors,
         "defaultProjectorId": default_projector["id"] if default_projector else None,
+        "visionUnavailableReason": vision_unavailable,
         "authenticated": bool(_hf_token()),
         "url": f"{_HF_API_BASE}/{repo_id}",
     }
@@ -1428,7 +1430,7 @@ def _hf_projector_fields(details: dict[str, Any], projector: dict[str, Any]) -> 
 
 def _hf_requested_projector(details: dict[str, Any], body: dict[str, Any]) -> dict[str, Any] | None:
     """The projector an import brings: the chosen one, else the default, unless vision is off."""
-    if body.get("includeVision") is False or not details.get("projectors"):
+    if body.get("includeVision") is False or not details.get("projectors") or not details.get("defaultProjectorId"):
         return None
     wanted = str(body.get("projectorId") or details.get("defaultProjectorId") or "")
     projector = next((item for item in details["projectors"] if item["id"] == wanted), None)
@@ -1797,6 +1799,8 @@ def _model_management() -> dict:
                 or value['canActivate'] and not value['running']):
             raise ValueError("Inconsistent model management response")
         result = {key: value[key] for key in ("managed", "canActivate", "canUnload", "running")}
+        # Whether the owned Windows launcher loads a vision projector (WP2).
+        result["vision"] = value["managed"] and value.get("vision") is True
         if isinstance(value.get('reason'), str):
             result['reason'] = value['reason'][:500]
         return result
@@ -1804,6 +1808,19 @@ def _model_management() -> dict:
         # A failed proof is unknown, not evidence of an independently managed service.
         return {"managed": None, "canActivate": False, "canUnload": False, "running": False,
                 "reason": "Runtime management could not be verified"}
+
+
+def _projector_unavailable_reason() -> str | None:
+    """Why this runtime cannot load a vision projector, or None when it can."""
+    if not _windows_hosted_runtime():
+        return None
+    management = _model_management()
+    if management.get("vision") is True:
+        return None
+    if management.get("managed") is True:
+        return ("This Windows model runtime was set up before vision support, so the model imports "
+                "without its vision file. Run Windows setup again to add vision")
+    return "ODS could not confirm that the Windows model runtime loads vision files, so the model imports without one"
 
 
 @router.get("/api/models", response_model=ModelLibraryResponse)
