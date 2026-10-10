@@ -84,6 +84,8 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
   const [preflightLoading, setPreflightLoading] = useState(false)
   const [preflightError, setPreflightError] = useState(null)
   const [overrideOffer, setOverrideOffer] = useState(null)
+  // WP2: a repository's vision projector is imported with the weights unless unticked.
+  const [includeVision, setIncludeVision] = useState(true)
 
   // Facts about the repository's GGUFs before any download: whether this
   // machine's llama.cpp can load it, whether it is a chat model, fit and disk.
@@ -147,6 +149,7 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
     const requestId = detailsRequestRef.current + 1
     detailsRequestRef.current = requestId
     setSelectedRepo(model)
+    setIncludeVision(true)
     setDetails(null)
     setDetailsError(null)
     setPreflight(null)
@@ -184,6 +187,7 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
     if (!details?.id || downloadBusy || pendingImport || importLock.current) return
     importLock.current = true
     const request = { repoId: details.id, artifactId: artifact.id }
+    if (details.defaultProjectorId) request.includeVision = includeVision
     if (allowUnsupportedRuntime) request.allowUnsupportedRuntime = true
     setOverrideOffer(null)
     setPendingImport({ ...request, startedAt: Date.now() })
@@ -210,7 +214,7 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
       const detail = requestError.detail
       setOverrideOffer(
         requestError.rejected && !allowUnsupportedRuntime && detail?.overridable === true
-          && detail?.code === 'runtime_architecture_unsupported' ? artifact : null,
+          && ['runtime_architecture_unsupported', 'runtime_tensor_type_unsupported'].includes(detail?.code) ? artifact : null,
       )
     } finally {
       setImportingArtifact(null)
@@ -383,6 +387,8 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
           downloadBusy={downloadBusy || Boolean(pendingImport)}
           importingArtifact={importingArtifact}
           importStatus={importStatus}
+          includeVision={includeVision}
+          onIncludeVisionChange={setIncludeVision}
           onClose={closeRepository}
           onImport={importArtifact}
           onRetry={() => openRepository(selectedRepo)}
@@ -451,7 +457,8 @@ function RepositoryRow({ model, onInspect }) {
   )
 }
 
-function ArtifactDialog({ model, details, loading, error, preflight, preflightLoading, preflightError, gpu, downloadBusy, importingArtifact, importStatus, onClose, onImport, onRetry }) {
+function ArtifactDialog({ model, details, loading, error, preflight, preflightLoading, preflightError, gpu, downloadBusy, importingArtifact, importStatus, includeVision = true, onIncludeVisionChange, onClose, onImport, onRetry }) {
+  const projector = (details?.projectors || []).find(item => item.id === details?.defaultProjectorId) || null
   const refusal = preflight?.refusal || null
   const [artifactFilter, setArtifactFilter] = useState('')
   const filteredArtifacts = useMemo(() => {
@@ -517,6 +524,20 @@ function ArtifactDialog({ model, details, loading, error, preflight, preflightLo
                 <PreflightSummary preflight={preflight} loading={preflightLoading} error={preflightError} />
               )}
 
+              {details.runtimeCompatible !== false && projector && (
+                <label className="mb-4 flex items-start gap-2 rounded-lg border border-white/[0.07] bg-black/20 px-4 py-3 text-xs text-theme-text-secondary">
+                  <input type="checkbox" className="mt-0.5" checked={includeVision} onChange={event => onIncludeVisionChange?.(event.target.checked)} />
+                  <span>Include vision: also download {projector.label} ({formatBytes(projector.sizeBytes)}) so this model can read images. Memory estimates below include it.</span>
+                </label>
+              )}
+
+              {details.runtimeCompatible !== false && !projector && details.visionUnavailableReason && (
+                <div className="mb-4 rounded-lg border border-white/[0.07] bg-black/20 px-4 py-3 text-xs text-theme-text-secondary">
+                  <p>{details.visionUnavailableReason}.</p>
+                  <HelpLink className="mt-1" />
+                </div>
+              )}
+
               {details.artifacts.length === 0 ? (
                 <div className="rounded-lg border border-theme-border bg-theme-text-secondary/8 px-4 py-8 text-center text-sm text-theme-text-secondary">
                   This repository has no complete GGUF artifact with exact size and SHA-256 metadata.
@@ -575,7 +596,9 @@ function ArtifactDialog({ model, details, loading, error, preflight, preflightLo
   )
 }
 
-function ArtifactRow({ artifact, gpu, check, checking, refusal, busy, importing, runtimeCompatible, onImport }) {
+function ArtifactRow({ artifact, gpu, check, checking, refusal: repositoryRefusal, busy, importing, runtimeCompatible, onImport }) {
+  // A repository refusal applies to every file; a tensor-type refusal to this file only.
+  const refusal = repositoryRefusal || check?.tensors?.refusal || null
   const [confirmingOverride, setConfirmingOverride] = useState(false)
   const memory = artifactMemory(artifact, gpu, check, checking)
   const diskShort = check?.disk === 'insufficient' && !artifact.installed
@@ -606,6 +629,9 @@ function ArtifactRow({ artifact, gpu, check, checking, refusal, busy, importing,
         <p className={`text-xs font-semibold ${memory.ok === false ? 'text-theme-text-secondary' : 'text-emerald-300'}`}>{memory.value}</p>
         <p className="mt-0.5 text-[10px] text-theme-text-muted">{memory.detail}</p>
         {diskShort && <p className="mt-0.5 text-[10px] font-semibold text-amber-300">Not enough free disk space</p>}
+        {check?.tensors?.status === 'unsupported' && (
+          <p className="mt-0.5 text-[10px] font-semibold text-amber-300">Stored as {check.tensors.unknown.join(', ')}: needs a newer llama.cpp</p>
+        )}
       </div>
       <button type="button" onClick={startImport} disabled={busy || artifact.installed || blocked || diskShort} className="inline-flex h-8 items-center justify-center gap-2 rounded-md bg-theme-accent px-3 text-xs font-semibold text-white transition-colors hover:bg-theme-accent-light disabled:cursor-not-allowed disabled:opacity-45">
         {importing ? <Loader2 size={13} className="animate-spin" /> : artifact.installed ? <CheckCircle2 size={13} /> : <ArrowDownToLine size={13} />}

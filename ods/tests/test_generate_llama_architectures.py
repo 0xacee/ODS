@@ -57,3 +57,41 @@ def test_committed_document_has_a_list_for_every_policy_build():
     assert set(document["builds"]) == set(document["backendBuilds"].values())
     for entry in document["builds"].values():
         assert entry["architectures"] == sorted(set(entry["architectures"]))
+
+
+GGML_H = """
+    // NOTE: always add types at the end of the enum to keep backward compatibility
+    enum ggml_type {
+        GGML_TYPE_F32     = 0,
+        GGML_TYPE_F16     = 1,
+        GGML_TYPE_Q4_0    = 2,
+        // GGML_TYPE_Q4_2 = 4, support has been removed
+        /* GGML_TYPE_Q4_3 = 5, support has been removed */
+        GGML_TYPE_Q8_0    = 8,
+        GGML_TYPE_Q4_K    = 12,
+        GGML_TYPE_Q2_0    = 42,
+        GGML_TYPE_COUNT   = 43,
+    };
+"""
+
+
+def test_tensor_types_skip_removed_entries_and_the_count():
+    assert generator.tensor_types(GGML_H) == {"F32": 0, "F16": 1, "Q4_0": 2, "Q8_0": 8, "Q4_K": 12, "Q2_0": 42}
+
+
+def test_tensor_types_need_the_enum():
+    with pytest.raises(ValueError, match="enum ggml_type"):
+        generator.tensor_types("int main() {}")
+
+
+def test_build_entry_reads_both_local_sources(tmp_path, monkeypatch):
+    arch = tmp_path / "llama-arch.cpp"
+    arch.write_text('LLM_ARCH_NAMES = {\n    { LLM_ARCH_LLAMA, "llama" },\n};\n', encoding="utf-8")
+    ggml = tmp_path / "ggml.h"
+    ggml.write_text(GGML_H, encoding="utf-8")
+    monkeypatch.setattr(generator, "_fetch", lambda url: b'{"sha": "' + b"a" * 40 + b'"}')
+
+    entry = generator.build_entry("b1", arch, ggml)
+
+    assert entry == {"commit": "a" * 40, "architectures": ["llama"],
+                     "tensorTypes": {"F32": 0, "F16": 1, "Q4_0": 2, "Q8_0": 8, "Q4_K": 12, "Q2_0": 42}}

@@ -242,3 +242,76 @@ def refusal(
             "overridable": True,
         }
     return None
+
+
+def build_tensor_types(policy: dict[str, Any] | None, build: str | None) -> dict[str, int] | None:
+    """``{ggml type name: id}`` a build knows (ggml.h ``enum ggml_type`` at its tag)."""
+    entry = (policy or {}).get("builds", {}).get(build) if build else None
+    types = entry.get("tensorTypes") if isinstance(entry, dict) else None
+    return types if isinstance(types, dict) and types else None
+
+
+def _tensor_type_names(policy: dict[str, Any] | None) -> dict[int, str]:
+    """Every ggml type any pinned build knows, by id."""
+    names: dict[int, str] = {}
+    for entry in (policy or {}).get("builds", {}).values():
+        for name, type_id in ((entry or {}).get("tensorTypes") or {}).items():
+            names[int(type_id)] = name
+    return names
+
+
+_QUANT_LABEL_SUFFIX = re.compile(r"_(?:XXS|XS|S|M|L|XL|XXL)$")
+
+
+def label_tensor_type(policy: dict[str, Any] | None, label: Any) -> str | None:
+    """The ggml type a quantization label names outright (Q2_0, MXFP4, Q4_K_M -> Q4_K)."""
+    names = set(_tensor_type_names(policy).values())
+    text = str(label or "").strip().upper()
+    if text.startswith("UD-"):
+        text = text[3:]
+    if text in names:
+        return text
+    stripped = _QUANT_LABEL_SUFFIX.sub("", text)
+    return stripped if stripped in names else None
+
+
+def artifact_tensor_check(
+    policy: dict[str, Any] | None,
+    build: str | None,
+    label: Any,
+    header_types: list[int] | None = None,
+) -> dict[str, Any]:
+    """Can this build read the file's tensor types? Positive evidence only.
+
+    ``header_types`` are the ggml type ids from the file's own tensor table,
+    when its header was read; otherwise the quantization label is checked
+    when it names a type outright. Anything else is ``unknown``.
+    """
+    known = build_tensor_types(policy, build)
+    if known is None:
+        return {"status": "unknown", "unknown": [], "source": None}
+    if header_types is not None:
+        names = _tensor_type_names(policy)
+        known_ids = set(known.values())
+        missing = [names.get(type_id, f"type {type_id}") for type_id in sorted(set(header_types))
+                   if type_id not in known_ids]
+        return {"status": "unsupported" if missing else "ok", "unknown": missing, "source": "header"}
+    named = label_tensor_type(policy, label)
+    if named is None:
+        return {"status": "unknown", "unknown": [], "source": None}
+    if named in known:
+        return {"status": "ok", "unknown": [], "source": "name"}
+    return {"status": "unsupported", "unknown": [named], "source": "name"}
+
+
+def tensor_refusal(build: str | None, unknown: list[str]) -> dict[str, Any]:
+    """The per-file refusal for tensor types this build cannot read (PLAN D9: overridable)."""
+    return {
+        "code": "runtime_tensor_type_unsupported",
+        "message": (
+            f"This file stores weights as {', '.join(unknown)}, which this machine's llama.cpp "
+            f"(build {build}) cannot read. Choose another quantization of this model, "
+            "or import anyway if you know this runtime can load it."
+        ),
+        "overridable": True,
+    }

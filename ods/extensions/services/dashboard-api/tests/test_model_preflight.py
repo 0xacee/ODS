@@ -208,3 +208,67 @@ def test_a_gated_repository_is_refused_before_the_runtime_check():
     assert gated == {"code": "gated", "message": preflight.GATED_MESSAGE, "overridable": False}
     # Not being a chat model outranks access: a token would not make an embedding model chat-capable.
     assert preflight.refusal("embedding", None, "nomic-bert", "b9014", gated=True)["code"] == "not_a_chat_model:embedding"
+
+
+TENSOR_POLICY = {
+    "backendBuilds": {"nvidia": "b11429", "amd": "b9014"},
+    "builds": {
+        "b9014": {"architectures": ["llama"], "tensorTypes": {"F32": 0, "F16": 1, "Q8_0": 8, "Q4_K": 12,
+                                                                "Q6_K": 14, "IQ2_XXS": 16, "MXFP4": 39, "NVFP4": 40}},
+        "b11429": {"architectures": ["llama"], "tensorTypes": {"F32": 0, "F16": 1, "Q8_0": 8, "Q4_K": 12,
+                                                                 "Q6_K": 14, "IQ2_XXS": 16, "MXFP4": 39, "NVFP4": 40,
+                                                                 "Q2_0": 42}},
+    },
+}
+
+
+@pytest.mark.parametrize("build, header_types, status, unknown", [
+    ("b9014", [0, 12, 14], "ok", []),
+    ("b9014", [0, 42], "unsupported", ["Q2_0"]),          # newer than this build
+    ("b11429", [0, 42], "ok", []),
+    ("b9014", [0, 77], "unsupported", ["type 77"]),       # newer than any pinned build
+])
+def test_tensor_check_from_the_files_own_header(build, header_types, status, unknown):
+    check = preflight.artifact_tensor_check(TENSOR_POLICY, build, "Q4_K_M", header_types)
+    assert check == {"status": status, "unknown": unknown, "source": "header"}
+
+
+@pytest.mark.parametrize("label, status, unknown", [
+    ("Q2_0", "unsupported", ["Q2_0"]),
+    ("UD-Q2_0", "unsupported", ["Q2_0"]),
+    ("Q4_K_M", "ok", []),          # Q4_K_M is stored as Q4_K
+    ("IQ2_XXS", "ok", []),         # an exact type name is not stripped to IQ2
+    ("MXFP4", "ok", []),
+    ("IQ2_M", "unknown", []),      # no ggml type by that name: no claim
+    ("Q4_K_M-imatrix", "unknown", []),
+    (None, "unknown", []),
+])
+def test_tensor_check_from_a_label_that_names_a_type(label, status, unknown):
+    check = preflight.artifact_tensor_check(TENSOR_POLICY, "b9014", label)
+    assert (check["status"], check["unknown"]) == (status, unknown)
+
+
+def test_tensor_check_without_a_type_table_makes_no_claim():
+    assert preflight.artifact_tensor_check({"builds": {"b9014": {}}}, "b9014", "Q2_0", [42])["status"] == "unknown"
+    assert preflight.artifact_tensor_check(None, None, "Q2_0")["status"] == "unknown"
+
+
+def test_tensor_refusal_names_the_types_and_build_and_can_be_overridden():
+    refusal = preflight.tensor_refusal("b9014", ["Q2_0"])
+    assert refusal["code"] == "runtime_tensor_type_unsupported"
+    assert refusal["overridable"] is True
+    assert "Q2_0" in refusal["message"] and "b9014" in refusal["message"]
+
+
+def test_the_committed_policy_lists_tensor_types_for_every_build():
+    import json
+    from pathlib import Path
+
+    policy = json.loads((Path(__file__).resolve().parents[4] / "config" / "llama-cpp-architectures.json")
+                        .read_text(encoding="utf-8"))
+    for build, entry in policy["builds"].items():
+        types = entry["tensorTypes"]
+        assert types["F32"] == 0 and types["Q4_K"] == 12, build
+        assert 4 not in types.values(), f"{build}: removed Q4_2 must not be listed"
+    assert "Q2_0" in policy["builds"]["b11429"]["tensorTypes"]
+    assert "Q2_0" not in policy["builds"]["b9014"]["tensorTypes"]

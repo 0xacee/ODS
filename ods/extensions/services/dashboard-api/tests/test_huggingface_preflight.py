@@ -10,11 +10,13 @@ import hf_gguf_header
 from models import GPUInfo
 
 REPO = "org/model-GGUF"
+_TYPES_B9014 = {"F32": 0, "F16": 1, "Q8_0": 8, "Q4_K": 12, "Q6_K": 14}
 POLICY = {
     "backendBuilds": {"nvidia": "b11429", "cpu": "b9014", "amd": "b9014"},
     "builds": {
-        "b9014": {"commit": "1" * 40, "architectures": ["llama", "qwen3"]},
-        "b11429": {"commit": "2" * 40, "architectures": ["llama", "nanbeige", "qwen3"]},
+        "b9014": {"commit": "1" * 40, "architectures": ["llama", "qwen3"], "tensorTypes": _TYPES_B9014},
+        "b11429": {"commit": "2" * 40, "architectures": ["llama", "nanbeige", "qwen3"],
+                   "tensorTypes": {**_TYPES_B9014, "Q2_0": 42}},
     },
 }
 GIB = 1024 ** 3
@@ -467,3 +469,228 @@ def test_a_short_hold_that_outlasts_the_grace_still_ends_in_words(test_client, p
 
     assert response.status_code == 409
     assert "checking a downloaded model file" in response.json()["detail"]["message"]
+
+
+def _two_quantizations():
+    return _details(artifacts=[
+        {
+            "id": "a" * 20, "label": "model-Q4_K_M.gguf", "quantization": "Q4_K_M", "sizeBytes": 4 * GIB,
+            "files": [{"filename": "model-Q4_K_M.gguf", "sizeBytes": 4 * GIB, "sha256": "e" * 64}],
+            "installed": False,
+        },
+        {
+            "id": "c" * 20, "label": "model-Q2_0.gguf", "quantization": "Q2_0", "sizeBytes": 5 * GIB,
+            "files": [{"filename": "model-Q2_0.gguf", "sizeBytes": 5 * GIB, "sha256": "d" * 64}],
+            "installed": False,
+        },
+    ])
+
+
+@pytest.mark.parametrize("backend, q2_status", [("amd", "unsupported"), ("nvidia", "ok")])
+def test_preflight_judges_each_files_tensor_types(test_client, preflight_env, monkeypatch, backend, q2_status):
+    models_router, state = preflight_env
+    monkeypatch.setattr(models_router, "GPU_BACKEND", backend)
+    state["details"] = _two_quantizations()
+    state["header"] = {**_dense_header(), "tensor_types": [0, 12, 14]}
+
+    body = _preflight(test_client).json()
+
+    # The header read was the smallest file's: it speaks for that file only.
+    assert body["artifacts"]["a" * 20]["tensors"] == {"status": "ok", "unknown": [], "source": "header"}
+    q2 = body["artifacts"]["c" * 20]["tensors"]
+    assert (q2["status"], q2["source"]) == (q2_status, "name")
+    assert body["refusal"] is None  # the repository itself is fine
+    if q2_status == "unsupported":
+        assert q2["unknown"] == ["Q2_0"]
+        assert q2["refusal"]["code"] == "runtime_tensor_type_unsupported"
+        assert q2["refusal"]["overridable"] is True
+
+
+def test_import_refuses_a_file_this_build_cannot_read_unless_acknowledged(test_client, preflight_env, monkeypatch):
+    models_router, state = preflight_env
+    monkeypatch.setattr(models_router, "GPU_BACKEND", "amd")
+    monkeypatch.setattr(models_router, "_call_agent_model", lambda path, payload: {"status": "started"})
+    state["details"] = _two_quantizations()
+
+    refused = test_client.post("/api/models/huggingface/import", headers=test_client.auth_headers,
+                               json={"repoId": REPO, "artifactId": "c" * 20})
+
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["code"] == "runtime_tensor_type_unsupported"
+    assert not (models_router.Path(models_router.DATA_DIR) / "model-imports.json").exists()
+
+    accepted = test_client.post("/api/models/huggingface/import", headers=test_client.auth_headers,
+                                json={"repoId": REPO, "artifactId": "c" * 20, "allowUnsupportedRuntime": True})
+
+    assert accepted.status_code == 200
+    record = json.loads((models_router.Path(models_router.DATA_DIR) / "model-imports.json").read_text(encoding="utf-8"))["models"][0]
+    assert record["runtime_override"]["tensorTypes"] == ["Q2_0"]
+    assert record["runtime_override"]["build"] == "b9014"
+
+
+def _sibling(filename, size=100, sha="a" * 64):
+    return {"rfilename": filename, "size": size, "lfs": {"size": size, "sha256": sha}}
+
+
+@pytest.mark.parametrize("names, default", [
+    (["mmproj-BF16.gguf", "mmproj-F16.gguf", "mmproj-F32.gguf"], "mmproj-F16.gguf"),
+    (["mmproj-BF16.gguf", "mmproj-F32.gguf"], "mmproj-BF16.gguf"),
+    (["mmproj-model.gguf"], "mmproj-model.gguf"),          # the only one
+    (["mmproj-a.gguf", "mmproj-b.gguf"], None),            # nothing to prefer: no guess
+    ([], None),
+])
+def test_projectors_are_listed_and_the_default_is_llama_cpps_closest_pick(names, default):
+    import routers.models as models_router
+
+    payload = {"siblings": [_sibling("model-Q4_K_M.gguf")] + [_sibling(name) for name in names]}
+    projectors = models_router._hf_gguf_projectors(payload)
+    chosen = models_router._hf_default_projector(projectors)
+
+    assert sorted(item["label"] for item in projectors) == sorted(names)
+    assert (chosen or {}).get("label") == default
+    # Projectors are never offered as weights.
+    assert [artifact["label"] for artifact in models_router._hf_gguf_artifacts(payload)] == ["model-Q4_K_M.gguf"]
+
+
+_PROJECTOR = {"id": "p" * 20, "label": "mmproj-F16.gguf", "filename": "mmproj-F16.gguf",
+              "sizeBytes": 1 * GIB, "sha256": "9" * 64, "precision": "F16"}
+
+
+def _vision_details():
+    return _details(projectors=[_PROJECTOR], defaultProjectorId=_PROJECTOR["id"])
+
+
+@pytest.mark.parametrize("extra, expect_projector", [({}, True), ({"includeVision": False}, False)])
+def test_import_brings_the_projector_unless_vision_is_unticked(test_client, preflight_env, monkeypatch,
+                                                              extra, expect_projector):
+    models_router, state = preflight_env
+    state["details"] = _vision_details()
+    sent: list[dict] = []
+
+    def agent(path, payload):
+        sent.append(payload)
+        return {"status": "started"}
+
+    monkeypatch.setattr(models_router, "_call_agent_model", agent)
+
+    response = _import(test_client, **extra)
+
+    assert response.status_code == 200
+    record = json.loads((models_router.Path(models_router.DATA_DIR) / "model-imports.json").read_text(encoding="utf-8"))["models"][0]
+    if expect_projector:
+        assert record["mmproj_file"].startswith("hf-org-model-GGUF-mmproj-F16-") and record["mmproj_file"].endswith(".gguf")
+        assert record["mmproj_sha256"] == "9" * 64 and record["mmproj_size_bytes"] == GIB
+        assert record["mmproj_url"].endswith("/resolve/" + "c" * 40 + "/mmproj-F16.gguf")
+        assert sent[0]["mmproj"] == {"file": record["mmproj_file"], "url": record["mmproj_url"], "sha256": "9" * 64}
+    else:
+        assert "mmproj_file" not in record and "mmproj" not in sent[0]
+
+
+def test_an_unknown_projector_choice_is_refused(test_client, preflight_env, monkeypatch):
+    models_router, state = preflight_env
+    state["details"] = _vision_details()
+    monkeypatch.setattr(models_router, "_call_agent_model", lambda *_a, **_k: pytest.fail("not dispatched"))
+
+    response = _import(test_client, projectorId="q" * 20)
+
+    assert response.status_code == 409
+
+
+def test_preflight_counts_the_projector_in_fit_and_disk(test_client, preflight_env):
+    _router, state = preflight_env
+    state["details"] = _vision_details()
+    # 20 GiB free, 5 GiB margin: the 4 GiB weights fit alone, 15 GiB weights + 1 GiB projector do not.
+    state["details"]["artifacts"][1]["sizeBytes"] = 15 * GIB
+    state["details"]["artifacts"][1]["files"][0]["sizeBytes"] = 15 * GIB
+
+    body = _preflight(test_client).json()
+
+    assert body["projector"] == {"id": "p" * 20, "label": "mmproj-F16.gguf", "sizeBytes": GIB, "precision": "F16"}
+    assert body["artifacts"]["a" * 20]["disk"] == "ok"
+    assert body["artifacts"]["b" * 20]["disk"] == "insufficient"
+
+
+def test_a_windows_launcher_without_vision_support_imports_the_weights_alone(test_client, monkeypatch):
+    import routers.models as models_router
+
+    async def hub(path, **_kwargs):
+        return {"id": REPO, "sha": "c" * 40, "siblings": [_sibling("model-Q4_K_M.gguf"), _sibling("mmproj-F16.gguf")]}, {}
+
+    monkeypatch.setattr(models_router, "_hf_get_json", hub)
+    monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: True)
+    management = {"managed": True, "canActivate": True, "canUnload": True, "running": True, "vision": False}
+    monkeypatch.setattr(models_router, "_model_management_proof", lambda: dict(management))
+
+    details = test_client.get(f"/api/models/huggingface/repositories/{REPO}", headers=test_client.auth_headers).json()
+
+    assert [item["label"] for item in details["projectors"]] == ["mmproj-F16.gguf"]
+    assert details["defaultProjectorId"] is None
+    assert "Run Windows setup again" in details["visionUnavailableReason"]
+    assert models_router._hf_requested_projector(details, {"includeVision": True}) is None
+
+    management["vision"] = True
+    details = test_client.get(f"/api/models/huggingface/repositories/{REPO}", headers=test_client.auth_headers).json()
+    assert details["defaultProjectorId"] is not None
+    assert details["visionUnavailableReason"] is None
+
+    management.update(managed=None, vision=False)
+    details = test_client.get(f"/api/models/huggingface/repositories/{REPO}", headers=test_client.auth_headers).json()
+    assert details["defaultProjectorId"] is None
+    assert "could not confirm" in details["visionUnavailableReason"]
+
+
+def test_vision_support_is_read_only_from_a_managed_proof_and_never_projected(monkeypatch):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: True)
+    for value, expected in (({"managed": True, "canActivate": True, "canUnload": True, "running": True, "vision": True}, True),
+                            ({"managed": True, "canActivate": True, "canUnload": True, "running": True}, False),
+                            ({"managed": True, "canActivate": True, "canUnload": True, "running": True, "vision": "yes"}, False),
+                            ({"managed": False, "canActivate": False, "canUnload": False, "running": False, "vision": True}, False)):
+        monkeypatch.setattr(models_router, "request_agent_json", lambda *_args, value=value, **_kwargs: dict(value))
+        assert models_router._model_management_proof()["vision"] is expected
+        assert "vision" not in models_router._model_management()
+
+
+def test_the_docker_desktop_windows_runtime_imports_the_weights_alone(monkeypatch):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "read_live_env_values",
+                        lambda keys: {"AMD_INFERENCE_RUNTIME_MODE": "windows-native-llama-server"})
+    monkeypatch.setattr(models_router, "_model_management_proof", lambda: pytest.fail("no management proof is needed"))
+    assert "does not load vision files" in models_router._projector_unavailable_reason()
+    monkeypatch.setattr(models_router, "read_live_env_values", lambda keys: {"AMD_INFERENCE_RUNTIME_MODE": "linux-container"})
+    monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: False)
+    assert models_router._projector_unavailable_reason() is None
+
+
+def test_delete_waits_out_a_short_hold_and_refuses_a_long_one_in_words(test_client, monkeypatch):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "_find_model_in_library", lambda model_id: {"id": model_id, "gguf_file": "x.gguf"})
+    monkeypatch.setattr(models_router.time, "sleep", lambda _seconds: None)
+    calls = []
+
+    def agent(path, payload):
+        calls.append((path, payload["gguf_file"]))
+        if len(calls) == 1:
+            raise _busy("pixel_access_mode")  # the periodic Pixel re-proof
+        return {"status": "deleted"}
+
+    monkeypatch.setattr(models_router, "_call_agent_model", agent)
+    response = test_client.delete("/api/models/some-import", headers=test_client.auth_headers)
+    assert response.status_code == 200
+    assert calls == [("/v1/model/delete", "x.gguf")] * 2
+
+    calls.clear()
+
+    def switching(path, payload):
+        calls.append((path, payload["gguf_file"]))
+        raise _busy("model_activation")  # not a short hold
+
+    monkeypatch.setattr(models_router, "_call_agent_model", switching)
+    response = test_client.delete("/api/models/some-import", headers=test_client.auth_headers)
+    assert response.status_code == 409
+    assert response.json()["detail"]["message"] == (
+        "ODS is switching models right now, so this model cannot be deleted yet. Try again in a minute.")
+    assert calls == [("/v1/model/delete", "x.gguf")]

@@ -23,6 +23,7 @@ import { Link } from 'react-router-dom'
 import { useModels } from '../hooks/useModels'
 import { useDownloadProgress } from '../hooks/useDownloadProgress'
 import HuggingFaceModelBrowser from '../components/model-library/HuggingFaceModelBrowser'
+import ModelProfileSummary from '../components/model-library/ModelProfileSummary'
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import FittedLibraryPage from '../components/FittedLibraryPage'
 import './models-refined.css'
@@ -375,6 +376,7 @@ export default function Models({ compact = false }) {
         currentModel={currentModel || loadedModel}
         gpu={gpu}
         externalApi={externalApi}
+        showProfile={canActivateModels}
       />
 
       {!currentModel && !loadedModel && configuredModel && !externalApi && (
@@ -506,7 +508,7 @@ export default function Models({ compact = false }) {
   )
 }
 
-function CurrentModelPanel({ model, currentModel, gpu, compact = false, externalApi = null }) {
+function CurrentModelPanel({ model, currentModel, gpu, compact = false, externalApi = null, showProfile = false }) {
   if (externalApi) return <ExternalApiPanel compact={compact} externalApi={externalApi} />
   const modelLabel = currentModel || model?.id
   const speed = getSpeedDisplay(model)
@@ -520,6 +522,7 @@ function CurrentModelPanel({ model, currentModel, gpu, compact = false, external
       <div className="models-active-name"><MetalMetricIcon icon={Box} size={22}/><strong title={modelLabel}>{model?.name || modelLabel || 'No model running'}</strong></div>
       {currentModel && <>
         <dl><div><dt>Context</dt><dd>{context}</dd></div>{memory && <div><dt>VRAM estimate</dt><dd>{memory.label}</dd></div>}</dl>
+        {showProfile && model?.id && <ModelProfileSummary modelId={model.id}/>}
       </>}
     </section>
   )
@@ -542,6 +545,7 @@ function CurrentModelPanel({ model, currentModel, gpu, compact = false, external
               {memory && <span>{memory.label} VRAM ({memory.percent}%)</span>}
               <span>{context} context</span>
             </div>
+            {showProfile && currentModel && model?.id && <ModelProfileSummary modelId={model.id} />}
           </div>
         </div>
 
