@@ -1,7 +1,9 @@
-"""Opt-in synthetic Docker Desktop probe; never selects installed ODS state.
+"""Opt-in synthetic macOS engine probe; never selects installed ODS state.
 
 Requires an already local, exact Node image ID. No pulls, published ports,
 networking, model files, credentials, or production container/volume names.
+Docker Desktop is the default. Colima requires explicit endpoint/OS bindings
+and its result is Colima qualification, not Docker Desktop reproduction.
 """
 import argparse
 import hashlib
@@ -32,7 +34,21 @@ const a=fs.lstatSync('/config');if(a.uid!==uid||a.gid!==gid||(a.mode&511)!==448)
 """
 
 
-def probe(image, output):
+def validate_engine(mode, endpoint, operating_system, *, expected_endpoint=None, expected_operating_system=None):
+    if mode == 'docker-desktop':
+        if 'docker desktop' not in operating_system.lower():
+            raise ValueError('This probe requires Docker Desktop')
+    elif mode == 'colima':
+        if (not expected_endpoint or not expected_operating_system
+                or endpoint != expected_endpoint or operating_system != expected_operating_system
+                or not endpoint.startswith('unix:///') or '/.colima/' not in endpoint
+                or 'docker desktop' in operating_system.lower()):
+            raise ValueError('An exact independently reviewed Colima endpoint and engine are required')
+    else:
+        raise ValueError('Unknown qualification engine')
+
+
+def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, expected_operating_system=None):
     if platform.system() != 'Darwin' or os.getuid() == 0:
         raise ValueError('Run only as the signed-in Mac owner')
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', image):
@@ -61,13 +77,14 @@ def probe(image, output):
         env.pop(key, None)
     env['DOCKER_HOST'] = endpoint
     operating_system = docker('info', '--format', '{{.OperatingSystem}}').stdout.strip()
-    if 'docker desktop' not in operating_system.lower():
-        raise ValueError('This probe requires Docker Desktop')
+    validate_engine(engine, endpoint, operating_system, expected_endpoint=expected_endpoint,
+        expected_operating_system=expected_operating_system)
     if docker('image', 'inspect', '--format', '{{.Id}}', image).stdout.strip() != image:
         raise ValueError('Local image identity changed')
     uid, gid = os.getuid(), os.getgid()
     receipt = {'source': 'synthetic-private-config', 'project': project, 'image': image,
-        'operatingSystem': operating_system, 'reporterReproduced': False, 'productMutation': False}
+        'operatingSystem': operating_system, 'engineMode': engine, 'endpoint': endpoint,
+        'reporterReproduced': False, 'productMutation': False}
     created = False
     with tempfile.TemporaryDirectory(prefix=project + '-') as directory:
         directory = Path(directory)
@@ -145,5 +162,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--engine', choices=('docker-desktop', 'colima'), default='docker-desktop')
+    parser.add_argument('--expected-endpoint')
+    parser.add_argument('--expected-operating-system')
     args = parser.parse_args()
-    probe(args.image, args.output)
+    probe(args.image, args.output, engine=args.engine, expected_endpoint=args.expected_endpoint,
+        expected_operating_system=args.expected_operating_system)
