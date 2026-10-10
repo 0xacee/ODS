@@ -109,6 +109,14 @@ def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, exp
                 args = ('run', '--pull', 'never', *args[1:])
             return docker('compose', '--project-name', project, '-f', str(compose),
                 *args, timeout=timeout, input=input)
+        # Retain the random namespace before the first container/volume action,
+        # so a killed transport can still be reconciled without guessing owners.
+        receipt['status'] = 'prepared'
+        with output.open('x') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(json.dumps(receipt, indent=2) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
         try:
             docker('volume', 'create', '--label', 'ods.synthetic.config-probe=' + project, volume)
             created = True
