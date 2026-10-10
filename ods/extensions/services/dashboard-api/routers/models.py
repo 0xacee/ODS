@@ -1408,7 +1408,7 @@ async def _hf_preflight(
         artifact_context = artifact_layout.get("max_context_length") or fallback_context
         # Access denial applies to the repository; model evidence does not.
         refusal = gate["refusal"] if (gate["refusal"] or {}).get("code") == "gated" else artifact_gate["refusal"]
-        needed = 0 if artifact.get("installed") else _hf_artifact_size(artifact) + projector_bytes
+        weights = 0 if artifact.get("installed") else _hf_artifact_size(artifact)
         artifacts[artifact["id"]] = {
             "header": artifact_gate["headerStatus"],
             "architecture": artifact_gate["architecture"],
@@ -1417,7 +1417,9 @@ async def _hf_preflight(
             "contextSource": "gguf_header" if artifact_layout.get("max_context_length") else fallback_source,
             "refusal": refusal,
             "fit": _hf_artifact_fit(artifact, artifact_layout, artifact_context, gpu_info, projector_bytes),
-            "disk": model_preflight.disk_status(needed, storage),
+            "disk": model_preflight.disk_status(weights + projector_bytes if weights else 0, storage),
+            # An import with Include vision unticked downloads the weights alone.
+            "diskWithoutProjector": model_preflight.disk_status(weights, storage),
             "tensors": _hf_artifact_tensors(artifact_gate, artifact),
         }
     return {
