@@ -357,3 +357,16 @@ def test_selection_reports_a_qualified_profiles_measured_projector(tmp_path):
     (data / 'model-imports.json').write_text(json.dumps(imports))
     selected = resolve_runtime_selection(tmp_path, verify_hashes=False)
     assert selected['projectorPath'] == str((external / 'measured-mmproj.gguf').resolve())
+
+
+def test_vision_projectors_are_not_listed_as_models(tmp_path):
+    # WP2: an import keeps its projector next to its weights as
+    # hf-<repo>-mmproj-<quant>-<hash>.gguf; it must not appear as a runnable model.
+    models = tmp_path / 'data' / 'models'
+    models.mkdir(parents=True)
+    for name in ('hf-unsloth-gemma-4-E4B-it-GGUF-gemma-4-E4B-it-Q4_K_M-1a2b3c4d.gguf',
+                 'hf-unsloth-gemma-4-E4B-it-GGUF-mmproj-F16-ca7d7e15.gguf',
+                 'mmproj-F16.gguf', 'llava.mmproj.gguf', 'mtp-head.gguf'):
+        (models / name).write_bytes(b'gguf')
+    listed = scan_model_files(tmp_path / 'data')
+    assert sorted(listed) == ['hf-unsloth-gemma-4-E4B-it-GGUF-gemma-4-E4B-it-Q4_K_M-1a2b3c4d.gguf']

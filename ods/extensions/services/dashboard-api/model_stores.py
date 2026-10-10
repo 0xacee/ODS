@@ -218,6 +218,11 @@ def safe_artifact(root: Path, filename: str, *, allow_empty: bool = False) -> Pa
         return None
 
 
+# A vision projector is not a model: upstream names them mmproj-*.gguf and an
+# import stores its own as hf-<repo>-mmproj-<quant>-<hash>.gguf (WP2).
+_PROJECTOR_FILE = re.compile(r"(?:^|[-_.])mmproj(?:[-_.]|$)", re.IGNORECASE)
+
+
 def scan_model_files(data_dir: Path, *, container: bool = False, default_dir: Path | None = None) -> dict[str, Path]:
     stores = registered_stores(data_dir, container=container)
     if default_dir is not None:
@@ -226,7 +231,8 @@ def scan_model_files(data_dir: Path, *, container: bool = False, default_dir: Pa
     for store in stores:
         try:
             for child in store["path"].iterdir():
-                if not child.name.lower().endswith(".gguf") or child.name.lower().startswith(("mmproj", "mtp-")):
+                if (not child.name.lower().endswith(".gguf") or child.name.lower().startswith("mtp-")
+                        or _PROJECTOR_FILE.search(child.name)):
                     continue
                 target = safe_artifact(store["path"], child.name)
                 if target is not None:
