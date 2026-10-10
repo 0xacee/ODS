@@ -81,6 +81,9 @@ ENV_NAMES_BY_BUILD = {
         # get_value_from_env also reads LLAMA_ARG_NO_CACHE_PROMPT. Any value,
         # including 0 or empty, disables prompt caching.
         "LLAMA_ARG_NO_CACHE_PROMPT",
+        # -mm/--mmproj, common/arg.cpp:2165-2171 at b9014 (mmproj_examples
+        # includes LLAMA_EXAMPLE_SERVER): a vision import's projector.
+        "LLAMA_ARG_MMPROJ",
     },
     11429: {
         "LLAMA_ARG_REASONING", "LLAMA_ARG_FLASH_ATTN",
@@ -89,6 +92,8 @@ ENV_NAMES_BY_BUILD = {
         "LLAMA_ARG_CACHE_RAM", "LLAMA_ARG_SPEC_TYPE", "LLAMA_ARG_SPEC_DRAFT_N_MAX",
         "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K", "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V",
         "LLAMA_ARG_SPLIT_MODE", "LLAMA_ARG_TENSOR_SPLIT", "LLAMA_ARG_NO_CACHE_PROMPT",
+        # common/arg.cpp:2581-2587 at b11429.
+        "LLAMA_ARG_MMPROJ",
     },
 }
 

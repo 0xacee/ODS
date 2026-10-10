@@ -814,6 +814,9 @@ start_native_llama() {
     macos_resolve_checkpoint_args "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$reasoning_fmt" || return 1
     llama_args+=(${MACOS_NATIVE_CHECKPOINT_ARGS[@]+"${MACOS_NATIVE_CHECKPOINT_ARGS[@]}"})
     fi
+    # The projector the host agent's switch launches with: a qualified profile's
+    # or a vision import's own (WP2), so a restart keeps the model's vision.
+    [[ -n "${MACOS_NATIVE_PROJECTOR_PATH:-}" ]] && llama_args+=(--mmproj "$MACOS_NATIVE_PROJECTOR_PATH")
 
     # Artifact and argument verification must precede termination of working inference.
     [[ "$replace" != true ]] || stop_native_llama

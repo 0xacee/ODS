@@ -241,6 +241,31 @@ def inspect_gguf(path: Path | str, max_metadata_bytes: int = 32 * 1024 * 1024) -
     return result
 
 
+_MAX_TENSOR_DIMS = 8  # GGML_MAX_DIMS is 4; anything past 8 is not a tensor table
+
+
+def _tensor_types(reader: _Reader, tensor_count: int) -> list[int] | None:
+    """Distinct ggml types in the tensor-info table that follows the metadata.
+
+    Each entry is a name, a dimension count, the dimensions, a ggml type and
+    an offset. Returns None when ``data`` ends inside the table: the metadata
+    is still complete, and a ranged reader may fetch more to learn the types.
+    """
+    types: set[int] = set()
+    try:
+        for _ in range(tensor_count):
+            reader.skip(reader.unpack("<Q"))
+            dims = reader.unpack("<I")
+            if dims > _MAX_TENSOR_DIMS:
+                raise ValueError(f"tensor with {dims} dimensions")
+            reader.skip(8 * dims)
+            types.add(reader.unpack("<I"))
+            reader.skip(8)
+    except GGUFTruncated:
+        return None
+    return sorted(types)
+
+
 def parse_gguf_metadata(data: bytes) -> dict[str, Any]:
     """Normalize the GGUF metadata block at the start of ``data``.
 
@@ -260,6 +285,8 @@ def parse_gguf_metadata(data: bytes) -> dict[str, Any]:
         key = reader.string()
         value_type = reader.unpack("<I")
         metadata[key] = _read_value(reader, value_type)
+    metadata_bytes = reader.offset
+    tensor_types = _tensor_types(reader, tensor_count)
 
     file_type = metadata.get("general.file_type")
     architecture = metadata.get("general.architecture", "unknown")
@@ -268,7 +295,8 @@ def parse_gguf_metadata(data: bytes) -> dict[str, Any]:
         "version": version,
         "tensor_count": tensor_count,
         "metadata_count": metadata_count,
-        "metadata_bytes": reader.offset,
+        "metadata_bytes": metadata_bytes,
+        "tensor_types": tensor_types,
         "architecture": architecture if isinstance(architecture, str) else "unknown",
         "file_type": file_type,
         "quantization": _FILE_TYPE_LABELS.get(file_type, str(file_type) if file_type is not None else "unknown"),

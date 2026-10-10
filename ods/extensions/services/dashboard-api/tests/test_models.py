@@ -3344,3 +3344,10 @@ def test_model_agent_generic_failure_mapping_stays_unchanged(monkeypatch, path, 
         models_router._call_agent_model(path, {})
     assert error.value.status_code == 502
     assert error.value.detail == "generic failure"
+def test_huggingface_quantization_names_mxfp4_artifacts():
+    import routers.models as models_router
+
+    assert models_router._hf_quantization("gpt-oss-20b-MXFP4.gguf") == "MXFP4"
+    assert models_router._hf_quantization("Qwen3.6-35B-A3B-MXFP4_MOE.gguf") == "MXFP4_MOE"
+    assert models_router._hf_quantization("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf") == "Q4_K_M"
+    assert models_router._hf_quantization("model.gguf") is None

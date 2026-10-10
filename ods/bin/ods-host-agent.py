@@ -17,6 +17,7 @@ import atexit
 import base64
 import collections
 import hashlib
+import http.client
 import importlib
 import importlib.util
 import json
@@ -50,7 +51,18 @@ _SWITCHBOARD_BIN_DIR = str(Path(__file__).resolve().parent)
 if _SWITCHBOARD_BIN_DIR not in sys.path:
     sys.path.insert(0, _SWITCHBOARD_BIN_DIR)
 from model_switchboard.router_transport import request as _router_transport_request
+from model_switchboard.router_transport import exchange as _router_transport_exchange
 from model_switchboard import wsl_runtime as _wsl_runtime
+# Model profiles (WP3): measured capabilities per GGUF x llama.cpp build x host.
+# Fail-open like the switchboard: without the package a switch runs as before.
+try:
+    import model_profile as _model_profile
+    from model_profile import probes as _model_profile_probes
+    from model_profile import store as _model_profile_store
+except ImportError:  # pragma: no cover - import environment dependent
+    _model_profile = None
+    _model_profile_probes = None
+    _model_profile_store = None
 
 try:
     from model_switchboard import state as _switchboard_state
@@ -537,6 +549,8 @@ _model_lifecycle_revision = 0
 _MODEL_RUNTIME_NEUTRAL_OPERATIONS = frozenset({
     'pixel_startup_reproof', 'pixel_access_mode', 'pixel_open_app',
     'pixel_providers', 'pixel_settings',
+    # Re-measuring the running model reads it; the runtime does not change.
+    'model_profile_recheck',
 })
 # Advances only for lifecycle operations that can change the model runtime.
 _model_runtime_revision = 0
@@ -551,7 +565,7 @@ _model_activation_failure_code: str | None = None
 # restart. Neutral status/reproof work preserves it; a new runtime operation
 # invalidates it. Restored outcomes are recorded only after rollback proof.
 _model_activation_result: dict | None = None
-_MODEL_ACTIVATION_PHASES = frozenset({'preparing', 'loading', 'verifying', 'rolling_back', 'rollback_verifying'})
+_MODEL_ACTIVATION_PHASES = frozenset({'preparing', 'loading', 'profiling', 'verifying', 'rolling_back', 'rollback_verifying'})
 _MODEL_ACTIVATION_FAILURE_CODES = frozenset({'runtime_load_failed', 'runtime_readiness_failed', 'consumer_verification_failed', 'rollback_unconfirmed'})
 _model_status_verify_thread: threading.Thread | None = None
 _switchboard_initial_verify_lock = threading.Lock()
@@ -1094,10 +1108,58 @@ def _model_download_manifest(model: dict) -> dict | None:
             "size_bytes": _artifact_expected_size(model),
         })
 
+    projector = _model_projector_artifact(model)
+    if projector is not None:
+        artifacts.append(projector)
     filenames = [artifact["file"] for artifact in artifacts]
     if gguf_file not in filenames or len(filenames) != len(set(filenames)):
         return None
     return {"gguf_file": gguf_file, "artifacts": artifacts}
+
+
+def _library_record_for_gguf(gguf_file: str) -> dict | None:
+    """The catalog or import record whose weights are ``gguf_file``, if any."""
+    try:
+        library = _load_model_library_records()
+    except RuntimeError:
+        logger.warning("Model library unavailable; launching %s without library extras", gguf_file)
+        return None
+    return next((entry for entry in library if entry.get("gguf_file") == gguf_file), None)
+
+
+def _model_projector_file(model: dict | None, models_dir: Path) -> Path | None:
+    """The downloaded vision projector of a model record, if it has one on disk."""
+    filename = str((model or {}).get("mmproj_file") or "").strip()
+    if not filename:
+        return None
+    projector = _safe_model_artifact_path(models_dir, filename)
+    return projector if projector is not None and projector.is_file() else None
+
+
+def _projector_shared(library: list[dict], owner: dict, projector: Path, models_dir: Path) -> bool:
+    """Does another installed model use this projector? Quantizations of one repo share it."""
+    for entry in library:
+        if entry is owner or str(entry.get("mmproj_file") or "") != projector.name:
+            continue
+        weights = _safe_model_artifact_path(models_dir, entry.get("gguf_file"))
+        if weights is not None and weights.exists():
+            return True
+    return False
+
+
+def _model_projector_artifact(model: dict) -> dict | None:
+    """The vision projector (mmproj) an import downloads and verifies with its weights (WP2)."""
+    filename = str(model.get("mmproj_file") or "").strip()
+    url = str(model.get("mmproj_url") or "").strip()
+    if not filename or not url:
+        return None
+    return {
+        "file": filename,
+        "url": url,
+        "sha256": str(model.get("mmproj_sha256") or "").strip().lower(),
+        "size_bytes": _artifact_expected_size({"size_bytes": model.get("mmproj_size_bytes")}),
+        "role": "projector",
+    }
 
 
 def _load_model_library_records() -> list[dict]:
@@ -2210,8 +2272,10 @@ def _model_management_snapshot() -> tuple[int, dict]:
                 value = _managed_wsl_runtime(env)
                 managed = value.get('managed') is True
                 running = managed and value.get('running') is True
+                # vision: the owned launcher loads a projector with its model.
                 result = (200, {'managed': managed, 'canActivate': running,
-                                'canUnload': managed, 'running': running})
+                                'canUnload': managed, 'running': running,
+                                'vision': _wsl_runtime.supports_projector(value)})
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 logger.warning('Windows runtime management verification failed: %s', exc)
                 result = unavailable
@@ -9679,6 +9743,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_model_management()
         elif path == "/v1/model/storage":
             self._handle_model_storage()
+        elif path == "/v1/model/profile":
+            self._handle_model_profile()
         elif path == "/v1/model/external-observation":
             self._handle_retired_lemonade_endpoint()
         elif path == "/v1/model/recovery":
@@ -10341,6 +10407,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_service_restart()
         elif self.path == "/v1/model/download":
             self._handle_model_download()
+        elif self.path == "/v1/model/profile/recheck":
+            self._handle_model_profile_recheck()
         elif self.path == "/v1/model/download/cancel":
             self._handle_model_download_cancel()
         elif self.path == "/v1/model/activate":
@@ -12813,6 +12881,65 @@ class AgentHandler(BaseHTTPRequestHandler):
 
     # ── Model management handlers ──
 
+    def _handle_model_profile(self):
+        """The stored profile for ``?model=<id>`` (default: the last activated model)."""
+        if not check_auth(self):
+            return
+        requested = (parse_qs(urlparse(self.path).query).get("model") or [""])[0].strip()
+        env = load_env(INSTALL_DIR / ".env")
+        mode = _model_profiles_mode(env)
+        if _model_profile_store is None:
+            json_response(self, 200, {"mode": "off", "modelId": requested or None, "profile": None})
+            return
+        try:
+            doc = _model_profile_store.load(_model_profile_path())
+        except _model_profile_store.StoreError as exc:
+            logger.warning("Model profile store unreadable: %s", exc)
+            doc = _model_profile_store.empty()
+        last = doc.get("lastActivation") or {}
+        model_id = requested or str(last.get("modelId") or "")
+        profile = None
+        if model_id and model_id == last.get("modelId"):
+            profile = next((entry for entry in doc["profiles"] if entry["keyHash"] == last.get("keyHash")), None)
+        if profile is None and model_id:
+            profile = _model_profile_store.latest_for_model(doc, model_id)
+        json_response(self, 200, {"mode": mode, "modelId": model_id or None, "profile": profile})
+
+    def _handle_model_profile_recheck(self):
+        """Measure the running model again, ignoring its stored profile."""
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+        model_id = str(body.get("model") or "").strip()
+        env = load_env(INSTALL_DIR / ".env")
+        if _model_profiles_mode(env) == "off" or _model_profile_store is None:
+            json_response(self, 409, {"error": "Model profiles are turned off on this machine", "code": "profiles_off"})
+            return
+        try:
+            library = _load_model_library_records()
+        except RuntimeError as exc:
+            json_response(self, 500, {"error": str(exc)})
+            return
+        model = next((entry for entry in library if entry.get("id") == model_id), None)
+        if model is None:
+            json_response(self, 404, {"error": "Unknown model"})
+            return
+        if str(model.get("gguf_file") or "") != str(env.get("GGUF_FILE") or ""):
+            json_response(self, 409, {"error": "Only the running model can be checked; run it first", "code": "not_running"})
+            return
+        acquired, active = _begin_model_lifecycle("model_profile_recheck", model_id)
+        if not acquired:
+            json_response(self, 409, _model_lifecycle_conflict("a model check", active))
+            return
+        try:
+            result = _profile_model_advisory(env, model, model_id=model_id,
+                                             gguf_file=str(model.get("gguf_file")), force=True)
+        finally:
+            _end_model_lifecycle("model_profile_recheck")
+        json_response(self, 200, result)
+
     def _handle_model_storage(self):
         """Report free space where model downloads land, for download preflight."""
         if not check_auth(self):
@@ -12943,6 +13070,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                 return
         else:
             download_plan = [(gguf_file, gguf_url)]
+        # A vision import brings its projector (WP2) as the plan's last file.
+        mmproj = body.get("mmproj")
+        if isinstance(mmproj, dict) and mmproj.get("file") and mmproj.get("url"):
+            download_plan.append((mmproj["file"], mmproj["url"]))
 
         # Validate the complete request against the library. A split request
         # must include every catalog part; accepting a subset can otherwise
@@ -12961,18 +13092,11 @@ class AgentHandler(BaseHTTPRequestHandler):
             candidate_manifest = _model_download_manifest(m)
             if candidate_manifest is None:
                 break
-            if gguf_parts:
-                catalog_plan = [
-                    (artifact["file"], artifact["url"])
-                    for artifact in candidate_manifest["artifacts"]
-                ]
-                if download_plan == catalog_plan:
-                    allowed = True
-                    manifest = candidate_manifest
-            elif (
-                len(candidate_manifest["artifacts"]) == 1
-                and candidate_manifest["artifacts"][0]["url"] == gguf_url
-            ):
+            catalog_plan = [
+                (artifact["file"], artifact["url"])
+                for artifact in candidate_manifest["artifacts"]
+            ]
+            if download_plan == catalog_plan:
                 allowed = True
                 manifest = candidate_manifest
             break
@@ -14448,6 +14572,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                     # runs the backend default again; a host or owner image that
                     # no catalog model names is kept.
                     remove_keys.add("LLAMA_SERVER_IMAGE")
+                # A vision import loads its projector in the container (WP2);
+                # any other model clears the previous one's. Host-native
+                # runtimes take the projector as an argument instead.
+                projector_file = _model_projector_file(model, target.parent)
+                if projector_file is not None and not host_native_llama and gpu_backend != "apple":
+                    updates["LLAMA_ARG_MMPROJ"] = f"/models/{projector_file.name}"
+                else:
+                    remove_keys.add("LLAMA_ARG_MMPROJ")
                 new_lines = []
                 seen = set()
                 for line in lines:
@@ -14525,13 +14657,22 @@ class AgentHandler(BaseHTTPRequestHandler):
             if wsl_managed.get('managed') is True:
                 runtime_restart_strategy = 'wsl-native-llama'
 
+                # A launcher from before vision support (Windows setup not
+                # rerun since) runs the weights alone.
+                wsl_projector = _model_projector_file(model, target.parent)
+                if wsl_projector is not None and not _wsl_runtime.supports_projector(wsl_managed):
+                    logger.warning('The Windows model runtime predates vision support; %s runs without %s',
+                                   gguf_file, wsl_projector.name)
+                    wsl_projector = None
+
                 def _bridge_activate(_e):
                     # The CAS digest the controller reports, even on failure,
                     # decides whether rollback restores or restarts the plan.
                     nonlocal wsl_changed_digest
                     try:
                         switched = _wsl_runtime.activate(INSTALL_DIR, _e, gguf_file,
-                                                          int(context_length), wsl_managed['planDigest'])
+                                                          int(context_length), wsl_managed['planDigest'],
+                                                          mmproj=wsl_projector.name if wsl_projector else None)
                     except _wsl_runtime.BridgeError as exc:
                         wsl_changed_digest = exc.new_plan_digest
                         raise
@@ -14663,6 +14804,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                 healthy = bool(runtime_identity)
 
             if healthy:
+                # WP3: measure what the new model can do before any consumer
+                # is touched (first switch per file x build x host only).
+                model_profile_status = _profile_model_advisory(
+                    env, model, model_id=model_id, gguf_file=gguf_file)
                 _set_model_activation_phase('verifying')
                 if host_native_llama:
                     _write_host_native_litellm_config(env, gguf_file, llm_model_name)
@@ -14989,6 +15134,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                         "context_length": int(context_length),
                         "gpu_assignment_changed": bool(gpu_assignment_plan),
                         "consumers": consumers,
+                        "profile": model_profile_status,
                     },
                 )
             else:
@@ -15092,13 +15238,18 @@ class AgentHandler(BaseHTTPRequestHandler):
             except RuntimeError:
                 library = []
             for entry in library:
-                if entry.get("gguf_file") == gguf_file and entry.get("gguf_parts"):
+                if entry.get("gguf_file") != gguf_file:
+                    continue
+                if entry.get("gguf_parts"):
                     parts_to_delete = []
                     for part in entry["gguf_parts"]:
                         part_file = _safe_model_artifact_path(models_dir, part.get("file"))
                         if part_file is not None and part_file.exists():
                             parts_to_delete.append(part_file)
-                    break
+                projector = _model_projector_file(entry, models_dir)
+                if projector is not None and not _projector_shared(library, entry, projector, models_dir):
+                    parts_to_delete.append(projector)
+                break
 
             deleted_names = {path.name for path in parts_to_delete}
             deleted_names.add(gguf_file)
@@ -15116,7 +15267,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                     'code': 'model_store_read_only',
                 })
                 return
-            if managed.get('managed') is True and managed['plan']['GgufFile'] in deleted_names:
+            if managed.get('managed') is True and (managed['plan']['GgufFile'] in deleted_names
+                                                    or managed['plan'].get('MmprojFile') in deleted_names):
                 json_response(self, 409, {'error': 'Cannot delete the model selected in the Windows startup plan'})
                 return
             if str(env.get("GGUF_FILE") or "") in deleted_names:
@@ -15411,6 +15563,157 @@ def _runtime_http(
     return result.stdout
 
 
+class _RefuseRedirects(urllib_request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib_error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
+# Probe answers are small; a streamed tool call with its deltas stays far below this.
+# A streamed probe answer is one JSON event per token: about 400 KB for the
+# 1,000 tokens a thinking model may use (Tower3, 2026-10-09).
+_RUNTIME_EXCHANGE_LIMIT = 2097152
+
+
+def _runtime_exchange(
+    env: dict,
+    path: str,
+    *,
+    payload: dict | None = None,
+    timeout: float = 30,
+) -> tuple[int, str]:
+    """``(http_status, text)`` from the runtime, error statuses included.
+
+    For capability probes (WP3), which classify llama-server's own error text
+    such as a 400 "Unable to generate parser for this template". Same
+    endpoint and key handling as ``_runtime_http``: the key travels in a
+    request header (never argv), no proxy, no redirects, bounded body.
+    Raises OSError when the runtime cannot be reached or does not answer in time.
+    """
+    origin, transport = _runtime_endpoint(env)
+    api_key = _runtime_api_key(env)
+    if transport == "router":
+        return _router_transport_exchange(
+            INSTALL_DIR, origin, path, payload=payload, api_key=api_key, timeout=timeout,
+        )
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib_request.Request(f"{origin}{path}", data=data, headers=headers)
+    opener = urllib_request.build_opener(urllib_request.ProxyHandler({}), _RefuseRedirects())
+    try:
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                status, body = response.status, response.read(_RUNTIME_EXCHANGE_LIMIT + 1)
+        except urllib_error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise OSError(f"llama-server {path} redirected; refusing") from exc
+            status, body = exc.code, exc.read(_RUNTIME_EXCHANGE_LIMIT + 1)
+    except http.client.HTTPException as exc:
+        raise OSError(f"llama-server {path} answered incompletely: {exc}") from exc
+    if len(body) > _RUNTIME_EXCHANGE_LIMIT:
+        raise OSError(f"llama-server {path} answer exceeds {_RUNTIME_EXCHANGE_LIMIT} bytes")
+    return status, body.decode("utf-8", errors="replace")
+
+
+_MODEL_PROFILE_MODES = frozenset({"off", "observe", "enabled"})
+_MODEL_PROFILE_DEFAULT_MODE = "observe"  # PLAN D5: observe in the first release
+
+
+def _model_profiles_mode(env: dict) -> str:
+    """``ODS_MODEL_PROFILES``: off, observe (default) or enabled."""
+    value = str(env.get("ODS_MODEL_PROFILES") or _MODEL_PROFILE_DEFAULT_MODE).strip().lower()
+    if value not in _MODEL_PROFILE_MODES:
+        logger.warning("ODS_MODEL_PROFILES=%r is not off, observe or enabled; using %s",
+                       value, _MODEL_PROFILE_DEFAULT_MODE)
+        return _MODEL_PROFILE_DEFAULT_MODE
+    return value
+
+
+def _model_profile_path() -> Path:
+    return INSTALL_DIR / "data" / "model-profiles.json"
+
+
+def _model_profile_backend(env: dict) -> str:
+    if _runtime_uses_router_transport(env) or _is_windows_host_llama_server(env):
+        return "windows-native"
+    return str(env.get("GPU_BACKEND") or "cpu").strip().lower() or "cpu"
+
+
+def _model_profile_digests(model: dict, gguf_file: str) -> list[str]:
+    """Every GGUF part's SHA-256 from the model's integrity manifest, else a file marker."""
+    manifest = _model_download_manifest(model) if isinstance(model, dict) else None
+    digests = [str(artifact["sha256"]) for artifact in (manifest or {}).get("artifacts", [])
+               if artifact.get("sha256") and artifact.get("role") != "projector"]
+    return digests or [f"file:{gguf_file}"]
+
+
+def _profile_model(env: dict, model: dict, *, model_id: str, gguf_file: str, force: bool = False) -> dict:
+    """Measure the loaded model once per GGUF x llama.cpp build x host (PLAN WP3).
+
+    A stored profile with the same key is reused unless ``force``. Inside an
+    activation this runs after the runtime proof and before any consumer is
+    touched (D1), under one total budget (D2), shown as the "profiling" phase.
+    """
+    if _model_profiles_mode(env) == "off" or _model_profile_probes is None or _model_profile_store is None:
+        return {"status": "off"}
+    if str(env.get("ODS_MODE") or "local").lower() == "cloud":
+        return {"status": "skipped", "reason": "cloud"}
+    status, text = _runtime_exchange(env, "/props", timeout=15)
+    props = json.loads(text) if status == 200 else None
+    if not isinstance(props, dict):
+        return {"status": "unavailable", "reason": f"props-http-{status}"}
+    facts = _model_profile_probes.static_facts(props)
+    projector_sha = str(model.get("mmproj_sha256") or "").strip().lower() if isinstance(model, dict) else ""
+    key = _model_profile_store.profile_key(
+        gguf_sha256=_model_profile_digests(model, gguf_file),
+        projector_sha256=projector_sha if projector_sha and facts["vision"] else None,
+        build_info=facts["buildInfo"],
+        backend=_model_profile_backend(env),
+        template_sha256=facts["templateSha256"],
+        template_source="embedded",
+        suite=_model_profile.SUITE_VERSION,
+        host=_model_profile_store.host_id(),
+    )
+    path = _model_profile_path()
+    try:
+        doc = _model_profile_store.load(path)
+    except _model_profile_store.StoreError as exc:
+        logger.warning("Model profile store unreadable; starting a new one: %s", exc)
+        doc = _model_profile_store.empty()
+    profile = None if force else _model_profile_store.find(doc, key)
+    cached = profile is not None
+    if profile is None:
+        _set_model_activation_phase("profiling")
+        result = _model_profile_probes.run_battery(
+            lambda probe_path, probe_payload, probe_timeout: _runtime_exchange(
+                env, probe_path, payload=probe_payload, timeout=probe_timeout),
+            props,
+        )
+        profile = _model_profile_store.recorded_profile(
+            key, model_id=model_id, gguf_file=gguf_file, result=result, product_version=ODS_VERSION)
+        doc = _model_profile_store.with_profile(doc, profile)
+        logger.info("Model profile for %s took %d ms: %s", model_id, result["elapsedMs"],
+                    json.dumps(result["summary"], sort_keys=True))
+    _model_profile_store.atomic_write(
+        path, _model_profile_store.with_last_activation(doc, model_id, profile["keyHash"]))
+    return {"status": "cached" if cached else "recorded", "keyHash": profile["keyHash"],
+            "summary": profile["result"]["summary"]}
+
+
+def _profile_model_advisory(env: dict, model: dict, *, model_id: str, gguf_file: str, force: bool = False) -> dict:
+    """``_profile_model`` that can never fail a switch (PLAN D4, the no-lockout rule).
+
+    These are the I/O and response-shape failures a probe run can meet; each
+    is logged with its trace and reported as the profile's status instead.
+    """
+    try:
+        return _profile_model(env, model, model_id=model_id, gguf_file=gguf_file, force=force)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
+        logger.exception("Model profile for %s did not complete", model_id)
+        return {"status": "error", "reason": type(exc).__name__}
+
+
 def _runtime_health(env: dict) -> str:
     """Return ``ok``, ``loading`` or ``error`` from llama-server ``/health``."""
     body = _runtime_http(env, "/health")
@@ -15675,7 +15978,18 @@ def _meaningful_completion(data: object, *, include_reasoning: bool = True) -> b
     return bool(non_space) and set(non_space) != {"?"}
 
 
-def _completion_probe_payload(model_name: str, *, disable_thinking: bool) -> dict:
+_COMPLETION_PROBE_TOKENS = 64
+# A model that always thinks (the DeepSeek-R1 distills ignore enable_thinking)
+# spends the short probe inside its reasoning and never reaches visible
+# content, so every switch to one rolled back: R1-Distill-Qwen-1.5B needs 441
+# tokens to answer (Tower3, 2026-10-09). An answer cut off while thinking earns
+# one longer probe; visible content is still required.
+_COMPLETION_PROBE_THINKING_TOKENS = 1024
+_COMPLETION_PROBE_THINKING_SECONDS = 120
+
+
+def _completion_probe_payload(model_name: str, *, disable_thinking: bool,
+                              max_tokens: int = _COMPLETION_PROBE_TOKENS) -> dict:
     payload = {
         "model": model_name,
         "messages": [{
@@ -15684,12 +15998,21 @@ def _completion_probe_payload(model_name: str, *, disable_thinking: bool) -> dic
         }],
         # A few reasoning-capable servers ignore enable_thinking. Leave enough
         # room for them to reach visible output while still bounding the probe.
-        "max_tokens": 64,
+        "max_tokens": max_tokens,
         "temperature": 0,
     }
     if disable_thinking:
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     return payload
+
+
+def _reasoning_cut_short(response: object) -> bool:
+    """The answer hit max_tokens inside its reasoning: thinking, but no visible text yet."""
+    choices = response.get("choices") if isinstance(response, dict) else None
+    first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    return (first.get("finish_reason") == "length"
+            and _meaningful_completion(response, include_reasoning=True)
+            and not _meaningful_completion(response, include_reasoning=False))
 
 
 def _completion_response_ready(
@@ -15734,10 +16057,12 @@ def _chat_completion_ready(
     prefix = "/" + api_prefix.strip("/")
     origin = base_url.rstrip("/") if base_url else f"http://{host}:{port}"
     url = f"{origin}{prefix}/chat/completions"
-    payload = json.dumps(_completion_probe_payload(model_name, disable_thinking=disable_thinking))
-    try:
+
+    def probe(max_tokens: int, seconds: int):
+        payload = json.dumps(_completion_probe_payload(
+            model_name, disable_thinking=disable_thinking, max_tokens=max_tokens))
         command = [
-            "curl", "-sf", "--max-time", "30", "--max-filesize", "65536",
+            "curl", "-sf", "--max-time", str(seconds), "--max-filesize", "65536",
             "-X", "POST", url,
             "-H", "Content-Type: application/json",
         ]
@@ -15754,11 +16079,16 @@ def _chat_completion_ready(
             capture_output=True,
             text=True,
             input=header_input,
-            timeout=35,
+            timeout=seconds + 5,
         )
-        if result.returncode != 0:
+        return json.loads(result.stdout or "{}") if result.returncode == 0 else None
+
+    try:
+        response = probe(_COMPLETION_PROBE_TOKENS, 30)
+        if response is not None and require_visible_content and _reasoning_cut_short(response):
+            response = probe(_COMPLETION_PROBE_THINKING_TOKENS, _COMPLETION_PROBE_THINKING_SECONDS)
+        if response is None:
             return False
-        response = json.loads(result.stdout or "{}")
     except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
         return False
     return _completion_response_ready(
@@ -15804,6 +16134,15 @@ def _runtime_completion_ready(
             timeout=30,
         )
         response = json.loads(body or "{}")
+        if _reasoning_cut_short(response):
+            body = _runtime_http(
+                env,
+                "/v1/chat/completions",
+                payload=_completion_probe_payload(
+                    model_name, disable_thinking=True, max_tokens=_COMPLETION_PROBE_THINKING_TOKENS),
+                timeout=_COMPLETION_PROBE_THINKING_SECONDS,
+            )
+            response = json.loads(body or "{}")
     except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
         return False
     return _completion_response_ready(response, require_visible_content=True, **expected)
@@ -16099,6 +16438,12 @@ def _wait_for_model_readiness(
                         "verifiedAt": _iso_now(),
                     }
                 return runtime_identity if return_identity else True
+            if runtime_identity:
+                # Loaded and serving, yet no visible answer: never leave the
+                # earlier "still loading" in place (Tower3, 2026-10-09).
+                diagnosis["reason"] = (
+                    f"{runtime_identity} is loaded but did not answer a test message with visible text"
+                )
             if attempt % 6 == 0:
                 logger.info(
                     "Model %s readiness incomplete (attempt %d, identity=%s)%s",
@@ -19112,6 +19457,11 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         if projector is None:
             raise RuntimeError("The memory-qualified vision projector is unavailable")
         args.extend(["--mmproj", str(projector)])
+    else:
+        # A vision import's own projector (WP2), downloaded with its weights.
+        imported_projector = _model_projector_file(_library_record_for_gguf(gguf_file), model_path.parent)
+        if imported_projector is not None:
+            args.extend(["--mmproj", str(imported_projector)])
     # On macOS the default runtime gets its reasoning flags from the tuning
     # helper below (--reasoning on b9014, where --reasoning-format none put an
     # empty think block into every reply). Everything else passes the format.

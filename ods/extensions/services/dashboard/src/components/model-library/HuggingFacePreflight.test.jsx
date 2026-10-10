@@ -183,3 +183,66 @@ test('the context label names where the number came from', async () => {
   expect(dialog.getByText('GGUF metadata')).toBeVisible()
   expect(dialog.queryByText('This file’s GGUF header')).toBeNull()
 })
+
+test('a file stored in a tensor type this runtime cannot read needs an explicit Import anyway, other files do not', async () => {
+  const refusal = {code: 'runtime_tensor_type_unsupported', message: 'This file stores weights as Q2_0, which this machine’s llama.cpp (build b9014) cannot read.', overridable: true}
+  preflightBody = preflight({
+    artifacts: {
+      q4: {...okCheck, tensors: {status: 'ok', unknown: [], source: 'header'}},
+      q8: {...okCheck, tensors: {status: 'unsupported', unknown: ['Q2_0'], source: 'name', refusal}},
+    },
+  })
+  const dialog = await open()
+  expect(dialog.getByText('Stored as Q2_0: needs a newer llama.cpp')).toBeVisible()
+  expect(dialog.getByRole('button', {name: /^Import$/})).toBeEnabled()
+  await act(async () => { fireEvent.click(dialog.getByRole('button', {name: 'Import anyway…'})) })
+  expect(dialog.getByRole('alertdialog', {name: 'Import anyway'})).toHaveTextContent('stores weights as Q2_0')
+  await act(async () => { fireEvent.click(dialog.getByRole('button', {name: 'Import anyway'})) })
+  expect(importBodies()).toEqual([{repoId: 'org/model', artifactId: 'q8', allowUnsupportedRuntime: true}])
+})
+
+test('a repository with a vision projector imports it unless Include vision is unticked', async () => {
+  detailsBody = {
+    ...repo, artifacts,
+    projectors: [{id: 'p1', label: 'mmproj-F16.gguf', sizeBytes: 9e8, precision: 'F16'}],
+    defaultProjectorId: 'p1',
+  }
+  const dialog = await open()
+  const vision = dialog.getByRole('checkbox', {name: /Include vision/})
+  expect(vision).toBeChecked()
+  expect(vision.closest('label')).toHaveTextContent('mmproj-F16.gguf')
+  await act(async () => { fireEvent.click(dialog.getAllByRole('button', {name: /^Import$/})[0]) })
+  expect(importBodies()[0]).toEqual({repoId: 'org/model', artifactId: 'q4', includeVision: true})
+})
+
+test('unticking Include vision imports the weights alone', async () => {
+  detailsBody = {
+    ...repo, artifacts,
+    projectors: [{id: 'p1', label: 'mmproj-F16.gguf', sizeBytes: 9e8, precision: 'F16'}],
+    defaultProjectorId: 'p1',
+  }
+  const dialog = await open()
+  await act(async () => { fireEvent.click(dialog.getByRole('checkbox', {name: /Include vision/})) })
+  await act(async () => { fireEvent.click(dialog.getAllByRole('button', {name: /^Import$/})[0]) })
+  expect(importBodies()[0]).toEqual({repoId: 'org/model', artifactId: 'q4', includeVision: false})
+})
+
+test('a repository without a projector shows no vision choice', async () => {
+  const dialog = await open()
+  expect(dialog.queryByRole('checkbox', {name: /Include vision/})).toBeNull()
+})
+
+test('a runtime that cannot load vision says why and imports the weights alone', async () => {
+  detailsBody = {
+    ...repo, artifacts,
+    projectors: [{id: 'p1', label: 'mmproj-F16.gguf', sizeBytes: 9e8, precision: 'F16'}],
+    defaultProjectorId: null,
+    visionUnavailableReason: 'This Windows model runtime was set up before vision support, so the model imports without its vision file. Run Windows setup again to add vision',
+  }
+  const dialog = await open()
+  expect(dialog.queryByRole('checkbox', {name: /Include vision/})).toBeNull()
+  expect(dialog.getByText(/set up before vision support/)).toBeInTheDocument()
+  expect(dialog.getByText(/set up before vision support/).closest('div').querySelector('a[href^="https://discord.gg/"]')).not.toBeNull()
+  await act(async () => { fireEvent.click(dialog.getAllByRole('button', {name: /^Import$/})[0]) })
+  expect(importBodies()[0]).toEqual({repoId: 'org/model', artifactId: 'q4'})
+})

@@ -535,6 +535,65 @@ class TestCompletionProof:
 
         assert _mod._chat_completion_ready("127.0.0.1", "8080", "model.gguf") is False
 
+    def test_an_answer_cut_off_while_thinking_earns_one_longer_probe(self, monkeypatch):
+        # DeepSeek-R1 distills ignore enable_thinking: 64 tokens end inside the
+        # reasoning; with room they answer (R1-Distill-Qwen-1.5B: 441 tokens).
+        calls: list = []
+        answers = [
+            {"model": "R1.gguf", "choices": [{"finish_reason": "length",
+                                              "message": {"content": "", "reasoning_content": "Okay, so I need to"}}]},
+            {"model": "R1.gguf", "choices": [{"finish_reason": "stop",
+                                              "message": {"content": "Ready", "reasoning_content": "Okay..."}}]},
+        ]
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(answers[len(calls) - 1]), stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert _mod._chat_completion_ready(
+            "", "", "R1.gguf", "/v1", base_url="http://127.0.0.1:8080",
+            disable_thinking=True, require_visible_content=True, expected_gguf_file="R1.gguf",
+        ) is True
+        budgets = [json.loads(cmd[cmd.index("-d") + 1])["max_tokens"] for cmd, _ in calls]
+        assert budgets == [64, 1024]
+        assert calls[1][0][calls[1][0].index("--max-time") + 1] == "120"
+        assert calls[1][1]["timeout"] == 125
+
+    @pytest.mark.parametrize("first", [
+        # Not cut short: an empty answer that stopped on its own, and visible text.
+        {"choices": [{"finish_reason": "stop", "message": {"content": "", "reasoning_content": "hm"}}]},
+        {"choices": [{"finish_reason": "length", "message": {"content": "READY", "reasoning_content": "x"}}]},
+    ])
+    def test_only_an_answer_cut_off_inside_its_reasoning_is_probed_again(self, monkeypatch, first):
+        calls: list = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(first), stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        _mod._chat_completion_ready("", "", "M.gguf", "/v1", base_url="http://127.0.0.1:8080",
+                                    disable_thinking=True, require_visible_content=True)
+        assert len(calls) == 1
+
+    def test_the_router_proof_gives_a_thinking_model_the_same_longer_probe(self, monkeypatch):
+        requests: list = []
+        answers = [
+            json.dumps({"model": "R1.gguf", "choices": [{"finish_reason": "length",
+                        "message": {"content": "", "reasoning_content": "Okay, so"}}]}),
+            json.dumps({"model": "R1.gguf", "choices": [{"finish_reason": "stop", "message": {"content": "Ready"}}]}),
+        ]
+        monkeypatch.setattr(_mod, "_runtime_endpoint", lambda env: ("http://host.docker.internal:13305", "router"))
+
+        def runtime_http(env, path, *, payload=None, timeout=5):
+            requests.append((payload["max_tokens"], timeout))
+            return answers[len(requests) - 1]
+
+        monkeypatch.setattr(_mod, "_runtime_http", runtime_http)
+        assert _mod._runtime_completion_ready({}, "R1.gguf", expected_gguf_file="R1.gguf") is True
+        assert requests == [(64, 30), (1024, 120)]
+
     def test_runtime_proof_rejects_reasoning_only_output_on_every_runtime(self, monkeypatch):
         # Contract section 1.4: a reasoning-only answer does not prove a
         # runtime can serve consumers. NVIDIA's container proof included.
@@ -545,11 +604,14 @@ class TestCompletionProof:
                 "choices": [{"message": {"content": "", "reasoning_content": "thinking..."}}],
             },
         ))
+        diagnosis: dict = {}
         assert _mod._wait_for_model_readiness(
             {"GPU_BACKEND": "nvidia", "OLLAMA_PORT": "8080", "CTX_SIZE": "65536"},
             model_id="model", gguf_file="Model.gguf", llm_model_name="model",
-            attempts=1, initial_delay=0, interval=0,
+            attempts=1, initial_delay=0, interval=0, diagnosis=diagnosis,
         ) is False
+        # The loaded model is named as loaded, not "still loading".
+        assert diagnosis["reason"] == "Model.gguf is loaded but did not answer a test message with visible text"
 
 
 class TestRuntimeReadiness:
@@ -7595,3 +7657,190 @@ def test_router_publication_rejects_unverified_context(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="unverified"):
         _mod._publish_activation_route({}, "target", {"identity": "target", "contextVerified": False}, {})
     assert not (tmp_path / "data/model-state.json").exists()
+
+
+class TestModelProfileInActivation:
+    """WP3 (TEST-PLAN T-U-3): the first switch profiles the model before consumers are
+    touched, the next switch to the same file reuses the profile, and nothing about
+    profiling can fail a switch."""
+
+    PROPS = {
+        "chat_template": "{% if tools %}<tools>{% endif %}{% if enable_thinking %}<think>{% endif %}",
+        "chat_template_caps": {"supports_tools": True, "supports_tool_calls": True},
+        "modalities": {"vision": False, "audio": False},
+        "build_info": "b11429-d81235049",
+        "default_generation_settings": {"n_ctx": 65536},
+    }
+
+    @pytest.fixture(autouse=True)
+    def _quiet_runtime(self, monkeypatch):
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, ""))
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
+        monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
+        monkeypatch.setattr(_mod, "_verify_hermes_dashboard_ready", lambda: None)
+        monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
+        monkeypatch.setattr(_mod, "_wait_for_model_readiness", _mock_verified_readiness)
+
+    def _scripted(self, order):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import test_model_profile_probes as scripted
+
+        runtime = scripted.Runtime()
+
+        def exchange(_env, path, *, payload=None, timeout=30):
+            order.append(path)
+            if path == "/props":
+                return 200, json.dumps(self.PROPS)
+            return runtime(path, payload, timeout)
+
+        return exchange
+
+    def _activate(self, install_dir, monkeypatch, exchange):
+        order: list[str] = []
+        phases: list[str] = []
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "_runtime_exchange", exchange(order))
+        monkeypatch.setattr(_mod, "_set_model_activation_phase", lambda phase, *_a: phases.append(phase))
+        real_render = _mod._render_model_router_runtime_configs
+
+        def render(*args, **kwargs):
+            order.append("consumers")
+            return real_render(*args, **kwargs)
+
+        monkeypatch.setattr(_mod, "_render_model_router_runtime_configs", render)
+        handler = _ResponseHandler()
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+        return handler, order, phases
+
+    def test_first_switch_profiles_before_consumers_then_reuses_the_profile(self, tmp_path, monkeypatch):
+        install_dir, *_ = _write_model_activation_fixture(tmp_path)
+
+        handler, order, phases = self._activate(install_dir, monkeypatch, self._scripted)
+
+        assert handler.response_code == 200, handler.parse_response()
+        status = handler.parse_response()["profile"]
+        assert status["status"] == "recorded" and status["summary"]["tools"] is True
+        assert order[0] == "/props" and order.count("/v1/chat/completions") >= 6
+        last_probe = max(i for i, path in enumerate(order) if path == "/v1/chat/completions")
+        assert order.index("consumers") > last_probe
+        assert phases.index("profiling") < phases.index("verifying")
+        store = json.loads((install_dir / "data" / "model-profiles.json").read_text(encoding="utf-8"))
+        assert [entry["modelId"] for entry in store["profiles"]] == ["target-model"]
+        assert store["lastActivation"] == {"modelId": "target-model", "keyHash": status["keyHash"]}
+        assert store["profiles"][0]["key"]["buildInfo"] == "b11429-d81235049"
+        assert store["profiles"][0]["key"]["backend"] == "nvidia"
+
+        again, order, phases = self._activate(install_dir, monkeypatch, self._scripted)
+
+        assert again.response_code == 200
+        assert again.parse_response()["profile"]["status"] == "cached"
+        assert order.count("/v1/chat/completions") == 0 and "profiling" not in phases
+
+    def test_an_unreachable_runtime_is_recorded_and_the_switch_still_succeeds(self, tmp_path, monkeypatch):
+        install_dir, *_ = _write_model_activation_fixture(tmp_path)
+
+        def unreachable(order):
+            def exchange(_env, path, **_kwargs):
+                order.append(path)
+                raise OSError("connection refused")
+            return exchange
+
+        handler, order, _phases = self._activate(install_dir, monkeypatch, unreachable)
+
+        assert handler.response_code == 200
+        assert handler.parse_response()["profile"] == {"status": "error", "reason": "OSError"}
+        assert "consumers" in order
+        assert not (install_dir / "data" / "model-profiles.json").exists()
+
+    def test_a_malformed_props_answer_skips_profiling(self, tmp_path, monkeypatch):
+        install_dir, *_ = _write_model_activation_fixture(tmp_path)
+
+        def odd(order):
+            def exchange(_env, path, **_kwargs):
+                order.append(path)
+                return 200, "[]"
+            return exchange
+
+        handler, order, _phases = self._activate(install_dir, monkeypatch, odd)
+
+        assert handler.response_code == 200
+        assert handler.parse_response()["profile"] == {"status": "unavailable", "reason": "props-http-200"}
+        assert order.count("/v1/chat/completions") == 0
+
+    def test_profiles_off_sends_no_probe(self, tmp_path, monkeypatch):
+        install_dir, env_path, *_ = _write_model_activation_fixture(tmp_path)
+        env_path.write_text(env_path.read_text(encoding="utf-8") + "ODS_MODEL_PROFILES=off\n", encoding="utf-8")
+
+        handler, order, phases = self._activate(install_dir, monkeypatch, self._scripted)
+
+        assert handler.response_code == 200
+        assert handler.parse_response()["profile"] == {"status": "off"}
+        assert [path for path in order if path != "consumers"] == [] and "profiling" not in phases
+
+
+class TestVisionProjectorActivation:
+    """WP2: a vision import loads its projector in the container; any other model clears it."""
+
+    @pytest.fixture(autouse=True)
+    def _quiet_runtime(self, monkeypatch):
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, ""))
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
+        monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
+        monkeypatch.setattr(_mod, "_verify_hermes_dashboard_ready", lambda: None)
+        monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
+        monkeypatch.setattr(_mod, "_wait_for_model_readiness", _mock_verified_readiness)
+
+    def _fixture(self, tmp_path, *, vision, env_extra=""):
+        install_dir, env_path, *_ = _write_model_activation_fixture(tmp_path)
+        library = json.loads((install_dir / "config" / "model-library.json").read_text(encoding="utf-8"))
+        if vision:
+            (install_dir / "data" / "models" / "mmproj-test.gguf").write_bytes(b"projector")
+            library["models"][0].update({
+                "mmproj_file": "mmproj-test.gguf",
+                "mmproj_url": "https://example.test/mmproj-test.gguf",
+                "mmproj_sha256": hashlib.sha256(b"projector").hexdigest(),
+            })
+        (install_dir / "config" / "model-library.json").write_text(json.dumps(library), encoding="utf-8")
+        if env_extra:
+            env_path.write_text(env_path.read_text(encoding="utf-8") + env_extra, encoding="utf-8")
+        return install_dir, env_path
+
+    def _activate(self, install_dir, monkeypatch):
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        handler = _ResponseHandler()
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+        return handler
+
+    def test_a_vision_import_loads_its_projector(self, tmp_path, monkeypatch):
+        install_dir, env_path = self._fixture(tmp_path, vision=True)
+
+        handler = self._activate(install_dir, monkeypatch)
+
+        assert handler.response_code == 200, handler.parse_response()
+        assert "LLAMA_ARG_MMPROJ=/models/mmproj-test.gguf" in env_path.read_text(encoding="utf-8").splitlines()
+
+    def test_the_next_model_without_a_projector_clears_it(self, tmp_path, monkeypatch):
+        install_dir, env_path = self._fixture(
+            tmp_path, vision=False, env_extra="LLAMA_ARG_MMPROJ=/models/mmproj-old.gguf\n")
+
+        handler = self._activate(install_dir, monkeypatch)
+
+        assert handler.response_code == 200, handler.parse_response()
+        assert "LLAMA_ARG_MMPROJ" not in env_path.read_text(encoding="utf-8")
+
+    def test_a_vision_import_with_its_projector_missing_does_not_start(self, tmp_path, monkeypatch):
+        install_dir, env_path = self._fixture(tmp_path, vision=True)
+        (install_dir / "data" / "models" / "mmproj-test.gguf").unlink()
+        before = env_path.read_text(encoding="utf-8")
+
+        handler = self._activate(install_dir, monkeypatch)
+
+        assert handler.response_code == 400
+        assert "verification" in handler.parse_response()["error"]
+        assert env_path.read_text(encoding="utf-8") == before
