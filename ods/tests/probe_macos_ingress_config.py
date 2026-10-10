@@ -34,6 +34,26 @@ const a=fs.lstatSync('/config');if(a.uid!==uid||a.gid!==gid||(a.mode&511)!==448)
 """
 
 
+def probe_workspace(output, project):
+    # The reviewed output parent is on the engine's shared home mount. macOS's
+    # default /var/folders temporary tree need not be visible to the engine.
+    return tempfile.TemporaryDirectory(prefix=project + '-', dir=Path(output).parent)
+
+
+def record_docker_failure(output, operation, result):
+    """Keep the first CLI failure privately, without logging command arguments."""
+    diagnostic = Path(output).with_name(Path(output).name + '.private-docker-failure.json')
+    try:
+        fd = os.open(diagnostic, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return  # Preserve the initial failure if cleanup encounters another.
+    with os.fdopen(fd, 'w') as stream:
+        json.dump({'operation': operation, 'exitCode': result.returncode,
+            'stdoutTail': result.stdout[-4096:], 'stderrTail': result.stderr[-8192:]}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def validate_engine(mode, endpoint, operating_system, *, expected_endpoint=None, expected_operating_system=None):
     if mode == 'docker-desktop':
         if 'docker desktop' not in operating_system.lower():
@@ -64,7 +84,8 @@ def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, exp
             timeout=timeout, env=env)
         if result.returncode:
             # CLI stderr can contain arbitrary engine details. Keep it out of
-            # this credential-free public receipt and fail the probe closed.
+            # the public receipt; retain bounded owner-private diagnostics.
+            record_docker_failure(output, args[0], result)
             raise RuntimeError('Docker probe operation failed: ' + args[0])
         return result
     context = json.loads(docker('context', 'inspect').stdout)
@@ -86,7 +107,7 @@ def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, exp
         'operatingSystem': operating_system, 'engineMode': engine, 'endpoint': endpoint,
         'reporterReproduced': False, 'productMutation': False}
     created = False
-    with tempfile.TemporaryDirectory(prefix=project + '-') as directory:
+    with probe_workspace(output, project) as directory:
         directory = Path(directory)
         source = directory / 'gateway.json'
         source.write_text('{"gateway":{"auth":{"token":"synthetic-probe-only-token"}}}')
