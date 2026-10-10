@@ -142,6 +142,33 @@ assert args[args.index("--spec-type")+1] == "legacy"
 PY
 echo "[PASS] default installs retain the normal runtime and legacy tuning"
 
+# A vision import keeps its projector across restarts (WP2): the resolver reads
+# the import registry the way the host agent's switch does.
+printf 'mmproj' > "$INSTALL_DIR/data/models/default-mmproj-F16.gguf"
+printf '%s' '{"version":1,"models":[{"id":"hf-default","source":"huggingface","gguf_file":"default.gguf","mmproj_file":"default-mmproj-F16.gguf"}]}' \
+    > "$INSTALL_DIR/data/model-imports.json"
+: > "$CALLS"
+start_native_llama true || fail "vision import did not launch"
+wait
+python3 - "$ARGV" "$INSTALL_DIR" <<'PY'
+import sys
+from pathlib import Path
+args=Path(sys.argv[1]).read_bytes().decode().split("\0")[:-1]
+assert args.count("--mmproj") == 1, args
+assert args[args.index("--mmproj")+1] == str(Path(sys.argv[2]).resolve()/"data/models/default-mmproj-F16.gguf"), args
+PY
+rm "$INSTALL_DIR/data/models/default-mmproj-F16.gguf"
+start_native_llama true || fail "import without its projector file did not launch"
+wait
+python3 - "$ARGV" <<'PY'
+import sys
+from pathlib import Path
+args=Path(sys.argv[1]).read_bytes().decode().split("\0")[:-1]
+assert "--mmproj" not in args, args
+PY
+rm "$INSTALL_DIR/data/model-imports.json"
+echo "[PASS] a vision import's projector survives restart; without the file it launches text-only"
+
 mkdir -p "$INSTALL_DIR/installers/macos/lib"
 cp "$ROOT_DIR/installers/macos/lib/native-checkpoint-args.py" "$INSTALL_DIR/installers/macos/lib/"
 printf 'LLAMA_ARG_CHECKPOINT_EVERY_NT=1024\nLLAMA_ARG_CTX_CHECKPOINTS=8\nLLAMA_ARG_CACHE_RAM=512\n' >> "$INSTALL_DIR/.env"

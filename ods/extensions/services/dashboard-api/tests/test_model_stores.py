@@ -321,3 +321,39 @@ def test_native_launch_loads_a_vision_imports_own_projector(tmp_path, monkeypatc
         assert ('--mmproj' in command) is expected
         if expected:
             assert command[command.index('--mmproj') + 1] == str(models / 'hf-vision-mmproj-F16.gguf')
+
+
+def test_selection_reports_a_vision_imports_projector_for_native_restarts(tmp_path):
+    # WP2: `ods start` and installer reruns on macOS read the projector here,
+    # the way the host agent's switch does, so a vision import keeps its vision.
+    models = tmp_path / 'data' / 'models'
+    models.mkdir(parents=True)
+    (models / 'vision.gguf').write_bytes(b'weights')
+    (models / 'vision-mmproj-F16.gguf').write_bytes(b'projector')
+    (tmp_path / '.env').write_text('GGUF_FILE=vision.gguf\n')
+    imports = {'version': 1, 'models': [{'id': 'hf-vision', 'source': 'huggingface', 'gguf_file': 'vision.gguf',
+                                         'mmproj_file': 'vision-mmproj-F16.gguf'}]}
+    (tmp_path / 'data' / 'model-imports.json').write_text(json.dumps(imports))
+
+    selected = resolve_runtime_selection(tmp_path, verify_hashes=False)
+    assert selected['projectorPath'] == str((models / 'vision-mmproj-F16.gguf').resolve())
+
+    (models / 'vision-mmproj-F16.gguf').unlink()
+    assert resolve_runtime_selection(tmp_path, verify_hashes=False)['projectorPath'] is None
+    (tmp_path / 'data' / 'model-imports.json').write_text('{not json')
+    assert resolve_runtime_selection(tmp_path, verify_hashes=False)['projectorPath'] is None
+
+
+def test_selection_reports_a_qualified_profiles_measured_projector(tmp_path):
+    # A memory-qualified native profile was measured with its projector loaded;
+    # restarts launch exactly that, never an import record's projector instead.
+    fit = {'runtimeMode': 'native', 'contextLength': 16384, 'visionProjectorFile': 'measured-mmproj.gguf',
+           'visionProjectorSha256': hashlib.sha256(b'measured').hexdigest()}
+    data, external = registry(tmp_path, memoryQualification=fit)
+    (tmp_path / '.env').write_text('GGUF_FILE=new.gguf\nODS_ACTIVE_MODEL_STORE=ssd\n')
+    (external / 'measured-mmproj.gguf').write_bytes(b'measured')
+    (external / 'import-mmproj.gguf').write_bytes(b'other')
+    imports = {'models': [{'id': 'x', 'source': 'huggingface', 'gguf_file': 'new.gguf', 'mmproj_file': 'import-mmproj.gguf'}]}
+    (data / 'model-imports.json').write_text(json.dumps(imports))
+    selected = resolve_runtime_selection(tmp_path, verify_hashes=False)
+    assert selected['projectorPath'] == str((external / 'measured-mmproj.gguf').resolve())
