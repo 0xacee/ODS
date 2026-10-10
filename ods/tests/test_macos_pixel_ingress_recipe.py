@@ -54,3 +54,10 @@ def test_actual_previous_main_ingress_recipe_survives_secure_refresh_snapshot(tm
     assert restored['services'][module.SERVICE]['environment']['PIXEL_GATEWAY_TOKEN_FILE'] == '/run/gateway.json'
     assert set(restored['services']) == {module.SERVICE}
     assert receipt['configHash'] == expected
+    # Compose excludes build/dependency/pull policy from the service hash.
+    # The minimal restore must retain the same identity so an interrupted
+    # rollback and a later refresh recognize the restored container.
+    restored_hash = execute(['docker', 'compose', '--project-directory', str(ROOT),
+        '--project-name', 'ods', '--env-file', '/dev/null', '-f', receipt['path'],
+        'config', '--hash', module.SERVICE]).stdout.strip().split()[1]
+    assert restored_hash == expected
