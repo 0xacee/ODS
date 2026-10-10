@@ -81,8 +81,9 @@ def test_update_publication_is_atomic_and_replayable(tmp_path, monkeypatch, faul
         return SimpleNamespace(stdout=json.dumps(proof))
     monkeypatch.setattr(module.subprocess, 'run', verify)
     refreshed = []
-    def refresh(path):
+    def refresh(path, *, ingress_selection_locked=False):
         assert path == installed
+        assert ingress_selection_locked is True
         assert stack.read_selection(directory)[0]['runtimeDigest'] == 'c' * 64
         refreshed.append(True)
         if fault == 'clients' and len(refreshed) == 1: raise OSError('client recreation failed')
@@ -163,7 +164,8 @@ def test_refresh_clients_uses_native_stack_and_verifies_from_dashboard(tmp_path,
     native_compose = module.helper('pixel-native-compose')
     monkeypatch.setattr(module, 'helper', lambda name: {
         'pixel-macos-access-install': installer, 'pixel-native-stack': stack,
-        'pixel-native-env': native_env, 'pixel-native-compose': native_compose}[name])
+        'pixel-native-env': native_env, 'pixel-native-compose': native_compose,
+        'pixel-native-ingress-refresh': SimpleNamespace(refresh_installed=lambda *args, **kwargs: None)}[name])
     monkeypatch.setattr(module.Path, 'is_socket', lambda path: fault != 'socket')
     monkeypatch.setenv('DOCKER_CONTEXT', 'remote')
     monkeypatch.setenv('DOCKER_TLS_VERIFY', '1')

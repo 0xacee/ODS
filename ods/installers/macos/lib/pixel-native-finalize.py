@@ -241,13 +241,15 @@ def compose_flags(install_dir, process_env, *, recovery=False):
     return tokens
 
 
-def refresh_clients(install_dir):
+def refresh_clients(install_dir, *, ingress_selection_locked=False):
     """Recreate native consumers from the resolved stack, preserving volumes.
 
     The owner selection must already be published and protected activation
     verified. Failure leaves that selection intact for an explicit replay.
     """
     install_dir = Path(install_dir).resolve(strict=True)
+    helper('pixel-native-ingress-refresh').refresh_installed(install_dir,
+        selection_locked=ingress_selection_locked)
     installer, stack = helper('pixel-macos-access-install'), helper('pixel-native-stack')
     owner = pwd.getpwuid(os.getuid())
     _, environment, _, _, _, _ = installer._source_gateway(
@@ -342,7 +344,7 @@ def finalize_update(preparation):
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        refresh_clients(install_dir)
+        refresh_clients(install_dir, ingress_selection_locked=True)
     finally:
         os.close(lock)
     return {'status': 'selection-ready', 'path': str(directory / stack.UPDATE_SELECTION)}

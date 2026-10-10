@@ -82,7 +82,7 @@ def selection(receipt, activation):
 
 
 def finish(*, preparation, receipt, run, verify, compose, selected_services, restore_host_agent=None,
-           resume_model=None, restore_optional_tools=None):
+           resume_model=None, restore_optional_tools=None, refresh_ingress=None):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     config = helper('pixel-native-config')
@@ -116,6 +116,8 @@ def finish(*, preparation, receipt, run, verify, compose, selected_services, res
                 raise ValueError('native-initial-recovery-proof-failed')
             unchanged()
         prove()
+        if refresh_ingress is not None:
+            refresh_ingress()
         compose.wait_ready(run)
         clients = ['dashboard-api']
         if 'open-webui' in selected_services:

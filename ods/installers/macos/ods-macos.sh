@@ -959,6 +959,14 @@ cmd_status() {
     echo ""
 }
 
+prepare_native_ingress() {
+    local flags="$1" service="${2:-}"
+    [[ -z "$service" || "$service" == "pixel-native-ingress" ]] || return 0
+    [[ "$flags" == *installers/macos/pixel-native.compose.yaml.disabled* ]] || return 0
+    "${ODS_PYTHON_CMD:-python3}" "$INSTALL_DIR/installers/macos/lib/pixel-native-ingress-refresh.py" \
+        --install-dir "$INSTALL_DIR"
+}
+
 cmd_start() {
     local service="${1:-}"
     test_install
@@ -998,6 +1006,7 @@ cmd_start() {
         start_native_llama || return 1
     elif [[ -n "$service" ]]; then
         ai "Starting ${service}..."
+        prepare_native_ingress "$flags" "$service" || return 1
         # shellcheck disable=SC2086
         if ! docker compose $flags up -d "$service"; then
             ai_err "Failed to start ${service}."
@@ -1006,6 +1015,7 @@ cmd_start() {
         ai_ok "${service} started"
     else
         ai "Starting all services..."
+        prepare_native_ingress "$flags" || return 1
         # shellcheck disable=SC2086
         if ! docker compose $flags up -d; then
             ai_err "Failed to start ODS services."
@@ -1103,6 +1113,7 @@ cmd_restart() {
         start_native_llama true || return 1
     elif [[ -n "$service" ]]; then
         ai "Restarting ${service}..."
+        prepare_native_ingress "$flags" "$service" || return 1
         # shellcheck disable=SC2086
         if ! docker compose $flags up -d --force-recreate --no-build --pull never "$service"; then
             ai_err "Failed to restart ${service}."
@@ -1121,6 +1132,7 @@ cmd_restart() {
         start_native_llama true || ai_warn "Native llama-server did not restart; continuing with the container services."
 
         ai "Restarting all services..."
+        prepare_native_ingress "$flags" || return 1
         # shellcheck disable=SC2086
         if ! docker compose $flags up -d --force-recreate --no-build --pull never; then
             ai_err "Failed to restart ODS services."
@@ -1277,6 +1289,7 @@ cmd_update() {
     fi
 
     ai "Recreating containers..."
+    prepare_native_ingress "$flags" || return 1
     # shellcheck disable=SC2086
     docker compose $flags up -d --force-recreate
     ai_ok "Update complete"
