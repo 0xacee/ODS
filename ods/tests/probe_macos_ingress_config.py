@@ -88,13 +88,15 @@ def probe(image, output):
         compose = directory / 'compose.json'
         compose.write_text(json.dumps(definition))
         def run(*args, timeout=30, input=None):
+            if args[0] == 'run':
+                args = ('run', '--pull', 'never', *args[1:])
             return docker('compose', '--project-name', project, '-f', str(compose),
                 *args, timeout=timeout, input=input)
         try:
             docker('volume', 'create', '--label', 'ods.synthetic.config-probe=' + project, volume)
             created = True
             def read(mount, target):
-                value = docker('run', '--rm', '--name', project + '-reader',
+                value = docker('run', '--rm', '--pull', 'never', '--name', project + '-reader',
                     '--label', 'ods.synthetic.config-probe=' + project,
                     '--network', 'none', '--read-only', '--cap-drop', 'ALL',
                     '--security-opt', 'no-new-privileges:true', '--pids-limit', '32',
