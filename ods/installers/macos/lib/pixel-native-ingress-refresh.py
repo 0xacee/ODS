@@ -191,7 +191,7 @@ def refresh(run, docker_run, *, install_dir, directory, project, dashboard_key):
     if selected.returncode or len(selected.stdout) > 4 * 1024 * 1024:
         raise ValueError('native-ingress-compose-required')
     document = json.loads(selected.stdout)
-    source = Path(document['services']['pixel-native-config-write']['x-ods-native-config-source'])
+    source = Path(document['services']['pixel-native-config-write']['labels']['org.osmantic.ods.native-config-source'])
     source_before = environment.snapshot(source)
     expected = hashlib.sha256(source_before[0]).hexdigest()
     observed = selected_ingress(docker_run, project)

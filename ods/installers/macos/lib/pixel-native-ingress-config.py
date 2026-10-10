@@ -75,7 +75,7 @@ def prepare(run, *, environment_path, backup, checkpoint=None):
             or writer.get('cap_drop') != ['ALL']
             or writer.get('entrypoint') != ['node', '/source/native_ingress_config.mjs']):
         raise ValueError('native-ingress-config-writer-selection-required')
-    source = Path(writer['x-ods-native-config-source'])
+    source = Path(writer['labels']['org.osmantic.ods.native-config-source'])
     source_before = environment.snapshot(source)
     receipt = stage(run, source, user=user)
     if receipt['sha256'] != hashlib.sha256(source_before[0]).hexdigest():

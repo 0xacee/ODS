@@ -79,7 +79,7 @@ def test_prepare_publishes_only_after_staging_and_restores_exact_previous_env(tm
             return SimpleNamespace(returncode=0, stdout=json.dumps({'services': {
                 'pixel-native-config-write': {'user': user, 'image': image, 'network_mode': 'none',
                     'read_only': True, 'cap_drop': ['ALL'], 'entrypoint': ['node', '/source/native_ingress_config.mjs'],
-                    'x-ods-native-config-source': str(source)},
+                    'labels': {'org.osmantic.ods.native-config-source': str(source)}},
                 'pixel-native-ingress': {'user': user, 'image': image}}}))
         return SimpleNamespace(returncode=0, stdout=json.dumps({'sha256': digest, 'reused': False}))
     def checkpoint(value):

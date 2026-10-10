@@ -29,7 +29,7 @@ def fixture(tmp_path):
         'networks': {'default': {}}}
     writer = {'image': image, 'user': user, 'network_mode': 'none', 'read_only': True,
         'cap_drop': ['ALL'], 'entrypoint': ['node', '/source/native_ingress_config.mjs'],
-        'x-ods-native-config-source': str(source)}
+        'labels': {'org.osmantic.ods.native-config-source': str(source)}}
     document = {'name': 'ods', 'services': {module.SERVICE: definition, 'pixel-native-config-write': writer},
         'volumes': {'config': {'name': 'ods_config'}}, 'networks': {'default': {'name': 'ods_default'}}}
     observed = {'Id': 'b' * 64, 'Image': image, 'Name': '/ods-pixel-native-ingress',

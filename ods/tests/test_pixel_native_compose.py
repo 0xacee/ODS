@@ -101,7 +101,7 @@ class NativeComposeTests(unittest.TestCase):
         self.assertEqual(writer['network_mode'], 'none')
         self.assertEqual(writer['cap_drop'], ['ALL'])
         self.assertTrue(writer['read_only'])
-        self.assertEqual(writer['x-ods-native-config-source'], self.env['PIXEL_NATIVE_CONFIG_PATH'])
+        self.assertEqual(writer['labels']['org.osmantic.ods.native-config-source'], self.env['PIXEL_NATIVE_CONFIG_PATH'])
         self.assertNotIn('pixel-native-config-write', self.document()['services'])
 
     def test_shared_edge_contract_preserved(self):
