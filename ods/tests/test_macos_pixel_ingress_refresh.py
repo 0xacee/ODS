@@ -183,6 +183,42 @@ def test_cli_may_start_only_the_exact_owned_stopped_edge_before_refresh(tmp_path
         assert events == ['native-idle', 'start', 'readiness']
 
 
+@pytest.mark.parametrize('fault', [None, 'definition', 'source-before-stage', 'source-after-stage'])
+def test_unchanged_selection_reuses_only_exact_current_config_without_restart(tmp_path, monkeypatch, fault):
+    source, directory, document, observed = fixture(tmp_path)
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    selected = '/run/pixel-config/' + expected + '.json'
+    document['services'][module.SERVICE]['environment']['PIXEL_GATEWAY_TOKEN_FILE'] = selected
+    observed['Config']['Env'] = ['PIXEL_GATEWAY_TOKEN_FILE=' + selected]
+    monkeypatch.setattr(module, 'selected_ingress', lambda *args: observed)
+    called = []
+    staging = module.helper('pixel-native-ingress-config')
+    def stage(*args, **kwargs):
+        called.append('stage')
+        if fault in ('source-before-stage', 'source-after-stage'):
+            source.write_text('{"gateway":{"port":19999,"auth":{"token":"changed-synthetic-token"}}}')
+        return {'sha256': hashlib.sha256(source.read_bytes()).hexdigest()
+            if fault == 'source-before-stage' else expected, 'reused': True}
+    monkeypatch.setattr(staging, 'stage', stage)
+    helper = module.helper
+    monkeypatch.setattr(module, 'helper', lambda name: staging if name == 'pixel-native-ingress-config' else helper(name))
+    def run(*args, **kwargs):
+        if args[0] == '--profile': return SimpleNamespace(returncode=0, stdout=json.dumps(document))
+        assert args == ('config', '--hash', module.SERVICE)
+        return SimpleNamespace(returncode=0, stdout=module.SERVICE + ' ' + ('d' if fault == 'definition' else 'c') * 64)
+    def forbidden(*args, **kwargs): pytest.fail('An unchanged selection must not start/recreate services or acquire admission')
+    monkeypatch.setattr(module, 'edge_ready', forbidden)
+    def action(): return module.refresh(run, forbidden, install_dir=tmp_path, directory=directory,
+        project='ods', dashboard_key='f' * 64)
+    if fault:
+        with pytest.raises(ValueError, match='definition-changed' if fault == 'definition' else 'source-changed'): action()
+    else:
+        assert action()['phase'] == 'unchanged'
+    assert called == ([] if fault == 'definition' else ['stage'])
+    assert not (directory / 'refresh.json').exists()
+    assert (tmp_path / '.env').read_text() == 'MODEL=preserve\n'
+
+
 @pytest.mark.parametrize('state', [
     {'available': True, 'phase': 'idle', 'active': 0},
     {'available': True, 'phase': 'idle', 'active': 1},

@@ -252,7 +252,9 @@ def refresh(run, docker_run, *, install_dir, directory, project, dashboard_key, 
             raise ValueError('native-ingress-current-definition-changed')
         # Revalidate/reuse immutable bytes without restarting anything. This
         # also supports a normal CLI start after the containers were stopped.
-        helper('pixel-native-ingress-config').stage(run, source, user=observed['Config']['User'])
+        staged = helper('pixel-native-ingress-config').stage(run, source, user=observed['Config']['User'])
+        if staged['sha256'] != expected or environment.snapshot(source) != source_before:
+            raise ValueError('native-ingress-config-source-changed')
         return {'phase': 'unchanged', 'sha256': expected,
             'environmentAfterSha256': hashlib.sha256(environment.snapshot(install_dir / '.env')[0]).hexdigest()}
     if os.path.lexists(directory / 'refresh.json'):
