@@ -48,7 +48,7 @@ for (const fault of ["wrong-hash", "oversize", "invalid-json", "missing-token", 
     const raw = fault === "oversize" ? Buffer.alloc(2 * 1024 * 1024 + 1)
       : fault === "invalid-json" ? Buffer.from("{")
       : fault === "missing-token" ? Buffer.from("{}")
-      : body(fault === "whitespace-token" ? "not a token" : "synthetic-token");
+      : body(fault === "whitespace-token" ? " surrounding-whitespace " : "synthetic-token");
     assert.throws(() => stageConfiguration(dir, raw, fault === "wrong-hash" ? "a".repeat(64) : hash(raw)));
     assert.deepEqual(fs.readdirSync(dir), []);
   });
@@ -62,6 +62,7 @@ for (const fault of ["symlink", "mode", "tamper", "directory"]) {
       fs.symlinkSync(outside, target);
     } else if (fault === "directory") fs.mkdirSync(target);
     else fs.writeFileSync(target, fault === "tamper" ? body("other-token") : raw, { mode: fault === "mode" ? 0o644 : 0o600 });
+    if (fault === "mode") fs.chmodSync(target, 0o644); // do not let the test runner's private umask erase this fault
     const before = fs.lstatSync(target);
     assert.throws(() => stageConfiguration(dir, raw, hash(raw)));
     assert.equal(fs.lstatSync(target).ino, before.ino);

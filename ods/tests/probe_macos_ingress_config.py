@@ -53,6 +53,8 @@ def probe(image, output):
         return result
     context = json.loads(docker('context', 'inspect').stdout)
     endpoint = context[0]['Endpoints']['docker']['Host']
+    if env.get('DOCKER_HOST') not in (None, '', endpoint):
+        raise ValueError('Explicit Docker endpoint differs from the selected context')
     if not endpoint.startswith('unix:///') or not Path(endpoint[7:]).is_socket():
         raise ValueError('A local Docker Desktop socket is required')
     for key in ('DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'):
@@ -75,7 +77,7 @@ def probe(image, output):
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
         common = {'image': image, 'network_mode': 'none', 'read_only': True,
             'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
-            'pids_limit': 32, 'mem_limit': '128m', 'cpus': 0.5,
+            'pids_limit': 32, 'mem_limit': '128m', 'memswap_limit': '128m', 'cpus': 0.5,
             'volumes': [str(ROOT / 'extensions/services/pixel-agent/host') + ':/source:ro', volume + ':/config']}
         definition = {'name': project, 'services': {
             'pixel-native-config-init': {**common, 'user': '0:0', 'cap_add': ['CHOWN'],
@@ -116,18 +118,24 @@ def probe(image, output):
         finally:
             # Compose owns only this random project; timeout remnants remain
             # visible until this bounded cleanup completes successfully.
-            run('down', '--timeout', '5', timeout=20)
-            for label in ('ods.synthetic.config-probe=' + project, 'com.docker.compose.project=' + project):
-                ids = docker('ps', '-aq', '--filter', 'label=' + label).stdout.split()
-                for identity in ids:
-                    if not re.fullmatch('[a-f0-9]{12,64}', identity): raise ValueError('Invalid probe container ID')
-                    docker('rm', '-f', identity)
-            if created:
-                labels = json.loads(docker('volume', 'inspect', '--format', '{{json .Labels}}', volume).stdout)
-                if labels.get('ods.synthetic.config-probe') != project: raise ValueError('Probe volume ownership changed')
-                docker('volume', 'rm', volume)
-            receipt['cleanup'] = 'owned-probe-containers-and-volume-removed'
-            output.write_text(json.dumps(receipt, indent=2) + '\n')
+            try:
+                run('down', '--timeout', '5', timeout=20)
+                for label in ('ods.synthetic.config-probe=' + project, 'com.docker.compose.project=' + project):
+                    ids = docker('ps', '-aq', '--filter', 'label=' + label).stdout.split()
+                    for identity in ids:
+                        if not re.fullmatch('[a-f0-9]{12,64}', identity): raise ValueError('Invalid probe container ID')
+                        docker('rm', '-f', identity)
+                if created:
+                    labels = json.loads(docker('volume', 'inspect', '--format', '{{json .Labels}}', volume).stdout)
+                    if labels.get('ods.synthetic.config-probe') != project: raise ValueError('Probe volume ownership changed')
+                    docker('volume', 'rm', volume)
+                receipt['cleanup'] = 'owned-probe-containers-and-volume-removed'
+            except BaseException as error:
+                receipt['cleanup'] = 'attention-required'
+                receipt['cleanupErrorType'] = type(error).__name__
+                raise
+            finally:
+                output.write_text(json.dumps(receipt, indent=2) + '\n')
     return receipt
 
 

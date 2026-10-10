@@ -81,6 +81,9 @@ services:
     security_opt: [no-new-privileges:true]
     restart: "no"
     pids_limit: 32
+    cpus: 0.5
+    mem_limit: 128m
+    memswap_limit: 128m
     entrypoint: [node, -e]
     command:
       - >-
@@ -103,6 +106,9 @@ services:
     security_opt: [no-new-privileges:true]
     restart: "no"
     pids_limit: 32
+    cpus: 0.5
+    mem_limit: 128m
+    memswap_limit: 128m
     entrypoint: [node, /source/native_ingress_config.mjs]
     x-ods-native-config-source: ${PIXEL_NATIVE_CONFIG_PATH:?Set PIXEL_NATIVE_CONFIG_PATH}
     volumes:
