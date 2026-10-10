@@ -117,8 +117,10 @@ _HF_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-
 _HF_AUTHOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 _HF_AVATAR_HOSTS = {"huggingface.co", "cdn-avatars.huggingface.co"}
 _HF_SPLIT_GGUF_RE = re.compile(r"^(?P<prefix>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf$", re.IGNORECASE)
+# MXFP4 is gpt-oss's native format ("gpt-oss-20b-MXFP4.gguf", unsloth's
+# "*-MXFP4_MOE.gguf"); without it the import was named "· unknown".
 _HF_QUANT_RE = re.compile(
-    r"(?:^|[-_.])(?P<quant>(?:IQ\d(?:_[A-Z0-9]+)+|Q\d(?:_[A-Z0-9]+)+|BF16|F16|F32))(?:[-_.]|$)",
+    r"(?:^|[-_.])(?P<quant>(?:IQ\d(?:_[A-Z0-9]+)+|Q\d(?:_[A-Z0-9]+)+|MXFP4(?:_MOE)?|BF16|F16|F32))(?:[-_.]|$)",
     re.IGNORECASE,
 )
 _HF_SEARCH_CACHE_TTL_SECONDS = 300.0

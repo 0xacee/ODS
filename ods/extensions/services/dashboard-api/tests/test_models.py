@@ -3291,3 +3291,12 @@ def test_api_models_names_the_external_api_model_and_host(test_client, monkeypat
 def test_external_api_host_keeps_only_host_and_port(url, host):
     from routers import models as models_router
     assert models_router._external_api_host(url) == host
+
+
+def test_huggingface_quantization_names_mxfp4_artifacts():
+    import routers.models as models_router
+
+    assert models_router._hf_quantization("gpt-oss-20b-MXFP4.gguf") == "MXFP4"
+    assert models_router._hf_quantization("Qwen3.6-35B-A3B-MXFP4_MOE.gguf") == "MXFP4_MOE"
+    assert models_router._hf_quantization("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf") == "Q4_K_M"
+    assert models_router._hf_quantization("model.gguf") is None
