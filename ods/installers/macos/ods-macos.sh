@@ -964,7 +964,7 @@ prepare_native_ingress() {
     [[ -z "$service" || "$service" == "pixel-native-ingress" ]] || return 0
     [[ "$flags" == *installers/macos/pixel-native.compose.yaml.disabled* ]] || return 0
     "${ODS_PYTHON_CMD:-python3}" "$INSTALL_DIR/installers/macos/lib/pixel-native-ingress-refresh.py" \
-        --install-dir "$INSTALL_DIR"
+        --install-dir "$INSTALL_DIR" --start-stopped-edge
 }
 
 cmd_start() {

@@ -19,6 +19,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import time
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
@@ -48,6 +49,46 @@ def selected_ingress(docker_run, project):
     if len(rows) > 1:
         raise ValueError('ambiguous-native-managed-ingress')
     return compose._inspect_ingress(docker_run, rows[0]) if rows else None
+
+
+def edge_ready(docker_run, *, project, dashboard_key, source, allow_start=False):
+    """CLI start/restart may start its exact stopped Edge before taking a hold.
+
+    Never replace the definition here. A failed CLI start can leave this owned
+    dependency running, just as the normal Compose start does; no ingress or
+    config selection has changed yet, and no readiness is claimed on failure.
+    """
+    compose = helper('pixel-native-compose')
+    try:
+        return compose._managed_edge(docker_run, project)
+    except ValueError:
+        if not allow_start:
+            raise
+    identity = compose._named_ingress(docker_run, compose.EDGE_NAME)
+    if identity is None:
+        raise ValueError('native-managed-edge-required')
+    before = compose._inspect_ingress(docker_run, identity)
+    labels = before['Config'].get('Labels') or {}
+    if (labels.get('com.docker.compose.project') != project
+            or labels.get('com.docker.compose.service') != 'pixel-edge'
+            or before['State'].get('Running') is not False
+            or before['State'].get('Status') not in ('created', 'exited')):
+        raise ValueError('native-owned-stopped-edge-required')
+    native_idle(source)
+    compose._docker(docker_run, 'start', identity)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        current = compose._inspect_ingress(docker_run, identity)
+        if any(current[key] != before[key] for key in ('Id', 'Image', 'Config', 'Mounts', 'Name')):
+            raise ValueError('native-edge-definition-changed')
+        try:
+            if compose._managed_edge(docker_run, project) != identity:
+                raise ValueError('native-edge-identity-changed')
+            compose._edge_transition(docker_run, identity, dashboard_key)
+            return identity
+        except ValueError:
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    raise ValueError('native-edge-start-not-ready')
 
 
 def native_idle(source):
@@ -185,7 +226,7 @@ def rollback(run, docker_run, record, *, install_dir, dashboard_key, checkpoint)
     checkpoint(record)
 
 
-def refresh(run, docker_run, *, install_dir, directory, project, dashboard_key):
+def refresh(run, docker_run, *, install_dir, directory, project, dashboard_key, allow_stopped_edge=False):
     compose, environment = helper('pixel-native-compose'), helper('pixel-native-env')
     selected = run('--profile', 'native-config-maintenance', 'config', '--format', 'json', timeout=30)
     if selected.returncode or len(selected.stdout) > 4 * 1024 * 1024:
@@ -206,6 +247,9 @@ def refresh(run, docker_run, *, install_dir, directory, project, dashboard_key):
     target = 'PIXEL_GATEWAY_TOKEN_FILE=/run/pixel-config/' + expected + '.json'
     if (target in observed['Config']['Env']
             and document['services'][SERVICE]['environment']['PIXEL_GATEWAY_TOKEN_FILE'] == target.split('=', 1)[1]):
+        hashed = run('config', '--hash', SERVICE, timeout=30)
+        if hashed.returncode or hashed.stdout.strip() != SERVICE + ' ' + str(labels.get('com.docker.compose.config-hash')):
+            raise ValueError('native-ingress-current-definition-changed')
         # Revalidate/reuse immutable bytes without restarting anything. This
         # also supports a normal CLI start after the containers were stopped.
         helper('pixel-native-ingress-config').stage(run, source, user=observed['Config']['User'])
@@ -216,7 +260,8 @@ def refresh(run, docker_run, *, install_dir, directory, project, dashboard_key):
     recipe = snapshot_previous(run, docker_run, directory, install_dir=install_dir, project=project,
         document=document, observed=observed, source=source)
     native_idle(source)
-    edge = compose._managed_edge(docker_run, project)
+    edge = edge_ready(docker_run, project=project, dashboard_key=dashboard_key, source=source,
+        allow_start=allow_stopped_edge)
     transition = compose._edge_transition(docker_run, edge, dashboard_key)
     record = {'schemaVersion': 1, 'phase': 'acquiring', 'project': project, 'source': str(source),
         'rollback': recipe, 'binding': {'token': secrets.token_hex(32), 'revision': transition['revision']}}
@@ -289,13 +334,13 @@ def attempt_directory(preparation):
     return directory
 
 
-def refresh_locked(run, docker_run, *, install_dir, project, dashboard_key):
+def refresh_locked(run, docker_run, *, install_dir, project, dashboard_key, allow_stopped_edge=False):
     """The retained-recovery caller already owns preparation/.selection.lock."""
     preparation = install_dir / 'data/pixel-native/preparation'
     directory = attempt_directory(preparation)
     try:
         result = refresh(run, docker_run, install_dir=install_dir, directory=directory,
-            project=project, dashboard_key=dashboard_key)
+            project=project, dashboard_key=dashboard_key, allow_stopped_edge=allow_stopped_edge)
     except BaseException:
         if not (directory / 'refresh.json').exists():
             private_write(directory / 'refresh.json', b'{"phase":"not-started"}\n')
@@ -305,7 +350,8 @@ def refresh_locked(run, docker_run, *, install_dir, project, dashboard_key):
     return result
 
 
-def refresh_installed(install_dir, *, restore=False, finish_release=False, selection_locked=False):
+def refresh_installed(install_dir, *, restore=False, finish_release=False, selection_locked=False,
+                      allow_stopped_edge=False):
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise ValueError('native-macos-owner-required')
     install_dir = Path(install_dir).resolve(strict=True)
@@ -354,7 +400,7 @@ def refresh_installed(install_dir, *, restore=False, finish_release=False, selec
         key = installer._env_file(install_dir / '.env')['DASHBOARD_API_KEY']
         if not restore and not finish_release:
             return refresh_locked(run, docker_run, install_dir=install_dir,
-                project=transport['project'], dashboard_key=key)
+                project=transport['project'], dashboard_key=key, allow_stopped_edge=allow_stopped_edge)
         environment = helper('pixel-native-env')
         pointer = json.loads(environment.snapshot(preparation / 'ingress-refresh-current.json')[0])
         name = pointer.get('directory', '')
@@ -388,12 +434,15 @@ def refresh_installed(install_dir, *, restore=False, finish_release=False, selec
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--install-dir', required=True)
+    parser.add_argument('--start-stopped-edge', action='store_true',
+        help='For an explicit CLI start/restart only: start the exact owned stopped Edge before acquiring admission')
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument('--rollback', action='store_true')
     recovery.add_argument('--finish-release', action='store_true')
     args = parser.parse_args()
     try:
-        print(json.dumps(refresh_installed(args.install_dir, restore=args.rollback, finish_release=args.finish_release)))
+        print(json.dumps(refresh_installed(args.install_dir, restore=args.rollback,
+            finish_release=args.finish_release, allow_stopped_edge=args.start_stopped_edge)))
     except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError):
         print('Native ingress refresh stopped. Preserve the private ingress-refresh journal; '
             'an unresolved admission hold requires review and explicit --rollback.', file=sys.stderr)

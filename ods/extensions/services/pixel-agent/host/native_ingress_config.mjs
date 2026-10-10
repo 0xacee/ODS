@@ -22,6 +22,7 @@ export function stageConfiguration(directory, body, expected) {
   }
   const destination = path.join(directory, expected + ".json");
   const verify = () => {
+    if (fs.lstatSync(destination).size > LIMIT) throw new Error("configuration snapshot too large");
     // Preserve the production token reader's owner, mode, link and token checks.
     readGatewayConfiguration(destination);
     if (digest(fs.readFileSync(destination)) !== expected) {

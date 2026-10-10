@@ -143,3 +143,74 @@ def test_refresh_holds_admission_stages_then_recreates_and_rolls_back_exact_env(
     else:
         assert events.index('hold') < events.index('stage') < events.index('recreate') < events.index('release')
         assert json.loads((directory / 'refresh.json').read_text())['phase'] == 'ready'
+
+
+@pytest.mark.parametrize('fault', [None, 'not-cli', 'foreign', 'paused', 'active', 'changed'])
+def test_cli_may_start_only_the_exact_owned_stopped_edge_before_refresh(tmp_path, monkeypatch, fault):
+    compose = module.helper('pixel-native-compose')
+    before = {'Id': 'a' * 64, 'Image': 'sha256:' + 'b' * 64, 'Name': '/ods-pixel-edge', 'Mounts': [],
+        'Config': {'Labels': {'com.docker.compose.project': 'foreign' if fault == 'foreign' else 'ods',
+            'com.docker.compose.service': 'pixel-edge'}},
+        'State': {'Running': False, 'Status': 'paused' if fault == 'paused' else 'exited'}}
+    events = []
+    def managed(*args):
+        if 'start' not in events: raise ValueError('stopped')
+        return before['Id']
+    def inspected(*args):
+        current = copy.deepcopy(before)
+        if fault == 'changed' and 'start' in events: current['Image'] = 'sha256:' + 'c' * 64
+        return current
+    monkeypatch.setattr(compose, '_managed_edge', managed)
+    monkeypatch.setattr(compose, '_named_ingress', lambda *args: before['Id'])
+    monkeypatch.setattr(compose, '_inspect_ingress', inspected)
+    monkeypatch.setattr(compose, '_edge_transition', lambda *args: events.append('readiness'))
+    def docker(runner, *args):
+        assert args == ('start', before['Id'])
+        events.append('start')
+    monkeypatch.setattr(compose, '_docker', docker)
+    def idle(source):
+        events.append('native-idle')
+        if fault == 'active': raise ValueError('active')
+    monkeypatch.setattr(module, 'native_idle', idle)
+    monkeypatch.setattr(module, 'helper', lambda name: compose)
+    def action(): return module.edge_ready(None, project='ods', dashboard_key='d' * 64,
+        source=tmp_path / 'unused-config', allow_start=fault != 'not-cli')
+    if fault:
+        with pytest.raises(ValueError): action()
+        if fault != 'changed': assert 'start' not in events
+    else:
+        assert action() == before['Id']
+        assert events == ['native-idle', 'start', 'readiness']
+
+
+@pytest.mark.parametrize('state', [
+    {'available': True, 'phase': 'idle', 'active': 0},
+    {'available': True, 'phase': 'idle', 'active': 1},
+    {'available': True, 'phase': 'held', 'active': 0},
+    {'available': True, 'phase': 'idle', 'active': False},
+    {'available': False, 'phase': 'idle', 'active': 0},
+])
+def test_native_idle_reads_only_selected_loopback_gateway_and_fails_closed(tmp_path, monkeypatch, state):
+    source = tmp_path / 'config.json'
+    source.write_text('{"gateway":{"port":19999,"auth":{"token":"synthetic-private-token"}}}')
+    source.chmod(0o600)
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, size):
+            assert size == 65537
+            return json.dumps(state).encode()
+    def open_request(request, timeout):
+        assert request.full_url == 'http://127.0.0.1:19999/pixel-ods/access-runtime'
+        assert request.get_method() == 'GET' and request.data is None and timeout == 10
+        assert request.get_header('Authorization') == 'Bearer synthetic-private-token'
+        return Response()
+    def opener(proxy):
+        assert proxy.proxies == {}
+        return SimpleNamespace(open=open_request)
+    monkeypatch.setattr(module.urllib.request, 'build_opener', opener)
+    if state == {'available': True, 'phase': 'idle', 'active': 0} and type(state['active']) is int:
+        module.native_idle(source)
+    else:
+        with pytest.raises(ValueError, match='native-ingress-active'): module.native_idle(source)

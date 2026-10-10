@@ -54,7 +54,7 @@ for (const fault of ["wrong-hash", "oversize", "invalid-json", "missing-token", 
   });
 }
 
-for (const fault of ["symlink", "mode", "tamper", "directory"]) {
+for (const fault of ["symlink", "mode", "tamper", "directory", "oversize"]) {
   test(`existing ${fault} snapshot fails closed and is never overwritten`, t => {
     const dir = fixture(t), raw = body("synthetic-token"), target = path.join(dir, hash(raw) + ".json");
     if (fault === "symlink") {
@@ -63,6 +63,7 @@ for (const fault of ["symlink", "mode", "tamper", "directory"]) {
     } else if (fault === "directory") fs.mkdirSync(target);
     else fs.writeFileSync(target, fault === "tamper" ? body("other-token") : raw, { mode: fault === "mode" ? 0o644 : 0o600 });
     if (fault === "mode") fs.chmodSync(target, 0o644); // do not let the test runner's private umask erase this fault
+    if (fault === "oversize") fs.appendFileSync(target, Buffer.alloc(2 * 1024 * 1024, " "));
     const before = fs.lstatSync(target);
     assert.throws(() => stageConfiguration(dir, raw, hash(raw)));
     assert.equal(fs.lstatSync(target).ino, before.ino);
