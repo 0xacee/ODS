@@ -252,7 +252,9 @@ export default function HuggingFaceModelBrowser({ gpu, downloadBusy, onImportSta
       if (detailsRequestRef.current !== requestId || importLock.current !== owner || downloadBusyRef.current) return
       const refusal = check?.refusal || check?.tensors?.refusal
       if (refusal && !(refusal.overridable && allowUnsupportedRuntime)) return
-      if (check?.disk === 'insufficient' && !artifact.installed) return
+      // Use the vision choice captured before the selected-artifact check began.
+      const disk = request.includeVision === false ? check?.diskWithoutProjector : check?.disk
+      if (disk === 'insufficient' && !artifact.installed) return
       if (!confirmedUnknown && check?.header.status !== 'read') {
         setArtifactCheckIssue({
           repoId: repository.id, revision: repository.sha, artifactId: artifact.id, unknown: true, allowUnsupportedRuntime,

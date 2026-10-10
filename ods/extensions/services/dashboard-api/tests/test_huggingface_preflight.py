@@ -788,17 +788,28 @@ def test_selected_header_tensor_refusal_is_preserved_through_import(test_client,
     assert record["runtime_override"]["tensorTypes"] == ["Q2_0"]
 
 
-def test_preflight_reports_disk_for_an_import_without_the_projector(test_client, preflight_env):
+@pytest.mark.parametrize("artifact_id", [None, "b" * 20])
+@pytest.mark.parametrize("weights_gib, expected", [(15, "ok"), (16, "insufficient")])
+def test_preflight_reports_disk_for_an_import_without_the_projector(
+    test_client, preflight_env, artifact_id, weights_gib, expected,
+):
     _router, state = preflight_env
     state["details"] = _vision_details()
-    # 20 GiB free, 5 GiB margin: 15 GiB weights fit alone, not with the 1 GiB projector.
-    state["details"]["artifacts"][1]["sizeBytes"] = 15 * GIB
-    state["details"]["artifacts"][1]["files"][0]["sizeBytes"] = 15 * GIB
+    # 20 GiB free, 5 GiB margin: 15 GiB fits without the projector; 16 GiB never fits.
+    state["details"]["artifacts"][1]["sizeBytes"] = weights_gib * GIB
+    state["details"]["artifacts"][1]["files"][0]["sizeBytes"] = weights_gib * GIB
 
-    artifacts = _preflight(test_client).json()["artifacts"]
+    url = f"/api/models/huggingface/preflight/{REPO}"
+    if artifact_id:
+        url += f"?artifactId={artifact_id}"
+    response = test_client.get(url, headers=test_client.auth_headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["artifactId"] == (artifact_id or "a" * 20)
+    artifacts = body["artifacts"]
 
     assert artifacts["b" * 20]["disk"] == "insufficient"
-    assert artifacts["b" * 20]["diskWithoutProjector"] == "ok"
+    assert artifacts["b" * 20]["diskWithoutProjector"] == expected
     assert artifacts["a" * 20]["diskWithoutProjector"] == "ok"
 
 
