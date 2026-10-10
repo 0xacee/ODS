@@ -129,7 +129,9 @@ def snapshot_previous(run, docker_run, directory, *, install_dir, project, docum
         definition['environment']['PIXEL_GATEWAY_TOKEN_FILE'] = old_path
         definition['volumes'] = [value for value in definition['volumes']
             if value['target'] != '/run/pixel-config']
-        definition['volumes'].append({'type': 'bind', 'source': str(source),
+        # Existing config JSON is already replay-escaped. Only this newly
+        # injected host path needs escaping before Compose reads it again.
+        definition['volumes'].append({'type': 'bind', 'source': str(source).replace('$', '$$'),
             'target': old_path, 'read_only': True, 'bind': {'create_host_path': False}})
     elif not re.fullmatch(r'/run/pixel-config/[a-f0-9]{64}\.json', str(old_path)):
         raise ValueError('native-ingress-previous-config-required')
@@ -155,7 +157,8 @@ def snapshot_previous(run, docker_run, directory, *, install_dir, project, docum
             if matches[0]['Name'] != name:
                 raise ValueError('native-ingress-previous-volume-changed')
             rollback['volumes'][mount['source']] = {'name': name, 'external': True}
-        elif mount['type'] != 'bind' or matches[0]['Source'] != mount['source']:
+        elif (mount['type'] != 'bind' or matches[0]['Source'] !=
+                helper('pixel-native-ingress-config').rendered_literal(mount['source'])):
             raise ValueError('native-ingress-previous-bind-changed')
     for alias in definition.get('networks', {}):
         name = previous['networks'][alias]['name']
@@ -232,7 +235,8 @@ def refresh(run, docker_run, *, install_dir, directory, project, dashboard_key, 
     if selected.returncode or len(selected.stdout) > 4 * 1024 * 1024:
         raise ValueError('native-ingress-compose-required')
     document = json.loads(selected.stdout)
-    source = Path(document['services']['pixel-native-config-write']['labels']['org.osmantic.ods.native-config-source'])
+    source = Path(helper('pixel-native-ingress-config').rendered_literal(
+        document['services']['pixel-native-config-write']['labels']['org.osmantic.ods.native-config-source']))
     source_before = environment.snapshot(source)
     expected = hashlib.sha256(source_before[0]).hexdigest()
     observed = selected_ingress(docker_run, project)

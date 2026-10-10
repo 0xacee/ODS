@@ -19,6 +19,17 @@ def _environment():
     return module
 
 
+def rendered_literal(value):
+    """Decode one Compose config-JSON escape layer for host-side consumption.
+
+    Keep the original rendered strings when saving a Compose replay file.
+    This is not variable expansion; even ${NAME} remains literal data.
+    """
+    if type(value) is not str:
+        raise ValueError('native-ingress-compose-string-required')
+    return value.replace('$$', '$')
+
+
 def stage(run, source, *, user):
     """Return a verified digest; leave all existing snapshots untouched."""
     if not re.fullmatch(str(os.getuid()) + r':[0-9]+', user) or os.getuid() == 0:
@@ -75,7 +86,7 @@ def prepare(run, *, environment_path, backup, checkpoint=None):
             or writer.get('cap_drop') != ['ALL']
             or writer.get('entrypoint') != ['node', '/source/native_ingress_config.mjs']):
         raise ValueError('native-ingress-config-writer-selection-required')
-    source = Path(writer['labels']['org.osmantic.ods.native-config-source'])
+    source = Path(rendered_literal(writer['labels']['org.osmantic.ods.native-config-source']))
     source_before = environment.snapshot(source)
     receipt = stage(run, source, user=user)
     if receipt['sha256'] != hashlib.sha256(source_before[0]).hexdigest():
