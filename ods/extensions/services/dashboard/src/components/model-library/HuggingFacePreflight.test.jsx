@@ -461,3 +461,28 @@ test('repository access refusal still applies to all artifact rows', async () =>
   for (const button of dialog.getAllByRole('button', {name: 'Needs access'})) expect(button).toBeDisabled()
   expect(dialog.getAllByRole('alert')).toHaveLength(1)
 })
+
+test('retained import metadata offers Import again after the owner removed its files', async () => {
+  detailsBody = {...detailsBody, artifacts: [{...artifacts[0], importedModelId: 'hf-retained', installed: false}]}
+  importResponse = {ok: true, status: 200, body: {modelId: 'hf-retained', status: 'started'}}
+  const dialog = await open()
+  expect(dialog.queryByRole('button', {name: 'Retry', exact: true})).toBeNull()
+  await act(async () => { fireEvent.click(dialog.getByRole('button', {name: 'Import', exact: true})) })
+  expect(importBodies()).toEqual([{repoId: repo.id, revision: 'c'.repeat(40), artifactId: 'q4'}])
+})
+
+test('retained installed files still disable the artifact action', async () => {
+  detailsBody = {...detailsBody, artifacts: [{...artifacts[0], importedModelId: 'hf-retained', installed: true}]}
+  const dialog = await open()
+  expect(dialog.getByRole('button', {name: 'Installed', exact: true})).toBeDisabled()
+  expect(importBodies()).toEqual([])
+})
+
+test('closing and reopening a deleted import keeps a single enabled Import action', async () => {
+  detailsBody = {...detailsBody, artifacts: [{...artifacts[0], importedModelId: 'hf-retained', installed: false}]}
+  await open()
+  fireEvent.click(screen.getByTitle('Close'))
+  await act(async () => { fireEvent.click(screen.getByRole('button', {name: 'Choose file'})) })
+  expect(within(screen.getByRole('dialog')).getByRole('button', {name: 'Import', exact: true})).toBeEnabled()
+  expect(importBodies()).toEqual([])
+})

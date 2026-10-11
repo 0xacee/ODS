@@ -696,12 +696,13 @@ function ArtifactRow({ artifact, gpu, check, checking, checkingHeader, checkIssu
   const diskShort = check?.disk === 'insufficient' && !artifact.installed
   const blocked = !runtimeCompatible || (refusal && !refusal.overridable)
   const needsOverride = Boolean(refusal?.overridable) && !blocked
+  // Import records survive deletion; their IDs identify artifacts, not a failed action.
   const label = checkingHeader ? 'Checking file…' : importing ? 'Starting'
     : artifact.installed ? 'Installed'
       : blocked ? (refusal?.code === 'gated' ? 'Needs access' : 'Not supported')
         : diskShort ? 'Not enough disk'
           : needsOverride ? 'Import anyway…'
-            : artifact.importedModelId ? 'Retry' : 'Import'
+            : 'Import'
   const startImport = () => {
     if (needsOverride) {
       setConfirmingOverride(true)
