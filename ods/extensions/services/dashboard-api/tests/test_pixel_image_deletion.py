@@ -114,6 +114,9 @@ def test_independent_connections_cannot_reupload_retain_or_reopen_a_tombstoned_s
 @pytest.mark.parametrize("completed", [False, True])
 @pytest.mark.parametrize("retained", [False, True])
 def test_deleted_chat_admission_has_typed_refusal_before_reservation_or_native_work(client, monkeypatch, completed, retained):
+    native_context, native_delete = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(pixel, "_chat_context_request", native_context)
+    monkeypatch.setattr(pixel, "_delete_native_conversation_images", native_delete)
     owner = owner_namespace("owner")
     pixel_images._storage_call("begin_delete", owner, "deleted-chat")
     if completed:
@@ -135,8 +138,8 @@ def test_deleted_chat_admission_has_typed_refusal_before_reservation_or_native_w
         "message": "This conversation is being deleted or was deleted. Start a new conversation.",
     }}
     assert pixel_images._storage_call("deletion", owner, "deleted-chat") == {"completed": completed}
-    pixel._chat_context_request.assert_not_awaited()
-    pixel._delete_native_conversation_images.assert_not_awaited()
+    native_context.assert_not_awaited()
+    native_delete.assert_not_awaited()
 
 
 def test_deletion_after_reservation_rejects_before_producer_and_preserves_tombstone(client, monkeypatch):
