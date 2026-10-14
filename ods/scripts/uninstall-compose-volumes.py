@@ -7,10 +7,12 @@ selected and unselected-extension volumes before removing any of them.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 
@@ -226,6 +228,105 @@ def retired_volume_keys(root: Path) -> set[str]:
     return set(keys)
 
 
+def native_ingress_rollback_provenance(root: Path, project: str, row: dict, files: str) -> str:
+    """Prove the terminal frozen rollback recipe without merging current config."""
+    service = "pixel-native-ingress"
+    labels = row["Config"]["Labels"]
+    prefix = root / "data/pixel-native/preparation"
+    path = Path(files)
+    if (labels.get("com.docker.compose.service") != service or "," in files or
+            path.parent.parent != prefix or path.name != "rollback.compose.json" or
+            not re.fullmatch(r"ingress-refresh-[a-f0-9]{32}", path.parent.name)):
+        raise ValueError("Compose project contains a container from another installation")
+    failure = "Native ingress rollback ownership could not be proven"
+    owner = root.stat().st_uid
+
+    def private_document(selected: Path, limit: int) -> bytes:
+        # All ancestors within this install must retain owner custody. Never
+        # follow a moved journal/recipe through a symlink, even inside root.
+        for parent in (root, *(root / value for value in
+                              reversed(selected.parent.relative_to(root).parents) if value != Path("."))):
+            info = parent.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022):
+                raise ValueError(failure)
+        info = selected.parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or
+                stat.S_IMODE(info.st_mode) != 0o700 or selected.resolve() != selected):
+            raise ValueError(failure)
+        fd = os.open(selected, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != owner or
+                    before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o600 or before.st_size > limit):
+                raise ValueError(failure)
+            body = stream.read(limit + 1)
+            after = os.fstat(stream.fileno())
+        if (len(body) > limit or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            raise ValueError(failure)
+        return body
+
+    journal = path.parent / "refresh.json"
+    try:
+        journal_body, body = private_document(journal, 65536), private_document(path, 4 * 1024 * 1024)
+        record, recipe = json.loads(journal_body), json.loads(body)
+        saved = record["rollback"]
+        definition = recipe["services"][service]
+        native = root / NATIVE_STACK_RECIPES[0]
+        if (record.get("schemaVersion") != 1 or record.get("phase") != "rolled-back" or
+                record.get("project") != project or
+                record.get("source") != str(root / "data/pixel-native/home/.openclaw/openclaw.json") or
+                saved["path"] != str(path) or saved["sha256"] != hashlib.sha256(body).hexdigest() or
+                saved["image"] != row["Image"] or saved["user"] != row["Config"]["User"] or
+                not CONTAINER_RE.fullmatch(saved["previousId"]) or
+                not CONTAINER_RE.fullmatch(saved["configHash"]) or
+                set(recipe) != {"name", "services", "volumes", "networks"} or
+                recipe["name"] != project or set(recipe["services"]) != {service} or
+                definition["image"] != row["Image"] or definition["user"] != saved["user"] or
+                any(key in definition for key in ("build", "depends_on", "pull_policy")) or
+                native.is_symlink() or not native.is_file() or service not in compose_service_names(native)):
+            raise ValueError(failure)
+        # The snapshot externalizes only existing named volumes. Preserve their
+        # shipped logical-key provenance; never bless arbitrary external data.
+        keys = trusted_plain_volume_keys(root, only_file=native)
+        for key, value in recipe["volumes"].items():
+            if key not in keys or value != {"name": f"{project}_{key}", "external": True}:
+                raise ValueError(failure)
+        mounts = row["Mounts"]
+        declared = definition["volumes"]
+        if not isinstance(mounts, list) or not isinstance(declared, list) or len(mounts) != len(declared):
+            raise ValueError(failure)
+        targets = set()
+        for mount in declared:
+            target = mount["target"]
+            actual = [value for value in mounts if value.get("Destination") == target]
+            if (target in targets or len(actual) != 1 or actual[0]["Type"] != mount["type"] or
+                    actual[0]["RW"] is not (not mount.get("read_only", False))):
+                raise ValueError(failure)
+            targets.add(target)
+            if mount["type"] == "volume":
+                if actual[0]["Name"] != recipe["volumes"][mount["source"]]["name"]:
+                    raise ValueError(failure)
+            elif (mount["type"] != "bind" or
+                  actual[0]["Source"] != mount["source"].replace("$$", "$")):
+                raise ValueError(failure)
+        expected = labels.get("com.docker.compose.config-hash", "")
+        if not CONTAINER_RE.fullmatch(expected):
+            raise ValueError(failure)
+        # Hash only the recorded immutable definition with an empty env file.
+        # Prepending today's base file would change the recovery definition.
+        hashed = docker(root, "compose", "--project-directory", str(root), "--project-name", project,
+                        "--env-file", "/dev/null", "-f", str(path), "config", "--hash", service).strip()
+        if (hashed != service + " " + expected or private_document(journal, 65536) != journal_body or
+                private_document(path, 4 * 1024 * 1024) != body):
+            raise ValueError(failure)
+    except (OSError, KeyError, TypeError, AttributeError, ValueError):
+        # Neither the frozen environment nor journal admission credentials may
+        # reach an uninstall log through parser or subprocess diagnostics.
+        raise ValueError(failure) from None
+    return str(native.resolve())
+
+
 def project_containers(
     root: Path, project: str,
 ) -> tuple[set[str], set[str], dict[str, set[tuple[str, str]]]]:
@@ -257,10 +358,12 @@ def project_containers(
                     not isinstance(files, str) or
                     not files.split(",") or
                     not os.path.isabs(files.split(",")[0]) or
-                    os.path.realpath(files.split(",")[0]) not in base_files or
                     not isinstance(service, str) or
                     not PROJECT_RE.fullmatch(service)):
                 raise ValueError("Compose project contains a container from another installation")
+            provenance_files = files.split(",")
+            if os.path.realpath(provenance_files[0]) not in base_files:
+                provenance_files = [native_ingress_rollback_provenance(root, project, row, files)]
             mounts = row.get("Mounts") or []
             if not isinstance(mounts, list):
                 raise ValueError("Docker returned invalid container mounts")
@@ -272,7 +375,7 @@ def project_containers(
                     if not isinstance(name, str) or not VOLUME_RE.fullmatch(name):
                         raise ValueError("Docker returned invalid mounted volume")
                     mounted.add(name)
-                    for config_file in files.split(","):
+                    for config_file in provenance_files:
                         if os.path.isabs(config_file):
                             provenance.setdefault(name, set()).add(
                                 (service, os.path.realpath(config_file))
