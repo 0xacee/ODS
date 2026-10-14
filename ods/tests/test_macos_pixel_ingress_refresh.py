@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from native_config_volume_fixture import StorageEngine, mapping
 
 SPEC = importlib.util.spec_from_file_location('ingress_refresh',
     Path(__file__).resolve().parents[1] / 'installers/macos/lib/pixel-native-ingress-refresh.py')
@@ -27,13 +28,14 @@ def fixture(tmp_path):
     directory.mkdir(mode=0o700)
     image, user = 'sha256:' + 'a' * 64, f'{os.getuid()}:{os.getgid()}'
     definition = {'image': image, 'user': user, 'environment': {'PIXEL_GATEWAY_TOKEN_FILE': '/run/pixel-config/unprovisioned.json'},
-        'volumes': [{'type': 'volume', 'source': 'config', 'target': '/run/pixel-config', 'read_only': True}],
+        'volumes': [{'type': 'volume', 'source': 'pixel-native-config', 'target': '/run/pixel-config', 'read_only': True}],
         'networks': {'default': {}}}
     writer = {'image': image, 'user': user, 'network_mode': 'none', 'read_only': True,
         'cap_drop': ['ALL'], 'entrypoint': ['node', '/source/native_ingress_config.mjs'],
         'labels': {'org.osmantic.ods.native-config-source': str(source)}}
     document = {'name': 'ods', 'services': {module.SERVICE: definition, 'pixel-native-config-write': writer},
-        'volumes': {'config': {'name': 'ods_config'}}, 'networks': {'default': {'name': 'ods_default'}}}
+        'networks': {'default': {'name': 'ods_default'}}}
+    mapping(document)
     observed = {'Id': 'b' * 64, 'Image': image, 'Name': '/ods-pixel-native-ingress',
         'Config': {'User': user, 'Env': ['PIXEL_GATEWAY_TOKEN_FILE=/run/gateway.json'],
             'Labels': {'com.docker.compose.project': 'ods', 'com.docker.compose.service': module.SERVICE,
@@ -165,6 +167,7 @@ def test_previous_recipe_tolerates_only_mount_order_and_health_changes(tmp_path,
 @pytest.mark.parametrize('fault', [None, 'active', 'busy-edge', 'staging', 'recreate', 'restore', 'release', 'owner-edit'])
 def test_refresh_holds_admission_stages_then_recreates_and_rolls_back_exact_env(tmp_path, monkeypatch, fault):
     source, directory, document, observed = fixture(tmp_path)
+    storage = StorageEngine(tmp_path)
     compose = module.helper('pixel-native-compose')
     events = []
     monkeypatch.setattr(module, 'selected_ingress', lambda *args: observed)
@@ -204,6 +207,7 @@ def test_refresh_holds_admission_stages_then_recreates_and_rolls_back_exact_env(
         if fault == 'owner-edit': (tmp_path / '.env').write_bytes(b'OWNER_EDIT=preserve\n')
         return SimpleNamespace(returncode=int(fault in ('recreate', 'restore', 'owner-edit')), stdout='')
     def docker(*args, **kwargs):
+        if args[0] != 'compose': return storage(*args, **kwargs)
         events.append('rollback')
         assert (tmp_path / '.env').read_bytes() == before
         assert args[-1] == module.SERVICE and args[args.index('-f') + 1] == str(recipe)
@@ -221,6 +225,11 @@ def test_refresh_holds_admission_stages_then_recreates_and_rolls_back_exact_env(
     elif fault in ('staging', 'recreate'):
         assert events[-2:] == ['rollback', 'release']
         assert (tmp_path / '.env').read_bytes() == before
+        # The restored old bind does not mount new storage. Its completed
+        # producer receipt survives rollback for guarded uninstall instead.
+        producer = json.loads((tmp_path / 'data/pixel-native/preparation/ingress-config-volume.json').read_text())
+        assert producer['state'] == 'ready' and producer['fingerprint'] == {
+            key: storage.volume[key] for key in ('Name', 'Labels', 'CreatedAt', 'Driver')}
     elif fault == 'restore':
         assert events[-1] == 'rollback' and 'release' not in events
     elif fault == 'owner-edit':
@@ -346,8 +355,9 @@ def test_native_idle_reads_only_selected_loopback_gateway_and_fails_closed(tmp_p
 @pytest.mark.parametrize('fault', [None, 'operation', 'health', 'volume', 'source', 'ingress', 'selection', 'release'])
 def test_lifecycle_remains_held_through_final_work_even_for_unchanged_config(tmp_path, monkeypatch, kind, unchanged, fault):
     source, _, document, observed = fixture(tmp_path)
+    storage = StorageEngine(tmp_path)
     preparation = tmp_path / 'data/pixel-native/preparation'
-    preparation.mkdir(parents=True, mode=0o700)
+    preparation.mkdir(parents=True, mode=0o700, exist_ok=True)
     expected = hashlib.sha256(source.read_bytes()).hexdigest()
     if unchanged:
         selected = '/run/pixel-config/' + expected + '.json'
@@ -410,7 +420,7 @@ def test_lifecycle_remains_held_through_final_work_even_for_unchanged_config(tmp
             raise ValueError('final-selection-changed')
         operation.validate_result = changed_after_readiness
     def forbidden(*args, **kwargs): pytest.fail('Final lifecycle failure must not use ingress-only rollback')
-    def action(): return module.refresh_locked(run, forbidden, install_dir=tmp_path, project='ods',
+    def action(): return module.refresh_locked(run, storage, install_dir=tmp_path, project='ods',
         dashboard_key='f' * 64, operation=operation, operation_kind=kind, operation_key='8' * 64)
     if fault:
         with pytest.raises(ValueError): action()

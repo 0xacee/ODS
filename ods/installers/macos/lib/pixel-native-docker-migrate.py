@@ -110,6 +110,7 @@ def migrate(preparation, *, apply=False):
     try:
         def prepare_ingress(checkpoint):
             return helper('ingress-config').prepare(run,
+                docker_run=docker_run,
                 environment_path=install_dir / '.env', backup=preparation / 'ingress-environment.before.env',
                 checkpoint=checkpoint)
         record = compose.migrate_infrastructure(run, docker_run,

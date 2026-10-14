@@ -215,6 +215,7 @@ def activate(*, preparation, install_dir, ods_source, compose_files, configure_s
             record['ingressConfig'] = value
             checkpoint()
         record['ingressConfig'] = helper('pixel-native-ingress-config.py').prepare(run,
+            docker_run=docker_run,
             environment_path=install_dir / '.env', backup=preparation / 'ingress-environment.before.env',
             checkpoint=config_checkpoint)
         checkpoint()

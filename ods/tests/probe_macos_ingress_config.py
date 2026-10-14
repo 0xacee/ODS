@@ -77,7 +77,7 @@ def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, exp
     if output.exists():
         raise ValueError('A new receipt path is required')
     project = 'ods-config-probe-' + uuid.uuid4().hex
-    volume = project + '-private'
+    volume = project + '_pixel-native-config'
     env = dict(os.environ)
     def docker(*args, input=None, timeout=30):
         result = subprocess.run(['docker', *args], input=input, text=True, capture_output=True,
@@ -109,6 +109,7 @@ def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, exp
     created = False
     with probe_workspace(output, project) as directory:
         directory = Path(directory)
+        (directory / 'data/pixel-native/preparation').mkdir(parents=True, mode=0o700)
         source = directory / 'gateway.json'
         source.write_text('{"gateway":{"auth":{"token":"synthetic-probe-only-token"}}}')
         source.chmod(0o600)
@@ -116,13 +117,15 @@ def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, exp
         common = {'image': image, 'network_mode': 'none', 'read_only': True,
             'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
             'pids_limit': 32, 'mem_limit': '128m', 'memswap_limit': '128m', 'cpus': 0.5,
-            'volumes': [str(ROOT / 'extensions/services/pixel-agent/host') + ':/source:ro', volume + ':/config']}
+            'volumes': [str(ROOT / 'extensions/services/pixel-agent/host') + ':/source:ro', 'pixel-native-config:/config']}
         definition = {'name': project, 'services': {
             'pixel-native-config-init': {**common, 'user': '0:0', 'cap_add': ['CHOWN'],
                 'entrypoint': ['node', '-e', INIT, str(uid), str(gid)]},
             'pixel-native-config-write': {**common, 'user': f'{uid}:{gid}',
-                'entrypoint': ['node', '/source/native_ingress_config.mjs']}},
-            'volumes': {volume: {'name': volume, 'labels': {'ods.synthetic.config-probe': project}}}}
+                'entrypoint': ['node', '/source/native_ingress_config.mjs']},
+            'pixel-native-ingress': {'image': image, 'profiles': ['native-config-maintenance'],
+                'volumes': ['pixel-native-config:/run/pixel-config:ro']}},
+            'volumes': {'pixel-native-config': {'name': volume}}}
         compose = directory / 'compose.json'
         compose.write_text(json.dumps(definition))
         def run(*args, timeout=30, input=None):
@@ -139,7 +142,9 @@ def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, exp
             stream.flush()
             os.fsync(stream.fileno())
         try:
-            docker('volume', 'create', '--label', 'ods.synthetic.config-probe=' + project, volume)
+            docker('volume', 'create', '--label', 'ods.synthetic.config-probe=' + project,
+                '--label', 'com.docker.compose.project=' + project,
+                '--label', 'com.docker.compose.volume=pixel-native-config', volume)
             created = True
             def read(mount, target):
                 value = docker('run', '--rm', '--pull', 'never', '--name', project + '-reader',
@@ -157,7 +162,8 @@ def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, exp
                 ROOT / 'installers/macos/lib/pixel-native-ingress-config.py')
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            receipt['staging'] = module.stage(run, source, user=f'{uid}:{gid}')
+            receipt['staging'] = module.stage(run, source, user=f'{uid}:{gid}',
+                docker_run=docker, install_dir=directory)
             receipt['volume'] = read('type=volume,source=' + volume + ',target=/config,readonly', '/config/' + digest + '.json')
             receipt['reportedBoundaryObservedHere'] = (receipt['bind'].get('reason') == 'owner-mismatch'
                 and receipt['bind']['uid'] != uid)

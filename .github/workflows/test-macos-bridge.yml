@@ -22,6 +22,8 @@ on:
       - 'ods/tests/test_macos_pixel_controller_held_proof.py'
       - 'ods/tests/test_macos_pixel_native_finalize.py'
       - 'ods/tests/test_macos_pixel_ingress*'
+      - 'ods/tests/test_macos_pixel_config_volume.py'
+      - 'ods/tests/native_config_volume_fixture.py'
       - 'ods/tests/test-macos-cli-saved-python.sh'
       - 'ods/tests/test-macos-env-quote-strip.sh'
       - 'ods/tests/test_macos_pixel_lifecycle*.py'
@@ -64,6 +66,8 @@ on:
       - 'ods/tests/test_macos_pixel_native_finalize.py'
       - 'ods/tests/test_macos_pixel_ingress*'
       - 'ods/tests/test-macos-cli-saved-python.sh'
+      - 'ods/tests/test_macos_pixel_config_volume.py'
+      - 'ods/tests/native_config_volume_fixture.py'
       - 'ods/tests/test-macos-env-quote-strip.sh'
       - 'ods/tests/test_macos_pixel_lifecycle*.py'
       - 'ods/tests/test_macos_pixel_native_recover.py'
@@ -127,6 +131,7 @@ jobs:
         run: >-
           ODS_LIFECYCLE_TEST_BASH="$(command -v bash)" python -m pytest -q
           ods/tests/test_macos_pixel_ingress_config.py
+          ods/tests/test_macos_pixel_config_volume.py
           ods/tests/test_macos_pixel_ingress_refresh.py
           ods/tests/test_macos_pixel_ingress_cli.py
           ods/tests/test_macos_pixel_ingress_probe.py

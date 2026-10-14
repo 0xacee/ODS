@@ -463,6 +463,50 @@ def fingerprint(row: dict) -> dict:
     return {key: row.get(key) for key in ("Name", "Labels", "CreatedAt", "Driver")}
 
 
+def native_config_volume_provenance(root: Path, project: str, volumes: dict[str, dict]) -> dict[str, dict]:
+    """Consume only completed producer custody, including after an old-bind rollback."""
+    path = root / "data/pixel-native/preparation/ingress-config-volume.json"
+    if not os.path.lexists(path):
+        return {}
+    failure = "Native config volume creation requires review; purge refused"
+    owner = root.stat().st_uid
+    for parent in (root, root / "data", root / "data/pixel-native", path.parent):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022:
+            raise ValueError(failure)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != owner or
+                stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or before.st_size > 16384):
+            raise ValueError(failure)
+        body = stream.read(16385)
+        after = os.fstat(stream.fileno())
+    if (len(body) > 16384 or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+        raise ValueError(failure)
+    record = json.loads(body)
+    key = "pixel-native-config"
+    name = f"{project}_{key}"
+    if (not isinstance(record, dict) or set(record) !=
+            {"schemaVersion", "installDir", "project", "key", "state", "nonce", "preexisting", "fingerprint"}
+            or record["schemaVersion"] != 1 or record["installDir"] != str(root)
+            or record["project"] != project or record["key"] != key or record["state"] != "ready"
+            or record["preexisting"] is not False or not isinstance(record["nonce"], str)
+            or not re.fullmatch("[a-f0-9]{32}", record["nonce"])):
+        raise ValueError(failure)
+    row = volumes.get(name)
+    if row is None:
+        # Completed uninstall can have removed it before an interruption. Never
+        # reinterpret an absent/replaced volume as fresh producer custody.
+        return {}
+    if (row.get("Driver") != "local" or row.get("Scope") != "local" or row.get("Options") not in (None, {})
+            or (row.get("Labels") or {}).get("org.osmantic.ods.native-config-creation") != record["nonce"]
+            or record["fingerprint"] != fingerprint(row)):
+        raise ValueError(failure)
+    return {name: fingerprint(row)}
+
+
 # A purge preflight proves volume ownership through the containers that mount
 # them, and Compose down then removes those containers. Keep the verified
 # record in the retained installation tree so an uninstall interrupted after
@@ -519,6 +563,7 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
         }), encoding="utf-8")
         return
     volumes = project_volumes(root, project)
+    produced = native_config_volume_provenance(root, project, volumes)
     resumed, resumed_anonymous = resume_record(root, project)
     unselected = unselected_volume_provenance(root, trusted_root)
     expected_names = set(selected) | {
@@ -533,7 +578,8 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
         raise ValueError(f"Volume {name} matches an ODS recipe but lacks Compose ownership labels")
     def proven_earlier(name: str, row: dict) -> bool:
         # Unmounted now, but identical to what an interrupted uninstall proved.
-        return name not in mounted and resumed.get(name) == fingerprint(row)
+        return name not in mounted and (resumed.get(name) == fingerprint(row)
+            or produced.get(name) == fingerprint(row))
 
     if volumes and not container_ids and not all(
             name in external or proven_earlier(name, row) for name, row in volumes.items()):

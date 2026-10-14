@@ -8,6 +8,7 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+from native_config_volume_fixture import StorageEngine
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = os.environ.get('ODS_INGRESS_BASELINE_ROOT')
@@ -62,6 +63,7 @@ def test_actual_compose_preserves_ingress_paths_values_and_rollback_hash(tmp_pat
                 return SimpleNamespace(returncode=0, stdout=json.dumps({'sha256': expected_digest, 'reused': False}))
             return execute([*command(ROOT), *args])
         selection = module.helper('pixel-native-ingress-config').prepare(selected,
+            docker_run=StorageEngine(install),
             environment_path=install / '.env', backup=install / 'before.env')
         assert selection['sha256'] == expected_digest
         assert (install / '.env').read_text() == 'KEEP=fixture\nPIXEL_NATIVE_CONFIG_SHA256=' + expected_digest + '\n'

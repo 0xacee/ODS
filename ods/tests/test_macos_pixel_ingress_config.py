@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from native_config_volume_fixture import StorageEngine, mapping
 
 SPEC = importlib.util.spec_from_file_location('native_ingress_config',
     Path(__file__).resolve().parents[1] / 'installers/macos/lib/pixel-native-ingress-config.py')
@@ -23,6 +24,8 @@ def test_staging_checks_real_private_input_and_readback_before_returning_selecti
     source.write_bytes(raw)
     source.chmod(0o600)
     expected = hashlib.sha256(raw).hexdigest()
+    storage = StorageEngine(tmp_path)
+    document = mapping({'services': {}})
     calls = []
     def run(*args, **kwargs):
         calls.append((args, kwargs))
@@ -37,10 +40,12 @@ def test_staging_checks_real_private_input_and_readback_before_returning_selecti
         return SimpleNamespace(returncode=int(fault == 'write'), stdout='x' * 1025 if fault == 'oversized-output'
             else json.dumps({'sha256': 'a' * 64 if fault == 'digest' else expected, 'reused': False}))
     if fault:
-        with pytest.raises(ValueError): module.stage(run, source, user=f'{os.getuid()}:{os.getgid()}')
+        with pytest.raises(ValueError): module.stage(run, source, user=f'{os.getuid()}:{os.getgid()}',
+            docker_run=storage, install_dir=tmp_path, document=document)
         if fault in ('init', 'changed-before'): assert len(calls) == 1
     else:
-        assert module.stage(run, source, user=f'{os.getuid()}:{os.getgid()}') == {'sha256': expected, 'reused': False}
+        assert module.stage(run, source, user=f'{os.getuid()}:{os.getgid()}',
+            docker_run=storage, install_dir=tmp_path, document=document) == {'sha256': expected, 'reused': False}
         assert len(calls) == 2
 
 
@@ -63,7 +68,7 @@ def test_unsafe_source_never_starts_storage_or_writer(tmp_path, fault):
     if fault == 'invalid-json': source.write_text('{')
     def forbidden(*args, **kwargs): pytest.fail('unsafe input reached Docker')
     with pytest.raises((ValueError, OSError)):
-        module.stage(forbidden, source, user=user)
+        module.stage(forbidden, source, user=user, docker_run=forbidden, install_dir=tmp_path)
 
 
 @pytest.mark.parametrize('existing', [False, True])
@@ -77,21 +82,22 @@ def test_prepare_publishes_only_after_staging_and_restores_exact_previous_env(tm
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     user, image = f'{os.getuid()}:{os.getgid()}', 'sha256:' + 'b' * 64
     calls, receipts = [], []
+    storage = StorageEngine(tmp_path)
     def run(*args, **kwargs):
         calls.append(args)
         assert env.read_bytes() == before
         if args[0] == '--profile':
-            return SimpleNamespace(returncode=0, stdout=json.dumps({'services': {
+            return SimpleNamespace(returncode=0, stdout=json.dumps(mapping({'services': {
                 'pixel-native-config-write': {'user': user, 'image': image, 'network_mode': 'none',
                     'read_only': True, 'cap_drop': ['ALL'], 'entrypoint': ['node', '/source/native_ingress_config.mjs'],
                     'labels': {'org.osmantic.ods.native-config-source': str(source)}},
-                'pixel-native-ingress': {'user': user, 'image': image}}}))
+                'pixel-native-ingress': {'user': user, 'image': image}}})))
         return SimpleNamespace(returncode=0, stdout=json.dumps({'sha256': digest, 'reused': False}))
     def checkpoint(value):
         assert env.read_bytes() == before
         assert Path(value['environmentAfter']).read_bytes() != before
         receipts.append(value)
-    receipt = module.prepare(run, environment_path=env, backup=tmp_path / 'before', checkpoint=checkpoint)
+    receipt = module.prepare(run, docker_run=storage, environment_path=env, backup=tmp_path / 'before', checkpoint=checkpoint)
     assert receipts == [receipt]
     assert len(calls) == 3
     after = env.read_bytes()

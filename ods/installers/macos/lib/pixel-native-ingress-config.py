@@ -30,17 +30,27 @@ def rendered_literal(value):
     return value.replace('$$', '$')
 
 
-def stage(run, source, *, user):
+def stage(run, source, *, user, docker_run, install_dir, document=None):
     """Return a verified digest; leave all existing snapshots untouched."""
     if not re.fullmatch(str(os.getuid()) + r':[0-9]+', user) or os.getuid() == 0:
         raise ValueError('native-ingress-owner-required')
     environment = _environment()
     before = environment.snapshot(source)
     body = before[0]
-    document = json.loads(body)
-    if type(document) is not dict:
+    configuration = json.loads(body)
+    if type(configuration) is not dict:
         raise ValueError('native-ingress-json-config-required')
     expected = hashlib.sha256(body).hexdigest()
+    if document is None:
+        selected = run('--profile', 'native-config-maintenance', 'config', '--format', 'json', timeout=30)
+        if selected.returncode or len(selected.stdout) > 4 * 1024 * 1024:
+            raise ValueError('native-ingress-config-compose-required')
+        document = json.loads(selected.stdout)
+    spec = importlib.util.spec_from_file_location('native_config_volume',
+        Path(__file__).with_name('pixel-native-config-volume.py'))
+    storage = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(storage)
+    storage.ensure(docker_run, document, install_dir)
     # Runners validate the selected Compose files and pin the local Docker
     # endpoint. Neither operation starts ingress or publishes a new selection.
     initialized = run('run', '--rm', '--no-deps', '-T', 'pixel-native-config-init', timeout=30)
@@ -64,7 +74,7 @@ def stage(run, source, *, user):
     return receipt
 
 
-def prepare(run, *, environment_path, backup, checkpoint=None):
+def prepare(run, *, docker_run, environment_path, backup, checkpoint=None):
     """Stage first, then select the digest with existing guarded env custody.
 
     The caller holds its lifecycle/admission boundary and retains backup until
@@ -76,7 +86,8 @@ def prepare(run, *, environment_path, backup, checkpoint=None):
     result = run('--profile', 'native-config-maintenance', 'config', '--format', 'json', timeout=30)
     if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
         raise ValueError('native-ingress-config-compose-required')
-    services = json.loads(result.stdout)['services']
+    document = json.loads(result.stdout)
+    services = document['services']
     writer, ingress = services['pixel-native-config-write'], services['pixel-native-ingress']
     user = writer.get('user')
     image = writer.get('image', '')
@@ -88,7 +99,8 @@ def prepare(run, *, environment_path, backup, checkpoint=None):
         raise ValueError('native-ingress-config-writer-selection-required')
     source = Path(rendered_literal(writer['labels']['org.osmantic.ods.native-config-source']))
     source_before = environment.snapshot(source)
-    receipt = stage(run, source, user=user)
+    receipt = stage(run, source, user=user, docker_run=docker_run,
+        install_dir=Path(environment_path).parent, document=document)
     if receipt['sha256'] != hashlib.sha256(source_before[0]).hexdigest():
         raise ValueError('native-ingress-config-source-changed')
     def unchanged():
