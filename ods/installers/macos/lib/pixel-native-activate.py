@@ -137,19 +137,33 @@ def activate(*, preparation, install_dir, ods_source, compose_files, configure_s
         '--services-bundle', str(preparation / 'services'), '--services-digest', receipt['serviceDigest'],
         '--pixel-source-ref', receipt['pixelSourceRef'], '--initial-install']
     if resume_final_health:
-        def refresh_ingress():
+        def refresh_ingress(complete_held):
             nonlocal selected_services, optional_snapshot
             native_env = helper('pixel-native-env.py')
             if restore_optional_tools and native_env.snapshot(install_dir / '.env') != optional_snapshot:
                 raise ValueError('retained-model-environment-changed')
+            def operation(selection, record, checkpoint):
+                nonlocal selected_services, optional_snapshot
+                if restore_optional_tools:
+                    after = native_env.snapshot(install_dir / '.env')
+                    if hashlib.sha256(after[0]).hexdigest() != selection['environmentAfterSha256']:
+                        raise ValueError('retained-model-environment-changed')
+                    optional_snapshot = after
+                current = run('config', '--format', 'json')
+                if current.returncode:
+                    raise ValueError('native-recovery-compose-selection-changed')
+                latest = json.loads(current.stdout)['services']
+                selected_services.clear()
+                selected_services.update(latest)
+                return complete_held()
+            key = hashlib.sha256(json.dumps({'receipt': receipt,
+                'source': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                'restoreHostAgent': restore_host_agent, 'restoreOptionalTools': restore_optional_tools,
+                'opencodeChoice': opencode_choice}, sort_keys=True).encode()).hexdigest()
             refreshed = helper('pixel-native-ingress-refresh.py').refresh_locked(run, docker_run,
-                install_dir=install_dir, project=source_env['PIXEL_HISTORY_PROJECT'], dashboard_key=keys[0])
-            if restore_optional_tools:
-                after = native_env.snapshot(install_dir / '.env')
-                if hashlib.sha256(after[0]).hexdigest() != refreshed['environmentAfterSha256']:
-                    raise ValueError('retained-model-environment-changed')
-                optional_snapshot = after
-            selected_services = json.loads(run('config', '--format', 'json').stdout)['services']
+                install_dir=install_dir, project=source_env['PIXEL_HISTORY_PROJECT'], dashboard_key=keys[0],
+                operation=operation, operation_kind='retained-recovery', operation_key=key)
+            return refreshed['operationResult']
         def verify_selection(unchanged):
             unchanged()
             current = run('config', '--format', 'json')

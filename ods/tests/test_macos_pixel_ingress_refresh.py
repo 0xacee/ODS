@@ -250,3 +250,97 @@ def test_native_idle_reads_only_selected_loopback_gateway_and_fails_closed(tmp_p
         module.native_idle(source)
     else:
         with pytest.raises(ValueError, match='native-ingress-active'): module.native_idle(source)
+
+
+@pytest.mark.parametrize('kind', ['cli-restart', 'finalize-clients', 'retained-recovery'])
+@pytest.mark.parametrize('unchanged', [False, True])
+@pytest.mark.parametrize('fault', [None, 'operation', 'health', 'volume', 'source', 'ingress', 'selection', 'release'])
+def test_lifecycle_remains_held_through_final_work_even_for_unchanged_config(tmp_path, monkeypatch, kind, unchanged, fault):
+    source, _, document, observed = fixture(tmp_path)
+    preparation = tmp_path / 'data/pixel-native/preparation'
+    preparation.mkdir(parents=True, mode=0o700)
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    if unchanged:
+        selected = '/run/pixel-config/' + expected + '.json'
+        document['services'][module.SERVICE]['environment']['PIXEL_GATEWAY_TOKEN_FILE'] = selected
+        observed['Config']['Env'] = ['PIXEL_GATEWAY_TOKEN_FILE=' + selected]
+        observed['Config']['Labels']['com.docker.compose.config-hash'] = '9' * 64
+        (tmp_path / '.env').write_text('MODEL=preserve\nPIXEL_NATIVE_CONFIG_SHA256=' + expected + '\n')
+    compose = module.helper('pixel-native-compose')
+    real_helper = module.helper
+    monkeypatch.setattr(module, 'helper', lambda name: compose if name == 'pixel-native-compose' else real_helper(name))
+    events = []
+    monkeypatch.setattr(module, 'selected_ingress', lambda *args: observed)
+    monkeypatch.setattr(compose, '_managed_edge', lambda *args: ('b' if 'operation' in events else 'a') * 64)
+    monkeypatch.setattr(module, 'native_idle', lambda *args: events.append('native-idle'))
+    monkeypatch.setattr(module, 'edge_ready', lambda *args, **kwargs: 'a' * 64)
+    volume = {'Name': 'ods_transition', 'Type': 'volume', 'Destination': '/pixel-transition-state', 'RW': True}
+    monkeypatch.setattr(module, 'edge_storage', lambda *args: dict(volume,
+        Name='foreign' if fault == 'volume' and 'operation' in events else 'ods_transition'))
+    def transition(*args, binding=None, release=False):
+        events.append('release' if release else 'hold' if binding else 'inspect')
+        if release and fault == 'release': raise ValueError('lost-release-reply')
+        return {'revision': 'e' * 64}
+    monkeypatch.setattr(compose, '_edge_transition', transition)
+    def health(*args, **kwargs):
+        events.append('health')
+        assert 'operation' in events and 'release' not in events
+        if fault == 'health': raise ValueError('not-ready')
+    monkeypatch.setattr(compose, 'wait_ready', health)
+    def snapshot(run, docker, directory, **kwargs):
+        path = directory / 'rollback.compose.json'; path.write_text('{}'); path.chmod(0o600)
+        return {'path': str(path), 'sha256': hashlib.sha256(b'{}').hexdigest(), 'previousId': observed['Id'],
+            'image': observed['Image'], 'user': observed['Config']['User'],
+            'configHash': observed['Config']['Labels']['com.docker.compose.config-hash']}
+    monkeypatch.setattr(module, 'snapshot_previous', snapshot)
+    def run(*args, **kwargs):
+        if args[0] == '--profile': return SimpleNamespace(returncode=0, stdout=json.dumps(document))
+        if args[0] == 'config': return SimpleNamespace(returncode=0, stdout=module.SERVICE + ' ' + '9' * 64)
+        if args[0] == 'run':
+            assert 'hold' in events and 'release' not in events
+            events.append('stage')
+            return SimpleNamespace(returncode=0, stdout=json.dumps({'sha256': expected, 'reused': unchanged}))
+        assert args[0] == 'up'
+        events.append('ingress-up')
+        observed['Config']['Labels']['com.docker.compose.config-hash'] = '9' * 64
+        return SimpleNamespace(returncode=0, stdout='')
+    def operation(selection, record, checkpoint):
+        assert 'hold' in events and 'release' not in events
+        assert record['phase'] == 'operating' and selection['sha256'] == expected
+        events.append('operation')
+        if kind == 'cli-restart': events.extend(['native-restart', 'cli-compose-up'])
+        if fault == 'operation': raise ValueError('final-work-failed')
+        observed['Config']['Labels']['com.docker.compose.config-hash'] = ('f' if fault == 'ingress' else '9') * 64
+        if fault == 'source': source.write_text('{"owner_changed":true}')
+        return 'complete'
+    if fault == 'selection':
+        def changed_after_readiness(record):
+            assert 'health' in events
+            raise ValueError('final-selection-changed')
+        operation.validate_result = changed_after_readiness
+    def forbidden(*args, **kwargs): pytest.fail('Final lifecycle failure must not use ingress-only rollback')
+    def action(): return module.refresh_locked(run, forbidden, install_dir=tmp_path, project='ods',
+        dashboard_key='f' * 64, operation=operation, operation_kind=kind, operation_key='8' * 64)
+    if fault:
+        with pytest.raises(ValueError): action()
+    else:
+        result = action()
+        assert result['operationResult'] == 'complete'
+        assert events.index('hold') < events.index('operation') < events.index('health') < events.index('release')
+        assert events[-2:] == ['native-idle', 'release']
+    directory = preparation / json.loads((preparation / 'ingress-refresh-current.json').read_text())['directory']
+    record = json.loads((directory / 'refresh.json').read_text())
+    assert record['phase'] == ('ready' if fault is None else 'releasing' if fault == 'release' else 'operation-failed')
+    if fault != 'release' and fault is not None: assert 'release' not in events
+    if kind == 'cli-restart':
+        assert events.count('cli-compose-up') == 1 and 'ingress-up' not in events
+        assert events.index('hold') < events.index('native-restart')
+    if fault == 'operation':
+        with pytest.raises(ValueError, match='unreleased-refresh'):
+            module.rollback(run, forbidden, record, install_dir=tmp_path, dashboard_key='f' * 64, checkpoint=lambda value: None)
+        with pytest.raises(ValueError, match='operation-selection-changed'):
+            module.refresh_locked(run, forbidden, install_dir=tmp_path, project='ods', dashboard_key='f' * 64,
+                operation=operation, operation_kind=kind, operation_key='7' * 64)
+        fault = None
+        assert action()['operationResult'] == 'complete'
+        assert len(list(preparation.glob('ingress-refresh-*'))) == 2  # one directory plus pointer

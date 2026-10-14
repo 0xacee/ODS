@@ -21,6 +21,8 @@ on:
       - 'ods/tests/test_macos_pixel_controller_repair.py'
       - 'ods/tests/test_macos_pixel_controller_held_proof.py'
       - 'ods/tests/test_macos_pixel_native_finalize.py'
+      - 'ods/tests/test_macos_pixel_ingress*'
+      - 'ods/tests/test_macos_pixel_lifecycle*.py'
       - 'ods/tests/test_macos_pixel_native_recover.py'
       - 'ods/tests/test_macos_pixel_access_install.py'
       - 'ods/tests/test_macos_pixel_runtime_upgrade.py'
@@ -58,6 +60,8 @@ on:
       - 'ods/tests/test_macos_pixel_controller_repair.py'
       - 'ods/tests/test_macos_pixel_controller_held_proof.py'
       - 'ods/tests/test_macos_pixel_native_finalize.py'
+      - 'ods/tests/test_macos_pixel_ingress*'
+      - 'ods/tests/test_macos_pixel_lifecycle*.py'
       - 'ods/tests/test_macos_pixel_native_recover.py'
       - 'ods/tests/test_macos_pixel_access_install.py'
       - 'ods/tests/test_macos_pixel_runtime_upgrade.py'
@@ -111,6 +115,16 @@ jobs:
         run: python -m pytest -q ods/tests/test_bridge_denied_admission.py ods/tests/test_macos_llm_bridge.py
       - name: Verify private environment rollback custody
         run: python -m pytest -q ods/tests/test_macos_upsert_env_value.py
+      - name: Verify private ingress and held native lifecycle contracts
+        run: >-
+          ODS_LIFECYCLE_TEST_BASH="$(command -v bash)" python -m pytest -q
+          ods/tests/test_macos_pixel_ingress_config.py
+          ods/tests/test_macos_pixel_ingress_refresh.py
+          ods/tests/test_macos_pixel_ingress_cli.py
+          ods/tests/test_macos_pixel_ingress_probe.py
+          ods/tests/test_macos_pixel_ingress_recipe.py
+          ods/tests/test_macos_pixel_lifecycle.py
+          ods/tests/test_macos_pixel_lifecycle_stack.py
       - name: Verify native installer, update and startup contracts
         run: >-
           python -m pytest -q

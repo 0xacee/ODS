@@ -203,11 +203,15 @@ def test_recovery_preserves_failed_attempt_and_never_reactivates(retained, monke
         return SimpleNamespace(returncode=int(fault == 'route'))
     services = {'dashboard-api': {}, 'open-webui': {}}
     if fault == 'legacy-host': services['dashboard-api']['extra_hosts'] = {'pixel-edge': 'host-gateway'}
-    def refresh():
+    def refresh(complete_held):
         events.append('ingress-refresh')
         assert events[0] == 'proof'
         assert not destination.exists() or json.loads(destination.read_text())['activation']['status'] == 'ready'
         if fault == 'ingress-refresh': raise ValueError('ingress-refresh-failed')
+        result = complete_held()
+        assert destination.exists(), 'Selection publication belongs inside the held callback'
+        events.append('ingress-release')
+        return result
     def finish():
         return module.finish(preparation=preparation, receipt=receipt, run=run, verify=prove,
             compose=SimpleNamespace(wait_ready=health), selected_services=services, refresh_ingress=refresh)
@@ -222,7 +226,7 @@ def test_recovery_preserves_failed_attempt_and_never_reactivates(retained, monke
             assert 'up' not in events
     else:
         assert finish() == destination
-        assert events == ['proof', 'ingress-refresh', 'health', 'up', 'exec', 'health', 'proof']
+        assert events == ['proof', 'ingress-refresh', 'health', 'up', 'exec', 'health', 'proof', 'ingress-release']
         selected = json.loads(destination.read_text())
         assert selected['activation'] == dict(activation, status='ready', phase='services-ready', requiresRecovery=False)
         assert selected['preparation'] == receipt

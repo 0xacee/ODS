@@ -114,7 +114,8 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
             validate_stack=module.helper('pixel-native-compose.py').validate_stack),
         'pixel-native-ingress-config.py': SimpleNamespace(prepare=lambda run, **kw: event('ingress-config')),
         'pixel-native-ingress-refresh.py': SimpleNamespace(refresh_locked=lambda *args, **kw:
-            (event('ingress-refresh') or {'environmentAfterSha256': hashlib.sha256(b'fixture').hexdigest()})),
+            (event('ingress-refresh') or {'operationResult': kw['operation'](
+                {'environmentAfterSha256': hashlib.sha256(b'fixture').hexdigest()}, {}, lambda record: None)})),
         'pixel-native-env.py': SimpleNamespace(snapshot=lambda path: (b'fixture', None)),
     }
     if fault in ('resume', 'resume-host', 'resume-model', 'resume-optional'):
@@ -123,7 +124,7 @@ def test_prepared_activation_validates_and_orders_real_entry_points(tmp_path, mo
             assert kwargs['receipt'] == receipt
             assert kwargs['preparation'] == preparation
             assert kwargs['verify']() == {'status': 'active', 'runtimeDigest': 'a' * 64, 'serviceDigest': 'b' * 64}
-            kwargs['refresh_ingress']()
+            kwargs['refresh_ingress'](lambda: None)
             if fault == 'resume-host':
                 kwargs['restore_host_agent']()
             else:

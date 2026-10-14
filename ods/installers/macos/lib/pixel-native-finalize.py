@@ -248,8 +248,16 @@ def refresh_clients(install_dir, *, ingress_selection_locked=False):
     verified. Failure leaves that selection intact for an explicit replay.
     """
     install_dir = Path(install_dir).resolve(strict=True)
-    helper('pixel-native-ingress-refresh').refresh_installed(install_dir,
-        selection_locked=ingress_selection_locked)
+    selection = helper('pixel-native-stack').read_selection(install_dir / 'data/pixel-native/preparation')
+    key = hashlib.sha256(json.dumps({'selection': selection,
+        'source': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}, sort_keys=True).encode()).hexdigest()
+    return helper('pixel-native-ingress-refresh').refresh_installed(install_dir,
+        selection_locked=ingress_selection_locked, operation_kind='finalize-clients', operation_key=key,
+        operation=lambda selection, record, checkpoint: _refresh_clients_held(install_dir))
+
+
+def _refresh_clients_held(install_dir):
+    """Called only inside the installed ingress admission transaction."""
     installer, stack = helper('pixel-macos-access-install'), helper('pixel-native-stack')
     owner = pwd.getpwuid(os.getuid())
     _, environment, _, _, _, _ = installer._source_gateway(
@@ -330,21 +338,36 @@ def finalize_update(preparation):
             '--source-ref', prepared['pixelSourceRef']], stdout=subprocess.PIPE,
             text=True, timeout=180, check=True)
         document = update_selection_records(previous, activation, prepared, json.loads(result.stdout), install_dir)
-        # One atomic record avoids a mismatched preparation/activation pair after a crash.
-        with tempfile.TemporaryDirectory(prefix='.selection-', dir=directory) as temporary:
-            staged = Path(temporary) / 'selection.json'
-            with staged.open('xb') as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                stream.write((json.dumps(document, sort_keys=True) + '\n').encode())
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(staged, directory / stack.UPDATE_SELECTION)
-            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        refresh_clients(install_dir, ingress_selection_locked=True)
+        def complete_held(selection, record, checkpoint):
+            # One atomic record avoids a mismatched preparation/activation pair after a crash.
+            with tempfile.TemporaryDirectory(prefix='.selection-', dir=directory) as temporary:
+                staged = Path(temporary) / 'selection.json'
+                with staged.open('xb') as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write((json.dumps(document, sort_keys=True) + '\n').encode())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(staged, directory / stack.UPDATE_SELECTION)
+                fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            _refresh_clients_held(install_dir)
+            # Recheck protected authority after the actual client handover,
+            # while the same admission hold still excludes user requests.
+            checked = subprocess.run(['/usr/bin/sudo', '/usr/bin/python3', str(Path(__file__).resolve()),
+                '--verify-protected', '--owner', pwd.getpwuid(os.getuid()).pw_name,
+                '--runtime', prepared['runtimeDigest'], '--services', prepared['serviceDigest'],
+                '--source-ref', prepared['pixelSourceRef']], stdout=subprocess.PIPE,
+                text=True, timeout=180, check=True)
+            if json.loads(checked.stdout) != json.loads(result.stdout):
+                raise ValueError('native-update-protected-proof-changed')
+        operation_key = hashlib.sha256(json.dumps({'selection': document,
+            'source': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}, sort_keys=True).encode()).hexdigest()
+        helper('pixel-native-ingress-refresh').refresh_installed(install_dir,
+            selection_locked=True, operation=complete_held, operation_kind='finalize-clients',
+            operation_key=operation_key)
     finally:
         os.close(lock)
     return {'status': 'selection-ready', 'path': str(directory / stack.UPDATE_SELECTION)}

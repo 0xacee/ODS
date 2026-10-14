@@ -8,9 +8,9 @@ import pytest
 ROOT = Path(os.environ.get('ODS_INGRESS_CLI_SOURCE_ROOT', Path(__file__).resolve().parents[1]))
 
 
-@pytest.mark.parametrize('command', ['start pixel-native-ingress', 'restart pixel-native-ingress', 'update'])
+@pytest.mark.parametrize('command', ['start pixel-native-ingress', 'restart pixel-native-ingress', 'start', 'restart', 'update'])
 @pytest.mark.parametrize('failure', [False, True])
-def test_native_cli_provisions_before_recreate_and_stops_on_failure(tmp_path, command, failure):
+def test_native_cli_parent_delegates_whole_body_and_never_recreates_after_release(tmp_path, command, failure):
     install = tmp_path / 'install'; install.mkdir()
     (install / '.env').write_text('SHIELD_API_KEY=fixture\n')
     log = tmp_path / 'commands'
@@ -41,7 +41,7 @@ docker() { printf 'docker:%s\n' "$*" >> "$EVENT_LOG"; }
         assert result.returncode != 0 and events == ['refresh']
     else:
         assert result.returncode == 0, result.stderr[-500:]
-        assert len(events) == 2 and ' up -d' in events[1]
+        assert events == ['refresh'], 'The parent must not restart native or Compose after its transaction returns'
 
 
 def test_unrelated_service_needs_no_native_refresh(tmp_path):
