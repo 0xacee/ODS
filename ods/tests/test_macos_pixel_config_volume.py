@@ -148,7 +148,9 @@ def test_uninstall_rejects_unproven_or_changed_storage_without_removing_anything
     if fault == 'no-receipt': receipt.unlink()
     if fault == 'mode': receipt.chmod(0o644)
     if fault == 'symlink':
-        original = receipt.with_suffix('.original'); receipt.rename(original); receipt.symlink_to(original)
+        original = receipt.with_suffix('.original')
+        receipt.rename(original)
+        receipt.symlink_to(original)
     if fault == 'hardlink': os.link(receipt, receipt.with_suffix('.linked'))
     if fault == 'ancestor': receipt.parent.chmod(0o777)
     if fault == 'consumer': fake.foreign_consumers[NAME] = ['b' * 64]
