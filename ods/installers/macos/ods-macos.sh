@@ -257,6 +257,7 @@ compose_pull_with_retry() {
 
 read_ods_env() {
     local env_file="${INSTALL_DIR}/.env"
+    local selected_key="${1:-}"
     if [[ ! -f "$env_file" ]]; then
         return
     fi
@@ -268,6 +269,7 @@ read_ods_env() {
         if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
             local key="${BASH_REMATCH[1]}"
             local val="${BASH_REMATCH[2]}"
+            [[ -z "$selected_key" || "$key" == "$selected_key" ]] || continue
             # Apply Docker Compose's value grammar, mirrored from
             # lib/safe-env.sh, before stripping quotes: trim surrounding
             # whitespace (Compose trims leading space, so "KEY=  # x" becomes
@@ -1392,6 +1394,17 @@ show_help() {
 # ============================================================================
 # Command Dispatch
 # ============================================================================
+
+# A fresh shell must use the interpreter prepared and saved by the installer.
+# Read only this selector with the existing literal .env grammar; never source
+# the file. A nonempty explicit environment override still takes precedence.
+if [[ -z "${ODS_PYTHON_CMD:-}" ]]; then
+    unset ENV_ODS_PYTHON_CMD
+    read_ods_env ODS_PYTHON_CMD
+    if [[ -n "${ENV_ODS_PYTHON_CMD:-}" ]]; then
+        export ODS_PYTHON_CMD="$ENV_ODS_PYTHON_CMD"
+    fi
+fi
 
 COMMAND="${1:-help}"
 if [[ "$COMMAND" == __native-lifecycle ]]; then
