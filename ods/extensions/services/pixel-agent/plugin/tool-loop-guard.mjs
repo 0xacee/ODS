@@ -10765,9 +10765,10 @@ export function createToolLoopGuard({
       state.workspacePreviewForbidden && previewEvent?.result?.isError === true;
     // A rejected website tool cannot create a website-delivery obligation for
     // a document-only request. Unexpected successes still follow receipt checks.
+    // Hook vetoes can arrive as event.error without a tool result.
     const documentPreviewError = state.ownerIntentObserved &&
       state.workspaceDocumentDeliveryRequested && !state.workspacePreviewRequired &&
-      previewEvent?.result?.isError === true;
+      toolCallFailed(previewEvent);
     if (previewEvent && !declinedPreviewError && !documentPreviewError) {
       state.workspacePreviewAttempted = true;
       const requestedDirectory = normalizeWorkspaceFilePath(
