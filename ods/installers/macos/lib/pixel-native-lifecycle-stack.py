@@ -79,6 +79,18 @@ def image_id(docker_run, reference, *, missing=False):
     return value
 
 
+def start_requires_pull(definition, docker_run):
+    if definition.get('build') or definition.get('pull_policy') == 'never':
+        return False
+    reference = definition['image']
+    policy = definition.get('pull_policy', 'missing')
+    # Honor refresh policies before pinning the activation image. Time-based
+    # policies conservatively refresh once; a retry uses the recorded image.
+    refresh = policy in ('always', 'daily', 'weekly') or policy.startswith('every_')
+    return (refresh or reference.endswith(':latest') and '@sha256:' not in reference
+        or image_id(docker_run, reference, missing=True) is None)
+
+
 def freeze(install_dir, directory, record, *, action, service, read_selection, run, docker_run, checkpoint,
            retry_preparation=False):
     files, document = read_selection()
@@ -126,9 +138,11 @@ def freeze(install_dir, directory, record, *, action, service, read_selection, r
             result = run('build', *build, timeout=1800)
             if result.returncode:
                 raise ValueError('native-lifecycle-image-preparation-failed')
-        # `start` may pull a missing non-buildable image, like ordinary up.
-        pull = [name for name in services if not document['services'][name].get('build') and image_id(docker_run,
-            document['services'][name]['image'], missing=True) is None]
+        # Preserve ordinary start's missing/latest/refresh-policy pulls. Update
+        # already performed its selected pull above, so do not pull twice.
+        pull = [name for name in services if (action == 'start' and start_requires_pull(document['services'][name], docker_run))
+            or (action == 'update' and not document['services'][name].get('build') and image_id(docker_run,
+                document['services'][name]['image'], missing=True) is None)]
         if pull:
             saved['retrySameInputs'] = all('@sha256:' in document['services'][name]['image']
                 or document['services'][name]['image'].startswith('sha256:') for name in pull)

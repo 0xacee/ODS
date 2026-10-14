@@ -160,6 +160,15 @@ def test_wrong_resolved_project_cannot_prepare_or_activate(tmp_path):
     assert not f.calls
 
 
+@pytest.mark.parametrize('policy', ['always', 'daily', 'weekly', 'every_24h', 'missing'])
+def test_start_preserves_latest_and_refresh_policy_before_pinning(tmp_path, policy):
+    f = fixture(tmp_path); f.document['services']['pixel-edge']['pull_policy'] = policy
+    assert f.freeze('start')['phase'] == 'selected'
+    assert [call for call in f.calls if call[0] == 'pull'] == [('pull', '--ignore-buildable', 'pixel-edge')]
+    f.freeze('start')
+    assert len([call for call in f.calls if call[0] == 'pull']) == 1
+
+
 def test_root_build_binding_never_traverses_runtime_model_store(tmp_path):
     f = fixture(tmp_path)
     (f.install / '.dockerignore').write_text('*\n!app\n**/__pycache__\n')
