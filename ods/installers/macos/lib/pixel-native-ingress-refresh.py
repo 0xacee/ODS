@@ -169,7 +169,12 @@ def snapshot_previous(run, docker_run, directory, *, install_dir, project, docum
         # State/health may change independently. Require stable configuration,
         # mounts and identity, not an identical last-healthcheck timestamp.
         current = compose._inspect_ingress(docker_run, observed['Id'])
-        if any(current[key] != observed[key] for key in ('Id', 'Image', 'Config', 'Mounts', 'Name')):
+        # Docker may reorder Mounts between inspections. Compare every complete
+        # entry, retaining duplicates and all fields, independently of order.
+        current_mounts = sorted(json.dumps(value, sort_keys=True) for value in current['Mounts'])
+        observed_mounts = sorted(json.dumps(value, sort_keys=True) for value in observed['Mounts'])
+        if (any(current[key] != observed[key] for key in ('Id', 'Image', 'Config', 'Name'))
+                or current_mounts != observed_mounts):
             raise ValueError('native-ingress-previous-container-changed')
     body = json.dumps(rollback, sort_keys=True).encode()
     path = directory / 'rollback.compose.json'

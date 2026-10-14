@@ -77,6 +77,91 @@ def test_previous_recipe_requires_actual_compose_hash_and_mount_identity(tmp_pat
     assert all('up' not in call for call in calls)
 
 
+@pytest.mark.parametrize('fault', [None, 'health-only', 'order-and-health', 'rw', 'rw-type', 'source', 'destination',
+    'type', 'volume-name', 'mode', 'propagation', 'driver', 'added-field', 'removed-field',
+    'missing-mount', 'extra-mount', 'duplicate-mount', 'id', 'image', 'name', 'user', 'env', 'label'])
+def test_previous_recipe_tolerates_only_mount_order_and_health_changes(tmp_path, fault):
+    source, directory, document, observed = fixture(tmp_path)
+    document['services'][module.SERVICE]['volumes'].append({
+        'type': 'volume', 'source': 'state', 'target': '/data/runtime', 'read_only': False})
+    document['volumes']['state'] = {'name': 'ods_ingress_state'}
+    observed['Mounts'][0].update(Mode='ro', Propagation='rprivate')
+    observed['Mounts'].append({'Type': 'volume', 'Name': 'ods_ingress_state',
+        'Source': '/var/lib/docker/volumes/ods_ingress_state/_data', 'Destination': '/data/runtime',
+        'Driver': 'local', 'Mode': 'rw', 'RW': True, 'Propagation': ''})
+    observed['State']['Health'] = {'Status': 'healthy', 'Log': [{'End': 'before'}]}
+    current = copy.deepcopy(observed)
+    # Both fresh Docker inspections report the same complete entries in reverse
+    # order, reproducing the live failure without changing the actual mounts.
+    if fault != 'health-only':
+        current['Mounts'].reverse()
+    volume = current['Mounts'][0]
+    changes = {'rw': ('RW', False), 'rw-type': ('RW', 1), 'source': ('Source', '/foreign'),
+        'destination': ('Destination', '/foreign'), 'type': ('Type', 'bind'),
+        'volume-name': ('Name', 'foreign'), 'mode': ('Mode', 'ro'),
+        'propagation': ('Propagation', 'rshared'), 'driver': ('Driver', 'foreign'),
+        'added-field': ('UnrecognizedMountOption', True)}
+    if fault in changes:
+        key, value = changes[fault]
+        volume[key] = value
+    elif fault == 'removed-field':
+        del volume['Driver']
+    elif fault == 'missing-mount':
+        current['Mounts'].pop()
+    elif fault == 'extra-mount':
+        current['Mounts'].append({'Type': 'bind', 'Source': '/foreign', 'Destination': '/foreign', 'RW': False})
+    elif fault == 'duplicate-mount':
+        current['Mounts'].append(copy.deepcopy(volume))
+    elif fault == 'id':
+        current['Id'] = 'd' * 64
+    elif fault == 'image':
+        current['Image'] = 'sha256:' + 'd' * 64
+    elif fault == 'name':
+        current['Name'] = '/foreign'
+    elif fault == 'user':
+        current['Config']['User'] = '0:0'
+    elif fault == 'env':
+        current['Config']['Env'].append('UNEXPECTED=value')
+    elif fault == 'label':
+        current['Config']['Labels']['com.docker.compose.config-hash'] = 'd' * 64
+    elif fault in ('health-only', 'order-and-health'):
+        current['State']['Health']['Log'][0]['End'] = 'later'
+    before = copy.deepcopy(observed)
+    calls = []
+
+    def docker(*args, **kwargs):
+        calls.append(args)
+        if args[0] == 'inspect':
+            assert args[1] == observed['Id']
+            return SimpleNamespace(returncode=0, stdout=json.dumps([current]))
+        assert args[-3:] == ('config', '--hash', module.SERVICE)
+        return SimpleNamespace(returncode=0, stdout=module.SERVICE + ' ' + 'c' * 64)
+
+    def action():
+        return module.snapshot_previous(None, docker, directory, install_dir=tmp_path,
+            project='ods', document=document, observed=observed, source=source)
+
+    if fault not in (None, 'health-only', 'order-and-health'):
+        error = 'native-ingress-container-changed' if fault == 'id' else 'native-ingress-previous-container-changed'
+        with pytest.raises(ValueError, match=error):
+            action()
+        assert not (directory / 'rollback.compose.json').exists()
+    else:
+        receipt = action()
+        raw = Path(receipt['path']).read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == receipt['sha256']
+        restored = json.loads(raw)
+        assert restored['volumes'] == {'state': {'name': 'ods_ingress_state', 'external': True}}
+        assert restored['services'][module.SERVICE]['volumes'] == [
+            {'type': 'volume', 'source': 'state', 'target': '/data/runtime', 'read_only': False},
+            {'type': 'bind', 'source': str(source), 'target': '/run/gateway.json',
+             'read_only': True, 'bind': {'create_host_path': False}}]
+        assert receipt['previousId'] == observed['Id']
+    assert observed == before, 'Comparison must preserve the original inspection'
+    assert sum(call[0] == 'inspect' for call in calls) == (1 if fault == 'id' else 2)
+    assert all(call[0] in ('inspect', 'compose') and 'up' not in call for call in calls)
+
+
 @pytest.mark.parametrize('fault', [None, 'active', 'busy-edge', 'staging', 'recreate', 'restore', 'release', 'owner-edit'])
 def test_refresh_holds_admission_stages_then_recreates_and_rolls_back_exact_env(tmp_path, monkeypatch, fault):
     source, directory, document, observed = fixture(tmp_path)
