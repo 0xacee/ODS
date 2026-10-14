@@ -125,6 +125,9 @@ jobs:
           ods/tests/test_macos_pixel_ingress_recipe.py
           ods/tests/test_macos_pixel_lifecycle.py
           ods/tests/test_macos_pixel_lifecycle_stack.py
+      - name: Verify full native recipe hashes and zero-scaled targets without a daemon
+        if: runner.os == 'Linux'
+        run: ODS_LIFECYCLE_COMPOSE_CONTROL=1 python -m pytest -q ods/tests/test_macos_pixel_lifecycle_recipe.py
       - name: Verify native installer, update and startup contracts
         run: >-
           python -m pytest -q

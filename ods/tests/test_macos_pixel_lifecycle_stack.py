@@ -160,6 +160,30 @@ def test_wrong_resolved_project_cannot_prepare_or_activate(tmp_path):
     assert not f.calls
 
 
+@pytest.mark.parametrize('scaling', [{'scale': 0}, {'deploy': {'replicas': 0}}, {'scale': 0, 'deploy': {'replicas': 0}}])
+def test_zero_scaled_services_and_dependencies_are_not_image_or_runtime_targets(tmp_path, scaling):
+    f = fixture(tmp_path)
+    f.document['services']['llama-server'] = {'image': 'disabled:latest', **scaling}
+    f.document['services']['pixel-edge']['depends_on'] = {'llama-server': {'condition': 'service_started', 'required': False}}
+    saved = f.freeze('update')
+    assert saved['services'] == ['pixel-edge', 'pixel-native-ingress']
+    assert json.loads(Path(saved['path']).read_text())['services']['llama-server'] == f.document['services']['llama-server']
+    assert module.verify_result(saved, f.docker_run, f.install)
+    assert not any('disabled:latest' in call or 'llama-server' in call for call in f.calls)
+
+
+def test_explicit_zero_scaled_ingress_cannot_open_a_lifecycle_transaction(tmp_path):
+    f = fixture(tmp_path); f.document['services']['pixel-native-ingress']['deploy'] = {'replicas': 0}
+    with pytest.raises(ValueError, match='ingress-selection-required'):
+        module.active_services(f.document, 'pixel-native-ingress')
+
+
+def test_invalid_resolved_scale_conflict_never_chooses_one_spelling(tmp_path):
+    f = fixture(tmp_path); f.document['services']['pixel-edge'].update(scale=1, deploy={'replicas': 0})
+    with pytest.raises(ValueError, match='resolved-scale-conflict'): f.freeze('restart')
+    assert not f.calls
+
+
 @pytest.mark.parametrize('policy', ['always', 'daily', 'weekly', 'every_24h', 'missing'])
 def test_start_preserves_latest_and_refresh_policy_before_pinning(tmp_path, policy):
     f = fixture(tmp_path); f.document['services']['pixel-edge']['pull_policy'] = policy

@@ -51,16 +51,39 @@ def capture(install_dir, *, files, document, bind_build_inputs=True):
         'buildInputs': build_inputs().capture(install_dir, document, active_services(document, '')) if bind_build_inputs else None}
 
 
+def service_replicas(definition):
+    """Consume Compose's resolved scaling, including macOS's disabled llama.
+
+    Compose config rejects conflicting scale/deploy.replicas before this helper
+    runs. Keep that refusal for an invalid supplied document instead of choosing
+    one spelling as authority.
+    """
+    scale = definition.get('scale')
+    replicas = definition.get('deploy', {}).get('replicas')
+    if scale is not None and replicas is not None and scale != replicas:
+        raise ValueError('native-lifecycle-resolved-scale-conflict')
+    value = scale if scale is not None else replicas if replicas is not None else 1
+    if type(value) is not int or value < 0:
+        raise ValueError('native-lifecycle-resolved-scale-required')
+    return value
+
+
 def active_services(document, service):
     definitions = document['services']
-    selected = {service} if service else {name for name, value in definitions.items() if not value.get('profiles')}
+    if service and service not in definitions:
+        raise ValueError('native-lifecycle-service-selection-required')
+    if service:
+        selected = {service} if service_replicas(definitions[service]) != 0 else set()
+    else:
+        selected = {name for name, value in definitions.items()
+            if not value.get('profiles') and service_replicas(value) != 0}
     pending = list(selected)
     while pending:
         name = pending.pop()
         if name not in definitions:
             raise ValueError('native-lifecycle-service-selection-required')
         for dependency in definitions[name].get('depends_on', {}):
-            if dependency not in selected:
+            if dependency not in selected and service_replicas(definitions[dependency]) != 0:
                 selected.add(dependency); pending.append(dependency)
     if 'pixel-native-ingress' not in selected:
         raise ValueError('native-lifecycle-ingress-selection-required')
