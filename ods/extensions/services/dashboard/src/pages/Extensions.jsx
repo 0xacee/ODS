@@ -128,6 +128,8 @@ export default function Extensions({ compact = false }) {
   const [pollingLost, setPollingLost] = useState(false)
   const installProgressRef = useRef(null)
   const activePollers = useRef({})
+  const catalogRequest = useRef(0)
+  const catalogPending = useRef(false)
   // Per-service recovery tracker: counts consecutive fetch failures and
   // fires onThresholdReached/onRecovered to drive the polling-lost banner.
   // Keyed by serviceId because multiple installs can be polling concurrently.
@@ -178,10 +180,8 @@ export default function Extensions({ compact = false }) {
           // Refresh catalog — if it shows "enabled" (long-running service)
           // or "cli_installed" (one-shot CLI tool whose container exits
           // after init), we're done.
-          const catRes = await fetchJson('/api/extensions/catalog')
-          if (!catRes.ok) return
-          const catData = await catRes.json()
-          setCatalog(catData)
+          const catData = await fetchCatalog({ background: true })
+          if (!catData) return
           const ext = catData.extensions?.find(e => e.id === serviceId)
           if (ext && (ext.status === 'enabled' || ext.status === 'cli_installed')) {
             clearInterval(activePollers.current[serviceId])
@@ -214,6 +214,7 @@ export default function Extensions({ compact = false }) {
       .then(d => setTemplates(d.templates || []))
       .catch(() => {})
     return () => {
+      catalogRequest.current += 1
       Object.values(activePollers.current).forEach(clearInterval)
       activePollers.current = {}
       recoveryTrackers.current = {}
@@ -287,20 +288,41 @@ export default function Extensions({ compact = false }) {
 
   const openDialog = dialog => setConfirm({ ...dialog, id: ++dialogSeq.current })
 
-  const fetchCatalog = async () => {
+  const fetchCatalog = async ({ background = false } = {}) => {
+    // A slow read must get time to finish instead of being superseded on every
+    // progress tick. Explicit refreshes and action completions still take priority.
+    if (background && catalogPending.current) return null
+    // Polls, manual refreshes and action completions share one ordering rule:
+    // only the newest request may publish catalog state or finish its loading UI.
+    const request = ++catalogRequest.current
+    catalogPending.current = true
     try {
-      if (!catalog) setLoading(true)
-      setRefreshing(true)
-      setError(null)
+      if (!background) {
+        if (!catalog) setLoading(true)
+        setRefreshing(true)
+        setError(null)
+      }
       const res = await fetchJson(`/api/extensions/catalog`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      setCatalog(await res.json())
+      if (!res.ok) {
+        if (background) return null
+        throw new Error(`HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      if (request !== catalogRequest.current) return null
+      setCatalog(data)
+      return data
     } catch (err) {
+      if (request !== catalogRequest.current) return null
+      if (background) throw err
       setError(err.name === 'AbortError' ? 'Request timed out' : 'Failed to load extensions catalog')
       console.error('Extensions fetch error:', err)
+      return null
     } finally {
-      setLoading(false)
-      setRefreshing(false)
+      if (request === catalogRequest.current) {
+        catalogPending.current = false
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
   }
 
