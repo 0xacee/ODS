@@ -597,7 +597,7 @@ require_proxy_auth() {
         return 1
     }
     if [[ "$(read_env_value "$env_file" "WEBUI_AUTH")" != "true" ]]; then
-        upsert_env_value "$env_file" "WEBUI_AUTH" "true"
+        upsert_env_value "$env_file" "WEBUI_AUTH" "true" || return 1
         ai "Network access requires sign-in; set WEBUI_AUTH=true."
     fi
     export WEBUI_AUTH=true
@@ -978,6 +978,11 @@ native_lifecycle_selected() {
 
 run_native_lifecycle() {
     local action="$1" service="${2:-}"
+    # Freeze the same authenticated selection that the child will recreate.
+    # Changing .env after capture would invalidate the transaction's inputs.
+    if [[ -z "$service" ]] && network_access_is_enabled; then
+        require_proxy_auth || return 1
+    fi
     "${ODS_PYTHON_CMD:-python3}" "$INSTALL_DIR/installers/macos/lib/pixel-native-ingress-refresh.py" \
         --install-dir "$INSTALL_DIR" --start-stopped-edge \
         --lifecycle-action "$action" --lifecycle-service "$service" --lifecycle-bash "$BASH" || return $?
