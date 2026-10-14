@@ -28,7 +28,8 @@ def setup(tmp_path, *, held=True, body_fault=None, bash=None):
     attempt.mkdir(mode=0o700, parents=True)
     journal = attempt / 'refresh.json'
     pointer = preparation / 'ingress-refresh-current.json'
-    pointer.write_text(json.dumps({'directory': attempt.name})); pointer.chmod(0o600)
+    pointer.write_text(json.dumps({'directory': attempt.name}))
+    pointer.chmod(0o600)
     descriptor = os.open(preparation / '.selection.lock', os.O_CREAT | os.O_RDWR, 0o600)
     if held: fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     cli = install / 'installers/macos/ods-macos.sh'
@@ -63,7 +64,8 @@ def setup(tmp_path, *, held=True, body_fault=None, bash=None):
         run=lambda *a, **k: SimpleNamespace(returncode=0, stdout=''), docker_run=docker_run)
     record = {'phase': 'operating', 'project': 'ods', 'operation': {'kind': kind, 'key': key}}
     def checkpoint(value):
-        journal.write_text(json.dumps(value)); journal.chmod(0o600)
+        journal.write_text(json.dumps(value))
+        journal.chmod(0o600)
     checkpoint(record)
     return install, descriptor, cli, record, checkpoint, operation
 
@@ -103,7 +105,9 @@ def test_observation_timeout_does_not_kill_child_or_release_its_inherited_lease(
     children = []
     class ObservedTimeout:
         def __init__(self, *args, **kwargs):
-            self.child = original(*args, **kwargs); self.pid = self.child.pid; children.append(self.child)
+            self.child = original(*args, **kwargs)
+            self.pid = self.child.pid
+            children.append(self.child)
         def wait(self, timeout):
             raise subprocess.TimeoutExpired('controlled observer', timeout)
     monkeypatch.setattr(module.subprocess, 'Popen', ObservedTimeout)
@@ -114,7 +118,8 @@ def test_observation_timeout_does_not_kill_child_or_release_its_inherited_lease(
         with pytest.raises(ValueError, match='child-unconfirmed'): operation({}, record, checkpoint)
         assert record['child']['outcome'] == 'unconfirmed'
         assert children[0].poll() is None
-        os.close(descriptor); descriptor = None
+        os.close(descriptor)
+        descriptor = None
         probe = os.open(install / 'data/pixel-native/preparation/.selection.lock', os.O_RDWR)
         try:
             with pytest.raises(BlockingIOError): fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -150,14 +155,17 @@ operation({},record,checkpoint)
             assert owner.poll() is None
             time.sleep(0.02)
         assert selected and selected.get('child'), 'owner never recorded its actual Bash child'
-        owner.terminate(); owner.wait(timeout=5)
+        owner.terminate()
+        owner.wait(timeout=5)
         descriptor = os.open(install / 'data/pixel-native/preparation/.selection.lock', os.O_RDWR)
         try:
             with pytest.raises(BlockingIOError): fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             (install / 'release-child').touch()
             deadline = time.monotonic() + 10
             while True:
-                try: fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
                 except BlockingIOError:
                     assert time.monotonic() < deadline, 'orphan did not release its inherited descriptor'
                     time.sleep(0.02)
@@ -181,9 +189,12 @@ def test_unconfirmed_preparation_requires_actual_previous_child_exit(tmp_path):
                 directory=directory, timeout=0.5)
         child = record['preparationCommand']['pid']
         with pytest.raises(ValueError, match='previous-child-still-live'): module.require_previous_gone(record)
-        os.kill(child, signal.SIGTERM); os.waitpid(child, 0); child = None
+        os.kill(child, signal.SIGTERM)
+        os.waitpid(child, 0)
+        child = None
         module.require_previous_gone(record)
     finally:
         if child is not None:
-            os.kill(child, signal.SIGTERM); os.waitpid(child, 0)
+            os.kill(child, signal.SIGTERM)
+            os.waitpid(child, 0)
         os.close(descriptor)

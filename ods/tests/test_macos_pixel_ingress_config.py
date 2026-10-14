@@ -52,8 +52,12 @@ def test_unsafe_source_never_starts_storage_or_writer(tmp_path, fault):
     user = f'{os.getuid()}:{os.getgid()}'
     if fault == 'mode': source.chmod(0o640)
     if fault == 'symlink':
-        original = tmp_path / 'original'; source.rename(original); source.symlink_to(original)
-    if fault == 'directory': source.unlink(); source.mkdir()
+        original = tmp_path / 'original'
+        source.rename(original)
+        source.symlink_to(original)
+    if fault == 'directory':
+        source.unlink()
+        source.mkdir()
     if fault == 'hardlink': os.link(source, tmp_path / 'linked')
     if fault == 'user': user = '0:0'
     if fault == 'invalid-json': source.write_text('{')
@@ -68,7 +72,8 @@ def test_prepare_publishes_only_after_staging_and_restores_exact_previous_env(tm
     source.write_text('{"gateway":{"auth":{"token":"synthetic-token"}}}')
     source.chmod(0o600)
     before = b'LLM_MODEL=operator-choice\n' + (b'PIXEL_NATIVE_CONFIG_SHA256=' + b'a' * 64 + b'\n' if existing else b'')
-    env.write_bytes(before); env.chmod(0o600)
+    env.write_bytes(before)
+    env.chmod(0o600)
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     user, image = f'{os.getuid()}:{os.getgid()}', 'sha256:' + 'b' * 64
     calls, receipts = [], []
@@ -103,7 +108,9 @@ def test_prepare_publishes_only_after_staging_and_restores_exact_previous_env(tm
 
 
 def test_digest_replacement_cannot_replace_any_other_setting(tmp_path):
-    env = tmp_path / '.env'; env.write_text('LLM_MODEL=operator-choice\n'); env.chmod(0o600)
+    env = tmp_path / '.env'
+    env.write_text('LLM_MODEL=operator-choice\n')
+    env.chmod(0o600)
     with pytest.raises(ValueError, match='native-ingress-digest-binding-required'):
         module._environment()._persist(env, {'LLM_MODEL': 'a' * 64}, backup=tmp_path / 'before',
             replace_ingress_digest=True)

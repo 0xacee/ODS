@@ -78,17 +78,21 @@ def execute(command, *, env, descriptor, record, field, checkpoint, directory, t
             child = subprocess.Popen([sys.executable, '-c', gate, str(reader), *command],
                 cwd=directory, env=env, stdout=stream, stderr=subprocess.STDOUT,
                 pass_fds=(descriptor, reader))
-            os.close(reader); reader = None
+            os.close(reader)
+            reader = None
             record[field] = {'pid': child.pid, 'birth': process_birth(child.pid),
                 'log': str(log), 'outcome': 'running', 'command': command}
             if not record[field]['birth']:
                 raise ValueError('native-lifecycle-child-unconfirmed')
             checkpoint(record)
-            os.write(writer, b'G'); os.close(writer); writer = None
+            os.write(writer, b'G')
+            os.close(writer)
+            writer = None
             try:
                 code = child.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                record[field]['outcome'] = 'unconfirmed'; checkpoint(record)
+                record[field]['outcome'] = 'unconfirmed'
+                checkpoint(record)
                 raise ValueError('native-lifecycle-child-unconfirmed') from None
         record[field].update(exitCode=code, outcome='completed' if code == 0 else 'failed')
         checkpoint(record)
@@ -140,7 +144,7 @@ def cli_operation(*, install_dir, action, service, bash, descriptor, process_env
         def prepare(*args, **kwargs):
             return run.prepare(*args, record=record, checkpoint=checkpoint, directory=journal.parent,
                 descriptor=descriptor, **kwargs)
-        saved = stack.freeze(install_dir, journal.parent, record, action=action, service=service,
+        stack.freeze(install_dir, journal.parent, record, action=action, service=service,
             read_selection=read_selection, run=prepare if hasattr(run, 'prepare') else run,
             docker_run=docker_run, checkpoint=checkpoint, retry_preparation=retry_image_preparation)
         token = secrets.token_hex(32)

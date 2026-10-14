@@ -34,7 +34,8 @@ def file_identity(path, *, absent=False):
 def build_inputs():
     spec = importlib.util.spec_from_file_location('lifecycle_build_inputs',
         Path(__file__).with_name('pixel-native-lifecycle-inputs.py'))
-    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     return module
 
 
@@ -84,7 +85,8 @@ def active_services(document, service):
             raise ValueError('native-lifecycle-service-selection-required')
         for dependency in definitions[name].get('depends_on', {}):
             if dependency not in selected and service_replicas(definitions[dependency]) != 0:
-                selected.add(dependency); pending.append(dependency)
+                selected.add(dependency)
+                pending.append(dependency)
     if 'pixel-native-ingress' not in selected:
         raise ValueError('native-lifecycle-ingress-selection-required')
     if any(not re.fullmatch('[a-zA-Z0-9][a-zA-Z0-9_.-]*', name) for name in selected):
@@ -193,7 +195,10 @@ def freeze(install_dir, directory, record, *, action, service, read_selection, r
     checkpoint(record)
     temporary = directory / ('lifecycle-' + secrets.token_hex(8) + '.tmp')
     with temporary.open('xb') as stream:
-        os.fchmod(stream.fileno(), 0o600); stream.write(body); stream.flush(); os.fsync(stream.fileno())
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(body)
+        stream.flush()
+        os.fsync(stream.fileno())
     os.replace(temporary, path)
     saved['phase'] = 'selected'
     checkpoint(record)
@@ -239,7 +244,9 @@ def verify_result(saved, docker_run, install_dir):
         rows = json.loads(result.stdout)
         if len(rows) != 1 or rows[0].get('Id') != identity:
             raise ValueError('native-lifecycle-selected-container-required')
-        observed = rows[0]; labels = observed['Config']['Labels']; state = observed['State']
+        observed = rows[0]
+        labels = observed['Config']['Labels']
+        state = observed['State']
         if (labels.get('com.docker.compose.project') != saved['project']
                 or labels.get('com.docker.compose.service') != name
                 or labels.get('com.docker.compose.config-hash') != hashes.get(name)

@@ -21,8 +21,10 @@ def fixture(tmp_path):
     source = tmp_path / 'config.json'
     source.write_text('{"gateway":{"port":18789,"auth":{"token":"synthetic-token"}}}')
     source.chmod(0o600)
-    (tmp_path / '.env').write_text('MODEL=preserve\n'); (tmp_path / '.env').chmod(0o600)
-    directory = tmp_path / 'attempt'; directory.mkdir(mode=0o700)
+    (tmp_path / '.env').write_text('MODEL=preserve\n')
+    (tmp_path / '.env').chmod(0o600)
+    directory = tmp_path / 'attempt'
+    directory.mkdir(mode=0o700)
     image, user = 'sha256:' + 'a' * 64, f'{os.getuid()}:{os.getgid()}'
     definition = {'image': image, 'user': user, 'environment': {'PIXEL_GATEWAY_TOKEN_FILE': '/run/pixel-config/unprovisioned.json'},
         'volumes': [{'type': 'volume', 'source': 'config', 'target': '/run/pixel-config', 'read_only': True}],
@@ -96,7 +98,9 @@ def test_refresh_holds_admission_stages_then_recreates_and_rolls_back_exact_env(
         if fault == 'active': raise ValueError('active')
     monkeypatch.setattr(module, 'native_idle', idle)
     # The snapshot routine has separate exact-hash/identity controls above.
-    recipe = directory / 'rollback.compose.json'; recipe.write_bytes(b'{}'); recipe.chmod(0o600)
+    recipe = directory / 'rollback.compose.json'
+    recipe.write_bytes(b'{}')
+    recipe.chmod(0o600)
     monkeypatch.setattr(module, 'snapshot_previous', lambda *args, **kwargs: {
         'path': str(recipe), 'sha256': hashlib.sha256(b'{}').hexdigest(), 'previousId': observed['Id'],
         'image': observed['Image'], 'user': observed['Config']['User'], 'configHash': 'c' * 64})
@@ -288,7 +292,9 @@ def test_lifecycle_remains_held_through_final_work_even_for_unchanged_config(tmp
         if fault == 'health': raise ValueError('not-ready')
     monkeypatch.setattr(compose, 'wait_ready', health)
     def snapshot(run, docker, directory, **kwargs):
-        path = directory / 'rollback.compose.json'; path.write_text('{}'); path.chmod(0o600)
+        path = directory / 'rollback.compose.json'
+        path.write_text('{}')
+        path.chmod(0o600)
         return {'path': str(path), 'sha256': hashlib.sha256(b'{}').hexdigest(), 'previousId': observed['Id'],
             'image': observed['Image'], 'user': observed['Config']['User'],
             'configHash': observed['Config']['Labels']['com.docker.compose.config-hash']}

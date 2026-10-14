@@ -21,15 +21,19 @@ pytestmark = pytest.mark.skipif(os.environ.get('ODS_LIFECYCLE_COMPOSE_CONTROL') 
 
 def load(name):
     spec = importlib.util.spec_from_file_location(name.replace('-', '_'), HELPERS / (name + '.py'))
-    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     return module
 
 
 @pytest.mark.parametrize('literal_dollars', [False, True])
 def test_full_native_recipe_keeps_ingress_hash_and_zero_scale_when_other_images_are_pinned(tmp_path, monkeypatch, literal_dollars):
-    stack = load('pixel-native-lifecycle-stack'); refresh = load('pixel-native-ingress-refresh')
-    install = tmp_path / ('owner$ODS_LITERAL_OWNER' if literal_dollars else 'owner'); install.mkdir()
-    attempt = install / 'attempt'; attempt.mkdir()
+    stack = load('pixel-native-lifecycle-stack')
+    refresh = load('pixel-native-ingress-refresh')
+    install = tmp_path / ('owner$ODS_LITERAL_OWNER' if literal_dollars else 'owner')
+    install.mkdir()
+    attempt = install / 'attempt'
+    attempt.mkdir()
     (install / '.env').write_text('SYNTHETIC=1\n')
     files = [ROOT / name for name in ('docker-compose.base.yml', 'installers/macos/docker-compose.macos.yml',
         'extensions/services/pixel-model-relay/compose.yaml.disabled', 'extensions/services/pixel-edge/compose.yaml.disabled',

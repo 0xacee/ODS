@@ -20,7 +20,8 @@ HELPERS = Path(os.environ.get('ODS_INGRESS_RECIPE_HELPER_ROOT', ROOT / 'installe
 def test_actual_compose_preserves_ingress_paths_values_and_rollback_hash(tmp_path, literal_dollars, check):
     baseline = Path(BASE)
     spec = importlib.util.spec_from_file_location('recipe_refresh', HELPERS / 'pixel-native-ingress-refresh.py')
-    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     base = tmp_path / 'base.json'
     base.write_text(json.dumps({'services': {name: {'image': 'busybox:1.36.1'} for name in ('dashboard-api', 'open-webui')}}))
     install = tmp_path / ('owner$ODS_LITERAL_OWNER' if literal_dollars else 'owner')
@@ -51,7 +52,8 @@ def test_actual_compose_preserves_ingress_paths_values_and_rollback_hash(tmp_pat
     if check == 'label':
         # Exercise actual source-label extraction and private env selection.
         # Only container execution is substituted; rendering and files are real.
-        (install / '.env').write_text('KEEP=fixture\n'); (install / '.env').chmod(0o600)
+        (install / '.env').write_text('KEEP=fixture\n')
+        (install / '.env').chmod(0o600)
         expected_digest = hashlib.sha256(source.read_bytes()).hexdigest()
         def selected(*args, **kwargs):
             if args[0] == 'run':

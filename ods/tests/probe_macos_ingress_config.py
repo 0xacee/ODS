@@ -155,7 +155,8 @@ def probe(image, output, *, engine='docker-desktop', expected_endpoint=None, exp
             receipt['bind'] = read('type=bind,source=' + str(source) + ',target=/run/gateway.json,readonly', '/run/gateway.json')
             spec = importlib.util.spec_from_file_location('probe_ingress_config',
                 ROOT / 'installers/macos/lib/pixel-native-ingress-config.py')
-            module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
             receipt['staging'] = module.stage(run, source, user=f'{uid}:{gid}')
             receipt['volume'] = read('type=volume,source=' + volume + ',target=/config,readonly', '/config/' + digest + '.json')
             receipt['reportedBoundaryObservedHere'] = (receipt['bind'].get('reason') == 'owner-mismatch'

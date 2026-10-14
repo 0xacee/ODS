@@ -6,12 +6,16 @@ import subprocess
 import pytest
 
 ROOT = Path(os.environ.get('ODS_INGRESS_CLI_SOURCE_ROOT', Path(__file__).resolve().parents[1]))
+# The CLI requires Bash 4+. Sourcing under 3.2 would re-exec its caller ($0),
+# so use the same explicit modern Bash as the real lifecycle-child fixtures.
+BASH = os.environ.get('ODS_LIFECYCLE_TEST_BASH', '/bin/bash')
 
 
 @pytest.mark.parametrize('command', ['start pixel-native-ingress', 'restart pixel-native-ingress', 'start', 'restart', 'update'])
 @pytest.mark.parametrize('failure', [False, True])
 def test_native_cli_parent_delegates_whole_body_and_never_recreates_after_release(tmp_path, command, failure):
-    install = tmp_path / 'install'; install.mkdir()
+    install = tmp_path / 'install'
+    install.mkdir()
     (install / '.env').write_text('SHIELD_API_KEY=fixture\n')
     log = tmp_path / 'commands'
     python = tmp_path / 'private-python'
@@ -31,7 +35,7 @@ cmd_status() { :; }
 sleep() { :; }
 docker() { printf 'docker:%s\n' "$*" >> "$EVENT_LOG"; }
 '''
-    result = subprocess.run(['/bin/bash', '-c', script + '\ncmd_' + command],
+    result = subprocess.run([BASH, '-c', script + '\ncmd_' + command],
         env={**os.environ, 'ODS_INSTALL_DIR': str(install), 'ODS_PYTHON_CMD': str(python),
             'EVENT_LOG': str(log), 'CLI_SOURCE': str(ROOT / 'installers/macos/ods-macos.sh')},
         text=True, capture_output=True, timeout=15)
@@ -45,8 +49,16 @@ docker() { printf 'docker:%s\n' "$*" >> "$EVENT_LOG"; }
 
 
 def test_unrelated_service_needs_no_native_refresh(tmp_path):
-    install = tmp_path / 'install'; install.mkdir()
+    install = tmp_path / 'install'
+    install.mkdir()
     log = tmp_path / 'commands'
+    # The public entry point is a script, not a sourced Bash library. Exercise
+    # the real system-Bash handoff too (3.2 -> Homebrew Bash on macOS).
+    public_entry = subprocess.run(['/bin/bash', str(ROOT / 'installers/macos/ods-macos.sh'), 'help'],
+        env={**os.environ, 'ODS_INSTALL_DIR': str(install)},
+        text=True, capture_output=True, timeout=15)
+    assert public_entry.returncode == 0, public_entry.stderr[-500:]
+    assert 'start' in public_entry.stdout and 'restart' in public_entry.stdout
     script = '''source "$CLI_SOURCE" help >/dev/null
 test_install() { :; }; ensure_llama_cpu_budget() { :; }
 get_compose_flags() { printf '%s\n' '-f installers/macos/pixel-native.compose.yaml.disabled'; }
@@ -54,7 +66,7 @@ network_access_is_enabled() { return 1; }
 docker() { printf 'docker:%s\n' "$*" >> "$EVENT_LOG"; }
 cmd_start dashboard-api
 '''
-    result = subprocess.run(['/bin/bash', '-c', script], env={**os.environ,
+    result = subprocess.run([BASH, '-c', script], env={**os.environ,
         'ODS_INSTALL_DIR': str(install), 'ODS_PYTHON_CMD': '/deliberately-absent-python',
         'EVENT_LOG': str(log), 'CLI_SOURCE': str(ROOT / 'installers/macos/ods-macos.sh')},
         text=True, capture_output=True, timeout=15)

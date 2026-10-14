@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import unittest
 
 spec = importlib.util.spec_from_file_location('synthetic_probe', Path(__file__).with_name('probe_macos_ingress_config.py'))
-probe = importlib.util.module_from_spec(spec); spec.loader.exec_module(probe)
+probe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(probe)
 
 
 class ProbeEngineTests(unittest.TestCase):
