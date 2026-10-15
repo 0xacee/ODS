@@ -1910,11 +1910,12 @@ if (Test-ODSWindowsServiceEnabled -ServiceId "perplexica" -Plan $servicePlan) {
     if (($perplexicaUsesLiteLlm -or $switchboardMode -eq "enabled") -and $windowsEnvMap.ContainsKey("LITELLM_KEY") -and -not [string]::IsNullOrWhiteSpace($windowsEnvMap["LITELLM_KEY"])) {
         $perplexicaApiKey = $windowsEnvMap["LITELLM_KEY"]
     }
-    $perplexicaOk = Set-PerplexicaConfig -PerplexicaPort 3004 -LlmModel $perplexicaModel -LlmBaseUrl $perplexicaBaseUrl -ApiKey $perplexicaApiKey
+    $perplexicaPort = Get-WindowsODSEnvPort -EnvMap $windowsEnvMap -Name "PERPLEXICA_PORT" -DefaultPort 3004
+    $perplexicaOk = Set-PerplexicaConfig -PerplexicaPort $perplexicaPort -LlmModel $perplexicaModel -LlmBaseUrl $perplexicaBaseUrl -ApiKey $perplexicaApiKey
     if ($perplexicaOk) {
         Write-AISuccess "Perplexica configured (model: $perplexicaModel)"
     } else {
-        Write-AIWarn "Perplexica auto-config skipped -- complete setup at http://localhost:3004"
+        Write-AIWarn "Perplexica auto-config skipped -- complete setup at http://localhost:$perplexicaPort"
     }
 }
 
@@ -2003,7 +2004,7 @@ if ($installReadiness -and $installReadiness.AllReady -and $llmModelReady -and $
 
 # ── Desktop & Start Menu shortcuts ───────────────────────────────────────────
 try {
-    $dashboardUrl  = "http://localhost:3001"
+    $dashboardUrl  = "http://localhost:$dashboardPort"
     $shortcutName  = "ODS"
     $iconPath      = Join-Path $installDir "extensions\services\dashboard\public\osmantic-os.ico"
     $iconContent   = if (Test-Path -LiteralPath $iconPath) { "IconFile=$iconPath`nIconIndex=0" } else { "IconIndex=0" }

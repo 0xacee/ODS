@@ -745,23 +745,32 @@ COMFYUI_CPU_LIMIT=$comfyuiCpuLimit
 COMFYUI_CPU_RESERVATION=$comfyuiCpuReservation
 
 #=== Ports ===
+DASHBOARD_PORT=$(Resolve-WindowsODSPort -Name "DASHBOARD_PORT" -DefaultPort 3001 -ExistingEnv $existingEnv)
+DASHBOARD_REMOTE_PORT=$(Resolve-WindowsODSPort -Name "DASHBOARD_REMOTE_PORT" -DefaultPort 3011 -ExistingEnv $existingEnv)
+DASHBOARD_API_PORT=$(Resolve-WindowsODSPort -Name "DASHBOARD_API_PORT" -DefaultPort 3002 -ExistingEnv $existingEnv)
+PERPLEXICA_PORT=$(Resolve-WindowsODSPort -Name "PERPLEXICA_PORT" -DefaultPort 3004 -ExistingEnv $existingEnv)
+EMBEDDINGS_PORT=$(Resolve-WindowsODSPort -Name "EMBEDDINGS_PORT" -DefaultPort 8090 -ExistingEnv $existingEnv)
+SHIELD_PORT=$(Resolve-WindowsODSPort -Name "SHIELD_PORT" -DefaultPort 8085 -ExistingEnv $existingEnv)
+TOKEN_SPY_PORT=$(Resolve-WindowsODSPort -Name "TOKEN_SPY_PORT" -DefaultPort 3005 -ExistingEnv $existingEnv)
+COMFYUI_PORT=$(Resolve-WindowsODSPort -Name "COMFYUI_PORT" -DefaultPort 8188 -ExistingEnv $existingEnv)
+APE_PORT=$(Resolve-WindowsODSPort -Name "APE_PORT" -DefaultPort 7890 -ExistingEnv $existingEnv)
 OLLAMA_PORT=11434
 WEBUI_PORT=$webuiPort
 WHISPER_PORT=$whisperPort
-TTS_PORT=8880
-N8N_PORT=5678
-QDRANT_PORT=6333
-QDRANT_GRPC_PORT=6334
+TTS_PORT=$(Resolve-WindowsODSPort -Name "TTS_PORT" -DefaultPort 8880 -ExistingEnv $existingEnv)
+N8N_PORT=$(Resolve-WindowsODSPort -Name "N8N_PORT" -DefaultPort 5678 -ExistingEnv $existingEnv)
+QDRANT_PORT=$(Resolve-WindowsODSPort -Name "QDRANT_PORT" -DefaultPort 6333 -ExistingEnv $existingEnv)
+QDRANT_GRPC_PORT=$(Resolve-WindowsODSPort -Name "QDRANT_GRPC_PORT" -DefaultPort 6334 -ExistingEnv $existingEnv)
 QDRANT_API_KEY=$qdrantApiKey
-LITELLM_PORT=4000
-SEARXNG_PORT=8888
+LITELLM_PORT=$(Resolve-WindowsODSPort -Name "LITELLM_PORT" -DefaultPort 4000 -ExistingEnv $existingEnv)
+SEARXNG_PORT=$(Resolve-WindowsODSPort -Name "SEARXNG_PORT" -DefaultPort 8888 -ExistingEnv $existingEnv)
 
 #=== Hermes Agent ===
 HERMES_LLM_BASE_URL=$hermesLlmBaseUrl
 HERMES_LLM_API_KEY=$hermesLlmApiKey
 HERMES_LANGUAGE=en
 HERMES_REQUIRE_OWNER_CARD=$(Get-EnvOrNew "HERMES_REQUIRE_OWNER_CARD" $(if ($env:HERMES_REQUIRE_OWNER_CARD) { $env:HERMES_REQUIRE_OWNER_CARD } else { "false" }))
-HERMES_PROXY_PORT=9120
+HERMES_PROXY_PORT=$(Resolve-WindowsODSPort -Name "HERMES_PROXY_PORT" -DefaultPort 9120 -ExistingEnv $existingEnv)
 HERMES_PROXY_UPSTREAM=ods-hermes:9119
 ODS_AUTH_UPSTREAM=ods-dashboard-api:3002
 
@@ -779,7 +788,7 @@ $(if ($windowsAmdHostInference) { "LLAMA_SERVER_API_KEY=$llamaServerApiKey" })
 LIVEKIT_API_KEY=$livekitApiKey
 LIVEKIT_API_SECRET=$livekitSecret
 OPENCODE_SERVER_PASSWORD=$opencodePassword
-OPENCODE_PORT=3003
+OPENCODE_PORT=$(Resolve-WindowsODSPort -Name "OPENCODE_PORT" -DefaultPort 3003 -ExistingEnv $existingEnv)
 TOKEN_SPY_API_KEY=$tokenSpyApiKey
 SEARXNG_SECRET=$searxngSecret
 DIFY_SECRET_KEY=$difySecretKey
