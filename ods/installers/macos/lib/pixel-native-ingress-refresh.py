@@ -79,7 +79,12 @@ def edge_ready(docker_run, *, project, dashboard_key, source, allow_start=False)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         current = compose._inspect_ingress(docker_run, identity)
-        if any(current[key] != before[key] for key in ('Id', 'Image', 'Config', 'Mounts', 'Name')):
+        # Docker may reorder Mounts when starting a stopped container. Preserve
+        # every complete entry and duplicate; only collection order is ignored.
+        current_mounts = sorted(json.dumps(value, sort_keys=True) for value in current['Mounts'])
+        before_mounts = sorted(json.dumps(value, sort_keys=True) for value in before['Mounts'])
+        if (any(current[key] != before[key] for key in ('Id', 'Image', 'Config', 'Name'))
+                or current_mounts != before_mounts):
             raise ValueError('native-edge-definition-changed')
         try:
             if compose._managed_edge(docker_run, project) != identity:

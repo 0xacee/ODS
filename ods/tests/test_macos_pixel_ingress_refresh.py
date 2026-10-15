@@ -281,6 +281,89 @@ def test_cli_may_start_only_the_exact_owned_stopped_edge_before_refresh(tmp_path
         assert events == ['native-idle', 'start', 'readiness']
 
 
+@pytest.mark.parametrize('fault', [None, 'health-only', 'order-and-health', 'rw', 'rw-type', 'source', 'destination',
+    'type', 'volume-name', 'mode', 'propagation', 'driver', 'added-field', 'removed-field',
+    'missing-mount', 'extra-mount', 'duplicate-mount', 'id', 'image', 'name', 'user', 'env', 'label'])
+def test_stopped_edge_tolerates_only_mount_order_and_health_changes(tmp_path, monkeypatch, fault):
+    compose = module.helper('pixel-native-compose')
+    before = {'Id': 'a' * 64, 'Image': 'sha256:' + 'b' * 64, 'Name': '/ods-pixel-edge',
+        'Config': {'User': '501:501', 'Env': ['UNCHANGED=value'], 'Labels': {
+            'com.docker.compose.project': 'ods', 'com.docker.compose.service': 'pixel-edge'}},
+        'Mounts': [
+            {'Type': 'volume', 'Name': 'ods_runtime', 'Source': '/volumes/ods_runtime/_data',
+                'Destination': '/pixel-runtime', 'RW': False, 'Driver': 'local', 'Mode': 'ro', 'Propagation': ''},
+            {'Type': 'volume', 'Name': 'ods_transition', 'Source': '/volumes/ods_transition/_data',
+                'Destination': '/pixel-transition-state', 'RW': True, 'Driver': 'local', 'Mode': 'rw', 'Propagation': ''}],
+        'State': {'Running': False, 'Status': 'exited'}}
+    current = copy.deepcopy(before)
+    current['State'] = {'Running': True, 'Status': 'running', 'Health': {'Status': 'starting'}}
+    if fault != 'health-only':
+        current['Mounts'].reverse()
+    volume = current['Mounts'][0]
+    changes = {'rw': ('RW', False), 'rw-type': ('RW', 1), 'source': ('Source', '/foreign'),
+        'destination': ('Destination', '/foreign'), 'type': ('Type', 'bind'),
+        'volume-name': ('Name', 'foreign'), 'mode': ('Mode', 'ro'),
+        'propagation': ('Propagation', 'rshared'), 'driver': ('Driver', 'foreign'),
+        'added-field': ('UnrecognizedMountOption', True)}
+    if fault in changes:
+        key, value = changes[fault]
+        volume[key] = value
+    elif fault == 'removed-field':
+        del volume['Driver']
+    elif fault == 'missing-mount':
+        current['Mounts'].pop()
+    elif fault == 'extra-mount':
+        current['Mounts'].append({'Type': 'bind', 'Source': '/foreign', 'Destination': '/foreign', 'RW': False})
+    elif fault == 'duplicate-mount':
+        current['Mounts'].append(copy.deepcopy(volume))
+    elif fault == 'id':
+        current['Id'] = 'c' * 64
+    elif fault == 'image':
+        current['Image'] = 'sha256:' + 'c' * 64
+    elif fault == 'name':
+        current['Name'] = '/foreign'
+    elif fault == 'user':
+        current['Config']['User'] = '0:0'
+    elif fault == 'env':
+        current['Config']['Env'].append('UNEXPECTED=value')
+    elif fault == 'label':
+        current['Config']['Labels']['com.docker.compose.project'] = 'foreign'
+    if fault in ('health-only', 'order-and-health'):
+        current['State']['Health']['Status'] = 'healthy'
+    pristine = copy.deepcopy(before)
+    events = []
+
+    def managed(*args):
+        if 'start' not in events:
+            raise ValueError('native-managed-edge-required')
+        return before['Id']
+
+    def docker(runner, *args):
+        assert args == ('start', before['Id'])
+        events.append('start')
+
+    monkeypatch.setattr(compose, '_managed_edge', managed)
+    monkeypatch.setattr(compose, '_named_ingress', lambda *args: before['Id'])
+    monkeypatch.setattr(compose, '_inspect_ingress', lambda *args: current if 'start' in events else before)
+    monkeypatch.setattr(compose, '_docker', docker)
+    monkeypatch.setattr(compose, '_edge_transition', lambda *args: events.append('transition-ready'))
+    monkeypatch.setattr(module, 'native_idle', lambda source: events.append('native-idle'))
+    monkeypatch.setattr(module, 'helper', lambda name: compose)
+
+    def action():
+        return module.edge_ready(None, project='ods', dashboard_key='d' * 64,
+            source=tmp_path / 'unused-config', allow_start=True)
+
+    if fault in (None, 'health-only', 'order-and-health'):
+        assert action() == before['Id']
+        assert events == ['native-idle', 'start', 'transition-ready']
+    else:
+        with pytest.raises(ValueError, match='native-edge-definition-changed'):
+            action()
+        assert events == ['native-idle', 'start']
+    assert before == pristine
+
+
 @pytest.mark.parametrize('fault', [None, 'definition', 'source-before-stage', 'source-after-stage'])
 def test_unchanged_selection_reuses_only_exact_current_config_without_restart(tmp_path, monkeypatch, fault):
     source, directory, document, observed = fixture(tmp_path)
