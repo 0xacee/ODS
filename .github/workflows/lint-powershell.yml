@@ -243,7 +243,7 @@ jobs:
 
       - name: Windows Service Port Override Contract (PowerShell 7)
         shell: pwsh
-        run: ./tests/test-windows-service-port-overrides.ps1
+        run: ./tests/test-windows-service-port-overrides.ps1 ${{ runner.os == 'Linux' && '-CheckCompose' || '' }}
 
       - name: Windows Service Port Override Contract (Windows PowerShell)
         if: runner.os == 'Windows'
