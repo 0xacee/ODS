@@ -69,6 +69,26 @@ def test_event_totals_include_disjoint_cache_buckets(sqlite_db, cached, written,
     assert sqlite_db.query_recent_events(after_id=cursor)[0]["total_tokens"] == expected
 
 
+def test_legacy_rows_keep_event_semantics_through_additive_schema_upgrade(sqlite_db):
+    conn = sqlite_db._get_conn()
+    if any(row[1] == "token_buckets_version" for row in conn.execute("PRAGMA table_info(usage)")):
+        conn.execute("ALTER TABLE usage DROP COLUMN token_buckets_version")
+    # Same provider, ambiguous historical formats: never infer/rewrite either.
+    for input_tokens in (2048, 512, None):
+        conn.execute("INSERT INTO usage(agent,model,provider_name,input_tokens,output_tokens,"
+                     "cache_read_tokens,cache_write_tokens,estimated_cost_usd) "
+                     "VALUES('legacy','gpt-4o','openai',?,100,1536,0,0.1)", (input_tokens,))
+    conn.commit()
+    before = conn.execute("SELECT input_tokens,output_tokens,cache_read_tokens,estimated_cost_usd FROM usage").fetchall()
+    sqlite_db.init_db()
+    sqlite_db.init_db()
+    assert conn.execute("SELECT input_tokens,output_tokens,cache_read_tokens,estimated_cost_usd FROM usage").fetchall() == before
+    rows = sqlite_db.query_recent_events()
+    assert [row["total_tokens"] for row in rows] == [2148, 612, None]
+    assert [row["total_tokens"] for row in sqlite_db.query_recent_events(after_id=rows[0]["id"])] == [612, None]
+    assert [row[0] for row in conn.execute("SELECT token_buckets_version FROM usage")] == [None] * 3
+
+
 def test_public_sse_generator_recovers_without_replay_or_loss(sqlite_db, monkeypatch):
     monkeypatch.syspath_prepend(str(SERVICE))
     monkeypatch.setenv("DB_BACKEND", "sqlite")

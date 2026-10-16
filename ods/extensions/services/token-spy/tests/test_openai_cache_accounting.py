@@ -43,6 +43,28 @@ async def public_events(api):
     return [json.loads(body[6:]) for body in bodies if body.startswith(b"data: ")]
 
 
+def test_public_events_preserve_legacy_and_new_receipt_totals(monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(SERVICE))
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("TOKEN_SPY_API_KEY", "cache-fixture-key")
+    db = load("db.py")
+    db.DB_PATH = str(tmp_path / "usage.db")
+    monkeypatch.setitem(sys.modules, "db", db)
+    db.init_db()
+    conn = db._get_conn()
+    conn.execute("INSERT INTO usage(agent,model,input_tokens,output_tokens,cache_read_tokens) "
+                 "VALUES('legacy','gpt-4o',2048,100,1536)")
+    conn.commit()
+    db.log_usage({"agent": "new", "model": "gpt-4o", "input_tokens": 512,
+                  "output_tokens": 100, "cache_read_tokens": 1536, "cache_write_tokens": 0})
+    api = load("main.py")
+    try:
+        events = asyncio.run(public_events(api))
+        assert [event["total_tokens"] for event in events] == [2148, 2148]
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("details,cached", [
     ({"cached_tokens": 1536}, 1536),
