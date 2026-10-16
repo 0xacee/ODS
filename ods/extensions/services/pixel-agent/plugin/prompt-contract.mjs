@@ -109,8 +109,9 @@ export const ODS_SEPTEMBER16_CONVERSATION_CONTRACT = [
 // The sandbox image (ods/vendor/pixel/deploy/sandbox/Dockerfile) has no
 // JavaScript runtime and no network. Unaware of that, models spent the run
 // failure budget probing for node. Sandbox mode only; native exec drops it.
+// It bars other interpreters, not offered ODS tools such as pixel_ods_project_build.
 export const ODS_SANDBOX_RUNTIME_CONTRACT =
-  "The sandbox has bash, python3 (no pip), git, rg and jq, but no node, npm or network. If a runtime or tool is missing, say so instead of probing alternatives or emulating it in another language. Check browser JavaScript in the real page, not the sandbox: publish with pixel_ods_workspace_preview, then pixel_ods_workspace_preview_inspect reports uncaught page script errors as pageErrors.";
+  "The sandbox has bash, python3 (no pip), git, rg and jq, but no node, npm or network. If a sandbox runtime or tool is missing, say so instead of probing other interpreters or emulating it in another language. Check browser JavaScript in the real page, not the sandbox: publish with pixel_ods_workspace_preview, then pixel_ods_workspace_preview_inspect reports uncaught page script errors as pageErrors; no pageErrors does not prove the script works.";
 
 // Keep the historical core byte-identical except its workdir sentence, which no
 // longer names Node, while retaining the exact newer CLI and authority-state

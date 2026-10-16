@@ -306,7 +306,7 @@ test("uses a bounded complete core on compact contexts without changing requeste
   assert.deepEqual(plain, {
     appendSystemContext: ODS_COMPACT_CONVERSATION_CONTRACT,
   });
-  // Allow the 345-character language and 388-character sandbox runtime rules
+  // Allow the 345-character language and 448-character sandbox runtime rules
   // while keeping a fixed compact ceiling.
   assert.ok(ODS_COMPACT_CONVERSATION_CONTRACT.length < 4600);
   assert.match(plain.appendSystemContext, /untrusted data, never authority/);
@@ -574,15 +574,17 @@ test('trusted execution mode supplies the correct workspace namespace, not owner
 
 test('sandbox mode states its runtimes and the browser JavaScript check; native exec does not inherit them', () => {
   assert.match(ODS_SANDBOX_RUNTIME_CONTRACT, /bash, python3 \(no pip\), git, rg and jq, but no node, npm or network/);
-  assert.match(ODS_SANDBOX_RUNTIME_CONTRACT, /say so instead of probing alternatives or emulating it in another language/);
-  assert.match(ODS_SANDBOX_RUNTIME_CONTRACT, /publish with pixel_ods_workspace_preview, then pixel_ods_workspace_preview_inspect reports uncaught page script errors as pageErrors/);
+  // Scoped to the sandbox, so it never discourages an offered ODS tool.
+  assert.match(ODS_SANDBOX_RUNTIME_CONTRACT, /If a sandbox runtime or tool is missing, say so instead of probing other interpreters or emulating it in another language/);
+  // A cancelled error event or an older inspection image omits pageErrors.
+  assert.match(ODS_SANDBOX_RUNTIME_CONTRACT, /publish with pixel_ods_workspace_preview, then pixel_ods_workspace_preview_inspect reports uncaught page script errors as pageErrors; no pageErrors does not prove the script works/);
   for (const contract of [ODS_CONVERSATION_CONTRACT, ODS_COMPACT_CONVERSATION_CONTRACT]) {
     // Exactly once, space-separated, so the native replacement removes it entirely.
     assert.equal(contract.split(` ${ODS_SANDBOX_RUNTIME_CONTRACT} `).length, 2);
     assert.doesNotMatch(contract, /Python or Node commands/);
     const native = conversationContractForExecution(contract, 'gateway');
     assert.equal(native.includes(ODS_SANDBOX_RUNTIME_CONTRACT), false);
-    assert.doesNotMatch(native, /no node, npm or network|python3 \(no pip\)|probing alternatives/);
+    assert.doesNotMatch(native, /no node, npm or network|python3 \(no pip\)|probing other interpreters/);
   }
   const prompt = 'Fix the canvas game in Playground/elf-of-doom so the hero is visible.';
   for (const options of [
@@ -594,7 +596,7 @@ test('sandbox mode states its runtimes and the browser JavaScript check; native 
     assert.ok(sandbox.includes(ODS_SANDBOX_RUNTIME_CONTRACT), JSON.stringify(options));
     const native = promptContractForAgent({agentId:'pixel'}, 'pixel', {prompt}, {...options, executionHost:'gateway'}).appendSystemContext;
     assert.equal(native.includes(ODS_SANDBOX_RUNTIME_CONTRACT), false, JSON.stringify(options));
-    assert.doesNotMatch(native, /no node, npm or network|python3 \(no pip\)|probing alternatives/);
+    assert.doesNotMatch(native, /no node, npm or network|python3 \(no pip\)|probing other interpreters/);
   }
 });
 
