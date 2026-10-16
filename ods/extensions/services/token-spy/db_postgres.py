@@ -73,7 +73,11 @@ def init_db():
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Add metadata only: NULL keeps every historical event's arithmetic.
             # Existing rows may mix inclusive and disjoint OpenAI prompt counts.
-            cur.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS token_buckets_version INTEGER")
+            # A preprovisioned schema must also work with a DML-only app role.
+            cur.execute("SELECT 1 FROM pg_attribute WHERE attrelid = 'requests'::regclass "
+                        "AND attname = 'token_buckets_version' AND NOT attisdropped")
+            if cur.fetchone() is None:
+                cur.execute("ALTER TABLE requests ADD COLUMN IF NOT EXISTS token_buckets_version INTEGER")
             # Check if tenant exists
             cur.execute(
                 "SELECT id FROM tenants WHERE slug = %s AND deleted_at IS NULL",

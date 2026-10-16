@@ -189,6 +189,43 @@ def test_public_events_preserve_legacy_and_new_receipt_totals(pg_db, monkeypatch
         conn.close()
 
 
+@pytest.mark.parametrize("preprovisioned", [True, False])
+def test_dml_role_requires_owner_only_for_missing_marker(pg_db, monkeypatch, preprovisioned):
+    from psycopg2 import sql
+
+    conn = _connect()
+    role = sql.Identifier("token_spy_dml_" + uuid4().hex)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(role))
+            cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
+            cur.execute(sql.SQL("GRANT SELECT, INSERT ON tenants, agents, requests TO {}").format(role))
+            if not preprovisioned:
+                cur.execute("ALTER TABLE requests DROP COLUMN token_buckets_version")
+        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("SET ROLE {}").format(role))
+        conn.commit()
+        monkeypatch.setattr(pg_db, "_get_conn", lambda: conn)
+        monkeypatch.setattr(pg_db, "_put_conn", lambda _conn: None)
+        if preprovisioned:
+            pg_db.init_db()
+            pg_db.log_usage({"agent": "dml-owner", "model": "gpt-4o", "input_tokens": 512,
+                             "output_tokens": 100, "cache_read_tokens": 1536, "cache_write_tokens": 0})
+            assert pg_db.query_recent_events()[0]["total_tokens"] == 2148
+        else:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                pg_db.init_db()
+    finally:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute("RESET ROLE")
+            cur.execute(sql.SQL("DROP OWNED BY {}").format(role))
+            cur.execute(sql.SQL("DROP ROLE {}").format(role))
+        conn.commit()
+        conn.close()
+
+
 def test_forward_poll_delivers_every_row_inserted_after_connect(pg_db):
     tenant_id = pg_db._tenant_id
     base = datetime(2026, 7, 27, tzinfo=timezone.utc)
