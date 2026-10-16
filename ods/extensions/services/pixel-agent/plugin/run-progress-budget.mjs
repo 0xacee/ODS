@@ -97,26 +97,75 @@ export function createRunProgressBudget() {
 // A lookup that found nothing answered its question; it did not fail.
 // grep, egrep, fgrep, rg and git grep exit 1 only when nothing matched (their
 // errors exit 2, git 128), and `which` exits 1 only when no name resolves.
-// OpenClaw merges stdout and stderr, so an exit-1 receipt with no output is a
-// completed lookup with an empty answer. Only one lookup qualifies, optionally
-// after one literal `cd DIR &&` (a failed cd prints, so it cannot pass the
-// no-output test). Pipelines, lists, redirections, substitutions and escapes
-// outside quotes stay ordinary failures, as does every other exit code.
+// Models also chain searches (`grep a f | head; echo ===; grep b g`), so a list
+// joined by `;` or `&&` qualifies when every step is a lookup, a literal echo or
+// sed printing a line range, optionally piped into head, tail, cat, wc, sort or
+// uniq, and the last step is a bare lookup. None of the other steps can exit 1,
+// so exit 1 still means a search came up empty. OpenClaw merges stdout and
+// stderr: a single lookup must print nothing, and a list must print no error.
+// One literal `cd DIR &&` may lead. Redirections, substitutions, `||`, background
+// jobs, escapes outside quotes and every other exit code stay ordinary failures.
 const LOOKUP_CD = /^cd[ \t]+(?:'[^'\r\n]*'|"[^"$`\\\r\n]*"|[A-Za-z0-9._/-]+)[ \t]*&&[ \t]*/;
 const LOOKUP_PROGRAM = /^(?:e?grep|fgrep|rg|git[ \t]+grep|which)(?=[ \t]|$)/;
-const LOOKUP_QUOTED = /'[^'\r\n]*'|"(?:[^"\\$`\r\n]|\\[^\r\n])*"/g;
+const LOOKUP_COMPANION = /^(?:echo(?=[ \t]|$)|sed[ \t]+-n[ \t]+(['"]?)\d+(?:,\d+)?p\1(?:[ \t]+[^-\s]\S*)+$)/;
+const LOOKUP_SINK = /^(?:cat|sort(?:[ \t]+-[a-z]+)?|uniq(?:[ \t]+-c)?|wc[ \t]+-[lwc]|(?:head|tail)(?:[ \t]+(?:-n[ \t]*)?-?\d+)?)$/;
+const LOOKUP_ERROR = /^(?:sh|bash|dash|e?grep|fgrep|rg|sed|git|which|head|tail|cat|wc|sort|uniq|fatal)(?:: \d+)?: |No such file or directory|Permission denied/m;
+
+// Splits a command into steps at `;` and `&&` and each step into stages at `|`,
+// outside quotes. Null for anything else the shell would interpret.
+function lookupSteps(command) {
+  const steps = [[]];
+  let stage = '';
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (c === "'") {
+      const end = command.indexOf("'", i + 1);
+      if (end < 0 || /[\r\n]/.test(command.slice(i, end))) return null;
+      stage += command.slice(i, end + 1);
+      i = end;
+    } else if (c === '"') {
+      let j = i + 1;
+      for (; j < command.length && command[j] !== '"'; j++) {
+        if (/[$`\r\n]/.test(command[j]) || (command[j] === '\\' && /^[\r\n]?$/.test(command[j + 1] ?? ''))) return null;
+        if (command[j] === '\\') j++;
+      }
+      if (j >= command.length) return null;
+      stage += command.slice(i, j + 1);
+      i = j;
+    } else if (c === ';' || (c === '&' && command[i + 1] === '&')) {
+      steps.at(-1).push(stage.trim());
+      steps.push([]);
+      stage = '';
+      if (c === '&') i++;
+    } else if (c === '|' && command[i + 1] !== '|') {
+      steps.at(-1).push(stage.trim());
+      stage = '';
+    } else if (/[|&<>()`$\\#\r\n]/.test(c)) {
+      return null;
+    } else {
+      stage += c;
+    }
+  }
+  steps.at(-1).push(stage.trim());
+  return steps.every(stages => stages.every(Boolean)) ? steps : null;
+}
+
 export function lookupFoundNothing(command, result) {
   if (typeof command !== 'string' || command.length > 4096) return false;
-  const lookup = command.trim().replace(LOOKUP_CD, '');
-  if (!LOOKUP_PROGRAM.test(lookup) || /[|&;<>()`$\\'"\r\n]/.test(lookup.replace(LOOKUP_QUOTED, ''))) return false;
+  const steps = lookupSteps(command.trim().replace(LOOKUP_CD, ''));
+  if (!steps || !steps.every(([first, ...sinks]) =>
+    (LOOKUP_PROGRAM.test(first) || LOOKUP_COMPANION.test(first)) && sinks.every(sink => LOOKUP_SINK.test(sink)))) return false;
+  const last = steps.at(-1);
+  if (last.length !== 1 || !LOOKUP_PROGRAM.test(last[0])) return false;
   const details = result?.details;
   if (!details || typeof details !== 'object' || details.status !== 'completed' || details.exitCode !== 1 ||
       Object.hasOwn(details, 'sessionId')) return false;
-  const output = typeof details.aggregated === 'string' ? details.aggregated
+  const output = (typeof details.aggregated === 'string' ? details.aggregated
     : (Array.isArray(result.content) ? result.content : [])
-      .map(block => block?.type === 'text' && typeof block.text === 'string' ? block.text : '').join('');
-  // OpenClaw appends this exit note to every non-zero completion.
-  return output.replace(/\(Command exited with code 1\)/, '').trim() === '';
+      .map(block => block?.type === 'text' && typeof block.text === 'string' ? block.text : '').join(''))
+    // OpenClaw appends this exit note to every non-zero completion.
+    .replace(/\(Command exited with code 1\)/, '').trim();
+  return steps.length === 1 ? output === '' : !LOOKUP_ERROR.test(output);
 }
 
 // This deliberately does not classify general shell commands as read-only.

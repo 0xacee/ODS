@@ -412,20 +412,27 @@ confusing its training cutoff with the actual date.
 
 ## Empty lookups are answers
 
-The run-progress budget charges every non-zero exit as a failure. One shape is
-exempt: a single `grep`, `egrep`, `fgrep`, `rg`, `git grep` or `which`, optionally
-after one literal `cd DIR &&`, that completed with exit 1 and printed nothing
-(`lookupFoundNothing`). Those programs exit 1 only when nothing matched or
-resolved, and OpenClaw merges stdout and stderr, so no output means no error. The
-receipt must be bound to the exact pending call (run, transport, session and the
+The run-progress budget charges every non-zero exit as a failure. Searches that
+came up empty are exempt (`lookupFoundNothing`): a `grep`, `egrep`, `fgrep`, `rg`,
+`git grep` or `which` that completed with exit 1, optionally after one literal
+`cd DIR &&`. Those programs exit 1 only when nothing matched or resolved. A single
+lookup must have printed nothing; OpenClaw merges stdout and stderr, so no output
+means no error. Models also chain searches (`grep a f | head; echo ===; grep b g`),
+so a list joined by `;` or `&&` qualifies when every step is a lookup, a literal
+`echo` or `sed -n 'N,Mp'`, optionally piped into `head`, `tail`, `cat`, `wc`,
+`sort` or `uniq`, the last step is a bare lookup, and the output holds no error
+line. None of those other steps can exit 1, so exit 1 still means a search found
+nothing. The receipt must be bound to the exact pending call (run, transport, session and the
 executed, wrapped parameters), and the model's own command is read from that
 call's record. Such a lookup is recorded as discovery: it is not charged and it
 resets nothing, up to `FREE_EMPTY_LOOKUPS_PER_RUN` per run, after which it is an
 ordinary failure again. Discovery never resets the round fuse, so a run that only
-searches still stops after `roundsWithoutProgress` rounds. Pipelines, lists,
-redirections, substitutions, any output and every other exit code stay failures.
-On the RTX Spark (Elf of Doom), empty greps counted as failures filled the
-12-failure total and stopped a run with 21 good edits behind it.
+searches still stops after `roundsWithoutProgress` rounds. Any other program in
+the command, `||`, background jobs, redirections, substitutions, escapes outside
+quotes, an error in the output and every other exit code stay failures. On the
+RTX Spark (Elf of Doom), empty greps counted as failures filled the 12-failure
+total and stopped a run with 21 good edits behind it; in the next run four of the
+five empty searches were chains like the one above.
 `tests/empty_lookup_progress.test.mjs` replays the hook sequence for both the
 direct and the Tool Search transport.
 

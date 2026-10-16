@@ -71,6 +71,25 @@ for (const wrapped of [false, true]) {
     assert.equal(run.exhausted(), false);
   });
 
+  test(`${transport}: chained searches whose last search came up empty are answers too`, () => {
+    const run = harness({wrapped});
+    for (let i = 0; i < RUN_PROGRESS_LIMITS.totalFailures; i++) {
+      run.edit(i);
+      run.grep(`cd Playground/elf-of-doom && sed -n '860,900p' ui.js; echo ===; grep -n "function showScreen${i}" -A 15 ui.js`,
+        completed(1, '  updateHud();\n==='));
+    }
+    assert.equal(run.exhausted(), false);
+  });
+
+  test(`${transport}: a chain that printed an error is charged`, () => {
+    const run = harness({wrapped});
+    for (let i = 0; i < RUN_PROGRESS_LIMITS.consecutiveFailures; i++) {
+      assert.equal(run.exhausted(), false);
+      run.grep(`grep -n "x${i}" missing.js; grep -n "y" ui.js`, completed(1, 'grep: missing.js: No such file or directory'));
+    }
+    assert.equal(run.exhausted(), true);
+  });
+
   test(`${transport}: the empty-search allowance is bounded per run`, () => {
     const run = harness({wrapped});
     for (let i = 0; i < FREE_EMPTY_LOOKUPS_PER_RUN; i++) { run.edit(i); run.grep(`grep -rn "name${i}" Playground/elf-of-doom`); }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRunProgressBudget, failedToolOutcome, isLiteralEcho, lookupFoundNothing, RUN_PROGRESS_LIMITS} from '../plugin/run-progress-budget.mjs';
 
-test('only a single lookup that completed with exit 1 and no output found nothing', () => {
+test('a single lookup found nothing only when it completed with exit 1 and printed nothing', () => {
   const receipt = (exitCode, text = '', details = {}) => ({content:[{type:'text', text:`${text}\n\n(Command exited with code ${exitCode})`}],
     details:{status:'completed', exitCode, durationMs:3, ...details}});
   const empty = receipt(1);
@@ -29,6 +29,36 @@ test('only a single lookup that completed with exit 1 and no output found nothin
   ]) assert.equal(lookupFoundNothing(search, result), false, JSON.stringify(result));
   assert.equal(lookupFoundNothing(search, {details:{status:'completed', exitCode:1, aggregated:''}}), true);
   assert.equal(lookupFoundNothing('grep '.padEnd(4100, 'x'), empty), false);
+});
+
+test('a chain of read-only searches whose last search came up empty found nothing', () => {
+  const receipt = (text, exitCode = 1) => ({content:[{type:'text', text:`${text}\n\n(Command exited with code ${exitCode})`}],
+    details:{status:'completed', exitCode, durationMs:5}});
+  // The chains Portal's agent ran on the RTX Spark, with the output it got.
+  const chains = [
+    ['cd Playground/elf-of-doom && grep -n "shadowBlob\\|vShade\\|shadowBlur" chars.js legacy.js | head -40; echo "=== counts"; grep -c "shadowBlob" chars.js legacy.js',
+      'chars.js:312:  g.shadowColor = "#7fd0ff"; g.shadowBlur = 10;\n=== counts\nchars.js:0\nlegacy.js:0'],
+    ['cd Playground/elf-of-doom && grep -rn "hitSet\\|new Set(" *.js | cat; echo ---; grep -n "function startShot" -A 30 ui.js',
+      'engine.js:244:  G.projectiles.push({ x: P.x, fromEnemy: false });\n---'],
+    ['cd Playground/elf-of-doom && grep -n "function burst" -A 12 ui.js; grep -n "function popText" -A 6 ui.js; grep -n "function supplyTick" -A 2 ui.js', ''],
+    ["cd Playground/elf-of-doom && sed -n '860,900p' ui.js; echo ===; grep -n \"function showScreen\" -A 15 ui.js",
+      '  updateHud();\n  requestAnimationFrame(frame);\n==='],
+    ['grep -c x a.js | sort | uniq -c && rg -n "y" src | tail -n 5 && which deno', '      1 a.js:2\nsrc/main.js:4:y'],
+  ];
+  for (const [command, output] of chains) assert.equal(lookupFoundNothing(command, receipt(output)), true, command);
+  const [command, output] = chains[0];
+  for (const result of [receipt(output, 0), receipt(output, 2), receipt(`${output}\ngrep: legacy.js: No such file or directory`),
+    receipt(`sh: 1: cd: can't cd to Playground/elf-of-doom\n${output}`),
+    {...receipt(output), details:{status:'completed', exitCode:1, sessionId:'s-1'}}]) {
+    assert.equal(lookupFoundNothing(command, result), false, JSON.stringify(result));
+  }
+  for (const chain of [
+    'grep a f; echo ===', 'grep a f; grep b f | head', 'grep a f; rm f; grep b f', 'grep a f | sh; grep b f',
+    'grep a f | tee out; grep b f', "sed -i '1d' f; grep b f", "sed -n '1p' -i f; grep b f", "sed -n '1w out' f; grep b f",
+    'grep a f;; grep b f', 'grep a f; grep b f;', 'grep a f |& cat; grep b f', 'grep a f & grep b f', 'grep a f || grep b f',
+    'echo "$(rm x)"; grep b f', 'grep a f; cd x && grep b f', 'cat f; grep b f', 'grep a f | xargs rm; grep b f',
+    'grep a f # ; grep b f', 'grep "a\\\nb" f; grep b f', "grep 'a\nb' f; grep b f", 'grep "a f; grep b f',
+  ]) assert.equal(lookupFoundNothing(chain, receipt('')), false, chain);
 });
 
 test('outer and nested failure receipts do not masquerade as successful progress', () => {
