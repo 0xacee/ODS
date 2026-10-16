@@ -8804,20 +8804,35 @@ class TestModelDeleteSafety:
         assert not list(models.glob(".ods-model-delete-*"))
 
     @pytest.mark.parametrize("cleanup_fails", [False, True])
-    @pytest.mark.parametrize("status_failure", ["helper", "invalid_status_unlink", "status_list", "status_null"])
+    @pytest.mark.parametrize("status_failure", ["write", "replace", "invalid_status_unlink", "status_list", "status_null"])
     def test_split_status_failure_reports_committed_deletion(
         self, tmp_path, monkeypatch, cleanup_fails, status_failure,
     ):
         models, parts, status = self._split_fixture(tmp_path, monkeypatch)
+        original_status = status.read_bytes()
         original_unlink = Path.unlink
         if status_failure == "invalid_status_unlink":
             status.write_text("{invalid status", encoding="utf-8")
         elif status_failure in {"status_list", "status_null"}:
             status.write_text("[]" if status_failure == "status_list" else "null", encoding="utf-8")
+        elif status_failure == "write":
+            original_write = Path.write_text
+
+            def fail_status_write(path, *args, **kwargs):
+                if path.parent == status.parent and path.name.startswith(status.name + "."):
+                    raise PermissionError("status temporary file cannot be written")
+                return original_write(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "write_text", fail_status_write)
         else:
-            def fail_status_write(*_args, **_kwargs):
-                raise OSError("status writer failed")
-            monkeypatch.setattr(_mod, "_write_model_status", fail_status_write)
+            original_replace = os.replace
+
+            def fail_status_replace(source, destination, *args, **kwargs):
+                if Path(destination) == status:
+                    raise PermissionError("status destination is busy")
+                return original_replace(source, destination, *args, **kwargs)
+
+            monkeypatch.setattr(os, "replace", fail_status_replace)
 
         def fail_cleanup_or_status(path, *args, **kwargs):
             if status_failure == "invalid_status_unlink" and path == status:
@@ -8834,6 +8849,9 @@ class TestModelDeleteSafety:
         assert response["code"] == "model_delete_status_update_failed"
         assert response["deletionCommitted"] is True
         assert not any(part.exists() for part in parts)
+        if status_failure in {"write", "replace"}:
+            assert status.read_bytes() == original_status
+            assert not list(status.parent.glob(status.name + ".*.tmp"))
         if cleanup_fails:
             assert response["cleanupPending"] is True
             assert response["recoveryDirectory"] in response["error"]
@@ -8842,6 +8860,40 @@ class TestModelDeleteSafety:
         else:
             assert "recoveryDirectory" not in response
             assert not list(models.glob(".ods-model-delete-*"))
+
+    @pytest.mark.skipif(os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+                        reason="requires POSIX directory permissions enforced for a nonroot user")
+    def test_split_status_failure_uses_real_filesystem_permissions(self, tmp_path, monkeypatch):
+        models, parts, status = self._split_fixture(tmp_path, monkeypatch)
+        original_status = status.read_bytes()
+        original_mode = stat.S_IMODE(status.parent.stat().st_mode)
+        # The model store remains writable; only status publication is denied.
+        status.parent.chmod(0o555)
+        try:
+            handler = _FakeHandler(json.dumps({"gguf_file": parts[0].name}).encode())
+            _mod.AgentHandler._handle_model_delete(handler)
+        finally:
+            status.parent.chmod(original_mode)
+        assert handler.response_code == 500
+        response = handler.parse_response()
+        assert response["code"] == "model_delete_status_update_failed"
+        assert response["deletionCommitted"] is True
+        assert not any(part.exists() for part in parts)
+        assert status.read_bytes() == original_status
+        assert not list(models.glob(".ods-model-delete-*"))
+
+    def test_status_writer_remains_best_effort_for_other_callers(self, tmp_path, monkeypatch):
+        status = tmp_path / "model-download-status.json"
+        status.write_text('{"status":"complete"}', encoding="utf-8")
+        original_status = status.read_bytes()
+
+        def fail_replace(*_args, **_kwargs):
+            raise PermissionError("status destination is busy")
+
+        monkeypatch.setattr(os, "replace", fail_replace)
+        _mod._write_model_status(status, "idle", "", 0, 0)
+        assert status.read_bytes() == original_status
+        assert not list(tmp_path.glob(status.name + ".*.tmp"))
 
     def test_split_restore_does_not_overwrite_recreated_name(self, tmp_path, monkeypatch):
         models, parts, _status = self._split_fixture(tmp_path, monkeypatch)

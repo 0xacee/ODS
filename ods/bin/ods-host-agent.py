@@ -15614,7 +15614,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                             raise ValueError("Model download status must be an object")
                         status_model = _download_status_model_token(status_data.get("model"))
                         if status_model in deleted_names:
-                            _write_model_status(status_path, "idle", "", 0, 0)
+                            _write_model_status(status_path, "idle", "", 0, 0, strict=True)
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
                 # Retirement already committed. A metadata error must not hide
                 # that fact or the location of bytes still awaiting cleanup.
@@ -20722,8 +20722,9 @@ def _recreate_llama_server(env: dict, override_image: str = ""):
     logger.info("llama-server container created successfully")
 
 
-def _write_model_status(path: Path, status: str, model: str, downloaded: int, total: int, error: str = ""):
-    """Write model download status JSON atomically."""
+def _write_model_status(path: Path, status: str, model: str, downloaded: int, total: int, error: str = "",
+                        *, strict: bool = False):
+    """Write status atomically; strict callers must report publication failure."""
     data = {
         "status": status,
         "model": model,
@@ -20747,6 +20748,8 @@ def _write_model_status(path: Path, status: str, model: str, downloaded: int, to
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        if strict:
+            raise
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
