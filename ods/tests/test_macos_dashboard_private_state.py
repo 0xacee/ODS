@@ -533,7 +533,7 @@ class PublicCommands(unittest.TestCase):
         self.assertNotEqual(restart.returncode, 0)
         self.assertIn("image-missing", restart.stderr)
         self.assertEqual(json.loads(fixture.read_text())["builds"], 0)
-        for operation in ("start", "restart", "update"):
+        for operation in ("start", "restart", "update", "install"):
             if operation == "update":
                 data = json.loads(fixture.read_text())
                 data["image"] = False
@@ -543,7 +543,8 @@ class PublicCommands(unittest.TestCase):
         data = json.loads(fixture.read_text())
         self.assertEqual(data["builds"], 2)
         self.assertEqual(data["launches"], [["up", "-d"], ["up", "-d", "--force-recreate", "--no-build", "--pull", "never"],
-                                            ["up", "-d", "--force-recreate"]])
+                                            ["up", "-d", "--force-recreate"],
+                                            ["up", "-d", "--remove-orphans", "--no-build", "--pull", "never"]])
 
     def test_selected_dashboard_prepares_dependency_and_keeps_explicit_target(self):
         fixture = self.root / "docker-fixture.json"
