@@ -142,6 +142,16 @@ function unchangedPaintNote(result) {
   }
   return '';
 }
+// A passed paint step whose box is almost all one color: a cleared canvas with a
+// few specks (dust, a cursor) shows two colors and passes, yet looks blank to a
+// player. Informational, never a failure: menus and dark scenes can be mostly
+// one color too.
+const NEARLY_ONE_COLOR_PERCENT = 95;
+function nearlyOneColorNote(result) {
+  const step = (result.steps ?? []).find(step => step.action === 'assert-painted' && step.status === 'passed' &&
+    step.paint.dominant.percent >= NEARLY_ONE_COLOR_PERCENT);
+  return step ? ` Note: step ${step.index+1} (assert-painted) passed, but ${step.paint.dominant.percent}% of that element's box is one color (${step.paint.dominant.hex}). If it should show a scene, sprites or a map, it is probably still blank apart from small details: check what the render path draws last over the frame, and assert visible state with assert-text.` : '';
+}
 function transitionCoverageFeedback(request, result) {
   if (result.errorCode === 'request_blocked' || result.blockedRequests?.some(kind => kind === 'network' || kind === 'navigation')) return 'The inspection guard blocked a page operation. Check project requests and navigation; keep assets relative to the published output and navigation within that snapshot; root-absolute asset paths such as /_next/ may leave its site prefix. Inspect the project build configuration, rebuild and republish if needed. Do not broaden network access, rewrite host routes, or change permissions to bypass this boundary. Requested behavior remains unverified; this result does not establish that the inspection runtime is unavailable.';
   if (result.errorCode === 'unsupported_capability') return paintPlan(request) ? (pressPlan(request)
@@ -479,7 +489,7 @@ export function createWorkspacePreviewInspectTool({request,transport='unix',tran
         const summary=pageErrors
           ? `Preview inspection ${result.status==='passed'?'steps passed, but':'failed, and'} ${pageErrorFeedback(pageErrors)}`
           : requirement ? transitionIncompleteFeedback(normalized, requirement)
-            : `Preview inspection ${result.status}. ${transitionCoverageFeedback(normalized, result)}${unchangedPaintNote(result)}`;
+            : `Preview inspection ${result.status}. ${transitionCoverageFeedback(normalized, result)}${unchangedPaintNote(result)}${nearlyOneColorNote(result)}`;
         // The palette is stated once, as its fixed line; the evidence copy omits
         // it and the load-time control names (used only for locator feedback).
         const {renderedColors,controls,...rest}=result;

@@ -247,6 +247,20 @@ test('an unchanged fingerprint around an interaction is an informational note, n
   }
 });
 
+test('a pass that is nearly one color gets an informational note, never a failure',async()=>{
+  const nearlyBlank={width:200,height:150,distinctColors:5,dominant:{hex:'#2a1712',percent:97},
+    colors:[{name:'brown',hex:'#2a1712',percent:97},{name:'orange',hex:'#c06030',percent:2}],fingerprint:'0011223344556677'};
+  const plan=params(press('Space'),painted());
+  let output=await execute(plan,receipt(normalize(plan),{1:nearlyBlank}));
+  assert.equal(output.isError,undefined);
+  assert.equal(output.details.status,'passed');
+  assert.match(output.content[0].text,/Note: step 2 \(assert-painted\) passed, but 97% of that element's box is one color \(#2a1712\)/);
+  output=await execute(plan,receipt(normalize(plan),{1:{...nearlyBlank,dominant:{hex:'#2a1712',percent:94}}}));
+  assert.doesNotMatch(output.content[0].text,/of that element's box is one color/);
+  output=await execute(plan,receipt(normalize(plan)));
+  assert.doesNotMatch(output.content[0].text,/of that element's box is one color/);
+});
+
 test('evidence policy: assert-painted is a postcondition and a paint-only plan stays read-only',()=>{
   const bound=plan=>boundPreviewBehavior(plan,{details:receipt(normalize(plan))},preview,{requiresInteraction:true});
   for(const plan of [params(press(),painted()),params(press('Space'),press(),painted()),params(click('#start'),painted())])
