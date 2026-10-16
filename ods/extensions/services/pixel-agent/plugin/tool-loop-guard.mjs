@@ -11718,9 +11718,9 @@ export function createToolLoopGuard({
       state.progressBudget.observeResult({callId: toolCallId, tool: message.toolName,
         failed: true, lane:progressLane});
     }
-    // Transcript copy only: OpenClaw applies tool_result_persist to the saved
-    // session, not to the live context of this run. The finalization
-    // instruction therefore travels as a before_tool_call refusal.
+    // The ODS-repaired Pixel runtime projects persisted feedback into the next
+    // provider request (openclaw-compaction-budget.json). Other SDK agents keep
+    // storage-only semantics. before_tool_call still enforces the stop itself.
     if (state?.progressBudget.exhausted) {
       return {message: {...message, content: [{type: 'text', text: RUN_PROGRESS_STOP_REASON}]}};
     }
