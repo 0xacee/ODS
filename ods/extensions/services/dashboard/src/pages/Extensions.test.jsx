@@ -48,6 +48,34 @@ const installFetchMock = (catalogFixture, templates = [], webuiSelection = { ena
   return fetchMock
 }
 
+it.each([false, true])('shows LiteLLM as an API service without an unsupported Admin UI launch (compact=%s)', async compact => {
+  installFetchMock({
+    agent_available: true,
+    extensions: [
+      { id: 'litellm', name: 'LiteLLM (API Gateway)', source: 'core', status: 'enabled', port: 4000, ui_path: '/ui/', features: [baseFeature] },
+      { id: 'it-tools', name: 'IT-Tools', source: 'user', status: 'enabled', port: 8080, external_port: 8089, ui_path: '/', features: [baseFeature] },
+    ],
+    summary: baseSummary({ total: 2, installed: 2 }),
+  })
+  render(<Extensions compact={compact} />)
+  const gateway = within((await screen.findByText('LiteLLM (API Gateway)')).closest('article'))
+  expect(gateway.getByText('API service')).toBeVisible()
+  expect(gateway.queryByRole('link')).toBeNull()
+  expect(gateway.getByRole('button', { name: 'Logs' })).toBeEnabled()
+
+  // Actual web applications retain their published launch port.
+  const webApp = within(screen.getByText('IT-Tools').closest('article'))
+  expect(webApp.getByRole('link', { name: ':8089' })).toHaveAttribute('href', 'http://localhost:8089')
+  expect(webApp.getByRole('button', { name: 'Logs' })).toBeEnabled()
+
+  fireEvent.click(gateway.getByRole('button', { name: 'Details for LiteLLM (API Gateway)' }))
+  const details = within(screen.getByRole('dialog', { name: 'LiteLLM (API Gateway)' }))
+  expect(details.getByText('4000')).toBeVisible()
+  expect(details.queryByRole('link')).toBeNull()
+  fireEvent.click(details.getByRole('button', { name: 'Close extension details' }))
+  expect(gateway.getByRole('button', { name: 'Logs' })).toBeEnabled()
+})
+
 it.each([false, true])('an initial catalog timeout is unavailable, not an empty result, and Retry recovers (compact=%s)', async compact => {
   const catalog = {agent_available: true, extensions: [{id: 'known', name: 'Known extension', status: 'not_installed', features: [baseFeature]}], summary: baseSummary()}
   const fetchMock = installFetchMock(catalog)
