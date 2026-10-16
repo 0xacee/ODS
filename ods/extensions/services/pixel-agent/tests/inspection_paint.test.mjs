@@ -3,8 +3,8 @@ import {test} from 'node:test';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createWorkspacePreviewInspectTool,normalizeWorkspacePreviewInspectionParams as normalize,validateWorkspacePreviewInspectionReceipt as validate,
-  inspectionPlanHash,INSPECTION_KIND,INSPECTION_SCOPE,SELECT_INSPECTION_SCOPE,FILL_INSPECTION_SCOPE,DOWNLOAD_INSPECTION_SCOPE,PRESS_INSPECTION_SCOPE,
-  PAINT_INSPECTION_SCOPE,MAX_PAINT_SIDE,MAX_PAINT_COLORS,MAX_PAINT_DISTINCT_COLORS} from '../plugin/workspace-preview-inspect.mjs';
+  inspectionPlanHash,INSPECTION_KIND,INSPECTION_SCOPE,STEP_INSPECTION_SCOPE,SELECT_OPTION_INSPECTION_SCOPE,FILL_INSPECTION_SCOPE,PRESS_FILL_INSPECTION_SCOPE,
+  DOWNLOAD_INSPECTION_SCOPE,PRESS_INSPECTION_SCOPE,PAINT_INSPECTION_SCOPE,MAX_PAINT_SIDE,MAX_PAINT_COLORS,MAX_PAINT_DISTINCT_COLORS} from '../plugin/workspace-preview-inspect.mjs';
 import {attemptedPreviewBehavior,boundPreviewBehavior,boundRenderedPreviewInspection,boundStaticPreviewInspection} from '../plugin/preview-interaction-assurance.mjs';
 
 const preview={siteId:'site-'+'a'.repeat(24),sha256:'a'.repeat(64)};
@@ -17,7 +17,10 @@ const state=extra=>({count:1,visible:true,display:'block',visibility:'visible',o
 const scene=(fingerprint='0123456789abcdef')=>({width:200,height:150,distinctColors:12,dominant:{hex:'#101820',percent:81},
   colors:[{name:'black',hex:'#101820',percent:85},{name:'red',hex:'#e53935',percent:9},{name:'blue',hex:'#1e88e5',percent:4}],fingerprint});
 const uniform={width:200,height:150,distinctColors:1,dominant:{hex:'#000000',percent:100},colors:[{name:'black',hex:'#000000',percent:100}],fingerprint:'fedcba9876543210'};
-const scopeOf=request=>INSPECTION_SCOPE+(request.steps.some(s=>s.action==='press')?PRESS_INSPECTION_SCOPE:'')+(request.steps.some(s=>s.action==='assert-painted')?PAINT_INSPECTION_SCOPE:'');
+const scopeOf=request=>{
+  const press=request.steps.some(s=>s.action==='press'),paint=request.steps.some(s=>s.action==='assert-painted');
+  return (press||paint?STEP_INSPECTION_SCOPE:INSPECTION_SCOPE)+(press?PRESS_INSPECTION_SCOPE:'')+(paint?PAINT_INSPECTION_SCOPE:'');
+};
 // paints: {stepIndex: paint} for assert-painted steps; scene() otherwise.
 function receipt(request,paints={}) {
   return {schemaVersion:1,kind:INSPECTION_KIND,status:'passed',siteId:request.siteId,sha256:request.sha256,planSha256:inspectionPlanHash(request),viewport:request.viewport,
@@ -76,7 +79,7 @@ test('the plugin mirrors the Python scope, bounds, validation and plan hash',()=
   const samples=[params(painted()),params(press(),painted(),text('1')),params(painted(),{...painted(),value:'x'}),
     params({action:'select-option',locator:{selector:'#s'},value:'a'},{action:'fill',locator:{selector:'#f'},value:'x'},press(),painted(),
       {action:'download',locator:{selector:'#d'},path:'a.pdf',expectedBytes:1,expectedSha256:'b'.repeat(64)}),
-    params({...painted(),key:'Space'}),params(text('0'))];
+    params({...painted(),key:'Space'}),params(text('0')),params({action:'fill',locator:{selector:'#f'},value:'x'},painted())];
   const py=python(samples.map(sample=>({schemaVersion:1,action:'inspect',...sample})));
   assert.equal(py.scope,PAINT_INSPECTION_SCOPE);
   assert.equal(py.capability,'element-paint-v1');
@@ -89,8 +92,13 @@ test('the plugin mirrors the Python scope, bounds, validation and plan hash',()=
     if(request) validate({schemaVersion:1,kind:INSPECTION_KIND,status:'failed',errorCode:'unavailable',siteId:request.siteId,sha256:request.sha256,
       planSha256:py.requests[i].hash,scope:py.requests[i].scope},request);
   });
-  assert.equal(py.requests[3].scope,SELECT_INSPECTION_SCOPE+FILL_INSPECTION_SCOPE+PRESS_INSPECTION_SCOPE+PAINT_INSPECTION_SCOPE+DOWNLOAD_INSPECTION_SCOPE);
-  assert.equal(py.requests[5].scope.includes(PAINT_INSPECTION_SCOPE),false);
+  // A press or paint plan's base never denies its presses or paint checks,
+  // and beside presses the fill sentence speaks only of fill.
+  assert.equal(py.requests[3].scope,STEP_INSPECTION_SCOPE+SELECT_OPTION_INSPECTION_SCOPE+PRESS_FILL_INSPECTION_SCOPE+PRESS_INSPECTION_SCOPE+PAINT_INSPECTION_SCOPE+DOWNLOAD_INSPECTION_SCOPE);
+  assert.doesNotMatch(py.requests[3].scope,/not pixel paint|click dispatches were tested|does not test keyboard behavior/);
+  assert.equal(py.requests[0].scope,STEP_INSPECTION_SCOPE+PAINT_INSPECTION_SCOPE);
+  assert.equal(py.requests[6].scope,STEP_INSPECTION_SCOPE+FILL_INSPECTION_SCOPE+PAINT_INSPECTION_SCOPE);
+  assert.equal(py.requests[5].scope,INSPECTION_SCOPE,'plans older capsules run keep their exact scope');
 });
 
 test('capsule paint summaries validate as receipts, and only two or more colors pass',()=>{
@@ -116,6 +124,7 @@ test('the schema and description offer assert-painted without claiming image rec
   assert.match(description,/One color fails as uniform_paint/);
   assert.match(description,/never an image, and it is not image recognition/);
   assert.match(description,/Visibility assertions test CSS layout visibility, not pixel paint/);
+  assert.match(description,/after the presses or start click that begin it \(it can be that click's assertion\)/);
 });
 
 test('a paint receipt binds bounded aggregates and never a forged pass',()=>{
@@ -130,7 +139,7 @@ test('a paint receipt binds bounded aggregates and never a forged pass',()=>{
     r=>paint(r).dominant.name='black',r=>paint(r).colors=[],r=>paint(r).colors.push(...scene().colors),r=>paint(r).colors[0].name='ultraviolet',
     r=>paint(r).colors[1].percent=90,r=>paint(r).colors[2].percent=0,r=>{paint(r).colors[0].percent=99;paint(r).colors[1].percent=9;paint(r).colors[2].percent=4;},
     r=>delete r.steps[0].paint,r=>r.steps[0].paint=uniform,r=>r.steps[0].after=state(),r=>r.steps[0].before.visible=false,r=>r.steps[0].stable=false,
-    r=>r.steps[1].paint=scene(),r=>r.scope=INSPECTION_SCOPE,
+    r=>r.steps[1].paint=scene(),r=>r.scope=INSPECTION_SCOPE,r=>r.scope=INSPECTION_SCOPE+PAINT_INSPECTION_SCOPE,
     r=>r.scope='Only the listed CSS layout visibility assertions and click dispatches were tested; not pixel paint, occlusion, clipping, a full accessibility audit, or overall functionality.']) {
     const bad=structuredClone(good);change(bad);assert.throws(()=>validate(bad,request),undefined,change.toString());
   }
@@ -166,15 +175,32 @@ test('uniform paint feedback names the captured color and quotes no page text',a
   assert.match(message,/Step 2 \(assert-painted\) captured one color only \(#000000\)/);
   assert.match(message,/a blank, black or single-color render/);
   assert.match(message,/fix the rendering, republish and inspect the new snapshot/);
+  // The GPU-less inspector may not render WebGL: never "repair" a working page for it.
+  assert.match(message,/may not render WebGL: when the element draws with WebGL, keep the page unchanged for that limitation and report rendering as unverified/);
   assert.match(message,/Rendering remains unverified/);
   assert.doesNotMatch(message,/canary/);
 });
 
-test('an element outside the viewport asks for the drawing element and a larger viewport',async()=>{
+test('a capture of nothing names each cause: viewport, a too-thin element or a lost match',async()=>{
   const plan=params(painted()),output=await execute(plan,failedPaint(normalize(plan),'not_in_viewport'));
   assert.equal(output.isError,true);
-  assert.match(output.content[0].text,/less than 8x8 CSS pixels of the element's content box, inside any rounded corners, lay within the 800x600 viewport/);
-  assert.match(output.content[0].text,/the inspector does not scroll/);
+  const message=output.content[0].text;
+  assert.match(message,/less than 8x8 CSS pixels of the element's content box, inside any rounded corners, lay within the 800x600 viewport/);
+  assert.match(message,/too thin for its length to keep a captured pixel inside it once its longer side is downscaled to 256 pixels/);
+  assert.match(message,/stopped being one visible match while the paint was sampled/);
+  assert.match(message,/that stays visible after the listed actions/);
+  assert.match(message,/the inspector does not scroll/);
+});
+
+test('a missing assert-painted target after a click is not blamed on the locator alone',async()=>{
+  // The start handler that should create the canvas may be broken.
+  const plan=params(click('#start'),painted()),request=normalize(plan),value=receipt(request);
+  value.status='failed';value.steps[1]={index:1,...request.steps[1],before:{count:0},stable:true,status:'failed',errorCode:'no_match'};
+  assert.equal(validate(value,request),value);
+  const message=(await execute(plan,value)).content[0].text;
+  assert.match(message,/An earlier click passed, but the requested result remains unverified/);
+  assert.match(message,/did not create or render the expected state/);
+  assert.doesNotMatch(message,/Do not change the site only to satisfy a locator/);
 });
 
 test('an image without paint support asks for an inspector update, not a site change',async()=>{

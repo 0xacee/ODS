@@ -36,9 +36,18 @@ from preview_inspection_protocol import (
     validate_bundle,
 )
 
+# document.activeElement stops at a shadow host, such as a web component whose
+# inner field takes focus through delegatesFocus. Open shadow roots name the
+# focused element inside; a closed root hides it from the isolated world too.
+DEEP_FOCUS = r"""  const focused = () => {
+    let e = document.activeElement;
+    while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement;
+    return e;
+  };
+"""
+
 # Runs in a Chromium isolated world, not the site's mutable JS global realm.
-OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill, focusState, paintBox) {
-  const element = this, style = getComputedStyle(element);
+OBSERVE_ELEMENT = "function(includeText, selectValue, fillValue, performFill, focusState, paintBox) {\n" + DEEP_FOCUS + r"""  const element = this, style = getComputedStyle(element);
   const rects = [...element.getClientRects()].filter(r => r.width > 0 && r.height > 0);
   return {count:1, visible:element.checkVisibility({checkOpacity:true,checkVisibilityCSS:true,contentVisibilityAuto:true}) && rects.length > 0,
     display:style.display, visibility:style.visibility, opacity:style.opacity,
@@ -93,7 +102,9 @@ OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill,
     ...(focusState ? (() => {
       // Press never types into text entry: fill, with its sensitive-field
       // denylist, stays the only text path. A focused nested frame's own
-      // focused element is not observable here, so it is refused the same way.
+      // focused element is not observable here, so it is refused the same way;
+      // so is focus inside a closed shadow root, which the capsule asks CDP
+      // about (FOCUSED_ELEMENT).
       const keyOnly = ['button','checkbox','image','radio','range','reset','submit'];
       const editable = e => Boolean(e) && (e.isContentEditable || document.designMode === 'on' ||
         e instanceof HTMLTextAreaElement || e instanceof HTMLSelectElement ||
@@ -103,10 +114,10 @@ OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill,
       // 'release': as a pointer press on the target would, take focus from
       // another element (a button an earlier step clicked), so the keys reach
       // the target or, when it cannot take focus, the document body.
-      const held = document.activeElement;
+      const held = focused();
       if (focusState === 'release' && !editable(element) && held && held !== element &&
           held !== document.body && held !== document.documentElement) held.blur();
-      const active = document.activeElement;
+      const active = focused();
       return {focus: {target: editable(element), active: editable(active),
         element: active === element, document: document.hasFocus()}};
     })() : {}),
@@ -128,6 +139,10 @@ OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill,
     ...(includeText ? (() => { const text=Array.from((element.innerText || '').replace(/\s+/g,' ').trim());
       return {text:{actual:text.slice(0,256).join(''),truncated:text.length>256}}; })() : {})};
 }"""
+
+# The element OBSERVE_ELEMENT judges focused, as a remote object, so CDP can
+# say whether it hosts a closed shadow root that hides the real focus.
+FOCUSED_ELEMENT = "function() {\n" + DEEP_FOCUS + "  return focused();\n}"
 
 DIAGNOSTIC = r"""function() {
   let count=0, untilFound=0;
@@ -830,7 +845,11 @@ PAINT_WINDOW_S = 1.5
 
 def paint_clip(box):
     """The capture clip of an element's content box, or None when less than
-    8x8 CSS pixels of it, inside rounded corners, lie in the viewport.
+    8x8 CSS pixels of it, inside rounded corners, lie in the viewport, or when
+    it is too thin for its length to keep a pixel inside the one-pixel inset
+    once its longer side is downscaled to 256 pixels (a fully visible 1000x8
+    bar, for example). paint() also samples nothing once the element stops
+    being one visible match; all three end as not_in_viewport.
 
     The wrapper iframe fills the never-scrolled page from (0, 0), so frame
     coordinates are page coordinates. The clip keeps whole pixels inside the
@@ -1414,14 +1433,33 @@ def run_browser(bundle, playwright_factory=None):
             def paint(locator):
                 # One assert-painted sample of the composited page, preview
                 # frame and anything over the element included; None when the
-                # element is no longer one rendered match or too little of it
-                # is in the viewport.
+                # element is no longer one rendered match or paint_clip finds
+                # nothing to capture.
                 observed = once(locator, paint_box=True)
                 clip = paint_clip(observed["box"]) if observed.get("count") == 1 and observed["visible"] else None
                 if clip is None:
                     return None
                 capture = cdp.send("Page.captureScreenshot", {"format": "png", "clip": clip, "captureBeyondViewport": False})
                 return paint_summary(base64.b64decode(capture["data"], validate=True))
+
+            def closed_focus():
+                # OBSERVE_ELEMENT follows open shadow roots to the focused
+                # element. When that element hosts a closed root, the real
+                # focus is inside it, hidden from the isolated world; CDP
+                # describes closed roots too, so the press can be refused.
+                focused = cdp.send(
+                    "Runtime.callFunctionOn",
+                    {"executionContextId": world, "functionDeclaration": FOCUSED_ELEMENT, "returnByValue": False},
+                )
+                if focused.get("exceptionDetails"):
+                    raise Invalid("inspection failed")
+                if "objectId" not in focused["result"]:
+                    return False
+                try:
+                    node = cdp.send("DOM.describeNode", {"objectId": focused["result"]["objectId"], "pierce": True})["node"]
+                finally:
+                    cdp.send("Runtime.releaseObject", {"objectId": focused["result"]["objectId"]})
+                return any(root.get("shadowRootType") == "closed" for root in node.get("shadowRoots", []))
 
             page.wait_for_timeout(100)
             diagnostics = evaluate(DIAGNOSTIC)
@@ -1577,7 +1615,7 @@ def run_browser(bundle, playwright_factory=None):
                             ).focus(timeout=2000)
                             focus = once(step["locator"], focus_state="observe")["focus"]
                             item["focus"] = {"element": focus["element"], "document": focus["document"]}
-                            if focus["active"]:
+                            if focus["active"] or closed_focus():
                                 item["errorCode"] = "text_field_press_unsupported"
                             elif not focus["document"]:
                                 item["errorCode"] = "focus_failed"

@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createWorkspacePreviewInspectTool,normalizeWorkspacePreviewInspectionParams as normalize,validateWorkspacePreviewInspectionReceipt as validate,
-  inspectionPlanHash,INSPECTION_KIND,INSPECTION_SCOPE,PRESS_INSPECTION_SCOPE,PRESS_KEYS,MAX_PRESS_HOLD_MS} from '../plugin/workspace-preview-inspect.mjs';
+  inspectionPlanHash,INSPECTION_KIND,INSPECTION_SCOPE,STEP_INSPECTION_SCOPE,FILL_INSPECTION_SCOPE,PRESS_FILL_INSPECTION_SCOPE,PRESS_INSPECTION_SCOPE,PRESS_KEYS,MAX_PRESS_HOLD_MS} from '../plugin/workspace-preview-inspect.mjs';
 import {attemptedPreviewBehavior,boundPreviewBehavior,boundRenderedPreviewInspection,boundStaticPreviewInspection,previewBehaviorInstruction} from '../plugin/preview-interaction-assurance.mjs';
 
 const preview={siteId:'site-'+'a'.repeat(24),sha256:'a'.repeat(64)};
@@ -17,7 +17,7 @@ function receipt(request) {
     steps:request.steps.map((s,index)=>({index,...s,stable:true,status:'passed',
       before:s.action==='assert-text'?state({text:{actual:s.expectedText,truncated:false}}):state(),
       ...(s.action==='press'?{focus:{element:true,document:true}}:{}),...(['press','click'].includes(s.action)?{after:state()}:{})})),
-    diagnostics:{renderedHiddenAttributeCount:0,hiddenUntilFoundCount:0},blockedRequests:[],scope:INSPECTION_SCOPE+PRESS_INSPECTION_SCOPE};
+    diagnostics:{renderedHiddenAttributeCount:0,hiddenUntilFoundCount:0},blockedRequests:[],scope:STEP_INSPECTION_SCOPE+PRESS_INSPECTION_SCOPE};
 }
 // The receipt of a plan that stopped at its first press, which failed.
 function failedPress(request,errorCode,{focus,blockedRequests=[]}={}) {
@@ -35,7 +35,8 @@ const execute=async(plan,result)=>createWorkspacePreviewInspectTool({request:asy
 // The capsule protocol in Python decides what the broker accepts and hashes.
 function python(requests) {
   const script='import json,sys\nsys.path.insert(0,sys.argv[1])\nimport preview_inspection_protocol as p\n'+
-    'out={"keys":list(p.PRESS_KEYS),"scope":p.PRESS_SCOPE,"base":p.SCOPE,"hold":p.PRESS_HOLD_MS,"max":p.MAX_PRESS_HOLD_MS,"requests":[]}\n'+
+    'out={"keys":list(p.PRESS_KEYS),"scope":p.PRESS_SCOPE,"base":p.SCOPE,"step":p.STEP_SCOPE,"fill":p.FILL_SCOPE,"pressFill":p.PRESS_FILL_SCOPE,\n'+
+    '     "hold":p.PRESS_HOLD_MS,"max":p.MAX_PRESS_HOLD_MS,"requests":[]}\n'+
     'for r in json.load(sys.stdin):\n'+
     '    try: p.validate_request(r); out["requests"].append({"valid":True,"hash":p.plan_hash(r),"scope":p.inspection_scope(r)})\n'+
     '    except p.Invalid: out["requests"].append({"valid":False})\n'+
@@ -67,12 +68,17 @@ test('press accepts exactly one allowlisted key and a bounded hold',()=>{
 test('the plugin mirrors the Python key list, scope, validation and plan hash',()=>{
   const samples=[params(press()),params(press('ArrowRight',{holdMs:0}),text('1')),params(press('z',{holdMs:1000})),
     params(press('Control+a')),params(press('A')),params(press('Space',{holdMs:1001})),params(press('Space',{holdMs:true})),
-    params({...click('#game'),key:'a'})];
+    params({...click('#game'),key:'a'}),
+    // Fill a name, then press keys; and the same fill without presses.
+    params({action:'fill',locator:{selector:'#name'},value:'Ada'},press(),text('1')),params({action:'fill',locator:{selector:'#name'},value:'Ada'},text('1'))];
   const requests=samples.map(sample=>({schemaVersion:1,action:'inspect',...sample}));
   const py=python(requests);
   assert.deepEqual(py.keys,[...PRESS_KEYS]);
   assert.equal(py.scope,PRESS_INSPECTION_SCOPE);
   assert.equal(py.base,INSPECTION_SCOPE);
+  assert.equal(py.step,STEP_INSPECTION_SCOPE);
+  assert.equal(py.fill,FILL_INSPECTION_SCOPE);
+  assert.equal(py.pressFill,PRESS_FILL_INSPECTION_SCOPE);
   assert.equal(py.hold,100);
   assert.equal(py.max,MAX_PRESS_HOLD_MS);
   samples.forEach((sample,i)=>{
@@ -81,9 +87,16 @@ test('the plugin mirrors the Python key list, scope, validation and plan hash',(
     assert.equal(py.requests[i].valid,request!==undefined,JSON.stringify(sample));
     if(request) {
       assert.equal(py.requests[i].hash,inspectionPlanHash(request));
-      assert.equal(py.requests[i].scope,validate(receipt(request),request).scope);
+      // A bound failure receipt carrying Python's scope must validate.
+      validate({schemaVersion:1,kind:INSPECTION_KIND,status:'failed',errorCode:'unavailable',siteId:request.siteId,sha256:request.sha256,
+        planSha256:py.requests[i].hash,scope:py.requests[i].scope},request);
+      if(!request.steps.some(s=>s.action==='fill')) assert.equal(py.requests[i].scope,validate(receipt(request),request).scope);
     }
   });
+  // The receipt states what each step did and never denies the presses.
+  assert.equal(py.requests[8].scope,STEP_INSPECTION_SCOPE+PRESS_FILL_INSPECTION_SCOPE+PRESS_INSPECTION_SCOPE);
+  assert.doesNotMatch(py.requests[8].scope,/does not test keyboard behavior|click dispatches were tested/);
+  assert.equal(py.requests[9].scope,INSPECTION_SCOPE+FILL_INSPECTION_SCOPE,'plans older capsules run keep their exact scope');
 });
 
 test('the schema states keys as an enum and bounds the hold, so local grammars stay simple',()=>{
@@ -96,6 +109,8 @@ test('the schema states keys as an enum and bounds the hold, so local grammars s
   assert.doesNotMatch(description,/does not simulate keystrokes/);
   assert.match(description,/use press with key/);
   assert.match(description,/Press refuses text fields; use fill for those\./);
+  // The evidence policy needs a postcondition after a start click, before any press.
+  assert.match(description,/A start click needs its own assertion before the first press .*a click followed directly by a press does not count as behavior evidence\./);
 });
 
 test('a press receipt binds key, hold, focus and the after observation',()=>{
@@ -106,7 +121,7 @@ test('a press receipt binds key, hold, focus and the after observation',()=>{
   for(const change of [r=>delete r.steps[1].after,r=>delete r.steps[1].focus,r=>r.steps[1].focus.document=false,
     r=>r.steps[1].focus.element='true',r=>r.steps[1].focus.active=false,r=>r.steps[1].key='Enter',r=>r.steps[1].holdMs=100,
     r=>r.steps[1].before.visible=false,r=>r.steps[1].stable=false,r=>r.steps[0].focus={element:true,document:true},
-    r=>r.scope=INSPECTION_SCOPE,
+    r=>r.scope=INSPECTION_SCOPE,r=>r.scope=INSPECTION_SCOPE+PRESS_INSPECTION_SCOPE,
     r=>r.scope='Only the listed CSS layout visibility assertions and click dispatches were tested; not pixel paint, occlusion, clipping, a full accessibility audit, or overall functionality.']) {
     const bad=structuredClone(good);change(bad);assert.throws(()=>validate(bad,request),undefined,change.toString());
   }
@@ -129,8 +144,11 @@ test('press failures are bound evidence with actionable feedback',async()=>{
   assert.equal(validate(refused,request),refused);
   let output=await execute(plan,refused);
   assert.equal(output.isError,true);
-  assert.match(output.content[0].text,/editable field, or focus moved to one, so no key was sent/);
-  assert.match(output.content[0].text,/use fill for native text and number fields/);
+  assert.match(output.content[0].text,/\(press\) was refused, so no key was sent: its target, or the element that took focus, accepts text or hides where keys would go/);
+  // A select, a nested frame and a closed shadow root are named with their way out.
+  assert.match(output.content[0].text,/Use fill for native text and number fields and select-option for a native select\./);
+  assert.match(output.content[0].text,/a nested iframe, frame, object or embed, or an element whose focus lies inside a closed shadow root/);
+  assert.match(output.content[0].text,/Keys cannot reach content inside a nested frame or a closed shadow root in this inspector: keep the page unchanged/);
   const redirected=failedPress(request,'text_field_press_unsupported',{focus:{element:false,document:true}});
   assert.equal(validate(redirected,request),redirected);
 
@@ -167,7 +185,7 @@ test('press failures are bound evidence with actionable feedback',async()=>{
 test('an image without press support asks for an inspector update, not a site change',async()=>{
   const plan=params(press(),text('1')),request=normalize(plan);
   const result={schemaVersion:1,kind:INSPECTION_KIND,status:'failed',errorCode:'unsupported_capability',siteId:request.siteId,
-    sha256:request.sha256,planSha256:inspectionPlanHash(request),scope:INSPECTION_SCOPE+PRESS_INSPECTION_SCOPE};
+    sha256:request.sha256,planSha256:inspectionPlanHash(request),scope:STEP_INSPECTION_SCOPE+PRESS_INSPECTION_SCOPE};
   const output=await execute(plan,result);
   assert.equal(output.isError,true);
   assert.match(output.content[0].text,/does not support trusted key presses/);
@@ -182,9 +200,24 @@ test('passing press plans get key-press feedback, not show/hide coaching',async(
   assert.match(output.content[0].text,/A key press alone proves no result/);
   assert.doesNotMatch(output.content[0].text,/This plan contains no click/);
   assert.ok(output.content[0].text.includes(PRESS_INSPECTION_SCOPE));
+  assert.doesNotMatch(output.content[0].text,/does not count as evidence/);
   plan=params(text('0'),press('Space'));
   output=await execute(plan,receipt(normalize(plan)));
   assert.match(output.content[0].text,/No assertion follows the last press, so no keyboard result was checked/);
+});
+
+test('a passing click-then-press plan says the start click needs its own postcondition',async()=>{
+  // boundPreviewBehavior rejects it, so the passing result must not read as proof.
+  const plan=params(click('#start'),press('Space'),text('1'));
+  assert.equal(boundPreviewBehavior(plan,{details:receipt(normalize(plan))},preview,{requiresInteraction:true}),undefined);
+  let output=await execute(plan,receipt(normalize(plan)));
+  assert.equal(output.details.status,'passed');
+  assert.match(output.content[0].text,/Step 1 \(click\) is followed directly by step 2 \(press\) with no assertion of the click's own result, so this plan does not count as evidence of the requested behavior/);
+  assert.match(output.content[0].text,/Insert an assertion of that click's visible result there, such as assert-visible on the started game or assert-painted on its canvas, and retry the same published snapshot/);
+  const fixed=params(click('#start'),{action:'assert-visible',locator:{selector:'#game'}},press('Space'),text('1'));
+  assert.ok(boundPreviewBehavior(fixed,{details:receipt(normalize(fixed))},preview,{requiresInteraction:true}));
+  output=await execute(fixed,receipt(normalize(fixed)));
+  assert.doesNotMatch(output.content[0].text,/does not count as evidence/);
 });
 
 test('a missing assertion target after a key press is not blamed on the locator alone',async()=>{

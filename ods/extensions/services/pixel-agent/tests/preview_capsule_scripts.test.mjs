@@ -20,7 +20,7 @@ function capsuleScripts() {
 
 test('every capsule isolated-world script compiles', () => {
   const scripts = capsuleScripts();
-  for (const name of ['OBSERVE_ELEMENT', 'DIAGNOSTIC', 'SELECTOR_COUNT', 'ROLE_NAME_INCLUDING_HIDDEN', 'ROLE_NAME_RENDERED',
+  for (const name of ['OBSERVE_ELEMENT', 'FOCUSED_ELEMENT', 'DIAGNOSTIC', 'SELECTOR_COUNT', 'ROLE_NAME_INCLUDING_HIDDEN', 'ROLE_NAME_RENDERED',
     'CONTROL_NAMES'])
     assert.ok(name in scripts, name);
   for (const [name, source] of Object.entries(scripts))
@@ -106,6 +106,26 @@ test('press refuses text entry, nested frames and editable focus, but not key-on
   assert.deepEqual(focusState(canvas, {active: () => ({}), hasFocus: false}), {target: false, active: false, element: false, document: false});
   assert.deepEqual(focusState(canvas, {active: input('password')}), {target: false, active: true, element: false, document: true});
   assert.equal(focusState(canvas, {active: () => null}).active, false, 'no focused element is not an editable one');
+});
+
+test('press follows open shadow roots to the focused element; a closed root stops at its host', () => {
+  // document.activeElement reports only the shadow host of a web-component
+  // field that took focus through delegatesFocus.
+  const host = inner => () => ({shadowRoot: {activeElement: inner}});
+  const password = c => Object.assign(new c.HTMLInputElement(), {type: 'password'});
+  assert.deepEqual(focusState(c => ({}), {active: c => host(password(c))()}), {target: false, active: true, element: false, document: true});
+  // Nested open roots, and a target that is itself inside an open root.
+  assert.equal(focusState(c => ({}), {active: c => host(host(password(c))())()}).active, true);
+  let inner;
+  assert.equal(focusState(() => (inner = {}), {active: () => host(inner)()}).element, true);
+  // A focused host whose root holds no focus is itself the focused element.
+  assert.deepEqual(focusState(c => ({}), {active: host(null)}), {target: false, active: false, element: false, document: true});
+  // A closed root is invisible here (shadowRoot is null); the capsule asks CDP.
+  assert.equal(focusState(c => ({}), {active: () => ({shadowRoot: null})}).active, false);
+  // FOCUSED_ELEMENT returns the same element as a remote object.
+  const scripts = capsuleScripts(), field = {};
+  const context = vm.createContext({document: {activeElement: {shadowRoot: {activeElement: {shadowRoot: {activeElement: field}}}}}});
+  assert.equal(new vm.Script(`(${scripts.FOCUSED_ELEMENT})`).runInContext(context)(), field);
 });
 
 test('press releases focus another element holds, never the target, the body or before a refusal', () => {

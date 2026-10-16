@@ -26,7 +26,8 @@ CSP = (
 )
 SANDBOX = "allow-scripts allow-forms allow-downloads"
 SCOPE = "Only the listed CSS layout visibility, normalized visible-text assertions and click dispatches were tested; not pixel paint, occlusion, clipping, a full accessibility audit, or overall functionality."
-SELECT_SCOPE = SCOPE + " Native single-select values were observed only for explicit select-option steps."
+SELECT_OPTION_SCOPE = " Native single-select values were observed only for explicit select-option steps."
+SELECT_SCOPE = SCOPE + SELECT_OPTION_SCOPE
 SELECT_CAPABILITY = "native-single-select-v1"
 FILL_CAPABILITY = "native-text-number-fill-v2"
 FILL_SCOPE = " Native non-sensitive text and number fields were filled only with explicit synthetic values; number constraint flags are observations, not a claim of form validity. This does not test keyboard behavior or submit forms."
@@ -44,12 +45,20 @@ PRESS_HOLD_MS = 100
 MAX_PRESS_HOLD_MS = 1000
 PAINT_CAPABILITY = "element-paint-v1"
 PAINT_SCOPE = " Pixel paint was checked only for explicit assert-painted steps, as aggregate color statistics of each element's on-screen box; this detects a blank or single-color render, not image recognition or whether the intended content was drawn."
+# Press and paint plans run only on a capsule labelled for them, so their scope
+# need not match older capsules: its base does not deny the key presses and
+# paint checks described after it, and beside presses the fill sentence speaks
+# only of fill. workspace-preview-inspect.mjs mirrors both exactly.
+STEP_SCOPE = "Only the listed steps were tested, each only as stated here. CSS layout visibility, normalized visible-text assertions and click dispatches do not test pixel paint; no step tests occlusion, clipping, a full accessibility audit, or overall functionality."
+PRESS_FILL_SCOPE = " Native non-sensitive text and number fields were filled only with explicit synthetic values; number constraint flags are observations, not a claim of form validity. Fill sends no key events and does not submit forms."
 
 
 def inspection_scope(request):
-    scope = SELECT_SCOPE if any(s['action'] == 'select-option' for s in request['steps']) else SCOPE
-    scope += FILL_SCOPE if any(s['action'] == 'fill' for s in request['steps']) else ''
-    scope += PRESS_SCOPE if any(s['action'] == 'press' for s in request['steps']) else ''
+    pressed = any(s['action'] == 'press' for s in request['steps'])
+    scope = STEP_SCOPE if pressed or any(s['action'] == 'assert-painted' for s in request['steps']) else SCOPE
+    scope += SELECT_OPTION_SCOPE if any(s['action'] == 'select-option' for s in request['steps']) else ''
+    scope += (PRESS_FILL_SCOPE if pressed else FILL_SCOPE) if any(s['action'] == 'fill' for s in request['steps']) else ''
+    scope += PRESS_SCOPE if pressed else ''
     scope += PAINT_SCOPE if any(s['action'] == 'assert-painted' for s in request['steps']) else ''
     return scope + (DOWNLOAD_SCOPE if request['steps'][-1]['action'] == 'download' else '')
 

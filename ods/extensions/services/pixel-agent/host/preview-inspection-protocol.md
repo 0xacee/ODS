@@ -409,13 +409,19 @@ canvas, its container, the page body or a non-text control. The capsule then:
    button an earlier step clicked), so `Space` on a canvas never activates
    that button;
 2. focuses the wrapper's preview iframe, then the target inside it;
-3. reads in the isolated world whether the target is `document.activeElement`
-   and whether the preview document has focus, and records them as
-   `focus: {element, document}`. A canvas without `tabindex` cannot take focus,
-   so `element` may be false; the keys then reach the document body, and
-   window and document listeners still run. The step fails as `focus_failed`
-   when the document has no focus, and as `text_field_press_unsupported` when
-   focus landed on an editable element, in both cases without sending a key;
+3. reads in the isolated world whether the target is the focused element and
+   whether the preview document has focus, and records them as
+   `focus: {element, document}`. `document.activeElement` stops at a shadow
+   host, such as a web component whose inner field takes focus through
+   `delegatesFocus`, so the focused element is found by following open shadow
+   roots' `activeElement`, here and when blurring in step 1. A canvas without
+   `tabindex` cannot take focus, so `element` may be false; the keys then reach
+   the document body, and window and document listeners still run. The step
+   fails as `focus_failed` when the document has no focus, and as
+   `text_field_press_unsupported` when focus landed on an element step 1 would
+   refuse or on the host of a closed shadow root, whose focused element the
+   isolated world cannot see (CDP `DOM.describeNode` with `pierce` reports
+   closed roots), in each case without sending a key;
 4. sends Playwright `page.keyboard.press(key, delay=holdMs)`: trusted keydown
    and keyup events, with the key's ordinary default action, to the focused
    frame;
@@ -427,21 +433,31 @@ fails as `press_failed`, exactly as a click fails as `click_failed`. A download
 started by a key is `unexpected_download`. A press alone proves no result.
 Presses may run in a row (for example `Space` to start, then `ArrowRight`), but
 the last one needs an assertion of its visible result before the plan counts
-as behavior evidence. A press plan is never a read-only inspection.
+as behavior evidence. A click before a press needs its own assertion first
+(click Start, assert the started game, then press); a passing plan without one
+says that it does not count. A press plan is never a read-only inspection.
 
-Press plans add the scope suffix `Trusted key presses were sent to the focused
-preview frame only for explicit press steps; behavior beyond the listed
-assertions, such as gameplay, is not verified.` A receipt with the legacy scope
-never satisfies a press plan.
+Press and paint plans run only on a capsule labelled for them, so their scope
+need not match older capsules. Its base is `Only the listed steps were tested,
+each only as stated here. CSS layout visibility, normalized visible-text
+assertions and click dispatches do not test pixel paint; no step tests
+occlusion, clipping, a full accessibility audit, or overall functionality.`,
+which does not deny the presses and paint checks named after it, and next to
+presses the fill sentence ends `Fill sends no key events and does not submit
+forms.` Other plans keep the exact scope older capsules return. Press plans add
+the suffix `Trusted key presses were sent to the focused preview frame only for
+explicit press steps; behavior beyond the listed assertions, such as gameplay,
+is not verified.` A receipt with the legacy scope never satisfies a press plan.
 
 Security notes:
 
 - Press is not a text path. Fill, with its sensitive-field denylist, remains
   the only way to enter text. Press refuses editable targets and editable
-  focused elements, and every key comes from the fixed allowlist, never from
-  user data. A page's own key handler can still move focus elsewhere while the
-  key is down; that page then receives one allowlisted key, inside a capsule
-  with no autofill profile, host files or network.
+  focused elements, including a field inside an open shadow root and any focus
+  hidden in a closed one, and every key comes from the fixed allowlist, never
+  from user data. A page's own key handler can still move focus elsewhere
+  while the key is down; that page then receives one allowlisted key, inside a
+  capsule with no autofill profile, host files or network.
 - A trusted key press grants user activation, which can unlock popups,
   downloads, fullscreen, pointer lock and clipboard writes. Popups are closed,
   downloads cancelled and extra navigations blocked; each is recorded in
@@ -462,14 +478,17 @@ that Windows on Arm hosts build.
 
 `test_preview_inspection_press.py` covers the protocol bounds, the broker's
 label check before any snapshot read, the scripted focus and key order and
-each refusal, and (with the opt-in Chromium or image settings above) a
-focusable canvas pressed without a prior click, a window listener behind an
-unfocusable canvas, `Space` on a canvas after a button click, a held key read
-per animation frame, refused text fields
-and redirected focus, Enter on a link, a key-started download, and a page error
-raised in the frame after a key. `inspection_press.test.mjs` checks the
-schema, the Python/JavaScript key list, scope and plan hash, forged press
-receipts, feedback and the evidence policy.
+each refusal, including focus a closed shadow root hides, and (with the opt-in
+Chromium or image settings above) a focusable canvas pressed without a prior
+click, a window listener behind an unfocusable canvas, `Space` on a canvas
+after a button click, a held key read per animation frame, refused text fields,
+redirected focus and fields inside open and closed shadow roots that take focus
+through `delegatesFocus` or a focus handler, Enter on a link, a key-started
+download, and a page error raised in the frame after a key.
+`preview_capsule_scripts.test.mjs` runs the refusal and the shadow-root walk
+against a minimal DOM. `inspection_press.test.mjs` checks the schema, the
+Python/JavaScript key list, scope and plan hash, forged press receipts,
+feedback and the evidence policy.
 
 ## Element paint
 
@@ -489,8 +508,11 @@ fails as `visibility_mismatch`. Then, sampling every 100 ms within a further
    pixels and inset by one captured pixel, so blended edges of the surrounding
    page never count as a second color. The wrapper iframe fills the
    never-scrolled page from (0, 0), so frame coordinates are page coordinates.
-   When less than 8x8 CSS pixels remain, or the element is no longer one
-   rendered match, the sample is empty; the inspector never scrolls;
+   The sample is empty when less than 8x8 CSS pixels remain, when the region
+   is too thin for its length to keep a pixel inside the one-pixel inset once
+   its longer side is downscaled to 256 (a fully visible 1000x8 bar, for
+   example), or when the element is no longer one rendered match; the
+   inspector never scrolls;
 2. captures that region with CDP `Page.captureScreenshot` (PNG,
    `captureBeyondViewport: false`), downscaled so neither side exceeds 256
    pixels. Playwright's element screenshot is not used: it scrolls the element
@@ -503,7 +525,7 @@ The step passes on the first sample with at least two exact colors. Canvases
 often draw on a later animation frame or once their images load, so a
 single-color or empty sample is retried until the window ends. A timeout never
 passes: the last sample fails the step as `uniform_paint` or, when it was empty,
-`not_in_viewport`.
+`not_in_viewport`, whose feedback names all three causes of an empty sample.
 
 A measured step carries `paint: {width, height, distinctColors, dominant:
 {hex, percent}, colors, fingerprint}`: the captured size (1–256 pixels per
@@ -529,11 +551,12 @@ working control, and an effect may lie elsewhere or come later.
 For the evidence policy `assert-painted` is a postcondition, so a press
 followed by `assert-painted` counts as an interaction with its result. It only
 observes, so a plan of assertions and `assert-painted` steps stays read-only.
-Paint plans add the scope suffix `Pixel paint was checked only for explicit
-assert-painted steps, as aggregate color statistics of each element's on-screen
-box; this detects a blank or single-color render, not image recognition or
-whether the intended content was drawn.` A receipt with the legacy scope never
-satisfies a paint plan.
+Paint plans use the press and paint scope base (see "Keyboard press") and add
+the suffix `Pixel paint was checked only for explicit assert-painted steps, as
+aggregate color statistics of each element's on-screen box; this detects a
+blank or single-color render, not image recognition or whether the intended
+content was drawn.` A receipt with the legacy scope never satisfies a paint
+plan.
 
 Security notes:
 
@@ -555,15 +578,17 @@ older image returns a bound `unsupported_capability` failure without executing
 the plan; deploy plugin, broker and rebuilt capsule together. Whether the
 capsule's GPU-less headless Chromium renders WebGL is checked only by the
 opt-in real-browser case; where it does not, a WebGL canvas reads as its page
-background (`uniform_paint`). Capture geometry and WebGL also need a run on the
-arm64 image that Windows on Arm hosts build.
+background (`uniform_paint`), so the `uniform_paint` feedback asks to keep a
+WebGL page unchanged and report its rendering unverified. Capture geometry and
+WebGL also need a run on the arm64 image that Windows on Arm hosts build.
 
 `test_preview_inspection_paint.py` covers the protocol bounds, the broker's
 label check before any snapshot read, the capture clip (viewport, rounding,
 rounded corners, downscaling, minimum size), the bounded summary, polling, and
 through a scripted browser the exact CDP call, the uniform and late-drawing
-cases, the state after a click, a blocked request during sampling and the
-receipt bound. With the opt-in Chromium or image settings above it also checks
+cases, a long thin bar and an element hidden or removed while sampling (both
+`not_in_viewport`), the state after a click, a blocked request during sampling
+and the receipt bound. With the opt-in Chromium or image settings above it also checks
 a black canvas that never draws, a drawn and a late-drawn 2D canvas, an
 overlay, a rounded black canvas, an element below the viewport, a large
 canvas, a key press that moves a sprite, unchanged style, scroll and viewport

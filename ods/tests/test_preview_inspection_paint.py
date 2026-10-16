@@ -3,7 +3,6 @@ import base64
 import hashlib
 import itertools
 import json
-import math
 import os
 import unittest
 from unittest.mock import patch
@@ -53,13 +52,18 @@ class PaintProtocol(unittest.TestCase):
                 protocol.validate_request(bundle('<canvas id=game>', [{**painted(), **extra}])['request'])
 
     def test_scope_names_paint_checks_in_a_fixed_order(self):
-        self.assertEqual(protocol.inspection_scope({'steps': [painted()]}), protocol.SCOPE + protocol.PAINT_SCOPE)
+        self.assertEqual(protocol.inspection_scope({'steps': [painted()]}), protocol.STEP_SCOPE + protocol.PAINT_SCOPE)
         mixed = {'steps': [{'action': 'select-option'}, {'action': 'fill'}, press(), painted(), {'action': 'download'}]}
-        self.assertEqual(protocol.inspection_scope(mixed), protocol.SELECT_SCOPE + protocol.FILL_SCOPE + protocol.PRESS_SCOPE
-                         + protocol.PAINT_SCOPE + protocol.DOWNLOAD_SCOPE)
+        self.assertEqual(protocol.inspection_scope(mixed), protocol.STEP_SCOPE + protocol.SELECT_OPTION_SCOPE + protocol.PRESS_FILL_SCOPE
+                         + protocol.PRESS_SCOPE + protocol.PAINT_SCOPE + protocol.DOWNLOAD_SCOPE)
+        # Without presses the fill sentence is the one older capsules return.
+        self.assertEqual(protocol.inspection_scope({'steps': [{'action': 'fill'}, painted()]}),
+                         protocol.STEP_SCOPE + protocol.FILL_SCOPE + protocol.PAINT_SCOPE)
         self.assertNotIn(protocol.PAINT_SCOPE, protocol.inspection_scope({'steps': [text('Ready')]}))
         # The scope never overclaims: a blank detector, not image recognition.
         self.assertIn('not image recognition', protocol.PAINT_SCOPE)
+        # Nor does its base deny the paint check it reports.
+        self.assertNotIn('not pixel paint', protocol.inspection_scope({'steps': [painted()]}))
 
 
 class PaintCapability(unittest.TestCase):
@@ -71,7 +75,7 @@ class PaintCapability(unittest.TestCase):
                 result = broker.inspect_request(request, config())
             self.assertEqual(result['errorCode'], 'unsupported_capability')
             self.assertEqual(result['planSha256'], protocol.plan_hash(request))
-            self.assertEqual(result['scope'], protocol.SCOPE + protocol.PAINT_SCOPE)
+            self.assertEqual(result['scope'], protocol.STEP_SCOPE + protocol.PAINT_SCOPE)
             self.assertEqual(process.call_count, 1)
             self.assertIn('org.osmantic.ods.inspection.paint', str(process.call_args))
             snapshot.assert_not_called()
@@ -218,7 +222,8 @@ class PaintBrowser(harness.ScriptedBrowser):
     def __init__(self, render, geometry=None, during_capture=None, **kwargs):
         super().__init__(**kwargs)
         self.render, self.geometry, self.during_capture = render, geometry or box(10, 20, 330, 260), during_capture
-        self.captures, self.now = [], 0.0
+        # gone: 'hidden' or 'removed' makes the element stop being one visible match.
+        self.captures, self.now, self.gone = [], 0.0, None
 
     def monotonic(self):
         return self.now
@@ -239,9 +244,14 @@ class PaintBrowser(harness.ScriptedBrowser):
             if self.during_capture:
                 self.during_capture(self)
             return {'data': base64.b64encode(self.render(self)).decode()}
+        if self.gone == 'removed' and (params or {}).get('functionDeclaration') == capsule.SELECTOR_COUNT:
+            return {'result': {'value': {'count': 0}}}
         result = super().send(method, params)
-        if (params or {}).get('functionDeclaration') == capsule.OBSERVE_ELEMENT and params['arguments'][5]['value']:
-            result['result']['value']['box'] = dict(self.geometry)
+        if (params or {}).get('functionDeclaration') == capsule.OBSERVE_ELEMENT:
+            if params['arguments'][5]['value']:
+                result['result']['value']['box'] = dict(self.geometry)
+            if self.gone == 'hidden':
+                result['result']['value']['visible'] = False
         return result
 
 
@@ -258,7 +268,7 @@ class ScriptedPaint(unittest.TestCase):
         browser = PaintBrowser(frames(SCENE))
         result = self.run_paint(browser, [painted()])
         self.assertEqual(result['status'], 'passed', result)
-        self.assertEqual(result['scope'], protocol.SCOPE + protocol.PAINT_SCOPE)
+        self.assertEqual(result['scope'], protocol.STEP_SCOPE + protocol.PAINT_SCOPE)
         self.assertEqual(browser.captures, [{'format': 'png', 'captureBeyondViewport': False,
                                              'clip': {'x': 12, 'y': 22, 'width': 316, 'height': 236, 'scale': 0.8}}])
         step = result['steps'][0]
@@ -291,6 +301,29 @@ class ScriptedPaint(unittest.TestCase):
         step = self.run_paint(browser, [painted()])['steps'][0]
         self.assertEqual(step['errorCode'], 'not_in_viewport')
         self.assertNotIn('paint', step)
+        self.assertEqual(browser.captures, [])
+
+    def test_an_element_that_stops_being_one_visible_match_while_sampling_captures_nothing(self):
+        # A splash canvas that hides or removes itself after one uniform
+        # sample: every later sample is empty, and the last one decides.
+        for gone in ('hidden', 'removed'):
+            with self.subTest(gone=gone):
+                def vanish(browser, gone=gone):
+                    browser.gone = gone
+                browser = PaintBrowser(frames(BLACK), during_capture=vanish)
+                result = self.run_paint(browser, [painted(), harness.step('assert-visible', '#item')])
+                step = result['steps'][0]
+                self.assertEqual((result['status'], len(result['steps'])), ('failed', 1))
+                self.assertEqual((step['status'], step['errorCode']), ('failed', 'not_in_viewport'))
+                self.assertNotIn('paint', step)
+                self.assertEqual(len(browser.captures), 1)
+
+    def test_a_fully_visible_long_thin_bar_is_too_thin_to_capture(self):
+        # 1000x8 CSS pixels pass the 8x8 minimum, but downscaled by 0.256 the
+        # one-captured-pixel inset (4 CSS pixels per side) leaves nothing.
+        browser = PaintBrowser(frames(SCENE), geometry=box(0, 0, 1000, 8, viewport=(1280, 720)))
+        step = self.run_paint(browser, [painted()])['steps'][0]
+        self.assertEqual(step['errorCode'], 'not_in_viewport')
         self.assertEqual(browser.captures, [])
 
     def test_a_hidden_element_is_a_visibility_mismatch_without_capture(self):

@@ -52,11 +52,24 @@ class PressProtocol(unittest.TestCase):
 
     def test_scope_names_presses_in_a_fixed_order(self):
         request = {'steps': [press(), text('Ready')]}
-        self.assertEqual(protocol.inspection_scope(request), protocol.SCOPE + protocol.PRESS_SCOPE)
+        self.assertEqual(protocol.inspection_scope(request), protocol.STEP_SCOPE + protocol.PRESS_SCOPE)
         mixed = {'steps': [{'action': 'select-option'}, {'action': 'fill'}, press(), {'action': 'download'}]}
-        self.assertEqual(protocol.inspection_scope(mixed), protocol.SELECT_SCOPE + protocol.FILL_SCOPE
-                         + protocol.PRESS_SCOPE + protocol.DOWNLOAD_SCOPE)
+        self.assertEqual(protocol.inspection_scope(mixed), protocol.STEP_SCOPE + protocol.SELECT_OPTION_SCOPE
+                         + protocol.PRESS_FILL_SCOPE + protocol.PRESS_SCOPE + protocol.DOWNLOAD_SCOPE)
         self.assertNotIn(protocol.PRESS_SCOPE, protocol.inspection_scope({'steps': [text('Ready')]}))
+
+    def test_press_scope_never_denies_the_presses_it_names(self):
+        # Fill a name, then press keys: the receipt states what each did.
+        scope = protocol.inspection_scope({'steps': [{'action': 'fill'}, press(), text('Ready')]})
+        self.assertEqual(scope, protocol.STEP_SCOPE + protocol.PRESS_FILL_SCOPE + protocol.PRESS_SCOPE)
+        self.assertNotIn('does not test keyboard behavior', scope)
+        self.assertNotIn('click dispatches were tested', scope)
+        self.assertIn('Fill sends no key events', scope)
+        # Plans older capsules also run keep their exact strings.
+        self.assertEqual(protocol.inspection_scope({'steps': [{'action': 'fill'}, text('Ready')]}),
+                         protocol.SCOPE + protocol.FILL_SCOPE)
+        self.assertEqual(protocol.inspection_scope({'steps': [{'action': 'select-option'}, text('Ready')]}),
+                         protocol.SELECT_SCOPE)
 
 
 class PressCapability(unittest.TestCase):
@@ -68,7 +81,7 @@ class PressCapability(unittest.TestCase):
                 result = broker.inspect_request(request, config())
             self.assertEqual(result['errorCode'], 'unsupported_capability')
             self.assertEqual(result['planSha256'], protocol.plan_hash(request))
-            self.assertEqual(result['scope'], protocol.SCOPE + protocol.PRESS_SCOPE)
+            self.assertEqual(result['scope'], protocol.STEP_SCOPE + protocol.PRESS_SCOPE)
             self.assertEqual(process.call_count, 1)
             self.assertIn('org.osmantic.ods.inspection.press', str(process.call_args))
             snapshot.assert_not_called()
@@ -101,10 +114,13 @@ class PressBrowser(harness.ScriptedBrowser):
     """Scripted double with focus and a keyboard: a key press reveals #item.
     The real focus path is covered by the opt-in RealPress cases below."""
 
-    def __init__(self, target_editable=False, active_editable=False, document_focus=True, during_press=None, **kwargs):
+    def __init__(self, target_editable=False, active_editable=False, document_focus=True, during_press=None,
+                 shadow_root=None, focused_error=False, **kwargs):
         super().__init__(**kwargs)
         self.target_editable, self.active_editable, self.document_focus = target_editable, active_editable, document_focus
         self.during_press, self.keyboard, self.probes = during_press, self, []
+        # shadow_root: the type of the root CDP reports on the focused element.
+        self.shadow_root, self.focused_error = shadow_root, focused_error
 
     def route(self, _pattern, handler):
         self.guard = handler
@@ -128,8 +144,18 @@ class PressBrowser(harness.ScriptedBrowser):
         self.emit(self.click_errors)
 
     def send(self, method, params=None):
-        result = super().send(method, params)
         params = params or {}
+        if params.get('functionDeclaration') == capsule.FOCUSED_ELEMENT:
+            if self.focused_error:
+                return {'result': {'type': 'object'}, 'exceptionDetails': {'text': 'Uncaught'}}
+            return {'result': {'type': 'object', 'objectId': 'focused'}}
+        if method == 'DOM.describeNode':
+            self.calls.append('describe:' + params['objectId'] + (':pierce' if params.get('pierce') else ''))
+            roots = [{'nodeName': '#document-fragment', 'shadowRootType': self.shadow_root}] if self.shadow_root else []
+            return {'node': {'nodeName': 'X-FIELD', **({'shadowRoots': roots} if roots else {})}}
+        if method == 'Runtime.releaseObject' and params['objectId'] == 'focused':
+            self.calls.append('release:focused')
+        result = super().send(method, params)
         if params.get('functionDeclaration') == capsule.OBSERVE_ELEMENT and params['arguments'][4]['value']:
             self.probes.append(params['arguments'][4]['value'])
             focused = 'focus:css=#game' in self.calls
@@ -151,9 +177,12 @@ class ScriptedPress(unittest.TestCase):
         browser = PressBrowser()
         result = self.run_press(browser)
         self.assertEqual(result['status'], 'passed', result)
-        self.assertEqual(result['scope'], protocol.SCOPE + protocol.PRESS_SCOPE)
-        actions = [c for c in browser.calls if c.startswith(('focus:', 'press:'))]
-        self.assertEqual(actions, ['focus:iframe[name="inspection"]', 'focus:css=#game', 'press:Space:100'])
+        self.assertEqual(result['scope'], protocol.STEP_SCOPE + protocol.PRESS_SCOPE)
+        actions = [c for c in browser.calls if c.startswith(('focus:', 'describe:', 'release:', 'press:'))]
+        # CDP describes the focused element, closed shadow roots included,
+        # after focusing and before the key; its handle is released.
+        self.assertEqual(actions, ['focus:iframe[name="inspection"]', 'focus:css=#game', 'describe:focused:pierce',
+                                   'release:focused', 'press:Space:100'])
         # Focus held elsewhere is released before focusing; the second probe only reads.
         self.assertEqual(browser.probes, ['release', 'observe'])
         step = result['steps'][1]
@@ -185,6 +214,24 @@ class ScriptedPress(unittest.TestCase):
         self.assertEqual(step['errorCode'], 'text_field_press_unsupported')
         self.assertEqual(step['focus'], {'element': True, 'document': True})
         self.assertFalse([c for c in browser.calls if c.startswith('press:')])
+
+    def test_focus_hidden_in_a_closed_shadow_root_is_refused_before_the_key(self):
+        # document.activeElement stops at the host (a delegatesFocus web
+        # component field); the isolated world cannot see into a closed root.
+        for root, refused in (('closed', True), ('open', False), ('user-agent', False)):
+            with self.subTest(root=root):
+                browser = PressBrowser(shadow_root=root)
+                step = self.run_press(browser)['steps'][1]
+                self.assertEqual(step.get('errorCode'), 'text_field_press_unsupported' if refused else None, step)
+                self.assertEqual(step['focus'], {'element': True, 'document': True})
+                self.assertEqual(bool([c for c in browser.calls if c.startswith('press:')]), not refused)
+                self.assertIn('release:focused', browser.calls)
+
+    def test_an_unreadable_focused_element_fails_closed_without_a_key(self):
+        browser = PressBrowser(focused_error=True)
+        step = self.run_press(browser)['steps'][1]
+        self.assertEqual(step['errorCode'], 'press_failed')
+        self.assertFalse([c for c in browser.calls if c.startswith(('describe:', 'press:'))])
 
     def test_unfocused_document_fails_closed_without_a_key(self):
         browser = PressBrowser(document_focus=False)
@@ -281,7 +328,14 @@ class RealPress(unittest.TestCase):
                      '<input id="game" type="date">', '<textarea id="game">PRIVATE</textarea>',
                      '<div id="game" contenteditable>PRIVATE</div>', '<select id="game"><option>PRIVATE</option></select>',
                      '<button id="game">Go</button><input id="secret" type="password"><script>'
-                     "game.addEventListener('focus', () => secret.focus());</script>"):
+                     "game.addEventListener('focus', () => secret.focus());</script>",
+                     # Web-component fields: document.activeElement is only the host.
+                     *('<div id="game"></div><script>game.attachShadow({mode: "%s", delegatesFocus: true})'
+                       ".innerHTML = '<input type=\"password\" value=\"PRIVATE\">';</script>" % mode
+                       for mode in ('open', 'closed')),
+                     '<canvas id="game" tabindex="0" width="64" height="64"></canvas><div id="field"></div><script>'
+                     "const root = field.attachShadow({mode: 'closed'}); root.innerHTML = '<input value=\"PRIVATE\">';"
+                     "game.addEventListener('focus', () => root.querySelector('input').focus());</script>"):
             with self.subTest(html=html):
                 result = execute_real(bundle(html, [press(key='a')]))
                 self.assertEqual(result['status'], 'failed', result)
