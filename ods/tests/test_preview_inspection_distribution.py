@@ -317,6 +317,7 @@ def image():
                     "org.osmantic.ods.inspection.fill": "native-text-number-fill-v2",
                     "org.osmantic.ods.inspection.select": "native-single-select-v1",
                     "org.osmantic.ods.inspection.press": "trusted-key-press-v1",
+                    "org.osmantic.ods.inspection.paint": "element-paint-v1",
                     "org.osmantic.ods.inspection.playwright": "1.62.0",
                 },
             },
@@ -345,7 +346,7 @@ def test_config_rejects_ambient_authority(field, value):
 
 
 @pytest.mark.parametrize(
-    "fault", ["id", "os", "architecture", "user", "entrypoint", "label", "select", "fill", "press"]
+    "fault", ["id", "os", "architecture", "user", "entrypoint", "label", "select", "fill", "press", "paint"]
 )
 def test_image_contract_is_exact(monkeypatch, fault):
     monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
@@ -364,6 +365,8 @@ def test_image_contract_is_exact(monkeypatch, fault):
         del value[0]['Config']['Labels']['org.osmantic.ods.inspection.select']
     elif fault == "press":
         del value[0]["Config"]["Labels"]["org.osmantic.ods.inspection.press"]
+    elif fault == "paint":
+        del value[0]["Config"]["Labels"]["org.osmantic.ods.inspection.paint"]
     else:
         value[0]["Config"]["Labels"]["org.osmantic.ods.inspection.protocol"] = "2"
     with pytest.raises(ValueError):

@@ -123,6 +123,32 @@ test('press releases focus another element holds, never the target, the body or 
   assert.equal(blurs, 1, 'a refused text field leaves focus where it was');
 });
 
+// assert-painted reads geometry only: the content box, the largest corner
+// radii and the viewport, through the isolated world's own layout APIs.
+function paintBox(style, rect = {left: 10, top: 20, right: 210, bottom: 170, width: 200, height: 150}) {
+  observeSource ??= capsuleScripts().OBSERVE_ELEMENT;
+  const context = vm.createContext({innerWidth: 800, innerHeight: 600});
+  context.getComputedStyle = () => ({display: 'block', visibility: 'visible', opacity: '1', ...style});
+  const element = {getClientRects: () => [{width: 10, height: 10}], getBoundingClientRect: () => rect,
+    checkVisibility: () => true, hasAttribute: () => false, getAttribute: () => null};
+  const observe = new vm.Script(`(${observeSource})`).runInContext(context);
+  return JSON.parse(JSON.stringify(observe.call(element, false, null, null, false, null, true).box));
+}
+
+test('assert-painted measures the content box, the largest corner radii and the viewport', () => {
+  assert.deepEqual(paintBox({}), {left: 10, top: 20, right: 210, bottom: 170, radiusX: 0, radiusY: 0, viewportWidth: 800, viewportHeight: 600});
+  assert.deepEqual(paintBox({borderLeftWidth: '2px', paddingLeft: '3px', borderTopWidth: '1px', paddingTop: '4px',
+    borderRightWidth: '2px', paddingRight: '5px', borderBottomWidth: '1px', paddingBottom: '0px'}),
+  {left: 15, top: 25, right: 203, bottom: 169, radiusX: 0, radiusY: 0, viewportWidth: 800, viewportHeight: 600});
+  // Elliptical and percentage radii resolve against the border box, each at most half of it.
+  const radii = style => { const {radiusX, radiusY} = paintBox(style); return [radiusX, radiusY]; };
+  assert.deepEqual(radii({borderTopLeftRadius: '12px'}), [12, 12]);
+  assert.deepEqual(radii({borderTopLeftRadius: '4px', borderBottomRightRadius: '20px 6px'}), [20, 6]);
+  assert.deepEqual(radii({borderTopRightRadius: '10%'}), [20, 15]);
+  assert.deepEqual(radii({borderTopLeftRadius: '9999px'}), [100, 75]);
+  assert.deepEqual(radii({borderBottomLeftRadius: '50%'}), [100, 75]);
+});
+
 test('native numeric fill rejects nonfinite syntax before invoking any setter or event', () => {
   let writes=0,events=0;
   class Input {

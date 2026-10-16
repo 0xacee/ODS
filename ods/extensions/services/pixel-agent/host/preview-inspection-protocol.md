@@ -10,10 +10,11 @@ socket or browser authority.
 The plugin sends one JSON object with `schemaVersion: 1`, `action: "inspect"`,
 `siteId`, the full snapshot `sha256`, `viewport: {width, height}`, and `steps`.
 Each step has `action` (`assert-visible`, `assert-hidden`, `assert-text`,
-`click`, `select-option`, `fill`, `download`, or `press`) and `locator`.
-`assert-text` adds `expectedText`; `select-option` and `fill` add `value`;
-`download` adds `path`, `expectedBytes` and `expectedSha256`; `press` adds
-`key` and an optional `holdMs` (see the sections below). A locator is either
+`click`, `select-option`, `fill`, `download`, `press`, or `assert-painted`)
+and `locator`. `assert-text` adds `expectedText`; `select-option` and `fill`
+add `value`; `download` adds `path`, `expectedBytes` and `expectedSha256`;
+`press` adds `key` and an optional `holdMs`; `assert-painted` adds nothing
+(see the sections below). A locator is either
 `{selector: "CSS"}` or `{role: "button", name: "Show items", exact: true}`.
 Semantic roles are
 allowlisted. There are no URLs, executable expressions, shell commands, image
@@ -27,8 +28,9 @@ Every locator must match exactly one element, including hidden assertions.
 ## Locator matching
 
 A CSS locator matches through the isolated world's `querySelectorAll`, hidden
-elements included. An exact role/name locator for `assert-visible` or `click`
-matches only rendered elements: Chromium's accessibility tree, united by
+elements included. An exact role/name locator for `assert-visible`,
+`assert-painted`, `click` or `press` matches only rendered elements:
+Chromium's accessibility tree, united by
 element identity with Playwright's default
 `getByRole(role, {name, exact: true})` role and name rules in the isolated
 world. Chromium's names apply CSS `text-transform` (an uppercase-styled
@@ -64,8 +66,9 @@ same snapshot, not change the site to satisfy a locator.
 
 The receipt binds the exact site, full snapshot hash, viewport, and canonical
 UTF-8 JSON request hash (`planSha256`). Each executed step records its index,
-locator, CSS visibility measurement, stable sampling, status, and (for clicks
-and key presses) after measurement. Remaining steps are not executed after a failed assertion.
+locator, CSS visibility measurement, stable sampling, status, (for clicks
+and key presses) after measurement, and (for `assert-painted`) paint
+statistics. Remaining steps are not executed after a failed assertion.
 A click dispatch alone proves no resulting behavior. Verify the requested
 initial state, click, and resulting condition with separate assertions.
 
@@ -79,7 +82,9 @@ are never translated or relaxed. Other browser failures remain unavailable.
 
 Visibility means CSS layout visibility, including opacity and ancestor CSS
 visibility. It does not prove pixel paint, clipping, occlusion, or a full
-accessibility audit. Exact role/name locators do check that accessible match.
+accessibility audit; only an explicit `assert-painted` step samples paint, as
+aggregate color statistics (see "Element paint" below). Exact role/name
+locators do check that accessible match.
 Measurements run in an isolated Chromium world so page script cannot replace
 the measurement APIs. Visible elements bearing `hidden` produce a diagnostic;
 they fail only an explicit hidden assertion. Intentional CSS overrides are not
@@ -465,3 +470,104 @@ and redirected focus, Enter on a link, a key-started download, and a page error
 raised in the frame after a key. `inspection_press.test.mjs` checks the
 schema, the Python/JavaScript key list, scope and plan hash, forged press
 receipts, feedback and the evidence policy.
+
+## Element paint
+
+`assert-painted` takes exactly `action` and `locator`. It detects a blank or
+single-color render, such as a game canvas that stays black after its start
+button or first key press. It is a blank detector, not image recognition.
+
+The locator must match one rendered element, as for `assert-visible`; its
+visibility is awaited within the same observation window, and a hidden element
+fails as `visibility_mismatch`. Then, sampling every 100 ms within a further
+1.5-second window, the capsule:
+
+1. reads in the isolated world the element's content box (border and padding
+   removed), its largest corner radii and the frame viewport. The capture
+   region is that box inset by 0.3 times the radii, which keeps it inside
+   rounded corners, intersected with the viewport, rounded inward to whole CSS
+   pixels and inset by one captured pixel, so blended edges of the surrounding
+   page never count as a second color. The wrapper iframe fills the
+   never-scrolled page from (0, 0), so frame coordinates are page coordinates.
+   When less than 8x8 CSS pixels remain, or the element is no longer one
+   rendered match, the sample is empty; the inspector never scrolls;
+2. captures that region with CDP `Page.captureScreenshot` (PNG,
+   `captureBeyondViewport: false`), downscaled so neither side exceeds 256
+   pixels. Playwright's element screenshot is not used: it scrolls the element
+   into view and injects caret-hiding style. The capture is the composited page
+   of the step context, so it shows the state after earlier clicks and key
+   presses, including anything that covers the element, such as an overlay;
+3. decodes the PNG with the standard-library decoder of the rendered palette.
+
+The step passes on the first sample with at least two exact colors. Canvases
+often draw on a later animation frame or once their images load, so a
+single-color or empty sample is retried until the window ends. A timeout never
+passes: the last sample fails the step as `uniform_paint` or, when it was empty,
+`not_in_viewport`.
+
+A measured step carries `paint: {width, height, distinctColors, dominant:
+{hex, percent}, colors, fingerprint}`: the captured size (1–256 pixels per
+side), the number of exact colors (saturating at 4096), the most frequent exact
+color and its share rounded half up, at most four buckets named as in
+`renderedColors`, and the first 16 hex digits of the SHA-256 of the captured PNG
+bytes. A `uniform_paint` step carries it with `distinctColors: 1`;
+`not_in_viewport` and other failures carry none. A request blocked during
+sampling ends the run as `request_blocked`, and a failed capture as
+`unavailable`, never as a paint verdict. Callers validate these exact bounds and
+reject any other shape.
+
+A pass shows only that the box held two or more colors at one sample. A
+gradient background without its sprite, or an invisible hero on a colored
+background, still passes; an element's own `clip-path`, mask or rotation shows
+the page around it inside its box. Pair it with `assert-text` where the page
+shows state as text. When two passed `assert-painted` steps of one locator
+around a press or click have the same fingerprint, the tool adds an
+informational note that nothing visible changed there at those samples. It
+never fails the step: animation makes a changed fingerprint weak evidence of a
+working control, and an effect may lie elsewhere or come later.
+
+For the evidence policy `assert-painted` is a postcondition, so a press
+followed by `assert-painted` counts as an interaction with its result. It only
+observes, so a plan of assertions and `assert-painted` steps stays read-only.
+Paint plans add the scope suffix `Pixel paint was checked only for explicit
+assert-painted steps, as aggregate color statistics of each element's on-screen
+box; this detects a blank or single-color render, not image recognition or
+whether the intended content was drawn.` A receipt with the legacy scope never
+satisfies a paint plan.
+
+Security notes:
+
+- No image bytes, base64 data or page text leave the capsule: only bounded
+  integers, colors and a truncated hash, which the plugin validates exactly.
+  Feedback quotes only the capsule-computed dominant color.
+- The capture reads pixels the no-network capsule already renders and adds no
+  network, file or navigation permission. It changes no page style, scroll
+  position or animation state. Chromium applies the downscale as capture-time
+  emulation; that the page observes no resize, scroll or DOM change during it
+  is proven only by the opt-in real-browser case.
+- Pure-Python decoding is bounded to 256x256 pixels per sample, so polling fits
+  the 1-CPU capsule and its 45-second deadline.
+
+The immutable capsule must advertise
+`org.osmantic.ods.inspection.paint=element-paint-v1`. The broker checks it
+before reading the snapshot, and the installer requires it, as for press. An
+older image returns a bound `unsupported_capability` failure without executing
+the plan; deploy plugin, broker and rebuilt capsule together. Whether the
+capsule's GPU-less headless Chromium renders WebGL is checked only by the
+opt-in real-browser case; where it does not, a WebGL canvas reads as its page
+background (`uniform_paint`). Capture geometry and WebGL also need a run on the
+arm64 image that Windows on Arm hosts build.
+
+`test_preview_inspection_paint.py` covers the protocol bounds, the broker's
+label check before any snapshot read, the capture clip (viewport, rounding,
+rounded corners, downscaling, minimum size), the bounded summary, polling, and
+through a scripted browser the exact CDP call, the uniform and late-drawing
+cases, the state after a click, a blocked request during sampling and the
+receipt bound. With the opt-in Chromium or image settings above it also checks
+a black canvas that never draws, a drawn and a late-drawn 2D canvas, an
+overlay, a rounded black canvas, an element below the viewport, a large
+canvas, a key press that moves a sprite, unchanged style, scroll and viewport
+during a downscaled capture, and WebGL. `inspection_paint.test.mjs` checks the
+schema, the Python/JavaScript scope, bounds and plan hash, capsule summaries as
+receipts, forged paint evidence, feedback, the unchanged-fingerprint note and
+the evidence policy.

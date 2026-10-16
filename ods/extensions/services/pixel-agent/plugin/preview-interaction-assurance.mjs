@@ -161,13 +161,15 @@ export function boundVisibilityInspection(params, result, preview) {
 
 // A read-only inspection may preserve existing interaction evidence. It cannot
 // establish that evidence, and a click plan without a transition is not static.
+// assert-painted only observes, so a paint-only plan is read-only.
 export function boundStaticPreviewInspection(params, result, preview) {
   return boundInspection(params, result, preview,
     request => request.steps.every(step => !['click', 'fill', 'select-option', 'download', 'press'].includes(step.action)));
 }
 
 const BEHAVIOR_ACTIONS = ['fill', 'click', 'select-option', 'press'];
-const BEHAVIOR_ASSERTIONS = ['assert-text', 'assert-visible', 'assert-hidden'];
+// assert-painted is a postcondition too: press, then a painted canvas.
+const BEHAVIOR_ASSERTIONS = ['assert-text', 'assert-visible', 'assert-hidden', 'assert-painted'];
 
 // Remember the first bounded action plan, even if its locator schema was bad.
 // This is the model's attempted check, not a natural-language interpretation

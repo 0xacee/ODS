@@ -304,7 +304,9 @@ test('capsule and plugin share the palette vocabulary and bounds',()=>{
 test('tool description points to the rendered colors for color changes',()=>{
  const {description}=createWorkspacePreviewInspectTool({request:async()=>{}});
  assert.match(description,/also lists the rendered colors of the page by area at a desktop view as first loaded; use them to confirm a requested color change is actually visible\./);
- assert.match(description,/This tests CSS layout visibility, not pixel paint, occlusion or clipping\./);
+ assert.match(description,/Visibility assertions test CSS layout visibility, not pixel paint, occlusion or clipping\./);
+ // A blank canvas is detectable with assert-painted; visibility alone is not paint.
+ assert.match(description,/use assert-painted \(action and locator only\)/);
  // Keyboard controls are testable with press steps; fill alone sends no keys.
  assert.doesNotMatch(description,/does not simulate keystrokes/);
  assert.match(description,/use press with key/);

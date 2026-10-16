@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Untrusted site execution lives only in the short-lived no-network capsule."""
 
+import base64
 import collections
 import hashlib
 import http.server
 import itertools
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -35,7 +37,7 @@ from preview_inspection_protocol import (
 )
 
 # Runs in a Chromium isolated world, not the site's mutable JS global realm.
-OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill, focusState) {
+OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill, focusState, paintBox) {
   const element = this, style = getComputedStyle(element);
   const rects = [...element.getClientRects()].filter(r => r.width > 0 && r.height > 0);
   return {count:1, visible:element.checkVisibility({checkOpacity:true,checkVisibilityCSS:true,contentVisibilityAuto:true}) && rects.length > 0,
@@ -107,6 +109,21 @@ OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill,
       const active = document.activeElement;
       return {focus: {target: editable(element), active: editable(active),
         element: active === element, document: document.hasFocus()}};
+    })() : {}),
+    ...(paintBox ? (() => {
+      // assert-painted geometry in this frame's CSS pixels: the content box
+      // (border and padding removed), the largest corner radii, since rounded
+      // corners show what lies behind the element, and the viewport.
+      const box = element.getBoundingClientRect(), px = value => parseFloat(value) || 0;
+      const corners = ['TopLeft','TopRight','BottomRight','BottomLeft'].map(c => String(style['border' + c + 'Radius'] || '0px').split(' '));
+      const radius = (part, size) => Math.min(size / 2, part.endsWith('%') ? px(part) * size / 100 : px(part));
+      return {box: {left: box.left + px(style.borderLeftWidth) + px(style.paddingLeft),
+        top: box.top + px(style.borderTopWidth) + px(style.paddingTop),
+        right: box.right - px(style.borderRightWidth) - px(style.paddingRight),
+        bottom: box.bottom - px(style.borderBottomWidth) - px(style.paddingBottom),
+        radiusX: Math.max(...corners.map(([x]) => radius(x, box.width))),
+        radiusY: Math.max(...corners.map(([x, y = x]) => radius(y, box.height))),
+        viewportWidth: innerWidth, viewportHeight: innerHeight}};
     })() : {}),
     ...(includeText ? (() => { const text=Array.from((element.innerText || '').replace(/\s+/g,' ').trim());
       return {text:{actual:text.slice(0,256).join(''),truncated:text.length>256}}; })() : {})};
@@ -795,6 +812,83 @@ def rendered_palette(counts, limit=MAX_PALETTE_COLORS):
     return colors
 
 
+# assert-painted: a downscaled CDP capture of one element's on-screen content
+# box in the step context, so it shows the state after earlier clicks and key
+# presses, including anything that covers the element. Only bounded aggregates
+# and a fingerprint leave the capsule, never image bytes. CDP is used rather
+# than Playwright's element screenshot, which scrolls the element into view
+# and injects caret-hiding style into the page.
+MIN_PAINT_SIZE = 8
+MAX_PAINT_SIDE = 256
+MAX_PAINT_COLORS = 4
+MAX_PAINT_DISTINCT_COLORS = 4096
+# A box inset by 0.3 r (more than 1 - 1/sqrt(2)) from each side misses every
+# rounded corner of radius r, elliptical ones included.
+PAINT_CORNER_INSET = 0.3
+PAINT_WINDOW_S = 1.5
+
+
+def paint_clip(box):
+    """The capture clip of an element's content box, or None when less than
+    8x8 CSS pixels of it, inside rounded corners, lie in the viewport.
+
+    The wrapper iframe fills the never-scrolled page from (0, 0), so frame
+    coordinates are page coordinates. The clip keeps whole pixels inside the
+    box, inset by one captured pixel, so blended edge pixels of the
+    surrounding page never count as a second color."""
+    left = math.ceil(max(box["left"] + PAINT_CORNER_INSET * box["radiusX"], 0))
+    top = math.ceil(max(box["top"] + PAINT_CORNER_INSET * box["radiusY"], 0))
+    right = math.floor(min(box["right"] - PAINT_CORNER_INSET * box["radiusX"], box["viewportWidth"]))
+    bottom = math.floor(min(box["bottom"] - PAINT_CORNER_INSET * box["radiusY"], box["viewportHeight"]))
+    if right - left < MIN_PAINT_SIZE or bottom - top < MIN_PAINT_SIZE:
+        return None
+    # At most 256 captured pixels per side keeps pure-Python decoding cheap.
+    scale = min(1, MAX_PAINT_SIDE / max(right - left, bottom - top))
+    edge = math.ceil(1 / scale)
+    if min(right - left, bottom - top) <= 2 * edge:
+        return None
+    return {"x": left + edge, "y": top + edge, "width": right - left - 2 * edge,
+            "height": bottom - top - 2 * edge, "scale": scale}
+
+
+def png_size(data):
+    """Width and height from the header chunk, which Chromium writes first."""
+    if data[:8] != PNG_SIGNATURE or data[8:16] != b"\x00\x00\x00\x0dIHDR":
+        raise Invalid("invalid png")
+    return struct.unpack(">II", data[16:24])
+
+
+def paint_summary(image):
+    """Bounded aggregates of one assert-painted capture; never its bytes."""
+    width, height = png_size(image)
+    if not (0 < width <= MAX_PAINT_SIDE and 0 < height <= MAX_PAINT_SIDE):
+        raise Invalid("unsupported paint capture")
+    counts = png_colors(image)
+    total = sum(counts.values())
+    color, count = min(counts.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "width": width,
+        "height": height,
+        "distinctColors": min(len(counts), MAX_PAINT_DISTINCT_COLORS),
+        "dominant": {"hex": "#%02x%02x%02x" % color, "percent": (200 * count + total) // (2 * total)},
+        "colors": rendered_palette(counts, MAX_PAINT_COLORS),
+        "fingerprint": hashlib.sha256(image).hexdigest()[:16],
+    }
+
+
+def paint_until_varied(sample, wait):
+    """Sample until the element shows two or more colors, within the same
+    1.5 s window as observe_until_stable: canvases often draw on a later
+    animation frame or once their images load. A timeout never passes; the
+    last sample (None: not in the viewport) decides."""
+    deadline = time.monotonic() + PAINT_WINDOW_S
+    painted = sample()
+    while (painted is None or painted["distinctColors"] < 2) and deadline - time.monotonic() >= 0.1:
+        wait(100)
+        painted = sample()
+    return painted
+
+
 def wrapper_document(prefix):
     # Fixed and script-free: page script exceptions therefore come only from
     # the sandboxed preview frame or a frame the preview itself created.
@@ -1240,10 +1334,10 @@ def run_browser(bundle, playwright_factory=None):
                 )["result"]["objectId"]
                 return 1, node
 
-            def once(locator, include_hidden=False, include_text=False, select_value=None, arm_download=False, fill_value=None, perform_fill=False, focus_state=None):
+            def once(locator, include_hidden=False, include_text=False, select_value=None, arm_download=False, fill_value=None, perform_fill=False, focus_state=None, paint_box=False):
                 owned = []
                 try:
-                    return measure(locator, include_hidden, owned, include_text, select_value, arm_download, fill_value, perform_fill, focus_state)
+                    return measure(locator, include_hidden, owned, include_text, select_value, arm_download, fill_value, perform_fill, focus_state, paint_box)
                 finally:
                     for object_id in dict.fromkeys(owned):
                         try:
@@ -1251,7 +1345,7 @@ def run_browser(bundle, playwright_factory=None):
                         except Exception:
                             pass
 
-            def measure(locator, include_hidden, owned, include_text=False, select_value=None, arm_download=False, fill_value=None, perform_fill=False, focus_state=None):
+            def measure(locator, include_hidden, owned, include_text=False, select_value=None, arm_download=False, fill_value=None, perform_fill=False, focus_state=None, paint_box=False):
                 if blocked:
                     raise BlockedRequest()
                 if "selector" in locator:
@@ -1304,7 +1398,7 @@ def run_browser(bundle, playwright_factory=None):
                     {
                         "objectId": node,
                         "functionDeclaration": OBSERVE_ELEMENT,
-                        "arguments": [{"value": include_text}, {"value": select_value}, {"value": fill_value}, {"value": perform_fill}, {"value": focus_state}],
+                        "arguments": [{"value": include_text}, {"value": select_value}, {"value": fill_value}, {"value": perform_fill}, {"value": focus_state}, {"value": paint_box}],
                         "returnByValue": True,
                     },
                 )
@@ -1316,6 +1410,18 @@ def run_browser(bundle, playwright_factory=None):
                 return observe_until_stable(
                     lambda: once(locator, include_hidden, expected_text is not None, select_value, fill_value=fill_value), page.wait_for_timeout, expected, expected_text
                 )
+
+            def paint(locator):
+                # One assert-painted sample of the composited page, preview
+                # frame and anything over the element included; None when the
+                # element is no longer one rendered match or too little of it
+                # is in the viewport.
+                observed = once(locator, paint_box=True)
+                clip = paint_clip(observed["box"]) if observed.get("count") == 1 and observed["visible"] else None
+                if clip is None:
+                    return None
+                capture = cdp.send("Page.captureScreenshot", {"format": "png", "clip": clip, "captureBeyondViewport": False})
+                return paint_summary(base64.b64decode(capture["data"], validate=True))
 
             page.wait_for_timeout(100)
             diagnostics = evaluate(DIAGNOSTIC)
@@ -1329,8 +1435,10 @@ def run_browser(bundle, playwright_factory=None):
             for index, step in enumerate(request["steps"]):
                 try:
                     # Only a hidden assertion may address a hidden element by
-                    # role/name; assert-visible, click and press stay
-                    # rendered-only, and match Playwright's source-text names too.
+                    # role/name; assert-visible, assert-painted, click and press
+                    # stay rendered-only, and match Playwright's source-text
+                    # names too. assert-painted waits for visibility like
+                    # assert-visible.
                     before, stable = observe(
                         step["locator"], step["action"] == "assert-hidden",
                         None if step["action"] in ("click", "select-option", "fill", "download", "press") else step["action"] != "assert-hidden",
@@ -1487,6 +1595,22 @@ def run_browser(bundle, playwright_factory=None):
                                 )
                     except Exception:
                         item["errorCode"] = "unexpected_download" if 'download' in blocked else "press_failed"
+                elif step["action"] == "assert-painted":
+                    # A blank detector: two or more captured colors pass. A
+                    # request blocked meanwhile or a failed capture ends the
+                    # run (request_blocked, unavailable), never as a verdict.
+                    if not before["visible"]:
+                        item["errorCode"] = "visibility_mismatch"
+                    else:
+                        painted = paint_until_varied(lambda: paint(step["locator"]), page.wait_for_timeout)
+                        if painted is None:
+                            item["errorCode"] = "not_in_viewport"
+                        else:
+                            item["paint"] = painted
+                            if painted["distinctColors"] >= 2:
+                                item["status"] = "passed"
+                            else:
+                                item["errorCode"] = "uniform_paint"
                 elif step['action'] == 'assert-text':
                     matches = before.get('visible') is True and before.get('text') == {
                         'actual': step['expectedText'], 'truncated': False}

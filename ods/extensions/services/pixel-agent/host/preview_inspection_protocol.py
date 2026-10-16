@@ -42,12 +42,15 @@ PRESS_KEYS = (
 )
 PRESS_HOLD_MS = 100
 MAX_PRESS_HOLD_MS = 1000
+PAINT_CAPABILITY = "element-paint-v1"
+PAINT_SCOPE = " Pixel paint was checked only for explicit assert-painted steps, as aggregate color statistics of each element's on-screen box; this detects a blank or single-color render, not image recognition or whether the intended content was drawn."
 
 
 def inspection_scope(request):
     scope = SELECT_SCOPE if any(s['action'] == 'select-option' for s in request['steps']) else SCOPE
     scope += FILL_SCOPE if any(s['action'] == 'fill' for s in request['steps']) else ''
     scope += PRESS_SCOPE if any(s['action'] == 'press' for s in request['steps']) else ''
+    scope += PAINT_SCOPE if any(s['action'] == 'assert-painted' for s in request['steps']) else ''
     return scope + (DOWNLOAD_SCOPE if request['steps'][-1]['action'] == 'download' else '')
 
 
@@ -201,7 +204,7 @@ def validate_request(value):
         press_step = isinstance(step, dict) and step.get("action") == "press"
         extra = ("expectedText",) if text_step else ("value",) if select_step else ("path", "expectedBytes", "expectedSha256") if download_step else ("key", *(("holdMs",) if "holdMs" in step else ())) if press_step else ()
         exact(step, ("action", "locator", *extra))
-        if step["action"] not in ("assert-visible", "assert-hidden", "assert-text", "click", "select-option", "fill", "download", "press"):
+        if step["action"] not in ("assert-visible", "assert-hidden", "assert-text", "click", "select-option", "fill", "download", "press", "assert-painted"):
             raise Invalid("invalid step")
         if press_step and (
             not isinstance(step["key"], str) or step["key"] not in PRESS_KEYS
