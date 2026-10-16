@@ -4613,7 +4613,10 @@ export function userMessageRequestsWorkspaceDocumentDelivery(messages, prompt = 
   const positive = lane.split(/[!?;\n]+|\.(?=\s|$)/).filter(clause =>
     !/\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|without)\s+(?:download|deliver|attach|publish)\b/i.test(clause)
   ).join(' ');
-  return /\b(?:download(?:able)?|attach(?:ment)?|deliver(?:y)?)\b/i.test(positive) &&
+  // The noun delivery (for example, a file's delivery date) is not itself
+  // a publication request. Preserve the existing download/attachment phrases
+  // and deliver verb without combining a schedule with a file mention.
+  return /\b(?:download(?:able)?|attach(?:ment)?|deliver)\b/i.test(positive) &&
     (/\.(?:md|markdown|txt|csv|tsv|json|pdf|zip|rar|docx|xlsx|pptx)\b/i.test(positive) ||
       (/\b(?:documents?|files?|archives?|projects?|source\s+(?:code|filenames?))\b/i.test(positive) &&
         !/\b(?:images?|photos?|audio|video|websites?|webpages?|html)\b|\.(?:png|jpe?g|gif|svg|mp3|mp4|wav|webm|html?)\b/i.test(positive)));
