@@ -165,7 +165,7 @@ function ProfileForModel({modelId, lifecycleActive}) {
     // Portal advisory sends the owner here to press Check again.
     return (
       <div className="mt-2 space-y-1.5 text-[11px] text-theme-text-muted">
-        <p>Not checked yet: ODS checks what a model can do the first time it runs on this machine.</p>
+        <p>No saved capability check is available for this model on this machine. Choose Check again to run one.</p>
         {recheckButton}
         {notice && <p role="status" className="text-amber-200">{notice}</p>}
       </div>
