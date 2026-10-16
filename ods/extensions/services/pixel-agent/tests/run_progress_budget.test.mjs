@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRunProgressBudget, failedToolOutcome, isLiteralEcho, lookupFoundNothing, RUN_PROGRESS_LIMITS} from '../plugin/run-progress-budget.mjs';
 
-test('a single lookup found nothing only when it completed with exit 1 and printed nothing', () => {
+test('a single lookup found nothing only when it completed with exit 1 and printed no error', () => {
   const receipt = (exitCode, text = '', details = {}) => ({content:[{type:'text', text:`${text}\n\n(Command exited with code ${exitCode})`}],
     details:{status:'completed', exitCode, durationMs:3, ...details}});
   const empty = receipt(1);
@@ -21,13 +21,16 @@ test('a single lookup found nothing only when it completed with exit 1 and print
   ]) assert.equal(lookupFoundNothing(command, empty), false, String(command));
   const search = 'grep -n x f';
   for (const result of [
-    receipt(0), receipt(2), receipt(127), receipt(128), receipt(1, 'f:1: x'), receipt(1, 'grep: f: No such file or directory'),
+    receipt(0), receipt(2), receipt(127), receipt(128), receipt(1, 'grep: f: No such file or directory'),
     receipt(1, '', {status:'running'}), receipt(1, '', {status:'failed'}), receipt(1, '', {sessionId:'s-1'}),
     {content:[{type:'text', text:''}], details:{status:'completed', exitCode:1.5}},
-    {content:[{type:'text', text:''}], details:{status:'completed'}}, {details:{status:'completed', exitCode:1, aggregated:'x'}},
+    {content:[{type:'text', text:''}], details:{status:'completed'}}, {details:{status:'completed', exitCode:1, aggregated:'grep: f: Permission denied'}},
     undefined, null, {},
   ]) assert.equal(lookupFoundNothing(search, result), false, JSON.stringify(result));
   assert.equal(lookupFoundNothing(search, {details:{status:'completed', exitCode:1, aggregated:''}}), true);
+  // A count of zero and `which` resolving only some names are empty answers too.
+  assert.equal(lookupFoundNothing('grep -c foo ui.js', receipt(1, '0')), true);
+  assert.equal(lookupFoundNothing('which node deno', receipt(1, '/usr/bin/node')), true);
   assert.equal(lookupFoundNothing('grep '.padEnd(4100, 'x'), empty), false);
 });
 
@@ -44,8 +47,22 @@ test('a chain of read-only searches whose last search came up empty found nothin
     ["cd Playground/elf-of-doom && sed -n '860,900p' ui.js; echo ===; grep -n \"function showScreen\" -A 15 ui.js",
       '  updateHud();\n  requestAnimationFrame(frame);\n==='],
     ['grep -c x a.js | sort | uniq -c && rg -n "y" src | tail -n 5 && which deno', '      1 a.js:2\nsrc/main.js:4:y'],
+    ['grep -rn foo . | tail -n +5 | sort -u | uniq -c; grep -n zzz ui.js', '      1 ./a.js:9:foo'],
+    // grep's own notices on a search that succeeded are not errors, nor is quoting an error message.
+    ['grep -rn "ui.js" .; grep -n zzz ui.js', './index.html:9:<script src="ui.js"></script>\ngrep: ./.git/index: binary file matches'],
+    ['grep -n "\\d" ui.js; grep -n zzz ui.js', 'grep: warning: stray \\ before d'],
+    ['grep -rn "Permission denied" src; grep -n zzz ui.js', "src/a.js:3:  log('Permission denied');"],
   ];
   for (const [command, output] of chains) assert.equal(lookupFoundNothing(command, receipt(output)), true, command);
+  // An earlier step that failed prints an error, even where rg 13 leaves out its name.
+  for (const [chain, output] of [
+    ['rg -n "showScreen(" ui.js; grep -n "function showScreen" ui.js', 'regex parse error:\n    showScreen(\n              ^\nerror: unclosed group'],
+    ['rg --bogus x ui.js; grep -n zzz ui.js', "error: Found argument '--bogus' which wasn't expected, or isn't valid in this context"],
+    ['git grep --bogus x; grep -n zzz ui.js', "error: unknown option `bogus'\nusage: git grep [<options>] [-e] <pattern> [<rev>...] [[--] <path>...]"],
+    ['which -z node; grep -n zzz ui.js', 'Illegal option -z\nUsage: /usr/bin/which [-as] args'],
+    ['rg -n x missing.js; grep -n zzz ui.js', 'missing.js: No such file or directory (os error 2)'],
+    ['grep -n x ui.js; grep -n zzz src', 'grep: src: Is a directory'],
+  ]) assert.equal(lookupFoundNothing(chain, receipt(output)), false, chain);
   const [command, output] = chains[0];
   for (const result of [receipt(output, 0), receipt(output, 2), receipt(`${output}\ngrep: legacy.js: No such file or directory`),
     receipt(`sh: 1: cd: can't cd to Playground/elf-of-doom\n${output}`),
@@ -58,6 +75,11 @@ test('a chain of read-only searches whose last search came up empty found nothin
     'grep a f;; grep b f', 'grep a f; grep b f;', 'grep a f |& cat; grep b f', 'grep a f & grep b f', 'grep a f || grep b f',
     'echo "$(rm x)"; grep b f', 'grep a f; cd x && grep b f', 'cat f; grep b f', 'grep a f | xargs rm; grep b f',
     'grep a f # ; grep b f', 'grep "a\\\nb" f; grep b f', "grep 'a\nb' f; grep b f", 'grep "a f; grep b f',
+    // Options that write files or run programs, however they are quoted.
+    "sed -n '1p' ui.js '-i'; grep -n zzz ui.js", 'sed -n 1p ui.js "--in-place"; grep -n zzz ui.js', "sed -n '0p' f; grep b f",
+    'grep -rn foo . | sort -omakefile; grep -n zzz ui.js', 'grep -rn foo . | sort -c; grep -n zzz ui.js', 'grep a f | head 5; grep b f',
+    "git grep -O'rm -f' foo; grep -n zzz ui.js", 'git grep -nOrm foo; grep -n zzz ui.js', 'git grep --open-files-in-pager=rm foo; grep -n zzz ui.js',
+    'rg --pre rm -n x victim.txt', 'rg --pre=rm x victim.txt', "rg --p're' rm x f", 'git -C src grep x',
   ]) assert.equal(lookupFoundNothing(chain, receipt('')), false, chain);
 });
 

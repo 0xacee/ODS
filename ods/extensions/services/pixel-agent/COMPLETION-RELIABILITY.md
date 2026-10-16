@@ -415,14 +415,16 @@ confusing its training cutoff with the actual date.
 The run-progress budget charges every non-zero exit as a failure. Searches that
 came up empty are exempt (`lookupFoundNothing`): a `grep`, `egrep`, `fgrep`, `rg`,
 `git grep` or `which` that completed with exit 1, optionally after one literal
-`cd DIR &&`. Those programs exit 1 only when nothing matched or resolved. A single
-lookup must have printed nothing; OpenClaw merges stdout and stderr, so no output
-means no error. Models also chain searches (`grep a f | head; echo ===; grep b g`),
-so a list joined by `;` or `&&` qualifies when every step is a lookup, a literal
-`echo` or `sed -n 'N,Mp'`, optionally piped into `head`, `tail`, `cat`, `wc`,
-`sort` or `uniq`, the last step is a bare lookup, and the output holds no error
-line. None of those other steps can exit 1, so exit 1 still means a search found
-nothing. The receipt must be bound to the exact pending call (run, transport, session and the
+`cd DIR &&`. Those programs exit 1 only when nothing matched or resolved. Models
+also chain searches (`grep a f | head; echo ===; grep b g`), so a list joined by
+`;` or `&&` qualifies when every step is a lookup, an `echo` or `sed -n 'N,Mp'`,
+optionally piped into `head`, `tail`, `cat`, `wc`, `sort` or `uniq`, and the
+last step is a bare lookup. None of those other steps can exit 1, so exit 1 still
+means a search found nothing. OpenClaw merges stdout and stderr, and any error
+line in the output (grep's warnings and binary-match notices aside) disqualifies
+the command, as do options that run programs or write files (`rg --pre`,
+`git grep -O`, `sort -o`, `sed -i`). The reasoning assumes the sandbox's GNU tools
+and rg 13 under dash. The receipt must be bound to the exact pending call (run, transport, session and the
 executed, wrapped parameters), and the model's own command is read from that
 call's record. Such a lookup is recorded as discovery: it is not charged and it
 resets nothing, up to `FREE_EMPTY_LOOKUPS_PER_RUN` per run, after which it is an
