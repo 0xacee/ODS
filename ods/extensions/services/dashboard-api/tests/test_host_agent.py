@@ -4716,9 +4716,38 @@ class TestRemoteProviderLifecycle:
         assert 'target_route_fingerprint="$8"' in calls[-1][2]
         assert _mod._reconcile_managed_pixel_contract(runtime) == "reconciled"
         assert calls[-1][-3:] == ["", "unknown", ""]
+        for control in ("enable_thinking", "always", "none"):
+            assert _mod._reconcile_managed_pixel_contract(runtime, thinking_control=control) == "reconciled"
+            assert calls[-1][-3:] == ["", "unknown", control]
         with pytest.raises(RuntimeError, match="route identity"):
             _mod._reconcile_managed_pixel_contract({**runtime, "routeFingerprint": "a" * 64 + "\n"})
-        assert len(calls) == 2
+        assert len(calls) == 5
+
+    @pytest.mark.parametrize("control", ["", "other", True, 1, [], {}])
+    def test_deactivation_rejects_invalid_saved_thinking_control_before_mutation(
+        self, monkeypatch, tmp_path, control,
+    ):
+        monkeypatch.setattr(_mod, "DATA_DIR", tmp_path)
+        route = _mod._plan_remote_provider_lifecycle_operation(self._configure_payload())["route"]
+        path = tmp_path / "remote-provider" / "activation-state.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({
+            "schema": _mod._REMOTE_PROVIDER_ACTIVATION_STATE_SCHEMA,
+            "phase": "active",
+            "previous": {
+                "odsMode": "local", "llmApiUrl": "http://llama-server:8080",
+                "cloudConfig": _mod._serializable_text_snapshot({"exists": False}),
+                "pixel": None, "pixelThinkingControl": control,
+            },
+            "remote": _mod._remote_provider_runtime_contract(route),
+            "routeFingerprint": _mod._remote_provider_route_fingerprint(route),
+        }), encoding="utf-8")
+        path.chmod(0o600)
+        before = path.read_bytes()
+        monkeypatch.setattr(_mod, "_snapshot_text_file", lambda _: pytest.fail("mutation preparation reached"))
+        with pytest.raises(RuntimeError, match="contract is invalid"):
+            _mod._deactivate_remote_provider_route()
+        assert path.read_bytes() == before
 
     def test_active_remote_pixel_runtime_requires_current_proven_custody_join(
         self,
@@ -4812,10 +4841,14 @@ class TestRemoteProviderLifecycle:
         route["status"]["proven"] = False
         assert _mod._active_remote_provider_pixel_runtime() is None
 
+    @pytest.mark.parametrize("thinking_control", [None, "enable_thinking", "always", "none"])
+    @pytest.mark.parametrize("legacy_receipt", [False, True])
     def test_consumer_activation_and_deactivation_restore_exact_prior_route(
         self,
         monkeypatch,
         tmp_path,
+        thinking_control,
+        legacy_receipt,
     ):
         install_dir = tmp_path / "ods"
         data_dir = install_dir / "data"
@@ -4850,7 +4883,14 @@ class TestRemoteProviderLifecycle:
         }
         current_pixel = {"value": local_pixel}
         reconciled = []
+        reconciled_controls = []
         verified = []
+        answers_path = data_dir / "pixel" / "onboarding.json"
+        answers_path.parent.mkdir()
+        answers = {"modelThinkingControl": thinking_control} if thinking_control else {}
+        answers_path.write_text(json.dumps(answers), encoding="utf-8")
+        answers_path.chmod(0o600)
+        monkeypatch.setattr(_mod, "_ods_managed_pixel_identity", lambda: ("fixture", tmp_path))
         monkeypatch.setattr(
             _mod, "_managed_pixel_runtime_contract", lambda: current_pixel["value"]
         )
@@ -4873,9 +4913,15 @@ class TestRemoteProviderLifecycle:
             assert env["ODS_MODE"] == "cloud"
             cloud_path.write_text("model_list:\n  - model_name: ods/current\n", encoding="utf-8")
 
-        def fake_reconcile(contract):
+        def fake_reconcile(contract, *, thinking_control=None):
             reconciled.append(contract)
+            reconciled_controls.append(thinking_control)
             current_pixel["value"] = contract
+            # A remote promotion clears a previous model's control, just as
+            # the shipped onboarding writer does. Readback uses the real
+            # private-answers reader rather than a cached test constant.
+            answers = {"modelThinkingControl": thinking_control} if thinking_control else {}
+            answers_path.write_text(json.dumps(answers), encoding="utf-8")
             return "reconciled"
 
         monkeypatch.setattr(_mod, "_render_remote_provider_cloud_config", fake_render)
@@ -4908,6 +4954,8 @@ class TestRemoteProviderLifecycle:
             "model_list:\n  - model_name: ods/current\n"
         )
         assert reconciled[-1] == remote_pixel
+        assert _mod._managed_pixel_thinking_control() is None
+        assert _mod._read_remote_provider_activation_state()["previous"].get("pixelThinkingControl") == thinking_control
         assert verified[-1] == ("cloud", "ods/current")
         public = json.loads(
             (data_dir / "remote-provider" / "activation-public.json").read_text(
@@ -4937,8 +4985,8 @@ class TestRemoteProviderLifecycle:
         assert _mod._verify_current_remote_provider_consumers(second_route, second_runtime) is None
         private_before = (data_dir / "remote-provider" / "activation-state.json").read_bytes()
 
-        def fail_new_route(contract):
-            fake_reconcile(contract)
+        def fail_new_route(contract, **kwargs):
+            fake_reconcile(contract, **kwargs)
             if contract.get("routeFingerprint") == second_runtime["routeFingerprint"]:
                 raise RuntimeError("simulated native reconciliation failure")
 
@@ -4949,12 +4997,40 @@ class TestRemoteProviderLifecycle:
         assert (data_dir / "remote-provider" / "activation-state.json").read_bytes() == private_before
         monkeypatch.setattr(_mod, "_reconcile_managed_pixel_contract", fake_reconcile)
 
+        # Replacing a remote route must retain the first local model's control,
+        # even though the remote onboarding answers no longer contain it.
+        _mod._activate_remote_provider_route(second_route)
+        assert _mod._read_remote_provider_activation_state()["previous"].get("pixelThinkingControl") == thinking_control
+        if legacy_receipt:
+            state = _mod._read_remote_provider_activation_state()
+            state["previous"].pop("pixelThinkingControl", None)
+            _mod._write_remote_provider_activation_state(state)
+        expected_control = None if legacy_receipt else thinking_control
+        active_env = env_path.read_bytes()
+        active_state = (data_dir / "remote-provider" / "activation-state.json").read_bytes()
+
+        def fail_restore(contract, **kwargs):
+            fake_reconcile(contract, **kwargs)
+            if contract == local_pixel:
+                raise RuntimeError("simulated local restoration failure")
+
+        monkeypatch.setattr(_mod, "_reconcile_managed_pixel_contract", fail_restore)
+        with pytest.raises(RuntimeError, match="simulated local restoration failure"):
+            _mod._deactivate_remote_provider_route()
+        assert env_path.read_bytes() == active_env
+        assert (data_dir / "remote-provider" / "activation-state.json").read_bytes() == active_state
+        assert current_pixel["value"] == second_runtime
+        assert _mod._managed_pixel_thinking_control() is None
+        monkeypatch.setattr(_mod, "_reconcile_managed_pixel_contract", fake_reconcile)
+
         deactivation = _mod._deactivate_remote_provider_route()
 
         assert deactivation["restored"] is True
         assert env_path.read_text(encoding="utf-8") == original_env
         assert cloud_path.read_text(encoding="utf-8") == original_cloud
         assert reconciled[-1] == local_pixel
+        assert reconciled_controls[-1] == expected_control
+        assert _mod._managed_pixel_thinking_control() == expected_control
         assert verified[-1] == ("local", "ods/current")
         assert not (data_dir / "remote-provider" / "activation-state.json").exists()
         assert not (data_dir / "remote-provider" / "activation-public.json").exists()

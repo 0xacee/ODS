@@ -4954,6 +4954,13 @@ def _read_remote_provider_activation_state() -> dict | None:
         or any(character in previous["llmApiUrl"] for character in "\r\n\x00")
         or not _valid_serializable_text_snapshot(previous.get("cloudConfig"))
         or not _valid_managed_pixel_runtime_contract(previous.get("pixel"))
+        or (
+            previous.get("pixelThinkingControl") is not None
+            and (
+                not isinstance(previous["pixelThinkingControl"], str)
+                or previous["pixelThinkingControl"] not in _THINKING_CONTROLS
+            )
+        )
         or not _valid_remote_provider_runtime_contract(remote)
         or not isinstance(value.get("routeFingerprint"), str)
         or not re.fullmatch(r"[a-f0-9]{64}", value["routeFingerprint"])
@@ -5278,7 +5285,7 @@ def _activate_remote_provider_route(
     activation_snapshot = _snapshot_text_file(activation_path)
     activation_public_snapshot = _snapshot_text_file(activation_public_path)
     pixel_before = transaction.previous if transaction is not None else _managed_pixel_runtime_contract()
-    # The local model's measured thinking control, restored if activation fails.
+    # Keep the local model's measured control for rollback and later disable.
     pixel_before_control = None if transaction is not None else _managed_pixel_thinking_control()
     container_state = _capture_container_state("ods-litellm")
     if not container_state.get("running"):
@@ -5293,6 +5300,7 @@ def _activate_remote_provider_route(
             "llmApiUrl": str(env.get("LLM_API_URL") or "http://llama-server:8080"),
             "cloudConfig": _serializable_text_snapshot(cloud_snapshot),
             "pixel": pixel_before,
+            "pixelThinkingControl": pixel_before_control,
         }
     candidate_state = {
         "schema": _REMOTE_PROVIDER_ACTIVATION_STATE_SCHEMA,
@@ -5440,7 +5448,10 @@ def _deactivate_remote_provider_route(*, transaction=None) -> dict[str, object]:
                 raise RuntimeError('Previous local runtime could not be proved before remote deactivation')
             pixel_status = transaction.apply(previous_pixel)
         else:
-            pixel_status = _reconcile_managed_pixel_contract(previous_pixel)
+            pixel_status = _reconcile_managed_pixel_contract(
+                previous_pixel,
+                **_thinking_control_kwargs(previous.get("pixelThinkingControl")),
+            )
         _remove_remote_provider_file(activation_path)
         _remove_remote_provider_file(activation_public_path)
         if transaction is not None and owns_transaction:
