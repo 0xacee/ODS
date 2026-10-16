@@ -116,7 +116,11 @@ $parentModulePath = $env:PSModulePath
 try {
     Initialize-ODSPrivateDirectory $fixture
     $private = Join-Path $fixture 'private'; Initialize-ODSPrivateDirectory $private
-    [IO.File]::WriteAllText((Join-Path $private 'instance.json'), '{"distro":"","installRoot":""}')
+    # Elevated Windows runners can give a raw new file the Administrators owner.
+    # Match production's explicit owner custody before testing the child ACL read.
+    $manifestPath = Join-Path $private 'instance.json'
+    Write-ODSWslJson $manifestPath @{distro='';installRoot=''}
+    if ((Get-Acl -LiteralPath $manifestPath).GetOwner([Security.Principal.SecurityIdentifier]).Value -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) { throw 'Fixture manifest owner does not match the controller user' }
     $exposed = Join-Path $fixture 'exposed'
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User); $acl.SetAccessRuleProtection($true, $false)
@@ -151,7 +155,7 @@ try {
             $directory = if ($case -eq 'private-acl') { $private } else { $exposed }
             $start.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $ControllerRoot 'wsl-lifecycle.ps1') + '" -Action hold -InstanceDirectory "' + $directory + '"'
         }
-        $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
+        $process = [Diagnostics.Process]::new(); $process.StartInfo = $start; $stderr = ''
         try {
             if (-not $process.Start()) { throw 'Could not start module-path fixture' }
             $stdoutTask = $process.StandardOutput.ReadToEndAsync(); $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -169,7 +173,7 @@ try {
                 if ($process.ExitCode -eq 0 -or $stdout.Trim() -or $stderr -notmatch [regex]::Escape($expected) -or $stderr -match 'CONTAMINATED_PARENT_MODULE|CouldNotAutoloadMatchingModule') { throw "Controller did not enforce the expected native ACL/identity guard: $case" }
             }
             Write-Host "PASS module-path $case uses the real PS5 process boundary"
-        } catch { $failures += "$case : $($_.Exception.Message)" }
+        } catch { $failures += "$case : $($_.Exception.Message); child stderr: $($stderr.Substring(0, [Math]::Min(2048, $stderr.Length)))" }
         finally { if ($process.Id -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }; $process.Dispose() }
     }
     if ($env:PSModulePath -cne $parentModulePath) { throw 'Controller tests changed the parent module path' }
