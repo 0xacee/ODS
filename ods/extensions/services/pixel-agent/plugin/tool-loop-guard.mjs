@@ -29,7 +29,7 @@ import { researchRequestProblem } from "./perplexica-research.mjs";
 import { HOST_CITATION_LIMITS } from './citation-verification.mjs';
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
-import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, progressLaneStopReason, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
+import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, lookupFoundNothing, progressLaneStopReason, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
 import { assistantMessageText, composeProgressFinalization, composeReadPages, createProgressFinalization, partialFinalizationAnswer,
   PROGRESS_FINALIZATION_INSTRUCTION } from "./progress-finalization.mjs";
 import { STOP_SYNTHESIS_LIMITS, STOP_SYNTHESIS_NOTE, synthesisAnswer, synthesisRequest } from "./stop-synthesis.mjs";
@@ -210,6 +210,15 @@ const NATIVE_DELEGATION_WAIT_REASON =
 // Per run and per kind of corrective answer (see recordFreeCorrection): how
 // many answers are recorded without consuming the failure budget.
 export const FREE_CORRECTIONS_PER_KIND = 2;
+
+// Per run: how many bound exec lookups that completed and found nothing (see
+// lookupFoundNothing) are recorded as discovery instead of failures. A coding
+// session searches for a name, sees "not here" and searches elsewhere; on the
+// RTX Spark (Elf of Doom, 2026-10-16) such empty greps, counted as failures,
+// filled the 12-failure total and stopped a run that had made 21 good edits.
+// Discovery never resets the round fuse, so a run of searches that changes
+// nothing still stops after RUN_PROGRESS_LIMITS.roundsWithoutProgress rounds.
+export const FREE_EMPTY_LOOKUPS_PER_RUN = 12;
 
 // Refusals for a write that re-types existing workspace files (see
 // derivedWriteMatch). Fixed text; only the appended matched paths vary.
@@ -7192,13 +7201,33 @@ export function createToolLoopGuard({
   // unchanged consecutive/total failure fuses. A nested Tool Search execution
   // is charged through its outer tool_call receipt, whose ID differs, so it
   // never receives the allowance. Returns whether this answer was free.
-  function recordFreeCorrection(state, kind, callId, toolName) {
+  function recordFreeCorrection(state, kind, callId, toolName, limit = FREE_CORRECTIONS_PER_KIND) {
     if (!state || typeof callId !== "string" || !callId || callId.startsWith("tool_search_code:")) return false;
     const used = state.freeCorrections.get(kind) ?? 0;
-    if (used >= FREE_CORRECTIONS_PER_KIND) return false;
+    if (used >= limit) return false;
     state.freeCorrections.set(kind, used + 1);
     state.progressBudget.observeResult({callId, tool: toolName, failed: false, discovery: true});
     return true;
+  }
+
+  // The exec receipt (direct, or the core exec inside a Tool Search call) for
+  // this exact pending call: same run, transport, session and executed
+  // (wrapped) parameters as recorded before it ran. Undefined for anything
+  // else, so an unbound or foreign receipt is never reclassified.
+  function boundExecReceipt(state, pendingToolRun, event, context, runId, toolCallId, toolName) {
+    const execution = toolName === 'exec' ? event
+      : toolName === 'tool_call' ? toolSearchEventEnvelope(event, 'exec', 'core') : undefined;
+    if (!state || !execution || pendingToolRun?.runId !== runId || pendingToolRun.selectedToolName !== 'exec' ||
+        pendingToolRun.transport !== toolName ||
+        pendingToolRun.inspectionSessionId !== state.currentSessionId ||
+        pendingToolRun.inspectionSessionKey !== state.currentSessionKey ||
+        (context?.sessionId && context.sessionId !== state.currentSessionId) ||
+        (context?.sessionKey && context.sessionKey !== state.currentSessionKey) ||
+        (event?.runId && event.runId !== runId) ||
+        (event?.toolCallId && event.toolCallId !== toolCallId) ||
+        (event?.toolName && event.toolName !== toolName) ||
+        !isDeepStrictEqual(execution.params, pendingToolRun.executedParams)) return undefined;
+    return execution;
   }
 
   // Refusal text for a write that re-types files this run wrote, edited or
@@ -10363,7 +10392,15 @@ export function createToolLoopGuard({
         state.pendingExecSessions.has(selected.params.sessionId);
       const effectiveProgressTool = toolName === 'tool_call'
         ? String(event.params?.id ?? '').split(':').at(-1) : toolName;
-      state.progressBudget.observeResult({callId: toolCallId, tool: toolName,
+      // A bound lookup that completed and found nothing is an answer: recorded
+      // as discovery (no charge, no reset) within FREE_EMPTY_LOOKUPS_PER_RUN.
+      // The model's own command is read from this call's pending record, since
+      // event.params carries the cancellable wrapper.
+      const lookupReceipt = boundExecReceipt(state, pendingToolRun, event, context, runId, toolCallId, toolName);
+      const emptyLookup = Boolean(lookupReceipt) &&
+        lookupFoundNothing(pendingToolRun.selectedParams?.command, lookupReceipt.result) &&
+        recordFreeCorrection(state, 'empty-lookup', toolCallId, toolName, FREE_EMPTY_LOOKUPS_PER_RUN);
+      if (!emptyLookup) state.progressBudget.observeResult({callId: toolCallId, tool: toolName,
         params: event.params, failed: failedToolOutcome(event), pending: running,
         discovery:state.workspaceLaneRequested && (EXTENSION_METADATA_TOOLS.has(effectiveProgressTool) ||
           effectiveProgressTool === 'pixel_ops_inventory'),
