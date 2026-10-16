@@ -483,7 +483,7 @@ export default function ODSTalk() {
     // prompt for images ("Describe what you see in this image."). Without
     // either a caption or an attachment, there's nothing to send.
     if (!clean && !attachment) return
-    if (sending || status !== 'ready') return
+    if (sending || recorderRef.current || status !== 'ready') return
     setSending(true)
 
     const userId = transcriptId || makeId('user')
@@ -810,7 +810,7 @@ export default function ODSTalk() {
 
   // Send is enabled either with text OR an attachment (an image alone is a
   // valid message — the model gets a default "describe this" prompt).
-  const canSend = (input.trim().length > 0 || pendingAttachment) && !sending && status === 'ready'
+  const canSend = (input.trim().length > 0 || pendingAttachment) && !sending && !recording && status === 'ready'
 
   return (
     <div className="pixel-app ods-talk min-h-dvh bg-theme-bg text-theme-text antialiased">

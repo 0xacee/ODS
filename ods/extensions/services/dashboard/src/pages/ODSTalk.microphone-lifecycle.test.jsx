@@ -99,6 +99,28 @@ describe('Talk microphone ownership', () => {
     expect(uploads()[0][1].body.get('file').name).toBe('recording.webm')
   })
 
+  test.each(['permission pending', 'recording'])('text submission cannot compete while capture is %s', async phase => {
+    if (phase === 'permission pending') getUserMedia.mockReturnValue(new Promise(() => {}))
+    const view = await mount()
+    fireEvent.click(screen.getByRole('button', { name: 'Record voice' }))
+    if (phase === 'recording') await waitFor(() => expect(instances).toHaveLength(1))
+    const composer = screen.getByPlaceholderText('Message ODS')
+    fireEvent.change(composer, { target: { value: 'Draft while recording' } })
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Stop recording' })).toBeEnabled()
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    // Direct form submission also goes through the guarded send callback.
+    fireEvent.submit(composer.closest('form'))
+    expect(fetchMock.mock.calls.filter(([url]) => url !== '/api/talk/status')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Stop recording' }))
+    if (phase === 'recording') {
+      expect(await screen.findByText('Voice received')).toBeInTheDocument()
+      expect(tracks[0].stop).toHaveBeenCalled()
+      expect(uploads()).toHaveLength(1)
+    }
+    view.unmount()
+  })
+
   test('a second click while permission is pending cancels and cannot start a second capture', async () => {
     const permission = deferred()
     getUserMedia.mockReturnValue(permission.promise)
