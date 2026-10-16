@@ -20,11 +20,17 @@ test("writable output refusal explains narrowing permissions without changing th
 test("folder and file refusals state the host's rules and that hidden entries are skipped", async () => {
   for (const [errorCode, expected] of [
     ['unsafe_directory', [/every folder inside it must belong to the workspace owner, be readable, and must not be a symlink or writable by group or others/,
-      /letters, digits, '\.', '_', '-', '\[' and '\]' \(at most 128 characters\) and must not start with '-', '\]' or the reserved __ods_ prefix/,
+      /only ASCII letters \(A-Z, a-z\), digits, '\.', '_', '-', '\[' and '\]' \(at most 128 characters\) and must not start with '-', '\]' or the reserved __ods_ prefix/,
       /folders starting with '\.' are hidden and skipped, never published/,
-      /Rename a folder that breaks these rules \(for example, one with spaces in its name\) or move it outside the site directory/,
-      /never delete files/]],
+      // Each cause gets its own remedy: renaming cannot fix a mode fault, and
+      // moving a needed asset folder out would publish a site full of 404s.
+      /Rename a folder whose name breaks these rules \(for example, one with spaces in its name\) and update the references to it, or move an unrelated folder outside the site directory/,
+      /If the selected directory or a folder inside it is writable by group or others, remove only those write bits from that folder \(chmod go-w\)/,
+      /Move a symlinked or foreign-owned folder outside the site and, if the site needs its files, copy them into a real folder the workspace owner owns/,
+      /Leave folders on the path above the selected directory unchanged and tell the owner/,
+      /Never delete files, broaden permissions, or blindly change ownership/]],
     ['unsafe_file', [/not a symlink, hard link, or special file/, /at most 4 MiB/, /index\.html must not be empty/,
+      /only ASCII letters \(A-Z, a-z\), digits, '\.', '_', '-', '\[' and '\]' \(at most 128 characters\), must not start with '-', '\]' or the reserved __ods_ prefix, and must not be exactly __pycache__/,
       /files starting with '\.' are hidden and skipped, never published/]],
   ]) {
     const tool = createWorkspacePreviewTool({request: async () => ({
