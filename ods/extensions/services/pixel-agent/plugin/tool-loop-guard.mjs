@@ -5612,6 +5612,24 @@ export function userMessageExactHostCommand(messages, prompt = undefined) {
   return exact?.[1];
 }
 
+// An action word asks for a host command only when it is used as a verb. In
+// "the start screen", "a restart button", "the update page" or "change log"
+// it names part of the owner's project, and in "the game won't start" it
+// describes what the owner saw rather than asking for anything.
+const HOST_ACTION_WORD =
+  /\b(?:run|execute|invoke|launch|start|stop|restart|reload|install|uninstall|remove|update|upgrade|configure|modify|change|create|delete)\b/gi;
+const NOT_A_REQUEST_BEFORE_HOST_ACTION =
+  /\b(?:the|a|an|this|my|your|our|its|their|won['’]?t|doesn['’]?t|didn['’]?t|can['’]?t|cannot|couldn['’]?t|wouldn['’]?t|isn['’]?t)\s+$/i;
+const NOUN_AFTER_HOST_ACTION =
+  /^[\s-]+(?:screen|menu|button|page|link|icon|bar|panel|tab|dialog|banner|view|log)\b/i;
+
+function hostActionVerb(clause) {
+  return [...clause.matchAll(HOST_ACTION_WORD)].find((match) =>
+    !NOT_A_REQUEST_BEFORE_HOST_ACTION.test(clause.slice(0, match.index)) &&
+    !NOUN_AFTER_HOST_ACTION.test(clause.slice(match.index + match[0].length))
+  );
+}
+
 export function userMessageRequestsHostCommand(messages, prompt = undefined) {
   const text = currentOwnerIntentText(messages, prompt);
   if (!text) return false;
@@ -5625,7 +5643,10 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
   }
   if (userMessageExactHostCommand(messages, prompt)) return true;
   const localHost = /\b(?:ODS[- ]host|local\s+(?:ODS\s+)?host|this\s+(?:ODS\s+)?(?:host|machine|computer|laptop)|my\s+(?:ODS\s+)?(?:host|machine|computer|laptop))\b/i;
-  const action = /\b(?:run|execute|invoke|launch|start|stop|restart|reload|install|uninstall|remove|update|upgrade|configure|modify|change|create|delete)\b/i;
+  // "Only work in Playground/elf-of-doom" scopes the whole turn to the
+  // workspace: only a host the owner names as the ODS host is still a target.
+  const workspaceScoped =
+    /\b(?:only\s+work|work\s+only)\s+in(?:side)?\s+(?:the\s+|your\s+)?(?:workspace|sandbox|Playground\/)/i.test(text);
   const remoteHost = /\b(?:SSH\s+(?:(?:connection|connectivity)\s+)?(?:to|into)|remote\s+(?:host|machine|computer|server|device)|(?:host|machine|computer|server|device)\s+(?:named|called)\s+[A-Za-z0-9][A-Za-z0-9._-]{0,127})\b/i;
   const remoteAction = /\b(?:connect|verify|check|inspect|query|report|troubleshoot|debug|run|execute|invoke)\b/i;
   const guidanceOnly =
@@ -5650,13 +5671,25 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
         );
       }
       const hostMatch = clause.match(localHost);
-      const actionMatch = clause.match(action);
+      const actionMatch = hostActionVerb(clause);
       if (!hostMatch || !actionMatch) return false;
       // Negation and how-to language constrain only their own clause. A later
       // safety boundary such as "Do not run anything else" must not erase an
       // earlier exact host command that the owner explicitly requested.
       if (guidanceOnly.test(clause) || explicitlyRejected.test(clause)) return false;
       if (/\b(?:workspace|sandbox)\b/i.test(clause) && !/\bODS[- ]host\b/i.test(clause)) {
+        return false;
+      }
+      if (workspaceScoped && !/\bODS\b/i.test(hostMatch[0])) return false;
+      // "On my laptop the start screen gets cut off" says where the owner saw
+      // something. A leading host phrase is a command target only when the
+      // request follows it directly, as in "On this ODS host, restart Docker."
+      if (
+        /^\s*(?:(?:and|but|also)\s+)?(?:on|in)\s+$/i.test(clause.slice(0, hostMatch.index)) &&
+        !/^[\s,]*(?:please\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?)?$/i.test(
+          clause.slice(hostMatch.index + hostMatch[0].length, actionMatch.index)
+        )
+      ) {
         return false;
       }
       if (
