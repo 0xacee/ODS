@@ -284,6 +284,67 @@ OPENCLAW_PACKAGE=/path/to/openclaw node --test \
   ods/extensions/services/pixel-agent/tests/runtime_tool_result_delivery.integration.mjs
 ```
 
+## Compaction during long runs
+
+Inside one long owner turn, OpenClaw 2026.6.33 compacts when its tool-loop
+guard (`installToolResultContextGuard` in `selection-BEwSQKM-.js`) throws
+`Context overflow: estimated context size exceeds safe threshold during tool
+loop.` The guard counts characters against 3.6 per window token, with tool
+results weighted at 2 characters per token. It measured the raw in-memory
+results, but the provider stream sends them through the projection above: 16k
+per result, 64k in total, older results reduced to a notice. On the RTX Spark
+(2026-10-16, 131k context) a fresh session compacted four times in 15 minutes
+while the model's real prompt was 35-46k tokens. Each compaction dropped the
+files the agent had just read, and it made no edits in 20 minutes.
+
+The compaction summarizer then read the stored transcript. The pinned
+`serializeConversation` caps each tool result at 2,000 characters, but it keeps
+every result, every reasoning block and every edit or write payload whole, and
+it sends the whole stretch in one request. In a 31-minute game build on the
+same host, 299 entries (769k JSON characters, about 190k tokens) followed the
+first overflow compaction. The next one asked the 131k model to summarize all
+of them. That request was far larger than the context, so the transport cut
+its output to one token, the compaction ended incomplete (`willRetry=false`)
+and Portal showed that it could not complete the response.
+
+Two hash-chained recipes fix both:
+
+- `openclaw-compaction-budget.json` passes the provider stream's projection
+  (`persistedToolResultModelProjection`, then
+  `truncateOversizedToolResultsInMessages` with the same caps) to the loop
+  guard. The guard measures the tool results the request will carry. Its
+  threshold, its returned messages and the stream itself are unchanged.
+- `openclaw-compaction-empty.json` bounds every summary request in
+  `proxy-Bsfwfsp-.js` (history and split-turn prefix, automatic, overflow and
+  manual `/compact`). Its input is held to an ordinary turn at the compaction
+  threshold: the transport's own estimate (`estimateStringChars`, 4
+  characters per token, 1.25 margin) plus `reserveTokens` fits the window.
+  The reserve covers the summary output and leaves tokenizer headroom. A
+  conversation within the budget is sent byte-for-byte as before. Above it,
+  like the live projection, the oldest long tool results, tool-call argument
+  values and reasoning become a short notice first; requests, replies, tool
+  names and short values such as paths stay. Only text that cannot be reduced
+  loses its oldest messages, with a count marker.
+
+The session transcript, `reserveTokens`, `keepRecentTokens` and the one or two
+summary calls per compaction are unchanged. The read/modified file lists still
+come from every summarized message. The 1800-second run deadline is unchanged.
+Both recipes migrate from the previous reviewed hashes through the original
+source with the existing Linux/WSL receipts (`--compaction-budget`,
+`--compaction-empty`, each with `--restore`); the macOS staged bundle composes
+them as before.
+
+The regression runs the real runner and compaction wrapper with a loopback
+provider that rejects prompts larger than its context, as llama.cpp does. It
+reads a 30k-character file twelve times and compacts a 300-entry Spark-shaped
+tail. `ODS_LONG_RUN_COMPACTION_BASELINE=1` loads the previous recipes; the same
+assertions then fail:
+
+```sh
+OPENCLAW_PACKAGE_DIR=/path/to/openclaw node --test \
+  ods/extensions/services/pixel-agent/tests/runtime_long_run_compaction.integration.mjs
+```
+
 ## Tool-call arguments under the native macOS stream order
 
 OpenClaw 2026.6.33's openai-completions transport parses streamed tool-call
