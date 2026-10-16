@@ -20,6 +20,29 @@ def load(filename):
     return module
 
 
+async def public_events(api):
+    """Collect a finite authenticated /token_events ASGI connection."""
+    disconnected = asyncio.Event()
+    bodies = []
+    async def receive():
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+    async def send(message):
+        if message["type"] == "http.response.start":
+            assert message["status"] == 200
+        body = message.get("body", b"")
+        bodies.append(body)
+        if body.startswith(b":heartbeat"):
+            disconnected.set()
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+             "http_version": "1.1", "method": "GET", "scheme": "http",
+             "path": "/token_events", "raw_path": b"/token_events", "query_string": b"",
+             "headers": [(b"authorization", b"Bearer cache-fixture-key")],
+             "client": ("127.0.0.1", 1), "server": ("fixture", 80)}
+    await asyncio.wait_for(api.app(scope, receive, send), timeout=2)
+    return [json.loads(body[6:]) for body in bodies if body.startswith(b"data: ")]
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("details,cached", [
     ({"cached_tokens": 1536}, 1536),
@@ -61,6 +84,9 @@ def test_cached_prompt_receipt_and_report(monkeypatch, tmp_path, streaming, deta
                 today = datetime.now(timezone.utc).date().isoformat()
                 report = await client.get("/api/report", params={"start": today, "end": today})
                 assert report.status_code == 200
+                events = await public_events(api)
+                assert len(events) == 1
+                assert events[0]["total_tokens"] == 2148
                 return report.json()
 
     try:

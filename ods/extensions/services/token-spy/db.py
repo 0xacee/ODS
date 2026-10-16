@@ -502,7 +502,8 @@ def query_recent_events(limit: int = 100, after_id: str = None):
             SELECT
                 id, agent as agent_name, model,
                 input_tokens, output_tokens,
-                (input_tokens + output_tokens) as total_tokens,
+                (input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)
+                    + COALESCE(cache_write_tokens, 0)) as total_tokens,
                 estimated_cost_usd as cost_usd, timestamp
             FROM usage
             WHERE id > ?
@@ -517,7 +518,8 @@ def query_recent_events(limit: int = 100, after_id: str = None):
             SELECT
                 id, agent as agent_name, model,
                 input_tokens, output_tokens,
-                (input_tokens + output_tokens) as total_tokens,
+                (input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)
+                    + COALESCE(cache_write_tokens, 0)) as total_tokens,
                 estimated_cost_usd as cost_usd, timestamp
             FROM usage
             WHERE id IN (SELECT id FROM usage ORDER BY id DESC LIMIT ?)

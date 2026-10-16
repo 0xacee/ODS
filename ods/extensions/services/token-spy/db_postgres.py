@@ -660,7 +660,8 @@ def query_recent_events(limit: int = 100, after_id=None):
                         r.provider,
                         r.input_tokens,
                         r.output_tokens,
-                        (r.input_tokens + r.output_tokens) as total_tokens,
+                        (r.input_tokens + r.output_tokens + COALESCE(r.cache_read_tokens, 0)
+                            + COALESCE(r.cache_write_tokens, 0)) as total_tokens,
                         r.estimated_cost_usd as cost_usd,
                         r.timestamp,
                         a.name as agent_name
@@ -683,7 +684,8 @@ def query_recent_events(limit: int = 100, after_id=None):
                         r.provider,
                         r.input_tokens,
                         r.output_tokens,
-                        (r.input_tokens + r.output_tokens) as total_tokens,
+                        (r.input_tokens + r.output_tokens + COALESCE(r.cache_read_tokens, 0)
+                            + COALESCE(r.cache_write_tokens, 0)) as total_tokens,
                         r.estimated_cost_usd as cost_usd,
                         r.timestamp,
                         a.name as agent_name

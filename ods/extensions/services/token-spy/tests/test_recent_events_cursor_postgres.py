@@ -53,7 +53,17 @@ def pg_db():
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id UUID, agent_id UUID, request_id TEXT, provider TEXT,
             model TEXT, input_tokens INT, output_tokens INT,
-            estimated_cost_usd NUMERIC, "timestamp" TIMESTAMPTZ)
+            cache_read_tokens INT, cache_write_tokens INT,
+            request_body_bytes INT, message_count INT, user_message_count INT,
+            assistant_message_count INT, tool_count INT,
+            system_prompt_total_chars INT, workspace_agents_chars INT,
+            workspace_soul_chars INT, workspace_tools_chars INT,
+            workspace_identity_chars INT, workspace_user_chars INT,
+            workspace_heartbeat_chars INT, workspace_bootstrap_chars INT,
+            workspace_memory_chars INT, skill_injection_chars INT,
+            base_prompt_chars INT, conversation_history_chars INT,
+            duration_ms INT, stop_reason TEXT,
+            estimated_cost_usd NUMERIC, "timestamp" TIMESTAMPTZ DEFAULT NOW())
         """
     )
     cur.execute("TRUNCATE requests, agents, tenants CASCADE")
@@ -110,6 +120,19 @@ def test_initial_window_is_chronological_and_does_not_replay(pg_db):
     assert pg_db.query_recent_events(
         limit=50, after_id=initial[-1]["_cursor"]
     ) == []
+
+
+@pytest.mark.parametrize("cached,written,expected", [(1536, 0, 2148), (2048, 0, 2148),
+                                                     (100, 20, 732), (None, None, 612)])
+def test_logged_cache_receipt_totals_in_initial_and_poll_events(pg_db, cached, written, expected):
+    _insert_row(pg_db, pg_db._tenant_id, datetime.now(timezone.utc) - timedelta(days=1), 0)
+    cursor = pg_db.query_recent_events()[-1]["_cursor"]
+    # Use the actual PostgreSQL persistence producer, not a total-only fake.
+    pg_db.log_usage({"agent": "cache-fixture", "model": "gpt-4o", "provider_name": "openai",
+                     "input_tokens": 0 if cached == 2048 else 512, "output_tokens": 100,
+                     "cache_read_tokens": cached, "cache_write_tokens": written})
+    assert pg_db.query_recent_events(limit=1)[0]["total_tokens"] == expected
+    assert pg_db.query_recent_events(after_id=cursor)[0]["total_tokens"] == expected
 
 
 def test_forward_poll_delivers_every_row_inserted_after_connect(pg_db):
