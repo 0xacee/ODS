@@ -15,6 +15,31 @@ test("writable output refusal explains narrowing permissions without changing th
   assert.match(result.content[0].text, /Do not change parent directories/);
 });
 
+// RTX Spark: the generic unsafe_directory text named no cause, so the agent
+// guessed and tried rm -r on its own hidden .harness/ folder.
+test("folder and file refusals state the host's rules and that hidden entries are skipped", async () => {
+  for (const [errorCode, expected] of [
+    ['unsafe_directory', [/every folder inside it must belong to the workspace owner, be readable, and must not be a symlink or writable by group or others/,
+      /letters, digits, '\.', '_', '-', '\[' and '\]' \(at most 128 characters\) and must not start with '-', '\]' or the reserved __ods_ prefix/,
+      /folders starting with '\.' are hidden and skipped, never published/,
+      /Rename a folder that breaks these rules \(for example, one with spaces in its name\) or move it outside the site directory/,
+      /never delete files/]],
+    ['unsafe_file', [/not a symlink, hard link, or special file/, /at most 4 MiB/, /index\.html must not be empty/,
+      /files starting with '\.' are hidden and skipped, never published/]],
+  ]) {
+    const tool = createWorkspacePreviewTool({request: async () => ({
+      schemaVersion: 1, kind: 'ods-pixel-workspace-preview', status: 'failed',
+      boundary: testing.BOUNDARY, error: 'ODS workspace preview publication failed', errorCode,
+    })});
+    const result = await tool.execute('unsafe-entry', {relativeDirectory: 'Playground/elf-of-doom'});
+    assert.equal(result.isError, true);
+    assert.equal(result.details.errorCode, errorCode);
+    for (const pattern of expected) assert.match(result.content[0].text, pattern, errorCode);
+    // File write bits are reported as writable_file, never as unsafe_file.
+    assert.doesNotMatch(result.content[0].text, /mode 0664|blindly relax|unsafe names/, errorCode);
+  }
+});
+
 import {
   createWorkspacePreviewTool,
   EMPTY_PUBLISHED_FILES_PREFIX,

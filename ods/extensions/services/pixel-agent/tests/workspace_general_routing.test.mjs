@@ -106,7 +106,7 @@ for (const history of [false,true]) for (const wrapped of [false,true]) for (con
     }}),context);
     const result=guard.deliveryVerificationForRun(context.runId);
     assert.equal(result.status,'failed');
-    assert.match(result.text,/directory failed the preview path or permission checks/);
+    assert.match(result.text,/a folder in it is a symlink, is unreadable, is not owned by the workspace owner, is writable by group or others, or has a name the preview does not accept/);
     assert.doesNotMatch(result.text,/https?:|created by|create.*index\.html/i);
     assert.doesNotMatch(guard.beforeAgentFinalize({lastAssistantMessage:result.text},context)?.retry?.instruction ?? '',/index\.html|pixel_ods_workspace_preview|write|exec/);
   });
