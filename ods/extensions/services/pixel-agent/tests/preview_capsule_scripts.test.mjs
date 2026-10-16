@@ -75,6 +75,54 @@ test('native text fill refuses fields whose name, label or autocomplete marks th
   ]) assert.equal(fillEligibility(attributes, label), false, JSON.stringify([attributes, label]));
 });
 
+// Press refuses text entry, so this classification decides whether a trusted
+// key may reach an element at all; it runs against a minimal DOM as well.
+let observeSource;
+function focusState(make, {active, designMode = 'off', hasFocus = true, mode = 'observe'} = {}) {
+  observeSource ??= capsuleScripts().OBSERVE_ELEMENT;
+  const context = vm.createContext({});
+  for (const name of ['HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'HTMLIFrameElement',
+    'HTMLFrameElement', 'HTMLObjectElement', 'HTMLEmbedElement']) context[name] = class {};
+  context.getComputedStyle = () => ({display: 'block', visibility: 'visible', opacity: '1'});
+  const element = Object.assign(make(context), {getClientRects: () => [{width: 10, height: 10}],
+    checkVisibility: () => true, hasAttribute: () => false, getAttribute: () => null});
+  context.document = {designMode, body: {}, documentElement: {}, hasFocus: () => hasFocus};
+  context.document.activeElement = active === undefined ? element : active(context);
+  const observe = new vm.Script(`(${observeSource})`).runInContext(context);
+  // Copied out of the vm realm, whose Object prototype differs.
+  return JSON.parse(JSON.stringify(observe.call(element, false, null, null, false, mode).focus));
+}
+
+test('press refuses text entry, nested frames and editable focus, but not key-only controls', () => {
+  const input = type => c => Object.assign(new c.HTMLInputElement(), {type});
+  for (const type of ['button', 'checkbox', 'image', 'radio', 'range', 'reset', 'submit'])
+    assert.deepEqual(focusState(input(type)), {target: false, active: false, element: true, document: true}, type);
+  for (const make of [...['text', 'password', 'email', 'number', 'date', 'search', 'color', 'file', 'hidden'].map(input),
+    c => new c.HTMLTextAreaElement(), c => new c.HTMLSelectElement(), c => ({isContentEditable: true}),
+    c => new c.HTMLIFrameElement(), c => new c.HTMLFrameElement(), c => new c.HTMLObjectElement(), c => new c.HTMLEmbedElement()])
+    assert.equal(focusState(make).target, true, make.toString());
+  const canvas = () => ({});
+  assert.deepEqual(focusState(canvas, {designMode: 'on'}), {target: true, active: true, element: true, document: true});
+  assert.deepEqual(focusState(canvas, {active: () => ({}), hasFocus: false}), {target: false, active: false, element: false, document: false});
+  assert.deepEqual(focusState(canvas, {active: input('password')}), {target: false, active: true, element: false, document: true});
+  assert.equal(focusState(canvas, {active: () => null}).active, false, 'no focused element is not an editable one');
+});
+
+test('press releases focus another element holds, never the target, the body or before a refusal', () => {
+  let blurs = 0;
+  const held = c => ({blur() { blurs++; c.document.activeElement = c.document.body; }});
+  const canvas = () => ({});
+  assert.deepEqual(focusState(canvas, {active: held}), {target: false, active: false, element: false, document: true});
+  assert.equal(blurs, 0, 'observing never moves focus');
+  assert.deepEqual(focusState(canvas, {active: held, mode: 'release'}), {target: false, active: false, element: false, document: true});
+  assert.equal(blurs, 1);
+  // The target itself and the body carry no blur here: calling it would throw.
+  assert.equal(focusState(canvas, {mode: 'release'}).element, true);
+  assert.equal(focusState(canvas, {active: c => c.document.body, mode: 'release'}).element, false);
+  assert.equal(focusState(c => Object.assign(new c.HTMLInputElement(), {type: 'password'}), {active: held, mode: 'release'}).target, true);
+  assert.equal(blurs, 1, 'a refused text field leaves focus where it was');
+});
+
 test('native numeric fill rejects nonfinite syntax before invoking any setter or event', () => {
   let writes=0,events=0;
   class Input {

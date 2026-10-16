@@ -24,6 +24,7 @@ from preview_inspection_protocol import (
     MAX_BUNDLE,
     MAX_RESULT,
     MAX_FILE,
+    PRESS_HOLD_MS,
     SANDBOX,
     canonical,
     failure,
@@ -34,7 +35,7 @@ from preview_inspection_protocol import (
 )
 
 # Runs in a Chromium isolated world, not the site's mutable JS global realm.
-OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill) {
+OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill, focusState) {
   const element = this, style = getComputedStyle(element);
   const rects = [...element.getClientRects()].filter(r => r.width > 0 && r.height > 0);
   return {count:1, visible:element.checkVisibility({checkOpacity:true,checkVisibilityCSS:true,contentVisibilityAuto:true}) && rects.length > 0,
@@ -86,6 +87,26 @@ OBSERVE_ELEMENT = r"""function(includeText, selectValue, fillValue, performFill)
           valueMissing:element.validity.valueMissing, rangeUnderflow:element.validity.rangeUnderflow,
           rangeOverflow:element.validity.rangeOverflow, stepMismatch:element.validity.stepMismatch,
           badInput:element.validity.badInput}} : {})}};
+    })() : {}),
+    ...(focusState ? (() => {
+      // Press never types into text entry: fill, with its sensitive-field
+      // denylist, stays the only text path. A focused nested frame's own
+      // focused element is not observable here, so it is refused the same way.
+      const keyOnly = ['button','checkbox','image','radio','range','reset','submit'];
+      const editable = e => Boolean(e) && (e.isContentEditable || document.designMode === 'on' ||
+        e instanceof HTMLTextAreaElement || e instanceof HTMLSelectElement ||
+        (e instanceof HTMLInputElement && !keyOnly.includes(e.type)) ||
+        e instanceof HTMLIFrameElement || e instanceof HTMLFrameElement ||
+        e instanceof HTMLObjectElement || e instanceof HTMLEmbedElement);
+      // 'release': as a pointer press on the target would, take focus from
+      // another element (a button an earlier step clicked), so the keys reach
+      // the target or, when it cannot take focus, the document body.
+      const held = document.activeElement;
+      if (focusState === 'release' && !editable(element) && held && held !== element &&
+          held !== document.body && held !== document.documentElement) held.blur();
+      const active = document.activeElement;
+      return {focus: {target: editable(element), active: editable(active),
+        element: active === element, document: document.hasFocus()}};
     })() : {}),
     ...(includeText ? (() => { const text=Array.from((element.innerText || '').replace(/\s+/g,' ').trim());
       return {text:{actual:text.slice(0,256).join(''),truncated:text.length>256}}; })() : {})};
@@ -1219,10 +1240,10 @@ def run_browser(bundle, playwright_factory=None):
                 )["result"]["objectId"]
                 return 1, node
 
-            def once(locator, include_hidden=False, include_text=False, select_value=None, arm_download=False, fill_value=None, perform_fill=False):
+            def once(locator, include_hidden=False, include_text=False, select_value=None, arm_download=False, fill_value=None, perform_fill=False, focus_state=None):
                 owned = []
                 try:
-                    return measure(locator, include_hidden, owned, include_text, select_value, arm_download, fill_value, perform_fill)
+                    return measure(locator, include_hidden, owned, include_text, select_value, arm_download, fill_value, perform_fill, focus_state)
                 finally:
                     for object_id in dict.fromkeys(owned):
                         try:
@@ -1230,7 +1251,7 @@ def run_browser(bundle, playwright_factory=None):
                         except Exception:
                             pass
 
-            def measure(locator, include_hidden, owned, include_text=False, select_value=None, arm_download=False, fill_value=None, perform_fill=False):
+            def measure(locator, include_hidden, owned, include_text=False, select_value=None, arm_download=False, fill_value=None, perform_fill=False, focus_state=None):
                 if blocked:
                     raise BlockedRequest()
                 if "selector" in locator:
@@ -1283,7 +1304,7 @@ def run_browser(bundle, playwright_factory=None):
                     {
                         "objectId": node,
                         "functionDeclaration": OBSERVE_ELEMENT,
-                        "arguments": [{"value": include_text}, {"value": select_value}, {"value": fill_value}, {"value": perform_fill}],
+                        "arguments": [{"value": include_text}, {"value": select_value}, {"value": fill_value}, {"value": perform_fill}, {"value": focus_state}],
                         "returnByValue": True,
                     },
                 )
@@ -1308,11 +1329,11 @@ def run_browser(bundle, playwright_factory=None):
             for index, step in enumerate(request["steps"]):
                 try:
                     # Only a hidden assertion may address a hidden element by
-                    # role/name; assert-visible and click stay rendered-only,
-                    # and they match Playwright's source-text names too.
+                    # role/name; assert-visible, click and press stay
+                    # rendered-only, and match Playwright's source-text names too.
                     before, stable = observe(
                         step["locator"], step["action"] == "assert-hidden",
-                        None if step["action"] in ("click", "select-option", "fill", "download") else step["action"] != "assert-hidden",
+                        None if step["action"] in ("click", "select-option", "fill", "download", "press") else step["action"] != "assert-hidden",
                         step.get('expectedText'),
                         step.get('value') if step['action'] == 'select-option' else None,
                         step.get('value') if step['action'] == 'fill' else None,
@@ -1425,6 +1446,47 @@ def run_browser(bundle, playwright_factory=None):
                         )
                     except Exception:
                         item["errorCode"] = "unexpected_download" if 'download' in blocked else "click_failed"
+                elif step["action"] == "press":
+                    try:
+                        if not before["visible"]:
+                            raise Invalid("press target unavailable")
+                        if once(step["locator"], focus_state="release")["focus"]["target"]:
+                            item["errorCode"] = "text_field_press_unsupported"
+                        else:
+                            # Focus the wrapper's preview iframe, then the
+                            # target inside it, so the keys reach the preview
+                            # document even when the target is not focusable
+                            # (a canvas game listening on window or document).
+                            page.locator('iframe[name="inspection"]').focus(timeout=2000)
+                            (
+                                frame.locator("css=" + step["locator"]["selector"])
+                                if "selector" in step["locator"]
+                                else frame.get_by_role(
+                                    step["locator"]["role"],
+                                    name=step["locator"]["name"],
+                                    exact=True,
+                                )
+                            ).focus(timeout=2000)
+                            focus = once(step["locator"], focus_state="observe")["focus"]
+                            item["focus"] = {"element": focus["element"], "document": focus["document"]}
+                            if focus["active"]:
+                                item["errorCode"] = "text_field_press_unsupported"
+                            elif not focus["document"]:
+                                item["errorCode"] = "focus_failed"
+                            else:
+                                # Trusted keydown/keyup; holdMs keeps the key
+                                # down for games that read held keys per frame.
+                                page.keyboard.press(step["key"], delay=step.get("holdMs", PRESS_HOLD_MS))
+                                if blocked:
+                                    raise BlockedRequest()
+                                after, after_stable = observe(step["locator"])
+                                item.update(
+                                    after=after,
+                                    stable=after_stable,
+                                    status="passed" if after_stable else "failed",
+                                )
+                    except Exception:
+                        item["errorCode"] = "unexpected_download" if 'download' in blocked else "press_failed"
                 elif step['action'] == 'assert-text':
                     matches = before.get('visible') is True and before.get('text') == {
                         'actual': step['expectedText'], 'truncated': False}

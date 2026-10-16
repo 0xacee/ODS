@@ -32,11 +32,22 @@ FILL_CAPABILITY = "native-text-number-fill-v2"
 FILL_SCOPE = " Native non-sensitive text and number fields were filled only with explicit synthetic values; number constraint flags are observations, not a claim of form validity. This does not test keyboard behavior or submit forms."
 DOWNLOAD_CAPABILITY = "snapshot-download-v1"
 DOWNLOAD_SCOPE = " Download verification is limited to one final step whose own click must produce matching snapshot bytes inside the capsule. A failed or unavailable receipt does not verify a download; no delivery to the user's computer, PDF quality, or ZIP content validation is established."
+PRESS_CAPABILITY = "trusted-key-press-v1"
+PRESS_SCOPE = " Trusted key presses were sent to the focused preview frame only for explicit press steps; behavior beyond the listed assertions, such as gameplay, is not verified."
+# One unmodified key per press: no modifiers, chords, function keys or text.
+# workspace-preview-inspect.mjs mirrors this list exactly as a schema enum.
+PRESS_KEYS = (
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Enter", "Escape", "Tab",
+    *"abcdefghijklmnopqrstuvwxyz", *"0123456789",
+)
+PRESS_HOLD_MS = 100
+MAX_PRESS_HOLD_MS = 1000
 
 
 def inspection_scope(request):
     scope = SELECT_SCOPE if any(s['action'] == 'select-option' for s in request['steps']) else SCOPE
     scope += FILL_SCOPE if any(s['action'] == 'fill' for s in request['steps']) else ''
+    scope += PRESS_SCOPE if any(s['action'] == 'press' for s in request['steps']) else ''
     return scope + (DOWNLOAD_SCOPE if request['steps'][-1]['action'] == 'download' else '')
 
 
@@ -187,10 +198,16 @@ def validate_request(value):
         text_step = isinstance(step, dict) and step.get("action") == "assert-text"
         select_step = isinstance(step, dict) and step.get("action") in ("select-option", "fill")
         download_step = isinstance(step, dict) and step.get("action") == "download"
-        extra = ("expectedText",) if text_step else ("value",) if select_step else ("path", "expectedBytes", "expectedSha256") if download_step else ()
+        press_step = isinstance(step, dict) and step.get("action") == "press"
+        extra = ("expectedText",) if text_step else ("value",) if select_step else ("path", "expectedBytes", "expectedSha256") if download_step else ("key", *(("holdMs",) if "holdMs" in step else ())) if press_step else ()
         exact(step, ("action", "locator", *extra))
-        if step["action"] not in ("assert-visible", "assert-hidden", "assert-text", "click", "select-option", "fill", "download"):
+        if step["action"] not in ("assert-visible", "assert-hidden", "assert-text", "click", "select-option", "fill", "download", "press"):
             raise Invalid("invalid step")
+        if press_step and (
+            not isinstance(step["key"], str) or step["key"] not in PRESS_KEYS
+            or ("holdMs" in step and (type(step["holdMs"]) is not int or not 0 <= step["holdMs"] <= MAX_PRESS_HOLD_MS))
+        ):
+            raise Invalid("invalid press step")
         if download_step and (
             index != len(steps) - 1 or not isinstance(step['path'], str)
             or len(step['path']) > 512 or len(step['path'].split('/')) > 12

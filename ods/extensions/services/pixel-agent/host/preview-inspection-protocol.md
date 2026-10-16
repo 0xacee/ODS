@@ -10,9 +10,12 @@ socket or browser authority.
 The plugin sends one JSON object with `schemaVersion: 1`, `action: "inspect"`,
 `siteId`, the full snapshot `sha256`, `viewport: {width, height}`, and `steps`.
 Each step has `action` (`assert-visible`, `assert-hidden`, `assert-text`,
-`select-option`, or `click`) and
-`locator`. A locator is either `{selector: "CSS"}` or
-`{role: "button", name: "Show items", exact: true}`. Semantic roles are
+`click`, `select-option`, `fill`, `download`, or `press`) and `locator`.
+`assert-text` adds `expectedText`; `select-option` and `fill` add `value`;
+`download` adds `path`, `expectedBytes` and `expectedSha256`; `press` adds
+`key` and an optional `holdMs` (see the sections below). A locator is either
+`{selector: "CSS"}` or `{role: "button", name: "Show items", exact: true}`.
+Semantic roles are
 allowlisted. There are no URLs, executable expressions, shell commands, image
 names, host paths, or Docker arguments in this protocol.
 
@@ -61,8 +64,8 @@ same snapshot, not change the site to satisfy a locator.
 
 The receipt binds the exact site, full snapshot hash, viewport, and canonical
 UTF-8 JSON request hash (`planSha256`). Each executed step records its index,
-locator, CSS visibility measurement, stable sampling, status, and (for clicks)
-after measurement. Remaining steps are not executed after a failed assertion.
+locator, CSS visibility measurement, stable sampling, status, and (for clicks
+and key presses) after measurement. Remaining steps are not executed after a failed assertion.
 A click dispatch alone proves no resulting behavior. Verify the requested
 initial state, click, and resulting condition with separate assertions.
 
@@ -376,3 +379,89 @@ together. No network, navigation, file or download permissions are added.
 `test_preview_inspection_fill.py` exercises real Chromium form handlers,
 selection after filling, typed refusals, old-image rejection and blocked
 network effects; `inspection_fill.test.mjs` rejects forged fill receipts.
+
+## Keyboard press
+
+`press` takes exactly `action`, `locator`, `key`, and an optional `holdMs`.
+`key` is one of `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Space`,
+`Enter`, `Escape`, `Tab`, a lowercase letter `a`–`z` or a digit `0`–`9`: one
+unmodified key, never a modifier, chord, function key or free text. The plugin
+schema states this list as an enum rather than a pattern, so local-model
+grammar conversion compiles it. `holdMs` is an integer 0–1000 and defaults to
+100 when absent: games often set a flag on keydown, clear it on keyup and read
+it once per animation frame, so a zero-length press may move nothing.
+
+The locator must match one rendered, visible element, as for `click`: a game
+canvas, its container, the page body or a non-text control. The capsule then:
+
+1. refuses the step as `text_field_press_unsupported`, before focusing
+   anything, when the target is a `textarea`, a `select`, an `input` other than
+   `button`, `checkbox`, `image`, `radio`, `range`, `reset` or `submit`,
+   contenteditable content, any element while the document is in design mode,
+   or a nested `iframe`, `frame`, `object` or `embed` (whose own focused
+   element the capsule cannot observe); otherwise, as a pointer press on the
+   target would, it blurs any other element that holds focus (for example a
+   button an earlier step clicked), so `Space` on a canvas never activates
+   that button;
+2. focuses the wrapper's preview iframe, then the target inside it;
+3. reads in the isolated world whether the target is `document.activeElement`
+   and whether the preview document has focus, and records them as
+   `focus: {element, document}`. A canvas without `tabindex` cannot take focus,
+   so `element` may be false; the keys then reach the document body, and
+   window and document listeners still run. The step fails as `focus_failed`
+   when the document has no focus, and as `text_field_press_unsupported` when
+   focus landed on an editable element, in both cases without sending a key;
+4. sends Playwright `page.keyboard.press(key, delay=holdMs)`: trusted keydown
+   and keyup events, with the key's ordinary default action, to the focused
+   frame;
+5. observes the target again as `after`, as for a click.
+
+A navigation, popup, websocket or foreign request caused by the key is blocked
+and recorded in `blockedRequests`; when it is seen within the step, the step
+fails as `press_failed`, exactly as a click fails as `click_failed`. A download
+started by a key is `unexpected_download`. A press alone proves no result.
+Presses may run in a row (for example `Space` to start, then `ArrowRight`), but
+the last one needs an assertion of its visible result before the plan counts
+as behavior evidence. A press plan is never a read-only inspection.
+
+Press plans add the scope suffix `Trusted key presses were sent to the focused
+preview frame only for explicit press steps; behavior beyond the listed
+assertions, such as gameplay, is not verified.` A receipt with the legacy scope
+never satisfies a press plan.
+
+Security notes:
+
+- Press is not a text path. Fill, with its sensitive-field denylist, remains
+  the only way to enter text. Press refuses editable targets and editable
+  focused elements, and every key comes from the fixed allowlist, never from
+  user data. A page's own key handler can still move focus elsewhere while the
+  key is down; that page then receives one allowlisted key, inside a capsule
+  with no autofill profile, host files or network.
+- A trusted key press grants user activation, which can unlock popups,
+  downloads, fullscreen, pointer lock and clipboard writes. Popups are closed,
+  downloads cancelled and extra navigations blocked; each is recorded in
+  `blockedRequests` and fails the receipt. Clipboard and fullscreen stay inside
+  the no-network capsule and end with it. CSP `form-action 'none'` blocks a
+  submit started by Enter.
+- The wrapper document contains no script, and keys go only to the preview
+  frame focused in step 2.
+
+The immutable capsule must advertise
+`org.osmantic.ods.inspection.press=trusted-key-press-v1`. The broker checks it
+before reading the snapshot, and the installer requires it, as for fill and
+select. An older image returns a bound `unsupported_capability` failure without
+executing the plan; deploy plugin, broker and rebuilt capsule together. Focus
+delivery into the sandboxed opaque-origin frame without a prior click is proven
+only by the opt-in real-browser cases, which also need a run on the arm64 image
+that Windows on Arm hosts build.
+
+`test_preview_inspection_press.py` covers the protocol bounds, the broker's
+label check before any snapshot read, the scripted focus and key order and
+each refusal, and (with the opt-in Chromium or image settings above) a
+focusable canvas pressed without a prior click, a window listener behind an
+unfocusable canvas, `Space` on a canvas after a button click, a held key read
+per animation frame, refused text fields
+and redirected focus, Enter on a link, a key-started download, and a page error
+raised in the frame after a key. `inspection_press.test.mjs` checks the
+schema, the Python/JavaScript key list, scope and plan hash, forged press
+receipts, feedback and the evidence policy.
