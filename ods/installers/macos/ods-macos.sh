@@ -122,12 +122,24 @@ test_install() {
 get_compose_flags() {
     local flags helper
     flags="$(_get_base_compose_flags)" || return $?
+    flags="$(/usr/bin/python3 "$INSTALL_DIR/installers/macos/lib/dashboard-private-state.py" \
+        flags --install-dir "$INSTALL_DIR" --flags="$flags")" || return $?
     helper="${INSTALL_DIR}/installers/macos/lib/pixel-native-stack.py"
     if [[ -e "${INSTALL_DIR}/data/pixel-native/preparation/activation.json" || -L "${INSTALL_DIR}/data/pixel-native/preparation/activation.json" ]]; then
         /usr/bin/python3 "$helper" --install-dir "$INSTALL_DIR" --flags="$flags"
     else
         printf '%s\n' "$flags"
     fi
+}
+
+dashboard_compose_up() {
+    local flags="$1" action="$2" service="${3:-}"
+    local -a selection=()
+    [[ -z "$service" ]] || selection+=(--service "$service")
+    # The helper checks the selected service's dependency closure: starting
+    # dashboard can also start dashboard-api and must prepare its stores first.
+    /usr/bin/python3 "$INSTALL_DIR/installers/macos/lib/dashboard-private-state.py" \
+        launch --install-dir "$INSTALL_DIR" --flags="$flags" --operation "$action" "${selection[@]}"
 }
 
 _get_base_compose_flags() {
@@ -999,7 +1011,7 @@ cmd_start() {
     elif [[ -n "$service" ]]; then
         ai "Starting ${service}..."
         # shellcheck disable=SC2086
-        if ! docker compose $flags up -d "$service"; then
+        if ! dashboard_compose_up "$flags" start "$service"; then
             ai_err "Failed to start ${service}."
             return 1
         fi
@@ -1007,7 +1019,7 @@ cmd_start() {
     else
         ai "Starting all services..."
         # shellcheck disable=SC2086
-        if ! docker compose $flags up -d; then
+        if ! dashboard_compose_up "$flags" start; then
             ai_err "Failed to start ODS services."
             return 1
         fi
@@ -1110,7 +1122,7 @@ cmd_restart() {
     elif [[ -n "$service" ]]; then
         ai "Restarting ${service}..."
         # shellcheck disable=SC2086
-        if ! docker compose $flags up -d --force-recreate --no-build --pull never "$service"; then
+        if ! dashboard_compose_up "$flags" restart "$service"; then
             ai_err "Failed to restart ${service}."
             return 1
         fi
@@ -1128,7 +1140,7 @@ cmd_restart() {
 
         ai "Restarting all services..."
         # shellcheck disable=SC2086
-        if ! docker compose $flags up -d --force-recreate --no-build --pull never; then
+        if ! dashboard_compose_up "$flags" restart; then
             ai_err "Failed to restart ODS services."
             return 1
         fi
@@ -1284,7 +1296,7 @@ cmd_update() {
 
     ai "Recreating containers..."
     # shellcheck disable=SC2086
-    docker compose $flags up -d --force-recreate
+    dashboard_compose_up "$flags" update || return 1
     ai_ok "Update complete"
     macos_maybe_resume_bootstrap_upgrade || true
 

@@ -8,6 +8,11 @@ on:
       - 'ods/tests/test_macos_upsert_env_value.py'
       - 'ods/tests/test_bridge_denied_admission.py'
       - 'ods/installers/macos/**'
+      - 'ods/tests/test_macos_dashboard_private_state.py'
+      - 'ods/ods-backup.sh'
+      - 'ods/ods-restore.sh'
+      - 'ods/lib/dashboard-private-state.sh'
+      - 'ods/scripts/uninstall-compose-volumes.py'
       - 'ods/installers/lib/pixel-workspace-guidance.py'
       - 'ods/installers/lib/pixel-host-install.sh'
       - 'ods/tests/test_pixel_workspace_guidance.py'
@@ -45,6 +50,11 @@ on:
       - 'ods/tests/test_macos_upsert_env_value.py'
       - 'ods/tests/test_bridge_denied_admission.py'
       - 'ods/installers/macos/**'
+      - 'ods/tests/test_macos_dashboard_private_state.py'
+      - 'ods/ods-backup.sh'
+      - 'ods/ods-restore.sh'
+      - 'ods/lib/dashboard-private-state.sh'
+      - 'ods/scripts/uninstall-compose-volumes.py'
       - 'ods/installers/lib/pixel-workspace-guidance.py'
       - 'ods/installers/lib/pixel-host-install.sh'
       - 'ods/tests/test_pixel_workspace_guidance.py'
@@ -90,7 +100,17 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install test dependencies
-        run: python -m pip install 'pytest>=8,<9' 'PyYAML>=6,<7'
+        run: python -m pip install 'pytest>=8,<9' 'PyYAML>=6,<7' 'Pillow==12.3.0'
+      - name: Install backup tools on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rsync jq
+      - name: Install backup tools on macOS
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew install rsync jq
+      - name: Verify private dashboard store migration and backup recovery
+        run: python -m pytest -q ods/tests/test_macos_dashboard_private_state.py
       - name: Install modern Bash for macOS CLI fixtures
         if: runner.os == 'macOS'
         env:

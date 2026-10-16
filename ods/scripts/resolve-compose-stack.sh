@@ -1647,6 +1647,10 @@ if tier in ("0", "T0"):
 # under installer/CI and may handle composes from sources the operator
 # trusts less than themselves (cloned repo, restored backup). Apply the
 # same content scan as user extensions.
+if gpu_backend == "apple":
+    private_state = "installers/macos/dashboard-private-state.compose.yaml"
+    if (script_dir / private_state).is_file() and private_state not in resolved:
+        resolved.append(private_state)
 override = script_dir / "docker-compose.override.yml"
 if override.exists():
     ok, warnings = _scan_user_compose_content(override)
