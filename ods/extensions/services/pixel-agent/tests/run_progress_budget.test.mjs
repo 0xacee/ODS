@@ -46,7 +46,8 @@ test('a chain of read-only searches whose last search came up empty found nothin
     ['cd Playground/elf-of-doom && grep -n "function burst" -A 12 ui.js; grep -n "function popText" -A 6 ui.js; grep -n "function supplyTick" -A 2 ui.js', ''],
     ["cd Playground/elf-of-doom && sed -n '860,900p' ui.js; echo ===; grep -n \"function showScreen\" -A 15 ui.js",
       '  updateHud();\n  requestAnimationFrame(frame);\n==='],
-    ['grep -c x a.js | sort | uniq -c && rg -n "y" src | tail -n 5 && which deno', '      1 a.js:2\nsrc/main.js:4:y'],
+    ['grep -c x a.js | sort | uniq -c && git grep -n "y" | tail -n 5 && which deno', '      1 a.js:2\nsrc/main.js:4:y'],
+    ['grep -n "showScreen" ui.js; rg -n "function showScreen" src', 'ui.js:12:  showScreen("title");'],
     ['grep -rn foo . | tail -n +5 | sort -u | uniq -c; grep -n zzz ui.js', '      1 ./a.js:9:foo'],
     // grep's own notices on a search that succeeded are not errors, nor is quoting an error message.
     ['grep -rn "ui.js" .; grep -n zzz ui.js', './index.html:9:<script src="ui.js"></script>\ngrep: ./.git/index: binary file matches'],
@@ -80,6 +81,8 @@ test('a chain of read-only searches whose last search came up empty found nothin
     'grep -rn foo . | sort -omakefile; grep -n zzz ui.js', 'grep -rn foo . | sort -c; grep -n zzz ui.js', 'grep a f | head 5; grep b f',
     "git grep -O'rm -f' foo; grep -n zzz ui.js", 'git grep -nOrm foo; grep -n zzz ui.js', 'git grep --open-files-in-pager=rm foo; grep -n zzz ui.js',
     'rg --pre rm -n x victim.txt', 'rg --pre=rm x victim.txt', "rg --p're' rm x f", 'git -C src grep x',
+    // rg 13 prints some errors without a prefix, so rg may only be the last step.
+    'rg -n -t jsx showScreen src; grep -n zzz ui.js', 'rg -t jsx x src | head -5 && grep zzz f', 'rg -n "a" f && grep b f',
   ]) assert.equal(lookupFoundNothing(chain, receipt('')), false, chain);
 });
 

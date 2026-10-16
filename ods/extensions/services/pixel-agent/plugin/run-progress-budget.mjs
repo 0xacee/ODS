@@ -96,13 +96,15 @@ export function createRunProgressBudget() {
 
 // A lookup that found nothing answered its question; it did not fail.
 // grep, egrep, fgrep, rg and git grep exit 1 only when nothing matched (their
-// errors exit 2, git 128), and `which` exits 1 only when no name resolves.
+// errors exit 2, git 128), and `which` exits 1 only when a name did not resolve.
 // Models also chain searches (`grep a f | head; echo ===; grep b g`), so a list
 // joined by `;` or `&&` qualifies when every step is a lookup, an echo, or sed
 // printing a line range, optionally piped into head, tail, cat, wc, sort or
 // uniq, and the last step is a bare lookup. None of the other steps can exit 1,
 // so exit 1 still means a search came up empty. OpenClaw merges stdout and
-// stderr, and an error in any step disqualifies the command. Options that run
+// stderr, and an error in any step disqualifies the command. rg 13 prints some
+// errors with no recognisable prefix, so rg may only be the last step, where
+// its own exit status tells an error from an empty search. Options that run
 // programs or write files (rg --pre, git grep -O, sort -o, sed -i) disqualify it
 // too. One literal `cd DIR &&` may lead. Redirections, substitutions, `||`,
 // background jobs and escapes outside quotes stay ordinary failures, as does
@@ -197,7 +199,7 @@ export function lookupFoundNothing(command, result) {
   if (!steps || !steps.every(([first, ...sinks]) =>
     (isLookup(first) || isLookupCompanion(first)) && sinks.every(isLookupSink))) return false;
   const last = steps.at(-1);
-  if (last.length !== 1 || !isLookup(last[0])) return false;
+  if (last.length !== 1 || !isLookup(last[0]) || steps.slice(0, -1).some(([[program]]) => program === 'rg')) return false;
   const details = result?.details;
   if (!details || typeof details !== 'object' || details.status !== 'completed' || details.exitCode !== 1 ||
       Object.hasOwn(details, 'sessionId')) return false;
