@@ -336,6 +336,16 @@ jobs:
         shell: pwsh
         run: ./tests/test-windows-opencode-runtime.ps1
 
+      - name: Windows OpenCode Startup (PowerShell 7)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: pwsh
+        run: ./tests/test-windows-opencode-startup.ps1
+
+      - name: Windows OpenCode Startup (Windows PowerShell)
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: powershell
+        run: ./tests/test-windows-opencode-startup.ps1
+
       - name: Windows Restart Model Preflight
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: pwsh
