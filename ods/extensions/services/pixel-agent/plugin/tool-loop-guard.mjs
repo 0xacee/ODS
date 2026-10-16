@@ -283,7 +283,7 @@ const WORKSPACE_PREVIEW_FAILURE_REASONS = Object.freeze({
   snapshot_too_large: "the directory exceeds the preview size limit",
   unsafe_file: "a file failed the preview safety checks",
   writable_file: "a generated file allows group/other writes; remove only those write bits on affected output files, never broaden permissions or change parent directories",
-  unsafe_directory: "the directory failed the preview path or permission checks",
+  unsafe_directory: "the directory, a folder on its path, or a folder in it is a symlink, is unreadable, is not owned by the workspace owner, or is writable by group or others, or a folder in it has a name the preview refuses (for example, one with spaces)",
   cancelled: "waiting for the preview was cancelled; publication may still be pending",
   unavailable: "the preview was unavailable; the tool supplied no more specific verified cause",
 });

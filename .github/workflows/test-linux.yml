@@ -129,7 +129,9 @@ jobs:
             extensions/services/pixel-agent/tests/test_access_mode_config.py
 
       - name: Test preview publication directory failures
-        run: python -m pytest -q extensions/services/pixel-agent/tests/test_preview_directory_errors.py
+        run: |
+          python -m pytest -q extensions/services/pixel-agent/tests/test_preview_directory_errors.py \
+            extensions/services/pixel-agent/tests/test_preview_hidden_entries.py
 
   token-spy-pricing:
     runs-on: ubuntu-latest
