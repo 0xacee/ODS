@@ -22,6 +22,15 @@ $gpuInfo = @{Backend='cpu'}; $tierConfig = @{GgufFile='fixture.gguf';LlmModel='f
 $cloudMode = $false; $_ocReady = $true
 $script:denied = $true; $script:startDenied = $false; $script:directStarts = 0; $script:taskStarts = 0; $script:checks = 0
 $script:messages = [Collections.Generic.List[string]]::new()
+$script:foreignOwner = $false
+function Get-Acl {
+    param($LiteralPath, $ErrorAction)
+    $acl = Microsoft.PowerShell.Security\Get-Acl @PSBoundParameters
+    if ($script:foreignOwner -and $LiteralPath -eq $script:entry) {
+        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    }
+    return $acl
+}
 function Check($condition, $message) { if (-not $condition) { throw $message }; $script:checks++; Write-Host "PASS $message" }
 function Get-ODSOpenCodeStartupPath { return $script:entry }
 function Write-AI { param($Message) $script:messages.Add([string]$Message) }
@@ -50,10 +59,23 @@ try {
     Check (Test-Path -LiteralPath $script:entry) 'registration denial creates durable owner Startup fallback'
     Check ($script:directStarts -eq 1 -and $script:taskStarts -eq 0) 'denial still starts only the existing session launcher once'
     $content = [IO.File]::ReadAllText($script:entry)
+    if (-not (Test-ODSOpenCodeStartupOwned -Path $script:entry -InstallDir $installDir)) {
+        $observed = Get-Acl -LiteralPath $script:entry
+        Write-Host ('Startup custody: owner={0}; current={1}; exactContent={2}; attributes={3}' -f
+            $observed.GetOwner([Security.Principal.SecurityIdentifier]).Value,
+            [Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+            ($content -ceq (Get-ODSOpenCodeStartupContent -InstallDir $installDir)),
+            (Get-Item -LiteralPath $script:entry).Attributes)
+    }
     Check (Test-ODSOpenCodeStartupOwned -Path $script:entry -InstallDir $installDir) 'real private file is owned by this installation'
     $acl = Get-Acl -LiteralPath $script:entry
     $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
     Check ($acl.AreAccessRulesProtected -and $rules.Count -eq 1 -and $rules[0].IdentityReference -eq [Security.Principal.WindowsIdentity]::GetCurrent().User) 'Startup payload has the current-user-only DACL'
+    $script:foreignOwner = $true
+    Check (-not (Test-ODSOpenCodeStartupOwned -Path $script:entry -InstallDir $installDir)) 'an Administrators-owned existing entry is not treated as current-owner custody'
+    Remove-ODSOpenCodeStartupFallback -InstallDir $installDir
+    Check (Test-Path -LiteralPath $script:entry) 'foreign ownership is preserved even when its contents match'
+    $script:foreignOwner = $false
     $encoded = [regex]::Match($content,'-EncodedCommand ([A-Za-z0-9+/=]+)').Groups[1].Value
     $command = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
     $previousHome = $env:ODS_HOME

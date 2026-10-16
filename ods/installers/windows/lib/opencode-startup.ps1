@@ -47,6 +47,20 @@ function Set-ODSOpenCodeStartupFallback {
     $temporary = Join-Path (Split-Path -Parent $entry) ('.ods-opencode-' + [guid]::NewGuid().ToString('N'))
     try {
         Write-ODSPrivateEnvFile -Path $temporary -Content (Get-ODSOpenCodeStartupContent -InstallDir $InstallDir)
+        # An elevated Windows token can default new-file ownership to the
+        # Administrators group even with a current-user-only DACL.
+        # Set only Owner, preserving the private DACL without touching SACLs.
+        $acl = [Security.AccessControl.FileSecurity]::new()
+        $acl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User)
+        $item = Get-Item -LiteralPath $temporary -Force -ErrorAction Stop
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            [IO.FileSystemAclExtensions]::SetAccessControl($item, $acl)
+        } else {
+            $item.SetAccessControl($acl)
+        }
+        if (-not (Test-ODSOpenCodeStartupOwned -Path $temporary -InstallDir $InstallDir)) {
+            throw 'Could not verify the new OpenCode Startup entry owner.'
+        }
         [IO.File]::Move($temporary, $entry)
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
