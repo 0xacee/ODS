@@ -1,4 +1,4 @@
-import {validDeliveredArtifact, WORKSPACE_ARTIFACT_DELIVERY_GUIDANCE} from './workspace-artifact.mjs';
+import {validDeliveredArtifact, normalizeWorkspaceArtifact, WORKSPACE_ARTIFACT_DELIVERY_GUIDANCE} from './workspace-artifact.mjs';
 // Pixel per-run tool-loop guard.
 //
 // OpenClaw's built-in identical-call detector blocks a repeated tool call, but
@@ -10633,6 +10633,24 @@ export function createToolLoopGuard({
         }
       }
       state.successfulWritePaths.add(completedWritePath);
+      // A plain document may need no exec step. Keep its successful write
+      // bound to this pending call so publication guidance reaches the next
+      // model pass, before finalization refuses revision after side effects.
+      if (state.workspaceDocumentDeliveryRequested &&
+          pendingToolRun?.runId === runId && pendingToolRun.selectedToolName === 'write' &&
+          pendingToolRun.transport === toolName &&
+          pendingToolRun.inspectionSessionId === state.currentSessionId &&
+          pendingToolRun.inspectionSessionKey === state.currentSessionKey &&
+          (!context?.sessionId || context.sessionId === state.currentSessionId) &&
+          (!context?.sessionKey || context.sessionKey === state.currentSessionKey) &&
+          (!event?.runId || event.runId === runId) &&
+          (!event?.toolCallId || event.toolCallId === toolCallId) &&
+          !['failed','error','blocked','running','pending','unavailable'].includes(successfulMutation.event.result?.details?.status) &&
+          isDeepStrictEqual(successfulMutation.event.params, pendingToolRun.selectedParams)) {
+        try {
+          pendingToolRun.artifactWritePath = normalizeWorkspaceArtifact({relativePath:completedWritePath}).relativePath;
+        } catch { /* Unsupported files still require normal packaging and validation. */ }
+      }
       const writtenContent = successfulMutation.event?.params?.content;
       if (
         typeof writtenContent === "string" &&
@@ -11823,10 +11841,39 @@ export function createToolLoopGuard({
       !state.workspaceArtifacts?.length && workspaceArtifactUnavailableReason({
         agentId, runId, sessionId: state.currentSessionId, sessionKey: state.currentSessionKey,
       }) === undefined;
+    const artifactWritePath = pending?.artifactWritePath;
+    const artifactWriteReceipt = pending?.transport === 'write' ? message
+      : pending?.transport === 'tool_call' ? validatedToolSearchEnvelope(message.details, 'write', 'core')?.result : undefined;
+    // A plain file request need not select the project-work lane. Preserve an
+    // explicit test obligation even when that lane's verification flag is off.
+    const artifactTestsRequested = state?.workspaceVerificationRequested ||
+      /\b(?:(?:run|execute)\s+(?:the\s+)?(?:unit\s*)?tests?|test\s+suite|unittest)\b/i.test(state?.ownerRequestText ?? '');
+    const artifactWriteReady = artifactWritePath && artifactWriteReceipt &&
+      !toolCallFailed({result:artifactWriteReceipt}) && boundWebCall &&
+      message.role === 'toolResult' && message.toolName === pending.transport &&
+      pending.inspectionSessionId === state?.currentSessionId &&
+      pending.inspectionSessionKey === state?.currentSessionKey &&
+      (!context?.sessionKey || context.sessionKey === state.currentSessionKey) &&
+      (!context?.toolName || context.toolName === pending.transport) &&
+      (!event?.toolName || event.toolName === pending.transport) &&
+      (!context?.runId || context.runId === pending.runId) &&
+      (!event?.runId || event.runId === pending.runId) &&
+      !state.ownerQuestionIntent && !state.workspacePreviewRequired &&
+      !state.operationsRequired && !state.exactDownloadRequested &&
+      !state.progressBudget.laneExhausted('workspace') &&
+      (!artifactTestsRequested || state.latestVerificationStatus === 'passed') &&
+      !['failed','pending'].includes(state.latestVerificationStatus) &&
+      state.workspaceRequestedFiles.includes(artifactWritePath.split('/').at(-1)) &&
+      (!state.workspaceTaskPath || (state.workspaceTaskDirectory
+        ? artifactWritePath.startsWith(state.workspaceTaskDirectory + '/') : artifactWritePath === state.workspaceTaskPath)) &&
+      state.workspaceRequestedFiles.every(file => state.successfulWritePaths.has(
+        artifactWritePath.slice(0, artifactWritePath.lastIndexOf('/') + 1) + file));
     const artifactStageInstruction = artifactDeliveryPending && !failedToolResult &&
-      executionGuidance && syntaxReceipt?.details?.exitCode === 0 &&
-      state.latestVerificationStatus !== 'failed'
-      ? `[ODS Pixel next step] ${WORKSPACE_ARTIFACT_DELIVERY_GUIDANCE}` : undefined;
+      state.latestVerificationStatus !== 'failed' &&
+      ((executionGuidance && syntaxReceipt?.details?.exitCode === 0) || artifactWriteReady)
+      ? `[ODS Pixel next step] ${WORKSPACE_ARTIFACT_DELIVERY_GUIDANCE}` +
+        (artifactWriteReady ? ` The successfully written file has exact publication args ${JSON.stringify({relativePath:artifactWritePath})}; finish any remaining requested edits and checks first.` : '')
+      : undefined;
     const workspaceStageInstruction = (() => {
       if (failedToolResult) return undefined;
       if (!compactCoreResult || !state || state.progressBudget.laneExhausted('workspace')) return undefined;
