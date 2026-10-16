@@ -411,6 +411,107 @@ async def test_huggingface_search_returns_stale_cache_on_transient_hub_failure(m
     assert result == {**cached, "stale": True}
 
 
+@pytest.mark.asyncio
+async def test_huggingface_exact_repository_works_without_search_index(monkeypatch):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "_hf_token", lambda: "")
+    monkeypatch.setattr(models_router, "_HF_SEARCH_CACHE", {})
+    calls = []
+
+    async def metadata(path, **kwargs):
+        calls.append((path, kwargs))
+        assert path == "/api/models/owner/Model-GGUF", "The unavailable search index must not be called"
+        return {
+            "id": "owner/model-GGUF", "downloads": 12,
+            "siblings": [{"rfilename": "model-Q4_K_M.gguf"}],
+        }, {}
+
+    monkeypatch.setattr(models_router, "_hf_get_json", metadata)
+    result = await models_router.search_huggingface_models(
+        q=" owner/Model-GGUF ", sort="downloads", limit=20, api_key="test",
+    )
+    assert [item["id"] for item in result["models"]] == ["owner/model-GGUF"]
+    assert result["models"][0]["ggufFileCount"] == 1
+    assert result["authenticated"] is False
+    assert calls == [("/api/models/owner/Model-GGUF", {"timeout_seconds": 6.0, "connect_timeout_seconds": 3.0})]
+
+
+@pytest.mark.asyncio
+async def test_huggingface_repository_prefix_falls_back_only_when_not_found(monkeypatch):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "_hf_token", lambda: "")
+    monkeypatch.setattr(models_router, "_HF_SEARCH_CACHE", {})
+    calls = []
+
+    async def metadata(path, **kwargs):
+        calls.append(path)
+        if path == "/api/models/owner/partial":
+            raise models_router.HTTPException(status_code=404, detail="Not found")
+        assert kwargs["params"]["search"] == "owner/partial"
+        return [{"id": "owner/partial-GGUF", "siblings": [{"rfilename": "model.gguf"}]}], {}
+
+    monkeypatch.setattr(models_router, "_hf_get_json", metadata)
+    result = await models_router.search_huggingface_models(
+        q="owner/partial", sort="downloads", limit=20, api_key="test",
+    )
+    assert calls == ["/api/models/owner/partial", "/api/models"]
+    assert result["models"][0]["id"] == "owner/partial-GGUF"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 429, 502, 504])
+async def test_huggingface_exact_repository_preserves_access_and_transient_errors(monkeypatch, status):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "_hf_token", lambda: "")
+    monkeypatch.setattr(models_router, "_HF_SEARCH_CACHE", {})
+    calls = []
+
+    async def metadata(path, **_kwargs):
+        calls.append(path)
+        raise models_router.HTTPException(status_code=status, detail="Hub refused")
+
+    monkeypatch.setattr(models_router, "_hf_get_json", metadata)
+    with pytest.raises(models_router.HTTPException) as error:
+        await models_router.search_huggingface_models(q="owner/model", sort="downloads", limit=20, api_key="test")
+    assert error.value.status_code == status
+    assert calls == ["/api/models/owner/model"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repository", [[], {"id": "another/model"}, {}])
+async def test_huggingface_exact_repository_rejects_unrelated_metadata(monkeypatch, repository):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "_hf_token", lambda: "")
+    monkeypatch.setattr(models_router, "_HF_SEARCH_CACHE", {})
+
+    async def metadata(*_args, **_kwargs):
+        return repository, {}
+
+    monkeypatch.setattr(models_router, "_hf_get_json", metadata)
+    with pytest.raises(models_router.HTTPException) as error:
+        await models_router.search_huggingface_models(q="owner/model", sort="downloads", limit=20, api_key="test")
+    assert error.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_huggingface_exact_repository_keeps_gguf_only_filter(monkeypatch):
+    import routers.models as models_router
+
+    monkeypatch.setattr(models_router, "_hf_token", lambda: "")
+    monkeypatch.setattr(models_router, "_HF_SEARCH_CACHE", {})
+
+    async def metadata(*_args, **_kwargs):
+        return {"id": "owner/model", "siblings": [{"rfilename": "model.safetensors"}]}, {}
+
+    monkeypatch.setattr(models_router, "_hf_get_json", metadata)
+    result = await models_router.search_huggingface_models(q="owner/model", sort="downloads", limit=20, api_key="test")
+    assert result["models"] == []
+
+
 def test_huggingface_cache_identity_changes_without_exposing_token(monkeypatch):
     import routers.models as models_router
 
@@ -573,7 +674,7 @@ def test_huggingface_import_record_pins_revision_and_renames_remote_paths():
         }],
     }
 
-    record = models_router._hf_import_record(details, artifact)
+    record = models_router._hf_import_record({**details, "artifacts": [artifact]}, artifact)
 
     assert record["source"] == "huggingface"
     assert record["source_revision"] == "c" * 40
@@ -704,7 +805,7 @@ def test_huggingface_import_retains_retry_state_after_agent_failure(
 
     attempts = 0
 
-    def flaky_agent(_path, payload):
+    def flaky_agent(_path, payload, **_kwargs):
         nonlocal attempts
         attempts += 1
         assert payload["gguf_sha256"] == "e" * 64
@@ -815,7 +916,7 @@ def test_huggingface_import_disk_refusal_is_definitively_not_started(
     async def fake_details(_repo_id):
         return _hf_import_details()
 
-    def refuse(_path, _payload):
+    def refuse(_path, _payload, **_kwargs):
         raise models_router.HTTPException(
             status_code=507,
             detail=models_router._insufficient_disk_detail({
@@ -3024,7 +3125,7 @@ def test_local_gguf_ui_id_loads_and_deletes_spaced_filename(test_client, monkeyp
     assert delete_response.status_code == 200
     assert calls == [
         ("/v1/model/activate", {"model_id": "My-Custom-Model.Q8_0"}, 2700),
-        ("/v1/model/delete", {"gguf_file": "My Custom Model.Q8_0.GGUF"}, 30),
+        ("/v1/model/delete", {"gguf_file": "My Custom Model.Q8_0.GGUF"}, 20.0),
     ]
 
 
@@ -3201,6 +3302,100 @@ def test_reload_at_the_floor_stays_idempotent(test_client, monkeypatch, tmp_path
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "already_active"
+
+
+def _running_tower_model(monkeypatch, tmp_path, *, ctx=65536):
+    models_router, install_dir, data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
+    _write_model_library(install_dir, _repo_catalog_entries("qwen3.5-27b-q4"))
+    (data_dir / "models" / "Qwen3.5-27B-Q4_K_M.gguf").write_text("model", encoding="utf-8")
+    _tower_env(install_dir, llm_model="qwen3.5-27b", gguf="Qwen3.5-27B-Q4_K_M.gguf", ctx=ctx)
+    monkeypatch.setattr(models_router, "get_gpu_info", _rtx_5090)
+    monkeypatch.setattr(models_router, "_already_active_model", lambda *_args: (True, "Qwen3.5-27B-Q4_K_M.gguf"))
+    monkeypatch.setattr(models_router, "_verified_activation_context", lambda _loaded: ctx)
+    return models_router
+
+
+def test_a_fixed_template_restarts_the_running_model_at_its_context(test_client, monkeypatch, tmp_path):
+    """WP5 manual action: always a real switch (never "already active"), the context kept."""
+    models_router = _running_tower_model(monkeypatch, tmp_path, ctx=49152)
+    calls = []
+
+    def _call_agent(path, body, timeout=30, **_kwargs):
+        calls.append((path, body))
+        return {"status": "activated"}
+
+    monkeypatch.setattr(models_router, "_call_agent_model", _call_agent)
+
+    resp = test_client.post("/api/models/qwen3.5-27b-q4/chat-template", headers=test_client.auth_headers,
+                            json={"override": "qwen-tools-fix"})
+
+    assert resp.status_code == 200
+    assert calls == [("/v1/model/activate", {
+        "model_id": "qwen3.5-27b-q4", "context_length": 49152, "chat_template_override": "qwen-tools-fix",
+    })]
+
+
+@pytest.mark.parametrize("body", [None, {}, {"override": 7}, {"override": "Qwen Fix"}, {"override": "../x"},
+                                  {"override": "qwen-tools-fix", "context_length": 65536}])
+def test_a_fixed_template_request_names_exactly_one_template(test_client, monkeypatch, tmp_path, body):
+    models_router = _running_tower_model(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "_call_agent_model", lambda *_a, **_k: pytest.fail("not dispatched"))
+
+    resp = test_client.post("/api/models/qwen3.5-27b-q4/chat-template", headers=test_client.auth_headers,
+                            json=body)
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("windows", ["hosted", "legacy"])
+def test_windows_runtimes_refuse_a_fixed_template_in_words(test_client, monkeypatch, tmp_path, windows):
+    models_router = _running_tower_model(monkeypatch, tmp_path)
+    monkeypatch.setattr(models_router, "_windows_hosted_runtime", lambda: windows == "hosted")
+    monkeypatch.setattr(models_router, "read_live_env_values", lambda keys: {
+        "AMD_INFERENCE_RUNTIME_MODE": "windows-native-llama-server" if windows == "legacy" else "linux-container"})
+    monkeypatch.setattr(models_router, "_call_agent_model", lambda *_a, **_k: pytest.fail("not dispatched"))
+
+    resp = test_client.post("/api/models/qwen3.5-27b-q4/chat-template", headers=test_client.auth_headers,
+                            json={"override": "qwen-tools-fix"})
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["code"] == "chat_template_override_unsupported"
+    assert "cannot use a fixed chat template" in detail["message"]
+
+
+def test_the_agents_refusal_of_a_fixed_template_reaches_the_page(test_client, monkeypatch, tmp_path):
+    from host_agent_client import AgentHTTPError
+
+    models_router = _running_tower_model(monkeypatch, tmp_path)
+    refusal = {"error": "This fixed chat template is not for this model.", "code": "chat_template_override_not_matched"}
+
+    def agent(method, path, *, payload=None, timeout):
+        raise AgentHTTPError(409, "conflict", response_text=json.dumps(refusal))
+
+    monkeypatch.setattr(models_router, "request_agent_json", agent)
+
+    resp = test_client.post("/api/models/qwen3.5-27b-q4/chat-template", headers=test_client.auth_headers,
+                            json={"override": "qwen-tools-fix"})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == refusal
+
+
+def test_a_plain_run_never_asks_for_a_fixed_template(test_client, monkeypatch, tmp_path):
+    models_router = _running_tower_model(monkeypatch, tmp_path, ctx=32768)
+    monkeypatch.setattr(models_router, "_already_active_model", lambda *_args: (False, None))
+    calls = []
+
+    def _call_agent(path, body, timeout=30, **_kwargs):
+        calls.append(body)
+        return {"status": "activated"}
+
+    monkeypatch.setattr(models_router, "_call_agent_model", _call_agent)
+
+    test_client.post("/api/models/qwen3.5-27b-q4/load", headers=test_client.auth_headers)
+
+    assert calls and "chat_template_override" not in calls[0]
 
 
 def test_explicit_context_is_never_replanned(test_client, monkeypatch, tmp_path):
