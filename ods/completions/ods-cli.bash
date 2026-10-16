@@ -18,7 +18,7 @@ _ods_complete_presets() {
     COMPREPLY=()
     # Names are directory names, not .preset files. Keep each array element
     # intact (including spaces), without changing the user's glob options.
-    for path in "$preset_dir"/* "$preset_dir"/.[!.]* "$preset_dir"/..?*; do
+    for path in "$preset_dir"/[!.]* "$preset_dir"/.[!.]* "$preset_dir"/..?*; do
         [[ -d "$path" ]] || continue
         name="${path##*/}"
         [[ "$name" == "$cur"* ]] && COMPREPLY+=("$name")

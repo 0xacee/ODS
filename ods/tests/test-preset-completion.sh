@@ -52,6 +52,11 @@ complete_names ods preset load literal
 expect_names 'literal.preset'
 complete_names ods preset load .
 expect_names '.hidden'
+shopt -s dotglob
+complete_names ods preset load .
+expect_names '.hidden'
+shopt -q dotglob || fail 'completion changed caller dotglob option'
+shopt -u dotglob
 complete_names ods preset load unrelated
 [[ ${#COMPREPLY[@]} == 0 ]] || fail 'included a regular file as a preset'
 complete_names ods preset load obsolete
