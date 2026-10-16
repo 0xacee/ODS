@@ -2037,7 +2037,7 @@ try {
 
 # ── Success card ──────────────────────────────────────────────────────────────
 if ($allHealthy) {
-    Write-SuccessCard
+    Write-SuccessCard -WebUIPort $webuiPort -DashboardPort $dashboardPort
 } else {
     Write-Host ""
     Write-AIWarn "Install finished, but one or more services are not ready yet. Check status with:"

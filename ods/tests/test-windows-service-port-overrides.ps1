@@ -238,6 +238,22 @@ services:
     . ([scriptblock]::Create($urlAssignment.Extent.Text))
     Assert-Equal ($urlContent.Contains('URL=http://localhost:13101')) $true 'InternetShortcut content uses selected port'
 
+    # Execute the real success-card call and retain the helper's actual defaults.
+    # The card must receive the same selected URLs that readiness just checked.
+    function Write-SuccessCard {
+        param([string]$WebUIPort = '3000', [string]$DashboardPort = '3001')
+        $script:successCardPorts = @{ WebUI = $WebUIPort; Dashboard = $DashboardPort }
+    }
+    $webuiPort = 13100
+    $cardCall = $installerAst.Find({
+        param($n)
+        $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Write-SuccessCard'
+    }, $true)
+    if (-not $cardCall) { throw 'Success-card invocation was not found' }
+    . ([scriptblock]::Create($cardCall.Extent.Text))
+    Assert-Equal $script:successCardPorts.Dashboard 13101 'Success card receives selected Dashboard port'
+    Assert-Equal $script:successCardPorts.WebUI 13100 'Success card receives selected WebUI port'
+
     $windowsEnvMap = @{ PERPLEXICA_PORT = '13004' }; $perplexicaPort = 0
     $readinessEnv = $windowsEnvMap
     $readinessFunction = $installerAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ReadinessPort' }, $true)
