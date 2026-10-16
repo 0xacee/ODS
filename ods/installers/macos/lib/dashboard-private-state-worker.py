@@ -191,7 +191,7 @@ def worker(action, kind, token, expected="", root=Path("/store")):
         return
     if action == "export":
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / STORES[kind]
+            output = Path(temporary).resolve() / STORES[kind]
             snapshot(root, kind, output)
             with output.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):

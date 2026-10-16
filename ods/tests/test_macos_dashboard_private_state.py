@@ -274,6 +274,38 @@ class Migration(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "receipt-selection"):
             self.stores.prepare(self.state)
 
+    def export_with_temp_directory(self, *, aliased):
+        self.populate()
+        self.stores.prepare(self.state)
+        temporary_root = self.root / "worker-temporary"
+        temporary_root.mkdir(mode=0o700)
+        selected = temporary_root
+        if aliased:
+            selected = self.root / "temporary-alias"
+            selected.symlink_to(temporary_root, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "private-store-custody"):
+                W.private(selected, directory=True)
+        source = self.stores.path("pixel-images") / "images.sqlite3"
+        before = source.read_bytes()
+        backup = self.root / "backup/data/pixel-images"
+        with patch.object(W.tempfile, "tempdir", str(selected)):
+            self.stores.export(self.state, backup)
+        saved = self.images(backup)
+        try:
+            self.assertEqual(saved.get("a" * 64, "kept", self.image["id"])["data"], self.png)
+            self.assertEqual(saved.deletion("a" * 64, "pending"), {"completed": False})
+            self.assertEqual(saved.deletion("a" * 64, "deleted"), {"completed": True})
+        finally:
+            saved.close()
+        self.assertEqual(source.read_bytes(), before)
+        self.assertEqual(list(temporary_root.iterdir()), [])
+
+    def test_export_uses_private_canonical_temporary_directory(self):
+        self.export_with_temp_directory(aliased=False)
+
+    def test_export_resolves_fresh_temporary_directory_under_real_alias(self):
+        self.export_with_temp_directory(aliased=True)
+
     def test_backup_uses_active_image_volume_and_restore_rolls_back(self):
         self.populate()
         self.stores.prepare(self.state)
