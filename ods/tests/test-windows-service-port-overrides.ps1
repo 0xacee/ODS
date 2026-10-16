@@ -28,6 +28,22 @@ function Read-Ast([string]$Path) {
     if ($parseErrors.Count) { throw $parseErrors[0].Message }
     return $tree
 }
+$healthInstallerAst = Read-Ast (Join-Path $SourceRoot 'installers/windows/install-windows.ps1')
+$workflowHealthNode = $healthInstallerAst.Find({
+    param($n)
+    $n -is [System.Management.Automation.Language.IfStatementAst] -and
+        $n.Extent.Text.Contains('Name = "n8n (Workflows)"')
+}, $true)
+if (-not $workflowHealthNode) { throw 'Workflow health-check assembly was not found' }
+$workflowHealthBlock = [scriptblock]::Create($workflowHealthNode.Extent.Text)
+function Get-WorkflowHealthUrl([hashtable]$EnvMap) {
+    $windowsEnvMap = $EnvMap
+    $enableWorkflows = $true
+    $healthChecks = @()
+    . $workflowHealthBlock
+    if ($healthChecks.Count -ne 1) { throw 'Expected one workflow health check' }
+    return $healthChecks[0].Url
+}
 $phasePath = Join-Path $SourceRoot 'installers/windows/phases/04-requirements.ps1'
 $phaseAst = Read-Ast $phasePath
 foreach ($name in @('Get-WindowsODSSelectedPortConflicts', 'Assert-WindowsODSSelectedPortAvailability')) {
@@ -123,6 +139,7 @@ try {
         }
         $selected = Get-SelectedPorts $fixture
         $generated = Generate-Env
+        Assert-Equal (Get-WorkflowHealthUrl $generated) "http://localhost:$($expected.N8N_PORT)/healthz" "$case workflow health check uses the generated port"
         foreach ($key in $defaults.Keys) {
             Assert-Equal $generated[$key] $expected[$key] "$case generated $key"
             if ($labels.ContainsKey($key)) { Assert-Equal $selected[$labels[$key]] $expected[$key] "$case preflight $key" }
