@@ -94,6 +94,31 @@ export function createRunProgressBudget() {
   };
 }
 
+// A lookup that found nothing answered its question; it did not fail.
+// grep, egrep, fgrep, rg and git grep exit 1 only when nothing matched (their
+// errors exit 2, git 128), and `which` exits 1 only when no name resolves.
+// OpenClaw merges stdout and stderr, so an exit-1 receipt with no output is a
+// completed lookup with an empty answer. Only one lookup qualifies, optionally
+// after one literal `cd DIR &&` (a failed cd prints, so it cannot pass the
+// no-output test). Pipelines, lists, redirections, substitutions and escapes
+// outside quotes stay ordinary failures, as does every other exit code.
+const LOOKUP_CD = /^cd[ \t]+(?:'[^'\r\n]*'|"[^"$`\\\r\n]*"|[A-Za-z0-9._/-]+)[ \t]*&&[ \t]*/;
+const LOOKUP_PROGRAM = /^(?:e?grep|fgrep|rg|git[ \t]+grep|which)(?=[ \t]|$)/;
+const LOOKUP_QUOTED = /'[^'\r\n]*'|"(?:[^"\\$`\r\n]|\\[^\r\n])*"/g;
+export function lookupFoundNothing(command, result) {
+  if (typeof command !== 'string' || command.length > 4096) return false;
+  const lookup = command.trim().replace(LOOKUP_CD, '');
+  if (!LOOKUP_PROGRAM.test(lookup) || /[|&;<>()`$\\'"\r\n]/.test(lookup.replace(LOOKUP_QUOTED, ''))) return false;
+  const details = result?.details;
+  if (!details || typeof details !== 'object' || details.status !== 'completed' || details.exitCode !== 1 ||
+      Object.hasOwn(details, 'sessionId')) return false;
+  const output = typeof details.aggregated === 'string' ? details.aggregated
+    : (Array.isArray(result.content) ? result.content : [])
+      .map(block => block?.type === 'text' && typeof block.text === 'string' ? block.text : '').join('');
+  // OpenClaw appends this exit note to every non-zero completion.
+  return output.replace(/\(Command exited with code 1\)/, '').trim() === '';
+}
+
 // This deliberately does not classify general shell commands as read-only.
 // Only a single quoted literal echo is provably unable to mutate the project.
 export function isLiteralEcho(command) {

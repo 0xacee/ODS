@@ -1,6 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createRunProgressBudget, failedToolOutcome, isLiteralEcho, RUN_PROGRESS_LIMITS} from '../plugin/run-progress-budget.mjs';
+import {createRunProgressBudget, failedToolOutcome, isLiteralEcho, lookupFoundNothing, RUN_PROGRESS_LIMITS} from '../plugin/run-progress-budget.mjs';
+
+test('only a single lookup that completed with exit 1 and no output found nothing', () => {
+  const receipt = (exitCode, text = '', details = {}) => ({content:[{type:'text', text:`${text}\n\n(Command exited with code ${exitCode})`}],
+    details:{status:'completed', exitCode, durationMs:3, ...details}});
+  const empty = receipt(1);
+  for (const command of [
+    'grep -n "function drawEnemyEnt" -A 12 chars.js',
+    'cd Playground/elf-of-doom && grep -n "function drawEnemyEnt" -A 12 chars.js',
+    "cd 'Playground/elf of doom' && grep -rn 'hitSet|fromEnemy' *.js",
+    'grep -rn "a\\|b" .', 'egrep -n "x" f', 'fgrep -n x f', 'rg -n "x" src', 'git grep -n "x"', 'which node nodejs deno bun',
+    '  grep -n x f  ',
+  ]) assert.equal(lookupFoundNothing(command, empty), true, command);
+  for (const command of [
+    'grep -n x f | head', 'cat f | grep x', 'grep x f; echo $?', 'grep x f || true', 'grep x f && echo y',
+    'grep x f > out', 'grep x f 2>/dev/null', 'grep x $(ls)', 'grep x `ls`', 'grep x f\nrm f', 'grep x f &',
+    'cd a && cd b && grep x f', 'echo grep x', 'grepx -n f', 'sh -c "grep x f"', 'find . -name x', 'test -f x',
+    'diff a b', 'command -v node', 'python3 -c "print(1)"', 'grep "unclosed', 'grep x\\ y f', '', 42, undefined,
+  ]) assert.equal(lookupFoundNothing(command, empty), false, String(command));
+  const search = 'grep -n x f';
+  for (const result of [
+    receipt(0), receipt(2), receipt(127), receipt(128), receipt(1, 'f:1: x'), receipt(1, 'grep: f: No such file or directory'),
+    receipt(1, '', {status:'running'}), receipt(1, '', {status:'failed'}), receipt(1, '', {sessionId:'s-1'}),
+    {content:[{type:'text', text:''}], details:{status:'completed', exitCode:1.5}},
+    {content:[{type:'text', text:''}], details:{status:'completed'}}, {details:{status:'completed', exitCode:1, aggregated:'x'}},
+    undefined, null, {},
+  ]) assert.equal(lookupFoundNothing(search, result), false, JSON.stringify(result));
+  assert.equal(lookupFoundNothing(search, {details:{status:'completed', exitCode:1, aggregated:''}}), true);
+  assert.equal(lookupFoundNothing('grep '.padEnd(4100, 'x'), empty), false);
+});
 
 test('outer and nested failure receipts do not masquerade as successful progress', () => {
   for (const event of [{error:'unavailable'}, {result:{isError:true}},
