@@ -115,10 +115,10 @@ test.each([null, undefined])('an unknown thinking check is not presented as meas
   expect(screen.queryByText('Always thinks before it answers')).toBeNull()
 })
 
-test('a model not measured yet says when it will be', async () => {
+test('a missing saved check explains how to run one', async () => {
   profileBody.profile = null
   await show()
-  expect(screen.getByText(/Not checked yet/)).toBeVisible()
+  expect(screen.getByText('No saved capability check is available for this model on this machine. Choose Check again to run one.')).toBeVisible()
 })
 
 test('a running model never checked can be checked from its card', async () => {
@@ -138,7 +138,7 @@ test('a refused first check is shown in words', async () => {
   await show()
   await act(async () => { fireEvent.click(screen.getByRole('button', {name: 'Check again'})) })
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Only the running model can be checked'))
-  expect(screen.getByText(/Not checked yet/)).toBeVisible()
+  expect(screen.getByText(/No saved capability check/)).toBeVisible()
 })
 
 test('nothing shows when profiles are off or the check is unavailable', async () => {
@@ -215,7 +215,7 @@ test('refreshes a delayed first profile after the model lifecycle settles withou
   profileBody.profile = null
   const view = render(<ModelProfileSummary modelId="qwen3.5-9b" lifecycleActive={false}/>)
   await act(async () => {})
-  expect(screen.getByText(/Not checked yet/)).toBeVisible()
+  expect(screen.getByText(/No saved capability check/)).toBeVisible()
   view.rerender(<ModelProfileSummary modelId="qwen3.5-9b" lifecycleActive={true}/>)
   await act(async () => {})
   expect(fetch).toHaveBeenCalledTimes(1)
