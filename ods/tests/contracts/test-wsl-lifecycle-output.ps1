@@ -155,14 +155,21 @@ try {
             $directory = if ($case -eq 'private-acl') { $private } else { $exposed }
             $start.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $ControllerRoot 'wsl-lifecycle.ps1') + '" -Action hold -InstanceDirectory "' + $directory + '"'
         }
-        $process = [Diagnostics.Process]::new(); $process.StartInfo = $start; $stderr = ''
+        $process = [Diagnostics.Process]::new(); $process.StartInfo = $start; $stdout = ''; $stderr = ''; $exitCode = $null
         try {
-            if (-not $process.Start()) { throw 'Could not start module-path fixture' }
+            # Match the Python bridge's BOM-free UTF-8 bytes. .NET Framework's
+            # redirected writer inherits Console.InputEncoding when Start runs.
+            $inputEncoding = [Console]::InputEncoding
+            try {
+                if ($case -eq 'model-json') { [Console]::InputEncoding = [Text.UTF8Encoding]::new($false) }
+                if (-not $process.Start()) { throw 'Could not start module-path fixture' }
+            } finally { [Console]::InputEncoding = $inputEncoding }
             $stdoutTask = $process.StandardOutput.ReadToEndAsync(); $stderrTask = $process.StandardError.ReadToEndAsync()
             if ($case -eq 'model-json') { $process.StandardInput.Write('{"action":"unknown","distro":"fixture","installDir":"/fixture"}') }
             $process.StandardInput.Close()
             if (-not $process.WaitForExit(15000)) { $process.Kill(); $process.WaitForExit(); throw 'Module-path fixture timed out' }
             $stdout = $stdoutTask.GetAwaiter().GetResult(); $stderr = $stderrTask.GetAwaiter().GetResult()
+            $exitCode = $process.ExitCode
             if ($case -eq 'model-json') {
                 $receipt = $stdout | ConvertFrom-Json -ErrorAction Stop
                 if ($process.ExitCode -ne 1 -or $receipt.code -cne 'invalid_request' -or $receipt.ok -ne $false -or $stderr.Trim()) { throw 'Contaminated module path broke the finite JSON error boundary' }
@@ -173,7 +180,7 @@ try {
                 if ($process.ExitCode -eq 0 -or $stdout.Trim() -or $stderr -notmatch [regex]::Escape($expected) -or $stderr -match 'CONTAMINATED_PARENT_MODULE|CouldNotAutoloadMatchingModule') { throw "Controller did not enforce the expected native ACL/identity guard: $case" }
             }
             Write-Host "PASS module-path $case uses the real PS5 process boundary"
-        } catch { $failures += "$case : $($_.Exception.Message); child stderr: $($stderr.Substring(0, [Math]::Min(2048, $stderr.Length)))" }
+        } catch { $failures += "$case : $($_.Exception.Message); child exit: $exitCode; stdout: $($stdout.Substring(0, [Math]::Min(2048, $stdout.Length))); stderr: $($stderr.Substring(0, [Math]::Min(2048, $stderr.Length)))" }
         finally { if ($process.Id -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }; $process.Dispose() }
     }
     if ($env:PSModulePath -cne $parentModulePath) { throw 'Controller tests changed the parent module path' }
