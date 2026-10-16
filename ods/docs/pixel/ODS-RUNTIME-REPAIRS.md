@@ -303,9 +303,12 @@ every result, every reasoning block and every edit or write payload whole, and
 it sends the whole stretch in one request. In a 31-minute game build on the
 same host, 299 entries (769k JSON characters, about 190k tokens) followed the
 first overflow compaction. The next one asked the 131k model to summarize all
-of them. That request was far larger than the context, so the transport cut
-its output to one token, the compaction ended incomplete (`willRetry=false`)
-and Portal showed that it could not complete the response.
+of them in one request. The compaction ended incomplete (`willRetry=false`)
+and Portal showed that it could not complete the response. The Spark's log
+records only a model response (status 200 after 32 ms) and the incomplete end
+68 seconds later, with no LiteLLM or llama.cpp error. In the Spark-shaped
+regression fixture the same request is 156,902 tokens by the transport's
+estimate, so the transport cuts `max_tokens` to 1 and the server rejects it.
 
 Two hash-chained recipes fix both:
 
@@ -324,7 +327,12 @@ Two hash-chained recipes fix both:
   like the live projection, the oldest long tool results, tool-call argument
   values and reasoning become a short notice first; requests, replies, tool
   names and short values such as paths stay. Only text that cannot be reduced
-  loses its oldest messages, with a count marker.
+  loses its oldest messages, with a count marker. When the previous summary
+  and the instructions leave no room for even the newest reduced message, the
+  compaction fails with `summarization_failed` before any request. This can
+  happen on an 8K or 16K model whose previous summary ends with a long
+  verbatim owner request. Without the check it would save a summary that
+  silently drops all the work since the last checkpoint.
 
 The session transcript, `reserveTokens`, `keepRecentTokens` and the one or two
 summary calls per compaction are unchanged. The read/modified file lists still
@@ -335,9 +343,20 @@ source with the existing Linux/WSL receipts (`--compaction-budget`,
 them as before.
 
 The regression runs the real runner and compaction wrapper with a loopback
-provider that rejects prompts larger than its context, as llama.cpp does. It
-reads a 30k-character file twelve times and compacts a 300-entry Spark-shaped
-tail. `ODS_LONG_RUN_COMPACTION_BASELINE=1` loads the previous recipes; the same
+provider that rejects prompts larger than its context, as llama.cpp does:
+
+- Twelve reads of a 30k-character file do not compact.
+- Large writes, whose tool-call arguments the projection keeps whole, still
+  trip the guard. The last prompt before it fires is above 85% of the window,
+  the provider rejects nothing, and the run continues after the compaction.
+- A 300-entry Spark-shaped tail compacts directly (overflow and manual).
+- The same tail compacts twice inside one run, after two provider overflows.
+  Each time it uses the session's own overflow auto-compaction, the path that
+  failed on the Spark. The run retries and answers.
+- At 8K and 16K, a previous summary with no room for new work fails as
+  described above.
+
+`ODS_LONG_RUN_COMPACTION_BASELINE=1` loads the previous recipes, and the same
 assertions then fail:
 
 ```sh
