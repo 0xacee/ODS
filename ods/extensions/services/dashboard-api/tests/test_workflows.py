@@ -1,5 +1,6 @@
 """Tests for workflows router endpoints."""
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -715,7 +716,7 @@ def test_workflow_executions_installed(test_client, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("activation", ["active", "inactive", "rejected", "timeout", "connection", "invalid-json", "missing-id", "invalid-id", "invalid-create-json"])
+@pytest.mark.parametrize("activation", ["active", "inactive", "rejected", "timeout", "connection", "invalid-json", "missing-id", "invalid-id", "invalid-create-json", "create-body-timeout"])
 def test_workflow_enable_success(test_client, tmp_path, monkeypatch, activation):
     """The pinned public API creates at top level and activates with POST."""
     import routers.workflows as wf_mod
@@ -749,6 +750,8 @@ def test_workflow_enable_success(test_client, tmp_path, monkeypatch, activation)
         create_resp.json.return_value = {"id": "../outside"}
     elif activation == "invalid-create-json":
         create_resp.json.side_effect = json.JSONDecodeError("invalid", "", 0)
+    elif activation == "create-body-timeout":
+        create_resp.json.side_effect = asyncio.TimeoutError()
 
     # n8n 2.41.6 rejects read-only create fields and requires POST /activate.
     activate_resp = AsyncMock()
@@ -765,7 +768,6 @@ def test_workflow_enable_success(test_client, tmp_path, monkeypatch, activation)
     activate_ctx.__aenter__ = AsyncMock(return_value=activate_resp)
     activate_ctx.__aexit__ = AsyncMock(return_value=False)
     if activation in ("timeout", "connection"):
-        import asyncio
         activate_ctx.__aenter__.side_effect = asyncio.TimeoutError() if activation == "timeout" else aiohttp.ClientError("lost")
 
     session_mock = AsyncMock()
@@ -779,7 +781,7 @@ def test_workflow_enable_success(test_client, tmp_path, monkeypatch, activation)
             headers=test_client.auth_headers,
         )
 
-    if activation in ("missing-id", "invalid-id", "invalid-create-json"):
+    if activation in ("missing-id", "invalid-id", "invalid-create-json", "create-body-timeout"):
         assert resp.status_code == 502
         assert "before importing again" in resp.json()["detail"]
         assert session_mock.post.call_count == 1

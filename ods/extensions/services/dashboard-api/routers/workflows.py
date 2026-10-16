@@ -245,7 +245,7 @@ async def enable_workflow(workflow_id: str, api_key: str = Depends(verify_api_ke
                 if resp.status in (200, 201):
                     try:
                         result = await resp.json()
-                    except (aiohttp.ClientError, json.JSONDecodeError):
+                    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError):
                         raise HTTPException(status_code=502, detail="n8n accepted the workflow import but its response was unavailable. Check n8n before importing again.")
                     n8n_id = result.get("id") if isinstance(result, dict) else None
                     if not isinstance(n8n_id, str) or not _WORKFLOW_ID_RE.fullmatch(n8n_id):
