@@ -31,7 +31,7 @@ async function begin() {
   render(<HuggingFaceModelBrowser onImportStarted={onImportStarted}/>)
   await act(async () => { await vi.advanceTimersByTimeAsync(350) })
   await open()
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry', exact: true })) })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Import', exact: true })) })
 }
 const posts = () => fetch.mock.calls.filter(([, options]) => options?.method === 'POST')
 
@@ -42,7 +42,7 @@ test('allows closing a stalled import and reconciles the exact download without 
   await act(async () => { await vi.advanceTimersByTimeAsync(45000) })
   expect(screen.getByText(/The request timed out/)).toBeVisible()
   await open()
-  expect(screen.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
   fireEvent.click(screen.getByTitle('Close'))
   progress = { status: 'downloading', model: 'hf-model.gguf', bytesDownloaded: 20, updatedAt: new Date().toISOString() }
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check download status' })) })
@@ -57,7 +57,7 @@ test('does not treat another artifact or idle state as permission to duplicate a
   progress = { status: 'complete', model: 'another.gguf', updatedAt: new Date().toISOString() }
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check download status' })) })
   expect(screen.getByText(/not yet confirmed/)).toBeVisible()
-  expect(screen.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
   expect(posts()).toHaveLength(1)
   expect(onImportStarted).not.toHaveBeenCalled()
 })
@@ -88,7 +88,7 @@ test('a definitive refusal releases import controls and displays the server reas
   post = async () => response({ detail: 'Private repository requires HF_TOKEN' }, 403)
   await begin()
   expect(screen.getByText('Private repository requires HF_TOKEN')).toBeVisible()
-  expect(screen.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Import', exact: true })).toBeEnabled()
   expect(screen.queryByRole('button', { name: 'Check download status' })).toBeNull()
 })
 
@@ -97,7 +97,7 @@ test('a preparation failure marked not dispatched permits retry even on HTTP 500
     headers: { get: key => key === 'X-ODS-Import-Started' ? 'false' : null } })
   await begin()
   expect(screen.getByText('No download was started; retry.')).toBeVisible()
-  expect(screen.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Import', exact: true })).toBeEnabled()
   expect(screen.queryByRole('button', { name: 'Check download status' })).toBeNull()
   expect(posts()).toHaveLength(1)
 })
@@ -105,7 +105,7 @@ test('a preparation failure marked not dispatched permits retry even on HTTP 500
 test('an uncertain server error still requires readback rather than replaying a download', async () => {
   post = async () => response({ detail: 'Upstream connection lost' }, 502)
   await begin()
-  expect(screen.getByRole('button', { name: 'Retry', exact: true })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
   expect(screen.getByRole('button', { name: 'Check download status' })).toBeEnabled()
   expect(posts()).toHaveLength(1)
 })

@@ -10631,3 +10631,36 @@ class TestVisionProjectorFiles:
         assert second.response_code == 200, second.parse_response()
         assert not (models / "hf-vision-mmproj-F16.gguf").exists()
         assert sorted(path.name for path in models.iterdir()) == []
+
+def test_successful_import_deletion_keeps_repository_identity_without_installed_files(tmp_path, monkeypatch, test_client):
+    """The actual deletion producer leaves metadata that the Import action must not mistake for a retry."""
+    import routers.models as router
+    install, models = TestModelDeleteSafety()._setup(tmp_path, monkeypatch)
+    (install / 'config/model-library.json').write_text(json.dumps({'models': []}), encoding='utf-8')
+    hub = {'id': 'org/model', 'sha': 'c' * 40, 'siblings': [
+        {'rfilename': 'model.gguf', 'size': 10, 'lfs': {'size': 10, 'sha256': 'e' * 64}}]}
+    artifact_id = router._hf_gguf_artifacts(hub)[0]['id']
+    record = {'id': 'hf-retained', 'source': 'huggingface', 'source_repo': hub['id'],
+              'source_revision': hub['sha'], 'source_artifact_id': artifact_id, 'gguf_file': 'hf-model.gguf'}
+    registry = install / 'data/model-imports.json'
+    registry.write_text(json.dumps({'models': [record]}), encoding='utf-8')
+    original_registry = registry.read_bytes()
+    (models / record['gguf_file']).write_bytes(b'model data')
+    monkeypatch.setattr(_mod, '_live_runtime_has_model', lambda *_args: False)
+    monkeypatch.setattr(router, 'INSTALL_DIR', str(install))
+    monkeypatch.setattr(router, 'DATA_DIR', str(install / 'data'))
+    monkeypatch.setattr(router, '_MODELS_DIR', models)
+    monkeypatch.setattr(router, '_ENV_PATH', install / '.env')
+    async def read_hub(*_args, **_kwargs):
+        return hub, {}
+    monkeypatch.setattr(router, '_hf_get_json', read_hub)
+    url = '/api/models/huggingface/repositories/org/model'
+    before = test_client.get(url, headers=test_client.auth_headers).json()['artifacts'][0]
+    assert before['importedModelId'] == record['id'] and before['installed'] is True
+    handler = _FakeHandler(json.dumps({'gguf_file': record['gguf_file']}).encode())
+    _mod.AgentHandler._handle_model_delete(handler)
+    assert handler.response_code == 200
+    assert not (models / record['gguf_file']).exists()
+    assert registry.read_bytes() == original_registry
+    after = test_client.get(url, headers=test_client.auth_headers).json()['artifacts'][0]
+    assert after['importedModelId'] == record['id'] and after['installed'] is False
