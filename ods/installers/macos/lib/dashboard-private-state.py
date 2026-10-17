@@ -208,8 +208,14 @@ class Stores:
         result = subprocess.run(["docker", *args], cwd=self.root, env=self.env, capture_output=True, check=False)
         if result.returncode:
             # Do not log expanded Compose/environment output.
-            if missing and b"No such" in result.stderr:
-                return None
+            if missing and len(args) == 3:
+                if args[:2] == ("volume", "inspect"):
+                    absent = ("Error response from daemon: get " + args[2] + ": no such volume").encode()
+                    if (result.returncode == 1 and result.stdout.strip() == b"[]"
+                            and result.stderr.strip() == absent):
+                        return None
+                elif args[:2] == ("image", "inspect") and b"No such" in result.stderr:
+                    return None
             raise ValueError("private-store-docker-" + args[0])
         return result.stdout.decode()
 

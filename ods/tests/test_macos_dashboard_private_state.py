@@ -46,7 +46,8 @@ elif args[:2] == ['volume', 'create']:
     save(); print(name)
 elif args[:2] == ['volume', 'inspect']:
     if args[-1] not in data['volumes']:
-        print('Error: No such volume', file=sys.stderr); sys.exit(1)
+        print('[]')
+        print('Error response from daemon: get '+args[-1]+': no such volume', file=sys.stderr); sys.exit(1)
     print(json.dumps([data['volumes'][args[-1]]]))
 elif args[:1] == ['ps']: pass
 elif args[:1] == ['compose']:
@@ -80,6 +81,46 @@ elif args[:1] == ['run']:
         sys.exit(subprocess.run([sys.executable, '-c', program, *child]).returncode)
 else: sys.exit(33)
 '''
+
+
+class MissingVolume(unittest.TestCase):
+    def setUp(self):
+        self.stores = object.__new__(M.Stores)
+        self.stores.root = Path.cwd()
+        self.stores.env = {}
+        self.name = 'ods_dashboard-pixel-images'
+        self.absent = ('Error response from daemon: get '+self.name+': no such volume\n').encode()
+
+    def inspect(self, status=1, stdout=b'[]\n', stderr=None, *, missing=True, args=None):
+        result = subprocess.CompletedProcess([], status, stdout, self.absent if stderr is None else stderr)
+        with patch.object(M.subprocess, 'run', return_value=result):
+            return self.stores.docker(*(args or ('volume', 'inspect', self.name)), missing=missing)
+
+    def test_exact_daemon_absence_for_both_requested_volumes(self):
+        for kind in W.STORES:
+            name = 'ods_dashboard-'+kind
+            with self.subTest(kind=kind):
+                self.assertIsNone(self.inspect(args=('volume', 'inspect', name),
+                    stderr=('Error response from daemon: get '+name+': no such volume\n').encode()))
+
+    def test_other_errors_and_outputs_are_not_absence(self):
+        cases = (
+            {'status': 2}, {'stdout': b''}, {'stdout': b'null\n'}, {'stdout': b'[{}]\n'},
+            {'stderr': b'Error response from daemon: get another: no such volume\n'},
+            {'stderr': b'Error response from daemon: get ods_dashboard-pixel-images: permission denied\n'},
+            {'stderr': b'dial unix /missing/docker.sock: connect: No such file or directory\n'},
+            {'stderr': b'Error: No such volume\n'},
+            {'stderr': self.absent+b'another daemon error\n'},
+            {'missing': False}, {'args': ('volume', 'create', self.name)},
+            {'args': ('volume', 'inspect', self.name, 'another')},
+        )
+        for case in cases:
+            with self.subTest(case=case), self.assertRaisesRegex(ValueError, '^private-store-docker-volume$'):
+                self.inspect(**case)
+
+    def test_successful_inspection_is_preserved(self):
+        self.assertEqual(self.inspect(status=0, stdout=b'[{"Name":"kept"}]\n', stderr=b''),
+                         '[{"Name":"kept"}]\n')
 
 
 class FakeStores(M.Stores):
@@ -555,6 +596,15 @@ class PublicCommands(unittest.TestCase):
 
     def image_path(self):
         return self.root / "volumes/ods_dashboard-pixel-images"
+
+    def test_real_fresh_install_handles_exact_missing_volume_transcript(self):
+        result = self.command("launch", "--operation", "install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for kind in W.STORES:
+            self.assertTrue((self.root / "volumes" / ("ods_dashboard-"+kind) / W.MARKER).is_file())
+        data = json.loads((self.root / "docker-fixture.json").read_text())
+        self.assertEqual(set(data["volumes"]), {"ods_dashboard-"+kind for kind in W.STORES})
+        self.assertEqual(data["launches"], [["up", "-d", "--remove-orphans", "--no-build", "--pull", "never"]])
 
     def test_real_cli_builds_missing_start_and_update_but_never_restart(self):
         fixture = self.root / "docker-fixture.json"
