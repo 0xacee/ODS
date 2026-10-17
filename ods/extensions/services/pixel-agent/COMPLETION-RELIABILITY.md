@@ -410,6 +410,39 @@ Each prompt also receives the current host UTC time. The model must preserve
 the owner's requested date/timezone, check source publication dates and avoid
 confusing its training cutoff with the actual date.
 
+## Empty lookups are answers
+
+The run-progress budget charges every non-zero exit as a failure. Searches that
+came up empty are exempt (`lookupFoundNothing`): a `grep`, `egrep`, `fgrep`, `rg`,
+`git grep` or `which` that completed with exit 1, optionally after one literal
+`cd DIR &&`. The search tools exit 1 only when nothing matched, and `which` only
+when a name did not resolve. Models also chain searches
+(`grep a f | head; echo ===; grep b g`), so a list joined by `;` or `&&` qualifies
+when every step is a lookup, an `echo` or `sed -n 'N,Mp'`, optionally piped into
+`head`, `tail`, `cat`, `wc`, `sort` or `uniq`, and the last step is a bare
+lookup. None of those other steps can exit 1, so exit 1 still means a search
+found nothing. OpenClaw merges stdout and stderr, and an error line in the output
+(grep's warnings and binary-match notices aside) disqualifies the command. rg 13
+prints some errors with no recognisable prefix, so `rg` may only be the last
+step, where its own exit status separates an error from an empty search. Options
+that run programs or write files (`rg --pre`, `git grep -O`, `sort -o`, `sed -i`)
+disqualify the command too. The reasoning assumes the sandbox's GNU tools and
+rg 13 under dash.
+
+The receipt must be bound to the exact pending call (run, transport, session and
+the executed, wrapped parameters), and the model's own command is read from that
+call's record. Such a lookup is recorded as discovery: it is not charged and it
+resets nothing, up to `FREE_EMPTY_LOOKUPS_PER_RUN` per run, after which it is an
+ordinary failure again. Discovery never resets the round fuse, so a run that only
+searches still stops after `roundsWithoutProgress` rounds. Any other program in
+the command, `||`, background jobs, redirections, substitutions, escapes outside
+quotes, an error in the output and every other exit code stay failures. On the
+RTX Spark (Elf of Doom), empty greps counted as failures filled the 12-failure
+total and stopped a run with 21 good edits behind it; in the next run four of the
+five empty searches were chains like the one above.
+`tests/empty_lookup_progress.test.mjs` replays the hook sequence for both the
+direct and the Tool Search transport.
+
 ## Tool-limit finalization
 
 When the run-progress budget (`run-progress-budget.mjs`) or the research
@@ -546,6 +579,88 @@ cancelled request. A later message sees none of this.
 `tests/cancel_request_binding.test.mjs` replays the fleet case and a cancel
 before, during and after a revision is armed; the real-harness fixture
 `tests/runtime_cancel_recovery.integration.mjs` cancels through the ingress.
+
+## Run deadline
+
+OpenClaw stops each attempt at `agents.defaults.timeoutSeconds`, wherever the
+attempt is. The ODS installers pin it to 1800 seconds. This section does not
+change that policy, which is coupled to `diagnostics.stuckSessionAbortMs`, the
+session write-lock hold and the ingress and dashboard-api budgets.
+
+On the RTX Spark (2026-10-16, a 131K local model, after #7728 let long runs
+keep their context), one owner message asked for several game fixes. The run
+worked for exactly 30 minutes (288 model calls, 6 edits) and was still reading
+and editing when it stopped. `ui.js` already called `wolfHitShapes()`,
+`bossHitShapes()` and `WOLF_ZOOM`, but the `chars.js` edit that defines them
+had failed, so 4 of 6 levels threw `ReferenceError`. The owner saw "LLM request
+failed." and OpenClaw's advice to increase `agents.defaults.timeoutSeconds`,
+which ODS resets. The model had no warning that the deadline was near.
+
+`plugin/run-deadline.mjs` now handles both sides:
+
+- **The model is warned.** `before_prompt_build` runs once per attempt, just
+  after the runtime arms that attempt's timer. For the owner's own Portal turns
+  the guard records the configured timeout, when the response began (its first
+  attempt) and when this attempt began. When 5 minutes of the response remain
+  (at most a sixth of the timeout), and again at 2 minutes (at most a
+  fifteenth), the next persisted tool result ends with one fixed
+  `[ODS Pixel time limit]` block. It tells the model to finish or undo a partly
+  made change across files so the saved project still works, stop calling
+  tools, and tell the owner what is done, what is left, and that "continue"
+  resumes the rest.
+  - The schedule counts from the response, not the attempt. A retry, a
+    compaction retry or a revision gets a fresh runtime timer, but the ingress
+    stops the whole response at 1920 seconds, whatever attempt it is on. A
+    fresh schedule would place a later attempt's notices after that cut.
+  - Persisted results reach the live model through the ODS projection
+    (`host/openclaw-compaction-budget.json`). The block is short and separate,
+    so the per-result size cap keeps it whole.
+  - The text holds only durations from config, so its bytes are stable.
+  - Each stage is sent once per response. After a compaction, whose summary
+    can drop it (`keepRecentTokens` is 8192 on a 131K model), the stage now due
+    is sent again with the same bytes. A tool-limit stop, its tool-free answer
+    turn, an owner cancel and any other ODS abort get no notice.
+- **The owner is told what happened.** No hook reports the runtime's timeout
+  kind, so `agent_end` classifies it. All of these must hold:
+  - the attempt failed (`success: false`);
+  - the attempt, counted from its own start, ran at least the timeout minus
+    15 seconds;
+  - ODS did not stop it: no owner cancel, tool limit or recursive-delete
+    refusal, and no guard abort. The guard marks every run it aborts.
+  - its last assistant message is not a completed answer, which OpenClaw
+    delivers itself.
+
+  Delivery verification then returns `failed` with the text below, followed by
+  the last verified preview and any failure already recorded, such as a failed
+  test. When that failure already links a preview, for example because files
+  changed after it was published, the preview is linked once, by the failure.
+
+  > **Portal stopped this response after 30 minutes, the most one response can
+  > run.** This request needed more time. Files saved before the stop are kept,
+  > but the last change may be unfinished, so the project may not work yet.
+  > Send "continue" to pick up where it left off. If it keeps happening,
+  > [get help on Discord](https://discord.gg/4ntNp9MAwC).
+
+  The sentence about saved files appears only when the response changed
+  workspace files (a successful write, edit or exec). A research or chat
+  response gets only the limit and the "continue" step.
+
+  The ingress replaces the runtime text with it and reports `pixel_outcome`
+  `failed`. Channel delivery (`reply_payload_sending`) uses the same
+  verification. This also covers a deadline during a tool call, where OpenClaw
+  emits no timeout text at all.
+
+A deadline during compaction does not get this copy. The runtime extends that
+attempt by the compaction grace (`agents.defaults.compaction.timeoutSeconds`,
+which ODS also pins to 1800 seconds). That always outlasts the ingress's
+2-minute margin, so the response still ends with the dashboard's "Portal could
+not complete the response".
+
+Subagent, cron and team-worker runs get no notice or copy: subagent and cron
+lanes can use another timeout or none, and a team worker reports to its
+coordinator rather than the owner.
+`tests/run_deadline.test.mjs` and `tests/run_deadline_delivery.test.mjs`
+(including the real ingress over loopback) cover these paths.
 
 ## Search availability
 

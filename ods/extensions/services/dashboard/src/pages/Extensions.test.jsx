@@ -48,6 +48,34 @@ const installFetchMock = (catalogFixture, templates = [], webuiSelection = { ena
   return fetchMock
 }
 
+it.each([false, true])('shows LiteLLM as an API service without an unsupported Admin UI launch (compact=%s)', async compact => {
+  installFetchMock({
+    agent_available: true,
+    extensions: [
+      { id: 'litellm', name: 'LiteLLM (API Gateway)', source: 'core', status: 'enabled', port: 4000, ui_path: '/ui/', features: [baseFeature] },
+      { id: 'it-tools', name: 'IT-Tools', source: 'user', status: 'enabled', port: 8080, external_port: 8089, ui_path: '/', features: [baseFeature] },
+    ],
+    summary: baseSummary({ total: 2, installed: 2 }),
+  })
+  render(<Extensions compact={compact} />)
+  const gateway = within((await screen.findByText('LiteLLM (API Gateway)')).closest('article'))
+  expect(gateway.getByText('API service')).toBeVisible()
+  expect(gateway.queryByRole('link')).toBeNull()
+  expect(gateway.getByRole('button', { name: 'Logs' })).toBeEnabled()
+
+  // Actual web applications retain their published launch port.
+  const webApp = within(screen.getByText('IT-Tools').closest('article'))
+  expect(webApp.getByRole('link', { name: ':8089' })).toHaveAttribute('href', 'http://localhost:8089')
+  expect(webApp.getByRole('button', { name: 'Logs' })).toBeEnabled()
+
+  fireEvent.click(gateway.getByRole('button', { name: 'Details for LiteLLM (API Gateway)' }))
+  const details = within(screen.getByRole('dialog', { name: 'LiteLLM (API Gateway)' }))
+  expect(details.getByText('4000')).toBeVisible()
+  expect(details.queryByRole('link')).toBeNull()
+  fireEvent.click(details.getByRole('button', { name: 'Close extension details' }))
+  expect(gateway.getByRole('button', { name: 'Logs' })).toBeEnabled()
+})
+
 it.each([false, true])('an initial catalog timeout is unavailable, not an empty result, and Retry recovers (compact=%s)', async compact => {
   const catalog = {agent_available: true, extensions: [{id: 'known', name: 'Known extension', status: 'not_installed', features: [baseFeature]}], summary: baseSummary()}
   const fetchMock = installFetchMock(catalog)
@@ -337,6 +365,79 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+})
+
+describe('built-in provenance and runtime state', () => {
+  it.each([
+    ['core', 'disabled', false, 'ODS is not currently reporting this service as healthy.'],
+    ['user', 'disabled', false, 'Installed but turned off — won’t start on restart'],
+    ['core', 'enabled', true, 'Service is running and healthy'],
+  ])('describes runtime evidence without inferring installation (source=%s, status=%s)', async (source, status, manageable, description) => {
+    installFetchMock({agent_available:true,extensions:[
+      {id:'runtime-evidence',name:'Runtime evidence',source,status,library_manageable:manageable,features:[baseFeature]},
+    ],summary:baseSummary()})
+    render(<Extensions compact />)
+    const card = within((await screen.findByRole('heading',{name:'Runtime evidence'})).closest('article'))
+    expect(card.getByText(description, {exact:true})).toBeInTheDocument()
+    if (source === 'core' && status === 'disabled') {
+      expect(card.queryByText(/Installed but turned off|won’t start on restart/)).toBeNull()
+    }
+  })
+
+  const states = [
+    ['disabled', {}, 'disabled'],
+    ['enabled', {}, 'enabled'],
+    ['installing', {runtime_starting: true}, 'starting'],
+    ['setting_up', {}, 'setting up'],
+    ['error', {}, 'error'],
+  ]
+  it.each([false, true].flatMap(compact => states.map(row => [compact, ...row])))(
+    'shows runtime state beside built-in provenance (compact=%s, status=%s)', async (compact, status, extra, label) => {
+      const ext = {id:'brave-search',name:'Brave Search',source:'core',category:'optional',
+        status,features:[{category:'search'}],...extra}
+      const fetchMock = installFetchMock({agent_available:true,extensions:[ext],summary:baseSummary()})
+      const catalogFetch = fetchMock.getMockImplementation()
+      fetchMock.mockImplementation(async (url, options) => String(url).includes('/progress')
+        ? makeJsonResponse({status:'idle'})
+        : catalogFetch(url, options))
+      render(<Extensions compact={compact} />)
+      const card = within((await screen.findByRole('heading',{name:'Brave Search'})).closest('article'))
+      expect(card.getByText(label, {exact:true})).toBeVisible()
+      expect(card.getByText('built-in')).toBeVisible()
+      expect(card.queryByText('core', {exact:true})).toBeNull()
+      expect(card.queryByRole('button',{name:/^(Enable|Disable|Install|Add)(?: |$)/})).toBeNull()
+      if (status === 'disabled') {
+        fireEvent.click(screen.getByRole('button',{name:'Installed 1'}))
+        const installed = within(screen.getByRole('heading',{name:'Brave Search'}).closest('article'))
+        expect(installed.getByText('disabled', {exact:true})).toBeVisible()
+        fireEvent.click(installed.getByRole('button',{name:'Details for Brave Search'}))
+        const details = within(screen.getByRole('dialog',{name:'Brave Search'}))
+        expect(details.getByText('disabled', {exact:true})).toBeVisible()
+        expect(details.getByText('optional', {exact:true})).toBeVisible()
+      }
+      expect(fetchMock.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true)
+    })
+
+  it('preserves optional and third-party actions without inventing built-in provenance', async () => {
+    installFetchMock({agent_available:true,extensions:[
+      {id:'n8n',name:'Optional built-in',source:'core',status:'disabled',library_manageable:true,library_selected:false,features:[baseFeature]},
+      {id:'retained',name:'Retained extension',source:'user',status:'disabled',features:[baseFeature]},
+      {id:'available',name:'Available extension',source:'library',status:'not_installed',installable:true,features:[baseFeature]},
+    ],summary:baseSummary({total:3})})
+    render(<Extensions compact />)
+    const optional = within((await screen.findByRole('heading',{name:'Optional built-in'})).closest('article'))
+    expect(optional.getByText('built-in')).toBeVisible()
+    expect(optional.getByText('disabled', {exact:true})).toBeVisible()
+    expect(optional.getByRole('button',{name:'Add Optional built-in'})).toBeEnabled()
+    for (const name of ['Retained extension','Available extension']) {
+      const card = within(screen.getByRole('heading',{name}).closest('article'))
+      expect(card.queryByText('built-in')).toBeNull()
+    }
+    expect(screen.getByRole('button',{name:'Enable Retained extension'})).toBeEnabled()
+    expect(screen.getByRole('button',{name:'Installed 1'})).toBeVisible()
+    expect(screen.getByRole('button',{name:'Available 2'})).toBeVisible()
+    expect(within(screen.getByRole('heading',{name:'Available extension'}).closest('article')).getByRole('button',{name:'Install'})).toBeEnabled()
+  })
 })
 
 it('offers Add for qualified bundled n8n while keeping other built-ins managed by ODS', async () => {
@@ -656,8 +757,7 @@ describe('Extensions page — unhealthy + install derivations', () => {
     const { container } = render(<Extensions />)
     await screen.findByText('Unhealthy Core Service')
 
-    // Core extensions render the "CORE" pill (L665-672) instead of StatusBadge
-    // and never get a toggle button — isToggleable requires source === 'user'.
+    // Runtime status does not grant controls to an unmanaged built-in.
     expect(findToggleButton(container)).toBeUndefined()
   })
 
@@ -902,4 +1002,27 @@ it('opens enabled Hermes through its ODS authenticated proxy entry', async () =>
   const agentCard = (await screen.findByRole('heading',{name:'Hermes Agent'})).closest('article')
   expect(within(agentCard).getByRole('link',{name:':9120'})).toHaveAttribute(
     'href','http://localhost:9120/auth/ods')
+})
+
+it('re-checks the ODS session before opening Hermes from its card', async () => {
+  const fetchMock = installFetchMock({agent_available:true,extensions:[
+    {id:'hermes',name:'Hermes Agent',source:'core',status:'enabled',
+      library_manageable:true,library_selected:true,external_port_default:0,features:[baseFeature]},
+    {id:'hermes-proxy',name:'Hermes Auth Proxy',source:'core',status:'enabled',
+      library_manageable:true,library_selected:true,external_port:9120,ui_path:'/auth/ods',features:[baseFeature]},
+  ],summary:baseSummary({total:2,installed:2})})
+  const catalog = fetchMock.getMockImplementation()
+  fetchMock.mockImplementation(async (url, options) => {
+    if (url === '/api/auth/verify-session') return makeJsonResponse({}, {ok:false, status:401})
+    if (url === '/api/auth/admin-session') return makeJsonResponse({ok:true})
+    return catalog(url, options)
+  })
+  const tab = {opener:window, closed:false, location:{replace:vi.fn()}}
+  vi.spyOn(window, 'open').mockReturnValue(tab)
+  render(<Extensions compact />)
+  const agentCard = (await screen.findByRole('heading',{name:'Hermes Agent'})).closest('article')
+  expect(fireEvent.click(within(agentCard).getByRole('link',{name:':9120'}))).toBe(false)
+  expect(window.open).toHaveBeenCalledWith('', '_blank')
+  await waitFor(() => expect(tab.location.replace).toHaveBeenCalledWith('http://localhost:9120/auth/ods'))
+  expect(fetchMock).toHaveBeenCalledWith('/api/auth/admin-session', expect.objectContaining({method:'POST'}))
 })

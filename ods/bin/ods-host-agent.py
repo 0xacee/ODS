@@ -4954,6 +4954,13 @@ def _read_remote_provider_activation_state() -> dict | None:
         or any(character in previous["llmApiUrl"] for character in "\r\n\x00")
         or not _valid_serializable_text_snapshot(previous.get("cloudConfig"))
         or not _valid_managed_pixel_runtime_contract(previous.get("pixel"))
+        or (
+            previous.get("pixelThinkingControl") is not None
+            and (
+                not isinstance(previous["pixelThinkingControl"], str)
+                or previous["pixelThinkingControl"] not in _THINKING_CONTROLS
+            )
+        )
         or not _valid_remote_provider_runtime_contract(remote)
         or not isinstance(value.get("routeFingerprint"), str)
         or not re.fullmatch(r"[a-f0-9]{64}", value["routeFingerprint"])
@@ -5278,7 +5285,7 @@ def _activate_remote_provider_route(
     activation_snapshot = _snapshot_text_file(activation_path)
     activation_public_snapshot = _snapshot_text_file(activation_public_path)
     pixel_before = transaction.previous if transaction is not None else _managed_pixel_runtime_contract()
-    # The local model's measured thinking control, restored if activation fails.
+    # Keep the local model's measured control for rollback and later disable.
     pixel_before_control = None if transaction is not None else _managed_pixel_thinking_control()
     container_state = _capture_container_state("ods-litellm")
     if not container_state.get("running"):
@@ -5293,6 +5300,7 @@ def _activate_remote_provider_route(
             "llmApiUrl": str(env.get("LLM_API_URL") or "http://llama-server:8080"),
             "cloudConfig": _serializable_text_snapshot(cloud_snapshot),
             "pixel": pixel_before,
+            "pixelThinkingControl": pixel_before_control,
         }
     candidate_state = {
         "schema": _REMOTE_PROVIDER_ACTIVATION_STATE_SCHEMA,
@@ -5440,7 +5448,10 @@ def _deactivate_remote_provider_route(*, transaction=None) -> dict[str, object]:
                 raise RuntimeError('Previous local runtime could not be proved before remote deactivation')
             pixel_status = transaction.apply(previous_pixel)
         else:
-            pixel_status = _reconcile_managed_pixel_contract(previous_pixel)
+            pixel_status = _reconcile_managed_pixel_contract(
+                previous_pixel,
+                **_thinking_control_kwargs(previous.get("pixelThinkingControl")),
+            )
         _remove_remote_provider_file(activation_path)
         _remove_remote_provider_file(activation_public_path)
         if transaction is not None and owns_transaction:
@@ -15559,19 +15570,89 @@ class AgentHandler(BaseHTTPRequestHandler):
                 json_response(self, 409, {'error': 'Model artifacts are shared or changed; deletion was refused',
                                           'code': 'model_artifact_shared'})
                 return
-            for pf in parts_to_delete:
-                pf.unlink()
+            # Move the complete group out of discovery on this filesystem
+            # before retiring any bytes. A later busy shard must not destroy
+            # the earlier shards of an otherwise usable split model.
+            staging = Path(tempfile.mkdtemp(prefix=".ods-model-delete-", dir=models_dir))
+            staged = []
+            try:
+                for pf in parts_to_delete:
+                    retired = staging / pf.name
+                    pf.rename(retired)
+                    staged.append((pf, retired))
+            except OSError:
+                restore_failed = False
+                for original, retired in reversed(staged):
+                    try:
+                        # Atomic no-replacement restore: an external writer
+                        # can recreate the name at any instant. Hard-link
+                        # creation refuses an existing destination; only then
+                        # retire the staging name. Neither failure loses bytes.
+                        os.link(retired, original, follow_symlinks=False)
+                        retired.unlink()
+                    except OSError:
+                        restore_failed = True
+                if restore_failed:
+                    json_response(self, 500, {
+                        "error": (f"Model deletion stopped. Restore the preserved shards from '{staging.name}' "
+                                  "inside this model's store directory before retrying; do not overwrite existing files."),
+                        "code": "model_delete_recovery_required",
+                        "recoveryDirectory": staging.name,
+                    })
+                    return
+                staging.rmdir()
+                raise
+
+            cleanup_pending = False
+            try:
+                for _original, retired in staged:
+                    retired.unlink()
+                staging.rmdir()
+            except OSError:
+                # The whole model is already retired. Remaining shards are
+                # retained for cleanup; do not report the disk space freed.
+                cleanup_pending = True
 
             status_path = INSTALL_DIR / "data" / "model-download-status.json"
-            if status_path.exists():
-                try:
-                    status_data = json.loads(status_path.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    status_path.unlink(missing_ok=True)
-                else:
-                    status_model = _download_status_model_token(status_data.get("model"))
-                    if status_model in deleted_names:
-                        _write_model_status(status_path, "idle", "", 0, 0)
+            try:
+                if status_path.exists():
+                    try:
+                        status_data = json.loads(status_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        status_path.unlink(missing_ok=True)
+                    else:
+                        if not isinstance(status_data, dict):
+                            raise ValueError("Model download status must be an object")
+                        status_model = _download_status_model_token(status_data.get("model"))
+                        if status_model in deleted_names:
+                            _write_model_status(status_path, "idle", "", 0, 0, strict=True)
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+                # Retirement already committed. A metadata error must not hide
+                # that fact or the location of bytes still awaiting cleanup.
+                payload = {
+                    "error": "Model was removed from the library, but download status could not be updated",
+                    "code": "model_delete_status_update_failed",
+                    "deletionCommitted": True,
+                }
+                if cleanup_pending:
+                    payload.update(
+                        cleanupPending=True,
+                        recoveryDirectory=staging.name,
+                        error=("Model was removed from the library, but download status could not be updated. "
+                               f"Disk cleanup is also incomplete. Remove the remaining files in '{staging.name}' "
+                               "inside this model's store directory to free disk space."),
+                    )
+                json_response(self, 500, payload)
+                return
+            if cleanup_pending:
+                json_response(self, 500, {
+                    "error": (f"Model was removed from the library, but disk cleanup is incomplete. Remove the remaining "
+                              f"files in '{staging.name}' inside this model's store directory to free disk space."),
+                    "code": "model_delete_cleanup_pending",
+                    "deletionCommitted": True,
+                    "recoveryDirectory": staging.name,
+                })
+                return
             json_response(self, 200, {"status": "deleted", "gguf_file": gguf_file})
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             json_response(self, 500, {"error": f"Failed to delete: {exc}"})
@@ -20652,8 +20733,9 @@ def _recreate_llama_server(env: dict, override_image: str = ""):
     logger.info("llama-server container created successfully")
 
 
-def _write_model_status(path: Path, status: str, model: str, downloaded: int, total: int, error: str = ""):
-    """Write model download status JSON atomically."""
+def _write_model_status(path: Path, status: str, model: str, downloaded: int, total: int, error: str = "",
+                        *, strict: bool = False):
+    """Write status atomically; strict callers must report publication failure."""
     data = {
         "status": status,
         "model": model,
@@ -20677,6 +20759,8 @@ def _write_model_status(path: Path, status: str, model: str, downloaded: int, to
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        if strict:
+            raise
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -20803,9 +20887,14 @@ def _reconcile_native_pixel_startup():
                          and projection.get('busy') is False
                          and projection.get('reason') in (
                              'admission-gate-unavailable', 'runtime-unavailable-or-busy',
-                             'managed-runtime-unavailable')))
+                             'managed-runtime-unavailable',
+                             # Boot order: after a WSL or machine restart this check can
+                             # run before Docker or the Pixel edge container is up.
+                             'edge-container-unavailable', 'host-command-failed')))
                 if not retry:
-                    logger.warning('Pixel startup reproof requires attention')
+                    # Both values are bounded tokens from the helper's projection.
+                    logger.warning('Pixel startup reproof requires attention (stage=%s reason=%s)',
+                                   diagnostic.get('stage'), projection.get('reason'))
                     return
                 unavailable = (diagnostic.get('stage'), projection.get('reason'))
             except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):

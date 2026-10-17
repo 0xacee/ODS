@@ -116,24 +116,46 @@ PY
 }
 
 ods_pixel_run_as_owner() {
-    local owner="$1" home="$2" current_groups account_groups argv_json group refresh_command
-    local -a refresh_groups=()
+    local owner="$1" home="$2" current_groups account_groups argv_json group refresh_command primary_group
+    local -a refresh_groups=() group_order=()
     shift 2
+    # The last group listed becomes the command's primary group (see below).
+    primary_group="${ODS_PIXEL_OWNER_PRIMARY_GROUP:-docker}"
+    case "$primary_group" in
+        docker) group_order=(ods-pixel docker) ;;
+        ods-pixel) group_order=(docker ods-pixel) ;;
+        *)
+            printf '%s\n' 'error: unsupported Pixel owner primary group' >&2
+            return 1
+            ;;
+    esac
     # A redundant sudo -u of the already-current owner can allocate a fresh
     # pseudo-terminal (sudoers use_pty). Pixel's child installers then lose
     # the authenticated parent tty and prompt for sudo mid-install/update.
     if [[ "$(id -un)" == "$owner" ]]; then
         current_groups=" $(id -nG) "
         account_groups=" $(id -nG "$owner") "
-        for group in docker ods-pixel; do
+        for group in "${group_order[@]}"; do
             if [[ "$current_groups" != *" $group "* && "$account_groups" == *" $group "* ]]; then
                 refresh_groups+=("$group")
             fi
         done
         if (( ${#refresh_groups[@]} > 0 )); then
+            # A requested group already present as the primary group can be
+            # lost when sg refreshes another missing group. Reapply it last
+            # even when it did not itself need refreshing.
+            if [[ "$account_groups" == *" $primary_group "* \
+                && "${refresh_groups[${#refresh_groups[@]}-1]}" != "$primary_group" ]]; then
+                refresh_groups+=("$primary_group")
+            fi
             # A first install may have just granted Docker and Pixel socket
-            # access. sg adds only its requested group, so refresh each missing
-            # runtime group without creating another sudo pseudo-terminal.
+            # access. Refresh each missing runtime group with nested sg rather
+            # than another sudo pseudo-terminal. The innermost sg sets the
+            # primary group. shadow's sg also keeps the outer groups, but
+            # util-linux sg (Ubuntu 26.04) only replaces the primary group, so
+            # the innermost one is the only group sure to survive. Owner
+            # commands need Docker there; only the root-owned inspection socket
+            # needs ods-pixel, and its caller asks for it.
             # Caller arguments remain JSON in the environment, never shell code.
             if ! command -v sg >/dev/null 2>&1 \
                 || ! command -v python3 >/dev/null 2>&1; then
@@ -268,6 +290,20 @@ _ods_pixel_assert_managed_state() {
     marker_dir="${marker%/*}"
     pixel_install="$home/.local/share/pixel"
     local gateway_unit="${ODS_PIXEL_GATEWAY_UNIT_PATH:-/etc/systemd/system/openclaw-gateway.service}"
+    local config_dir="${marker_dir%/*}"
+    # The access coordinator trusts the marker only when ~/.config is owned by
+    # the owner and not writable by others (model-marker-unsafe otherwise).
+    # The installer runs as the owner with Ubuntu's default umask 0002, which
+    # would create ~/.config as 0775, and other tools may have done the same.
+    if [[ -e "$config_dir" || -L "$config_dir" ]]; then
+        [[ -d "$config_dir" && ! -L "$config_dir" ]] || return 1
+        [[ "$(stat -c '%u' -- "$config_dir")" == "$(id -u "$owner")" ]] || return 1
+        if (( (8#$(stat -c '%a' -- "$config_dir") & 0022) != 0 )); then
+            ods_pixel_run_as_owner "$owner" "$home" chmod go-w -- "$config_dir" || return 1
+        fi
+    else
+        ods_pixel_run_as_owner "$owner" "$home" install -d -m 0755 -- "$config_dir" || return 1
+    fi
     if [[ -e "$marker_dir" || -L "$marker_dir" ]]; then
         [[ -d "$marker_dir" && ! -L "$marker_dir" ]] || return 1
         [[ "$(stat -c '%u' -- "$marker_dir")" == "$(id -u "$owner")" ]] || return 1
@@ -5070,7 +5106,9 @@ _ods_pixel_install_preview_inspection() {
     ods_sudo systemctl is-active --quiet pixel-preview-inspection.service || return 1
     # Type=simple becomes active before Python imports finish and the broker
     # binds its socket. Slow WSL startup can exceed the former five-second wait.
-    ods_pixel_run_as_owner "$owner" "$home" /usr/bin/python3 "$installer" wait-owner-socket \
+    # The socket directory is root:ods-pixel, so this probe needs that group.
+    ODS_PIXEL_OWNER_PRIMARY_GROUP=ods-pixel \
+        ods_pixel_run_as_owner "$owner" "$home" /usr/bin/python3 "$installer" wait-owner-socket \
         || return 1
     ods_sudo /usr/bin/python3 -B /usr/local/libexec/ods-pixel-inspection/preview_inspection.py health \
         | jq -e '.schemaVersion == 1 and .kind == "ods-pixel-preview-inspection" and .status == "ready"' >/dev/null

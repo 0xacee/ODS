@@ -10,6 +10,7 @@ import { DependencyBadges, DependencyConfirmDialog, DisableDependentWarning } fr
 import { TemplatePicker } from '../components/TemplatePicker'
 import { getTemplateStatus } from '../lib/templates'
 import { serviceUrl } from '../lib/serviceUrls'
+import { openWithFreshSession, opensWithOdsSession } from '../lib/odsSession'
 import { createRecoveryTracker } from '../utils/recoveryTracker'
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import FittedLibraryPage from '../components/FittedLibraryPage'
@@ -23,7 +24,7 @@ import './extensions-refined.css'
 export { getTemplateStatus }
 
 // API/backend services with no user-facing web UI — show badge instead of port link.
-const HEADLESS_EXTENSIONS = new Set(['embeddings', 'tts', 'whisper', 'privacy-shield'])
+const HEADLESS_EXTENSIONS = new Set(['embeddings', 'tts', 'whisper', 'privacy-shield', 'litellm'])
 const UPDATE_CONFIRMATION_STATES = {
   update_state_unknown: 'unknown',
   locally_modified: 'modified',
@@ -875,6 +876,9 @@ export default function Extensions({ compact = false }) {
 function StatusBadge({ status, statusStyle, ext, gpuBackend, onConsole }) {
   const runtimeStarting = status === 'installing' && ext.runtime_starting === true
   let tooltip = runtimeStarting ? 'Service is starting; waiting for its health check' : STATUS_DESCRIPTIONS[status] || ''
+  if (status === 'disabled' && ext.source === 'core' && ext.library_manageable !== true) {
+    tooltip = 'ODS is not currently reporting this service as healthy.'
+  }
   if (status === 'incompatible') {
     tooltip += ` \u2014 requires ${ext.gpu_backends?.join(' or ') || 'specific GPU'}, your system: ${gpuBackend || 'unknown'}`
   }
@@ -987,16 +991,15 @@ function ExtensionCard({ ext, hermesProxy, gpuBackend, agentAvailable, onDetails
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <LlmSwapBadge llm={ext.llm} />
-            {isCore && !isManagedBuiltin ? (
+            {isCore && (
               <span
                 className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/15 uppercase tracking-wider cursor-help"
-                title={ext.id === 'open-webui' && webuiSelection?.supported && webuiSelection.enabled === false ? 'Optional chat service available to add' : 'Built-in service — managed by ODS'}
+                title="Bundled with ODS; runtime status is shown separately"
               >
-                {ext.id === 'open-webui' && webuiSelection?.supported && webuiSelection.enabled === false ? 'optional' : 'core'}
+                built-in
               </span>
-            ) : (
-              <StatusBadge status={status} statusStyle={statusStyle} ext={ext} gpuBackend={gpuBackend} onConsole={onConsole} />
             )}
+            <StatusBadge status={status} statusStyle={statusStyle} ext={ext} gpuBackend={gpuBackend} onConsole={onConsole} />
             {isToggleable && (
               <button
                 disabled={actionDisabled}
@@ -1203,7 +1206,10 @@ function ExtensionCard({ ext, hermesProxy, gpuBackend, agentAvailable, onDetails
                 href={launchUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                onClick={e => e.stopPropagation()}
+                onClick={e => {
+                  e.stopPropagation()
+                  if (opensWithOdsSession(launchService.id)) openWithFreshSession(e)
+                }}
                 className="flex items-center gap-1 px-2 py-1.5 text-[10px] font-mono text-theme-text-secondary hover:text-theme-text hover:bg-theme-surface-hover/40 rounded-lg transition-colors"
                 title={launchPort ? "Open on port " + launchPort : "Open service"}
               >
