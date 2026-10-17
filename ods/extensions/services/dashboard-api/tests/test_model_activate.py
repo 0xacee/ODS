@@ -3919,7 +3919,7 @@ class TestModelActivateRollback:
     def _successful_meaningful_completion(self, monkeypatch):
         monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
         monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
-        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, ""))
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, "", None))
         monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
         monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
         monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
@@ -7752,7 +7752,7 @@ class TestModelProfileInActivation:
     def _quiet_runtime(self, monkeypatch):
         monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
         monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
-        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, ""))
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, "", None))
         monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
         monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
         monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
@@ -8104,7 +8104,7 @@ class TestVisionProjectorActivation:
     def _quiet_runtime(self, monkeypatch):
         monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
         monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
-        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, ""))
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, "", None))
         monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
         monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
         monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
@@ -8253,7 +8253,7 @@ class TestChatTemplateOverrideActivation:
         monkeypatch.setattr(_mod, "_runtime_exchange", _no_runtime)
         monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
         monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
-        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, ""))
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, "", None))
         monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
         monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
         monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
@@ -8576,7 +8576,7 @@ class TestAutomaticTemplateRetry:
     def _quiet_runtime(self, monkeypatch):
         monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
         monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
-        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, ""))
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, "", None))
         monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
         monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
         monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
@@ -8804,3 +8804,191 @@ class TestAutomaticTemplateRetry:
 
         assert results[0] == results[1]
         assert "templateRetry" not in json.dumps(results[0][1])
+
+
+_NO_MODALITIES = object()
+
+
+class TestPixelVisionReadback:
+    """A Models-page switch declares Pixel's image input from what ODS's own
+    llama-server reports for the activated model (/props modalities.vision)."""
+
+    @pytest.fixture(autouse=True)
+    def _llama_server(self, monkeypatch):
+        # The real readiness proof runs against a scripted llama-server. Its
+        # /props reports vision exactly when the env it was launched with
+        # loads a projector, unless a test sets that model's answer.
+        self.answers: dict = {}
+        self.props_reads: list = []
+
+        def runtime_http(env, path, *, payload=None, timeout=5):
+            gguf = env["GGUF_FILE"]
+            if path == "/v1/models":
+                return _llama_identity_response(gguf)
+            assert path == "/props", path
+            self.props_reads.append(gguf)
+            answer = self.answers.get(gguf, {"vision": bool(env.get("LLAMA_ARG_MMPROJ")), "audio": False})
+            if isinstance(answer, OSError):
+                raise answer
+            props = {"default_generation_settings": {"n_ctx": int(env["CTX_SIZE"])}, "model_path": f"/models/{gguf}"}
+            if answer is not _NO_MODALITIES:
+                props["modalities"] = answer
+            return json.dumps(props)
+
+        monkeypatch.setattr(_mod, "_runtime_http", runtime_http)
+        monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(_mod, "_runtime_exchange", _no_runtime)
+        monkeypatch.setattr(_mod, "_staged_llama_load_failure_probe", lambda *_args: None)
+        monkeypatch.setattr(_mod, "_failed_llama_server_log_excerpt", lambda *_args: "")
+        monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
+        monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
+        monkeypatch.setattr(_mod, "_verify_hermes_dashboard_ready", lambda: None)
+
+    @staticmethod
+    def _install(tmp_path, monkeypatch, *, text_record=None, native_transaction=False):
+        """The fixture's target-model as a vision import, plus a text-only text-model."""
+        install_dir, env_path, *_ = _write_model_activation_fixture(tmp_path)
+        models = install_dir / "data" / "models"
+        (models / "mmproj-vision.gguf").write_bytes(b"projector")
+        (models / "text-model.gguf").write_bytes(b"text")
+        library_path = install_dir / "config" / "model-library.json"
+        library = json.loads(library_path.read_text(encoding="utf-8"))
+        library["models"][0].update({
+            "context_length": 65536,
+            "mmproj_file": "mmproj-vision.gguf",
+            "mmproj_url": "https://example.test/mmproj-vision.gguf",
+            "mmproj_sha256": hashlib.sha256(b"projector").hexdigest(),
+        })
+        library["models"].append({
+            "id": "text-model", "gguf_file": "text-model.gguf", "gguf_url": "https://example.test/text-model.gguf",
+            "gguf_sha256": hashlib.sha256(b"text").hexdigest(), "llm_model_name": "text-model",
+            "context_length": 65536, **(text_record or {}),
+        })
+        library_path.write_text(json.dumps(library), encoding="utf-8")
+        env_path.write_text(
+            env_path.read_text(encoding="utf-8").replace("CTX_SIZE=2048", "CTX_SIZE=65536")
+            + ("PIXEL_OPENWEBUI_KEY=configured\n" if native_transaction else ""),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        return env_path
+
+    @staticmethod
+    def _pixel(monkeypatch):
+        """Pixel's declaration as the shell reconcile path writes and reads it."""
+        declared = {"contract": {"model": "old-model.gguf", "contextLength": 65536, "maxTokens": 8192,
+                                 "reasoning": False, "imageInput": "unknown"}}
+        written: list = []
+
+        def reconcile(model, context_length, **kwargs):
+            written.append(kwargs["image_input"])
+            declared["contract"] = {"model": model, "contextLength": context_length,
+                                    "maxTokens": kwargs["max_tokens"], "reasoning": kwargs["reasoning"],
+                                    "imageInput": kwargs["image_input"]}
+            return "reconciled"
+
+        monkeypatch.setattr(_mod, "_reconcile_ods_managed_pixel_model", reconcile)
+        monkeypatch.setattr(_mod, "_managed_pixel_runtime_contract", lambda: dict(declared["contract"]))
+        monkeypatch.setattr(_mod, "_managed_pixel_thinking_control", lambda: None)
+        return written
+
+    @staticmethod
+    def _activate(model_id):
+        handler = _ResponseHandler()
+        _mod.AgentHandler._do_model_activate(handler, model_id)
+        return handler
+
+    def test_a_loaded_projector_declares_image_input_supported(self, tmp_path, monkeypatch):
+        env_path = self._install(tmp_path, monkeypatch)
+        written = self._pixel(monkeypatch)
+
+        handler = self._activate("target-model")
+
+        assert handler.response_code == 200, handler.parse_response()
+        assert "LLAMA_ARG_MMPROJ=/models/mmproj-vision.gguf" in env_path.read_text(encoding="utf-8").splitlines()
+        assert written == ["supported"]
+        assert handler.parse_response()["consumers"]["pixel"] == "reconciled"
+
+    @pytest.mark.parametrize("answer", [
+        {"vision": False, "audio": False},  # the launcher ran the weights alone
+        _NO_MODALITIES,                     # a build that reports no modalities
+        {"vision": "true"},
+        {"vision": None},
+    ], ids=["false", "absent", "string", "null"])
+    def test_without_a_vision_report_the_switch_keeps_todays_declaration(self, tmp_path, monkeypatch, answer):
+        self._install(tmp_path, monkeypatch)
+        written = self._pixel(monkeypatch)
+        self.answers["new-model.gguf"] = answer
+
+        handler = self._activate("target-model")
+
+        assert handler.response_code == 200, handler.parse_response()
+        assert written == ["unknown"]
+        assert "new-model.gguf" in self.props_reads
+
+    @pytest.mark.parametrize("text_record,today", [({}, "unknown"), ({"vision": False}, "unsupported")])
+    def test_a_switch_to_a_text_model_restores_its_own_declaration(self, tmp_path, monkeypatch, text_record, today):
+        env_path = self._install(tmp_path, monkeypatch, text_record=text_record)
+        written = self._pixel(monkeypatch)
+
+        assert self._activate("target-model").response_code == 200
+        handler = self._activate("text-model")
+
+        assert handler.response_code == 200, handler.parse_response()
+        assert "LLAMA_ARG_MMPROJ" not in env_path.read_text(encoding="utf-8")
+        # The text model gets exactly what it would have had without the
+        # readback, never the vision model's declaration.
+        assert written == ["supported", today]
+
+    def test_an_unreadable_props_answer_never_declares_support(self, tmp_path, monkeypatch):
+        env_path = self._install(tmp_path, monkeypatch)
+        before = env_path.read_text(encoding="utf-8")
+        written = self._pixel(monkeypatch)
+        self.answers["new-model.gguf"] = OSError("llama-server /props is unreachable (curl exit 7)")
+
+        handler = self._activate("target-model")
+
+        # The same /props answer proves the served context, so the switch
+        # cannot complete, and Pixel's declaration is never written.
+        payload = handler.parse_response()
+        assert handler.response_code >= 500 and payload["rolled_back"] is True, payload
+        assert written == []
+        assert env_path.read_text(encoding="utf-8") == before
+
+    def test_the_native_transaction_applies_each_declaration_before_admission_reopens(self, tmp_path, monkeypatch):
+        self._install(tmp_path, monkeypatch, native_transaction=True)
+        state = {"schemaVersion": 1, "status": "ready", "revision": "a" * 64, "pending": False,
+                 "transactionId": None, "outcome": None,
+                 "contract": {"model": "old-model.gguf", "contextLength": 65536, "maxTokens": 8192,
+                              "reasoning": False, "imageInput": "unknown"}}
+        events: list = []
+
+        def control(operation, request=None, *, config):
+            if operation == "model-begin":
+                state.update(status="held", pending=True, transactionId=request["transactionId"], outcome=None)
+            elif operation == "model-apply":
+                # Portal admits no request while the transaction holds it.
+                assert state["status"] == "held" and state["pending"] is True
+                events.append(("apply", request["target"]["model"], request["target"]["imageInput"]))
+                state.update(status="applied", contract=request["target"])
+            elif operation == "model-finish":
+                events.append(("finish", request["outcome"], state["contract"]["imageInput"]))
+                state.update(status="completed", pending=False, outcome=request["outcome"])
+            return json.loads(json.dumps(state))
+
+        monkeypatch.setattr(_mod, "_runtime_model_control", control)
+        monkeypatch.setattr(_mod, "_reconcile_ods_managed_pixel_model",
+                            lambda *_a, **_k: pytest.fail("must use the coordinated native apply"))
+
+        assert self._activate("target-model").response_code == 200
+        handler = self._activate("text-model")
+
+        assert handler.response_code == 200, handler.parse_response()
+        assert events == [
+            ("apply", "new-model.gguf", "supported"), ("finish", "commit", "supported"),
+            ("apply", "text-model.gguf", "unknown"), ("finish", "commit", "unknown"),
+        ]
+        assert state["contract"]["imageInput"] == "unknown" and state["pending"] is False
