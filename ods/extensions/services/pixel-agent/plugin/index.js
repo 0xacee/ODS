@@ -104,6 +104,10 @@ const toolLoopGuardRegistry = createToolLoopGuardRegistry();
 const projectRunControl = createProjectRunControl();
 const goalProgress = createGoalProgress({agentId:AGENT_ID});
 const workspaceProjects = createWorkspaceProjects();
+// A clarification card's answer gets its request back as model-only context,
+// even when OpenClaw runs it in a replacement native session. Conversation
+// deletion removes the chat's card with its transcripts.
+const pendingClarifications = createPendingClarifications();
 const taskActivity = createTaskActivity({agentId:AGENT_ID, goalForRun:id=>goalProgress.projection(id),projectsForSession:key=>workspaceProjects.forSession(key)});
 let execCancellationControl;
 let accessRuntime;
@@ -311,6 +315,7 @@ export default definePluginEntry({
     conversationImageLifecycle ??= createConversationImageLifecycle({
       readConfig:()=>api.runtime?.config?.current?.()??api.config,
       getSessionEntry,patchSessionEntry,resolveStorePath,callGateway:callGatewayTool,compactor:contextCompaction,
+      forgetConversation:sessionKey=>pendingClarifications.forget(sessionKey),
     });
     conversationImageLifecycle.register(api);
     api.on('before_agent_run',(_event,context)=>{
@@ -366,9 +371,7 @@ export default definePluginEntry({
       // After a tool-limit stop without an answer: one tool-free completion by
       // the same configured model, from the pages the run read.
       stopSynthesis: createStopSynthesisClient({runtime: api.runtime, agentId: AGENT_ID}),
-      // A clarification card's answer gets its request back as model-only
-      // context, even when OpenClaw runs it in a replacement native session.
-      pendingClarifications: createPendingClarifications(),
+      pendingClarifications,
       warn: (message) => api.logger.warn(message),
       info: (message) => api.logger.info?.(message),
     });

@@ -715,24 +715,34 @@ answer.
 That text reads correctly only beside the model's own question. OpenClaw can
 start it in a new native session that lacks the request and the question (RTX
 Spark, 2026-10-16: the model answered its own "Where should I apply…?" with a
-location and edited nothing). A delivered card therefore leaves one private
+location and edited nothing). When a run sets a card (the ask tool's result, or
+the requested-choice repair at finalize), the plugin therefore keeps one private
 record per chat (`.ods-pending-clarifications` in the OpenClaw state directory,
 owner-only, keyed by a hash of the session key): its questions and the owner
 request they clarify, without Portal's delivery contract and capped at 4,000
-characters. The first later owner turn in that chat consumes it; unanswered
-records expire after 24 hours. Only when that turn is the card's exact answer
-(the first question's text, then every question in order) does its run get
-fixed model-only context (`before_prompt_build` `appendContext`, never persisted
-as owner text) with the request, told to carry it out with the answers unless an
-answer declines or changes it. A follow-up card keeps the original request and
+characters. The next owner-authored turn in that chat claims it; a subagent
+announce continuation, cron, a team worker or another session never does. Only
+when that turn is the card's exact answer (the first question's text, then every
+question in order) does its run get fixed model-only context
+(`before_prompt_build` `appendContext`, never persisted as owner text) with the
+request: follow an answer that declines or changes it, otherwise finish the
+request with the answers. That answer keeps the record until its run ends with
+success, so an answer blocked at admission, failed or lost to a gateway restart
+is understood when resent; any other owner turn consumes the record unused.
+Unanswered records expire after 24 hours, and deleting the conversation deletes
+its record with the transcripts. A follow-up card keeps the original request and
 up to two earlier answers. The context is added whether or not the session was
 replaced: the plugin cannot see a replacement made at admission, and in the same
 session it only restates the transcript. The owner text is unchanged, so
 recursive-delete authorization, choice-question intent, Playground project
 reservation and every route see what they saw before; an earlier in-text frame
-quoting the request turned a declined delete into authorization.
-`tests/pending_clarification.test.mjs` replays the field turn after a gateway
-restart and compares each owner-intent outcome with and without the record.
+quoting the request turned a declined delete into authorization. The dashboard's
+clean-context recovery retry runs under a new chat ID, so an answer retried
+that way has no record. `tests/pending_clarification.test.mjs` replays the field
+turn after a gateway restart, drives the real plugin entry and compares each
+owner-intent outcome with and without the record;
+`tests/runtime_clarification_answer.integration.mjs` sends the answer through the
+pinned runtime into a replaced native session.
 
 The plugin loader isolates imports to its package. Keep its `questions-schema.mjs`
 and the independently installed ingress `questions_schema.mjs` aligned; the

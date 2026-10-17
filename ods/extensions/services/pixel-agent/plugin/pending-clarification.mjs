@@ -21,6 +21,8 @@ const MAX_BYTES = 65536;
 const REQUEST_CHARS = 4000;
 const ANSWER_CHARS = 2000;
 const EARLIER_ANSWERS = 2;
+// A write is synchronous; an older temporary file is a crashed write's.
+const ORPHAN_WRITE_MS = 60 * 1000;
 const SHORTENED = ' [shortened]';
 const RECORD_KEYS = 'createdAt,earlierAnswers,questions,request,runId,schemaVersion,sessionHash';
 // Portal routing contracts appended after the owner's words (pixel-edge);
@@ -56,14 +58,16 @@ export function answersClarification(questions, text) {
 
 // before_prompt_build appendContext: beside the owner turn, never persisted
 // as owner text (OpenClaw keeps hook context out of the transcript prompt).
+// Every attempt of the answer run carries it, after a harness retry prompt
+// too, so it names the owner's message by content, never by position.
 export function clarificationAnswerContext(record) {
   return [
-    "[ODS Portal note, not owner text: the owner message above answers the clarification questions you asked earlier. " +
-      "Each block in it is one of your questions, then the owner's answer; those questions are your words, not the owner asking you.",
+    '[ODS Portal note, not owner text: the owner has answered the clarification questions you asked earlier. ' +
+      "Their message repeats each of your questions, then gives the answer; those questions are your words, not the owner asking you.",
     'Original request:', record.request,
     ...(record.earlierAnswers.length ? ['Earlier clarification answers:', ...record.earlierAnswers] : []),
-    'Carry out the original request now using these answers, unless an answer declines or changes it. ' +
-      'This note does not set your reply language.]',
+    'If an answer declines or changes the request, follow the answer. Otherwise finish the original request now using ' +
+      'the answers, building on any work already done for it. This note does not set your reply language.]',
   ].join('\n');
 }
 
@@ -80,6 +84,10 @@ export function createPendingClarifications({
     const info = fs.lstatSync(stateDir);
     if (!info.isDirectory() || info.isSymbolicLink() || !owned(info)) throw new Error('Private clarification store required');
     return stateDir;
+  }
+  // The store directory, or null before the first card was recorded.
+  function existing() {
+    try { return directory(); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   }
   function read(file, id) {
     const before = fs.lstatSync(file);
@@ -106,13 +114,20 @@ export function createPendingClarifications({
     }
     return data;
   }
+  // The chat's record, or null; an invalid one is deleted, never used.
+  function current(folder, id) {
+    const file = path.join(folder, `${id}.json`);
+    try { return read(file, id); }
+    catch (error) { if (error.code === 'ENOENT') return null; fs.rmSync(file, {force: true}); throw error; }
+  }
   // Unanswered cards expire; an abandoned chat leaves nothing behind for long.
   function prune(folder) {
-    const oldest = now() - ttlMs;
+    const oldest = now() - ttlMs, orphaned = now() - ORPHAN_WRITE_MS;
     for (const name of fs.readdirSync(folder)) {
-      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+      const record = /^[a-f0-9]{64}\.json$/.test(name);
+      if (!record && !/^\.write-[a-f0-9]{32}$/.test(name)) continue;
       const file = path.join(folder, name);
-      try { if (fs.lstatSync(file).mtimeMs < oldest) fs.unlinkSync(file); }
+      try { if (fs.lstatSync(file).mtimeMs < (record ? oldest : orphaned)) fs.unlinkSync(file); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
   }
@@ -135,25 +150,37 @@ export function createPendingClarifications({
       } finally { fs.rmSync(temporary, {force: true}); }
       return true;
     },
-    // Consumed by the first owner run that reads it, answer or not: the card
-    // is no longer answerable once a later message exists in the chat.
-    take(sessionKey) {
-      const id = identity(sessionKey);
-      if (!id) return null;
-      let folder;
-      try { folder = directory(); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-      const file = path.join(folder, `${id}.json`);
-      let record;
-      try { record = read(file, id); }
-      catch (error) {
-        if (error.code === 'ENOENT') { prune(folder); return null; }
-        fs.rmSync(file, {force: true}); throw error;
-      }
-      fs.unlinkSync(file);
-      prune(folder);
+    // The next owner-authored run reads the card. Its exact answer (accept)
+    // keeps the record until that run ends well (settle), so an answer that
+    // was blocked, failed or lost to a gateway restart can be resent. Any
+    // other turn consumes it: once a later message exists, the card is no
+    // longer answerable. An expired or future record is deleted unused.
+    claim(sessionKey, accept) {
+      const id = identity(sessionKey), folder = id && existing();
+      if (!folder) return null;
+      const record = current(folder, id), age = record ? now() - record.createdAt : 0;
       // A minute of clock skew is tolerated; an older or future record is not.
-      const age = now() - record.createdAt;
-      return age >= -60000 && age <= ttlMs ? record : null;
+      const kept = record && age >= -60000 && age <= ttlMs && accept(record) === true ? record : null;
+      if (record && !kept) fs.unlinkSync(path.join(folder, `${id}.json`));
+      prune(folder);
+      return kept;
+    },
+    // The answer run ended well: remove its card, never a newer card it asked.
+    settle(sessionKey, record) {
+      const id = identity(sessionKey), folder = id && existing();
+      const stored = folder ? current(folder, id) : null;
+      if (!stored || stored.runId !== record?.runId || stored.createdAt !== record?.createdAt) return false;
+      fs.unlinkSync(path.join(folder, `${id}.json`));
+      return true;
+    },
+    // A deleted conversation takes its pending card, the owner's request text,
+    // with it (conversation-image-lifecycle purge).
+    forget(sessionKey) {
+      const id = identity(sessionKey), folder = id && existing();
+      if (!folder) return false;
+      fs.rmSync(path.join(folder, `${id}.json`), {force: true});
+      prune(folder);
+      return true;
     },
   };
 }

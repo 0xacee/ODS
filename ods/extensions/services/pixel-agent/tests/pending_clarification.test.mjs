@@ -11,14 +11,14 @@ import * as fs from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {createHash} from 'node:crypto';
 import {createAskUserTool, requestsChoiceQuestion} from '../plugin/ask-user.mjs';
 import {requestsNewPlaygroundProject} from '../plugin/playground-projects.mjs';
 import {createPendingClarifications, answersClarification, clarificationAnswerContext,
   PENDING_CLARIFICATION_TTL_MS} from '../plugin/pending-clarification.mjs';
 import {createToolLoopGuard, userMessageAuthorizesRecursiveDelete, RECURSIVE_DELETE_REQUIRES_OWNER_REASON} from '../plugin/tool-loop-guard.mjs';
+import {createConversationImageLifecycle} from '../plugin/conversation-image-lifecycle.mjs';
 import {promptContractForAgent} from '../plugin/prompt-contract.mjs';
-import {ACTIVITY_CONTRACT} from '../plugin/activity-display.mjs';
-import {GOAL_CONTRACT} from '../plugin/goal-progress.mjs';
 
 const USER = 'ods-2c7a1f3b9e0d4c6a8b5e7f9a1c3d5e7f9b1a3c5e7d9f1b3a5c7e9d1f3b5a7c9e';
 const SESSION_KEY = `agent:pixel:openai-user:${USER}`;
@@ -37,10 +37,11 @@ const answersMessage = (questions, answers) => questions.map(q => `${q.question}
 const FIELD_ANSWER = "Where should I apply the 10% enemy increase?\nA game project in my workspace (I'll locate the enemy/spawn config)\n\n" +
   'What does "increase enemies by 10%" mean for you?\nEnemy spawn count / density';
 // The exact model-only context the 8b4c4b17 turn now receives after its owner message.
-const FIELD_CONTEXT = "[ODS Portal note, not owner text: the owner message above answers the clarification questions you asked earlier. " +
-  "Each block in it is one of your questions, then the owner's answer; those questions are your words, not the owner asking you.\n" +
+const FIELD_CONTEXT = '[ODS Portal note, not owner text: the owner has answered the clarification questions you asked earlier. ' +
+  "Their message repeats each of your questions, then gives the answer; those questions are your words, not the owner asking you.\n" +
   'Original request:\nIncrease enemies by 10%\n' +
-  'Carry out the original request now using these answers, unless an answer declines or changes it. This note does not set your reply language.]';
+  'If an answer declines or changes the request, follow the answer. Otherwise finish the original request now using ' +
+  'the answers, building on any work already done for it. This note does not set your reply language.]';
 
 function stateDir(t) {
   const root = fs.mkdtempSync(path.join(tmpdir(), 'ods-pending-clarification-'));
@@ -48,10 +49,13 @@ function stateDir(t) {
   return path.join(root, '.ods-pending-clarifications');
 }
 const context = (runId, extra = {}) => ({agentId: 'pixel', runId, sessionId: `session-${runId}`, sessionKey: SESSION_KEY, trigger: 'user', ...extra});
+const records = dir => fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+// OpenClaw agent_end for one attempt: success is !aborted && !promptError.
+const ended = (guard, ctx, success = true) => guard.observeAgentEnd({runId: ctx.runId, success, messages: []}, ctx);
 
 // One owner turn that ends on a delivered card, as the plugin hooks see it.
-async function askingRun(guard, runId, prompt, questions = QUESTIONS, {capabilities, before = []} = {}) {
-  const ctx = context(runId);
+async function askingRun(guard, runId, prompt, questions = QUESTIONS, {capabilities, before = [], extra = {}} = {}) {
+  const ctx = context(runId, extra);
   guard.observeRun(ctx, 'pixel', {prompt: prompt + PORTAL}, capabilities);
   for (const call of before) call(guard, ctx);
   const result = await createAskUserTool().execute('ask', {questions});
@@ -63,8 +67,12 @@ async function askingRun(guard, runId, prompt, questions = QUESTIONS, {capabilit
 
 test('the card answer is recognized only in the exact shape the dashboard sends', () => {
   assert.equal(answersMessage(QUESTIONS, ANSWERS), FIELD_ANSWER);
-  assert.equal(answersClarification(QUESTIONS, FIELD_ANSWER), true);
-  assert.equal(answersClarification(QUESTIONS, answersMessage(QUESTIONS, {...ANSWERS, meaning: 'More bosses\n\nand faster ones'})), true);
+  for (const text of [
+    FIELD_ANSWER,
+    answersMessage(QUESTIONS, {...ANSWERS, meaning: 'More bosses\n\nand faster ones'}),
+    FIELD_ANSWER.replace(/\n/g, '\r\n'),
+    `\n  ${FIELD_ANSWER}`,
+  ]) assert.equal(answersClarification(QUESTIONS, text), true, text);
   assert.equal(answersClarification(QUESTIONS.slice(0, 1), 'Where should I apply the 10% enemy increase?\nworld.js'), true);
   for (const text of [
     'Increase them by 20% instead',
@@ -77,14 +85,20 @@ test('the card answer is recognized only in the exact shape the dashboard sends'
     FIELD_ANSWER.replace('\n\nWhat does', '\nWhat does'),
     'Where should I apply the 10% enemy increase?\n\n\nWhat does "increase enemies by 10%" mean for you?\nEnemy spawn count / density',
     `${FIELD_ANSWER.split('\n\n')[1]}\n\n${FIELD_ANSWER.split('\n\n')[0]}`,
+    `${FIELD_ANSWER.split('\n\n')[0]}\n\nWhat does "increase enemies by 10%" mean for you?\n  `,
   ]) assert.equal(answersClarification(QUESTIONS, text), false, text);
+  for (const text of ['Where should I apply the 10% enemy increase?\n', 'Where should I apply the 10% enemy increase?\n \n']) {
+    assert.equal(answersClarification(QUESTIONS.slice(0, 1), text), false, 'an empty answer is not an answer');
+  }
   for (const questions of [undefined, [], [{question: ''}]]) assert.equal(answersClarification(questions, FIELD_ANSWER), false);
 });
 
-test('records are private, bounded, replaced by a newer card, consumed once and expire', t => {
+test('records are private, bounded, replaced by a newer card, claimed once and expire', t => {
   let clock = Date.parse('2026-10-16T18:10:00Z');
   const dir = stateDir(t), store = createPendingClarifications({stateDir: dir, now: () => clock});
-  assert.equal(store.take(SESSION_KEY), null, 'no store directory yet');
+  const answer = () => true, other = () => false;
+  assert.equal(store.claim(SESSION_KEY, answer), null, 'no store directory yet');
+  assert.equal(store.forget(SESSION_KEY), false);
   assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'ask', questions: QUESTIONS, request: REQUEST + PORTAL}), true);
   if (process.platform !== 'win32') {
     assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
@@ -94,24 +108,36 @@ test('records are private, bounded, replaced by a newer card, consumed once and 
   assert.match(name, /^[a-f0-9]{64}\.json$/, 'one hashed record, no temporary file');
   assert.ok(!name.includes(USER.slice(4, 20)), 'the chat identity is hashed again');
   clock += 2 * 60 * 60 * 1000 + 18 * 60 * 1000;
-  assert.deepEqual(store.take(SESSION_KEY), {schemaVersion: 1, sessionHash: name.slice(0, 64), runId: 'ask',
-    createdAt: Date.parse('2026-10-16T18:10:00Z'), request: REQUEST, questions: QUESTIONS, earlierAnswers: []});
+  const expected = {schemaVersion: 1, sessionHash: name.slice(0, 64), runId: 'ask',
+    createdAt: Date.parse('2026-10-16T18:10:00Z'), request: REQUEST, questions: QUESTIONS, earlierAnswers: []};
+  // The answer keeps it until its run settles; a resend reads it again.
+  assert.deepEqual(store.claim(SESSION_KEY, record => { assert.deepEqual(record, expected); return true; }), expected);
+  assert.deepEqual(store.claim(SESSION_KEY, answer), expected);
+  assert.equal(store.settle(SESSION_KEY, {...expected, runId: 'another'}), false, 'only that card');
+  assert.equal(store.settle(SESSION_KEY, expected), true);
+  assert.deepEqual(fs.readdirSync(dir), []);
+  assert.equal(store.settle(SESSION_KEY, expected), false);
+  // Any other turn consumes it unused.
+  assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'ask', questions: QUESTIONS, request: REQUEST}), true);
+  assert.equal(store.claim(SESSION_KEY, other), null);
   assert.deepEqual(fs.readdirSync(dir), [], 'consumed');
-  assert.equal(store.take(SESSION_KEY), null);
+  assert.equal(store.claim(SESSION_KEY, answer), null);
 
   assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'first', questions: QUESTIONS, request: 'first'}), true);
   assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'second', questions: QUESTIONS.slice(1), request: 'second'}), true);
-  const newer = store.take(SESSION_KEY);
+  const newer = store.claim(SESSION_KEY, answer);
   assert.equal(newer.runId, 'second');
   assert.deepEqual(newer.questions, QUESTIONS.slice(1));
-  assert.equal(store.take(SESSION_KEY), null);
+  assert.equal(store.forget(SESSION_KEY), true);
+  assert.deepEqual(fs.readdirSync(dir), [], 'forgotten');
 
   const long = 'a'.repeat(3999) + '\u{1F600}' + 'b'.repeat(2000);
   assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'long', questions: QUESTIONS, request: long,
-    earlierAnswers: ['one', 'two', 'x'.repeat(5000) + PORTAL]}), true);
-  const bounded = store.take(SESSION_KEY);
-  assert.equal(bounded.request, 'a'.repeat(3999) + ' [shortened]', 'no lone surrogate at the cut');
-  assert.deepEqual(bounded.earlierAnswers, ['two', 'x'.repeat(2000) + ' [shortened]']);
+    earlierAnswers: ['one', 'two' + PORTAL, 'x'.repeat(5000) + PORTAL]}), true);
+  const kept = store.claim(SESSION_KEY, answer);
+  assert.equal(kept.request, 'a'.repeat(3999) + ' [shortened]', 'no lone surrogate at the cut');
+  assert.deepEqual(kept.earlierAnswers, ['two', 'x'.repeat(2000) + ' [shortened]'], 'bounded, without the delivery contract');
+  store.forget(SESSION_KEY);
 
   for (const value of [
     {sessionKey: 'agent:pixel:main', runId: 'r', questions: QUESTIONS, request: REQUEST},
@@ -119,25 +145,69 @@ test('records are private, bounded, replaced by a newer card, consumed once and 
     {sessionKey: SESSION_KEY, runId: 'r', questions: QUESTIONS, request: PORTAL},
     {sessionKey: SESSION_KEY, runId: '', questions: QUESTIONS, request: REQUEST},
   ]) assert.equal(store.remember(value), false);
-  assert.equal(store.take('agent:pixel:main'), null);
+  assert.equal(store.claim('agent:pixel:main', answer), null);
+  assert.equal(store.forget('agent:pixel:main'), false);
   assert.deepEqual(fs.readdirSync(dir), []);
 
   assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'stale', questions: QUESTIONS, request: REQUEST}), true);
   clock += PENDING_CLARIFICATION_TTL_MS + 1;
-  assert.equal(store.take(SESSION_KEY), null, 'expired');
+  assert.equal(store.claim(SESSION_KEY, answer), null, 'expired');
   assert.deepEqual(fs.readdirSync(dir), []);
   assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'future', questions: QUESTIONS, request: REQUEST}), true);
   clock -= 2 * 60 * 1000;
-  assert.equal(store.take(SESSION_KEY), null, 'a record from the future is not trusted');
+  assert.equal(store.claim(SESSION_KEY, answer), null, 'a record from the future is not trusted');
+  assert.deepEqual(fs.readdirSync(dir), []);
+});
 
-  const file = path.join(dir, `${'0'.repeat(64)}.json`);
-  fs.writeFileSync(file, '{"schemaVersion":1}', {mode: 0o600});
-  const forged = createPendingClarifications({stateDir: dir, now: () => clock});
-  assert.equal(forged.remember({sessionKey: SESSION_KEY, runId: 'ask', questions: QUESTIONS, request: REQUEST}), true);
-  const target = fs.readdirSync(dir).find(name => name !== path.basename(file));
-  fs.writeFileSync(path.join(dir, target), JSON.stringify({...JSON.parse(fs.readFileSync(path.join(dir, target), 'utf8')), extra: true}));
-  assert.throws(() => forged.take(SESSION_KEY), /Invalid clarification record/);
-  assert.equal(fs.existsSync(path.join(dir, target)), false, 'an invalid record is removed, never used');
+test('a forged, oversized or linked record is refused and deleted, and a crashed write is pruned', t => {
+  const dir = stateDir(t), store = createPendingClarifications({stateDir: dir});
+  const other = `agent:pixel:openai-user:ods-${'e'.repeat(64)}`;
+  assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'ask', questions: QUESTIONS, request: REQUEST}), true);
+  const [name] = fs.readdirSync(dir), file = path.join(dir, name), valid = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const [label, write, error = /Invalid clarification record/] of [
+    ['an extra key', () => fs.writeFileSync(file, JSON.stringify({...valid, extra: true}))],
+    ['another schema', () => fs.writeFileSync(file, JSON.stringify({...valid, schemaVersion: 2}))],
+    ['another chat', () => fs.writeFileSync(file, JSON.stringify({...valid, sessionHash: 'f'.repeat(64)}))],
+    ['three earlier answers', () => fs.writeFileSync(file, JSON.stringify({...valid, earlierAnswers: ['a', 'b', 'c']}))],
+    ['an over-long request', () => fs.writeFileSync(file, JSON.stringify({...valid, request: 'r'.repeat(4100)}))],
+    ['invalid questions', () => fs.writeFileSync(file, JSON.stringify({...valid, questions: [{...QUESTIONS[0], options: ['one']}]}))],
+    ['an oversized file', () => fs.writeFileSync(file, JSON.stringify({...valid, pad: 'p'.repeat(70000)}))],
+    ['not JSON', () => fs.writeFileSync(file, '{'), /JSON/],
+  ]) {
+    write();
+    assert.throws(() => store.claim(SESSION_KEY, () => true), error, label);
+    assert.equal(fs.existsSync(file), false, `${label}: removed, never used`);
+    assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'ask', questions: QUESTIONS, request: REQUEST}), true);
+  }
+  const copy = path.join(dir, `${createHash('sha256').update(other).digest('hex')}.json`);
+  fs.copyFileSync(file, copy);
+  assert.throws(() => store.settle(other, valid), /Invalid clarification record/, 'a record copied to another chat');
+  assert.equal(fs.existsSync(copy), false);
+  if (process.platform !== 'win32') {
+    const outside = path.join(path.dirname(dir), 'outside.json');
+    fs.renameSync(file, outside);
+    fs.symlinkSync(outside, file);
+    assert.throws(() => store.claim(SESSION_KEY, () => true), /Invalid clarification record/);
+    assert.equal(fs.existsSync(file), false, 'the link is removed');
+    assert.equal(fs.existsSync(outside), true, 'its target is not');
+    fs.linkSync(outside, file);
+    assert.throws(() => store.claim(SESSION_KEY, () => true), /Invalid clarification record/, 'a hard link is refused');
+    assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'ask', questions: QUESTIONS, request: REQUEST}), true);
+    fs.chmodSync(file, 0o644);
+    assert.throws(() => store.claim(SESSION_KEY, () => true), /Invalid clarification record/, 'a readable record is refused');
+    fs.chmodSync(dir, 0o755);
+    assert.throws(() => store.claim(SESSION_KEY, () => true), /Private clarification store required/);
+    assert.throws(() => store.forget(SESSION_KEY), /Private clarification store required/, 'deletion fails closed too');
+    fs.chmodSync(dir, 0o700);
+  }
+  const crashed = path.join(dir, `.write-${'a'.repeat(32)}`), fresh = path.join(dir, `.write-${'b'.repeat(32)}`);
+  fs.writeFileSync(crashed, '{"request":"private"}');
+  fs.writeFileSync(fresh, '{}');
+  const old = new Date(Date.now() - 2 * 60 * 1000);
+  fs.utimesSync(crashed, old, old);
+  store.forget(SESSION_KEY);
+  assert.equal(fs.existsSync(crashed), false, 'a crashed write leaves no owner text behind');
+  assert.equal(fs.existsSync(fresh), true);
 });
 
 test('abandoned cards expire to make room and the store refuses new chats only when full', t => {
@@ -151,11 +221,11 @@ test('abandoned cards expire to make room and the store refuses new chats only w
   clock += PENDING_CLARIFICATION_TTL_MS + 60 * 1000;
   assert.equal(store.remember({sessionKey: key(3), runId: 'c', questions: QUESTIONS, request: REQUEST}), true);
   assert.equal(fs.readdirSync(dir).length, 1, 'expired records were deleted');
-  assert.equal(store.take(key(3)).runId, 'c');
+  assert.equal(store.claim(key(3), () => true).runId, 'c');
 });
 
 test('field case: the answer in a replacement session gets its request as model-only context once', async t => {
-  const store = createPendingClarifications({stateDir: stateDir(t)});
+  const dir = stateDir(t), store = createPendingClarifications({stateDir: dir});
   const warnings = [];
   await askingRun(createToolLoopGuard({pendingClarifications: store}), 'run-02269765', REQUEST);
   // A gateway restart drops every in-memory run; the record is on disk.
@@ -168,53 +238,105 @@ test('field case: the answer in a replacement session gets its request as model-
   assert.deepEqual(event, before, 'the owner turn is not rewritten');
   assert.deepEqual(guard.ownerIntentEventForRun(answer.runId, event), before, 'classifiers read the owner turn unchanged');
   assert.equal(guard.promptContextForRun(answer.runId), undefined, 'nothing is prepended to the owner turn');
-  // Every attempt of that run keeps it; the next run never sees it again.
+  // Every attempt of that run keeps it; the record goes once the run ends well.
   guard.observeRun(answer, 'pixel', {prompt: 'Continue where you left off.'});
   assert.equal(guard.clarificationContextForRun(answer.runId), FIELD_CONTEXT);
+  assert.equal(records(dir).length, 1);
+  ended(guard, answer);
+  assert.deepEqual(records(dir), []);
+  assert.equal(guard.clarificationContextForRun(answer.runId), FIELD_CONTEXT, 'a later attempt still has it');
   const repeat = context('run-repeat');
   guard.observeRun(repeat, 'pixel', event);
-  assert.equal(guard.clarificationContextForRun(repeat.runId), undefined);
+  assert.equal(guard.clarificationContextForRun(repeat.runId), undefined, 'the next run never sees it again');
   assert.deepEqual(warnings, []);
   assert.equal(clarificationAnswerContext({request: REQUEST, earlierAnswers: []}), FIELD_CONTEXT);
 });
 
-test('only the card answer from an owner turn takes the record, and any owner turn ends it', async t => {
+test('an answer that was blocked, failed or lost to a restart keeps its card for the resend', async t => {
+  const dir = stateDir(t), store = createPendingClarifications({stateDir: dir});
+  await askingRun(createToolLoopGuard({pendingClarifications: store}), 'ask', REQUEST);
+  // A before_agent_run block or a provider error ends with success false;
+  // a gateway restart mid-run ends with no agent_end at all.
+  const blocked = createToolLoopGuard({pendingClarifications: store});
+  const first = context('answer-blocked');
+  blocked.observeRun(first, 'pixel', {prompt: FIELD_ANSWER + PORTAL});
+  assert.equal(blocked.clarificationContextForRun(first.runId), FIELD_CONTEXT);
+  ended(blocked, first, false);
+  assert.equal(records(dir).length, 1);
+  const lost = context('answer-lost');
+  blocked.observeRun(lost, 'pixel', {prompt: FIELD_ANSWER + PORTAL});
+  assert.equal(blocked.clarificationContextForRun(lost.runId), FIELD_CONTEXT);
+  const restarted = createToolLoopGuard({pendingClarifications: store});
+  const resent = context('answer-resent');
+  restarted.observeRun(resent, 'pixel', {prompt: FIELD_ANSWER + PORTAL});
+  assert.equal(restarted.clarificationContextForRun(resent.runId), FIELD_CONTEXT);
+  ended(restarted, resent);
+  assert.deepEqual(records(dir), []);
+  // After a failed answer, any other owner turn still ends the card.
+  await askingRun(restarted, 'ask-again', REQUEST);
+  const failed = context('answer-failed');
+  restarted.observeRun(failed, 'pixel', {prompt: FIELD_ANSWER + PORTAL});
+  ended(restarted, failed, false);
+  const instead = context('instead');
+  restarted.observeRun(instead, 'pixel', {prompt: 'Never mind, leave the enemies as they are.' + PORTAL});
+  assert.equal(restarted.clarificationContextForRun(instead.runId), undefined);
+  assert.deepEqual(records(dir), []);
+});
+
+test('only an owner-authored turn claims the card: a subagent report, cron, workers and other sessions leave it pending', async t => {
   const dir = stateDir(t), store = createPendingClarifications({stateDir: dir});
   for (const [prompt, expected] of [['Increase them by 20% instead', false], [FIELD_ANSWER, true]]) {
     const guard = createToolLoopGuard({pendingClarifications: store});
     const asked = await askingRun(guard, `ask-${expected}`, REQUEST);
-    // A later attempt of the asking run, a cron turn, a non-Portal session
+    // A later attempt of the asking run, a child's announce continuation
+    // (trigger user in the owner session), a cron turn, a non-Portal session
     // and a team worker in the same chat leave the card pending.
+    const child = 'agent:pixel:subagent:22222222-2222-4333-8444-555555555555';
     guard.observeRun(asked, 'pixel', {prompt: FIELD_ANSWER + PORTAL});
+    guard.observeRun(context(`announce:v1:${child}:run-${expected}`, {inputProvenance: {kind: 'inter_session',
+      sourceTool: 'subagent_announce', sourceSessionKey: child}}), 'pixel', {prompt: 'Child result: world.js holds ROSTER_SCALE.',
+      messages: [{role: 'user', content: REQUEST + PORTAL}]});
     guard.observeRun(context('cron', {trigger: 'cron'}), 'pixel', {prompt: FIELD_ANSWER + PORTAL});
     guard.observeRun(context('main', {sessionKey: 'agent:pixel:main'}), 'pixel', {prompt: FIELD_ANSWER + PORTAL});
     guard.observeRun(context('worker'), 'pixel', {prompt: "You are the Reviewer in the owner's Portal team.\n" + FIELD_ANSWER});
-    assert.equal(fs.readdirSync(dir).length, 1);
+    assert.equal(records(dir).length, 1);
     const next = context(`next-${expected}`);
     guard.observeRun(next, 'pixel', {prompt: prompt + PORTAL});
     assert.equal(Boolean(guard.clarificationContextForRun(next.runId)), expected, prompt);
-    assert.deepEqual(fs.readdirSync(dir), [], 'the card ends with the next owner turn');
+    ended(guard, next);
+    assert.deepEqual(records(dir), [], 'the card ends with the next owner turn');
     const late = context(`late-${expected}`);
     guard.observeRun(late, 'pixel', {prompt: FIELD_ANSWER + PORTAL});
     assert.equal(guard.clarificationContextForRun(late.runId), undefined);
   }
-  // No card is recorded for a team worker or without a store.
-  const worker = createToolLoopGuard({pendingClarifications: store});
-  const ctx = context('team');
-  worker.observeRun(ctx, 'pixel', {prompt: "You are the Builder in the owner's Portal team.\nBuild it."});
+  // No card is recorded for a team worker, a cron run, a cancelled run or without a store.
   const result = await createAskUserTool().execute('ask', {questions: QUESTIONS});
-  worker.afterToolCall({toolName: 'pixel_ods_ask_user', result}, {...ctx, toolCallId: 'ask'});
-  assert.deepEqual(fs.readdirSync(dir), []);
+  for (const [prompt, extra] of [["You are the Builder in the owner's Portal team.\nBuild it.", {}], [REQUEST, {trigger: 'cron'}]]) {
+    const guard = createToolLoopGuard({pendingClarifications: store}), ctx = context('not-owner', extra);
+    guard.observeRun(ctx, 'pixel', {prompt});
+    guard.afterToolCall({toolName: 'pixel_ods_ask_user', result}, {...ctx, toolCallId: 'ask'});
+    guard.beforeAgentFinalize({lastAssistantMessage: '?'}, ctx);
+    assert.deepEqual(records(dir), [], prompt);
+  }
+  const cancelling = createToolLoopGuard({pendingClarifications: store, abortRunAndDrain: async () => ({aborted: true, drained: true})});
+  const cancelledAsk = context('cancelled-ask');
+  cancelling.observeRun(cancelledAsk, 'pixel', {prompt: REQUEST + PORTAL});
+  assert.equal(await cancelling.abortUserRun(USER), true);
+  cancelling.afterToolCall({toolName: 'pixel_ods_ask_user', result}, {...cancelledAsk, toolCallId: 'ask'});
+  assert.deepEqual(records(dir), [], 'a stopped run leaves no card');
   await askingRun(createToolLoopGuard(), 'no-store', REQUEST);
-  assert.deepEqual(fs.readdirSync(dir), []);
-  // A cancel of the answering run withdraws the note with the rest of the turn.
+  assert.deepEqual(records(dir), []);
+  // A cancel of the answering run withdraws the note with the rest of the
+  // turn; the card stays, so resending the same answer is still understood.
   const guard = createToolLoopGuard({pendingClarifications: store, abortRunAndDrain: async () => ({aborted: true, drained: true})});
   await askingRun(guard, 'ask-cancel', REQUEST);
   const cancelled = context('answer-cancel');
   guard.observeRun(cancelled, 'pixel', {prompt: FIELD_ANSWER + PORTAL});
   assert.ok(guard.clarificationContextForRun(cancelled.runId));
   assert.equal(await guard.abortUserRun(USER), true);
+  ended(guard, cancelled, false);
   assert.equal(guard.clarificationContextForRun(cancelled.runId), undefined);
+  assert.equal(records(dir).length, 1);
 });
 
 test('every delivered card is recorded: the tool, its Tool Search form and the requested-choice repair', async t => {
@@ -240,18 +362,40 @@ test('every delivered card is recorded: the tool, its Tool Search form and the r
   }
 });
 
-test('a follow-up card keeps the original request and carries the earlier answers', async t => {
-  const store = createPendingClarifications({stateDir: stateDir(t)});
+test('a follow-up card keeps the original request, carries the earlier answers and survives its asking run', async t => {
+  const dir = stateDir(t), store = createPendingClarifications({stateDir: dir});
   const guard = createToolLoopGuard({pendingClarifications: store});
   await askingRun(guard, 'ask-one', REQUEST, QUESTIONS.slice(0, 1));
   const first = answersMessage(QUESTIONS.slice(0, 1), ANSWERS);
-  await askingRun(guard, 'ask-two', first, QUESTIONS.slice(1));
+  const two = await askingRun(guard, 'ask-two', first, QUESTIONS.slice(1));
   assert.equal(guard.clarificationContextForRun('ask-two'), FIELD_CONTEXT, 'the first answer ran with its request');
+  ended(guard, two);
+  assert.equal(records(dir).length, 1, 'settling the first card left the follow-up pending');
   const last = context('answer-two');
   guard.observeRun(last, 'pixel', {prompt: answersMessage(QUESTIONS.slice(1), ANSWERS) + PORTAL});
   assert.equal(guard.clarificationContextForRun(last.runId), FIELD_CONTEXT.replace(
     'Original request:\nIncrease enemies by 10%\n',
     `Original request:\nIncrease enemies by 10%\nEarlier clarification answers:\n${first}\n`));
+});
+
+test('deleting a conversation removes its pending card with the transcripts', async t => {
+  const dir = stateDir(t), store = createPendingClarifications({stateDir: dir});
+  const sessions = fs.mkdtempSync(path.join(tmpdir(), 'ods-clarify-sessions-'));
+  t.after(() => fs.rmSync(sessions, {recursive: true, force: true}));
+  const lifecycle = createConversationImageLifecycle({readConfig: () => ({}), resolveStorePath: () => path.join(sessions, 'sessions.json'),
+    getSessionEntry: () => null, patchSessionEntry: async () => {}, callGateway: async () => assert.fail('no native session'),
+    compactor: {withMaintenance: async (_user, fn) => fn()}, forgetConversation: key => store.forget(key)});
+  const kept = `agent:pixel:openai-user:ods-${'e'.repeat(64)}`;
+  await askingRun(createToolLoopGuard({pendingClarifications: store}), 'unanswered', REQUEST);
+  assert.equal(store.remember({sessionKey: kept, runId: 'other-chat', questions: QUESTIONS, request: 'Keep this chat'}), true);
+  assert.equal(records(dir).length, 2);
+  assert.deepEqual(await lifecycle.purge(USER), {schemaVersion: 1, deleted: true});
+  assert.equal(records(dir).length, 1, 'only that chat');
+  assert.equal(store.claim(kept, () => true).request, 'Keep this chat');
+  // A retried deletion of the already deleted chat still clears a late copy.
+  assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'late', questions: QUESTIONS, request: REQUEST}), true);
+  assert.deepEqual(await lifecycle.purge(USER), {schemaVersion: 1, deleted: true});
+  assert.equal(store.claim(SESSION_KEY, () => true), null);
 });
 
 // Run the same two owner turns through a guard with and without the store and
@@ -355,41 +499,122 @@ test('Playground keeps the project the request created when its card is answered
   for (const root of roots) assert.deepEqual(fs.readdirSync(path.join(root, 'Playground')), ['snake']);
 });
 
-// The before_prompt_build hook from index.js with its collaborators stubbed
-// and the real guard and store.
-function promptHook(guard, goalActive = false) {
-  const source = fs.readFileSync(new URL('../plugin/index.js', import.meta.url), 'utf8');
-  const begin = source.indexOf('    api.on("before_prompt_build",');
-  const finish = source.indexOf('    api.on("model_call_started",', begin);
-  assert.ok(begin >= 0 && finish > begin);
-  let callback;
-  vm.runInNewContext(source.slice(begin, finish), {
-    api: {config: {}, on: (_name, fn) => { callback = fn; }}, AGENT_ID: 'pixel',
-    accessRuntime: {isProbe: () => false},
-    delegationDelivery: {admission: () => undefined, observe() {}, promptContext: () => undefined},
-    privateBrowserAccessForAgent: () => false, executionHostForAgent: () => 'sandbox',
-    toolLoopGuard: guard, goalProgress: {begin() {}, active: () => goalActive}, taskActivity: {begin() {}},
-    promptContractForAgent, configuredContextWindow: 131072, configuredLeanPrompt: false,
-    extensionRepositoryContext: async () => '', ACTIVITY_CONTRACT, GOAL_CONTRACT,
-    executionLocationContext: () => '', executionContext: () => '',
-  });
-  return (prompt, ctx) => callback({prompt}, ctx);
+// The real plugin entry with only the OpenClaw SDK boundary replaced (the
+// tool-grammar-registration.mjs pattern), registered for a gateway and driven
+// through its hooks in the pinned runtime's order. Each load is a fresh
+// index.js instance: a gateway restart for every registry it owns.
+let pluginLoads = 0;
+async function loadPlugin(sessions) {
+  const entry = new URL('../plugin/index.js', import.meta.url);
+  const source = fs.readFileSync(entry, 'utf8').replace(/from\s+(['"])([^'"]+)\1/g, (match, _quote, specifier) =>
+    specifier.startsWith('.') ? `from ${JSON.stringify(new URL(specifier, entry).href)}` : match);
+  // Only these SDK calls are expected; any other fails the test.
+  const sdk = {getSessionEntry: () => undefined, resolveStorePath: () => path.join(sessions, 'sessions.json'),
+    resolveActiveEmbeddedRunSessionId: () => undefined, resolveAgentWorkspaceDir: () => undefined, resolveUserPath: value => value};
+  globalThis.__odsClarificationSdk = (name, args) => {
+    if (!Object.hasOwn(sdk, name)) throw new Error(`Unexpected SDK call: ${name}`);
+    return sdk[name](...args);
+  };
+  const stubbed = source.replace(/import\s*\{([^}]+)\}\s*from\s*['"]openclaw\/plugin-sdk\/[^'"]+['"];?/g, (_match, names) =>
+    names.split(',').map(name => name.trim()).filter(Boolean).map(name => name === 'definePluginEntry'
+      ? 'const definePluginEntry = entry => entry;' : name === 'OPENCLAW_VERSION' ? 'const OPENCLAW_VERSION = "2026.6.33";'
+        : `const ${name} = (...args) => globalThis.__odsClarificationSdk(${JSON.stringify(name)}, args);`).join('\n'));
+  assert.doesNotMatch(stubbed, /from\s*['"]openclaw\//, 'all SDK imports are isolated');
+  const {default: plugin} = await import(`data:text/javascript;base64,${Buffer.from(
+    `${stubbed}\n//# sourceURL=${entry.href}?clarification-${++pluginLoads}`).toString('base64')}`);
+  const hooks = new Map(), tools = new Map();
+  plugin.register({registrationMode: 'full', pluginConfig: {perplexicaPort: 1}, logger: {warn() {}, info() {}},
+    config: {agents: {list: [{id: 'pixel', sandbox: {mode: 'off'}, tools: {exec: {host: 'gateway'}}}]}},
+    on: (name, handler) => hooks.set(name, [...(hooks.get(name) ?? []), handler]),
+    registerHttpRoute() {}, registerTool: (factory, options) => tools.set(options?.names?.[0], factory)});
+  const fire = async (name, event, ctx) => {
+    const results = [];
+    for (const handler of hooks.get(name) ?? []) results.push(await handler(event, ctx));
+    return results.filter(Boolean);
+  };
+  // OpenClaw resolvePromptBuildHookResult: context fields of every handler, joined.
+  const promptBuild = async (event, ctx) => {
+    const results = await fire('before_prompt_build', event, ctx);
+    const joined = key => results.map(result => result[key]).filter(Boolean).join('\n\n') || undefined;
+    return {prependContext: joined('prependContext'), appendContext: joined('appendContext'),
+      prependSystemContext: joined('prependSystemContext'), appendSystemContext: joined('appendSystemContext'),
+      systemPrompt: results.map(result => result.systemPrompt).find(Boolean)};
+  };
+  return {tools, fire, promptBuild};
 }
 
-test('the prompt hook puts the note beside the owner turn, after goal mode, and nowhere else', async t => {
-  for (const goalActive of [false, true]) {
-    const store = createPendingClarifications({stateDir: stateDir(t)});
-    const guard = createToolLoopGuard({pendingClarifications: store});
-    const hook = promptHook(guard, goalActive);
-    const asking = await hook(REQUEST + PORTAL, context(`ask-${goalActive}`));
-    assert.equal(asking.appendContext, goalActive ? GOAL_CONTRACT : undefined);
-    const result = await createAskUserTool().execute('ask', {questions: QUESTIONS});
-    guard.afterToolCall({toolName: 'pixel_ods_ask_user', result}, {...context(`ask-${goalActive}`), toolCallId: 'ask'});
-    const answered = await hook(FIELD_ANSWER + PORTAL, context(`answer-${goalActive}`));
-    assert.equal(answered.appendContext, goalActive ? `${GOAL_CONTRACT}\n\n${FIELD_CONTEXT}` : FIELD_CONTEXT);
-    assert.equal(answered.prependContext, undefined);
-    assert.ok(!answered.appendSystemContext.includes(REQUEST), 'the cached system prompt is unchanged');
-    const later = await hook('Thanks!' + PORTAL, context(`later-${goalActive}`));
-    assert.equal(later.appendContext, goalActive ? GOAL_CONTRACT : undefined);
+test('the real plugin entry: the note goes beside the owner turn only and the run that ends well settles it', async t => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'ods-clarify-plugin-'));
+  t.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  const sessions = path.join(root, 'sessions'), dir = path.join(root, 'state', '.ods-pending-clarifications');
+  fs.mkdirSync(sessions, {recursive: true, mode: 0o700});
+  // index.js keeps one store for the process, under the OpenClaw state
+  // directory. Every other state root the full registration opens (access
+  // runtime, exec control) follows the home directory: keep both disposable.
+  for (const [name, value] of [['OPENCLAW_STATE_DIR', path.join(root, 'state')], ['HOME', root], ['USERPROFILE', root]]) {
+    const previous = process.env[name];
+    process.env[name] = value;
+    t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
   }
+  const runId = n => `chatcmpl_00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  const turn = (n, sessionId) => ({agentId: 'pixel', runId: runId(n), sessionId, sessionKey: SESSION_KEY, trigger: 'user'});
+  async function ask(host, ctx, prompt = REQUEST) {
+    const event = {prompt: prompt + PORTAL, messages: []};
+    const built = await host.promptBuild(event, ctx);
+    await host.fire('before_agent_run', event, ctx);
+    assert.ok(!String(built.appendContext ?? '').includes('ODS Portal note'), 'no note on the asking turn');
+    const toolCtx = {...ctx, toolCallId: 'call_ask'};
+    const [decision] = await host.fire('before_tool_call', {toolName: 'pixel_ods_ask_user', toolCallId: 'call_ask', params: {questions: QUESTIONS}}, toolCtx);
+    assert.ok(!decision?.block, JSON.stringify(decision));
+    const result = await host.tools.get('pixel_ods_ask_user')(ctx).execute('call_ask', {questions: QUESTIONS});
+    await host.fire('after_tool_call', {toolName: 'pixel_ods_ask_user', toolCallId: 'call_ask', params: {questions: QUESTIONS}, result, durationMs: 1}, toolCtx);
+    const [final] = await host.fire('before_agent_finalize', {runId: ctx.runId, lastAssistantMessage: 'I will make the change once you answer.'}, ctx);
+    assert.equal(final?.action, 'finalize');
+    await host.fire('agent_end', {runId: ctx.runId, success: true, messages: []}, ctx);
+  }
+  async function answer(host, ctx, prompt = FIELD_ANSWER, success = true) {
+    const event = {prompt: prompt + PORTAL, messages: []}, before = structuredClone(event);
+    const built = await host.promptBuild(event, ctx);
+    await host.fire('before_agent_run', event, ctx);
+    assert.deepEqual(event, before, 'the hooks never rewrite the owner event');
+    assert.equal(built.prependContext, undefined, 'nothing is prepended to the owner turn');
+    assert.ok(!String(built.appendSystemContext ?? '').includes(REQUEST) && !built.systemPrompt, 'the cached system prompt is unchanged');
+    await host.fire('agent_end', {runId: ctx.runId, success, messages: []}, ctx);
+    return built.appendContext;
+  }
+
+  // Asked, then a gateway restart, then the exact answer in a new native session.
+  await ask(await loadPlugin(sessions), turn(1, 'session-02269765'));
+  assert.equal(records(dir).length, 1);
+  const restarted = await loadPlugin(sessions);
+  assert.equal(await answer(restarted, turn(2, 'session-8b4c4b17'), FIELD_ANSWER, false), FIELD_CONTEXT, 'model-only, after the owner text');
+  assert.equal(records(dir).length, 1, 'a failed answer keeps its card');
+  assert.equal(await answer(restarted, turn(3, 'session-8b4c4b17')), FIELD_CONTEXT, 'the resend is understood');
+  assert.deepEqual(records(dir), [], 'settled by the run that ended well');
+  assert.equal(await answer(restarted, turn(4, 'session-8b4c4b17')), undefined, 'never twice');
+  assert.equal(await answer(restarted, turn(5, 'session-8b4c4b17'), 'Thanks!'), undefined);
+  // Only the card's answer: an unrelated turn consumes the card unused.
+  await ask(restarted, turn(6, 'session-8b4c4b17'));
+  assert.equal(await answer(restarted, turn(7, 'session-8b4c4b17'), 'Increase them by 20% instead'), undefined);
+  assert.deepEqual(records(dir), []);
+});
+
+test('index.js hands conversation deletion the same store the guard records into', t => {
+  // Source composition (the access_hook_composition pattern): the production
+  // lifecycle construction, with the real store. The lifecycle's own purge
+  // path is covered above; its maintenance lease needs the POSIX runtime.
+  const source = fs.readFileSync(new URL('../plugin/index.js', import.meta.url), 'utf8');
+  const begin = source.indexOf('    conversationImageLifecycle ??= createConversationImageLifecycle({');
+  const finish = source.indexOf('    conversationImageLifecycle.register(api);', begin);
+  assert.ok(begin >= 0 && finish > begin);
+  assert.match(source, /\nconst pendingClarifications = createPendingClarifications\(\);\n/, 'one store per gateway process');
+  assert.match(source, /\n {6}pendingClarifications,\n/, 'the guard records into it');
+  const dir = stateDir(t), store = createPendingClarifications({stateDir: dir});
+  let dependencies;
+  vm.runInNewContext(source.slice(begin, finish), {api: {config: {}}, conversationImageLifecycle: undefined,
+    createConversationImageLifecycle: value => { dependencies = value; return {}; }, pendingClarifications: store,
+    getSessionEntry() {}, patchSessionEntry() {}, resolveStorePath() {}, callGatewayTool() {}, contextCompaction: {}});
+  assert.equal(store.remember({sessionKey: SESSION_KEY, runId: 'ask', questions: QUESTIONS, request: REQUEST}), true);
+  assert.equal(dependencies.forgetConversation(SESSION_KEY), true);
+  assert.deepEqual(records(dir), []);
 });

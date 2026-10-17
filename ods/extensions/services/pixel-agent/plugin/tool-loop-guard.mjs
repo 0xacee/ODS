@@ -7419,9 +7419,10 @@ export function createToolLoopGuard({
     state.completionAssurance.followWithdrawnRequest(record.ownerText);
   }
 
-  // A delivered clarification card leaves a record for its chat: its exact
-  // questions and the owner request they clarify. A follow-up card in the run
-  // that answered one keeps the original request and adds those answers.
+  // A clarification card leaves a record for its chat once the run sets it
+  // (the ask tool's result, or the requested-choice repair at finalize): its
+  // exact questions and the owner request they clarify. A follow-up card in
+  // the run that answered one keeps the original request and adds those answers.
   function rememberPendingClarification(state, runId) {
     if (!pendingClarifications || !state.ownerQuestions || !state.artifactOwnerInteractive || state.managedTeamWorker ||
         state.clientCancelled || typeof state.currentSessionKey !== 'string') return;
@@ -7435,21 +7436,38 @@ export function createToolLoopGuard({
     }
   }
 
-  // The first owner turn in the chat after the asking run takes the record.
-  // Only that card's own answer keeps it: model-only context for this run and
-  // each of its attempts (clarificationContextForRun). Its owner text, and
-  // every intent classifier reading it, are unchanged. It applies whether or
-  // not OpenClaw kept the native session: the plugin cannot see a replacement
-  // made at admission, and in the same session it restates the transcript.
+  // The first owner-authored turn in the chat after the asking run claims the
+  // record. A subagent announce continuation (input provenance), cron, a team
+  // worker or another session never does, so the card outlives a child's
+  // report. Only that card's own answer keeps it: model-only context for this
+  // run and each of its attempts (clarificationContextForRun), and the record
+  // stays until the run ends well (observeAgentEnd), so a blocked, failed or
+  // restarted answer can be resent. Its owner text, and every intent
+  // classifier reading it, are unchanged. It applies whether or not OpenClaw
+  // kept the native session: the plugin cannot see a replacement made at
+  // admission, and in the same session it restates the transcript.
   function takePendingClarification(state, runId, context, agentId, ownerText) {
     if (!pendingClarifications || state.clarificationBoundaryObserved || state.managedTeamWorker ||
-        !ownerInteractiveTurn(context, agentId)) return;
+        context?.inputProvenance || !ownerInteractiveTurn(context, agentId)) return;
     state.clarificationBoundaryObserved = true;
     try {
-      const record = pendingClarifications.take(context.sessionKey);
-      if (record && record.runId !== runId && answersClarification(record.questions, ownerText)) state.clarificationAnswer = record;
+      // The boundary flag already keeps the asking run's own attempts away;
+      // the run check keeps a card from answering itself if that order changes.
+      state.clarificationAnswer = pendingClarifications.claim(context.sessionKey, record =>
+        record.runId !== runId && answersClarification(record.questions, ownerText)) ?? undefined;
     } catch (error) {
       warn(`Pixel could not read the pending clarification: ${String(error)}`);
+    }
+  }
+
+  // The answer run ended well: its card is done. A follow-up card it asked
+  // replaced the record, and settle leaves that one pending.
+  function settlePendingClarification(state, event) {
+    if (!pendingClarifications || !state.clarificationAnswer || event?.success !== true) return;
+    try {
+      pendingClarifications.settle(state.currentSessionKey, state.clarificationAnswer);
+    } catch (error) {
+      warn(`Pixel could not clear the answered clarification: ${String(error)}`);
     }
   }
 
@@ -12669,6 +12687,7 @@ export function createToolLoopGuard({
     state.runEnded = true;
     state.runDeadlineReached = !state.clientCancelled && !state.odsAborted && !state.progressBudget.exhausted &&
       !state.recursiveDeleteDenied && runDeadlineReached(state.runDeadline, event, now());
+    settlePendingClarification(state, event);
   }
 
   // Model-only prompt context for one attempt (before_prompt_build
