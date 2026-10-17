@@ -2551,6 +2551,9 @@ else
         ai "Applying lightweight memory limits for Tier 0"
     fi
 
+    # Both cloud and native Mac installs keep private API SQLite in the VM.
+    COMPOSE_FLAGS+=("-f" "installers/macos/dashboard-private-state.compose.yaml")
+
     # Docker compose override (user customizations)
     if [[ -f "${INSTALL_DIR}/docker-compose.override.yml" ]]; then
         COMPOSE_FLAGS+=("-f" "docker-compose.override.yml")
@@ -2866,7 +2869,9 @@ for service in (data.get("services") or {}).values():
     echo "${COMPOSE_FLAGS[*]}" > "${INSTALL_DIR}/.compose-flags"
     ai "Running: docker compose ${COMPOSE_FLAGS[*]} ${_macos_compose_up_args[*]}"
     set +o pipefail  # pipefail would abort on compose exit before PIPESTATUS is read; capture it first
-    docker compose "${COMPOSE_FLAGS[@]}" "${_macos_compose_up_args[@]}" 2>&1 | tee -a "$_compose_up_log" | while IFS= read -r line; do
+    /usr/bin/python3 "$INSTALL_DIR/installers/macos/lib/dashboard-private-state.py" \
+        launch --operation install --install-dir "$INSTALL_DIR" --flags="${COMPOSE_FLAGS[*]}" \
+        2>&1 | tee -a "$_compose_up_log" | while IFS= read -r line; do
         echo "  $line"
     done
     compose_exit="${PIPESTATUS[0]}"

@@ -20,6 +20,12 @@ trap cleanup EXIT
 mkdir -p "$FIXTURE/install" "$FIXTURE/bin" "$FIXTURE/saved runtime" "$FIXTURE/home"
 INSTALL="$FIXTURE/install"
 EVENT_LOG="$FIXTURE/events"
+# Compose selection runs before ingress dispatch; provide its shipped helpers
+# and recipes while keeping only the selected interpreter boundary simulated.
+mkdir -p "$INSTALL/installers/macos/lib"
+cp "$ROOT/installers/macos/lib/"dashboard-private-state{,-worker}.py "$INSTALL/installers/macos/lib/"
+cp "$ROOT/installers/macos/dashboard-private-state.compose.yaml" "$INSTALL/installers/macos/"
+cp "$ROOT/installers/macos/pixel-native.compose.yaml.disabled" "$INSTALL/installers/macos/"
 
 cat > "$FIXTURE/bin/docker" <<'EOF'
 #!/bin/bash

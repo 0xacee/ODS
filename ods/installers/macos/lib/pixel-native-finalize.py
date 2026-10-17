@@ -235,6 +235,10 @@ def compose_flags(install_dir, process_env, *, recovery=False):
             *(['--native-recovery'] if recovery else [])],
             cwd=install_dir, env=resolver_env, capture_output=True, text=True,
             check=True, timeout=30).stdout
+    # Retained caches can predate the Mac private-store overlay. Include it
+    # before native lifecycle selection is frozen, preserving user overrides.
+    if (install_dir / 'installers/macos/dashboard-private-state.compose.yaml').is_file():
+        raw = helper('dashboard-private-state').selected_flags(install_dir, raw)
     tokens = shlex.split(raw)
     if not tokens or len(tokens) % 2 or any(token != '-f' for token in tokens[::2]):
         raise ValueError('resolved-compose-flags-required')

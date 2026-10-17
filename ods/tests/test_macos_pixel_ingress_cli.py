@@ -116,6 +116,9 @@ test_install() { :; }; ensure_llama_cpu_budget() { :; }
 get_compose_flags() { printf '%s\n' '-f installers/macos/pixel-native.compose.yaml.disabled'; }
 network_access_is_enabled() { return 1; }
 docker() { printf 'docker:%s\n' "$*" >> "$EVENT_LOG"; }
+# This control isolates native dispatch; the private-store integration suite
+# separately exercises the real storage dispatcher and exact Compose argv.
+dashboard_compose_up() { printf 'private:%s:%s\n' "$2" "$3" >> "$EVENT_LOG"; }
 cmd_start dashboard-api
 '''
     result = subprocess.run([BASH, '-c', script], env={**os.environ,
@@ -123,4 +126,4 @@ cmd_start dashboard-api
         'EVENT_LOG': str(log), 'CLI_SOURCE': str(ROOT / 'installers/macos/ods-macos.sh')},
         text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr[-500:]
-    assert log.read_text().splitlines() == ['docker:compose -f installers/macos/pixel-native.compose.yaml.disabled up -d dashboard-api']
+    assert log.read_text().splitlines() == ['private:start:dashboard-api']

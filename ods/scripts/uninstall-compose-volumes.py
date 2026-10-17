@@ -166,6 +166,7 @@ def unselected_volume_provenance(root: Path, trusted_root: Path) -> dict[str, se
 # A native install that stops after starting the stack never adds these files
 # to .compose-flags, so ownership must also use the containers' recipe paths.
 NATIVE_STACK_RECIPES = (
+    "installers/macos/dashboard-private-state.compose.yaml",
     "installers/macos/pixel-native.compose.yaml.disabled",
     "extensions/services/pixel-edge/compose.yaml.disabled",
 )
@@ -207,6 +208,58 @@ def native_stack_volume_provenance(root: Path, trusted_root: Path) -> dict[str, 
 
 def unselected_volume_keys(root: Path, trusted_root: Path) -> set[str]:
     return set(unselected_volume_provenance(root, trusted_root))
+
+
+def private_dashboard_volumes(root: Path, trusted_root: Path, project: str,
+                              volumes: dict[str, dict]) -> set[str]:
+    """A failed first launch may have prepared volumes before any API mount.
+
+    Only these two fixed stores have owner-private creation receipts plus a
+    random token bound to the Docker daemon and installation. Never infer
+    ownership from their names or Compose labels alone.
+    """
+    recipe = "installers/macos/dashboard-private-state.compose.yaml"
+    trusted = trusted_plain_volume_keys(trusted_root, only_file=trusted_root / recipe)
+    installed = trusted_plain_volume_keys(root, only_file=root / recipe)
+    names = {f"{project}_dashboard-{kind}": kind for kind in ("pixel-images", "pixel-chat-results")}
+    candidates = set(volumes) & set(names)
+    if not candidates:
+        return set()
+    directory = root / "data/.dashboard-private-stores"
+    if not directory.exists():
+        return set()
+    info = directory.lstat()
+    if (directory.resolve() != directory or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+        raise ValueError("Private dashboard migration custody is invalid; retain volumes")
+    daemon = docker(root, "info", "--format", "{{.ID}}").strip()
+    install = hashlib.sha256(str(root).encode()).hexdigest()
+    proven = set()
+    for name in candidates:
+        kind = names[name]
+        key = "dashboard-" + kind
+        path = directory / (kind + ".json")
+        if not path.exists():
+            continue
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > 16384):
+            raise ValueError("Private dashboard migration receipt is invalid; retain volumes")
+        record = json.loads(path.read_text())
+        if not isinstance(record, dict):
+            raise ValueError("Private dashboard migration receipt is invalid; retain volumes")
+        row = volumes[name]
+        labels = row.get("Labels") or {}
+        token = record.get("token", "")
+        if (key in trusted & installed and isinstance(token, str) and re.fullmatch("[a-f0-9]{32}", token)
+                and record.get("kind") == kind and record.get("volume") == name
+                and record.get("install") == install and record.get("daemon") == daemon
+                and row.get("Driver") == "local" and not row.get("Options")
+                and labels.get(PROJECT_LABEL) == project and labels.get(VOLUME_LABEL) == key
+                and labels.get("io.ods.private-store.token") == token
+                and labels.get("io.ods.private-store.install") == install):
+            proven.add(name)
+    return proven
 
 
 def retired_volume_keys(root: Path) -> set[str]:
@@ -272,7 +325,7 @@ def native_ingress_rollback_provenance(root: Path, project: str, row: dict, file
         record, recipe = json.loads(journal_body), json.loads(body)
         saved = record["rollback"]
         definition = recipe["services"][service]
-        native = root / NATIVE_STACK_RECIPES[0]
+        native = root / "installers/macos/pixel-native.compose.yaml.disabled"
         if (record.get("schemaVersion") != 1 or record.get("phase") != "rolled-back" or
                 record.get("project") != project or
                 record.get("source") != str(root / "data/pixel-native/home/.openclaw/openclaw.json") or
@@ -563,6 +616,7 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
         }), encoding="utf-8")
         return
     volumes = project_volumes(root, project)
+    private_prepared = private_dashboard_volumes(root, trusted_root, project, volumes)
     produced = native_config_volume_provenance(root, project, volumes)
     resumed, resumed_anonymous = resume_record(root, project)
     unselected = unselected_volume_provenance(root, trusted_root)
@@ -582,7 +636,7 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
             or produced.get(name) == fingerprint(row))
 
     if volumes and not container_ids and not all(
-            name in external or proven_earlier(name, row) for name, row in volumes.items()):
+            name in external or name in private_prepared or proven_earlier(name, row) for name, row in volumes.items()):
         raise ValueError(
             "ODS project volumes remain but no container proves the installation path; "
             "an older 'ods stop' or an interrupted uninstall may have removed that proof. "
@@ -607,7 +661,7 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
         if proven_earlier(name, row):
             owned[name] = fingerprint(row)
             continue
-        if name in selected and name not in mounted:
+        if name in selected and name not in mounted and name not in private_prepared:
             raise ValueError(
                 f"Selected volume {name} has no verified ODS container mount; an interrupted "
                 "uninstall may have removed that proof. Rerun with --keep-data to keep the "
@@ -619,9 +673,11 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
             bool(mount_provenance.get(name, set()) & unselected[key])
         )
         retired_owned = key in retired and name == f"{project}_{key}"
-        if name in selected or unselected_owned or retired_owned:
+        if name in selected or unselected_owned or retired_owned or name in private_prepared:
             owned[name] = fingerprint(row)
             if name not in selected and unselected_owned:
+                trusted_used.add(key)
+            if name in private_prepared:
                 trusted_used.add(key)
         elif key in RETIRED_VOLUME_KEYS and name == f"{project}_{key}":
             raise ValueError(

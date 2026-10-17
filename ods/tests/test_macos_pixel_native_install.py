@@ -532,8 +532,9 @@ def test_main_shell_routes_pixel_only_after_base_launch_and_before_flag_persiste
     assert script.index('compose_exit="${PIPESTATUS[0]}"') < launch
     save = 'echo "${COMPOSE_FLAGS[*]}" > "${INSTALL_DIR}/.compose-flags"'
     # The base stack is saved before it starts; Pixel's fragments only after it.
-    assert script.index(save) < script.index(
-        'docker compose "${COMPOSE_FLAGS[@]}" "${_macos_compose_up_args[@]}"')
+    base_launch = script.index('/usr/bin/python3 "$INSTALL_DIR/installers/macos/lib/dashboard-private-state.py"')
+    assert script.index(save) < base_launch < script.index('compose_exit="${PIPESTATUS[0]}"') < launch
+    assert 'launch --operation install --install-dir "$INSTALL_DIR" --flags="${COMPOSE_FLAGS[*]}"' in script
     assert launch < script.rindex(save)
     shared = (ROOT / 'installers/phases/06-directories.sh').read_text()
     source_contract = (ROOT / 'installers/lib/pixel-integration.sh').read_text()
