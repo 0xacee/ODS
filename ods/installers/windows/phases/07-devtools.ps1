@@ -46,6 +46,10 @@ Write-AI "Setting up OpenCode AI coding assistant..."
 $_ocReady = Install-ODSOpenCode
 if ($_ocReady) { Write-AISuccess "OpenCode v$($script:OPENCODE_VERSION) ready" }
 
+# Phase 06 has persisted the selected port; use the same configuration
+# as the dashboard link, CLI and later login launches.
+$script:OPENCODE_PORT = Get-WindowsODSEnvPort `
+    -EnvMap (Get-WindowsODSEnvMap -InstallDir $installDir) -Name 'OPENCODE_PORT' -DefaultPort 3003
 if ($_ocReady -and (Test-Path $script:OPENCODE_EXE)) {
     $_ocSync = Sync-WindowsOpenCodeConfigFromEnv `
         -InstallDir $installDir `
@@ -73,8 +77,13 @@ if ($_ocReady -and (Test-Path $script:OPENCODE_EXE)) {
     $_ocLauncherPath = Join-Path $script:OPENCODE_DIR "start-opencode.ps1"
     $_ocExeLiteral = $script:OPENCODE_EXE.Replace("'", "''")
     $_ocDirLiteral = $script:OPENCODE_DIR.Replace("'", "''")
+    # Keep this new path ASCII in the BOM-less script read by PowerShell 5.1.
+    $_ocInstallBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($installDir))
     $_ocLauncherContent = @"
 `$ErrorActionPreference = "Stop"
+`$odsInstallDir = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$_ocInstallBase64'))
+. (Join-Path `$odsInstallDir 'lib/llm-endpoint.ps1')
+`$opencodePort = Get-WindowsODSEnvPort -EnvMap (Get-WindowsODSEnvMap -InstallDir `$odsInstallDir) -Name 'OPENCODE_PORT' -DefaultPort 3003
 Remove-Item Env:OPENCODE_SERVER_PASSWORD -ErrorAction SilentlyContinue
 `$env:OPENCODE_ENABLE_EXA = '1'
 # Preserve inherited OPENCODE_WEBSEARCH_PROVIDER; enabled Exa is the default.
@@ -86,7 +95,7 @@ if (Test-Path -LiteralPath `$bunTmp) { Remove-Item -LiteralPath `$bunTmp -Recurs
 New-Item -ItemType Directory -Path `$bunTmp -Force | Out-Null
 `$env:BUN_TMPDIR = `$bunTmp
 Set-Location -LiteralPath '$_ocDirLiteral'
-& '$_ocExeLiteral' web --port $($script:OPENCODE_PORT) --hostname 127.0.0.1
+& '$_ocExeLiteral' web --port `$opencodePort --hostname 127.0.0.1
 exit `$LASTEXITCODE
 "@
     Write-Utf8NoBom -Path $_ocLauncherPath -Content $_ocLauncherContent

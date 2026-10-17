@@ -72,6 +72,10 @@ $script:NATIVE_LLAMA_TASK_NAME = $script:ODSNativeLlamaLegacyTaskName
 
 # ── Resolve install directory ──
 $InstallDir = $script:ODS_INSTALL_DIR
+# The installed configuration also supplies the dashboard link and login
+# launcher. Do not let an unrelated shell override select a different port.
+$script:OPENCODE_PORT = Get-WindowsODSEnvPort `
+    -EnvMap (Get-WindowsODSEnvMap -InstallDir $InstallDir) -Name 'OPENCODE_PORT' -DefaultPort 3003
 
 # ============================================================================
 # Helpers

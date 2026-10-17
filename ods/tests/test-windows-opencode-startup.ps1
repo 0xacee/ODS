@@ -83,7 +83,7 @@ try {
     finally { $env:ODS_HOME = $previousHome }
     Check ($actual.home -ceq $installDir -and ($actual.arguments -join ',') -ceq 'start,opencode') 'generated command uses the exact custom Unicode/apostrophe installation and CLI arguments'
     $launcher = [IO.File]::ReadAllText((Join-Path $script:OPENCODE_DIR 'start-opencode.ps1'))
-    Check ($launcher.Contains('web --port 3003 --hostname 127.0.0.1') -and $launcher.Contains('Remove-Item Env:OPENCODE_SERVER_PASSWORD')) 'fallback retains the same fixed loopback launcher and password handling'
+    Check ($launcher.Contains('web --port $opencodePort --hostname 127.0.0.1') -and $launcher.Contains('Get-WindowsODSEnvPort') -and $launcher.Contains('Remove-Item Env:OPENCODE_SERVER_PASSWORD')) 'fallback retains the configured-port loopback launcher and password handling'
     $stamp = (Get-Item -LiteralPath $script:entry).LastWriteTimeUtc
     . $block
     Check ([IO.File]::ReadAllText($script:entry) -ceq $content -and (Get-Item -LiteralPath $script:entry).LastWriteTimeUtc -eq $stamp) 'retained installer rerun reuses the exact entry without rewriting it'
