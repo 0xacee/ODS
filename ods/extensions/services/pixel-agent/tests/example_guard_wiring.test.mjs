@@ -18,7 +18,7 @@ import vm from 'node:vm';
 import {applyVerificationToCompletion, parseVerificationResponse} from '../host/pixel_ingress.mjs';
 import {withCronCommandPayloadBlock} from '../plugin/cron-command-payload-guard.mjs';
 import {withPixelCronDeliveryDefault} from '../plugin/cron-delivery-default.mjs';
-import {EXAMPLE_NOTES} from '../plugin/example-guard.mjs';
+import {EXAMPLE_NOTES, exampleNotice} from '../plugin/example-guard.mjs';
 import {exampleRecordDirectory, exampleRecordFile} from '../plugin/example-projects.mjs';
 import {createProjectRunControl} from '../plugin/project-run-control.mjs';
 import {promptContractForAgent} from '../plugin/prompt-contract.mjs';
@@ -62,6 +62,9 @@ function workspace() {
   const example = path.join(root, 'Playground', 'elf-of-doom');
   return {root, example, ui: () => fs.readFileSync(path.join(example, 'ui.js'), 'utf8')};
 }
+// The folders ODS moved what it took out of the example to, oldest first.
+const recovered = root => fs.readdirSync(path.join(root, 'Playground')).filter(name => name.startsWith('elf-of-doom-recovered-'))
+  .sort().map(name => `Playground/${name}`);
 
 const OWNER = `agent:pixel:openai-user:ods-${'a'.repeat(64)}`;
 const USER = `ods-${'a'.repeat(64)}`;
@@ -151,7 +154,13 @@ test('a turn that does not name it gets the game back through the entry\'s hooks
   assert.ok(text.endsWith(EXAMPLE_NOTES.restored.model), text);
   assert.equal(ui(), original);
   fs.appendFileSync(path.join(example, 'ui.js'), '// late\n');
-  assert.equal(await turn.finish('It is faster now.'), `It is faster now.\n\n${EXAMPLE_NOTES.restored.owner}`);
+  const reply = await turn.finish('It is faster now.');
+  // Each restore moved the changed ui.js out to a folder of its own, and the owner hears where.
+  const folders = recovered(root);
+  assert.equal(folders.length, 2);
+  assert.deepEqual(folders.map(folder => fs.readFileSync(path.join(root, ...folder.split('/'), 'ui.js'), 'utf8').slice(original.length)),
+    ['// faster\n', '// late\n']);
+  assert.equal(reply, `It is faster now.\n\n${exampleNotice('restored', folders)}`);
   assert.equal(ui(), original, 'put back at the end of the run too');
 });
 
@@ -221,5 +230,6 @@ test('a delegated child of a turn that does not name it is put back, and the del
     () => fs.appendFileSync(path.join(example, 'ui.js'), '// snake\n'))).endsWith(EXAMPLE_NOTES.restored.model));
   await child.finish('Done.');
   assert.equal(ui(), original);
-  assert.equal(await announce(wired, 'The snake is faster.'), `The snake is faster.\n\n${EXAMPLE_NOTES.restored.owner}`);
+  assert.equal(recovered(root).length, 1);
+  assert.equal(await announce(wired, 'The snake is faster.'), `The snake is faster.\n\n${exampleNotice('restored', recovered(root))}`);
 });

@@ -20,8 +20,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Workspace panel with no model run. Portal changes Elf of Doom only when
   your message starts with "In elf-of-doom,", for example "In elf-of-doom,
   make the arrows give 7"; when Portal changes it while working on anything
-  else, ODS puts it back and says so, and changes you make yourself while
-  Portal is idle stay. To remove it, delete the folder; ODS never adds it
+  else, ODS puts it back and says so, moving what it takes out (such as a
+  file or folder Portal moved in) to a new
+  `Playground/elf-of-doom-recovered-<UTC time>` folder instead of deleting
+  it, and changes you make yourself while Portal is idle stay. To remove it,
+  delete the folder; ODS never adds it
   back. Existing Linux and Windows (WSL2) installs get it on their next
   installer run; Macs get it on a new install or the next native Portal
   update.

@@ -814,7 +814,12 @@ act as a capability gate:
     background process wrote after that run ended.
   - For a run whose message does not have that form, the folder is compared
     with the tree after each tool call, at finalize and when the run ends,
-    and restored exactly on any difference.
+    and restored exactly on any difference. Nothing ODS finds there is
+    deleted: what it takes out (a changed file, or a file or folder moved
+    in) is moved to a new folder beside it,
+    `Playground/elf-of-doom-recovered-<UTC time>`, and the owner's line
+    names that folder. A link found there is removed itself, never what it
+    points to.
   - From the start of a run with that form until it ends (or its deadline
     plus two minutes, if the gateway never sees its end), no other run's
     change is undone, and its end makes the folder as it is then the

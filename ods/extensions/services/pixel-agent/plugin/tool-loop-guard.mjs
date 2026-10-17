@@ -39,7 +39,7 @@ import { createRunDeadline, runDeadlineReached, runDeadlineStopText, takeRunDead
 import { OWNER_VISIBLE_REPLY_INSTRUCTION, OWNER_VISIBLE_REPLY_REASON, ownerInteractiveTurn, silentReplyText } from "./owner-visible-reply.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent, nativeExecWorkdir, sandboxHostWorkspaceFailure, malformedRelativeWorkspacePath } from "./workspace-path-contract.mjs";
 import { routePlaygroundTool, requestsNewPlaygroundProject } from "./playground-projects.mjs";
-import { createExampleGuard, EXAMPLE_NOTES, mentionsExample, namesExample } from "./example-guard.mjs";
+import { createExampleGuard, EXAMPLE_NOTES, exampleNotice, mentionsExample, namesExample } from "./example-guard.mjs";
 import { workspaceMutationFiles } from "./workspace-projects.mjs";
 import {WORKSPACE_BUNDLE_TOOL, normalizeWorkspaceBundle} from './workspace-bundle.mjs';
 import { PREVIEW_INSPECTION_TOOL, requestsVisibilityInteraction, requestsBehaviorPreservation, boundVisibilityInspection, boundStaticPreviewInspection,
@@ -10513,19 +10513,25 @@ export function createToolLoopGuard({
   function exampleTurn(context) {
     return runs.get(runs.get(context?.runId)?.exampleTurnRunId ?? exampleOwnerRun(context) ?? context?.runId);
   }
-  function recordExampleOutcome(context, outcome, toolCallId) {
-    if (!outcome) return;
+  // The guard's result ({outcome, recovered}): the turn keeps the latest
+  // outcome and every folder ODS moved something out of the example to.
+  function recordExampleOutcome(context, result, toolCallId) {
+    if (!result) return;
     const turn = exampleTurn(context);
-    if (turn) turn.exampleOutcome = outcome;
+    if (turn) {
+      turn.exampleOutcome = result.outcome;
+      if (result.recovered) turn.exampleRecovered = [...(turn.exampleRecovered ?? []), result.recovered];
+    }
     if (typeof toolCallId !== 'string' || !toolCallId) return;
     exampleNotes.delete(toolCallId);
-    exampleNotes.set(toolCallId, outcome);
+    exampleNotes.set(toolCallId, result.outcome);
     while (exampleNotes.size > MAX_TRACKED_RUNS) exampleNotes.delete(exampleNotes.keys().next().value);
   }
-  // The owner's one line for a turn in which ODS put the example back.
+  // The owner's one line for a turn in which ODS put the example back,
+  // naming where it moved what it took out.
   function exampleNoticeForRun(runId) {
-    const outcome = typeof runId === 'string' && runId ? exampleTurn({runId})?.exampleOutcome : undefined;
-    return outcome ? EXAMPLE_NOTES[outcome].owner : undefined;
+    const turn = typeof runId === 'string' && runId ? exampleTurn({runId}) : undefined;
+    return turn?.exampleOutcome ? exampleNotice(turn.exampleOutcome, turn.exampleRecovered) : undefined;
   }
 
   function afterToolCall(event, context, agentId = "pixel") {

@@ -151,9 +151,10 @@ upstream default. Other agents and existing jobs are unaffected.
   Portal's sidebar opens it through the same preview service with no model
   run. Portal changes it only when the owner's message starts with
   "In elf-of-doom,", for example "In elf-of-doom, make the arrows give 7";
-  a change another run makes to it while that run works is put back, and
-  the owner's own changes while Portal is idle stay
-  (`plugin/example-guard.mjs`). The
+  a change another run makes to it while that run works is put back (what
+  ODS takes out is moved to a `Playground/elf-of-doom-recovered-<UTC time>`
+  folder, never deleted), and the owner's own changes while Portal is idle
+  stay (`plugin/example-guard.mjs`). The
   preview adapter can publish only an existing directory containing
   `index.html`; it has no template, scaffold, HTML, title, theme, or content
   input.

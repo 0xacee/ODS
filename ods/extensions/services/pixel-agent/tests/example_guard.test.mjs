@@ -23,7 +23,7 @@ import {fileURLToPath} from 'node:url';
 import {applyVerificationToCompletion, createIngressServer, parseVerificationResponse} from '../host/pixel_ingress.mjs';
 import {exampleRecordDirectory, exampleRecordFile} from '../plugin/example-projects.mjs';
 import {createAskUserTool} from '../plugin/ask-user.mjs';
-import {createExampleGuard, EXAMPLE_NOTES, exampleGuardTesting, mentionsExample, namesExample} from '../plugin/example-guard.mjs';
+import {createExampleGuard, EXAMPLE_NOTES, exampleGuardTesting, exampleNotice, mentionsExample, namesExample} from '../plugin/example-guard.mjs';
 import {createPendingClarifications} from '../plugin/pending-clarification.mjs';
 import {requestsNewPlaygroundProject} from '../plugin/playground-projects.mjs';
 import {createSubagentDelivery} from '../plugin/subagent-delivery.mjs';
@@ -158,15 +158,27 @@ function tree(folder, {links = true, skip = () => false} = {}) {
   return entries;
 }
 const listing = root => fs.readdirSync(path.join(root, 'Playground')).sort();
-// The whole workspace except the example, plus any folder outside it. The
-// Playground folder's own entry is left out: a missing one is the only thing
-// outside the example the guard creates, to hold it (its contents count).
-// On a disk that ignores case, any spelling of the example's name is the
-// example. Link counts are left out: breaking a hard link into the example
-// lowers the outside file's count.
-function outsideExample(root, others = []) {
+// The folders beside the example that ODS moves what it takes out of it to
+// (example-guard.mjs recoveryBeside), by name; none while Playground is not
+// a real folder.
+const RECOVERY = /^elf-of-doom-recovered-\d{8}T\d{6}Z(?:-[1-9]\d*)?$/;
+function recoveries(root) {
+  const playground = fs.lstatSync(path.join(root, 'Playground'), {throwIfNoEntry: false});
+  return playground?.isDirectory() && !playground.isSymbolicLink() ? listing(root).filter(name => RECOVERY.test(name)) : [];
+}
+const madeSince = (root, had) => recoveries(root).filter(name => !had.includes(name)).map(name => `Playground/${name}`);
+// The whole workspace except the example and the recovery folders made
+// (Playground-relative), plus any folder outside it. The Playground folder's
+// own entry is left out: a missing one is the only other thing outside the
+// example the guard creates, to hold it (its contents count). On a disk that
+// ignores case, any spelling of the example's name is the example. Link
+// counts are left out: breaking a hard link into the example lowers the
+// outside file's count.
+function outsideExample(root, others = [], made = []) {
   const example = new RegExp(String.raw`^Playground/elf-of-doom(?:/|$)`, IGNORES_CASE ? 'i' : '');
-  const all = Object.entries(tree(root, {links: false, skip: key => example.test(key)})).filter(([key]) => key !== 'Playground');
+  const recovered = key => made.some(folder => key === folder || key.startsWith(`${folder}/`));
+  const all = Object.entries(tree(root, {links: false, skip: key => example.test(key) || recovered(key)}))
+    .filter(([key]) => key !== 'Playground');
   return {workspace: Object.fromEntries(all), others: others.map(folder => tree(folder, {links: false}))};
 }
 
@@ -216,12 +228,16 @@ const OWNER = `agent:pixel:openai-user:ods-${'a'.repeat(64)}`;
 const chat = letter => `agent:pixel:openai-user:ods-${letter.repeat(64)}`;
 let runs = 0;
 // One owner turn through the plugin's hooks. Every tool call asserts that the
-// guard changed nothing outside Playground/elf-of-doom (nor in others).
+// guard changed nothing outside Playground/elf-of-doom (nor in others) but
+// make at most one new recovery folder. recovered lists the recovery folders
+// made during the turn's calls and finish, oldest first, and notice() is the
+// owner's line for the turn when ODS put the example back.
 function turn(guard, prompt, root, {sessionKey = OWNER, runId = `run-${++runs}`, trigger = 'user', others = [], env = {}, ...rest} = {}) {
   const context = {agentId: 'pixel', runId, sessionId: `session-${runId}`, sessionKey, trigger, ...rest};
   guard.observeRun(context, 'pixel', {prompt}, {executionHost: 'sandbox', workspaceRoot: root});
   guard.observeExampleRun(context);
   let calls = 0;
+  const recovered = [];
   // A call's hooks: before_tool_call, the call itself, after_tool_call and
   // tool_result_persist. start() returns the remaining steps, so a test can
   // act while the call is still running.
@@ -231,12 +247,16 @@ function turn(guard, prompt, root, {sessionKey = OWNER, runId = `run-${++runs}`,
     assert.notEqual(before?.block, true, before?.blockReason);
     const used = before?.params ?? params;
     return {params: used, end(output = 'ok', details = {status: 'completed', exitCode: 0}) {
-      const afterTool = outsideExample(root, others);
+      const afterTool = outsideExample(root, others), had = recoveries(root);
       const result = {content: [{type: 'text', text: output || 'ok'}], details};
       guard.afterToolCall({toolName, runId, params: used, toolCallId, result}, ctx, 'pixel');
       const message = {role: 'toolResult', toolName, toolCallId, ...structuredClone(result)};
       const persisted = guard.toolResultPersist({toolName, toolCallId, message}, ctx, 'pixel')?.message ?? message;
-      assert.deepEqual(outsideExample(root, others), afterTool, 'the guard touches nothing outside Playground/elf-of-doom');
+      const made = madeSince(root, had);
+      assert.ok(made.length <= 1, `one recovery folder per restore: ${made}`);
+      assert.deepEqual(outsideExample(root, others, made), afterTool,
+        'the guard touches nothing outside Playground/elf-of-doom but the recovery folder it makes');
+      recovered.push(...made);
       return {params: used, text: persisted.content.map(block => block.text).join('\n')};
     }};
   };
@@ -261,13 +281,20 @@ function turn(guard, prompt, root, {sessionKey = OWNER, runId = `run-${++runs}`,
     // The run's finalize and end, then the reply as Portal receives it: the
     // ingress reads the verification after the run ended.
     finish(text = 'Done.') {
+      const had = recoveries(root);
       guard.beforeAgentFinalize({runId, lastAssistantMessage: text}, context, 'pixel');
       guard.observeAgentEnd({runId, success: true}, context);
+      recovered.push(...madeSince(root, had));
       return delivered(guard, runId, text);
     },
+    recovered,
+    notice: () => exampleNotice('restored', recovered),
   };
 }
 const RESTORED = EXAMPLE_NOTES.restored;
+// One file or folder in a recovery folder (Playground-relative), by its path
+// in the example.
+const kept = (root, folder, relative = '') => path.join(root, ...folder.split('/'), ...relative.split('/').filter(Boolean));
 const SED_FONT = `sed -i 's/font-family:[^;]*/font-family: "Comic Sans MS"/'`;
 const ENGINE_EDIT = "sed -i 's/const /let /' Playground/elf-of-doom/engine.js";
 
@@ -289,8 +316,12 @@ for (const command of BULK) {
     assert.match(fs.readFileSync(path.join(root, 'Playground', 'snake-game', 'style.css'), 'utf8'), /Comic Sans MS/,
       'the owner\'s other games changed as asked');
     assert.ok(text.endsWith(RESTORED.model), text);
+    // What ODS took out, the changed style.css, is kept beside the example.
+    assert.equal(run.recovered.length, 1);
+    assert.match(fs.readFileSync(kept(root, run.recovered[0], 'style.css'), 'utf8'), /Comic Sans MS/);
     const reply = run.finish('I changed the font in all your games.');
-    assert.equal(reply, `I changed the font in all your games.\n\n${RESTORED.owner}`);
+    assert.equal(reply, `I changed the font in all your games.\n\n${run.notice()}`);
+    assert.ok(reply.includes(`What ODS took out of it is in ${run.recovered[0]}.`), reply);
     assert.doesNotMatch(reply, /discord/i, 'a restore is not a failure');
     assert.deepEqual(tree(example), original);
   });
@@ -362,7 +393,8 @@ test('a new-game request writes into a new folder, and a write that lands in the
   assert.equal(landed.params.path, 'Playground/elf-of-doom/index.html');
   assert.ok(landed.text.endsWith(RESTORED.model));
   assert.deepEqual(tree(example), original);
-  assert.match(read.finish('Your new game is ready.'), new RegExp(`${escaped(RESTORED.owner)}$`));
+  assert.equal(fs.readFileSync(kept(root, read.recovered[0], 'index.html'), 'utf8'), '<!doctype html><title>New game</title>\n');
+  assert.match(read.finish('Your new game is ready.'), new RegExp(`${escaped(read.notice())}$`));
 });
 
 test('a turn about a sibling folder such as elf-of-doom-2 leaves the example guarded', {skip: NO_BASH}, () => {
@@ -374,7 +406,7 @@ test('a turn about a sibling folder such as elf-of-doom-2 leaves the example gua
   assert.ok(sibling.exec("sed -i 's/const /let /' Playground/elf-of-doom*/engine.js").text.endsWith(RESTORED.model));
   assert.deepEqual(tree(example), original);
   assert.match(fs.readFileSync(path.join(root, 'Playground', 'elf-of-doom-2', 'engine.js'), 'utf8'), /\blet /);
-  assert.ok(sibling.finish('The arrows give 7 now.').endsWith(RESTORED.owner));
+  assert.ok(sibling.finish('The arrows give 7 now.').endsWith(sibling.notice()));
   const mistaken = turn(guard, 'Make elf-of-doom-2 faster', root);
   mistaken.read('Playground/elf-of-doom/engine.js');
   assert.ok(mistaken.write('Playground/elf-of-doom/engine.js', 'const speed = 99;\n').text.endsWith(RESTORED.model));
@@ -403,7 +435,7 @@ const MENTIONS = [
   ['Port elf-of-doom to TypeScript', `${ENGINE_EDIT} && echo '// typed' > Playground/elf-of-doom/types.ts`, null],
   ['Open elf-of-doom and make the arrows give 7', ENGINE_EDIT, null],
 ];
-for (const [prompt, command, kept] of MENTIONS) {
+for (const [prompt, command, stays] of MENTIONS) {
   test(`a turn that mentions it without the documented form gets guidance and the game back: ${prompt}`, {skip: NO_BASH}, () => {
     const {root, example, original} = workspace();
     const before = listing(root);
@@ -413,10 +445,10 @@ for (const [prompt, command, kept] of MENTIONS) {
     if (prompt.startsWith('Make a new game')) run.write('Playground/elf-like/notes.txt', 'like elf of doom\n');
     assert.ok(run.exec(command).text.endsWith(RESTORED.model));
     assert.deepEqual(tree(example), original);
-    if (kept) assert.ok(fs.existsSync(path.join(root, 'Playground', ...kept.split('/'))), `${kept} stays as the command left it`);
+    if (stays) assert.ok(fs.existsSync(path.join(root, 'Playground', ...stays.split('/'))), `${stays} stays as the command left it`);
     else if (command.startsWith('rm')) assert.deepEqual(listing(root), ['elf-of-doom']);
-    else assert.deepEqual(listing(root), before);
-    assert.ok(run.finish().endsWith(RESTORED.owner));
+    else assert.deepEqual(listing(root), [...before, ...run.recovered.map(folder => path.posix.basename(folder))].sort());
+    assert.ok(run.finish().endsWith(run.notice()));
   });
 }
 
@@ -453,7 +485,7 @@ test('nothing carries over: after a named change, "Make it faster" is put back t
   const next = turn(guard, 'Make it faster', root);
   assert.ok(next.exec("sed -i 's/let /var /' Playground/elf-of-doom/engine.js").text.endsWith(RESTORED.model));
   assert.deepEqual(tree(example), named);
-  assert.ok(next.finish().endsWith(RESTORED.owner));
+  assert.ok(next.finish().endsWith(next.notice()));
 });
 
 // Wordings that ask for a new project on their own. After the documented
@@ -518,7 +550,7 @@ test('an answer to a clarification card is named by the request it answers, neve
   assert.equal(declined.guidance, EXAMPLE_NOTES.guidance, 'the question mentions it, so the model is told');
   assert.ok(declined.exec(`${SED_FONT} Playground/*/style.css`).text.endsWith(RESTORED.model));
   assert.deepEqual(tree(example), original);
-  assert.ok(declined.finish().endsWith(RESTORED.owner));
+  assert.ok(declined.finish().endsWith(declined.notice()));
   const accepted = answer('Change the font in all my games', QUESTION, 'Yes', root);
   accepted.exec(`${SED_FONT} Playground/*/style.css`);
   assert.deepEqual(tree(example), original, 'a yes to the model\'s question does not name it either');
@@ -536,7 +568,7 @@ test('an answer to a card about a turn that mentions it gets guidance too', {ski
   assert.equal(run.guidance, EXAMPLE_NOTES.guidance, 'the request the card answers mentions it');
   assert.ok(run.exec(ENGINE_EDIT).text.endsWith(RESTORED.model));
   assert.deepEqual(tree(example), original);
-  assert.ok(run.finish().endsWith(RESTORED.owner));
+  assert.ok(run.finish().endsWith(run.notice()));
 });
 
 test('an answer to a card of a turn that names it works in the real folder, even when the answer reads like a new project', {skip: NO_BASH}, () => {
@@ -564,7 +596,7 @@ test('a change made while Portal is idle is the owner\'s: the next run keeps it 
   assert.deepEqual(tree(example), mine, 'a run never restores when it starts');
   assert.ok(next.exec(`${SED_FONT} Playground/*/style.css`).text.endsWith(RESTORED.model));
   assert.deepEqual(tree(example), mine, 'put back to the owner\'s tree, not the shipped one');
-  assert.equal(next.finish('Done.'), `Done.\n\n${RESTORED.owner}`);
+  assert.equal(next.finish('Done.'), `Done.\n\n${next.notice()}`);
   assert.equal(turn(guard, 'What can you do?', root).finish('I can build games.'), 'I can build games.');
   assert.deepEqual(tree(example), mine);
 });
@@ -595,7 +627,7 @@ test('a run that starts while another works keeps the known-good tree, so the fi
   assert.ok(reformat.end().text.endsWith(RESTORED.model));
   assert.deepEqual(tree(example), original);
   assert.equal(second.finish('I can build games.'), 'I can build games.');
-  assert.ok(first.finish('Reformatted.').endsWith(RESTORED.owner));
+  assert.ok(first.finish('Reformatted.').endsWith(first.notice()));
 });
 
 test('after a gateway restart the folder as ODS first finds it is the known-good tree', () => {
@@ -604,7 +636,7 @@ test('after a gateway restart the folder as ODS first finds it is the known-good
   const run = turn(createToolLoopGuard(), 'Make the snake faster', root);
   const found = tree(example);
   fs.appendFileSync(path.join(example, 'ui.js'), '\n// during the run\n');
-  assert.ok(run.finish('Done.').endsWith(RESTORED.owner));
+  assert.ok(run.finish('Done.').endsWith(run.notice()));
   assert.deepEqual(tree(example), found);
 });
 
@@ -615,8 +647,10 @@ test('a change made outside any tool call is put back at finalize, so the reply 
   fs.appendFileSync(path.join(example, 'ui.js'), '\n// late\n');
   guard.beforeAgentFinalize({runId: run.context.runId, lastAssistantMessage: 'The snake is faster.'}, run.context, 'pixel');
   assert.deepEqual(tree(example), original);
-  assert.equal(guard.deliveryVerificationForRun(run.context.runId).notice, RESTORED.owner);
-  assert.ok(run.finish('The snake is faster.').endsWith(RESTORED.owner));
+  const notice = exampleNotice('restored', madeSince(root, []));
+  assert.match(notice, /What ODS took out of it is in Playground\/elf-of-doom-recovered-/);
+  assert.equal(guard.deliveryVerificationForRun(run.context.runId).notice, notice);
+  assert.ok(run.finish('The snake is faster.').endsWith(notice));
 });
 
 test('a run that ends without finalizing (stopped or failed) is still checked when it ends', () => {
@@ -626,7 +660,9 @@ test('a run that ends without finalizing (stopped or failed) is still checked wh
   fs.appendFileSync(path.join(example, 'ui.js'), '\n// late\n');
   guard.observeAgentEnd({runId: run.context.runId, success: false, error: 'aborted'}, run.context);
   assert.deepEqual(tree(example), original);
-  assert.equal(guard.exampleNoticeForRun(run.context.runId), RESTORED.owner);
+  const [recovered] = madeSince(root, []);
+  assert.match(fs.readFileSync(kept(root, recovered, 'ui.js'), 'utf8'), /\/\/ late\n$/);
+  assert.equal(guard.exampleNoticeForRun(run.context.runId), exampleNotice('restored', [recovered]));
 });
 
 test('a later attempt of a run that does not name it gets that run\'s earlier changes put back', () => {
@@ -637,7 +673,7 @@ test('a later attempt of a run that does not name it gets that run\'s earlier ch
   // The runtime retries the attempt: before_prompt_build runs again.
   guard.observeExampleRun(run.context);
   assert.deepEqual(tree(example), original);
-  assert.equal(run.finish('Done.'), `Done.\n\n${RESTORED.owner}`);
+  assert.equal(run.finish('Done.'), `Done.\n\n${exampleNotice('restored', madeSince(root, []))}`);
 });
 
 // ------------------------------------------------- what Portal delivers --
@@ -653,8 +689,8 @@ test('a reply ODS replaces with its own text is followed by the notice, once', {
   const verification = guard.deliveryVerificationForRun(run.context.runId);
   assert.equal(verification.status, 'failed');
   assert.match(verification.text, /^The requested download was not attached/);
-  assert.equal(verification.notice, RESTORED.owner);
-  assert.equal(reply, `${verification.text}\n\n${RESTORED.owner}`);
+  assert.equal(verification.notice, run.notice());
+  assert.equal(reply, `${verification.text}\n\n${run.notice()}`);
 });
 
 // The host's preview receipt digest (workspace-preview.mjs) for one file.
@@ -692,8 +728,8 @@ test('a new game\'s verified preview reply keeps the model\'s text and the evide
   assert.equal(guard.deliveryVerificationForRun(run.context.runId).deliveryMode, 'append');
   assert.ok(reply.startsWith('Your new space game is ready.\n\n'), reply);
   assert.match(reply, /\nPublication scope: [^\n]+\n\nODS put Playground\/elf-of-doom back as it was\./);
-  assert.ok(reply.endsWith(RESTORED.owner), reply);
-  assert.equal(count(reply, RESTORED.owner), 1);
+  assert.ok(reply.endsWith(run.notice()), reply);
+  assert.equal(count(reply, run.notice()), 1);
 });
 
 test('the ingress adds the notice once, and only one plain line that is not on a question card', () => {
@@ -767,6 +803,7 @@ test('a link to a folder outside, added inside, is removed without touching that
   run.exec(`node -e "require('fs').symlinkSync(process.env.OUT, 'Playground/elf-of-doom/assets', '${DIRECTORY_LINK}')"`);
   assert.deepEqual(tree(example), original);
   assert.equal(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'keep\n');
+  assert.deepEqual(run.recovered, [], 'a link is removed itself, never moved aside');
   run.finish();
 });
 
@@ -881,7 +918,7 @@ test('a workspace replaced by a link during a run is never written through', () 
   fs.renameSync(root, `${root}-moved`);
   temporary.push(`${root}-moved`);
   fs.symlinkSync(outside, root, DIRECTORY_LINK);
-  assert.equal(examples.check('swapped'), 'failed');
+  assert.deepEqual(examples.check('swapped'), {outcome: 'failed'});
   assert.deepEqual(fs.readdirSync(outside), [], 'nothing is written where the link points');
   fs.rmSync(root, {recursive: true, force: true});
 });
@@ -901,7 +938,7 @@ test('a workspace whose parent folder is swapped for a link during a run is neve
   temporary.push(`${parent}-moved`);
   fs.symlinkSync(outside, parent, DIRECTORY_LINK);
   try {
-    assert.equal(examples.check('parent-swapped'), 'failed');
+    assert.deepEqual(examples.check('parent-swapped'), {outcome: 'failed'});
     assert.deepEqual(tree(outside), before, 'nothing is written where the link points');
   } finally { fs.rmSync(parent, {recursive: true, force: true}); }
 });
@@ -919,6 +956,130 @@ test('putting a file back never changes the read-only flag it shares with anothe
     assert.equal(fs.readFileSync(shared, 'utf8'), 'const speed = 1;\n');
     run.finish();
   } finally { fs.chmodSync(shared, 0o644); }
+});
+
+// ------------------------------------------- nothing it takes out is lost --
+
+const RECOVERED_PATH = /^Playground\/elf-of-doom-recovered-\d{8}T\d{6}Z(?:-[1-9]\d*)?$/;
+
+test('the owner\'s game a turn that does not name it moves into the example is moved out again, never deleted, and the reply says where', {skip: NO_BASH}, () => {
+  const {root, example, original} = workspace();
+  const snake = tree(path.join(root, 'Playground', 'snake-game'));
+  const run = turn(createToolLoopGuard(), 'Move my snake-game into the elf of doom folder so they sit together', root);
+  assert.equal(run.guidance, EXAMPLE_NOTES.guidance);
+  // The model runs it anyway.
+  assert.ok(run.exec('mv Playground/snake-game Playground/elf-of-doom/').text.endsWith(RESTORED.model));
+  assert.deepEqual(tree(example), original);
+  assert.equal(run.recovered.length, 1);
+  const [recovered] = run.recovered;
+  assert.match(recovered, RECOVERED_PATH);
+  assert.deepEqual(tree(kept(root, recovered, 'snake-game')), snake, 'every byte of snake-game, at its path in the example');
+  assert.deepEqual(listing(root), ['elf-of-doom', path.posix.basename(recovered), 'space-race']);
+  const reply = run.finish('Moved snake-game into elf-of-doom.');
+  assert.equal(reply, `Moved snake-game into elf-of-doom.\n\n${exampleNotice('restored', [recovered])}`);
+  assert.ok(reply.includes(`What ODS took out of it is in ${recovered}.`), reply);
+});
+
+// Other owner content a turn that does not name it moves into the example,
+// from (workspace-relative), and where ODS keeps it: its path in the
+// example, inside the recovery folder.
+const MOVED_IN = [
+  ['Rename my game elf-of-doom-2 to elf-of-doom', 'Playground/elf-of-doom-2', 'mv Playground/elf-of-doom-2 Playground/elf-of-doom', 'elf-of-doom-2'],
+  ['Put my notes with the elf of doom game', 'notes.md', 'mv notes.md Playground/elf-of-doom/', 'notes.md'],
+  // A file of the example's that is replaced.
+  ['Use my snake page as the elf of doom page', 'Playground/snake-game/index.html',
+    'mv Playground/snake-game/index.html Playground/elf-of-doom/index.html', 'index.html'],
+  // A file where the example's folder belongs.
+  ['Replace elf of doom with my notes', 'notes.md', 'rm -r Playground/elf-of-doom && mv notes.md Playground/elf-of-doom', 'elf-of-doom'],
+  // A file where a folder inside it belongs.
+  ['Put my notes where the elf of doom sounds are', 'notes.md',
+    'rm -r Playground/elf-of-doom/sounds && mv notes.md Playground/elf-of-doom/sounds', 'sounds'],
+];
+for (const [prompt, from, command, place] of MOVED_IN) {
+  test(`what a turn that does not name it moves into the example is kept beside it: ${command}`, {skip: NO_BASH}, () => {
+    const {root, example} = workspace();
+    fs.cpSync(path.join(root, 'Playground', 'space-race'), path.join(root, 'Playground', 'elf-of-doom-2'), {recursive: true});
+    fs.writeFileSync(path.join(root, 'notes.md'), '# my notes\n');
+    // A folder of the owner's own inside the game, made while Portal was idle.
+    fs.mkdirSync(path.join(example, 'sounds'));
+    fs.writeFileSync(path.join(example, 'sounds', 'boom.txt'), 'boom\n');
+    const original = tree(example);
+    const moved = tree(path.join(root, ...from.split('/')));
+    const run = turn(createToolLoopGuard(), prompt, root);
+    assert.ok(run.exec(command).text.endsWith(RESTORED.model));
+    assert.deepEqual(tree(example), original);
+    assert.equal(run.recovered.length, 1);
+    assert.deepEqual(tree(kept(root, run.recovered[0], place)), moved, `${from} is at ${place} in the recovery folder`);
+    assert.ok(run.finish().endsWith(exampleNotice('restored', run.recovered)));
+  });
+}
+
+test('each restore moves what it takes out to a new recovery folder, never into or over anything already there', () => {
+  const {root, example, original} = workspace();
+  const examples = createExampleGuard({now: () => Date.UTC(2026, 9, 17, 15, 30, 12, 345)});
+  const playground = path.join(root, 'Playground');
+  const name = 'elf-of-doom-recovered-20261017T153012Z';
+  // Something of the owner's already has the first name.
+  fs.writeFileSync(path.join(playground, name), 'mine\n');
+  examples.begin('run', root, false);
+  fs.appendFileSync(path.join(example, 'ui.js'), '// first\n');
+  assert.deepEqual(examples.check('run'), {outcome: 'restored', recovered: `Playground/${name}-2`});
+  fs.appendFileSync(path.join(example, 'ui.js'), '// second\n');
+  assert.deepEqual(examples.check('run'), {outcome: 'restored', recovered: `Playground/${name}-3`});
+  assert.equal(fs.readFileSync(path.join(playground, name), 'utf8'), 'mine\n');
+  const shipped = fs.readFileSync(path.join(SHIPPED, 'ui.js'), 'utf8');
+  assert.equal(fs.readFileSync(path.join(playground, `${name}-2`, 'ui.js'), 'utf8'), `${shipped}// first\n`);
+  assert.equal(fs.readFileSync(path.join(playground, `${name}-3`, 'ui.js'), 'utf8'), `${shipped}// second\n`);
+  assert.deepEqual(tree(example), original);
+  // Bringing back only what was deleted takes nothing out.
+  fs.rmSync(path.join(example, 'legacy.js'));
+  assert.deepEqual(examples.check('run'), {outcome: 'restored'});
+  assert.deepEqual(listing(root), ['elf-of-doom', name, `${name}-2`, `${name}-3`, 'snake-game', 'space-race']);
+  assert.ok(fs.lstatSync(path.join(playground, name)).isFile(), 'the owner\'s file is still a file');
+  assert.equal(examples.end('run'), undefined);
+});
+
+test('a restore that fails partway still names the recovery folder, which keeps what it took out', () => {
+  const {root, example} = workspace();
+  const examples = createExampleGuard();
+  examples.begin('run', root, false);
+  fs.writeFileSync(path.join(example, 'notes.md'), '# my notes\n');
+  fs.appendFileSync(path.join(example, 'ui.js'), '// changed\n');
+  // Writing ui.js back fails, after notes.md and the changed ui.js were moved out.
+  const original = commonFs.openSync;
+  commonFs.openSync = (file, ...rest) => {
+    if (path.basename(String(file)).startsWith('.ods-restore-')) throw Object.assign(new Error('EIO: i/o error'), {code: 'EIO', syscall: 'open'});
+    return original(file, ...rest);
+  };
+  syncBuiltinESMExports();
+  let result;
+  try { result = examples.check('run'); } finally { commonFs.openSync = original; syncBuiltinESMExports(); }
+  assert.equal(result.outcome, 'failed');
+  assert.match(result.recovered, RECOVERED_PATH);
+  assert.equal(fs.readFileSync(kept(root, result.recovered, 'notes.md'), 'utf8'), '# my notes\n');
+  assert.match(fs.readFileSync(kept(root, result.recovered, 'ui.js'), 'utf8'), /\/\/ changed\n$/);
+  const notice = exampleNotice('failed', [result.recovered]);
+  assert.ok(notice.startsWith('Playground/elf-of-doom changed and ODS could not put it back as it was, so it stays as it is now. '
+    + `What ODS took out of it is in ${result.recovered}. If the game no longer works`), notice);
+  // A later check puts it back.
+  assert.equal(examples.check('run').outcome, 'restored');
+  examples.end('run');
+});
+
+test('the owner\'s line names at most three recovery folders, and the ingress accepts it as one line', () => {
+  const folders = Array.from({length: 10}, (_, i) => `Playground/elf-of-doom-recovered-20261017T153012Z${i ? `-${i + 1}` : ''}`);
+  assert.equal(exampleNotice('restored'), RESTORED.owner);
+  assert.equal(exampleNotice('failed', []), EXAMPLE_NOTES.failed.owner);
+  assert.equal(exampleNotice('restored', folders.slice(0, 1)), `ODS put Playground/elf-of-doom back as it was. What ODS took out of it `
+    + `is in ${folders[0]}. To change Elf of Doom, send a new message that starts with "In elf-of-doom," (with the comma), for `
+    + 'example "In elf-of-doom, make the arrows faster".');
+  assert.ok(exampleNotice('restored', folders.slice(0, 2)).includes(` is in ${folders[0]} and ${folders[1]}. `));
+  for (const outcome of ['restored', 'failed']) {
+    const notice = exampleNotice(outcome, folders);
+    assert.ok(notice.includes(` is in ${folders.slice(0, 3).join(', ')} and 7 more Playground folders whose names start with `
+      + 'elf-of-doom-recovered-. '), notice);
+    assert.equal(deliver('Done.', {status: 'none', notice}), `Done.\n\n${notice}`);
+  }
 });
 
 // ------------------------------------------------------------- whose copy --
@@ -940,7 +1101,7 @@ test('a workspace given through a linked path is guarded at its real path', () =
   fs.symlinkSync(root, alias, DIRECTORY_LINK);
   const run = turn(createToolLoopGuard(), 'Make the snake faster', alias);
   fs.appendFileSync(path.join(example, 'ui.js'), '\n// changed\n');
-  assert.ok(run.finish().endsWith(RESTORED.owner));
+  assert.ok(run.finish().endsWith(run.notice()));
   assert.deepEqual(tree(example), original);
 });
 
@@ -1062,7 +1223,8 @@ test('a file replaced by a larger one is put back without reading the new bytes'
   fs.writeFileSync(path.join(example, 'ui.js'), Buffer.alloc(24 * 1024 * 1024, 1));
   let outcome;
   assert.ok(bytesRead(() => { outcome = examples.check('big'); }) < 64 * 1024);
-  assert.equal(outcome, 'restored');
+  assert.equal(outcome.outcome, 'restored');
+  assert.equal(fs.statSync(kept(root, outcome.recovered, 'ui.js')).size, 24 * 1024 * 1024, 'moved aside, never copied');
   assert.deepEqual(tree(example), original);
   examples.end('big');
 });
@@ -1168,7 +1330,7 @@ test('a run still working when a run that names it ends keeps that run\'s change
   fs.appendFileSync(path.join(example, 'ui.js'), '\n// formatted\n');
   assert.ok(stray.end().text.endsWith(RESTORED.model));
   assert.deepEqual(tree(example), arrows);
-  assert.ok(other.finish('The snake is faster.').endsWith(RESTORED.owner));
+  assert.ok(other.finish('The snake is faster.').endsWith(other.notice()));
 });
 
 test('a run that names it holds restores back while its backgrounded command still writes', () => {
@@ -1212,7 +1374,7 @@ test('a run that names it and whose end ODS never saw stops counting after its d
   clock += 1;
   assert.equal(examples.check('other-run'), undefined, 'its end keeps the tree as it is');
   fs.appendFileSync(path.join(example, 'ui.js'), '\n// not asked\n');
-  assert.equal(examples.check('other-run'), 'restored');
+  assert.equal(examples.check('other-run').outcome, 'restored');
   assert.deepEqual(tree(example), named);
   assert.equal(examples.end('other-run'), undefined);
 });
@@ -1276,7 +1438,7 @@ test('a delegated child uses its owner run\'s message, never its own task text',
   assert.ok(child.exec(ENGINE_EDIT).text.endsWith(RESTORED.model));
   assert.deepEqual(tree(example), original);
   child.finish('Done in elf-of-doom.');
-  assert.equal(announce(wired, owner, root, 'The snake is faster.'), `The snake is faster.\n\n${RESTORED.owner}`);
+  assert.equal(announce(wired, owner, root, 'The snake is faster.'), `The snake is faster.\n\n${child.notice()}`);
 });
 
 test('a delegated child of a turn that names it may change it', {skip: NO_BASH}, () => {
@@ -1407,7 +1569,7 @@ for (const stream of [false, true]) {
     run.exec(`${SED_FONT} Playground/*/style.css`);
     assert.deepEqual(tree(example), original);
     const text = await portal(t, guard, () => { run.finish(); return 'I changed the font in all your games.'; }, stream);
-    assert.equal(text, `I changed the font in all your games.\n\n${RESTORED.owner}`);
+    assert.equal(text, `I changed the font in all your games.\n\n${run.notice()}`);
   });
 
   test(`Portal receives a preview reply, its evidence and then the notice over the real ingress, stream=${stream}`, async t => {
@@ -1415,8 +1577,8 @@ for (const stream of [false, true]) {
     const text = await portal(t, guard, () => { run.finish(); return 'Your new space game is ready.'; }, stream);
     assert.ok(text.startsWith('Your new space game is ready.\n\n'), text);
     assert.match(text, /Publication scope: [^\n]+\n\nODS put Playground\/elf-of-doom back as it was\./);
-    assert.ok(text.endsWith(RESTORED.owner));
-    assert.equal(count(text, RESTORED.owner), 1);
+    assert.ok(text.endsWith(run.notice()));
+    assert.equal(count(text, run.notice()), 1);
   });
 
   test(`Portal receives the failure notice with the help link over the real ingress, stream=${stream}`, {skip: NO_BASH}, async t => {

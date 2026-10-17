@@ -10,7 +10,11 @@
 //   that run ended.
 // - After each tool call of a run that does not name it, at its finalize and
 //   at its end, the folder is compared with that tree and restored exactly on
-//   any difference. It reads no commands: only the outcome counts.
+//   any difference. It reads no commands: only the outcome counts. Nothing
+//   it finds there is deleted: what it takes out (an edited file, or a file
+//   or folder moved in) goes to a new folder beside it,
+//   Playground/elf-of-doom-recovered-<UTC time>, and the owner's line names
+//   that folder.
 // - From the start of a run that names it until that run ends (or its
 //   deadline plus a grace, if ODS never sees the end), no other run's change
 //   is undone, and when it ends the folder as it is then becomes the
@@ -35,9 +39,18 @@ const RUN_GRACE_MS = 2 * 60 * 1000;
 const RUN_TTL_MS = 2 * 60 * 60 * 1000;
 
 const DOCUMENTED_FORM = '"In elf-of-doom," (with the comma), for example "In elf-of-doom, make the arrows faster"';
+// The owner's line for each outcome: its first sentence, then the rest.
+// exampleNotice puts where ODS moved what it took out between the two.
+const OWNER_LINES = Object.freeze({
+  restored: ['ODS put Playground/elf-of-doom back as it was.',
+    `To change Elf of Doom, send a new message that starts with ${DOCUMENTED_FORM}.`],
+  failed: ['Playground/elf-of-doom changed and ODS could not put it back as it was, so it stays as it is now.',
+    'If the game no longer works, send a new message that starts with "In elf-of-doom," asking Portal to fix it, or '
+      + '[get help on Discord](https://discord.gg/4ntNp9MAwC).'],
+});
 // What the model reads (before a turn that mentions the example, and on the
 // result of a call after which ODS acted) and the one line the owner reads at
-// the end of the reply.
+// the end of the reply when ODS moved nothing out of the example.
 export const EXAMPLE_NOTES = Object.freeze({
   guidance: '[ODS Portal] Playground/elf-of-doom is ODS\'s example game and is protected on this turn. Do not change, move or '
     + 'delete it; make new games in a new Playground folder. If the owner wants Elf of Doom itself changed, don\'t change '
@@ -46,16 +59,29 @@ export const EXAMPLE_NOTES = Object.freeze({
     model: '[ODS Portal] ODS put Playground/elf-of-doom back as it was: it is protected on this turn. Do not change it again, '
       + 'and do not tell the owner it changed. Make new games in a new Playground folder. If the owner wants Elf of Doom '
       + `changed, tell them to send a new message that starts with ${DOCUMENTED_FORM}.`,
-    owner: `ODS put Playground/elf-of-doom back as it was. To change Elf of Doom, send a new message that starts with ${DOCUMENTED_FORM}.`,
+    owner: OWNER_LINES.restored.join(' '),
   }),
   failed: Object.freeze({
     model: '[ODS Portal] Playground/elf-of-doom changed and ODS could not put it back as it was. Do not change it further, and '
       + 'tell the owner it may have changed.',
-    owner: 'Playground/elf-of-doom changed and ODS could not put it back as it was, so it stays as it is now. If the game no '
-      + 'longer works, send a new message that starts with "In elf-of-doom," asking Portal to fix it, or '
-      + '[get help on Discord](https://discord.gg/4ntNp9MAwC).',
+    owner: OWNER_LINES.failed.join(' '),
   }),
 });
+const RECOVERY_NAMED = 3;
+
+// The owner's one line for a turn's outcome ('restored' or 'failed'). When
+// ODS moved anything out of the example during the turn (recovered: the
+// Playground folders it moved it to, oldest first), the line says where:
+// the first three by name and how many more, so it stays one short line.
+export function exampleNotice(outcome, recovered = []) {
+  const [first, rest] = OWNER_LINES[outcome];
+  if (!recovered.length) return `${first} ${rest}`;
+  const more = recovered.length - RECOVERY_NAMED;
+  const places = [...recovered.slice(0, RECOVERY_NAMED),
+    ...(more > 0 ? [`${more} more Playground folders whose names start with ${EXAMPLE}-recovered-`] : [])];
+  const where = places.length > 1 ? `${places.slice(0, -1).join(', ')} and ${places.at(-1)}` : places[0];
+  return `${first} What ODS took out of it is in ${where}. ${rest}`;
+}
 
 // ------------------------------------------------------------------ naming --
 
@@ -215,39 +241,76 @@ function makeUsable(target, stat, mode = 0o700) {
   if ((stat.mode & 0o700) !== 0o700) fs.chmodSync(target, mode | 0o700);
 }
 
-// Removes one entry without following links: a link (or junction) is
-// removed itself, and a real folder is made usable and emptied first.
-function remove(target) {
-  const stat = lstatOrNull(target);
-  if (!realDirectory(stat)) { if (stat) fs.rmSync(target, {recursive: true, force: true}); return; }
-  makeUsable(target, stat);
-  for (const name of fs.readdirSync(target)) remove(path.join(target, name));
-  fs.rmdirSync(target);
+// The recovery folder of one restore: made beside the example only when ODS
+// first moves something into it, as Playground/elf-of-doom-recovered-<UTC
+// time>, or that name with -2, -3 and so on when something already has it.
+// Making it never replaces or enters anything that is there. A Playground
+// the owner cannot write to is made writable for that and gets its mode
+// back. name is the folder's name once it is made.
+function recoveryBeside(folder, time) {
+  const playground = path.dirname(folder);
+  const base = `${EXAMPLE}-recovered-${new Date(time).toISOString().replace(/[-:]|\.\d+/g, '')}`;
+  const recovery = {name: undefined};
+  const reserve = () => {
+    const stat = fs.lstatSync(playground);
+    makeUsable(playground, stat, modeOf(stat));
+    try {
+      for (let n = 1; ; n++) {
+        const name = n === 1 ? base : `${base}-${n}`;
+        try { fs.mkdirSync(path.join(playground, name)); return name; }
+        catch (error) { if (error.code !== 'EEXIST') throw error; }
+      }
+    } finally { if (modeOf(fs.lstatSync(playground)) !== modeOf(stat)) fs.chmodSync(playground, modeOf(stat)); }
+  };
+  // Where the entry at key goes: the same relative path in the recovery
+  // folder, and the example's own folder (key '') as elf-of-doom in it.
+  recovery.place = key => {
+    recovery.name ??= reserve();
+    const destination = path.join(playground, recovery.name, ...(key || EXAMPLE).split('/'));
+    fs.mkdirSync(path.dirname(destination), {recursive: true});
+    return destination;
+  };
+  return recovery;
 }
 
-// A file written beside its target with its mode and renamed over it. rename
-// replaces the entry itself, never what a link there points to; anything
-// other than a regular file in the way is removed first. Windows refuses to
-// rename over a read-only file, so there one is removed first too, which
-// leaves the read-only flag of any other name for that file as it was.
-function writeFile(target, entry, stat) {
+// Takes the entry at target out of the example without deleting it: a link
+// (or junction) is removed itself, never what it points to, and anything
+// else is renamed to its place in the recovery folder, on the same disk, so
+// no byte is copied or lost. A folder the owner cannot write to is made
+// writable for the move (POSIX needs that to move a folder to another
+// folder) and gets its mode back after.
+function setAside(target, key, recovery) {
+  const stat = lstatOrNull(target);
+  if (!stat) return;
+  if (stat.isSymbolicLink()) { fs.rmSync(target, {recursive: true, force: true}); return; }
+  const destination = recovery.place(key);
+  const locked = stat.isDirectory() && !(stat.mode & 0o200);
+  if (locked) fs.chmodSync(target, modeOf(stat) | 0o200);
+  fs.renameSync(target, destination);
+  if (locked) fs.chmodSync(destination, modeOf(stat));
+}
+
+// A file written beside its target with its mode and renamed into place.
+// restore has set aside whatever was there, so nothing is replaced.
+function writeFile(target, entry) {
   const temporary = path.join(path.dirname(target), `.ods-restore-${randomBytes(8).toString('hex')}`);
   try {
     const fd = fs.openSync(temporary, 'wx', 0o600);
     try { fs.writeFileSync(fd, entry.bytes); fs.fchmodSync(fd, entry.mode); } finally { fs.closeSync(fd); }
-    if (stat && (!stat.isFile() || (process.platform === 'win32' && !(stat.mode & 0o200)))) remove(target);
     fs.renameSync(temporary, target);
   } finally { fs.rmSync(temporary, {force: true}); }
 }
 
-// Puts the example back exactly as the copy has it. Only the example (and a
-// missing Playground above it) is written: a case-only rename is undone,
-// each directory is recreated or made writable before its entries are
-// touched, every file is written atomically with its mode, anything the copy
-// does not have is removed, and directory modes are set last. It changes
-// modes by path, so a racing process could still swap a folder for a link
-// between the check and the change: it is not a sandbox.
-function restore(folder, snapshot) {
+// Puts the example back exactly as the copy has it. Only the example, a
+// missing Playground above it and the recovery folder beside it are written:
+// a case-only rename is undone, each directory is recreated or made writable
+// before its entries are touched, anything in the way that the copy does not
+// have exactly (an extra entry, a changed file, a file where a folder
+// belongs) is set aside into the recovery folder, every file is written with
+// its mode, and directory modes are set last. It changes modes by path, so a
+// racing process could still swap a folder for a link between the check and
+// the change: it is not a sandbox.
+function restore(folder, snapshot, recovery) {
   const playground = path.dirname(folder);
   if (!lstatOrNull(playground)) fs.mkdirSync(playground, {mode: 0o700});
   // Found under another spelling only on a disk that ignores case: the same folder.
@@ -257,13 +320,15 @@ function restore(folder, snapshot) {
   for (const [key, entry] of snapshot.entries) {
     const target = entryPath(folder, key), stat = lstatOrNull(target);
     if (!entry.children) {
-      if (!sameAsCopy(target, stat, entry)) writeFile(target, entry, stat);
+      if (!sameAsCopy(target, stat, entry)) { setAside(target, key, recovery); writeFile(target, entry); }
       continue;
     }
-    if (stat && !realDirectory(stat)) remove(target);
+    if (stat && !realDirectory(stat)) setAside(target, key, recovery);
     if (realDirectory(stat)) makeUsable(target, stat, entry.mode);
     else fs.mkdirSync(target, {mode: entry.mode | 0o700});
-    for (const name of fs.readdirSync(target)) if (!entry.children.includes(name)) remove(path.join(target, name));
+    for (const name of fs.readdirSync(target)) {
+      if (!entry.children.includes(name)) setAside(path.join(target, name), key ? `${key}/${name}` : name, recovery);
+    }
   }
   for (const [key, entry] of [...snapshot.entries].reverse()) {
     const target = entryPath(folder, key);
@@ -273,8 +338,11 @@ function restore(folder, snapshot) {
 
 // ----------------------------------------------------------------- runs --
 
-// One guard per gateway. begin(), check() and end() return 'restored',
-// 'failed' or undefined.
+// One guard per gateway. begin(), check() and end() return undefined when
+// ODS did nothing, or {outcome, recovered}: outcome 'restored' or 'failed',
+// and recovered, when ODS moved anything out of the example, the folder it
+// moved it to (Playground/elf-of-doom-recovered-...), even when the restore
+// then failed.
 export function createExampleGuard({warn = () => {}, now = Date.now} = {}) {
   // Per canonical workspace root: the known-good tree. Per run: its root,
   // whether its owner turn names the example and when it stops counting.
@@ -313,19 +381,22 @@ export function createExampleGuard({warn = () => {}, now = Date.now} = {}) {
   function settle(root) {
     const baseline = baselines.get(root);
     if (!baseline || namedWorking(root)) return undefined;
+    let recovery;
+    const result = outcome => recovery?.name ? {outcome, recovered: `${path.posix.dirname(EXAMPLE_FOLDER)}/${recovery.name}`} : {outcome};
     try {
       if (!realLayout(root)) {
         once(`${root}:put-back:${LINKED}`, `Portal could not put ${EXAMPLE_FOLDER} back in ${root}: ${LINKED}.`);
-        return 'failed';
+        return result('failed');
       }
       const folder = folderIn(root);
       if (matches(folder, baseline)) return undefined;
-      restore(folder, baseline);
-      return 'restored';
+      recovery = recoveryBeside(folder, now());
+      restore(folder, baseline, recovery);
+      return result('restored');
     } catch (error) {
       if (!filesystemError(error)) throw error;
       once(`${root}:${error.code}`, `Portal could not put ${EXAMPLE_FOLDER} back in ${root}: ${error.code} ${error.message}`);
-      return 'failed';
+      return result('failed');
     }
   }
   // Runs whose end ODS never saw stop counting once their time is up; one
