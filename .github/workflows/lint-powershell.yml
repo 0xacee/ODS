@@ -170,6 +170,16 @@ jobs:
           ./tests/contracts/test-windows-portal-model-control.ps1
           ./tests/contracts/test-windows-portal-llama-migration.ps1
 
+      - name: Windows ODS App Shortcut Contracts (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/contracts/test-windows-app-shortcut.ps1
+
+      - name: Windows ODS App Shortcut Contracts (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/contracts/test-windows-app-shortcut.ps1
+
       - name: Windows Native llama-server (non-Portal) and Lemonade Retirement Contracts (PowerShell 7)
         if: runner.os == 'Windows'
         shell: pwsh
