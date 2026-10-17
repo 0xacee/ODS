@@ -1192,6 +1192,40 @@ class TestSwitchboardRuntimeConfig:
             "LLM_API_URL": "http://litellm:4000/v1",
         }) == "http://llama-server:8080/v1"
 
+    @pytest.mark.parametrize("mode,consumer_url", [
+        ("local", "http://llama-server:8080"),
+        ("hybrid", "http://litellm:4000"),
+    ])
+    @pytest.mark.parametrize("gateway,ports,expected", [
+        ("192.168.64.1", {"ODS_NATIVE_LLAMA_PORT": "8080", "OLLAMA_PORT": "9999", "AMD_INFERENCE_PORT": "7777"}, "http://192.168.64.1:8080"),
+        ("192.168.106.1", {"ODS_NATIVE_LLAMA_PORT": "19090"}, "http://192.168.106.1:19090"),
+        ("", {"ODS_NATIVE_LLAMA_PORT": "19090"}, "http://host.docker.internal:19090"),
+        ("192.168.64.1", {"OLLAMA_PORT": "19091", "AMD_INFERENCE_PORT": "7777"}, "http://192.168.64.1:19091"),
+        ("", {}, "http://host.docker.internal:8080"),
+    ])
+    def test_apple_activation_renders_native_origin_after_mode_change(
+        self, monkeypatch, tmp_path, mode, consumer_url, gateway, ports, expected,
+    ):
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Darwin")
+        _mod._render_model_router_runtime_configs(
+            tmp_path,
+            {"ODS_MODEL_SWITCHBOARD": "enabled", "GPU_BACKEND": "apple",
+             "ODS_MODE": mode, "LLM_API_URL": consumer_url,
+             "ODS_MACOS_HOST_GATEWAY": gateway, **ports},
+            model="qwen", gguf_file="Qwen.gguf", context_length=65536,
+        )
+        endpoints = json.loads(
+            (tmp_path / "config/model-router/endpoints.json").read_text(encoding="utf-8")
+        )
+        assert endpoints == {"endpoints": [{
+            "id": "llama-server-default", "baseUrl": expected,
+        }]}
+        # Consumer aliases still go through the switchboard; only its upstream
+        # must use the actual native listener instead of a nonexistent container.
+        switchboard = (tmp_path / "config/litellm/switchboard.yaml").read_text(encoding="utf-8")
+        assert "api_base: http://model-router:9099/v1" in switchboard
+        assert "model_name: default" in switchboard
+
     def test_windows_native_runtime_base_uses_host_gateway(self, monkeypatch):
         monkeypatch.setattr(_mod, "_is_windows_host_llama_server", lambda _env: True)
 

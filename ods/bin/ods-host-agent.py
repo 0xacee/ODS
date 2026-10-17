@@ -17196,6 +17196,11 @@ def _runtime_llama_api_base(env: dict) -> str:
     """Container-visible OpenAI base (``.../v1``) of the managed llama-server."""
     if _runtime_uses_router_transport(env) or _is_windows_host_llama_server(env):
         return f"{_native_llm_container_origin(env)}/v1"
+    if str(env.get("GPU_BACKEND") or "").strip().lower() == "apple":
+        # Public mode URLs select consumers, not the native server's origin.
+        host = str(env.get("ODS_MACOS_HOST_GATEWAY") or "").strip() or "host.docker.internal"
+        port = str(env.get("ODS_NATIVE_LLAMA_PORT") or env.get("OLLAMA_PORT") or "8080")
+        return f"http://{host}:{port}/v1"
     configured = str(env.get("LLM_API_URL") or "").strip()
     if configured and "litellm" not in configured.lower():
         return configured
