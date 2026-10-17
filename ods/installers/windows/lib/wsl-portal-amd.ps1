@@ -21,6 +21,9 @@ $script:ODSPortalRuntimeTaskPrefix = 'ODSLlamaServerRuntime-'
 # Migrations and reruns keep the port the WSL side already uses.
 $script:ODSPortalRuntimePortCandidates = @(8080, 18080, 28080)
 $script:ODSPortalReadySeconds = 1020
+# Setup waits this long for a model change the dashboard started (a switch
+# can load for up to the readiness limit above).
+$script:ODSPortalRuntimeChangeWaitSeconds = 1200
 # The key reaches the Linux installer through this WSLENV-forwarded variable,
 # never on a command line (contract: --native-llm-api-key-env).
 $script:ODSPortalApiKeyVariable = 'ODS_NATIVE_LLM_API_KEY'
@@ -384,6 +387,45 @@ function Set-ODSPortalRuntimeIntent([ValidateSet('running', 'stopped')][string]$
     Write-ODSPrivateEnvFile -Path (Join-Path (Get-ODSPortalRuntimeDir) 'intent.json') -Content (@{ State = $State } | ConvertTo-Json -Compress)
 }
 
+function Get-ODSPortalControlMutexName {
+    return ('Global\ODS-PortalModelControl-' + (Get-ODSPortalUserSid))
+}
+
+function Enter-ODSPortalRuntimeChange {
+    <#
+    .SYNOPSIS
+        Setup's turn to change the Windows model runtime. The dashboard's model
+        controller holds the same mutex for every switch, Unload and Resume, so
+        a rerun waits for one that is running instead of racing its stop.
+        Returns the held mutex for Exit-ODSPortalRuntimeChange.
+    #>
+    $mutex = [Threading.Mutex]::new($false, (Get-ODSPortalControlMutexName))
+    $held = $false
+    try {
+        try { $held = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
+        if (-not $held) {
+            Write-Host '         A model change started from the dashboard is still running; setup continues once it finishes.'
+            # Short waits keep Ctrl+C working while setup waits.
+            $deadline = [datetime]::UtcNow.AddSeconds($script:ODSPortalRuntimeChangeWaitSeconds)
+            while (-not $held -and [datetime]::UtcNow -lt $deadline) {
+                try { $held = $mutex.WaitOne(2000) } catch [Threading.AbandonedMutexException] { $held = $true }
+            }
+        }
+    } finally {
+        if (-not $held) { $mutex.Dispose() }
+    }
+    if (-not $held) {
+        throw ('A model change started from the dashboard or with ods model is still running, so setup did not change ' +
+            'the model runtime. Let it finish, or restart Windows, then run setup again.')
+    }
+    return $mutex
+}
+
+function Exit-ODSPortalRuntimeChange($Mutex) {
+    $Mutex.ReleaseMutex()
+    $Mutex.Dispose()
+}
+
 function Assert-ODSPortalWslBinding([string]$WslDistro, [string]$WslInstallDir) {
     if ($WslDistro -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$' -or $WslDistro -match '^docker-desktop' -or
         $WslInstallDir -notmatch '^/[^\x00-\x1f\x7f]+$' -or $WslInstallDir -match '(^|/)\.\.?(/|$)' -or
@@ -670,33 +712,67 @@ function Invoke-ODSPortalRuntimeCutover {
         prove it, or restore the previous ODS runtime and fail visibly.
     #>
     param($Existing, $Plan, $Options, [string]$ApiKey, [bool]$KeepPort, [string]$WslDistro = '', [string]$WslInstallDir = '')
-    $label = if ($Existing.Kind -eq 'lemonade') { 'lemonade-backup' } else { 'backup' }
-    $backup = if ($Existing.Kind -ne 'none') { Backup-ODSPortalRuntimeDirectory $label } else { '' }
-    # Quiesce only proven ODS identities. A user's own Lemonade keeps running.
-    if ($Existing.Kind -eq 'llama-server') { Stop-ODSPortalRuntime }
-    if (@($Existing.Launches).Count) { Stop-ODSPortalLemonadeLaunches $Existing.Launches }
-    $registered = $false
+    # One change at a time: a model switch, Unload or Resume from the
+    # dashboard holds the same lock, so its stop never races this one.
+    $change = Enter-ODSPortalRuntimeChange
     try {
-        if ($KeepPort) { Assert-ODSPortalPortAvailable $Plan.Port }
-        $registration = New-ODSPortalRuntimeAction $Plan $Options $ApiKey $WslDistro $WslInstallDir
-        $taskName = Register-ODSPortalRuntimeTask $registration
-        $registered = $true
-        Start-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
-        $null = Wait-ODSPortalRuntimeReady $registration
-    } catch {
-        $failure = $_.Exception.Message
+        $label = if ($Existing.Kind -eq 'lemonade') { 'lemonade-backup' } else { 'backup' }
+        $backup = if ($Existing.Kind -ne 'none') { Backup-ODSPortalRuntimeDirectory $label } else { '' }
+        # Quiesce only proven ODS identities. A user's own Lemonade keeps running.
+        $llamaStopped = $false
         try {
-            Undo-ODSPortalRuntimeCutover $Existing $backup $registered
+            if ($Existing.Kind -eq 'llama-server') { Stop-ODSPortalRuntime; $llamaStopped = $true }
+            if (@($Existing.Launches).Count) { Stop-ODSPortalLemonadeLaunches $Existing.Launches }
         } catch {
-            throw "The llama.cpp runtime did not start ($failure), and restoring the previous runtime also failed: $($_.Exception.Message) Rerun setup; ODS changed only its own files under $(Get-ODSPortalStateDir), and its backup is kept there."
+            $failure = $_
+            if ($llamaStopped) {
+                # A former Lemonade task failed to stop after llama.cpp stopped:
+                # put llama.cpp back as it was, as a failed start does. That
+                # task's own stop already left it as its outcome requires.
+                try {
+                    Restore-ODSPortalRuntimeDirectory $backup
+                    if ($Existing.WasEnabled) {
+                        Set-ODSPortalRuntimeIntent 'running'
+                        Enable-ScheduledTask -TaskName $Existing.Launch.TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+                        Start-ScheduledTask -TaskName $Existing.Launch.TaskName -TaskPath '\' -ErrorAction Stop
+                    }
+                } catch {
+                    throw "Setup could not stop a former ODS Lemonade task ($($failure.Exception.Message)), and restoring the previous llama.cpp runtime also failed: $($_.Exception.Message) Rerun setup; ODS changed only its own files under $(Get-ODSPortalStateDir), and its backup is kept there."
+                }
+                if ($backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+                throw "$($failure.Exception.Message) $(Get-ODSPortalRestoredRuntimeNote $Existing)"
+            }
+            # No new runtime file was written, so the backup is redundant.
+            # Failing to remove a private copy is safe to ignore; it must not
+            # hide the refusal the owner needs to see.
+            if ($backup) { Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }
+            throw $failure
         }
-        # The previous files are back in place; the backup is now redundant.
-        if ($backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
-        throw "The llama.cpp runtime did not start: $failure $(Get-ODSPortalRestoredRuntimeNote $Existing)"
+        $registered = $false
+        try {
+            if ($KeepPort) { Assert-ODSPortalPortAvailable $Plan.Port }
+            $registration = New-ODSPortalRuntimeAction $Plan $Options $ApiKey $WslDistro $WslInstallDir
+            $taskName = Register-ODSPortalRuntimeTask $registration
+            $registered = $true
+            Start-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
+            $null = Wait-ODSPortalRuntimeReady $registration
+        } catch {
+            $failure = $_.Exception.Message
+            try {
+                Undo-ODSPortalRuntimeCutover $Existing $backup $registered
+            } catch {
+                throw "The llama.cpp runtime did not start ($failure), and restoring the previous runtime also failed: $($_.Exception.Message) Rerun setup; ODS changed only its own files under $(Get-ODSPortalStateDir), and its backup is kept there."
+            }
+            # The previous files are back in place; the backup is now redundant.
+            if ($backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+            throw "The llama.cpp runtime did not start: $failure $(Get-ODSPortalRestoredRuntimeNote $Existing)"
+        }
+        if (@($Existing.Launches).Count) { Complete-ODSPortalLemonadeRetirement $Existing.Launches }
+        if ($backup -and $Existing.Kind -eq 'llama-server') { Remove-Item -LiteralPath $backup -Recurse -Force }
+        return $registration
+    } finally {
+        Exit-ODSPortalRuntimeChange $change
     }
-    if (@($Existing.Launches).Count) { Complete-ODSPortalLemonadeRetirement $Existing.Launches }
-    if ($backup -and $Existing.Kind -eq 'llama-server') { Remove-Item -LiteralPath $backup -Recurse -Force }
-    return $registration
 }
 
 function Write-ODSPortalFitWarning($Device, [string]$ModelPath) {

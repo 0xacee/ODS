@@ -29,6 +29,39 @@ $env:AMD_INFERENCE_PORT = ''
 try {
     $script:sid = 'S-1-5-21-100-200-300-1001'
     function Get-ODSPortalUserSid([string]$UserId) { if ($UserId) { return $UserId }; return $script:sid }
+    # A fixture-only name for the model-change lock: this test never waits on,
+    # or blocks, a real ODS model operation of this Windows user.
+    $script:fixtureMutex = 'ODS-PortalModelControl-Test-' + [guid]::NewGuid().ToString('N')
+    function Get-ODSPortalControlMutexName { return $script:fixtureMutex }
+    function Start-ControlHolder([int]$Milliseconds) {
+        # Holds the lock on a separate thread, as the dashboard's controller
+        # process would, until released or for the given time.
+        $held = [Threading.ManualResetEventSlim]::new($false)
+        $release = [Threading.ManualResetEventSlim]::new($false)
+        $holder = [PowerShell]::Create()
+        $null = $holder.AddScript({ param($Name, $Held, $Release, $Milliseconds)
+            $mutex = [Threading.Mutex]::new($false, $Name)
+            $acquired = $false
+            try {
+                $acquired = $mutex.WaitOne(0)
+                if (-not $acquired) { throw 'The isolated test mutex was unexpectedly busy.' }
+                $Held.Set()
+                $null = $Release.Wait($Milliseconds)
+            } finally { if ($acquired) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+        }).AddArgument($script:fixtureMutex).AddArgument($held).AddArgument($release).AddArgument($Milliseconds)
+        $pending = $holder.BeginInvoke()
+        if (-not $held.Wait(10000)) {
+            $holder.Stop(); $holder.Dispose(); $held.Dispose(); $release.Dispose()
+            throw 'The model-change lock is still held: setup did not release it.'
+        }
+        return [pscustomobject]@{ PowerShell = $holder; Pending = $pending; Held = $held; Release = $release }
+    }
+    function Stop-ControlHolder($Holder) {
+        $Holder.Release.Set()
+        if (-not $Holder.Pending.AsyncWaitHandle.WaitOne(5000)) { $Holder.PowerShell.Stop() }
+        try { $null = $Holder.PowerShell.EndInvoke($Holder.Pending) }
+        finally { $Holder.PowerShell.Dispose(); $Holder.Held.Dispose(); $Holder.Release.Dispose() }
+    }
     $script:shellPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
     function Get-Command { param($Name, $CommandType, $ErrorAction)
         if ($CommandType -eq 'Application') { return [pscustomobject]@{ Source = $script:shellPath; Name = 'powershell.exe' } }
@@ -71,6 +104,8 @@ try {
     # The proven-tree stops are covered by test-windows-portal-llama-restart.ps1.
     function Stop-ODSPortalLemonadeLaunch($Task, $Launch) {
         $script:events.Add('quiesce:' + $Launch.TaskName)
+        # A refusal changes nothing (the real stop restores what it touched).
+        if ($script:lemonadeStopFailure) { throw $script:lemonadeStopFailure }
         # As the real stop: publish the stopped intent, then disable the task.
         Set-ODSPortalRuntimeIntent 'stopped'
         Disable-ScheduledTask -TaskName $Launch.TaskName -TaskPath '\'
@@ -78,6 +113,7 @@ try {
     function Stop-ODSPortalRuntime([string]$ExecutablePath = '') {
         $task = Get-ODSPortalRuntimeTask
         if (-not $task) { return }
+        if ($script:llamaStopFailure) { throw $script:llamaStopFailure }
         $script:events.Add('stop-llama')
         Set-ODSPortalRuntimeIntent 'stopped'
         Disable-ScheduledTask -TaskName $task.TaskName -TaskPath '\'
@@ -140,7 +176,7 @@ try {
         $script:events.Clear(); $script:output.Clear(); $script:queried.Clear()
         $script:prompts = [Collections.Generic.List[string]]::new()
         $script:consent = $true; $script:installFailure = ''; $script:qualifyFailure = ''; $script:readyFailure = ''; $script:startFailure = ''
-        $script:restoredReadyFailure = ''
+        $script:restoredReadyFailure = ''; $script:llamaStopFailure = ''; $script:lemonadeStopFailure = ''
         $script:policyHint = ''; $script:owners = @{}; $script:reserved = @()
         $script:device = [pscustomobject]@{ Name = 'Vulkan0'; Description = 'AMD Radeon RX 9070 XT'; TotalMiB = 16304; FreeMiB = 16000 }
     }
@@ -230,6 +266,64 @@ try {
         Check (@(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*' }).Count -eq 0) 'a failed runtime backup leaves no partial backup that could pass for a complete one'
         $script:owners = @{}
     }
+
+    # --- Rerun: a refused stop changes nothing and keeps no backup ------------
+    Reset-Scenario
+    $planBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json')))
+    $script:llamaStopFailure = 'The runtime process ancestry is stale or ambiguous; no process was stopped.'
+    $message = ''
+    try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } catch { $message = $_.Exception.Message }
+    Check ($message -match 'stale or ambiguous' -and -not ($script:events -match '^(stop-llama|register|disable|enable|start)') -and
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json'))) -ceq $planBefore) 'a rerun whose stop is refused reports it and changes nothing'
+    Check (@(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*' }).Count -eq 0) 'a refused rerun stop leaves no runtime backup (or private key copy) behind'
+    $probe = Start-ControlHolder 0
+    Stop-ControlHolder $probe
+    Check $true 'a rerun that stops early still releases the model-change lock'
+    $script:owners = @{}
+
+    # --- Rerun: a former Lemonade task refuses after llama.cpp stopped ---------
+    Reset-Scenario
+    $leftoverExe = Join-Path (Join-Path $fixture 'former-lemonade') 'LemonadeServer.exe'
+    $script:tasks[$lemonadeTask] = [pscustomobject]@{ TaskName = $lemonadeTask; TaskPath = '\'; State = 'Ready'
+        Principal = [pscustomobject]@{ UserId = $script:sid }
+        Actions = @([pscustomobject]@{ Execute = $leftoverExe; WorkingDirectory = (Split-Path -Parent $leftoverExe)
+            Arguments = ('serve --port 13305 --host 127.0.0.1 --no-tray --llamacpp vulkan --extra-models-dir "' + (Get-ODSPortalModelsDir) + '"') }) }
+    $script:lemonadeStopFailure = 'Cannot prove the running Portal runtime task process; no process was stopped.'
+    $message = ''
+    try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } catch { $message = $_.Exception.Message }
+    Check ($message -match 'Cannot prove the running Portal runtime task process' -and $message -match 'previous ODS runtime was restored and is running again' -and
+        (Get-Index 'stop-llama') -lt (Get-Index "quiesce:$lemonadeTask") -and (Get-Index "quiesce:$lemonadeTask") -lt (Get-Index "enable:$llamaTask") -and
+        (Get-Index "enable:$llamaTask") -lt (Get-Index "start:$llamaTask") -and $script:events[$script:events.Count - 1] -ceq 'ready-restored' -and
+        -not ($script:events -match '^(register|unregister)') -and -not ($script:events -contains "start:$lemonadeTask") -and
+        (Test-ODSNativeLlamaWanted (Join-Path $runtimeDir 'intent.json'))) 'a former Lemonade task that refuses after llama.cpp stopped restarts llama.cpp as it was and reports both'
+    Check ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json'))) -ceq $planBefore -and
+        @(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*' }).Count -eq 0) 'that restore keeps the plan byte for byte and removes its redundant backup'
+    $null = $script:tasks.Remove($lemonadeTask)
+    $script:owners = @{}
+
+    # --- Rerun: a model change from the dashboard is still running ------------
+    Reset-Scenario
+    $script:ODSPortalRuntimeChangeWaitSeconds = 0
+    $holder = Start-ControlHolder 20000
+    $message = ''
+    try {
+        try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } catch { $message = $_.Exception.Message }
+    } finally { Stop-ControlHolder $holder }
+    Check ($message -match 'model change started from the dashboard or with ods model is still running, so setup did not change the model runtime\. Let it finish, or restart Windows, then run setup again\.' -and
+        -not ($script:events -match '^(stop-llama|register|disable|enable|start)') -and
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json'))) -ceq $planBefore -and
+        @(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*' }).Count -eq 0) 'a rerun never stops the runtime while a dashboard model change holds the lock, and says how to continue'
+    Reset-Scenario
+    $script:ODSPortalRuntimeChangeWaitSeconds = 30
+    $holder = Start-ControlHolder 1500
+    try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } finally { Stop-ControlHolder $holder }
+    Check ((($script:output -join ' ') -match 'A model change started from the dashboard is still running; setup continues once it finishes\.') -and
+        (Get-Index 'stop-llama') -ge 0 -and (Get-Index "register:$llamaTask") -gt (Get-Index 'stop-llama') -and (Get-Index 'ready') -gt 0) 'a rerun waits for a running dashboard model change, then replaces the runtime'
+    $script:ODSPortalRuntimeChangeWaitSeconds = 1200
+    $probe = Start-ControlHolder 0
+    Stop-ControlHolder $probe
+    Check $true 'a completed rerun releases the model-change lock'
+    $script:owners = @{}
 
     # --- Rerun: a selected vision model keeps its projector while it is stored --
     Reset-Scenario
