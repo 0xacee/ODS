@@ -626,7 +626,7 @@ run's at most three screenshots (`tool-loop-guard.mjs`
 calls cannot exceed it), the plugin adds `screenshot: {maxSide, maxPixels,
 maxBytes}` beside the plan: at most 1200 pixels per side (larger tool images
 are re-encoded by OpenClaw, `DEFAULT_IMAGE_MAX_DIMENSION_PX`), 1,048,576 pixels
-(the RTX Spark engine's `vision_max_pixels`) and 128 KiB (so a Tool Search
+(1024x1024, a common vision-encoder resize target) and 128 KiB (so a Tool Search
 result, which repeats the receipt beside the image, stays within the run
 guard's 256 KiB envelope bound), lowered by
 `agents.defaults.imageMaxDimensionPx` and the model row's

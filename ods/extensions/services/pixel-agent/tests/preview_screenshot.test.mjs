@@ -97,7 +97,7 @@ const ACTIVE = {provider: 'ods-gateway', modelId: 'ods/current', modelRef: 'ods-
 test('only a model declared to accept images, with the matching input list, opens the gate', () => {
   assert.deepEqual(previewScreenshotCapability(config('supported'), ACTIVE), {supported: true, directive: DIRECTIVE});
   assert.deepEqual(previewScreenshotCapability(config('supported')), {supported: true, directive: DIRECTIVE}, 'no SDK model reference');
-  // Today's RTX Spark: the engine has vision, but Portal's contract says unknown.
+  // An engine with a vision encoder whose Portal contract still says unknown.
   assert.deepEqual(previewScreenshotCapability(config('unknown'), ACTIVE), {supported: false, reason: 'unknown'});
   assert.deepEqual(previewScreenshotCapability(config('unsupported'), ACTIVE), {supported: false, reason: 'unsupported'});
   assert.deepEqual(previewScreenshotCapability(config(undefined), ACTIVE), {supported: false, reason: 'undeclared'});

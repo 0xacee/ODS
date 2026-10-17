@@ -9,7 +9,7 @@ import {createHash} from 'node:crypto';
 
 export const SCREENSHOT_CAPABILITY = 'viewport-screenshot-v1';
 // OpenClaw re-encodes larger tool images (DEFAULT_IMAGE_MAX_DIMENSION_PX), and
-// 1024x1024 is the RTX Spark engine's vision_max_pixels.
+// 1024x1024 is a common vision-encoder resize target.
 export const MAX_SCREENSHOT_SIDE = 1200, MIN_SCREENSHOT_SIDE = 64;
 export const MAX_SCREENSHOT_PIXELS = 1024 * 1024, MIN_SCREENSHOT_PIXELS = 4096;
 // 128 KiB keeps a Tool Search envelope (receipt twice, text and this base64
