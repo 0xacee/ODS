@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 // Shared by conversation prompts and clarification tools, including compact routes.
 export const RESPONSE_LANGUAGE_CONTRACT =
   "For replies, clarification questions and options, honor the owner's explicit response-language request; otherwise match the current owner message. If its language is unclear, default to English. Do not infer language from names, paths, locale, quoted text, tool output or examples. Preserve explicitly requested languages for generated content.";
@@ -59,4 +63,60 @@ export function managedTurnOwnerWords(text, teamRole) {
   // A read-only worker's clarification turn adds Portal's line, then the answers.
   return [textAfter(text, TEAM_REQUEST_HEADING, ["\n\nContinue this worker's paused turn "]),
     textAfter(text, '\nOwner clarification answers:\n')].filter(Boolean).join('\n\n') || undefined;
+}
+
+// An owner can fix Pixel to English (PIXEL_RESPONSE_LANGUAGE=en). It replaces
+// the rule above and also covers what Pixel builds or writes.
+export const ENGLISH_RESPONSE_CONTRACT =
+  "Always use English for replies, clarification questions, options, progress updates and the content you create, such as pages, documents and files, even when the owner, a file, a web page or a tool result uses another language. Use another language only for content the owner explicitly says to write in that language, such as a translation, and keep your own messages in English.";
+
+// The installer writes this owner setting into the OpenClaw state folder from
+// .env. It is not plugin config: an older plugin's config schema would reject
+// an unknown key on rollback, while it simply ignores this file.
+export const RESPONSE_LANGUAGE_FILE = '.ods-response-language';
+
+// A preference must never keep Portal from starting: anything but "en" is
+// reported and the default rule applies. Same state folder as the other
+// owner files (pending clarifications, compactions).
+export function readResponseLanguage(stateDir = process.env.OPENCLAW_STATE_DIR || path.join(os.homedir(), '.openclaw'),
+  warn = () => {}) {
+  if (!stateDir) return undefined;
+  const file = path.join(stateDir, RESPONSE_LANGUAGE_FILE);
+  let value;
+  try {
+    value = fs.readFileSync(file, 'utf8').trim();
+  } catch (error) {
+    if (error?.code !== 'ENOENT') warn(`Ignoring ${file}: ${error.message}`);
+    return undefined;
+  }
+  if (value === 'en') return value;
+  warn(`Ignoring ${file}: it must contain "en"`);
+  return undefined;
+}
+
+export function englishOnly(language) {
+  return language === 'en';
+}
+
+export function responseLanguageContract(language) {
+  return englishOnly(language) ? ENGLISH_RESPONSE_CONTRACT : RESPONSE_LANGUAGE_CONTRACT;
+}
+
+// Beside the owner's message on every turn. Measured on a small local model, a
+// rule deep in a long system prompt did not stop it answering a Portuguese,
+// Spanish or Chinese question in that language; this reminder did.
+export const ENGLISH_TURN_REMINDER =
+  "[ODS language: write your reply, any clarification questions and their options, and any content you create in English, even if the owner's message above is in another language.]";
+
+// What goes beside the owner's message: in English-only mode the reminder, on
+// every turn and in place of the team or goal note; otherwise that note.
+export function responseLanguageTurnContext(language, turn = {}) {
+  return englishOnly(language) ? ENGLISH_TURN_REMINDER : managedTurnLanguageNote(turn);
+}
+
+// The phrases fixed instructions use for where their text goes. By default the
+// response-language rule decides; English-only mode makes each say "in English".
+const WHERE_TEXT_GOES = /in the reply language|in the language of the owner request \(English if it is unclear\), not the language of the excerpts/g;
+export function inResponseLanguage(text, language) {
+  return englishOnly(language) ? text.replace(WHERE_TEXT_GOES, 'in English') : text;
 }

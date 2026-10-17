@@ -8,6 +8,7 @@
 // retry. The page text is untrusted data, wrapped and neutralized, never part
 // of the instruction.
 import { partialFinalizationAnswer, assistantMessageText } from './progress-finalization.mjs';
+import { inResponseLanguage } from './response-language.mjs';
 
 export const STOP_SYNTHESIS_LIMITS = Object.freeze({
   minPages: 2,          // pages with read receipts and excerpt text
@@ -46,7 +47,7 @@ const neutralize = value => String(value ?? '').replace(/[\u0000-\u0008\u000b\u0
 
 // The request's messages. Excerpts are cut to the overall budget in read order;
 // a page left with too little room is dropped.
-export function synthesisRequest({request, pages, limits = STOP_SYNTHESIS_LIMITS}) {
+export function synthesisRequest({request, pages, limits = STOP_SYNTHESIS_LIMITS, language}) {
   const owner = neutralize(request).slice(0, limits.requestChars);
   let remaining = limits.totalChars;
   const blocks = [];
@@ -61,7 +62,7 @@ export function synthesisRequest({request, pages, limits = STOP_SYNTHESIS_LIMITS
   }
   return {
     pages: blocks.length,
-    systemPrompt: STOP_SYNTHESIS_INSTRUCTION,
+    systemPrompt: inResponseLanguage(STOP_SYNTHESIS_INSTRUCTION, language),
     messages: [{role: 'user', content:
       `Owner request:\n<<<OWNER REQUEST>>>\n${owner}\n<<<END OWNER REQUEST>>>\n\n` +
       `Excerpts from ${blocks.length} pages read successfully in this response ` +

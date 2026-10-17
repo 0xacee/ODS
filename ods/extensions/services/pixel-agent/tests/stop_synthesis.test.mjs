@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createToolLoopGuard, WEB_LOOP_DELIVERY_REASON} from '../plugin/tool-loop-guard.mjs';
 import {RUN_PROGRESS_STOP_REASON} from '../plugin/run-progress-budget.mjs';
+import {inResponseLanguage} from '../plugin/response-language.mjs';
 import {createCompletionAssurance} from '../plugin/completion-assurance.mjs';
 import {externalContentBody, pageExcerpt, requestTerms} from '../plugin/page-excerpt.mjs';
 import {PROGRESS_FINALIZATION_INSTRUCTION, PROGRESS_FINALIZATION_NOTE, PROGRESS_READ_PAGES_HEADING} from '../plugin/progress-finalization.mjs';
@@ -85,7 +86,7 @@ const UNLISTED = 'https://www.techpowerup.com/gpu-specs/radeon-rx-9070.c4004';
 // Drives the real guard in OpenClaw's order for each model round: model call,
 // the assistant message written, before_tool_call for each call, then
 // after_tool_call and tool_result_persist for each result.
-function harness(name, {prompt = PROMPT, messages, stub = {}, limits} = {}) {
+function harness(name, {prompt = PROMPT, messages, stub = {}, limits, responseLanguage} = {}) {
   const context = {agentId: 'pixel', runId: `${name}-run`, sessionId: `${name}-session`, sessionKey: `agent:pixel:${name}`};
   const aborts = [];
   const calls = [];
@@ -101,7 +102,7 @@ function harness(name, {prompt = PROMPT, messages, stub = {}, limits} = {}) {
   };
   const guard = createToolLoopGuard({abortRun: (id, key) => { aborts.push([id, key]); return true; },
     abortRunAndDrain: async (id, key) => { aborts.push([id, key]); return {aborted: true, drained: true}; },
-    stopSynthesis: synthesis});
+    stopSynthesis: synthesis, responseLanguage});
   guard.observeRun(context, 'pixel', {prompt, ...(messages ? {messages} : {})});
   const sdk = {runId: context.runId, sessionId: context.sessionId, sessionKey: context.sessionKey};
   let rounds = 0, ids = 0;
@@ -364,6 +365,32 @@ test('the synthesis is skipped whenever its conditions do not hold', async () =>
   const next = stoppedRun('superseded');
   next.guard.observeRun({...next.context, runId: 'superseded-next-run'}, 'pixel', {prompt: 'And what about the RX 9070 XT?'});
   await check('the owner sent a new message', next, 'new-owner-message');
+});
+
+test('English-only: the guard tells the tool-free synthesis to answer in English, whatever the request language', async () => {
+  const prompt = 'Compare a RTX 5070 e a RX 9070 para jogos em 1440p: abra as fontes e cite os preços.';
+  const english = inResponseLanguage(STOP_SYNTHESIS_INSTRUCTION, 'en');
+  assert.notEqual(english, STOP_SYNTHESIS_INSTRUCTION);
+  for (const [responseLanguage, systemPrompt] of [['en', english], [undefined, STOP_SYNTHESIS_INSTRUCTION]]) {
+    const run = stoppedRun(`language-${responseLanguage}`, {prompt, responseLanguage});
+    await run.guard.settleDelivery(run.context.runId);
+    assert.equal(run.calls.length, 1, String(responseLanguage));
+    assert.equal(run.calls[0].systemPrompt, systemPrompt, String(responseLanguage));
+  }
+});
+
+test("English-only in a team or goal run: the owner's words, an English instruction and no language note",
+  {skip: !PYTHON_AVAILABLE && 'needs Python'}, async () => {
+  const {prompts} = dashboardApiTurns(PORTUGUESE);
+  for (const prompt of [prompts.builder, prompts.reviewer, prompts.goal]) {
+    const {guard, context, calls} = round069({prompt, responseLanguage: 'en'});
+    await guard.settleDelivery(context.runId);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].systemPrompt, inResponseLanguage(STOP_SYNTHESIS_INSTRUCTION, 'en'));
+    const content = calls[0].messages[0].content;
+    assert.ok(content.startsWith(`Owner request:\n<<<OWNER REQUEST>>>\n${PORTUGUESE.goal}\n<<<END OWNER REQUEST>>>\n\n`), content.slice(0, 300));
+    assert.ok(!`${calls[0].systemPrompt}${content}`.includes('[ODS language:'));
+  }
 });
 
 test('a timeout or rejected reply falls back to the stop text and page list, without retry; failures pause the synthesis', async () => {

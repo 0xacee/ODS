@@ -2191,6 +2191,31 @@ _ods_pixel_install_exec_control() {
         && "$(_ods_pixel_exec_control_stat mode "$root/sudo")" == 500 ]]
 }
 
+# PIXEL_RESPONSE_LANGUAGE=en fixes Pixel's replies, questions and created
+# content to English. The plugin reads this owner file from the OpenClaw state
+# folder at start. A plugin config key would break a rollback to a release
+# whose config schema rejects it; an older plugin simply ignores this file.
+_ods_pixel_install_response_language() {
+    local owner="$1" home="$2" language="${PIXEL_RESPONSE_LANGUAGE:-}"
+    local parent="$home/.openclaw" target="$home/.openclaw/.ods-response-language"
+    case "$language" in
+        ""|en) ;;
+        *) return 1 ;;
+    esac
+    [[ -d "$parent" && ! -L "$parent" \
+        && "$(_ods_pixel_exec_control_stat owner "$parent")" == "$owner" ]] || return 1
+    if [[ -e "$target" || -L "$target" ]]; then
+        [[ -f "$target" && ! -L "$target" \
+            && "$(_ods_pixel_exec_control_stat owner "$target")" == "$owner" ]] || return 1
+    fi
+    if [[ -z "$language" ]]; then
+        ods_pixel_run_as_owner "$owner" "$home" rm -f -- "$target"
+        return
+    fi
+    ods_pixel_run_as_owner "$owner" "$home" sh -c \
+        'umask 077 && printf "en\n" > "$1.new" && mv -f -- "$1.new" "$1"' sh "$target"
+}
+
 _ods_pixel_recreate_agent_sandbox() {
     local owner="$1" home="$2" openclaw_bin="$3" remaining
     [[ "$openclaw_bin" == /* && -x "$openclaw_bin" ]] || return 1
@@ -5381,6 +5406,15 @@ ods_pixel_install_default_agent() {
     if ! _ods_pixel_install_exec_control "$owner" "$home" \
         "$plugin_root/host/cancellable-exec.sh" "$plugin_root/host/noninteractive-sudo.sh"; then
         ai_bad "Could not install Pixel's owner-private cancellable execution control."
+        return 1
+    fi
+    if ! _ods_pixel_install_response_language "$owner" "$home"; then
+        case "${PIXEL_RESPONSE_LANGUAGE:-}" in
+            ""|en) ai_bad "Could not apply PIXEL_RESPONSE_LANGUAGE: $home/.openclaw/.ods-response-language must be a regular file owned by $owner, not a link, in a $home/.openclaw folder owned by $owner. Remove that file, then rerun the installer." ;;
+            *) ai_bad "PIXEL_RESPONSE_LANGUAGE=${PIXEL_RESPONSE_LANGUAGE} in .env is not supported. Set it to en, or remove the line to match the owner's language, then rerun the installer." ;;
+        esac
+        # Phase 11 stops with exit 1 here, which the installer's ERR trap does not see.
+        ai_bad "Need help? Ask on the ODS Discord: ${ODS_HELP_DISCORD_URL:-https://discord.gg/4ntNp9MAwC}"
         return 1
     fi
     gateway_alias="$(_ods_pixel_gateway_model_alias)" || {

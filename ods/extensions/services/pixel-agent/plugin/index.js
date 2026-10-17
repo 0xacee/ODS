@@ -9,7 +9,7 @@ import {createRuntimeIdentity} from './runtime-identity.mjs';
 import {fileURLToPath} from 'node:url';
 import {subagentDeliveryFor,delegationAccessIdentity} from './subagent-delivery.mjs';
 import {createActivityTool, ACTIVITY_CONTRACT} from './activity-display.mjs';
-import {managedTurnLanguageNote} from './response-language.mjs';
+import {inResponseLanguage, readResponseLanguage, responseLanguageTurnContext} from './response-language.mjs';
 import {previewRecoveryAllowed} from './preview-delivery-recovery.mjs';
 import {compactToolResultEnvelope} from './tool-result-envelope.mjs';
 import {withPiToolErrorContract} from './pi-tool-result.mjs';
@@ -338,6 +338,8 @@ export default definePluginEntry({
     const statusFile = statusFileFromEnv();
     const configuredContextWindow = api.pluginConfig?.modelContextWindow;
     const configuredLeanPrompt = api.pluginConfig?.leanPrompt === true;
+    // An owner can fix Pixel to English (PIXEL_RESPONSE_LANGUAGE=en in .env).
+    const configuredResponseLanguage = readResponseLanguage(undefined, message => api.logger.warn(message));
     // OpenClaw registers gateway HTTP routes and per-agent runtime hooks in
     // separate passes. Keep one process-local guard so the route can see the
     // opaque user -> active session mapping observed by the runtime hook.
@@ -373,6 +375,7 @@ export default definePluginEntry({
       // After a tool-limit stop without an answer: one tool-free completion by
       // the same configured model, from the pages the run read.
       stopSynthesis: createStopSynthesisClient({runtime: api.runtime, agentId: AGENT_ID}),
+      responseLanguage: configuredResponseLanguage,
       pendingClarifications,
       warn: (message) => api.logger.warn(message),
       info: (message) => api.logger.info?.(message),
@@ -431,6 +434,7 @@ export default definePluginEntry({
         verificationStatus: toolLoopGuard.verificationStatus(context?.runId),
         configuredContextWindow,
         configuredLeanPrompt,
+        configuredResponseLanguage,
         privateBrowserAccess,
         executionHost,
       });
@@ -445,13 +449,15 @@ export default definePluginEntry({
       // answer's note too: in a replacement session only the note names the
       // request, and the answer run's success already settled the card.
       // Portal wrote most of a team or goal message: a note says where the
-      // owner's own words are, for the response-language rule.
-      const languageNote = managedTurnLanguageNote({goal: goalProgress.active(context?.runId ?? event?.runId),
-        teamRole: managedTeamRole(ownerEvent)});
-      const appendContext = [goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : '', languageNote,
+      // owner's own words are, for the response-language rule. English-only
+      // mode puts its reminder there instead, on every turn.
+      const languageNote = responseLanguageTurnContext(configuredResponseLanguage,
+        {goal: goalProgress.active(context?.runId ?? event?.runId), teamRole: managedTeamRole(ownerEvent)});
+      const goalContract = inResponseLanguage(GOAL_CONTRACT, configuredResponseLanguage);
+      const appendContext = [goalProgress.active(context?.runId ?? event?.runId) ? goalContract : '', languageNote,
         toolLoopGuard.clarificationContextForRun(context?.runId ?? event?.runId) ??
           toolLoopGuard.clarificationContextForRun(delegationDelivery.ownerRunFor(context))].filter(Boolean).join('\n\n');
-      return contract ? { ...contract, ...(prependContext ? {prependContext} : {}), ...(appendContext ? {appendContext} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${executionLocationContext(context, AGENT_ID)} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : prependContext ? {prependContext} : undefined;
+      return contract ? { ...contract, ...(prependContext ? {prependContext} : {}), ...(appendContext ? {appendContext} : {}), appendSystemContext: `${inResponseLanguage(ACTIVITY_CONTRACT, configuredResponseLanguage)} ${executionLocationContext(context, AGENT_ID)} ${goalProgress.active(context?.runId ?? event?.runId) ? goalContract : ""} ${contract.appendSystemContext} ${inResponseLanguage(executionContext(), configuredResponseLanguage)} ${repositoryEvidence}` } : prependContext ? {prependContext} : undefined;
     });
     api.on("model_call_started", (event, context) =>
       toolLoopGuard.observeModelCall(event, context, AGENT_ID)
@@ -872,7 +878,7 @@ export default definePluginEntry({
       transport:api.pluginConfig?.workspacePreviewTransport,
     })), {names:['pixel_ods_workspace_artifact']});
     registerTool(api, createAgentSkillTool(), {names:['pixel_ods_skill']});
-    registerTool(api, createAskUserTool(), {names:['pixel_ods_ask_user']});
+    registerTool(api, createAskUserTool({responseLanguage: configuredResponseLanguage}), {names:['pixel_ods_ask_user']});
     registerTool(api, createGoalProgressTool(), {names:['pixel_ods_goal']});
     registerTool(api, createActivityTool(), {names:['pixel_ods_activity']});
     registerProjectBuild(api, onlyPixel, projectRunControl);
