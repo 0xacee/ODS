@@ -570,12 +570,18 @@ function Backup-ODSPortalRuntimeDirectory([string]$Label) {
     if (-not (Test-Path -LiteralPath $runtimeDir -PathType Container)) { return '' }
     $backup = Join-Path (Get-ODSPortalStateDir) ("portal-runtime.$Label-" + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $backup | Out-Null
-    foreach ($file in @(Get-ChildItem -LiteralPath $runtimeDir -File -Force)) {
-        if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            throw 'The Portal runtime folder contains a link; nothing was changed.'
+    try {
+        foreach ($file in @(Get-ChildItem -LiteralPath $runtimeDir -File -Force)) {
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'The Portal runtime folder contains a link; nothing was changed.'
+            }
+            if ($file.Name -match '\.log(\.\d+)?$' -or $file.Name -like '.ods-private-env-*') { continue }
+            Write-ODSPrivateFileBytes -Path (Join-Path $backup $file.Name) -Bytes ([IO.File]::ReadAllBytes($file.FullName))
         }
-        if ($file.Name -match '\.log(\.\d+)?$' -or $file.Name -like '.ods-private-env-*') { continue }
-        Write-ODSPrivateFileBytes -Path (Join-Path $backup $file.Name) -Bytes ([IO.File]::ReadAllBytes($file.FullName))
+    } catch {
+        # A partial backup is never left behind as if it were one.
+        Remove-Item -LiteralPath $backup -Recurse -Force
+        throw
     }
     return $backup
 }

@@ -215,6 +215,22 @@ try {
     Check (@(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.backup-*' }).Count -eq 0) 'a successful rerun leaves no backup behind'
     $script:owners = @{}
 
+    # --- Rerun: a runtime backup that cannot copy a file leaves nothing behind -
+    # Windows file locks only: another program holds runtime-options.json open.
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Reset-Scenario
+        $planBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json')))
+        $locked = [IO.File]::Open((Join-Path $runtimeDir 'runtime-options.json'), 'Open', 'Read', 'None')
+        $message = ''
+        try {
+            try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } catch { $message = $_.Exception.Message }
+        } finally { $locked.Dispose() }
+        Check ($message -and -not ($script:events -contains 'stop-llama') -and -not ($script:events -match '^register') -and
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json'))) -ceq $planBefore) 'a rerun whose runtime backup cannot copy a file stops before the runtime is touched'
+        Check (@(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*' }).Count -eq 0) 'a failed runtime backup leaves no partial backup that could pass for a complete one'
+        $script:owners = @{}
+    }
+
     # --- Rerun: a selected vision model keeps its projector while it is stored --
     Reset-Scenario
     $projectorPath = Join-Path (Get-ODSPortalModelsDir) 'mmproj-Pick-F16.gguf'
