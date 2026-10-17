@@ -1126,11 +1126,18 @@ cmd_restart() {
         macos_wait_for_bootstrap_compose_safe "restart" || return 1
         start_native_llama true || ai_warn "Native llama-server did not restart; continuing with the container services."
 
+        local restarted_mode
+        restarted_mode="$(read_env_value "$INSTALL_DIR/.env" ODS_MODE)"
         ai "Restarting all services..."
         # shellcheck disable=SC2086
         if ! docker compose $flags up -d --force-recreate --no-build --pull never; then
             ai_err "Failed to restart ODS services."
             return 1
+        fi
+        # The native agent keeps its startup mode independently of Docker.
+        # Reuse the shared authenticated comparison and launchd restart path.
+        if [[ -f "$INSTALL_DIR/bin/ods-host-agent.py" ]]; then
+            bash "$INSTALL_DIR/ods-cli" agent refresh-mode "$restarted_mode" || return 1
         fi
         ai_ok "All services restarted"
     fi

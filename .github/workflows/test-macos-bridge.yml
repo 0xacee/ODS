@@ -34,6 +34,8 @@ on:
       - 'ods/tests/test_macos_bootstrap_promote.py'
       - 'ods/tests/test_macos_bootstrap_dispatch.py'
       - 'ods/tests/test-macos-bootstrap-resume.sh'
+      - 'ods/tests/test-mode-restart-agent.sh'
+      - 'ods/ods-cli'
       - 'ods/tests/test_bootstrap_system_bash.py'
       - 'ods/bin/ods-host-agent.py'
       - '.github/workflows/test-macos-bridge.yml'
@@ -71,6 +73,8 @@ on:
       - 'ods/tests/test_macos_bootstrap_promote.py'
       - 'ods/tests/test_macos_bootstrap_dispatch.py'
       - 'ods/tests/test-macos-bootstrap-resume.sh'
+      - 'ods/tests/test-mode-restart-agent.sh'
+      - 'ods/ods-cli'
       - 'ods/tests/test_bootstrap_system_bash.py'
       - 'ods/bin/ods-host-agent.py'
       - '.github/workflows/test-macos-bridge.yml'
@@ -103,6 +107,8 @@ jobs:
           ods/tests/test_macos_bootstrap_dispatch.py
       - name: Verify saved macOS bootstrap resume arguments
         run: bash ods/tests/test-macos-bootstrap-resume.sh
+      - name: Verify mode application refreshes only a stale host agent
+        run: bash ods/tests/test-mode-restart-agent.sh
       - name: Verify the one-line bootstrap runs under the system Bash
         run: python -m pytest -q ods/tests/test_bootstrap_system_bash.py
       - name: Verify native retirement precedes destructive uninstall

@@ -10201,6 +10201,20 @@ class TestDockerServiceHealthSnapshot:
 
 class TestModelConfig:
 
+    @pytest.mark.parametrize(("startup", "expected"), [
+        ("local", "local"), ("cloud", "cloud"), ("hybrid", "hybrid"),
+        ("lemonade", "local"), (None, "unknown"), ("private-fixture", "unknown"),
+    ])
+    def test_effective_mode_is_bounded_startup_identity(self, tmp_path, monkeypatch, startup, expected):
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
+        monkeypatch.setattr(_mod, "STARTUP_ODS_MODE", startup)
+        monkeypatch.setenv("ODS_MODE", "cloud")
+        (tmp_path / ".env").write_text("ODS_MODE=local\nHF_TOKEN=private-fixture\n", encoding="utf-8")
+        handler = _FakeHandler(b"")
+        _mod.AgentHandler._handle_model_config(handler)
+        assert handler.parse_response() == {"configuredMode": "local", "effectiveMode": expected}
+
     @pytest.mark.parametrize(("contents", "expected"), [
         (None, "unknown"), ("", "unknown"), ("ODS_MODE=\n", "unknown"),
         ("ODS_MODE=invalid\n", "unknown"),
@@ -10218,7 +10232,7 @@ class TestModelConfig:
         handler = _FakeHandler(b"")
         _mod.AgentHandler._handle_model_config(handler)
         assert handler.response_code == 200
-        assert handler.parse_response() == {"configuredMode": expected}
+        assert handler.parse_response() == {"configuredMode": expected, "effectiveMode": "hybrid"}
         assert ("Cache-Control", "no-store") in handler.response_headers
 
     @pytest.mark.parametrize("failure", [PermissionError, UnicodeError])
@@ -10235,7 +10249,7 @@ class TestModelConfig:
         monkeypatch.setattr(_mod, "load_env", denied)
         handler = _FakeHandler(b"")
         _mod.AgentHandler._handle_model_config(handler)
-        assert handler.parse_response() == {"configuredMode": "unknown"}
+        assert handler.parse_response() == {"configuredMode": "unknown", "effectiveMode": "local"}
 
     def test_authenticated_fixed_route_reads_atomic_replacement(self, tmp_path, monkeypatch):
         import urllib.error
@@ -10268,7 +10282,7 @@ class TestModelConfig:
             headers = {"Authorization": "Bearer model-config-secret"}
             for mode in ("local", "cloud"):
                 with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=2) as response:
-                    assert json.load(response) == {"configuredMode": mode}
+                    assert json.load(response) == {"configuredMode": mode, "effectiveMode": "hybrid"}
                     assert response.headers["Cache-Control"] == "no-store"
                 if mode == "local":
                     replacement = tmp_path / ".env-new"
