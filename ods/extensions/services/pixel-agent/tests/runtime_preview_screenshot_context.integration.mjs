@@ -155,5 +155,5 @@ test('a compaction summary request carries the screenshot sentence, never its by
   const [inspectCall, result] = await direct(7);
   const text = serialize([{role: 'user', content: 'Fix the arena.'}, inspectCall, result]);
   assert.match(text, /\[Tool result\]: Preview inspection passed\. .*Screenshot attached: one 800x600 JPEG of the whole 800x600 preview viewport/s);
-  assert.doesNotMatch(text, new RegExp(result.content[1].data.slice(0, 32).replace(/[+/]/g, '\\$&')));
+  assert.equal(text.includes(result.content[1].data.slice(0, 32)), false);
 });
