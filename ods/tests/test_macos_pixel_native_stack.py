@@ -143,8 +143,12 @@ def test_shared_resolver_restores_native_selection_without_cache(tmp_path, mode)
         (directory / 'activation.json').write_text('{"status":"error"}')
     (tmp_path / 'docker-compose.base.yml').write_text('services: {}\n')
     (tmp_path / 'installers/macos/lib').mkdir(parents=True, exist_ok=True)
-    for name in ('pixel-native-stack.py', 'pixel-native-install.py'):
+    for name in ('pixel-native-stack.py', 'pixel-native-install.py',
+                 'dashboard-private-state.py', 'dashboard-private-state-worker.py'):
         shutil.copyfile(ROOT / 'installers/macos/lib' / name, tmp_path / 'installers/macos/lib' / name)
+    recipe = 'installers/macos/dashboard-private-state.compose.yaml'
+    shutil.copyfile(ROOT / recipe, tmp_path / recipe)
+    shutil.copyfile(ROOT / 'docker-compose.base.yml', tmp_path / 'docker-compose.base.yml')
     result = subprocess.run(['bash', str(ROOT / 'scripts/resolve-compose-stack.sh'),
         '--script-dir', str(tmp_path), '--gpu-backend', 'apple'], text=True, capture_output=True,
         env={**os.environ, 'PATH': str(Path(sys.executable).parent) + ':' + os.environ['PATH']})
@@ -210,6 +214,6 @@ def test_cli_cached_flags_use_the_same_native_selection_rules(tmp_path, mode):
         env={**os.environ, 'INSTALL_DIR': str(tmp_path)})
     if mode == 'ready':
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == ' '.join('-f ' + value for value in ['docker-compose.base.yml', *module.installer.FRAGMENTS])
+        assert result.stdout.strip() == ' '.join('-f ' + value for value in ['docker-compose.base.yml', recipe, *module.installer.FRAGMENTS])
     else:
         assert result.returncode != 0 and not result.stdout.strip()

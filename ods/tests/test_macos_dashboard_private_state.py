@@ -88,6 +88,8 @@ class MissingVolume(unittest.TestCase):
         self.stores = object.__new__(M.Stores)
         self.stores.root = Path.cwd()
         self.stores.env = {}
+        self.stores.binary = 'docker'
+        self.stores.compose_prefix = []
         self.name = 'ods_dashboard-pixel-images'
         self.absent = ('Error response from daemon: get '+self.name+': no such volume\n').encode()
 
