@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import * as fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -14,8 +15,8 @@ import vm from 'node:vm';
 import {MAX_PREVIEW_SCREENSHOTS_PER_RUN, MAX_SCREENSHOT_BYTES, MAX_SCREENSHOT_PIXELS, MAX_SCREENSHOT_RESULT, MAX_SCREENSHOT_SIDE,
   MIN_SCREENSHOT_BYTES, MIN_SCREENSHOT_PIXELS, MIN_SCREENSHOT_SIDE, SCREENSHOT_CAPABILITY, SCREENSHOT_OMISSIONS, jpegSize,
   previewScreenshotCapability, validatePreviewScreenshot} from '../plugin/preview-screenshot.mjs';
-import {INSPECTION_KIND, createWorkspacePreviewInspectTool, inspectionPlanHash, normalizeWorkspacePreviewInspectionParams}
-  from '../plugin/workspace-preview-inspect.mjs';
+import {INSPECTION_KIND, TRANSITION_UNTESTED, createWorkspacePreviewInspectTool, inspectionPlanHash, normalizeWorkspacePreviewInspectionParams,
+  unixRequest} from '../plugin/workspace-preview-inspect.mjs';
 import {PREVIEW_INSPECTION_TOOL} from '../plugin/preview-interaction-assurance.mjs';
 import {createToolLoopGuard} from '../plugin/tool-loop-guard.mjs';
 import {compactToolResultEnvelope} from '../plugin/tool-result-envelope.mjs';
@@ -96,7 +97,11 @@ const ACTIVE = {provider: 'ods-gateway', modelId: 'ods/current', modelRef: 'ods-
 
 test('only a model declared to accept images, with the matching input list, opens the gate', () => {
   assert.deepEqual(previewScreenshotCapability(config('supported'), ACTIVE), {supported: true, directive: DIRECTIVE});
-  assert.deepEqual(previewScreenshotCapability(config('supported')), {supported: true, directive: DIRECTIVE}, 'no SDK model reference');
+  // The declaration covers only a run that names the configured model.
+  for (const active of [undefined, {}, {provider: 'ods-gateway'}, {provider: 'ods-gateway', modelId: 'ods/current'}]) {
+    assert.deepEqual(previewScreenshotCapability(config('supported'), active), {supported: false, reason: 'unbound-model'}, JSON.stringify(active));
+  }
+  assert.deepEqual(previewScreenshotCapability(config('unknown')), {supported: false, reason: 'unknown'}, 'a closed declaration says so first');
   // An engine with a vision encoder whose Portal contract still says unknown.
   assert.deepEqual(previewScreenshotCapability(config('unknown'), ACTIVE), {supported: false, reason: 'unknown'});
   assert.deepEqual(previewScreenshotCapability(config('unsupported'), ACTIVE), {supported: false, reason: 'unsupported'});
@@ -147,7 +152,7 @@ function receipt({blank = false} = {}) {
         ...(blank ? {status: 'failed', errorCode: 'uniform_paint'} : {status: 'passed'})}],
     diagnostics: {renderedHiddenAttributeCount: 0, hiddenUntilFoundCount: 0}, blockedRequests: [], scope: SCOPE};
 }
-function registered({value, reserve = () => 'reserved', broker, activeModel = ACTIVE}) {
+function registered({value, reserve = () => 'reserved', broker, activeModel = ACTIVE, transition = () => undefined}) {
   const source = fs.readFileSync(new URL('../plugin/index.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const start = source.indexOf('    if (["unix", "native"].includes(api.pluginConfig?.workspacePreviewInspectionTransport)) {');
   const end = source.indexOf('\n    }\n', start);
@@ -160,7 +165,7 @@ function registered({value, reserve = () => 'reserved', broker, activeModel = AC
     onlyPixel: factory => factory, previewScreenshotCapability,
     createWorkspacePreviewInspectTool: options => createWorkspacePreviewInspectTool({...options,
       request: async request => { requests.push(structuredClone(request)); return broker(request); }}),
-    toolLoopGuard: {previewInspectionTransition: () => undefined,
+    toolLoopGuard: {previewInspectionTransition: transition,
       reservePreviewScreenshot: (id, params) => { reserved.push([id, params]); return reserve(id, params); }},
   });
   return {tool, requests, reserved};
@@ -190,6 +195,31 @@ test('a blank arena fails its paint check and still shows the model what is on s
   assert.match(result.content[0].text, /uniform_paint|captured one color only/);
   assert.deepEqual(result.content.map(block => block.type), ['text', 'image']);
   assert.match(result.content[0].text, /taken after all 2 steps/);
+});
+
+test('an untested show/hide transition is incomplete and still carries the screenshot', async () => {
+  const {tool} = registered({value: config('supported'), broker: () => ({...receipt(), screenshot: captured(IMAGE)}),
+    transition: () => ({target: 'Rules', initiallyHidden: true})});
+  const result = await tool.execute('call-8', structuredClone(PLAN));
+  assert.equal(result.isError, true);
+  assert.equal(result.details.errorCode, TRANSITION_UNTESTED);
+  assert.match(result.content[0].text, /^Preview inspection INCOMPLETE - not verified\..* Screenshot attached: one 800x600 JPEG/s);
+  assert.deepEqual(result.content.map(block => block.type), ['text', 'image']);
+});
+
+test('a run on another model, or one that names no model, gets no screenshot and says why', async () => {
+  for (const [activeModel, why] of [[{...ACTIVE, modelRef: 'cloud/other'}, 'this run uses a model other than the configured one, whose image input is not declared'],
+    // null: no model in the tool context (undefined would select the helper's default).
+    [null, 'this run did not report which model it uses, so its image input is not known']]) {
+    const {tool, requests, reserved} = registered({value: config('supported'), activeModel, broker: request => {
+      assert.equal(Object.hasOwn(request, 'screenshot'), false, 'no directive reaches the inspector');
+      return receipt();
+    }});
+    const result = await tool.execute('call-9', structuredClone(PLAN));
+    assert.deepEqual([reserved, requests.length], [[], 1]);
+    assert.deepEqual(result.content.map(block => block.type), ['text']);
+    assert.ok(result.content[0].text.includes(`No screenshot attached: ${why}.`), why);
+  }
 });
 
 test('a text-only, unknown or undeclared model gets the receipt exactly as before plus why no screenshot came', async () => {
@@ -255,6 +285,7 @@ test('the tool description offers the screenshot with the run bound it enforces'
   const {description} = createWorkspacePreviewInspectTool({request: async () => receipt()});
   assert.match(description, new RegExp(`at most ${MAX_PREVIEW_SCREENSHOTS_PER_RUN} per run\\) of the whole preview viewport`));
   assert.match(description, /look at it before saying how the page looks\. Otherwise the result says why it has none\./);
+  assert.match(description, /When ODS declares the selected model able to read images, the result also carries one JPEG screenshot/);
 });
 
 test('the run guard reserves at most the per-run bound for exactly the pending inspection', () => {
@@ -293,6 +324,11 @@ test('the run guard reserves at most the per-run bound for exactly the pending i
     const second = begin('run-2');
     pending(second, 'call-next');
     assert.equal(guard.reservePreviewScreenshot('call-next', PLAN), 'reserved');
+    // A pending call of a run its session has moved past is not bound either.
+    const stale = begin('run-4');
+    pending(stale, 'call-stale');
+    begin('run-5');
+    assert.equal(guard.reservePreviewScreenshot('call-stale', PLAN), 'unbound');
     // Without an installed inspector nothing is ever bound.
     const disabled = createToolLoopGuard({abortRun: () => true});
     assert.equal(disabled.reservePreviewScreenshot('call-0', PLAN), 'unbound');
@@ -317,7 +353,7 @@ test('every preview turn tells the model it may get a screenshot and must look; 
     ODS_WORKSPACE_VISUAL_CONTINUATION_CONTRACT, ODS_WORKSPACE_VERIFICATION_CONTINUATION_CONTRACT]) {
     assert.equal(contract.split(PREVIEW_SIGHT_CONTRACT).length, 2);
   }
-  assert.match(PREVIEW_SIGHT_CONTRACT, /pixel_ods_workspace_preview_inspect also returns one screenshot of the preview after its steps: look at it/);
+  assert.match(PREVIEW_SIGHT_CONTRACT, /^When ODS declares the selected model able to read images, pixel_ods_workspace_preview_inspect also returns one screenshot of the preview after its steps: look at it/);
   assert.match(PREVIEW_SIGHT_CONTRACT, /A result without one says why; then describe the page only from its checks, never as seen\./);
   for (const core of [ODS_CONVERSATION_CONTRACT, ODS_COMPACT_CONVERSATION_CONTRACT]) assert.equal(core.includes(PREVIEW_SIGHT_CONTRACT), false);
 });
@@ -336,6 +372,34 @@ test('a Tool Search result with the largest screenshot stays within the run guar
   const {tool} = registered({value: config('supported'), broker: () => ({...receipt(), screenshot: captured(largest)})});
   const result = await tool.execute('call-7', structuredClone(PLAN));
   assert.deepEqual(result.content.map(block => block.type), ['text', 'image']);
-  const envelope = {tool: {id: `openclaw:pixel-ods:${PREVIEW_INSPECTION_TOOL}`, source: 'openclaw', sourceName: 'pixel-ods', name: PREVIEW_INSPECTION_TOOL}, result};
+  // Tool Search's compactEntry: identity, label and the full tool description.
+  const envelope = {tool: {id: `openclaw:pixel-ods:${PREVIEW_INSPECTION_TOOL}`, source: 'openclaw', sourceName: 'pixel-ods', name: PREVIEW_INSPECTION_TOOL,
+    label: PREVIEW_INSPECTION_TOOL, description: tool.description}, result};
   assert.ok(Buffer.byteLength(JSON.stringify(envelope)) < bound);
+});
+
+// The real unix transport: a directive raises the response bound to the
+// receipt plus one JPEG, and only then. Windows serves the same stream API
+// over a named pipe.
+test('the inspector transport admits a screenshot response only for a directed request', async () => {
+  const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\pixel-screenshot-${process.pid}-${Date.now()}`
+    : path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-screenshot-')), 'control.sock');
+  let reply;
+  const server = net.createServer(socket => {
+    let raw = '';
+    socket.on('data', chunk => { raw += chunk; if (raw.endsWith('\n')) socket.end(`${JSON.stringify(reply)}\n`); });
+  });
+  await new Promise(resolve => server.listen(socketPath, resolve));
+  try {
+    const request = normalizeWorkspacePreviewInspectionParams(structuredClone(PLAN));
+    reply = {...receipt(), screenshot: captured(jpeg(1200, 675, {body: Buffer.alloc(64 * 1024, 7)}))};
+    assert.ok(Buffer.byteLength(JSON.stringify(reply)) > 32768, 'over the plain receipt bound');
+    assert.deepEqual(await unixRequest({...request, screenshot: DIRECTIVE}, {socketPath}), reply);
+    await assert.rejects(unixRequest(request, {socketPath}), /oversized/, 'a plain request keeps the 32 KiB bound');
+    reply = {...receipt(), screenshot: captured(jpeg(1200, 675, {body: Buffer.alloc(MAX_SCREENSHOT_RESULT, 7)}))};
+    await assert.rejects(unixRequest({...request, screenshot: DIRECTIVE}, {socketPath}), /oversized/, 'and a directed one its own bound');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    if (process.platform !== 'win32') fs.rmSync(path.dirname(socketPath), {recursive: true, force: true});
+  }
 });

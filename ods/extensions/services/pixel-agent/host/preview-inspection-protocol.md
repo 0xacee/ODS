@@ -603,10 +603,10 @@ the evidence policy.
 
 ## Viewport screenshot
 
-A model that accepts images can look at its own published preview: one JPEG
-of the whole inspection viewport, taken after the steps that ran, beside the
-receipt. A text-only receipt can say "the arena is about 95% one colour"; it
-cannot show what the canvas draws.
+A model that ODS declares able to read images can look at its own published
+preview: one JPEG of the whole inspection viewport, taken after the steps that
+ran, beside the receipt. A text-only receipt can say "the arena is about 95%
+one colour"; it cannot show what the canvas draws.
 
 **Who gets it.** The plugin
 (`plugin/preview-screenshot.mjs` `previewScreenshotCapability`) reads the same
@@ -614,11 +614,23 @@ declaration Portal's owner-image path and the runtime contract readback use
 (`plugin/context-compaction.mjs` `modelFor`, `plugin/model-runtime-readback.mjs`):
 the plugin's `modelImageInput` and the selected model row's `input` list, which
 must match (`["text","image"]` unless `unsupported`). Only `supported` opens the
-gate. `unknown`, `unsupported`, an undeclared or inconsistent contract, or a run
-on a model other than the configured one stays text-only, exactly as before,
-and the result says which. Unlike the owner-image path, `unknown` never becomes
+gate, and only for a run whose tool context names the configured model
+(`activeModel.modelRef`). `unknown`, `unsupported`, an undeclared or
+inconsistent contract, a run on a model other than the configured one, or a
+run that names no model stays text-only, exactly as before, and the result
+says which. Unlike the owner-image path, `unknown` never becomes
 an image test here: no owner consented to one for this purpose. OpenClaw's own
 transport would also drop a tool image for a row without `image` input.
+
+No route ODS sets up by default declares `supported` yet. Installs start at
+`unknown` (`installers/lib/pixel-onboarding.py`), remote routes are written as
+`unknown`, and the curated lookup (`bin/ods-host-agent.py`
+`_pixel_model_image_input`) needs a `vision` boolean that no record in
+`config/model-library.json` has. Today `supported` comes only from
+`ODS_MODEL_PROFILES=enabled` with a passing vision probe during a model switch,
+so screenshots stay off until a route declares its image input (for example a
+readback of llama-server `/props` `modalities.vision`, or of another engine's
+reported vision state, through `_reconcile_ods_managed_pixel_model`).
 
 **The directive.** When the gate is open and the run guard grants one of the
 run's at most three screenshots (`tool-loop-guard.mjs`
@@ -675,16 +687,28 @@ replays) returns exactly the earlier text.
 **Persistence and context.** Portal's owner-visible history holds owner and
 assistant text and owner image references only; a tool image never enters it.
 The session transcript keeps the image in the tool result: ODS's runtime sends
-the persisted copy of a result to the next model request
+the persisted copy of a result to the next model request of the attempt
 (`openclaw-compaction-budget.json`), so removing it there would hide it from
-the model. Old screenshots leave the prompt by the pinned runtime's own
-rules: three per run at most; images in turns older than the last three
-(the current one counts once it has an assistant message) are replaced by
-"[image data removed - already processed by model]" before each prompt; and a
-compaction summary request carries tool-result text only, so it keeps the
-screenshot sentence and never the bytes. The text sentence follows the
-summary, so the summary's 2,000-character tool-result excerpt keeps it
-unless the summary itself is long.
+the model. A screenshot is evidence for the run that took it, and the gate
+only vouches for that run's model. The same recipe therefore extends the
+pinned runtime's history image pruning (`pruneProcessedHistoryImages`, run
+before every model request): a preview screenshot before the latest user
+message, as a direct result or inside a Tool Search `tool_call` result, is
+replaced by "[image data removed - already processed by model]". The next
+owner turn never resends it, whatever model the Portal alias serves by then;
+an `unknown` route switched in later (its row also declares image input)
+receives none, and a route whose vision fails at runtime can stall only the
+run that took the screenshot. One request carries at most one run's three
+screenshots. A host retry prompt inside a run is a user message too: the retry
+keeps the screenshot sentence and may inspect again within the run's bound.
+Owner images keep the runtime's own rule (pruned once their turn is older than
+the last three completed turns). A compaction summary request carries
+tool-result text only, so it keeps the screenshot sentence and never the
+bytes. The text sentence follows the summary, so the summary's 2,000-character
+tool-result excerpt keeps it unless the summary itself is long. A Tool Search
+`tool_call` result also keeps the child's whole result in its `details`
+(`openclaw-image-envelope.json`), so the transcript holds that screenshot's
+base64 twice; the model never receives the `details` copy.
 
 `test_preview_inspection_screenshot.py` covers the directive bounds and its
 place beside the plan, the request frame, the JPEG frame reader against real
@@ -698,7 +722,11 @@ the key that moves it; the blank canvas's does not), a wide viewport and an
 undirected run. `preview_screenshot.test.mjs` checks the Python/JavaScript
 mirror, the capability gate, smaller limits, the registered tool's image block
 for a vision configuration and its absence (with the reason) for text-only,
-unknown and undeclared ones, the run bound, forged broker answers and
-persistence. `runtime_preview_screenshot_context.integration.mjs` runs the
-pinned runtime's history pruning and compaction serializer on real tool
-results.
+unknown and undeclared ones and for a run on another or no model, the
+incomplete-transition result, the run bound and its session binding, forged
+broker answers, the unix transport's response bound and persistence.
+`runtime_preview_screenshot_context.integration.mjs` runs the reviewed
+history pruning, the Tool Search envelope, the openai-completions request and
+the compaction serializer on real tool results: earlier runs' screenshots
+(direct and through Tool Search) leave the next request after a model switch,
+the current run keeps its own, and owner images keep the three-turn rule.

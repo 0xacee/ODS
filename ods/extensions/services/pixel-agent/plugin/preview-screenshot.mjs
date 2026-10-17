@@ -27,7 +27,8 @@ const positive = value => Number.isSafeInteger(value) && value > 0;
 const unsupported = reason => Object.freeze({supported: false, reason});
 
 // config: the gateway's current runtime config. activeModel: the tool
-// context's {provider, modelId, modelRef} for this run, when the SDK gives one.
+// context's {provider, modelId, modelRef} for this run. A run that does not
+// name its model gets no screenshot: the declaration is only for that model.
 export function previewScreenshotCapability(config, activeModel) {
   const agents = config?.agents?.list;
   const agent = Array.isArray(agents) ? agents.filter(item => item?.id === 'pixel') : [];
@@ -44,6 +45,8 @@ export function previewScreenshotCapability(config, activeModel) {
   if (!['supported','unsupported','unknown'].includes(declared) || matches.length !== 1 ||
       JSON.stringify(matches[0].input) !== JSON.stringify(declared === 'unsupported' ? ['text'] : ['text','image'])) return unsupported('mismatch');
   if (declared !== 'supported') return unsupported(declared);
+  // The declaration opens the gate only for a run that names this model.
+  if (activeModel?.modelRef !== selected) return unsupported('unbound-model');
   // A smaller limit the operator or the model declares wins: OpenClaw's tool
   // image side limit and the model row's own mediaInput.image limits.
   const limits = matches[0].mediaInput?.image ?? {};
@@ -108,6 +111,7 @@ const WHY = Object.freeze({
   undeclared: 'this installation does not declare whether the selected model accepts images',
   mismatch: "the declared image input does not match the selected model's configured inputs",
   'other-model': 'this run uses a model other than the configured one, whose image input is not declared',
+  'unbound-model': 'this run did not report which model it uses, so its image input is not known',
   'model-limit': "the selected model's image limits are below the smallest screenshot the inspector takes",
   budget: `this run already received ${MAX_PREVIEW_SCREENSHOTS_PER_RUN} preview screenshots, the most one run gets`,
   unbound: 'this inspection is not bound to an active Portal run',
