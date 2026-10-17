@@ -716,6 +716,15 @@ function Invoke-ODSPortalRuntimeCutover {
     # dashboard holds the same lock, so its stop never races this one.
     $change = Enter-ODSPortalRuntimeChange
     try {
+        # Setup read what ODS runs before it took the lock. A switch, Unload or
+        # Resume that finished meanwhile is the owner's latest choice: stop
+        # with nothing changed instead of undoing it.
+        $current = Get-ODSPortalExistingRuntime
+        if ($current.Kind -ne $Existing.Kind -or $current.WasEnabled -ne $Existing.WasEnabled -or
+            ($current.Selection | ConvertTo-Json -Compress) -cne ($Existing.Selection | ConvertTo-Json -Compress)) {
+            throw ('The model was changed from the dashboard while setup was running, so setup did not change the model ' +
+                'runtime. Run setup again; it keeps that change.')
+        }
         $label = if ($Existing.Kind -eq 'lemonade') { 'lemonade-backup' } else { 'backup' }
         $backup = if ($Existing.Kind -ne 'none') { Backup-ODSPortalRuntimeDirectory $label } else { '' }
         # Quiesce only proven ODS identities. A user's own Lemonade keeps running.

@@ -12,7 +12,12 @@ function Check([bool]$Condition, [string]$Message) {
     $script:checks++
     Microsoft.PowerShell.Utility\Write-Host "PASS $Message"
 }
-function Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Text) $script:output.Add([string]($Text -join ' ')) }
+function Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Text)
+    $line = [string]($Text -join ' ')
+    $script:output.Add($line)
+    # A scenario's dashboard change finishes once setup says it is waiting.
+    if ($script:releaseOnWait -and $line -match 'setup continues once it finishes') { $script:releaseOnWait.Set() }
+}
 # Process control and installers must never be reached by the orchestration.
 function Stop-Process { throw 'Stop-Process must never be used by the migration.' }
 function Start-Process { throw 'Start-Process (msiexec or any runtime) must never be used by the migration.' }
@@ -143,6 +148,8 @@ try {
     function Test-ODSNativeLlamaQualification { param($ExecutablePath, $ExpectedBuild, $AdapterName, $CodeIntegrity)
         $script:events.Add('qualify')
         if ($script:qualifyFailure) { throw $script:qualifyFailure }
+        # Setup already read what ODS runs; a dashboard change can start now.
+        if ($script:duringStaging) { & $script:duringStaging }
         $devices = if ($script:device) { @($script:device) } else { @() }
         return [pscustomobject]@{ Build = 9014; Commit = 'd4b0c22f'; Devices = $devices; Device = $script:device; PolicyHint = $script:policyHint }
     }
@@ -177,6 +184,7 @@ try {
         $script:prompts = [Collections.Generic.List[string]]::new()
         $script:consent = $true; $script:installFailure = ''; $script:qualifyFailure = ''; $script:readyFailure = ''; $script:startFailure = ''
         $script:restoredReadyFailure = ''; $script:llamaStopFailure = ''; $script:lemonadeStopFailure = ''
+        $script:duringStaging = $null; $script:releaseOnWait = $null
         $script:policyHint = ''; $script:owners = @{}; $script:reserved = @()
         $script:device = [pscustomobject]@{ Name = 'Vulkan0'; Description = 'AMD Radeon RX 9070 XT'; TotalMiB = 16304; FreeMiB = 16000 }
     }
@@ -323,6 +331,67 @@ try {
     $probe = Start-ControlHolder 0
     Stop-ControlHolder $probe
     Check $true 'a completed rerun releases the model-change lock'
+    $script:owners = @{}
+
+    # --- Rerun: a dashboard change that finishes while setup waits is kept ----
+    # The dashboard takes the lock after setup read what ODS runs, changes the
+    # runtime and finishes once setup waits. Setup must not act on its earlier
+    # read: that would undo the change.
+    $changedMessage = 'The model was changed from the dashboard while setup was running, so setup did not change the model runtime. Run setup again; it keeps that change.'
+    function Invoke-RerunDuringDashboardChange([scriptblock]$Change) {
+        $script:dashboardChange = $Change
+        $script:duringStaging = {
+            $script:holder = Start-ControlHolder 20000
+            $script:releaseOnWait = $script:holder.Release
+            & $script:dashboardChange
+        }
+        $script:ODSPortalRuntimeChangeWaitSeconds = 30
+        $failure = ''
+        try {
+            try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } catch { $failure = $_.Exception.Message }
+        } finally {
+            if ($script:holder) { Stop-ControlHolder $script:holder; $script:holder = $null }
+            $script:ODSPortalRuntimeChangeWaitSeconds = 1200
+        }
+        return $failure
+    }
+    # An Unload finishes during the wait, and the new runtime would then fail:
+    # setup must not restart the model the owner just unloaded.
+    Reset-Scenario
+    $planBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json')))
+    $script:readyFailure = 'llama-server exited during startup with code 1.'
+    $message = Invoke-RerunDuringDashboardChange {
+        # The controller's Unload: the stopped intent, then the task disabled.
+        Set-ODSPortalRuntimeIntent 'stopped'
+        $script:tasks[$llamaTask].State = 'Disabled'
+    }
+    Check ($message -ceq $changedMessage -and
+        (($script:output -join ' ') -match 'A model change started from the dashboard is still running; setup continues once it finishes\.')) 'a rerun that waited for a dashboard Unload stops and says the change is kept'
+    Check (-not ($script:events -match '^(stop-llama|register|unregister|disable|enable|start|ready)') -and
+        $script:tasks[$llamaTask].State -eq 'Disabled' -and -not (Test-ODSNativeLlamaWanted (Join-Path $runtimeDir 'intent.json')) -and
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json'))) -ceq $planBefore -and
+        @(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*' }).Count -eq 0) 'that rerun leaves the model unloaded: nothing restarted, re-armed or backed up'
+    $probe = Start-ControlHolder 0
+    Stop-ControlHolder $probe
+    $script:tasks[$llamaTask].State = 'Ready'; Set-ODSPortalRuntimeIntent 'running'
+    # A switch to another stored model finishes during the wait.
+    Reset-Scenario
+    [IO.File]::WriteAllText((Join-Path (Get-ODSPortalModelsDir) 'Switched-To.gguf'), 'fixture model')
+    $selectionBefore = [IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json'))
+    $message = Invoke-RerunDuringDashboardChange {
+        $switched = Get-Content -LiteralPath (Join-Path $runtimeDir 'runtime.json') -Raw | ConvertFrom-Json
+        $switched.GgufFile = 'Switched-To.gguf'; $switched.ContextSize = 16384
+        Write-ODSPrivateEnvFile -Path (Join-Path $runtimeDir 'runtime.json') -Content ($switched | ConvertTo-Json -Compress)
+    }
+    $kept = Get-Content -LiteralPath (Join-Path $runtimeDir 'runtime.json') -Raw | ConvertFrom-Json
+    Check ($message -ceq $changedMessage -and $kept.GgufFile -ceq 'Switched-To.gguf' -and $kept.ContextSize -eq 16384 -and
+        -not ($script:events -match '^(stop-llama|register|disable|enable|start|ready)') -and $script:tasks[$llamaTask].State -eq 'Ready' -and
+        @(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*' }).Count -eq 0) 'a rerun that waited for a dashboard model switch keeps the switched model and changes nothing'
+    $probe = Start-ControlHolder 0
+    Stop-ControlHolder $probe
+    Check $true 'a rerun that met a finished dashboard change releases the model-change lock'
+    Write-ODSPrivateFileBytes -Path (Join-Path $runtimeDir 'runtime.json') -Bytes $selectionBefore
+    Remove-Item -LiteralPath (Join-Path (Get-ODSPortalModelsDir) 'Switched-To.gguf')
     $script:owners = @{}
 
     # --- Rerun: a selected vision model keeps its projector while it is stored --
