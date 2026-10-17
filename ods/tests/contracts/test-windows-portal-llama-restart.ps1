@@ -453,7 +453,7 @@ try {
             Assert-Restart (-not $message -and ($script:stopCalls -join ',') -ceq 'disable,kill:101') 'a stopped wrapper recovers only its llama-server with the matching saved identity'
         } else { Assert-Restart ($message -and -not ($script:stopCalls -match '^kill')) "$case never treats stale PID evidence as process ownership" }
     }
-    foreach ($case in @('foreign-user', 'foreign-action', 'foreign-plan', 'lemonade-plan', 'duplicate-task', 'unrelated-root', 'old-child', 'recycled-pid', 'changed-task', 'queued-task', 'unknown-orphan')) {
+    foreach ($case in @('foreign-user', 'foreign-action', 'foreign-plan', 'lemonade-plan', 'duplicate-task', 'unrelated-root', 'old-child', 'old-child-other-case', 'recycled-pid', 'changed-task', 'queued-task', 'unknown-orphan')) {
         Reset-LlamaStopFixture
         switch ($case) {
             'foreign-user' { $script:stopTask.Principal.UserId = 'other-user' }
@@ -463,6 +463,10 @@ try {
             'duplicate-task' { $script:stopTask = @($script:stopTask, $script:stopTask) }
             'unrelated-root' { $script:engineId = 777 }
             'old-child' { $script:processNodes[1].CreationDate = [datetime]'2025-01-01T00:00:00' }
+            # Windows paths ignore letter case: the server's own folder in other
+            # case is still that folder, so the older process still refuses.
+            'old-child-other-case' { $script:processNodes[1].CreationDate = [datetime]'2025-01-01T00:00:00'
+                $script:processNodes[1].ExecutablePath = $plan.ExecutablePath.ToUpperInvariant() }
             'recycled-pid' { $script:reusedPid = 101 }
             'changed-task' { $script:changedTask = $true }
             'queued-task' { $script:engineId = 0; $script:stopTask.State = 'Queued' }

@@ -78,6 +78,34 @@ try {
     . $library
 
     if ($onWindows) {
+        # --- The real Edge lookup ------------------------------------------------
+        # The Program Files variables point at fixture roots. Edge lives in its
+        # Application folder, and the 32-bit root, where Edge installs, wins.
+        $previousX86 = ${env:ProgramFiles(x86)}
+        $previousProgramFiles = $env:ProgramFiles
+        $x86Root = Join-Path $fixture 'ProgramFilesX86'
+        $programFilesRoot = Join-Path $fixture 'ProgramFiles'
+        try {
+            [Environment]::SetEnvironmentVariable('ProgramFiles(x86)', $x86Root, 'Process')
+            [Environment]::SetEnvironmentVariable('ProgramFiles', $programFilesRoot, 'Process')
+            Check ($null -eq (Get-ODSEdgePath)) 'no msedge.exe under either Program Files root means no Edge'
+            $programFilesEdge = Join-Path $programFilesRoot 'Microsoft\Edge\Application\msedge.exe'
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $programFilesEdge)
+            [IO.File]::WriteAllText($programFilesEdge, 'edge fixture, never executed')
+            Check ((Get-ODSEdgePath) -ceq $programFilesEdge) 'Edge is found in Microsoft\Edge\Application under Program Files'
+            $x86Edge = Join-Path $x86Root 'Microsoft\Edge\Application\msedge.exe'
+            $null = New-Item -ItemType Directory -Force -Path $x86Edge
+            Check ((Get-ODSEdgePath) -ceq $programFilesEdge) 'a folder named msedge.exe is not Edge'
+            Remove-Item -LiteralPath $x86Edge
+            [IO.File]::WriteAllText($x86Edge, 'edge fixture, never executed')
+            Check ((Get-ODSEdgePath) -ceq $x86Edge) 'Edge in the 32-bit Program Files folder, where it installs, comes first'
+            [Environment]::SetEnvironmentVariable('ProgramFiles(x86)', $null, 'Process')
+            Check ((Get-ODSEdgePath) -ceq $programFilesEdge) 'without a 32-bit Program Files variable Edge is still found'
+        } finally {
+            [Environment]::SetEnvironmentVariable('ProgramFiles(x86)', $previousX86, 'Process')
+            [Environment]::SetEnvironmentVariable('ProgramFiles', $previousProgramFiles, 'Process')
+        }
+
         # --- Edge present: the ODS app on the desktop and in the Start menu ------
         $edgeFixture = Join-Path (Join-Path $fixture 'Edge') 'msedge.exe'
         $null = New-Item -ItemType Directory -Path (Split-Path -Parent $edgeFixture)

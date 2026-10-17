@@ -83,13 +83,14 @@ try {
         if ($script:failStart) { throw 'fixture task start failed' }
         $script:running = $true
     }
+    # Stop-ODSPortalRuntime disarms sign-in startup itself (its order is pinned
+    # in test-windows-portal-llama-restart.ps1) and is a fixture here, so the
+    # controller never disables the task on its own.
     function Disable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
-        Assert-Control (-not (Test-ODSNativeLlamaWanted (Join-Path (Split-Path -Parent $planPath) 'intent.json'))) 'stop intent is durable before retries are disabled'
-        $script:taskDisabled = $true
+        throw 'The controller must not disarm sign-in startup ahead of Stop-ODSPortalRuntime.'
     }
     function Enable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
         Assert-Control (Test-ODSNativeLlamaWanted (Join-Path (Split-Path -Parent $planPath) 'intent.json')) 'explicit start publishes running intent before enabling the owned task'
-        $script:taskDisabled = $false
     }
     function Wait-ODSPortalRuntimeReady($Registration, [int]$Seconds = 1020) {
         if ($script:failReady) { throw 'fixture load failure' }
@@ -302,10 +303,10 @@ try {
     $null = Assert-ControlError (New-ControlRequest 'stop' (Get-ODSPortalPlanDigest $planPath)) 'stop_unverified'
     $script:occupied = $false
     # The stop itself disarms and re-arms; the controller never disarms ahead of it.
-    $script:failStop = $true; $script:taskDisabled = $false
+    $script:failStop = $true
     $failed = $null
     try { $null = Invoke-ODSPortalModelControl (New-ControlRequest 'stop' (Get-ODSPortalPlanDigest $planPath)) } catch { $failed = $_.Exception }
-    Assert-Control ($failed.Message -eq 'fixture stop refused' -and -not $script:taskDisabled -and
+    Assert-Control ($failed.Message -eq 'fixture stop refused' -and
         (Test-ODSNativeLlamaWanted (Join-Path (Split-Path -Parent $planPath) 'intent.json'))) 'a refused Unload leaves sign-in startup armed'
     $script:failStop = $false
     # --- Vision projector (WP2): planned only for a launcher that declares it ---
