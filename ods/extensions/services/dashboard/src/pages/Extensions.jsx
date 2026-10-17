@@ -988,16 +988,15 @@ function ExtensionCard({ ext, hermesProxy, gpuBackend, agentAvailable, onDetails
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <LlmSwapBadge llm={ext.llm} />
-            {isCore && !isManagedBuiltin ? (
+            {isCore && (
               <span
                 className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/15 uppercase tracking-wider cursor-help"
-                title={ext.id === 'open-webui' && webuiSelection?.supported && webuiSelection.enabled === false ? 'Optional chat service available to add' : 'Built-in service — managed by ODS'}
+                title="Bundled with ODS; runtime status is shown separately"
               >
-                {ext.id === 'open-webui' && webuiSelection?.supported && webuiSelection.enabled === false ? 'optional' : 'core'}
+                built-in
               </span>
-            ) : (
-              <StatusBadge status={status} statusStyle={statusStyle} ext={ext} gpuBackend={gpuBackend} onConsole={onConsole} />
             )}
+            <StatusBadge status={status} statusStyle={statusStyle} ext={ext} gpuBackend={gpuBackend} onConsole={onConsole} />
             {isToggleable && (
               <button
                 disabled={actionDisabled}
