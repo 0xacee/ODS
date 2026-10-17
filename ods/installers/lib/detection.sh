@@ -400,6 +400,15 @@ detect_gpu() {
     if $_nvidia_hw && command -v nvidia-smi &> /dev/null; then
         local raw
         if raw=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null) && [[ -n "$raw" ]]; then
+            # A row whose memory is [N/A] beside a GPU with a memory size is
+            # not a GPU for the model (Windows on Arm lists an NVIDIA NPU that
+            # way). A lone [N/A] row stays: that is the unified-memory case
+            # below (GB10, GB200).
+            local _first_gpu_row=1
+            if awk -F',' '$2 ~ /[0-9]/ { found = 1 } END { exit !found }' <<< "$raw"; then
+                _first_gpu_row=$(awk -F',' '{ m = $2; gsub(/^[ \t]+|[ \t]+$/, "", m) } m != "[N/A]" && m != "N/A" { print NR; exit }' <<< "$raw")
+                raw=$(awk -F',' '{ m = $2; gsub(/^[ \t]+|[ \t]+$/, "", m) } m != "[N/A]" && m != "N/A"' <<< "$raw")
+            fi
             GPU_BACKEND="nvidia"
             GPU_MEMORY_TYPE="discrete"
             GPU_INFO="$raw"
@@ -425,9 +434,10 @@ detect_gpu() {
                     fi
                 fi
             fi
-            # Extract PCI device ID from first GPU
+            # Extract PCI device ID from first GPU (nvidia-smi lists devices
+            # in the same order for every query)
             local pci_id
-            pci_id=$(nvidia-smi --query-gpu=pci.device_id --format=csv,noheader 2>/dev/null | head -1 | xargs)
+            pci_id=$(nvidia-smi --query-gpu=pci.device_id --format=csv,noheader 2>/dev/null | sed -n "${_first_gpu_row}p" | xargs)
             [[ -n "$pci_id" ]] && GPU_DEVICE_ID="${pci_id:0:6}"
             if [[ $GPU_COUNT -gt 1 ]]; then
                 # Build a display name for multi-GPU (e.g. "RTX 3090 + RTX 4090" or "RTX 4090 × 2")
