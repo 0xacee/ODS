@@ -195,23 +195,35 @@ function Stop-ODSPortalTaskTree {
     # Every stop path, including uninstall, must disarm scheduled retries.
     # Publish first so even an already queued durable launcher exits cleanly.
     $armed = [string]$Task.State -ne 'Disabled'
-    Set-ODSPortalRuntimeIntent 'stopped'
-    Disable-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+    $progress = @{ Stopping = $false }
     try {
-        Stop-ODSPortalDisarmedTaskTree @PSBoundParameters
+        Set-ODSPortalRuntimeIntent 'stopped'
+        Disable-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+        Stop-ODSPortalDisarmedTaskTree @PSBoundParameters -Progress $progress
     } catch {
-        # A stop that fails leaves sign-in startup as it found it, so a
+        $failure = $_
+        # A refusal stopped nothing: sign-in startup goes back as it was, so a
         # refused rerun or Unload never leaves the model off after a restart.
-        if ($armed) {
-            Set-ODSPortalRuntimeIntent 'running'
-            Enable-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+        # Once stopping began the model may be down, and it stays disarmed as
+        # the Unload or uninstall that asked for the stop expects.
+        if ($armed -and -not $progress.Stopping) {
+            try {
+                Set-ODSPortalRuntimeIntent 'running'
+                Enable-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+            } catch {
+                throw ("$($failure.Exception.Message) Sign-in startup of the model could not be turned back on " +
+                    "either: $($_.Exception.Message) Run Windows setup again to restore it.")
+            }
         }
-        throw
+        throw $failure
     }
 }
 
 function Stop-ODSPortalDisarmedTaskTree {
-    param($Task, [string]$TaskName, $Action, [string]$ActionExe, [string]$ExecutablePath, [int]$Port, [bool]$Durable)
+    # $Progress.Stopping turns true just before the first task or process is
+    # stopped; a failure before that point is a refusal that changed nothing.
+    param($Task, [string]$TaskName, $Action, [string]$ActionExe, [string]$ExecutablePath, [int]$Port, [bool]$Durable,
+        [hashtable]$Progress = @{})
     $runtimeDir = Get-ODSPortalRuntimeDir
     $readyPath = Join-Path $runtimeDir 'ready.json'
     $ownershipPath = Join-Path $runtimeDir 'process-ownership.json'
@@ -299,6 +311,7 @@ function Stop-ODSPortalDisarmedTaskTree {
             $currentTasks[0].Actions[0].WorkingDirectory -ne $Action.WorkingDirectory -or (Get-ODSPortalTaskEngineId $TaskName) -ne $engineId) {
             throw 'The Portal runtime task changed during ownership verification; no process was stopped.'
         }
+        $Progress.Stopping = $true
         if ($engineId -gt 0) { Stop-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop }
         Stop-ODSPortalOwnedProcesses $owned.Handles
         if ($Durable -and (Test-Path -LiteralPath $ownershipPath)) { Remove-Item -LiteralPath $ownershipPath -Force }

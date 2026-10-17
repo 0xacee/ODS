@@ -181,6 +181,11 @@ try {
             [pscustomobject]@{ ProcessId = 4244; ParentProcessId = 4243; ExecutablePath = (Join-Path $fixture 'helper-child.exe'); CreationDate = [datetime]'2026-01-01T00:00:02' }
             [pscustomobject]@{ ProcessId = 4999; ParentProcessId = 5; ExecutablePath = $script:runtimePlan.ExecutablePath; CreationDate = [datetime]'2025-01-01T00:00:00' }
         }
+        if ($script:olderApp) {
+            # A browser opened before llama-server started, whose recorded
+            # parent PID Windows reused for llama-server.
+            [pscustomobject]@{ ProcessId = 4250; ParentProcessId = 4242; ExecutablePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'; CreationDate = [datetime]'2025-06-01T00:00:00' }
+        }
     }
     function Start-Process { param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, [switch]$PassThru)
         $script:arguments = $ArgumentList
@@ -316,6 +321,16 @@ try {
     }
     $script:workers = $false; $script:exitBeforeFailure = $false; $script:reusedRoot = $false
     $script:killFailure = 0; $script:killExitRace = $false; $script:runtimeExitCode = 0
+    # The launcher's own startup-failure cleanup leaves such a browser running
+    # and still closes llama-server and its children.
+    Reset-Launch
+    $script:workers = $true; $script:olderApp = $true; $script:servedModel = 'Other.gguf'
+    $message = ''
+    try { $null = Invoke-ODSNativeLlamaRuntime $registration.Plan $registration.Options $registration.ReadyPath } catch { $message = $_.Exception.Message }
+    Assert-Restart ($message -match "serves 'Other.gguf'" -and $message -notmatch 'Cleanup could not be completed' -and $script:child.Killed -and
+        $script:runtimeHandles[4243].HasExited -and $script:runtimeHandles[4244].HasExited -and -not $script:calls.Contains('kill:4250') -and
+        -not (Test-Path -LiteralPath $ownershipPath)) 'startup cleanup leaves an older app whose parent PID llama-server reused running and closes only its own tree'
+    $script:workers = $false; $script:olderApp = $false
     Reset-Launch
     $script:occupied = $true
     $message = ''
@@ -356,15 +371,27 @@ try {
         if ($script:portTaken) { return [pscustomobject]@{ LocalAddress = '127.0.0.1'; OwningProcess = 9999 } }
     }
     function Stop-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) $script:stopCalls.Add('task') }
-    function Disable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) $script:stopCalls.Add('disable') }
-    function Enable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) $script:stopCalls.Add('enable') }
+    # The stopped intent is durable before retries are disabled, and the
+    # running intent before a refused stop re-enables them.
+    function Disable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
+        $script:stopCalls.Add($(if (Test-ODSNativeLlamaWanted $intentPath) { 'disable-before-intent' } else { 'disable' }))
+        if ($script:disableFailure) { throw 'mock Disable-ScheduledTask failed.' }
+    }
+    function Enable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
+        $script:stopCalls.Add($(if (Test-ODSNativeLlamaWanted $intentPath) { 'enable' } else { 'enable-before-intent' }))
+        if ($script:enableFailure) { throw 'mock Enable-ScheduledTask failed.' }
+    }
     function Get-Process { param($Id, $ErrorAction)
         $node = @($script:processNodes | Where-Object { $_.ProcessId -eq $Id })[0]
         if (-not $node) { throw 'Mock process no longer exists.' }
         $started = $node.CreationDate
         if ($script:reusedPid -eq $Id) { $started = $started.AddMinutes(1) }
         $handle = [pscustomobject]@{ Id = $Id; Handle = $Id; Path = $node.ExecutablePath; StartTime = $started; HasExited = $false }
-        $handle | Add-Member ScriptMethod Kill { $script:stopCalls.Add("kill:$($this.Id)"); $this.HasExited = $true }
+        $handle | Add-Member ScriptMethod Kill {
+            $script:stopCalls.Add("kill:$($this.Id)")
+            if ($script:killDeniedPid -eq $this.Id) { throw [UnauthorizedAccessException]::new('mock kill denied') }
+            $this.HasExited = $script:stuckPid -ne $this.Id
+        }
         $handle | Add-Member ScriptMethod WaitForExit { param($Milliseconds) return $this.HasExited }
         $handle | Add-Member ScriptMethod Dispose { $script:disposed.Add([int]$this.Id) }
         return $handle
@@ -380,6 +407,7 @@ try {
         $script:disposed = [Collections.Generic.List[int]]::new()
         $script:engineId = 100; $script:reusedPid = 0; $script:portTaken = $false
         $script:changedTask = $false; $script:taskReads = 0
+        $script:stuckPid = 0; $script:killDeniedPid = 0; $script:disableFailure = $false; $script:enableFailure = $false
         $script:stopTaskName = Get-ODSPortalRuntimeTaskName
         $script:stopTask = [pscustomobject]@{ TaskName = $script:stopTaskName
             TaskPath = '\'; State = 'Running'; Principal = [pscustomobject]@{ UserId = 'fixture-user' }
@@ -452,6 +480,40 @@ try {
     $message = ''
     try { Stop-ODSPortalRuntime } catch { $message = $_.Exception.Message }
     Assert-Restart ($message -and ($script:stopCalls -join ',') -ceq 'disable' -and -not (Test-ODSNativeLlamaWanted $intentPath)) 'a refused stop of an unloaded runtime leaves it unloaded'
+    # Once stopping began the model may be down: an Unload or uninstall asked
+    # for it to stay off, so a stop that fails after the kill stays disarmed.
+    foreach ($case in @('exit-timeout', 'kill-denied')) {
+        Reset-LlamaStopFixture
+        if ($case -eq 'exit-timeout') { $script:stuckPid = 101 } else { $script:killDeniedPid = 101 }
+        $message = ''
+        try { Stop-ODSPortalRuntime $plan.ExecutablePath } catch { $message = $_.Exception.Message }
+        $expected = if ($case -eq 'exit-timeout') { 'did not exit within 60 seconds' } else { 'mock kill denied' }
+        Assert-Restart ($message -match $expected -and ($script:stopCalls -join ',') -ceq 'disable,task,kill:100,kill:101' -and
+            -not (Test-ODSNativeLlamaWanted $intentPath)) "a stop that fails after it stopped the task ($case) keeps sign-in startup off"
+    }
+    # Disabling the task itself fails: nothing was stopped, so the published
+    # stopped intent is withdrawn and the model still starts at sign-in.
+    Reset-LlamaStopFixture
+    $script:disableFailure = $true
+    $message = ''
+    try { Stop-ODSPortalRuntime $plan.ExecutablePath } catch { $message = $_.Exception.Message }
+    Assert-Restart ($message -match 'mock Disable-ScheduledTask failed' -and ($script:stopCalls -join ',') -ceq 'disable,enable' -and
+        (Test-ODSNativeLlamaWanted $intentPath)) 'a failed disable leaves sign-in startup armed with the running intent'
+    # The re-arm after a refusal fails too: the owner sees both causes.
+    Reset-LlamaStopFixture
+    $script:processNodes[1].CreationDate = [datetime]'2025-01-01T00:00:00'
+    $script:enableFailure = $true
+    $message = ''
+    try { Stop-ODSPortalRuntime $plan.ExecutablePath } catch { $message = $_.Exception.Message }
+    Assert-Restart ($message -match 'stale or ambiguous; no process was stopped\. Sign-in startup of the model could not be turned back on either: mock Enable-ScheduledTask failed\. Run Windows setup again' -and
+        -not ($script:stopCalls -match '^(kill|task)')) 'a refusal whose re-arm also fails reports the refusal, the re-arm failure and the way out'
+    # Without a server path (the non-Portal routes) the walk stays strict: an
+    # older child from any folder refuses.
+    Reset-LlamaStopFixture
+    $script:processNodes += [pscustomobject]@{ ProcessId = 22121; ParentProcessId = 101; ExecutablePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'; CreationDate = [datetime]'2025-06-01T00:00:00' }
+    $message = ''
+    try { $null = Get-ODSPortalOwnedProcessTree @($script:processNodes[1]) $script:processNodes } catch { $message = $_.Exception.Message }
+    Assert-Restart ($message -match 'stale or ambiguous' -and $script:disposed.Count -eq 0) 'without a server path an older child from another folder still refuses the walk'
 
     foreach ($case in @('startup-cleanup-retry', 'startup-recycled-worker')) {
         Reset-LlamaStopFixture
@@ -482,6 +544,7 @@ try {
         $script:disposed = [Collections.Generic.List[int]]::new()
         $script:engineId = 101; $script:reusedPid = 0; $script:portTaken = $false
         $script:changedTask = $false; $script:taskReads = 0
+        $script:stuckPid = 0; $script:killDeniedPid = 0; $script:disableFailure = $false; $script:enableFailure = $false
         $script:stopTaskName = Get-ODSPortalLemonadeTaskName
         $script:stopArgs = 'serve --port 13305 --host 127.0.0.1 --no-tray --llamacpp vulkan --extra-models-dir "' + (Get-ODSPortalModelsDir) + '" --ctx-size 65536'
         $script:stopTask = [pscustomobject]@{ TaskName = $script:stopTaskName

@@ -882,7 +882,8 @@ function Get-ODSPortalOwnedProcessTree([object[]]$Roots, [object[]]$Nodes, [stri
     # With -ServerPath, a process older than its recorded parent is skipped
     # unless it runs from the server's folder: Windows reused that parent's
     # PID, so it was never our child. A browser window opened before the
-    # runtime started can name the runtime's console host this way.
+    # runtime started can name the runtime's console host this way. Without
+    # it (the non-Portal routes) any older child still refuses.
     $serverFolder = if ($ServerPath) { [IO.Path]::GetDirectoryName($ServerPath) } else { '' }
     $tree = [Collections.Generic.List[object]]::new()
     foreach ($root in $Roots) { $tree.Add($root) }
@@ -1076,7 +1077,7 @@ function Invoke-ODSNativeLlamaRuntime($Plan, $Options, [string]$ReadyPath) {
                     # Cleanup must still run when disk space or ACLs prevent
                     # writing the failure record or removing stale readiness.
                     try {
-                        $owned = Get-ODSPortalOwnedProcessTree @($identity) @(Get-CimInstance Win32_Process -ErrorAction Stop)
+                        $owned = Get-ODSPortalOwnedProcessTree @($identity) @(Get-CimInstance Win32_Process -ErrorAction Stop) $Plan.ExecutablePath
                     } catch {
                         # This retained handle cannot point at a recycled PID.
                         # An unproved descendant is deliberately left untouched.
