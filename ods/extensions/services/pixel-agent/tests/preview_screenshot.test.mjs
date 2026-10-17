@@ -387,6 +387,9 @@ test('the inspector transport admits a screenshot response only for a directed r
   let reply;
   const server = net.createServer(socket => {
     let raw = '';
+    // The client destroys its end when it refuses an oversized reply, so the
+    // server's write can see the reset; any other socket error still fails.
+    socket.on('error', error => { if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE') throw error; });
     socket.on('data', chunk => { raw += chunk; if (raw.endsWith('\n')) socket.end(`${JSON.stringify(reply)}\n`); });
   });
   await new Promise(resolve => server.listen(socketPath, resolve));
