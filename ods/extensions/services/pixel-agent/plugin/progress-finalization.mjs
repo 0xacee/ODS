@@ -98,7 +98,8 @@ export function assistantMessageText(message) {
 // digits across at least two other lines or sentences.
 const MIN_PARTIAL_CONTENT_CHARS = 160;
 const MIN_PARTIAL_CONTENT_UNITS = 2;
-const NARRATION = /^(?:(?:ok(?:ay)?|now|next|first|then|so|alright|good|great|also|finally)\b[,!.:]?\s*)*(?:let(?:'s|\s+me|\s+us)\b|(?:i|we)(?:'ll|'m going to|'re going to|\s+(?:will|am going to|are going to|need to|still need to|should|must|want to|have to|can now))\b|(?:agora\s+)?(?:vou|irei|vamos|preciso|precisamos|deixe-me|deixa eu)\b)/i;
+// preview-explanation.mjs also reads it, for a reply that ends by narrating.
+export const NARRATION = /^(?:(?:ok(?:ay)?|now|next|first|then|so|alright|good|great|also|finally)\b[,!.:]?\s*)*(?:let(?:'s|\s+me|\s+us)\b|(?:i|we)(?:'ll|'m going to|'re going to|\s+(?:will|am going to|are going to|need to|still need to|should|must|want to|have to|can now))\b|(?:agora\s+)?(?:vou|irei|vamos|preciso|precisamos|deixe-me|deixa eu)\b)/i;
 const alphanumerics = value => value.match(/[\p{L}\p{N}]/gu)?.length ?? 0;
 
 export function partialFinalizationAnswer(text, options) {

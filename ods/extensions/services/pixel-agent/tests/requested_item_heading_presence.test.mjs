@@ -12,9 +12,8 @@ import {createToolLoopGuard} from '../plugin/tool-loop-guard.mjs';
 import {extractRequestedLiterals, missingRequestedText, requestedTextCheck, requestedTextInstruction,
   requestedTextRevisionInstruction, requestedTextDeliveryNote, REQUESTED_ITEM_HEADING_REVISION_INSTRUCTION}
   from '../plugin/requested-literals.mjs';
-import {PREVIEW_CHECK_LABEL, PREVIEW_CLAIM_NOTE} from '../plugin/preview-explanation.mjs';
 
-const TOWER2 =JSON.parse(fs.readFileSync(new URL('./requested-heading-tower2-round082.json', import.meta.url), 'utf8'));
+const TOWER2 = JSON.parse(fs.readFileSync(new URL('./requested-heading-tower2-round082.json', import.meta.url), 'utf8'));
 const DIRECTORY = 'fleet-qualification-1d43828fc26e';
 const FILES = TOWER2.files;
 const ORIGINAL = FILES['index.html'];
@@ -194,9 +193,7 @@ test('tower2 round 082: the receipt carries the note, the recorded answer gets o
   assert.equal(guard.beforeAgentFinalize({lastAssistantMessage: TOWER2.finalAnswer}, context)?.action, 'finalize');
   const outcome = guard.verificationForRun(context.runId);
   assert.equal(outcome.status, 'failed');
-  // The recorded answer is kept; the note after it contradicts its claim.
-  assert.ok(outcome.text.startsWith(`${TOWER2.finalAnswer.trim()}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_CLAIM_NOTE}\n\n${FAILURE_NOTE}\n\n`),
-    outcome.text);
+  assert.ok(outcome.text.startsWith(`${FAILURE_NOTE}\n\n`), outcome.text);
 });
 
 test('tower2 round 082: renaming the card heading to the exact name clears the miss', () => {

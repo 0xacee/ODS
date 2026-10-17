@@ -21,7 +21,6 @@ import {PREVIEW_INSPECTION_TOOL, boundInspectionControls, boundInspectionPageErr
   boundVisibilityInspection} from '../plugin/preview-interaction-assurance.mjs';
 import {INSPECTION_KIND, INSPECTION_SCOPE, TRANSITION_UNTESTED, createWorkspacePreviewInspectTool, inspectionPlanHash,
   validateIncompleteInspectionReceipt, normalizeWorkspacePreviewInspectionParams} from '../plugin/workspace-preview-inspect.mjs';
-import {PREVIEW_CHECK_LABEL, PREVIEW_CLAIM_NOTE} from '../plugin/preview-explanation.mjs';
 
 const TOWER2 = JSON.parse(fs.readFileSync(new URL('./control-names-tower2-round100.json', import.meta.url), 'utf8'));
 const FIXTURE = new URL('../../../../tests/fixtures/preview-controls/tower2-r100/', import.meta.url);
@@ -229,14 +228,12 @@ for (const transport of ['direct', 'tool_call']) {
     const incomplete = await f.inspect(receipt, UNTESTED, 'untested', transport);
     assertIncomplete(incomplete, receipt);
     assert.ok(incomplete.text.includes(NEXT), incomplete.text);
-    // The recorded answer: one bounded revision, then the honest failure. The
-    // answer is kept, and its claim of full verification is contradicted.
+    // The recorded answer: one bounded revision, then the honest failure.
     assert.deepEqual(f.finalize(TOWER2.finalAnswer), {action: 'revise',
       reason: 'Pixel has not completed every owner-requested verified step.',
       retry: {instruction: REQUESTED_CONTROL_NAME_REVISION_INSTRUCTION.join('["Show sold out"]'),
         idempotencyKey: 'pixel-ods-workspace-preview-control-name', maxAttempts: 1}});
-    assert.ok(f.delivered().text.startsWith(`${TOWER2.finalAnswer.trim()}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_CLAIM_NOTE}\n\n${FAILURE_NOTE}`),
-      f.delivered().text);
+    assert.ok(f.delivered().text.startsWith(FAILURE_NOTE), f.delivered().text);
     assert.equal(f.delivered().status, 'failed');
     // The repaired snapshot needs its own show/hide check; the same untested
     // plan is INCOMPLETE again, now without a name repair.

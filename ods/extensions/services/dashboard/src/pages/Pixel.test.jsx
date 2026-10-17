@@ -1180,7 +1180,10 @@ describe('Pixel', () => {
     previewManifests.set(`/pixel-preview/${siteId}/__ods_manifest__.json`, preview)
     const content = 'The cause is `ui.js:748`: a canvas is not a valid `fillStyle`, so the previous colour stays set.\n\n' +
       '- The last full-viewport fill covers the arena.\n\n' +
-      '**Portal check:** The attempted preview interaction checks have not passed browser inspection. ' +
+      "**Portal check:** The reply above is the agent's own account, not a verified result. " +
+      "This request did not pass Portal's checks.\n\n" +
+      'Latest browser inspection of this preview: step 2 (assert-painted) on `#arena` captured one color only (#8fce3a).\n\n' +
+      'The attempted preview interaction checks have not passed browser inspection. ' +
       'The published preview is available, but those checks remain unverified.\n\n' +
       `Your preview is ready.\n\n[Open preview](${preview.url})\n\nPublished from your workspace.`
     globalThis.fetch.mockResolvedValueOnce(response({ available: true, model: 'pixel/default', detail: 'local' }))
@@ -1199,6 +1202,8 @@ describe('Pixel', () => {
     expect(label.closest('strong')).not.toBeNull()
     expect(screen.getByText('ui.js:748').closest('code')).not.toBeNull()
     expect(screen.getByText('The last full-viewport fill covers the arena.').closest('li')).not.toBeNull()
+    expect(screen.getByText(/did not pass Portal's checks/)).toBeVisible()
+    expect(screen.getByText('#arena').closest('code')).not.toBeNull()
     expect(screen.getByText(/attempted preview interaction checks have not passed browser inspection/)).toBeVisible()
     expect(screen.queryByText('Your preview is ready.')).toBeNull()
     expect(screen.queryByText(/Published from your workspace/)).toBeNull()

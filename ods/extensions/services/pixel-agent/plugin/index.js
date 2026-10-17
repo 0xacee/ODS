@@ -372,6 +372,9 @@ export default definePluginEntry({
       // the same configured model, from the pages the run read.
       stopSynthesis: createStopSynthesisClient({runtime: api.runtime, agentId: AGENT_ID}),
       pendingClarifications,
+      // The final reply a failed preview delivery keeps is the visible text of
+      // the transcript's last assistant message, as the harness computes it.
+      finalText: extractAssistantVisibleText,
       warn: (message) => api.logger.warn(message),
       info: (message) => api.logger.info?.(message),
     });
@@ -610,8 +613,9 @@ export default definePluginEntry({
     });
     // Delivery rewriting is limited to host-authoritative failed or pending
     // verification state. It neither requests nor receives conversation data;
-    // a failed preview delivery carries the agent's final reply, seen at
-    // before_agent_finalize, ahead of its host facts (preview-explanation.mjs).
+    // a failed or pending preview delivery carries the agent's final reply,
+    // seen at before_agent_finalize, ahead of its host facts
+    // (preview-explanation.mjs).
     api.on("reply_payload_sending", (event) =>
       toolLoopGuard.replyPayloadSending(event)
     );

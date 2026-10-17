@@ -47,7 +47,7 @@ import { PREVIEW_INSPECTION_TOOL, requestsVisibilityInteraction, requestsBehavio
   attemptedPreviewBehavior, boundPreviewBehavior, previewBehaviorInstruction } from './preview-interaction-assurance.mjs';
 import { workspaceRevalidationCandidate, workspaceReadOnlyCall, settledRevalidationReceipt, boundedPreviewVerification } from "./preview-revalidation.mjs";
 import { boundedPreviewDelivery } from './preview-delivery-recovery.mjs';
-import { explainedPreviewDelivery } from './preview-explanation.mjs';
+import { explainedPreviewDelivery, inspectionFailureLine } from './preview-explanation.mjs';
 import { extractRequestedLiterals, requestedTextCheck, requestedTextInstruction, requestedTextRevisionInstruction,
   requestedTextDeliveryNote, publishedElementOutline, extractRequestedControlNames, requestedControlSources,
   requestedControlNameCheck, requestedControlNameInstruction, requestedControlNameRevisionInstruction,
@@ -7189,6 +7189,9 @@ export function createToolLoopGuard({
   // Durable pending clarification cards (pending-clarification.mjs). Only the
   // plugin entry supplies the store; without one nothing is recorded.
   pendingClarifications,
+  // A transcript message's visible text, as the harness computes the final
+  // reply (index.js supplies OpenClaw's extractAssistantVisibleText).
+  finalText = assistantMessageText,
   execMarkerCleanupDelayMs = 5000,
   limits,
   warn = () => {},
@@ -7252,6 +7255,15 @@ export function createToolLoopGuard({
     const attempt = state.workspaceBehaviorAttempt;
     return attempt?.sessionId === state.currentSessionId && attempt?.sessionKey === state.currentSessionKey
       ? attempt : undefined;
+  }
+
+  // The failed step of the current snapshot's latest inspection, for the note
+  // beside a kept explanation (preview-explanation.mjs). Never evidence.
+  function workspaceInspectionFailureLine(state) {
+    const failure = state.workspaceInspectionFailure;
+    return visibilityInspectionMatches(failure, state.workspacePreview) &&
+      failure.sessionId === state.currentSessionId && failure.sessionKey === state.currentSessionKey
+      ? failure.line : undefined;
   }
 
   function rememberSessionDownload(sessionId, jobId) {
@@ -7553,6 +7565,7 @@ export function createToolLoopGuard({
       state.workspaceVisibilityInspection = undefined;
       state.workspaceBehaviorInspection = undefined;
       state.workspaceRenderedInspection = undefined;
+      state.workspaceInspectionFailure = undefined;
       state.workspaceInspectionGeneration = (state.workspaceInspectionGeneration ?? 0) + 1;
     }
     // First-attempt obligation: record the duty to check an interaction
@@ -10548,6 +10561,11 @@ export function createToolLoopGuard({
           ? boundRenderedPreviewInspection(inspected.params, inspected.result, state.workspacePreview) : undefined;
         state.workspaceRenderedInspection = renderedProof ? Object.freeze({...renderedProof,
           sessionId: state.currentSessionId, sessionKey: state.currentSessionKey}) : undefined;
+        // Names the first failed step to the owner beside a kept explanation.
+        const failureLine = inspectionFailureLine(inspected.result?.details, state.workspacePreview);
+        state.workspaceInspectionFailure = failureLine ? Object.freeze({siteId: state.workspacePreview.siteId,
+          sha256: state.workspacePreview.sha256, sessionId: state.currentSessionId, sessionKey: state.currentSessionKey,
+          line: failureLine}) : undefined;
         state.workspaceVisibilityInspectionUnavailable =
           inspected.result?.details?.errorCode === 'unavailable';
         // Selects the repair instruction only; bound to this exact snapshot.
@@ -12721,6 +12739,20 @@ export function createToolLoopGuard({
     return state?.clarificationAnswer && !state.clientCancelled ? clarificationAnswerContext(state.clarificationAnswer) : undefined;
   }
 
+  // lastAssistantMessage only when the transcript's last assistant message, a
+  // turn without tool calls, holds exactly that text (subagent-delivery.mjs
+  // end() checks the same). When that turn has no visible text, OpenClaw
+  // 2026.6.33 fills lastAssistantMessage with the joined narration of the
+  // earlier tool-call turns ("Let me read ui.js..."), which is no reply.
+  function terminalReplyText(event) {
+    const text = event?.lastAssistantMessage;
+    const terminal = Array.isArray(event?.messages) ? event.messages.findLast(message => message?.role === 'assistant') : undefined;
+    if (typeof text !== 'string' || !Array.isArray(terminal?.content) ||
+        terminal.content.some(block => block?.type === 'toolCall')) return undefined;
+    const visible = finalText(terminal);
+    return typeof visible === 'string' && visible.trim() === text.trim() ? text : undefined;
+  }
+
   function beforeAgentFinalize(event, context, agentId = "pixel") {
     if (context?.agentId !== agentId) return undefined;
     const runId = context?.runId ?? event?.runId;
@@ -12729,10 +12761,9 @@ export function createToolLoopGuard({
     // The agent's latest final reply. A failed preview delivery keeps it ahead
     // of the host facts (preview-explanation.mjs). The pinned harness refuses a
     // revision after side effects, so this text is usually what is sent; a
-    // further model call clears it (observeModelCall).
-    if (state && !state.clientCancelled) {
-      state.finalReplyText = typeof event?.lastAssistantMessage === 'string' ? event.lastAssistantMessage : undefined;
-    }
+    // further model call clears it (observeModelCall), and delivery after an
+    // owner cancel never uses it (deliveryVerificationForRun).
+    if (state) state.finalReplyText = terminalReplyText(event);
     if (state?.recursiveDeleteDenied && !state.clientCancelled && !state.recursiveDeleteAbortAttempted) {
       if ((context?.sessionId && context.sessionId !== state.currentSessionId) ||
           (context?.sessionKey && context.sessionKey !== state.currentSessionKey) ||
@@ -12801,12 +12832,20 @@ export function createToolLoopGuard({
     };
   }
 
+  // Workspace preview outcomes (the preview branch of taskVerificationForRun),
+  // also once lane-stop or extension facts are added to one. Delivered as is,
+  // a failed or pending one keeps the agent's final explanation ahead of its
+  // host facts (deliveryVerificationForRun, preview-explanation.mjs).
+  const previewOutcomes = new WeakSet();
+  const previewOutcome = result => (previewOutcomes.add(result), result);
+  const derivedOutcome = (from, result) => previewOutcomes.has(from) ? previewOutcome(result) : result;
+
   function verificationForRun(runId) {
     const verification = mixedTaskVerificationForRun(runId);
     const stopped = runs.get(runId)?.progressBudget.exhaustedLanes ?? [];
     if (!stopped.length) return verification;
-    return {...verification,status:'failed',
-      text:[verification.text,...stopped.map(progressLaneStopReason)].filter(Boolean).join('\n\n')};
+    return derivedOutcome(verification, {...verification,status:'failed',
+      text:[verification.text,...stopped.map(progressLaneStopReason)].filter(Boolean).join('\n\n')});
   }
 
   function mixedTaskVerificationForRun(runId) {
@@ -12826,10 +12865,10 @@ export function createToolLoopGuard({
     // hide missing tests/preview, and a working artifact cannot finish a still
     // pending installation. Preserve the artifact receipt in either case.
     const statuses = [verification.status, extension.status];
-    return {...verification,
+    return derivedOutcome(verification, {...verification,
       status:statuses.includes('failed') ? 'failed' : statuses.includes('pending') ? 'pending' : 'passed',
       text:[verification.text,extension.text].filter(Boolean).join('\n\n'),
-    };
+    });
   }
 
   function taskVerificationForRun(runId) {
@@ -12903,11 +12942,10 @@ export function createToolLoopGuard({
       !state.operationsRequired &&
       !state.exactDownloadRequested
     ) {
-      // A failed outcome keeps the agent's own final explanation ahead of
-      // these host facts; passing and pending outcomes are unchanged.
-      const explained = result => explainedPreviewDelivery(result, state.finalReplyText);
+      // Every result here is a preview outcome (previewOutcomes): the texts
+      // stay host-only, and delivery adds the agent's explanation.
       if (!state.workspacePreview) {
-        if (state.workspacePreviewRestrictions?.mutation && state.workspacePreviewAttempted) return explained({
+        if (state.workspacePreviewRestrictions?.mutation && state.workspacePreviewAttempted) return previewOutcome({
           status: "failed",
           text: "ODS could not publish that directory: " +
             (WORKSPACE_PREVIEW_FAILURE_REASONS[state.workspacePreviewFailureCode] ?? "no valid publication receipt was returned") +
@@ -12924,7 +12962,7 @@ export function createToolLoopGuard({
           const stopText = state.codingExhausted
             ? "Portal stopped before the requested work was complete. Saved files are preserved."
             : "";
-          return explained({
+          return previewOutcome({
             status: "failed",
             text:
               (stopText ? `${stopText}\n\n` : "") +
@@ -12949,7 +12987,7 @@ export function createToolLoopGuard({
         ].some(
           (value) => typeof value === "string" && value.endsWith("/index.html")
         );
-        return explained({
+        return previewOutcome({
           status: "failed",
           text: hasIndexEvidence
             ? WORKSPACE_PREVIEW_UNVERIFIED_DELIVERY_PREFIX
@@ -12971,7 +13009,7 @@ export function createToolLoopGuard({
       // showed missing withhold certification, whatever else passed.
       const requestedTextMissing = requestedTextDeliveryNote(state.workspacePreview, state.workspaceRequestedTextCheck,
         state.workspaceControlNameCheck);
-      return explained({
+      return previewOutcome({
         status: checkIncomplete ? checkStatus : interactionUnverified || behaviorUnverified || renderedUnverified || requestedTextMissing ? "failed" : "passed",
         text:
           (checkText ? `${checkText}\n\n` : "") +
@@ -13231,6 +13269,9 @@ export function createToolLoopGuard({
     let result=baseDeliveryVerificationForRun(runId);
     const state=runs.get(runId);
     const artifacts=state?.workspaceArtifacts;
+    // A preview outcome delivered as is (no stop, deadline or question text
+    // replaced it) keeps the agent's final reply ahead of all its host facts.
+    const explainable=previewOutcomes.has(result) && !state.clientCancelled;
     // Passing tests or creating an archive cannot stand in for its download
     // receipt. Keep pending questions, cancellation and existing failure facts.
     if (state?.workspaceDocumentDeliveryRequested && state.artifactOwnerInteractive &&
@@ -13241,6 +13282,8 @@ export function createToolLoopGuard({
         ? `${missing}\n\n${result.text}`.slice(0, MAX_INGRESS_VERIFICATION_TEXT) : missing};
       delete result.deliveryMode;
     }
+    if (explainable) result=explainedPreviewDelivery(result, {reply: state.finalReplyText,
+      inspection: workspaceInspectionFailureLine(state)});
     return artifacts?.length && !state.clientCancelled && ['none','passed','failed'].includes(result.status)
       ? {...result,artifacts:structuredClone(artifacts)} : result;
   }
@@ -13318,7 +13361,7 @@ export function createToolLoopGuard({
             action.startsWith("host.") || action === "ods.extensions.list" || action === "ods.extensions.search"))));
     return verification.status === "passed" && verification.text &&
       (readOnlyOperations || verification.preview || state?.exactDownloadPromotion)
-      ? { ...verification, deliveryMode: "append" }
+      ? derivedOutcome(verification, { ...verification, deliveryMode: "append" })
       : verification;
   }
 
@@ -13396,6 +13439,7 @@ export function createToolLoopGuard({
       state.workspaceVisibilityInspection = undefined;
       state.workspaceBehaviorInspection = undefined;
       state.workspaceRenderedInspection = undefined;
+      state.workspaceInspectionFailure = undefined;
       state.previewVerificationGeneration = (state.previewVerificationGeneration ?? 0) + 1;
       sessionPreviews.delete(state.currentSessionId);
       sessionPreviewVisibilityObligations.delete(state.currentSessionId);

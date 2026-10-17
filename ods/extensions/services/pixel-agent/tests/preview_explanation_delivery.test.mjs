@@ -5,9 +5,12 @@
 // the owner that explanation. Its press + assert-painted check had failed, so
 // Portal replaced the whole reply with its host delivery and the explanation
 // never reached the owner. A failed preview outcome now keeps the agent's
-// final prose and appends the unchanged host facts after it.
+// final prose, then a fixed note (the reply is the agent's own account; the
+// request did not pass Portal's checks), the failed step, and the unchanged
+// host facts.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
 import {createHash} from 'node:crypto';
 import {createServer} from 'node:http';
 import {createToolLoopGuard} from '../plugin/tool-loop-guard.mjs';
@@ -15,11 +18,12 @@ import {createIngressServer} from '../host/pixel_ingress.mjs';
 import {PREVIEW_INSPECTION_TOOL} from '../plugin/preview-interaction-assurance.mjs';
 import {INSPECTION_KIND, PAINT_INSPECTION_SCOPE, PRESS_INSPECTION_SCOPE, STEP_INSPECTION_SCOPE, createWorkspacePreviewInspectTool,
   inspectionPlanHash} from '../plugin/workspace-preview-inspect.mjs';
-import {PREVIEW_CHECK_LABEL, PREVIEW_CLAIM_NOTE, claimsVerifiedSuccess, explainedPreviewDelivery}
-  from '../plugin/preview-explanation.mjs';
+import {PREVIEW_ACCOUNT_NOTE, PREVIEW_CHECK_LABEL, PREVIEW_FAILED_NOTE, PREVIEW_PENDING_NOTE, PREVIEW_STOPPED_NOTE,
+  explainedPreviewDelivery, foldedText, inspectionFailureLine, openFence} from '../plugin/preview-explanation.mjs';
 
+const USER = 'ods-' + 'e1f'.repeat(21) + 'e';
 const runId = 'chatcmpl_7e1f0d2c-4b8a-4c3e-9d5f-0a1b2c3d4e5f';
-const context = {agentId: 'pixel', runId, sessionId: 'elf-session', sessionKey: 'elf-key'};
+const context = {agentId: 'pixel', runId, sessionId: 'elf-session', sessionKey: `agent:pixel:openai-user:${USER}`};
 const OWNER = 'Still the same: when I start a realm the whole arena is just one flat colour. Fix it in elf-of-doom, ' +
   "then pull up a fresh preview and actually look at it before you say it's fixed.";
 const GAME = '<!doctype html><title>Elf of Doom</title><canvas id="arena" width="960" height="540"></canvas><script src="ui.js"></script>';
@@ -31,11 +35,24 @@ const EXPLANATION = 'Your observation is exactly the diagnostic I needed. The ca
   'My preview check reported the same single colour even with the canvas fully blanked, so my tool cannot see canvas pixels at all. ' +
   'Let me use your eyes instead: the fix is to draw the vignette with `drawImage` or drop that fill. I have not changed line 748 yet.';
 const FALSE_CLAIM = 'Fixed! The arena renders again and every check passed.';
+const FAILED = `${PREVIEW_CHECK_LABEL} ${PREVIEW_ACCOUNT_NOTE} ${PREVIEW_FAILED_NOTE}`;
+const PAINT_FAILURE = 'Latest browser inspection of this preview: step 2 (assert-painted) on `#arena` captured one color only (#8fce3a).';
 const SCOPE = 'Publication scope: this receipt verifies the published snapshot, not functional behavior or completion of other requested work.';
 const PLAN = {viewport: {width: 1280, height: 800}, steps: [
   {action: 'press', locator: {selector: '#arena'}, key: 'Space'},
   {action: 'assert-painted', locator: {selector: '#arena'}},
 ]};
+
+// The transcript at before_agent_finalize: narrated tool-call turns, then the
+// final turn. `terminal` replaces that final assistant message.
+const NARRATION = 'Let me read ui.js to find where the arena is drawn.';
+function transcript(reply, terminal = {role: 'assistant', content: [{type: 'text', text: reply}], stopReason: 'stop'}) {
+  return [{role: 'user', content: OWNER},
+    {role: 'assistant', content: [{type: 'text', text: NARRATION}, {type: 'toolCall', id: 'read-ui', name: 'read', arguments: {path: 'elf-of-doom/ui.js'}}],
+      stopReason: 'toolUse'},
+    {role: 'toolResult', toolCallId: 'read-ui', toolName: 'read', content: [{type: 'text', text: 'g.fillStyle = vignetteSprite();'}]},
+    terminal];
+}
 
 const shown = {count: 1, visible: true, display: 'block', visibility: 'visible', opacity: '1', hidden: false, hiddenUntilFound: false, rectCount: 1};
 function receipt(params, {painted}) {
@@ -58,10 +75,11 @@ function receipt(params, {painted}) {
 
 // One Elf of Doom turn through the real guard: write, publish, then the
 // press + assert-painted check (failed: one colour; or painted), and the
-// agent's final reply at finalization when `reply` is a string.
-async function elfTurn({reply, painted = false, before, after} = {}) {
-  const guard = createToolLoopGuard({workspacePreviewInspectionAvailable: true});
-  guard.observeRun(context, 'pixel', {prompt: OWNER});
+// agent's final reply at finalization when `reply` is a string (with its
+// transcript, or `messages` when given).
+async function elfTurn({reply, painted = false, before, after, messages, prompt = OWNER, guardOptions = {}, runOptions} = {}) {
+  const guard = createToolLoopGuard({workspacePreviewInspectionAvailable: true, ...guardOptions});
+  guard.observeRun({...context, trigger: 'user'}, 'pixel', {prompt}, runOptions);
   let sequence = 0;
   const invoke = (toolName, params, result) => {
     const ctx = {...context, toolName, toolCallId: `call-${sequence++}`};
@@ -89,7 +107,8 @@ async function elfTurn({reply, painted = false, before, after} = {}) {
   guard.afterToolCall({toolName: PREVIEW_INSPECTION_TOOL, runId, toolCallId: ctx.toolCallId, params: prepared, result,
     ...(result.isError ? {error: result.content[0].text} : {})}, ctx);
   after?.({guard, invoke, preview});
-  if (typeof reply === 'string') guard.beforeAgentFinalize({lastAssistantMessage: reply}, context);
+  const replyText = typeof reply === 'function' ? reply(preview) : reply;
+  if (typeof replyText === 'string') guard.beforeAgentFinalize({lastAssistantMessage: replyText, messages: messages === undefined ? transcript(replyText) : messages}, context);
   return {guard, preview, inspection: result, delivery: guard.deliveryVerificationForRun(runId)};
 }
 
@@ -100,15 +119,15 @@ test('Elf of Doom: the failed paint check is the real uniform-colour receipt', a
   assert.match(inspection.content[0].text, /captured one color only \(#8fce3a\)/);
   assert.equal(delivery.status, 'failed');
   assert.match(delivery.text, /^The attempted preview interaction checks have not passed browser inspection\./m);
+  assert.doesNotMatch(delivery.text, /Latest browser inspection/, 'the host-only delivery is unchanged');
 });
 
-test('Elf of Doom: the agent explanation reaches the owner, followed by the unchanged host facts', async () => {
+test('Elf of Doom: the explanation reaches the owner, then the fixed note, the failed step and the unchanged host facts', async () => {
   const plain = await elfTurn({reply: ''});
   const {guard, preview, delivery} = await elfTurn({reply: EXPLANATION});
   assert.equal(delivery.status, 'failed', 'keeping the prose never certifies the preview');
   assert.deepEqual(delivery.preview, plain.delivery.preview);
-  assert.equal(delivery.text, `${EXPLANATION}\n\n${PREVIEW_CHECK_LABEL} ${plain.delivery.text}`);
-  assert.doesNotMatch(delivery.text, new RegExp(PREVIEW_CLAIM_NOTE.slice(0, 30)), 'an honest diagnosis is not contradicted');
+  assert.equal(delivery.text, `${EXPLANATION}\n\n${FAILED}\n\n${PAINT_FAILURE}\n\n${plain.delivery.text}`);
   assert.match(delivery.text, /attempted preview interaction checks have not passed browser inspection/);
   assert.ok(delivery.text.endsWith(`Your preview is ready.\n\n[Open preview](${preview.url})\n\nPublished from your workspace.`));
   assert.equal(Object.keys(delivery).sort().join(), Object.keys(plain.delivery).sort().join(), 'the ingress schema is unchanged');
@@ -151,7 +170,7 @@ for (const stream of [false, true]) test(`Elf of Doom: Portal ingress delivers t
       content = frames.map(frame => frame.choices?.[0]?.delta?.content ?? '').join('');
     } else content = JSON.parse(raw).choices[0].message.content;
     assert.equal(content, delivery.text);
-    assert.ok(content.startsWith(EXPLANATION));
+    assert.ok(content.startsWith(`${EXPLANATION}\n\n${FAILED}`));
     if (stream) {
       assert.equal(terminal.pixel_outcome.status, 'failed');
       assert.deepEqual(terminal.pixel.preview, delivery.preview);
@@ -159,32 +178,83 @@ for (const stream of [false, true]) test(`Elf of Doom: Portal ingress delivers t
   } finally { await close(ingress); await close(gateway); }
 });
 
-test('a reply claiming success is kept unchanged and contradicted by the host note', async () => {
+// The note is the same whatever the prose claims: no wording heuristic can
+// miss a claim (quoted, in code, a checklist, negation-shaped, keyword-free).
+test('every kept reply, however it claims success, is followed by the same plain failure note', async () => {
   const plain = await elfTurn({reply: ''});
-  const {guard, delivery} = await elfTurn({reply: FALSE_CLAIM});
-  assert.equal(delivery.status, 'failed');
-  assert.equal(delivery.text, `${FALSE_CLAIM}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_CLAIM_NOTE}\n\n${plain.delivery.text}`);
-  assert.match(delivery.text, /Portal's checks did not all pass/);
-  assert.equal(guard.replyPayloadSending({runId, kind: 'final', payload: {text: FALSE_CLAIM}}).payload.text, delivery.text);
-  // A recorded fleet-style claim with checkmarks is contradicted the same way.
-  const checklist = 'All inspections passed. The game is complete and verified:\n\n- ✅ Arena renders\n- ✅ Orcs and floor visible';
-  assert.ok((await elfTurn({reply: checklist})).delivery.text.startsWith(`${checklist}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_CLAIM_NOTE}\n\n`));
+  const recorded = JSON.parse(fs.readFileSync(new URL('./requested-text-tower1-round067.json', import.meta.url), 'utf8')).finalAnswer;
+  const claims = [FALSE_CLAIM, '> ✅ Verified: the game works and every check passed.',
+    'Inspection log:\n\n```\nassert-painted #arena ..... passed (212 colours)\n```', 'Inspection status: `PASSED`',
+    '- ✅ Requirements met\n- ✅ Arena renders\n- ✅ Orcs and floor visible', 'Everything works without any errors now.',
+    'I fixed the canvas bug, so the arena is no longer one flat colour.', 'The game is alive and playing.',
+    'The flat colour bug is gone.'];
+  for (const claim of claims) {
+    const {delivery} = await elfTurn({reply: claim});
+    assert.equal(delivery.status, 'failed');
+    assert.equal(delivery.text, `${claim}\n\n${FAILED}\n\n${PAINT_FAILURE}\n\n${plain.delivery.text}`, claim);
+  }
+  // A recorded fleet answer citing the current preview, as agents do.
+  const {preview, delivery} = await elfTurn({reply: current => recorded.replace(/http:\/\/site-[a-f0-9]{24}\.localhost:9437\/site-[a-f0-9]{24}\//, current.url)});
+  assert.ok(delivery.text.startsWith(`${recorded.replace(/http:\/\/site-\S+\//, preview.url)}\n\n${FAILED}\n\n`), delivery.text);
 });
 
+const IMITATIONS = ['**Portal check:**', '**Portal&#32;check:**', '**Portal check:**', '**Portal check**:', '**Portal checks:**',
+  '**Portal** **check:**', 'Portal​ check:', '**Ｐortal check:**', 'Portal check&colon;', '**Portal&nbsp;check:**'];
 for (const [name, reply] of [['empty', ''], ['whitespace', ' \n\t '], ['silent', 'NO_REPLY'], ['heartbeat', 'HEARTBEAT_OK'],
-  ['silent JSON', '{"action":"NO_REPLY"}'], ['too short', 'Done.'],
+  ['silent JSON', '{"action":"NO_REPLY"}'],
+  ['long silent JSON', '{"action":"NO_REPLY","reason":"Nothing further to add for the owner in this realm right now."}'],
+  ['too short', 'Done.'],
   ['tool-call text', '<tool_call>{"name":"exec","arguments":{"command":"cat ui.js"}}</tool_call>'],
-  ['imitated host note', `I looked again.\n\n${PREVIEW_CHECK_LABEL} The arena check passed and the game works.`],
+  ...IMITATIONS.map(label => [`imitated note ${JSON.stringify(label)}`,
+    `I repaired line 748 and looked again. ${label} browser inspection found the arena fully drawn.`]),
+  ['copied receipt', preview => `The arena still needs work.\n\nYour preview is ready.\n\n[Open preview](${preview.url})\n\nPublished from your workspace.`],
+  ['receipt line split across lines', 'The arena still needs work, line 748 is the cause.\n\nYour preview\nis   ready.'],
+  ['copied stale link', 'Compare the earlier build: [Open last published preview](https://example.invalid/).'],
   ['another local URL', 'The arena draws again on the dev server at http://localhost:3000/ so it looks fixed to me.'],
   ['a stale preview link', 'Open the earlier build at http://site-0123456789abcdef01234567.localhost:9437/site-0123456789abcdef01234567/ to compare.'],
   ['too long', `The arena fill comes from line 748. ${'Detail. '.repeat(3000)}`]]) {
   test(`${name} final reply keeps the existing host-only delivery`, async () => {
     const plain = await elfTurn();
-    const {guard, delivery} = await elfTurn({reply});
+    const {guard, delivery, preview} = await elfTurn({reply});
     assert.deepEqual(delivery, plain.delivery);
-    assert.equal(guard.replyPayloadSending({runId, kind: 'final', payload: {text: reply}}).payload.text, plain.delivery.text);
+    const text = typeof reply === 'function' ? reply(preview) : reply;
+    assert.equal(guard.replyPayloadSending({runId, kind: 'final', payload: {text}}).payload.text, plain.delivery.text);
   });
 }
+
+// OpenClaw 2026.6.33 fills lastAssistantMessage with the joined narration of
+// earlier tool-call turns when the final turn has no visible text.
+test('only text the final assistant message holds is a reply: narration, tool calls and no transcript keep host-only', async () => {
+  const plain = await elfTurn();
+  const narration = `${NARRATION}\n\nI'll check the vignette fill next.\n\nNow let me publish the preview and press Space to check the arena.`;
+  for (const [name, options] of [
+    ['reasoning-only final turn', {reply: narration, messages: transcript(narration,
+      {role: 'assistant', content: [{type: 'thinking', thinking: 'The arena is still green.'}], stopReason: 'stop'})}],
+    ['empty final turn', {reply: narration, messages: transcript(narration, {role: 'assistant', content: [], stopReason: 'stop'})}],
+    ['final turn with a tool call', {reply: EXPLANATION, messages: transcript(EXPLANATION, {role: 'assistant',
+      content: [{type: 'text', text: EXPLANATION}, {type: 'toolCall', id: 'again', name: 'read', arguments: {path: 'ui.js'}}], stopReason: 'toolUse'})}],
+    ['different final text', {reply: EXPLANATION, messages: transcript('The arena is green.')}],
+    ['no transcript', {reply: EXPLANATION, messages: null}],
+  ]) assert.deepEqual((await elfTurn(options)).delivery, plain.delivery, name);
+  // The harness's visible-text extraction is injected (index.js passes
+  // OpenClaw's): here it reads only the final-answer block of the last message.
+  const terminal = {role: 'assistant', stopReason: 'stop',
+    content: [{type: 'text', text: 'Working notes.'}, {type: 'text', text: EXPLANATION}]};
+  assert.deepEqual((await elfTurn({reply: EXPLANATION, messages: transcript(EXPLANATION, terminal)})).delivery, plain.delivery);
+  const {delivery} = await elfTurn({reply: EXPLANATION, messages: transcript(EXPLANATION, terminal),
+    guardOptions: {finalText: message => message.content.at(-1).text}});
+  assert.ok(delivery.text.startsWith(`${EXPLANATION}\n\n${FAILED}`));
+});
+
+test('a reply that announces more work says the run stopped and the step has not started', async () => {
+  const plain = await elfTurn();
+  const stopped = `${PREVIEW_CHECK_LABEL} ${PREVIEW_ACCOUNT_NOTE} ${PREVIEW_FAILED_NOTE} ${PREVIEW_STOPPED_NOTE}`;
+  for (const reply of ["Found it: ui.js:748 assigns a canvas to fillStyle. I'll fix that line now and republish the preview so you can check it.",
+    'The cause is ui.js:748, a canvas assigned to fillStyle.\n\nNow let me republish the preview and press Space to check the arena.']) {
+    const {delivery} = await elfTurn({reply});
+    assert.equal(delivery.text, `${reply}\n\n${stopped}\n\n${PAINT_FAILURE}\n\n${plain.delivery.text}`);
+  }
+});
 
 test('a later model call voids the reply seen at finalization (the run continued with tools)', async () => {
   const plain = await elfTurn();
@@ -192,17 +262,35 @@ test('a later model call voids the reply seen at finalization (the run continued
   guard.observeModelCall({callId: 'next-round'}, context);
   assert.deepEqual(guard.deliveryVerificationForRun(runId), plain.delivery);
   // The next final reply is captured again.
-  guard.beforeAgentFinalize({lastAssistantMessage: EXPLANATION}, context);
-  assert.ok(guard.deliveryVerificationForRun(runId).text.startsWith(`${EXPLANATION}\n\n${PREVIEW_CHECK_LABEL} `));
+  guard.beforeAgentFinalize({lastAssistantMessage: EXPLANATION, messages: transcript(EXPLANATION)}, context);
+  assert.ok(guard.deliveryVerificationForRun(runId).text.startsWith(`${EXPLANATION}\n\n${FAILED}`));
 });
 
-test('the current preview link and an unclosed code fence stay deliverable', async () => {
+test('the owner cancelling after finalization keeps the host-only delivery', async () => {
+  const plain = await elfTurn();
+  const {guard} = await elfTurn({reply: EXPLANATION,
+    guardOptions: {abortRun: () => true, abortRunAndDrain: async () => ({aborted: true, drained: true})}});
+  assert.equal(await guard.abortUserRun(USER), true);
+  assert.equal(guard.deliveryVerificationForRun(runId).text, plain.delivery.text);
+});
+
+test('the current preview link stays deliverable and an open code block is closed with its own fence', async () => {
   const {preview} = await elfTurn();
   const linked = `The arena is still one colour in [the preview](${preview.url}); line 748 is the cause.`;
-  assert.ok((await elfTurn({reply: linked})).delivery.text.startsWith(`${linked}\n\n${PREVIEW_CHECK_LABEL} `));
-  const fenced = 'The last draw call covers the frame:\n\n```js\ng.fillStyle = vignetteSprite();\ng.fillRect(0, 0, W, H);';
-  const {delivery} = await elfTurn({reply: fenced});
-  assert.ok(delivery.text.startsWith(`${fenced}\n\`\`\`\n\n${PREVIEW_CHECK_LABEL} `), 'the receipt is never inside the code block');
+  assert.ok((await elfTurn({reply: linked})).delivery.text.startsWith(`${linked}\n\n${FAILED}\n\n`));
+  const code = 'g.fillStyle = vignetteSprite();\ng.fillRect(0, 0, W, H);';
+  for (const [reply, closing] of [
+    [`The last draw call covers the frame:\n\n\`\`\`js\n${code}`, '```'],
+    [`Nested sample:\n\n\`\`\`\`markdown\n\`\`\`js\n${code}\n\`\`\``, '````'],
+    [`Mixed fences:\n\n\`\`\`markdown\n~~~\n${code}`, '```'],
+    [`Tilde block:\n\n~~~~\n${code}\n~~~`, '~~~~'],
+    [`Closed block:\n\n\`\`\`js\n${code}\n\`\`\``, ''],
+    [`Inline marker:\n\n\`\`\`inline\`\`\` is not a fence, and line 748 is the cause.`, ''],
+  ]) {
+    const {delivery} = await elfTurn({reply});
+    assert.ok(delivery.text.startsWith(`${reply}${closing ? `\n${closing}` : ''}\n\n${FAILED}\n\n`), delivery.text.slice(0, 400));
+    assert.equal(openFence(delivery.text), undefined, 'nothing after the reply is inside a code block');
+  }
 });
 
 test('passing checks keep the existing appended delivery, without repeating the prose', async () => {
@@ -216,13 +304,16 @@ test('passing checks keep the existing appended delivery, without repeating the 
     `${EXPLANATION}\n\n${delivery.text}\n${SCOPE}`);
 });
 
-test('a still-running check keeps the existing pending delivery', async () => {
+test('a still-running check keeps the explanation and says the checks have not finished', async () => {
   const pending = ({invoke}) => invoke('exec', {command: 'python3 -m unittest -v', background: true},
     {details: {status: 'running', sessionId: 'elf-check-session'}});
   const plain = await elfTurn({before: pending});
-  const {delivery} = await elfTurn({before: pending, reply: EXPLANATION});
   assert.equal(plain.delivery.status, 'pending');
-  assert.deepEqual(delivery, plain.delivery);
+  const {delivery} = await elfTurn({before: pending, reply: EXPLANATION});
+  assert.equal(delivery.status, 'pending');
+  assert.equal(delivery.text, `${EXPLANATION}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_ACCOUNT_NOTE} ${PREVIEW_PENDING_NOTE}\n\n` +
+    `${PAINT_FAILURE}\n\n${plain.delivery.text}`);
+  assert.deepEqual(delivery.preview, plain.delivery.preview);
 });
 
 test('a stale snapshot keeps the explanation ahead of the last-published-preview note', async () => {
@@ -232,8 +323,39 @@ test('a stale snapshot keeps the explanation ahead of the last-published-preview
   assert.match(plain.delivery.text, /^Your last published preview is still available\./);
   const {delivery} = await elfTurn({after: stale, reply: EXPLANATION});
   assert.equal(delivery.status, 'failed');
-  assert.equal(delivery.text, `${EXPLANATION}\n\n${PREVIEW_CHECK_LABEL} ${plain.delivery.text}`);
+  // The failed step named an earlier snapshot state, so it is not repeated.
+  assert.equal(delivery.text, `${EXPLANATION}\n\n${FAILED}\n\n${plain.delivery.text}`);
   assert.deepEqual(delivery.preview, plain.delivery.preview);
+});
+
+test('a newer inspection of the snapshot that has not returned voids the failed-step line', async () => {
+  const rerun = ({invoke, preview}) => invoke(PREVIEW_INSPECTION_TOOL, {siteId: preview.siteId, sha256: preview.sha256, ...structuredClone(PLAN)});
+  const plain = await elfTurn({after: rerun});
+  const {delivery} = await elfTurn({after: rerun, reply: EXPLANATION});
+  assert.equal(delivery.text, `${EXPLANATION}\n\n${FAILED}\n\n${plain.delivery.text}`);
+});
+
+test('a requested download that was not attached follows the explanation, even over a passing preview', async () => {
+  const prompt = 'Fix the arena in elf-of-doom, pull up a fresh preview, and give me the downloadable project.';
+  const plain = await elfTurn({painted: true, prompt});
+  assert.equal(plain.delivery.status, 'failed');
+  assert.match(plain.delivery.text, /^The requested download was not attached/);
+  const {delivery} = await elfTurn({painted: true, prompt, reply: EXPLANATION});
+  assert.equal(delivery.text, `${EXPLANATION}\n\n${FAILED}\n\n${plain.delivery.text}`);
+});
+
+test('a stopped extension lane over a passing preview keeps the explanation ahead of both results', async () => {
+  const prompt = '/extensions install https://github.com/example/project; create /workspace/elf-of-doom/index.html and show its preview.';
+  const extensionFailures = ({guard}) => {
+    for (let i = 0; i < 4; i++) guard.afterToolCall({toolName: 'pixel_ods_extension_request_prepare', toolCallId: `prepare-${i}`,
+      params: {}, result: {isError: true}}, context);
+  };
+  const runOptions = {executionHost: 'sandbox'};
+  const plain = await elfTurn({painted: true, prompt, before: extensionFailures, runOptions});
+  assert.equal(plain.delivery.status, 'failed');
+  assert.match(plain.delivery.text, /extension portion.*stopped/);
+  const {delivery} = await elfTurn({painted: true, prompt, before: extensionFailures, runOptions, reply: EXPLANATION});
+  assert.equal(delivery.text, `${EXPLANATION}\n\n${FAILED}\n\n${plain.delivery.text}`);
 });
 
 test('an unpublished site keeps the explanation and still forbids local links', () => {
@@ -244,36 +366,65 @@ test('an unpublished site keeps the explanation and still forbids local links', 
     const prepared = guard.beforeToolCall({toolName: 'write', runId, toolCallId: 'write', params: {path: 'elf-of-doom/index.html', content: GAME}}, ctx);
     guard.afterToolCall({toolName: 'write', runId, toolCallId: 'write', params: prepared?.params ?? {path: 'elf-of-doom/index.html', content: GAME},
       result: {content: [{type: 'text', text: 'Successfully wrote file.'}]}}, ctx);
-    if (reply !== undefined) guard.beforeAgentFinalize({lastAssistantMessage: reply}, context);
+    if (reply !== undefined) guard.beforeAgentFinalize({lastAssistantMessage: reply, messages: transcript(reply)}, context);
     return guard.deliveryVerificationForRun(runId);
   };
   const plain = turn();
   assert.equal(plain.status, 'failed');
   assert.equal(plain.preview, undefined);
   const reason = 'The publish step was refused because the .harness folder in the game directory is not allowed in a preview.';
-  assert.equal(turn(reason).text, `${reason}\n\n${PREVIEW_CHECK_LABEL} ${plain.text}`);
+  assert.equal(turn(reason).text, `${reason}\n\n${FAILED}\n\n${plain.text}`);
   assert.deepEqual(turn('Your game is live at http://localhost:8080/ and works.'), plain);
 });
 
-test('success claims: English statements only, never negated, conditional or quoted', () => {
-  for (const text of [FALSE_CLAIM, 'The game works now.', 'All 6 checks passed.', 'Verified in the browser.',
-    'Everything is working', 'I fixed the arena, but the HUD still flickers.', 'Resolved: the vignette is drawn correctly.'])
-    assert.equal(claimsVerifiedSuccess(text), true, text);
-  for (const text of [EXPLANATION, 'This should fix it.', 'It is not fixed yet.', "I couldn't verify the canvas.",
-    'If it works, tell me.', 'The check failed, so nothing is confirmed.', 'Rerun `npm test` and see whether it passes.',
-    '> It works.', '```\nconsole.log("passed")\n```', 'The arena is still one flat colour.', ''])
-    assert.equal(claimsVerifiedSuccess(text), false, text);
+test('the failed-step line reads only bounded receipt fields, bound to the snapshot', () => {
+  const preview = {siteId: `site-${'a'.repeat(24)}`, sha256: 'a'.repeat(64)};
+  const failed = (step, extra = {}) => ({status: 'failed', siteId: preview.siteId, sha256: preview.sha256,
+    steps: [{index: 0, action: 'press', status: 'passed'}, {index: 1, status: 'failed', ...step}], ...extra});
+  assert.equal(inspectionFailureLine(failed({action: 'assert-painted', locator: {selector: '#arena'}, errorCode: 'uniform_paint',
+    paint: {dominant: {hex: '#8fce3a'}}}), preview), PAINT_FAILURE);
+  assert.equal(inspectionFailureLine(failed({action: 'click', locator: {role: 'button', name: 'Start `realm`', exact: true},
+    errorCode: 'no_match'}), preview),
+    'Latest browser inspection of this preview: step 2 (click) on the button named `` Start `realm` `` matched no element.');
+  assert.equal(inspectionFailureLine(failed({action: 'assert-text', locator: {selector: '#score'}, errorCode: 'constructor'}), preview),
+    'Latest browser inspection of this preview: step 2 (assert-text) on `#score` did not pass (constructor).');
+  assert.equal(inspectionFailureLine(failed({action: 'assert-painted', locator: {selector: '#arena'}, errorCode: 'uniform_paint',
+    paint: {dominant: {hex: 'url(javascript:alert(1))'}}}), preview),
+    'Latest browser inspection of this preview: step 2 (assert-painted) on `#arena` did not pass (uniform_paint).');
+  assert.equal(inspectionFailureLine({status: 'failed', siteId: preview.siteId, sha256: preview.sha256, errorCode: 'timeout'}, preview),
+    'Latest browser inspection of this preview did not complete (timeout).');
+  for (const details of [failed({action: 'click'}, {status: 'passed'}), failed({action: 'click'}, {sha256: 'b'.repeat(64)}),
+    failed({action: 'click', index: 'x'}), {status: 'failed', errorCode: 'invalid_request'}, undefined])
+    assert.equal(inspectionFailureLine(details, preview), undefined);
+  assert.equal(inspectionFailureLine(failed({action: 'click'}), undefined), undefined);
 });
 
-test('only failed outcomes with host text are explained, within the ingress bound, in fixed English', () => {
-  for (const result of [{status: 'passed', text: 'Ready.'}, {status: 'pending', text: 'Running.'}, {status: 'none'},
-    {status: 'failed'}, undefined])
-    assert.equal(explainedPreviewDelivery(result, EXPLANATION), result);
+test('folded text sees the label however markdown or HTML draws it; fences follow CommonMark', () => {
+  for (const label of IMITATIONS) assert.match(foldedText(label), /portal[\s\p{P}]{0,3}checks?\b/iu, label);
+  assert.equal(foldedText("Portal's checks"), "Portal's checks");
+  assert.equal(openFence('```js\ncode'), '```');
+  assert.equal(openFence('````\n```\ncode\n```'), '````');
+  assert.equal(openFence('```\n~~~\ncode'), '```');
+  assert.equal(openFence('~~~~\ncode\n~~~'), '~~~~');
+  assert.equal(openFence('```js\ncode\n```'), undefined);
+  assert.equal(openFence('```inline``` text'), undefined);
+  assert.equal(openFence('    ```\ncode'), undefined, 'an indented line is code, not a fence');
+});
+
+test('only failed or pending outcomes with host text are explained, within the ingress bound, in fixed English', () => {
+  for (const result of [{status: 'passed', text: 'Ready.'}, {status: 'none'}, {status: 'failed'}, undefined])
+    assert.equal(explainedPreviewDelivery(result, {reply: EXPLANATION}), result);
   const failed = {status: 'failed', text: 'The browser check failed.'};
-  assert.deepEqual(explainedPreviewDelivery(failed, EXPLANATION), {status: 'failed',
-    text: `${EXPLANATION}\n\n${PREVIEW_CHECK_LABEL} The browser check failed.`});
+  assert.deepEqual(explainedPreviewDelivery(failed, {reply: EXPLANATION}), {status: 'failed',
+    text: `${EXPLANATION}\n\n${FAILED}\n\nThe browser check failed.`});
+  assert.deepEqual(explainedPreviewDelivery(failed, {reply: EXPLANATION, inspection: PAINT_FAILURE}), {status: 'failed',
+    text: `${EXPLANATION}\n\n${FAILED}\n\n${PAINT_FAILURE}\n\nThe browser check failed.`});
+  assert.equal(explainedPreviewDelivery({status: 'pending', text: 'Still running.'}, {reply: EXPLANATION}).text,
+    `${EXPLANATION}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_ACCOUNT_NOTE} ${PREVIEW_PENDING_NOTE}\n\nStill running.`);
   assert.equal(failed.text, 'The browser check failed.', 'the host result is not mutated');
+  assert.equal(explainedPreviewDelivery(failed), failed);
   const long = {status: 'failed', text: 'x'.repeat(12000)};
-  assert.equal(explainedPreviewDelivery(long, `${'The arena fill comes from line 748. '.repeat(400)}`), long);
-  for (const fixed of [PREVIEW_CHECK_LABEL, PREVIEW_CLAIM_NOTE]) assert.match(fixed, /^[\x20-\x7e]+$/);
+  assert.equal(explainedPreviewDelivery(long, {reply: `${'The arena fill comes from line 748. '.repeat(400)}`}), long);
+  for (const fixed of [PREVIEW_CHECK_LABEL, PREVIEW_ACCOUNT_NOTE, PREVIEW_FAILED_NOTE, PREVIEW_PENDING_NOTE, PREVIEW_STOPPED_NOTE])
+    assert.match(fixed, /^[\x20-\x7e]+$/);
 });
