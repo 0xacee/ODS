@@ -363,13 +363,17 @@ $_usesNativeLlm = ($gpuInfo.Backend -eq "amd" -and -not $cloudMode)
 
 # ── Port conflict detection ───────────────────────────────────────────────────
 # Build list of ports to check based on enabled features.
-# Default service ports match .env.example. Open WebUI uses the same persisted
-# or process-level override that phase 06 will write to .env.
+# Resolve the same process override / retained .env / default as phase 06.
+# The remote Dashboard listener is required even on loopback-only installs.
 $_portsToCheck = [ordered]@{
     "Open WebUI (chat)"   = Resolve-WindowsODSPort `
         -Name "WEBUI_PORT" -DefaultPort 3000 -InstallDir $installDir
-    "Dashboard"           = 3001
-    "Dashboard API"       = 3002
+    "Dashboard"           = Resolve-WindowsODSPort `
+        -Name "DASHBOARD_PORT" -RequireValidProcessOverride -DefaultPort 3001 -InstallDir $installDir
+    "Dashboard (remote)"  = Resolve-WindowsODSPort `
+        -Name "DASHBOARD_REMOTE_PORT" -RequireValidProcessOverride -DefaultPort 3011 -InstallDir $installDir
+    "Dashboard API"       = Resolve-WindowsODSPort `
+        -Name "DASHBOARD_API_PORT" -RequireValidProcessOverride -DefaultPort 3002 -InstallDir $installDir
 }
 $_llmPortToCheck = Resolve-WindowsLlmPreflightPort `
     -GpuBackend ([string]$gpuInfo.Backend) `
@@ -381,9 +385,12 @@ if ($_llmPortToCheck -gt 0) {
     $_portsToCheck[$_llmServiceLabel] = $_llmPortToCheck
 }
 if ($enableRecommended) {
-    $_portsToCheck["LiteLLM (API gateway)"] = 4000
-    $_portsToCheck["SearXNG (search)"] = 8888
-    $_portsToCheck["Token Spy (usage monitor)"] = 3005
+    $_portsToCheck["LiteLLM (API gateway)"] = Resolve-WindowsODSPort `
+        -Name "LITELLM_PORT" -RequireValidProcessOverride -DefaultPort 4000 -InstallDir $installDir
+    $_portsToCheck["SearXNG (search)"] = Resolve-WindowsODSPort `
+        -Name "SEARXNG_PORT" -RequireValidProcessOverride -DefaultPort 8888 -InstallDir $installDir
+    $_portsToCheck["Token Spy (usage monitor)"] = Resolve-WindowsODSPort `
+        -Name "TOKEN_SPY_PORT" -RequireValidProcessOverride -DefaultPort 3005 -InstallDir $installDir
 }
 if ($enableVoice) {
     # Preflight the exact host port phase 06 / New-ODSEnv will write: honor the
@@ -394,29 +401,40 @@ if ($enableVoice) {
     $_whisperPortToCheck = [int](Resolve-WindowsWhisperHostPort `
         -ConfiguredPort ([string]$_whisperConfiguredPort))
     $_portsToCheck["Whisper (STT)"] = $_whisperPortToCheck
-    $_portsToCheck["Kokoro (TTS)"]  = 8880
+    $_portsToCheck["Kokoro (TTS)"]  = Resolve-WindowsODSPort `
+        -Name "TTS_PORT" -RequireValidProcessOverride -DefaultPort 8880 -InstallDir $installDir
 }
 if ($enableWorkflows) {
-    $_portsToCheck["n8n (workflows)"] = 5678
+    $_portsToCheck["n8n (workflows)"] = Resolve-WindowsODSPort `
+        -Name "N8N_PORT" -RequireValidProcessOverride -DefaultPort 5678 -InstallDir $installDir
 }
 if ($enableRag) {
-    $_portsToCheck["Qdrant (vector DB)"] = 6333
-    $_portsToCheck["TEI (embeddings)"] = 8090
+    $_portsToCheck["Qdrant (gRPC)"] = Resolve-WindowsODSPort `
+        -Name "QDRANT_GRPC_PORT" -RequireValidProcessOverride -DefaultPort 6334 -InstallDir $installDir
+    $_portsToCheck["Qdrant (vector DB)"] = Resolve-WindowsODSPort `
+        -Name "QDRANT_PORT" -RequireValidProcessOverride -DefaultPort 6333 -InstallDir $installDir
+    $_portsToCheck["TEI (embeddings)"] = Resolve-WindowsODSPort `
+        -Name "EMBEDDINGS_PORT" -RequireValidProcessOverride -DefaultPort 8090 -InstallDir $installDir
 }
 if ($enableHermes) {
-    $_portsToCheck["Hermes auth proxy"] = 9120
+    $_portsToCheck["Hermes auth proxy"] = Resolve-WindowsODSPort `
+        -Name "HERMES_PROXY_PORT" -RequireValidProcessOverride -DefaultPort 9120 -InstallDir $installDir
 }
 if ($enableHermes) {
-    $_portsToCheck["APE (agent policy engine)"] = 7890
+    $_portsToCheck["APE (agent policy engine)"] = Resolve-WindowsODSPort `
+        -Name "APE_PORT" -RequireValidProcessOverride -DefaultPort 7890 -InstallDir $installDir
 }
 if ($enableComfyui) {
-    $_portsToCheck["ComfyUI (image generation)"] = 8188
+    $_portsToCheck["ComfyUI (image generation)"] = Resolve-WindowsODSPort `
+        -Name "COMFYUI_PORT" -RequireValidProcessOverride -DefaultPort 8188 -InstallDir $installDir
 }
 if ($enableDeepResearch) {
-    $_portsToCheck["Perplexica (deep research)"] = 3004
+    $_portsToCheck["Perplexica (deep research)"] = Resolve-WindowsODSPort `
+        -Name "PERPLEXICA_PORT" -RequireValidProcessOverride -DefaultPort 3004 -InstallDir $installDir
 }
 if ($enablePrivacyShield) {
-    $_portsToCheck["Privacy Shield"] = 8085
+    $_portsToCheck["Privacy Shield"] = Resolve-WindowsODSPort `
+        -Name "SHIELD_PORT" -RequireValidProcessOverride -DefaultPort 8085 -InstallDir $installDir
 }
 
 $_portConflicts = @(Get-WindowsODSSelectedPortConflicts `
