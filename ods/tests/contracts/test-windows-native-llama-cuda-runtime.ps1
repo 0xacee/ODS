@@ -448,6 +448,11 @@ try {
     function Start-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) }
     function Wait-ODSPortalRuntimeReady($Registration, [int]$Seconds = 1020) { return 'model' }
     $none = [pscustomobject]@{ Kind = 'none'; Launches = @() }
+    # The cutover takes the model-change lock and re-reads what ODS runs; this
+    # case is only about the task description, so both see nothing installed.
+    function Enter-ODSPortalRuntimeChange([hashtable]$Lock) { }
+    function Exit-ODSPortalRuntimeChange([hashtable]$Lock) { }
+    function Get-ODSPortalExistingRuntime { return $none }
     $null = Invoke-ODSPortalRuntimeCutover -Existing $none -Plan $plan -Options $cudaOptions -ApiKey ('a' * 64) -KeepPort $false
     $null = Invoke-ODSPortalRuntimeCutover -Existing $none -Plan $plan -Options $cudaOptions -ApiKey ('a' * 64) -KeepPort $false -TaskDescription $script:ODSPortalRuntimeTaskDescriptions['cuda']
     Check ($script:cutoverDescriptions.Count -eq 2 -and $script:cutoverDescriptions[0] -ceq '' -and $script:cutoverDescriptions[1] -cmatch 'NVIDIA GPU') 'the cutover passes its task description through, empty (AMD) by default'
