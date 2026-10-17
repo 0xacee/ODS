@@ -5369,6 +5369,8 @@ _agent_mode_snapshot() {
     esac
     [[ -n "$key" && "$key" != *$'\n'* && "$key" != *$'\r'* ]] || return 1
     port="$(_env_get_raw ODS_AGENT_PORT)"
+    port="${port#\"}"; port="${port%\"}"
+    port="${port#\'}"; port="${port%\'}"
     [[ "$port" =~ ^[0-9]+$ ]] || port=7710
     host="$(_agent_probe_host)"
     # Keep credentials off argv and out of diagnostics, including on failure.
@@ -5386,7 +5388,7 @@ _agent_refresh_mode() {
     expected="${1:-}"
     expected="${expected#\"}"; expected="${expected%\"}"
     expected="${expected#\'}"; expected="${expected%\'}"
-    expected="${expected,,}"
+    expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
     [[ "$expected" != lemonade ]] || expected=local
     case "$expected" in
         local|cloud|hybrid) ;;

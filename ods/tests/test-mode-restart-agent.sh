@@ -12,7 +12,7 @@ extract() { awk -v name="$2" '$0 == name "() {" { copy=1 } copy { print } copy &
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 
 for platform in linux macos; do
-    for scenario in local-hybrid cloud-local unknown-local matching service-only stack-failed agent-failed read-failed configured-unknown old-agent stale-agent config-changed stack-mode-changed; do
+    for scenario in local-hybrid cloud-local unknown-local quoted-port single-quoted-port matching service-only stack-failed agent-failed read-failed configured-unknown old-agent stale-agent config-changed stack-mode-changed; do
         install="$FIXTURE/$platform-$scenario"
         mkdir -p "$install/bin"
         touch "$install/bin/ods-host-agent.py" "$install/ods-cli"
@@ -26,6 +26,10 @@ for platform in linux macos; do
         esac
         printf '%s\n' "$initial" > "$install/effective"
         printf 'ODS_MODE=%s\nODS_AGENT_KEY=fixture-private-key\nGPU_BACKEND=amd\n' "$initial" > "$install/.env"
+        case "$scenario" in
+            quoted-port) printf 'ODS_AGENT_PORT="17710"\n' >> "$install/.env" ;;
+            single-quoted-port) printf "ODS_AGENT_PORT='17710'\n" >> "$install/.env" ;;
+        esac
         : > "$install/trace"
         if output=$(
             INSTALL_DIR="$install" BLUE='' GREEN='' RED='' CYAN='' NC=''
@@ -68,6 +72,10 @@ for platform in linux macos; do
                 trace snapshot
                 [[ "$*" != *fixture-private-key* ]] || exit 42
                 [[ "$(cat)" == 'Authorization: Bearer fixture-private-key' ]] || exit 43
+                case "$scenario" in
+                    quoted-port|single-quoted-port)
+                        [[ "$*" == *'http://127.0.0.1:17710/v1/model/config'* ]] || return 1 ;;
+                esac
                 [[ "$scenario" != read-failed ]] || return 1
                 local configured effective
                 configured="$(_env_get_raw ODS_MODE)"
@@ -111,7 +119,7 @@ for platform in linux macos; do
         printf '%s\n' "$output" > "$install/output"
         [[ "$output" != *fixture-private-key* ]] || fail "$platform $scenario leaked the credential"
         case "$scenario" in
-            local-hybrid|cloud-local|unknown-local)
+            local-hybrid|cloud-local|unknown-local|quoted-port|single-quoted-port)
                 [[ "$rc" == 0 ]] || fail "$platform $scenario failed: $output"
                 [[ "$(cat "$install/effective")" == "$target" ]] || fail "$platform $scenario kept the old agent mode"
                 [[ "$(grep -c '^agent-restart$' "$install/trace")" == 1 ]] || fail "$platform $scenario did not refresh exactly once"
@@ -139,3 +147,41 @@ for platform in linux macos; do
         printf '[PASS] %s %s\n' "$platform" "$scenario"
     done
 done
+
+# The full CLIs re-exec Bash 4+ on macOS. Keep these leaf helpers portable
+# anyway, and execute them under Apple's /bin/bash 3.2 in the macOS CI job.
+{
+    printf 'set -euo pipefail\n'
+    extract "$CLI" _agent_mode_snapshot
+    extract "$CLI" _agent_refresh_mode
+    cat <<'HELPER_FIXTURE'
+_env_get_raw() {
+    case "$1" in
+        ODS_AGENT_KEY) printf "'fixture-private-key'\n" ;;
+        ODS_AGENT_PORT) printf '%s\n' "$PORT" ;;
+    esac
+}
+_agent_probe_host() { printf '127.0.0.1\n'; }
+curl() {
+    [[ "$*" != *fixture-private-key* ]] || return 1
+    [[ "$(cat)" == 'Authorization: Bearer fixture-private-key' ]] || return 1
+    [[ "$*" == *'http://127.0.0.1:17710/v1/model/config'* ]] || return 1
+    printf '{"configuredMode":"local","effectiveMode":"%s"}\n' "$EFFECTIVE"
+}
+log() { :; }
+success() { :; }
+log_error() { printf '%s\n' "$*" >&2; }
+cmd_agent() { [[ "$1" == restart ]] || return 1; EFFECTIVE=local; }
+sleep() { :; }
+for PORT in '"17710"' "'17710'"; do
+    EFFECTIVE=cloud
+    _agent_refresh_mode '"LOCAL"'
+    [[ "$EFFECTIVE" == local ]]
+    _agent_refresh_mode "'LEMONADE'"
+done
+printf '[PASS] quoted mode and port helpers under Bash %s\n' "$BASH_VERSION"
+HELPER_FIXTURE
+} > "$FIXTURE/mode-helpers.sh"
+helper_shell="$BASH"
+[[ ! -x /bin/bash ]] || helper_shell=/bin/bash
+"$helper_shell" "$FIXTURE/mode-helpers.sh"
