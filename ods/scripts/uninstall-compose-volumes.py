@@ -7,10 +7,12 @@ selected and unselected-extension volumes before removing any of them.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 
@@ -164,6 +166,7 @@ def unselected_volume_provenance(root: Path, trusted_root: Path) -> dict[str, se
 # A native install that stops after starting the stack never adds these files
 # to .compose-flags, so ownership must also use the containers' recipe paths.
 NATIVE_STACK_RECIPES = (
+    "installers/macos/dashboard-private-state.compose.yaml",
     "installers/macos/pixel-native.compose.yaml.disabled",
     "extensions/services/pixel-edge/compose.yaml.disabled",
 )
@@ -207,6 +210,58 @@ def unselected_volume_keys(root: Path, trusted_root: Path) -> set[str]:
     return set(unselected_volume_provenance(root, trusted_root))
 
 
+def private_dashboard_volumes(root: Path, trusted_root: Path, project: str,
+                              volumes: dict[str, dict]) -> set[str]:
+    """A failed first launch may have prepared volumes before any API mount.
+
+    Only these two fixed stores have owner-private creation receipts plus a
+    random token bound to the Docker daemon and installation. Never infer
+    ownership from their names or Compose labels alone.
+    """
+    recipe = "installers/macos/dashboard-private-state.compose.yaml"
+    trusted = trusted_plain_volume_keys(trusted_root, only_file=trusted_root / recipe)
+    installed = trusted_plain_volume_keys(root, only_file=root / recipe)
+    names = {f"{project}_dashboard-{kind}": kind for kind in ("pixel-images", "pixel-chat-results")}
+    candidates = set(volumes) & set(names)
+    if not candidates:
+        return set()
+    directory = root / "data/.dashboard-private-stores"
+    if not directory.exists():
+        return set()
+    info = directory.lstat()
+    if (directory.resolve() != directory or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+        raise ValueError("Private dashboard migration custody is invalid; retain volumes")
+    daemon = docker(root, "info", "--format", "{{.ID}}").strip()
+    install = hashlib.sha256(str(root).encode()).hexdigest()
+    proven = set()
+    for name in candidates:
+        kind = names[name]
+        key = "dashboard-" + kind
+        path = directory / (kind + ".json")
+        if not path.exists():
+            continue
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > 16384):
+            raise ValueError("Private dashboard migration receipt is invalid; retain volumes")
+        record = json.loads(path.read_text())
+        if not isinstance(record, dict):
+            raise ValueError("Private dashboard migration receipt is invalid; retain volumes")
+        row = volumes[name]
+        labels = row.get("Labels") or {}
+        token = record.get("token", "")
+        if (key in trusted & installed and isinstance(token, str) and re.fullmatch("[a-f0-9]{32}", token)
+                and record.get("kind") == kind and record.get("volume") == name
+                and record.get("install") == install and record.get("daemon") == daemon
+                and row.get("Driver") == "local" and not row.get("Options")
+                and labels.get(PROJECT_LABEL) == project and labels.get(VOLUME_LABEL) == key
+                and labels.get("io.ods.private-store.token") == token
+                and labels.get("io.ods.private-store.install") == install):
+            proven.add(name)
+    return proven
+
+
 def retired_volume_keys(root: Path) -> set[str]:
     """Retired Lemonade volume keys this installation's migration recorded."""
     path = root / RETIRED_VOLUME_RECORD
@@ -224,6 +279,105 @@ def retired_volume_keys(root: Path) -> set[str]:
             "retired Lemonade volumes yourself with 'docker volume rm', or rerun with --keep-data"
         )
     return set(keys)
+
+
+def native_ingress_rollback_provenance(root: Path, project: str, row: dict, files: str) -> str:
+    """Prove the terminal frozen rollback recipe without merging current config."""
+    service = "pixel-native-ingress"
+    labels = row["Config"]["Labels"]
+    prefix = root / "data/pixel-native/preparation"
+    path = Path(files)
+    if (labels.get("com.docker.compose.service") != service or "," in files or
+            path.parent.parent != prefix or path.name != "rollback.compose.json" or
+            not re.fullmatch(r"ingress-refresh-[a-f0-9]{32}", path.parent.name)):
+        raise ValueError("Compose project contains a container from another installation")
+    failure = "Native ingress rollback ownership could not be proven"
+    owner = root.stat().st_uid
+
+    def private_document(selected: Path, limit: int) -> bytes:
+        # All ancestors within this install must retain owner custody. Never
+        # follow a moved journal/recipe through a symlink, even inside root.
+        for parent in (root, *(root / value for value in
+                              reversed(selected.parent.relative_to(root).parents) if value != Path("."))):
+            info = parent.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022):
+                raise ValueError(failure)
+        info = selected.parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or
+                stat.S_IMODE(info.st_mode) != 0o700 or selected.resolve() != selected):
+            raise ValueError(failure)
+        fd = os.open(selected, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != owner or
+                    before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o600 or before.st_size > limit):
+                raise ValueError(failure)
+            body = stream.read(limit + 1)
+            after = os.fstat(stream.fileno())
+        if (len(body) > limit or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            raise ValueError(failure)
+        return body
+
+    journal = path.parent / "refresh.json"
+    try:
+        journal_body, body = private_document(journal, 65536), private_document(path, 4 * 1024 * 1024)
+        record, recipe = json.loads(journal_body), json.loads(body)
+        saved = record["rollback"]
+        definition = recipe["services"][service]
+        native = root / "installers/macos/pixel-native.compose.yaml.disabled"
+        if (record.get("schemaVersion") != 1 or record.get("phase") != "rolled-back" or
+                record.get("project") != project or
+                record.get("source") != str(root / "data/pixel-native/home/.openclaw/openclaw.json") or
+                saved["path"] != str(path) or saved["sha256"] != hashlib.sha256(body).hexdigest() or
+                saved["image"] != row["Image"] or saved["user"] != row["Config"]["User"] or
+                not CONTAINER_RE.fullmatch(saved["previousId"]) or
+                not CONTAINER_RE.fullmatch(saved["configHash"]) or
+                set(recipe) != {"name", "services", "volumes", "networks"} or
+                recipe["name"] != project or set(recipe["services"]) != {service} or
+                definition["image"] != row["Image"] or definition["user"] != saved["user"] or
+                any(key in definition for key in ("build", "depends_on", "pull_policy")) or
+                native.is_symlink() or not native.is_file() or service not in compose_service_names(native)):
+            raise ValueError(failure)
+        # The snapshot externalizes only existing named volumes. Preserve their
+        # shipped logical-key provenance; never bless arbitrary external data.
+        keys = trusted_plain_volume_keys(root, only_file=native)
+        for key, value in recipe["volumes"].items():
+            if key not in keys or value != {"name": f"{project}_{key}", "external": True}:
+                raise ValueError(failure)
+        mounts = row["Mounts"]
+        declared = definition["volumes"]
+        if not isinstance(mounts, list) or not isinstance(declared, list) or len(mounts) != len(declared):
+            raise ValueError(failure)
+        targets = set()
+        for mount in declared:
+            target = mount["target"]
+            actual = [value for value in mounts if value.get("Destination") == target]
+            if (target in targets or len(actual) != 1 or actual[0]["Type"] != mount["type"] or
+                    actual[0]["RW"] is not (not mount.get("read_only", False))):
+                raise ValueError(failure)
+            targets.add(target)
+            if mount["type"] == "volume":
+                if actual[0]["Name"] != recipe["volumes"][mount["source"]]["name"]:
+                    raise ValueError(failure)
+            elif (mount["type"] != "bind" or
+                  actual[0]["Source"] != mount["source"].replace("$$", "$")):
+                raise ValueError(failure)
+        expected = labels.get("com.docker.compose.config-hash", "")
+        if not CONTAINER_RE.fullmatch(expected):
+            raise ValueError(failure)
+        # Hash only the recorded immutable definition with an empty env file.
+        # Prepending today's base file would change the recovery definition.
+        hashed = docker(root, "compose", "--project-directory", str(root), "--project-name", project,
+                        "--env-file", "/dev/null", "-f", str(path), "config", "--hash", service).strip()
+        if (hashed != service + " " + expected or private_document(journal, 65536) != journal_body or
+                private_document(path, 4 * 1024 * 1024) != body):
+            raise ValueError(failure)
+    except (OSError, KeyError, TypeError, AttributeError, ValueError):
+        # Neither the frozen environment nor journal admission credentials may
+        # reach an uninstall log through parser or subprocess diagnostics.
+        raise ValueError(failure) from None
+    return str(native.resolve())
 
 
 def project_containers(
@@ -257,10 +411,12 @@ def project_containers(
                     not isinstance(files, str) or
                     not files.split(",") or
                     not os.path.isabs(files.split(",")[0]) or
-                    os.path.realpath(files.split(",")[0]) not in base_files or
                     not isinstance(service, str) or
                     not PROJECT_RE.fullmatch(service)):
                 raise ValueError("Compose project contains a container from another installation")
+            provenance_files = files.split(",")
+            if os.path.realpath(provenance_files[0]) not in base_files:
+                provenance_files = [native_ingress_rollback_provenance(root, project, row, files)]
             mounts = row.get("Mounts") or []
             if not isinstance(mounts, list):
                 raise ValueError("Docker returned invalid container mounts")
@@ -272,7 +428,7 @@ def project_containers(
                     if not isinstance(name, str) or not VOLUME_RE.fullmatch(name):
                         raise ValueError("Docker returned invalid mounted volume")
                     mounted.add(name)
-                    for config_file in files.split(","):
+                    for config_file in provenance_files:
                         if os.path.isabs(config_file):
                             provenance.setdefault(name, set()).add(
                                 (service, os.path.realpath(config_file))
@@ -360,6 +516,50 @@ def fingerprint(row: dict) -> dict:
     return {key: row.get(key) for key in ("Name", "Labels", "CreatedAt", "Driver")}
 
 
+def native_config_volume_provenance(root: Path, project: str, volumes: dict[str, dict]) -> dict[str, dict]:
+    """Consume only completed producer custody, including after an old-bind rollback."""
+    path = root / "data/pixel-native/preparation/ingress-config-volume.json"
+    if not os.path.lexists(path):
+        return {}
+    failure = "Native config volume creation requires review; purge refused"
+    owner = root.stat().st_uid
+    for parent in (root, root / "data", root / "data/pixel-native", path.parent):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022:
+            raise ValueError(failure)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != owner or
+                stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or before.st_size > 16384):
+            raise ValueError(failure)
+        body = stream.read(16385)
+        after = os.fstat(stream.fileno())
+    if (len(body) > 16384 or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+        raise ValueError(failure)
+    record = json.loads(body)
+    key = "pixel-native-config"
+    name = f"{project}_{key}"
+    if (not isinstance(record, dict) or set(record) !=
+            {"schemaVersion", "installDir", "project", "key", "state", "nonce", "preexisting", "fingerprint"}
+            or record["schemaVersion"] != 1 or record["installDir"] != str(root)
+            or record["project"] != project or record["key"] != key or record["state"] != "ready"
+            or record["preexisting"] is not False or not isinstance(record["nonce"], str)
+            or not re.fullmatch("[a-f0-9]{32}", record["nonce"])):
+        raise ValueError(failure)
+    row = volumes.get(name)
+    if row is None:
+        # Completed uninstall can have removed it before an interruption. Never
+        # reinterpret an absent/replaced volume as fresh producer custody.
+        return {}
+    if (row.get("Driver") != "local" or row.get("Scope") != "local" or row.get("Options") not in (None, {})
+            or (row.get("Labels") or {}).get("org.osmantic.ods.native-config-creation") != record["nonce"]
+            or record["fingerprint"] != fingerprint(row)):
+        raise ValueError(failure)
+    return {name: fingerprint(row)}
+
+
 # A purge preflight proves volume ownership through the containers that mount
 # them, and Compose down then removes those containers. Keep the verified
 # record in the retained installation tree so an uninstall interrupted after
@@ -416,6 +616,8 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
         }), encoding="utf-8")
         return
     volumes = project_volumes(root, project)
+    private_prepared = private_dashboard_volumes(root, trusted_root, project, volumes)
+    produced = native_config_volume_provenance(root, project, volumes)
     resumed, resumed_anonymous = resume_record(root, project)
     unselected = unselected_volume_provenance(root, trusted_root)
     expected_names = set(selected) | {
@@ -430,10 +632,11 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
         raise ValueError(f"Volume {name} matches an ODS recipe but lacks Compose ownership labels")
     def proven_earlier(name: str, row: dict) -> bool:
         # Unmounted now, but identical to what an interrupted uninstall proved.
-        return name not in mounted and resumed.get(name) == fingerprint(row)
+        return name not in mounted and (resumed.get(name) == fingerprint(row)
+            or produced.get(name) == fingerprint(row))
 
     if volumes and not container_ids and not all(
-            name in external or proven_earlier(name, row) for name, row in volumes.items()):
+            name in external or name in private_prepared or proven_earlier(name, row) for name, row in volumes.items()):
         raise ValueError(
             "ODS project volumes remain but no container proves the installation path; "
             "an older 'ods stop' or an interrupted uninstall may have removed that proof. "
@@ -458,7 +661,7 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
         if proven_earlier(name, row):
             owned[name] = fingerprint(row)
             continue
-        if name in selected and name not in mounted:
+        if name in selected and name not in mounted and name not in private_prepared:
             raise ValueError(
                 f"Selected volume {name} has no verified ODS container mount; an interrupted "
                 "uninstall may have removed that proof. Rerun with --keep-data to keep the "
@@ -470,9 +673,11 @@ def preflight(root: Path, snapshot: Path, flags: list[str], keep_data: bool = Fa
             bool(mount_provenance.get(name, set()) & unselected[key])
         )
         retired_owned = key in retired and name == f"{project}_{key}"
-        if name in selected or unselected_owned or retired_owned:
+        if name in selected or unselected_owned or retired_owned or name in private_prepared:
             owned[name] = fingerprint(row)
             if name not in selected and unselected_owned:
+                trusted_used.add(key)
+            if name in private_prepared:
                 trusted_used.add(key)
         elif key in RETIRED_VOLUME_KEYS and name == f"{project}_{key}":
             raise ValueError(

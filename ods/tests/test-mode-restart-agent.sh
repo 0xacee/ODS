@@ -32,7 +32,9 @@ for platform in linux macos; do
         esac
         : > "$install/trace"
         if output=$(
+            exec 2>&1
             INSTALL_DIR="$install" BLUE='' GREEN='' RED='' CYAN='' NC=''
+            NATIVE_LIFECYCLE_CHILD=false
             trace() { printf '%s\n' "$*" >> "$INSTALL_DIR/trace"; }
             check_install() { :; }
             test_install() { :; }
@@ -54,6 +56,8 @@ for platform in linux macos; do
             _ods_cli_maybe_resume_bootstrap_upgrade() { :; }
             macos_wait_for_bootstrap_compose_safe() { :; }
             macos_maybe_resume_bootstrap_upgrade() { :; }
+            native_lifecycle_selected() { return 1; }
+            dashboard_compose_up() { docker compose "$@"; }
             start_native_llama() { trace native; }
             _compose_run_with_summary() { trace compose; [[ "$scenario" != stack-failed ]] || exit 41; [[ "$scenario" != stack-mode-changed ]] || _env_set ODS_MODE hybrid; }
             docker() { trace compose; [[ "$scenario" != stack-failed ]] || return 1; [[ "$scenario" != stack-mode-changed ]] || _env_set ODS_MODE hybrid; }
@@ -106,7 +110,7 @@ for platform in linux macos; do
             for function in _env_set cmd_mode _agent_mode_snapshot _agent_refresh_mode; do
                 source <(extract "$CLI" "$function")
             done
-            cmd_mode "$target"
+            cmd_mode "$target" >/dev/null
             if [[ "$platform" == macos ]]; then
                 source <(extract "$MAC_CLI" cmd_restart)
             else

@@ -59,6 +59,7 @@ $LibDir = Join-Path $ScriptDir "lib"
 . (Join-Path $LibDir "native-llama-legacy.ps1")
 . (Join-Path $LibDir "model-activation.ps1")
 . (Join-Path $LibDir "host-agent-process.ps1")
+. (Join-Path $LibDir "opencode-startup.ps1")
 . (Join-Path $LibDir "install-report.ps1")
 . (Join-Path $LibDir "tier-map.ps1")
 
@@ -699,6 +700,7 @@ function Test-ODSUninstallStartupLauncherOwned {
 function Stop-ODSUninstallOwnedHelpers {
     # Shared executable locations, ports and stale PID files cannot identify
     # an installation. Only a helper's executable/script path can do that.
+    Remove-ODSOpenCodeStartupFallback -InstallDir $InstallDir
     $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
     $byId = @{}; $ancestors = @{}
     foreach ($process in $processes) { $byId[[int]$process.ProcessId] = $process }
