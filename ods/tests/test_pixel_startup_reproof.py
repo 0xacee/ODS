@@ -169,7 +169,9 @@ class StartupTests(unittest.TestCase):
         # Pixel edge container is up; both answers come from the read-only status.
         for reason in ('edge-container-unavailable', 'host-command-failed'):
             with self.subTest(reason=reason):
-                self.run.reset_mock(); self.sleep.reset_mock(); self.end.reset_mock()
+                self.run.reset_mock()
+                self.sleep.reset_mock()
+                self.end.reset_mock()
                 failure = {'stage': 'unsafe-state', 'projection': {'available': False,
                     'pending': False, 'busy': False, 'reason': reason}}
                 self.run.side_effect = [
