@@ -32,7 +32,8 @@ export const STOP_SYNTHESIS_INSTRUCTION =
   '(another model, variant, component or a system-level requirement) is not a substitute. ' +
   'For anything the excerpts do not establish, use null in structured output or write "not found"; never guess, ' +
   'and never invent values, prices, stock states, dates, sources or results. ' +
-  "Follow the owner's requested output format as far as the excerpts allow, in the owner's language. " +
+  "Follow the owner's requested output format as far as the excerpts allow, in the language of the owner request " +
+  '(English if it is unclear), not the language of the excerpts. ' +
   'Do not describe your process, tools, searches or next steps.';
 
 export const STOP_SYNTHESIS_NOTE =
