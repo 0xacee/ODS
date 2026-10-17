@@ -63,13 +63,28 @@ try {
     $made = @(Publish-ODSPortalShortcut -PortalUrl $portal -DesktopFolder $desktop -ProgramsFolder $programs)
     Check ($made.Count -eq 1 -and (Test-Path -LiteralPath $webLink) -and
         ($script:output -join "`n") -match 'WARNING: The ODS app shortcut was not created: The WScript\.Shell COM object is unavailable\. A desktop web link is used instead\.') 'a failed app shortcut warns with its cause and falls back to the web link'
+    if ($onWindows) {
+        # Controlled folder access, or a read-only web link left by an older
+        # install: the fallback warns with the cause and the Portal address.
+        Reset-Folders
+        [IO.File]::WriteAllText($webLink, "[InternetShortcut]`r`nURL=http://localhost:3000/pixel`r`n")
+        (Get-Item -LiteralPath $webLink).Attributes = 'ReadOnly'
+        $made = @(Publish-ODSPortalShortcut -PortalUrl $portal -DesktopFolder $desktop -ProgramsFolder $programs)
+        $said = $script:output -join "`n"
+        Check ($made.Count -eq 0 -and $said -match "WARNING: The desktop shortcut 'ODS Portal' was not created: .+ open it at http://localhost:3001/pixel" -and
+            $said -match 'discord\.gg/' -and $said -notmatch "Created the desktop shortcut") 'a web link that cannot be written warns with its cause and the Portal address instead of failing the install'
+        (Get-Item -LiteralPath $webLink).Attributes = 'Normal'
+    }
     . $library
 
     if ($onWindows) {
         # --- Edge present: the ODS app on the desktop and in the Start menu ------
         $edgeFixture = Join-Path (Join-Path $fixture 'Edge') 'msedge.exe'
         $null = New-Item -ItemType Directory -Path (Split-Path -Parent $edgeFixture)
-        [IO.File]::WriteAllText($edgeFixture, 'edge fixture, never executed')
+        # Windows reads a saved target back in its long form, and a runner's
+        # TEMP can be an 8.3 short path, so the target is matched by content.
+        $edgeMarker = 'edge fixture, never executed ' + [guid]::NewGuid().ToString('N')
+        [IO.File]::WriteAllText($edgeFixture, $edgeMarker)
         function Get-ODSEdgePath { return $edgeFixture }
         Reset-Folders
         $made = @(New-ODSAppShortcut -Url 'http://localhost:3001/' -IconSource $iconSource -Folders @($desktop, (Join-Path $fixture 'missing')))
@@ -77,8 +92,10 @@ try {
         try {
             $link = $shell.CreateShortcut($made[0])
             $copiedIcon = Join-Path $env:LOCALAPPDATA 'ODS\ods-app.ico'
-            Check ($made.Count -eq 1 -and $made[0] -eq (Join-Path $desktop 'ODS.lnk') -and $link.TargetPath -eq $edgeFixture -and
-                $link.Arguments -ceq '--app=http://localhost:3001/' -and $link.WorkingDirectory -eq (Split-Path -Parent $edgeFixture) -and
+            Check ($made.Count -eq 1 -and $made[0] -eq (Join-Path $desktop 'ODS.lnk') -and
+                (Split-Path -Leaf $link.TargetPath) -eq 'msedge.exe' -and [IO.File]::ReadAllText($link.TargetPath) -ceq $edgeMarker -and
+                $link.Arguments -ceq '--app=http://localhost:3001/' -and
+                [IO.File]::ReadAllText((Join-Path $link.WorkingDirectory 'msedge.exe')) -ceq $edgeMarker -and
                 $link.IconLocation -like '*\ODS\ods-app.ico,0' -and
                 (Get-FileHash -LiteralPath $copiedIcon).Hash -eq (Get-FileHash -LiteralPath $iconSource).Hash) 'the app shortcut opens the dashboard in an Edge app window with a private copy of the ODS icon'
         } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
@@ -91,6 +108,18 @@ try {
         Reset-Folders
         $null = Publish-ODSPortalShortcut -PortalUrl $portal -IconSource $iconSource -DesktopFolder $desktop -ProgramsFolder (Join-Path $fixture 'missing')
         Check (($script:output -join "`n") -match 'Created the ODS app on the desktop\.') 'the note names only the places a shortcut was made'
+        # The Start-menu save fails after the desktop one succeeded (a
+        # read-only ODS.lnk there): only the desktop app is reported.
+        Reset-Folders
+        $blocked = Join-Path $programs 'ODS.lnk'
+        [IO.File]::WriteAllText($blocked, 'read-only placeholder')
+        (Get-Item -LiteralPath $blocked).Attributes = 'ReadOnly'
+        $made = @(Publish-ODSPortalShortcut -PortalUrl $portal -IconSource $iconSource -DesktopFolder $desktop -ProgramsFolder $programs)
+        $said = $script:output -join "`n"
+        Check ($made.Count -eq 1 -and $made[0] -eq (Join-Path $desktop 'ODS.lnk') -and -not (Test-Path -LiteralPath $webLink) -and
+            $said -match ([regex]::Escape("WARNING: The ODS app shortcut could not be saved in ${programs}:")) -and
+            $said -match 'Created the ODS app on the desktop\.' -and $said -notmatch 'was not created') 'a Start-menu shortcut that cannot be saved keeps the desktop app and reports only it'
+        (Get-Item -LiteralPath $blocked).Attributes = 'Normal'
     }
 
     # --- windows.ps1 uses this helper after a verified install -------------------

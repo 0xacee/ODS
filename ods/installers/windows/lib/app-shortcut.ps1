@@ -18,8 +18,9 @@ function New-ODSAppShortcut {
     <#
     .SYNOPSIS
         Create the ODS app shortcuts for a loopback dashboard URL. Returns the
-        shortcut paths, or none when Edge is missing (the caller keeps its
-        plain web link then).
+        shortcut paths it saved, or none when Edge is missing (the caller
+        keeps its plain web link then). A folder whose shortcut cannot be
+        saved is skipped with a warning.
     #>
     param([Parameter(Mandatory = $true)][string]$Url, [string]$IconSource = '',
         [string[]]$Folders = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs')))
@@ -39,14 +40,20 @@ function New-ODSAppShortcut {
         foreach ($folder in $Folders) {
             if (-not $folder -or -not (Test-Path -LiteralPath $folder -PathType Container)) { continue }
             $path = Join-Path $folder 'ODS.lnk'
-            $link = $shell.CreateShortcut($path)
-            $link.TargetPath = $edge
-            $link.Arguments = "--app=$Url"
-            $link.WorkingDirectory = Split-Path -Parent $edge
-            $link.Description = 'ODS: your local AI in its own window. Press F11 for full screen.'
-            if (Test-Path -LiteralPath $icon -PathType Leaf) { $link.IconLocation = "$icon,0" }
-            $link.Save()
-            $created += $path
+            try {
+                $link = $shell.CreateShortcut($path)
+                $link.TargetPath = $edge
+                $link.Arguments = "--app=$Url"
+                $link.WorkingDirectory = Split-Path -Parent $edge
+                $link.Description = 'ODS: your local AI in its own window. Press F11 for full screen.'
+                if (Test-Path -LiteralPath $icon -PathType Leaf) { $link.IconLocation = "$icon,0" }
+                $link.Save()
+                $created += $path
+            } catch {
+                # Controlled folder access or a read-only folder: the other
+                # shortcut, or the caller's web link, still gets made.
+                Write-Warning "The ODS app shortcut could not be saved in ${folder}: $($_.Exception.Message)"
+            }
         }
         return $created
     } finally {
@@ -82,7 +89,13 @@ function Publish-ODSPortalShortcut {
     }
     if (-not $DesktopFolder) { return @() }
     $webLink = Join-Path $DesktopFolder 'ODS Portal.url'
-    Set-Content -LiteralPath $webLink -Value @('[InternetShortcut]', "URL=$PortalUrl") -Encoding ASCII
+    try {
+        Set-Content -LiteralPath $webLink -Value @('[InternetShortcut]', "URL=$PortalUrl") -Encoding ASCII -ErrorAction Stop
+    } catch {
+        Write-Warning ("The desktop shortcut 'ODS Portal' was not created: $($_.Exception.Message) ODS is installed; open it at " +
+            "$PortalUrl, or run setup again to retry the shortcut. Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC")
+        return @()
+    }
     Write-Host "Created the desktop shortcut 'ODS Portal'."
     return @($webLink)
 }
