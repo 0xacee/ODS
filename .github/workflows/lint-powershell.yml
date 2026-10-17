@@ -122,6 +122,15 @@ jobs:
         shell: powershell
         run: ./tests/contracts/test-windows-portal-amd.ps1
 
+      - name: Windows RTX Spark Detection Contracts (PowerShell 7)
+        shell: pwsh
+        run: ./tests/contracts/test-windows-spark-detection.ps1
+
+      - name: Windows RTX Spark Detection Contracts (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/contracts/test-windows-spark-detection.ps1
+
       - name: Windows Native llama.cpp Runtime Contracts (PowerShell 7)
         shell: pwsh
         run: ./tests/contracts/test-windows-native-llama-runtime.ps1
