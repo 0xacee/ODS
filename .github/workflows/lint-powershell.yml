@@ -247,6 +247,7 @@ jobs:
         run: ./tests/test-windows-port-preflight.ps1
 
       - name: Windows Port Preflight Contract (Windows PowerShell)
+        if: runner.os == 'Windows'
         shell: powershell
         run: ./tests/test-windows-port-preflight.ps1
 

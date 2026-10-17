@@ -388,6 +388,7 @@ $script:mockListeners.Remove(8080)
 
 # A retained Compose binding is allowed only with the exact install directory,
 # service, publication address and local Desktop listener. No container is stopped.
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
 $savedDockerFunction = (Get-Item Function:docker).ScriptBlock
 $savedCimFunction = (Get-Item Function:Get-CimInstance).ScriptBlock
 $savedDockerHost = $env:DOCKER_HOST
@@ -506,6 +507,7 @@ try {
     if ($null -eq $savedDockerHost) { Remove-Item Env:DOCKER_HOST -ErrorAction SilentlyContinue } else { $env:DOCKER_HOST = $savedDockerHost }
 }
 Write-Host "Retained Compose port ownership: $script:composeChecks checks passed."
+}
 
 function Remove-VoiceSeedDir {
     param([string]$Path)
