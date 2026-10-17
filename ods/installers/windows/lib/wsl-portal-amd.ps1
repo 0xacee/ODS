@@ -192,14 +192,29 @@ function Stop-ODSPortalTaskTree {
     #>
     param($Task, [string]$TaskName, $Action, [string]$ActionExe, [string]$ExecutablePath, [int]$Port, [bool]$Durable)
     if ($Port -lt 1 -or $Port -gt 65535) { throw 'The existing Portal runtime task has an invalid port.' }
+    # Every stop path, including uninstall, must disarm scheduled retries.
+    # Publish first so even an already queued durable launcher exits cleanly.
+    $armed = [string]$Task.State -ne 'Disabled'
+    Set-ODSPortalRuntimeIntent 'stopped'
+    Disable-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+    try {
+        Stop-ODSPortalDisarmedTaskTree @PSBoundParameters
+    } catch {
+        # A stop that fails leaves sign-in startup as it found it, so a
+        # refused rerun or Unload never leaves the model off after a restart.
+        if ($armed) {
+            Set-ODSPortalRuntimeIntent 'running'
+            Enable-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+        }
+        throw
+    }
+}
+
+function Stop-ODSPortalDisarmedTaskTree {
+    param($Task, [string]$TaskName, $Action, [string]$ActionExe, [string]$ExecutablePath, [int]$Port, [bool]$Durable)
     $runtimeDir = Get-ODSPortalRuntimeDir
     $readyPath = Join-Path $runtimeDir 'ready.json'
     $ownershipPath = Join-Path $runtimeDir 'process-ownership.json'
-
-    # Every stop path, including uninstall, must disarm scheduled retries.
-    # Publish first so even an already queued durable launcher exits cleanly.
-    Set-ODSPortalRuntimeIntent 'stopped'
-    Disable-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
 
     $engineId = Get-ODSPortalTaskEngineId $TaskName
     $nodes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
@@ -275,7 +290,7 @@ function Stop-ODSPortalTaskTree {
     # Hold process handles before stopping the task, so a recycled PID cannot
     # redirect a later Kill(). Children may live outside the runtime folder.
     $roots = if ($root) { @($root) } else { $recovered }
-    $owned = Get-ODSPortalOwnedProcessTree $roots $nodes
+    $owned = Get-ODSPortalOwnedProcessTree $roots $nodes $ExecutablePath
     try {
         $currentTasks = @(Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop)
         if ($currentTasks.Count -ne 1 -or $currentTasks[0].TaskPath -ne $Task.TaskPath -or

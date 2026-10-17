@@ -357,6 +357,7 @@ try {
     }
     function Stop-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) $script:stopCalls.Add('task') }
     function Disable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) $script:stopCalls.Add('disable') }
+    function Enable-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction) $script:stopCalls.Add('enable') }
     function Get-Process { param($Id, $ErrorAction)
         $node = @($script:processNodes | Where-Object { $_.ProcessId -eq $Id })[0]
         if (-not $node) { throw 'Mock process no longer exists.' }
@@ -391,11 +392,21 @@ try {
         )
         Write-ODSPrivateEnvFile -Path (Join-Path $runtimeDir 'runtime.json') -Content ($registration.Plan | ConvertTo-Json -Compress)
         if (Test-Path -LiteralPath $registration.ReadyPath) { Remove-Item -LiteralPath $registration.ReadyPath -Force }
+        Set-ODSPortalRuntimeIntent 'running'
     }
+    $intentPath = Join-Path $runtimeDir 'intent.json'
     Reset-LlamaStopFixture
     Stop-ODSPortalRuntime $plan.ExecutablePath
     Assert-Restart (($script:stopCalls -join ',') -ceq 'disable,task,kill:100,kill:101' -and $script:disposed.Count -eq 2) 'the llama.cpp task stops its exact wrapper and llama-server and preserves a user llama-server and Lemonade'
-    Assert-Restart (-not (Test-ODSNativeLlamaWanted (Join-Path $runtimeDir 'intent.json'))) 'every stop publishes the stopped intent before disabling the task'
+    Assert-Restart (-not (Test-ODSNativeLlamaWanted $intentPath)) 'every stop publishes the stopped intent before disabling the task'
+    # A browser opened before the runtime started can name a PID Windows later
+    # reused for the runtime's console host. It is older, so not its child.
+    Reset-LlamaStopFixture
+    $script:processNodes += [pscustomobject]@{ ProcessId = 102; ParentProcessId = 100; ExecutablePath = 'C:\Windows\System32\conhost.exe'; CreationDate = [datetime]'2026-01-01T00:00:01' }
+    $script:processNodes += [pscustomobject]@{ ProcessId = 22120; ParentProcessId = 102; ExecutablePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'; CreationDate = [datetime]'2025-06-01T00:00:00' }
+    $script:processNodes += [pscustomobject]@{ ProcessId = 22121; ParentProcessId = 101; ExecutablePath = $null; CreationDate = [datetime]'2025-06-01T00:00:00' }
+    Stop-ODSPortalRuntime $plan.ExecutablePath
+    Assert-Restart (($script:stopCalls -join ',') -ceq 'disable,task,kill:100,kill:101,kill:102') 'an older app whose recorded parent PID was reused by the runtime is left running and never blocks the stop'
     Reset-LlamaStopFixture
     $script:stopTask = $null; $script:portTaken = $true
     Stop-ODSPortalRuntime
@@ -432,7 +443,15 @@ try {
         $message = ''
         try { Stop-ODSPortalRuntime } catch { $message = $_.Exception.Message }
         Assert-Restart ($message -and -not ($script:stopCalls -match '^(kill|task)')) "$case refuses teardown before stopping any task or process"
+        Assert-Restart ((($script:stopCalls -join ',') -cin @('', 'disable,enable')) -and (Test-ODSNativeLlamaWanted $intentPath)) "$case leaves sign-in startup armed"
     }
+    # After an Unload the task is disabled; a refused stop keeps it that way.
+    Reset-LlamaStopFixture
+    $script:stopTask.State = 'Disabled'; Set-ODSPortalRuntimeIntent 'stopped'
+    $script:processNodes[1].CreationDate = [datetime]'2025-01-01T00:00:00'
+    $message = ''
+    try { Stop-ODSPortalRuntime } catch { $message = $_.Exception.Message }
+    Assert-Restart ($message -and ($script:stopCalls -join ',') -ceq 'disable' -and -not (Test-ODSNativeLlamaWanted $intentPath)) 'a refused stop of an unloaded runtime leaves it unloaded'
 
     foreach ($case in @('startup-cleanup-retry', 'startup-recycled-worker')) {
         Reset-LlamaStopFixture

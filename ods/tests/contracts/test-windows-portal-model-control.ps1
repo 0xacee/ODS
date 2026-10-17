@@ -53,7 +53,7 @@ try {
         Principal = [pscustomobject]@{ UserId = Get-ODSPortalUserSid }; Actions = @($registration.Action) }
     $script:taskMissing = $false; $script:occupied = $false; $script:running = $false
     $script:healthFailure = $false; $script:staleProcess = $false; $script:wrongModel = $false
-    $script:failStart = $false; $script:failReady = $false; $script:mutateDuringStop = $false
+    $script:failStart = $false; $script:failReady = $false; $script:mutateDuringStop = $false; $script:failStop = $false
     $script:probeMutexDuringHealth = $false; $script:replacePlanDuringHealth = $false
     $script:contextOffset = 0; $script:wrongKey = $false; $script:visionLoaded = $true
     $script:events = [Collections.Generic.List[string]]::new()
@@ -73,6 +73,7 @@ try {
     }
     function Stop-ODSPortalRuntime([string]$ExecutablePath) {
         Assert-Control ($ExecutablePath -eq $exe) 'controller stops only the verified plan executable'
+        if ($script:failStop) { throw 'fixture stop refused' }
         $script:events.Add('stop'); $script:running = $false
         if ($script:mutateDuringStop) { [IO.File]::AppendAllText($planPath, ' ') }
     }
@@ -300,6 +301,13 @@ try {
     $script:occupied = $true
     $null = Assert-ControlError (New-ControlRequest 'stop' (Get-ODSPortalPlanDigest $planPath)) 'stop_unverified'
     $script:occupied = $false
+    # The stop itself disarms and re-arms; the controller never disarms ahead of it.
+    $script:failStop = $true; $script:taskDisabled = $false
+    $failed = $null
+    try { $null = Invoke-ODSPortalModelControl (New-ControlRequest 'stop' (Get-ODSPortalPlanDigest $planPath)) } catch { $failed = $_.Exception }
+    Assert-Control ($failed.Message -eq 'fixture stop refused' -and -not $script:taskDisabled -and
+        (Test-ODSNativeLlamaWanted (Join-Path (Split-Path -Parent $planPath) 'intent.json'))) 'a refused Unload leaves sign-in startup armed'
+    $script:failStop = $false
     # --- Vision projector (WP2): planned only for a launcher that declares it ---
     [IO.File]::WriteAllText((Join-Path $models 'mmproj-F16.gguf'), 'fixture')
     function New-VisionRequest([string]$Digest, [string]$Projector = 'mmproj-F16.gguf') {

@@ -878,7 +878,12 @@ function Get-ODSNativeLlamaModelProof {
 
 # --- Process ownership ----------------------------------------------------------
 
-function Get-ODSPortalOwnedProcessTree([object[]]$Roots, [object[]]$Nodes) {
+function Get-ODSPortalOwnedProcessTree([object[]]$Roots, [object[]]$Nodes, [string]$ServerPath = '') {
+    # With -ServerPath, a process older than its recorded parent is skipped
+    # unless it runs from the server's folder: Windows reused that parent's
+    # PID, so it was never our child. A browser window opened before the
+    # runtime started can name the runtime's console host this way.
+    $serverFolder = if ($ServerPath) { [IO.Path]::GetDirectoryName($ServerPath) } else { '' }
     $tree = [Collections.Generic.List[object]]::new()
     foreach ($root in $Roots) { $tree.Add($root) }
     for ($index = 0; $index -lt $tree.Count; $index++) {
@@ -887,8 +892,15 @@ function Get-ODSPortalOwnedProcessTree([object[]]$Roots, [object[]]$Nodes) {
             throw "Cannot read the owned runtime process identity (PID $($parent.ProcessId)); no process was stopped."
         }
         foreach ($node in @($Nodes | Where-Object { $_.ParentProcessId -eq $parent.ProcessId })) {
-            if ($node.CreationDate -isnot [datetime] -or $node.CreationDate.ToUniversalTime() -lt $parent.CreationDate.ToUniversalTime()) {
+            if ($node.CreationDate -isnot [datetime]) {
                 throw 'The runtime process ancestry is stale or ambiguous; no process was stopped.'
+            }
+            if ($node.CreationDate.ToUniversalTime() -lt $parent.CreationDate.ToUniversalTime()) {
+                $nodeFolder = if ($node.ExecutablePath) { [IO.Path]::GetDirectoryName([string]$node.ExecutablePath) } else { '' }
+                if (-not $serverFolder -or $nodeFolder -ieq $serverFolder) {
+                    throw 'The runtime process ancestry is stale or ambiguous; no process was stopped.'
+                }
+                continue
             }
             # A retained process handle supplies the original root's exit time.
             # Children born after that exit belong to a reused PID, not to us.

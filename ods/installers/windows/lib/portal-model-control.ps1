@@ -273,9 +273,8 @@ function Invoke-ODSPortalModelControl($Request) {
         }
         # Existing task ownership and held process handles prove every stop.
         # Its action is unchanged: the durable launcher reads runtime.json, and
-        # each model switch is a llama-server restart (no load API).
-        Set-ODSPortalRuntimeIntent 'stopped'
-        Disable-ScheduledTask -TaskName $configuration.TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+        # each model switch is a llama-server restart (no load API). The stop
+        # disarms sign-in startup first and restores it if the stop fails.
         Stop-ODSPortalRuntime $plan.ExecutablePath
         if ((Get-ODSPortalTaskEngineId $configuration.TaskName) -gt 0 -or
             @(Get-NetTCPConnection -LocalPort $plan.Port -State Listen -ErrorAction SilentlyContinue).Count) {
