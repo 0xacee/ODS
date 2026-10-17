@@ -876,6 +876,9 @@ export default function Extensions({ compact = false }) {
 function StatusBadge({ status, statusStyle, ext, gpuBackend, onConsole }) {
   const runtimeStarting = status === 'installing' && ext.runtime_starting === true
   let tooltip = runtimeStarting ? 'Service is starting; waiting for its health check' : STATUS_DESCRIPTIONS[status] || ''
+  if (status === 'disabled' && ext.source === 'core' && ext.library_manageable !== true) {
+    tooltip = 'ODS is not currently reporting this service as healthy.'
+  }
   if (status === 'incompatible') {
     tooltip += ` \u2014 requires ${ext.gpu_backends?.join(' or ') || 'specific GPU'}, your system: ${gpuBackend || 'unknown'}`
   }

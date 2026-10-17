@@ -368,6 +368,22 @@ afterEach(() => {
 })
 
 describe('built-in provenance and runtime state', () => {
+  it.each([
+    ['core', 'disabled', false, 'ODS is not currently reporting this service as healthy.'],
+    ['user', 'disabled', false, 'Installed but turned off — won’t start on restart'],
+    ['core', 'enabled', true, 'Service is running and healthy'],
+  ])('describes runtime evidence without inferring installation (source=%s, status=%s)', async (source, status, manageable, description) => {
+    installFetchMock({agent_available:true,extensions:[
+      {id:'runtime-evidence',name:'Runtime evidence',source,status,library_manageable:manageable,features:[baseFeature]},
+    ],summary:baseSummary()})
+    render(<Extensions compact />)
+    const card = within((await screen.findByRole('heading',{name:'Runtime evidence'})).closest('article'))
+    expect(card.getByText(description, {exact:true})).toBeInTheDocument()
+    if (source === 'core' && status === 'disabled') {
+      expect(card.queryByText(/Installed but turned off|won’t start on restart/)).toBeNull()
+    }
+  })
+
   const states = [
     ['disabled', {}, 'disabled'],
     ['enabled', {}, 'enabled'],
