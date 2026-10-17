@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -426,10 +427,51 @@ class Migration(unittest.TestCase):
             connection.execute("CREATE TABLE evidence (value TEXT)")
             connection.execute("INSERT INTO evidence VALUES ('committed')")
             connection.commit()
+            before = {suffix: Path(str(database) + suffix).read_bytes() for suffix in ("", "-wal")}
             target = self.state / "snapshot.sqlite3"
             W.snapshot(directory, "pixel-images", target)
+            self.assertEqual(target.read_bytes()[18:20], b"\x01\x01")
+            self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone(), ("wal",))
+            self.assertEqual({suffix: Path(str(database) + suffix).read_bytes() for suffix in ("", "-wal")}, before)
             with sqlite3.connect(target) as result:
                 self.assertEqual(result.execute("SELECT value FROM evidence").fetchone(), ("committed",))
+
+    def test_exported_image_archive_restores_without_wal_sidecars(self):
+        self.populate()
+        self.stores.prepare(self.state)
+        current = self.images(self.stores.path("pixel-images"))
+        self.addCleanup(current.close)
+        current.db.execute("PRAGMA journal_mode=WAL")
+        current.db.execute("PRAGMA wal_autocheckpoint=0")
+        current.begin_delete("a" * 64, "volume-only")
+        backup = self.root / "backup/data/pixel-images"
+        self.stores.export(self.state, backup)
+        database = backup / "images.sqlite3"
+        self.assertEqual(database.read_bytes()[18:20], b"\x01\x01")
+        self.assertEqual(list(backup.iterdir()), [database])
+        archive = self.root / "backup.tar.gz"
+        with tarfile.open(archive, "w:gz") as compressed:
+            compressed.add(database, arcname="images.sqlite3")
+        extracted = self.root / "extracted"
+        extracted.mkdir(mode=0o700)
+        with tarfile.open(archive) as compressed:
+            (extracted / "images.sqlite3").write_bytes(compressed.extractfile("images.sqlite3").read())
+        (extracted / "images.sqlite3").chmod(0o600)
+        # Staging is read-only with respect to the archive, including sidecars.
+        before = (extracted / "images.sqlite3").read_bytes()
+        current.close()
+        transaction = self.root / "archive-restore"
+        transaction.mkdir(mode=0o700)
+        for action in ("stage", "publish", "commit"):
+            self.stores.restore(self.state, action, transaction, extracted if action == "stage" else None)
+        self.assertEqual(list(extracted.iterdir()), [extracted / "images.sqlite3"])
+        self.assertEqual((extracted / "images.sqlite3").read_bytes(), before)
+        restored = self.images(self.stores.path("pixel-images"))
+        try:
+            self.assertEqual(restored.get("a" * 64, "kept", self.image["id"])["data"], self.png)
+            self.assertIsNotNone(restored.deletion("a" * 64, "volume-only"))
+        finally:
+            restored.close()
 
     def test_killed_snapshot_never_publishes_partial_rollback_database(self):
         directory = self.root / "interrupted"

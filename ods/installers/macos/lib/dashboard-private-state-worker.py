@@ -89,6 +89,10 @@ def snapshot(directory: Path, kind: str, destination: Path):
                     raise ValueError("private-store-source-replaced")
             else:
                 target.execute("PRAGMA user_version=0")
+            # Backup copies the source's WAL header. Only the completed output
+            # travels in an archive, so make it independent of WAL sidecars.
+            if target.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+                raise ValueError("private-store-snapshot-journal")
             if target.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                 raise ValueError("private-store-snapshot-integrity")
         private(pending)
