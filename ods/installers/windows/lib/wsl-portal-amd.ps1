@@ -752,7 +752,8 @@ function Invoke-ODSPortalRuntimeCutover {
                 } catch {
                     throw "Setup could not stop a former ODS Lemonade task ($($failure.Exception.Message)), and restoring the previous llama.cpp runtime also failed: $($_.Exception.Message) Rerun setup; ODS changed only its own files under $(Get-ODSPortalStateDir), and its backup is kept there."
                 }
-                if ($backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+                # A backup that cannot be removed must not hide the cause.
+                if ($backup) { Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }
                 throw "$($failure.Exception.Message) $(Get-ODSPortalRestoredRuntimeNote $Existing)"
             }
             # No new runtime file was written, so the backup is redundant.
@@ -776,8 +777,9 @@ function Invoke-ODSPortalRuntimeCutover {
             } catch {
                 throw "The llama.cpp runtime did not start ($failure), and restoring the previous runtime also failed: $($_.Exception.Message) Rerun setup; ODS changed only its own files under $(Get-ODSPortalStateDir), and its backup is kept there."
             }
-            # The previous files are back in place; the backup is now redundant.
-            if ($backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+            # The previous files are back in place; the backup is now redundant,
+            # and one that cannot be removed must not hide the cause.
+            if ($backup) { Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }
             throw "The llama.cpp runtime did not start: $failure $(Get-ODSPortalRestoredRuntimeNote $Existing)"
         }
         if (@($Existing.Launches).Count) { Complete-ODSPortalLemonadeRetirement $Existing.Launches }

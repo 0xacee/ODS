@@ -121,8 +121,22 @@ try {
     }
     function Get-ODSPortalTaskEngineId { param($TaskName) return 0 }
     # The proven-tree stops are covered by test-windows-portal-llama-restart.ps1.
+    function Open-BackupReader {
+        # Another program reads a file in the runtime backup (sharing reads,
+        # not deletes): the backup can be restored but not removed.
+        $backups = @(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*backup-*' })
+        if ($backups.Count -ne 1) { throw "Expected one runtime backup, found $($backups.Count)." }
+        $script:backupReader = [IO.File]::Open((Join-Path $backups[0].FullName 'runtime.json'), 'Open', 'Read', 'Read')
+    }
+    function Close-BackupReader {
+        if ($script:backupReader) { $script:backupReader.Dispose(); $script:backupReader = $null }
+        # The backup that could not be removed is the scenario's to clean up.
+        Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*backup-*' } |
+            Remove-Item -Recurse -Force
+    }
     function Stop-ODSPortalLemonadeLaunch($Task, $Launch) {
         $script:events.Add('quiesce:' + $Launch.TaskName)
+        if ($script:holdBackup -eq 'lemonade-stop') { Open-BackupReader }
         # A refusal changes nothing (the real stop restores what it touched).
         if ($script:lemonadeStopFailure) { throw $script:lemonadeStopFailure }
         # As the real stop: publish the stopped intent, then disable the task.
@@ -182,6 +196,7 @@ try {
             return [string]$Registration.Plan.GgufFile
         }
         $script:events.Add('ready')
+        if ($script:holdBackup -eq 'start') { Open-BackupReader }
         if ($script:readyFailure) { throw $script:readyFailure }
         return [string]$Registration.Plan.GgufFile
     }
@@ -198,7 +213,7 @@ try {
         $script:prompts = [Collections.Generic.List[string]]::new()
         $script:consent = $true; $script:installFailure = ''; $script:qualifyFailure = ''; $script:readyFailure = ''; $script:startFailure = ''
         $script:restoredReadyFailure = ''; $script:llamaStopFailure = ''; $script:lemonadeStopFailure = ''
-        $script:duringStaging = $null; $script:releaseOnWait = $null
+        $script:duringStaging = $null; $script:releaseOnWait = $null; $script:holdBackup = ''
         $script:policyHint = ''; $script:owners = @{}; $script:reserved = @()
         $script:device = [pscustomobject]@{ Name = 'Vulkan0'; Description = 'AMD Radeon RX 9070 XT'; TotalMiB = 16304; FreeMiB = 16000 }
     }
@@ -320,8 +335,36 @@ try {
         (Test-ODSNativeLlamaWanted (Join-Path $runtimeDir 'intent.json'))) 'a former Lemonade task that refuses after llama.cpp stopped restarts llama.cpp as it was and reports both'
     Check ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $runtimeDir 'runtime.json'))) -ceq $planBefore -and
         @(Get-ChildItem -LiteralPath (Get-ODSPortalStateDir) -Directory | Where-Object { $_.Name -like 'portal-runtime.*' }).Count -eq 0) 'that restore keeps the plan byte for byte and removes its redundant backup'
+    # Windows file sharing only: another program (antivirus, an editor) reads a
+    # backup file, so the redundant backup cannot be removed. The owner still
+    # sees why setup stopped and what it restored.
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Reset-Scenario
+        $script:lemonadeStopFailure = 'Cannot prove the running Portal runtime task process; no process was stopped.'
+        $script:holdBackup = 'lemonade-stop'
+        $message = ''
+        try {
+            try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } catch { $message = $_.Exception.Message }
+        } finally { Close-BackupReader }
+        Check ($message -match 'Cannot prove the running Portal runtime task process' -and $message -match 'previous ODS runtime was restored and is running again' -and
+            $script:events[$script:events.Count - 1] -ceq 'ready-restored') 'a backup that cannot be removed never hides the Lemonade refusal or the restored state'
+        $script:owners = @{}
+    }
     $null = $script:tasks.Remove($lemonadeTask)
     $script:owners = @{}
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        # The same after a failed start: the cause and the restored runtime.
+        Reset-Scenario
+        $script:readyFailure = 'llama-server exited during startup with code 1.'
+        $script:holdBackup = 'start'
+        $message = ''
+        try {
+            try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } catch { $message = $_.Exception.Message }
+        } finally { Close-BackupReader }
+        Check ($message -match 'did not start: llama-server exited during startup' -and $message -match 'previous ODS runtime was restored and is running again' -and
+            $script:events[$script:events.Count - 1] -ceq 'ready-restored') 'a backup that cannot be removed never hides why the new runtime did not start or the restored state'
+        $script:owners = @{}
+    }
 
     # --- Rerun: a model change from the dashboard is still running ------------
     Reset-Scenario
