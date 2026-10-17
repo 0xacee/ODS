@@ -143,12 +143,8 @@ def test_shared_resolver_restores_native_selection_without_cache(tmp_path, mode)
         (directory / 'activation.json').write_text('{"status":"error"}')
     (tmp_path / 'docker-compose.base.yml').write_text('services: {}\n')
     (tmp_path / 'installers/macos/lib').mkdir(parents=True, exist_ok=True)
-    for name in ('pixel-native-stack.py', 'pixel-native-install.py',
-                 'dashboard-private-state.py', 'dashboard-private-state-worker.py'):
+    for name in ('pixel-native-stack.py', 'pixel-native-install.py'):
         shutil.copyfile(ROOT / 'installers/macos/lib' / name, tmp_path / 'installers/macos/lib' / name)
-    recipe = 'installers/macos/dashboard-private-state.compose.yaml'
-    shutil.copyfile(ROOT / recipe, tmp_path / recipe)
-    shutil.copyfile(ROOT / 'docker-compose.base.yml', tmp_path / 'docker-compose.base.yml')
     result = subprocess.run(['bash', str(ROOT / 'scripts/resolve-compose-stack.sh'),
         '--script-dir', str(tmp_path), '--gpu-backend', 'apple'], text=True, capture_output=True,
         env={**os.environ, 'PATH': str(Path(sys.executable).parent) + ':' + os.environ['PATH']})
@@ -205,8 +201,12 @@ def test_cli_cached_flags_use_the_same_native_selection_rules(tmp_path, mode):
         (directory / 'activation.json').unlink()
         (directory / 'activation.json').symlink_to(directory / 'absent')
     (tmp_path / 'installers/macos/lib').mkdir(parents=True, exist_ok=True)
-    for name in ('pixel-native-stack.py', 'pixel-native-install.py'):
+    for name in ('pixel-native-stack.py', 'pixel-native-install.py',
+                 'dashboard-private-state.py', 'dashboard-private-state-worker.py'):
         shutil.copyfile(ROOT / 'installers/macos/lib' / name, tmp_path / 'installers/macos/lib' / name)
+    recipe = 'installers/macos/dashboard-private-state.compose.yaml'
+    shutil.copyfile(ROOT / recipe, tmp_path / recipe)
+    shutil.copyfile(ROOT / 'docker-compose.base.yml', tmp_path / 'docker-compose.base.yml')
     script = (ROOT / 'installers/macos/ods-macos.sh').read_text()
     function = script[script.index('get_compose_flags() {'):script.index('\n_get_base_compose_flags() {')]
     shell = 'set -euo pipefail\n_get_base_compose_flags() { echo "-f docker-compose.base.yml"; }\n' + function + '\nget_compose_flags\n'
