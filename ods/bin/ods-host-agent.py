@@ -13137,14 +13137,17 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 500, {"error": f"Failed to list models: {exc}"})
 
     def _handle_model_config(self):
-        """Expose only the fresh persisted mode, never private .env values."""
+        """Expose the two bounded mode identities, never private .env values."""
         if not check_auth(self):
             return
         try:
             mode = _normalize_ods_mode(load_env(INSTALL_DIR / ".env").get("ODS_MODE"))
         except (OSError, UnicodeError):
             mode = "unknown"
-        json_response(self, 200, {"configuredMode": mode}, no_store=True)
+        json_response(self, 200, {
+            "configuredMode": mode,
+            "effectiveMode": _normalize_ods_mode(STARTUP_ODS_MODE),
+        }, no_store=True)
 
     def _handle_model_status(self):
         """Return current model download progress."""

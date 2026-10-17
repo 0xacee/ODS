@@ -992,15 +992,23 @@ native_lifecycle_selected() {
 }
 
 run_native_lifecycle() {
-    local action="$1" service="${2:-}"
+    local action="$1" service="${2:-}" restarted_mode=""
     # Freeze the same authenticated selection that the child will recreate.
     # Changing .env after capture would invalidate the transaction's inputs.
     if [[ -z "$service" ]] && network_access_is_enabled; then
         require_proxy_auth || return 1
     fi
+    if [[ "$action" == restart && -z "$service" ]]; then
+        restarted_mode="$(read_env_value "$INSTALL_DIR/.env" ODS_MODE)"
+    fi
     "${ODS_PYTHON_CMD:-python3}" "$INSTALL_DIR/installers/macos/lib/pixel-native-ingress-refresh.py" \
         --install-dir "$INSTALL_DIR" --start-stopped-edge \
         --lifecycle-action "$action" --lifecycle-service "$service" --lifecycle-bash "$BASH" || return $?
+    # The child only applies its frozen stack. Refresh the independent agent
+    # after the parent has verified that result and released admission.
+    if [[ "$action" == restart && -z "$service" && -f "$INSTALL_DIR/bin/ods-host-agent.py" ]]; then
+        bash "$INSTALL_DIR/ods-cli" agent refresh-mode "$restarted_mode" || return 1
+    fi
     # Async model continuation begins only after admission has been released;
     # its existing detached launcher closes inherited file descriptors.
     [[ -n "$service" ]] || macos_maybe_resume_bootstrap_upgrade || true
@@ -1201,11 +1209,18 @@ cmd_restart() {
         macos_wait_for_bootstrap_compose_safe "restart" || return 1
         start_native_llama true || ai_warn "Native llama-server did not restart; continuing with the container services."
 
+        local restarted_mode
+        restarted_mode="$(read_env_value "$INSTALL_DIR/.env" ODS_MODE)"
         ai "Restarting all services..."
         # shellcheck disable=SC2086
         if ! dashboard_compose_up "$flags" restart; then
             ai_err "Failed to restart ODS services."
             return 1
+        fi
+        # The native agent keeps its startup mode independently of Docker.
+        # Reuse the shared authenticated comparison and launchd restart path.
+        if [[ "$NATIVE_LIFECYCLE_CHILD" != true && -f "$INSTALL_DIR/bin/ods-host-agent.py" ]]; then
+            bash "$INSTALL_DIR/ods-cli" agent refresh-mode "$restarted_mode" || return 1
         fi
         ai_ok "All services restarted"
     fi
