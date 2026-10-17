@@ -1071,6 +1071,12 @@ SERVICE_PORT_DEFAULTS
             *) ai_bad "PIXEL_WEB_SEARCH_PROVIDER must be parallel-free or searxng."; return 1 ;;
         esac
         export PIXEL_WEB_SEARCH_PROVIDER="$PIXEL_WEB_SEARCH_PROVIDER_VALUE"
+        PIXEL_RESPONSE_LANGUAGE_VALUE="$(_env_get_explicit_first PIXEL_RESPONSE_LANGUAGE "")"
+        case "$PIXEL_RESPONSE_LANGUAGE_VALUE" in
+            ""|en) ;;
+            *) ai_bad "PIXEL_RESPONSE_LANGUAGE=$PIXEL_RESPONSE_LANGUAGE_VALUE in .env is not supported. Set it to en, or remove the line to match the owner's language, then rerun the installer."; return 1 ;;
+        esac
+        export PIXEL_RESPONSE_LANGUAGE="$PIXEL_RESPONSE_LANGUAGE_VALUE"
         PIXEL_SOURCE_DIR_VALUE="$_phase06_requested_pixel_dir"
         # Phase 11 installs Pixel in this same installer shell. Preserve the
         # resolved immutable source contract in that shell as well as in .env;
@@ -1717,6 +1723,7 @@ PIXEL_SOURCE_URL=$(dotenv_quote "$PIXEL_SOURCE_URL_VALUE")
 PIXEL_SOURCE_REF=$(dotenv_value "${PIXEL_SOURCE_REF_VALUE}")
 PIXEL_SOURCE_DIR=$(dotenv_quote "$PIXEL_SOURCE_DIR_VALUE")
 $(if [[ -n "$PIXEL_WEB_SEARCH_PROVIDER_VALUE" ]]; then printf 'PIXEL_WEB_SEARCH_PROVIDER=%s\n' "$PIXEL_WEB_SEARCH_PROVIDER_VALUE"; fi)
+$(if [[ -n "${PIXEL_RESPONSE_LANGUAGE_VALUE:-}" ]]; then printf 'PIXEL_RESPONSE_LANGUAGE=%s\n' "$PIXEL_RESPONSE_LANGUAGE_VALUE"; fi)
 PIXEL_OPENWEBUI_KEY=$(dotenv_value "${PIXEL_OPENWEBUI_KEY_VALUE}")
 PIXEL_MODEL_RELAY_KEY=$(dotenv_value "${PIXEL_MODEL_RELAY_KEY_VALUE}")
 PIXEL_MODEL_RELAY_PORT=$(dotenv_value "${PIXEL_MODEL_RELAY_PORT_VALUE}")

@@ -25,7 +25,7 @@ import { captureNativeWebSearchResult, projectNativeWebSearchResult, projectWebR
 import { SEARCH_PACING_STREAK, SEARCH_PACING_REASON, searchTerms, nearDuplicateSearch, searchLeadUrls,
   duplicateSearchReason, ownerResearchDate, staleSearchDate, staleSearchDateGuidance } from "./research-pacing.mjs";
 import { createCompletionAssurance } from "./completion-assurance.mjs";
-import { managedTurnOwnerWords } from "./response-language.mjs";
+import { englishOnly, inResponseLanguage, managedTurnOwnerWords } from "./response-language.mjs";
 import { researchRequestProblem } from "./perplexica-research.mjs";
 import { HOST_CITATION_LIMITS } from './citation-verification.mjs';
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
@@ -7186,6 +7186,7 @@ export function createToolLoopGuard({
   publishWorkspacePreview,
   hostCitationVerifier,
   stopSynthesis,
+  responseLanguage,
   // Durable pending clarification cards (pending-clarification.mjs). Only the
   // plugin entry supplies the store; without one nothing is recorded.
   pendingClarifications,
@@ -7611,7 +7612,7 @@ export function createToolLoopGuard({
     if (!state) {
       pruneRuns();
       state = {
-        completionAssurance: createCompletionAssurance(),
+        completionAssurance: createCompletionAssurance({englishOnly: englishOnly(responseLanguage)}),
         extensionCompletionGate: undefined,
         workspaceLaneRequested: false,
         workspaceExtensionIsolated: false,
@@ -8081,7 +8082,7 @@ export function createToolLoopGuard({
           warn(`Pixel deletion-refusal abort failed for run ${runId}: ${String(error)}`);
         }
       }
-      return { block: true, blockReason: RECURSIVE_DELETE_REQUIRES_OWNER_REASON };
+      return { block: true, blockReason: inResponseLanguage(RECURSIVE_DELETE_REQUIRES_OWNER_REASON, responseLanguage) };
     }
     // Put this terminal fuse before every tool-specific return, including
     // Tool Search, reply controls, and workspace recovery adaptations. The
@@ -9490,7 +9491,7 @@ export function createToolLoopGuard({
       !state?.recursiveDeleteAuthorized
     ) {
       if (state) state.recursiveDeleteDenied = true;
-      return { block: true, blockReason: RECURSIVE_DELETE_REQUIRES_OWNER_REASON };
+      return { block: true, blockReason: inResponseLanguage(RECURSIVE_DELETE_REQUIRES_OWNER_REASON, responseLanguage) };
     }
 
     if (
@@ -12608,7 +12609,8 @@ export function createToolLoopGuard({
       // In a team or goal run, only the owner's own words: this request carries
       // no language note, and Portal's English instructions around those
       // words would set its language.
-      const request = synthesisRequest({request: state.managedOwnerWords ?? state.ownerRequestText ?? '', pages: sources, limits});
+      const request = synthesisRequest({request: state.managedOwnerWords ?? state.ownerRequestText ?? '', pages: sources, limits,
+        language: responseLanguage});
       if (request.pages < limits.minPages) return skip('too-few-pages');
       const used = sources.filter(source => request.messages[0].content.includes(`URL: ${source.url}\n`));
       const started = Date.now();

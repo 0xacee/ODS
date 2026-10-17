@@ -158,10 +158,12 @@ export async function realPromptBuild(t, {stateFiles = {}} = {}) {
 }
 
 // The entry's before_prompt_build hook alone (plugin/index.js), run in a vm
-// context where its collaborators are stubs: goal mode and a clarification
-// note are set directly, so the order of everything beside the owner turn can
-// be checked for turns the real flow rarely combines.
-export async function promptHookAlone({goal = false, clarificationNote, prompt = 'Quais são três dicas para manter o foco?'} = {}) {
+// context where its collaborators are stubs: the response-language setting,
+// goal mode and a clarification note are set directly, so the order of
+// everything beside the owner turn can be checked for turns the real flow
+// rarely combines.
+export async function promptHookAlone({language, goal = false, clarificationNote,
+  prompt = 'Quais são três dicas para manter o foco?'} = {}) {
   const source = fs.readFileSync(new URL('../plugin/index.js', import.meta.url), 'utf8');
   const begin = source.indexOf('    api.on("before_prompt_build",');
   const finish = source.indexOf('    api.on("model_call_started",', begin);
@@ -177,7 +179,7 @@ export async function promptHookAlone({goal = false, clarificationNote, prompt =
       observeRepositorySource() {}, promptContextForRun: () => undefined,
       clarificationContextForRun: id => (id === 'run' ? clarificationNote : undefined)},
     goalProgress: {begin() {}, active: () => goal}, taskActivity: {begin() {}},
-    promptContractForAgent, configuredContextWindow: 131072, configuredLeanPrompt: false,
+    promptContractForAgent, configuredContextWindow: 131072, configuredLeanPrompt: false, configuredResponseLanguage: language,
     extensionRepositoryContext: async () => '', managedTeamRole, ACTIVITY_CONTRACT, GOAL_CONTRACT,
     executionLocationContext: () => '', executionContext,
   });

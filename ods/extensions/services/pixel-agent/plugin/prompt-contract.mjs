@@ -3,7 +3,7 @@
 // This is trusted plugin text. Dynamic route values are limited to guard-
 // parsed canonical URLs, extension IDs, peer hostnames, and numeric ports;
 // untrusted projection or tool-result fields are never interpolated here.
-import { RESPONSE_LANGUAGE_CONTRACT } from './response-language.mjs';
+import { RESPONSE_LANGUAGE_CONTRACT, responseLanguageContract } from './response-language.mjs';
 
 import {
   managedTeamRole,
@@ -331,9 +331,11 @@ export function promptContractForAgent(
   context,
   agentId,
   event = undefined,
-  { verificationStatus, configuredContextWindow, configuredLeanPrompt, privateBrowserAccess, executionHost } = {}
+  { verificationStatus, configuredContextWindow, configuredLeanPrompt, privateBrowserAccess, executionHost,
+    configuredResponseLanguage } = {}
 ) {
   if (!context || context.agentId !== agentId) return undefined;
+  const languageContract = responseLanguageContract(configuredResponseLanguage);
   // A 32K runtime also needs the compact core: fixed instructions otherwise
   // exhaust its reserved input budget even after conversation compaction.
   const contextWindows = [
@@ -344,11 +346,12 @@ export function promptContractForAgent(
   const leanPrompt = configuredLeanPrompt === true ||
     (contextWindows.length > 0 && Math.min(...contextWindows) <= 32768);
   const conversationContract = conversationContractForExecution(leanPrompt
-    ? ODS_COMPACT_CONVERSATION_CONTRACT : ODS_CONVERSATION_CONTRACT, executionHost);
+    ? ODS_COMPACT_CONVERSATION_CONTRACT : ODS_CONVERSATION_CONTRACT, executionHost)
+    .replace(RESPONSE_LANGUAGE_CONTRACT, () => languageContract);
   const teamRole=managedTeamRole(event);
   if(teamRole==='Coordinator')return {appendSystemContext:'Plan the team size only. Choose the smallest useful number of workers, from 1 to 6. Honor an explicitly requested number within that limit. Return only JSON with one integer field, count. Do not perform the task, ask questions, or use tools.'};
   if(teamRole && teamRole!=='Builder')return {appendSystemContext:
-    `You are a read-only ${teamRole} in the owner's managed team. Analyze the supplied request and earlier teammates' actual reports. Return concise findings. ${RESPONSE_LANGUAGE_CONTRACT} Do not repeat the earlier answer: identify concrete corrections, unsupported claims and remaining limitations. For research or current factual claims, consult primary sources with web search/fetch and cite what you actually verified. A teammate's prose is not proof. Subjective rankings require explicit criteria, not a purported objective winner. Do not carry out the Builder's implementation again. Do not create files, run commands, publish previews, or operate services: those tools are unavailable to your role. For a purely creative writing task, review the supplied text directly. If a necessary owner preference is missing, use pixel_ods_ask_user and wait. Never invent tool results or claim verification you did not perform.`};
+    `You are a read-only ${teamRole} in the owner's managed team. Analyze the supplied request and earlier teammates' actual reports. Return concise findings. ${languageContract} Do not repeat the earlier answer: identify concrete corrections, unsupported claims and remaining limitations. For research or current factual claims, consult primary sources with web search/fetch and cite what you actually verified. A teammate's prose is not proof. Subjective rankings require explicit criteria, not a purported objective winner. Do not carry out the Builder's implementation again. Do not create files, run commands, publish previews, or operate services: those tools are unavailable to your role. For a purely creative writing task, review the supplied text directly. If a necessary owner preference is missing, use pixel_ods_ask_user and wait. Never invent tool results or claim verification you did not perform.`};
   const recovery = needsLoopRecovery(event?.messages)
     ? ` ${ODS_LOOP_RECOVERY_CONTRACT}`
     : "";

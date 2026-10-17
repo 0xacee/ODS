@@ -362,7 +362,7 @@ export function portugueseDateHint(ownerText) {
   return /\b(?:voce|noticias|hoje|consulte|pesquise|busque|procure|crie|arquivo|instale|instalar|baixar|configurar|quais|qual (?:e|o|a|os|as|sao))\b/.test(normalize(ownerText));
 }
 
-export function createCompletionAssurance() {
+export function createCompletionAssurance({englishOnly = false} = {}) {
   let initialized = false, research = false, portuguese = false, conversational = false, attempts = 0;
   let readsRequired = false, attributionAttempts = 0;
   let workObserved = false, webObserved = false, terminal, terminalStatus = 'failed';
@@ -416,7 +416,7 @@ export function createCompletionAssurance() {
       research = readsRequired || researchRequested(ownerText) || researchRequested(precedingRequest);
       terms = requestTerms(ownerText, precedingRequest);
       conversational = /^(?:(?:please|por favor)[,\s]+)?(?:traduza|translate|reescreva|rewrite|repita|repeat|diga apenas|say exactly|responda apenas|return exactly|explique|explain|rascunho|draft|exemplo|example)\b/.test(normalize(ownerText).trim()) && !research;
-      portuguese = portugueseDateHint(ownerText);
+      portuguese = !englishOnly && portugueseDateHint(ownerText);
     },
     // The owner cancelled this run. Any revision it armed, its replacement
     // text and any pending host read are void; nothing here outlives it.

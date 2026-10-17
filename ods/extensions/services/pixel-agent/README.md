@@ -168,6 +168,26 @@ upstream default. Other agents and existing jobs are unaffected.
 Secrets are never configured here. The token lives only in
 `PIXEL_GATEWAY_TOKEN_FILE`.
 
+## Reply language
+
+Portal answers in the language of the owner's current message and uses English
+when that is unclear. In team and goal runs, that means the owner's own request,
+not the instructions Portal writes around it. Its own fixed notices are always
+English.
+
+To keep Portal in English whatever language the owner writes, set
+`PIXEL_RESPONSE_LANGUAGE=en` in `.env` and rerun the installer. This covers
+replies, clarification cards, progress updates and the content Portal creates,
+in ordinary, team and goal runs.
+The installer writes the owner file `~/.openclaw/.ods-response-language`, and
+the plugin reads it when the gateway starts. To return to the default, remove
+the line and rerun the installer. The Linux installer applies this setting; the
+native macOS installer does not read it yet.
+
+The setting instructs the model; it does not filter or translate what the
+model writes. A model that ignores the instruction can still answer in another
+language, and Portal delivers that answer as written.
+
 ## systemd unit
 
 `host/pixel-ingress.service` runs as the same unprivileged owner as the Pixel
