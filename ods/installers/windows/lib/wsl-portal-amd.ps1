@@ -391,39 +391,42 @@ function Get-ODSPortalControlMutexName {
     return ('Global\ODS-PortalModelControl-' + (Get-ODSPortalUserSid))
 }
 
-function Enter-ODSPortalRuntimeChange {
+function Enter-ODSPortalRuntimeChange([hashtable]$Lock) {
     <#
     .SYNOPSIS
         Setup's turn to change the Windows model runtime. The dashboard's model
         controller holds the same mutex for every switch, Unload and Resume, so
         a rerun waits for one that is running instead of racing its stop.
-        Returns the held mutex for Exit-ODSPortalRuntimeChange.
+        The caller's $Lock holds the mutex before any wait begins, so its
+        finally (Exit-ODSPortalRuntimeChange) releases the lock even when
+        Ctrl+C stops setup just as a wait takes it.
     #>
-    $mutex = [Threading.Mutex]::new($false, (Get-ODSPortalControlMutexName))
+    $Lock.Mutex = [Threading.Mutex]::new($false, (Get-ODSPortalControlMutexName))
     $held = $false
-    try {
-        try { $held = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
-        if (-not $held) {
-            Write-Host '         A model change started from the dashboard is still running; setup continues once it finishes.'
-            # Short waits keep Ctrl+C working while setup waits.
-            $deadline = [datetime]::UtcNow.AddSeconds($script:ODSPortalRuntimeChangeWaitSeconds)
-            while (-not $held -and [datetime]::UtcNow -lt $deadline) {
-                try { $held = $mutex.WaitOne(2000) } catch [Threading.AbandonedMutexException] { $held = $true }
-            }
-        }
-    } finally {
-        if (-not $held) { $mutex.Dispose() }
+    # An abandoned mutex (a controller that ended without releasing it) is
+    # handed to this thread, so setup takes over.
+    try { $held = $Lock.Mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $held = $true }
+    if ($held) { return }
+    Write-Host '         A model change started from the dashboard is still running; setup continues once it finishes.'
+    # Short waits keep Ctrl+C working while setup waits.
+    $deadline = [datetime]::UtcNow.AddSeconds($script:ODSPortalRuntimeChangeWaitSeconds)
+    while (-not $held -and [datetime]::UtcNow -lt $deadline) {
+        try { $held = $Lock.Mutex.WaitOne(2000) } catch [Threading.AbandonedMutexException] { $held = $true }
     }
     if (-not $held) {
         throw ('A model change started from the dashboard or with ods model is still running, so setup did not change ' +
             'the model runtime. Let it finish, or restart Windows, then run setup again.')
     }
-    return $mutex
 }
 
-function Exit-ODSPortalRuntimeChange($Mutex) {
-    $Mutex.ReleaseMutex()
-    $Mutex.Dispose()
+function Exit-ODSPortalRuntimeChange([hashtable]$Lock) {
+    if (-not $Lock.Mutex) { return }
+    # Setup can stop before a wait took the lock, or just after. Only a lock
+    # this thread holds is released; ReleaseMutex refuses any other
+    # (ApplicationException), and that refusal needs no action.
+    try { $Lock.Mutex.ReleaseMutex() } catch [ApplicationException] { }
+    $Lock.Mutex.Dispose()
+    $Lock.Mutex = $null
 }
 
 function Assert-ODSPortalWslBinding([string]$WslDistro, [string]$WslInstallDir) {
@@ -714,8 +717,9 @@ function Invoke-ODSPortalRuntimeCutover {
     param($Existing, $Plan, $Options, [string]$ApiKey, [bool]$KeepPort, [string]$WslDistro = '', [string]$WslInstallDir = '')
     # One change at a time: a model switch, Unload or Resume from the
     # dashboard holds the same lock, so its stop never races this one.
-    $change = Enter-ODSPortalRuntimeChange
+    $lock = @{}
     try {
+        Enter-ODSPortalRuntimeChange $lock
         # Setup read what ODS runs before it took the lock. A switch, Unload or
         # Resume that finished meanwhile is the owner's latest choice: stop
         # with nothing changed instead of undoing it.
@@ -780,7 +784,7 @@ function Invoke-ODSPortalRuntimeCutover {
         if ($backup -and $Existing.Kind -eq 'llama-server') { Remove-Item -LiteralPath $backup -Recurse -Force }
         return $registration
     } finally {
-        Exit-ODSPortalRuntimeChange $change
+        Exit-ODSPortalRuntimeChange $lock
     }
 }
 

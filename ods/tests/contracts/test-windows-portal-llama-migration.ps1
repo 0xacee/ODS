@@ -67,6 +67,20 @@ try {
         try { $null = $Holder.PowerShell.EndInvoke($Holder.Pending) }
         finally { $Holder.PowerShell.Dispose(); $Holder.Held.Dispose(); $Holder.Release.Dispose() }
     }
+    function Get-ControlLockState {
+        # Free, busy or abandoned, as another thread sees the lock. Setup's own
+        # thread would simply re-enter a lock it kept.
+        $probe = [PowerShell]::Create()
+        $null = $probe.AddScript({ param($Name)
+            $mutex = [Threading.Mutex]::new($false, $Name)
+            try {
+                try { $taken = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $mutex.ReleaseMutex(); return 'abandoned' }
+                if ($taken) { $mutex.ReleaseMutex(); return 'free' }
+                return 'busy'
+            } finally { $mutex.Dispose() }
+        }).AddArgument($script:fixtureMutex)
+        try { return [string]@($probe.EndInvoke($probe.BeginInvoke()))[0] } finally { $probe.Dispose() }
+    }
     $script:shellPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
     function Get-Command { param($Name, $CommandType, $ErrorAction)
         if ($CommandType -eq 'Application') { return [pscustomobject]@{ Source = $script:shellPath; Name = 'powershell.exe' } }
@@ -393,6 +407,128 @@ try {
     Write-ODSPrivateFileBytes -Path (Join-Path $runtimeDir 'runtime.json') -Bytes $selectionBefore
     Remove-Item -LiteralPath (Join-Path (Get-ODSPortalModelsDir) 'Switched-To.gguf')
     $script:owners = @{}
+
+    # Thread-level lock behavior, on the Windows route that runs it.
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        # --- Ctrl+C while setup waits never keeps the lock --------------------
+        # The console runs setup on a thread it reuses, so a lock setup kept
+        # after Ctrl+C would stay held until the window closed, and every
+        # dashboard switch, Unload and Resume would answer busy. The owner
+        # presses Ctrl+C while setup waits: as the dashboard change ends (its
+        # wait takes the lock in that same moment), or while it still runs.
+        $raceSetup = @'
+. $setupLibrary
+$script:ODSPortalRuntimeChangeWaitSeconds = 60
+function Get-ODSPortalControlMutexName { return $fixtureMutex }
+function Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Text)
+    if (($Text -join ' ') -match 'setup continues once it finishes') { $waiting.Set() }
+}
+# Ctrl+C lands before setup gets past the lock; if it did not, setup stops
+# here, and nothing outside this runspace is ever reached.
+function Get-ODSPortalExistingRuntime { Start-Sleep -Seconds 30; throw 'The Ctrl+C fixture never continues past the lock.' }
+foreach ($name in @('Register-ScheduledTask', 'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask', 'Enable-ScheduledTask',
+    'Disable-ScheduledTask', 'Get-ScheduledTask', 'Get-CimInstance', 'Stop-Process', 'Start-Process', 'wsl', 'wsl.exe', 'docker', 'schtasks', 'reg')) {
+    Set-Item -Path "Function:global:$name" -Value ([scriptblock]::Create("throw 'The Ctrl+C fixture must not run $name.'"))
+}
+'@
+        $raceCutover = "Invoke-ODSPortalRuntimeCutover -Existing ([pscustomobject]@{ Kind = 'none'; WasEnabled = `$false; Launches = @(); Selection = `$null }) " +
+            "-Plan @{} -Options @{} -ApiKey 'fixture' -KeepPort `$false"
+        $setupLibrary = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../installers/windows/lib/wsl-portal-setup.ps1'))
+        function Invoke-CtrlCDuringWait([bool]$ChangeEndsAtStop) {
+            $holder = Start-ControlHolder 60000
+            $waiting = [Threading.ManualResetEventSlim]::new($false)
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ThreadOptions = 'ReuseThread'
+            $runspace.Open()
+            $setup = [PowerShell]::Create()
+            $setup.Runspace = $runspace
+            try {
+                $runspace.SessionStateProxy.SetVariable('setupLibrary', $setupLibrary)
+                $runspace.SessionStateProxy.SetVariable('fixtureMutex', $script:fixtureMutex)
+                $runspace.SessionStateProxy.SetVariable('waiting', $waiting)
+                $null = $setup.AddScript($raceSetup, $false).Invoke()
+                $setup.Commands.Clear()
+                $null = $setup.AddScript($raceCutover, $false).BeginInvoke()
+                if (-not $waiting.Wait(30000)) { throw 'Setup never reached the model-change wait.' }
+                # Setup is now inside one of its 2 s waits.
+                [Threading.Thread]::Sleep(300)
+                $stop = $setup.BeginStop($null, $null)
+                if ($ChangeEndsAtStop) { $holder.Release.Set() }
+                if (-not $stop.AsyncWaitHandle.WaitOne(30000)) { throw 'Setup did not stop after Ctrl+C.' }
+                Stop-ControlHolder $holder
+                $holder = $null
+                # The setup window is still open: its thread is alive.
+                return (Get-ControlLockState)
+            } finally {
+                if ($holder) { Stop-ControlHolder $holder }
+                $setup.Dispose(); $runspace.Dispose(); $waiting.Dispose()
+            }
+        }
+        $states = @(foreach ($trial in 1..4) { Invoke-CtrlCDuringWait $true })
+        Check (($states -join ',') -ceq 'free,free,free,free') ("Ctrl+C as a dashboard change ends during setup's wait never leaves the lock held while the window stays open" +
+            $(if (($states -join ',') -cne 'free,free,free,free') { " Got: $($states -join ',')." }))
+        $state = Invoke-CtrlCDuringWait $false
+        Check ($state -ceq 'free') ("Ctrl+C while the dashboard change still runs leaves the lock free once that change ends" + $(if ($state -cne 'free') { " Got: $state." }))
+
+        # --- A controller that ended without releasing the lock ---------------
+        # Windows hands the next waiter an abandoned mutex; setup takes it over
+        # instead of failing.
+        function Start-AbandoningHolder {
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ThreadOptions = 'UseNewThread'
+            $runspace.Open()
+            $holder = [PowerShell]::Create()
+            $holder.Runspace = $runspace
+            $held = [Threading.ManualResetEventSlim]::new($false)
+            $release = [Threading.ManualResetEventSlim]::new($false)
+            $null = $holder.AddScript({ param($Name, $Held, $Release)
+                $mutex = [Threading.Mutex]::new($false, $Name)
+                if (-not $mutex.WaitOne(0)) { throw 'The isolated test mutex was unexpectedly busy.' }
+                $Held.Set()
+                $null = $Release.Wait(20000)
+                # Ends without ReleaseMutex; its thread ends with the pipeline.
+                [Threading.Thread]::CurrentThread
+            }).AddArgument($script:fixtureMutex).AddArgument($held).AddArgument($release)
+            $pending = $holder.BeginInvoke()
+            if (-not $held.Wait(10000)) { throw 'The abandoning holder never took the isolated test mutex.' }
+            return [pscustomobject]@{ PowerShell = $holder; Runspace = $runspace; Pending = $pending; Held = $held; Release = $release }
+        }
+        function Complete-AbandoningHolder($Holder) {
+            $Holder.Release.Set()
+            try {
+                $thread = @($Holder.PowerShell.EndInvoke($Holder.Pending))[0]
+                if (-not $thread.Join(10000)) { throw 'The abandoning holder thread did not end.' }
+            } finally { $Holder.PowerShell.Dispose(); $Holder.Runspace.Dispose(); $Holder.Held.Dispose(); $Holder.Release.Dispose() }
+        }
+        # Abandoned before setup reaches the lock.
+        Reset-Scenario
+        Complete-AbandoningHolder (Start-AbandoningHolder)
+        $message = ''
+        try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } catch { $message = $_.Exception.Message }
+        Check (-not $message -and -not (($script:output -join ' ') -match 'still running; setup continues') -and
+            (Get-Index 'stop-llama') -ge 0 -and (Get-Index "register:$llamaTask") -gt (Get-Index 'stop-llama') -and
+            (Get-Index 'ready') -gt (Get-Index "register:$llamaTask")) ("a rerun takes over a model-change lock a controller left abandoned, without waiting" + $(if ($message) { " Setup said: $message" }))
+        $state = Get-ControlLockState
+        Check ($state -ceq 'free') ("that rerun releases the lock it took over" + $(if ($state -cne 'free') { " Got: $state." }))
+        # Abandoned while setup waits for it.
+        Reset-Scenario
+        $script:ODSPortalRuntimeChangeWaitSeconds = 30
+        $abandoning = Start-AbandoningHolder
+        $script:releaseOnWait = $abandoning.Release
+        $message = ''
+        try {
+            try { $null = Initialize-ODSPortalAmdRuntime $plan $fixture $true 'Ubuntu-24.04' '/home/user/ods' } catch { $message = $_.Exception.Message }
+        } finally {
+            Complete-AbandoningHolder $abandoning
+            $script:ODSPortalRuntimeChangeWaitSeconds = 1200
+        }
+        Check (-not $message -and (($script:output -join ' ') -match 'still running; setup continues') -and
+            (Get-Index 'stop-llama') -ge 0 -and (Get-Index "register:$llamaTask") -gt (Get-Index 'stop-llama') -and
+            (Get-Index 'ready') -gt (Get-Index "register:$llamaTask")) ("a rerun waiting for a controller that ends without releasing the lock takes it over" + $(if ($message) { " Setup said: $message" }))
+        $state = Get-ControlLockState
+        Check ($state -ceq 'free') ("that rerun releases the lock afterwards" + $(if ($state -cne 'free') { " Got: $state." }))
+        $script:owners = @{}
+    }
 
     # --- Rerun: a selected vision model keeps its projector while it is stored --
     Reset-Scenario
