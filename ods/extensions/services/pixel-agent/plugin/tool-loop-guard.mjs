@@ -7444,8 +7444,9 @@ export function createToolLoopGuard({
   // stays until the run ends well (observeAgentEnd), so a blocked, failed or
   // restarted answer can be resent. Its owner text, and every intent
   // classifier reading it, are unchanged. It applies whether or not OpenClaw
-  // kept the native session: the plugin cannot see a replacement made at
-  // admission, and in the same session it restates the transcript.
+  // kept the native session: a compaction can summarize the model's own
+  // question away as surely as a replacement session lacks it, and in an
+  // unchanged session the note only restates the transcript.
   function takePendingClarification(state, runId, context, agentId, ownerText) {
     if (!pendingClarifications || state.clarificationBoundaryObserved || state.managedTeamWorker ||
         context?.inputProvenance || !ownerInteractiveTurn(context, agentId)) return;
@@ -12697,7 +12698,17 @@ export function createToolLoopGuard({
   function promptContextForRun(runId) {
     const state = typeof runId === "string" ? runs.get(runId) : undefined;
     if (state?.clientCancelled) return CLIENT_CANCELLED_REASON;
-    return state?.withdrawnOwnerRequest ? OWNER_CANCELLED_REQUEST_CONTEXT : undefined;
+    return state?.withdrawnOwnerRequest && !resendsWithdrawnAnswer(state) ? OWNER_CANCELLED_REQUEST_CONTEXT : undefined;
+  }
+
+  // The owner stopped a clarification answer and sent the same answer again.
+  // That text is not withdrawn: the clarification note says to finish its
+  // request, and a note calling the same text withdrawn would contradict it.
+  // A different message after the cancel still gets the cancel note.
+  function resendsWithdrawnAnswer(state) {
+    const withdrawn = state.withdrawnOwnerRequest?.ownerText;
+    return Boolean(state.clarificationAnswer && typeof withdrawn === "string" && withdrawn.trim() &&
+      withdrawn.trim() === String(state.ownerRequestText ?? "").trim());
   }
 
   // Model-only context beside the owner turn (before_prompt_build

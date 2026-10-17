@@ -25,9 +25,21 @@ const EARLIER_ANSWERS = 2;
 const ORPHAN_WRITE_MS = 60 * 1000;
 const SHORTENED = ' [shortened]';
 const RECORD_KEYS = 'createdAt,earlierAnswers,questions,request,runId,schemaVersion,sessionHash';
-// Portal routing contracts appended after the owner's words (pixel-edge);
-// a multipart turn can carry them after a single newline.
-const PORTAL_CONTRACT = /\s*\[ODS (?:Portal|Pixel) delivery requirement:[\s\S]*$/;
+// Portal's routing contracts close the owner's words (pixel-edge). They start
+// a line: after a blank line, after one newline in a multipart turn, or at the
+// very start of a turn with no text. The last such marker, in a message ending
+// with the contract's closing bracket, is the contract. A marker the owner
+// quotes inside a line or before more of their own text stays theirs.
+const PORTAL_CONTRACT = /(?:^|\n)[ \t]*\[ODS (?:Portal|Pixel) delivery requirement:/g;
+// Image parts never reach the hook's prompt text, so a turn of attached
+// images alone has no owner words to record. Its card still gets a note.
+export const IMAGE_ONLY_REQUEST = '(The owner sent only attached images, with no text.)';
+
+function withoutPortalContract(text) {
+  const value = String(text ?? '');
+  const last = [...value.matchAll(PORTAL_CONTRACT)].at(-1);
+  return last && /\]\s*$/.test(value) ? value.slice(0, last.index) : value;
+}
 
 function bounded(text, max) {
   const value = String(text ?? '').trim();
@@ -36,7 +48,7 @@ function bounded(text, max) {
 
 // The owner's own words of the run that asked, without Portal's contracts.
 export function clarificationRequestText(text) {
-  return bounded(String(text ?? '').replace(PORTAL_CONTRACT, ''), REQUEST_CHARS);
+  return bounded(withoutPortalContract(text), REQUEST_CHARS);
 }
 
 // True only for the card's own answer: the first question's exact text, a
@@ -58,8 +70,10 @@ export function answersClarification(questions, text) {
 
 // before_prompt_build appendContext: beside the owner turn, never persisted
 // as owner text (OpenClaw keeps hook context out of the transcript prompt).
-// Every attempt of the answer run carries it, after a harness retry prompt
-// too, so it names the owner's message by content, never by position.
+// OpenClaw's trajectory files record every model prompt, so they hold it, as
+// they hold the owner's own text. Every attempt of the answer run carries it,
+// after a harness retry prompt too, so it names the owner's message by
+// content, never by position.
 export function clarificationAnswerContext(record) {
   return [
     '[ODS Portal note, not owner text: the owner has answered the clarification questions you asked earlier. ' +
@@ -134,13 +148,14 @@ export function createPendingClarifications({
   return {
     // One pending card per chat: a newer question replaces the older one.
     remember({sessionKey, runId, questions, request, earlierAnswers = []}) {
-      const id = identity(sessionKey), parsed = parseQuestions(questions), text = clarificationRequestText(request);
-      if (!id || !parsed || typeof runId !== 'string' || !runId || runId.length > 256 || !text || !Array.isArray(earlierAnswers)) return false;
+      const id = identity(sessionKey), parsed = parseQuestions(questions);
+      const text = clarificationRequestText(request) || IMAGE_ONLY_REQUEST;
+      if (!id || !parsed || typeof runId !== 'string' || !runId || runId.length > 256 || !Array.isArray(earlierAnswers)) return false;
       const folder = directory(true), target = path.join(folder, `${id}.json`);
       prune(folder);
       if (!fs.existsSync(target) && fs.readdirSync(folder).filter(name => name.endsWith('.json')).length >= maximumSessions) return false;
       const value = {schemaVersion: 1, sessionHash: id, runId, createdAt: now(), request: text, questions: parsed,
-        earlierAnswers: earlierAnswers.map(answer => bounded(String(answer ?? '').replace(PORTAL_CONTRACT, ''), ANSWER_CHARS))
+        earlierAnswers: earlierAnswers.map(answer => bounded(withoutPortalContract(answer), ANSWER_CHARS))
           .filter(Boolean).slice(-EARLIER_ANSWERS)};
       const temporary = path.join(folder, `.write-${randomBytes(16).toString('hex')}`);
       try {

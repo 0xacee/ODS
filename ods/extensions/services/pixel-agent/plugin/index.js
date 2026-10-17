@@ -438,9 +438,13 @@ export default definePluginEntry({
       const cancelContext = toolLoopGuard.promptContextForRun(context?.runId ?? event?.runId);
       const deliveryContext = delegationDelivery.promptContext(context);
       const prependContext = [contract?.prependContext,cancelContext,deliveryContext].filter(Boolean).join('\n\n');
-      // Beside the owner turn (OpenClaw appendContext), also model-only.
+      // Beside the owner turn (OpenClaw appendContext), also model-only. A
+      // child's announce continuation of a clarification answer carries that
+      // answer's note too: in a replacement session only the note names the
+      // request, and the answer run's success already settled the card.
       const appendContext = [goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : '',
-        toolLoopGuard.clarificationContextForRun(context?.runId ?? event?.runId)].filter(Boolean).join('\n\n');
+        toolLoopGuard.clarificationContextForRun(context?.runId ?? event?.runId) ??
+          toolLoopGuard.clarificationContextForRun(delegationDelivery.ownerRunFor(context))].filter(Boolean).join('\n\n');
       return contract ? { ...contract, ...(prependContext ? {prependContext} : {}), ...(appendContext ? {appendContext} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${executionLocationContext(context, AGENT_ID)} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : prependContext ? {prependContext} : undefined;
     });
     api.on("model_call_started", (event, context) =>
