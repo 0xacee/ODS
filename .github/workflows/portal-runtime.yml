@@ -139,6 +139,12 @@ jobs:
         env:
           OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
         run: node --test ods/extensions/services/pixel-agent/tests/runtime_cancel_recovery.integration.mjs
+      - name: Verify a clarification answer in a replaced session gets its request as model-only context with the real runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_clarification_answer.integration.mjs
       - name: Verify tool-call arguments reach the tool unchanged in the native macOS stream order
         if: runner.os != 'Windows'
         shell: bash

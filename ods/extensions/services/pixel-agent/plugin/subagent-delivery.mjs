@@ -294,6 +294,13 @@ export function createSubagentDelivery({agentId = 'pixel', now = Date.now,
     if (Buffer.byteLength(projection) > MAX_CHAIN_ANNOUNCEMENT_BYTES) {fail(run.chain); return;}
     return projection;
   }
+  // The owner run a native announce continuation reports to, with the same
+  // custody as promptContext, so that continuation can carry that run's own
+  // model-only context (a clarification answer's request). Otherwise undefined.
+  function ownerRunFor(context) {
+    const run = owned(context);
+    return run && run.id !== run.chain.id && run.id === run.chain.currentRun ? run.chain.id : undefined;
+  }
   function admission(context) {
     if (context?.agentId !== agentId) return;
     expire();
@@ -354,6 +361,6 @@ export function createSubagentDelivery({agentId = 'pixel', now = Date.now,
       return {block:true,blockReason:'No registered child completion event is pending. Review the current event and the earlier child results supplied in this run, then consolidate the owner response. This yield was not executed.'};
     }
   }
-  return {observe,before,after,nativeSpawn,finalize,end,read,finalRun,cancel,blocked,promptContext,admission,hasPendingChildren,
+  return {observe,before,after,nativeSpawn,finalize,end,read,finalRun,cancel,blocked,promptContext,ownerRunFor,admission,hasPendingChildren,
     invalidate:() => {for (const chain of roots.values()) fail(chain);}};
 }

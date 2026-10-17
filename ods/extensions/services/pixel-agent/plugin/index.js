@@ -46,6 +46,7 @@ import {
 import { promptContractForAgent } from "./prompt-contract.mjs";
 import { executionContext } from "./completion-assurance.mjs";
 import { createAskUserTool } from "./ask-user.mjs";
+import { createPendingClarifications } from "./pending-clarification.mjs";
 import {
   appsToolText,
   statusToolText,
@@ -103,6 +104,10 @@ const toolLoopGuardRegistry = createToolLoopGuardRegistry();
 const projectRunControl = createProjectRunControl();
 const goalProgress = createGoalProgress({agentId:AGENT_ID});
 const workspaceProjects = createWorkspaceProjects();
+// A clarification card's answer gets its request back as model-only context,
+// even when OpenClaw runs it in a replacement native session. Conversation
+// deletion removes the chat's card with its transcripts.
+const pendingClarifications = createPendingClarifications();
 const taskActivity = createTaskActivity({agentId:AGENT_ID, goalForRun:id=>goalProgress.projection(id),projectsForSession:key=>workspaceProjects.forSession(key)});
 let execCancellationControl;
 let accessRuntime;
@@ -310,6 +315,7 @@ export default definePluginEntry({
     conversationImageLifecycle ??= createConversationImageLifecycle({
       readConfig:()=>api.runtime?.config?.current?.()??api.config,
       getSessionEntry,patchSessionEntry,resolveStorePath,callGateway:callGatewayTool,compactor:contextCompaction,
+      forgetConversation:sessionKey=>pendingClarifications.forget(sessionKey),
     });
     conversationImageLifecycle.register(api);
     api.on('before_agent_run',(_event,context)=>{
@@ -365,6 +371,7 @@ export default definePluginEntry({
       // After a tool-limit stop without an answer: one tool-free completion by
       // the same configured model, from the pages the run read.
       stopSynthesis: createStopSynthesisClient({runtime: api.runtime, agentId: AGENT_ID}),
+      pendingClarifications,
       warn: (message) => api.logger.warn(message),
       info: (message) => api.logger.info?.(message),
     });
@@ -431,7 +438,14 @@ export default definePluginEntry({
       const cancelContext = toolLoopGuard.promptContextForRun(context?.runId ?? event?.runId);
       const deliveryContext = delegationDelivery.promptContext(context);
       const prependContext = [contract?.prependContext,cancelContext,deliveryContext].filter(Boolean).join('\n\n');
-      return contract ? { ...contract, ...(prependContext ? {prependContext} : {}), ...(goalProgress.active(context?.runId ?? event?.runId) ? {appendContext:GOAL_CONTRACT} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${executionLocationContext(context, AGENT_ID)} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : prependContext ? {prependContext} : undefined;
+      // Beside the owner turn (OpenClaw appendContext), also model-only. A
+      // child's announce continuation of a clarification answer carries that
+      // answer's note too: in a replacement session only the note names the
+      // request, and the answer run's success already settled the card.
+      const appendContext = [goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : '',
+        toolLoopGuard.clarificationContextForRun(context?.runId ?? event?.runId) ??
+          toolLoopGuard.clarificationContextForRun(delegationDelivery.ownerRunFor(context))].filter(Boolean).join('\n\n');
+      return contract ? { ...contract, ...(prependContext ? {prependContext} : {}), ...(appendContext ? {appendContext} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${executionLocationContext(context, AGENT_ID)} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : prependContext ? {prependContext} : undefined;
     });
     api.on("model_call_started", (event, context) =>
       toolLoopGuard.observeModelCall(event, context, AGENT_ID)

@@ -709,7 +709,64 @@ The model cannot choose for the owner or turn this card into Operations approval
 The ingress releases the bounded `pixel_questions` envelope only on the verified
 terminal SSE frame. Malformed receipts fail closed. Questions and draft answers
 are retained with the conversation; Continue sends ordinary owner text in that
-same chat, without UI metadata in the model request.
+same chat, without UI metadata in the model request: each question, then its
+answer.
+
+That text reads correctly only beside the model's own question. OpenClaw can
+start it in a new native session that lacks the request and the question (RTX
+Spark, 2026-10-16: the model answered its own "Where should I apply…?" with a
+location and edited nothing). When a run sets a card (the ask tool's result, or
+the requested-choice repair at finalize), the plugin therefore keeps one private
+record per chat (`.ods-pending-clarifications` in the OpenClaw state directory,
+owner-only, keyed by a hash of the session key): its questions and the owner
+request they clarify, capped at 4,000 characters. Portal's delivery contract is
+cut at its last marker that starts a line, so a request that quotes the marker
+keeps its own words. A request of attached images alone is stored as a fixed
+placeholder, because image parts never reach the hook's prompt text. The next
+owner-authored turn in that chat claims the record; a subagent announce
+continuation, cron, a team worker or another session never does. Only when that
+turn is the card's exact answer (the first question's text, then every question
+in order) does its run get fixed model-only context (`before_prompt_build`
+`appendContext`) with the request: follow an answer that declines or changes it,
+otherwise finish the request with the answers. That answer keeps the record until
+its run ends with success, so an answer blocked at admission, failed or lost to
+a gateway restart is understood when resent; any other owner turn consumes the
+record unused. Unanswered records expire after 24 hours, and deleting the
+conversation deletes its record with the transcripts. A follow-up card keeps the
+original request and up to two earlier answers.
+
+The context is added whether or not OpenClaw kept the native session: a
+compaction can summarize the model's own question away as surely as a
+replacement session lacks it, and in an unchanged session the note only restates
+the transcript. The owner text is unchanged, so recursive-delete authorization,
+choice-question intent, Playground project reservation and every route see what
+they saw before; an earlier in-text frame quoting the request turned a declined
+delete into authorization. Further cases:
+
+- The note stays out of the transcript, which keeps only the owner text. OpenClaw
+  trajectory files (`<session>.trajectory.jsonl`) record every model prompt, so
+  they hold the note, as they already hold the owner's own messages. Conversation
+  deletion does not yet remove trajectory files; that is a separate follow-up.
+- If the answering run delegates, each announce continuation of that run (the
+  child's report back in the owner session) carries the same note while Portal
+  still holds that delegation's custody (no stop, gateway restart or expiry).
+  That run's success has already settled the card, and in a replacement session
+  only the note names the request.
+- Stopping the answer withdraws its note with the rest of that run, and the card
+  stays. When the owner resends the same answer, it gets the clarification note
+  without the withdrawn-request note, which would call that same text withdrawn.
+  A different message after the stop still gets the withdrawn-request note.
+- A card asked inside a goal task is answered with a goal continuation
+  (`/goal Continue the goal ...`, dashboard `continueGoal`) that carries its own
+  original objective. It never has the card's answer shape, so it consumes the
+  record without a note.
+- The dashboard's clean-context recovery retry runs under a new chat ID, so an
+  answer retried that way has no record.
+
+`tests/pending_clarification.test.mjs` replays the field turn after a gateway
+restart, drives the real plugin entry and compares each owner-intent outcome
+with and without the record; `tests/runtime_clarification_answer.integration.mjs`
+sends the answer through the pinned runtime into a replaced native session.
 
 The plugin loader isolates imports to its package. Keep its `questions-schema.mjs`
 and the independently installed ingress `questions_schema.mjs` aligned; the

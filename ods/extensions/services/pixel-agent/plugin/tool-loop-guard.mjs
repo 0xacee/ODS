@@ -29,6 +29,7 @@ import { researchRequestProblem } from "./perplexica-research.mjs";
 import { HOST_CITATION_LIMITS } from './citation-verification.mjs';
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
+import { answersClarification, clarificationAnswerContext } from "./pending-clarification.mjs";
 import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, lookupFoundNothing, progressLaneStopReason, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
 import { assistantMessageText, composeProgressFinalization, composeReadPages, createProgressFinalization, partialFinalizationAnswer,
   PROGRESS_FINALIZATION_INSTRUCTION } from "./progress-finalization.mjs";
@@ -7184,6 +7185,9 @@ export function createToolLoopGuard({
   publishWorkspacePreview,
   hostCitationVerifier,
   stopSynthesis,
+  // Durable pending clarification cards (pending-clarification.mjs). Only the
+  // plugin entry supplies the store; without one nothing is recorded.
+  pendingClarifications,
   execMarkerCleanupDelayMs = 5000,
   limits,
   warn = () => {},
@@ -7413,6 +7417,59 @@ export function createToolLoopGuard({
     sessionCancellations.delete(sessionKey);
     state.withdrawnOwnerRequest = record;
     state.completionAssurance.followWithdrawnRequest(record.ownerText);
+  }
+
+  // A clarification card leaves a record for its chat once the run sets it
+  // (the ask tool's result, or the requested-choice repair at finalize): its
+  // exact questions and the owner request they clarify. A follow-up card in
+  // the run that answered one keeps the original request and adds those answers.
+  function rememberPendingClarification(state, runId) {
+    if (!pendingClarifications || !state.ownerQuestions || !state.artifactOwnerInteractive || state.managedTeamWorker ||
+        state.clientCancelled || typeof state.currentSessionKey !== 'string') return;
+    const answered = state.clarificationAnswer;
+    try {
+      pendingClarifications.remember({sessionKey: state.currentSessionKey, runId, questions: state.ownerQuestions,
+        request: answered ? answered.request : state.ownerRequestText,
+        earlierAnswers: answered ? [...answered.earlierAnswers, state.ownerRequestText] : []});
+    } catch (error) {
+      warn(`Pixel could not record the pending clarification: ${String(error)}`);
+    }
+  }
+
+  // The first owner-authored turn in the chat after the asking run claims the
+  // record. A subagent announce continuation (input provenance), cron, a team
+  // worker or another session never does, so the card outlives a child's
+  // report. Only that card's own answer keeps it: model-only context for this
+  // run and each of its attempts (clarificationContextForRun), and the record
+  // stays until the run ends well (observeAgentEnd), so a blocked, failed or
+  // restarted answer can be resent. Its owner text, and every intent
+  // classifier reading it, are unchanged. It applies whether or not OpenClaw
+  // kept the native session: a compaction can summarize the model's own
+  // question away as surely as a replacement session lacks it, and in an
+  // unchanged session the note only restates the transcript.
+  function takePendingClarification(state, runId, context, agentId, ownerText) {
+    if (!pendingClarifications || state.clarificationBoundaryObserved || state.managedTeamWorker ||
+        context?.inputProvenance || !ownerInteractiveTurn(context, agentId)) return;
+    state.clarificationBoundaryObserved = true;
+    try {
+      // The boundary flag already keeps the asking run's own attempts away;
+      // the run check keeps a card from answering itself if that order changes.
+      state.clarificationAnswer = pendingClarifications.claim(context.sessionKey, record =>
+        record.runId !== runId && answersClarification(record.questions, ownerText)) ?? undefined;
+    } catch (error) {
+      warn(`Pixel could not read the pending clarification: ${String(error)}`);
+    }
+  }
+
+  // The answer run ended well: its card is done. A follow-up card it asked
+  // replaced the record, and settle leaves that one pending.
+  function settlePendingClarification(state, event) {
+    if (!pendingClarifications || !state.clarificationAnswer || event?.success !== true) return;
+    try {
+      pendingClarifications.settle(state.currentSessionKey, state.clarificationAnswer);
+    } catch (error) {
+      warn(`Pixel could not clear the answered clarification: ${String(error)}`);
+    }
   }
 
   function rememberSessionPreview(sessionId, preview, state) {
@@ -9953,6 +10010,7 @@ export function createToolLoopGuard({
       // same run carries a harness retry prompt instead.
       if (ownerIntent) state.ownerRequestText ??= ownerIntent;
       takeOwnerCancellation(state, runId, context, agentId);
+      takePendingClarification(state, runId, context, agentId, ownerIntent);
       if (currentUserText(event?.messages, event?.prompt)) {
         state.ownerIntentObserved = true;
         state.workspacePreviewForbidden = ownerForbidsWorkspacePreview(event?.messages, event?.prompt);
@@ -10425,6 +10483,7 @@ export function createToolLoopGuard({
       : toolName === 'tool_call' ? toolSearchSelectedToolEvent(event, 'pixel_ods_ask_user', 'pixel-ods') : undefined;
     if (!state.ownerQuestions && questionResult?.result?.details?.status === 'awaiting_user' && !failedToolOutcome(questionResult)) {
       state.ownerQuestions = parseQuestions(questionResult.result.details.questions);
+      rememberPendingClarification(state, runId);
     }
     const toolCallId = context?.toolCallId ?? event?.toolCallId;
     event = {...event, params: canonicalWorkspaceParams(toolName, event?.params, state.configuredWorkspaceRoot)};
@@ -12629,6 +12688,7 @@ export function createToolLoopGuard({
     state.runEnded = true;
     state.runDeadlineReached = !state.clientCancelled && !state.odsAborted && !state.progressBudget.exhausted &&
       !state.recursiveDeleteDenied && runDeadlineReached(state.runDeadline, event, now());
+    settlePendingClarification(state, event);
   }
 
   // Model-only prompt context for one attempt (before_prompt_build
@@ -12638,7 +12698,24 @@ export function createToolLoopGuard({
   function promptContextForRun(runId) {
     const state = typeof runId === "string" ? runs.get(runId) : undefined;
     if (state?.clientCancelled) return CLIENT_CANCELLED_REASON;
-    return state?.withdrawnOwnerRequest ? OWNER_CANCELLED_REQUEST_CONTEXT : undefined;
+    return state?.withdrawnOwnerRequest && !resendsWithdrawnAnswer(state) ? OWNER_CANCELLED_REQUEST_CONTEXT : undefined;
+  }
+
+  // The owner stopped a clarification answer and sent the same answer again.
+  // That text is not withdrawn: the clarification note says to finish its
+  // request, and a note calling the same text withdrawn would contradict it.
+  // A different message after the cancel still gets the cancel note.
+  function resendsWithdrawnAnswer(state) {
+    const withdrawn = state.withdrawnOwnerRequest?.ownerText;
+    return Boolean(state.clarificationAnswer && typeof withdrawn === "string" && withdrawn.trim() &&
+      withdrawn.trim() === String(state.ownerRequestText ?? "").trim());
+  }
+
+  // Model-only context beside the owner turn (before_prompt_build
+  // appendContext) for a run that answers a pending clarification card.
+  function clarificationContextForRun(runId) {
+    const state = typeof runId === 'string' ? runs.get(runId) : undefined;
+    return state?.clarificationAnswer && !state.clientCancelled ? clarificationAnswerContext(state.clarificationAnswer) : undefined;
   }
 
   function beforeAgentFinalize(event, context, agentId = "pixel") {
@@ -12666,6 +12743,7 @@ export function createToolLoopGuard({
     }
     if (state?.ownerQuestionIntent && !state.ownerQuestions && !state.clientCancelled && !state.progressBudget.exhausted) {
       state.ownerQuestions=choiceQuestionFromText(event?.lastAssistantMessage);
+      rememberPendingClarification(state, runId);
     }
     if (state?.ownerQuestions) return {action:'finalize', reason:'Waiting for the owner clarification answer.'};
     if (state?.progressBudget.exhausted && !state.clientCancelled && !state.recursiveDeleteDenied && !state.webLoopAborted) {
@@ -13327,6 +13405,7 @@ export function createToolLoopGuard({
     endPreviewRevalidation,
     observeAgentEnd,
     promptContextForRun,
+    clarificationContextForRun,
     replyPayloadSending,
     observeRun,
     observeModelCall,
