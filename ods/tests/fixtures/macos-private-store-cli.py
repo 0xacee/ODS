@@ -24,6 +24,8 @@ spec.loader.exec_module(module)
 def isolated(self, root, flags, **options):
     self.root=root
     self.env=dict(os.environ)
+    self.binary="docker"
+    self.compose_prefix=[]
     self.flags=module.flags_for(root, flags)
     self.requires_stores=False
 module.Stores.__init__=isolated

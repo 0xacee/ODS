@@ -11,7 +11,7 @@ import {validDeliveredArtifact, normalizeWorkspaceArtifact, WORKSPACE_ARTIFACT_D
 // OpenClaw's public harness runtime.
 
 import { createHash, randomBytes } from "node:crypto";
-import { validSourceReview, normalizeWorkspacePreviewParams, PREVIEW_STORAGE_DISCLOSURE } from './workspace-preview.mjs';
+import { validSourceReview, normalizeWorkspacePreviewParams } from './workspace-preview.mjs';
 import * as fs from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -33,6 +33,7 @@ import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, lookupFoundN
 import { assistantMessageText, composeProgressFinalization, composeReadPages, createProgressFinalization, partialFinalizationAnswer,
   PROGRESS_FINALIZATION_INSTRUCTION } from "./progress-finalization.mjs";
 import { STOP_SYNTHESIS_LIMITS, STOP_SYNTHESIS_NOTE, synthesisAnswer, synthesisRequest } from "./stop-synthesis.mjs";
+import { createRunDeadline, runDeadlineReached, runDeadlineStopText, takeRunDeadlineNotice } from "./run-deadline.mjs";
 import { OWNER_VISIBLE_REPLY_INSTRUCTION, OWNER_VISIBLE_REPLY_REASON, ownerInteractiveTurn, silentReplyText } from "./owner-visible-reply.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent, nativeExecWorkdir, sandboxHostWorkspaceFailure, malformedRelativeWorkspacePath } from "./workspace-path-contract.mjs";
 import { routePlaygroundTool, requestsNewPlaygroundProject } from "./playground-projects.mjs";
@@ -283,7 +284,7 @@ const WORKSPACE_PREVIEW_FAILURE_REASONS = Object.freeze({
   snapshot_too_large: "the directory exceeds the preview size limit",
   unsafe_file: "a file failed the preview safety checks",
   writable_file: "a generated file allows group/other writes; remove only those write bits on affected output files, never broaden permissions or change parent directories",
-  unsafe_directory: "the directory failed the preview path or permission checks",
+  unsafe_directory: "the directory, a folder on its path, or a folder in it is a symlink, is unreadable, is not owned by the workspace owner, or is writable by group or others, or a folder in it has a name the preview refuses (for example, one with spaces)",
   cancelled: "waiting for the preview was cancelled; publication may still be pending",
   unavailable: "the preview was unavailable; the tool supplied no more specific verified cause",
 });
@@ -5612,6 +5613,111 @@ export function userMessageExactHostCommand(messages, prompt = undefined) {
   return exact?.[1];
 }
 
+// An action word asks for a host command only when it is used as a verb aimed
+// at the host. In "the start screen", "every restart", "the game's restart",
+// "a hard reload" or "press start" it names part of the owner's project or a
+// moment in it. In "the game won't start", "it used to run", "the sprites
+// start flickering", "restart doesn't work" or "when I restart the level" it
+// describes what something did or what the owner did. In "change the layout
+// so it fits on my laptop" the project is the object and the laptop is only
+// where the owner looked.
+const HOST_ACTION_WORD =
+  /\b(?:run|execute|invoke|launch|start|stop|restart|reload|install|uninstall|remove|update|upgrade|configure|modify|change|create|delete)\b/gi;
+const NOUN_ADJECTIVE =
+  String.raw`(?:latest|last|new|recent|first|next|second|third|final|fresh|clean|hard|soft|cold|warm|full|quick|test|trial|manual|pending|previous|initial|failed|partial)`;
+const NOT_A_REQUEST_BEFORE_HOST_ACTION = new RegExp(String.raw`(?:${[
+  // A noun phrase. "Apply the latest update" and "needs a restart" make the
+  // noun the object of a request, and in "make this run" "this" is an object.
+  String.raw`\b(?<!\b(?:apply|do|perform|finish|complete|redo|retry|rerun|resume|continue|handle|trigger|schedule|kick\s+off|go\s+ahead\s+with|take\s+care\s+of|need(?:s|ed)?|give\s+[\w.-]+)\s+)(?:the|a|an|these|those|my|your|our|its|their|every|each|no|any|some|(?<!\b(?:make|let|get|have)\s+)(?:this|that))(?:\s+${NOUN_ADJECTIVE})?`,
+  // A possessive ("yesterday's update"), but not "let's" or "it's".
+  String.raw`\b(?!(?:let|it|that|what|here|there|who|where|he|she|how)['’]s\b)[\w-]+['’]s`,
+  // A moment or a press: "at start", "on first launch", "clicking restart".
+  String.raw`\b(?:at|on|after|upon)(?:\s+${NOUN_ADJECTIVE})?`,
+  String.raw`\b(?:press(?:es|ed|ing)?|click(?:s|ed|ing)?|hit(?:s|ting)?|tap(?:s|ped|ping)?|select(?:s|ed|ing)?|choos(?:e|es|ing)|chose)`,
+  // What something does or did: "won't even start", "used to run", "should run".
+  String.raw`\b(?:not|won['’]?t|doesn['’]?t|didn['’]?t|wouldn['’]?t|isn['’]?t|can['’]?t|cannot|couldn['’]?t)(?:\s+(?:even|ever|really|always|properly|actually|correctly|reliably|fully|quite|seem\s+to))*`,
+  String.raw`\b(?:fail(?:s|ed)?|refuse[sd]?|struggle[sd]?|seem(?:s|ed)?|used|tend(?:s|ed)?)\s+to`,
+  String.raw`\b(?:takes?|took)\s+(?:[\w-]+\s+){0,3}to`,
+  String.raw`\bno\s+(?:way|option)\s+to`,
+  String.raw`\blet\s+me`,
+  String.raw`\b(?:makes|made|making|forces|forced|forcing|causes|caused|causing)\s+(?:me|us|you|it|(?:my|this|the)\s+(?:ODS\s+)?(?:host|machine|computer|laptop))(?:\s+to)?`,
+  String.raw`(?<!\b(?:you|we|Pixel)\s+)\b(?:will|would|should|could|might|may|must|can|shall)(?:\s+(?:not|never|barely|hardly|still|also|only|always|sometimes|eventually|automatically|really|even|just))*`,
+  // What the owner did: "I restart", "when we restart", "whenever you
+  // restart", "I've tried to start". "Can we stop Ollama" stays a request.
+  String.raw`\bI`,
+  String.raw`\b(?:when|whenever|if|after|before|until|once|while|every\s+time|each\s+time)\s+(?:I|we|they)(?:\s+(?:just|first|then|also|again))?`,
+  String.raw`\b(?:when|whenever|until|every\s+time|each\s+time)\s+you`,
+  String.raw`(?:\b(?:I|we)(?:['’]ve|\s+(?:have|had|was|were|am|are|just|already|also|even|then|still))*\s+(?:tried|try|trying|attempted|had|have)|\b(?:tried|trying))\s+to`,
+].join('|')})\s+["'“‘]?$`, 'i');
+// "I can't restart Docker" asks Pixel to do what the owner could not, but "I
+// can't restart the level" is a bug report. It is a request only when the
+// clause names host software or asks for the work.
+const OWNER_CANNOT_BEFORE_HOST_ACTION =
+  /\b(?:I|we)(?:\s+(?:still|just|really|simply|honestly|actually|even|literally|also))*\s+(?:can['’]?t|cannot|can\s+not|couldn['’]?t)\s+$/i;
+// "start flickering", "stop responding", "start to lag" describe what a
+// thing does, unless the word opens a request ("Stop running containers").
+const ASPECT_AFTER_START_STOP = /^\s+(?:to\s+\w|(?!(?:every|any|some|no)thing\b)\w+ing\b)/i;
+const IMPERATIVE_BEFORE_HOST_ACTION =
+  /(?:^|[,:]|\b(?:please|kindly|then|now|just|also|first|and|you|to))\s*$/i;
+// A finite verb after the word makes it a subject: "Restart doesn't work",
+// "Cold start takes 10 seconds", "First launch on my laptop shows a blank page".
+const SUBJECT_USE_AFTER_HOST_ACTION = new RegExp(String.raw`^(?:\s+(?:and|or|&)\s+${HOST_ACTION_WORD.source})?\s+(?:(?:on|in)\s+(?:this|my|the)\s+(?:ODS\s+)?(?:host|machine|computer|laptop)\s+)?(?:(?:still|also|just|never|always|now|even|sometimes)\s+)?(?:is|isn['’]?t|was|wasn['’]?t|are|aren['’]?t|were|does|doesn['’]?t|did|didn['’]?t|won['’]?t|can['’]?t|has|hasn['’]?t|had|keeps?|takes?|took|shows?|showed|crashe[sd]|freezes|froze|hangs|hung|fails|failed|breaks|broke|overlaps?|resets|seems|looks|gets|got|works|worked|stalls|stalled|when|whenever|while|by\s+itself|itself)\b`, 'i');
+// A UI noun right after the word ("start screen", "start/restart buttons",
+// "upgrade shop", a quoted "Start" button, "change log") makes it part of a
+// name. A host setting after "screen" ("change screen resolution") and "logs",
+// "log files" or "log cleanup" are the object of a request.
+const NOUN_AFTER_HOST_ACTION = new RegExp(String.raw`^(?:\s*(?:and|or|&|\/)\s*${HOST_ACTION_WORD.source})?[\s"'“”‘’-]+(?:(?:screen|menu|button|page|link|icon|bar|panel|tab|dialog|banner|view|option|text|prompt|title|logo|label|popup|modal|overlay|animation|speed|position|shop|note)s?\b(?!\s+(?:settings?|resolution|recording|timeout|saver|brightness|scaling|sharing|capture|lock)\b)|log\b(?=\s*(?:$|[,:!?)]|(?:on|in|is|was|does|doesn['’]?t|shows?|says?|looks?)\b)))`, 'i');
+// The project as subject ("make the game run better", "the game won't start",
+// even after "please fix it") or as the object ending the phrase after the
+// word ("change the start screen so it fits", "stop the elf from clipping").
+const PROJECT_SUBJECT_BEFORE_HOST_ACTION =
+  /\b(?:the|this|that|my|our|your|its)\s+(?:[\w-]+\s+)?(?:game|level|elf|sprite|player|enemy|enemies|character)s?\s+(?:(?:will|would|should|can|could|does|did|won['’]?t|wouldn['’]?t|doesn['’]?t|didn['’]?t|can['’]?t|cannot|isn['’]?t)\s+(?:(?:not|even|ever|really)\s+)*)?$/i;
+const PROJECT_OBJECT_AFTER_HOST_ACTION =
+  /^\s+(?:(?:the|this|that|these|those|a|an|my|our|your|its)\s+)?(?:[\w'’-]+\s+){0,2}?(?:game|level|layout|font(?:\s+size)?|scrollbar|elf|sprite|player|enemy|enemies|score|hud|title|screen|menu|button|page|icon|banner|dialog|popup|overlay|animation|text|label|logo)s?\b(?=\s*(?:$|[,:!?)]|(?:so|that|which|it|on|in|for|from|to|at|when|while|and|but|with|by|is|are|because|until|whenever)\b))/i;
+// Describing a host problem and then asking for help is still a host request:
+// "Docker won't start on my laptop, can you fix it?", "The last update broke
+// Ollama on my machine. Can you roll it back?". A hand-off of the work itself
+// ("please do it", "redo it", "can you?") counts without naming host software.
+const HOST_SOFTWARE =
+  /\b(?:docker|ollama|ODS(?![- ]host\b)(?!\s+(?:link|button|logo|page|site|website|icon|banner|text|title)\b)|llama[-.]?(?:server|cpp)|vllm|cuda|nvidia|drivers?|containers?|services?|daemons?|wsl|packages?|htop|model\s+files)\b/i;
+const HOST_HELP_REQUEST =
+  /\b(?:(?:can|could|would|will)\s+you|please|go\s+ahead|for\s+me|help|I\s+need\s+you\s+to|(?:fix|repair|reinstall|undo|revert|handle|force)\s+(?:it|that|this)|(?:roll|sort)\s+(?:it|that|this)\s+(?:back|out)|try\s+(?:it\s+)?again|take\s+a\s+look)\b/i;
+const HOST_HANDOFF =
+  /\b(?:(?:do|redo|finish|complete|resume|retry|rerun|apply)\s+(?:it|that|this)\b|you\s+do\s+it\b|(?:can|could|would|will)\s+you\s*$)/i;
+
+function actionUnrelatedToHost(clause, match, hostIndex) {
+  if (match.index > hostIndex) return false;
+  const relation = clause.slice(match.index + match[0].length, hostIndex);
+  return Boolean(relation.trim()) && !/\b(?:on|in|from|against|for)\b/i.test(relation);
+}
+
+function hostActionIsVerb(clause, match, {requested, hostSoftware}) {
+  const before = clause.slice(0, match.index);
+  const after = clause.slice(match.index + match[0].length);
+  if (NOUN_AFTER_HOST_ACTION.test(after)) return false;
+  if (PROJECT_SUBJECT_BEFORE_HOST_ACTION.test(before) || PROJECT_OBJECT_AFTER_HOST_ACTION.test(after)) {
+    return false;
+  }
+  if (requested) return true;
+  if (OWNER_CANNOT_BEFORE_HOST_ACTION.test(before)) return hostSoftware;
+  if (/^(?:start|stop)$/i.test(match[0]) && ASPECT_AFTER_START_STOP.test(after) &&
+      !IMPERATIVE_BEFORE_HOST_ACTION.test(before)) {
+    return false;
+  }
+  return !NOT_A_REQUEST_BEFORE_HOST_ACTION.test(before) && !SUBJECT_USE_AFTER_HOST_ACTION.test(after);
+}
+
+function hostActionVerb(clause, hostIndex, context) {
+  for (const match of clause.matchAll(HOST_ACTION_WORD)) {
+    if (hostActionIsVerb(clause, match, context)) return match;
+    // A skipped noun with the host as the object of another verb ("The start
+    // screen froze my laptop") means a later action word in the same clause
+    // describes the aftermath ("and I had to restart").
+    if (!context.requested && actionUnrelatedToHost(clause, match, hostIndex)) return undefined;
+  }
+  return undefined;
+}
+
 export function userMessageRequestsHostCommand(messages, prompt = undefined) {
   const text = currentOwnerIntentText(messages, prompt);
   if (!text) return false;
@@ -5625,7 +5731,6 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
   }
   if (userMessageExactHostCommand(messages, prompt)) return true;
   const localHost = /\b(?:ODS[- ]host|local\s+(?:ODS\s+)?host|this\s+(?:ODS\s+)?(?:host|machine|computer|laptop)|my\s+(?:ODS\s+)?(?:host|machine|computer|laptop))\b/i;
-  const action = /\b(?:run|execute|invoke|launch|start|stop|restart|reload|install|uninstall|remove|update|upgrade|configure|modify|change|create|delete)\b/i;
   const remoteHost = /\b(?:SSH\s+(?:(?:connection|connectivity)\s+)?(?:to|into)|remote\s+(?:host|machine|computer|server|device)|(?:host|machine|computer|server|device)\s+(?:named|called)\s+[A-Za-z0-9][A-Za-z0-9._-]{0,127})\b/i;
   const remoteAction = /\b(?:connect|verify|check|inspect|query|report|troubleshoot|debug|run|execute|invoke)\b/i;
   const guidanceOnly =
@@ -5638,7 +5743,7 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
     /\b(?:do\s+not|don't|never|must\s+not|should\s+not)\s+(?:ever\s+|actually\s+|please\s+|now\s+){0,2}(?:SSH|connect|contact|access|inspect|query|run|execute|invoke)\b/i;
   return text
     .split(/[.!?;\n]+|,\s*(?=(?:and\s+then|but|however|instead|then)\b)/i)
-    .some((clause) => {
+    .some((clause, index, clauses) => {
       const remoteHostMatch = clause.match(remoteHost);
       const remoteActionMatch = clause.match(remoteAction);
       if (remoteHostMatch && remoteActionMatch) {
@@ -5650,8 +5755,15 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
         );
       }
       const hostMatch = clause.match(localHost);
-      const actionMatch = clause.match(action);
-      if (!hostMatch || !actionMatch) return false;
+      if (!hostMatch) return false;
+      // A request for help may follow in the next sentence: "The last update
+      // broke Ollama on my machine. Can you roll it back?"
+      const next = clauses[index + 1] || '';
+      const hostSoftware = HOST_SOFTWARE.test(clause);
+      const requested = HOST_HANDOFF.test(clause) || HOST_HANDOFF.test(next) ||
+        (hostSoftware && (HOST_HELP_REQUEST.test(clause) || HOST_HELP_REQUEST.test(next)));
+      const actionMatch = hostActionVerb(clause, hostMatch.index, {requested, hostSoftware});
+      if (!actionMatch) return false;
       // Negation and how-to language constrain only their own clause. A later
       // safety boundary such as "Do not run anything else" must not erase an
       // earlier exact host command that the owner explicitly requested.
@@ -5665,15 +5777,7 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
       ) {
         return false;
       }
-      if (actionMatch.index < hostMatch.index) {
-        const relation = clause.slice(
-          actionMatch.index + actionMatch[0].length,
-          hostMatch.index
-        );
-        if (relation.trim() && !/\b(?:on|in|from|against|for)\b/i.test(relation)) {
-          return false;
-        }
-      }
+      if (actionUnrelatedToHost(clause, actionMatch, hostMatch.index)) return false;
       return !/\brun\s+(?:a|any|some|the)?\s*(?:command|shell)\s*(?:on|against|for)?\s*(?:this|my|the|ODS)?\s*(?:host|machine|computer|laptop)?\s*$/i.test(
         clause.trim()
       );
@@ -7069,7 +7173,7 @@ function execTargetsNonPublicAddress(event) {
 }
 
 export function createToolLoopGuard({
-  abortRun,
+  abortRun: abortActiveRun,
   abortRunAndDrain,
   cancelProjectRun,
   execControl,
@@ -7084,6 +7188,7 @@ export function createToolLoopGuard({
   limits,
   warn = () => {},
   info = () => {},
+  now = Date.now,
 } = {}) {
   const effective = normalizedLimits(limits);
   // This intentionally stays plugin-local. OpenClaw's runContext write API is
@@ -7092,6 +7197,14 @@ export function createToolLoopGuard({
   const runs = new Map();
   const activeUsers = new Map();
   const sessionRuns = new Map();
+  // Every run the guard itself stops is marked, so agent_end never names the
+  // runtime's run deadline as the cause (observeAgentEnd).
+  const abortRun = typeof abortActiveRun === "function" ? (sessionId, ...rest) => {
+    const state = runs.get(sessionRuns.get(sessionId));
+    const aborted = abortActiveRun(sessionId, ...rest);
+    if (aborted && state) state.odsAborted = true;
+    return aborted;
+  } : undefined;
   // The newest run observed per session key, and the owner cancel that the
   // next owner message in that chat must start clean from.
   const sessionKeyRuns = new Map();
@@ -7471,6 +7584,7 @@ export function createToolLoopGuard({
         privateNetworkRequestDenied: false,
         privateNetworkPrompt: false,
         clientCancelled: false,
+        odsAborted: false,
         fetchedUrls: new Map(),
         // Research pacing (research-pacing.mjs). Run state, so it survives
         // transcript compaction: bound search receipts with their result
@@ -7541,6 +7655,8 @@ export function createToolLoopGuard({
         ownerIntentObserved: false,
         workspaceTaskRequested: false,
         workspaceMutationRequested: false,
+        // A successful write, edit or exec (an exec can change files too).
+        workspaceMutationObserved: false,
         workspaceTaskPath: undefined,
         workspaceTaskDirectory: undefined,
         workspaceRequestedFiles: [],
@@ -9814,6 +9930,14 @@ export function createToolLoopGuard({
         state.configuredWorkspaceRoot = capabilities.workspaceRoot;
         state.privateBrowserAccess = capabilities.privateBrowserAccess === true &&
           userMessageRequestsPrivateUrl(event?.messages, event?.prompt);
+        // before_prompt_build runs once per attempt, just after the runtime
+        // arms that attempt's own timer; the notices keep the response's
+        // schedule (run-deadline.mjs). Only the owner's own turns: subagent
+        // and cron lanes can run with another timeout or none, and team
+        // workers report to their coordinator, not the owner.
+        state.runDeadline = state.artifactOwnerInteractive && !state.managedTeamWorker
+          ? createRunDeadline(capabilities.runTimeoutSeconds, now(), state.runDeadline) : undefined;
+        state.runDeadlineReached = false;
       }
       if (typeof sessionId === "string" && sessionId) {
         state.currentSessionId = sessionId;
@@ -10135,6 +10259,10 @@ export function createToolLoopGuard({
     if (!state) return;
     if (phase === "start") state.compactionWindow = { calls: new Set(), started: 0 };
     else if (state.compactionWindow?.calls.size === 0) state.compactionWindow = undefined;
+    // The summary can drop a delivered run-deadline notice (keepRecentTokens
+    // is 8192 on a 131K model), so the stage now due is sent again, with the
+    // same bytes, on the next persisted result.
+    if (phase === "end" && state.runDeadline) state.runDeadline.notices = 0;
   }
 
   function observeModelCall(event, context, agentId = "pixel") {
@@ -10500,6 +10628,7 @@ export function createToolLoopGuard({
         ? completedMutation
         : undefined;
     if (successfulMutation) {
+      state.workspaceMutationObserved = true;
       state.invalidEditCreateBlocks = 0;
       state.oversizedEditBlocks = 0;
       state.noOpEditBlocks = 0;
@@ -10576,6 +10705,7 @@ export function createToolLoopGuard({
       }
     }
     const associateExecProject = directory => {
+      state.workspaceMutationObserved = true;
       if(typeof directory!=='string') return;
       try {onWorkspaceMutation({sessionKey:state.currentSessionKey,workspaceRoot:state.configuredWorkspaceRoot,directory,kind:'exec'});}
       catch {warn('Workspace project metadata could not be recorded.');}
@@ -11767,6 +11897,9 @@ export function createToolLoopGuard({
     if (message.isError === true && state?.progressBudget.laneExhausted(progressLane)) {
       return {message:{...message,content:[...(message.content ?? []),{type:'text',text:progressLaneStopReason(progressLane)}]}};
     }
+    // The only mid-attempt channel to the live model; never on a stopped run.
+    const deadlineNotice = state && !state.clientCancelled && !state.odsAborted
+      ? takeRunDeadlineNotice(state.runDeadline, now()) : undefined;
     const boundWebCall = pending &&
       (!state?.currentSessionId || sessionRuns.get(state.currentSessionId) === pending.runId) &&
       (!message.toolCallId || message.toolCallId === toolCallId) &&
@@ -12120,7 +12253,8 @@ export function createToolLoopGuard({
       !previewStageInstruction &&
       !controlNameRepair &&
       !sandboxPathCorrection &&
-      !executionGuidance
+      !executionGuidance &&
+      !deadlineNotice
     ) {
       return undefined;
     }
@@ -12190,6 +12324,8 @@ export function createToolLoopGuard({
         text: `${OPERATIONS_TRUSTED_CONTINUATION_PREFIX} ${continuation.instruction}`,
       });
     }
+    // Last, and a block of its own: the per-result cap keeps short blocks whole.
+    if (deadlineNotice) content.push({type: 'text', text: deadlineNotice});
     return {
       message: {
         ...compactMessage,
@@ -12483,10 +12619,16 @@ export function createToolLoopGuard({
   }
 
   // agent_end: a later cancel for this user can no longer name this run's
-  // request as the one it withdrew.
+  // request as the one it withdrew. It also classifies the runtime's run
+  // deadline, which no hook reports directly. An ODS stop (owner cancel, tool
+  // limit, recursive-delete refusal or any other guard abort) has its own
+  // delivery text.
   function observeAgentEnd(event, context) {
     const state = runs.get(context?.runId ?? event?.runId);
-    if (state) state.runEnded = true;
+    if (!state) return;
+    state.runEnded = true;
+    state.runDeadlineReached = !state.clientCancelled && !state.odsAborted && !state.progressBudget.exhausted &&
+      !state.recursiveDeleteDenied && runDeadlineReached(state.runDeadline, event, now());
   }
 
   // Model-only prompt context for one attempt (before_prompt_build
@@ -12750,7 +12892,6 @@ export function createToolLoopGuard({
             ? "Browser inspection passed for the submitted interaction checks only; this does not verify all requested behavior.\n\n" : "") +
           (state.workspaceVisibilityInteractionRequired && !interactionUnverified
             ? "Browser inspection passed for the submitted show/hide checks only; this does not verify all requested behavior.\n\n" : "") +
-          `${PREVIEW_STORAGE_DISCLOSURE}\n\n` +
           `${WORKSPACE_PREVIEW_PUBLISHED_DELIVERY_PREFIX}\n\n` +
           `[Open preview](${state.workspacePreview.url})\n\n` +
           (state.workspacePreviewModelAuthored
@@ -13020,6 +13161,19 @@ export function createToolLoopGuard({
       return {status:'failed', text:'ODS did not observe a verified managed installation receipt for this GitHub extension request.'};
     }
     if (state?.ownerQuestions && !state.clientCancelled) return {status:'pending',text:questionsText(state.ownerQuestions),questions:state.ownerQuestions};
+    // Replaces the runtime's advice to raise agents.defaults.timeoutSeconds,
+    // which ODS resets. Failure facts, such as a failed test, follow.
+    if (state?.runDeadlineReached && !state.clientCancelled) {
+      const failure = verification.status === 'failed' ? verification : undefined;
+      // A failure with a preview receipt, such as one edited since it was
+      // published, already links that preview and says what it does not prove.
+      const preview = failure?.preview ? undefined : progressStopPreview(state);
+      return {status: 'failed', text: [runDeadlineStopText(state.runDeadline, state.workspaceMutationObserved),
+        preview && `[Open last published preview](${preview.url})\n\nThis is the last verified publication, not proof that all requested work completed.`,
+        failure?.text].filter(Boolean).join('\n\n').slice(0, MAX_INGRESS_VERIFICATION_TEXT),
+      ...(failure?.preview ? {preview: failure.preview}
+        : preview ? {preview: {schemaVersion: 1, kind: 'ods-pixel-workspace-preview', ...preview}} : {})};
+    }
     // Completion assurance arms its terminal before a revision and is not
     // consulted after a stop, so a tool-limit answer is always the newer one.
     const synthesized = state?.stopSynthesisOutcome?.status === 'answered' ? state.stopSynthesisOutcome : undefined;

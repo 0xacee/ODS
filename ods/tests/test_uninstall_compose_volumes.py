@@ -1,9 +1,11 @@
 """Behavioral checks for uninstalling volumes from disabled Compose fragments."""
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -33,6 +35,8 @@ class FakeDocker:
         self.foreign_consumers = {}
         self.removed = []
         self.uninspectable = set()
+        self.frozen_hash = "d" * 64
+        self.hash_commands = []
 
     @staticmethod
     def _volume(name, key):
@@ -66,6 +70,9 @@ class FakeDocker:
         assert root == self.root
         if args[0] == "compose" and args[-3:] == ("config", "--format", "json"):
             return json.dumps(self.config)
+        if args[0] == "compose" and args[-3:] == ("config", "--hash", "pixel-native-ingress"):
+            self.hash_commands.append(args)
+            return "pixel-native-ingress " + self.frozen_hash
         if args[0] == "ps":
             visible = [
                 row for row in self.containers
@@ -222,6 +229,177 @@ class NativePixelStackVolumeTests(unittest.TestCase):
         shutil.copyfile(self.native, trusted / "installers/macos/pixel-native.compose.yaml.disabled")
         with self.assertRaisesRegex(ValueError, "not linked to this installation"):
             MODULE.preflight(self.root, self.snapshot, ["-f", "docker-compose.base.yml"], trusted_root=trusted)
+
+
+@unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "native macOS custody requires POSIX file semantics")
+class NativeIngressRollbackVolumeTests(unittest.TestCase):
+    """A real rollback label must not make the next official uninstall foreign.
+
+    The ID and recipe suffix reproduce the observed Mac label; private journal,
+    config and mount contents are synthetic, following snapshot_previous's schema.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="ods-ingress-rollback-uninstall-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve() / "ods"
+        native = self.root / "installers/macos/pixel-native.compose.yaml.disabled"
+        native.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "installers/macos/pixel-native.compose.yaml.disabled", native)
+        (self.root / "docker-compose.base.yml").write_text("services: {}\n", encoding="utf-8")
+        directory = self.root / "data/pixel-native/preparation/ingress-refresh-d0a83c2c18a060ae57c6516a3b763d33"
+        directory.mkdir(parents=True, mode=0o700)
+        self.path, self.journal = directory / "rollback.compose.json", directory / "refresh.json"
+        self.source = str(self.root / "data/pixel-native/home/.openclaw/openclaw.json")
+        self.recipe = {
+            "name": "ods", "services": {"pixel-native-ingress": {
+                "image": "sha256:" + "b" * 64, "user": "501:20",
+                "environment": {"PIXEL_GATEWAY_TOKEN_FILE": "/run/gateway.json"},
+                "volumes": [
+                    {"type": "volume", "source": "pixel-native-runtime", "target": "/runtime"},
+                    {"type": "bind", "source": self.source, "target": "/run/gateway.json", "read_only": True},
+                ],
+            }},
+            "volumes": {"pixel-native-runtime": {"name": "ods_pixel-native-runtime", "external": True}},
+            "networks": {},
+        }
+        self.record = {"schemaVersion": 1, "phase": "rolled-back", "project": "ods", "source": self.source,
+                       "rollback": {"path": str(self.path), "previousId": "c" * 64, "configHash": "e" * 64,
+                                    "image": "sha256:" + "b" * 64, "user": "501:20"}}
+        self.write_records()
+        self.snapshot = Path(self.temp.name) / "snapshot.json"
+        self.snapshot.touch()
+        self.fake = FakeDocker(self.root)
+        self.fake.volumes = {"ods_pixel-native-runtime": FakeDocker._volume(
+            "ods_pixel-native-runtime", "pixel-native-runtime")}
+        self.container = {
+            "Id": "a64d0b6cf689e2f9d028f99a71765d9d8adfadd4fdd5031d27f5793989d59eb9",
+            "Image": "sha256:" + "b" * 64,
+            "Config": {"User": "501:20", "Labels": {
+                "com.docker.compose.project": "ods", "com.docker.compose.service": "pixel-native-ingress",
+                "com.docker.compose.project.working_dir": str(self.root),
+                "com.docker.compose.project.config_files": str(self.path),
+                "com.docker.compose.config-hash": self.fake.frozen_hash,
+            }},
+            "Mounts": [
+                {"Type": "volume", "Name": "ods_pixel-native-runtime", "Destination": "/runtime", "RW": True},
+                {"Type": "bind", "Source": self.source, "Destination": "/run/gateway.json", "RW": False},
+            ],
+        }
+        self.fake.containers = [self.container]
+        patcher = patch.object(MODULE, "docker", self.fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write_records(self):
+        body = json.dumps(self.recipe, sort_keys=True).encode()
+        self.path.write_bytes(body)
+        self.path.chmod(0o600)
+        self.record["rollback"]["sha256"] = hashlib.sha256(body).hexdigest()
+        self.journal.write_text(json.dumps(self.record), encoding="utf-8")
+        self.journal.chmod(0o600)
+
+    def preflight(self):
+        MODULE.preflight(self.root, self.snapshot, ["-f", "docker-compose.base.yml"])
+
+    def assert_refused(self):
+        with self.assertRaises(ValueError):
+            self.preflight()
+        self.assertEqual(self.snapshot.stat().st_size, 0)
+        self.assertFalse(self.fake.removed)
+
+    def test_observed_rollback_label_allows_owned_uninstall_and_purge(self):
+        self.preflight()
+        self.assertEqual(self.fake.hash_commands, [(
+            "compose", "--project-directory", str(self.root), "--project-name", "ods",
+            "--env-file", "/dev/null", "-f", str(self.path), "config", "--hash", "pixel-native-ingress",
+        )])
+        self.fake.containers = []
+        MODULE.postflight_containers(self.root, self.snapshot)
+        MODULE.complete(self.root, self.snapshot)
+        self.assertEqual(self.fake.removed, ["ods_pixel-native-runtime"])
+        self.assertEqual(self.fake.foreign, {"ods-pixel-retired-research", "ods-unrelated"})
+
+    def test_newer_pointer_does_not_invalidate_container_bound_terminal_journal(self):
+        pointer = self.path.parent.parent / "ingress-refresh-current.json"
+        pointer.write_text(json.dumps({"directory": "ingress-refresh-" + "f" * 32}), encoding="utf-8")
+        self.preflight()
+
+    def test_other_installation_label_is_refused(self):
+        self.container["Config"]["Labels"]["com.docker.compose.project.working_dir"] = "/other/ods"
+        self.assert_refused()
+
+    def test_other_installation_journal_is_refused(self):
+        for field, value in (("source", "/other/ods/config.json"), ("project", "other"), ("phase", "rolling-back")):
+            with self.subTest(field=field):
+                original = self.record[field]
+                self.record[field] = value
+                self.write_records()
+                self.assert_refused()
+                self.record[field] = original
+
+    def test_external_overlay_or_unknown_recipe_stays_refused(self):
+        labels = self.container["Config"]["Labels"]
+        for path in (self.root.parent / "qualification/config/frozen.json",
+                     self.root / "data/custom/rollback.compose.json",
+                     Path(str(self.path) + "," + str(self.root / "docker-compose.base.yml"))):
+            with self.subTest(path=path):
+                labels["com.docker.compose.project.config_files"] = str(path)
+                self.assert_refused()
+
+    def test_journal_cannot_claim_other_recipe(self):
+        self.record["rollback"]["path"] = str(self.path.parent / "other.json")
+        self.write_records()
+        self.assert_refused()
+
+    def test_changed_recipe_bytes_are_refused(self):
+        self.path.write_bytes(self.path.read_bytes() + b" ")
+        self.assert_refused()
+
+    def test_matching_digest_but_changed_live_definition_is_refused(self):
+        self.fake.frozen_hash = "f" * 64
+        self.assert_refused()
+
+    def test_changed_live_image_or_user_is_refused(self):
+        self.container["Image"] = "sha256:" + "f" * 64
+        self.assert_refused()
+        self.container["Image"] = self.record["rollback"]["image"]
+        self.container["Config"]["User"] = "0:0"
+        self.assert_refused()
+
+    def test_changed_mount_source_or_mode_is_refused(self):
+        self.container["Mounts"][1]["Source"] = "/other/ods/config.json"
+        self.assert_refused()
+        self.container["Mounts"][1]["Source"] = self.source
+        self.container["Mounts"][1]["RW"] = True
+        self.assert_refused()
+
+    def test_unknown_named_volume_is_not_blessed_by_journal(self):
+        self.recipe["volumes"]["unrelated"] = {"name": "ods_unrelated", "external": True}
+        self.write_records()
+        self.assert_refused()
+
+    def test_foreign_volume_consumer_still_blocks_purge(self):
+        self.fake.foreign_consumers["ods_pixel-native-runtime"] = ["f" * 64]
+        self.assert_refused()
+
+    def test_symlink_or_nonprivate_recipe_is_refused(self):
+        self.path.chmod(0o644)
+        self.assert_refused()
+        original = self.path.with_name("copy.json")
+        self.path.rename(original)
+        original.chmod(0o600)
+        self.path.symlink_to(original)
+        self.assert_refused()
+
+    def test_recipe_changed_during_compose_inspection_is_refused(self):
+        def changing_docker(root, *args):
+            result = self.fake(root, *args)
+            if args[-3:] == ("config", "--hash", "pixel-native-ingress"):
+                self.path.write_bytes(self.path.read_bytes() + b" ")
+            return result
+        with patch.object(MODULE, "docker", changing_docker):
+            self.assert_refused()
 
 
 class UninstallVolumeTests(unittest.TestCase):

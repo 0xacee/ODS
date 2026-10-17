@@ -158,9 +158,12 @@ def needs_stores(document, selected):
 
 
 class Stores:
-    def __init__(self, root, flags, *, build=False, frozen=None, service=None):
+    def __init__(self, root, flags, *, build=False, frozen=None, service=None, native=None):
         self.root = root
         self.env = dict(os.environ)
+        self.binary = self.env["ODS_NATIVE_LIFECYCLE_DOCKER"] if native else "docker"
+        self.compose_prefix = (["--project-directory", str(root), "--project-name", native["project"],
+                                "--env-file", "/dev/null"] if native else [])
         self.install = hashlib.sha256(str(root).encode()).hexdigest()
         if frozen:
             if frozen["install"] != self.install:
@@ -205,7 +208,10 @@ class Stores:
             raise ValueError("private-store-api-image-identity")
 
     def docker(self, *args, missing=False):
-        result = subprocess.run(["docker", *args], cwd=self.root, env=self.env, capture_output=True, check=False)
+        command = [self.binary, *args]
+        if args[0] == "compose":
+            command[2:2] = self.compose_prefix
+        result = subprocess.run(command, cwd=self.root, env=self.env, capture_output=True, check=False)
         if result.returncode:
             # Do not log expanded Compose/environment output.
             if missing and len(args) == 3:
@@ -272,7 +278,7 @@ class Stores:
             outgoing = stack.enter_context(output.open("xb")) if output else subprocess.DEVNULL
             if output:
                 os.chmod(output, 0o600)
-            result = subprocess.run(["docker", *arguments], cwd=self.root, stdin=incoming,
+            result = subprocess.run([self.binary, *arguments], cwd=self.root, stdin=incoming,
                                     stdout=outgoing, stderr=subprocess.PIPE, env=self.env, check=False)
         if result.returncode:
             raise ValueError("private-store-transfer-" + action + "; staging retained, retry the same operation after checking stopped writers")
@@ -396,6 +402,7 @@ def main():
     parser.add_argument("--source", type=Path)
     parser.add_argument("--operation", choices=("start", "restart", "update", "install"))
     parser.add_argument("--service")
+    parser.add_argument("--native-lifecycle", action="store_true")
     args = parser.parse_args()
     if args.service is not None and not re.fullmatch("[A-Za-z0-9][A-Za-z0-9_.-]*", args.service):
         raise ValueError("private-store-service-name")
@@ -409,13 +416,25 @@ def main():
     if args.action == "flags":
         print(selected_flags(root, flags))
         return
-    if frozen is None:
+    native = None
+    lifecycle = None
+    if args.native_lifecycle:
+        if args.action != "launch" or args.operation not in {"start", "restart", "update"}:
+            raise ValueError("private-store-native-operation")
+        spec = importlib.util.spec_from_file_location("private_native_lifecycle", HERE / "pixel-native-lifecycle.py")
+        lifecycle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lifecycle)
+        native = lifecycle.verify_child(root, args.operation, args.service or "")
+        expected = ["-f", str(Path(native["path"]).relative_to(root))]
+        if shlex.split(flags) != expected:
+            raise ValueError("private-store-native-frozen-flags")
+    if frozen is None and native is None:
         # Older installed caches lack this new recipe. All callers, including
         # backup/restore, must resolve the same selection as the Mac CLI.
         flags = selected_flags(root, flags)
     with locked(root) as directory:
-        stores = Stores(root, flags, build=args.build_missing or args.operation in {"start", "update"},
-                        frozen=frozen, service=args.service if args.action == "launch" else None)
+        stores = Stores(root, flags, build=not native and (args.build_missing or args.operation in {"start", "update"}),
+                        frozen=frozen, service=args.service if args.action == "launch" else None, native=native)
         if args.action in {"prepare", "launch"}:
             if stores.requires_stores:
                 stores.prepare(directory)
@@ -425,9 +444,18 @@ def main():
                            "install": ["--remove-orphans", "--no-build", "--pull", "never"]}
                 if args.operation not in options:
                     raise ValueError("private-store-launch-operation")
+                if native is not None:
+                    # Parent already prepared and pinned images under admission.
+                    # Verify again after storage preparation; replay only its
+                    # exact recipe, Docker binary, project and empty env file.
+                    if lifecycle.verify_child(root, args.operation, args.service or "") != native:
+                        raise ValueError("private-store-native-selection-changed")
+                    options[args.operation] = ["--wait", "--wait-timeout", "120", "--no-build", "--pull", "never"]
+                    if args.operation != "start":
+                        options[args.operation].append("--force-recreate")
                 # Keep the lock through Compose. A concurrent restore cannot
                 # pass its stopped-writer check between prepare and API start.
-                result = subprocess.run(["docker", "compose", *stores.flags, "up", "-d",
+                result = subprocess.run([stores.binary, "compose", *stores.compose_prefix, *stores.flags, "up", "-d",
                                          *options[args.operation], *([args.service] if args.service else [])],
                                         cwd=root, env=stores.env, check=False)
                 if result.returncode:

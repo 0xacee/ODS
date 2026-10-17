@@ -9,6 +9,7 @@ on:
       - 'ods/tests/test_bridge_denied_admission.py'
       - 'ods/installers/macos/**'
       - 'ods/tests/test_macos_dashboard_private_state.py'
+      - 'ods/tests/test_macos_private_store_native_integration.py'
       - 'ods/ods-backup.sh'
       - 'ods/ods-restore.sh'
       - 'ods/lib/dashboard-private-state.sh'
@@ -26,6 +27,12 @@ on:
       - 'ods/tests/test_macos_pixel_controller_repair.py'
       - 'ods/tests/test_macos_pixel_controller_held_proof.py'
       - 'ods/tests/test_macos_pixel_native_finalize.py'
+      - 'ods/tests/test_macos_pixel_ingress*'
+      - 'ods/tests/test_macos_pixel_config_volume.py'
+      - 'ods/tests/native_config_volume_fixture.py'
+      - 'ods/tests/test-macos-cli-saved-python.sh'
+      - 'ods/tests/test-macos-env-quote-strip.sh'
+      - 'ods/tests/test_macos_pixel_lifecycle*.py'
       - 'ods/tests/test_macos_pixel_native_recover.py'
       - 'ods/tests/test_macos_pixel_access_install.py'
       - 'ods/tests/test_macos_pixel_runtime_upgrade.py'
@@ -51,6 +58,7 @@ on:
       - 'ods/tests/test_bridge_denied_admission.py'
       - 'ods/installers/macos/**'
       - 'ods/tests/test_macos_dashboard_private_state.py'
+      - 'ods/tests/test_macos_private_store_native_integration.py'
       - 'ods/ods-backup.sh'
       - 'ods/ods-restore.sh'
       - 'ods/lib/dashboard-private-state.sh'
@@ -68,6 +76,12 @@ on:
       - 'ods/tests/test_macos_pixel_controller_repair.py'
       - 'ods/tests/test_macos_pixel_controller_held_proof.py'
       - 'ods/tests/test_macos_pixel_native_finalize.py'
+      - 'ods/tests/test_macos_pixel_ingress*'
+      - 'ods/tests/test-macos-cli-saved-python.sh'
+      - 'ods/tests/test_macos_pixel_config_volume.py'
+      - 'ods/tests/native_config_volume_fixture.py'
+      - 'ods/tests/test-macos-env-quote-strip.sh'
+      - 'ods/tests/test_macos_pixel_lifecycle*.py'
       - 'ods/tests/test_macos_pixel_native_recover.py'
       - 'ods/tests/test_macos_pixel_access_install.py'
       - 'ods/tests/test_macos_pixel_runtime_upgrade.py'
@@ -110,7 +124,7 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: '1'
         run: brew install rsync jq
       - name: Verify private dashboard store migration and backup recovery
-        run: python -m pytest -q ods/tests/test_macos_dashboard_private_state.py
+        run: python -m pytest -q ods/tests/test_macos_dashboard_private_state.py ods/tests/test_macos_private_store_native_integration.py
       - name: Install modern Bash for macOS CLI fixtures
         if: runner.os == 'macOS'
         env:
@@ -131,6 +145,24 @@ jobs:
         run: python -m pytest -q ods/tests/test_bridge_denied_admission.py ods/tests/test_macos_llm_bridge.py
       - name: Verify private environment rollback custody
         run: python -m pytest -q ods/tests/test_macos_upsert_env_value.py
+      - name: Verify saved Python selection from a fresh macOS CLI shell
+        run: |
+          bash ods/tests/test-macos-cli-saved-python.sh
+          bash ods/tests/test-macos-env-quote-strip.sh
+      - name: Verify private ingress and held native lifecycle contracts
+        run: >-
+          ODS_LIFECYCLE_TEST_BASH="$(command -v bash)" python -m pytest -q
+          ods/tests/test_macos_pixel_ingress_config.py
+          ods/tests/test_macos_pixel_config_volume.py
+          ods/tests/test_macos_pixel_ingress_refresh.py
+          ods/tests/test_macos_pixel_ingress_cli.py
+          ods/tests/test_macos_pixel_ingress_probe.py
+          ods/tests/test_macos_pixel_ingress_recipe.py
+          ods/tests/test_macos_pixel_lifecycle.py
+          ods/tests/test_macos_pixel_lifecycle_stack.py
+      - name: Verify full native recipe hashes and zero-scaled targets without a daemon
+        if: runner.os == 'Linux'
+        run: ODS_LIFECYCLE_COMPOSE_CONTROL=1 python -m pytest -q ods/tests/test_macos_pixel_lifecycle_recipe.py
       - name: Verify native installer, update and startup contracts
         run: >-
           python -m pytest -q

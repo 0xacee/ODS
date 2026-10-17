@@ -55,7 +55,14 @@ elif args[:1] == ['compose']:
         config = data['config']
         if data.get('reject_config_after_env') and (root/'.env').read_text().startswith('backup-'):
             sys.exit(34)
-        if not any(arg.endswith('/dashboard-private-state.compose.yaml') for arg in args):
+        if data.get('require_native'):
+            assert args[1:7] == ['--project-directory', str(root), '--project-name', 'ods', '--env-file', '/dev/null']
+            assert len([arg for arg in args if arg == '-f']) == 1
+            selected = pathlib.Path(args[args.index('-f')+1])
+            assert selected.name == 'lifecycle.compose.json'
+            config = json.loads((root/selected).read_text())
+            data['native_prefix_verified'] = True; save()
+        elif not any(arg.endswith('/dashboard-private-state.compose.yaml') for arg in args):
             config['services']['dashboard-api']['volumes'] = [
                 mount for mount in config['services']['dashboard-api']['volumes'] if mount['target'] == '/data']
             config['volumes'] = {}
@@ -63,6 +70,14 @@ elif args[:1] == ['compose']:
     elif 'build' in args:
         data['builds'] += 1; data['image'] = True; save()
     elif 'up' in args:
+        if data.get('require_native'):
+            import fcntl
+            with (root/'data/.dashboard-private-stores/lock').open('r') as lock:
+                try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError: data['storage_lock_verified'] = True
+                else: sys.exit(37)
+            assert args[1:7] == ['--project-directory', str(root), '--project-name', 'ods', '--env-file', '/dev/null']
+            assert len([arg for arg in args if arg == '-f']) == 1
         data['launches'].append(args[args.index('up'):]); save()
     else: sys.exit(31)
 elif args[:1] == ['run']:
