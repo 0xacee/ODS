@@ -9738,6 +9738,37 @@ def _wsl_nvidia_sensors(timeout: float) -> dict[str, dict]:
     return {name: value for name, value in sensors.items() if name not in duplicates}
 
 
+# nvidia-smi can wake a GPU that was asleep, so its readings are reused this
+# long, well past the three-second CPU/RAM/GPU sample.
+_WSL_NVIDIA_SENSOR_SECONDS = 15
+_wsl_nvidia_cached = (0.0, None)
+
+
+def _wsl_windows_model_route() -> bool:
+    """True when this installation's model server runs natively on Windows.
+
+    Only then does the GPU tile read the Windows host sample; the Docker
+    NVIDIA route reads nvidia-smi in the dashboard container instead, and CPU
+    or cloud mode needs no GPU sensors.
+    """
+    try:
+        return _wsl_runtime.candidate(load_env(INSTALL_DIR / ".env"))
+    except (OSError, ValueError):
+        return False  # An unreadable .env only skips the optional GPU sensors.
+
+
+def _wsl_nvidia_sensor_sample(budget: float) -> dict[str, dict]:
+    """nvidia-smi readings, at most once per fifteen seconds (caller holds the metrics lock)."""
+    global _wsl_nvidia_cached
+    if _wsl_nvidia_cached[1] is not None and time.monotonic() - _wsl_nvidia_cached[0] < _WSL_NVIDIA_SENSOR_SECONDS:
+        return _wsl_nvidia_cached[1]
+    if budget < 0.5:
+        return {}
+    sensors = _wsl_nvidia_sensors(budget)
+    _wsl_nvidia_cached = (time.monotonic(), sensors)
+    return sensors
+
+
 def _wsl_system_metrics():
     """Read native Windows sensors through existing WSL interop, without setup."""
     global _wsl_metrics_cached
@@ -9781,10 +9812,12 @@ def _wsl_system_metrics():
                     payload["ram"].update(used_gb=round(used / 1024**3, 1), percent=round(used / total * 100, 1))
             rows = data.get("gpus")
             # The dashboard waits nine seconds for this sample: nvidia-smi gets
-            # what the Windows sensor read left, at most two seconds.
+            # what the Windows sensor read left, at most two seconds. It runs
+            # only for an NVIDIA adapter that a Windows model server uses.
             budget = min(2.0, 8.5 - (time.monotonic() - started))
-            nvidia = _wsl_nvidia_sensors(budget) if budget >= 0.5 and isinstance(rows, list) and any(
-                isinstance(row, dict) and row.get("vendor") == 0x10DE for row in rows[:32]) else {}
+            nvidia = _wsl_nvidia_sensor_sample(budget) if isinstance(rows, list) and any(
+                isinstance(row, dict) and row.get("vendor") == 0x10DE for row in rows[:32]
+            ) and _wsl_windows_model_route() else {}
             if isinstance(rows, list):
                 for row in rows[:32]:
                     if not isinstance(row, dict):

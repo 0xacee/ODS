@@ -100,7 +100,8 @@ def test_nvidia_adapter_reports_the_windows_driver_temperature_and_power(monkeyp
     assert info.power_w == 58.7
     aggregate = gpu.aggregate_gpu_details([info], "nvidia")
     assert aggregate.temperature_available and aggregate.temperature_c == 69 and aggregate.power_w == 58.7
-    data["gpus"][0].update(temperature_c=999, power_w=-1)
-    monkeypatch.setattr(host_metrics, "_windows_cached", (0, None))
-    info = gpu.get_gpu_info_wsl_host_detailed()[0]
-    assert not info.temperature_available and info.power_w is None
+    for temperature, power in ((999, -1), (151, 2001)):
+        data["gpus"][0].update(temperature_c=temperature, power_w=power)
+        monkeypatch.setattr(host_metrics, "_windows_cached", (0, None))
+        info = gpu.get_gpu_info_wsl_host_detailed()[0]
+        assert not info.temperature_available and info.power_w is None
