@@ -65,10 +65,11 @@ URLs and asks the model to replace each with a page it actually read in this
 response or remove it and mark the claim unverified; where each item needs its
 own source, it prefers the item's own page to a shared listing. If the answer still cites
 unread URLs afterwards, or the harness refuses the revision, the owner receives
-that answer with only those links replaced by `[source not verified]`
-(`[fonte não verificada]` in Portuguese), Markdown link syntax around them
-flattened to text, and one fixed source-check note. Nothing else in the answer
-changes and no link is added. The outcome stays `failed`, so the harness and
+that answer with only those links replaced by `[source not verified]`,
+Markdown link syntax around them flattened to text, and one fixed source-check
+note. Nothing else in the answer changes and no link is added. Fixed notices
+such as this marker and note are English for every owner; the model's own
+answer is never translated. The outcome stays `failed`, so the harness and
 owner still see that verification was incomplete. The whole answer is replaced
 with the incomplete-research text only when none of its cited URLs was read,
 too little prose remains outside links, or it exceeds 20,000 characters. If a
@@ -513,6 +514,11 @@ request and up to eight page excerpts, in read order:
 - **Instruction:** answer only from the excerpts, cite only their URLs, use
   `null` or "not found" for anything they do not establish, never substitute a
   related figure, and no process narration.
+- **Owner's request:** the owner's message, which also sets the answer's
+  language. In a team or goal run it is only the owner's own words from the
+  message Portal built around them (`managedTurnOwnerWords` in
+  `response-language.mjs`): the request after "Owner's requested outcome:",
+  the goal after "/goal" or "Original objective:", and the owner's answers.
 - **Excerpts:** at most 1,800 characters per page and 12,000 in total, taken
   from the read ledger and selected around the request's terms and quantities.
   A page's `web_fetch` and targeted extraction are merged, the extraction

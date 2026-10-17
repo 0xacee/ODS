@@ -9,6 +9,7 @@ import {createRuntimeIdentity} from './runtime-identity.mjs';
 import {fileURLToPath} from 'node:url';
 import {subagentDeliveryFor,delegationAccessIdentity} from './subagent-delivery.mjs';
 import {createActivityTool, ACTIVITY_CONTRACT} from './activity-display.mjs';
+import {managedTurnLanguageNote} from './response-language.mjs';
 import {previewRecoveryAllowed} from './preview-delivery-recovery.mjs';
 import {compactToolResultEnvelope} from './tool-result-envelope.mjs';
 import {withPiToolErrorContract} from './pi-tool-result.mjs';
@@ -56,6 +57,7 @@ import {
   createExecCancellationControl,
   createRunAbortAdapter,
   createToolLoopGuardRegistry,
+  managedTeamRole,
   privateBrowserAccessForAgent,
 } from "./tool-loop-guard.mjs";
 import { withPixelCronDeliveryDefault } from "./cron-delivery-default.mjs";
@@ -442,7 +444,11 @@ export default definePluginEntry({
       // child's announce continuation of a clarification answer carries that
       // answer's note too: in a replacement session only the note names the
       // request, and the answer run's success already settled the card.
-      const appendContext = [goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : '',
+      // Portal wrote most of a team or goal message: a note says where the
+      // owner's own words are, for the response-language rule.
+      const languageNote = managedTurnLanguageNote({goal: goalProgress.active(context?.runId ?? event?.runId),
+        teamRole: managedTeamRole(ownerEvent)});
+      const appendContext = [goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : '', languageNote,
         toolLoopGuard.clarificationContextForRun(context?.runId ?? event?.runId) ??
           toolLoopGuard.clarificationContextForRun(delegationDelivery.ownerRunFor(context))].filter(Boolean).join('\n\n');
       return contract ? { ...contract, ...(prependContext ? {prependContext} : {}), ...(appendContext ? {appendContext} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${executionLocationContext(context, AGENT_ID)} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : prependContext ? {prependContext} : undefined;
