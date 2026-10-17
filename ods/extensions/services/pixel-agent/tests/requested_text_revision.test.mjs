@@ -14,8 +14,11 @@ import {REQUESTED_TEXT_REVISION_INSTRUCTION, requestedTextRevisionInstruction} f
 import {PREVIEW_INSPECTION_TOOL} from '../plugin/preview-interaction-assurance.mjs';
 import {INSPECTION_KIND, INSPECTION_SCOPE, inspectionPlanHash, normalizeWorkspacePreviewInspectionParams}
   from '../plugin/workspace-preview-inspect.mjs';
+import {PREVIEW_CHECK_LABEL, PREVIEW_CLAIM_NOTE} from '../plugin/preview-explanation.mjs';
 
 const TOWER1 = JSON.parse(fs.readFileSync(new URL('./requested-text-tower1-round067.json', import.meta.url), 'utf8'));
+// A failed delivery keeps the recorded answer, which claims full verification.
+const KEPT_ANSWER = `${TOWER1.finalAnswer.trim()}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_CLAIM_NOTE}\n\n`;
 const [WRITE, PUBLISH, INSPECT] = TOWER1.calls;
 const DIRECTORY = PUBLISH.arguments.args.relativeDirectory;
 const INDEX = `${DIRECTORY}/index.html`;
@@ -167,7 +170,9 @@ test('tower1 round 067: a second miss ends in the unchanged honest failure', t =
   assert.equal(f.revisions(), 1);
   const outcome = f.delivered();
   assert.equal(outcome.status, 'failed');
-  assert.equal(body(outcome.text), body(FAILURE).replaceAll(f.first.receipt.url, second.receipt.url));
+  // The answer claims no success, so only the unchanged failure follows it.
+  assert.equal(body(outcome.text), `Updated and republished.\n\n${PREVIEW_CHECK_LABEL} ` +
+    body(FAILURE).replaceAll(f.first.receipt.url, second.receipt.url));
 });
 
 test('tower1 round 067: answering after the revision keeps the recorded failure delivery', t => {
@@ -176,7 +181,7 @@ test('tower1 round 067: answering after the revision keeps the recorded failure 
     {action: 'finalize', reason: 'Owner-requested text is still missing after the bounded revision.'});
   assert.equal(f.finalize(TOWER1.finalAnswer)?.action, 'finalize', 'no loop on a repeated finalization');
   assert.equal(f.revisions(), 1);
-  assert.deepEqual({status: f.delivered().status, text: body(f.delivered().text)}, {status: 'failed', text: body(FAILURE)});
+  assert.deepEqual({status: f.delivered().status, text: body(f.delivered().text)}, {status: 'failed', text: KEPT_ANSWER + body(FAILURE)});
   // Further tool results for that snapshot may repeat the note, never the revision.
   assert.doesNotMatch(f.inspect(f.first.receipt, 'inspect-again'), new RegExp(REVISION_START));
   assert.equal(f.revisions(), 1);
@@ -196,7 +201,8 @@ test('an answer straight after the receipt gets the same revision once at finali
   assert.equal(f.inspect(f.publish(ORIGINAL, 'same-bytes').receipt, 'inspect').includes(REVISION_START), false,
     'the finalization revision was the one revision');
   assert.equal(f.delivered().status, 'failed');
-  assert.match(f.delivered().text, /^The published page does not contain text the owner requested: "Midnight sold-out concert"\./);
+  assert.ok(f.delivered().text.startsWith(`${KEPT_ANSWER}The published page does not contain text the owner requested: "Midnight sold-out concert".`),
+    f.delivered().text);
 });
 
 test('no revision after the owner cancelled', async t => {

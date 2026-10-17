@@ -780,6 +780,37 @@ four bullet options. It creates the same bounded card without another model call
 It rejects surrounding prose, code, translations, numbered steps and plans.
 A model can still miss a suitable clarification or produce unsupported wording.
 
+## Failed preview checks keep the explanation
+
+On the RTX Spark (Elf of Doom), an interaction check failed and the agent then
+wrote the owner a correct root-cause explanation. Portal replaced the whole
+reply with its host delivery ("The attempted preview interaction checks have
+not passed browser inspection ... Your preview is ready."), so the owner never
+saw it. `preview-explanation.mjs` changes only that substitution: when a
+workspace preview outcome is `failed` (a browser, interaction or requested-text
+check that did not pass, a stale snapshot, or no publication), the agent's
+final reply comes first and the unchanged host result follows it under
+**Portal check:**.
+
+- The outcome stays `failed`, and every host failure line and the preview
+  receipt still follow the reply, so the dashboard still shows the preview card
+  and the failure.
+- The reply is never rewritten. When it says the work passed, works or is fixed
+  (an English heuristic that skips negated, conditional and quoted clauses),
+  the note starts with "Portal's checks did not all pass: where the reply above
+  says the work passed, works or is fixed, that is not verified."
+- The host-only delivery stays as before when the reply is empty, silent, too
+  short, tool-call text, over 20,000 characters, links any local URL other than
+  this outcome's own preview, or carries a "Portal check:" label of its own.
+- The reply is the `lastAssistantMessage` seen at `before_agent_finalize`; any
+  later model call clears it. Passing (`append`) and pending outcomes are
+  unchanged. The ingress verification schema is unchanged.
+
+`tests/preview_explanation_delivery.test.mjs` replays the Elf of Doom case
+through the real guard, inspection receipt and ingress, plus the regression
+cases (a false success claim, empty and silent replies, passing and pending
+checks, local links).
+
 ## Focused verification
 
 For an explicitly published repair naming one workspace file, recognized

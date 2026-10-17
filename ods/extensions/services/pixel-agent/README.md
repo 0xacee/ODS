@@ -116,7 +116,10 @@ upstream default. Other agents and existing jobs are unaffected.
   the private ingress therefore asks the plugin for the exact run's bounded
   verification state over a gateway-authenticated loopback route. Failed or
   still-running verification replaces model-authored success text with an
-  honest host-authored result. Streaming responses are bounded and buffered
+  honest host-authored result. A failed workspace preview check keeps the
+  agent's own explanation first and appends that host result after it, saying
+  plainly that the checks did not all pass when the explanation claims success
+  (see COMPLETION-RELIABILITY.md). Streaming responses are bounded and buffered
   until that check completes, so false content is never released and then
   retracted.
 - **Protected local host commands.** An explicit owner request to run one

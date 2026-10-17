@@ -1166,6 +1166,49 @@ describe('Pixel', () => {
     expect(send).toBeEnabled()
   })
 
+  // RTX Spark Elf of Doom: a failed preview check now keeps the agent's own
+  // explanation ahead of Portal's note instead of replacing it.
+  it('renders a kept agent explanation and the failed-check note as Markdown with the preview card', async () => {
+    const matchMedia = globalThis.matchMedia
+    vi.stubGlobal('matchMedia', query => query === '(prefers-reduced-motion: reduce)'
+      ? { matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }
+      : matchMedia?.(query) ?? { matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })
+    const sha256 = 'c'.repeat(64)
+    const siteId = `site-${sha256.slice(0, 24)}`
+    const preview = {schemaVersion: 1, kind: 'ods-pixel-workspace-preview', relativeDirectory: 'elf-of-doom', siteId, port: 9437,
+      url: `http://${siteId}.localhost:9437/${siteId}/`, files: 3, bytes: 4096, sha256, entrySha256: 'd'.repeat(64)}
+    previewManifests.set(`/pixel-preview/${siteId}/__ods_manifest__.json`, preview)
+    const content = 'The cause is `ui.js:748`: a canvas is not a valid `fillStyle`, so the previous colour stays set.\n\n' +
+      '- The last full-viewport fill covers the arena.\n\n' +
+      '**Portal check:** The attempted preview interaction checks have not passed browser inspection. ' +
+      'The published preview is available, but those checks remain unverified.\n\n' +
+      `Your preview is ready.\n\n[Open preview](${preview.url})\n\nPublished from your workspace.`
+    globalThis.fetch.mockResolvedValueOnce(response({ available: true, model: 'pixel/default', detail: 'local' }))
+    globalThis.fetch.mockResolvedValueOnce(sseResponse([
+      JSON.stringify({ choices: [{ delta: { content } }] }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], pixel: { schemaVersion: 1, preview },
+        pixel_outcome: { schemaVersion: 1, status: 'failed' } }),
+      '[DONE]',
+    ]))
+    render(<Pixel />)
+    await waitFor(() => expect(screen.getByText('Available')).toBeInTheDocument())
+    fireEvent.change(screen.getByPlaceholderText('Message Portal...'), { target: { value: 'Fix the arena, then look at the preview.' } })
+    fireEvent.click(screen.getByTitle('Send'))
+
+    const label = await screen.findByText('Portal check:')
+    expect(label.closest('strong')).not.toBeNull()
+    expect(screen.getByText('ui.js:748').closest('code')).not.toBeNull()
+    expect(screen.getByText('The last full-viewport fill covers the arena.').closest('li')).not.toBeNull()
+    expect(screen.getByText(/attempted preview interaction checks have not passed browser inspection/)).toBeVisible()
+    expect(screen.queryByText('Your preview is ready.')).toBeNull()
+    expect(screen.queryByText(/Published from your workspace/)).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Open preview' })).toBeNull()
+    expect(await screen.findByTitle('Interactive Portal preview')).toHaveAttribute('src', `/pixel-preview/${siteId}/__ods_view__.html`)
+    // The stored reply and the model's history keep the full delivered text.
+    await waitFor(() => expect(JSON.parse(globalThis.localStorage.getItem('ods.pixel.chat.v1')).messages.at(-1))
+      .toMatchObject({ role: 'assistant', content, publication: preview }))
+  })
+
   it('preserves earlier file changes across another message and reload without sending UI metadata to the model', async () => {
     const publication = letter => {
       const sha256 = letter.repeat(64)

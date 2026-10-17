@@ -22,8 +22,9 @@ import {extractRequestedControlNames, extractRequestedLiterals, requestedControl
 import {PREVIEW_INSPECTION_TOOL, boundInspectionControls} from '../plugin/preview-interaction-assurance.mjs';
 import {createWorkspacePreviewInspectTool, normalizeWorkspacePreviewInspectionParams, inspectionPlanHash}
   from '../plugin/workspace-preview-inspect.mjs';
+import {PREVIEW_CHECK_LABEL, PREVIEW_CLAIM_NOTE} from '../plugin/preview-explanation.mjs';
 
-const TOWER2 = JSON.parse(fs.readFileSync(new URL('./control-names-tower2-round100.json', import.meta.url), 'utf8'));
+const TOWER2 =JSON.parse(fs.readFileSync(new URL('./control-names-tower2-round100.json', import.meta.url), 'utf8'));
 const FIXTURE = new URL('../../../../tests/fixtures/preview-controls/tower2-r100/', import.meta.url);
 const FILES = Object.fromEntries(['index.html', 'script.js', 'styles.css']
   .map(name => [name, fs.readFileSync(new URL(name, FIXTURE), 'utf8')]));
@@ -332,7 +333,7 @@ test('tower2 round 100: both inspections of the replaced-name snapshot carry the
   assert.ok(css.includes(NEXT), css);
   assert.ok(!css.includes(WORKSPACE_PREVIEW_COMPLETE_REASON), 'never "give the concise final result" over a failing name');
   // The recorded answer claimed full verification: one bounded revision,
-  // then the honest failure stands.
+  // then the honest failure stands after that answer, contradicting its claim.
   assert.deepEqual(f.finalize(TOWER2.finalAnswer), {action: 'revise',
     reason: 'Pixel has not completed every owner-requested verified step.',
     retry: {instruction: REQUESTED_CONTROL_NAME_REVISION_INSTRUCTION.join('["Show sold out"]'),
@@ -341,7 +342,8 @@ test('tower2 round 100: both inspections of the replaced-name snapshot carry the
     {action: 'finalize', reason: 'Owner-requested control names are still not met after the bounded revision.'});
   const outcome = f.delivered();
   assert.equal(outcome.status, 'failed');
-  assert.ok(outcome.text.startsWith(`${FAILURE_NOTE}\n\nBrowser inspection passed for the submitted show/hide checks only;`), outcome.text);
+  assert.ok(outcome.text.startsWith(`${TOWER2.finalAnswer.trim()}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_CLAIM_NOTE}\n\n` +
+    `${FAILURE_NOTE}\n\nBrowser inspection passed for the submitted show/hide checks only;`), outcome.text);
   assert.equal(outcome.preview.sha256, RECEIPT.sha256);
 });
 

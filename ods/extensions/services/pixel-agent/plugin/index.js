@@ -609,7 +609,9 @@ export default definePluginEntry({
       return decision;
     });
     // Delivery rewriting is limited to host-authoritative failed or pending
-    // verification state. It neither requests nor receives conversation data.
+    // verification state. It neither requests nor receives conversation data;
+    // a failed preview delivery carries the agent's final reply, seen at
+    // before_agent_finalize, ahead of its host facts (preview-explanation.mjs).
     api.on("reply_payload_sending", (event) =>
       toolLoopGuard.replyPayloadSending(event)
     );

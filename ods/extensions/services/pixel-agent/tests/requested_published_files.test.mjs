@@ -11,6 +11,7 @@ import * as fs from 'node:fs';
 import {createToolLoopGuard} from '../plugin/tool-loop-guard.mjs';
 import {extractRequestedLiterals, requestedTextCheck, requestedTextInstruction, requestedTextRevisionInstruction,
   requestedTextDeliveryNote, REQUESTED_FILE_REVISION_INSTRUCTION, PREVIEW_FILE_SUFFIXES} from '../plugin/requested-literals.mjs';
+import {PREVIEW_CHECK_LABEL, PREVIEW_CLAIM_NOTE} from '../plugin/preview-explanation.mjs';
 
 const TOWER2 = JSON.parse(fs.readFileSync(new URL('./requested-files-tower2-round082.json', import.meta.url), 'utf8'));
 const RECEIPT = TOWER2.publicationReceipt;
@@ -162,7 +163,9 @@ test('tower2 round 082 coding: the receipt carries the note, the recorded answer
   assert.equal(guard.beforeAgentFinalize({lastAssistantMessage: TOWER2.finalAnswer}, context)?.action, 'finalize');
   const outcome = guard.verificationForRun(context.runId);
   assert.equal(outcome.status, 'failed');
-  assert.ok(outcome.text.startsWith(`${FAILURE_NOTE}\n\n`), outcome.text);
+  // The recorded answer is kept; the note after it contradicts its claim.
+  assert.ok(outcome.text.startsWith(`${TOWER2.finalAnswer.trim()}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_CLAIM_NOTE}\n\n${FAILURE_NOTE}\n\n`),
+    outcome.text);
 });
 
 test('tower2 round 082 coding: republishing with test-results.txt inside public clears the miss', () => {

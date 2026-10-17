@@ -47,6 +47,7 @@ import { PREVIEW_INSPECTION_TOOL, requestsVisibilityInteraction, requestsBehavio
   attemptedPreviewBehavior, boundPreviewBehavior, previewBehaviorInstruction } from './preview-interaction-assurance.mjs';
 import { workspaceRevalidationCandidate, workspaceReadOnlyCall, settledRevalidationReceipt, boundedPreviewVerification } from "./preview-revalidation.mjs";
 import { boundedPreviewDelivery } from './preview-delivery-recovery.mjs';
+import { explainedPreviewDelivery } from './preview-explanation.mjs';
 import { extractRequestedLiterals, requestedTextCheck, requestedTextInstruction, requestedTextRevisionInstruction,
   requestedTextDeliveryNote, publishedElementOutline, extractRequestedControlNames, requestedControlSources,
   requestedControlNameCheck, requestedControlNameInstruction, requestedControlNameRevisionInstruction,
@@ -10352,6 +10353,8 @@ export function createToolLoopGuard({
     state.operationsPromptRound += 1;
     state.progressBudget.beginModelRound();
     if (state.progressBudget.exhausted && !compactionCall) progressFinalization(state).modelCallStarted();
+    // A further agent turn means the reply seen at finalization was not final.
+    if (!compactionCall) state.finalReplyText = undefined;
   }
 
   function observeModelEnd(event, context, agentId = "pixel") {
@@ -12723,6 +12726,13 @@ export function createToolLoopGuard({
     const runId = context?.runId ?? event?.runId;
     if (typeof runId !== "string" || !runId) return undefined;
     const state = runs.get(runId);
+    // The agent's latest final reply. A failed preview delivery keeps it ahead
+    // of the host facts (preview-explanation.mjs). The pinned harness refuses a
+    // revision after side effects, so this text is usually what is sent; a
+    // further model call clears it (observeModelCall).
+    if (state && !state.clientCancelled) {
+      state.finalReplyText = typeof event?.lastAssistantMessage === 'string' ? event.lastAssistantMessage : undefined;
+    }
     if (state?.recursiveDeleteDenied && !state.clientCancelled && !state.recursiveDeleteAbortAttempted) {
       if ((context?.sessionId && context.sessionId !== state.currentSessionId) ||
           (context?.sessionKey && context.sessionKey !== state.currentSessionKey) ||
@@ -12893,13 +12903,16 @@ export function createToolLoopGuard({
       !state.operationsRequired &&
       !state.exactDownloadRequested
     ) {
+      // A failed outcome keeps the agent's own final explanation ahead of
+      // these host facts; passing and pending outcomes are unchanged.
+      const explained = result => explainedPreviewDelivery(result, state.finalReplyText);
       if (!state.workspacePreview) {
-        if (state.workspacePreviewRestrictions?.mutation && state.workspacePreviewAttempted) return {
+        if (state.workspacePreviewRestrictions?.mutation && state.workspacePreviewAttempted) return explained({
           status: "failed",
           text: "ODS could not publish that directory: " +
             (WORKSPACE_PREVIEW_FAILURE_REASONS[state.workspacePreviewFailureCode] ?? "no valid publication receipt was returned") +
             ". No verified preview URL was returned; the requested no-edit restriction remains in effect.",
-        };
+        });
         // A command may have changed the workspace, but it cannot change the
         // immutable host publication. Retain its usable link without treating
         // it as verification of the latest workspace or a completed request.
@@ -12911,7 +12924,7 @@ export function createToolLoopGuard({
           const stopText = state.codingExhausted
             ? "Portal stopped before the requested work was complete. Saved files are preserved."
             : "";
-          return {
+          return explained({
             status: "failed",
             text:
               (stopText ? `${stopText}\n\n` : "") +
@@ -12928,7 +12941,7 @@ export function createToolLoopGuard({
               kind: "ods-pixel-workspace-preview",
               ...preview,
             },
-          };
+          });
         }
         const hasIndexEvidence = [
           ...state.successfulWritePaths,
@@ -12936,12 +12949,12 @@ export function createToolLoopGuard({
         ].some(
           (value) => typeof value === "string" && value.endsWith("/index.html")
         );
-        return {
+        return explained({
           status: "failed",
           text: hasIndexEvidence
             ? WORKSPACE_PREVIEW_UNVERIFIED_DELIVERY_PREFIX
             : WORKSPACE_PREVIEW_NOT_CREATED_DELIVERY_PREFIX,
-        };
+        });
       }
       // Publication and verification are independent evidence. A successful
       // snapshot cannot turn a failed or still-running check into completion.
@@ -12958,7 +12971,7 @@ export function createToolLoopGuard({
       // showed missing withhold certification, whatever else passed.
       const requestedTextMissing = requestedTextDeliveryNote(state.workspacePreview, state.workspaceRequestedTextCheck,
         state.workspaceControlNameCheck);
-      return {
+      return explained({
         status: checkIncomplete ? checkStatus : interactionUnverified || behaviorUnverified || renderedUnverified || requestedTextMissing ? "failed" : "passed",
         text:
           (checkText ? `${checkText}\n\n` : "") +
@@ -12980,7 +12993,7 @@ export function createToolLoopGuard({
           kind: "ods-pixel-workspace-preview",
           ...state.workspacePreview,
         },
-      };
+      });
     }
     if (state.exactDownloadRequested) {
       const terminalText = exactDownloadTerminalText(state.exactDownloadTerminalOutcome);

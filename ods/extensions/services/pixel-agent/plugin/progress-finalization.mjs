@@ -50,7 +50,17 @@ const TOOL_CALL_TEXT = /<\/?tool_call\b|<\|tool_call|<function[=\s>]|<\/function
 const LOCAL_URL = /\b(?:https?|wss?):\/\/(?:[^\s/?#@]*@)?(?:localhost|[a-z0-9.-]*\.localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\]|host\.docker\.internal)(?::\d+)?(?:[/?#][^\s<>"'`)\]]*)?/gi;
 
 // Returns the sanitized answer, or undefined when it cannot be delivered.
-export function progressFinalizationAnswer(text, {localUrlsForbidden = false, allowedUrls = []} = {}) {
+export function progressFinalizationAnswer(text, options) {
+  const answer = deliverableAnswer(text, options);
+  // After a tool-limit stop, a short promise of more work is not an answer.
+  if (answer && promisesExecution(answer) && answer.length < 900 && !/https?:\/\//.test(answer)) return undefined;
+  return answer;
+}
+
+// The checks every host-composed answer needs (preview-explanation.mjs too):
+// visible text within bounds, no tool-call text or echoed stop text, and, when
+// local URLs are forbidden, none other than the allowed preview.
+export function deliverableAnswer(text, {localUrlsForbidden = false, allowedUrls = []} = {}) {
   if (typeof text !== 'string') return undefined;
   const answer = text.replace(CONTROL_CHARACTERS, '').trim();
   if (!answer || answer.length > MAX_ANSWER_CHARS) return undefined;
@@ -59,7 +69,6 @@ export function progressFinalizationAnswer(text, {localUrlsForbidden = false, al
   if (TOOL_CALL_TEXT.test(answer)) return undefined;
   // Echoing the stop text or instruction is not an answer to the owner.
   if (answer.includes(RUN_PROGRESS_STOP_REASON) || answer.includes('[ODS Pixel tool limit]')) return undefined;
-  if (promisesExecution(answer) && answer.length < 900 && !/https?:\/\//.test(answer)) return undefined;
   if (localUrlsForbidden) {
     for (const match of answer.matchAll(LOCAL_URL)) {
       const url = match[0].replace(/[.,;:!?]+$/, '');

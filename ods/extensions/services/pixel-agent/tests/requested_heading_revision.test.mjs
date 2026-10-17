@@ -16,8 +16,11 @@ import {extractRequestedLiterals, missingRequestedText, requestedTextInstruction
 import {PREVIEW_INSPECTION_TOOL} from '../plugin/preview-interaction-assurance.mjs';
 import {INSPECTION_KIND, INSPECTION_SCOPE, inspectionPlanHash, normalizeWorkspacePreviewInspectionParams}
   from '../plugin/workspace-preview-inspect.mjs';
+import {PREVIEW_CHECK_LABEL, PREVIEW_CLAIM_NOTE} from '../plugin/preview-explanation.mjs';
 
 const TOWER2 = JSON.parse(fs.readFileSync(new URL('./requested-heading-tower2-round073.json', import.meta.url), 'utf8'));
+// A failed delivery keeps the recorded answer, which claims full verification.
+const KEPT_ANSWER = `${TOWER2.finalAnswer.trim()}\n\n${PREVIEW_CHECK_LABEL} ${PREVIEW_CLAIM_NOTE}\n\n`;
 const WRITES = TOWER2.calls.filter(call => call.tool === 'write');
 const [PUBLISH] = TOWER2.calls.filter(call => call.tool === 'pixel_ods_workspace_preview');
 const [INSPECT] = TOWER2.calls.filter(call => call.tool === PREVIEW_INSPECTION_TOOL);
@@ -225,7 +228,8 @@ test('tower2 round 073: the recorded answer after the revision gets the honest d
   assert.equal(f.revisions(), 1);
   const outcome = f.delivered();
   assert.equal(outcome.status, 'failed');
-  assert.ok(outcome.text.startsWith(`${FAILURE_NOTE}\n\n`), outcome.text);
+  // The recorded answer is kept; the note after it contradicts its claim.
+  assert.ok(outcome.text.startsWith(`${KEPT_ANSWER}${FAILURE_NOTE}\n\n`), outcome.text);
   assert.doesNotMatch(f.inspect(f.first.receipt, 'inspect-again'), new RegExp(REVISION_START), 'never a second revision');
   assert.equal(f.revisions(), 1);
 });
@@ -238,5 +242,5 @@ test('tower2 round 073: an answer straight after the receipt gets the same revis
     retry: {instruction: REVISION.replace('[ODS Pixel next step] ', ''),
       idempotencyKey: 'pixel-ods-workspace-preview-requested-text', maxAttempts: 1}});
   assert.equal(f.finalize(TOWER2.finalAnswer)?.action, 'finalize');
-  assert.ok(f.delivered().text.startsWith(FAILURE_NOTE));
+  assert.ok(f.delivered().text.startsWith(`${KEPT_ANSWER}${FAILURE_NOTE}`), f.delivered().text);
 });
