@@ -96,6 +96,7 @@ $LibDir = Join-Path $ScriptDir "lib"
 . (Join-Path $LibDir "opencode-config.ps1")
 . (Join-Path $LibDir "readiness-summary.ps1")
 . (Join-Path $LibDir "service-plan.ps1")
+. (Join-Path $LibDir "retained-extensions.ps1")
 
 # Preserve the caller's Docker client configuration before any installer phase
 # changes location. Docker accepts relative DOCKER_CONFIG values, whose meaning
@@ -598,6 +599,14 @@ if ($dryRun) {
         if ($skippedExtensionServices.Count -gt 0) {
             Write-AI "Skipped extension services: $($skippedExtensionServices.Count)"
         }
+
+        # Preserve active dashboard-installed recipes before saving the stack or
+        # running up --remove-orphans. User recipes keep their own enabled state.
+        $retainedBackend = $(if ($currentBackend -eq "nvidia" -and $script:gpuPassthroughFailed) { "cpu" } else { $currentBackend })
+        $composeFlags = @(Add-ODSWindowsRetainedExtensions -InstallDir $installDir `
+            -ComposeFlags $composeFlags -Tier $selectedTier -GpuBackend $retainedBackend `
+            -GpuCount ([Math]::Max(1, [int]$gpuInfo.Count)) `
+            -OdsMode $(if ($cloudMode) { "cloud" } else { "local" }))
 
         # Tier 0 memory overlay
         if ($selectedTier -eq "0" -and (Test-Path (Join-Path $installDir "docker-compose.tier0.yml"))) {
