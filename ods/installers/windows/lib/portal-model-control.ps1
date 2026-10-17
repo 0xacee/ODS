@@ -34,10 +34,6 @@ function Get-ODSPortalPlanDigest([string]$Path) {
     finally { $hash.Dispose() }
 }
 
-function Get-ODSPortalControlMutexName {
-    return ('Global\ODS-PortalModelControl-' + (Get-ODSPortalUserSid))
-}
-
 function Assert-ODSPortalPrivateControlFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or
         ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -273,9 +269,8 @@ function Invoke-ODSPortalModelControl($Request) {
         }
         # Existing task ownership and held process handles prove every stop.
         # Its action is unchanged: the durable launcher reads runtime.json, and
-        # each model switch is a llama-server restart (no load API).
-        Set-ODSPortalRuntimeIntent 'stopped'
-        Disable-ScheduledTask -TaskName $configuration.TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
+        # each model switch is a llama-server restart (no load API). The stop
+        # disarms sign-in startup first and restores it when it refuses.
         Stop-ODSPortalRuntime $plan.ExecutablePath
         if ((Get-ODSPortalTaskEngineId $configuration.TaskName) -gt 0 -or
             @(Get-NetTCPConnection -LocalPort $plan.Port -State Listen -ErrorAction SilentlyContinue).Count) {
@@ -283,8 +278,8 @@ function Invoke-ODSPortalModelControl($Request) {
         }
         if (Test-Path -LiteralPath $configuration.ReadyPath) { Remove-Item -LiteralPath $configuration.ReadyPath -Force }
         if ($Request.action -ceq 'stop') { return Get-ODSPortalControlStatus $configuration }
-        # Recheck after teardown; a concurrent installer is not covered by this
-        # controller's mutex. A changed plan is never overwritten.
+        # Recheck after teardown: setup holds this mutex only for its cutover,
+        # and an older setup holds none. A changed plan is never overwritten.
         if ((Get-ODSPortalPlanDigest $configuration.PlanPath) -cne $configuration.PlanDigest) {
             Throw-ODSPortalControlError 'plan_conflict' 'The Windows startup plan changed during teardown.'
         }
