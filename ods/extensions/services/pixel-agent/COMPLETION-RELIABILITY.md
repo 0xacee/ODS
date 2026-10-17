@@ -786,6 +786,60 @@ four bullet options. It creates the same bounded card without another model call
 It rejects surrounding prose, code, translations, numbered steps and plans.
 A model can still miss a suitable clarification or produce unsupported wording.
 
+## Failed preview checks keep the explanation
+
+On the RTX Spark (Elf of Doom), an interaction check failed and the agent then
+wrote the owner a correct root-cause explanation. Portal replaced the whole
+reply with its host delivery ("The attempted preview interaction checks have
+not passed browser inspection ... Your preview is ready."), so the owner never
+saw it. `preview-explanation.mjs` changes only that substitution: when a
+workspace preview outcome is `failed` or `pending` (a browser, interaction or
+requested-text check that did not pass, a stale snapshot, no publication, a
+verification command still running, or any of these with extension, lane-stop
+or missing-download facts added), the agent's final reply comes first. A fixed
+note follows under **Portal check:**, then the unchanged host result:
+
+- The note always says "The reply above is the agent's own account, not a
+  verified result." and then "This request did not pass Portal's checks." (or,
+  when pending, "Portal's checks for this request have not finished."). No
+  wording heuristic decides this, so a claim of success in any wording, quoted,
+  in code or in a checklist, is still followed by that plain statement. The
+  reply itself is never rewritten.
+- When the reply promises more work ("I'll fix line 748 now") or ends by
+  narrating its next action, the note adds that Portal has stopped for this
+  message and the step has not started.
+- When the current snapshot's latest inspection failed, one host line names
+  the failed step from the validated receipt, for example "step 2
+  (assert-painted) on `#arena` captured one color only (#8fce3a)". Only the
+  step number, action, error code, the capsule's color and the plan's locator
+  (quoted as code) are used. This line is not added to a host-only delivery.
+- The outcome keeps its status, and every host failure line and the preview
+  receipt still follow, so the dashboard still shows the preview card and the
+  failure. An open code block in the reply is closed with its own fence, read
+  as the dashboard's `publicationDisplayText` reads it.
+- The host-only delivery stays as before when the reply is empty, silent, too
+  short, tool-call text, over 20,000 characters, links any local URL other than
+  this outcome's own preview, or carries Portal's wording: its label or receipt
+  lines ("Your preview is ready.", "[Open preview]", "Published from your
+  workspace."), however markdown or HTML draws them (character references,
+  no-break or zero-width spaces, fullwidth letters, emphasis split across the
+  words).
+- The reply is the `lastAssistantMessage` seen at `before_agent_finalize`, and
+  only when the transcript's last assistant message, a turn without tool calls,
+  holds exactly that visible text. When that turn has none, OpenClaw 2026.6.33
+  fills `lastAssistantMessage` with the joined narration of earlier tool-call
+  turns, which is no reply. Any later model call, and an owner cancel, clear it.
+- Passing (`append`) outcomes are unchanged, and so is the ingress verification
+  schema. A run-deadline, tool-limit, recursive-delete or clarification
+  delivery keeps its own text.
+- The reply is filtered like a tool-limit answer, not scrubbed: a path or other
+  text the agent quotes is delivered as in any passing reply.
+
+`tests/preview_explanation_delivery.test.mjs` replays the Elf of Doom case
+through the real guard, inspection receipt and ingress, plus the regression
+cases (success claims in many forms, empty, silent and narration-only replies,
+imitated notes, passing and pending checks, local links, code fences).
+
 ## Focused verification
 
 For an explicitly published repair naming one workspace file, recognized
