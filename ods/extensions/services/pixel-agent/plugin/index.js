@@ -46,6 +46,7 @@ import {
 import { promptContractForAgent } from "./prompt-contract.mjs";
 import { executionContext } from "./completion-assurance.mjs";
 import { createAskUserTool } from "./ask-user.mjs";
+import { createPendingClarifications } from "./pending-clarification.mjs";
 import {
   appsToolText,
   statusToolText,
@@ -365,6 +366,9 @@ export default definePluginEntry({
       // After a tool-limit stop without an answer: one tool-free completion by
       // the same configured model, from the pages the run read.
       stopSynthesis: createStopSynthesisClient({runtime: api.runtime, agentId: AGENT_ID}),
+      // A clarification card's answer gets its request back as model-only
+      // context, even when OpenClaw runs it in a replacement native session.
+      pendingClarifications: createPendingClarifications(),
       warn: (message) => api.logger.warn(message),
       info: (message) => api.logger.info?.(message),
     });
@@ -431,7 +435,10 @@ export default definePluginEntry({
       const cancelContext = toolLoopGuard.promptContextForRun(context?.runId ?? event?.runId);
       const deliveryContext = delegationDelivery.promptContext(context);
       const prependContext = [contract?.prependContext,cancelContext,deliveryContext].filter(Boolean).join('\n\n');
-      return contract ? { ...contract, ...(prependContext ? {prependContext} : {}), ...(goalProgress.active(context?.runId ?? event?.runId) ? {appendContext:GOAL_CONTRACT} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${executionLocationContext(context, AGENT_ID)} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : prependContext ? {prependContext} : undefined;
+      // Beside the owner turn (OpenClaw appendContext), also model-only.
+      const appendContext = [goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : '',
+        toolLoopGuard.clarificationContextForRun(context?.runId ?? event?.runId)].filter(Boolean).join('\n\n');
+      return contract ? { ...contract, ...(prependContext ? {prependContext} : {}), ...(appendContext ? {appendContext} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${executionLocationContext(context, AGENT_ID)} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : prependContext ? {prependContext} : undefined;
     });
     api.on("model_call_started", (event, context) =>
       toolLoopGuard.observeModelCall(event, context, AGENT_ID)

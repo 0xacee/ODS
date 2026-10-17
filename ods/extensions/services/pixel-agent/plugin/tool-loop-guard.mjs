@@ -29,6 +29,7 @@ import { researchRequestProblem } from "./perplexica-research.mjs";
 import { HOST_CITATION_LIMITS } from './citation-verification.mjs';
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
+import { answersClarification, clarificationAnswerContext } from "./pending-clarification.mjs";
 import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, lookupFoundNothing, progressLaneStopReason, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
 import { assistantMessageText, composeProgressFinalization, composeReadPages, createProgressFinalization, partialFinalizationAnswer,
   PROGRESS_FINALIZATION_INSTRUCTION } from "./progress-finalization.mjs";
@@ -7184,6 +7185,9 @@ export function createToolLoopGuard({
   publishWorkspacePreview,
   hostCitationVerifier,
   stopSynthesis,
+  // Durable pending clarification cards (pending-clarification.mjs). Only the
+  // plugin entry supplies the store; without one nothing is recorded.
+  pendingClarifications,
   execMarkerCleanupDelayMs = 5000,
   limits,
   warn = () => {},
@@ -7413,6 +7417,40 @@ export function createToolLoopGuard({
     sessionCancellations.delete(sessionKey);
     state.withdrawnOwnerRequest = record;
     state.completionAssurance.followWithdrawnRequest(record.ownerText);
+  }
+
+  // A delivered clarification card leaves a record for its chat: its exact
+  // questions and the owner request they clarify. A follow-up card in the run
+  // that answered one keeps the original request and adds those answers.
+  function rememberPendingClarification(state, runId) {
+    if (!pendingClarifications || !state.ownerQuestions || !state.artifactOwnerInteractive || state.managedTeamWorker ||
+        state.clientCancelled || typeof state.currentSessionKey !== 'string') return;
+    const answered = state.clarificationAnswer;
+    try {
+      pendingClarifications.remember({sessionKey: state.currentSessionKey, runId, questions: state.ownerQuestions,
+        request: answered ? answered.request : state.ownerRequestText,
+        earlierAnswers: answered ? [...answered.earlierAnswers, state.ownerRequestText] : []});
+    } catch (error) {
+      warn(`Pixel could not record the pending clarification: ${String(error)}`);
+    }
+  }
+
+  // The first owner turn in the chat after the asking run takes the record.
+  // Only that card's own answer keeps it: model-only context for this run and
+  // each of its attempts (clarificationContextForRun). Its owner text, and
+  // every intent classifier reading it, are unchanged. It applies whether or
+  // not OpenClaw kept the native session: the plugin cannot see a replacement
+  // made at admission, and in the same session it restates the transcript.
+  function takePendingClarification(state, runId, context, agentId, ownerText) {
+    if (!pendingClarifications || state.clarificationBoundaryObserved || state.managedTeamWorker ||
+        !ownerInteractiveTurn(context, agentId)) return;
+    state.clarificationBoundaryObserved = true;
+    try {
+      const record = pendingClarifications.take(context.sessionKey);
+      if (record && record.runId !== runId && answersClarification(record.questions, ownerText)) state.clarificationAnswer = record;
+    } catch (error) {
+      warn(`Pixel could not read the pending clarification: ${String(error)}`);
+    }
   }
 
   function rememberSessionPreview(sessionId, preview, state) {
@@ -9953,6 +9991,7 @@ export function createToolLoopGuard({
       // same run carries a harness retry prompt instead.
       if (ownerIntent) state.ownerRequestText ??= ownerIntent;
       takeOwnerCancellation(state, runId, context, agentId);
+      takePendingClarification(state, runId, context, agentId, ownerIntent);
       if (currentUserText(event?.messages, event?.prompt)) {
         state.ownerIntentObserved = true;
         state.workspacePreviewForbidden = ownerForbidsWorkspacePreview(event?.messages, event?.prompt);
@@ -10425,6 +10464,7 @@ export function createToolLoopGuard({
       : toolName === 'tool_call' ? toolSearchSelectedToolEvent(event, 'pixel_ods_ask_user', 'pixel-ods') : undefined;
     if (!state.ownerQuestions && questionResult?.result?.details?.status === 'awaiting_user' && !failedToolOutcome(questionResult)) {
       state.ownerQuestions = parseQuestions(questionResult.result.details.questions);
+      rememberPendingClarification(state, runId);
     }
     const toolCallId = context?.toolCallId ?? event?.toolCallId;
     event = {...event, params: canonicalWorkspaceParams(toolName, event?.params, state.configuredWorkspaceRoot)};
@@ -12641,6 +12681,13 @@ export function createToolLoopGuard({
     return state?.withdrawnOwnerRequest ? OWNER_CANCELLED_REQUEST_CONTEXT : undefined;
   }
 
+  // Model-only context beside the owner turn (before_prompt_build
+  // appendContext) for a run that answers a pending clarification card.
+  function clarificationContextForRun(runId) {
+    const state = typeof runId === 'string' ? runs.get(runId) : undefined;
+    return state?.clarificationAnswer && !state.clientCancelled ? clarificationAnswerContext(state.clarificationAnswer) : undefined;
+  }
+
   function beforeAgentFinalize(event, context, agentId = "pixel") {
     if (context?.agentId !== agentId) return undefined;
     const runId = context?.runId ?? event?.runId;
@@ -12666,6 +12713,7 @@ export function createToolLoopGuard({
     }
     if (state?.ownerQuestionIntent && !state.ownerQuestions && !state.clientCancelled && !state.progressBudget.exhausted) {
       state.ownerQuestions=choiceQuestionFromText(event?.lastAssistantMessage);
+      rememberPendingClarification(state, runId);
     }
     if (state?.ownerQuestions) return {action:'finalize', reason:'Waiting for the owner clarification answer.'};
     if (state?.progressBudget.exhausted && !state.clientCancelled && !state.recursiveDeleteDenied && !state.webLoopAborted) {
@@ -13327,6 +13375,7 @@ export function createToolLoopGuard({
     endPreviewRevalidation,
     observeAgentEnd,
     promptContextForRun,
+    clarificationContextForRun,
     replyPayloadSending,
     observeRun,
     observeModelCall,

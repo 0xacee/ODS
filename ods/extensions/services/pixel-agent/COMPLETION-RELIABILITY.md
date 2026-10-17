@@ -709,7 +709,30 @@ The model cannot choose for the owner or turn this card into Operations approval
 The ingress releases the bounded `pixel_questions` envelope only on the verified
 terminal SSE frame. Malformed receipts fail closed. Questions and draft answers
 are retained with the conversation; Continue sends ordinary owner text in that
-same chat, without UI metadata in the model request.
+same chat, without UI metadata in the model request: each question, then its
+answer.
+
+That text reads correctly only beside the model's own question. OpenClaw can
+start it in a new native session that lacks the request and the question (RTX
+Spark, 2026-10-16: the model answered its own "Where should I apply…?" with a
+location and edited nothing). A delivered card therefore leaves one private
+record per chat (`.ods-pending-clarifications` in the OpenClaw state directory,
+owner-only, keyed by a hash of the session key): its questions and the owner
+request they clarify, without Portal's delivery contract and capped at 4,000
+characters. The first later owner turn in that chat consumes it; unanswered
+records expire after 24 hours. Only when that turn is the card's exact answer
+(the first question's text, then every question in order) does its run get
+fixed model-only context (`before_prompt_build` `appendContext`, never persisted
+as owner text) with the request, told to carry it out with the answers unless an
+answer declines or changes it. A follow-up card keeps the original request and
+up to two earlier answers. The context is added whether or not the session was
+replaced: the plugin cannot see a replacement made at admission, and in the same
+session it only restates the transcript. The owner text is unchanged, so
+recursive-delete authorization, choice-question intent, Playground project
+reservation and every route see what they saw before; an earlier in-text frame
+quoting the request turned a declined delete into authorization.
+`tests/pending_clarification.test.mjs` replays the field turn after a gateway
+restart and compares each owner-intent outcome with and without the record.
 
 The plugin loader isolates imports to its package. Keep its `questions-schema.mjs`
 and the independently installed ingress `questions_schema.mjs` aligned; the
