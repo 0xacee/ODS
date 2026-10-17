@@ -9699,6 +9699,45 @@ def _wsl_sensor_run(command):
     raise OSError("No usable trusted WSL telemetry interop session")
 
 
+def _wsl_nvidia_sensors(timeout: float) -> dict[str, dict]:
+    """Temperature and power per NVIDIA GPU name, from the Windows driver.
+
+    DXGI gives memory and load but no sensors. WSL's nvidia-smi reads the
+    Windows NVIDIA driver directly, so it needs no interop session and works
+    whether or not this stack's containers use the GPU (a model server that
+    runs on Windows). A name listed twice is ambiguous and gets no reading.
+    """
+    smi = "/usr/lib/wsl/lib/nvidia-smi"
+    if not Path(smi).is_file():
+        return {}
+    try:
+        result = subprocess.run([smi, "--query-gpu=name,temperature.gpu,power.draw",
+                                 "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0 or len(result.stdout) > 65536:
+        return {}
+
+    def reading(text: str, maximum: float) -> float | None:
+        try:
+            value = float(text)
+        except ValueError:
+            return None  # "[N/A]" where the driver has no such sensor
+        return value if math.isfinite(value) and 0 <= value <= maximum else None
+
+    sensors: dict[str, dict] = {}
+    duplicates = set()
+    for line in result.stdout.splitlines()[:32]:
+        fields = [field.strip() for field in line.rsplit(",", 2)]
+        if len(fields) != 3 or not fields[0]:
+            continue
+        if fields[0] in sensors:
+            duplicates.add(fields[0])
+        sensors[fields[0]] = {"temperature_c": reading(fields[1], 150), "power_w": reading(fields[2], 2000)}
+    return {name: value for name, value in sensors.items() if name not in duplicates}
+
+
 def _wsl_system_metrics():
     """Read native Windows sensors through existing WSL interop, without setup."""
     global _wsl_metrics_cached
@@ -9721,6 +9760,7 @@ def _wsl_system_metrics():
             if not math.isfinite(value) or value < 0 or (maximum is not None and value > maximum):
                 return None
             return value
+        started = time.monotonic()
         try:
             result = _wsl_sensor_run(
                 [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
@@ -9740,6 +9780,11 @@ def _wsl_system_metrics():
                 if used is not None:
                     payload["ram"].update(used_gb=round(used / 1024**3, 1), percent=round(used / total * 100, 1))
             rows = data.get("gpus")
+            # The dashboard waits nine seconds for this sample: nvidia-smi gets
+            # what the Windows sensor read left, at most two seconds.
+            budget = min(2.0, 8.5 - (time.monotonic() - started))
+            nvidia = _wsl_nvidia_sensors(budget) if budget >= 0.5 and isinstance(rows, list) and any(
+                isinstance(row, dict) and row.get("vendor") == 0x10DE for row in rows[:32]) else {}
             if isinstance(rows, list):
                 for row in rows[:32]:
                     if not isinstance(row, dict):
@@ -9753,13 +9798,15 @@ def _wsl_system_metrics():
                     # DXGI's dedicated allocation is real capacity. Shared capacity
                     # is a borrowing limit, not additional physical VRAM.
                     usage = number(row.get("dedicatedUsedBytes"), capacity)
+                    sensors = nvidia.get(name.strip(), {}) if row.get("vendor") == 0x10DE else {}
                     payload["gpus"].append({
                         "name": name[:128], "uuid": luid,
                         "memory_total_mb": int(capacity // 1024**2),
                         "memory_used_mb": int(usage // 1024**2) if usage is not None else None,
                         "memory_type": "unified" if _is_windows_amd_integrated_gpu_name(name) else "discrete",
                         "memory_scope": "dedicated", "utilization_percent": number(row.get("utilizationPercent"), 100),
-                        "temperature_c": None, "source": "windows-dxgi-cim",
+                        "temperature_c": sensors.get("temperature_c"), "power_w": sensors.get("power_w"),
+                        "source": "windows-dxgi-cim",
                         "backend": "amd" if row.get("vendor") == 0x1002 else "nvidia" if row.get("vendor") == 0x10DE else "unknown",
                     })
         except (OSError, subprocess.SubprocessError, ValueError):
