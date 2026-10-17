@@ -1451,6 +1451,7 @@ function MobileMetricLabel({ children }) {
 
 function DownloadProgressBar({ progress, helpers, onRetry }) {
   const { formatBytes, formatEta, cancelDownload, cancelError, statusError, isCancelling } = helpers
+  const hasKnownTotal = Number.isFinite(progress.bytesTotal) && progress.bytesTotal > 0
 
   if (progress.error) {
     const cancelled = progress.status === 'cancelled'
@@ -1494,16 +1495,25 @@ function DownloadProgressBar({ progress, helpers, onRetry }) {
               {progress.status === 'verifying' ? 'Verifying' : 'Downloading'} {progress.model}
             </p>
             <p className="text-sm text-theme-text-muted">
-              {formatBytes(progress.bytesDownloaded)} / {formatBytes(progress.bytesTotal)}
+              {hasKnownTotal
+                ? `${formatBytes(progress.bytesDownloaded)} / ${formatBytes(progress.bytesTotal)}`
+                : progress.bytesDownloaded > 0
+                  ? `${formatBytes(progress.bytesDownloaded)} downloaded · Total size unavailable`
+                  : 'Progress unavailable'}
               {progress.speedMbps > 0 && ` - ${progress.speedMbps.toFixed(1)} MB/s`}
-              {progress.eta && ` - ETA: ${formatEta(progress.eta)}`}
+              {hasKnownTotal && progress.eta && ` - ETA: ${formatEta(progress.eta)}`}
             </p>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-3">
-          <span className="text-lg font-bold text-theme-accent">
-            {progress.percent?.toFixed(0) || 0}%
-          </span>
+          {hasKnownTotal ? (
+            <span className="text-lg font-bold text-theme-accent">
+              {progress.percent?.toFixed(0) || 0}%
+            </span>
+          ) : (
+            <Loader2 size={20} role="progressbar" aria-label="Download progress"
+              className="text-theme-accent motion-safe:animate-spin" />
+          )}
           <button
             type="button"
             onClick={cancelDownload}
@@ -1528,12 +1538,15 @@ function DownloadProgressBar({ progress, helpers, onRetry }) {
         </p>
       )}
 
-      <div className="h-2.5 overflow-hidden rounded-full bg-theme-border">
-        <div
-          className="h-full rounded-full bg-theme-accent transition-all duration-300"
-          style={{ width: `${progress.percent || 0}%` }}
-        />
-      </div>
+      {hasKnownTotal && (
+        <div role="progressbar" aria-label="Download progress" aria-valuenow={progress.percent || 0}
+          className="h-2.5 overflow-hidden rounded-full bg-theme-border">
+          <div
+            className="h-full rounded-full bg-theme-accent transition-all duration-300"
+            style={{ width: `${progress.percent || 0}%` }}
+          />
+        </div>
+      )}
     </div>
   )
 }
