@@ -404,77 +404,6 @@ def test_core_recreation_excludes_unrelated_secrets_but_keeps_overlays_and_depen
     assert '${UNRELATED_SECRET:?Required}' in (tmp_path / next(iter(fragments))).read_text()
 
 
-def _route_failure_answers(answer, ready="200"):
-    """A fake curl: one completion answer, and LiteLLM's readiness."""
-    calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        if command[-1].endswith("/health/readiness"):
-            return subprocess.CompletedProcess(command, 0, ready, "")
-        code, stdout = answer
-        return subprocess.CompletedProcess(command, code, stdout, "")
-
-    return calls, fake_run
-
-
-def _litellm_error(message, status):
-    return json.dumps({"error": {"message": message, "code": str(status)}}) + f"\n{status}"
-
-
-@pytest.mark.parametrize(("answer", "ready", "expected"), [
-    # The fleet outage: the provider's own 500, passed on by LiteLLM.
-    ((0, _litellm_error("litellm.InternalServerError: InternalServerError: OpenAIException - Connection error.\n"
-                        "Received Model Group=ods/current", 500)), "200",
-     (500, "Connection error.", True)),
-    ((0, _litellm_error("litellm.RateLimitError: RateLimitError: OpenAIException - slow down", 429)), "200",
-     (429, "slow down", True)),
-    ((0, _litellm_error("litellm.ServiceUnavailableError: OpenAIException - overloaded", 503)), "200",
-     (503, "overloaded", True)),
-    # LiteLLM got no HTTP answer from its own egress hop: not the API's fault.
-    ((0, _litellm_error("litellm.APIConnectionError: APIConnectionError: OpenAIException - Connection error.", 500)), "200",
-     (500, "Connection error.", False)),
-    ((0, _litellm_error("litellm.BadRequestError: Invalid model name passed in model=ods/current", 400)), "200",
-     (400, "Invalid model name passed in model=ods/current", False)),
-    ((0, json.dumps({"choices": [{"message": {"content": ""}}]}) + "\n200"), "200",
-     (200, "The API answered with an empty completion", True)),
-    ((28, ""), "200", (504, "The API did not answer within 30 seconds", True)),
-    ((28, ""), "000", (None, "LiteLLM did not answer in time", False)),
-    ((7, "\n000"), "200", (None, "LiteLLM did not answer", False)),
-    ((0, json.dumps({"choices": [{"message": {"content": "READY"}}]}) + "\n200"), "200", None),
-])
-def test_litellm_route_failure_tells_the_providers_answer_from_litellms_own(monkeypatch, answer, ready, expected):
-    calls, fake_run = _route_failure_answers(answer, ready)
-    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-    env = {"LITELLM_KEY": "unit-test-litellm-key", "LITELLM_PORT": "4000"}
-
-    assert _mod._litellm_route_failure(env) == expected
-
-    command, kwargs = calls[0]
-    assert "unit-test-litellm-key" not in " ".join(command)
-    assert kwargs["input"] == "Authorization: Bearer unit-test-litellm-key\n"
-    assert kwargs["encoding"] == "utf-8" and kwargs["errors"] == "replace"
-    assert command[command.index("-X") + 2] == "http://127.0.0.1:4000/v1/chat/completions"
-
-
-def test_litellm_route_failure_never_passes_on_a_key_echo_or_a_backslash(monkeypatch):
-    # Key- and hash-shaped values are built at runtime so secret scanners stay quiet.
-    key_hash = hashlib.sha256(b"unit-test").hexdigest()
-    fake_key = "sk-" + "unittest" + "fake01"
-    message = ("litellm.InternalServerError: OpenAIException - Connection error. "
-               f"Received API Key = sk-...wxyz, Key Hash (Token) ={key_hash}, "
-               f"Rate limit exceeded for api_key: {key_hash[:40]} {fake_key} \\e[31mred\\c")
-    _calls, fake_run = _route_failure_answers((0, _litellm_error(message, 500)))
-    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-
-    status, text, provider = _mod._litellm_route_failure({"LITELLM_KEY": "k"})
-
-    assert (status, provider) == (500, True)
-    assert key_hash not in text and key_hash[:32] not in text and fake_key not in text
-    assert "\\" not in text
-    assert text.startswith("Connection error. Received API Key = [redacted], Key Hash (Token) =[redacted]")
-
-
 def test_core_recreation_does_not_hide_invalid_extension_yaml(tmp_path, monkeypatch):
     monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
     monkeypatch.setattr(_mod, 'EXTENSIONS_DIR', tmp_path / 'extensions')
@@ -3701,6 +3630,77 @@ class TestPixelOperationsStatus:
         handler = _FakeHandler(b"")
         _mod.AgentHandler._handle_pixel_ops_status(handler, query)
         assert handler.response_code == 400
+
+
+def _route_failure_answers(answer, ready="200"):
+    """A fake curl: one completion answer, and LiteLLM's readiness."""
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[-1].endswith("/health/readiness"):
+            return subprocess.CompletedProcess(command, 0, ready, "")
+        code, stdout = answer
+        return subprocess.CompletedProcess(command, code, stdout, "")
+
+    return calls, fake_run
+
+
+def _litellm_error(message, status):
+    return json.dumps({"error": {"message": message, "code": str(status)}}) + f"\n{status}"
+
+
+@pytest.mark.parametrize(("answer", "ready", "expected"), [
+    # The fleet outage: the provider's own 500, passed on by LiteLLM.
+    ((0, _litellm_error("litellm.InternalServerError: InternalServerError: OpenAIException - Connection error.\n"
+                        "Received Model Group=ods/current", 500)), "200",
+     (500, "Connection error.", True)),
+    ((0, _litellm_error("litellm.RateLimitError: RateLimitError: OpenAIException - slow down", 429)), "200",
+     (429, "slow down", True)),
+    ((0, _litellm_error("litellm.ServiceUnavailableError: OpenAIException - overloaded", 503)), "200",
+     (503, "overloaded", True)),
+    # LiteLLM got no HTTP answer from its own egress hop: not the API's fault.
+    ((0, _litellm_error("litellm.APIConnectionError: APIConnectionError: OpenAIException - Connection error.", 500)), "200",
+     (500, "Connection error.", False)),
+    ((0, _litellm_error("litellm.BadRequestError: Invalid model name passed in model=ods/current", 400)), "200",
+     (400, "Invalid model name passed in model=ods/current", False)),
+    ((0, json.dumps({"choices": [{"message": {"content": ""}}]}) + "\n200"), "200",
+     (200, "The API answered with an empty completion", True)),
+    ((28, ""), "200", (504, "The API did not answer within 30 seconds", True)),
+    ((28, ""), "000", (None, "LiteLLM did not answer in time", False)),
+    ((7, "\n000"), "200", (None, "LiteLLM did not answer", False)),
+    ((0, json.dumps({"choices": [{"message": {"content": "READY"}}]}) + "\n200"), "200", None),
+])
+def test_litellm_route_failure_tells_the_providers_answer_from_litellms_own(monkeypatch, answer, ready, expected):
+    calls, fake_run = _route_failure_answers(answer, ready)
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+    env = {"LITELLM_KEY": "unit-test-litellm-key", "LITELLM_PORT": "4000"}
+
+    assert _mod._litellm_route_failure(env) == expected
+
+    command, kwargs = calls[0]
+    assert "unit-test-litellm-key" not in " ".join(command)
+    assert kwargs["input"] == "Authorization: Bearer unit-test-litellm-key\n"
+    assert kwargs["encoding"] == "utf-8" and kwargs["errors"] == "replace"
+    assert command[command.index("-X") + 2] == "http://127.0.0.1:4000/v1/chat/completions"
+
+
+def test_litellm_route_failure_never_passes_on_a_key_echo_or_a_backslash(monkeypatch):
+    # Key- and hash-shaped values are built at runtime so secret scanners stay quiet.
+    key_hash = hashlib.sha256(b"unit-test").hexdigest()
+    fake_key = "sk-" + "unittest" + "fake01"
+    message = ("litellm.InternalServerError: OpenAIException - Connection error. "
+               f"Received API Key = sk-...wxyz, Key Hash (Token) ={key_hash}, "
+               f"Rate limit exceeded for api_key: {key_hash[:40]} {fake_key} \\e[31mred\\c")
+    _calls, fake_run = _route_failure_answers((0, _litellm_error(message, 500)))
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+    status, text, provider = _mod._litellm_route_failure({"LITELLM_KEY": "k"})
+
+    assert (status, provider) == (500, True)
+    assert key_hash not in text and key_hash[:32] not in text and fake_key not in text
+    assert "\\" not in text
+    assert text.startswith("Connection error. Received API Key = [redacted], Key Hash (Token) =[redacted]")
 
 
 class TestRemoteProviderLifecycle:
