@@ -53,4 +53,25 @@ if output="$( (_remote_provider_fail "Remote-provider test failed (HTTP 500): bo
 fi
 grep -qF "https://discord.gg/4ntNp9MAwC" <<<"$output" || fail "a failure did not point at help: $output"
 
+# Portal writes each file in one reply, so the default output limit is a
+# quarter of the context window, at most 32768 (fleet 2026-10-18: the old
+# 4096 default cut off a game file).
+for name in _strip_outer_quotes _remote_provider_read_secret _remote_provider_write_payload; do
+    body="$(extract "$name")"
+    [[ -n "$body" ]] || fail "$name was not found in ods-cli"
+    eval "$body"
+done
+error() { echo "$1" >&2; exit 1; }
+payload_limits() {
+    REMOTE_LLM_API_KEY=unit-test-provider-key _remote_provider_write_payload configure "$fixture/payload.json" \
+        --base-url https://api.example.test/v1 --model m "$@"
+    jq -r '"\(.provider.contextLength) \(.provider.maxTokens)"' "$fixture/payload.json"
+}
+for case in "|32768 8192" "--context-length 131072|131072 32768" "--context-length 1048576|1048576 32768" \
+    "--context-length 131072 --max-tokens 4096|131072 4096"; do
+    read -r -a options <<<"${case%%|*}"
+    output="$(payload_limits "${options[@]}")"
+    [[ "$output" == "${case#*|}" ]] || fail "options '${case%%|*}' gave context/output '$output', not '${case#*|}'"
+done
+
 echo 'PASS: remote-provider CLI output matches what happened and failures point at help'

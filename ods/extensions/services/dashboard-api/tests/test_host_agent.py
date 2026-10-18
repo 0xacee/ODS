@@ -4914,7 +4914,8 @@ class TestRemoteProviderLifecycle:
         remote_pixel = {
             "model": "qwen/remote:latest",
             "contextLength": 32768,
-            "maxTokens": 4096,
+            # The default output limit: a quarter of the context window.
+            "maxTokens": 8192,
             "reasoning": False,
             "imageInput": "unknown",
         }

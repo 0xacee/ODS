@@ -362,6 +362,12 @@ and whether that route supports reasoning. Those limits become Pixel's managed
 runtime contract, so model-family and context changes are explicit instead of
 being guessed from a provider response.
 
+Maximum output tokens defaults to a quarter of the context window, at most
+32768 (`ods remote-provider configure --max-tokens` sets it). Portal writes each
+file in one reply, so use the provider's real output limit. When a reply still
+reaches it, the cut-off tool call does not run: Portal names the limit and the
+file, and the chat's next turn writes that file in smaller parts.
+
 For a direct HTTPS provider, **Configure** first performs a bounded provider
 probe. ODS then writes the private egress credential, renders the cloud
 LiteLLM route, recreates and health-checks LiteLLM, serves a real completion

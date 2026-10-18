@@ -25,12 +25,23 @@ const PROBE_TIMEOUT_MS = 1805000
 const LIFECYCLE_TIMEOUT_MS = 1805000
 const PEER_MODELS_TIMEOUT_MS = 30000
 const PEER_MODEL_LOAD_TIMEOUT_MS = 2705000
+// The default output limit: a quarter of the context window, at most 32768,
+// as in ods-cli and the lifecycle API. Portal writes each file in one reply.
+const MAX_DEFAULT_OUTPUT_TOKENS = 32768
+
+function defaultMaxTokens(contextLength) {
+  const context = Number(contextLength)
+  return Number.isInteger(context) && context > 0
+    ? String(Math.min(MAX_DEFAULT_OUTPUT_TOKENS, Math.floor(context / 4)))
+    : ''
+}
+
 const INITIAL_FORM = {
   baseUrl: '',
   model: '',
   apiKey: '',
   contextLength: '32768',
-  maxTokens: '4096',
+  maxTokens: defaultMaxTokens(32768),
   reasoning: false,
 }
 
@@ -384,7 +395,9 @@ export default function RemoteProvider({ compact = false }) {
   const [testResult, setTestResult] = useState(null)
   const [testError, setTestError] = useState(null)
   const [form, setForm] = useState(INITIAL_FORM)
-  const formEdit = useRef({ dirty: false, revision: 0 })
+  // outputLimitSet: the owner typed the output limit, or a saved route set
+  // it. Until then it follows the context window.
+  const formEdit = useRef({ dirty: false, revision: 0, outputLimitSet: false })
   const [planning, setPlanning] = useState(false)
   const [applyingAction, setApplyingAction] = useState(null)
   const [planResult, setPlanResult] = useState(null)
@@ -408,12 +421,13 @@ export default function RemoteProvider({ compact = false }) {
       setStatusData(payload)
       const provider = payload?.routeState?.provider
       if (!formEdit.current.dirty && provider) {
+        formEdit.current.outputLimitSet = Boolean(provider.maxTokens)
         setForm(current => ({
           ...current,
           baseUrl: provider.baseUrl || '',
           model: provider.model || '',
           contextLength: String(provider.contextLength || 32768),
-          maxTokens: String(provider.maxTokens || 4096),
+          maxTokens: String(provider.maxTokens || defaultMaxTokens(provider.contextLength || 32768)),
           reasoning: provider.reasoning === true,
         }))
       }
@@ -465,7 +479,13 @@ export default function RemoteProvider({ compact = false }) {
   const updateForm = (key, value) => {
     formEdit.current.dirty = true
     formEdit.current.revision += 1
-    setForm(current => ({ ...current, [key]: value }))
+    if (key === 'maxTokens') formEdit.current.outputLimitSet = true
+    const follow = key === 'contextLength' && !formEdit.current.outputLimitSet
+    setForm(current => ({
+      ...current,
+      [key]: value,
+      ...(follow ? { maxTokens: defaultMaxTokens(value) } : {}),
+    }))
   }
 
   // After a change, ODS and Portal switch over for a few seconds; re-check
@@ -976,7 +996,7 @@ export default function RemoteProvider({ compact = false }) {
                 value={form.maxTokens}
                 onChange={value => updateForm('maxTokens', value)}
                 type="number"
-                hint="Longest single answer."
+                hint="Longest single reply. Portal writes each file in one reply, so use your API's limit. By default a quarter of the context window."
               />
               <label className="flex h-10 items-center gap-2 self-start rounded-lg border border-theme-border bg-theme-bg px-3 text-sm text-theme-text md:mt-5">
                 <input
