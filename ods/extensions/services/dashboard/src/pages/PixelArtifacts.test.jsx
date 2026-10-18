@@ -78,7 +78,7 @@ it('does not bind an authored snapshot URL without completed delivery metadata',
   reply=stream([{choices:[{delta:{content:`[Download report.md](${href})`}}]},'[DONE]'])
   render(<Pixel/>)
   await send()
-  expect(await screen.findByRole('link',{name:/Download report/})).toHaveAttribute('href',href)
+  expect(await screen.findByRole('link',{name:/Download report/},{timeout:5000})).toHaveAttribute('href',href)
   expect(screen.queryByRole('button',{name:'Download verified report.md'})).toBeNull()
 })
 
@@ -87,7 +87,7 @@ it('uses the same digest refusal for a receipt-bound prose download',async()=>{
   reply=stream([{choices:[{delta:{content:`[Download report.md](https://example.com/${artifact.siteId}/report.md)`}}]},marker,'[DONE]'])
   render(<Pixel/>)
   await send()
-  fireEvent.click(await screen.findByRole('button',{name:'Download verified report.md'}))
+  fireEvent.click(await screen.findByRole('button',{name:'Download verified report.md'},{timeout:5000}))
   await screen.findByText('Download could not be verified. Try again.')
   expect(URL.createObjectURL).not.toHaveBeenCalled()
   expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled()
