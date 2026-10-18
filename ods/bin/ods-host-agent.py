@@ -287,6 +287,10 @@ _ALLOWED_CORE_RECREATE_IDS = frozenset({
     "tts", "whisper", "embeddings", "token-spy", "comfyui",
     "ape", "privacy-shield", "model-router",
 })
+# Pixel's model relay picks its upstream (model-router, or LiteLLM in cloud
+# mode) from ODS_MODE once, when it starts. A remote-provider route change
+# therefore recreates it with LiteLLM, or Portal keeps the old model.
+_PIXEL_MODEL_RELAY_CONTAINER = "ods-pixel-model-relay"
 
 
 def _to_bash_path(path: Path) -> str:
@@ -5361,6 +5365,27 @@ def _render_remote_provider_cloud_config(route: dict, env: dict[str, str]) -> No
         raise RuntimeError("Could not render the remote-provider LiteLLM route")
 
 
+def _refresh_pixel_model_relay(state: dict[str, bool]) -> None:
+    """Recreate a relay that was running so it takes the route .env now names."""
+    if _restart_existing_container(_PIXEL_MODEL_RELAY_CONTAINER, state, recreate=True):
+        _wait_for_container_health(_PIXEL_MODEL_RELAY_CONTAINER)
+
+
+def _restore_pixel_model_relay(state: dict[str, bool]) -> None:
+    """Best effort, for rollbacks and disable, the fail-safe path.
+
+    A relay left on LiteLLM still reaches a restored local route through it;
+    the warning names the repair for one left on the local route.
+    """
+    try:
+        _refresh_pixel_model_relay(state)
+    except RuntimeError as exc:
+        logger.warning(
+            "Pixel model relay did not follow the restored model route (%s); "
+            "repair it with: ods restart pixel-model-relay", exc,
+        )
+
+
 def _activate_remote_provider_route(
     route: dict, *, transaction=None, defer_consumer_rollback: bool = False,
 ) -> dict[str, object]:
@@ -5382,6 +5407,7 @@ def _activate_remote_provider_route(
     container_state = _capture_container_state("ods-litellm")
     if not container_state.get("running"):
         raise RuntimeError("LiteLLM must be running before a remote provider can become active")
+    relay_state = _capture_container_state(_PIXEL_MODEL_RELAY_CONTAINER)
 
     existing = _read_remote_provider_activation_state()
     previous = existing.get("previous") if isinstance(existing, dict) else None
@@ -5412,6 +5438,7 @@ def _activate_remote_provider_route(
     pixel_attempted = False
     litellm_recreated = False
     litellm_attempted = False
+    relay_attempted = False
     try:
         _write_remote_provider_activation_state(candidate_state)
         raw_env = str(env_snapshot.get("text") or "")
@@ -5428,6 +5455,10 @@ def _activate_remote_provider_route(
             raise RuntimeError("LiteLLM route could not be recreated")
         _wait_for_container_health("ods-litellm")
         _verify_litellm_route(env, model="ods/current")
+        # Portal reaches the model through the relay, so it must follow
+        # ODS_MODE to LiteLLM before Pixel is bound to the remote model.
+        relay_attempted = True
+        _refresh_pixel_model_relay(relay_state)
         pixel_attempted = pixel_before is not None
         pixel_status = transaction.apply(runtime) if transaction is not None else _reconcile_managed_pixel_contract(runtime)
         activation_public = {
@@ -5466,6 +5497,10 @@ def _activate_remote_provider_route(
             _restore_text_file(activation_public_path, activation_public_snapshot)
         except Exception as rollback_exc:
             rollback_errors.append(f"configuration: {rollback_exc}")
+        # The relay reads only .env, restored above, so it is restored here
+        # even when the lifecycle owner refreshes LiteLLM itself.
+        if relay_attempted:
+            _restore_pixel_model_relay(relay_state)
         # The lifecycle owner must restore its route and credential snapshots
         # before refreshing a consumer that reads those files at startup.
         if litellm_attempted and not defer_consumer_rollback:
@@ -5507,6 +5542,7 @@ def _deactivate_remote_provider_route(*, transaction=None) -> dict[str, object]:
     activation_public_snapshot = _snapshot_text_file(activation_public_path)
     pixel_before = transaction.previous if transaction is not None else _managed_pixel_runtime_contract()
     container_state = _capture_container_state("ods-litellm")
+    relay_state = _capture_container_state(_PIXEL_MODEL_RELAY_CONTAINER)
     owns_transaction = transaction is None
     if owns_transaction:
         transaction = _begin_pixel_model_transaction(load_env(env_path))
@@ -5514,6 +5550,7 @@ def _deactivate_remote_provider_route(*, transaction=None) -> dict[str, object]:
             pixel_before = transaction.previous
     litellm_recreated = False
     litellm_attempted = False
+    relay_attempted = False
     pixel_attempted = False
     try:
         raw_env = str(env_snapshot.get("text") or "")
@@ -5533,6 +5570,10 @@ def _deactivate_remote_provider_route(*, transaction=None) -> dict[str, object]:
         _wait_for_container_health("ods-litellm")
         restored_env = load_env(env_path)
         _verify_litellm_route(restored_env, model="ods/current")
+        # Send Portal's relay back to the restored mode's route as well. Best
+        # effort: disable is the fail-safe path and must not fail on the relay.
+        relay_attempted = True
+        _restore_pixel_model_relay(relay_state)
         previous_pixel = previous.get("pixel")
         pixel_attempted = previous_pixel is not None
         if transaction is not None:
@@ -5570,6 +5611,8 @@ def _deactivate_remote_provider_route(*, transaction=None) -> dict[str, object]:
             _restore_text_file(activation_public_path, activation_public_snapshot)
         except Exception as rollback_exc:
             rollback_errors.append(f"configuration: {rollback_exc}")
+        if relay_attempted:
+            _restore_pixel_model_relay(relay_state)
         if litellm_attempted:
             try:
                 _restore_container_state("ods-litellm", container_state, recreate=True)
@@ -7332,19 +7375,20 @@ def validate_core_recreate_ids(service_ids: list[str]) -> tuple[bool, str]:
     return True, ""
 
 
-def _core_recreate_compose_flags(flags: list[str]) -> list[str]:
+def _core_recreate_compose_flags(flags: list[str], services: tuple[str, ...] | list[str] = ()) -> list[str]:
     """Exclude unrelated extension fragments before Compose interpolates them.
 
     Preserve core overlays and whole extension fragment groups that contribute
-    to core services, including their service references. Missing configuration
-    in a selected fragment must still fail; never fill it with dummy secrets.
+    to core services or to the requested ``services``, including their service
+    references. Missing configuration in a selected fragment must still fail;
+    never fill it with dummy secrets.
     """
     import yaml
 
     roots = (EXTENSIONS_DIR.resolve(), USER_EXTENSIONS_DIR.resolve())
     groups = {}
     file_groups = {}
-    needed = set(CORE_SERVICE_IDS)
+    needed = set(CORE_SERVICE_IDS) | set(services)
     for index, flag in enumerate(flags[:-1]):
         if flag != "-f":
             continue
@@ -7416,13 +7460,18 @@ def docker_compose_converge(service_ids: list[str]) -> tuple:
 
 
 def docker_compose_recreate(service_ids: list[str], *, force_recreate: bool = True) -> tuple:
-    """Force-recreate a set of allowed core services using the current compose stack."""
-    ok, error = validate_core_recreate_ids(service_ids)
-    if not ok:
-        return False, error
+    """Force-recreate a set of allowed core services using the current compose stack.
+
+    Pixel's model relay is no core service, but this agent recreates it on
+    its own when a remote-provider route change rewrites ODS_MODE.
+    """
+    if service_ids != [_PIXEL_MODEL_RELAY_CONTAINER.removeprefix("ods-")]:
+        ok, error = validate_core_recreate_ids(service_ids)
+        if not ok:
+            return False, error
 
     try:
-        flags = _core_recreate_compose_flags(resolve_compose_flags())
+        flags = _core_recreate_compose_flags(resolve_compose_flags(), service_ids)
     except (OSError, ValueError) as exc:
         return False, f"Could not resolve core Compose fragments: {exc}"
     cmd = (
@@ -7431,7 +7480,10 @@ def docker_compose_recreate(service_ids: list[str], *, force_recreate: bool = Tr
         + service_ids
     )
     compose_env = os.environ.copy()
-    for key in ("GGUF_FILE", "LLM_MODEL", "MAX_CONTEXT", "CTX_SIZE"):
+    # Compose prefers the caller's environment to .env. An agent started from
+    # a shell exported .env at that time, and a route change has since
+    # rewritten the route keys (remote-provider activation).
+    for key in ("GGUF_FILE", "LLM_MODEL", "MAX_CONTEXT", "CTX_SIZE", "ODS_MODE", "LLM_API_URL", "EXTERNAL_LLM_URL"):
         compose_env.pop(key, None)
     if "open-webui" in service_ids and _network_auth_required(load_env(INSTALL_DIR / ".env")):
         compose_env["WEBUI_AUTH"] = "true"

@@ -404,6 +404,43 @@ def test_core_recreation_excludes_unrelated_secrets_but_keeps_overlays_and_depen
     assert '${UNRELATED_SECRET:?Required}' in (tmp_path / next(iter(fragments))).read_text()
 
 
+def test_pixel_model_relay_recreation_selects_its_fragment_but_not_the_dashboard_allowlist(tmp_path, monkeypatch):
+    monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
+    monkeypatch.setattr(_mod, 'EXTENSIONS_DIR', tmp_path / 'extensions')
+    monkeypatch.setattr(_mod, 'USER_EXTENSIONS_DIR', tmp_path / 'user-extensions')
+    monkeypatch.setattr(_mod, 'CORE_SERVICE_IDS', {'litellm'})
+    fragments = {
+        'extensions/pixel-model-relay/compose.yaml':
+            'services:\n  pixel-model-relay:\n    environment:\n      KEY: ${PIXEL_MODEL_RELAY_KEY:?Required}\n',
+        'extensions/unrelated/compose.yaml':
+            'services:\n  unrelated:\n    environment:\n      SECRET: ${UNRELATED_SECRET:?Required}\n',
+    }
+    flags = ['-f', 'base.yaml']
+    for name, body in fragments.items():
+        file = tmp_path / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(body)
+        flags += ['-f', name]
+    monkeypatch.setattr(_mod, 'resolve_compose_flags', lambda: list(flags))
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, '', '')
+
+    monkeypatch.setattr(_mod.subprocess, 'run', fake_run)
+
+    assert _mod.docker_compose_recreate(['pixel-model-relay']) == (True, '')
+    assert calls == [[
+        'docker', 'compose', '-f', 'base.yaml', '-f', 'extensions/pixel-model-relay/compose.yaml',
+        'up', '-d', '--no-deps', '--force-recreate', 'pixel-model-relay',
+    ]]
+    # Only the agent's own route change recreates it; a dashboard request cannot.
+    ok, error = _mod.validate_core_recreate_ids(['pixel-model-relay'])
+    assert ok is False
+    assert 'not a core ODS service' in error
+
+
 def test_core_recreation_does_not_hide_invalid_extension_yaml(tmp_path, monkeypatch):
     monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
     monkeypatch.setattr(_mod, 'EXTENSIONS_DIR', tmp_path / 'extensions')
@@ -5083,6 +5120,144 @@ class TestRemoteProviderLifecycle:
         assert cloud_path.read_text(encoding="utf-8") == original_cloud
         assert not (data_dir / "remote-provider" / "activation-state.json").exists()
         assert not (data_dir / "remote-provider" / "activation-public.json").exists()
+
+    def test_route_changes_recreate_pixel_model_relay_for_the_new_mode(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """relay.py picks model-router or LiteLLM from ODS_MODE once, at start.
+
+        Fleet 2026-10-18 (F17): after `ods remote-provider configure` the kept
+        relay still sent Portal to the local model until it was recreated.
+        """
+        install_dir = tmp_path / "ods"
+        data_dir = install_dir / "data"
+        cloud_path = install_dir / "config" / "litellm" / "cloud.yaml"
+        cloud_path.parent.mkdir(parents=True)
+        data_dir.mkdir(parents=True)
+        env_path = install_dir / ".env"
+        env_path.write_text("ODS_MODE=local\nLLM_API_URL=http://llama-server:8080\n", encoding="utf-8")
+        cloud_path.write_text("previous-cloud\n", encoding="utf-8")
+        env_path.chmod(0o600)
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "DATA_DIR", data_dir)
+        local_pixel = {"model": "qwen-local", "contextLength": 65536, "maxTokens": 4096, "reasoning": False}
+        current_pixel = {"value": local_pixel}
+        events = []
+
+        def mode():
+            return _mod.load_env(env_path)["ODS_MODE"]
+
+        def restart(container, state, *, recreate=False):
+            assert state == {"exists": True, "running": True}
+            events.append(("recreate" if recreate else "restart", container, mode()))
+            return True
+
+        def restore(container, previous, *, recreate=False):
+            assert previous == {"exists": True, "running": True} and recreate is True
+            events.append(("restore", container, mode()))
+            return True
+
+        def reconcile(contract, **_kwargs):
+            events.append(("pixel", contract["model"], mode()))
+            current_pixel["value"] = contract
+            return "reconciled"
+
+        monkeypatch.setattr(
+            _mod, "_capture_container_state", lambda _name: {"exists": True, "running": True},
+        )
+        monkeypatch.setattr(_mod, "_restart_existing_container", restart)
+        monkeypatch.setattr(_mod, "_restore_container_state", restore)
+        monkeypatch.setattr(_mod, "_wait_for_container_health", lambda _name: None)
+        monkeypatch.setattr(_mod, "_verify_litellm_route", lambda env, *, model="default": None)
+        monkeypatch.setattr(
+            _mod,
+            "_render_remote_provider_cloud_config",
+            lambda route, env: cloud_path.write_text("remote-cloud\n", encoding="utf-8"),
+        )
+        monkeypatch.setattr(_mod, "_managed_pixel_runtime_contract", lambda: current_pixel["value"])
+        monkeypatch.setattr(_mod, "_managed_pixel_thinking_control", lambda: None)
+        monkeypatch.setattr(_mod, "_reconcile_managed_pixel_contract", reconcile)
+        route = _mod._plan_remote_provider_lifecycle_operation(self._configure_payload())["route"]
+
+        _mod._activate_remote_provider_route(route)
+
+        assert events == [
+            ("recreate", "ods-litellm", "cloud"),
+            ("recreate", "ods-pixel-model-relay", "cloud"),
+            ("pixel", "qwen/remote:latest", "cloud"),
+        ]
+        events.clear()
+
+        _mod._deactivate_remote_provider_route()
+
+        assert events == [
+            ("recreate", "ods-litellm", "local"),
+            ("recreate", "ods-pixel-model-relay", "local"),
+            ("pixel", "qwen-local", "local"),
+        ]
+        events.clear()
+
+        # A failed activation puts the relay back on the restored local route.
+        def fail_remote(contract, **kwargs):
+            reconcile(contract, **kwargs)
+            if contract["model"] != "qwen-local":
+                raise RuntimeError("simulated Pixel binding failure")
+            return "reconciled"
+
+        monkeypatch.setattr(_mod, "_reconcile_managed_pixel_contract", fail_remote)
+        with pytest.raises(RuntimeError, match="simulated Pixel binding failure"):
+            _mod._activate_remote_provider_route(route)
+
+        assert mode() == "local"
+        assert events == [
+            ("recreate", "ods-litellm", "cloud"),
+            ("recreate", "ods-pixel-model-relay", "cloud"),
+            ("pixel", "qwen/remote:latest", "cloud"),
+            ("recreate", "ods-pixel-model-relay", "local"),
+            ("restore", "ods-litellm", "local"),
+            ("pixel", "qwen-local", "local"),
+        ]
+
+        # Disable is the fail-safe path: a relay that cannot follow does not
+        # keep the owner on the remote route.
+        monkeypatch.setattr(_mod, "_reconcile_managed_pixel_contract", reconcile)
+        _mod._activate_remote_provider_route(route)
+
+        def relay_fault(container, state, *, recreate=False):
+            if container == "ods-pixel-model-relay":
+                raise RuntimeError("simulated relay fault")
+            return restart(container, state, recreate=recreate)
+
+        monkeypatch.setattr(_mod, "_restart_existing_container", relay_fault)
+        assert _mod._deactivate_remote_provider_route()["restored"] is True
+        assert mode() == "local"
+
+
+def test_compose_recreation_reads_the_route_from_env_not_the_agents_environment(tmp_path, monkeypatch):
+    """An agent started from a shell carries .env as it was at start."""
+    monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
+    monkeypatch.setattr(_mod, 'EXTENSIONS_DIR', tmp_path / 'extensions')
+    monkeypatch.setattr(_mod, 'USER_EXTENSIONS_DIR', tmp_path / 'user-extensions')
+    monkeypatch.setattr(_mod, 'CORE_SERVICE_IDS', {'litellm'})
+    monkeypatch.setattr(_mod, 'resolve_compose_flags', lambda: ['-f', 'base.yaml'])
+    for key, value in (("ODS_MODE", "local"), ("LLM_API_URL", "http://llama-server:8080"),
+                       ("EXTERNAL_LLM_URL", "http://host.docker.internal:8080")):
+        monkeypatch.setenv(key, value)
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs['env'])
+        return subprocess.CompletedProcess(cmd, 0, '', '')
+
+    monkeypatch.setattr(_mod.subprocess, 'run', fake_run)
+
+    assert _mod.docker_compose_recreate(['litellm']) == (True, '')
+    assert _mod.docker_compose_converge(['pixel-model-relay']) == (True, '')
+
+    for env in seen:
+        assert {'ODS_MODE', 'LLM_API_URL', 'EXTERNAL_LLM_URL'}.isdisjoint(env)
 
 
 class TestTailscaleStatus:
