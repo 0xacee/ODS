@@ -61,6 +61,7 @@ export function deliveredArtifactForHref(href, artifacts) {
     `/${siteId}/${file.path}`,
     `/${siteId.slice(5)}/${file.path}`,
     `/pixel-preview/${siteId}/${file.path}`,
+    `/preview/${siteId}/${file.path}`,
   ].includes(rawPath))
   return matches.length === 1 ? matches[0] : null
 }

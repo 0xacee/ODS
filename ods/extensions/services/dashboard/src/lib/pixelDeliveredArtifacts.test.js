@@ -11,9 +11,9 @@ it('resolves the observed invented host only through its exact delivered snapsho
   expect(deliveredArtifactForHref('https://portal.openclaw.ai/59a5b7d9dcc69d70aad30310/welcome.md',[source])).toEqual(source)
 })
 
-it.each(['site', 'stripped', 'relay'])('matches a canonical %s path without trusting the authored host', kind => {
+it.each(['site', 'stripped', 'relay', 'preview'])('matches a canonical %s path without trusting the authored host', kind => {
   const source=receipt()
-  const paths={site:`/${source.siteId}/report.md`,stripped:`/${source.siteId.slice(5)}/report.md`,relay:`/pixel-preview/${source.siteId}/report.md`}
+  const paths={site:`/${source.siteId}/report.md`,stripped:`/${source.siteId.slice(5)}/report.md`,relay:`/pixel-preview/${source.siteId}/report.md`,preview:`/preview/${source.siteId}/report.md`}
   expect(deliveredArtifactForHref(`https://untrusted.example${paths[kind]}`,[source])).toEqual(source)
 })
 
