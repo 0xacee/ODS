@@ -58,6 +58,10 @@ const STATUS_META = {
 const SETTLE_POLL_MS = 3000
 const SETTLE_POLLS = 5
 
+// The API listed its models but failed a test chat on the active route.
+const NOT_SERVING_TEXT = 'The API is not answering chats right now. ODS kept its settings, so chat and Portal fail until it is back. ' +
+  'Check again later, or turn the remote model off to use the model on this computer.'
+
 // The raw reason stays visible under "Details"; this says what to do.
 function friendlyProviderError(message) {
   const text = String(message || '')
@@ -73,7 +77,14 @@ function friendlyProviderError(message) {
   if (/already in progress|host_agent_http_409/i.test(text)) {
     return 'ODS is busy with another model change. Try again in a minute.'
   }
+  if (/provider_not_serving/.test(text)) return NOT_SERVING_TEXT
   return ''
+}
+
+function notServingSummary(routeProof) {
+  const status = Number.isInteger(routeProof.providerStatus) ? `HTTP ${routeProof.providerStatus}` : ''
+  const answer = [status, routeProof.providerMessage].filter(Boolean).join(': ')
+  return answer ? `${NOT_SERVING_TEXT} The API answered: ${answer}` : NOT_SERVING_TEXT
 }
 
 function ErrorBanner({ message, note = '' }) {
@@ -507,6 +518,8 @@ export default function RemoteProvider({ compact = false }) {
     try {
       const payload = await fetchJson('/api/remote-provider/probe', { method: 'POST' }, PROBE_TIMEOUT_MS)
       setTestResult(payload)
+      // A real failure: say it in the error banner, with its help link.
+      if (payload?.routeProof?.reason === 'provider_not_serving') setTestError(notServingSummary(payload.routeProof))
       await settleAfterAction()
     } catch (err) {
       setTestError(err?.message || 'The connection check failed')
@@ -544,6 +557,9 @@ export default function RemoteProvider({ compact = false }) {
       setTestResult(proof)
       if (proof?.routeProof?.recorded) {
         setConnectNotice(`Connected. ODS and Portal now use ${model} from ${host}.`)
+      } else if (proof?.routeProof?.reason === 'provider_not_serving') {
+        // The route is in use; the API itself fails chats.
+        setLifecycleError(notServingSummary(proof.routeProof))
       } else {
         setLifecycleError(proof?.routeProof?.reason || 'ODS could not switch to the API.')
         setLifecycleNote('The API answered, but ODS still uses its current model. Try Check connection again in a minute.')
@@ -689,6 +705,8 @@ export default function RemoteProvider({ compact = false }) {
   const proofSummary = useMemo(() => {
     if (!testResult?.routeProof || connectNotice) return null
     if (proofRecorded) return 'Connection checked: the API answered, and ODS and Portal use it.'
+    // Shown once, in the error banner with its help link.
+    if (testResult.routeProof.reason === 'provider_not_serving') return null
     const reason = testResult.routeProof.reason
     return `The API answered, but ODS could not switch to it: ${friendlyProviderError(reason) || titleize(reason)}`
   }, [connectNotice, proofRecorded, testResult])

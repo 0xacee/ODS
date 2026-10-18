@@ -3669,6 +3669,77 @@ class TestPixelOperationsStatus:
         assert handler.response_code == 400
 
 
+def _route_failure_answers(answer, ready="200"):
+    """A fake curl: one completion answer, and LiteLLM's readiness."""
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[-1].endswith("/health/readiness"):
+            return subprocess.CompletedProcess(command, 0, ready, "")
+        code, stdout = answer
+        return subprocess.CompletedProcess(command, code, stdout, "")
+
+    return calls, fake_run
+
+
+def _litellm_error(message, status):
+    return json.dumps({"error": {"message": message, "code": str(status)}}) + f"\n{status}"
+
+
+@pytest.mark.parametrize(("answer", "ready", "expected"), [
+    # The fleet outage: the provider's own 500, passed on by LiteLLM.
+    ((0, _litellm_error("litellm.InternalServerError: InternalServerError: OpenAIException - Connection error.\n"
+                        "Received Model Group=ods/current", 500)), "200",
+     (500, "Connection error.", True)),
+    ((0, _litellm_error("litellm.RateLimitError: RateLimitError: OpenAIException - slow down", 429)), "200",
+     (429, "slow down", True)),
+    ((0, _litellm_error("litellm.ServiceUnavailableError: OpenAIException - overloaded", 503)), "200",
+     (503, "overloaded", True)),
+    # LiteLLM got no HTTP answer from its own egress hop: not the API's fault.
+    ((0, _litellm_error("litellm.APIConnectionError: APIConnectionError: OpenAIException - Connection error.", 500)), "200",
+     (500, "Connection error.", False)),
+    ((0, _litellm_error("litellm.BadRequestError: Invalid model name passed in model=ods/current", 400)), "200",
+     (400, "Invalid model name passed in model=ods/current", False)),
+    ((0, json.dumps({"choices": [{"message": {"content": ""}}]}) + "\n200"), "200",
+     (200, "The API answered with an empty completion", True)),
+    ((28, ""), "200", (504, "The API did not answer within 30 seconds", True)),
+    ((28, ""), "000", (None, "LiteLLM did not answer in time", False)),
+    ((7, "\n000"), "200", (None, "LiteLLM did not answer", False)),
+    ((0, json.dumps({"choices": [{"message": {"content": "READY"}}]}) + "\n200"), "200", None),
+])
+def test_litellm_route_failure_tells_the_providers_answer_from_litellms_own(monkeypatch, answer, ready, expected):
+    calls, fake_run = _route_failure_answers(answer, ready)
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+    env = {"LITELLM_KEY": "unit-test-litellm-key", "LITELLM_PORT": "4000"}
+
+    assert _mod._litellm_route_failure(env) == expected
+
+    command, kwargs = calls[0]
+    assert "unit-test-litellm-key" not in " ".join(command)
+    assert kwargs["input"] == "Authorization: Bearer unit-test-litellm-key\n"
+    assert kwargs["encoding"] == "utf-8" and kwargs["errors"] == "replace"
+    assert command[command.index("-X") + 2] == "http://127.0.0.1:4000/v1/chat/completions"
+
+
+def test_litellm_route_failure_never_passes_on_a_key_echo_or_a_backslash(monkeypatch):
+    # Key- and hash-shaped values are built at runtime so secret scanners stay quiet.
+    key_hash = hashlib.sha256(b"unit-test").hexdigest()
+    fake_key = "sk-" + "unittest" + "fake01"
+    message = ("litellm.InternalServerError: OpenAIException - Connection error. "
+               f"Received API Key = sk-...wxyz, Key Hash (Token) ={key_hash}, "
+               f"Rate limit exceeded for api_key: {key_hash[:40]} {fake_key} \\e[31mred\\c")
+    _calls, fake_run = _route_failure_answers((0, _litellm_error(message, 500)))
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+    status, text, provider = _mod._litellm_route_failure({"LITELLM_KEY": "k"})
+
+    assert (status, provider) == (500, True)
+    assert key_hash not in text and key_hash[:32] not in text and fake_key not in text
+    assert "\\" not in text
+    assert text.startswith("Connection error. Received API Key = [redacted], Key Hash (Token) =[redacted]")
+
+
 class TestRemoteProviderLifecycle:
     """Direct host-agent tests for remote-provider lifecycle planning/apply."""
 
@@ -4118,6 +4189,110 @@ class TestRemoteProviderLifecycle:
         assert "unit-test-provider-token" not in dumped
         assert "unit-test-ssh-key" not in dumped
         assert '"raw"' not in dumped
+
+    def _active_route_with_matching_consumers(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_mod, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        root = tmp_path / "remote-provider"
+        root.mkdir(parents=True)
+        plan = _mod._plan_remote_provider_lifecycle_operation(self._ssh_configure_payload())
+        state = _mod._remote_provider_route_state_from_plan(plan)
+        (root / "routing-state.json").write_text(json.dumps(state), encoding="utf-8")
+        runtime = _mod._remote_provider_runtime_contract(state)
+        monkeypatch.setattr(_mod, "_read_remote_provider_activation_state", lambda: {
+            "phase": "active", "remote": runtime,
+            "routeFingerprint": _mod._remote_provider_route_fingerprint(state),
+        })
+        (tmp_path / ".env").write_text("ODS_MODE=cloud\nLLM_API_URL=http://litellm:4000\n", encoding="utf-8")
+        monkeypatch.setattr(_mod, "_managed_pixel_runtime_contract", lambda: runtime)
+        return root / "routing-state.json"
+
+    def test_provider_outage_on_an_active_route_is_reported_without_reactivation(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Fleet 2026-10-18: during an outage a test recreated LiteLLM twice,
+        could hold Portal's model lane, and reported nothing useful."""
+        state_path = self._active_route_with_matching_consumers(monkeypatch, tmp_path)
+        asked = []
+
+        def outage(env, *, model="ods/current"):
+            asked.append(model)
+            return 500, "Connection error.", True
+
+        monkeypatch.setattr(_mod, "_litellm_route_failure", outage)
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+
+        def no_activation(route):
+            raise AssertionError("a provider outage must not re-activate the route")
+
+        monkeypatch.setattr(_mod, "_activate_remote_provider_route", no_activation)
+        before = state_path.read_bytes()
+        handler = _FakeHandler(json.dumps(self._egress_probe_response()).encode("utf-8"))
+
+        _mod.AgentHandler._handle_remote_provider_proof(handler)
+
+        assert handler.response_code == 502
+        assert handler.parse_response() == {
+            "error": "The remote provider did not serve a completion through the active route",
+            "code": "provider_not_serving",
+            "providerStatus": 500,
+            "providerMessage": "Connection error.",
+        }
+        assert state_path.read_bytes() == before
+        assert len(asked) == 2, "a single failure is asked once more"
+
+    def test_a_single_provider_hiccup_is_not_reported_as_an_outage(self, monkeypatch, tmp_path):
+        self._active_route_with_matching_consumers(monkeypatch, tmp_path)
+        answers = [(429, "slow down", True), None]
+        monkeypatch.setattr(_mod, "_litellm_route_failure", lambda env, *, model="ods/current": answers.pop(0))
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_activate_remote_provider_route",
+                            lambda route: pytest.fail("a working route must not be re-activated"))
+        handler = _FakeHandler(json.dumps(self._egress_probe_response()).encode("utf-8"))
+
+        _mod.AgentHandler._handle_remote_provider_proof(handler)
+
+        assert handler.response_code == 200
+        assert handler.parse_response()["activation"]["proven"] is True
+
+    @pytest.mark.parametrize("failure", [
+        (None, "LiteLLM did not answer", False),
+        (400, "Invalid model name", False),
+        (500, "Connection error.", False),
+    ])
+    @pytest.mark.parametrize("answers_later", [False, True])
+    def test_litellm_faults_on_an_active_route_keep_the_earlier_paths(
+        self,
+        monkeypatch,
+        tmp_path,
+        failure,
+        answers_later,
+    ):
+        """LiteLLM's own fault, or a LiteLLM still starting, gets the earlier
+        wait for a completion and then the repair path (a fresh activation)."""
+        self._active_route_with_matching_consumers(monkeypatch, tmp_path)
+        monkeypatch.setattr(_mod, "_litellm_route_failure", lambda env, *, model="ods/current": failure)
+
+        def earlier_wait(env, *, model="default"):
+            if not answers_later:
+                raise RuntimeError("LiteLLM did not serve a completion through the active ods/current route")
+
+        monkeypatch.setattr(_mod, "_verify_litellm_route", earlier_wait)
+        activated = []
+
+        def activate(route):
+            activated.append(route)
+            return {"active": True, "proven": True}
+
+        monkeypatch.setattr(_mod, "_activate_remote_provider_route", activate)
+        handler = _FakeHandler(json.dumps(self._egress_probe_response()).encode("utf-8"))
+
+        _mod.AgentHandler._handle_remote_provider_proof(handler)
+
+        assert handler.response_code == 200
+        assert len(activated) == (0 if answers_later else 1)
 
     def test_rejects_failed_egress_probe_without_overwriting_route_proof(
         self,
@@ -5009,6 +5184,7 @@ class TestRemoteProviderLifecycle:
             ("public", True),
         ]
 
+        monkeypatch.setattr(_mod, "_litellm_route_failure", lambda env, *, model="ods/current": None)
         current = _mod._verify_current_remote_provider_consumers(plan["route"], remote_pixel)
         assert current["unchanged"] is True
         assert current["pixel"] == "reconciled"
