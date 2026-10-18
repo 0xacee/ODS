@@ -5215,10 +5215,45 @@ class TestRemoteProviderLifecycle:
             ("recreate", "ods-litellm", "cloud"),
             ("recreate", "ods-pixel-model-relay", "cloud"),
             ("pixel", "qwen/remote:latest", "cloud"),
-            ("restore", "ods-pixel-model-relay", "local"),
+            ("recreate", "ods-pixel-model-relay", "local"),
             ("restore", "ods-litellm", "local"),
             ("pixel", "qwen-local", "local"),
         ]
+
+        # Disable is the fail-safe path: a relay that cannot follow does not
+        # keep the owner on the remote route.
+        monkeypatch.setattr(_mod, "_reconcile_managed_pixel_contract", reconcile)
+        _mod._activate_remote_provider_route(route)
+
+        def relay_fault(container, state, *, recreate=False):
+            if container == "ods-pixel-model-relay":
+                raise RuntimeError("simulated relay fault")
+            return restart(container, state, recreate=recreate)
+
+        monkeypatch.setattr(_mod, "_restart_existing_container", relay_fault)
+        assert _mod._deactivate_remote_provider_route()["restored"] is True
+        assert mode() == "local"
+
+
+def test_compose_recreation_reads_the_route_from_env_not_the_agents_environment(tmp_path, monkeypatch):
+    """An agent started from a shell carries .env as it was at start."""
+    monkeypatch.setattr(_mod, 'INSTALL_DIR', tmp_path)
+    monkeypatch.setattr(_mod, 'EXTENSIONS_DIR', tmp_path / 'extensions')
+    monkeypatch.setattr(_mod, 'USER_EXTENSIONS_DIR', tmp_path / 'user-extensions')
+    monkeypatch.setattr(_mod, 'CORE_SERVICE_IDS', {'litellm'})
+    monkeypatch.setattr(_mod, 'resolve_compose_flags', lambda: ['-f', 'base.yaml'])
+    for key, value in (("ODS_MODE", "local"), ("LLM_API_URL", "http://llama-server:8080"),
+                       ("EXTERNAL_LLM_URL", "http://host.docker.internal:8080")):
+        monkeypatch.setenv(key, value)
+    seen = []
+    monkeypatch.setattr(_mod.subprocess, 'run',
+                        lambda cmd, **kwargs: seen.append(kwargs['env']) or subprocess.CompletedProcess(cmd, 0, '', ''))
+
+    assert _mod.docker_compose_recreate(['litellm']) == (True, '')
+    assert _mod.docker_compose_converge(['pixel-model-relay']) == (True, '')
+
+    for env in seen:
+        assert {'ODS_MODE', 'LLM_API_URL', 'EXTERNAL_LLM_URL'}.isdisjoint(env)
 
 
 class TestTailscaleStatus:

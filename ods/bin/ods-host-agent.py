@@ -5365,6 +5365,27 @@ def _render_remote_provider_cloud_config(route: dict, env: dict[str, str]) -> No
         raise RuntimeError("Could not render the remote-provider LiteLLM route")
 
 
+def _refresh_pixel_model_relay(state: dict[str, bool]) -> None:
+    """Recreate a relay that was running so it takes the route .env now names."""
+    if _restart_existing_container(_PIXEL_MODEL_RELAY_CONTAINER, state, recreate=True):
+        _wait_for_container_health(_PIXEL_MODEL_RELAY_CONTAINER)
+
+
+def _restore_pixel_model_relay(state: dict[str, bool]) -> None:
+    """Best effort, for rollbacks and disable, the fail-safe path.
+
+    A relay left on LiteLLM still reaches a restored local route through it;
+    the warning names the repair for one left on the local route.
+    """
+    try:
+        _refresh_pixel_model_relay(state)
+    except RuntimeError as exc:
+        logger.warning(
+            "Pixel model relay did not follow the restored model route (%s); "
+            "repair it with: ods restart pixel-model-relay", exc,
+        )
+
+
 def _activate_remote_provider_route(
     route: dict, *, transaction=None, defer_consumer_rollback: bool = False,
 ) -> dict[str, object]:
@@ -5437,8 +5458,7 @@ def _activate_remote_provider_route(
         # Portal reaches the model through the relay, so it must follow
         # ODS_MODE to LiteLLM before Pixel is bound to the remote model.
         relay_attempted = True
-        if _restart_existing_container(_PIXEL_MODEL_RELAY_CONTAINER, relay_state, recreate=True):
-            _wait_for_container_health(_PIXEL_MODEL_RELAY_CONTAINER)
+        _refresh_pixel_model_relay(relay_state)
         pixel_attempted = pixel_before is not None
         pixel_status = transaction.apply(runtime) if transaction is not None else _reconcile_managed_pixel_contract(runtime)
         activation_public = {
@@ -5480,11 +5500,7 @@ def _activate_remote_provider_route(
         # The relay reads only .env, restored above, so it is restored here
         # even when the lifecycle owner refreshes LiteLLM itself.
         if relay_attempted:
-            try:
-                if _restore_container_state(_PIXEL_MODEL_RELAY_CONTAINER, relay_state, recreate=True):
-                    _wait_for_container_health(_PIXEL_MODEL_RELAY_CONTAINER)
-            except Exception as rollback_exc:
-                rollback_errors.append(f"Pixel model relay: {rollback_exc}")
+            _restore_pixel_model_relay(relay_state)
         # The lifecycle owner must restore its route and credential snapshots
         # before refreshing a consumer that reads those files at startup.
         if litellm_attempted and not defer_consumer_rollback:
@@ -5554,10 +5570,10 @@ def _deactivate_remote_provider_route(*, transaction=None) -> dict[str, object]:
         _wait_for_container_health("ods-litellm")
         restored_env = load_env(env_path)
         _verify_litellm_route(restored_env, model="ods/current")
-        # Send Portal's relay back to the restored mode's route as well.
+        # Send Portal's relay back to the restored mode's route as well. Best
+        # effort: disable is the fail-safe path and must not fail on the relay.
         relay_attempted = True
-        if _restart_existing_container(_PIXEL_MODEL_RELAY_CONTAINER, relay_state, recreate=True):
-            _wait_for_container_health(_PIXEL_MODEL_RELAY_CONTAINER)
+        _restore_pixel_model_relay(relay_state)
         previous_pixel = previous.get("pixel")
         pixel_attempted = previous_pixel is not None
         if transaction is not None:
@@ -5596,11 +5612,7 @@ def _deactivate_remote_provider_route(*, transaction=None) -> dict[str, object]:
         except Exception as rollback_exc:
             rollback_errors.append(f"configuration: {rollback_exc}")
         if relay_attempted:
-            try:
-                if _restore_container_state(_PIXEL_MODEL_RELAY_CONTAINER, relay_state, recreate=True):
-                    _wait_for_container_health(_PIXEL_MODEL_RELAY_CONTAINER)
-            except Exception as rollback_exc:
-                rollback_errors.append(f"Pixel model relay: {rollback_exc}")
+            _restore_pixel_model_relay(relay_state)
         if litellm_attempted:
             try:
                 _restore_container_state("ods-litellm", container_state, recreate=True)
@@ -7468,7 +7480,10 @@ def docker_compose_recreate(service_ids: list[str], *, force_recreate: bool = Tr
         + service_ids
     )
     compose_env = os.environ.copy()
-    for key in ("GGUF_FILE", "LLM_MODEL", "MAX_CONTEXT", "CTX_SIZE"):
+    # Compose prefers the caller's environment to .env. An agent started from
+    # a shell exported .env at that time, and a route change has since
+    # rewritten the route keys (remote-provider activation).
+    for key in ("GGUF_FILE", "LLM_MODEL", "MAX_CONTEXT", "CTX_SIZE", "ODS_MODE", "LLM_API_URL", "EXTERNAL_LLM_URL"):
         compose_env.pop(key, None)
     if "open-webui" in service_ids and _network_auth_required(load_env(INSTALL_DIR / ".env")):
         compose_env["WEBUI_AUTH"] = "true"
