@@ -1065,15 +1065,89 @@ def _download_bytes_needed(artifacts: list[dict], paths: dict[str, Path]) -> int
 
 
 def _model_storage_status(models_dir: Path) -> dict:
-    """Free and total bytes of the volume that holds models_dir."""
+    """Free and total bytes of the volume that holds models_dir.
+
+    On WSL that volume is normally the distribution's virtual disk, which
+    reports its ~1 TB growth limit instead of the Windows drive that stores
+    it; that drive is then checked too (_wsl_model_storage_status).
+    """
     probe = Path(models_dir)
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
     usage = shutil.disk_usage(probe)
+    if _is_wsl_linux() and _on_wsl_virtual_disk(probe):
+        drive, host = _wsl_disk_drive_usage()
+        return _wsl_model_storage_status(usage, drive, host)
     return {
         "freeBytes": int(usage.free),
         "totalBytes": int(usage.total),
         "marginBytes": _download_disk_margin(int(usage.total)),
+    }
+
+
+# Windows setup records the drive that stores this distribution's virtual
+# disk (ext4.vhdx, the distribution's BasePath); see wsl-portal-prereqs.ps1.
+_WSL_DISK_DRIVE_KEY = "ODS_WSL_DISK_DRIVE"
+
+
+def _on_wsl_virtual_disk(path: Path) -> bool:
+    """Is path on the distribution's own virtual disk, its root filesystem?
+
+    A Windows drive mount (DrvFS) or another mounted disk is not, and reports
+    its own free space already.
+    """
+    return os.stat(path).st_dev == os.stat("/").st_dev
+
+
+def _wsl_disk_drive_usage() -> tuple[str | None, object | None]:
+    """The recorded Windows drive under WSL's virtual disk, and its usage.
+
+    ``(None, None)`` when Windows setup has not recorded the drive or it
+    cannot be read from this distribution; each case is logged.
+    """
+    drive = str(load_env(INSTALL_DIR / ".env").get(_WSL_DISK_DRIVE_KEY) or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]:", drive):
+        logger.warning("%s is missing or invalid, so free space on the Windows drive under WSL is not "
+                       "checked; rerun install.ps1 to record it", _WSL_DISK_DRIVE_KEY)
+        return None, None
+    try:
+        mount = _wsl_runtime.drive_mount(drive)
+        # Without its DrvFS mount the drive's directory is plain storage on
+        # the virtual disk itself, which would only repeat its figures.
+        usage = None if _on_wsl_virtual_disk(mount) else shutil.disk_usage(mount)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Free space on Windows drive %s could not be checked: %s", drive, exc)
+        return None, None
+    if usage is None:
+        logger.warning("Windows drive %s is not mounted in WSL; its free space was not checked", drive)
+        return None, None
+    return drive, usage
+
+
+def _wsl_model_storage_status(disk, drive: str | None, host) -> dict:
+    """Download space on WSL's virtual disk, bounded by the Windows drive under it.
+
+    ``disk`` and ``host`` are ``shutil.disk_usage`` results. The virtual disk
+    grows into the Windows drive, and a full drive breaks Windows and WSL, so
+    free space is never more than that drive has and the margin follows its
+    size. ``windowsDrive`` names the drive when its free space is the figure
+    reported. Without a readable drive (``host`` is None) only the virtual
+    disk is known, and ``windowsDriveChecked`` says so.
+    """
+    if host is None:
+        return {
+            "freeBytes": int(disk.free),
+            "totalBytes": int(disk.total),
+            "marginBytes": _download_disk_margin(int(disk.total)),
+            "windowsDrive": None,
+            "windowsDriveChecked": False,
+        }
+    return {
+        "freeBytes": min(int(disk.free), int(host.free)),
+        "totalBytes": int(host.total),
+        "marginBytes": _download_disk_margin(int(host.total)),
+        "windowsDrive": drive if int(host.free) <= int(disk.free) else None,
+        "windowsDriveChecked": True,
     }
 
 
