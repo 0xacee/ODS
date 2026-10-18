@@ -394,6 +394,48 @@ test('runs configured route probe and shows proof recording result', async () =>
   expect(screen.getByText('2026-07-26T00:05:00+00:00')).toBeInTheDocument()
 })
 
+const NOT_SERVING_PROOF = {
+  recorded: false,
+  reachable: true,
+  reason: 'provider_not_serving',
+  statusCode: 502,
+  providerStatus: 500,
+  providerMessage: 'Connection error.',
+}
+const NOT_SERVING_SUMMARY = 'The API is not answering chats right now. ODS kept its settings, so chat and Portal fail until ' +
+  'it is back. Check again later, or turn the remote model off to use the model on this computer. The API answered: ' +
+  'HTTP 500: Connection error.'
+
+test('a provider that lists models but serves no chat is named, not reported as busy', async () => {
+  const notServing = { ...probePayload, routeProof: NOT_SERVING_PROOF }
+  globalThis.fetch
+    .mockResolvedValueOnce(response(statusPayload))
+    .mockResolvedValueOnce(response(notServing))
+    .mockResolvedValueOnce(response(statusPayload))
+
+  render(createElement(RemoteProvider))
+  fireEvent.click(await screen.findByRole('button', { name: /check connection/i }))
+
+  expect(await screen.findAllByText(NOT_SERVING_SUMMARY)).toHaveLength(1)
+  expect(screen.getByRole('link', { name: /get help on discord/i })).toBeInTheDocument()
+  expect(screen.queryByText(/busy with another model change/)).not.toBeInTheDocument()
+})
+
+test('connecting to an API that serves no chat says so once, without claiming ODS kept its model', async () => {
+  globalThis.fetch
+    .mockResolvedValueOnce(response(disabledStatusPayload))
+    .mockResolvedValueOnce(response(configureApplyPayload))
+    .mockResolvedValueOnce(response({ ...probePayload, routeProof: NOT_SERVING_PROOF }))
+    .mockResolvedValueOnce(response(statusPayload))
+
+  render(createElement(RemoteProvider))
+  await fillConfigureForm()
+  fireEvent.click(screen.getByRole('button', { name: 'Connect', exact: true }))
+
+  expect(await screen.findAllByText(NOT_SERVING_SUMMARY)).toHaveLength(1)
+  expect(screen.queryByText(/still uses its current model/)).not.toBeInTheDocument()
+})
+
 test('plans direct provider configuration without rendering secret material', async () => {
   globalThis.fetch
     .mockResolvedValueOnce(response(statusPayload))

@@ -18,7 +18,8 @@ extract() {
         in_block && /^}$/ { exit }
     ' "$ROOT/ods-cli"
 }
-for name in _remote_provider_print_apply_result _remote_provider_print_status _remote_provider_fail; do
+for name in _remote_provider_print_apply_result _remote_provider_print_status _remote_provider_fail \
+    _remote_provider_not_serving_reason _remote_provider_transport_reason; do
     body="$(extract "$name")"
     [[ -n "$body" ]] || fail "$name was not found in ods-cli"
     eval "$body"
@@ -35,6 +36,47 @@ printf '%s' '{"status":"ready","routeState":{"enabled":true,"resumeAvailable":fa
 output="$(_remote_provider_print_status "$fixture/on.json")"
 grep -q "Saved route" <<<"$output" && fail "an active route was reported as having no saved route: $output"
 grep -qF "Provider: m via direct at https://api.example.test/v1" <<<"$output" || fail "the active provider was not shown: $output"
+# "ready" is set up and proven earlier, not a live answer (fleet 2026-10-18:
+# it read ready through an upstream outage).
+grep -qF "Ready means set up and proven; check that the API answers now with: ods remote-provider test" <<<"$output" \
+    || fail "a ready route did not say how to check the API now: $output"
+printf '%s' '{"status":"ready","routeState":{"enabled":true,"status":{"lastProbe":{"verifiedAt":"2026-10-18T14:05:40Z"}},"provider":{"model":"m","transport":"direct","baseUrl":"https://api.example.test/v1"}},"egress":{"status":"ok","secret":{"configured":true}},"availableActions":{"test":true}}' \
+    > "$fixture/proven.json"
+grep -qF "Ready means set up and proven at 2026-10-18T14:05:40Z;" <<<"$(_remote_provider_print_status "$fixture/proven.json")" \
+    || fail "a ready route did not say when it was proven"
+
+# A provider that lists its models but serves no chat is named with its own
+# answer (an outage read "Remote provider probe: ok").
+printf '%s' '{"ok":true,"transport":"direct","probe":{"httpStatus":200},"routeProof":{"recorded":false,"reachable":true,"reason":"provider_not_serving","statusCode":502,"providerStatus":500,"providerMessage":"Connection error."}}' \
+    > "$fixture/not-serving.json"
+[[ "$(_remote_provider_not_serving_reason "$fixture/not-serving.json")" == "HTTP 500: Connection error." ]] \
+    || fail "the provider's answer was not named: $(_remote_provider_not_serving_reason "$fixture/not-serving.json")"
+printf '%s' '{"ok":true,"routeProof":{"recorded":true}}' > "$fixture/proven-route.json"
+[[ -z "$(_remote_provider_not_serving_reason "$fixture/proven-route.json")" ]] || fail "a recorded proof read as an outage"
+for name in _remote_provider_probe_configured _remote_provider_print_probe_result; do
+    body="$(extract "$name")"
+    [[ -n "$body" ]] || fail "$name was not found in ods-cli"
+    eval "$body"
+done
+# The Dashboard API's answer for a provider that serves no chat.
+_remote_provider_request() { cp "$fixture/not-serving.json" "$3"; printf '200'; }
+for mode in text json; do
+    if [[ "$mode" == json ]]; then args=(--json); else args=(); fi
+    if output="$( (_remote_provider_probe_configured "${args[@]}") 2>&1 )"; then
+        fail "an API that serves no chat passed ods remote-provider test ($mode)"
+    fi
+    grep -qF "The remote provider is not answering chats (HTTP 500: Connection error.). ODS kept its settings." <<<"$output" \
+        || fail "the outage was not named ($mode): $output"
+    grep -qF "ods remote-provider disable" <<<"$output" || fail "no way back to the local model ($mode): $output"
+    grep -qF "https://discord.gg/4ntNp9MAwC" <<<"$output" || fail "no help link ($mode): $output"
+done
+printf '%s' '{"ok":true,"routeProof":{"reason":"provider_not_serving","providerStatus":500,"providerMessage":"bad\\e[31m\\c"}}' \
+    > "$fixture/escape.json"
+[[ "$(_remote_provider_not_serving_reason "$fixture/escape.json")" == "HTTP 500: bade[31mc" ]] \
+    || fail "a backslash from the provider reached echo -e: $(_remote_provider_not_serving_reason "$fixture/escape.json")"
+grep -qF "did not answer in time" <<<"$(_remote_provider_transport_reason 28)" || fail "a curl timeout was not named"
+grep -qF "could not connect" <<<"$(_remote_provider_transport_reason 7)" || fail "a refused connection was not named"
+grep -qF "closed before" <<<"$(_remote_provider_transport_reason 52)" || fail "an empty reply was not named"
 
 printf '%s' '{"status":"paused","routeState":{"enabled":true,"provider":{"model":"m","transport":"direct","baseUrl":"https://api.example.test/v1"}},"egress":{"status":"ok","secret":{"configured":true}},"availableActions":{"enable":true}}' \
     > "$fixture/paused.json"

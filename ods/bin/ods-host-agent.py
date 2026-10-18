@@ -3883,6 +3883,15 @@ class _RemoteProviderApplyError(RuntimeError):
         self.rollback = rollback
 
 
+class _RemoteProviderNotServing(RuntimeError):
+    """The active route's consumers match, but the provider serves no completion."""
+
+    def __init__(self, provider_status: int, provider_message: str) -> None:
+        super().__init__("The remote provider did not serve a completion through the active route")
+        self.provider_status = provider_status
+        self.provider_message = provider_message
+
+
 def _remote_provider_root() -> Path:
     return DATA_DIR / "remote-provider"
 
@@ -5319,10 +5328,23 @@ def _verify_current_remote_provider_consumers(
     pixel = _managed_pixel_runtime_contract()
     if pixel is not None and pixel != runtime:
         return None
-    try:
-        _verify_litellm_route(env, model="ods/current")
-    except RuntimeError:
-        return None
+    failure = _litellm_route_failure(env)
+    if failure is not None and failure[2]:
+        # LiteLLM and its egress hop work, but the provider fails chats. A new
+        # activation would recreate LiteLLM and hold Portal's model lane through
+        # an outage it cannot fix (fleet 2026-10-18: a test took ~80 s and said
+        # nothing). A single 429 or 503 is not an outage, so ask once more.
+        time.sleep(2)
+        failure = _litellm_route_failure(env)
+        if failure is not None and failure[2] and failure[0] is not None:
+            raise _RemoteProviderNotServing(failure[0], failure[1])
+    if failure is not None:
+        # LiteLLM's own fault, or a LiteLLM that is still starting: give it the
+        # earlier time to answer, then let the repair path recreate it.
+        try:
+            _verify_litellm_route(env, model="ods/current")
+        except RuntimeError:
+            return None
     activation = {
         "active": True,
         "gateway": "litellm-cloud",
@@ -11464,6 +11486,15 @@ class AgentHandler(BaseHTTPRequestHandler):
             result = _record_remote_provider_egress_probe(body)
         except ValueError as exc:
             json_response(self, 400, {"error": str(exc)})
+            return
+        except _RemoteProviderNotServing as exc:
+            # Not a busy lifecycle (409): the provider failed; nothing changed.
+            json_response(self, 502, {
+                "error": str(exc),
+                "code": "provider_not_serving",
+                "providerStatus": exc.provider_status,
+                "providerMessage": exc.provider_message,
+            })
             return
         except RuntimeError as exc:
             json_response(self, 409, {"error": str(exc)})
@@ -19675,6 +19706,103 @@ def _verify_litellm_route(env: dict, *, model: str = "default") -> None:
     raise RuntimeError(
         f"LiteLLM did not serve a completion through the active {model} route"
     )
+
+
+# A provider error that LiteLLM passes on can name the end of a refused key,
+# the key's hash or a rate-limited key's hash (pixel-model-relay/relay.py);
+# none may leave the agent.
+_PROVIDER_KEY_ECHO = (
+    (re.compile(r"(Received API Key\s*=\s*)[^,\s\"\\]+", re.IGNORECASE), r"\1[redacted]"),
+    (re.compile(r"(Key Hash \(Token\)\s*=\s*)[0-9A-Fa-f]+", re.IGNORECASE), r"\1[redacted]"),
+    (re.compile(r"(api_key\s*[:=]\s*)[^\s,\"']+", re.IGNORECASE), r"\1[redacted]"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{6,}"), "[redacted]"),
+    (re.compile(r"\b[0-9A-Fa-f]{32,}\b"), "[redacted]"),
+)
+# LiteLLM's wrapper around a provider error, e.g. "litellm.InternalServerError:
+# InternalServerError: OpenAIException - Connection error."
+_LITELLM_ERROR_PREFIX = re.compile(r"^(?:litellm\.\w+:\s*)?(?:\w+Error:\s*)?(?:\w+Exception\s*-\s*)?")
+# LiteLLM got no HTTP answer from its own next hop (the egress): not the API.
+_LITELLM_OWN_FAULT = re.compile(r"^litellm\.APIConnectionError\b")
+
+
+def _provider_error_line(body: str) -> str:
+    """The first line of an error body's message, as LiteLLM wrote it."""
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError:
+        value = None
+    error = value.get("error") if isinstance(value, dict) else None
+    text = str((error.get("message") if isinstance(error, dict) else error if isinstance(error, str) else body) or "")
+    return text.strip().splitlines()[0] if text.strip() else ""
+
+
+def _provider_error_text(line: str) -> str:
+    """That line bounded, without key echoes, control characters or backslashes."""
+    for pattern, replacement in _PROVIDER_KEY_ECHO:
+        line = pattern.sub(replacement, line)
+    line = "".join(character for character in line if character.isprintable() and character != "\\")
+    return _LITELLM_ERROR_PREFIX.sub("", line).strip()[:300]
+
+
+def _litellm_ready(host: str, port: str) -> bool:
+    """LiteLLM's own readiness, which needs no provider answer."""
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "--max-time", "5", "-w", "%{http_code}",
+             f"http://{host}:{port}/health/readiness"],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "200"
+
+
+def _litellm_route_failure(env: dict, *, model: str = "ods/current") -> tuple[int | None, str, bool] | None:
+    """Ask the active LiteLLM route for one completion.
+
+    Returns None when it answers. Otherwise returns the HTTP status (None when
+    LiteLLM itself did not answer), a bounded error text, and whether the
+    failure is the provider's, meaning LiteLLM and its egress hop worked.
+    """
+    host = "ods-litellm" if os.environ.get("ODS_HOST_INSTALL_DIR") else "127.0.0.1"
+    port = str(env.get("LITELLM_PORT") or "4000")
+    api_key = str(env.get("LITELLM_KEY") or env.get("LITELLM_MASTER_KEY") or "")
+    command = [
+        "curl", "-s", "--max-time", "30", "--max-filesize", "65536",
+        "-w", "\n%{http_code}", "-X", "POST", f"http://{host}:{port}/v1/chat/completions",
+        "-H", "Content-Type: application/json", "-H", "@-",
+        "-d", json.dumps(_completion_probe_payload(model, disable_thinking=False)),
+    ]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, encoding="utf-8", errors="replace", timeout=35,
+            # Keep the key out of process listings (see _chat_completion_ready).
+            input=f"Authorization: Bearer {api_key}\n",
+        )
+        timed_out = result.returncode == 28
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    if timed_out:
+        # LiteLLM took the request but no answer came: the API's slowness if
+        # LiteLLM itself still answers, else LiteLLM's own fault.
+        if _litellm_ready(host, port):
+            return 504, "The API did not answer within 30 seconds", True
+        return None, "LiteLLM did not answer in time", False
+    body, _, code = result.stdout.rpartition("\n")
+    if result.returncode != 0 or not code.isdigit() or code == "000":
+        return None, "LiteLLM did not answer", False
+    status = int(code)
+    if status == 200:
+        try:
+            response = json.loads(body)
+        except json.JSONDecodeError:
+            return status, "LiteLLM returned an invalid completion", False
+        if _completion_response_ready(response, require_visible_content=False):
+            return None
+        return status, "The API answered with an empty completion", True
+    line = _provider_error_line(body)
+    provider = (status >= 500 or status in {408, 429}) and not _LITELLM_OWN_FAULT.match(line)
+    return status, _provider_error_text(line) or f"HTTP {status}", provider
 
 
 def _read_hermes_container_config() -> str:
