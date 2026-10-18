@@ -64,6 +64,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     network-problem message.
 
 ### Fixed
+- On Windows, a model download no longer trusts the free space that WSL's
+  virtual disk reports. That disk grows into the Windows drive that stores it,
+  up to about 1 TB, so the Hugging Face file picker offered 836 GiB while
+  drive C: had 68.8 GB free, and a large download could fill the drive that
+  Windows and WSL need. Windows setup now records the drive that stores the
+  Ubuntu distribution (`ODS_WSL_DISK_DRIVE`), and the download check counts no
+  more free space than that drive has and keeps 5% of its size (at least
+  2 GiB) free. The file picker names the drive, or says when it could not
+  check it. Existing Windows installs get the check on their next
+  `install.ps1` run; Linux and macOS are unchanged.
 - On an NVIDIA GPU of compute capability 12.1, the DGX Spark GB10 and the RTX
   Spark N1X, the model no longer answers with question marks. llama.cpp's CUDA
   12 container images, the default among them, have no kernels for that GPU;
