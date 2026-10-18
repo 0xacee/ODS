@@ -42,12 +42,12 @@ function revealNewText() {
 function StreamSpan({node,...props}) {return <span {...props}/>}
 const EMPTY_COMPONENTS={}
 const PLUGINS=[rehypeHighlight,muteEmbedNotes,revealNewText]
-export default function PortalStreamingText({children, active=false, animate=active, instant=false, onReveal, components=EMPTY_COMPONENTS}) {
+export default function PortalStreamingText({children, active=false, animate=active, instant=false, onReveal, components=EMPTY_COMPONENTS, artifacts=null}) {
   const fullSource=String(children ?? '')
   const source=useResponseReveal(fullSource,{animate,instant})
   const revealing=source!==fullSource
   useLayoutEffect(()=>{onReveal?.()},[source,onReveal])
-  const renderers=useMemo(()=>({...components,a:PortalInlineCitation,span:StreamSpan}),[components])
+  const renderers=useMemo(()=>({...components,a:props=><PortalInlineCitation {...props} artifacts={artifacts}/>,span:StreamSpan}),[components,artifacts])
   return <div className={`portal-streaming-text ${active || revealing?'is-streaming':''}`} aria-busy={active || revealing}>
     <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={PLUGINS} components={renderers}>{source}</ReactMarkdown>
     {(active || revealing) && <span className="portal-stream-cursor" aria-hidden="true"/>}

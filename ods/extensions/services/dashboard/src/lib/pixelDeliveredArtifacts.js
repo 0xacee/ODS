@@ -42,6 +42,30 @@ export function deliveredArtifactMetadata(message) {
   return artifacts?.length ? { artifacts } : {}
 }
 
+// Model-authored hosts never authorize a download. A canonical snapshot/file
+// path may select exactly one verified receipt from this completed response;
+// the download control still fetches and checks the ODS snapshot's bytes.
+export function deliveredArtifactForHref(href, artifacts) {
+  const delivered = parseDeliveredArtifacts(artifacts)
+  if (!delivered?.length || typeof href !== 'string' || !/^https?:\/\//i.test(href)
+    || /[\s\\]/.test(href)) return null
+  let url
+  try { url = new URL(href) } catch { return null }
+  if (url.username || url.password || url.search || url.hash) return null
+  const slash = href.indexOf('/', href.indexOf('://') + 3)
+  const rawPath = slash < 0 ? '' : href.slice(slash)
+  // URL parsing normalizes dot segments and backslashes. Never let that turn
+  // an unrelated or traversal-shaped URL into a receipt match.
+  if (rawPath !== url.pathname) return null
+  const matches = delivered.filter(({siteId, file}) => [
+    `/${siteId}/${file.path}`,
+    `/${siteId.slice(5)}/${file.path}`,
+    `/pixel-preview/${siteId}/${file.path}`,
+    `/preview/${siteId}/${file.path}`,
+  ].includes(rawPath))
+  return matches.length === 1 ? matches[0] : null
+}
+
 const EMBED_DIRECTIVE = /^\[embed ref="artifact_([a-f0-9]{64})" title="([^"]+)" height="([0-9]+)" \/\](?:\r?\n)*$/
 
 // Returns '' only when the entire assistant content is exactly one stand-alone

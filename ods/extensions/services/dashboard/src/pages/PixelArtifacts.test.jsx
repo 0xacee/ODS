@@ -39,6 +39,60 @@ async function send() {
   fireEvent.click(screen.getByTitle('Send'))
 }
 
+it('routes a receipt-bound authored link through verified bytes and keeps the original history',async()=>{
+  const href=`https://portal.openclaw.ai/${artifact.siteId.slice(5)}/report.md`
+  const content=`Your file is ready: [Download report.md](${href}).`
+  reply=stream([{choices:[{delta:{content}}]},marker,'[DONE]'])
+  const view=render(<Pixel/>)
+  await send()
+  const inline=await screen.findByRole('button',{name:'Download verified report.md'},{timeout:5000})
+  expect(inline).toHaveTextContent('Download report.md')
+  expect(screen.getByRole('button',{name:'Download report.md'})).toBeEnabled()
+  expect(screen.queryByRole('link',{name:/Download report/})).toBeNull()
+  expect(fetch.mock.calls.filter(([url])=>url.startsWith('/pixel-preview/'))).toHaveLength(0)
+  fireEvent.click(inline)
+  await screen.findByText('Verified download started')
+  expect(fetch).toHaveBeenCalledWith(`/pixel-preview/${artifact.siteId}/report.md`,expect.objectContaining({cache:'no-store'}))
+  expect(fetch.mock.calls.some(([url])=>url.includes('portal.openclaw.ai'))).toBe(false)
+  expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledOnce()
+  expect(JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).messages.at(-1).content).toBe(content)
+  view.unmount()
+  render(<Pixel/>)
+  expect(await screen.findByRole('button',{name:'Download verified report.md'})).toBeEnabled()
+})
+
+it('keeps unmatched external links and the existing localhost preview route unchanged',async()=>{
+  const external='https://example.com/report.md'
+  const preview=`http://${artifact.siteId}.localhost:8123/${artifact.siteId}/`
+  reply=stream([{choices:[{delta:{content:`[Source](${external}) and [Open preview](${preview}).`}}]},marker,'[DONE]'])
+  render(<Pixel/>)
+  await send()
+  await screen.findByRole('button',{name:'Download report.md'})
+  expect(await screen.findByRole('link',{name:/Source/},{timeout:5000})).toHaveAttribute('href',external)
+  expect(await screen.findByRole('link',{name:/Open preview/},{timeout:5000})).toHaveAttribute('href',`/pixel-preview/${artifact.siteId}/`)
+  expect(screen.queryByRole('button',{name:'Download verified report.md'})).toBeNull()
+})
+
+it('does not bind an authored snapshot URL without completed delivery metadata',async()=>{
+  const href=`https://example.com/${artifact.siteId}/report.md`
+  reply=stream([{choices:[{delta:{content:`[Download report.md](${href})`}}]},'[DONE]'])
+  render(<Pixel/>)
+  await send()
+  expect(await screen.findByRole('link',{name:/Download report/},{timeout:5000})).toHaveAttribute('href',href)
+  expect(screen.queryByRole('button',{name:'Download verified report.md'})).toBeNull()
+})
+
+it('uses the same digest refusal for a receipt-bound prose download',async()=>{
+  artifactResponse=async()=>({ok:true,arrayBuffer:async()=>new Uint8Array([1]).buffer})
+  reply=stream([{choices:[{delta:{content:`[Download report.md](https://example.com/${artifact.siteId}/report.md)`}}]},marker,'[DONE]'])
+  render(<Pixel/>)
+  await send()
+  fireEvent.click(await screen.findByRole('button',{name:'Download verified report.md'},{timeout:5000}))
+  await screen.findByText('Download could not be verified. Try again.')
+  expect(URL.createObjectURL).not.toHaveBeenCalled()
+  expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled()
+})
+
 it('delivers a document from terminal metadata without a site, verifies bytes on click, and restores its own history',async()=>{
   const view = render(<Pixel/>)
   await send()
