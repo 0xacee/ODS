@@ -5246,8 +5246,12 @@ def test_compose_recreation_reads_the_route_from_env_not_the_agents_environment(
                        ("EXTERNAL_LLM_URL", "http://host.docker.internal:8080")):
         monkeypatch.setenv(key, value)
     seen = []
-    monkeypatch.setattr(_mod.subprocess, 'run',
-                        lambda cmd, **kwargs: seen.append(kwargs['env']) or subprocess.CompletedProcess(cmd, 0, '', ''))
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs['env'])
+        return subprocess.CompletedProcess(cmd, 0, '', '')
+
+    monkeypatch.setattr(_mod.subprocess, 'run', fake_run)
 
     assert _mod.docker_compose_recreate(['litellm']) == (True, '')
     assert _mod.docker_compose_converge(['pixel-model-relay']) == (True, '')
