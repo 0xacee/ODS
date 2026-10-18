@@ -142,7 +142,9 @@ it('shows a note instead of an embed Portal cannot display, and keeps and copies
   try {
     const view=render(<Pixel/>)
     await send()
-    const note=await screen.findByText(EMBED_ONLY_NOTE)
+    // A live reply is revealed at about 120 characters a second: the whole
+    // note takes about a second, longer on a slow runner.
+    const note=await screen.findByText(EMBED_ONLY_NOTE,{},{timeout:5000})
     expect(note.closest('p')).toHaveClass('portal-embed-note')
     expect(screen.queryByText(/\[embed/)).toBeNull()
     expect(screen.queryByRole('region',{name:'Delivered files'})).toBeNull()
