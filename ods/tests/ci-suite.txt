@@ -60,6 +60,7 @@ tests/test-disk-space-preflight.sh
 tests/test-docker-image-pull-retry.sh
 tests/test-doctor-command.sh
 tests/test-doctor-extension-diagnostics.sh
+tests/test-doctor-spark-cuda-arch.sh
 tests/test-embeddings-prefetch-service-cache.sh
 tests/test-enable-gpu-validation.sh
 tests/test-env-example-inline-comments.sh
@@ -93,6 +94,7 @@ tests/test-linux-opencode-path.sh
 tests/test-linux-whisper-cuda-gating.sh
 tests/test-litellm-amd-auth-enforced.sh
 tests/test-litellm-config-selection.sh
+tests/test-llama-image-compute-cap.sh
 tests/test-llama-memory-budget.sh
 tests/test-llama-mtp-args.sh
 tests/test-llm-cold-storage-arithmetic.py
@@ -158,6 +160,7 @@ tests/test-opencode-runtime.sh
 tests/test-parallel-health-checks.sh
 tests/test-path-utils-cross-platform.py
 tests/test-perplexica-embedding-defaults.py
+tests/test-phase05-docker-desktop-nvidia-refusal.sh
 tests/test-phase05-podman-shim.sh
 tests/test-phase06-secret-generation.sh
 tests/test-phase08-selected-images.sh

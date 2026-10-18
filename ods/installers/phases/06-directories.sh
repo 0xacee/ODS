@@ -12,7 +12,7 @@
 #           ENABLE_VOICE, ENABLE_WORKFLOWS, ENABLE_RAG, ENABLE_HERMES,
 #           GPU_ASSIGNMENT_JSON, COMFYUI_GPU_UUID, WHISPER_GPU_UUID,
 #           EMBEDDINGS_GPU_UUID, LLAMA_SERVER_GPU_UUIDS, LLAMA_ARG_SPLIT_MODE,
-#           LLAMA_ARG_TENSOR_SPLIT,
+#           LLAMA_ARG_TENSOR_SPLIT, GPU_COMPUTE_CAP (optional),
 #           chapter(), ai(), ai_ok(), ai_warn(), log(), warn(), error()
 # Provides: WEBUI_SECRET, N8N_PASS, LITELLM_KEY, LIVEKIT_SECRET,
 #           DASHBOARD_API_KEY, SHIELD_API_KEY, TOKEN_SPY_API_KEY,
@@ -31,6 +31,8 @@ declare -F ods_native_llm_normalize_origin >/dev/null 2>&1 \
     || source "$SCRIPT_DIR/installers/lib/native-llm.sh"
 declare -F ods_amd_target_is_cdna >/dev/null 2>&1 \
     || source "$SCRIPT_DIR/installers/lib/amd-runtime.sh"
+declare -F ods_llama_image_for_compute_cap >/dev/null 2>&1 \
+    || source "$SCRIPT_DIR/installers/lib/tier-map.sh"
 
 ods_progress 38 "directories" "Preparing installation directory"
 chapter "SETTING UP INSTALLATION"
@@ -1199,6 +1201,31 @@ SERVICE_PORT_DEFAULTS
         done
         unset _amd_image_key _amd_llama_repo
     fi
+    # A GPU of compute capability 12.1 (DGX Spark GB10, RTX Spark N1X) gets
+    # unusable "????" answers from llama.cpp's CUDA 12 images, the Compose
+    # default included; it runs the CUDA 13 image config/backends/nvidia.json
+    # pins for it. Every step that sets the image (tier default, catalog
+    # selector, preserved model) ran before this, so .env and the phase 08
+    # pull name the same image. A host-native route runs no container.
+    if [[ "$GPU_BACKEND" == "nvidia" && "$NATIVE_LLM_ACTIVE" != "true" && -n "${GPU_COMPUTE_CAP:-}" ]]; then
+        if ! _compute_llama_image="$(ods_nvidia_llama_image_for_compute "$GPU_COMPUTE_CAP" "$SCRIPT_DIR/config/backends/nvidia.json")"; then
+            error "Could not read the llama.cpp image for compute capability $GPU_COMPUTE_CAP from $SCRIPT_DIR/config/backends/nvidia.json, so ODS stopped before writing its settings. The ODS files may be incomplete: download ODS again and rerun the installer. Need help? Ask on the ODS Discord: ${ODS_HELP_DISCORD_URL:-https://discord.gg/4ntNp9MAwC}"
+            return 1
+        fi
+        if [[ -n "$_compute_llama_image" ]]; then
+            _mapped_llama_image="$(ods_llama_image_for_compute_cap "${LLAMA_SERVER_IMAGE:-}" "$_compute_llama_image")"
+            if [[ "$_mapped_llama_image" != "${LLAMA_SERVER_IMAGE:-}" ]]; then
+                log "Compute capability $GPU_COMPUTE_CAP: llama-server runs $_mapped_llama_image instead of ${LLAMA_SERVER_IMAGE:-the Compose default}, a CUDA 12 build without kernels for this GPU"
+                LLAMA_SERVER_IMAGE="$_mapped_llama_image"
+            fi
+            if [[ -n "${LLAMA_SERVER_IMAGE_FALLBACK:-}" \
+                && "$(ods_llama_image_for_compute_cap "$LLAMA_SERVER_IMAGE_FALLBACK" "$_compute_llama_image")" != "$LLAMA_SERVER_IMAGE_FALLBACK" ]]; then
+                log "Not writing LLAMA_SERVER_IMAGE_FALLBACK: $LLAMA_SERVER_IMAGE_FALLBACK is a CUDA 12 build without kernels for compute capability $GPU_COMPUTE_CAP"
+                unset LLAMA_SERVER_IMAGE_FALLBACK
+            fi
+        fi
+        unset _compute_llama_image _mapped_llama_image
+    fi
     LLAMA_SERVER_MEMORY_LIMIT_VALUE=""
     if [[ "$GPU_BACKEND" == "nvidia" && "$EXTERNAL_LLM_ACTIVE" != "true" && "${ODS_MODE:-local}" != "cloud" ]]; then
         _docker_memory_gb="$(ods_docker_memory_gb 2>/dev/null || true)"
@@ -1603,6 +1630,7 @@ MODEL_RUNTIME_PROFILE=$(dotenv_quote "${MODEL_RUNTIME_PROFILE:-}")
 MODEL_RUNTIME_PROFILE_LABEL=$(dotenv_quote "${MODEL_RUNTIME_PROFILE_LABEL:-}")
 MODEL_RUNTIME_PROFILE_SOURCE=$(dotenv_quote "${MODEL_RUNTIME_PROFILE_SOURCE:-}")
 GPU_BACKEND=${GPU_BACKEND}
+$(if [[ -n "${GPU_COMPUTE_CAP:-}" ]]; then echo "GPU_COMPUTE_CAP=${GPU_COMPUTE_CAP}"; fi)
 SYSTEM_RAM_GB=${RAM_GB:-0}
 N_GPU_LAYERS=$(dotenv_value "${N_GPU_LAYERS_VALUE}")
 $(if [[ -n "${LLAMA_SERVER_IMAGE:-}" ]]; then echo "LLAMA_SERVER_IMAGE=${LLAMA_SERVER_IMAGE}"; fi)

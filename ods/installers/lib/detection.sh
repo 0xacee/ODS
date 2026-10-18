@@ -15,6 +15,7 @@
 #           normalize_profile_tier(), tier_rank(), load_backend_contract(),
 #           fix_nvidia_secure_boot(), MIN_DRIVER_VERSION
 #           Side-effect var on Jetson: JETSON_L4T_RELEASE (e.g. "R36.4.0")
+#           Side-effect var on NVIDIA: GPU_COMPUTE_CAP (e.g. "12.1")
 #
 # Modder notes:
 #   Add new GPU vendors or APU detection logic here.
@@ -328,6 +329,7 @@ detect_gpu() {
     GPU_BACKEND="cpu"  # default to CPU-only fallback
     GPU_MEMORY_TYPE="none"
     GPU_DEVICE_ID=""
+    GPU_COMPUTE_CAP=""
 
     # Try NVIDIA Jetson (Tegra SoC) first — Tegra iGPUs do not appear as PCIe
     # devices under /sys/class/drm with vendor 0x10de, and nvidia-smi (only in
@@ -439,6 +441,14 @@ detect_gpu() {
             local pci_id
             pci_id=$(nvidia-smi --query-gpu=pci.device_id --format=csv,noheader 2>/dev/null | sed -n "${_first_gpu_row}p" | xargs)
             [[ -n "$pci_id" ]] && GPU_DEVICE_ID="${pci_id:0:6}"
+            # Compute capability of the same GPU (12.1 on a DGX Spark GB10 or
+            # an RTX Spark N1X). Phase 06 picks the llama.cpp image built for
+            # it. A driver whose nvidia-smi lacks the compute_cap field (before
+            # 510) fails this query; the value then stays empty and the
+            # default image applies, as before.
+            local compute_cap
+            compute_cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | sed -n "${_first_gpu_row}p" | xargs) || compute_cap=""
+            [[ "$compute_cap" =~ ^[0-9]+\.[0-9]+$ ]] && GPU_COMPUTE_CAP="$compute_cap"
             if [[ $GPU_COUNT -gt 1 ]]; then
                 # Build a display name for multi-GPU (e.g. "RTX 3090 + RTX 4090" or "RTX 4090 × 2")
                 local first_name second_name

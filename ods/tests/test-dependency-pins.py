@@ -301,6 +301,44 @@ def test_nvidia_windows_arm64_archives_are_mirrored_in_lock() -> None:
     assert any("not present in config/backends/nvidia.json" in error for error in errors), errors
 
 
+def test_nvidia_compute_capability_image_is_locked() -> None:
+    """Compute capability 12.1 (DGX Spark GB10, RTX Spark N1X) runs a CUDA 13
+    image that no Compose file names; nvidia.json pins it and the lock records it."""
+    module = load_module()
+    lock = json.loads((ROOT / "config" / "dependency-lock.json").read_text(encoding="utf-8"))
+    contract_path = ROOT / "config" / "backends" / "nvidia.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    images = contract["runtime"]["llama_server"]["container_images_by_compute"]
+    assert sorted(images) == ["12.1"], images
+    image = images["12.1"]
+    assert image.startswith("ghcr.io/ggml-org/llama.cpp:server-cuda13-") and module.DIGEST_RE.search(image), image
+    by_id = {entry["id"]: entry for entry in lock["entries"]}
+    assert by_id["nvidia.llama-server-compute-12.1"] == {
+        "id": "nvidia.llama-server-compute-12.1", "type": "image",
+        "path": "config/backends/nvidia.json", "value": image,
+    }
+    refs = module._backend_contract_image_refs(contract_path)
+    assert [(ref.path, ref.value) for ref in refs] == [("config/backends/nvidia.json", image)], refs
+    assert refs[0].line > 0, refs
+    assert any(ref.path == "config/backends/nvidia.json" for ref in module.discover_image_refs())
+    # Without its lock entry the image is unrecorded; without the image the
+    # lock entry is stale.
+    unlocked = dict(lock, entries=[entry for entry in lock["entries"] if entry["value"] != image])
+    assert any("not recorded in dependency-lock.json" in error for error in module.validate_refs(refs, unlocked))
+    assert any("stale or undiscovered" in error for error in module.validate_refs([], lock))
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "config" / "backends").mkdir(parents=True)
+        bad = root / "config" / "backends" / "nvidia.json"
+        bad.write_text('{"runtime": {"llama_server": {"container_images_by_compute": ["x"]}}}', encoding="utf-8")
+        try:
+            module._backend_contract_image_refs(bad, root)
+        except ValueError as error:
+            assert "container_images_by_compute" in str(error)
+        else:
+            raise AssertionError("a malformed image map must fail closed")
+
+
 def test_archive_entries_need_a_sha256_and_are_not_image_refs() -> None:
     module = load_module()
     with TemporaryDirectory() as tmp:
@@ -374,6 +412,7 @@ def main() -> int:
         test_external_pins_cannot_be_bypassed_by_lock_or_latest_exception,
         test_amd_overlays_pin_official_llama_cpp_images_mirrored_in_lock_and_contract,
         test_nvidia_windows_arm64_archives_are_mirrored_in_lock,
+        test_nvidia_compute_capability_image_is_locked,
         test_archive_entries_need_a_sha256_and_are_not_image_refs,
         test_extension_library_sha_tags_are_rejected,
         test_dockerfile_heredocs_are_not_image_instructions,

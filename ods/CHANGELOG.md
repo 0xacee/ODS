@@ -64,6 +64,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     network-problem message.
 
 ### Fixed
+- On an NVIDIA GPU of compute capability 12.1, the DGX Spark GB10 and the RTX
+  Spark N1X, the model no longer answers with question marks. llama.cpp's CUDA
+  12 container images, the default among them, have no kernels for that GPU;
+  the installer now records the GPU's compute capability and runs llama.cpp's
+  CUDA 13 build of the same release (`server-cuda13-b11429`, pinned by digest)
+  there, and Models-page switches and their rollbacks keep it. Every other
+  NVIDIA GPU keeps its image, and an image you set yourself is kept. Existing
+  installs switch on their next installer run. `ods doctor` names the RTX Spark
+  beside the DGX Spark in its sm_121 check, and its fix now says to rerun the
+  installer.
+- Under Docker Desktop without an NVIDIA runtime, the Linux installer stops
+  with the cause, what to do and a link to the ODS Discord instead of
+  installing a second NVIDIA container toolkit and restarting a Docker service
+  that Docker Desktop does not use.
 - `ods status` now respects `GPU_BACKEND`, using the existing AMD and Apple
   GPU reporters instead of choosing NVIDIA tooling merely because it is
   installed. AMD device counting in `ods gpu status` uses DRM sysfs, and

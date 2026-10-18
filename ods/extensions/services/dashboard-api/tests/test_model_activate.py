@@ -7689,6 +7689,206 @@ class TestModelActivateRollback:
         assert rollback_restart < rollback_health < rollback_probe
 
 
+_NVIDIA_CONTRACT = _agent_path.parents[1] / "config" / "backends" / "nvidia.json"
+_COMPUTE_121_IMAGE = json.loads(_NVIDIA_CONTRACT.read_text(encoding="utf-8"))[
+    "runtime"]["llama_server"]["container_images_by_compute"]["12.1"]
+_CUDA12_DEFAULT_IMAGE = (
+    "ghcr.io/ggml-org/llama.cpp:server-cuda-b11429@sha256:"
+    "883915ea20a4b350e98f7284098f4d400c21e9b366e248d397cd42d90602a84c"
+)
+_CUDA12_CATALOG_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda-b9014@sha256:" + "f" * 64
+
+
+class TestComputeCapabilityLlamaImage:
+    """A compute-12.1 GPU (DGX Spark GB10, RTX Spark N1X) never runs a CUDA 12 build."""
+
+    @pytest.fixture(autouse=True)
+    def _synthetic_runtime(self, monkeypatch):
+        # The same synthetic runtime as TestModelActivateRollback.
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(_mod, "_runtime_health", lambda _env: "ok")
+        monkeypatch.setattr(_mod, "_llama_runtime_props", lambda _env: (131072, ""))
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_container_exists", lambda _container: False)
+        monkeypatch.setattr(_mod, "_container_running", lambda _container: False)
+        monkeypatch.setattr(_mod, "_verify_hermes_dashboard_ready", lambda: None)
+
+    @staticmethod
+    def _install(tmp_path, monkeypatch, env_lines: str):
+        install_dir, env_path, _env_text, _models_ini, _ini_text, _yaml, _yaml_text = (
+            _write_model_activation_fixture(tmp_path)
+        )
+        backends = install_dir / "config" / "backends"
+        backends.mkdir(parents=True)
+        shutil.copyfile(_NVIDIA_CONTRACT, backends / "nvidia.json")
+        env_path.write_text(
+            env_path.read_text(encoding="utf-8") + "MAX_CONTEXT=2048\n" + env_lines,
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        return install_dir, env_path
+
+    def test_the_pin_is_the_cuda13_build_of_the_nvidia_release(self):
+        assert _COMPUTE_121_IMAGE.startswith("ghcr.io/ggml-org/llama.cpp:server-cuda13-b11429@sha256:")
+        assert _CUDA12_DEFAULT_IMAGE.split("@")[0].rsplit("-", 1)[1] == "b11429"
+
+    @pytest.mark.parametrize(
+        ("image", "env", "expected"),
+        [
+            ("", {"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.1"}, _COMPUTE_121_IMAGE),
+            (_CUDA12_DEFAULT_IMAGE, {"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.1"}, _COMPUTE_121_IMAGE),
+            (_CUDA12_CATALOG_IMAGE, {"GPU_BACKEND": "NVIDIA", "GPU_COMPUTE_CAP": " 12.1 "}, _COMPUTE_121_IMAGE),
+            ("ghcr.io/ggml-org/llama.cpp:server-cuda12-b11429@sha256:" + "a" * 64,
+             {"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.1"}, _COMPUTE_121_IMAGE),
+            # Another CUDA 13 build and an owner's own image are kept.
+            ("ghcr.io/ggml-org/llama.cpp:server-cuda13-b9014@sha256:" + "b" * 64,
+             {"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.1"},
+             "ghcr.io/ggml-org/llama.cpp:server-cuda13-b9014@sha256:" + "b" * 64),
+            ("local/llama-gb10:sm121", {"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.1"}, "local/llama-gb10:sm121"),
+            # Every other compute capability and backend is unchanged.
+            (_CUDA12_DEFAULT_IMAGE, {"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.0"}, _CUDA12_DEFAULT_IMAGE),
+            (_CUDA12_DEFAULT_IMAGE, {"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "8.9"}, _CUDA12_DEFAULT_IMAGE),
+            ("", {"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.0"}, ""),
+            ("", {"GPU_BACKEND": "nvidia"}, ""),
+            ("", {"GPU_BACKEND": "amd", "GPU_COMPUTE_CAP": "12.1"}, ""),
+            (_CUDA12_CATALOG_IMAGE, {"GPU_BACKEND": "cpu", "GPU_COMPUTE_CAP": "12.1"}, _CUDA12_CATALOG_IMAGE),
+        ],
+    )
+    def test_image_for_compute(self, tmp_path, monkeypatch, image, env, expected):
+        self._install(tmp_path, monkeypatch, "")
+        assert _mod._llama_image_for_compute(image, env) == expected
+
+    def test_other_hosts_never_read_the_contract(self, tmp_path, monkeypatch):
+        # No nvidia.json at all: only a compute capability with an entry reads it.
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path / "missing")
+        assert _mod._llama_image_for_compute(_CUDA12_DEFAULT_IMAGE, {"GPU_BACKEND": "nvidia"}) == _CUDA12_DEFAULT_IMAGE
+        assert _mod._llama_image_for_compute("", {"GPU_BACKEND": "amd", "GPU_COMPUTE_CAP": "12.1"}) == ""
+
+    @pytest.mark.parametrize(
+        ("env", "expected"),
+        [
+            ({"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.1"}, _COMPUTE_121_IMAGE),
+            ({"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.1", "LLAMA_SERVER_IMAGE": _CUDA12_CATALOG_IMAGE},
+             _COMPUTE_121_IMAGE),
+            ({"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "12.1", "LLAMA_SERVER_IMAGE": "local/llama:own"},
+             "local/llama:own"),
+            # Elsewhere an empty value still keeps the inspected container's image.
+            ({"GPU_BACKEND": "nvidia", "GPU_COMPUTE_CAP": "8.9"}, ""),
+            ({"GPU_BACKEND": "nvidia", "LLAMA_SERVER_IMAGE": _CUDA12_CATALOG_IMAGE}, _CUDA12_CATALOG_IMAGE),
+            ({"GPU_BACKEND": "amd", "GPU_COMPUTE_CAP": "12.1", "LLAMA_SERVER_IMAGE": _CUDA12_CATALOG_IMAGE}, ""),
+        ],
+    )
+    def test_rollback_image(self, tmp_path, monkeypatch, env, expected):
+        self._install(tmp_path, monkeypatch, "")
+        assert _mod._container_llama_rollback_image(env) == expected
+
+    @pytest.mark.parametrize("case", ["no-image", "previous-catalog-image", "model-image"])
+    def test_in_container_switch_on_compute_121_runs_and_writes_the_cuda13_build(
+        self, tmp_path, monkeypatch, case,
+    ):
+        env_lines = "GPU_COMPUTE_CAP=12.1\n"
+        install_dir, env_path = self._install(tmp_path, monkeypatch, env_lines)
+        catalog_path = install_dir / "config" / "model-library.json"
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        if case == "previous-catalog-image":
+            catalog["models"].append({
+                "id": "previous-model", "gguf_file": "old-model.gguf",
+                "gguf_url": "https://example.test/old-model.gguf", "gguf_sha256": "0" * 64,
+                "llm_model_name": "old-model", "context_length": 4096,
+                "llama_server_image": _CUDA12_CATALOG_IMAGE,
+            })
+            env_path.write_text(
+                env_path.read_text(encoding="utf-8") + f"LLAMA_SERVER_IMAGE={_CUDA12_CATALOG_IMAGE}\n",
+                encoding="utf-8",
+            )
+        elif case == "model-image":
+            catalog["models"][0]["llama_server_image"] = _CUDA12_CATALOG_IMAGE
+        catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+        recreates = []
+        monkeypatch.setenv("ODS_HOST_INSTALL_DIR", str(install_dir))
+        monkeypatch.setattr(
+            _mod,
+            "_recreate_llama_server",
+            lambda env, override_image="": recreates.append((dict(env), override_image)),
+        )
+        monkeypatch.setattr(_mod, "_wait_for_model_readiness", _mock_verified_readiness)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+
+        assert handler.response_code == 200
+        assert recreates[0][1] == _COMPUTE_121_IMAGE
+        # .env names it too, so a later Compose start does not fall back to
+        # the CUDA 12 default.
+        assert _mod.load_env(env_path)["LLAMA_SERVER_IMAGE"] == _COMPUTE_121_IMAGE
+
+    @pytest.mark.parametrize("compute_cap", ["12.0", "8.9", None])
+    def test_in_container_switch_elsewhere_keeps_the_cuda12_default(self, tmp_path, monkeypatch, compute_cap):
+        env_lines = f"GPU_COMPUTE_CAP={compute_cap}\n" if compute_cap else ""
+        install_dir, env_path = self._install(tmp_path, monkeypatch, env_lines)
+        recreates = []
+        monkeypatch.setenv("ODS_HOST_INSTALL_DIR", str(install_dir))
+        monkeypatch.setattr(
+            _mod,
+            "_recreate_llama_server",
+            lambda env, override_image="": recreates.append((dict(env), override_image)),
+        )
+        monkeypatch.setattr(_mod, "_wait_for_model_readiness", _mock_verified_readiness)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+
+        assert handler.response_code == 200
+        assert recreates[0][1] == _CUDA12_DEFAULT_IMAGE
+        assert "LLAMA_SERVER_IMAGE" not in _mod.load_env(env_path)
+
+    def test_owner_image_is_kept_on_compute_121(self, tmp_path, monkeypatch):
+        install_dir, env_path = self._install(
+            tmp_path, monkeypatch, "GPU_COMPUTE_CAP=12.1\nLLAMA_SERVER_IMAGE=local/llama-gb10:sm121\n",
+        )
+        recreates = []
+        monkeypatch.setenv("ODS_HOST_INSTALL_DIR", str(install_dir))
+        monkeypatch.setattr(
+            _mod,
+            "_recreate_llama_server",
+            lambda env, override_image="": recreates.append((dict(env), override_image)),
+        )
+        monkeypatch.setattr(_mod, "_wait_for_model_readiness", _mock_verified_readiness)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+
+        assert handler.response_code == 200
+        assert recreates[0][1] == "local/llama-gb10:sm121"
+        assert _mod.load_env(env_path)["LLAMA_SERVER_IMAGE"] == "local/llama-gb10:sm121"
+
+    def test_failed_switch_on_compute_121_rolls_back_to_the_cuda13_build(self, tmp_path, monkeypatch):
+        install_dir, env_path = self._install(tmp_path, monkeypatch, "GPU_COMPUTE_CAP=12.1\n")
+        original_env = env_path.read_text(encoding="utf-8")
+        images = []
+        monkeypatch.setenv("ODS_HOST_INSTALL_DIR", str(install_dir))
+        monkeypatch.setattr(
+            _mod,
+            "_recreate_llama_server",
+            lambda env, override_image="": images.append((env["GGUF_FILE"], override_image)),
+        )
+        monkeypatch.setattr(
+            _mod,
+            "_wait_for_model_readiness",
+            lambda *_args, **kwargs: (_ for _ in ()).throw(RuntimeError("simulated load failure"))
+            if kwargs.get("gguf_file") == "new-model.gguf"
+            else _mock_verified_readiness(*_args, **kwargs),
+        )
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "target-model")
+
+        assert handler.response_code == 500
+        assert handler.parse_response()["rolled_back"] is True
+        assert images == [("new-model.gguf", _COMPUTE_121_IMAGE), ("old-model.gguf", _COMPUTE_121_IMAGE)]
+        assert env_path.read_text(encoding="utf-8") == original_env
+
+
 class TestNvidiaHealthUnchanged:
     """Ensure the NVIDIA health check still uses the simple '"ok"' check."""
 
