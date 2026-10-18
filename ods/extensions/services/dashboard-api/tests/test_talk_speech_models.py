@@ -49,6 +49,14 @@ def test_speech_models_keep_defaults_when_unset(install_env):
     assert talk._tts_voice() == "af_heart"
 
 
+def test_retired_piper_voice_is_not_sent_to_kokoro(install_env):
+    # What every fresh install writes today: no AUDIO_TTS_VOICE and the retired
+    # Piper TTS_VOICE. Kokoro answers 400 "Voice ... not found" for it.
+    install_env("TTS_VOICE=en_US-lessac-medium\n")
+
+    assert talk._tts_voice() == "af_heart"
+
+
 def test_transcription_requests_the_configured_model(install_env, monkeypatch):
     install_env("AUDIO_STT_MODEL=deepdml/faster-whisper-large-v3-turbo-ct2\n")
     seen = {}

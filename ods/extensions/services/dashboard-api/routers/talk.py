@@ -446,7 +446,9 @@ def _tts_model() -> str:
 
 
 def _tts_voice() -> str:
-    return read_live_env_value("AUDIO_TTS_VOICE") or read_live_env_value("TTS_VOICE") or "af_heart"
+    # Only the Kokoro voice. Installers still write TTS_VOICE=en_US-lessac-medium,
+    # the retired Piper voice, which Kokoro rejects with a 400 for every reply.
+    return read_live_env_value("AUDIO_TTS_VOICE") or "af_heart"
 
 
 async def _transcribe_bytes(data: bytes, filename: str, content_type: str) -> str:
