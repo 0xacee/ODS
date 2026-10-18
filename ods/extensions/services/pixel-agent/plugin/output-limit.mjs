@@ -6,24 +6,24 @@
 // one write call against an 8,192-token limit).
 //
 // The guard names the limit to the owner and tells the next turn in that chat
-// to write in smaller parts. Pure functions.
+// how to write the file in smaller parts. Pure functions.
 import { assistantMessageText } from './progress-finalization.mjs';
 
 const DISCORD = 'https://discord.gg/4ntNp9MAwC';
-const MAX_NAME_CHARS = 64;
 const MAX_PATH_CHARS = 200;
 const PATH_KEYS = ['path', 'file_path', 'filePath'];
+const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
 
-function boundedText(value, max) {
+function boundedPath(value) {
   if (typeof value !== 'string') return undefined;
   const text = value.replace(/[\u0000-\u001f\u007f`]/g, '').trim();
-  return text ? text.slice(0, max) : undefined;
+  return text ? text.slice(0, MAX_PATH_CHARS) : undefined;
 }
 
 function callPath(args) {
   if (!args || typeof args !== 'object') return undefined;
   for (const key of PATH_KEYS) {
-    const path = boundedText(args[key], MAX_PATH_CHARS);
+    const path = boundedPath(args[key]);
     if (path) return path;
   }
   return undefined;
@@ -40,14 +40,11 @@ export function outputLimitCut(message) {
   const tokens = message.usage?.output;
   return {
     tokens: Number.isSafeInteger(tokens) && tokens > 0 ? tokens : undefined,
-    tool: call ? boundedText(call.name, MAX_NAME_CHARS) ?? 'tool' : undefined,
+    // Model-supplied names reach owner markdown only as plain identifiers.
+    tool: call ? (TOOL_NAME.test(call.name ?? '') ? call.name : 'tool') : undefined,
     path: call ? callPath(call.arguments) : undefined,
     answered: !call && Boolean(assistantMessageText(message)),
   };
-}
-
-export function lastAssistantMessage(messages) {
-  return Array.isArray(messages) ? messages.findLast(message => message?.role === 'assistant') : undefined;
 }
 
 function limitPhrase(cut) {
@@ -66,25 +63,25 @@ export function outputLimitStopText(cut, {remote = false} = {}) {
     return `**Portal stopped: the model used ${limitPhrase(cut)} before it wrote an answer.** ` +
       'Send "continue" to try again. ' + remoteAdvice(remote) + help;
   }
-  const target = cut.path ? ` while writing \`${cut.path}\`` : ` in the middle of a ${cut.tool} call`;
+  const target = cut.path ? ` while writing \`${cut.path}\`` : ` in the middle of a \`${cut.tool}\` call`;
   return `**Portal stopped: the model reached ${limitPhrase(cut)}${target}.** ` +
-    (cut.path ? `That call did not run, so \`${cut.path}\` was not changed. ` : 'That call did not run. ') +
+    (cut.path ? `That call did not run, so it did not change \`${cut.path}\`. ` : 'That call did not run. ') +
     'Send "continue" and Portal will write it in smaller parts. ' + remoteAdvice(remote) + help;
 }
 
-// Follows a cut-off text answer, which is delivered as it is.
+// One line after a cut-off text answer, which is delivered as it is.
 export function outputLimitNotice(cut, {remote = false} = {}) {
-  return `This reply was cut off at the model's ${cut.tokens ? `${cut.tokens.toLocaleString('en-US')}-token ` : ''}` +
-    'output limit. Send "continue" for the rest. ' + remoteAdvice(remote).trim();
+  return (`This reply was cut off at the model's ${cut.tokens ? `${cut.tokens.toLocaleString('en-US')}-token ` : ''}` +
+    'output limit. Send "continue" for the rest. ' + remoteAdvice(remote)).trim();
 }
 
 // Model-only context for the chat's next turn after a cut-off tool call.
 export function outputLimitContext(cut) {
   const limit = cut.tokens ? `the model's ${cut.tokens}-token output limit` : "the model's output limit";
-  const target = cut.path ? ` while writing ${cut.path}` : ` in the middle of a ${cut.tool} call`;
+  const target = cut.path ? ` while writing ${JSON.stringify(cut.path)}` : ` in the middle of a ${cut.tool} call`;
   const lines = cut.tokens ? ` (about ${Math.max(50, Math.round(cut.tokens / 200) * 10)} lines of code)` : '';
   return `[ODS Pixel output limit] Your previous reply reached ${limit}${target}, so that call never ran ` +
-    'and nothing was changed by it. Do not send it as one call again. Write it in smaller parts: split the program ' +
+    'and changed nothing. If the owner still wants that work, do not send it as one call again: split the program ' +
     'into several files, or write a short first version and add the rest with edit calls. Keep each call under ' +
     `half of that limit${lines}.`;
 }

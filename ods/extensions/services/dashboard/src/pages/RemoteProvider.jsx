@@ -395,7 +395,9 @@ export default function RemoteProvider({ compact = false }) {
   const [testResult, setTestResult] = useState(null)
   const [testError, setTestError] = useState(null)
   const [form, setForm] = useState(INITIAL_FORM)
-  const formEdit = useRef({ dirty: false, revision: 0 })
+  // outputLimitSet: the owner typed the output limit, or a saved route set
+  // it. Until then it follows the context window.
+  const formEdit = useRef({ dirty: false, revision: 0, outputLimitSet: false })
   const [planning, setPlanning] = useState(false)
   const [applyingAction, setApplyingAction] = useState(null)
   const [planResult, setPlanResult] = useState(null)
@@ -419,6 +421,7 @@ export default function RemoteProvider({ compact = false }) {
       setStatusData(payload)
       const provider = payload?.routeState?.provider
       if (!formEdit.current.dirty && provider) {
+        formEdit.current.outputLimitSet = Boolean(provider.maxTokens)
         setForm(current => ({
           ...current,
           baseUrl: provider.baseUrl || '',
@@ -476,13 +479,12 @@ export default function RemoteProvider({ compact = false }) {
   const updateForm = (key, value) => {
     formEdit.current.dirty = true
     formEdit.current.revision += 1
+    if (key === 'maxTokens') formEdit.current.outputLimitSet = true
+    const follow = key === 'contextLength' && !formEdit.current.outputLimitSet
     setForm(current => ({
       ...current,
       [key]: value,
-      // The output limit follows the context window until the owner sets it.
-      ...(key === 'contextLength' && current.maxTokens === defaultMaxTokens(current.contextLength)
-        ? { maxTokens: defaultMaxTokens(value) }
-        : {}),
+      ...(follow ? { maxTokens: defaultMaxTokens(value) } : {}),
     }))
   }
 

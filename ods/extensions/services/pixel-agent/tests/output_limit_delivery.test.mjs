@@ -6,8 +6,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
-import {createIngressServer} from '../host/pixel_ingress.mjs';
+import {createIngressServer, parseVerificationResponse} from '../host/pixel_ingress.mjs';
 import {createToolLoopGuard} from '../plugin/tool-loop-guard.mjs';
 import {outputLimitCut} from '../plugin/output-limit.mjs';
 import {RUN_PROGRESS_LIMITS, RUN_PROGRESS_STOP_REASON} from '../plugin/run-progress-budget.mjs';
@@ -18,26 +19,24 @@ const USER = 'ods-' + 'b'.repeat(64);
 const OWNER = {agentId: 'pixel', runId: RUN_ID, sessionId: 'laptop-session', sessionKey: `agent:pixel:openai-user:${USER}`, trigger: 'user'};
 const PROMPT = 'Make me a space shooter game I can play in the browser.';
 const CAPABILITIES = {runTimeoutSeconds: 1800, executionHost: 'sandbox', workspaceRoot: '/workspace'};
+// An existing project, so its files may live in game/ (run_deadline_delivery).
+const PREVIEW_PROMPT = 'Fix the wolf and boss hitboxes in my game. Publish the game preview when it works.';
 const HELP = 'If it keeps happening, [get help on Discord](https://discord.gg/4ntNp9MAwC).';
 const REMOTE = 'If your API allows longer replies, raise Max output tokens in Settings → Remote model → Advanced. ';
 const stopCopy = (remote = false) => '**Portal stopped: the model reached its 8,192-token output limit while writing `space-game/game.js`.** ' +
-  'That call did not run, so `space-game/game.js` was not changed. Send "continue" and Portal will write it in smaller parts. ' +
+  'That call did not run, so it did not change `space-game/game.js`. Send "continue" and Portal will write it in smaller parts. ' +
   (remote ? REMOTE : '') + HELP;
 const NEXT_TURN_CONTEXT = "[ODS Pixel output limit] Your previous reply reached the model's 8192-token output limit while writing " +
-  'space-game/game.js, so that call never ran and nothing was changed by it. Do not send it as one call again. ' +
-  'Write it in smaller parts: split the program into several files, or write a short first version and add the rest ' +
-  'with edit calls. Keep each call under half of that limit (about 410 lines of code).';
+  '"space-game/game.js", so that call never ran and changed nothing. If the owner still wants that work, do not send it ' +
+  'as one call again: split the program into several files, or write a short first version and add the rest with edit ' +
+  'calls. Keep each call under half of that limit (about 410 lines of code).';
 // The laptop transcript's last reply: narration, then the cut-off write.
 const CUT_WRITE = {role: 'assistant', stopReason: 'length', usage: {input: 21480, output: 8192},
   content: [{type: 'text', text: 'Now the game logic:'},
     {type: 'toolCall', id: 'write-game', name: 'write', arguments: {path: 'space-game/game.js', content: 'const canvas = document.'}}]};
-const ended = (last, extra = {}) => ({success: true, ...extra, messages: [
-  {role: 'user', content: [{type: 'text', text: PROMPT}]},
-  {role: 'assistant', stopReason: 'toolUse', content: [{type: 'toolCall', id: 'write-html', name: 'write',
-    arguments: {path: 'space-game/index.html', content: '<!doctype html><canvas></canvas><script src="game.js"></script>'}}]},
-  {role: 'toolResult', toolCallId: 'write-html', toolName: 'write', content: [{type: 'text', text: 'Successfully wrote space-game/index.html.'}]},
-  last,
-]});
+const CUT_ANSWER = {role: 'assistant', stopReason: 'length', usage: {output: 8192}, content: [{type: 'text', text: 'Once upon a time the wolf'}]};
+const DONE = {role: 'assistant', stopReason: 'stop', content: [{type: 'text', text: 'The game is ready.'}]};
+const history = last => [{role: 'user', content: [{type: 'text', text: PROMPT}]}, last];
 
 function fixture({context = OWNER, prompt = PROMPT, remote = false} = {}) {
   const aborts = [];
@@ -48,7 +47,33 @@ function fixture({context = OWNER, prompt = PROMPT, remote = false} = {}) {
   });
   const begin = (ctx = context, text = prompt) => guard.observeRun(ctx, 'pixel', {prompt: text}, CAPABILITIES);
   begin();
-  return {guard, aborts, begin};
+  // Each reply is written to the transcript (before_message_write), then the
+  // run ends with the whole session history (agent_end).
+  const end = (replies, ctx = context, extra = {}) => {
+    for (const message of replies) guard.observeReplyEnd({message}, ctx, 'pixel');
+    guard.observeAgentEnd({success: true, ...extra, messages: history(replies.at(-1))}, ctx);
+  };
+  const invoke = (toolName, params, result, toolCallId) => {
+    const ctx = {...context, toolName, toolCallId};
+    const before = guard.beforeToolCall({toolName, params, toolCallId}, ctx);
+    assert.notEqual(before?.block, true, before?.blockReason);
+    guard.afterToolCall({toolName, params: before?.params ?? params, result, toolCallId}, ctx);
+    guard.toolResultPersist({toolName, toolCallId, message: {role: 'toolResult', toolName, toolCallId, ...result}}, ctx);
+  };
+  // A verified publication of game/ (the host snapshot digest the guard checks).
+  const publish = () => {
+    const content = '<!doctype html><title>Space</title><script src="game.js"></script>';
+    invoke('write', {path: 'game/index.html', content}, {content: [{type: 'text', text: 'written'}], details: {status: 'completed'}}, 'write-index');
+    const length = (bytes, value) => { const buffer = Buffer.alloc(bytes); bytes === 4 ? buffer.writeUInt32BE(value) : buffer.writeBigUInt64BE(BigInt(value)); return buffer; };
+    const sha256 = createHash('sha256').update(length(4, 10)).update('index.html').update(length(8, content.length)).update(content).digest('hex');
+    const siteId = `site-${sha256.slice(0, 24)}`;
+    const details = {schemaVersion: 1, kind: 'ods-pixel-workspace-preview', status: 'succeeded', relativeDirectory: 'game', port: 9437,
+      url: `http://${siteId}.localhost:9437/${siteId}/`, siteId, files: 1, bytes: content.length, sha256, entryFile: 'index.html',
+      entrySha256: createHash('sha256').update(content).digest('hex'), httpStatus: 200, readbackVerified: true, executable: false, overwritten: false};
+    invoke('pixel_ods_workspace_preview', {relativeDirectory: 'game'}, {content: [{type: 'text', text: 'published'}], details}, 'preview');
+    return details.url;
+  };
+  return {guard, aborts, begin, end, publish};
 }
 
 test('a reply cut at the limit is read from its stop reason, usage and last tool call', () => {
@@ -58,52 +83,68 @@ test('a reply cut at the limit is read from its stop reason, usage and last tool
   // Only the last call can be the cut one; an earlier call in the reply is complete.
   assert.equal(outputLimitCut({...CUT_WRITE, content: [{type: 'toolCall', id: 'a', name: 'read', arguments: {path: 'notes.md'}},
     ...CUT_WRITE.content]}).path, 'space-game/game.js');
-  // Model-supplied names cannot break out of their code span or add lines.
-  assert.deepEqual(outputLimitCut({...CUT_WRITE, usage: {}, content: [{type: 'toolCall', id: 'w', name: 'write',
-    arguments: {path: '`a`\nb.js'}}]}), {tokens: undefined, tool: 'write', path: 'ab.js', answered: false});
-  assert.deepEqual(outputLimitCut({role: 'assistant', stopReason: 'length', usage: {output: 8192},
-    content: [{type: 'text', text: 'Part one of the essay'}]}), {tokens: 8192, tool: undefined, path: undefined, answered: true});
+  // Model-supplied names cannot break out of their code span, add lines or links.
+  assert.deepEqual(outputLimitCut({...CUT_WRITE, usage: {}, content: [{type: 'toolCall', id: 'w',
+    name: '[Open preview](https://evil.example/x)', arguments: {path: '`a`\nb.js'}}]}),
+  {tokens: undefined, tool: 'tool', path: 'ab.js', answered: false});
+  assert.deepEqual(outputLimitCut(CUT_ANSWER), {tokens: 8192, tool: undefined, path: undefined, answered: true});
 });
 
 test('laptop replay: the owner learns the limit, the file and the remedy instead of no reason', () => {
   const f = fixture();
-  f.guard.observeAgentEnd(ended(CUT_WRITE), OWNER);
+  f.end([CUT_WRITE]);
   const verification = f.guard.deliveryVerificationForRun(RUN_ID);
   assert.equal(verification.status, 'failed');
   assert.ok(verification.text.startsWith(stopCopy()), verification.text);
+  assert.doesNotThrow(() => parseVerificationResponse(verification, RUN_ID));
   const reply = f.guard.replyPayloadSending({runId: RUN_ID, kind: 'final', payload: {text: ''}});
   assert.equal(reply.payload.text, verification.text);
 });
 
 test('on a remote API route the owner is also told where to raise the limit', () => {
   const f = fixture({remote: true});
-  f.guard.observeAgentEnd(ended(CUT_WRITE), OWNER);
+  f.end([CUT_WRITE]);
   assert.ok(f.guard.deliveryVerificationForRun(RUN_ID).text.startsWith(stopCopy(true)));
+});
+
+test('a cut after a verified publication keeps the preview link and receipt', () => {
+  const f = fixture({prompt: PREVIEW_PROMPT});
+  const url = f.publish();
+  f.end([CUT_WRITE]);
+  const verification = f.guard.deliveryVerificationForRun(RUN_ID);
+  assert.equal(verification.status, 'failed');
+  assert.ok(verification.text.startsWith(stopCopy()), verification.text);
+  assert.ok(verification.text.includes(url), verification.text);
+  assert.equal(verification.preview.url, url);
+  assert.doesNotThrow(() => parseVerificationResponse(verification, RUN_ID));
 });
 
 test('a reply that spent the whole limit before answering says so', () => {
   const f = fixture({prompt: 'Explain how the hitbox code works.'});
-  f.guard.observeAgentEnd(ended({role: 'assistant', stopReason: 'length', usage: {output: 8192},
-    content: [{type: 'thinking', thinking: 'The hitboxes are...'}]}), OWNER);
+  f.end([{role: 'assistant', stopReason: 'length', usage: {output: 8192}, content: [{type: 'thinking', thinking: 'The hitboxes are...'}]}]);
   assert.deepEqual(f.guard.deliveryVerificationForRun(RUN_ID), {status: 'failed', text:
     '**Portal stopped: the model used its 8,192-token output limit before it wrote an answer.** ' +
     `Send "continue" to try again. ${HELP}`});
 });
 
-test('a cut-off text answer is delivered as written, with a note after it', () => {
-  const f = fixture({prompt: 'Write a long story about the wolf.', remote: true});
-  const before = f.guard.deliveryVerificationForRun(RUN_ID);
-  f.guard.observeAgentEnd(ended({role: 'assistant', stopReason: 'length', usage: {output: 8192},
-    content: [{type: 'text', text: 'Once upon a time the wolf'}]}), OWNER);
-  const verification = f.guard.deliveryVerificationForRun(RUN_ID);
-  assert.equal(verification.text, before.text);
-  assert.equal(verification.notice, "This reply was cut off at the model's 8,192-token output limit. " +
-    'Send "continue" for the rest. If your API allows longer replies, raise Max output tokens in Settings → Remote model → Advanced.');
+test('a cut-off text answer keeps its delivery and gains one note line the ingress accepts', () => {
+  for (const prompt of ['Write a long story about the wolf.', PREVIEW_PROMPT]) {
+    const f = fixture({prompt, remote: true});
+    if (prompt.includes('Publish')) f.publish();
+    const before = f.guard.deliveryVerificationForRun(RUN_ID);
+    f.end([CUT_ANSWER]);
+    const verification = f.guard.deliveryVerificationForRun(RUN_ID);
+    const {notice, ...rest} = verification;
+    assert.deepEqual(rest, before, prompt);
+    assert.equal(notice, "This reply was cut off at the model's 8,192-token output limit. " +
+      'Send "continue" for the rest. If your API allows longer replies, raise Max output tokens in Settings → Remote model → Advanced.');
+    assert.doesNotThrow(() => parseVerificationResponse(verification, RUN_ID));
+  }
 });
 
-test('the chat\'s next turn is told to write in smaller parts, once', () => {
+test('the chat\'s next owner turn is told about the cut, once', () => {
   const f = fixture();
-  f.guard.observeAgentEnd(ended(CUT_WRITE), OWNER);
+  f.end([CUT_WRITE]);
   assert.equal(f.guard.promptContextForRun(RUN_ID), undefined, 'not the cut run itself');
   const next = {...OWNER, runId: NEXT_RUN_ID};
   f.begin(next, 'continue');
@@ -115,27 +156,53 @@ test('the chat\'s next turn is told to write in smaller parts, once', () => {
   assert.equal(f.guard.promptContextForRun('chatcmpl_later'), undefined, 'taken once');
 });
 
-test('another chat is not told about this chat\'s limit, and a cut answer leaves no turn context', () => {
+test('another chat, a cron run or a cut answer gets no turn context', () => {
   const f = fixture();
-  f.guard.observeAgentEnd(ended(CUT_WRITE), OWNER);
-  const other = {...OWNER, runId: NEXT_RUN_ID, sessionKey: 'agent:pixel:openai-user:other'};
-  f.begin(other, 'Hello');
+  f.end([CUT_WRITE]);
+  f.begin({...OWNER, runId: NEXT_RUN_ID, sessionKey: 'agent:pixel:openai-user:other'}, 'Hello');
   assert.equal(f.guard.promptContextForRun(NEXT_RUN_ID), undefined);
+  f.begin({...OWNER, runId: 'chatcmpl_cron', trigger: 'cron'}, 'Nightly check');
+  assert.equal(f.guard.promptContextForRun('chatcmpl_cron'), undefined);
   const g = fixture();
-  g.guard.observeAgentEnd(ended({role: 'assistant', stopReason: 'length', usage: {output: 8192},
-    content: [{type: 'text', text: 'Once upon a time'}]}), OWNER);
+  g.end([CUT_ANSWER]);
   g.begin({...OWNER, runId: NEXT_RUN_ID}, 'continue');
   assert.equal(g.guard.promptContextForRun(NEXT_RUN_ID), undefined);
 });
 
-for (const [name, last] of [
-  ['a completed answer', {role: 'assistant', stopReason: 'stop', content: [{type: 'text', text: 'The game is ready.'}]}],
-  ['a tool turn', {...CUT_WRITE, stopReason: 'toolUse'}],
-  ['an error', {role: 'assistant', stopReason: 'error', errorMessage: 'upstream 500', content: []}],
+test('only this attempt\'s replies count: an old cut in the history or a later finish clears it', () => {
+  const f = fixture();
+  // A precheck agent_end carries only the history, which still ends on the old cut.
+  f.guard.observeAgentEnd({success: true, messages: history(CUT_WRITE)}, OWNER);
+  assert.doesNotMatch(f.guard.deliveryVerificationForRun(RUN_ID).text ?? '', /output limit/);
+  f.end([CUT_WRITE]);
+  assert.match(f.guard.deliveryVerificationForRun(RUN_ID).text, /output limit/);
+  f.begin();
+  f.end([DONE]);
+  assert.doesNotMatch(f.guard.deliveryVerificationForRun(RUN_ID).text ?? '', /output limit/);
+  f.begin({...OWNER, runId: NEXT_RUN_ID}, 'continue');
+  assert.equal(f.guard.promptContextForRun(NEXT_RUN_ID), undefined, 'the finished retry dropped the chat record');
+});
+
+for (const [name, context, prompt] of [
+  ['a cron turn', {...OWNER, trigger: 'cron', sessionKey: 'agent:pixel:cron:nightly'}, PROMPT],
+  ['a subagent', {...OWNER, sessionKey: 'agent:pixel:subagent:7f2c'}, PROMPT],
+  ['a team worker in the owner session', OWNER, `You are the Builder in the owner's Portal team.\n\n${PROMPT}`],
+]) test(`no output-limit copy for ${name}`, () => {
+  const f = fixture({context, prompt});
+  const before = f.guard.deliveryVerificationForRun(RUN_ID);
+  f.end([CUT_WRITE], context);
+  assert.deepEqual(f.guard.deliveryVerificationForRun(RUN_ID), before);
+});
+
+for (const [name, last, extra] of [
+  ['a completed answer', DONE, {}],
+  ['a tool turn', {...CUT_WRITE, stopReason: 'toolUse'}, {}],
+  ['an error', {role: 'assistant', stopReason: 'error', errorMessage: 'upstream 500', content: []}, {}],
+  ['a failed run', CUT_WRITE, {success: false}],
 ]) test(`no output-limit copy for ${name}`, () => {
   const f = fixture();
   const before = f.guard.deliveryVerificationForRun(RUN_ID);
-  f.guard.observeAgentEnd(ended(last), OWNER);
+  f.end([last], OWNER, extra);
   assert.deepEqual(f.guard.deliveryVerificationForRun(RUN_ID), before);
 });
 
@@ -143,7 +210,7 @@ test('an owner cancel keeps the cancel outcome', async () => {
   const f = fixture();
   assert.equal(await f.guard.abortUserRun(USER), true);
   const cancelled = f.guard.deliveryVerificationForRun(RUN_ID);
-  f.guard.observeAgentEnd(ended(CUT_WRITE), OWNER);
+  f.end([CUT_WRITE]);
   assert.deepEqual(f.guard.deliveryVerificationForRun(RUN_ID), cancelled);
 });
 
@@ -154,13 +221,13 @@ test('a budget stop keeps its own text', () => {
     f.guard.toolResultPersist({toolCallId, message: {role: 'toolResult', toolName: 'web_fetch', toolCallId, isError: true,
       content: [{type: 'text', text: 'Web fetch failed (403)'}]}}, {...OWNER, toolName: 'web_fetch', toolCallId});
   }
-  f.guard.observeAgentEnd(ended(CUT_WRITE), OWNER);
+  f.end([CUT_WRITE]);
   const verification = f.guard.deliveryVerificationForRun(RUN_ID);
   assert.match(verification.text, new RegExp('^' + RUN_PROGRESS_STOP_REASON.slice(0, 40)));
   assert.doesNotMatch(verification.text, /output limit/);
 });
 
-test('the plugin entry reads the remote route from the live config', () => {
+test('the plugin entry reads the remote route from the live config and observes every reply', () => {
   const entry = readFileSync(new URL('../plugin/index.js', import.meta.url), 'utf8');
   const declaration = entry.match(/remoteModelRoute: (\(\) => [\s\S]*?=== 'string'),/);
   assert.ok(declaration);
@@ -171,6 +238,7 @@ test('the plugin entry reads the remote route from the live config', () => {
   assert.equal(resolve({runtime: {config: {current: () => config({})}}, config: config({modelRouteFingerprint: fingerprint})}), false);
   assert.equal(resolve({config: config({modelRouteFingerprint: fingerprint})}), true);
   assert.equal(resolve({config: {}}), false);
+  assert.match(entry, /api\.on\("before_message_write", \(event, context\) => \{[^}]*toolLoopGuard\.observeReplyEnd\(event, context, AGENT_ID\);/);
 });
 
 async function listen(server) {
@@ -197,7 +265,7 @@ test(`Portal receives the output-limit stop over the real ingress, stream=${stre
       case '/health': result = {ok: true}; break;
       case '/v1/chat/completions':
         // The cut-off reply carried no visible answer.
-        f.guard.observeAgentEnd(ended(CUT_WRITE), OWNER);
+        f.end([CUT_WRITE]);
         result = {id: RUN_ID, choices: [{index: 0, message: {role: 'assistant', content: ''}, finish_reason: 'length'}]};
         break;
       case '/pixel-ods/verification': result = {...f.guard.deliveryVerificationForRun(body.runId), task}; break;

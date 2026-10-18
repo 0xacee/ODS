@@ -451,6 +451,18 @@ test('the output limit is a quarter of the context window until the owner sets i
   expect(output).toHaveValue(16384)
 })
 
+test('a saved route keeps its output limit when the context changes', async () => {
+  globalThis.fetch.mockResolvedValueOnce(response(statusPayload))
+
+  render(createElement(RemoteProvider))
+  await screen.findByRole('heading', { name: 'Remote model' })
+  const output = screen.getByLabelText('Max output tokens')
+  // 4096 is a quarter of the saved 32768-token context, as typed by the owner.
+  expect(output).toHaveValue(4096)
+  fireEvent.change(screen.getByLabelText('Context window'), { target: { value: '131072' } })
+  expect(output).toHaveValue(4096)
+})
+
 test('applies direct provider configuration and clears the secret input', async () => {
   globalThis.fetch
     .mockResolvedValueOnce(response(statusPayload))
