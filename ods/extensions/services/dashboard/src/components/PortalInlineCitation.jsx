@@ -1,9 +1,13 @@
 import {useId, useState} from 'react'
 import PortalSiteIcon from './PortalSiteIcon'
+import PixelArtifactDownload from './PixelArtifactDownload'
+import {deliveredArtifactForHref} from '../lib/pixelDeliveredArtifacts'
 
 /** Decorate only links actually present in the answer; icons are not verification. */
-export default function PortalInlineCitation({href, children}) {
+export default function PortalInlineCitation({href, children, artifacts}) {
   const id=useId(), [open,setOpen]=useState(false)
+  const artifact=deliveredArtifactForHref(href,artifacts)
+  if(artifact)return <PixelArtifactDownload key={`${artifact.siteId}/${artifact.file.path}/${artifact.file.sha256}/${artifact.file.bytes}`} preview={artifact} file={artifact.file} inline>{children}</PixelArtifactDownload>
   let url
   try { url=new URL(href); if(!['https:','http:'].includes(url.protocol))return <span>{children}</span> } catch {return <span>{children}</span>}
   const snapshot = href.match(/^http:\/\/(site-[a-f0-9]{24})\.localhost:([1-9][0-9]{0,4})\/\1\/$/)
