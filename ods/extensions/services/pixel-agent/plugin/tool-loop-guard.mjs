@@ -423,6 +423,17 @@ export const OPERATIONS_REQUIRES_PROJECTIONS_REASON =
 export const OPERATIONS_LOOP_ABORT_REASON =
   "Pixel stopped this response because it requested another non-Operations tool after the host Operations boundary was enforced. Start a fresh message to retry the named broker action.";
 
+// Owner copy for that stop. The harness ends the aborted run with its own
+// error, which read "LLM request timed out." (fleet 2026-10-18, laptop).
+export function operationsLoopDeliveryText(tool, {evidence = false} = {}) {
+  const name = typeof tool === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(tool) ? `\`${tool}\`` : "another tool";
+  return `**Portal stopped this response:** this request needed ODS Operations work on this computer, and the model kept calling ${name} ` +
+    "instead, so Portal ended the response rather than let it loop. That call did not run. " +
+    (evidence ? "What Portal did verify is below. " : "") +
+    "The conversation and any saved files are preserved. Send a new message to try again; it starts a fresh attempt. " +
+    "If it keeps happening, [get help on Discord](https://discord.gg/4ntNp9MAwC).";
+}
+
 export const OPERATIONS_UNAVAILABLE_DELIVERY_PREFIX =
   "Portal did not submit the requested host or Operations work through the isolated Operations Broker. No sandbox command was accepted as host evidence.";
 export const OPERATIONS_UNAVAILABLE_ZERO_SUBMISSIONS_CODE =
@@ -7777,6 +7788,8 @@ export function createToolLoopGuard({
         unrequestedOperationsDeniedRound: 0,
         unrequestedOperationsTerminal: false,
         unrequestedOperationsAborted: false,
+        // The tool whose repeat after an Operations correction aborted the run.
+        operationsLoopAborted: undefined,
         operationsInventoryOnly: false,
         operationsInventoryAttempted: false,
         operationsInventory: undefined,
@@ -9279,6 +9292,7 @@ export function createToolLoopGuard({
       warn(
         `Pixel stopped a tool retry after the Operations-continuation boundary for run ${runId}; active run aborted=${aborted}`
       );
+      if (aborted) state.operationsLoopAborted ??= {tool: effectiveToolName};
       return { block: true, blockReason: OPERATIONS_LOOP_ABORT_REASON };
     }
 
@@ -9339,6 +9353,7 @@ export function createToolLoopGuard({
       warn(
         `Pixel stopped a tool retry after the Operations boundary for run ${runId}; active run aborted=${aborted}`
       );
+      if (aborted) state.operationsLoopAborted ??= {tool: effectiveToolName};
       return { block: true, blockReason: OPERATIONS_LOOP_ABORT_REASON };
     }
 
@@ -13517,6 +13532,13 @@ export function createToolLoopGuard({
     // research result, give ingress the actual cause instead of a generic reply.
     if (state?.webLoopAborted && verification.status === "none") {
       return { status: "failed", text: WEB_LOOP_DELIVERY_REASON };
+    }
+    // Host evidence verified before the abort follows the cause; a failure
+    // that already explains the missing Operations work is kept as it is.
+    if (state?.operationsLoopAborted && !state.clientCancelled && ["none", "passed"].includes(verification.status)) {
+      return { status: "failed", text: [operationsLoopDeliveryText(state.operationsLoopAborted.tool,
+        { evidence: Boolean(verification.text) }), verification.text].filter(Boolean).join("\n\n")
+        .slice(0, MAX_INGRESS_VERIFICATION_TEXT), ...(verification.preview ? { preview: verification.preview } : {}) };
     }
     const readOnlyOperations = extensionDiscoveryActive(state) || (state?.operationsRequired &&
       (state.operationsInventoryOnly ||
