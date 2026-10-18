@@ -622,15 +622,30 @@ says which. Unlike the owner-image path, `unknown` never becomes
 an image test here: no owner consented to one for this purpose. OpenClaw's own
 transport would also drop a tool image for a row without `image` input.
 
-No route ODS sets up by default declares `supported` yet. Installs start at
-`unknown` (`installers/lib/pixel-onboarding.py`), remote routes are written as
-`unknown`, and the curated lookup (`bin/ods-host-agent.py`
-`_pixel_model_image_input`) needs a `vision` boolean that no record in
-`config/model-library.json` has. Today `supported` comes only from
-`ODS_MODEL_PROFILES=enabled` with a passing vision probe during a model switch,
-so screenshots stay off until a route declares its image input (for example a
-readback of llama-server `/props` `modalities.vision`, or of another engine's
-reported vision state, through `_reconcile_ods_managed_pixel_model`).
+**Where `supported` comes from.** Installs start at `unknown`
+(`installers/lib/pixel-onboarding.py`). A Models-page switch to a model that
+ODS's own llama-server runs with a vision projector (`mmproj`) declares
+`supported`: the switch's final readiness proof (`bin/ods-host-agent.py`
+`_wait_for_model_readiness`) carries the `modalities.vision` of the same
+`/props` answer that proved the served file and context, and
+`_pixel_image_input_readback` turns `true` into `supported` for the Pixel
+target, which reaches Pixel through `_reconcile_ods_managed_pixel_model` or the
+native model transaction before Portal admits the next request. This covers
+the Linux and WSL containers, the Windows-owned runtime a WSL agent reaches
+through the model router, the Windows native `llama-server.exe` and native
+macOS: every route whose model server is ODS's own llama-server. A `false`, missing or unreadable report keeps the value the
+switch computed before (the curated record's `vision` boolean, else
+`unknown`), and `ODS_MODEL_PROFILES=enabled` with a measured vision probe
+still decides last. The value is computed for each switch's model alone, so
+the next switch to a model without a projector gets its own value back.
+Remote routes are written as `unknown` and never read a local report.
+An installation that already runs a vision model gets the readback on its
+next model switch. Every installer run, including an update, writes
+`unknown` over a `supported` declaration (`installers/lib/pixel-onboarding.py`):
+the installer rewrites `.env` without `LLAMA_ARG_MMPROJ` while keeping the
+active model, so the model may now run without its projector. `unsupported`
+and `unknown` carry over for the same route; the next switch reads the
+projector back.
 
 **The directive.** When the gate is open and the run guard grants one of the
 run's at most three screenshots (`tool-loop-guard.mjs`
@@ -730,3 +745,13 @@ history pruning, the Tool Search envelope, the openai-completions request and
 the compaction serializer on real tool results: earlier runs' screenshots
 (direct and through Tool Search) leave the next request after a model switch,
 the current run keeps its own, and owner images keep the three-turn rule.
+`vision_readback.test.mjs` renders Pixel's config with the coordinator's
+`pixel_model_contract.plan` from the install default through a readback
+`supported` target to a text-only one and checks the gate and the owner-image
+route check on each. The host agent's `test_host_agent_image_input.py` and
+`test_model_activate.py` (`TestPixelVisionReadback`) cover the `/props`
+report on every local route, the readback rule, switches with a reported,
+false, missing and unreadable vision state, a vision-to-text switch on both
+reconcile paths, and a remote activation that never reads it.
+`tests/test_pixel_onboarding.py` checks that an installer rerun after a
+`supported` switch renders `unknown` and keeps the rest of the route.

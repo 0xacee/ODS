@@ -3605,6 +3605,20 @@ def _profiled_pixel_reasoning(configured: bool, traits: dict | None) -> bool:
     return configured
 
 
+def _pixel_image_input_readback(configured: str, proof: dict | None) -> str:
+    """Pixel's image input once ODS's own llama-server proved the activated model.
+
+    ``proof`` is ``_wait_for_model_readiness``'s proof for that model, whose
+    ``vision`` is the same ``/props`` answer's ``modalities.vision``. llama.cpp
+    reports true only while a vision projector (mmproj) is loaded, so true
+    declares image input supported. False, absent or unreadable keeps the
+    configured value: a missing report is not evidence either way.
+    """
+    if isinstance(proof, dict) and proof.get("vision") is True:
+        return "supported"
+    return configured
+
+
 def _profiled_pixel_image_input(configured: str, traits: dict | None) -> str:
     """Pixel's image input from the vision probe when a projector was loaded (WP4.2)."""
     vision = (traits or {}).get("vision")
@@ -15339,8 +15353,13 @@ class AgentHandler(BaseHTTPRequestHandler):
                     'maxTokens': _pixel_max_tokens_for_context(int(context_length)),
                     'reasoning': _profiled_pixel_reasoning(
                         _pixel_model_reasoning_capable(str(llm_model_name), env), profile_traits),
+                    # Computed for this model alone: a model without a loaded
+                    # projector gets today's value back, never the previous
+                    # model's readback. A measured vision probe
+                    # (ODS_MODEL_PROFILES=enabled) still decides last.
                     'imageInput': _profiled_pixel_image_input(
-                        _pixel_model_image_input(model_id), profile_traits),
+                        _pixel_image_input_readback(_pixel_model_image_input(model_id), final_runtime_proof),
+                        profile_traits),
                 }
                 pixel_status = (pixel_transaction.apply(pixel_target) if pixel_transaction is not None
                     else _reconcile_ods_managed_pixel_model(
@@ -16471,23 +16490,28 @@ def _model_agent_viable(model: dict, context_length: int) -> bool:
     )
 
 
-def _llama_runtime_props(env: dict) -> tuple[int, str]:
-    """Return llama.cpp's actual ``n_ctx`` and served model file from /props.
+def _llama_runtime_props(env: dict) -> tuple[int, str, bool | None]:
+    """Return llama.cpp's actual ``n_ctx``, served model file and vision from /props.
 
     The file is the basename of ``model_path`` (empty when not reported).
-    Unreachable or malformed answers report ``(0, "")``.
+    Vision is ``modalities.vision`` when /props reports it as a boolean;
+    llama.cpp reports true only while a vision projector (mmproj) is loaded.
+    Any other value is None. Unreachable or malformed answers report
+    ``(0, "", None)``.
     """
     try:
         data = json.loads(_runtime_http(env, "/props") or "{}")
     except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
-        return 0, ""
+        return 0, "", None
     if not isinstance(data, dict):
-        return 0, ""
+        return 0, "", None
     settings = data.get("default_generation_settings")
     n_ctx = (_positive_int(settings.get("n_ctx")) or 0) if isinstance(settings, dict) else 0
     model_path = data.get("model_path")
     served = re.split(r"[\\/]", model_path.strip())[-1] if isinstance(model_path, str) else ""
-    return n_ctx, served
+    modalities = data.get("modalities")
+    vision = modalities.get("vision") if isinstance(modalities, dict) else None
+    return n_ctx, served, vision if type(vision) is bool else None
 
 
 def _llama_runtime_context_length(env: dict) -> int:
@@ -16921,7 +16945,9 @@ def _wait_for_model_readiness(
     visible content from the same model.
 
     Legacy callers receive a boolean. Identity callers receive the concrete
-    runtime identity. Adapters receive identity, actual context, and proof time.
+    runtime identity. Adapters receive identity, actual context, and proof time,
+    plus ``vision`` when that same ``/props`` answer reported
+    ``modalities.vision`` as a boolean.
 
     ``fast_poll_seconds`` opts into dense probing (every
     ``fast_poll_interval``) for that long *before* the regular schedule, for
@@ -16995,6 +17021,7 @@ def _wait_for_model_readiness(
             return not_ready
         runtime_identity = ""
         runtime_context = 0
+        runtime_vision = None
         try:
             health = _runtime_health(env)
             body = _runtime_http(env, "/v1/models").strip() if health == "ok" else ""
@@ -17012,7 +17039,7 @@ def _wait_for_model_readiness(
                 llm_model_name=llm_model_name,
             ) if body else ""
             if runtime_identity:
-                runtime_context, served_file = _llama_runtime_props(env)
+                runtime_context, served_file, runtime_vision = _llama_runtime_props(env)
                 if served_file and not _runtime_model_identity_matches(
                     served_file, gguf_file=gguf_file,
                 ):
@@ -17053,12 +17080,17 @@ def _wait_for_model_readiness(
                     reported_context = runtime_context or expected_context or 0
                     if reported_context <= 0:
                         return {}
-                    return {
+                    proof = {
                         "identity": runtime_identity,
                         "contextLength": reported_context,
                         "contextVerified": runtime_context > 0,
                         "verifiedAt": _iso_now(),
                     }
+                    # The same /props answer's modalities.vision, only when
+                    # it reported one (_pixel_image_input_readback reads it).
+                    if runtime_vision is not None:
+                        proof["vision"] = runtime_vision
+                    return proof
                 return runtime_identity if return_identity else True
             if runtime_identity:
                 # Loaded and serving, yet no visible answer: never leave the
