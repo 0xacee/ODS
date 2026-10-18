@@ -4461,6 +4461,7 @@ def _valid_managed_pixel_runtime_contract(value: object) -> bool:
         and 1 <= max_tokens <= context_length
         and type(reasoning) is bool
         and ("imageInput" not in value or value["imageInput"] in ("supported", "unsupported", "unknown"))
+        and ("thinkingControl" not in value or value["thinkingControl"] in ("enable_thinking", "always", "none"))
         and ("routeFingerprint" not in value or (
             isinstance(value["routeFingerprint"], str)
             and re.fullmatch(r"[a-f0-9]{64}", value["routeFingerprint"]) is not None
@@ -15606,6 +15607,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                         _pixel_image_input_readback(_pixel_model_image_input(model_id), final_runtime_proof),
                         profile_traits),
                 }
+                measured_control = (profile_traits or {}).get('control')
+                if measured_control in ('enable_thinking', 'always', 'none'):
+                    pixel_target['thinkingControl'] = measured_control
                 pixel_status = (pixel_transaction.apply(pixel_target) if pixel_transaction is not None
                     else _reconcile_ods_managed_pixel_model(
                         pixel_runtime_identity, int(context_length),
