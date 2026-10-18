@@ -1658,6 +1658,12 @@ $(if [[ -n "${LLAMA_ARG_SPEC_TYPE:-}" ]]; then echo "LLAMA_ARG_SPEC_TYPE=${LLAMA
 $(if [[ -n "${LLAMA_ARG_SPEC_DRAFT_N_MAX:-}" ]]; then echo "LLAMA_ARG_SPEC_DRAFT_N_MAX=${LLAMA_ARG_SPEC_DRAFT_N_MAX}"; fi)
 $(if [[ -n "${LLAMA_ARG_SPEC_DRAFT_TYPE_K:-}" ]]; then echo "LLAMA_ARG_SPEC_DRAFT_TYPE_K=${LLAMA_ARG_SPEC_DRAFT_TYPE_K}"; fi)
 $(if [[ -n "${LLAMA_ARG_SPEC_DRAFT_TYPE_V:-}" ]]; then echo "LLAMA_ARG_SPEC_DRAFT_TYPE_V=${LLAMA_ARG_SPEC_DRAFT_TYPE_V}"; fi)
+# Model activation sets these for the active model only: an imported model's
+# vision projector and a fixed chat template. A rerun keeps them only for the
+# same model (scripts/preserve-active-model.py).
+$(if [[ -n "${LLAMA_ARG_MMPROJ:-}" ]]; then echo "LLAMA_ARG_MMPROJ=$(dotenv_value "$LLAMA_ARG_MMPROJ")"; fi)
+$(if [[ -n "${MODEL_CHAT_TEMPLATE_OVERRIDE:-}" ]]; then echo "MODEL_CHAT_TEMPLATE_OVERRIDE=$(dotenv_value "$MODEL_CHAT_TEMPLATE_OVERRIDE")"; fi)
+$(if [[ -n "${LLAMA_ARG_CHAT_TEMPLATE_FILE:-}" ]]; then echo "LLAMA_ARG_CHAT_TEMPLATE_FILE=$(dotenv_value "$LLAMA_ARG_CHAT_TEMPLATE_FILE")"; fi)
 LLAMA_CPU_LIMIT=${LLAMA_CPU_LIMIT}
 LLAMA_CPU_RESERVATION=${LLAMA_CPU_RESERVATION}
 

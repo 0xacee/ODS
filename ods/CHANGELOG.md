@@ -64,6 +64,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     network-problem message.
 
 ### Fixed
+- Updating ODS (rerunning the installer) no longer takes a vision model's
+  projector away. The installer kept an imported vision model active but
+  rewrote `.env` without `LLAMA_ARG_MMPROJ`, so llama-server answered every
+  image with HTTP 500 ("image input is not supported"). A rerun now keeps the
+  projector for the same model while its file is still a regular file beside
+  the weights at the size the import recorded, and keeps a fixed chat template
+  (`MODEL_CHAT_TEMPLATE_OVERRIDE` with `LLAMA_ARG_CHAT_TEMPLATE_FILE`) while
+  this release still ships it unchanged. Another model, `--reselect-model` and
+  any other value get neither. Portal still asks before sending images after an
+  update until the next Models-page switch reads the projector back. An
+  installation an earlier update already left without its projector gets it
+  back by switching to the model again on the Models page.
 - On an NVIDIA GPU of compute capability 12.1, the DGX Spark GB10 and the RTX
   Spark N1X, the model no longer answers with question marks. llama.cpp's CUDA
   12 container images, the default among them, have no kernels for that GPU;

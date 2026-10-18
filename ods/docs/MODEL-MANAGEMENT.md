@@ -136,10 +136,10 @@ the image-test confirmation, and Portal's preview check shows the model a
 screenshot of the page it built. A model that runs without a projector keeps
 the earlier setting, so Portal asks before sending it an image. An
 installation already running a vision model picks this up on its next switch.
-Updating ODS (rerunning the installer) clears it, because the installer
-rewrites `.env` without the projector setting: Portal asks before sending
-images again until your next switch on the Models page reads the projector
-back.
+Updating ODS (rerunning the installer) keeps the model and its projector, as
+long as the projector file is still beside the weights, but it clears this
+setting: Portal asks before sending images again until your next switch on
+the Models page reads the projector back.
 
 These checks never block on missing information: when Hugging Face does not
 answer (for example a rate limit), the dialog says which checks could not run
