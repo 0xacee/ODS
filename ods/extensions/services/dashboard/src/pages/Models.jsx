@@ -361,11 +361,16 @@ export default function Models({ compact = false }) {
 
       {modelManagement?.managed === true && modelManagement.canUnload === true && (
         <section aria-label="Model runtime controls" className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-theme-border p-3 text-sm">
-          <p>{modelManagement.running ? 'Unload the model to release GPU memory. Your saved model selection is kept.' : 'The model runtime is stopped. Resume your saved model to enable model changes.'}</p>
+          <div className="min-w-0">
+            <p>{modelManagement.running ? 'Unload the model to release GPU memory. Your saved model selection is kept.' : 'The model runtime is stopped. Resume your saved model to enable model changes.'}</p>
+            {!modelManagement.running && modelManagement.runtimeError && (
+              <p role="status" className="mt-1 text-xs text-theme-text-secondary">{modelManagement.runtimeError}</p>
+            )}
+          </div>
           <button type="button" onClick={modelManagement.running ? stopRuntime : startRuntime}
             disabled={Boolean(runtimeActionLoading || activationLoading || modelLifecycle?.active || pendingModelActions.length || downloadProgress.isDownloading)}
             className="rounded-md border border-theme-border px-3 py-2 disabled:opacity-50">
-            {runtimeActionLoading === 'stop' ? 'Unloading…' : runtimeActionLoading === 'start' ? 'Resuming…' : modelManagement.running ? 'Unload model' : 'Resume model'}
+            {runtimeActionLoading === 'stop' ? 'Unloading…' : runtimeActionLoading === 'start' ? (modelManagement.startRefusal ? 'Starting…' : 'Resuming…') : modelManagement.running ? 'Unload model' : modelManagement.startRefusal ? 'Start anyway' : 'Resume model'}
           </button>
         </section>
       )}
