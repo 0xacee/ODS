@@ -8,6 +8,9 @@
   "provider_url": "http://llama-server:8080/v1",
   "runtime": {
     "llama_server": {
+      "container_images_by_compute": {
+        "12.1": "ghcr.io/ggml-org/llama.cpp:server-cuda13-b11429@sha256:9d6ca9a08b5e0c0a6d2560bff7d4c76bdf946776bbde6a20d9d6403594d93a9f"
+      },
       "windows_arm64": {
         "release_tag": "b11429",
         "flavor": "win-cuda-13.4-arm64",

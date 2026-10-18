@@ -93,6 +93,7 @@ tests/test-linux-opencode-path.sh
 tests/test-linux-whisper-cuda-gating.sh
 tests/test-litellm-amd-auth-enforced.sh
 tests/test-litellm-config-selection.sh
+tests/test-llama-image-compute-cap.sh
 tests/test-llama-memory-budget.sh
 tests/test-llama-mtp-args.sh
 tests/test-llm-cold-storage-arithmetic.py

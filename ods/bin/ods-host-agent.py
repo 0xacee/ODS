@@ -14901,6 +14901,19 @@ class AgentHandler(BaseHTTPRequestHandler):
                     # runs the backend default again; a host or owner image that
                     # no catalog model names is kept.
                     remove_keys.add("LLAMA_SERVER_IMAGE")
+                if gpu_backend not in {"apple", "amd"}:
+                    # A compute-12.1 GPU names its CUDA 13 build here: the
+                    # backend default (no key) is a CUDA 12 build.
+                    if "LLAMA_SERVER_IMAGE" in updates:
+                        env_image = updates["LLAMA_SERVER_IMAGE"]
+                    elif "LLAMA_SERVER_IMAGE" in remove_keys:
+                        env_image = ""
+                    else:
+                        env_image = str(env_pre.get("LLAMA_SERVER_IMAGE") or "").strip()
+                    compute_image = _llama_image_for_compute(env_image, env_pre)
+                    if compute_image != env_image:
+                        updates["LLAMA_SERVER_IMAGE"] = compute_image
+                        remove_keys.discard("LLAMA_SERVER_IMAGE")
                 # A vision import loads its projector in the container (WP2);
                 # any other model clears the previous one's. Host-native
                 # runtimes take the projector as an argument instead.
@@ -15057,14 +15070,15 @@ class AgentHandler(BaseHTTPRequestHandler):
                     # container; a catalog or .env image names a CUDA build.
                     override_image = ""
                 else:
-                    override_image = (
+                    override_image = _llama_image_for_compute(
                         llama_server_image
                         or env.get("LLAMA_SERVER_IMAGE")
                         or (
                             "ghcr.io/ggml-org/llama.cpp:server-cuda-b11429@sha256:883915ea20a4b350e98f7284098f4d400c21e9b366e248d397cd42d90602a84c"
                             if gpu_backend == "nvidia"
                             else ""
-                        )
+                        ),
+                        env,
                     )
                 runtime_restart_strategy = "container-llama"
                 if _switchboard_adapters is not None:
@@ -17339,10 +17353,50 @@ def _container_llama_rollback_image(env: dict) -> str:
 
     The AMD overlay pins its own image; a persisted LLAMA_SERVER_IMAGE can
     name another backend's (CUDA) build, so AMD always keeps the inspected one.
+    A compute-12.1 GPU rolls back to its CUDA 13 build, never to a CUDA 12 one
+    (_llama_image_for_compute).
     """
     if str(env.get("GPU_BACKEND") or "").strip().lower() == "amd":
         return ""
-    return str(env.get("LLAMA_SERVER_IMAGE") or "")
+    return _llama_image_for_compute(str(env.get("LLAMA_SERVER_IMAGE") or ""), env)
+
+
+# The repository stays separate so the pin contract does not read these
+# prefixes as unpinned image references.
+_LLAMA_CPP_REPOSITORY = "ghcr.io/ggml-org/llama.cpp"
+# llama.cpp's CUDA 12 images. They have no kernels for compute capability 12.1
+# (DGX Spark GB10, RTX Spark N1X) and answer "????" there; the CUDA 13 build
+# (server-cuda13-*) has them.
+_CUDA12_LLAMA_IMAGE_PREFIXES = (
+    f"{_LLAMA_CPP_REPOSITORY}:server-cuda-",
+    f"{_LLAMA_CPP_REPOSITORY}:server-cuda12-",
+)
+
+
+def _llama_image_for_compute(image: str, env: dict) -> str:
+    """The llama-server container image for this GPU's compute capability.
+
+    The installer records GPU_COMPUTE_CAP in .env, and
+    config/backends/nvidia.json runtime.llama_server.container_images_by_compute
+    pins the image a compute capability needs (installer phase 06 applies the
+    same map). On such an NVIDIA GPU the pinned image replaces a CUDA 12
+    llama.cpp build and the empty value, which means the backend default, a
+    CUDA 12 build. A CUDA 13 build, another backend's image and an owner's own
+    image are kept, and every other host gets ``image`` back unchanged.
+    """
+    image = str(image or "").strip()
+    if str(env.get("GPU_BACKEND") or "").strip().lower() != "nvidia":
+        return image
+    compute_cap = str(env.get("GPU_COMPUTE_CAP") or "").strip()
+    if not compute_cap:
+        return image
+    contract_path = INSTALL_DIR / "config" / "backends" / "nvidia.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    images = contract["runtime"]["llama_server"].get("container_images_by_compute", {})
+    pinned = str(images.get(compute_cap) or "").strip()
+    if pinned and (not image or image.startswith(_CUDA12_LLAMA_IMAGE_PREFIXES)):
+        return pinned
+    return image
 
 
 def _write_host_native_litellm_config(env: dict, gguf_file: str, model: str) -> None:
