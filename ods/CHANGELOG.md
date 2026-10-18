@@ -71,7 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   CUDA 13 build of the same release (`server-cuda13-b11429`, pinned by digest)
   there, and Models-page switches and their rollbacks keep it. Every other
   NVIDIA GPU keeps its image, and an image you set yourself is kept. Existing
-  installs switch on their next installer run.
+  installs switch on their next installer run. `ods doctor` names the RTX Spark
+  beside the DGX Spark in its sm_121 check, and its fix now says to rerun the
+  installer.
 - Under Docker Desktop without an NVIDIA runtime, the Linux installer stops
   with the cause, what to do and a link to the ODS Discord instead of
   installing a second NVIDIA container toolkit and restarting a Docker service
