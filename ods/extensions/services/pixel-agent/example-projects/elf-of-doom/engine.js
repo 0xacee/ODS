@@ -339,7 +339,7 @@ function supplyTick(dt) {
   // each drop keeps TILE*2 from the item already placed, and - the part that actually mattered -
   // farSpot consults pickups already on the floor, which it did not before at all.
   const a = D.farSpot(P.x, P.y, 170, 16);
-  G.pickups.push({ x: a.x, y: a.y, kind: "arrows", val: 6, t: 45, bob: rand(0, 6) });
+  G.pickups.push({ x: a.x, y: a.y, kind: "arrows", val: 12, t: 45, bob: rand(0, 6) });
   burst(a.x, a.y - 8, 5, "rgba(220,190,140,.7)", 60, .5, 3);
   const h = D.farSpot(a.x, a.y, 150, 16);
   G.pickups.push({ x: h.x, y: h.y, kind: "heart", val: 30, t: 45, bob: rand(0, 6) });
@@ -398,9 +398,12 @@ function killEnemy(e) {
     announce("Victory!", "The path ahead is clear.");
   } else {
     const st = ENEMY_STATS[e.kind];
+    // Plain purse, as it was before the lucky-drop pass: the 20% roll belongs to the quiver,
+    // not to gold.
     dropPickup(e.x, e.y - 10, "gold", randi(st.gold[0], st.gold[1]));
     if (Math.random() < .12) dropPickup(e.x, e.y - 20, "heart", 12);
-    if (Math.random() < .18) dropPickup(e.x, e.y + 6, "arrows", 3);
+    // 20% of slain foes drop a full quiver of 6 arrows.
+    if (Math.random() < .20) dropPickup(e.x, e.y + 6, "arrows", 6);
   }
   updateHud();
 }

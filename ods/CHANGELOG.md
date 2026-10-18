@@ -302,6 +302,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a long line of spaces.
 
 ### Changed
+- Elf of Doom gives more arrows: slain enemies drop a 6-arrow quiver 20% of
+  the time (was 18% for 3), and the timed supply drop gives 12 arrows every
+  20 seconds (was 6), so boss-fight reinforcements no longer outrun the arrow
+  supply. Portal made the change from the owner's prompts; the game files
+  stay exactly the ones https://odsspark.com/game/ serves.
 - Elf of Doom's wolves, the pack hounds and the wolf boss Skarnax, move 15%
   slower: players kept stalling in the wolf realm because of their speed.
   Portal made the change from one owner prompt, and the game files are again
