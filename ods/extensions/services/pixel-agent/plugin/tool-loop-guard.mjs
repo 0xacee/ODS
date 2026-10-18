@@ -36,6 +36,7 @@ import { assistantMessageText, composeProgressFinalization, composeReadPages, cr
   PROGRESS_FINALIZATION_INSTRUCTION } from "./progress-finalization.mjs";
 import { STOP_SYNTHESIS_LIMITS, STOP_SYNTHESIS_NOTE, synthesisAnswer, synthesisRequest } from "./stop-synthesis.mjs";
 import { createRunDeadline, runDeadlineReached, runDeadlineStopText, takeRunDeadlineNotice } from "./run-deadline.mjs";
+import { lastAssistantMessage, outputLimitContext, outputLimitCut, outputLimitNotice, outputLimitStopText } from "./output-limit.mjs";
 import { OWNER_VISIBLE_REPLY_INSTRUCTION, OWNER_VISIBLE_REPLY_REASON, ownerInteractiveTurn, silentReplyText } from "./owner-visible-reply.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent, nativeExecWorkdir, sandboxHostWorkspaceFailure, malformedRelativeWorkspacePath } from "./workspace-path-contract.mjs";
 import { routePlaygroundTool, requestsNewPlaygroundProject } from "./playground-projects.mjs";
@@ -7255,6 +7256,9 @@ export function createToolLoopGuard({
   // (subagent-delivery.mjs ownerRunOf), for the shipped example's guard.
   exampleOwnerRun = () => undefined,
   exampleGuard,
+  // Whether Pixel's model is the owner's remote API route, whose output limit
+  // the owner sets (Settings → Remote model), for output-limit stop text.
+  remoteModelRoute = () => false,
 } = {}) {
   const effective = normalizedLimits(limits);
   const examples = exampleGuard ?? createExampleGuard({warn, now});
@@ -7278,6 +7282,9 @@ export function createToolLoopGuard({
   // next owner message in that chat must start clean from.
   const sessionKeyRuns = new Map();
   const sessionCancellations = new Map();
+  // A tool call the model's output limit cut off, which the chat's next turn
+  // is told to write in smaller parts (output-limit.mjs).
+  const sessionOutputLimits = new Map();
   // Process-wide: a failed or timed-out stop synthesis pauses further ones.
   let stopSynthesisFailedAt = -Infinity;
   const pendingToolRuns = new Map();
@@ -7491,6 +7498,16 @@ export function createToolLoopGuard({
     sessionCancellations.delete(sessionKey);
     state.withdrawnOwnerRequest = record;
     state.completionAssurance.followWithdrawnRequest(record.ownerText);
+  }
+
+  // The next run in a chat whose last response ended on a cut-off tool call
+  // takes that cut once; every attempt of that run is told to write in parts.
+  function takeOutputLimit(state, runId, context) {
+    const sessionKey = context?.sessionKey;
+    const record = typeof sessionKey === "string" ? sessionOutputLimits.get(sessionKey) : undefined;
+    if (!record || record.runId === runId) return;
+    sessionOutputLimits.delete(sessionKey);
+    state.priorOutputLimit = record.cut;
   }
 
   // A clarification card leaves a record for its chat once the run sets it
@@ -10117,6 +10134,7 @@ export function createToolLoopGuard({
       if (ownerIntent) state.ownerRequestText ??= ownerIntent;
       if (ownerWords) state.managedOwnerWords ??= ownerWords;
       takeOwnerCancellation(state, runId, context, agentId);
+      takeOutputLimit(state, runId, context);
       takePendingClarification(state, runId, context, agentId, ownerIntent);
       if (currentUserText(event?.messages, event?.prompt)) {
         state.ownerIntentObserved = true;
@@ -12870,6 +12888,15 @@ export function createToolLoopGuard({
     state.runEnded = true;
     state.runDeadlineReached = !state.clientCancelled && !state.odsAborted && !state.progressBudget.exhausted &&
       !state.recursiveDeleteDenied && runDeadlineReached(state.runDeadline, event, now());
+    // The harness runs tool calls only after a 'toolUse' stop, so a reply cut
+    // at the output limit ends the response with its last call never run.
+    const cut = state.clientCancelled || state.odsAborted ? undefined : outputLimitCut(lastAssistantMessage(event?.messages));
+    if (cut) {
+      state.outputLimitStop = cut;
+      if (cut.tool && typeof state.currentSessionKey === "string") {
+        rememberBySessionKey(sessionOutputLimits, state.currentSessionKey, {runId, cut});
+      }
+    }
     settlePendingClarification(state, event);
   }
 
@@ -12880,7 +12907,9 @@ export function createToolLoopGuard({
   function promptContextForRun(runId) {
     const state = typeof runId === "string" ? runs.get(runId) : undefined;
     if (state?.clientCancelled) return CLIENT_CANCELLED_REASON;
-    return state?.withdrawnOwnerRequest && !resendsWithdrawnAnswer(state) ? OWNER_CANCELLED_REQUEST_CONTEXT : undefined;
+    const withdrawn = state?.withdrawnOwnerRequest && !resendsWithdrawnAnswer(state) ? OWNER_CANCELLED_REQUEST_CONTEXT : undefined;
+    const outputLimit = state?.priorOutputLimit ? outputLimitContext(state.priorOutputLimit) : undefined;
+    return [withdrawn, outputLimit].filter(Boolean).join('\n\n') || undefined;
   }
 
   // The owner stopped a clarification answer and sent the same answer again.
@@ -13447,7 +13476,7 @@ export function createToolLoopGuard({
     // the reply it delivers (host/pixel_ingress.mjs). A pending question card
     // carries none.
     const notice = result.status === 'pending' ? undefined : exampleNoticeForRun(runId);
-    if (notice) result = {...result, notice};
+    if (notice) result = {...result, notice: result.notice ? `${result.notice}\n\n${notice}` : notice};
     return artifacts?.length && !state.clientCancelled && ['none','passed','failed'].includes(result.status)
       ? {...result,artifacts:structuredClone(artifacts)} : result;
   }
@@ -13471,6 +13500,16 @@ export function createToolLoopGuard({
         failure?.text].filter(Boolean).join('\n\n').slice(0, MAX_INGRESS_VERIFICATION_TEXT),
       ...(failure?.preview ? {preview: failure.preview}
         : preview ? {preview: {schemaVersion: 1, kind: 'ods-pixel-workspace-preview', ...preview}} : {})};
+    }
+    // Without this the owner saw only a missing preview or "No detailed
+    // failure reason was returned". A cut-off answer keeps its text.
+    const outputLimit = !state?.clientCancelled && !state?.progressBudget.exhausted ? state?.outputLimitStop : undefined;
+    if (outputLimit) {
+      const options = {remote: remoteModelRoute() === true};
+      if (outputLimit.answered) return {...verification, notice: outputLimitNotice(outputLimit, options)};
+      const failure = verification.status === 'failed' ? verification : undefined;
+      return {status: 'failed', text: [outputLimitStopText(outputLimit, options), failure?.text].filter(Boolean)
+        .join('\n\n').slice(0, MAX_INGRESS_VERIFICATION_TEXT), ...(failure?.preview ? {preview: failure.preview} : {})};
     }
     // Completion assurance arms its terminal before a revision and is not
     // consulted after a stop, so a tool-limit answer is always the newer one.
