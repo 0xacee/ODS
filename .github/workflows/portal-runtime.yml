@@ -66,6 +66,8 @@ jobs:
         run: |
           node --test ods/extensions/services/pixel-agent/tests/preview_delivery_recovery.test.mjs
           node --test --test-name-pattern="saved project|automatic preview|publication .*not retried|concurrent finalizers" ods/extensions/services/pixel-agent/tests/tool_loop_guard.test.mjs
+      - name: Verify the Operations-boundary stop the owner sees
+        run: node --test ods/extensions/services/pixel-agent/tests/operations_abort_delivery.test.mjs
       - name: Install pinned read-tool runtime for integration
         shell: bash
         run: npm install --prefix "$RUNNER_TEMP/read-runtime" --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org openclaw@2026.6.33
