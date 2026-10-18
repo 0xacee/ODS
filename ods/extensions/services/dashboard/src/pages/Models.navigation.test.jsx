@@ -104,6 +104,26 @@ it.each(['remote_provider_apply', 'remote_provider_proof'])('shows progress duri
   expect(screen.getByRole('button',{name:'Run'})).toBeEnabled()
 })
 
+it.each(['remote_provider_apply', 'remote_provider_proof'])('waits through a transitional mode mismatch during %s, but reports a remaining mismatch',async operation=>{
+  let active=true
+  vi.stubGlobal('fetch',vi.fn(async()=>{
+    const payload=await response(false).json()
+    return {ok:true,json:async()=>({...payload,configuredMode:'cloud',
+      modelLifecycle:active?{active:true,operation}:null})}
+  }))
+  await openModels()
+  expect(screen.getByRole('status')).toHaveTextContent('checking or changing the model connection')
+  expect(screen.queryByText(/Restart or repair ODS/)).toBeNull()
+  expect(screen.getByRole('button',{name:'Run'})).toBeDisabled()
+  active=false
+  fireEvent.click(screen.getByTitle('Refresh models'))
+  await act(async()=>{})
+  expect(screen.queryByRole('status')).toBeNull()
+  expect(screen.getAllByText(/Restart or repair ODS/).length).toBeGreaterThan(0)
+  expect(screen.getByRole('button',{name:'Run'})).toBeDisabled()
+  expect(posts()).toHaveLength(0)
+})
+
 it('blocks an open activation dialog while recovery is pending and unlocks only after recovery readback',async()=>{
   let pending=false
   vi.stubGlobal('fetch',vi.fn(async (url,options)=>{
