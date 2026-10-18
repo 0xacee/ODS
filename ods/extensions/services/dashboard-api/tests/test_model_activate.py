@@ -8960,10 +8960,10 @@ class TestPixelVisionReadback:
 
     def test_the_native_transaction_applies_each_declaration_before_admission_reopens(self, tmp_path, monkeypatch):
         self._install(tmp_path, monkeypatch, native_transaction=True)
-        state = {"schemaVersion": 1, "status": "ready", "revision": "a" * 64, "pending": False,
-                 "transactionId": None, "outcome": None,
-                 "contract": {"model": "old-model.gguf", "contextLength": 65536, "maxTokens": 8192,
-                              "reasoning": False, "imageInput": "unknown"}}
+        state: dict = {"schemaVersion": 1, "status": "ready", "revision": "a" * 64, "pending": False,
+                       "transactionId": None, "outcome": None,
+                       "contract": {"model": "old-model.gguf", "contextLength": 65536, "maxTokens": 8192,
+                                    "reasoning": False, "imageInput": "unknown"}}
         events: list = []
 
         def control(operation, request=None, *, config):
