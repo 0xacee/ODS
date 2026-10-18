@@ -21304,6 +21304,328 @@ def _public_docker_client_config(install_dir: Path, environ) -> Path | None:
     return config_dir
 
 
+# `wsl --shutdown`, which ODS's own messages recommend, restarts Docker
+# Desktop's VM, and Docker brings ODS's unless-stopped containers back healthy.
+# Some of their published 127.0.0.1 ports then accept a connection and close
+# it at once, from Windows and from WSL, until that container restarts: Open
+# WebUI, llama-server, LiteLLM, Whisper and Kokoro stayed unreachable this way
+# (fleet test, Docker Desktop 4.68 / Engine 29.3.1, 2026-10-18). Each agent
+# start under WSL checks the healthy ODS HTTP ports once and restarts a
+# container whose port stays dead, at most once per WSL VM boot.
+_WSL_PORT_CHECK_WINDOW_SECONDS = 600  # llama-server can load a model for minutes
+_WSL_PORT_CHECK_MIN_WATCH_SECONDS = 120  # a container Docker starts late still counts
+_WSL_PORT_CHECK_POLL_SECONDS = 15
+_WSL_PORT_CHECK_DEAD_POLLS = 2  # consecutive polls on which a port must be dead
+_WSL_PORT_PROBE_TIMEOUT_SECONDS = 5
+_WSL_PORT_RESTART_TIMEOUT_SECONDS = 120
+_WSL_PORT_CHECK_RECORD = "wsl-port-check.json"
+# Published bindings that 127.0.0.1 reaches: loopback and the IPv4 wildcard.
+_WSL_PORT_LOOPBACK_HOST_IPS = frozenset({"127.0.0.1", "0.0.0.0", ""})
+# States after which this agent start leaves a container alone.
+_WSL_PORT_DONE_STATES = frozenset({
+    "answering", "repaired", "still-dead", "restarted-earlier", "restart-failed", "gone",
+})
+_LINUX_BOOT_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _linux_boot_id(path: Path = Path("/proc/sys/kernel/random/boot_id")) -> str | None:
+    """Return this kernel boot's id. WSL draws a new one each time its VM starts."""
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value if _LINUX_BOOT_ID_RE.fullmatch(value) else None
+
+
+def _declared_http_ports() -> dict[str, tuple[str, int]]:
+    """Map declared container names to (service id, in-container HTTP port).
+
+    A manifest ``health`` path marks ``port`` as HTTP. An empty one marks a
+    database or broker port, which an HTTP request cannot judge.
+    """
+    ports = {}
+    for name, service_id in _declared_docker_containers().items():
+        ext_dir = _find_ext_dir(service_id)
+        manifest = _read_manifest(ext_dir) if ext_dir is not None else None
+        service = manifest.get("service") if manifest else None
+        if not isinstance(service, dict):
+            continue
+        port, health = service.get("port"), service.get("health")
+        if type(port) is int and 0 < port < 65536 and isinstance(health, str) and health.strip():
+            ports[name] = (service_id, port)
+    return ports
+
+
+def _running_ods_container_rows() -> list:
+    """Inspect the running containers of the ODS Compose project; [] without an answer."""
+    try:
+        listed = subprocess.run(
+            ["docker", "ps", "--no-trunc", "--quiet", "--filter", "status=running",
+             "--filter", "label=com.docker.compose.project=ods"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if listed.returncode != 0 or not listed.stdout.split():
+            return []
+        inspected = subprocess.run(
+            ["docker", "inspect", "--type", "container", *listed.stdout.split()],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("WSL port check: Docker did not answer: %s", exc)
+        return []
+    # A container that stops between the two commands fails the inspect;
+    # the next poll sees the new state.
+    if inspected.returncode != 0:
+        return []
+    rows = json.loads(inspected.stdout)
+    return rows if isinstance(rows, list) else []
+
+
+def _wsl_port_check_targets(rows: list, http_ports: dict, install_dir: Path) -> list[dict]:
+    """Select this installation's running containers whose declared HTTP port
+    is published where 127.0.0.1 reaches it (pure).
+
+    Ownership is the Compose project and its working directory, as in
+    scripts/stop-owned-containers.py: a container name alone can belong to
+    another installation on the same Docker engine.
+    """
+    root = os.path.realpath(install_dir)
+    targets = []
+    for row in rows:
+        labels = (row.get("Config") or {}).get("Labels") or {}
+        state = row.get("State") or {}
+        working_dir = labels.get("com.docker.compose.project.working_dir")
+        name = str(row.get("Name") or "").lstrip("/")
+        container_id = str(row.get("Id") or "")
+        if (labels.get("com.docker.compose.project") != "ods"
+                or not isinstance(working_dir, str) or not os.path.isabs(working_dir)
+                or os.path.realpath(working_dir) != root
+                or name not in http_ports or state.get("Running") is not True
+                or not re.fullmatch(r"[0-9a-f]{64}", container_id)):
+            continue
+        service_id, port = http_ports[name]
+        bindings = ((row.get("NetworkSettings") or {}).get("Ports") or {}).get(f"{port}/tcp") or []
+        host_ports = sorted({
+            int(binding["HostPort"]) for binding in bindings
+            if binding.get("HostIp") in _WSL_PORT_LOOPBACK_HOST_IPS
+            and re.fullmatch(r"[1-9][0-9]{0,4}", str(binding.get("HostPort") or ""))
+            and int(binding["HostPort"]) < 65536
+        })
+        if host_ports:
+            health = (state.get("Health") or {}).get("Status") or "none"
+            targets.append({"id": container_id, "name": name, "service": service_id,
+                            "health": health, "ports": host_ports})
+    return targets
+
+
+def _probe_loopback_http(port: int) -> str:
+    """Send one minimal HTTP request to 127.0.0.1:<port> and classify the reply.
+
+    Any reply byte, whatever the status code, proves the forward works
+    ("answering"). A refused connection, or one closed without a reply, is
+    the dead Docker Desktop forward ("refused", "closed"). A timeout proves
+    nothing either way.
+    """
+    request = f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    try:
+        with socket.create_connection(
+            ("127.0.0.1", port), timeout=_WSL_PORT_PROBE_TIMEOUT_SECONDS,
+        ) as connection:
+            connection.sendall(request.encode("ascii"))
+            reply = connection.recv(64)
+    except ConnectionRefusedError:
+        return "refused"
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        return "closed"
+    except socket.timeout:
+        return "timeout"
+    return "answering" if reply else "closed"
+
+
+def _wsl_port_verdict(outcomes: list[str]) -> str:
+    """Combine one container's probes (pure): any reply proves its forward works."""
+    if "answering" in outcomes:
+        return "answering"
+    if any(outcome in ("refused", "closed") for outcome in outcomes):
+        return "dead"
+    return "unknown"
+
+
+def _wsl_port_check_decision(state: str, verdict: str, dead_polls: int,
+                             restarted_earlier: bool) -> str | None:
+    """Return a container's next state, "restart", or None to probe again (pure).
+
+    ``dead_polls`` counts consecutive dead verdicts, this one included.
+    """
+    if state == "restarted":
+        return {"answering": "repaired", "dead": "still-dead"}.get(verdict)
+    if verdict == "answering":
+        return "answering"
+    if verdict != "dead" or dead_polls < _WSL_PORT_CHECK_DEAD_POLLS:
+        return None
+    return "restarted-earlier" if restarted_earlier else "restart"
+
+
+def _read_wsl_port_restarts(path: Path, boot_id: str) -> set[str]:
+    """Return the containers already restarted during this WSL boot."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except ValueError:
+        logger.warning("WSL port check: ignoring unreadable restart record %s", path)
+        return set()
+    if not isinstance(record, dict) or record.get("bootId") != boot_id:
+        return set()
+    names = record.get("restarted")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        logger.warning("WSL port check: ignoring invalid restart record %s", path)
+        return set()
+    return set(names)
+
+
+def _record_and_restart(target: dict, restarted: set, record_path: Path,
+                        boot_id: str) -> tuple[str, str]:
+    """Record the restart for this boot first, so no crash or later agent
+    start can repeat it, then restart the same container (same model, same
+    settings: a restart, not a recreate)."""
+    restarted.add(target["name"])
+    try:
+        _atomic_write_json(record_path, {"bootId": boot_id, "restarted": sorted(restarted)})
+        result = subprocess.run(
+            ["docker", "restart", target["id"]],
+            capture_output=True, text=True, timeout=_WSL_PORT_RESTART_TIMEOUT_SECONDS,
+        )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        return "restart-failed", str(exc)
+    if result.returncode != 0:
+        return "restart-failed", (result.stderr or result.stdout or "").strip()[:300]
+    return "restarted", ""
+
+
+def _restart_dead_port_container(target: dict, restarted: set, record_path: Path,
+                                 boot_id: str) -> tuple[str, str]:
+    """Restart one container whose published port is dead; return (state, detail).
+
+    Like the dashboard's Restart button, this holds the service's lock.
+    llama-server also claims the model lifecycle and waits out a pending
+    Pixel model transaction, so it never races a model switch.
+    """
+    service = target["service"]
+    model_runtime = service == "llama-server"
+    if model_runtime:
+        acquired, active = _begin_model_lifecycle("wsl_port_restart")
+        if not acquired:
+            return "deferred", f"{active.get('operation') or 'a model operation'} is in progress"
+    lock = _service_locks[service]
+    locked = lock.acquire(blocking=False)
+    try:
+        if not locked:
+            return "deferred", "another operation on this service is in progress"
+        if model_runtime and _pixel_model_transition_pending_for_route_proof():
+            return "deferred", "a Pixel model transaction is pending"
+        if not _container_running(target["id"]):
+            return "gone", "it stopped or was replaced before the restart"
+        return _record_and_restart(target, restarted, record_path, boot_id)
+    finally:
+        if locked:
+            lock.release()
+        if model_runtime:
+            _end_model_lifecycle("wsl_port_restart")
+
+
+def _log_wsl_port_state(name: str, state: str, previous: str, detail: str) -> None:
+    if state == "restarted":
+        logger.info("WSL port check: restarted %s because its published port stopped "
+                    "forwarding (%s)", name, detail)
+    elif state == "deferred" and previous != "deferred":
+        logger.info("WSL port check: not restarting %s yet: %s", name, detail)
+    elif state == "gone":
+        logger.info("WSL port check: left %s alone: %s", name, detail)
+    elif state == "restart-failed":
+        logger.warning("WSL port check: could not restart %s: %s", name, detail)
+    elif state == "still-dead":
+        logger.warning("WSL port check: %s still has a dead port after one restart; "
+                       "not restarting it again during this WSL boot", name)
+    elif state == "restarted-earlier":
+        logger.info("WSL port check: %s has a dead port but was restarted once during "
+                    "this WSL boot already; leaving it", name)
+
+
+def _wsl_port_check_step(target: dict, states: dict, dead_polls: dict, restarted: set,
+                         record_path: Path, boot_id: str) -> None:
+    """Probe one container that Docker reports healthy and act on the result."""
+    name = target["name"]
+    state = states.setdefault(name, "waiting")
+    # Healthy means the service answers inside its container, so a dead
+    # published port is the forward, not a service that is still starting.
+    if state in _WSL_PORT_DONE_STATES or target["health"] != "healthy":
+        return
+    outcomes = [_probe_loopback_http(port) for port in target["ports"]]
+    verdict = _wsl_port_verdict(outcomes)
+    dead_polls[name] = dead_polls.get(name, 0) + 1 if verdict == "dead" else 0
+    decision = _wsl_port_check_decision(state, verdict, dead_polls[name], name in restarted)
+    if decision is None:
+        return
+    detail = ", ".join(f"127.0.0.1:{port} {outcome}"
+                       for port, outcome in zip(target["ports"], outcomes))
+    if decision == "restart":
+        decision, failure = _restart_dead_port_container(target, restarted, record_path, boot_id)
+        detail = failure or detail
+    _log_wsl_port_state(name, decision, state, detail)
+    states[name] = decision
+
+
+def _wsl_port_check(boot_id: str, record_path: Path, *, clock=time.monotonic,
+                    sleep=time.sleep) -> dict[str, str]:
+    """Watch ODS's published HTTP ports after a WSL VM boot, within a bound.
+
+    Returns each container's state; "waiting" never became healthy in time.
+    """
+    restarted = _read_wsl_port_restarts(record_path, boot_id)
+    states: dict[str, str] = {}
+    dead_polls: dict[str, int] = {}
+    started = clock()
+    while True:
+        rows = _running_ods_container_rows()
+        targets = _wsl_port_check_targets(rows, _declared_http_ports(), INSTALL_DIR) if rows else []
+        for target in targets:
+            _wsl_port_check_step(target, states, dead_polls, restarted, record_path, boot_id)
+        elapsed = clock() - started
+        settled = bool(targets) and all(states[t["name"]] in _WSL_PORT_DONE_STATES for t in targets)
+        if elapsed >= _WSL_PORT_CHECK_WINDOW_SECONDS or (
+            settled and elapsed >= _WSL_PORT_CHECK_MIN_WATCH_SECONDS
+        ):
+            return states
+        sleep(_WSL_PORT_CHECK_POLL_SECONDS)
+
+
+def _run_wsl_port_check() -> None:
+    """Thread body: one bounded check per agent start, summarized in one line."""
+    boot_id = _linux_boot_id()
+    if boot_id is None:
+        logger.warning("WSL port check skipped: no boot id to limit restarts to one per WSL boot")
+        return
+    logger.info("WSL port check: watching ODS's published HTTP ports for up to %d minutes",
+                _WSL_PORT_CHECK_WINDOW_SECONDS // 60)
+    states = _wsl_port_check(boot_id, DATA_DIR / _WSL_PORT_CHECK_RECORD)
+    by_state: dict[str, list[str]] = {}
+    for name, state in sorted(states.items()):
+        by_state.setdefault(state, []).append(name)
+    summary = "; ".join(f"{state} {', '.join(names)}" for state, names in sorted(by_state.items()))
+    logger.info("WSL port check finished: %s", summary or "no running ODS HTTP service")
+
+
+def _start_wsl_port_check() -> threading.Thread | None:
+    """Start the check in the background under WSL; the agent never waits on it."""
+    # An agent inside a container would probe that container's own loopback.
+    if not _is_wsl_linux() or os.environ.get("ODS_HOST_INSTALL_DIR"):
+        return None
+    thread = threading.Thread(target=_run_wsl_port_check, name="ods-wsl-port-check", daemon=True)
+    thread.start()
+    return thread
+
+
 def main():
     global INSTALL_DIR, DATA_DIR, AGENT_API_KEY, GPU_BACKEND, STARTUP_ODS_MODE
     global TIER, GPU_COUNT, CORE_SERVICE_IDS
@@ -21427,6 +21749,7 @@ def main():
         if platform.system() in ('Darwin', 'Linux'):
             threading.Thread(target=_monitor_native_pixel_access,
                              name='ods-pixel-startup-reproof', daemon=True).start()
+        _start_wsl_port_check()
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("Shutting down")
