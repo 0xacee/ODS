@@ -58,7 +58,7 @@ EXAMPLES = {
         'README.md': 'a7d4e1a0d6ac4e3477d17b4f3de4a42ff4f3da998e36d0c9450d57875abe8944',
         'chars.js': '161b08c8a331fef5f09ac45e6ade2cff62e03316ba7c6ac197adf8147af629db',
         'dungeon.js': '80dfc2e0517cb89bce4f445d75e6a85a4a9c2317893a6762d87666b5b136004c',
-        'engine.js': '77b64f14b43b4087ee134abf61ff34ff1927aa31c3d9ab38875f6e3800e29db7',
+        'engine.js': 'f50a91ae535f3d0f91e0f632f956babcfedaf3f423d351c31e12186fe13e3663',
         'index.html': 'af1c8b2b0a9f4e3ec4f5c6389078cf0b3a187a53badd451006ce24b737fd9906',
         'legacy.js': '0d33ded8670f4113f47baba1325ed52247305cbb9a0c92271aa7c8ef0c498165',
         'style.css': 'e063614db72fbc5c607bd4c79d4e2e967a0e5deceb3962f0a50f045e55197ee9',
