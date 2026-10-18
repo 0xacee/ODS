@@ -23,7 +23,15 @@ from starlette.requests import ClientDisconnect
 
 import hermes_bridge
 import session_signer
-from config import INSTALL_DIR, SERVICES, read_live_env_value
+from config import (
+    EXTENSIONS_DIR,
+    GPU_BACKEND,
+    INSTALL_DIR,
+    LIBRARY_MANAGEABLE_BUILTINS,
+    SERVICES,
+    load_extension_manifests,
+    read_live_env_value,
+)
 from helpers import check_service_health, get_llama_context_size, get_llama_vision_support, get_loaded_model
 from host_agent_client import AgentClientError, async_request_json as request_agent_json
 from performance_oracle import (
@@ -414,8 +422,30 @@ def _require_session(request: Request) -> tuple[str, int]:
     return hermes_bridge.talk_session_key(cookie_value), expires_at
 
 
-async def _service_state(service_id: str) -> dict[str, Any]:
+async def _service_config(service_id: str) -> dict[str, Any] | None:
+    """The service's registry entry, including a built-in added after startup.
+
+    SERVICES is read once when dashboard-api starts. Extensions can add Whisper,
+    Kokoro or Hermes later without an API restart, so read a missing built-in's
+    current manifest, as the catalog's health poll does (helpers.get_all_services).
+    Without this, Talk turned voice off after the owner added it.
+    """
     cfg = SERVICES.get(service_id)
+    if cfg or service_id not in LIBRARY_MANAGEABLE_BUILTINS:
+        return cfg
+    try:
+        current, _, _ = await asyncio.to_thread(
+            load_extension_manifests, EXTENSIONS_DIR, GPU_BACKEND,
+            only_service_ids=frozenset({service_id}),
+        )
+    except OSError as exc:
+        logger.warning("ODS Talk could not read the %s manifest: %s", service_id, exc)
+        return None
+    return current.get(service_id)
+
+
+async def _service_state(service_id: str) -> dict[str, Any]:
+    cfg = await _service_config(service_id)
     if not cfg:
         return {"configured": False, "status": "not_configured"}
     try:
