@@ -197,7 +197,7 @@ function spawnEnemy(kind) {
   // wolf hounds are 3x tankier than their base stat line
   const hpScale = (kind === "fenris" ? WOLF_HP_SCALE : 1);
   G.enemies.push({
-    kind, x: spot.x, y: spot.y, hp: st.hp * mult * hpScale, maxHp: st.hp * mult * hpScale, spd: st.spd * ENEMY_SPEED_SCALE, dmg: st.dmg * (1 + G.zone * .06),
+    kind, x: spot.x, y: spot.y, hp: st.hp * mult * hpScale, maxHp: st.hp * mult * hpScale, spd: st.spd * ENEMY_SPEED_SCALE * (kind === "fenris" ? WOLF_SPD_SCALE : 1), dmg: st.dmg * (1 + G.zone * .06),
     r: st.r,
     // Collision radius stays at the art's torso, but separation uses a stance radius so a hound
     // holds off at roughly nose length instead of pressing its muzzle into every packmate. A wolf
@@ -221,7 +221,7 @@ function spawnBoss() {
     // while a boss still walked at its raw BOSS_STATS.spd, so Skarnax crawled next to pack hounds and
     // the Hollow Crown trailed the brutes summoned around him. Same dial, so a boss keeps its
     // intended position relative to the crowd instead of becoming the slowest thing on screen.
-    spd: bs.spd * ENEMY_SPEED_SCALE, dmg: bs.dmg * (1 + G.zone * .05),
+    spd: bs.spd * ENEMY_SPEED_SCALE * (z.boss.kind === "fenris" ? WOLF_SPD_SCALE : 1), dmg: bs.dmg * (1 + G.zone * .05),
     r: bs.r, sepR: bs.r + 14, face: -1, faceHold: 0, atkT: 0, atkDur: .6, atkCdT: 1, hurtT: 0, wob: 2,
     aiT: 2, dashT: 0, dashDx: 0, dashDy: 0, spitT: 2, phase: 1, scale: bs.scale,
   };

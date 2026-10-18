@@ -302,6 +302,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a long line of spaces.
 
 ### Changed
+- Elf of Doom's wolves, the pack hounds and the wolf boss Skarnax, move 15%
+  slower: players kept stalling in the wolf realm because of their speed.
+  Portal made the change from one owner prompt, and the game files are again
+  exactly the ones https://odsspark.com/game/ serves. An install that already
+  has `Playground/elf-of-doom` keeps its own copy.
 - The unsupported Tauri desktop installer under `installer/` is removed. No CI
   built it and no release shipped it, and its installer arguments no longer
   matched the current installers. Its build dependencies carried the
