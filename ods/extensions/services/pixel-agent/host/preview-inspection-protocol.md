@@ -640,7 +640,12 @@ still decides last. The value is computed for each switch's model alone, so
 the next switch to a model without a projector gets its own value back.
 Remote routes are written as `unknown` and never read a local report.
 An installation that already runs a vision model gets the readback on its
-next model switch.
+next model switch. Every installer run, including an update, writes
+`unknown` over a `supported` declaration (`installers/lib/pixel-onboarding.py`):
+the installer rewrites `.env` without `LLAMA_ARG_MMPROJ` while keeping the
+active model, so the model may now run without its projector. `unsupported`
+and `unknown` carry over for the same route; the next switch reads the
+projector back.
 
 **The directive.** When the gate is open and the run guard grants one of the
 run's at most three screenshots (`tool-loop-guard.mjs`
@@ -748,3 +753,5 @@ route check on each. The host agent's `test_host_agent_image_input.py` and
 report on every local route, the readback rule, switches with a reported,
 false, missing and unreadable vision state, a vision-to-text switch on both
 reconcile paths, and a remote activation that never reads it.
+`tests/test_pixel_onboarding.py` checks that an installer rerun after a
+`supported` switch renders `unknown` and keeps the rest of the route.
