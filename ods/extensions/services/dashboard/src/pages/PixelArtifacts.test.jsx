@@ -2,6 +2,7 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { createHash } from 'node:crypto'
 import { render } from '../test/test-utils'
 import { saveConversation, SELECT_EVENT } from '../lib/pixelConversations'
+import { EMBED_NOTE, EMBED_ONLY_NOTE } from '../lib/embedDisplay'
 import Pixel from './Pixel'
 
 const bytes = new TextEncoder().encode('A verified document\n')
@@ -119,6 +120,8 @@ it('shows the verified download without a matching generated embed tag and retai
   await send()
   const download=await screen.findByRole('button',{name:'Download report.md'})
   expect(screen.queryByText(content)).toBeNull()
+  expect(screen.queryByText(EMBED_ONLY_NOTE)).toBeNull()
+  expect(screen.queryByText(EMBED_NOTE)).toBeNull()
   expect(JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).messages.at(-1).content).toBe(content)
   fireEvent.click(download)
   await screen.findByText('Verified download started')
@@ -127,4 +130,30 @@ it('shows the verified download without a matching generated embed tag and retai
   render(<Pixel/>)
   expect(await screen.findByRole('button',{name:'Download report.md'})).toBeEnabled()
   expect(screen.queryByText(content)).toBeNull()
+})
+
+it('shows a note instead of an embed Portal cannot display, and keeps and copies the original reply',async()=>{
+  // The whole reply a fleet test showed verbatim (Qwen3.5-4B, 2026-10-18).
+  const content='[embed ref="cv_456e4732d60d4117b731214838589d22" height="320"]'
+  reply=stream([{choices:[{delta:{content}}]},{choices:[{finish_reason:'stop'}]},'[DONE]'])
+  const writeText=vi.fn().mockResolvedValue(undefined)
+  const previous=Object.getOwnPropertyDescriptor(navigator,'clipboard')
+  Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText}})
+  try {
+    const view=render(<Pixel/>)
+    await send()
+    // A live reply is revealed at about 120 characters a second: the whole
+    // note takes about a second, longer on a slow runner.
+    const note=await screen.findByText(EMBED_ONLY_NOTE,{},{timeout:5000})
+    expect(note.closest('p')).toHaveClass('portal-embed-note')
+    expect(screen.queryByText(/\[embed/)).toBeNull()
+    expect(screen.queryByRole('region',{name:'Delivered files'})).toBeNull()
+    expect(JSON.parse(localStorage.getItem('ods.pixel.chat.v1')).messages.at(-1).content).toBe(content)
+    fireEvent.click(screen.getByRole('button',{name:'Copy response'}))
+    await waitFor(()=>expect(writeText).toHaveBeenCalledExactlyOnceWith(content))
+    view.unmount()
+    render(<Pixel/>)
+    expect(await screen.findByText(EMBED_ONLY_NOTE)).toBeVisible()
+    expect(screen.queryByText(/\[embed/)).toBeNull()
+  } finally {if(previous) Object.defineProperty(navigator,'clipboard',previous);else delete navigator.clipboard}
 })

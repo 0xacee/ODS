@@ -1312,7 +1312,10 @@ async def _model_storage_status() -> dict[str, Any] | None:
         return None
     if not isinstance(value, dict):
         return None
-    return {key: value.get(key) for key in ("freeBytes", "totalBytes", "marginBytes")}
+    status = {key: value.get(key) for key in ("freeBytes", "totalBytes", "marginBytes")}
+    # WSL only: whether the Windows drive under the virtual disk was counted.
+    status.update({key: value[key] for key in ("windowsDrive", "windowsDriveChecked") if key in value})
+    return status
 
 
 def _hf_default_context(declared: int | None) -> int:

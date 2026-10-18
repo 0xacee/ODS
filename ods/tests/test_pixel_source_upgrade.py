@@ -942,6 +942,71 @@ def test_completed_uninstall_inventory_refuses_anything_but_a_renumbered_device(
     assert (manager.state / 'source-scratch.json').read_bytes() == raw
 
 
+def test_unheld_refresh_after_remount_renews_buffer_and_preserves_old_receipt(mirrored):
+    manager, old, new, identity, mirror = mirrored
+    path = manager.state / 'source-scratch.json'
+    record = _renumbered_receipt(manager)
+    old_buffer = old / record['name']
+    raw = upgrade.encoded(record)
+    manager._write('source-scratch.json', raw)
+    (new / 'bin/added.py').write_text('refreshed candidate content')
+
+    manager.stage(new, os.getuid(), identity, refresh_unheld=True)
+    current = json.loads(path.read_text())
+    assert current['name'] != record['name']
+    assert current['parent'] == [old.stat().st_dev, old.stat().st_ino]
+    new_buffer = old / current['name']
+    assert new_buffer.is_dir() and list(new_buffer.iterdir()) == []
+    assert old_buffer.is_dir() and list(old_buffer.iterdir()) == []
+    assert (manager.state / upgrade.sha(raw)).read_bytes() == raw
+    assert manager.journal()['phase'] == 'staged'
+    assert manager.journal()['hold'] is None
+
+
+def test_unheld_refresh_after_remount_refuses_when_installed_tree_changed(mirrored):
+    manager, old, new, identity, mirror = mirrored
+    path = manager.state / 'source-scratch.json'
+    record = _renumbered_receipt(manager)
+    raw = upgrade.encoded(record)
+    manager._write('source-scratch.json', raw)
+    (new / 'bin/added.py').write_text('refreshed candidate content')
+    (old / 'bin/a.py').write_text('owner edit')
+    prior = manager.journal()
+
+    with pytest.raises(upgrade.UpgradeError):
+        manager.stage(new, os.getuid(), identity, refresh_unheld=True)
+    assert manager.journal() == prior
+    assert manager.journal()['hold'] is None
+    assert path.read_bytes() == raw
+
+
+def test_unheld_refresh_after_remount_refuses_when_old_buffer_non_empty(mirrored):
+    manager, old, new, identity, mirror = mirrored
+    record = _renumbered_receipt(manager)
+    raw = upgrade.encoded(record)
+    manager._write('source-scratch.json', raw)
+    old_buffer = old / record['name']
+    (old_buffer / 'payload').write_text('interrupted buffer payload')
+    (new / 'bin/added.py').write_text('refreshed candidate content')
+    prior = manager.journal()
+
+    with pytest.raises(upgrade.UpgradeError):
+        manager.stage(new, os.getuid(), identity, refresh_unheld=True)
+    assert manager.journal() == prior
+    assert (old_buffer / 'payload').read_text() == 'interrupted buffer payload'
+    assert (manager.state / 'source-scratch.json').read_bytes() == raw
+
+
+def test_unheld_refresh_without_remount_preserves_scratch_receipt_bytes(mirrored):
+    manager, old, new, identity, mirror = mirrored
+    path = manager.state / 'source-scratch.json'
+    raw = path.read_bytes()
+    (new / 'bin/added.py').write_text('refreshed candidate content')
+
+    manager.stage(new, os.getuid(), identity, refresh_unheld=True)
+    assert path.read_bytes() == raw
+
+
 def test_source_begin_protocol_has_no_caller_supplied_authority():
     import sys
     sys.path.insert(0, str(MODULE.parent))

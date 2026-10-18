@@ -833,10 +833,10 @@ class SourceUpgrade:
         value = self.journal()
         if (value is None or value['phase'] != 'staged' or value['hold'] is not None
                 or os.path.lexists(self.state.parent / 'transition.json')):
-            return
+            return False
         item, raw = read_file(self.state, 'source-scratch.json', self.state_uid)
         if item is None:
-            return
+            return False
         record = json.loads(raw)
         parent = self.install.stat()
         if (type(record) is not dict or set(record) != {'version','name','parent','identity'}
@@ -845,10 +845,10 @@ class SourceUpgrade:
                 or any(type(record[k]) is not list or len(record[k]) != 2
                        or any(type(n) is not int or n < 0 for n in record[k])
                        for k in ('parent', 'identity'))):
-            return
+            return False
         if (record['parent'][0] == parent.st_dev or record['parent'][1] != parent.st_ino
                 or record['identity'][0] != record['parent'][0]):
-            return
+            return False
         fd = os.open(self.install / record['name'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             info = os.fstat(fd)
@@ -861,6 +861,7 @@ class SourceUpgrade:
             self._write('source-scratch.json', encoded(dict(version=1,
                 name='.ods-source-staging-' + os.urandom(16).hex(),
                 parent=[parent.st_dev, parent.st_ino], identity=None)))
+            return True
         finally:
             os.close(fd)
 
@@ -1108,6 +1109,8 @@ class SourceUpgrade:
                 # remain content-addressed, never adopted as active authority.
                 self._write('previous-completion.json', encoded(existing))
             elif not same and refresh_unheld and candidate != existing['candidate']:
+                if self._renew_unheld_scratch_after_remount():
+                    self._prepare_scratch()
                 self._check_unheld_refresh(existing, identity, candidate, rebase_unheld=rebase_unheld)
                 refreshed = existing
             elif not same and rebase_unheld:

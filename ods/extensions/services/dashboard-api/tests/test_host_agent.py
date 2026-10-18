@@ -8653,7 +8653,8 @@ class TestModelDownloadDiskSpace:
 
         assert _mod._download_bytes_needed(artifacts, paths) == 11
 
-    def test_storage_status_uses_the_nearest_existing_directory(self, tmp_path):
+    def test_storage_status_uses_the_nearest_existing_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_mod, "_is_wsl_linux", lambda: False)
         status = _mod._model_storage_status(tmp_path / "not" / "created" / "yet")
 
         assert status["totalBytes"] > 0
@@ -8661,6 +8662,7 @@ class TestModelDownloadDiskSpace:
         assert status["marginBytes"] == _mod._download_disk_margin(status["totalBytes"])
 
     def test_storage_endpoint_reports_the_download_volume(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(_mod, "_is_wsl_linux", lambda: False)
         monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
         monkeypatch.setattr(_mod, "_model_download_directory", lambda: tmp_path)
         handler = _FakeHandler(b"")
@@ -8682,6 +8684,159 @@ class TestModelDownloadDiskSpace:
         _mod.AgentHandler._handle_model_storage(handler)
 
         assert handler.response_code == 409
+
+
+class TestWslModelStorage:
+    """On WSL the virtual disk's free space is bounded by the Windows drive under it."""
+
+    # Fleet laptop, 2026-10-18: the dashboard offered 836.21 GiB and a
+    # 50.34 GiB reserve from the virtual disk while its 1 TB drive C: had
+    # 68.8 GB free.
+    DISK = types.SimpleNamespace(total=int(1006.81 * 1024 ** 3), free=int(836.21 * 1024 ** 3))
+    HOST = types.SimpleNamespace(total=1_022_580_748_288, free=68_800_000_000)
+
+    def _wsl(self, monkeypatch, tmp_path, *, env="ODS_WSL_DISK_DRIVE=C:\n", host=None,
+             mount_error=None, mounted=True):
+        install = tmp_path / "install"
+        store = install / "data" / "models"
+        store.mkdir(parents=True)
+        (install / ".env").write_text(env, encoding="utf-8")
+        mount = tmp_path / "mnt" / "c"
+        mount.mkdir(parents=True)
+        drives = []
+
+        def drive_mount(drive):
+            drives.append(drive)
+            if mount_error is not None:
+                raise mount_error
+            return mount
+
+        usage = {store: self.DISK, mount: host or self.HOST}
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install)
+        monkeypatch.setattr(_mod, "_is_wsl_linux", lambda: True)
+        # The store is on the virtual disk; C: is its own DrvFS mount unless
+        # the drive is not mounted, which leaves a plain directory there.
+        monkeypatch.setattr(_mod, "_on_wsl_virtual_disk", lambda path: Path(path) != mount or not mounted)
+        monkeypatch.setattr(_mod._wsl_runtime, "drive_mount", drive_mount)
+        monkeypatch.setattr(_mod.shutil, "disk_usage", lambda path: usage[Path(path)])
+        return store, drives
+
+    def _store_volume(self):
+        return {
+            "freeBytes": self.DISK.free,
+            "totalBytes": self.DISK.total,
+            "marginBytes": _mod._download_disk_margin(self.DISK.total),
+        }
+
+    def _unchecked(self):
+        return {**self._store_volume(), "windowsDrive": None, "windowsDriveChecked": False}
+
+    def test_the_windows_drive_bounds_free_space_and_sets_the_margin(self, tmp_path, monkeypatch):
+        store, drives = self._wsl(monkeypatch, tmp_path)
+
+        assert _mod._model_storage_status(store) == {
+            "freeBytes": 68_800_000_000,
+            "totalBytes": 1_022_580_748_288,
+            "marginBytes": 51_129_037_414,
+            "windowsDrive": "C:",
+            "windowsDriveChecked": True,
+        }
+        assert drives == ["C:"]
+
+    def test_a_model_that_fits_the_virtual_disk_but_not_the_drive_is_refused(self, tmp_path, monkeypatch):
+        store, _drives = self._wsl(monkeypatch, tmp_path)
+        install = store.parents[1]
+        (install / "config").mkdir()
+        (install / "config" / "model-library.json").write_text(json.dumps({"models": [{
+            "id": "large-model",
+            "gguf_file": "large-model.gguf",
+            "gguf_url": "https://example.com/large-model.gguf",
+            "size_bytes": 30_000_000_000,
+        }]}), encoding="utf-8")
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
+        monkeypatch.setattr(_mod, "_model_download_directory", lambda: store)
+
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("a refused download must not take the model lifecycle")
+
+        monkeypatch.setattr(_mod, "_begin_model_lifecycle", refuse)
+        handler = _FakeHandler(json.dumps({
+            "gguf_file": "large-model.gguf",
+            "gguf_url": "https://example.com/large-model.gguf",
+        }).encode("utf-8"))
+
+        _mod.AgentHandler._handle_model_download(handler)
+
+        assert handler.response_code == 507
+        body = handler.parse_response()
+        assert body["code"] == "insufficient_disk_space"
+        assert body["freeBytes"] == 68_800_000_000
+        assert body["marginBytes"] == 51_129_037_414
+
+    def test_the_virtual_disk_limits_when_it_has_less_room(self, tmp_path, monkeypatch):
+        roomy = types.SimpleNamespace(total=4 * 10 ** 12, free=3 * 10 ** 12)
+        store, _drives = self._wsl(monkeypatch, tmp_path, host=roomy)
+
+        assert _mod._model_storage_status(store) == {
+            "freeBytes": self.DISK.free,
+            "totalBytes": roomy.total,
+            "marginBytes": _mod._download_disk_margin(roomy.total),
+            "windowsDrive": None,
+            "windowsDriveChecked": True,
+        }
+
+    @pytest.mark.parametrize("env", [
+        "",
+        "ODS_WSL_DISK_DRIVE=\n",
+        "ODS_WSL_DISK_DRIVE=C\n",
+        "ODS_WSL_DISK_DRIVE=C:\\\n",
+        "ODS_WSL_DISK_DRIVE=CD:\n",
+        "ODS_WSL_DISK_DRIVE=1:\n",
+    ])
+    def test_a_missing_or_invalid_drive_record_is_reported_unchecked(self, tmp_path, monkeypatch, caplog, env):
+        store, drives = self._wsl(monkeypatch, tmp_path, env=env)
+
+        with caplog.at_level(logging.WARNING, logger="ods-host-agent"):
+            assert _mod._model_storage_status(store) == self._unchecked()
+        assert drives == []
+        assert "ODS_WSL_DISK_DRIVE is missing or invalid" in caplog.text
+
+    @pytest.mark.parametrize("mount_error", [
+        _mod._wsl_runtime.BridgeError("WSL path translation failed"),
+        FileNotFoundError("/usr/bin/wslpath"),
+        subprocess.TimeoutExpired("wslpath", 5),
+    ])
+    def test_an_unreadable_drive_is_reported_unchecked(self, tmp_path, monkeypatch, caplog, mount_error):
+        store, drives = self._wsl(monkeypatch, tmp_path, mount_error=mount_error)
+
+        with caplog.at_level(logging.WARNING, logger="ods-host-agent"):
+            assert _mod._model_storage_status(store) == self._unchecked()
+        assert drives == ["C:"]
+        assert "Free space on Windows drive C: could not be checked" in caplog.text
+
+    def test_an_unmounted_drive_is_not_read_as_the_virtual_disk_again(self, tmp_path, monkeypatch, caplog):
+        store, drives = self._wsl(monkeypatch, tmp_path, mounted=False)
+
+        with caplog.at_level(logging.WARNING, logger="ods-host-agent"):
+            assert _mod._model_storage_status(store) == self._unchecked()
+        assert drives == ["C:"]
+        assert "Windows drive C: is not mounted in WSL" in caplog.text
+
+    def test_a_store_on_a_windows_drive_mount_keeps_its_own_figures(self, tmp_path, monkeypatch):
+        store, drives = self._wsl(monkeypatch, tmp_path)
+        monkeypatch.setattr(_mod, "_on_wsl_virtual_disk", lambda _path: False)
+
+        assert _mod._model_storage_status(store) == self._store_volume()
+        assert drives == []
+
+    def test_other_hosts_report_the_store_volume_only(self, tmp_path, monkeypatch):
+        store, drives = self._wsl(monkeypatch, tmp_path)
+        monkeypatch.setattr(_mod, "_is_wsl_linux", lambda: False)
+        monkeypatch.setattr(_mod, "_on_wsl_virtual_disk",
+                            lambda _path: pytest.fail("only WSL looks for a virtual disk"))
+
+        assert _mod._model_storage_status(store) == self._store_volume()
+        assert drives == []
 
 
 class TestModelDeleteSafety:
@@ -10426,8 +10581,9 @@ def test_install_result_is_not_terminal_until_worker_exits(tmp_path, monkeypatch
     assert _mod._read_install_operation(*identity)['state'] == terminal_state
 
 
-def test_orphaned_install_is_uncertain_and_blocks_new_attempt(install_operation_host):
+def test_orphaned_install_is_uncertain_and_blocks_new_attempt(install_operation_host, monkeypatch):
     invoke, responses, launches = install_operation_host
+    monkeypatch.setattr(_mod, '_observe_install_container', lambda service: None, raising=False)
     _mod._save_install_operation({'service_id': 'operation-test', 'operation_id': 'c' * 32,
         'run_setup_hook': False, 'state': 'running'})
     invoke('c' * 32)
@@ -10450,6 +10606,7 @@ def test_install_disconnect_does_not_replay_or_release_worker_twice(install_oper
 
 def test_install_timeout_does_not_authorize_replay(install_operation_host, monkeypatch):
     invoke, responses, launches = install_operation_host
+    monkeypatch.setattr(_mod, '_observe_install_container', lambda service: None, raising=False)
     def timeout(): raise subprocess.TimeoutExpired(['docker'], 1)
     monkeypatch.setattr(_mod, 'resolve_compose_flags', timeout)
     invoke('f' * 32)
@@ -10457,6 +10614,65 @@ def test_install_timeout_does_not_authorize_replay(install_operation_host, monke
     invoke('a' * 32)
     assert responses[-1][0] == 409
     assert len(launches) == 1
+
+
+def test_timed_out_install_reconciles_when_container_runs(install_operation_host, monkeypatch):
+    invoke, responses, launches = install_operation_host
+    def timeout(): raise subprocess.TimeoutExpired(['docker'], 1)
+    monkeypatch.setattr(_mod, 'resolve_compose_flags', timeout)
+    invoke('f' * 32)
+    assert _mod._read_install_operation('operation-test', 'f' * 32)['state'] == 'uncertain'
+    monkeypatch.setattr(_mod, '_observe_install_container', lambda service: 'running', raising=False)
+    monkeypatch.setattr(_mod, 'resolve_compose_flags', lambda: [])
+    invoke('a' * 32)
+    assert responses[-1][0] == 202
+    assert len(launches) == 2
+    reconciled = _mod._read_install_operation('operation-test', 'f' * 32)
+    assert reconciled['state'] == 'succeeded'
+    assert 'reconciled after interruption' in reconciled['reconciliation']
+
+
+def test_stale_install_reconciles_to_failed_when_container_absent(install_operation_host, monkeypatch):
+    invoke, responses, launches = install_operation_host
+    _mod._save_install_operation({'service_id': 'operation-test', 'operation_id': 'c' * 32,
+        'run_setup_hook': False, 'state': 'running'})
+    monkeypatch.setattr(_mod, '_observe_install_container', lambda service: 'stopped', raising=False)
+    invoke('d' * 32)
+    assert responses[-1][0] == 202
+    assert len(launches) == 1
+    reconciled = _mod._read_install_operation('operation-test', 'c' * 32)
+    assert reconciled['state'] == 'failed'
+    assert 'interrupted' in reconciled['reconciliation']
+
+
+def test_live_install_worker_still_blocks_new_attempt(install_operation_host, monkeypatch):
+    invoke, responses, launches = install_operation_host
+    identity = ('operation-test', 'c' * 32)
+    monkeypatch.setattr(_mod, '_install_operation_live', {identity})
+    _mod._save_install_operation({'service_id': identity[0], 'operation_id': identity[1],
+        'run_setup_hook': False, 'state': 'running'})
+    monkeypatch.setattr(_mod, '_observe_install_container', lambda service: 'running', raising=False)
+    invoke('d' * 32)
+    assert responses[-1][0] == 409
+    assert not launches
+    assert _mod._read_install_operation(*identity)['state'] == 'running'
+
+
+def test_unexpected_install_exception_leaves_terminal_receipt(install_operation_host, monkeypatch):
+    invoke, responses, launches = install_operation_host
+    def boom(): raise KeyError('unexpected')
+    monkeypatch.setattr(_mod, 'resolve_compose_flags', boom)
+    raised = []
+    class ThreadLikeWorker:  # A real thread reports, not propagates, target errors.
+        def __init__(self, target, **kwargs): self.target = target
+        def start(self):
+            with pytest.raises(KeyError) as error:
+                self.target()
+            raised.append(error.value)
+    monkeypatch.setattr(_mod.threading, 'Thread', ThreadLikeWorker)
+    invoke('e' * 32)
+    assert raised and responses[-1][0] == 202
+    assert _mod._read_install_operation('operation-test', 'e' * 32)['state'] == 'failed'
 
 
 def test_install_operation_http_observation_is_authenticated_and_bound(tmp_path, monkeypatch):
