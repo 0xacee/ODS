@@ -29,6 +29,39 @@ sys.modules["ods_host_agent"] = _mod
 _spec.loader.exec_module(_mod)
 
 
+@pytest.mark.parametrize("kind", ["apply", "proof"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_remote_provider_publishes_busy_state_until_request_settles(monkeypatch, kind, fails):
+    """Navigating to Models must not offer recovery during a provider switch."""
+    monkeypatch.setattr(_mod, "check_auth", lambda _handler: True)
+    monkeypatch.setattr(_mod, "_plan_remote_provider_lifecycle_operation", lambda _body: {"action": "disable"})
+    observed = []
+
+    def work(*_args):
+        observed.append(_mod._model_lifecycle_status())
+        recovery = _FakeHandler(b"{}")
+        _mod.AgentHandler._handle_model_recover(recovery)
+        assert recovery.response_code == 409
+        if fails:
+            raise RuntimeError("provider unavailable")
+        return {"applied": True}
+
+    monkeypatch.setattr(_mod, "_apply_remote_provider_lifecycle_operation", work)
+    monkeypatch.setattr(_mod, "_record_remote_provider_egress_probe", work)
+    handler = _FakeHandler(b'{"action":"disable"}')
+    getattr(_mod.AgentHandler, f"_handle_remote_provider_{kind}")(handler)
+
+    assert len(observed) == 1
+    assert observed[0]["lifecycleActive"] is True
+    assert observed[0]["activeOperation"] == f"remote_provider_{kind}"
+    assert not _mod._model_lifecycle_status().get("lifecycleActive")
+    acquired, _ = _mod._begin_model_lifecycle("model_recovery")
+    assert acquired, "both successful and failed provider operations release ownership"
+    _mod._end_model_lifecycle("model_recovery")
+    expected_status = (500 if kind == "apply" else 409) if fails else 200
+    assert handler.response_code == expected_status
+
+
 def test_host_selection_serializes_dependency_decisions_with_cli_helper(tmp_path, monkeypatch):
     """The agent uses the installed host selector, including ordered stops."""
     scripts = tmp_path / "scripts"
