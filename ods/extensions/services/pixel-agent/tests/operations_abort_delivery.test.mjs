@@ -2,14 +2,14 @@
 // model kept calling a tool outside the Operations boundary, the guard aborted
 // the run ("Pixel stopped a tool retry after the Operations boundary ...
 // aborted=true"), and the harness's own error for the aborted request reached
-// the owner as "LLM request timed out." The ingress case runs over real
-// loopback TCP (also on Windows).
+// the owner as "LLM request timed out." above the verified host facts. The
+// ingress case runs over real loopback TCP (also on Windows).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import {createIngressServer} from '../host/pixel_ingress.mjs';
+import {createIngressServer, parseVerificationResponse} from '../host/pixel_ingress.mjs';
 import {createToolLoopGuard, OPERATIONS_LOOP_ABORT_REASON, OPERATIONS_UNAVAILABLE_DELIVERY_PREFIX,
-  operationsLoopDeliveryText} from '../plugin/tool-loop-guard.mjs';
+  operationsLoopDeliveryText, operationsLoopVerifiedText} from '../plugin/tool-loop-guard.mjs';
 
 const RUN_ID = 'chatcmpl_5e2b7c1d-3f4a-4b6c-8d9e-0a1b2c3d4e5f';
 const USER = 'ods-' + 'c'.repeat(64);
@@ -21,9 +21,9 @@ const HOST_RECEIPT = {details: {jobId: 'ops-1234567890123-abcdef123456', status:
     outputTruncated: {stdout: false, stderr: false}, riskSignals: []}]}};
 const HELP = 'If it keeps happening, [get help on Discord](https://discord.gg/4ntNp9MAwC).';
 
-function fixture() {
+function fixture({abortRun = () => true} = {}) {
   const aborts = [];
-  const guard = createToolLoopGuard({abortRun: sessionId => { aborts.push(sessionId); return true; },
+  const guard = createToolLoopGuard({abortRun: sessionId => { aborts.push(sessionId); return abortRun(sessionId); },
     abortRunAndDrain: async () => ({aborted: true, drained: true})});
   guard.observeRun(CTX, 'pixel', {prompt: PROMPT});
   let round = 0;
@@ -52,21 +52,38 @@ function abortAfterEvidence(f) {
   assert.deepEqual(f.aborts, [CTX.sessionId]);
 }
 
-test('laptop replay: the owner reads why Portal stopped, above the host facts it verified', () => {
+test('laptop replay: the verified facts stand, under why Portal stopped, instead of a timeout', () => {
   const f = fixture();
   abortAfterEvidence(f);
   const verification = f.guard.deliveryVerificationForRun(RUN_ID);
-  assert.equal(verification.status, 'failed');
-  const cause = operationsLoopDeliveryText('message', {evidence: true});
-  assert.equal(cause, '**Portal stopped this response:** this request needed ODS Operations work on this computer, ' +
-    'and the model kept calling `message` instead, so Portal ended the response rather than let it loop. That call did not run. ' +
-    'What Portal did verify is below. The conversation and any saved files are preserved. ' +
-    `Send a new message to try again; it starts a fresh attempt. ${HELP}`);
+  const cause = operationsLoopVerifiedText({tool: 'message', boundary: 'operations'});
+  assert.equal(cause, '**Portal stopped this response after verifying the result below:** this request needed ODS ' +
+    'Operations work on this computer, and the model kept calling `message`, which that step does not allow, so Portal ' +
+    'ended the response rather than let it loop. That call did not run. If you need more, such as a file, ask for it in ' +
+    `a new message. ${HELP}`);
+  assert.equal(verification.status, 'passed', 'the host facts were verified');
   assert.ok(verification.text.startsWith(`${cause}\n\n`), verification.text);
   assert.match(verification.text, /Hostname: `test-host`/);
   assert.equal(verification.deliveryMode, undefined, 'replaces the harness error instead of appending to it');
+  assert.doesNotThrow(() => parseVerificationResponse(verification, RUN_ID));
   const reply = f.guard.replyPayloadSending({runId: RUN_ID, kind: 'final', payload: {text: TIMEOUT_TEXT, isError: true}});
   assert.equal(reply.payload.text, verification.text);
+});
+
+test('the stop copy names the boundary, and a combined request is asked in two messages', () => {
+  assert.equal(operationsLoopDeliveryText({tool: 'pixel_ods_workspace_artifact', boundary: 'operations'}),
+    '**Portal stopped this response:** this request needed ODS Operations work on this computer, and the model kept ' +
+    'calling `pixel_ods_workspace_artifact`, which that step does not allow, so Portal ended the response rather than ' +
+    'let it loop. That call did not run. The conversation and any saved files are preserved. Send a new message to try ' +
+    `again, and ask for a file or other work in a message of its own. ${HELP}`);
+  assert.match(operationsLoopDeliveryText({tool: 'pixel_ops_inventory', boundary: 'continuation'}),
+    /waiting for the result of an ODS Operations job, and the model called `pixel_ops_inventory` instead of reading it/);
+});
+
+test('a model-written tool name reaches the owner only as a plain identifier', () => {
+  for (const tool of ['evil`](https://x.test)', 'visit-help.example.com', 'Message', undefined]) {
+    assert.match(operationsLoopDeliveryText({tool, boundary: 'operations'}), /kept calling another tool,/, String(tool));
+  }
 });
 
 test('without host evidence the existing Operations failure is kept', () => {
@@ -78,28 +95,23 @@ test('without host evidence the existing Operations failure is kept', () => {
   assert.deepEqual(f.guard.deliveryVerificationForRun(RUN_ID), {status: 'failed', text: OPERATIONS_UNAVAILABLE_DELIVERY_PREFIX});
 });
 
-test('a correction that did not abort the run, or an abort the harness refused, changes nothing', () => {
-  const f = fixture();
-  f.nextRound();
-  f.observeHost();
-  f.nextRound();
-  f.message();
-  const corrected = f.guard.deliveryVerificationForRun(RUN_ID);
-  assert.equal(corrected.status, 'passed');
-  const refused = createToolLoopGuard({abortRun: () => false});
-  refused.observeRun(CTX, 'pixel', {prompt: PROMPT});
-  const g = {...f, guard: refused, aborts: []};
-  g.nextRound = () => refused.observeModelCall({runId: RUN_ID, callId: `refused-${Math.random()}`}, CTX);
-  g.observeHost = () => {
-    const params = {actions: ['host.identity']};
-    refused.beforeToolCall({toolName: 'pixel_ods_host_observe', params}, {...CTX, toolName: 'pixel_ods_host_observe'}, 'pixel');
-    refused.afterToolCall({toolName: 'pixel_ods_host_observe', params, result: HOST_RECEIPT}, {...CTX, toolName: 'pixel_ods_host_observe'}, 'pixel');
-  };
-  g.message = () => refused.beforeToolCall({toolName: 'message', params: {action: 'send', message: 'done'}},
-    {...CTX, toolName: 'message'}, 'pixel');
-  g.nextRound(); g.observeHost(); g.nextRound(); g.message(); g.nextRound();
-  assert.equal(g.message()?.blockReason, OPERATIONS_LOOP_ABORT_REASON);
-  assert.equal(refused.deliveryVerificationForRun(RUN_ID).status, 'passed', 'the run went on; its own answer follows');
+test('a correction alone, a refused abort, or a later completed model call changes nothing', () => {
+  const corrected = fixture();
+  corrected.nextRound();
+  corrected.observeHost();
+  corrected.nextRound();
+  corrected.message();
+  assert.equal(corrected.guard.deliveryVerificationForRun(RUN_ID).deliveryMode, 'append');
+
+  const refused = fixture({abortRun: () => false});
+  refused.nextRound(); refused.observeHost(); refused.nextRound(); refused.message(); refused.nextRound();
+  assert.equal(refused.message()?.blockReason, OPERATIONS_LOOP_ABORT_REASON);
+  assert.equal(refused.guard.deliveryVerificationForRun(RUN_ID).deliveryMode, 'append', 'the run went on; its own answer leads');
+
+  const resumed = fixture();
+  abortAfterEvidence(resumed);
+  resumed.guard.observeModelEnd({callId: 'call-4', outcome: 'completed'}, CTX);
+  assert.equal(resumed.guard.deliveryVerificationForRun(RUN_ID).deliveryMode, 'append', 'a later reply completed');
 });
 
 test('an owner cancel keeps the cancel outcome', async () => {
@@ -110,13 +122,7 @@ test('an owner cancel keeps the cancel outcome', async () => {
   const cancelled = f.guard.deliveryVerificationForRun(RUN_ID);
   f.nextRound(); f.message(); f.nextRound(); f.message();
   assert.deepEqual(f.guard.deliveryVerificationForRun(RUN_ID), cancelled);
-  assert.doesNotMatch(cancelled.text ?? '', /Portal stopped this response:/);
-});
-
-test('a model-supplied tool name never reaches the owner text raw', () => {
-  assert.match(operationsLoopDeliveryText('evil`](https://x.test)\n'), /kept calling another tool instead/);
-  assert.match(operationsLoopDeliveryText(undefined), /kept calling another tool instead/);
-  assert.doesNotMatch(operationsLoopDeliveryText('message'), /What Portal did verify/);
+  assert.doesNotMatch(cancelled.text ?? '', /Portal stopped this response/);
 });
 
 async function listen(server) {
@@ -169,8 +175,7 @@ test(`Portal receives the cause instead of the timeout text over the real ingres
   const frames = stream ? body.split(/\r?\n/).filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6))) : [];
   const text = stream ? frames.map(frame => frame.choices?.[0]?.delta?.content ?? '').join('')
     : JSON.parse(body).choices[0].message.content;
-  assert.ok(text.startsWith('**Portal stopped this response:**'), text);
+  assert.ok(text.startsWith('**Portal stopped this response after verifying the result below:**'), text);
   assert.match(text, /Hostname: `test-host`/);
   assert.doesNotMatch(body, /LLM request timed out/);
-  if (stream) assert.equal(frames.at(-1).pixel_outcome.status, 'failed');
 });

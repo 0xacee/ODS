@@ -425,12 +425,28 @@ export const OPERATIONS_LOOP_ABORT_REASON =
 
 // Owner copy for that stop. The harness ends the aborted run with its own
 // error, which read "LLM request timed out." (fleet 2026-10-18, laptop).
-export function operationsLoopDeliveryText(tool, {evidence = false} = {}) {
-  const name = typeof tool === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(tool) ? `\`${tool}\`` : "another tool";
-  return `**Portal stopped this response:** this request needed ODS Operations work on this computer, and the model kept calling ${name} ` +
-    "instead, so Portal ended the response rather than let it loop. That call did not run. " +
-    (evidence ? "What Portal did verify is below. " : "") +
-    "The conversation and any saved files are preserved. Send a new message to try again; it starts a fresh attempt. " +
+// A tool name is model-written; only a plain identifier is shown.
+function operationsLoopCause({tool, boundary}) {
+  const name = typeof tool === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(tool) ? `\`${tool}\`` : "another tool";
+  return boundary === "continuation"
+    ? `this response was waiting for the result of an ODS Operations job, and the model called ${name} instead of reading it`
+    : `this request needed ODS Operations work on this computer, and the model kept calling ${name}, which that step does not allow`;
+}
+
+// A combined request would meet the same boundary again, so the retry advice
+// asks for other work in a message of its own.
+export function operationsLoopDeliveryText(abort) {
+  return `**Portal stopped this response:** ${operationsLoopCause(abort)}, so Portal ended the response rather than let it loop. ` +
+    "That call did not run. The conversation and any saved files are preserved. Send a new message to try again, " +
+    "and ask for a file or other work in a message of its own. " +
+    "If it keeps happening, [get help on Discord](https://discord.gg/4ntNp9MAwC).";
+}
+
+// The same stop when Portal had already verified a result, which follows.
+export function operationsLoopVerifiedText(abort) {
+  return `**Portal stopped this response after verifying the result below:** ${operationsLoopCause(abort)}, ` +
+    "so Portal ended the response rather than let it loop. That call did not run. " +
+    "If you need more, such as a file, ask for it in a new message. " +
     "If it keeps happening, [get help on Discord](https://discord.gg/4ntNp9MAwC).";
 }
 
@@ -9292,7 +9308,7 @@ export function createToolLoopGuard({
       warn(
         `Pixel stopped a tool retry after the Operations-continuation boundary for run ${runId}; active run aborted=${aborted}`
       );
-      if (aborted) state.operationsLoopAborted ??= {tool: effectiveToolName};
+      if (aborted) state.operationsLoopAborted ??= {tool: effectiveToolName, boundary: "continuation"};
       return { block: true, blockReason: OPERATIONS_LOOP_ABORT_REASON };
     }
 
@@ -9353,7 +9369,7 @@ export function createToolLoopGuard({
       warn(
         `Pixel stopped a tool retry after the Operations boundary for run ${runId}; active run aborted=${aborted}`
       );
-      if (aborted) state.operationsLoopAborted ??= {tool: effectiveToolName};
+      if (aborted) state.operationsLoopAborted ??= {tool: effectiveToolName, boundary: "operations"};
       return { block: true, blockReason: OPERATIONS_LOOP_ABORT_REASON };
     }
 
@@ -10485,7 +10501,11 @@ export function createToolLoopGuard({
     if (!state || !context?.sessionId || context.sessionId !== state.currentSessionId) return;
     const compaction = state.compactionWindow;
     if (compaction?.calls.delete(event?.callId) && compaction.calls.size === 0) state.compactionWindow = undefined;
-    if (event?.outcome === 'completed') state.modelRouteFailed = false;
+    if (event?.outcome === 'completed') {
+      state.modelRouteFailed = false;
+      // A later model call completed, so that abort did not end this run.
+      state.operationsLoopAborted = undefined;
+    }
     else if (event?.outcome === 'error' && !state.progressAbortAttempted && !state.webLoopAborted &&
         ['timeout', 'connection_closed', 'connection_reset', 'terminated'].includes(event.failureKind)) state.modelRouteFailed = true;
     if (state.extensionPendingHandoff && !state.workspaceLaneRequested && !state.extensionPendingAbortAcknowledged &&
@@ -13533,22 +13553,28 @@ export function createToolLoopGuard({
     if (state?.webLoopAborted && verification.status === "none") {
       return { status: "failed", text: WEB_LOOP_DELIVERY_REASON };
     }
-    // Host evidence verified before the abort follows the cause; a failure
-    // that already explains the missing Operations work is kept as it is.
-    if (state?.operationsLoopAborted && !state.clientCancelled && ["none", "passed"].includes(verification.status)) {
-      return { status: "failed", text: [operationsLoopDeliveryText(state.operationsLoopAborted.tool,
-        { evidence: Boolean(verification.text) }), verification.text].filter(Boolean).join("\n\n")
-        .slice(0, MAX_INGRESS_VERIFICATION_TEXT), ...(verification.preview ? { preview: verification.preview } : {}) };
-    }
     const readOnlyOperations = extensionDiscoveryActive(state) || (state?.operationsRequired &&
       (state.operationsInventoryOnly ||
         (state.operationsRequiredActions.size > 0 &&
           [...state.operationsRequiredActions].every((action) =>
             action.startsWith("host.") || action === "ods.extensions.list" || action === "ods.extensions.search"))));
-    return verification.status === "passed" && verification.text &&
+    const result = verification.status === "passed" && verification.text &&
       (readOnlyOperations || verification.preview || state?.exactDownloadPromotion)
       ? derivedOutcome(verification, { ...verification, deliveryMode: "append" })
       : verification;
+    // After an Operations-boundary abort the harness error ("LLM request
+    // timed out.") is the reply: alone, or above appended evidence. Name the
+    // cause there. A receipt or failure text that replaces it stays as it is.
+    const abort = state?.clientCancelled ? undefined : state?.operationsLoopAborted;
+    if (abort && result.status === "none") {
+      return { status: "failed", text: operationsLoopDeliveryText(abort) };
+    }
+    if (abort && result.deliveryMode === "append") {
+      const verified = { ...result, text: `${operationsLoopVerifiedText(abort)}\n\n${result.text}`.slice(0, MAX_INGRESS_VERIFICATION_TEXT) };
+      delete verified.deliveryMode;
+      return verified;
+    }
+    return result;
   }
 
   function replyPayloadSending(event) {
