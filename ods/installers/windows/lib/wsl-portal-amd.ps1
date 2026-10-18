@@ -29,8 +29,10 @@ $script:ODSPortalRuntimeChangeWaitSeconds = 1200
 # The key reaches the Linux installer through this WSLENV-forwarded variable,
 # never on a command line (contract: --native-llm-api-key-env).
 $script:ODSPortalApiKeyVariable = 'ODS_NATIVE_LLM_API_KEY'
+# memory-plan.json and start-override.json exist only on the CUDA route: the
+# figures the launcher checks at every start, and the owner's Start anyway.
 $script:ODSPortalRuntimeOwnedFiles = @('runtime.json', 'runtime-options.json', 'launch.ps1', 'native-llama-runtime.ps1',
-    'private-file.ps1', 'api-key', 'intent.json', 'ready.json', 'process-ownership.json')
+    'private-file.ps1', 'api-key', 'intent.json', 'ready.json', 'process-ownership.json', 'memory-plan.json', 'start-override.json')
 # The scheduled task's description, by llama.cpp backend. Vulkan is the AMD
 # route and the default.
 $script:ODSPortalRuntimeTaskDescriptions = @{
@@ -504,7 +506,39 @@ function New-ODSPortalRuntimeOptions($Runtime, $Qualification, [string]$Backend 
     return $options
 }
 
-function New-ODSPortalRuntimeAction($Plan, $Options, [string]$ApiKey, [string]$WslDistro = '', [string]$WslInstallDir = '') {
+function Get-ODSGgufSplitSiblings([string]$File) {
+    <#
+    .SYNOPSIS
+        Every part of a split GGUF (name-00001-of-00003.gguf: all three), or
+        the file alone (pure). llama.cpp loads the other parts from the first.
+    #>
+    $match = [regex]::Match($File, '^(?<stem>.+)-(?<index>[0-9]{5})-of-(?<count>[0-9]{5})\.gguf$')
+    if (-not $match.Success) { return @($File) }
+    $count = [int]$match.Groups['count'].Value
+    $index = [int]$match.Groups['index'].Value
+    if ($count -lt 1 -or $index -lt 1 -or $index -gt $count) { return @($File) }
+    $stem = $match.Groups['stem'].Value
+    return @(1..$count | ForEach-Object { '{0}-{1:00000}-of-{2:00000}.gguf' -f $stem, $_, $count })
+}
+
+function New-ODSPortalMemoryPlanRecord($Plan, $Need, [double]$WslGiB) {
+    # memory-plan.json for a CUDA plan: what the launcher checks at each start.
+    $record = [ordered]@{
+        GgufFile = [string]$Plan.GgufFile
+        ContextSize = [long]$Plan.ContextSize
+        DeviceNeedGiB = [math]::Round([double]$Need.DeviceNeedGiB, 2)
+        CommitNeedGiB = [math]::Round([double]$Need.CommitNeedGiB, 2)
+        WslGiB = [math]::Round($WslGiB, 2)
+        Source = [string]$Need.Source
+    }
+    if (-not (Test-ODSNativeMemoryPlanRecord ([pscustomobject]$record))) { throw "The memory plan for $($Plan.GgufFile) is invalid." }
+    return $record
+}
+
+function New-ODSPortalRuntimeAction($Plan, $Options, [string]$ApiKey, [string]$WslDistro = '', [string]$WslInstallDir = '',
+    # The CUDA route's memory-plan.json record (New-ODSPortalMemoryPlanRecord);
+    # without one, no memory check runs (the AMD route).
+    $MemoryPlan = $null) {
     # All dependencies live beside the private plan, never in a temporary
     # checkout. The private writer verifies owner-only Windows ACLs.
     if ($WslDistro -or $WslInstallDir) { Assert-ODSPortalWslBinding $WslDistro $WslInstallDir }
@@ -532,6 +566,13 @@ function New-ODSPortalRuntimeAction($Plan, $Options, [string]$ApiKey, [string]$W
     }
     if ($null -ne $projector) { $plan.MmprojFile = [string]$projector }
     Write-ODSPrivateEnvFile -Path (Join-Path $runtimeDir 'runtime.json') -Content ($plan | ConvertTo-Json -Compress)
+    # A new plan never inherits an older plan's memory figures or Start anyway.
+    $memoryPath = Join-Path $runtimeDir 'memory-plan.json'
+    if ($null -ne $MemoryPlan) {
+        Write-ODSPrivateEnvFile -Path $memoryPath -Content ($MemoryPlan | ConvertTo-Json -Compress)
+    } elseif (Test-Path -LiteralPath $memoryPath) { Remove-Item -LiteralPath $memoryPath -Force }
+    $overridePath = Join-Path $runtimeDir 'start-override.json'
+    if (Test-Path -LiteralPath $overridePath) { Remove-Item -LiteralPath $overridePath -Force }
     Set-ODSPortalRuntimeIntent 'running'
     $readyPath = Join-Path $runtimeDir 'ready.json'
     if (Test-Path -LiteralPath $readyPath) { Remove-Item -LiteralPath $readyPath -Force }
@@ -545,10 +586,18 @@ try {
     $code = Invoke-ODSNativeLlamaRuntime $plan $options (Join-Path $PSScriptRoot 'ready.json')
     exit $code
 } catch {
-    $message = $_.Exception.Message
+    $exception = $_.Exception
+    $message = $exception.Message
     Add-Content -LiteralPath (Join-Path $PSScriptRoot 'native-llama-launch.log') -Encoding UTF8 `
         -Value ("{0:o} Portal llama-server startup failed: {1}" -f (Get-Date), $message)
-    $failure = @{ Error = ('llama-server startup failed: ' + $message) } | ConvertTo-Json -Compress
+    $record = [ordered]@{ Error = ('llama-server startup failed: ' + $message) }
+    if ($exception.Data['refusal']) {
+        # A memory refusal (CUDA): its own text, its code and the plan it was
+        # for, so the Models page can offer Start anyway for that plan.
+        $record = [ordered]@{ Error = $message; Code = [string]$exception.Data['refusal']
+            GgufFile = [string]$exception.Data['GgufFile']; ContextSize = [long]$exception.Data['ContextSize'] }
+    }
+    $failure = $record | ConvertTo-Json -Compress
     if (Get-Command Write-ODSPrivateEnvFile -ErrorAction SilentlyContinue) {
         Write-ODSPrivateEnvFile -Path (Join-Path $PSScriptRoot 'ready.json') -Content $failure
     } else {
@@ -581,6 +630,8 @@ function Wait-ODSPortalRuntimeReady($Registration, [int]$Seconds = $script:ODSPo
     while ((Get-Date) -lt $deadline) {
         if (Test-Path -LiteralPath $Registration.ReadyPath -PathType Leaf) {
             $ready = Get-Content -LiteralPath $Registration.ReadyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            # A memory refusal ran no server, so the server log says nothing about it.
+            if ($ready.Error -and $ready.Code) { throw ([string]$ready.Error) }
             if ($ready.Error) { throw ([string]$ready.Error + (Get-ODSPortalLogExcerpt)) }
             if ($ready.Port -ne $Registration.Plan.Port -or $ready.ContextSize -ne $Registration.Plan.ContextSize -or
                 [string]$ready.ModelId -cne [string]$Registration.Plan.GgufFile) { throw 'The Portal llama-server ready record does not match its plan.' }
@@ -754,7 +805,10 @@ function Invoke-ODSPortalRuntimeCutover {
     #>
     param($Existing, $Plan, $Options, [string]$ApiKey, [bool]$KeepPort, [string]$WslDistro = '', [string]$WslInstallDir = '',
         # Empty keeps the AMD task description.
-        [string]$TaskDescription = '')
+        [string]$TaskDescription = '',
+        # The CUDA route's memory-plan.json record. It is written with the new
+        # plan after the backup, so a rollback restores the old pair.
+        $MemoryPlan = $null)
     # One change at a time: a model switch, Unload or Resume from the
     # dashboard holds the same lock, so its stop never races this one.
     $lock = @{}
@@ -805,7 +859,7 @@ function Invoke-ODSPortalRuntimeCutover {
         $registered = $false
         try {
             if ($KeepPort) { Assert-ODSPortalPortAvailable $Plan.Port }
-            $registration = New-ODSPortalRuntimeAction $Plan $Options $ApiKey $WslDistro $WslInstallDir
+            $registration = New-ODSPortalRuntimeAction $Plan $Options $ApiKey $WslDistro $WslInstallDir $MemoryPlan
             $taskName = Register-ODSPortalRuntimeTask $registration $TaskDescription
             $registered = $true
             Start-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop

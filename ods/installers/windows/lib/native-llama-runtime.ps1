@@ -27,6 +27,12 @@
 #     the command line.
 #   - Proof: GET /health, then /v1/models (id equals the GGUF), then /props
 #     (model_path and n_ctx, allowing llama.cpp's 256-cell alignment).
+#   - Memory (CUDA only): Windows charges every GPU allocation against its
+#     commit limit, so before a CUDA start the launcher checks the commit and
+#     GPU memory the plan's memory-plan.json names. It waits for sign-in to
+#     settle, then refuses with the cause in ready.json; a start-override.json
+#     for the same plan (the Models page's Start anyway) starts it anyway.
+#     Vulkan (AMD) never runs this check.
 #
 # The Portal's durable launcher copies this file and private-file.ps1 beside
 # its private plan. Keep both ASCII-only and free of other ODS dependencies.
@@ -44,6 +50,18 @@ $script:ODSNativeLlamaVulkanFlavor = 'win-vulkan-x64'
 # The generation check: a question whose only right answer is one token.
 $script:ODSNativeLlamaProbeQuestion = 'What is 2+2? Answer with the number only.'
 $script:ODSNativeLlamaProbeContext = 4096
+# The commit rule the RTX Spark memory planner, this launcher and the model
+# controller share (Get-ODSNativeCommitFit). Windows itself commits about 12
+# GiB at idle and about 15 GiB beside the full stack on an RTX Spark, so at
+# least 16 GiB is kept for it; 2 GiB is slack.
+$script:ODSNativeWindowsReserveGiB = 16
+$script:ODSNativeCommitMarginGiB = 2
+# A refused start waits this long for sign-in to settle (other startup apps,
+# the WSL startup task's 30 s delay), re-checking every 5 seconds.
+$script:ODSNativeStartWaitSeconds = 120
+$script:ODSNativeStartPollSeconds = 5
+$script:ODSNativeStartRefusalCodes = @('memory_refused', 'gpu_busy')
+$script:ODSNativeHelpLine = 'Need help? Ask on the ODS Discord: https://discord.gg/4ntNp9MAwC'
 
 # --- Flavor ---------------------------------------------------------------------
 
@@ -1684,6 +1702,273 @@ function Read-ODSNativeLlamaJson([string]$Path) {
     return ([IO.File]::ReadAllText($Path, [Text.UTF8Encoding]::new($false, $true)) | ConvertFrom-Json -ErrorAction Stop)
 }
 
+# --- Memory at model start (CUDA) -----------------------------------------------
+# Windows charges every GPU allocation against its commit limit (visible RAM
+# plus the page file), even inside the GPU's firmware carve-out. A model the
+# commit limit cannot hold fails mid-load or makes other programs fail, so a
+# CUDA start is checked first against the figures setup or the model
+# controller saved in memory-plan.json. Nothing here ever changes a setting.
+
+function Get-ODSNativeOtherCommitGiB([double]$CommittedGiB, [double]$RunningModelGiB, $WslNowGiB) {
+    # What Windows commits besides the ODS model and WSL: never less than the
+    # reserve, and the reserve when WSL's own commit cannot be read.
+    if ($null -eq $WslNowGiB) { return [double]$script:ODSNativeWindowsReserveGiB }
+    return [math]::Max([double]$script:ODSNativeWindowsReserveGiB, $CommittedGiB - $RunningModelGiB - [double]$WslNowGiB)
+}
+
+function Get-ODSNativeCommitFit {
+    <#
+    .SYNOPSIS
+        The commit rule (pure), shared by the RTX Spark memory planner, this
+        launcher and the model controller so they cannot disagree.
+    .DESCRIPTION
+        CapacityGiB is what Windows can lend the model while WSL uses its whole
+        memory limit: CommitLimitGiB - OtherCommitGiB - WslGiB - 2 GiB. WSL is
+        planned at its limit, not its current use, because pages it touched
+        stay committed on Windows until they are reclaimed.
+    #>
+    param([double]$CommitNeedGiB, [double]$CommitLimitGiB, [double]$OtherCommitGiB, [double]$WslGiB)
+    $capacity = $CommitLimitGiB - $OtherCommitGiB - $WslGiB - $script:ODSNativeCommitMarginGiB
+    return [pscustomobject]@{ CapacityGiB = [math]::Round($capacity, 2); Fits = ($CommitNeedGiB -le $capacity + 1e-9) }
+}
+
+function Get-ODSNativeCommitState {
+    <#
+    .SYNOPSIS
+        Visible RAM, commit limit and commit charge in GiB, read unelevated
+        from Win32_OperatingSystem (the figures Task Manager shows), or $null
+        when WMI cannot answer.
+    #>
+    try { $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop }
+    catch [Microsoft.Management.Infrastructure.CimException] { return $null }
+    # Win32_OperatingSystem reports kilobytes.
+    $limit = [double]$os.TotalVirtualMemorySize / 1MB
+    return [pscustomobject]@{
+        VisibleGiB = [math]::Round([double]$os.TotalVisibleMemorySize / 1MB, 2)
+        CommitLimitGiB = [math]::Round($limit, 2)
+        CommittedGiB = [math]::Round($limit - [double]$os.FreeVirtualMemory / 1MB, 2)
+    }
+}
+
+function ConvertFrom-ODSNativeGpuMemoryCsv([string[]]$Lines, [string]$GpuName = '') {
+    # nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version
+    # --format=csv,noheader,nounits. The GPU named, else the only row with a
+    # memory size (the NPU has none), else $null.
+    $rows = @()
+    foreach ($line in @($Lines)) {
+        $fields = @(([string]$line).Split(','))
+        if ($fields.Count -lt 4) { continue }
+        $tail = @($fields[($fields.Count - 3)..($fields.Count - 1)] | ForEach-Object { $_.Trim() })
+        $name = (($fields[0..($fields.Count - 4)]) -join ',').Trim()
+        if ($tail[0] -notmatch '^[0-9]+$' -or $tail[1] -notmatch '^[0-9]+$') { continue }
+        $rows += [pscustomobject]@{ Name = $name; TotalMiB = [long]$tail[0]; UsedMiB = [long]$tail[1]; DriverVersion = $tail[2] }
+    }
+    if ($GpuName) {
+        $named = @($rows | Where-Object { $_.Name -ieq $GpuName })
+        if ($named.Count -eq 1) { return $named[0] }
+    }
+    if ($rows.Count -eq 1) { return $rows[0] }
+    return $null
+}
+
+function Get-ODSNativeGpuMemoryState([string]$GpuName = '') {
+    # The NVIDIA GPU's memory size and use from nvidia-smi, or $null when
+    # nvidia-smi is missing or fails. Never throws.
+    $smi = Get-Command nvidia-smi.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $smi) { return $null }
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $lines = @(& $smi.Source '--query-gpu=name,memory.total,memory.used,driver_version' '--format=csv,noheader,nounits' 2>$null)
+        $code = $LASTEXITCODE
+    } catch [System.Management.Automation.ApplicationFailedException] {
+        return $null
+    } finally { $ErrorActionPreference = $previousPreference }
+    if ($code -ne 0) { return $null }
+    return (ConvertFrom-ODSNativeGpuMemoryCsv ([string[]]$lines) $GpuName)
+}
+
+function Format-ODSNativeGiB([double]$Value) {
+    return ([math]::Round([math]::Max($Value, 0), 1)).ToString('0.0', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-ODSNativeModelStartRefusal {
+    <#
+    .SYNOPSIS
+        Why a CUDA model must not start now (pure): '' when it may, otherwise
+        Code (memory_refused or gpu_busy), Kind (structural: this page file
+        can never hold it; transient: other programs hold the memory now) and
+        the owner-facing Text, which names the cause and the way out.
+    #>
+    param($MemoryPlan, $Commit, $Gpu = $null)
+    $need = [double]$MemoryPlan.CommitNeedGiB
+    $device = [double]$MemoryPlan.DeviceNeedGiB
+    $limit = [double]$Commit.CommitLimitGiB
+    $fit = Get-ODSNativeCommitFit -CommitNeedGiB $need -CommitLimitGiB $limit `
+        -OtherCommitGiB $script:ODSNativeWindowsReserveGiB -WslGiB ([double]$MemoryPlan.WslGiB)
+    if (-not $fit.Fits) {
+        return [pscustomobject]@{ Code = 'memory_refused'; Kind = 'structural'
+            Text = ("The model was not started: it needs about $(Format-ODSNativeGiB $need) GiB, and with this page file Windows can never " +
+                "lend it more than about $(Format-ODSNativeGiB $fit.CapacityGiB) GiB (memory limit $(Format-ODSNativeGiB $limit) GiB). " +
+                'Rerun install.ps1 and answer yes to the page-file offer, or choose a smaller model on the Models page. ' +
+                "Start anyway is possible but may make other programs fail. $script:ODSNativeHelpLine") }
+    }
+    $headroom = $limit - [double]$Commit.CommittedGiB
+    if ($headroom -lt $need) {
+        return [pscustomobject]@{ Code = 'memory_refused'; Kind = 'transient'
+            Text = ("The model was not started: Windows can lend it only $(Format-ODSNativeGiB $headroom) GiB right now (memory limit " +
+                "$(Format-ODSNativeGiB $limit) GiB, $(Format-ODSNativeGiB $Commit.CommittedGiB) GiB in use) and it needs about " +
+                "$(Format-ODSNativeGiB $need) GiB. Close large programs, then press Start anyway on the Models page (if memory really " +
+                "runs out, other programs can fail). $script:ODSNativeHelpLine") }
+    }
+    if ($Gpu) {
+        $freeGiB = ([double]$Gpu.TotalMiB - [double]$Gpu.UsedMiB) / 1024
+        if ($freeGiB -lt $device) {
+            $name = ([string]$Gpu.Name -replace '[^\x20-\x7e]', '?')
+            return [pscustomobject]@{ Code = 'gpu_busy'; Kind = 'transient'
+                Text = ("The model was not started: another program is using $(Format-ODSNativeGiB ([double]$Gpu.UsedMiB / 1024)) GiB of " +
+                    "$name ($(Format-ODSNativeGiB $freeGiB) GiB free; the model needs about $(Format-ODSNativeGiB $device) GiB). " +
+                    "Close the other AI app or model server, then press Start anyway on the Models page. $script:ODSNativeHelpLine") }
+        }
+    }
+    return ''
+}
+
+function Test-ODSNativeMemoryNumber($Value) {
+    # ConvertFrom-Json gives Int32/Int64 on both shells, Decimal on 5.1 and
+    # Double on 7 for fractions.
+    return (($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) -and
+        [double]$Value -ge 0 -and [double]$Value -le 4096)
+}
+
+function Test-ODSNativeMemoryPlanRecord($Record) {
+    # memory-plan.json: { GgufFile; ContextSize; DeviceNeedGiB; CommitNeedGiB;
+    # WslGiB; Source = catalog | files }.
+    if ($null -eq $Record -or $Record -is [array]) { return $false }
+    foreach ($name in @('DeviceNeedGiB', 'CommitNeedGiB', 'WslGiB')) {
+        if (-not (Test-ODSNativeMemoryNumber $Record.$name)) { return $false }
+    }
+    return ($Record.GgufFile -is [string] -and $Record.GgufFile -cmatch '^[\x20-\x7e]{1,240}$' -and
+        ($Record.ContextSize -is [int] -or $Record.ContextSize -is [long]) -and $Record.ContextSize -ge 1 -and
+        [string]$Record.Source -cin @('catalog', 'files'))
+}
+
+function Read-ODSNativeLlamaJsonOrNull([string]$Path) {
+    # $null when the file is not valid UTF-8 JSON: ArgumentException, which
+    # covers DecoderFallbackException and arrives wrapped by the .NET call.
+    try { return (Read-ODSNativeLlamaJson $Path) } catch {
+        $cause = $_.Exception
+        while ($cause -and $cause -isnot [ArgumentException]) { $cause = $cause.InnerException }
+        if (-not $cause) { throw }
+        return $null
+    }
+}
+
+function Read-ODSNativeMemoryPlan([string]$Path, $Plan) {
+    <#
+    .SYNOPSIS
+        The memory plan saved for exactly this model and context, or Plan
+        $null with the Reason the check is skipped (missing, unreadable, or
+        written for another plan).
+    #>
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ Plan = $null; Reason = 'no memory-plan.json' } }
+    $record = Read-ODSNativeLlamaJsonOrNull $Path
+    if ($null -eq $record) { return [pscustomobject]@{ Plan = $null; Reason = 'memory-plan.json is not valid UTF-8 JSON' } }
+    if (-not (Test-ODSNativeMemoryPlanRecord $record)) { return [pscustomobject]@{ Plan = $null; Reason = 'memory-plan.json is invalid' } }
+    if ([string]$record.GgufFile -cne [string]$Plan.GgufFile -or [long]$record.ContextSize -ne [long]$Plan.ContextSize) {
+        return [pscustomobject]@{ Plan = $null; Reason = "memory-plan.json is for $($record.GgufFile) at $($record.ContextSize), not this plan" }
+    }
+    return [pscustomobject]@{ Plan = $record; Reason = '' }
+}
+
+function Use-ODSNativeStartOverride([string]$Path, $Plan) {
+    # The Models page's Start anyway: true once, for exactly this model and
+    # context. The file is consumed whatever plan it names.
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $record = Read-ODSNativeLlamaJsonOrNull $Path
+    Remove-Item -LiteralPath $Path -Force
+    return ($null -ne $record -and [string]$record.GgufFile -ceq [string]$Plan.GgufFile -and
+        ($record.ContextSize -is [int] -or $record.ContextSize -is [long]) -and [long]$record.ContextSize -eq [long]$Plan.ContextSize)
+}
+
+function Write-ODSNativeLaunchLog([string]$RuntimeDir, [string]$Message) {
+    Add-Content -LiteralPath (Join-Path $RuntimeDir 'native-llama-launch.log') -Encoding UTF8 -Value ("{0:o} {1}" -f (Get-Date), $Message)
+}
+
+function New-ODSNativeStartRefusal($Refusal, $Plan) {
+    # The launcher's catch writes Data into ready.json (Error, Code, GgufFile,
+    # ContextSize) for the model controller and the Models page.
+    $exception = [Management.Automation.RuntimeException]::new([string]$Refusal.Text)
+    $exception.Data['refusal'] = [string]$Refusal.Code
+    $exception.Data['GgufFile'] = [string]$Plan.GgufFile
+    $exception.Data['ContextSize'] = [long]$Plan.ContextSize
+    return $exception
+}
+
+function Wait-ODSNativeLlamaMemory {
+    <#
+    .SYNOPSIS
+        The CUDA start check: returns once the model may start, or throws the
+        refusal after the sign-in wait. A refusal only this page file causes
+        (structural) is final at once: waiting cannot change it.
+    .OUTPUTS
+        Checked, Override, CommitBeforeGiB and Gpu (for ready.json).
+    #>
+    param($Plan, [string]$RuntimeDir, [int]$WaitSeconds = $script:ODSNativeStartWaitSeconds)
+    $memory = Read-ODSNativeMemoryPlan (Join-Path $RuntimeDir 'memory-plan.json') $Plan
+    if (-not $memory.Plan) {
+        Write-ODSNativeLaunchLog $RuntimeDir "Memory check skipped: $($memory.Reason)."
+        return [pscustomobject]@{ Checked = $false; Override = $false; CommitBeforeGiB = $null; Gpu = (Get-ODSNativeGpuMemoryState) }
+    }
+    $override = Use-ODSNativeStartOverride (Join-Path $RuntimeDir 'start-override.json') $Plan
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    while ($true) {
+        $commit = Get-ODSNativeCommitState
+        $gpu = Get-ODSNativeGpuMemoryState
+        if (-not $commit) {
+            Write-ODSNativeLaunchLog $RuntimeDir 'Memory check skipped: Windows did not report its commit limit.'
+            return [pscustomobject]@{ Checked = $false; Override = $false; CommitBeforeGiB = $null; Gpu = $gpu }
+        }
+        $refusal = Get-ODSNativeModelStartRefusal $memory.Plan $commit $gpu
+        if (-not $refusal) {
+            return [pscustomobject]@{ Checked = $true; Override = $false; CommitBeforeGiB = $commit.CommittedGiB; Gpu = $gpu }
+        }
+        if ($override) {
+            Write-ODSNativeLaunchLog $RuntimeDir "Started although memory looked short (Start anyway): $($refusal.Text)"
+            return [pscustomobject]@{ Checked = $true; Override = $true; CommitBeforeGiB = $commit.CommittedGiB; Gpu = $gpu }
+        }
+        if ($refusal.Kind -ceq 'structural' -or (Get-Date) -ge $deadline) {
+            Write-ODSNativeLaunchLog $RuntimeDir "Model start refused ($($refusal.Code), $($refusal.Kind)): $($refusal.Text)"
+            throw (New-ODSNativeStartRefusal $refusal $Plan)
+        }
+        Start-Sleep -Seconds $script:ODSNativeStartPollSeconds
+    }
+}
+
+function Get-ODSNativeReadyMemoryFields($Memory, $Process) {
+    # Facts recorded in ready.json after a CUDA start. Nothing decides on them:
+    # the driver version keys the qualification cache, and the commit figures
+    # are measurements for the hardware verification runs.
+    $fields = [ordered]@{}
+    if ($Memory.Gpu -and $Memory.Gpu.DriverVersion -match '^[0-9]{2,4}\.[0-9]{1,3}$') { $fields.DriverVersion = [string]$Memory.Gpu.DriverVersion }
+    if ($Memory.Override) { $fields.MemoryOverride = $true }
+    if ($null -ne $Memory.CommitBeforeGiB) { $fields.CommitBeforeGiB = $Memory.CommitBeforeGiB }
+    $after = Get-ODSNativeCommitState
+    if ($after) { $fields.CommitAfterGiB = $after.CommittedGiB }
+    try {
+        $Process.Refresh()
+        $fields.ProcessCommitGiB = [math]::Round([double]$Process.PagedMemorySize64 / 1GB, 2)
+    } catch {
+        # The server already exited (InvalidOperationException, wrapped by the
+        # method call): the launcher reports that next; a measurement never
+        # decides anything. Anything else is a real error.
+        $cause = $_.Exception
+        while ($cause -and $cause -isnot [InvalidOperationException]) { $cause = $cause.InnerException }
+        if (-not $cause) { throw }
+    }
+    return $fields
+}
+
 # --- Launch -----------------------------------------------------------------------
 
 function Wait-ODSNativeLlamaStartup {
@@ -1718,6 +2003,12 @@ function Invoke-ODSNativeLlamaRuntime($Plan, $Options, [string]$ReadyPath) {
     $null = Test-ODSNativeLlamaInstall -Directory (Split-Path -Parent ([string]$Plan.ExecutablePath)) `
         -ExpectedZipSha256 ([string]$Options.ZipSha256) -ExpectedReleaseTag ([string]$Options.ReleaseTag)
     $apiKey = Read-ODSNativeLlamaApiKey ([string]$Options.ApiKeyPath)
+    $memory = $null
+    if ((Get-ODSNativeLlamaOptionsBackend $Options) -ceq 'cuda') {
+        # Before the old record goes: while sign-in settles, a refusal the
+        # last attempt recorded stays visible, so Start anyway still works.
+        $memory = Wait-ODSNativeLlamaMemory -Plan $Plan -RuntimeDir (Split-Path -Parent $ReadyPath)
+    }
     if (Test-Path -LiteralPath $ReadyPath) { Remove-Item -LiteralPath $ReadyPath -Force }
     if (@(Get-NetTCPConnection -LocalPort $Plan.Port -State Listen -ErrorAction SilentlyContinue).Count) {
         throw "Port $($Plan.Port) is already occupied; no existing process was changed."
@@ -1747,6 +2038,11 @@ function Invoke-ODSNativeLlamaRuntime($Plan, $Options, [string]$ReadyPath) {
         Assert-ODSNativeLlamaListener $Plan.Port $child.Id $Plan.ExecutablePath
         $ready = [ordered]@{ ProcessId = $child.Id; StartedAt = $child.StartTime.ToUniversalTime().ToString('o')
             Port = $Plan.Port; ModelId = $proof.ModelId; ContextSize = $Plan.ContextSize; RuntimeContext = $proof.RuntimeContext }
+        if ($memory) {
+            # CUDA only; readers ignore keys they do not know.
+            $fields = Get-ODSNativeReadyMemoryFields $memory $child
+            foreach ($key in $fields.Keys) { $ready[$key] = $fields[$key] }
+        }
         Write-ODSPrivateEnvFile -Path $ReadyPath -Content ($ready | ConvertTo-Json -Compress)
         $child.WaitForExit()
         if ($child.ExitCode -ne 0) { throw "llama-server exited with code $($child.ExitCode)." }

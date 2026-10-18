@@ -406,6 +406,10 @@ try {
         function Get-NetTCPConnection { param($LocalPort, $State, $ErrorAction) }
         function Get-CimInstance { param($ClassName, $Filter, $ErrorAction) @() }
         function Get-ODSPortalOwnedProcessTree([object[]]$Roots, [object[]]$Nodes) { [pscustomobject]@{ Nodes = $Roots; Handles = @() } }
+        # No memory-plan.json here, so the CUDA start check is skipped; the
+        # real nvidia-smi and WMI are never asked.
+        function Get-ODSNativeGpuMemoryState([string]$GpuName = '') { return $null }
+        function Get-ODSNativeCommitState { throw 'the commit state must not be read without a memory plan' }
         function Start-Process { param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, [switch]$PassThru)
             $script:launched = [string]$ArgumentList
             $child = [pscustomobject]@{ Id = 4243; Handle = 1; HasExited = $true; ExitCode = -1073741515; StartTime = (Get-Date); ExitTime = (Get-Date) }
