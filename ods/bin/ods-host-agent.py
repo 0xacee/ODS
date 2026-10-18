@@ -2278,6 +2278,10 @@ def _model_management_snapshot() -> tuple[int, dict]:
                 result = (200, {'managed': managed, 'canActivate': running,
                                 'canUnload': managed, 'running': running,
                                 'vision': _wsl_runtime.supports_projector(value)})
+                # Why the Windows model is not running, as its launcher wrote
+                # it (the bridge bounds the text); a memory refusal makes the
+                # Models page's Resume "Start anyway".
+                result[1].update(_wsl_runtime.launcher_error(value))
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 logger.warning('Windows runtime management verification failed: %s', exc)
                 result = unavailable
