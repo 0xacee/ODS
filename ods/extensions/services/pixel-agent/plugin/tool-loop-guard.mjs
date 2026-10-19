@@ -9185,6 +9185,10 @@ export function createToolLoopGuard({
         normalizedParams = toolName === "tool_call"
           ? { id: "read", args: { path: state.operationsWorkspaceExpectedPath } }
           : { path: state.operationsWorkspaceExpectedPath };
+        // The narrow evidence adapter becomes a core read. Bind its receipt
+        // to the admitted tool and path, not the pre-rewrite adapter name.
+        rememberToolRun(context?.toolCallId ?? event?.toolCallId, runId,
+          'read', {path: state.operationsWorkspaceExpectedPath}, undefined, toolName, 'core');
       } else {
         const suppliedContent = sourceArgs && typeof sourceArgs === "object" && !Array.isArray(sourceArgs)
           ? typeof sourceArgs.content === "string"
@@ -11655,7 +11659,6 @@ export function createToolLoopGuard({
               workspaceToolEvent.result?.content?.some(item => item?.type === 'text' && typeof item.text === 'string'));
           } else if (workspaceToolName === "read") {
             const fingerprint = workspaceReadFingerprint(workspaceToolEvent);
-            state.operationsWorkspaceReadVerified = Boolean(fingerprint);
             const boundRead = pendingToolRun?.runId === runId &&
               pendingToolRun.selectedToolName === 'read' && pendingToolRun.transport === toolName &&
               pendingToolRun.inspectionSessionId === state.currentSessionId &&
@@ -11666,6 +11669,7 @@ export function createToolLoopGuard({
               (!event?.toolCallId || event.toolCallId === toolCallId) &&
               (!event?.toolName || event.toolName === toolName) &&
               isDeepStrictEqual(workspaceToolEvent?.params, pendingToolRun.selectedParams);
+            state.operationsWorkspaceReadVerified = Boolean(boundRead && fingerprint);
             if (boundRead) state.operationsWorkspaceReadSnapshot = fingerprint;
           }
         }

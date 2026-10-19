@@ -15,9 +15,14 @@ const ctx = {trigger:'user', agentId:'pixel', runId:'artifact-composition', sess
 function fixture(prompt) {
   const guard = api.createToolLoopGuard({abortRunAndDrain:async()=>({aborted:true,drained:true,forceCleared:false})});
   guard.observeRun(ctx,'pixel',{prompt});
+  let calls=0;
   const call = (toolName,params,result) => {
-    assert.notEqual(guard.beforeToolCall({toolName,params,runId:ctx.runId},{...ctx,toolName},'pixel')?.block,true);
-    guard.afterToolCall({toolName,params,result},{...ctx,toolName},'pixel');
+    const toolCallId=`artifact-continuation-${++calls}`;
+    const event={toolName,params,runId:ctx.runId,toolCallId};
+    const context={...ctx,toolName,toolCallId};
+    const action=guard.beforeToolCall(event,context,'pixel');
+    assert.notEqual(action?.block,true);
+    guard.afterToolCall({...event,params:action?.params??params,result},context,'pixel');
   };
   const host = (status='succeeded') => call('pixel_ods_host_observe',{actions:['host.identity']},
     {details:{jobId:'ops-1234567890123-abcdef123456',status,waitTimedOut:false,

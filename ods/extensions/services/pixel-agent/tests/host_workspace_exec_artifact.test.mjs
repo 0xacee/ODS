@@ -127,6 +127,18 @@ test('unbound read results cannot establish current-run snapshot evidence',()=>{
   assert.doesNotMatch(f.delivery().text,matchedFooter);
 });
 
+test('an unbound read cannot verify readback after an ordinary direct write',()=>{
+  const f=fixture('Run a read-only hostname check on this Mac. Create fleet-squares.csv in the workspace, read it back, and give me a downloadable link.');
+  f.host();
+  f.call('write',{path:`/workspace/${name}`,content:csv},textResult('Written'));
+  f.publish();
+  f.guard.afterToolCall({toolName:'read',params:{path:`/workspace/${name}`},result:textResult(csv),
+    toolCallId:'never-started',runId:ctx.runId},{...ctx,toolName:'read',toolCallId:'never-started'},'pixel');
+  assert.doesNotMatch(f.delivery().text,/Pixel wrote and read back/);
+  assert.doesNotMatch(f.delivery().text,matchedFooter);
+  assert.equal(f.final()?.retry?.idempotencyKey,'pixel-ods-workspace-read');
+});
+
 test('readback hashes exact UTF-8 bytes, including empty and non-ASCII content',()=>{
   for(const text of ['', 'café,雪\r\n']){
     const f=fixture();f.host();f.exec();f.read(text);f.publish(text);
