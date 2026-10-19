@@ -22,7 +22,7 @@ import { parseQuestions } from "./questions_schema.mjs";
 import {createChatHistoryLedger,HistoryError} from './chat_history_ledger.mjs';
 import {createChatImageStore,createChatImageReadHandler,ChatImageError} from './chat_image_store.mjs';
 import {currentImageNote,decodeChatImageTurn,nativeHistoryMessages,validateImageRoute} from './chat_image_transport.mjs';
-import {handleAccessMode, handleModelControl, readAccessOwnerKey} from './access_mode_relay.mjs';
+import {handleAccessMode, handleModelControl, publicModelControl, readAccessOwnerKey, requestAccessController} from './access_mode_relay.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2320,19 +2320,43 @@ export async function start(cfg = configFromEnv(), opts = {}) {
     throw error;
   }
 
-  const interval = setInterval(() => {
-    void writeStatus(
+  let closed = false;
+  let statusRefresh = null;
+  const refreshStatus = async () => {
+    // systemd binds one config inode into this service. Atomic model changes
+    // replace the owner's file, leaving that private bind on the old inode.
+    // The existing owner controller reads the current committed route without
+    // giving ingress access to the owner's home or restarting active chats.
+    let configuredRuntime = null;
+    try {
+      const request = deps.requestAccessController ?? requestAccessController;
+      const result = await request({operation: 'model-route-status'}, {timeout: 20000});
+      if (result.status === 200) {
+        const current = publicModelControl(result.body);
+        if (!current.pending) {
+          configuredRuntime = {model: current.contract.model, context_length: current.contract.contextLength};
+        }
+      }
+    } catch {
+      // Missing, busy or invalid current evidence means unknown, never the
+      // bound startup config or an unrelated local model kept for rollback.
+    }
+    await writeStatus(
       true,
       cfg.gatewayPort,
       cfg.statusFile,
       cfg.odsVersion,
       deps,
       cfg.appPorts,
-      gateway.runtimeAuthoritative ? gateway.runtime : undefined
-    ).catch(() => {});
+      configuredRuntime
+    );
+  };
+  const interval = setInterval(() => {
+    // Skip ticks while a probe is pending instead of queuing stale projections.
+    if (closed || statusRefresh) return;
+    statusRefresh = refreshStatus().catch(() => {}).finally(() => { statusRefresh = null; });
   }, cfg.statusIntervalMs);
   interval.unref();
-  let closed = false;
   return {
     server,
     interval,
@@ -2340,6 +2364,7 @@ export async function start(cfg = configFromEnv(), opts = {}) {
       if (closed) return;
       closed = true;
       clearInterval(interval);
+      if (statusRefresh) await statusRefresh;
       await new Promise((resolve) => server.close(resolve));
       try {
         const current = fs.lstatSync(cfg.socketPath);
