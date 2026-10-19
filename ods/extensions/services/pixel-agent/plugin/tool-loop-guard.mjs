@@ -4720,14 +4720,15 @@ export function userMessageRequestsWorkspaceDocumentDelivery(messages, prompt = 
         !/\b(?:images?|photos?|audio|video|websites?|webpages?|html)\b|\.(?:png|jpe?g|gif|svg|mp3|mp4|wav|webm|html?)\b/i.test(positive)));
 }
 
-function ownerLaneText(text) {
+function ownerLaneText(text, {preserveCommands = false} = {}) {
   // Classify only current owner prose. Embedded examples cannot opt a workspace
   // turn into extension work; identifiers quoted as operands remain usable.
   return String(text ?? '')
     .replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g, ' ')
     .replace(/^\s*>[^\n]*/gm, ' ')
     .replace(/"[^"\n]*"|`[^`\n]*`|(?<!\w)'[^'\n]*'(?!\w)|“[^”\n]*”/g,
-      value => /\s/.test(value.slice(1, -1)) ? ' ' : value);
+      value => preserveCommands && value.startsWith('`') ? value :
+        /\s/.test(value.slice(1, -1)) ? ' ' : value);
 }
 
 function ownerForbidsTools(text) {
@@ -5465,7 +5466,7 @@ function localInspectionTextBesidePeer(text) {
   // Remote identity and background route lookups cannot become compulsory
   // observations of this computer. Keep independent positive local requests,
   // including a later "Report CPU and RAM" refinement of a local inspection.
-  const localHost = /\b(?:this|my|our|local|current|ODS)\s+(?:host|machine|computer|system|laptop|notebook|desktop|pc)\b/i;
+  const localHost = new RegExp(`\\b(?:this|my|our|local|current|ODS)\\s+${LOCAL_HOST_DEVICE}\\b`, 'i');
   const request = /\b(?:what|which|tell|show|report|check|verify|identify|inspect|give|get|read|return|measure|explore|inventory|survey|examine|describe)\b/i;
   const clauses = text.split(/[!?;\n]+|\.(?=\s|$)|\b(?:and|then|separately)\s+(?=(?:check|inspect|report|verify|probe|resolve|ping|show|read|measure)\b)/i);
   const positive = clauses.filter((clause) => request.test(clause) &&
@@ -5473,6 +5474,16 @@ function localInspectionTextBesidePeer(text) {
     !/\b(?:remote|peer|target|SSH|reachability|connectivity|ping|probe|resolve)\b/i.test(clause));
   return positive.some((clause) => localHost.test(clause)) ? positive.join(". ") : "";
 }
+
+// Apple device names need an explicit local-device reference: a MAC address
+// or a project/UI mention of Mac is not authority to inspect this computer.
+const APPLE_HOST_DEVICE = "(?:mac(?:book(?:\\s+(?:air|pro))?|\\s+(?:mini|studio|pro))?|imac)(?![\\s_-]+address(?:es)?\\b)";
+const LOCAL_HOST_DEVICE = `(?:host|machine|computer|system|laptop|notebook|desktop|pc|${APPLE_HOST_DEVICE})`;
+const HOST_CONTEXT_PATTERN = new RegExp(
+  `(?:\\b(?:ODS\\s+)?(?:host|machine|computer|system|laptop|notebook|desktop|pc)\\b|` +
+  `\\b(?:this|my|our|the|local|current|actual|physical)\\s+${APPLE_HOST_DEVICE}\\b)`, 'i');
+const HOST_OBSERVATION_GUIDANCE_ONLY =
+  /^\s*(?:please\s+)?(?:(?:explain|describe)\b|(?:tell|show)\s+(?:me\s+)?how\b|how\s+(?:do|should|would|can|could)\s+(?:I|we|you)\b)/i;
 
 export function userMessageOperationsRequirements(messages, prompt = undefined) {
   // Pixel Edge appends trusted delivery/routing guidance beside the owner
@@ -5483,7 +5494,7 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   if (!text) return { required: false, actions: [] };
   const hostCommand = userMessageRequestsHostCommand(messages, prompt);
   const networkPeer = hostCommand ? undefined : userMessageNetworkPeerRequest(messages, prompt);
-  const hostText = networkPeer ? localInspectionTextBesidePeer(text) : text;
+  const hostText = ownerLaneText(networkPeer ? localInspectionTextBesidePeer(text) : text);
   const explicitOperations =
     /\b(?:use|using|via|through|with)\b.{0,48}\b(?:Pixel\s+)?Operations(?:\s+(?:Broker|capabilit(?:y|ies)|tools?))?\b/i.test(
       positiveOperationsIntentText(text)
@@ -5508,12 +5519,13 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
   const hostEvidenceLocalHost = /\b(?:ODS|host|machine)\b/i;
   const hostEvidence = hostEvidenceClauses.some((clause) =>
     !hostEvidenceClauseNegation.test(clause) &&
+    !HOST_OBSERVATION_GUIDANCE_ONLY.test(clause) &&
     hostEvidenceRequest.test(clause) &&
     hostEvidenceFacet.test(clause) &&
     (hostEvidenceLocalHost.test(clause) ||
-      /\b(?:ODS\s+)?(?:host|machine|computer|system|laptop|notebook|desktop|pc)\b/i.test(hostText))
+      HOST_CONTEXT_PATTERN.test(hostText))
   );
-  const hostContextPattern = /\b(?:ODS\s+)?(?:host|machine|computer|system|laptop|notebook|desktop|pc)\b/i;
+  const hostContextPattern = HOST_CONTEXT_PATTERN;
   const hostContext = hostContextPattern.test(hostText);
   const hostScopeFacetPatterns = [
     /\b(?:hostname|host identity|kernel|machine architecture|architecture|cpu architecture|host platform|operating[- ]system(?: signature)?|(?:host\s+)?os(?:\s+(?:signature|release))?|linux distribution|distro|uptime|load averages?|system load)\b/i,
@@ -5732,10 +5744,10 @@ export function userMessageOperationsRequirements(messages, prompt = undefined) 
 }
 
 export function userMessageExactHostCommand(messages, prompt = undefined) {
-  const text = currentOwnerIntentText(messages, prompt);
+  const text = ownerLaneText(currentOwnerIntentText(messages, prompt), {preserveCommands:true});
   if (!text) return undefined;
   const exact = text.match(
-    /(?:^|[.!?]\s+)(?:please\s+)?(?:run|execute|invoke)\s+(?:exactly\s+)?`([^`\r\n\0]{1,16384})`\s+(?:on|in|from|against|for)\s+(?:this|my|the|local)\s+(?:ODS\s+)?(?:host|machine|computer|laptop)\b/i
+    /(?:^|[.!?]\s+)(?:please\s+)?(?:run|execute|invoke)\s+(?:exactly\s+)?`([^`\r\n\0]{1,16384})`\s+(?:on|in|from|against|for)\s+(?:this|my|the|local)\s+(?:ODS\s+)?(?:host|machine|computer|laptop|mac(?:book(?:\s+(?:air|pro))?|\s+(?:mini|studio|pro))?|imac)(?![\s_-]+address(?:es)?\b)\b/i
   );
   return exact?.[1];
 }
@@ -5767,7 +5779,7 @@ const NOT_A_REQUEST_BEFORE_HOST_ACTION = new RegExp(String.raw`(?:${[
   String.raw`\b(?:takes?|took)\s+(?:[\w-]+\s+){0,3}to`,
   String.raw`\bno\s+(?:way|option)\s+to`,
   String.raw`\blet\s+me`,
-  String.raw`\b(?:makes|made|making|forces|forced|forcing|causes|caused|causing)\s+(?:me|us|you|it|(?:my|this|the)\s+(?:ODS\s+)?(?:host|machine|computer|laptop))(?:\s+to)?`,
+  String.raw`\b(?:makes|made|making|forces|forced|forcing|causes|caused|causing)\s+(?:me|us|you|it|(?:my|this|the)\s+(?:ODS\s+)?${LOCAL_HOST_DEVICE})(?:\s+to)?`,
   String.raw`(?<!\b(?:you|we|Pixel)\s+)\b(?:will|would|should|could|might|may|must|can|shall)(?:\s+(?:not|never|barely|hardly|still|also|only|always|sometimes|eventually|automatically|really|even|just))*`,
   // What the owner did: "I restart", "when we restart", "whenever you
   // restart", "I've tried to start". "Can we stop Ollama" stays a request.
@@ -5788,7 +5800,7 @@ const IMPERATIVE_BEFORE_HOST_ACTION =
   /(?:^|[,:]|\b(?:please|kindly|then|now|just|also|first|and|you|to))\s*$/i;
 // A finite verb after the word makes it a subject: "Restart doesn't work",
 // "Cold start takes 10 seconds", "First launch on my laptop shows a blank page".
-const SUBJECT_USE_AFTER_HOST_ACTION = new RegExp(String.raw`^(?:\s+(?:and|or|&)\s+${HOST_ACTION_WORD.source})?\s+(?:(?:on|in)\s+(?:this|my|the)\s+(?:ODS\s+)?(?:host|machine|computer|laptop)\s+)?(?:(?:still|also|just|never|always|now|even|sometimes)\s+)?(?:is|isn['’]?t|was|wasn['’]?t|are|aren['’]?t|were|does|doesn['’]?t|did|didn['’]?t|won['’]?t|can['’]?t|has|hasn['’]?t|had|keeps?|takes?|took|shows?|showed|crashe[sd]|freezes|froze|hangs|hung|fails|failed|breaks|broke|overlaps?|resets|seems|looks|gets|got|works|worked|stalls|stalled|when|whenever|while|by\s+itself|itself)\b`, 'i');
+const SUBJECT_USE_AFTER_HOST_ACTION = new RegExp(String.raw`^(?:\s+(?:and|or|&)\s+${HOST_ACTION_WORD.source})?\s+(?:(?:on|in)\s+(?:this|my|the)\s+(?:ODS\s+)?${LOCAL_HOST_DEVICE}\s+)?(?:(?:still|also|just|never|always|now|even|sometimes)\s+)?(?:is|isn['’]?t|was|wasn['’]?t|are|aren['’]?t|were|does|doesn['’]?t|did|didn['’]?t|won['’]?t|can['’]?t|has|hasn['’]?t|had|keeps?|takes?|took|shows?|showed|crashe[sd]|freezes|froze|hangs|hung|fails|failed|breaks|broke|overlaps?|resets|seems|looks|gets|got|works|worked|stalls|stalled|when|whenever|while|by\s+itself|itself)\b`, 'i');
 // A UI noun right after the word ("start screen", "start/restart buttons",
 // "upgrade shop", a quoted "Start" button, "change log") makes it part of a
 // name. A host setting after "screen" ("change screen resolution") and "logs",
@@ -5845,8 +5857,20 @@ function hostActionVerb(clause, hostIndex, context) {
   return undefined;
 }
 
+// Only this complete natural-language observation clause can bypass the
+// raw-command classifier. An extra command or unrecognized suffix fails this
+// positive grammar; other clauses are still checked for host commands.
+const BOUNDED_HOST_OBSERVATION_CLAUSE = new RegExp(
+  '^\\s*(?:please\\s+)?(?:(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?)?' +
+  '(?:run|execute|invoke|perform)\\s+(?:a|the)\\s+(?:read[- ]only\\s+)?' +
+  '(?:hostname|host\\s+identity|host\\s+platform|kernel|machine\\s+architecture|' +
+  'operating[- ]system(?:\\s+(?:signature|release|version))?|uptime|cpu|gpu|memory|storage)' +
+  '\\s+(?:check|inspection|observation|query)\\s+(?:on|of|for)\\s+' +
+  `(?:this|my|our|the|local|current|actual|physical)\\s+(?:ODS\\s+)?${LOCAL_HOST_DEVICE}\\s*$`, 'i');
+
 export function userMessageRequestsHostCommand(messages, prompt = undefined) {
-  const text = currentOwnerIntentText(messages, prompt);
+  const ownerText = currentOwnerIntentText(messages, prompt);
+  const text = ownerLaneText(ownerText, {preserveCommands:true});
   if (!text) return false;
   if (
     userMessageRequestsOperationsCapabilityInventory(messages, prompt) ||
@@ -5857,7 +5881,8 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
     return false;
   }
   if (userMessageExactHostCommand(messages, prompt)) return true;
-  const localHost = /\b(?:ODS[- ]host|local\s+(?:ODS\s+)?host|this\s+(?:ODS\s+)?(?:host|machine|computer|laptop)|my\s+(?:ODS\s+)?(?:host|machine|computer|laptop))\b/i;
+  const localHost = new RegExp(
+    `\\b(?:ODS[- ]host|local\\s+(?:ODS\\s+)?host|(?:this|my)\\s+(?:ODS\\s+)?${LOCAL_HOST_DEVICE})\\b`, 'i');
   const remoteHost = /\b(?:SSH\s+(?:(?:connection|connectivity)\s+)?(?:to|into)|remote\s+(?:host|machine|computer|server|device)|(?:host|machine|computer|server|device)\s+(?:named|called)\s+[A-Za-z0-9][A-Za-z0-9._-]{0,127})\b/i;
   const remoteAction = /\b(?:connect|verify|check|inspect|query|report|troubleshoot|debug|run|execute|invoke)\b/i;
   const guidanceOnly =
@@ -5883,6 +5908,9 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
       }
       const hostMatch = clause.match(localHost);
       if (!hostMatch) return false;
+      if (BOUNDED_HOST_OBSERVATION_CLAUSE.test(clause) &&
+          ownerText.split(/[.!?;\n]+|,\s*(?=(?:and\s+then|but|however|instead|then)\b)/i)
+            .some(original => original.trim() === clause.trim())) return false;
       // A request for help may follow in the next sentence: "The last update
       // broke Ollama on my machine. Can you roll it back?"
       const next = clauses[index + 1] || '';
@@ -5900,12 +5928,12 @@ export function userMessageRequestsHostCommand(messages, prompt = undefined) {
       }
       if (
         /\bstart\s+by\b|\bupdate\s+(?:me|us)\b/i.test(clause) ||
-        /\b(?:can|could|would|should|does|did|will)\s+(?:this|my|the|local|ODS)\s+(?:ODS\s+)?(?:host|machine|computer|laptop)\b/i.test(clause)
+        new RegExp(`\\b(?:can|could|would|should|does|did|will)\\s+(?:this|my|the|local|ODS)\\s+(?:ODS\\s+)?${LOCAL_HOST_DEVICE}\\b`, 'i').test(clause)
       ) {
         return false;
       }
       if (actionUnrelatedToHost(clause, actionMatch, hostMatch.index)) return false;
-      return !/\brun\s+(?:a|any|some|the)?\s*(?:command|shell)\s*(?:on|against|for)?\s*(?:this|my|the|ODS)?\s*(?:host|machine|computer|laptop)?\s*$/i.test(
+      return !new RegExp(`\\brun\\s+(?:a|any|some|the)?\\s*(?:command|shell)\\s*(?:on|against|for)?\\s*(?:this|my|the|ODS)?\\s*${LOCAL_HOST_DEVICE}?\\s*$`, 'i').test(
         clause.trim()
       );
     });
