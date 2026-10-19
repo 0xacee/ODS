@@ -74,6 +74,7 @@ class ColdStorageInitialDirectoryTests(unittest.TestCase):
             self.assertEqual(res_second.returncode, 0)
             self.assertIn("0 archived, 0 skipped", res_second.stdout)
 
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses the read-only directory")
     def test_archive_mv_failure_does_not_symlink_or_report_archived(self):
         """When mv fails, the model must not be symlinked, ARCHIVED must not be logged, and skipped is incremented."""
         with tempfile.TemporaryDirectory() as tmp:
