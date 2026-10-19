@@ -3309,10 +3309,54 @@ function persistedToolSearchEnvelope(
   return undefined;
 }
 
-function persistedToolSearchResult(message, expectedToolName, expectedSourceName) {
-  return Boolean(
-    persistedToolSearchEnvelope(message, expectedToolName, expectedSourceName)
+function captureHostResultEvidence(pending, state, event, context, hostEvent, receipt) {
+  if (!pending || !receipt?.outcome || !hostEvent) return;
+  const runId = context?.runId ?? event?.runId;
+  const toolName = context?.toolName ?? event?.toolName;
+  const toolCallId = context?.toolCallId ?? event?.toolCallId;
+  if (pending.runId !== runId || pending.transport !== toolName ||
+      pending.inspectionSessionId !== state.currentSessionId ||
+      pending.inspectionSessionKey !== state.currentSessionKey ||
+      (context?.sessionId !== undefined && context.sessionId !== state.currentSessionId) ||
+      (context?.sessionKey !== undefined && context.sessionKey !== state.currentSessionKey) ||
+      (event?.runId !== undefined && event.runId !== runId) ||
+      (event?.toolCallId !== undefined && event.toolCallId !== toolCallId) ||
+      (event?.toolName !== undefined && event.toolName !== toolName) ||
+      ![SYNCHRONOUS_HOST_OBSERVE_TOOL, SYNCHRONOUS_HOST_COMMAND_TOOL].includes(pending.selectedToolName) ||
+      !isDeepStrictEqual(hostEvent.params, pending.selectedParams)) return;
+  const details = boundedJsonSnapshot(hostEvent.result?.details);
+  if (!details) return;
+  // The aggregate still requires all owner-requested peer ports. A single
+  // call's result describes only its own observed ports, not that completion.
+  const outcome = { ...receipt.outcome, requiredNetworkPeer: undefined };
+  const text = operationsEvidenceText(
+    new Set(outcome.actions.map(({ action }) => action)),
+    new Map([[outcome.jobId, outcome]]),
+    undefined,
+    synchronousHostOdsStatusProjection(hostEvent)
   );
+  if (text) pending.hostResultEvidence = { details, text };
+}
+
+function persistedHostResultEvidence(pending, state, event, context, runId, toolCallId) {
+  const captured = pending?.hostResultEvidence;
+  const message = event?.message;
+  if (!captured || !state || message?.isError === true || pending.runId !== runId ||
+      pending.transport !== message?.toolName ||
+      pending.inspectionSessionId !== state.currentSessionId ||
+      pending.inspectionSessionKey !== state.currentSessionKey ||
+      (context?.runId !== undefined && context.runId !== runId) ||
+      (context?.sessionId !== undefined && context.sessionId !== state.currentSessionId) ||
+      (context?.sessionKey !== undefined && context.sessionKey !== state.currentSessionKey) ||
+      (context?.toolName !== undefined && context.toolName !== pending.transport) ||
+      (event?.runId !== undefined && event.runId !== runId) ||
+      (event?.toolCallId !== undefined && event.toolCallId !== toolCallId) ||
+      (message?.toolCallId !== undefined && message.toolCallId !== toolCallId)) return undefined;
+  const result = pending.transport === 'tool_call'
+    ? persistedToolSearchEnvelope(message, pending.selectedToolName, 'pixel-ods')?.result
+    : message;
+  return result?.isError !== true && isDeepStrictEqual(result?.details, captured.details)
+    ? captured.text : undefined;
 }
 
 function cleanUnittestSummary(result) {
@@ -7706,7 +7750,8 @@ export function createToolLoopGuard({
     pendingToolRuns.set(toolCallId, {
       runId,
       selectedToolName,
-      selectedParams: [PREVIEW_INSPECTION_TOOL, 'exec'].includes(selectedToolName)
+      selectedParams: [PREVIEW_INSPECTION_TOOL, 'exec', SYNCHRONOUS_HOST_OBSERVE_TOOL,
+        SYNCHRONOUS_HOST_COMMAND_TOOL].includes(selectedToolName)
         ? structuredClone(selectedParams) : selectedParams,
       executedParams: selectedToolName === 'exec' ? structuredClone(selectedParams) : undefined,
       inspectionSessionId: runs.get(runId)?.currentSessionId,
@@ -7834,7 +7879,6 @@ export function createToolLoopGuard({
         operationsSubmittedJobs: new Map(),
         toolExecutionAttempted: false,
         operationsTerminalJobs: new Map(),
-        operationsHostResultCompactionsRemaining: 0,
         operationsTerminalBlocks: 0,
         operationsTerminalAborted: false,
         operationsRequiresOdsAppsProjection: false,
@@ -8897,13 +8941,6 @@ export function createToolLoopGuard({
         toolName,
         selectedToolTarget
       );
-      if (
-        selectedToolName !== SYNCHRONOUS_HOST_OBSERVE_TOOL &&
-        selectedToolName !== SYNCHRONOUS_HOST_COMMAND_TOOL &&
-        state.operationsHostResultCompactionsRemaining > 0
-      ) {
-        state.operationsHostResultCompactionsRemaining = 0;
-      }
     }
     if (toolName === "process" && state) {
       const params = normalizedParams ?? event?.params;
@@ -9123,6 +9160,10 @@ export function createToolLoopGuard({
           return { block: true, blockReason: OPERATIONS_HOST_COMMAND_REQUIRES_PROPOSAL_REASON };
         }
         const params = { command };
+        // The returned route may replace a generic proposal or its command.
+        // Bind the later receipt to what this hook actually admits.
+        rememberToolRun(context?.toolCallId ?? event?.toolCallId, runId,
+          SYNCHRONOUS_HOST_COMMAND_TOOL, params, undefined, toolName, 'pixel-ods');
         return toolName === "tool_call"
           ? { params: { id: SYNCHRONOUS_HOST_COMMAND_TOOL, args: params } }
           : { params };
@@ -10715,6 +10756,7 @@ export function createToolLoopGuard({
     if (runningExecSessionId(phantomExecReceipt)) rememberBackgroundExec(state, agentId);
     state.execCallsInFlight.delete(toolCallId);
     const pendingToolRun = pendingToolRuns.get(toolCallId);
+    if (pendingToolRun) pendingToolRun.hostResultEvidence = undefined;
     if (workspacePreviewInspectionAvailable && pendingToolRun?.selectedToolName === PREVIEW_INSPECTION_TOOL &&
         pendingToolRun.runId === runId && pendingToolRun.transport === toolName &&
         pendingToolRun.inspectionGeneration === state.workspaceInspectionGeneration &&
@@ -11336,7 +11378,8 @@ export function createToolLoopGuard({
             hostCommand.outcome
           );
         }
-        state.operationsHostResultCompactionsRemaining = 2;
+        captureHostResultEvidence(pendingToolRun, state, event, context,
+          wrappedHostCommand ?? event, hostCommand);
       }
       const wrappedHostObservation =
         toolName === "tool_call"
@@ -11363,10 +11406,8 @@ export function createToolLoopGuard({
             hostObservation.outcome
           );
         }
-        // A Tool Search call can persist both the selected plugin result and
-        // its outer wrapper. Compact at most those two messages, and clear the
-        // allowance as soon as any different tool starts.
-        state.operationsHostResultCompactionsRemaining = 2;
+        captureHostResultEvidence(pendingToolRun, state, event, context,
+          wrappedHostObservation ?? event, hostObservation);
         const combinedStatus = synchronousHostOdsStatusProjection(
           wrappedHostObservation ?? event
         );
@@ -12500,29 +12541,7 @@ export function createToolLoopGuard({
       !state.progressBudget.laneExhausted('workspace') && !state.operationsRequired && !state.exactDownloadRequested
       ? requestedControlNameInstruction(state.workspacePreview, state.workspaceControlNameCheck,
         state.workspaceControlNameSources) : undefined;
-    const hostToolResult =
-      pending?.selectedToolName === SYNCHRONOUS_HOST_OBSERVE_TOOL ||
-      pending?.selectedToolName === SYNCHRONOUS_HOST_COMMAND_TOOL ||
-      state?.operationsHostResultCompactionsRemaining > 0 ||
-      persistedToolSearchResult(
-        message,
-        SYNCHRONOUS_HOST_OBSERVE_TOOL,
-        "pixel-ods"
-      ) ||
-      persistedToolSearchResult(
-        message,
-        SYNCHRONOUS_HOST_COMMAND_TOOL,
-        "pixel-ods"
-      );
-    const hostEvidence =
-      hostToolResult
-        ? operationsEvidenceText(
-          state?.operationsRequiredActions,
-          state?.operationsTerminalJobs,
-          state?.operationsOdsAppsProjection,
-          state?.operationsOdsStatusProjection
-        )
-        : undefined;
+    const hostEvidence = persistedHostResultEvidence(pending, state, event, context, runId, toolCallId);
     // The external broker keeps the complete terminal receipt. Once the guard
     // has structurally validated that receipt in afterToolCall, persist only a
     // compact, receipt-bound projection into the model conversation. Tool
@@ -12604,9 +12623,6 @@ export function createToolLoopGuard({
     }
     if (controlNameRepair && coachingDue('control-name', `[ODS Pixel next step] ${controlNameRepair}`)) {
       content.push({type: 'text', text: `[ODS Pixel next step] ${controlNameRepair}`});
-    }
-    if (hostEvidence && state.operationsHostResultCompactionsRemaining > 0) {
-      state.operationsHostResultCompactionsRemaining -= 1;
     }
     if (continuation) {
       content.push({
