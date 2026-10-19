@@ -73,7 +73,12 @@ def test_late_or_superseded_request_is_not_success(monkeypatch, tmp_path, next_s
 def test_regular_download_cancel_still_uses_host_agent(monkeypatch, tmp_path):
     monkeypatch.setattr(router, "DATA_DIR", str(tmp_path))
     calls = []
-    monkeypatch.setattr(router, "_call_agent_model", lambda *args: calls.append(args) or {"cancelled": True})
+
+    def cancel_agent(*args):
+        calls.append(args)
+        return {"cancelled": True}
+
+    monkeypatch.setattr(router, "_call_agent_model", cancel_agent)
     assert router.cancel_download("test") == {"cancelled": True}
     assert calls == [("/v1/model/download/cancel", {})]
 
