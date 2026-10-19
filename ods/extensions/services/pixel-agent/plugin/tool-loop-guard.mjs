@@ -6913,7 +6913,29 @@ export function userMessageWorkspaceContinuationPath(messages, prompt = undefine
     }
     paths.add(value);
   }
-  return paths.size === 1 ? [...paths][0] : undefined;
+  if (paths.size === 1) return [...paths][0];
+  if (paths.size > 1) return undefined;
+  return userMessageBareWorkspaceFilename(messages, prompt);
+}
+
+// A single owner-named bare filename (no directory) is an unambiguous path
+// binding only when the owner names/calls exactly one such file, it is not
+// quoted as source/instruction text, and no other path-like token competes.
+// This never grants a directory and never overrides an explicit /workspace
+// path (handled by the caller before this runs).
+function userMessageBareWorkspaceFilename(messages, prompt = undefined) {
+  const text = workspacePreviewInstructionText(currentOwnerIntentText(messages, prompt),
+    {preserveFileTargets: true});
+  // Keep this fallback to a named file at the workspace root. A directory,
+  // URL, traversal or competing filename requires an explicit path instead.
+  if (/[\\/]|\bwww\./i.test(text)) return undefined;
+  const files = new Set([...text.matchAll(/\b([A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z][A-Za-z0-9]{0,11})\b/g)]
+    .map(match => match[1]));
+  if (files.size !== 1) return undefined;
+  const [name] = files;
+  if (!WORKSPACE_PATH_COMPONENT.test(name)) return undefined;
+  const named = [...text.matchAll(/\b(?:named|called)\s+([A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z][A-Za-z0-9]{0,11})\b/gi)];
+  return named.some(match => match[1] === name) ? name : undefined;
 }
 
 export function userMessageWorkspaceDirectoryPath(messages, prompt = undefined) {
@@ -11989,6 +12011,30 @@ export function createToolLoopGuard({
         instruction:
           `Do not reply yet. Call tool_call now with id read and args {\"path\":\"${relativePath}\"}. ` +
           "Reply only after the real readback succeeds.",
+      };
+    }
+    // Both the exact bound write and read succeeded. If the owner asked for a
+    // download and no verified artifact has been accepted yet, coach the real
+    // publication. The write/read receipt is not semantic completion; only a
+    // byte-verified publication receipt satisfies delivery. Respect the same
+    // artifact scope (owner/session/run, cancellation, budget, attempt limit)
+    // that gates reserveWorkspaceArtifact.
+    if (
+      state.workspaceDocumentDeliveryRequested &&
+      !state.workspaceArtifacts?.length &&
+      workspaceArtifactUnavailableReason({
+        agentId: "pixel",
+        runId,
+        sessionId: state.currentSessionId,
+        sessionKey: state.currentSessionKey,
+      }) === undefined
+    ) {
+      return {
+        stage: "workspace-publish",
+        instruction:
+          `Do not reply yet. Call tool_call now with id pixel_ods_workspace_artifact ` +
+          `and args ${JSON.stringify({ relativePath })}. ` +
+          "Publish only the exact file you just wrote and read back; accept only a byte-verified receipt.",
       };
     }
     return undefined;
