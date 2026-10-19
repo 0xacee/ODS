@@ -2320,19 +2320,35 @@ export async function start(cfg = configFromEnv(), opts = {}) {
     throw error;
   }
 
-  const interval = setInterval(() => {
-    void writeStatus(
+  let closed = false;
+  let statusRefresh = null;
+  const refreshStatus = async () => {
+    // Model transactions rewrite the secured configuration without restarting
+    // ingress. Do not keep reporting the model captured at process startup.
+    let configuredRuntime = null;
+    try {
+      const current = readGatewayConfiguration(cfg.gatewayTokenFile, opts.euid);
+      configuredRuntime = current.runtimeAuthoritative ? current.runtime : undefined;
+    } catch {
+      // Missing or unsafe current evidence means unknown, never the previous
+      // model or an unrelated local runtime retained for rollback.
+    }
+    await writeStatus(
       true,
       cfg.gatewayPort,
       cfg.statusFile,
       cfg.odsVersion,
       deps,
       cfg.appPorts,
-      gateway.runtimeAuthoritative ? gateway.runtime : undefined
-    ).catch(() => {});
+      configuredRuntime
+    );
+  };
+  const interval = setInterval(() => {
+    // Skip ticks while a probe is pending instead of queuing stale projections.
+    if (closed || statusRefresh) return;
+    statusRefresh = refreshStatus().catch(() => {}).finally(() => { statusRefresh = null; });
   }, cfg.statusIntervalMs);
   interval.unref();
-  let closed = false;
   return {
     server,
     interval,
@@ -2340,6 +2356,7 @@ export async function start(cfg = configFromEnv(), opts = {}) {
       if (closed) return;
       closed = true;
       clearInterval(interval);
+      if (statusRefresh) await statusRefresh;
       await new Promise((resolve) => server.close(resolve));
       try {
         const current = fs.lstatSync(cfg.socketPath);
