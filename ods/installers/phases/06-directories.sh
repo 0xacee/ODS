@@ -420,9 +420,9 @@ else
                 _phase06_pixel_source_transition=0
                 # The pending plan is bound to the tree it recorded. Keep the
                 # retired service files: `stage` below either resumes this
-                # release's own plan, which pruned them before staging, or
-                # refuses an older plan so the release that staged it can
-                # still finish or roll it back.
+                # release's own plan, or archives an older untouched unheld
+                # plan after verifying its exact baseline. Held plans retain
+                # their source so that release can finish or roll them back.
                 _phase06_prune_ready=false
             fi
             unset _phase06_source_status

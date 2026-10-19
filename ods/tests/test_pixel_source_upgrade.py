@@ -762,7 +762,8 @@ def test_stage_cli_selects_guarded_refresh_for_a_new_download(mirrored, monkeypa
     assert (old / 'bin/a.py').read_text() == 'old'
 
 
-def test_stage_trust_boundary_real_marker_files(trees):
+@pytest.mark.parametrize('requested_marker', [None, 'b' * 40])
+def test_stage_trust_boundary_real_marker_files(trees, requested_marker):
     manager, old, new, identity = trees
     uid = os.getuid()
     # Protected JSON deliberately rejects /tmp's world-writable ancestor.
@@ -777,7 +778,7 @@ def test_stage_trust_boundary_real_marker_files(trees):
         marker = dict(schema_version=2, manager='ods', install_dir=str(old),
                       initial_active_state='absent', state='ready',
                       pixel_source_ref=identity['beforeRef'],
-                      requested_source_ref=identity['afterRef'],
+                      requested_source_ref=requested_marker,
                       active_release_version='1.0.0')
         marker_path.write_text(json.dumps(marker))
         marker_path.chmod(0o600)
@@ -791,7 +792,10 @@ def test_stage_trust_boundary_real_marker_files(trees):
         identity['markerSha256'] = upgrade.sha(marker_path.read_bytes())
         identity['configSha256'] = upgrade.sha(config.read_bytes())
         identity['receiptSha256'] = None
+        upgrade._stage(manager, account, new, 'b' * 40)
+        original = upgrade.encoded(manager.journal())
         upgrade._stage(manager, account, new, 'f' * 40)
+        assert (manager.state / upgrade.sha(original)).read_bytes() == original
         first = manager.journal()
         assert first['phase'] == 'staged' and first['hold'] is None
         assert first['identity']['afterRef'] == 'f' * 40
