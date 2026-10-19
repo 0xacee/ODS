@@ -72,6 +72,14 @@ test('binds the unchanged live Python CSV prompt and direct owner file commands'
     assert.equal(api.userMessageWorkspaceContinuationPath([],p),undefined,p);
 });
 
+test('repeated conjunctions cannot cause filename-intent backtracking',()=>{
+  const hostile='Inspect the workspace. and'+ '\tthen\tand'.repeat(5000)+' create fleet-squares.csv.';
+  const start=performance.now();
+  assert.equal(api.userMessageWorkspaceContinuationPath([],hostile),undefined);
+  assert.ok(performance.now()-start<1000,'bounded owner-intent classification');
+  assert.equal(api.userMessageWorkspaceContinuationPath([],'Inspect the workspace. And then create fleet-squares.csv.'),name);
+});
+
 for(const wrapped of [false,true]) test(`Python-created CSV composes with readback and accepted download, wrapped=${wrapped}`,()=>{
   const f=fixture(); f.host(); f.exec(wrapped);
   assert.equal(f.final().retry.idempotencyKey,'pixel-ods-workspace-read');

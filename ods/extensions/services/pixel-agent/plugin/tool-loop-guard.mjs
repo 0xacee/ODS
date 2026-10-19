@@ -6971,7 +6971,7 @@ function userMessageBareWorkspaceFilename(messages, prompt = undefined) {
     if (match[1] !== name) continue;
     const prefix = text.slice(0, match.index).split(/[!?;\n]|\.(?=\s|$)/).at(-1).trimStart();
     if (/\b(?:not|never|avoid|skip|without|don't|mustn't|shouldn't)\b/i.test(prefix)) continue;
-    if (/^(?:(?:and(?:\s+then)?|then|now|instead)\s+)*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|I\s+(?:want|need)\s+you\s+to\s+)?(?:(?:in|inside)\s+(?:the\s+)?workspace[,]?\s+|use\s+[A-Za-z0-9 _-]{1,80}\s+to\s+)?$/i.test(prefix)) return name;
+    if (/^(?:(?:and(?:\s+then)?|then|now|instead)\s+)?(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|I\s+(?:want|need)\s+you\s+to\s+)?(?:(?:in|inside)\s+(?:the\s+)?workspace[,]?\s+|use\s+[A-Za-z0-9 _-]{1,80}\s+to\s+)?$/i.test(prefix)) return name;
   }
   return undefined;
 }
