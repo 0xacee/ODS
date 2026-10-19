@@ -37,12 +37,25 @@ function fixture() {
 }
 const ok = () => ({status: 200, body: {cancel: async () => {}}});
 const unavailableDocker = (_command, _args, _options, callback) => callback(new Error('unavailable'));
+function committed(model, contextLength = 65536, phase = 'completed', outcome = 'commit') {
+  return {status:200, body:{schemaVersion:1, status:phase, pending:false,
+    revision:'a'.repeat(64), transactionId:phase === 'ready' ? null : 'b'.repeat(64),
+    outcome:phase === 'ready' ? null : outcome,
+    contract:{model, contextLength, maxTokens:8192, reasoning:false}}};
+}
 
-test('running ingress follows rewritten model config and reports unsafe evidence as unknown', async () => {
+test('controller follows atomic model switches while the private bound config stays unchanged', async () => {
   const f = fixture();
   const inspections = [];
+  const boundBytes = fs.readFileSync(f.config);
+  let current = committed('local-before.gguf', 65536, 'ready');
   const h = await start(f.cfg, {deps: {
     fetch: async () => ok(),
+    requestAccessController: async (payload, options) => {
+      assert.deepEqual(payload, {operation:'model-route-status'});
+      assert.deepEqual(options, {timeout:20000});
+      return current;
+    },
     execFile: (_command, args, _options, callback) => {
       inspections.push(args[0]);
       if (args[0] === 'ps') callback(null, JSON.stringify({Names:'ods-llama-server',Status:'Up (healthy)'})+'\n', '');
@@ -52,20 +65,47 @@ test('running ingress follows rewritten model config and reports unsafe evidence
   const runtime = () => JSON.parse(fs.readFileSync(f.status, 'utf8')).runtime;
   try {
     assert.equal(runtime().model, 'local-before.gguf');
-    f.write('remote/after', 131072);
+    current = committed('remote/after', 131072);
     await eventually(() => assert.deepEqual(runtime(), {model:'remote/after', context_length:131072}));
-    fs.chmodSync(f.config, 0o644);
-    await eventually(() => assert.equal(runtime(), null));
-    f.write('restored-local.gguf');
+    current = committed('restored-local.gguf', 65536, 'completed', 'rollback');
     await eventually(() => assert.equal(runtime().model, 'restored-local.gguf'));
-    fs.writeFileSync(f.config, '{invalid json');
-    await eventually(() => assert.equal(runtime(), null));
+    assert.deepEqual(fs.readFileSync(f.config), boundBytes);
+    assert.doesNotMatch(fs.readFileSync(f.status, 'utf8'), /synthetic-refresh-test-token|transactionId|routeFingerprint/);
     assert.ok(inspections.every(operation => operation === 'ps'));
   } finally {
     await h.close();
     fs.rmSync(f.dir, {recursive:true, force:true});
   }
 });
+
+for (const failure of ['busy', 'unavailable', 'invalid', 'held', 'applied']) {
+  test(`controller ${failure} projects unknown instead of a stale or uncommitted model and recovers`, async () => {
+    const f = fixture();
+    let current = committed('first/model');
+    const h = await start(f.cfg, {deps:{
+      fetch:async () => ok(), execFile:unavailableDocker,
+      requestAccessController:async () => {
+        if (current === 'unavailable') throw new Error('private controller detail');
+        return current;
+      },
+    }});
+    const runtime = () => JSON.parse(fs.readFileSync(f.status, 'utf8')).runtime;
+    try {
+      await eventually(() => assert.equal(runtime()?.model, 'first/model'));
+      current = failure === 'unavailable' ? failure
+        : failure === 'busy' ? {status:409, body:{error:'transition-busy'}}
+        : failure === 'invalid' ? {status:200, body:{schemaVersion:1}}
+        : {status:200, body:{...committed('not-committed/target').body,
+          status:failure, pending:true, outcome:null}};
+      await eventually(() => assert.equal(runtime(), null));
+      assert.doesNotMatch(fs.readFileSync(f.status, 'utf8'), /private controller detail|not-committed/);
+      current = committed('recovered/model', 32768);
+      await eventually(() => assert.deepEqual(runtime(), {model:'recovered/model', context_length:32768}));
+    } finally {
+      await h.close(); fs.rmSync(f.dir, {recursive:true, force:true});
+    }
+  });
+}
 
 test('periodic status probes do not overlap and close waits for the active projection', async () => {
   const f = fixture();
@@ -75,6 +115,7 @@ test('periodic status probes do not overlap and close waits for the active proje
   const h = await start(f.cfg, {deps: {
     fetch: async () => { if (++calls > 1) await blocked; return ok(); },
     execFile: unavailableDocker,
+    requestAccessController: async () => committed('active/model'),
   }});
   let closing;
   try {

@@ -22,7 +22,7 @@ import { parseQuestions } from "./questions_schema.mjs";
 import {createChatHistoryLedger,HistoryError} from './chat_history_ledger.mjs';
 import {createChatImageStore,createChatImageReadHandler,ChatImageError} from './chat_image_store.mjs';
 import {currentImageNote,decodeChatImageTurn,nativeHistoryMessages,validateImageRoute} from './chat_image_transport.mjs';
-import {handleAccessMode, handleModelControl, readAccessOwnerKey} from './access_mode_relay.mjs';
+import {handleAccessMode, handleModelControl, publicModelControl, readAccessOwnerKey, requestAccessController} from './access_mode_relay.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2323,15 +2323,23 @@ export async function start(cfg = configFromEnv(), opts = {}) {
   let closed = false;
   let statusRefresh = null;
   const refreshStatus = async () => {
-    // Model transactions rewrite the secured configuration without restarting
-    // ingress. Do not keep reporting the model captured at process startup.
+    // systemd binds one config inode into this service. Atomic model changes
+    // replace the owner's file, leaving that private bind on the old inode.
+    // The existing owner controller reads the current committed route without
+    // giving ingress access to the owner's home or restarting active chats.
     let configuredRuntime = null;
     try {
-      const current = readGatewayConfiguration(cfg.gatewayTokenFile, opts.euid);
-      configuredRuntime = current.runtimeAuthoritative ? current.runtime : undefined;
+      const request = deps.requestAccessController ?? requestAccessController;
+      const result = await request({operation: 'model-route-status'}, {timeout: 20000});
+      if (result.status === 200) {
+        const current = publicModelControl(result.body);
+        if (!current.pending) {
+          configuredRuntime = {model: current.contract.model, context_length: current.contract.contextLength};
+        }
+      }
     } catch {
-      // Missing or unsafe current evidence means unknown, never the previous
-      // model or an unrelated local runtime retained for rollback.
+      // Missing, busy or invalid current evidence means unknown, never the
+      // bound startup config or an unrelated local model kept for rollback.
     }
     await writeStatus(
       true,
