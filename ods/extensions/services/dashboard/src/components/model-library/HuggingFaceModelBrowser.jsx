@@ -919,6 +919,7 @@ async function responseJson(response) {
 function errorMessage(body, fallback) {
   if (typeof body?.detail === 'string') return body.detail
   if (typeof body?.detail?.message === 'string') return body.detail.message
+  if (typeof body?.detail?.error === 'string') return body.detail.error
   if (typeof body?.error === 'string') return body.error
   return fallback
 }
