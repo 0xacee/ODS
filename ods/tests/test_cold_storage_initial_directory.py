@@ -76,7 +76,7 @@ class ColdStorageInitialDirectoryTests(unittest.TestCase):
 
     @unittest.skipIf(os.geteuid() == 0, "root bypasses the read-only directory")
     def test_archive_mv_failure_does_not_symlink_or_report_archived(self):
-        """When mv fails, the model must not be symlinked, ARCHIVED must not be logged, and skipped is incremented."""
+        """A failed move preserves the model and returns a failed scan."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             cache = root / "hf_cache"
@@ -108,7 +108,7 @@ class ColdStorageInitialDirectoryTests(unittest.TestCase):
                     text=True,
                     check=False,
                 )
-                self.assertEqual(res.returncode, 0)
+                self.assertNotEqual(res.returncode, 0)
                 # Model must remain a directory, not a symlink
                 self.assertFalse(model_dir.is_symlink(), "model_dir must not be replaced with a symlink on failed mv")
                 self.assertTrue(model_dir.is_dir())
@@ -116,8 +116,8 @@ class ColdStorageInitialDirectoryTests(unittest.TestCase):
                 log_content = log_file.read_text(encoding="utf-8")
                 self.assertNotIn(f"ARCHIVED: {name}", log_content)
                 self.assertIn("ERROR: failed to move", log_content)
-                # Scan summary must report 0 archived and non-zero skipped
-                self.assertIn("0 archived, 1 skipped", log_content)
+                # An attempted operation failed; this was not an ordinary skip.
+                self.assertIn("0 archived, 0 skipped, 1 failed", log_content)
             finally:
                 # restore write permission for cleanup
                 cold_dir.chmod(stat.S_IRWXU)
