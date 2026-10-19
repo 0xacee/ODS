@@ -1047,10 +1047,15 @@ class SourceUpgrade:
                 raise UpgradeError('source-journal-invalid')
         return self._mirror_record()['after']
 
-    def _check_unheld_refresh(self, existing, identity, candidate, *, rebase_unheld):
+    def _check_unheld_refresh(self, existing, identity, candidate, *, rebase_unheld,
+                              replace_unheld_ref=False):
         # Called under stage's source lock and the CLI's admission lock. A new
         # download may replace an unused plan, never a held/applied update.
         baseline = {'configSha256', 'receiptSha256'} if rebase_unheld else set()
+        if replace_unheld_ref:
+            if identity['afterRef'] == existing['identity']['afterRef']:
+                raise UpgradeError('source-unheld-refresh-refused')
+            baseline |= {'afterRef'}
         if (existing['phase'] != 'staged' or existing['hold'] is not None
                 or os.path.lexists(self.state.parent / 'transition.json')
                 or os.path.lexists(self.state / self.downstream_name())
@@ -1079,7 +1084,7 @@ class SourceUpgrade:
 
     @locked
     def stage(self, source, source_uid, identity, *, retire_complete=None, rebase_unheld=False,
-              supersede=False, refresh_unheld=False):
+              supersede=False, refresh_unheld=False, replace_unheld_ref=False):
         source = Path(source)
         if source.resolve() == self.install:
             raise UpgradeError('source-separate-candidate-required')
@@ -1108,10 +1113,12 @@ class SourceUpgrade:
                 # One compact prior receipt survives journal replacement. Blobs
                 # remain content-addressed, never adopted as active authority.
                 self._write('previous-completion.json', encoded(existing))
-            elif not same and refresh_unheld and candidate != existing['candidate']:
+            elif not same and refresh_unheld and (candidate != existing['candidate']
+                    or replace_unheld_ref):
                 if self._renew_unheld_scratch_after_remount():
                     self._prepare_scratch()
-                self._check_unheld_refresh(existing, identity, candidate, rebase_unheld=rebase_unheld)
+                self._check_unheld_refresh(existing, identity, candidate, rebase_unheld=rebase_unheld,
+                                           replace_unheld_ref=replace_unheld_ref)
                 refreshed = existing
             elif not same and rebase_unheld:
                 baseline_keys = {'configSha256', 'receiptSha256'}
@@ -1177,7 +1184,8 @@ class SourceUpgrade:
         if before != inventory(self.install, self.uid) or candidate != inventory(source, source_uid, candidate=True):
             raise UpgradeError("source-file-changed")
         if refreshed is not None:
-            self._check_unheld_refresh(refreshed, identity, candidate, rebase_unheld=rebase_unheld)
+            self._check_unheld_refresh(refreshed, identity, candidate, rebase_unheld=rebase_unheld,
+                                       replace_unheld_ref=replace_unheld_ref)
         if preserved_mirror is not None:
             name = 'mirror-' + sha(encoded([identity, candidate])) + '.json'
             self._write(name, preserved_mirror)
@@ -1476,12 +1484,29 @@ def _stage(manager, account, source, requested_ref):
         raise UpgradeError("source-managed-identity-invalid")
     fresh = existing is None or (existing['phase'] == 'complete'
                                and not os.path.lexists(manager.state.parent / 'transition.json'))
+    replace_unheld_ref = (not fresh and existing['phase'] == 'staged' and existing['hold'] is None
+                         and existing['identity']['afterRef'] != requested_ref)
     rebase_unheld = False
-    if fresh:
+    if fresh or replace_unheld_ref:
+        if replace_unheld_ref:
+            # A never-started plan may target an older bundled Pixel release.
+            # Keep its exact installed/marker identity, and let stage recheck
+            # the untouched tree, empty scratch, mirrors and absence of holds
+            # before archiving it and publishing any replacement.
+            previous = existing['identity']
+            # The hash binds every marker field, including a requested ref
+            # left by an even earlier unused plan. This also permits a second
+            # release to replace a plan that never reached marker publication.
+            if (marker.get('state') != 'ready' or marker_sha != previous['markerSha256']
+                    or marker.get('pixel_source_ref') != previous['beforeRef']):
+                raise UpgradeError('source-resume-identity-changed')
         if marker.get("state") != "ready" or not re.fullmatch(r"[a-f0-9]{40}", marker.get("pixel_source_ref", "")):
             raise UpgradeError("source-ready-baseline-required")
         identity = dict(beforeRef=marker["pixel_source_ref"], afterRef=requested_ref, markerSha256=marker_sha,
                         **owner_baseline(account.pw_dir, account.pw_uid))
+        if replace_unheld_ref:
+            rebase_unheld = any(identity[key] != existing['identity'][key]
+                               for key in ('configSha256', 'receiptSha256'))
         if identity["beforeRef"] != requested_ref:
             _, version_bytes = read_file(Path(source), 'vendor/pixel/VERSION', account.pw_uid, candidate=True)
             if version_bytes is None or len(version_bytes) > 128:
@@ -1494,9 +1519,18 @@ def _stage(manager, account, source, requested_ref):
                 raise UpgradeError("source-new-version-required")
     else:
         identity = existing["identity"]
+        # Replacement is journaled before the installer changes the owner
+        # marker. An interrupted rerun can therefore retain the old requested
+        # ref in that exact, hash-bound ready marker. This exception never
+        # applies after admission was held or the installed ref advanced.
+        unchanged_unheld_marker = (existing['phase'] == 'staged' and existing['hold'] is None
+                                   and marker_sha == identity['markerSha256']
+                                   and marker.get('state') == 'ready'
+                                   and marker.get('pixel_source_ref') == identity['beforeRef'])
         if (identity["afterRef"] != requested_ref or marker.get("state") not in ("ready", "installing")
                 or marker.get("pixel_source_ref") not in (identity["beforeRef"], identity["afterRef"])
-                or marker.get("requested_source_ref") not in (None, identity["afterRef"])):
+                or (not unchanged_unheld_marker
+                    and marker.get("requested_source_ref") not in (None, identity["afterRef"]))):
             raise UpgradeError("source-resume-identity-changed")
         if existing['phase'] == 'staged' and existing['hold'] is None:
             current = owner_baseline(account.pw_dir, account.pw_uid)
@@ -1517,7 +1551,8 @@ def _stage(manager, account, source, requested_ref):
                  and os.path.lexists(manager.state.parent / 'transition.json'))
     manager.stage(Path(source), account.pw_uid, identity, retire_complete=retire,
                   rebase_unheld=rebase_unheld, supersede=supersede,
-                  refresh_unheld=not fresh and existing['phase'] == 'staged' and existing['hold'] is None)
+                  refresh_unheld=not fresh and existing['phase'] == 'staged' and existing['hold'] is None,
+                  replace_unheld_ref=replace_unheld_ref)
 
 
 def needs_source_begin(plan, status, past_downstream):
