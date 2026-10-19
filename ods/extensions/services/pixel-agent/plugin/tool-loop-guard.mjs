@@ -6994,6 +6994,30 @@ function workspaceReadFingerprint(event) {
   return {bytes, sha256: createHash('sha256').update(block.text, 'utf8').digest('hex')};
 }
 
+// Preserve an explicit execution method when choosing how to create a named
+// output. This is routing guidance, not evidence that a program created bytes.
+export function userMessagePythonCreationPath(messages, prompt = undefined) {
+  const expected = userMessageWorkspaceContinuationPath(messages, prompt);
+  if (!expected) return undefined;
+  const text = workspacePreviewInstructionText(currentOwnerIntentText(messages, prompt),
+    {preserveFileTargets: true});
+  const path = expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const output = `(?:/workspace/|workspace/|\\./)?${path}(?=$|[\\s,;!?]|\\.(?:\\s|$))`;
+  const create = '\\b(?:create|generate|write|save|produce|emit)\\s+(?:(?:a|the)\\s+)?(?:file\\s+)?';
+  const methodFirst = new RegExp('\\b(?:use|run|execute|invoke)\\s+python3?\\b' +
+    '(?:\\s+(?:in|inside)\\s+(?:the\\s+)?workspace)?\\s+to\\s+' + create + output, 'i');
+  const outputFirst = new RegExp(create + output +
+    '\\s+(?:(?:by\\s+)?(?:using|running|executing)|with)\\s+python3?\\b', 'i');
+  for (const clause of text.split(/[!?;\n]+|\.(?=\s|$)/)) {
+    if (/\b(?:not|never|avoid|skip|without|don't|mustn't|shouldn't|instead\s+of|rather\s+than)\b/i.test(clause) ||
+        /\b(?:explain|describe|example|hypothetical|suppose|imagine|how\s+to|if\s+needed)\b/i.test(clause)) continue;
+    if (/\b(?:write|create|save|edit|update)\s+(?:(?:a|the)\s+)?python\s+(?:source|script|file|module)\b/i.test(clause)) continue;
+    const instruction = clause.replace(/["'`“”]/g, '');
+    if (methodFirst.test(instruction) || outputFirst.test(instruction)) return expected;
+  }
+  return undefined;
+}
+
 export function userMessageWorkspaceDirectoryPath(messages, prompt = undefined) {
   const path = userMessageWorkspaceContinuationPath(messages, prompt);
   if (!path) return undefined;
@@ -7983,6 +8007,7 @@ export function createToolLoopGuard({
         workspaceTaskDirectory: undefined,
         workspaceRequestedFiles: [],
         workspacePythonUnittestRequested: false,
+        workspacePythonCreationPath: undefined,
         workspaceParsedJsonVerificationRequested: false,
         workspaceVerificationRequested: false,
         workspacePreviewRequired: false,
@@ -9125,6 +9150,20 @@ export function createToolLoopGuard({
         : effectiveToolName === EVIDENCE_READBACK_TOOL
           ? "read"
           : effectiveToolName;
+    if (state?.workspacePythonCreationPath &&
+        (workspaceOperation === 'write' || workspaceOperation === 'edit')) {
+      const args = toolName === 'tool_call' ? wrappedToolParams?.args : normalizedParams ?? event?.params;
+      const target = effectiveToolName === EVIDENCE_REPORT_TOOL
+        ? state.operationsWorkspaceExpectedPath : normalizeWorkspaceFilePath(args?.path);
+      if (target === state.workspacePythonCreationPath) return {
+        block: true,
+        blockReason: `The owner explicitly requested creating "${target}" by executing Python in the workspace. ` +
+          'Use sandbox exec to run Python that creates this output; do not substitute directly written output bytes. ' +
+          'You may write a Python generator script at a different path, then execute it. ' +
+          'Read the generated file back and publish that exact file. Host observations remain independent; ' +
+          'an execution result alone is not proof of the delivered bytes.',
+      };
+    }
     if (
       state?.operationsWorkspaceContinuationRequested &&
       state.operationsWorkspaceEvidenceArtifactRequested &&
@@ -10428,6 +10467,7 @@ export function createToolLoopGuard({
           event?.messages,
           event?.prompt
         );
+        state.workspacePythonCreationPath = userMessagePythonCreationPath(event?.messages, event?.prompt);
         state.workspaceTaskDirectory = userMessageWorkspaceDirectoryPath(
           event?.messages,
           event?.prompt
@@ -10527,6 +10567,7 @@ export function createToolLoopGuard({
           userMessageRequestsWorkspaceContinuation(event?.messages, event?.prompt);
         state.operationsWorkspaceEvidenceArtifactRequested =
           state.operationsWorkspaceContinuationRequested &&
+          !state.workspacePythonCreationPath &&
           userMessageRequestsOperationsEvidenceArtifact(event?.messages, event?.prompt);
         state.operationsWorkspaceExpectedPath =
           state.operationsWorkspaceContinuationRequested

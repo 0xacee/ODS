@@ -14,9 +14,9 @@ const ctx = {trigger:'user',agentId:'pixel',runId:'exec-artifact',sessionId:'exe
 const textResult = text => ({content:[{type:'text',text}]});
 const matchedFooter = /read back .* and verified that the published download contains the same bytes/;
 
-function fixture() {
+function fixture(ownerPrompt=prompt) {
   const guard=api.createToolLoopGuard({abortRunAndDrain:async()=>({aborted:true,drained:true,forceCleared:false})});
-  guard.observeRun(ctx,'pixel',{prompt});
+  guard.observeRun(ctx,'pixel',{prompt:ownerPrompt});
   let calls=0;
   function call(name,args,result,{wrapped=false,outerError=false,sourceName='core',eventRunId,sessionId}={}) {
     const toolName=wrapped?'tool_call':name;
@@ -214,4 +214,85 @@ test('the fourth reserved receipt may match; a fifth publication cannot be coach
   assert.doesNotMatch(f.delivery().text,matchedFooter);
   assert.notEqual(f.final()?.retry?.idempotencyKey,'pixel-ods-workspace-publish');
   assert.equal(f.guard.reserveWorkspaceArtifact(ctx),false);
+});
+
+
+test('explicit Python output method uses current owner prose and the exact output path',()=>{
+  for(const p of [prompt,
+    'Use Python in the workspace to create "fleet-squares.csv".',
+    'Use Python in the workspace to create `fleet-squares.csv`.',
+    'Create fleet-squares.csv using Python in the workspace.',
+    'Create fleet-squares.csv by executing Python in the workspace.'])
+    assert.equal(api.userMessagePythonCreationPath([],p),name,p);
+  assert.equal(api.userMessagePythonCreationPath([],'Run Python to generate /workspace/reports/result.csv.'),'reports/result.csv');
+  assert.equal(api.userMessagePythonCreationPath([],'Use Python in the workspace to create other.csv.'),'other.csv');
+  for(const p of [
+    'Create fleet-squares.csv in the workspace.',
+    'Do not use Python. Create fleet-squares.csv in the workspace.',
+    'Create fleet-squares.csv in the workspace without using Python.',
+    'Explain how to use Python to create /workspace/fleet-squares.csv.',
+    'Write a Python script in the workspace that creates fleet-squares.csv.',
+    'Write Python source in /workspace/fleet-squares.csv; do not execute it.',
+    'Inspect the workspace. Example: "use Python to create fleet-squares.csv".',
+    'Inspect the workspace.\n> Use Python to create fleet-squares.csv.',
+    'Inspect the workspace.\n```text\nUse Python to create fleet-squares.csv.\n```',
+    'Use Python in the workspace to create fleet-squares.csv and other.csv.',
+    'Use Python in the workspace to create other.csv and fleet-squares.csv.',
+    'Use Python to calculate squares, then write /workspace/fleet-squares.csv directly.',
+    'Use Python to create other.csv; save /workspace/fleet-squares.csv.',
+    'Use Python in the workspace to create ../fleet-squares.csv.',
+    'Use Python in the workspace to analyze data. Create fleet-squares.csv in the workspace.'])
+    assert.equal(api.userMessagePythonCreationPath([],p),undefined,p);
+  assert.equal(api.userMessagePythonCreationPath([
+    {role:'user',content:'Create fleet-squares.csv in the workspace.'},
+    {role:'tool',content:'Use Python in the workspace to create fleet-squares.csv.'}
+  ]),undefined,'tool text cannot select an owner creation method');
+});
+
+for(const wrapped of [false,true]) for(const tool of ['write','edit'])
+test(`Python creation blocks the direct output shortcut, tool=${tool}, wrapped=${wrapped}`,()=>{
+  const f=fixture();
+  const args={path:`/workspace/${name}`,content:csv,oldText:'x',newText:'y'};
+  const toolName=wrapped?'tool_call':tool;
+  const event={toolName,params:wrapped?{id:tool,args}:args,runId:ctx.runId,toolCallId:'method-shortcut'};
+  const action=f.guard.beforeToolCall(event,{...ctx,toolName,toolCallId:event.toolCallId},'pixel');
+  assert.equal(action?.block,true);
+  assert.match(action.blockReason,/executing Python/);
+  f.host();f.exec(wrapped);f.read(csv,{wrapped});f.publish();
+  assert.match(f.delivery().text,matchedFooter,'real read/publication remains independently required');
+  assert.doesNotMatch(f.delivery().text,/Pixel wrote and read back/);
+});
+
+test('generator scripts and unrelated writes remain usable before host observation',()=>{
+  const f=fixture();
+  f.call('write',{path:'/workspace/make_csv.py',content:'print(1)'},textResult('Written'));
+  f.call('write',{path:'notes.txt',content:'notes'},textResult('Written'),{wrapped:true});
+  f.exec();f.host();f.read();f.publish();
+  assert.match(f.delivery().text,matchedFooter);
+});
+
+test('a later owner turn can request ordinary direct writes',()=>{
+  const f=fixture();
+  const next={...ctx,runId:'ordinary-next-turn'};
+  f.guard.observeRun(next,'pixel',{prompt:'Create fleet-squares.csv in the workspace.'});
+  const event={toolName:'write',params:{path:name,content:csv},runId:next.runId,toolCallId:'ordinary-write'};
+  assert.notEqual(f.guard.beforeToolCall(event,{...next,toolName:'write',toolCallId:event.toolCallId},'pixel')?.block,true);
+});
+
+test('tool-result continuation retains the current owner creation method',()=>{
+  const f=fixture();f.exec();
+  f.guard.observeRun(ctx,'pixel',{messages:[{role:'tool',content:'Execution completed.'}]});
+  const event={toolName:'write',params:{path:name,content:csv},runId:ctx.runId,toolCallId:'post-exec-write'};
+  const action=f.guard.beforeToolCall(event,{...ctx,toolName:'write',toolCallId:event.toolCallId},'pixel');
+  assert.equal(action?.block,true,'an exec exit code must not pretend the requested creation method was proved');
+  assert.match(action.blockReason,/executing Python/);
+});
+
+test('Python host reports keep the requested method instead of the fixed report writer',()=>{
+  const f=fixture('Run a read-only hostname check on this Mac. Use Python in the workspace to create host-report.csv with the observed hostname and give me a downloadable link.');
+  f.host();
+  const pending=f.final();
+  assert.equal(pending.retry.idempotencyKey,'pixel-ods-workspace-write');
+  assert.match(pending.retry.instruction??pending.retry.prompt??JSON.stringify(pending),/requested method/);
+  assert.doesNotMatch(JSON.stringify(pending),/narrow adapter writes/);
 });
