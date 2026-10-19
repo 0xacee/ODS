@@ -1944,6 +1944,17 @@ def _projector_unavailable_reason() -> str | None:
     return "ODS could not confirm that the Windows model runtime loads vision files, so the model imports without one"
 
 
+async def _discover_loaded_model() -> str | None:
+    """Try both identity sources within the catalog's one discovery budget."""
+    loaded_model = await get_loaded_model()
+    if loaded_model:
+        return loaded_model
+    service = SERVICES.get("llama-server", {})
+    return await _fetch_llama_loaded_model(
+        service.get("host", "llama-server"), int(service.get("port", 8080)),
+    )
+
+
 @router.get("/api/models", response_model=ModelLibraryResponse)
 async def list_models(api_key: str = Depends(verify_api_key)):
     """List model catalog entries with source-labelled performance metadata."""
@@ -1951,23 +1962,13 @@ async def list_models(api_key: str = Depends(verify_api_key)):
     gpu_info, loaded_model, agent_status = await asyncio.gather(
         asyncio.to_thread(get_gpu_info),
         _await_or_default(
-            get_loaded_model(),
+            _discover_loaded_model(),
             None,
-            "loaded model",
+            "loaded model discovery",
             timeout_seconds=_MODEL_DISCOVERY_TIMEOUT_SECONDS,
         ),
         asyncio.to_thread(_get_agent_model_status),
     )
-    if not loaded_model:
-        service = SERVICES.get("llama-server", {})
-        host = service.get("host", "llama-server")
-        port = int(service.get("port", 8080))
-        loaded_model = await _await_or_default(
-            _fetch_llama_loaded_model(host, port),
-            None,
-            "loaded model fallback",
-            timeout_seconds=_MODEL_DISCOVERY_TIMEOUT_SECONDS,
-        )
     metrics, context_size = await asyncio.gather(
         _await_or_default(
             get_llama_metrics(model_hint=loaded_model),
