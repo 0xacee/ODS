@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 const api = await import(process.env.GUARD_MODULE
   ? pathToFileURL(process.env.GUARD_MODULE).href : '../plugin/tool-loop-guard.mjs');
@@ -76,7 +77,7 @@ test('real hooks coach publication only after exact write and read, then require
     assert.equal(f.guard.reserveWorkspaceArtifact(ctx),true);
     assert.equal(f.guard.acceptWorkspaceArtifact(ctx,{schemaVersion:1,kind:'ods-pixel-workspace-artifact',
       relativePath:name,siteId:`site-${'a'.repeat(24)}`,sha256:'a'.repeat(64),
-      file:{path:name,bytes:10,sha256:'b'.repeat(64)}}),true);
+      file:{path:name,bytes:10,sha256:createHash('sha256').update('test-host\n').digest('hex')}}),true);
     assert.equal(f.guard.deliveryVerificationForRun(ctx.runId).artifacts.length,1);
     assert.notEqual(f.finalize()?.retry?.idempotencyKey,'pixel-ods-workspace-publish');
   }

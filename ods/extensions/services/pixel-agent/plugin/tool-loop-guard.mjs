@@ -6004,7 +6004,7 @@ export function userMessageRequestsWorkspaceContinuation(messages, prompt = unde
   const rejectsAction =
     /\b(?:do\s+not|don't|never|must\s+not|should\s+not|avoid|skip|without)\b[^.!?;\n]{0,96}\b(?:continue|work|inspect|create|write|edit|fix|repair|update|build|implement|run|test|verify|read|save|generate)\b/i;
   return text
-    .split(/[.!?;\n]+|,\s*(?=(?:and\s+then|but|however|instead|then)\b)/i)
+    .split(/[!?;\n]+|\.(?=\s|$)|,\s*(?=(?:and\s+then|but|however|instead|then)\b)/i)
     .some(
       (clause) =>
         namesWorkspace.test(clause) &&
@@ -6947,7 +6947,7 @@ export function userMessageWorkspaceContinuationPath(messages, prompt = undefine
 }
 
 // A single owner-named bare filename (no directory) is an unambiguous path
-// binding only when the owner names/calls exactly one such file, it is not
+// binding only when the owner names/calls or directly requests exactly one file, it is not
 // quoted as source/instruction text, and no other path-like token competes.
 // This never grants a directory and never overrides an explicit /workspace
 // path (handled by the caller before this runs).
@@ -6963,7 +6963,35 @@ function userMessageBareWorkspaceFilename(messages, prompt = undefined) {
   const [name] = files;
   if (!WORKSPACE_PATH_COMPONENT.test(name)) return undefined;
   const named = [...text.matchAll(/\b(?:named|called)\s+([A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z][A-Za-z0-9]{0,11})\b/gi)];
-  return named.some(match => match[1] === name) ? name : undefined;
+  if (named.some(match => match[1] === name)) return name;
+  // A direct object, not an incidental mention elsewhere in the sentence.
+  // Also allow "use Python in the workspace to create report.csv" without
+  // interpreting quoted examples, prohibitions or explanations as commands.
+  for (const match of text.matchAll(/\b(?:create|generate|write|save)\s+(?:(?:a|the)\s+)?(?:workspace\s+)?(?:file\s+)?([A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z][A-Za-z0-9]{0,11})\b/gi)) {
+    if (match[1] !== name) continue;
+    const prefix = text.slice(0, match.index).split(/[!?;\n]|\.(?=\s|$)/).at(-1).trimStart();
+    if (/\b(?:not|never|avoid|skip|without|don't|mustn't|shouldn't)\b/i.test(prefix)) continue;
+    if (/^(?:(?:and(?:\s+then)?|then|now|instead)\s+)*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|I\s+(?:want|need)\s+you\s+to\s+)?(?:(?:in|inside)\s+(?:the\s+)?workspace[,]?\s+|use\s+[A-Za-z0-9 _-]{1,80}\s+to\s+)?$/i.test(prefix)) return name;
+  }
+  return undefined;
+}
+
+// Hash only the actual full read result, before persistence adds guidance.
+// A command's exit code or a model-written hash is not file evidence.
+function workspaceReadFingerprint(event) {
+  const params = event?.params;
+  const result = event?.result;
+  if (toolCallFailed(event) || params?.offset !== undefined || params?.limit !== undefined ||
+      !Array.isArray(result?.content) || result.content.length !== 1) return undefined;
+  const block = result.content[0];
+  const details = result.details;
+  if (block?.type !== 'text' || typeof block.text !== 'string' ||
+      result.truncated === true || details?.truncated === true ||
+      details?.truncation?.truncated === true || details?.outputTruncated === true ||
+      details?.outputTruncated?.stdout === true || details?.outputTruncated?.stderr === true) return undefined;
+  const bytes = Buffer.byteLength(block.text, 'utf8');
+  if (bytes > 4 * 1024 * 1024) return undefined;
+  return {bytes, sha256: createHash('sha256').update(block.text, 'utf8').digest('hex')};
 }
 
 export function userMessageWorkspaceDirectoryPath(messages, prompt = undefined) {
@@ -7944,6 +7972,8 @@ export function createToolLoopGuard({
         operationsWorkspaceExpectedPath: undefined,
         operationsWorkspaceWriteVerified: false,
         operationsWorkspaceReadVerified: false,
+        operationsWorkspaceReadSnapshot: undefined,
+        operationsWorkspaceExecutionObserved: false,
         ownerIntentObserved: false,
         workspaceTaskRequested: false,
         workspaceMutationRequested: false,
@@ -8011,6 +8041,20 @@ export function createToolLoopGuard({
       runs.set(runId, state);
     }
     return state;
+  }
+
+  function requestedWorkspaceArtifact(state) {
+    return state?.workspaceArtifacts?.findLast(item =>
+      item.relativePath === state.operationsWorkspaceExpectedPath);
+  }
+
+  function publishedWorkspaceReadback(state, runId) {
+    if (!state || state.clientCancelled ||
+        sessionRuns.get(state.currentSessionId) !== runId) return false;
+    const snapshot = state.operationsWorkspaceReadSnapshot;
+    const artifact = requestedWorkspaceArtifact(state);
+    return Boolean(snapshot && artifact && snapshot.bytes === artifact.file.bytes &&
+      snapshot.sha256 === artifact.file.sha256);
   }
 
   function completeVerifiedEvidenceArtifact(state) {
@@ -9083,6 +9127,7 @@ export function createToolLoopGuard({
           : effectiveToolName;
     if (
       state?.operationsWorkspaceContinuationRequested &&
+      state.operationsWorkspaceEvidenceArtifactRequested &&
       state.operationsWorkspaceExpectedPath &&
       (workspaceOperation === "write" || workspaceOperation === "read")
     ) {
@@ -11084,6 +11129,8 @@ export function createToolLoopGuard({
     }
     const associateExecProject = directory => {
       state.workspaceMutationObserved = true;
+      // This selects readback coaching only; it is never write/file proof.
+      state.operationsWorkspaceExecutionObserved = true;
       if(typeof directory!=='string') return;
       try {onWorkspaceMutation({sessionKey:state.currentSessionKey,workspaceRoot:state.configuredWorkspaceRoot,directory,kind:'exec'});}
       catch {warn('Workspace project metadata could not be recorded.');}
@@ -11550,21 +11597,35 @@ export function createToolLoopGuard({
       if (
         state.operationsWorkspaceContinuationRequested &&
         state.operationsWorkspaceExpectedPath &&
-        workspaceToolEvent &&
-        !toolCallFailed(workspaceToolEvent) &&
-        Array.isArray(workspaceToolEvent?.result?.content) &&
-        workspaceToolEvent.result.content.some(
-          (item) => item && item.type === "text" && typeof item.text === "string"
-        )
+        workspaceToolName
       ) {
         const observedPath = normalizeWorkspaceFilePath(
-          workspaceToolEvent?.params?.path
+          workspaceToolEvent?.params?.path ??
+          (toolName === 'tool_call' ? event?.params?.args?.path : event?.params?.path)
         );
         if (observedPath === state.operationsWorkspaceExpectedPath) {
+          // A failed or partial later read cannot leave earlier read proof.
+          // A write may replace bytes even when its result reports failure.
+          state.operationsWorkspaceReadSnapshot = undefined;
+          state.operationsWorkspaceReadVerified = false;
           if (workspaceToolName === "write") {
-            state.operationsWorkspaceWriteVerified = true;
+            state.operationsWorkspaceWriteVerified = Boolean(workspaceToolEvent &&
+              !toolCallFailed(workspaceToolEvent) &&
+              workspaceToolEvent.result?.content?.some(item => item?.type === 'text' && typeof item.text === 'string'));
           } else if (workspaceToolName === "read") {
-            state.operationsWorkspaceReadVerified = true;
+            const fingerprint = workspaceReadFingerprint(workspaceToolEvent);
+            state.operationsWorkspaceReadVerified = Boolean(fingerprint);
+            const boundRead = pendingToolRun?.runId === runId &&
+              pendingToolRun.selectedToolName === 'read' && pendingToolRun.transport === toolName &&
+              pendingToolRun.inspectionSessionId === state.currentSessionId &&
+              pendingToolRun.inspectionSessionKey === state.currentSessionKey &&
+              (!context?.sessionId || context.sessionId === state.currentSessionId) &&
+              (!context?.sessionKey || context.sessionKey === state.currentSessionKey) &&
+              (!event?.runId || event.runId === runId) &&
+              (!event?.toolCallId || event.toolCallId === toolCallId) &&
+              (!event?.toolName || event.toolName === toolName) &&
+              isDeepStrictEqual(workspaceToolEvent?.params, pendingToolRun.selectedParams);
+            if (boundRead) state.operationsWorkspaceReadSnapshot = fingerprint;
           }
         }
       }
@@ -12007,7 +12068,10 @@ export function createToolLoopGuard({
     }
     const relativePath = state.operationsWorkspaceExpectedPath;
     if (!relativePath) return undefined;
-    if (!state.operationsWorkspaceWriteVerified) {
+    if (publishedWorkspaceReadback(state, runId)) return undefined;
+    const artifact = requestedWorkspaceArtifact(state);
+    if (!state.operationsWorkspaceWriteVerified && !artifact &&
+        (!state.operationsWorkspaceExecutionObserved || state.operationsWorkspaceEvidenceArtifactRequested)) {
       if (state.operationsWorkspaceEvidenceArtifactRequested) {
         return {
           stage: "workspace-write",
@@ -12020,11 +12084,13 @@ export function createToolLoopGuard({
       return {
         stage: "workspace-write",
         instruction:
-          `Do not reply yet. Call tool_call now with id write and args containing path ` +
-          `\"${relativePath}\" plus content built only from the verified evidence requested by the owner.`,
+          `Continue the owner's requested workspace work to create \"${relativePath}\" using the requested method, ` +
+          "including Python or other workspace execution when requested. Do not replace independent content with host facts. " +
+          "Then read the actual file back; do not rewrite a file solely to obtain a write-tool receipt.",
       };
     }
-    if (!state.operationsWorkspaceReadVerified) {
+    if (!state.operationsWorkspaceReadVerified || (!state.operationsWorkspaceWriteVerified &&
+        !state.operationsWorkspaceReadSnapshot)) {
       if (state.operationsWorkspaceEvidenceArtifactRequested) {
         return {
           stage: "workspace-read",
@@ -12041,15 +12107,15 @@ export function createToolLoopGuard({
           "Reply only after the real readback succeeds.",
       };
     }
-    // Both the exact bound write and read succeeded. If the owner asked for a
-    // download and no verified artifact has been accepted yet, coach the real
-    // publication. The write/read receipt is not semantic completion; only a
+    // A full read can verify output created by exec without inventing write
+    // provenance. Publish that exact requested file; a mismatching earlier
+    // snapshot does not satisfy delivery. Readback is not semantic completion; only a
     // byte-verified publication receipt satisfies delivery. Respect the same
     // artifact scope (owner/session/run, cancellation, budget, attempt limit)
     // that gates reserveWorkspaceArtifact.
     if (
       state.workspaceDocumentDeliveryRequested &&
-      !state.workspaceArtifacts?.length &&
+      (!artifact || (state.operationsWorkspaceReadSnapshot && !publishedWorkspaceReadback(state, runId))) &&
       workspaceArtifactUnavailableReason({
         agentId: "pixel",
         runId,
@@ -12062,7 +12128,7 @@ export function createToolLoopGuard({
         instruction:
           `Do not reply yet. Call tool_call now with id pixel_ods_workspace_artifact ` +
           `and args ${JSON.stringify({ relativePath })}. ` +
-          "Publish only the exact file you just wrote and read back; accept only a byte-verified receipt.",
+          "Publish only the exact requested file you just read back; accept only a byte-verified receipt.",
       };
     }
     return undefined;
@@ -13497,7 +13563,9 @@ export function createToolLoopGuard({
             state.operationsWorkspaceWriteVerified &&
             state.operationsWorkspaceReadVerified
               ? `- Workspace artifact: Pixel wrote and read back \`/workspace/${state.operationsWorkspaceExpectedPath}\` in this response.`
-              : "- Workspace continuation: the requested workspace artifact was not both written and read back successfully in this response."
+              : publishedWorkspaceReadback(state, runId)
+                ? `- Workspace artifact: Pixel read back \`/workspace/${state.operationsWorkspaceExpectedPath}\` and verified that the published download contains the same bytes.`
+                : "- Workspace continuation: a complete write/readback sequence or matching readback of the published download was not verified for this response."
           }`
           : evidenceText;
         // A requested approval plan is complete only when the requested
