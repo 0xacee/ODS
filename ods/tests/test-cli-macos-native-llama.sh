@@ -125,7 +125,7 @@ grep -qF 'discord.gg/' "$work/err" || fail "a missing macOS CLI gave no help lin
 macos_fixture="$work/macos_fixture"
 macos_bin="$macos_fixture/bin"
 macos_install="$macos_fixture/install"
-mkdir -p "$macos_bin" "$macos_install/installers/macos/lib" "$macos_install/data" "$macos_install/scripts"
+mkdir -p "$macos_bin" "$macos_install/installers/macos/lib" "$macos_install/data" "$macos_install/scripts" "$macos_fixture/home"
 touch "$macos_install/docker-compose.base.yml"
 printf '%s\n' 'GPU_BACKEND=apple' "ODS_INSTALL_DIR=$macos_install" > "$macos_install/.env"
 
@@ -191,7 +191,7 @@ run_macos_cmd() {
     local cmd="$1" target="${2:-}"
     local args=("$cmd")
     [[ -z "$target" ]] || args+=("$target")
-    PATH="$macos_bin:$PATH" PYTHON_CMD="$macos_bin/fake-python" \
+    HOME="$macos_fixture/home" PATH="$macos_bin:$PATH" PYTHON_CMD="$macos_bin/fake-python" \
         INSTALL_DIR="$macos_install" ODS_INSTALL_DIR="$macos_install" ODS_HOME="$macos_install" \
         bash "$root/installers/macos/ods-macos.sh" "${args[@]}"
 }
@@ -250,7 +250,41 @@ for action in stop start restart; do
     grep -qF 'ODS not found at' "$work/out" || fail "missing install dir did not report ODS not found: $(cat "$work/out")"
 done
 
-# Docker UP behavior remains unchanged: native service operations and Compose operations succeed.
+# A stopped Colima VM also removes its host-only network interface. Exercise
+# the real bridge manager with configured addresses and an unavailable probe.
+# Native-only lifecycle must defer that bridge without rewriting its plist.
+cp "$macos_install/.env" "$macos_fixture/before-bridge.env"
+printf '%s\n' 'ODS_MACOS_HOST_GATEWAY=192.0.2.1' 'ODS_MACOS_VM_IP=192.0.2.2' >> "$macos_install/.env"
+cp "$root/bin/ods-macos-llm-bridge.py" "$macos_install/bin/ods-macos-llm-bridge.py"
+bridge_log="$macos_fixture/bridge.log"
+cat > "$macos_bin/bridge-python" <<EOF
+#!/bin/sh
+echo probe >> '$bridge_log'
+exit 1
+EOF
+cat > "$macos_bin/launchctl" <<'EOF'
+#!/bin/sh
+[ "$1" = print ] && exit 113
+exit 0
+EOF
+chmod +x "$macos_bin/bridge-python" "$macos_bin/launchctl"
+mkdir -p "$macos_fixture/home/Library/LaunchAgents"
+bridge_plist="$macos_fixture/home/Library/LaunchAgents/com.ods.llm-bridge.plist"
+printf 'retained private bridge\n' > "$bridge_plist"
+for action in start restart; do
+    for target in llama-server llama; do
+        : > "$native_log"; : > "$bridge_log"
+        MACOS_BRIDGE_PYTHON="$macos_bin/bridge-python" run_macos_cmd "$action" "$target" >"$work/out" 2>&1 \
+            || fail "native $action failed with Colima bridge unavailable: $(cat "$work/out")"
+        grep -qF 'native-llama-service start' "$native_log" || fail 'deferred bridge prevented native startup'
+        [[ ! -s "$bridge_log" ]] || fail 'Docker-down native lifecycle attempted a bridge probe'
+        [[ "$(cat "$bridge_plist")" == 'retained private bridge' ]] || fail 'Docker-down lifecycle rewrote the retained bridge'
+        grep -qF 'Container access is deferred' "$work/out" || fail 'native startup hid deferred container access'
+    done
+done
+
+# Docker UP behavior remains strict even for native-only calls: a broken
+# bridge must fail before stopping or replacing working native inference.
 cat > "$macos_bin/docker" <<'EOF'
 #!/bin/sh
 if [ "$1" = "info" ]; then
@@ -263,6 +297,16 @@ fi
 exit 0
 EOF
 chmod +x "$macos_bin/docker"
+
+: > "$native_log"; : > "$bridge_log"
+rc=0
+MACOS_BRIDGE_PYTHON="$macos_bin/bridge-python" run_macos_cmd restart llama >"$work/out" 2>&1 || rc=$?
+[[ "$rc" -ne 0 && -s "$bridge_log" ]] || fail 'Docker-up native restart did not enforce the real bridge probe'
+[[ ! -s "$native_log" ]] || fail 'failed bridge replaced native inference'
+grep -qF 'Could not configure container access' "$work/out" || fail 'Docker-up bridge failure was hidden'
+cp "$macos_fixture/before-bridge.env" "$macos_install/.env"
+
+# Normal Docker-up native lifecycle still succeeds.
 
 for action in stop start restart; do
     for target in llama-server llama; do

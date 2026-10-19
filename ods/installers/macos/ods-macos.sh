@@ -770,8 +770,15 @@ get_native_llama_status() {
 
 start_native_llama() {
     local replace="${1:-false}"
+    local bridge_mode="${2:-required}"
     read_ods_env
-    if ! macos_configure_llm_bridge_from_env "${INSTALL_DIR}/.env" "$INSTALL_DIR"; then
+    # Only the native-only CLI branches may defer container access while
+    # Docker is unavailable. Keep the existing private bridge untouched so
+    # its LaunchAgent can recover when the Colima interface returns.
+    if [[ "$bridge_mode" == "native-only" ]] && ! docker info >/dev/null 2>&1; then
+        ai "Docker is unavailable. Container access is deferred; native inference remains on loopback."
+        ai "Once Docker returns, run ods start llama to verify container access."
+    elif ! macos_configure_llm_bridge_from_env "${INSTALL_DIR}/.env" "$INSTALL_DIR"; then
         ai_err "Could not configure container access to native llama-server"
         return 1
     fi
@@ -1031,7 +1038,7 @@ cmd_start() {
         cd "$INSTALL_DIR"
         ensure_llama_cpu_budget
         macos_wait_for_bootstrap_compose_safe "start" || return 1
-        start_native_llama || return 1
+        start_native_llama false native-only || return 1
         macos_maybe_resume_bootstrap_upgrade || true
         return 0
     fi
@@ -1166,7 +1173,7 @@ cmd_restart() {
         cd "$INSTALL_DIR"
         ensure_llama_cpu_budget
         macos_wait_for_bootstrap_compose_safe "restart" || return 1
-        start_native_llama true || return 1
+        start_native_llama true native-only || return 1
         macos_maybe_resume_bootstrap_upgrade || true
         return 0
     fi
