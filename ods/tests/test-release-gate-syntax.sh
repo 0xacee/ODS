@@ -79,16 +79,24 @@ if [[ -x /bin/bash ]]; then
     fi
 fi
 
-# 3. Simulate an environment without mapfile (shim function exiting 127) to
-# verify portability on platforms running newer bash versions.
-(
+# 3. Simulate an environment without mapfile/readarray by disabling the builtins
+# and assert syntax discovery successfully collects all shell files.
+out_disabled="$(
     cd "$git_repo"
-    bash -c '
-        mapfile() { echo "mapfile: command not found" >&2; return 127; }
-        export -f mapfile 2>/dev/null || true
+    bash -e -c '
+        enable -n mapfile readarray 2>/dev/null || true
         '"$syntax_block"'
+        printf "%s\n" "${sh_files[@]}"
     '
-)
+)"
+echo "$out_disabled" | grep -qx "alpha.sh" || {
+    echo "FAIL: alpha.sh missing when mapfile/readarray builtins disabled" >&2
+    exit 1
+}
+echo "$out_disabled" | grep -qx "nested/beta.sh" || {
+    echo "FAIL: nested/beta.sh missing when mapfile/readarray builtins disabled" >&2
+    exit 1
+}
 
 # 4. Verify that syntax errors in discovered scripts are properly caught.
 cat > "$git_repo/broken.sh" <<'SH'
