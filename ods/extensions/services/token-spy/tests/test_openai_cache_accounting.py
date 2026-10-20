@@ -66,13 +66,18 @@ def test_public_events_preserve_legacy_and_new_receipt_totals(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("details,cached", [
-    ({"cached_tokens": 1536}, 1536),
-    ({"cached_tokens": 2048}, 2048),
-    (None, 0),
-    ({}, 0),
+@pytest.mark.parametrize("prompt,details,cached,total_prompt", [
+    (2048, {"cached_tokens": 1536}, 1536, 2048),
+    (2048, {"cached_tokens": 2048}, 2048, 2048),
+    (2048, None, 0, 2048),
+    (2048, {}, 0, 2048),
+    (None, {"cached_tokens": 3}, 0, 0),
+    (100, {"cached_tokens": 500}, 100, 100),
+    (100, {"cached_tokens": -5}, 0, 100),
+    (100, "unavailable", 0, 100),
+    ("100", {"cached_tokens": "25"}, 25, 100),
 ])
-def test_cached_prompt_receipt_and_report(monkeypatch, tmp_path, streaming, details, cached):
+def test_cached_prompt_receipt_and_report(monkeypatch, tmp_path, streaming, prompt, details, cached, total_prompt):
     monkeypatch.syspath_prepend(str(SERVICE))
     monkeypatch.setenv("DB_BACKEND", "sqlite")
     monkeypatch.setenv("TOKEN_SPY_API_KEY", "cache-fixture-key")
@@ -84,7 +89,7 @@ def test_cached_prompt_receipt_and_report(monkeypatch, tmp_path, streaming, deta
     api = load("main.py")
     api.SETTINGS_PATH = str(tmp_path / "settings.json")
     monkeypatch.setattr(api, "OPENAI_UPSTREAM", "https://provider.example")
-    usage = {"prompt_tokens": 2048, "completion_tokens": 100,
+    usage = {"prompt_tokens": prompt, "completion_tokens": 100,
              "prompt_tokens_details": details}
     data = {"choices": [{"finish_reason": "stop"}], "usage": usage}
     payload = json.dumps(data)
@@ -108,26 +113,26 @@ def test_cached_prompt_receipt_and_report(monkeypatch, tmp_path, streaming, deta
                 assert report.status_code == 200
                 events = await public_events(api)
                 assert len(events) == 1
-                assert events[0]["total_tokens"] == 2148
+                assert events[0]["total_tokens"] == total_prompt + 100
                 return report.json()
 
     try:
         report = asyncio.run(exercise())
         summary = report["summary"]
         assert summary["requests"] == 1
-        assert summary["input_tokens"] == 2048 - cached
+        assert summary["input_tokens"] == total_prompt - cached
         assert summary["cache_read_tokens"] == cached
         assert summary["output_tokens"] == 100
-        assert summary["total_tokens"] == 2148
-        expected_cost = ((2048 - cached) * 2.50 + cached * 1.25 + 100 * 10) / 1_000_000
+        assert summary["total_tokens"] == total_prompt + 100
+        expected_cost = ((total_prompt - cached) * 2.50 + cached * 1.25 + 100 * 10) / 1_000_000
         row = db.query_usage()[0]
-        assert row["estimated_cost_usd"] == pytest.approx(expected_cost)
+        assert row["estimated_cost_usd"] == pytest.approx(round(expected_cost, 6))
         from providers.openai import OpenAICompatibleProvider
         adapter = OpenAICompatibleProvider()
         extracted = (adapter.extract_usage_from_stream("data: " + json.dumps(data))
                      if streaming else adapter.extract_usage_from_response(data))
-        assert extracted["input_tokens"] == 2048 - cached
+        assert extracted["input_tokens"] == total_prompt - cached
         assert extracted.get("cache_read_tokens", 0) == cached
-        assert adapter.calculate_cost(extracted, "gpt-4o") == pytest.approx(expected_cost)
+        assert adapter.calculate_cost(extracted, "gpt-4o") == pytest.approx(round(expected_cost, 6))
     finally:
         db._local.conn.close()

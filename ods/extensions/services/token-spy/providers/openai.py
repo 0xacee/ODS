@@ -13,6 +13,16 @@ from .base import LLMProvider
 from .registry import register_provider
 
 
+def _nonnegative_int(value: Any) -> int:
+    """Keep compatible upstream usage safe for token and cost arithmetic."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def openai_token_usage(usage: Dict[str, Any]) -> Dict[str, int]:
     """Convert OpenAI's inclusive prompt total to disjoint billing buckets.
 
@@ -20,12 +30,16 @@ def openai_token_usage(usage: Dict[str, Any]) -> Dict[str, int]:
     calculation add the input and cache buckets, as for Anthropic usage.
     prompt_tokens_details is optional and nullable in the OpenAI response.
     """
-    prompt_tokens = usage.get("prompt_tokens", 0)
+    prompt_tokens = _nonnegative_int(usage.get("prompt_tokens"))
     details = usage.get("prompt_tokens_details") or {}
-    cached_tokens = details.get("cached_tokens") or 0
+    if not isinstance(details, dict):
+        details = {}
+    # Cache reads are a subset of the inclusive prompt, even when a
+    # compatible provider reports inconsistent or nullable usage details.
+    cached_tokens = min(_nonnegative_int(details.get("cached_tokens")), prompt_tokens)
     return {
         "input_tokens": prompt_tokens - cached_tokens,
-        "output_tokens": usage.get("completion_tokens", 0),
+        "output_tokens": _nonnegative_int(usage.get("completion_tokens")),
         "cache_read_tokens": cached_tokens,
         "cache_write_tokens": 0,
     }
