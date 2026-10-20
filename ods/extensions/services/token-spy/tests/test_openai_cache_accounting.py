@@ -133,6 +133,6 @@ def test_cached_prompt_receipt_and_report(monkeypatch, tmp_path, streaming, prom
                      if streaming else adapter.extract_usage_from_response(data))
         assert extracted["input_tokens"] == total_prompt - cached
         assert extracted.get("cache_read_tokens", 0) == cached
-        assert adapter.calculate_cost(extracted, "gpt-4o") == pytest.approx(round(expected_cost, 6))
+        assert adapter.calculate_cost(extracted, "gpt-4o") == pytest.approx(expected_cost)
     finally:
         db._local.conn.close()
