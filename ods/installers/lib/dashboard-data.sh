@@ -14,11 +14,24 @@ _ods_dashboard_mutate() {
 }
 
 ods_prepare_dashboard_data() {
-    local install_dir="$1" rootless="$2" target private_store metadata group mode use_docker_repair=false
+    local install_dir="$1" rootless="$2" target private_store metadata group mode lock use_docker_repair=false
     target="$install_dir/data"
     if [[ ! -d "$target" || -L "$target" ]]; then
         echo "[error] Dashboard data must be a real directory: $target" >&2
         return 1
+    fi
+    # Host `ods enable` and the Dashboard serialize on this one lock. Create it
+    # as the owner, group-writable, so the Dashboard's group 1000 can open it
+    # whatever the owner's UID; an owner-only lock fails every Dashboard
+    # extension action with PermissionError.
+    lock="$target/.extensions-lock"
+    if [[ -e "$lock" || -L "$lock" ]]; then
+        if [[ ! -f "$lock" || -L "$lock" ]]; then
+            echo "[error] The extensions lock must be a regular file: $lock" >&2
+            return 1
+        fi
+    else
+        (umask 0007 && : >>"$lock") || return 1
     fi
     if [[ "$rootless" == true ]]; then
         use_docker_repair=true
@@ -27,6 +40,8 @@ ods_prepare_dashboard_data() {
         # directory to the Dashboard runtime's GID. Docker group access is
         # sufficient for this narrowly scoped bind-mount repair.
         metadata=$(stat -c '%g' "$target") || return 1
+        [[ "$metadata" == 1000 ]] || use_docker_repair=true
+        metadata=$(stat -c '%g' "$lock") || return 1
         [[ "$metadata" == 1000 ]] || use_docker_repair=true
         for private_store in "$target/pixel-chat-results" "$target/pixel-images"; do
             if [[ -d "$private_store" && ! -L "$private_store" ]]; then
@@ -48,6 +63,9 @@ ods_prepare_dashboard_data() {
                 test "$(stat -c %g /data)" = 1000
                 mode=$(stat -c %a /data)
                 test "$((0$mode & 070))" = 56
+                test -f /data/.extensions-lock && test ! -L /data/.extensions-lock
+                chgrp 1000 /data/.extensions-lock
+                chmod g+rw /data/.extensions-lock
                 for private_store in /data/pixel-chat-results /data/pixel-images; do
                     if test -e "$private_store" || test -L "$private_store"; then
                         test -d "$private_store" && test ! -L "$private_store" || exit 1
@@ -84,4 +102,12 @@ ods_prepare_dashboard_data() {
             [[ "$(stat -c '%u:%g' "$private_store")" == 1000:1000 ]] || return 1
         fi
     done
+    metadata=$(stat -c '%g:%a' "$lock") || return 1
+    IFS=: read -r group mode <<< "$metadata"
+    if [[ "$group" != 1000 ]]; then
+        _ods_dashboard_mutate chgrp 1000 "$lock" || return 1
+    fi
+    if (( (8#$mode & 8#060) != 8#060 )); then
+        _ods_dashboard_mutate chmod g+rw "$lock" || return 1
+    fi
 }
