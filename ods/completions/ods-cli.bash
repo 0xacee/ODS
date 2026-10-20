@@ -6,7 +6,11 @@
 _ods_completion_source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 
 _ods_complete_presets() {
-    local install_root="${INSTALL_DIR:-${ODS_HOME:-${ODS_INSTALL_DIR:-}}}" path name
+    local install_root="${INSTALL_DIR:-${ODS_HOME:-}}" path name
+    if [[ -z "$install_root" && -n "${ODS_SCRIPT_HINT:-}" && -f "$ODS_SCRIPT_HINT/.env" ]]; then
+        install_root="$ODS_SCRIPT_HINT"
+    fi
+    install_root="${install_root:-${ODS_INSTALL_DIR:-}}"
     if [[ -z "$install_root" ]]; then
         if [[ -f "$_ods_completion_source_root/docker-compose.base.yml" || -f "$_ods_completion_source_root/docker-compose.yml" ]]; then
             install_root="$_ods_completion_source_root"

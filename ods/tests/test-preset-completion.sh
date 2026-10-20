@@ -78,7 +78,22 @@ export ODS_INSTALL_DIR="$tmp/other-install"
 mkdir -p "$ODS_INSTALL_DIR/presets/other-only"
 complete_names ods preset load other
 expect_names 'other-only'
-unset ODS_INSTALL_DIR
+export ODS_SCRIPT_HINT="$tmp/hint install"
+mkdir -p "$ODS_SCRIPT_HINT/presets/hint-only"
+printf 'ODS_MODE=local\n' > "$ODS_SCRIPT_HINT/.env"
+complete_names ods preset load hint
+expect_names 'hint-only'
+# Higher-priority explicit roots still win over the populated hint.
+export ODS_HOME="$tmp/foreign"
+complete_names ods preset load foreign
+expect_names 'foreign-only'
+unset ODS_HOME
+rm -f "$ODS_SCRIPT_HINT/.env"
+complete_names ods preset load other
+expect_names 'other-only'
+complete_names ods preset load hint
+[[ ${#COMPREPLY[@]} == 0 ]] || fail 'honored an unpopulated install hint'
+unset ODS_SCRIPT_HINT ODS_INSTALL_DIR
 custom="$tmp/custom install"
 mkdir -p "$custom/completions" "$custom/presets/custom-only"
 cp "$ROOT/completions/ods-cli.bash" "$custom/completions/ods-cli.bash"
