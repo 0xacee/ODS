@@ -58,6 +58,19 @@ def load_workflow_catalog() -> dict:
         return DEFAULT_WORKFLOW_CATALOG
 
 
+def _matching_n8n_workflow(name: str, workflows: list[dict]) -> dict | None:
+    """Resolve only the exact imported name; never guess a deletion target."""
+    matches = [workflow for workflow in workflows
+               if workflow.get("name", "").lower() == name.lower()]
+    if len(matches) > 1:
+        # n8n allows more than one workflow with the same name. The catalog
+        # stores no n8n ID, so picking the first would depend on list order.
+        raise HTTPException(status_code=409, detail=(
+            f"Multiple n8n workflows are named {name!r}. Resolve the duplicate names in n8n before using this catalog action."
+        ))
+    return matches[0] if matches else None
+
+
 async def get_n8n_workflows() -> list[dict]:
     """Get all workflows from n8n API."""
     try:
@@ -149,17 +162,11 @@ async def api_workflows(api_key: str = Depends(verify_api_key)):
     """Get workflow catalog with status and dependency info."""
     catalog = load_workflow_catalog()
     n8n_workflows = await get_n8n_workflows()
-    n8n_by_name = {w.get("name", "").lower(): w for w in n8n_workflows}
 
     workflows = []
     health_cache: dict[str, bool] = {}
     for wf in catalog.get("workflows", []):
-        wf_name_lower = wf["name"].lower()
-        installed = None
-        for n8n_name, n8n_wf in n8n_by_name.items():
-            if wf_name_lower in n8n_name or n8n_name in wf_name_lower:
-                installed = n8n_wf
-                break
+        installed = _matching_n8n_workflow(wf["name"], n8n_workflows)
 
         dep_status = await check_workflow_dependencies(wf.get("dependencies", []), health_cache)
         all_deps_met = all(dep_status.values())
@@ -281,12 +288,7 @@ async def _remove_workflow(workflow_id: str):
     if not wf_info:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-    n8n_wf = None
-    wf_name_lower = wf_info["name"].lower()
-    for wf in n8n_workflows:
-        if wf_name_lower in wf.get("name", "").lower():
-            n8n_wf = wf
-            break
+    n8n_wf = _matching_n8n_workflow(wf_info["name"], n8n_workflows)
     if not n8n_wf:
         raise HTTPException(status_code=404, detail="Workflow not installed in n8n")
 
@@ -329,12 +331,7 @@ async def workflow_executions(workflow_id: str, limit: int = 20, api_key: str = 
     if not wf_info:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-    n8n_wf = None
-    wf_name_lower = wf_info["name"].lower()
-    for wf in n8n_workflows:
-        if wf_name_lower in wf.get("name", "").lower():
-            n8n_wf = wf
-            break
+    n8n_wf = _matching_n8n_workflow(wf_info["name"], n8n_workflows)
     if not n8n_wf:
         return {"executions": [], "message": "Workflow not installed"}
 
