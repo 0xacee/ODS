@@ -3499,7 +3499,10 @@ _ods_cli_publish_imported_preset() (
     stage=$(mktemp -d "$PRESETS_DIR/.import-XXXXXX") || return 1
     _preset_import_cleanup() {
         local status=$?
-        if [[ -n "$previous" && "$published" != true ]]; then
+        # Finish custody/cleanup decisions even if interrupted while unwinding.
+        trap 'status=130' INT
+        trap 'status=143' TERM
+        if [[ -n "$previous" && ( -e "$previous" || -L "$previous" ) && "$published" != true ]]; then
             # A signal can land after rename but before published=true, or a
             # different writer can create the destination. Never merge the
             # recovery copy into that directory or discard it on ambiguity.
@@ -3512,7 +3515,11 @@ _ods_cli_publish_imported_preset() (
                 return 1
             fi
         fi
-        rm -rf -- "$stage"
+        # Cleanup failure cannot undo an already committed replacement. Keep
+        # its original status and identify any temporary recovery files left.
+        if ! rm -rf -- "$stage"; then
+            warn "Could not remove temporary preset import files. Retained at: $stage"
+        fi
         return "$status"
     }
     trap _preset_import_cleanup EXIT
@@ -3528,8 +3535,8 @@ _ods_cli_publish_imported_preset() (
     [[ -f "$stage/payload/$name/extensions.list" ]] || { warn "Invalid preset: missing extensions.list"; return 1; }
 
     if [[ -e "$PRESETS_DIR/$name" ]]; then
-        mv -- "$PRESETS_DIR/$name" "$stage/previous" || return 1
         previous="$stage/previous"
+        mv -- "$PRESETS_DIR/$name" "$previous" || return 1
     fi
     mv -- "$stage/payload/$name" "$PRESETS_DIR/$name" || {
         warn "Failed to publish imported preset; restoring the previous preset."

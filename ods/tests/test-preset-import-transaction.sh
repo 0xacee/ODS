@@ -16,7 +16,7 @@ rm "$TMP/archive/shared/extensions.list"
 tar czf "$TMP/missing-extensions.tar.gz" -C "$TMP/archive" shared
 rm "$TMP/archive/shared/meta.txt"
 tar czf "$TMP/missing-meta.tar.gz" -C "$TMP/archive" shared
-export PRESET_REAL_TAR=$(command -v tar) PRESET_REAL_MV=$(command -v mv)
+export PRESET_REAL_TAR=$(command -v tar) PRESET_REAL_MV=$(command -v mv) PRESET_REAL_RM=$(command -v rm)
 cat > "$TMP/bin/tar" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == xzf && "${3:-}" == -C ]]; then
@@ -36,6 +36,18 @@ case "${PRESET_FAILURE:-}" in
     park) [[ "$3" != */previous ]] || exit 24 ;;
     publish|rollback-failure) [[ "$2" != */payload/shared ]] || exit 24 ;;
     term) if [[ "$2" == */payload/shared ]]; then kill -TERM "$PPID"; exit 24; fi ;;
+    term-after-park)
+        if [[ "$3" == */previous ]]; then
+            "$PRESET_REAL_MV" "$@" || exit "$?"
+            kill -TERM "$PPID"
+            exit 24
+        fi ;;
+    foreign-destination)
+        if [[ "$2" == */payload/shared ]]; then
+            mkdir "$3"
+            printf foreign > "$3/env"
+            exit 24
+        fi ;;
     term-after-publish)
         if [[ "$2" == */payload/shared ]]; then
             "$PRESET_REAL_MV" "$@" || exit "$?"
@@ -46,13 +58,22 @@ esac
 if [[ "${PRESET_FAILURE:-}" == rollback-failure && "$2" == */previous ]]; then exit 25; fi
 exec "$PRESET_REAL_MV" "$@"
 EOF
+cat > "$TMP/bin/rm" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${PRESET_FAILURE:-}" == cleanup && "${3:-}" == */.import-* ]]; then exit 26; fi
+if [[ "${PRESET_FAILURE:-}" == term-during-cleanup && "${3:-}" == */.import-* ]]; then
+    kill -TERM "$PPID"
+    exit 26
+fi
+exec "$PRESET_REAL_RM" "$@"
+EOF
 for command in docker sudo systemctl service launchctl curl powershell.exe; do
     printf '#!/bin/sh\necho "Unexpected host command: $0" >&2\nexit 99\n' > "$TMP/bin/$command"
 done
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
 
-for scenario in missing-extensions missing-meta extract park publish term term-after-publish rollback-failure cancel success fresh; do
+for scenario in missing-extensions missing-meta extract park publish term term-after-park term-after-publish foreign-destination rollback-failure cleanup term-during-cleanup cancel success fresh; do
     install="$TMP/$scenario"
     mkdir -p "$install/lib" "$install/extensions/services" "$install/presets/unrelated"
     cp "$ROOT"/lib/*.sh "$install/lib/"
@@ -68,21 +89,21 @@ for scenario in missing-extensions missing-meta extract park publish term term-a
     archive="$TMP/valid.tar.gz" reply=y PRESET_FAILURE=""
     case "$scenario" in
         missing-*) archive="$TMP/$scenario.tar.gz" ;;
-        extract|park|publish|term|term-after-publish|rollback-failure) PRESET_FAILURE="$scenario" ;;
+        extract|park|publish|term|term-after-park|term-after-publish|foreign-destination|rollback-failure|cleanup|term-during-cleanup) PRESET_FAILURE="$scenario" ;;
         cancel) reply=n ;;
     esac
     export INSTALL_DIR="$install" ODS_HOME="$install" ODS_INSTALL_DIR="$TMP/foreign" PRESET_FAILURE
     rc=0
     output=$(printf '%s\n' "$reply" | bash "$CLI" preset import "$archive" 2>&1) || rc=$?
     case "$scenario" in
-        missing-*|extract|park|publish|term)
+        missing-*|extract|park|publish|term|term-after-park)
             [[ "$rc" != 0 && $(cat "$install/presets/shared/env") == original ]] || {
                 echo "FAIL: $scenario lost the previous preset: $output"; exit 1;
             }
             [[ $(cat "$install/presets/shared/meta.txt") == 'old metadata' &&
                $(cat "$install/presets/shared/extensions.list") == 'old selection' ]] || exit 1
             [[ "$output" != *'imported successfully'* ]] || exit 1 ;;
-        rollback-failure|term-after-publish)
+        rollback-failure|term-after-publish|foreign-destination)
             recovery=$(find "$install/presets" -maxdepth 2 -path '*/.import-*/previous' -print)
             [[ "$rc" != 0 && -n "$recovery" && $(cat "$recovery/env") == original &&
                "$output" == *"Recovery copy retained at: $recovery"* ]] || {
@@ -90,10 +111,14 @@ for scenario in missing-extensions missing-meta extract park publish term term-a
             }
             if [[ "$scenario" == term-after-publish ]]; then
                 [[ $(cat "$install/presets/shared/env") == replacement && ! -e "$install/presets/shared/previous" ]] || exit 1
+            elif [[ "$scenario" == foreign-destination ]]; then
+                [[ $(cat "$install/presets/shared/env") == foreign && ! -e "$install/presets/shared/previous" ]] || exit 1
             fi ;;
         cancel)
             [[ "$rc" == 0 && $(cat "$install/presets/shared/env") == original && "$output" == *Cancelled* ]] || exit 1 ;;
-        success|fresh)
+        term-during-cleanup)
+            [[ "$rc" != 0 && $(cat "$install/presets/shared/env") == replacement ]] || exit 1 ;;
+        success|fresh|cleanup)
             [[ "$rc" == 0 && $(cat "$install/presets/shared/env") == replacement && "$output" == *'imported successfully'* ]] || {
                 echo "FAIL: $scenario import failed: $output"; exit 1;
             }
@@ -101,7 +126,12 @@ for scenario in missing-extensions missing-meta extract park publish term term-a
     esac
     [[ $(cat "$install/.env") == 'active settings' && $(cat "$install/presets/unrelated/env") == unrelated &&
        $(cat "$TMP/foreign/presets/shared/env") == foreign ]] || exit 1
-    [[ "$scenario" == rollback-failure || "$scenario" == term-after-publish || -z $(find "$install/presets" -maxdepth 1 -name '.import-*' -print) ]] || {
+    if [[ "$scenario" == cleanup || "$scenario" == term-during-cleanup ]]; then
+        retained=$(find "$install/presets" -maxdepth 1 -name '.import-*' -print)
+        [[ -n "$retained" && "$output" == *"Could not remove temporary preset import files. Retained at: $retained"* ]] || exit 1
+    fi
+    [[ "$scenario" == rollback-failure || "$scenario" == term-after-publish || "$scenario" == foreign-destination || "$scenario" == cleanup || "$scenario" == term-during-cleanup ||
+       -z $(find "$install/presets" -maxdepth 1 -name '.import-*' -print) ]] || {
         echo "FAIL: $scenario left staging behind"; exit 1;
     }
     echo "PASS: public preset import $scenario preserves recovery and unrelated state"
