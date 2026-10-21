@@ -235,6 +235,10 @@ test ! -e .git
     assert handed.is_relative_to(temporary) and handed.name == 'ods'
     assert (home / 'ods/source-head.txt').read_text().strip() == ref
     assert (home / 'ods/source-status.txt').read_text() == ''
+    import time
+    deadline = time.monotonic() + 5
+    while handed.parents[1].exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert not handed.parents[1].exists(), 'bootstrap left its temporary clone behind'
     assert (home / 'ods').is_dir()
     assert not (home / 'ods/.git').exists()
