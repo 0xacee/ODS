@@ -27,7 +27,7 @@ class KeepModelsTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.home = self.root / 'home'
         self.home.mkdir()
         self.install = self.home / 'ods'
@@ -121,6 +121,48 @@ rm -rf "$INSTALL_DIR"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIsNone(json.loads(self.result.read_text())['model'])
         self.assertNotIn('--keep-models', self.args.read_text())
+
+    def assert_clone_cleanup(self, installer_status):
+        installer = self.repo / 'ods/install.sh'
+        installer.write_text('''#!/bin/bash
+set -euo pipefail
+[[ "${1:-}" != --preflight-only ]] || exit 0
+# Both the dispatcher and its replacement need the checkout for provenance.
+test -f "$ODS_BOOTSTRAP_SOURCE_DIR/candidate-only"
+exec python3 - <<'PY'
+import json, os, pathlib
+source = pathlib.Path(os.environ['ODS_BOOTSTRAP_SOURCE_DIR'])
+pathlib.Path(os.environ['RESULT']).write_text(json.dumps({
+    'source': str(source), 'candidate': (source / 'candidate-only').read_text(),
+}))
+raise SystemExit(int(os.environ['FIXTURE_INSTALL_STATUS']))
+PY
+''')
+        subprocess.run(['git', '-C', str(self.repo), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.repo), '-c', 'user.name=Fixture',
+            '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'cleanup fixture'], check=True)
+        self.env['ODS_REF'] = subprocess.check_output(
+            ['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
+        scratch = self.root / 'bootstrap scratch'
+        scratch.mkdir()
+        self.env.update(TMPDIR=str(scratch), FIXTURE_INSTALL_STATUS=str(installer_status))
+        result = self.bootstrap('--force', '--non-interactive', '--keep-models')
+        self.assertEqual(result.returncode, installer_status, result.stdout + result.stderr)
+        value = json.loads(self.result.read_text())
+        self.assertEqual(value['candidate'], 'fresh source')
+        clone = Path(value['source']).parents[1]
+        # BSD mktemp may use the system per-user directory instead of TMPDIR.
+        self.assertTrue(clone.name.startswith('tmp.'))
+        self.assertFalse(clone.exists(), 'bootstrap left its temporary clone behind')
+        self.assertEqual(list(scratch.iterdir()), [])
+        self.assertEqual((self.install / 'data/models/llm/model.gguf').read_bytes(),
+            b'GGUF\x00fixture-exact-bytes\n')
+
+    def test_successful_installer_cleans_clone_after_source_provenance_read(self):
+        self.assert_clone_cleanup(0)
+
+    def test_failed_installer_cleans_clone_and_preserves_exit_status(self):
+        self.assert_clone_cleanup(37)
 
     def test_keep_models_requires_force_before_candidate_actions(self):
         result = self.bootstrap('--keep-models', '--non-interactive')
