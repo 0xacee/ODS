@@ -16,7 +16,10 @@ rm "$TMP/archive/shared/extensions.list"
 tar czf "$TMP/missing-extensions.tar.gz" -C "$TMP/archive" shared
 rm "$TMP/archive/shared/meta.txt"
 tar czf "$TMP/missing-meta.tar.gz" -C "$TMP/archive" shared
-export PRESET_REAL_TAR=$(command -v tar) PRESET_REAL_PYTHON=$(command -v python3) PRESET_REAL_RM=$(command -v rm)
+PRESET_REAL_TAR=$(command -v tar)
+PRESET_REAL_PYTHON=$(command -v python3)
+PRESET_REAL_RM=$(command -v rm)
+export PRESET_REAL_TAR PRESET_REAL_PYTHON PRESET_REAL_RM
 export PRESET_RUNTIME_MARKER="$TMP/runtime-unavailable"
 export PRESET_FOREIGN_PRESET="$TMP/foreign/presets/shared"
 export PRESET_COLLISION_HOOK="$TMP/collision-hook"
