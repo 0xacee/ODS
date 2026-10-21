@@ -4,7 +4,6 @@ import stat
 import tempfile
 import unittest
 import unittest.mock
-import errno
 import importlib.util
 import fcntl
 import subprocess
