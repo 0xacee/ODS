@@ -14,6 +14,26 @@ fail() { FAIL=$((FAIL + 1)); printf 'FAIL: %s\n' "$1" >&2; }
 # shellcheck source=../installers/lib/dashboard-data.sh
 source "$ROOT_DIR/installers/lib/dashboard-data.sh"
 
+# Match this shell fixture's simulated group-1000 authority, without requiring
+# the CI account to belong to that group. Root numeric tests cover real IDs.
+python3() {
+    if [[ "$1" == "$ROOT_DIR/installers/lib/dashboard-lock.py" && "$2" == repair ]]; then
+        command python3 - "$1" "$3" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("lock_fixture", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+helper._DASHBOARD_GID = os.getgid()
+helper.repair(sys.argv[2])
+PY
+        local result=$?
+        [[ "$result" == 0 ]] || return "$result"
+        printf '1000\n' > "$work/groups/.extensions-lock"
+    else
+        command python3 "$@"
+    fi
+}
+
 # Without root, chgrp to 1000 is recorded per path and read back by stat.
 fake_group() { cat "$work/groups/$(basename "$1")" 2>/dev/null || command stat -c %g "$1"; }
 stat() {

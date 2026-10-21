@@ -25,6 +25,22 @@ run_case() (
     warn() { echo "$*" >&2; }
     error() { echo "$*" >&2; return 1; }
     chown() { :; } # Existing unrelated Token Spy adjustment.
+    # This shell boundary fixture simulates group 1000. Execute the real lock
+    # helper with our available GID; numeric group authority is tested as root.
+    python3() {
+        if [[ "$1" == "$ROOT_DIR/installers/lib/dashboard-lock.py" && "$2" == repair ]]; then
+            command python3 - "$1" "$3" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("lock_fixture", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+helper._DASHBOARD_GID = os.getgid()
+helper.repair(sys.argv[2])
+PY
+        else
+            command python3 "$@"
+        fi
+    }
     ods_sudo_available() { return 0; }
     ods_sudo() {
         printf '%s\n' "$*" >> "$QA_CALLS"
@@ -65,7 +81,8 @@ run_case() (
         [[ "$*" == *"src=$INSTALL_DIR/data,dst=/data"* ]] || return 1
         [[ "$*" != *'chown -R '* ]] || return 1
         if [[ "$*" == *'python3 - repair /data' ]]; then
-            python3 - repair "$INSTALL_DIR/data"
+            # Preserve the exact stdin helper payload and simulate only GID.
+            command python3 -c 'import os,sys; ns={"__name__":"lock_fixture"}; exec(sys.stdin.read(), ns); ns["_DASHBOARD_GID"]=os.getgid(); ns["repair"](sys.argv[1])' "$INSTALL_DIR/data"
             return $?
         fi
         # Run the exact namespace command against this fixture's data root.
