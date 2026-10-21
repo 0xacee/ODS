@@ -59,10 +59,12 @@ function markDocumentDownloads() {
           const label=text(child).trim(), href=String(child.properties?.href || '')
           const named=/^download(?:\s+(?:verified\s+)?([A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9]+))?\s*:?$/i.exec(label)
           const explicitLabel=Boolean(named)
+          const prefixed=/(?:^|\n)\s*download\s*:\s*$/i.test(before)
+          const filename=named?.[1] || (prefixed && /^([A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9]+)$/.exec(label)?.[1])
           const rawLink=label===href || label===href.split('/').at(-1)
-          if(explicitLabel || (rawLink && /(?:^|\n)\s*download\s*:\s*$/i.test(before))) {
+          if(explicitLabel || filename || (rawLink && prefixed)) {
             child.properties={...child.properties,'data-ods-download-intent':true}
-            if(named?.[1])child.properties['data-ods-download-filename']=named[1]
+            if(filename)child.properties['data-ods-download-filename']=filename
             // A document download label is text, even when the model wraps it
             // in image syntax. Never load that label's invented remote image,
             // including while the completed artifact receipt is still pending.
