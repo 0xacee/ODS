@@ -3491,14 +3491,36 @@ cmd_list() {
 #=============================================================================
 PRESETS_DIR="${INSTALL_DIR}/presets"
 
+# Unlike mv, rename never nests a directory inside a competing destination.
+_ods_cli_rename_preset_dir() {
+    "$1" - "$2" "$3" <<'PY'
+import os
+import sys
+
+try:
+    if os.path.lexists(sys.argv[2]):
+        raise FileExistsError("preset destination already exists")
+    os.rename(sys.argv[1], sys.argv[2])
+except OSError as error:
+    print("Could not rename preset directory:", error, file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 # Keep a usable preset until its replacement is completely extracted and
 # validated. Staging beside the destination keeps publication on one filesystem.
 _ods_cli_publish_imported_preset() (
     local archive="$1" name="$2"
+    local preset_python="${PYTHON_CMD:-python3}"
+    if ! "$preset_python" -c 'import os, sys; sys.exit(sys.version_info[0] != 3)' >/dev/null 2>&1; then
+        warn "Safe preset import requires a working Python 3 runtime. Repair ODS's Python installation and retry; existing presets were retained."
+        return 1
+    fi
     local stage previous="" published=false
     stage=$(mktemp -d "$PRESETS_DIR/.import-XXXXXX") || return 1
     _preset_import_cleanup() {
         local status=$?
+        trap - EXIT
         # Finish custody/cleanup decisions even if interrupted while unwinding.
         trap 'status=130' INT
         trap 'status=143' TERM
@@ -3508,11 +3530,11 @@ _ods_cli_publish_imported_preset() (
             # recovery copy into that directory or discard it on ambiguity.
             if [[ -e "$PRESETS_DIR/$name" || -L "$PRESETS_DIR/$name" ]]; then
                 warn "Preset destination exists. Recovery copy retained at: $previous"
-                return 1
+                exit 1
             fi
-            if ! mv -- "$previous" "$PRESETS_DIR/$name"; then
+            if ! _ods_cli_rename_preset_dir "$preset_python" "$previous" "$PRESETS_DIR/$name"; then
                 warn "Could not restore the previous preset. Recovery copy retained at: $previous"
-                return 1
+                exit 1
             fi
         fi
         # Cleanup failure cannot undo an already committed replacement. Keep
@@ -3520,7 +3542,7 @@ _ods_cli_publish_imported_preset() (
         if ! rm -rf -- "$stage"; then
             warn "Could not remove temporary preset import files. Retained at: $stage"
         fi
-        return "$status"
+        exit "$status"
     }
     trap _preset_import_cleanup EXIT
     trap 'exit 130' INT
@@ -3536,9 +3558,9 @@ _ods_cli_publish_imported_preset() (
 
     if [[ -e "$PRESETS_DIR/$name" ]]; then
         previous="$stage/previous"
-        mv -- "$PRESETS_DIR/$name" "$previous" || return 1
+        _ods_cli_rename_preset_dir "$preset_python" "$PRESETS_DIR/$name" "$previous" || return 1
     fi
-    mv -- "$stage/payload/$name" "$PRESETS_DIR/$name" || {
+    _ods_cli_rename_preset_dir "$preset_python" "$stage/payload/$name" "$PRESETS_DIR/$name" || {
         warn "Failed to publish imported preset; restoring the previous preset."
         return 1
     }
