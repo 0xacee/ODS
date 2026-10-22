@@ -107,3 +107,46 @@ it('accepts the authoritative complete receipt when EOF precedes done', async ()
   expect(screen.queryByRole('alert')).toBeNull()
   expect(reply.body.locked).toBe(false)
 })
+
+it.each([
+  ['error', 'Hermes reported an error before finishing the response.'],
+  ['interrupted', 'The response was interrupted before it finished.'],
+  ['unexpected', 'The response ended with an unrecognized outcome.'],
+])('keeps received text and permits retry for a complete event with status %s', async (status, detail) => {
+  // The installed Hermes producer uses message.complete for failed and
+  // interrupted turns too; its terminal text can contain cancellation metadata.
+  const reply = stream([
+    { type: 'delta', text: 'Useful work before the interruption' },
+    { type: 'complete', text: 'Terminal failure metadata', status },
+    { type: 'done' },
+  ])
+  const fetcher = await start(reply, { spoken: true })
+  expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+  expect(screen.getByText('Useful work before the interruption')).toBeVisible()
+  expect(screen.queryByText('Terminal failure metadata')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Retry last message' })).toBeEnabled()
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/talk/speak')).toBe(false)
+  expect(reply.body.locked).toBe(false)
+})
+
+it('retains failed terminal text when no earlier answer text was streamed', async () => {
+  await start(stream([
+    { type: 'complete', text: 'Retained work from Hermes', status: 'error' },
+    { type: 'done' },
+  ]))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Hermes reported an error')
+  expect(screen.getByText('Retained work from Hermes')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Retry last message' })).toBeEnabled()
+})
+
+it.each(['complete', 'ok'])('accepts successful upstream status %s', async status => {
+  const fetcher = await start(stream([
+    { type: 'delta', text: 'Earlier draft' },
+    { type: 'complete', text: 'Successful terminal answer', status },
+    { type: 'done' },
+  ]), { spoken: true })
+  expect(await screen.findByText('Successful terminal answer')).toBeVisible()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Retry last message' })).toBeNull()
+  await waitFor(() => expect(fetcher.mock.calls.some(([url]) => url === '/api/talk/speak')).toBe(true))
+})

@@ -618,9 +618,24 @@ export default function ODSTalk() {
             streamDone = true
             break
           } else if (payload.type === 'complete') {
-            completed = true
-            if (typeof payload.text === 'string' && payload.text) assembled = payload.text
+            // Hermes uses this terminal event for failed/interrupted turns too.
+            // Missing status retains the legacy successful-completion contract.
+            const outcome = payload.status == null || payload.status === '' ? 'ok' : payload.status
+            const succeeded = outcome === 'ok' || outcome === 'complete'
+            if (typeof payload.text === 'string' && payload.text && (succeeded || !assembled)) {
+              assembled = payload.text
+            }
             finalWarning = payload.warning || null
+            if (succeeded) {
+              completed = true
+            } else {
+              // Terminal cancellation metadata must not replace useful deltas.
+              errorDetail = outcome === 'interrupted'
+                ? 'The response was interrupted before it finished.'
+                : outcome === 'error'
+                  ? 'Hermes reported an error before finishing the response.'
+                  : 'The response ended with an unrecognized outcome.'
+            }
           } else if (payload.type === 'error') {
             errorDetail = payload.detail || 'Hermes did not finish the response.'
           } else if (payload.type === 'approval') {
