@@ -148,7 +148,14 @@ class CompressedBackupVerification(unittest.TestCase):
                 self.assertEqual(list(self.scratch.iterdir()), [])
 
     def test_terminated_verification_removes_its_private_staging(self):
+        self.assert_interrupted_cleanup(signal.SIGTERM)
+
+    def test_interrupted_verification_removes_its_private_staging(self):
+        self.assert_interrupted_cleanup(signal.SIGINT)
+
+    def assert_interrupted_cleanup(self, interruption):
         _backup_id, archive = self.create_backup()
+        original = archive.read_bytes()
         marker = self.root / "extraction-started"
         real_tar = shutil.which("tar")
         wrapper = self.bin / "tar"
@@ -172,13 +179,14 @@ class CompressedBackupVerification(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertTrue(marker.exists(), "verification did not reach full extraction")
                 # Only the process group created for this fixture receives a signal.
-                os.killpg(process.pid, signal.SIGTERM)
+                os.killpg(process.pid, interruption)
                 process.wait(timeout=10)
                 self.assertNotEqual(process.returncode, 0)
                 deadline = time.monotonic() + 3
                 while list(self.scratch.iterdir()) and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertEqual(list(self.scratch.iterdir()), [], "terminated extraction remains on disk")
+                self.assertEqual(archive.read_bytes(), original)
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
