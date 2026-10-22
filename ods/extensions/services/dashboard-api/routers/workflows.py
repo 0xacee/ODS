@@ -166,7 +166,15 @@ async def api_workflows(api_key: str = Depends(verify_api_key)):
     workflows = []
     health_cache: dict[str, bool] = {}
     for wf in catalog.get("workflows", []):
-        installed = _matching_n8n_workflow(wf["name"], n8n_workflows)
+        match_error = None
+        try:
+            installed = _matching_n8n_workflow(wf["name"], n8n_workflows)
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            # A duplicate name blocks this entry's actions, not the catalog.
+            installed = None
+            match_error = exc.detail
 
         dep_status = await check_workflow_dependencies(wf.get("dependencies", []), health_cache)
         all_deps_met = all(dep_status.values())
@@ -175,7 +183,7 @@ async def api_workflows(api_key: str = Depends(verify_api_key)):
         if installed:
             executions = installed.get("statistics", {}).get("executions", {}).get("total", 0)
 
-        workflows.append({
+        workflow = {
             "id": wf["id"],
             "name": wf["name"],
             "description": wf["description"],
@@ -192,7 +200,11 @@ async def api_workflows(api_key: str = Depends(verify_api_key)):
             "setupTime": wf.get("setupTime", "~2 min"),
             "executions": executions,
             "featured": wf.get("featured", False)
-        })
+        }
+        if match_error:
+            workflow["status"] = "ambiguous"
+            workflow["error"] = match_error
+        workflows.append(workflow)
 
     return {
         "workflows": workflows,
