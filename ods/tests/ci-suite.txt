@@ -307,3 +307,4 @@ tests/test-cli-chat-route.py
 tests/test-cli-chat-error-exit.py
 tests/test-cli-update-model-lifecycle.sh
 tests/test-summary-quick-commands.sh
+tests/test_dashboard_env_custody.py
