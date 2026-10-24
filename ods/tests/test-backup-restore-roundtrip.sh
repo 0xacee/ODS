@@ -245,7 +245,7 @@ cp "$TARBALL" "$DST2/.backups/"
 
 info "Inspecting compressed backup before restore"
 compressed_list=$(ODS_DIR="$DST2" bash "$ODS_RESTORE" --list) || fail "Compressed backup listing failed"
-echo "$compressed_list" | grep -E "$CBACKUP_ID[[:space:]]+full[[:space:]]+[^[:space:]]+[[:space:]]+full cache recovery" \
+echo "$compressed_list" | grep -E "${CBACKUP_ID}[[:space:]]+full[[:space:]]+[^[:space:]]+[[:space:]]+full cache recovery" \
     >/dev/null || fail "Compressed backup listing lost its type or description"
 [[ ! -e "$DST2/.backups/$CBACKUP_ID" ]] || fail "Listing extracted the compressed backup"
 pass "Compressed backup metadata is visible before restore"
