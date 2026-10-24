@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { render } from '../test/test-utils'
 import ODSTalk from './ODSTalk' // eslint-disable-line no-unused-vars
 
@@ -149,4 +149,76 @@ it.each(['complete', 'ok'])('accepts successful upstream status %s', async statu
   expect(screen.queryByRole('alert')).toBeNull()
   expect(screen.queryByRole('button', { name: 'Retry last message' })).toBeNull()
   await waitFor(() => expect(fetcher.mock.calls.some(([url]) => url === '/api/talk/speak')).toBe(true))
+})
+
+describe('voice messages', () => {
+  // /api/talk/audio-message answers with one JSON reply that carries the same
+  // Hermes turn status as the stream's complete event.
+  let recorders
+  beforeEach(() => {
+    recorders = []
+    Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true })
+  })
+  afterEach(() => { Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false }) })
+
+  async function sendVoice(reply) {
+    localStorage.setItem('ods-talk-spoken-replies', '1')
+    const tracks = [{ stop: vi.fn() }]
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: vi.fn(async () => ({ getTracks: () => tracks })) } })
+    vi.stubGlobal('MediaRecorder', class {
+      state = 'inactive'
+      mimeType = 'audio/webm'
+      constructor() { recorders.push(this) }
+      start() { this.state = 'recording' }
+      stop() {
+        this.state = 'inactive'
+        const data = this.ondataavailable
+        const stopped = this.onstop
+        globalThis.queueMicrotask(() => {
+          data?.({ data: new Blob(['voice'], { type: 'audio/webm' }) })
+          stopped?.()
+        })
+      }
+    })
+    const fetcher = vi.fn(async url => {
+      if (url === '/api/talk/status') return json({ capabilities: { text_chat: true, tts: true, audio_message: true } })
+      if (url === '/api/talk/audio-message') return json(reply)
+      if (url === '/api/talk/message/stream') return stream([{ type: 'complete', text: 'Answer on retry' }, { type: 'done' }]).response
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetcher)
+    render(<ODSTalk />)
+    await screen.findByText('Ready')
+    fireEvent.click(screen.getByRole('button', { name: 'Record voice' }))
+    await waitFor(() => expect(recorders).toHaveLength(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop recording' }))
+    return fetcher
+  }
+  const spoke = fetcher => fetcher.mock.calls.some(([url]) => url === '/api/talk/speak')
+
+  it.each([
+    ['interrupted', 'The response was interrupted before it finished.'],
+    ['error', 'Hermes reported an error before finishing the response.'],
+    ['unexpected', 'The response ended with an unrecognized outcome.'],
+  ])('never speaks a voice reply whose turn ended %s, and Retry resends the transcript', async (status, detail) => {
+    const fetcher = await sendVoice({ text: 'Work before the stop', transcript: 'What is the weather?', status })
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(detail)
+    expect(within(alert).getByRole('link', { name: 'Get help on Discord' })).toHaveAttribute('href', 'https://discord.gg/4ntNp9MAwC')
+    expect(screen.getByText('Work before the stop')).toBeVisible()
+    expect(screen.getByText('What is the weather?')).toBeVisible()
+    expect(spoke(fetcher)).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry last message' }))
+    expect(await screen.findByText('Answer on retry')).toBeVisible()
+    const retried = fetcher.mock.calls.find(([url]) => url === '/api/talk/message/stream')
+    expect(JSON.parse(retried[1].body)).toEqual({ text: 'What is the weather?' })
+  })
+
+  it.each([undefined, 'ok', 'complete'])('speaks a successful voice reply (status %s)', async status => {
+    const fetcher = await sendVoice({ text: 'Sunny today', transcript: 'What is the weather?', status })
+    expect(await screen.findByText('Sunny today')).toBeVisible()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry last message' })).toBeNull()
+    await waitFor(() => expect(spoke(fetcher)).toBe(true))
+  })
 })

@@ -100,6 +100,16 @@ async function parseError(resp, fallback) {
   return body.detail || fallback || `Request failed: ${resp.status}`
 }
 
+// Hermes ends failed and interrupted turns with the same terminal reply as
+// answers; its status tells them apart. No status keeps the legacy
+// successful-completion contract. Returns the error text, or null on success.
+function failedOutcomeMessage(status) {
+  if (status == null || status === '' || status === 'ok' || status === 'complete') return null
+  if (status === 'interrupted') return 'The response was interrupted before it finished.'
+  if (status === 'error') return 'Hermes reported an error before finishing the response.'
+  return 'The response ended with an unrecognized outcome.'
+}
+
 export default function ODSTalk() {
   const [messages, setMessages] = useState([welcomeMessage])
   const [input, setInput] = useState('')
@@ -619,22 +629,16 @@ export default function ODSTalk() {
             break
           } else if (payload.type === 'complete') {
             // Hermes uses this terminal event for failed/interrupted turns too.
-            // Missing status retains the legacy successful-completion contract.
-            const outcome = payload.status == null || payload.status === '' ? 'ok' : payload.status
-            const succeeded = outcome === 'ok' || outcome === 'complete'
-            if (typeof payload.text === 'string' && payload.text && (succeeded || !assembled)) {
+            const failure = failedOutcomeMessage(payload.status)
+            if (typeof payload.text === 'string' && payload.text && (!failure || !assembled)) {
               assembled = payload.text
             }
             finalWarning = payload.warning || null
-            if (succeeded) {
-              completed = true
-            } else {
+            if (failure) {
               // Terminal cancellation metadata must not replace useful deltas.
-              errorDetail = outcome === 'interrupted'
-                ? 'The response was interrupted before it finished.'
-                : outcome === 'error'
-                  ? 'Hermes reported an error before finishing the response.'
-                  : 'The response ended with an unrecognized outcome.'
+              errorDetail = failure
+            } else {
+              completed = true
             }
           } else if (payload.type === 'error') {
             errorDetail = payload.detail || 'Hermes did not finish the response.'
@@ -723,9 +727,22 @@ export default function ODSTalk() {
         throw new Error(await parseError(resp, 'Voice message could not be sent.'))
       }
       const data = await resp.json()
+      const transcript = data.transcript || 'Voice message'
+      // The bridge passes Hermes' turn status through, as on the text path.
+      // A failed or interrupted turn keeps what Hermes returned, is never
+      // spoken, and offers Retry, which resends the transcript as text.
+      const failure = failedOutcomeMessage(data.status)
+      if (failure) {
+        setMessages(items => items.map(item => {
+          if (item.id === userId) return { ...item, text: transcript, status: 'done' }
+          if (item.id === assistantId) return { ...item, text: data.text || '', errorDetail: failure, status: 'error' }
+          return item
+        }))
+        return
+      }
       const reply = data.text || 'I did not get a response back.'
       setMessages(items => items.map(item => {
-        if (item.id === userId) return { ...item, text: data.transcript || 'Voice message', status: 'done' }
+        if (item.id === userId) return { ...item, text: transcript, status: 'done' }
         if (item.id === assistantId) return { ...item, text: reply, status: 'done', warning: data.warning || null }
         return item
       }))
@@ -1138,7 +1155,11 @@ function MessageBubble({ message, onApproval }) {
             <ReactMarkdown components={MARKDOWN_COMPONENTS}>{message.text}</ReactMarkdown>
           </div>
         )}
-        {message.errorDetail && <p className="mt-2 whitespace-pre-wrap break-words" role="alert">{message.errorDetail}</p>}
+        {message.errorDetail && (
+          <p className="mt-2 whitespace-pre-wrap break-words" role="alert">
+            {message.errorDetail} <HelpLink className="text-xs" />
+          </p>
+        )}
         {message.warning && (
           <p className="mt-2 text-xs text-theme-text-secondary">{message.warning}</p>
         )}
