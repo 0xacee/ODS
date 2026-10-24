@@ -1,22 +1,30 @@
 #!/usr/bin/env bash
 # Remote-provider containers receive the installation data group, not the
 # installation owner's UID. Their private state therefore needs group traversal.
-ods_create_remote_provider_directories() {
+#
+# Prints what is wrong and returns 1 instead of stopping: the remote provider is
+# optional, so callers warn and let the install continue. The folders are
+# created as before; only the permission change refuses links and files. It
+# only adds group read and traverse (g+rx) and never removes a bit, because
+# rootless Docker and the Dashboard API reach the routing state through the
+# other bits.
+ods_prepare_remote_provider_directories() {
     local install_dir="$1" directory
+    if ! mkdir -p "$install_dir/data/remote-provider/secrets"; then
+        printf 'Could not create %s\n' "$install_dir/data/remote-provider/secrets" >&2
+        return 1
+    fi
     for directory in "$install_dir/data" "$install_dir/data/remote-provider" \
         "$install_dir/data/remote-provider/secrets"; do
-        if [[ -L "$directory" || ( -e "$directory" && ! -d "$directory" ) ]]; then
-            printf 'Refusing unsafe remote-provider state directory: %s\n' "$directory" >&2
+        if [[ -L "$directory" || ! -d "$directory" ]]; then
+            printf 'Refusing to change permissions through a link or a file: %s\n' "$directory" >&2
             return 1
         fi
     done
-    mkdir -p "$install_dir/data/remote-provider/secrets" || return 1
-}
-
-ods_prepare_remote_provider_directories() {
-    local install_dir="$1" directory
-    ods_create_remote_provider_directories "$install_dir" || return 1
     for directory in "$install_dir/data/remote-provider" "$install_dir/data/remote-provider/secrets"; do
-        chgrp "$(id -g)" "$directory" && chmod 750 "$directory" || return 1
+        if ! { chgrp "$(id -g)" "$directory" && chmod g+rx "$directory"; }; then
+            printf 'Could not give the remote provider group access to %s\n' "$directory" >&2
+            return 1
+        fi
     done
 }

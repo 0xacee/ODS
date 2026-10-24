@@ -5758,6 +5758,7 @@ def _write_remote_provider_secret(ref: str, value: str) -> None:
 def _repair_remote_provider_secret_permissions() -> list[str]:
     """Repair group traversal and legacy provider-consumed secrets safely.
 
+    The two state directories only gain group read and traverse (g+rx).
     Existing installations may have secrets written before provider services
     received the installation data group. Never follow links or touch a file
     owned by another account when the host agent is unprivileged. A failure is
@@ -5815,27 +5816,35 @@ def _repair_remote_provider_secret_permissions() -> list[str]:
         try:
             repaired: list[str] = []
             # Readable files are unreachable when a strict installer umask
-            # leaves either parent at 0700. Inspect both held, no-follow
-            # descriptors before changing permissions or ownership anywhere.
+            # leaves either parent at 0700. Only add group read and traverse:
+            # rootless Docker and the Dashboard API reach the routing state
+            # through the other bits, so no bit is ever taken away and the
+            # owner and group stay as they are. Inspect both held, no-follow
+            # descriptors before changing either one.
             try:
+                pending: list[tuple[int, int]] = []
                 for descriptor in (provider_root_fd, secret_dir_fd):
                     metadata = os.fstat(descriptor)
                     if not stat_mod.S_ISDIR(metadata.st_mode):
                         raise RuntimeError("remote-provider state is not a directory")
+                    mode = stat_mod.S_IMODE(metadata.st_mode)
+                    if mode & 0o050 == 0o050:
+                        continue
                     if effective_uid != 0 and metadata.st_uid != desired_uid:
                         raise RuntimeError("remote-provider directory is owned by another user")
-                for descriptor in (provider_root_fd, secret_dir_fd):
-                    metadata = os.fstat(descriptor)
-                    if metadata.st_uid != desired_uid or metadata.st_gid != desired_gid:
-                        os.fchown(descriptor, desired_uid, desired_gid)
-                    if stat_mod.S_IMODE(metadata.st_mode) != 0o750:
-                        os.fchmod(descriptor, 0o750)
-                    final = os.fstat(descriptor)
-                    if (final.st_uid != desired_uid or final.st_gid != desired_gid
-                            or stat_mod.S_IMODE(final.st_mode) != 0o750):
+                    pending.append((descriptor, mode | 0o050))
+                for descriptor, mode in pending:
+                    os.fchmod(descriptor, mode)
+                    if stat_mod.S_IMODE(os.fstat(descriptor).st_mode) != mode:
                         raise RuntimeError("remote-provider directory repair did not persist")
             except (OSError, RuntimeError) as exc:
-                logger.warning("Could not repair remote-provider directory permissions: %s", exc)
+                root = _remote_provider_root()
+                logger.warning(
+                    "Could not give the remote provider group access to %s (%s); it cannot "
+                    "read its route or key until then. Fix it as the folders' owner with: "
+                    "chmod g+rx %s %s",
+                    root, exc, root, root / "secrets",
+                )
                 return []
             file_flags = (
                 os.O_RDONLY

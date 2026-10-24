@@ -25,6 +25,10 @@ for platform, file, start, end in (
     (output / (platform + '.sh')).write_text(block, encoding='utf-8')
 PY
 
+mode_of() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
 for platform in linux macos; do
     (
         export INSTALL_DIR="$tmp/$platform/install" ODS_HOME="$tmp/$platform/install"
@@ -35,6 +39,8 @@ for platform in linux macos; do
         ods_progress() { :; }
         error() { printf '%s\n' "$*" >&2; return 1; }
         ai_err() { printf '%s\n' "$*" >&2; return 1; }
+        warn() { printf '%s\n' "$*" >> "$tmp/$platform/warnings"; }
+        ai_warn() { printf '%s\n' "$*" >> "$tmp/$platform/warnings"; }
         # Refuse any accidental escape from the private permission fixture.
         sudo() { return 99; }
         ods_sudo() { return 99; }
@@ -55,14 +61,34 @@ for platform in linux macos; do
             echo "FAIL: $platform producer never granted remote-provider directory traversal"
             exit 1
         }
+        [[ ! -s "$tmp/$platform/warnings" ]] || {
+            echo "FAIL: $platform producer warned on a clean install" >&2
+            exit 1
+        }
+        # Under umask 077 both folders start at 0700 and only gain g+rx.
         for directory in "$INSTALL_DIR/data/remote-provider" "$INSTALL_DIR/data/remote-provider/secrets"; do
-            grep -F "chmod 750 $directory" "$tmp/$platform/permissions" >/dev/null
+            grep -F "chmod g+rx $directory" "$tmp/$platform/permissions" >/dev/null
             grep -F "chgrp $(id -g) $directory" "$tmp/$platform/permissions" >/dev/null
             if [[ "$(uname -s)" != MINGW* ]]; then
                 [[ "$(stat -c '%a:%g' "$directory" 2>/dev/null || stat -f '%Lp:%g' "$directory")" == "750:$(id -g)" ]]
             fi
         done
-        # Cancellation/refusal must leave a foreign resource and its modes alone.
+        # Additive only: rootless Docker and the Dashboard API reach the route
+        # through the other bits, so a 0755 folder must keep all of them.
+        command chmod 755 "$INSTALL_DIR/data/remote-provider"
+        command chmod 700 "$INSTALL_DIR/data/remote-provider/secrets"
+        ods_prepare_remote_provider_directories "$INSTALL_DIR"
+        if [[ "$(uname -s)" != MINGW* ]]; then
+            [[ "$(mode_of "$INSTALL_DIR/data/remote-provider")" == 755 ]] || {
+                echo "FAIL: $platform removed permission bits from a 0755 remote-provider folder" >&2
+                exit 1
+            }
+            [[ "$(mode_of "$INSTALL_DIR/data/remote-provider/secrets")" == 750 ]] || {
+                echo "FAIL: $platform did not add group traversal to a 0700 secrets folder" >&2
+                exit 1
+            }
+        fi
+        # A refusal changes no permissions and leaves a file in the way alone.
         : > "$tmp/$platform/permissions"
         rmdir "$INSTALL_DIR/data/remote-provider/secrets"
         printf 'foreign file\n' > "$INSTALL_DIR/data/remote-provider/secrets"
@@ -72,13 +98,28 @@ for platform in linux macos; do
         fi
         [[ ! -s "$tmp/$platform/permissions" ]]
         [[ "$(cat "$INSTALL_DIR/data/remote-provider/secrets")" == 'foreign file' ]]
+        # The remote provider is optional: the producer warns, with a recovery
+        # step and the help link, and the install continues.
+        source "$tmp/$platform.sh"
+        grep -F 'chmod g+rx' "$tmp/$platform/warnings" >/dev/null || {
+            echo "FAIL: $platform refusal warning gave no recovery step" >&2
+            exit 1
+        }
+        grep -F 'https://discord.gg/4ntNp9MAwC' "$tmp/$platform/warnings" >/dev/null || {
+            echo "FAIL: $platform refusal warning gave no help link" >&2
+            exit 1
+        }
+        [[ ! -s "$tmp/$platform/permissions" ]]
+        [[ "$(cat "$INSTALL_DIR/data/remote-provider/secrets")" == 'foreign file' ]]
         rm "$INSTALL_DIR/data/remote-provider/secrets"
         mkdir "$INSTALL_DIR/data/remote-provider/secrets"
+        # Folders are created as before, but permissions never change through
+        # a link.
         mv "$INSTALL_DIR/data" "$INSTALL_DIR/data-preserved"
         ln -s "$tmp/foreign" "$INSTALL_DIR/data"
         if [[ -L "$INSTALL_DIR/data" ]]; then
             if ods_prepare_remote_provider_directories "$INSTALL_DIR"; then
-                echo "FAIL: $platform followed a foreign state symlink" >&2
+                echo "FAIL: $platform changed permissions through a state symlink" >&2
                 exit 1
             fi
             [[ ! -s "$tmp/$platform/permissions" ]]
@@ -87,6 +128,6 @@ for platform in linux macos; do
         fi
         [[ "$(cat "$tmp/foreign/sentinel")" == 'foreign sentinel' ]]
     )
-    echo "PASS: $platform strict-umask producer grants only the provider data group traversal"
+    echo "PASS: $platform strict-umask producer only adds the provider data group traversal"
 done
 [[ "$(cat "$tmp/foreign/sentinel")" == 'foreign sentinel' ]]

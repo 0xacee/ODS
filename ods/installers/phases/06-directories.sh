@@ -566,12 +566,9 @@ else
     mkdir -p "$INSTALL_DIR"/data/{open-webui,whisper,tts,n8n,qdrant,models,privacy-shield,ape,token-spy,hermes,persona}
     mkdir -p "$INSTALL_DIR"/data/hermes-proxy/{caddy-data,caddy-config}
     mkdir -p "$INSTALL_DIR"/data/langfuse/{postgres,clickhouse,redis,minio}
+    # The remote-provider folders are prepared after ownership recovery below.
     # shellcheck source=../lib/remote-provider-directories.sh
     source "$SCRIPT_DIR/installers/lib/remote-provider-directories.sh"
-    ods_create_remote_provider_directories "$INSTALL_DIR" || {
-        error "Could not safely prepare remote-provider state directories"
-        return 1
-    }
     mkdir -p "$INSTALL_DIR"/config/{n8n,litellm,searxng}
 
     _phase06_repair_host_path() {
@@ -676,11 +673,13 @@ else
         fi
     done
 
-    # Prepare remote-provider group traversal after existing ownership recovery.
-    ods_prepare_remote_provider_directories "$INSTALL_DIR" || {
-        error "Could not safely prepare remote-provider state directory permissions"
-        return 1
-    }
+    # Prepare remote-provider group traversal after existing ownership recovery
+    # (this also creates its folders). The remote provider is optional, so a
+    # problem here warns and the install continues; a later configure failure
+    # then names the egress's own reason.
+    if ! ods_prepare_remote_provider_directories "$INSTALL_DIR"; then
+        warn "The optional remote provider may be unable to read its route and key (see the message above); the rest of ODS installs normally. If that message names a file, move the file aside and re-run the installer. Otherwise run, as the folders' owner: chmod g+rx $INSTALL_DIR/data/remote-provider $INSTALL_DIR/data/remote-provider/secrets. Need help? Ask on the ODS Discord: ${ODS_HELP_DISCORD_URL:-https://discord.gg/4ntNp9MAwC}"
+    fi
 
     # Ensure we can write to config/data subtrees (rsync will fail otherwise)
     if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then

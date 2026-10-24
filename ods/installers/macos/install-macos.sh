@@ -1794,12 +1794,13 @@ else
     mkdir -p "${INSTALL_DIR}/data/langfuse/clickhouse"
     mkdir -p "${INSTALL_DIR}/data/langfuse/redis"
     mkdir -p "${INSTALL_DIR}/data/langfuse/minio"
+    # The remote provider is optional: a problem here warns and the install
+    # continues.
     # shellcheck source=../lib/remote-provider-directories.sh
     source "${SOURCE_ROOT}/installers/lib/remote-provider-directories.sh"
-    ods_prepare_remote_provider_directories "$INSTALL_DIR" || {
-        ai_err "Could not safely prepare remote-provider state directories"
-        exit 1
-    }
+    if ! ods_prepare_remote_provider_directories "$INSTALL_DIR"; then
+        ai_warn "The optional remote provider may be unable to read its route and key (see the message above); the rest of ODS installs normally. If that message names a file, move the file aside and re-run the installer. Otherwise run: chmod g+rx ${INSTALL_DIR}/data/remote-provider ${INSTALL_DIR}/data/remote-provider/secrets. Need help? Ask on the ODS Discord: ${ODS_HELP_DISCORD_URL:-https://discord.gg/4ntNp9MAwC}"
+    fi
     mkdir -p "${INSTALL_DIR}/bin"
     ai_ok "Created directory structure"
 

@@ -100,10 +100,42 @@ class DirectoryRepairTests(unittest.TestCase):
                          [0o750, 0o750, 0o640])
         self.assertEqual(set(syscalls.closed), {9, 10, 11, 12})
 
-    def test_root_directory_group_matches_dedicated_container(self):
+    def test_root_repair_keeps_directory_owners_and_only_adds_group_access(self):
         syscalls = DescriptorOS(uid=0, gid=0)
         repair(syscalls, Path("/private/remote-provider"))
-        self.assertEqual([syscalls.entries[fd].st_gid for fd in (10, 11, 12)], [10778] * 3)
+        # Directories keep their owner and group; the provider-read secret
+        # still moves to the dedicated container group, as before.
+        self.assertEqual([(syscalls.entries[fd].st_uid, syscalls.entries[fd].st_gid) for fd in (10, 11)],
+                         [(0, 0), (0, 0)])
+        self.assertEqual([stat.S_IMODE(syscalls.entries[fd].st_mode) for fd in (10, 11)], [0o750, 0o750])
+        self.assertEqual((syscalls.entries[12].st_gid, stat.S_IMODE(syscalls.entries[12].st_mode)),
+                         (10778, 0o640))
+        self.assertEqual([change[0] for change in syscalls.changes if change[1] in (10, 11)],
+                         ["mode", "mode"])
+
+    def test_existing_other_bits_are_kept(self):
+        # Rootless Docker and the Dashboard API reach the route through the
+        # other bits, so a 0755 folder must stay exactly 0755.
+        syscalls = DescriptorOS()
+        for fd in (10, 11):
+            syscalls.entries[fd].st_mode = stat.S_IFDIR | 0o755
+        self.assertEqual(repair(syscalls, Path("/private/remote-provider")), ["REMOTE_LLM_API_KEY"])
+        self.assertEqual([stat.S_IMODE(syscalls.entries[fd].st_mode) for fd in (10, 11)], [0o755, 0o755])
+        self.assertEqual([change for change in syscalls.changes if change[1] in (10, 11)], [])
+
+    def test_strict_directory_only_gains_group_access(self):
+        syscalls = DescriptorOS()
+        syscalls.entries[10].st_mode = stat.S_IFDIR | 0o701
+        repair(syscalls, Path("/private/remote-provider"))
+        self.assertEqual(stat.S_IMODE(syscalls.entries[10].st_mode), 0o751)
+
+    def test_foreign_directory_that_already_has_group_access_is_left_alone(self):
+        syscalls = DescriptorOS()
+        syscalls.entries[11].st_uid = 9999
+        syscalls.entries[11].st_mode = stat.S_IFDIR | 0o750
+        self.assertEqual(repair(syscalls, Path("/private/remote-provider")), ["REMOTE_LLM_API_KEY"])
+        self.assertEqual(syscalls.entries[11].st_uid, 9999)
+        self.assertEqual([change for change in syscalls.changes if change[1] == 11], [])
 
     def test_second_repair_is_idempotent(self):
         syscalls = DescriptorOS()

@@ -189,6 +189,8 @@ class DashboardDataPermissions(unittest.TestCase):
             provider_directories = (ROOT / 'installers/lib/remote-provider-directories.sh').read_text(encoding='utf-8')
             pre_copy_script = ('set -euo pipefail\n' + provider_directories + '\n_phase06_rootless=false\nENABLE_HERMES=true\n'
                                '_phase06_repair_host_path() { echo "Unexpected ownership repair: $1" >&2; return 1; }\n'
+                               # Remote-provider preparation only warns in production; here it must succeed.
+                               'warn() { echo "Unexpected warning: $*" >&2; return 1; }\n'
                                'error() { echo "$*" >&2; return 1; }\nrun_phase() {\n' + pre_copy + '\n:\n}\nrun_phase\n')
             script = ('set -euo pipefail\n_phase06_rootless=false\n_phase06_step() { :; }\nods_sudo() { "$@"; }\n'
                       'chown() { [[ "${!#}" != "$INSTALL_DIR/data/token-spy" ]] || return 0; command chown "$@"; }\n'
