@@ -168,6 +168,6 @@ def test_duplicate_names_do_not_hide_unrelated_catalog_entry(test_client, catalo
                              ("delete", "/api/workflows/daily-digest")):
             refused = getattr(test_client, method)(path, headers=test_client.auth_headers)
             assert refused.status_code == 409
-            assert "duplicate names in n8n" in refused.json()["detail"]
+            assert "n8n" in refused.json()["detail"]
 
     assert calls == [("GET", "/api/v1/workflows")] * 3

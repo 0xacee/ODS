@@ -1,9 +1,15 @@
-"""Workflow management endpoints — n8n integration."""
+"""Workflow management endpoints â€” n8n integration."""
 
 import asyncio
 import json
 import logging
 import re
+import sys
+
+if sys.version_info >= (3, 11):
+    from asyncio import timeout as _async_timeout
+else:  # Python 3.10 standalone deployments
+    from async_timeout import timeout as _async_timeout
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException
@@ -58,37 +64,30 @@ def load_workflow_catalog() -> dict:
         return DEFAULT_WORKFLOW_CATALOG
 
 
-def _matching_n8n_workflow(name: str, workflows: list[dict]) -> dict | None:
-    """Resolve only the exact imported name; never guess a deletion target."""
-    matches = [workflow for workflow in workflows
-               if workflow.get("name", "").lower() == name.lower()]
-    if len(matches) > 1:
-        # n8n allows more than one workflow with the same name. The catalog
-        # stores no n8n ID, so picking the first would depend on list order.
-        raise HTTPException(status_code=409, detail=(
-            f"Multiple n8n workflows are named {name!r}. Resolve the duplicate names in n8n before using this catalog action."
-        ))
-    return matches[0] if matches else None
+def _n8n_data_items(data: object) -> list[dict]:
+    """Accept only a complete n8n list envelope before exposing its rows."""
+    if not isinstance(data, dict):
+        raise ValueError("n8n list response must be a JSON object")
+    items = data.get("data")
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise ValueError("n8n list response data must be an array of objects")
+    return items
 
 
-async def get_n8n_workflows() -> list[dict]:
-    """Get all workflows from n8n API."""
-    try:
-        headers = _n8n_headers()
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
-            async with session.get(f"{N8N_URL}/api/v1/workflows", headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("data", [])
-                # Falling through to the empty list silently makes a rejected
-                # request indistinguishable from "this install has no
-                # workflows". n8n's public API requires a key that nothing
-                # provisions, so a fresh install answers 401 here and the
-                # dashboard would just show an empty list with no explanation.
+async def _read_workflow_pages(session, headers: dict) -> list[dict] | None:
+    workflows = []
+    params: dict[str, str] = {}
+    seen_cursors = set()
+    while True:
+        async with session.get(f"{N8N_URL}/api/v1/workflows", headers=headers, params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+            else:
+                # Unavailable inventory must not look like zero installed workflows.
                 if resp.status in (401, 403):
                     logger.warning(
                         "n8n rejected the workflow listing (HTTP %s): %s. The n8n "
-                        "public API requires an API key — create one in n8n "
+                        "public API requires an API key â€” create one in n8n "
                         "(Settings > n8n API) and set N8N_API_KEY in .env.",
                         resp.status,
                         "N8N_API_KEY is not set"
@@ -101,9 +100,55 @@ async def get_n8n_workflows() -> list[dict]:
                         resp.status,
                         N8N_URL,
                     )
-    except (aiohttp.ClientError, OSError, json.JSONDecodeError) as e:
+                return None
+        workflows.extend(_n8n_data_items(data))
+        cursor = data.get("nextCursor")
+        if cursor is None or cursor == "":
+            return workflows
+        if not isinstance(cursor, str) or cursor in seen_cursors:
+            raise HTTPException(status_code=502, detail="n8n returned an invalid or repeated workflow cursor")
+        seen_cursors.add(cursor)
+        params = {"cursor": cursor}
+
+
+async def get_n8n_workflows() -> list[dict] | None:
+    """Get the complete inventory with a deadline shared by every page.
+
+    Returns None when the inventory could not be read completely (transport
+    error, timeout, malformed envelope, or any non-200 page). Returns [] only
+    for a genuinely empty, fully-read inventory.
+    """
+    try:
+        headers = _n8n_headers()
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+            async with _async_timeout(5):
+                return await _read_workflow_pages(session, headers)
+    except (aiohttp.ClientError, OSError, asyncio.TimeoutError, ValueError) as e:
         logger.warning(f"Failed to fetch workflows from n8n: {e}")
-    return []
+    return None
+
+
+def _installed_n8n_workflows(catalog_name: str, n8n_workflows: list[dict]) -> list[dict]:
+    """n8n workflows imported from a catalog entry: the same name, ignoring case.
+
+    Templates are imported under their catalog name. A partial match would
+    also select the owner's own workflows, such as an n8n duplicate named
+    "Daily Digest copy", and removing a catalog workflow deletes what it selects.
+    """
+    wanted = catalog_name.casefold()
+    return [wf for wf in n8n_workflows if str(wf.get("name") or "").casefold() == wanted]
+
+
+def _matching_n8n_workflow(name: str, workflows: list[dict]) -> dict | None:
+    """Resolve a unique exact name using the same predicate as removal."""
+    matches = _installed_n8n_workflows(name, workflows)
+    if len(matches) > 1:
+        # n8n permits duplicate names; the catalog stores no ID with which to
+        # distinguish them. List order is not evidence of the owner's choice.
+        raise HTTPException(status_code=409, detail=(
+            f"Multiple n8n workflows are named {name!r}. Resolve the duplicate names in n8n before using this catalog action."
+        ))
+    return matches[0] if matches else None
 
 
 async def check_workflow_dependencies(deps: list[str], health_cache: dict[str, bool] | None = None) -> dict[str, bool]:
@@ -162,6 +207,8 @@ async def api_workflows(api_key: str = Depends(verify_api_key)):
     """Get workflow catalog with status and dependency info."""
     catalog = load_workflow_catalog()
     n8n_workflows = await get_n8n_workflows()
+    inventory_complete = n8n_workflows is not None
+    n8n_workflows = n8n_workflows or []
 
     workflows = []
     health_cache: dict[str, bool] = {}
@@ -172,7 +219,7 @@ async def api_workflows(api_key: str = Depends(verify_api_key)):
         except HTTPException as exc:
             if exc.status_code != 409:
                 raise
-            # A duplicate name blocks this entry's actions, not the catalog.
+            # One ambiguous name must not hide unrelated catalog entries.
             installed = None
             match_error = exc.detail
 
@@ -212,7 +259,11 @@ async def api_workflows(api_key: str = Depends(verify_api_key)):
         "catalogSource": str(WORKFLOW_CATALOG_FILE),
         "workflowDir": str(WORKFLOW_DIR),
         "n8nUrl": N8N_URL,
-        "n8nAvailable": len(n8n_workflows) > 0 or await check_n8n_available()
+        # Health alone cannot prove the workflow inventory was read.
+        "n8nAvailable": inventory_complete and (
+            len(n8n_workflows) > 0 or await check_n8n_available()
+        ),
+        "n8nInventoryComplete": inventory_complete,
     }
 
 
@@ -294,15 +345,23 @@ async def enable_workflow(workflow_id: str, api_key: str = Depends(verify_api_ke
 
 async def _remove_workflow(workflow_id: str):
     """Shared logic for disabling/removing a workflow from n8n."""
-    n8n_workflows = await get_n8n_workflows()
     catalog = load_workflow_catalog()
     wf_info = next((wf for wf in catalog.get("workflows", []) if wf["id"] == workflow_id), None)
     if not wf_info:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-    n8n_wf = _matching_n8n_workflow(wf_info["name"], n8n_workflows)
-    if not n8n_wf:
+    n8n_workflows = await get_n8n_workflows()
+    if n8n_workflows is None:
+        raise HTTPException(status_code=503, detail="n8n workflow inventory is unavailable; cannot confirm the workflow is installed")
+    matches = _installed_n8n_workflows(wf_info["name"], n8n_workflows)
+    if not matches:
         raise HTTPException(status_code=404, detail="Workflow not installed in n8n")
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Several n8n workflows are named {wf_info['name']}. Remove the one you do not want in n8n.",
+        )
+    n8n_wf = matches[0]
 
     try:
         headers = _n8n_headers()
@@ -337,12 +396,14 @@ async def disable_workflow(workflow_id: str, api_key: str = Depends(verify_api_k
 async def workflow_executions(workflow_id: str, limit: int = 20, api_key: str = Depends(verify_api_key)):
     """Get recent executions for a workflow."""
     _validate_workflow_id(workflow_id)
-    n8n_workflows = await get_n8n_workflows()
     catalog = load_workflow_catalog()
     wf_info = next((wf for wf in catalog.get("workflows", []) if wf["id"] == workflow_id), None)
     if not wf_info:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
+    n8n_workflows = await get_n8n_workflows()
+    if n8n_workflows is None:
+        return {"executions": [], "error": "n8n workflow inventory is unavailable"}
     n8n_wf = _matching_n8n_workflow(wf_info["name"], n8n_workflows)
     if not n8n_wf:
         return {"executions": [], "message": "Workflow not installed"}
@@ -353,9 +414,9 @@ async def workflow_executions(workflow_id: str, limit: int = 20, api_key: str = 
             async with session.get(f"{N8N_URL}/api/v1/executions", headers=headers, params={"workflowId": n8n_wf["id"], "limit": limit}) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return {"workflowId": workflow_id, "n8nId": n8n_wf["id"], "executions": data.get("data", [])}
+                    return {"workflowId": workflow_id, "n8nId": n8n_wf["id"], "executions": _n8n_data_items(data)}
                 else:
                     return {"executions": [], "error": "Failed to fetch executions"}
-    except (aiohttp.ClientError, OSError, json.JSONDecodeError):
+    except (aiohttp.ClientError, OSError, asyncio.TimeoutError, ValueError):
         logger.exception("Failed to fetch workflow executions")
         return {"executions": [], "error": "Failed to fetch executions"}
