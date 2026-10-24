@@ -3757,19 +3757,18 @@ cmd_preset() {
             for sid in "${SERVICE_IDS[@]}"; do
                 local cat="${SERVICE_CATEGORIES[$sid]}"
                 [[ "$cat" == "core" ]] && continue
-                local cf="${SERVICE_COMPOSE[$sid]}"
                 # Match restore and Dashboard: a user extension shadows the
                 # bundled extension with the same service ID.
-                local user_ext_dir="$INSTALL_DIR/data/user-extensions/$sid"
-                [[ -L "$user_ext_dir" ]] && error "Invalid user extension: $sid"
-                if [[ -d "$user_ext_dir" ]]; then
-                    cf="$user_ext_dir/compose.yaml"
-                fi
-                if [[ -n "$cf" && -f "$cf" ]]; then
+                local ext_dir="$INSTALL_DIR/data/user-extensions/$sid"
+                [[ -L "$ext_dir" ]] && error "Invalid user extension: $sid"
+                [[ -d "$ext_dir" ]] || ext_dir="$INSTALL_DIR/extensions/services/$sid"
+                if [[ -f "$ext_dir/compose.yaml" ]]; then
                     echo "enabled:$sid" >> "$state_file"
-                else
+                elif [[ -f "$ext_dir/compose.yaml.disabled" ]]; then
                     echo "disabled:$sid" >> "$state_file"
                 fi
+                # Host-managed services (no Compose file) have no selection
+                # marker; the restore helper would reject them.
             done
 
             # Save metadata
