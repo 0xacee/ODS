@@ -254,6 +254,9 @@ export const VERIFICATION_FAILED_DELIVERY_PREFIX =
 export const VERIFICATION_NOT_RUN_DELIVERY_PREFIX =
   "Portal could not complete this task successfully because the owner-requested verification was not executed. The workspace is preserved; ask Portal to continue and run the requested checks.";
 
+export const EXECUTION_EVIDENCE_MISSING_DELIVERY_PREFIX =
+  "Portal did not receive a successful terminal execution receipt for the requested code run, so it cannot report a computed result as executed. The workspace is preserved; ask Portal to continue and run the code.";
+
 // Refusal for a test command composed with a pipe, redirect, chain or filter.
 // A plain `> file` keeps the exit status, but the runner output then never
 // reaches the exec result that verification is judged from (exit-zero
@@ -1351,6 +1354,21 @@ function verificationCommand(params) {
   if (workspaceCd) {
     commandWorkdir = workspaceCd[1] ?? workspaceCd[2] ?? workspaceCd[3];
     command = workspaceCd[4];
+  } else {
+    // A literal relative cd is common in real coding turns. Recognize the
+    // runner after it so completed test receipts and output-masking checks
+    // use the same path as the absolute /workspace form. Do not parse general
+    // shell syntax or change the command that will actually execute.
+    const relativeCd = command.match(
+      /^cd[ \t]+([A-Za-z0-9._][A-Za-z0-9._/-]*)[ \t]*&&[ \t]*(.+)$/
+    );
+    if (relativeCd && relativeCd[1].split("/").every(part => part && part !== "." && part !== "..")) {
+      const base = normalizeExecWorkdir(params.workdir);
+      if (base == null || typeof base === "string") {
+        commandWorkdir = path.posix.join(!base || base === "." ? "/workspace" : base, relativeCd[1]);
+        command = relativeCd[2];
+      }
+    }
   }
   const withoutStderrMerge = command.replace(/\s+2>&1\s*$/i, "").trim();
   if (
@@ -1407,9 +1425,36 @@ function verificationExecFingerprint(params) {
   const command = parsed.command
     .replace(/\s+2>&1\s*$/i, "")
     .replace(/\s+/g, " ");
-  const normalizedWorkdir = normalizeExecWorkdir(params.workdir ?? parsed.commandWorkdir);
+  // The runner executes after cd, even when exec also supplied a starting cwd.
+  const normalizedWorkdir = normalizeExecWorkdir(parsed.commandWorkdir ?? params.workdir);
   const workdir = normalizedWorkdir === "." ? "" : normalizedWorkdir;
   return JSON.stringify([command, typeof workdir === "string" ? workdir : ""]);
+}
+
+// A verification file need not follow a test_*.py naming convention. Keep
+// this separate from the generic runner heuristic: it requires a file named
+// by the owner and written in this run, plus a clean, bound unittest receipt.
+function ownerStandaloneUnittest(params, state) {
+  if (!state?.workspaceVerificationRequested || typeof params?.command !== "string") return undefined;
+  const command = params.command.trim().replace(/[ \t]+2>&1$/, "");
+  const match = command.match(
+    /^python(?:3(?:\.\d+)?)?(?:[ \t]+(?:-B|-u))*[ \t]+((?:\/workspace\/|\.\/)?[A-Za-z0-9._/-]+\.py)(?:[ \t]+-v)?$/
+  );
+  if (!match) return undefined;
+  const workdir = normalizeExecWorkdir(params.workdir);
+  if (workdir != null && typeof workdir !== "string") return undefined;
+  const base = !workdir || workdir === "." || workdir === "/workspace" ? "" : normalizeWorkspaceFilePath(workdir);
+  const file = normalizeWorkspaceFilePath(match[1]);
+  if ((base && !derivedWorkspacePath(base)) || !derivedWorkspacePath(file)) return undefined;
+  const relativePath = match[1].startsWith("/workspace/") ? file : base ? `${base}/${file}` : file;
+  const directory = path.posix.dirname(relativePath);
+  if (!state.workspaceRequestedFiles.includes(path.posix.basename(relativePath)) ||
+      state.workspaceTaskDirectory && directory !== state.workspaceTaskDirectory ||
+      !state.successfulWritePaths.has(relativePath)) return undefined;
+  const content = state.successfulWriteContentByPath.get(relativePath);
+  if (typeof content !== "string" || !/\bunittest\.TestCase\b/.test(content)) return undefined;
+  return { fingerprint: execFingerprint(params), relativePath, content,
+    sessionId: state.currentSessionId, sessionKey: state.currentSessionKey };
 }
 
 function canonicalRequestedUnittestParams(params, state) {
@@ -1506,7 +1551,121 @@ function verificationFingerprintIsPythonUnittest(fingerprint) {
   }
 }
 
-function execResultHasNonCleanUnittestOutcome(event) {
+// unittest's TextTestRunner ends every run with its own summary: "Ran N
+// tests in X.XXXs", one blank line, then "OK", "OK (skipped=2)", "FAILED
+// (failures=1)" or "NO TESTS RAN". Fleet, open-prompt 07 photo-renamer on
+// d4a61f33 (tower3, Qwen3.5-27B): an exit-0 run ended "Ran 11 tests ... OK",
+// yet a passing negative-path test had printed "Error: Folder ... does not
+// exist." and that program output kept the verification failed. When such a
+// summary is present, the result fails only on: a zero-test summary or NO
+// TESTS RAN, a summary not followed by OK, a FAILED ( line, nonzero expected
+// failures or unexpected successes (each also in its -v form), a failure
+// header after unittest's "=" separator, a line-start FAIL, or AssertionError
+// anywhere. Program output such as "Error:", "ERROR:" or "ERROR:root:..."
+// logging, or a -v docstring, does not fail it. Returns undefined when no
+// summary is present, so custom runners keep the text heuristics below. Only
+// a result of unittest's own runner is judged this way (see
+// execFingerprintRunsUnittestRunner).
+const UNITTEST_RUN_SUMMARY = /^Ran (\d+) tests? in \d+(?:\.\d+)?s\s*$/;
+const UNITTEST_CLEAN_RESULT = /^OK(?: \([^()]*\))?\s*$/;
+// printErrorList writes separator1 ("=" * 70), then "FAIL: test_x
+// (module.Class.test_x)" or "ERROR: setUpClass (module.Class)": a test name
+// and a dotted identifier. A photo renamer's "ERROR: IMG_0001.jpg (no EXIF
+// date)" or "ERROR: IMG_0002.jpg (corrupt)" is not a header.
+const UNITTEST_ERROR_SEPARATOR = /^={70}\s*$/;
+const UNITTEST_FAILURE_HEADER = /^(?:FAIL|ERROR): [\p{L}\p{N}_.]+ \([\p{L}\p{N}_.]+\)/u;
+// df3f4bf3a: a check that runs beside unittest in the same exec and prints
+// its failure still fails the run, whatever the summary says: module-level
+// checks imported by discovery, a test that catches its own assertion and
+// prints the traceback. Such a line starts with an upper-case FAIL word, or
+// with FAIL in any case before ":", "(", a space, a tab or the line end
+// ("fail: negative numbers", "Fail: ..."). AssertionError counts anywhere and
+// in any case: in a repr ("Test failed: AssertionError('...')") or after a
+// mark ("✗ add(-1, -2): AssertionError: ..."). A passing test that prints
+// such text therefore fails the run: a false failure, never a false pass.
+const CHECKER_FAILURE_LINE = /^[ \t]*FAIL\b/;
+const CHECKER_FAIL_LINE_ANY_CASE = /^[ \t]*FAIL(?:[:( \t]|$)/i;
+const CHECKER_ASSERTION_ERROR = /\bAssertionError\b/i;
+// unittest's FAILED result, and the same counts in any case.
+const UNITTEST_FAILED_RESULT = /^[ \t]*FAILED \(/;
+const UNITTEST_FAILED_COUNTS =
+  /^[ \t]*failed\s*\(\s*(?:failures|errors|expected failures|unexpected successes)\s*=/i;
+
+// Python 3.14 colors unittest's markers when its output is a terminal (a pty
+// exec), e.g. "\x1b[32mOK\x1b[0m (\x1b[33mskipped=1\x1b[0m)".
+function withoutTerminalColors(text) {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function unittestRunnerSummaryHasNonCleanOutcome(values) {
+  const texts = values.map(withoutTerminalColors);
+  const outputs = texts.map((text) => text.split(/\r?\n/));
+  if (!outputs.some((lines) => lines.some((line) => UNITTEST_RUN_SUMMARY.test(line)))) {
+    return undefined;
+  }
+  for (const lines of outputs) {
+    for (const [index, line] of lines.entries()) {
+      const summary = line.match(UNITTEST_RUN_SUMMARY);
+      if (summary) {
+        if (Number(summary[1]) === 0) return true;
+        const outcome = /^\s*$/.test(lines[index + 1] ?? "") ? lines[index + 2] : lines[index + 1];
+        if (!UNITTEST_CLEAN_RESULT.test(outcome ?? "")) return true;
+      }
+      if (
+        (UNITTEST_FAILURE_HEADER.test(line) && UNITTEST_ERROR_SEPARATOR.test(lines[index - 1] ?? "")) ||
+        CHECKER_FAILURE_LINE.test(line) ||
+        CHECKER_FAIL_LINE_ANY_CASE.test(line) ||
+        UNITTEST_FAILED_RESULT.test(line) ||
+        UNITTEST_FAILED_COUNTS.test(line)
+      ) {
+        return true;
+      }
+    }
+  }
+  return texts.some(
+    (text) =>
+      CHECKER_ASSERTION_ERROR.test(text) ||
+      /\bexpected failures?\s*=\s*[1-9][0-9]*\b/i.test(text) ||
+      /\bunexpected successes?\s*=\s*[1-9][0-9]*\b/i.test(text) ||
+      /\.\.\.\s+expected failure\b/i.test(text) ||
+      /\.\.\.\s+unexpected success\b/i.test(text) ||
+      /\bNO\s+TESTS?\s+RAN\b/i.test(text)
+  );
+}
+
+// A unittest summary is the run's own verdict only when unittest's runner is
+// the process the model ran: `python3 -m unittest ...`, alone or after `cd
+// /workspace/...`. Anything else in the same result can print a summary the
+// runner never printed, so such a result is judged by the text heuristics:
+// - setup that andChainVerificationParams accepts before the test (`echo Ran
+//   5 tests in 0.001s && echo && echo OK && ...`, `cp summary.txt
+//   /dev/stdout && ...`, or any other setup segment);
+// - a test script (`python3 test_calc.py`), whose own code runs around
+//   unittest.main(): checks after unittest.main(exit=False), or a custom
+//   runner that prints a summary of its own;
+// - a second process started beside the runner with `&` (`python3 -m
+//   unittest test_calc & python3 check_calc.py`), which
+//   verificationCommandIsAuditable does not refuse.
+// The fingerprint is execFingerprint of the command as the model sent it.
+function execFingerprintRunsUnittestRunner(fingerprint) {
+  if (typeof fingerprint !== "string" || !fingerprint) return false;
+  let command;
+  try {
+    [command] = JSON.parse(fingerprint);
+  } catch {
+    return false;
+  }
+  if (typeof command !== "string") return false;
+  const parsed = verificationCommand({ command });
+  return Boolean(parsed) && verificationCommandIsAuditable({ command }) &&
+    !parsed.withoutStderrMerge.includes("&") &&
+    /^python(?:3(?:\.\d+)?)?\s+-m\s+unittest\b/i.test(parsed.withoutStderrMerge);
+}
+
+// trustRunnerSummary: false keeps the text heuristics for every result (a
+// command other than unittest's own runner, and the transcript compaction
+// below).
+function execResultHasNonCleanUnittestOutcome(event, { trustRunnerSummary = true } = {}) {
   const result = event?.result;
   if (!result || typeof result !== "object" || Array.isArray(result)) return false;
   const values = [
@@ -1517,6 +1676,10 @@ function execResultHasNonCleanUnittestOutcome(event) {
       ? result.content.map((item) => item?.type === "text" ? item.text : undefined)
       : []),
   ];
+  const runnerVerdict = trustRunnerSummary
+    ? unittestRunnerSummaryHasNonCleanOutcome(values.filter((value) => typeof value === "string"))
+    : undefined;
+  if (runnerVerdict !== undefined) return runnerVerdict;
   return values.some(
     (value) =>
       typeof value === "string" &&
@@ -3367,7 +3530,10 @@ function cleanUnittestSummary(result) {
     result.isError === true ||
     result?.details?.status !== "completed" ||
     result?.details?.exitCode !== 0 ||
-    execResultHasNonCleanUnittestOutcome({ result })
+    // Compaction hides every other line from the model, so it needs the
+    // strict text heuristics as well: a result that passed despite program
+    // output keeps that output in the transcript.
+    execResultHasNonCleanUnittestOutcome({ result }, { trustRunnerSummary: false })
   ) {
     return undefined;
   }
@@ -3433,6 +3599,66 @@ function compactCleanVerificationResult(message, pending) {
   };
 }
 
+// Adapted from PR #6716, commit 2c042c830. A failed run can contain several
+// independent defects; retaining only the last traceback hides repair evidence.
+// Keep diagnostic excerpts and an explicit inventory within a fixed budget.
+const MULTI_FAILURE_SUMMARY_CHARS = 3500;
+function multipleUnittestFailures(lines) {
+  const ranIndex = lines.findLastIndex((line) => /^Ran\s+[1-9][0-9]*\s+tests?\s+in\s+/.test(line));
+  const headers = lines.flatMap((line, index) => /^(?:FAIL|ERROR):\s+/.test(line) ? [index] : []);
+  if (headers.length < 2 || ranIndex < 0 || headers.at(-1) > ranIndex) return undefined;
+  const clip = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit - 12)} [truncated]`;
+  const rawTail = lines.slice(ranIndex).join("\n").trim();
+  // A test may print arbitrarily long text after the runner summary. Reserve
+  // the verdict and command exit separately instead of slicing the output tail.
+  const tail = rawTail.length <= 500 ? rawTail : [
+    clip(lines[ranIndex], 160),
+    ...lines.slice(ranIndex + 1).filter((line) => /^FAILED\s*\(/.test(line)).slice(-1).map((line) => clip(line, 160)),
+    ...lines.slice(ranIndex + 1).filter((line) => /^\(Command exited with code\s+/.test(line)).slice(-1).map((line) => clip(line, 80)),
+    "[Additional trailer text omitted.]",
+  ].join("\n");
+  const exception = /^(?:AssertionError|[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)|SystemExit|KeyboardInterrupt|StopIteration)(?::|$)/;
+  const blocks = headers.map((start, position) => {
+    let end = headers[position + 1] ?? ranIndex;
+    while (end > start + 1 && /^(?:[=-]{20,}|\s*)$/.test(lines[end - 1])) end -= 1;
+    let errorIndex = -1, frameIndex = -1;
+    for (let index = start + 1; index < end; index += 1) {
+      if (exception.test(lines[index])) errorIndex = index;
+    }
+    for (let index = errorIndex - 1; index > start; index -= 1) {
+      if (/^\s*File\s+"/.test(lines[index])) {
+        frameIndex = index;
+        if (lines[index].includes("/workspace/")) break;
+      }
+    }
+    const excerpt = [clip(lines[start], 180)];
+    if (frameIndex >= 0) {
+      excerpt.push(clip(lines[frameIndex], 160));
+      if (frameIndex + 1 < errorIndex) excerpt.push(clip(lines[frameIndex + 1], 140));
+    }
+    if (errorIndex >= 0) excerpt.push(clip(lines[errorIndex], 220));
+    else excerpt.push("[Exception detail unavailable in this block.]");
+    return excerpt.join("\n");
+  });
+  const kept = [];
+  // Inventory and omission count need at most 160 characters for any array
+  // representable in JS. The fixed outer prefix and repair hint fit in the
+  // remaining space below the 4096-character model-facing bound.
+  let remaining = MULTI_FAILURE_SUMMARY_CHARS - tail.length - 160;
+  for (const block of blocks) {
+    if (block.length + 2 > remaining) continue;
+    kept.push(block);
+    remaining -= block.length + 2;
+  }
+  const omitted = blocks.length - kept.length;
+  return [
+    `Unittest diagnostic excerpts: ${blocks.length} failing tests; showing ${kept.length}.`,
+    ...kept,
+    ...(omitted ? [`[${omitted} more failing test(s) omitted to keep diagnostics bounded.]`] : []),
+    tail,
+  ].join("\n");
+}
+
 function compactFailedUnittestText(result) {
   if (
     !result ||
@@ -3450,6 +3676,7 @@ function compactFailedUnittestText(result) {
   const source = values.sort((left, right) => right.length - left.length)[0];
   if (typeof source !== "string" || source.length < 600) return undefined;
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  const everyFailure = multipleUnittestFailures(lines);
   const failureIndex = lines.findLastIndex((line) => /^(?:FAIL|ERROR):\s+/.test(line));
   const ranIndex = lines.findLastIndex((line) => /^Ran\s+[1-9][0-9]*\s+tests?\s+in\s+/.test(line));
   const diagnosticEnd = ranIndex > failureIndex ? ranIndex : lines.length;
@@ -3476,8 +3703,8 @@ function compactFailedUnittestText(result) {
   if (failureIndex >= 0) summaryLines.push(lines[failureIndex]);
   summaryLines.push(...lines.slice(detailStart, detailEnd));
   if (ranIndex >= 0) summaryLines.push(...lines.slice(ranIndex));
-  let summary = summaryLines.join("\n").trim();
-  if (summary.length > 1400) {
+  let summary = everyFailure ?? summaryLines.join("\n").trim();
+  if (!everyFailure && summary.length > 1400) {
     summary = `${summaryLines[0]}\n${summary.slice(-1320)}`;
   }
   const escapedNewlineHint =
@@ -4826,6 +5053,36 @@ function attachedPictureIds(text) {
 function namesAttachedPicture(params, ids) {
   const text = JSON.stringify(params ?? null);
   return ids.some(id => text.includes(id));
+}
+
+// Explicit owner request to execute code. This selects a delivery-evidence
+// boundary only; it grants no tool or execution authority. Explanations,
+// quoted commands, code fences, ordinary math, no-tools directives and
+// negations are excluded. A request to write AND execute code is preserved.
+function ownerRequestsCodeExecution(text) {
+  if (!text || ownerForbidsTools(text)) return false;
+  const lane = ownerLaneText(text);
+  // A later instruction can withdraw an earlier execution request. Keep such
+  // turns outside this delivery obligation; tool authority is handled elsewhere.
+  if (/\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|without)\s+(?:(?:actually|really)\s+)?(?:execute|executing|run|running|interpret|interpreting)\b/i.test(lane)) return false;
+  const clauses = lane.split(/[!?;\n]+|\.(?=\s|$)/);
+  const executionVerb = /\b(?:execute|run|interpret)\b/i;
+  const codeObject = /\b(?:code|script|program|python|javascript|typescript|node|command|interpreter|execution\s+tool|exec\s+tool)\b/i;
+  const toolPhrase = /\b(?:use|call|invoke)\s+(?:your\s+)?(?:python\s+)?(?:execution|exec|interpreter|terminal|shell)\s+tool\b/i;
+  // Meta/instructional framings that mention execution without requesting it.
+  const metaPrefix = /^\s*(?:please\s+)?(?:how\b|what\b|why\b|where\b|when\b|explain\b|describe\b|show\s+(?:me\s+)?(?:a\s+)?command\b|tell\s+me\s+how\b|give\s+me\b|print\s+(?:the\s+)?(?:words?|text|string)\b|quote\b|write\s+(?:the\s+)?(?:words?|text|string)\b|say\s+(?:the\s+)?(?:words?|text|string)\b)/i;
+  // "Give me Python code to run locally" / "code to run" is a request for
+  // code, not a request to execute it. Detect the code-object-then-verb form.
+  const codeToRun = /\b(?:code|script|program|snippet)\b[^.!?;\n]{0,40}\b(?:to|that\s+(?:i|you)\s+can)\s+(?:run|execute|interpret)\b/i;
+  return clauses.some(raw => {
+    const clause = raw.trim();
+    if (!clause) return false;
+    if (/\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not|without)\s+(?:(?:actually|really)\s+)?(?:execute|executing|run|running|interpret|interpreting|use|using|call|calling|invoke|invoking)\b/i.test(clause)) return false;
+    if (metaPrefix.test(clause)) return false;
+    if (codeToRun.test(clause)) return false;
+    if (toolPhrase.test(clause)) return true;
+    return executionVerb.test(clause) && codeObject.test(clause);
+  });
 }
 
 function ownerWorkspaceLaneRequested(text, workspaceRequested) {
@@ -7939,6 +8196,8 @@ export function createToolLoopGuard({
       priorBehaviorInspection,
       inspectionGeneration: state?.workspaceInspectionGeneration,
       verificationFingerprint,
+      standaloneUnittest: selectedToolName === "exec" && !verificationFingerprint
+        ? ownerStandaloneUnittest(selectedParams, state) : undefined,
       transport,
       selectedToolTarget,
     });
@@ -8125,6 +8384,12 @@ export function createToolLoopGuard({
         recursiveDeleteAbortAttempted: false,
         pendingExecSessions: new Map(),
         pendingExecBlocks: new Map(),
+        // Durable action evidence: a terminal exit-0 exec receipt observed in
+        // this run. Unlike successfulExec (a repetition map cleared on writes),
+        // this is never cleared and is the only fact that satisfies an explicit
+        // owner request to execute code.
+        executionReceiptObserved: false,
+        executionRequested: false,
         // Phantom-process bookkeeping: allowed exec calls whose receipt has
         // not been observed yet, and whether any exec went to the background.
         execCallsInFlight: new Set(),
@@ -9923,11 +10188,18 @@ export function createToolLoopGuard({
           state.latestVerificationPassedGeneration === state.previewVerificationGeneration)) {
         state.latestVerificationStatus = "failed";
       }
-      // The refusal runs nothing; repeats (often with a variant redirect) are
-      // bounded by recordFreeCorrection instead of each draining the budget.
-      recordFreeCorrection(state, "verification-not-auditable",
-        context?.toolCallId ?? event?.toolCallId, toolName);
-      return { block: true, blockReason: VERIFICATION_COMMAND_NOT_AUDITABLE_REASON };
+      // After a coding stop, the stop's own terminal handling below answers
+      // every further exec (one terminal refusal, then abort). "Run it
+      // directly" would contradict its "Do not call another tool", and a
+      // model obeys the newer message (strixy, d4a61f33: `...; echo
+      // "EXIT:$?"` was coached, then rerun bare).
+      if (!state?.codingExhausted) {
+        // The refusal runs nothing; repeats (often with a variant redirect) are
+        // bounded by recordFreeCorrection instead of each draining the budget.
+        recordFreeCorrection(state, "verification-not-auditable",
+          context?.toolCallId ?? event?.toolCallId, toolName);
+        return { block: true, blockReason: VERIFICATION_COMMAND_NOT_AUDITABLE_REASON };
+      }
     }
 
     if (state?.privateNetworkPrompt) {
@@ -10560,6 +10832,7 @@ export function createToolLoopGuard({
         state.workspaceMutationRequested =
           state.workspacePreviewRequired ||
           userMessageRequestsWorkspaceMutation(event?.messages, event?.prompt);
+        state.executionRequested = ownerRequestsCodeExecution(laneText);
         state.workspaceTaskPath = userMessageWorkspaceContinuationPath(
           event?.messages,
           event?.prompt
@@ -11399,6 +11672,10 @@ export function createToolLoopGuard({
       : undefined;
     if (successfulMutation) {
       for (const file of workspaceMutationFiles(successfulMutation.name,successfulMutation.event?.params)) {
+        if (state.latestStandaloneUnittest?.relativePath === normalizeWorkspaceFilePath(file)) {
+          state.latestVerificationStatus = undefined;
+          state.latestStandaloneUnittest = undefined;
+        }
         try {
           onWorkspaceMutation({sessionKey:state.currentSessionKey,workspaceRoot:state.configuredWorkspaceRoot,
             file,kind:successfulMutation.name});
@@ -11875,14 +12152,24 @@ export function createToolLoopGuard({
       if (!completion) return;
       const pending = state.pendingExecSessions.get(completion.sessionId);
       if (!pending) return;
+      if (pending.standaloneUnittest && (
+        event?.params?.sessionId !== completion.sessionId ||
+        (context?.sessionId && context.sessionId !== pending.standaloneUnittest.sessionId) ||
+        (context?.sessionKey && context.sessionKey !== pending.standaloneUnittest.sessionKey) ||
+        (event?.runId && event.runId !== runId))) return;
       state.pendingExecSessions.delete(completion.sessionId);
       state.pendingExecBlocks.delete(completion.sessionId);
       const verificationFailed =
         completion.failed ||
+        (pending.standaloneUnittest && (!pending.executionReceiptBound ||
+          !isDeepStrictEqual(pending.standaloneUnittest, ownerStandaloneUnittest(pending.standaloneParams, state)) ||
+          !cleanUnittestSummary(event.result))) ||
         (
           pending.verificationFingerprint &&
           verificationFingerprintIsPythonUnittest(pending.verificationFingerprint) &&
-          execResultHasNonCleanUnittestOutcome(event)
+          execResultHasNonCleanUnittestOutcome(event, {
+            trustRunnerSummary: execFingerprintRunsUnittestRunner(pending.fingerprint),
+          })
         );
       if (verificationFailed) {
         if (pending.fingerprint) {
@@ -11908,7 +12195,14 @@ export function createToolLoopGuard({
         if (pending.verificationFingerprint) {
           state.failedVerificationAttempts = 0;
           state.latestVerificationStatus = "passed";
+          state.latestStandaloneUnittest = pending.standaloneUnittest;
           state.latestVerificationPassedGeneration = state.previewVerificationGeneration;
+        }
+        // A polled background completion is durable action evidence only when
+        // it is a terminal exit-0 receipt for the matched pending session.
+        if (pending.executionReceiptBound && event?.params?.sessionId === completion.sessionId &&
+            event?.result?.details?.exitCode === 0 && !completion.failed && !toolCallFailed(event)) {
+          state.executionReceiptObserved = true;
         }
       }
       return;
@@ -11935,9 +12229,15 @@ export function createToolLoopGuard({
     if (!execEvent) return;
     const observedFingerprint = execFingerprint(execEvent?.params);
     const fingerprint = state.execOriginalByWrapped.get(observedFingerprint) ?? observedFingerprint;
+    const boundExecution = boundExecReceipt(
+      state, pendingToolRun, event, context, runId, toolCallId, toolName);
+    const standalone = boundExecution && !toolCallFailed(event) && pendingToolRun.standaloneUnittest;
+    const currentStandalone = standalone && ownerStandaloneUnittest(pendingToolRun.selectedParams, state);
+    const standaloneUnittest = standalone && isDeepStrictEqual(standalone, currentStandalone)
+      ? standalone : undefined;
     const verificationFingerprint =
       state.verificationOriginalByWrapped.get(observedFingerprint) ??
-      verificationExecFingerprint(execEvent?.params);
+      verificationExecFingerprint(execEvent?.params) ?? standaloneUnittest?.fingerprint;
     if (observedFingerprint) state.execOriginalByWrapped.delete(observedFingerprint);
     if (observedFingerprint) {
       state.verificationOriginalByWrapped.delete(observedFingerprint);
@@ -11955,6 +12255,11 @@ export function createToolLoopGuard({
       state.pendingExecSessions.set(pendingSessionId, {
         fingerprint,
         verificationFingerprint,
+        standaloneUnittest,
+        standaloneParams: standaloneUnittest ? pendingToolRun.selectedParams : undefined,
+        executionReceiptBound: Boolean(boundExecReceipt(
+          state, pendingToolRun, event, context, runId, toolCallId, toolName
+        )) && !toolCallFailed(event),
       });
       if (verificationFingerprint) state.latestVerificationStatus = "pending";
       return;
@@ -11964,10 +12269,13 @@ export function createToolLoopGuard({
         !Number.isInteger(execEvent?.result?.details?.exitCode)) return;
     const verificationFailed =
       execFailed(execEvent) ||
+      (standaloneUnittest && !cleanUnittestSummary(execEvent.result)) ||
       (
         verificationFingerprint &&
         verificationFingerprintIsPythonUnittest(verificationFingerprint) &&
-        execResultHasNonCleanUnittestOutcome(execEvent)
+        execResultHasNonCleanUnittestOutcome(execEvent, {
+          trustRunnerSummary: execFingerprintRunsUnittestRunner(fingerprint),
+        })
       );
     // Native exec has no Tool Search envelope. Capture the same bounded
     // failure projection only after this exact call's terminal unittest result;
@@ -12018,8 +12326,20 @@ export function createToolLoopGuard({
       if (verificationFingerprint) {
         state.failedVerificationAttempts = 0;
         state.latestVerificationStatus = "passed";
+        state.latestStandaloneUnittest = standaloneUnittest;
         state.latestVerificationPassedGeneration = state.previewVerificationGeneration;
       }
+    }
+    // Durable action evidence: only a terminal exit-0 receipt counts. Attempts,
+    // missing exit status, isError, and failed/pending/read/previous-run
+    // receipts do not satisfy an explicit execution request.
+    if (!verificationFailed && !toolCallFailed(event) &&
+        boundExecReceipt(state, pendingToolRun, event, context, runId, toolCallId, toolName) &&
+        execEvent?.result?.details?.status === "completed" &&
+        Number.isSafeInteger(execEvent.result.details.exitCode) &&
+        execEvent.result.details.exitCode === 0 &&
+        !toolCallFailed(execEvent)) {
+      state.executionReceiptObserved = true;
     }
   }
 
@@ -13044,7 +13364,8 @@ export function createToolLoopGuard({
     const cancellation = new AbortController();
     state.hostCitationAbort = cancellation;
     try {
-      outcome = await hostCitationVerifier.verify({answer, urls, portuguese, signal: cancellation.signal});
+      outcome = await hostCitationVerifier.verify({answer, urls, portuguese, owner: state.playgroundOwnerIntent,
+        signal: cancellation.signal});
     } catch (error) {
       // Best effort: a verifier fault leaves the ordinary citation checks.
       warn(`Pixel host citation verification failed for run ${runId}: ${String(error)}`);
@@ -13759,6 +14080,13 @@ export function createToolLoopGuard({
     }
     if (state.githubCanonicalUrl && !state.githubCanonicalSatisfied) {
       return { status: "failed", text: GITHUB_SOURCE_UNVERIFIED_DELIVERY_PREFIX };
+    }
+    // Action-evidence boundary: an explicit owner request to execute code
+    // cannot be delivered as successful without a terminal exit-0 receipt.
+    // This replaces unsupported prose with bounded factual wording and does
+    // not claim execution did not occur (it may be pending or failed).
+    if (state.executionRequested && !state.executionReceiptObserved) {
+      return { status: "failed", text: EXECUTION_EVIDENCE_MISSING_DELIVERY_PREFIX };
     }
     const staleExecWarningSuppression = state.suppressStaleExecWarning
       ? { suppressStaleExecWarning: true }
