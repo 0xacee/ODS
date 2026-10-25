@@ -5,7 +5,9 @@ on:
     branches: [main]
     paths:
       - 'ods/extensions/library/services/*/manifest.yaml'
+      - 'ods/extensions/services/*/manifest.yaml'
       - 'ods/scripts/generate-extensions-catalog.py'
+      - 'ods/tests/test-catalog-invalid-manifest.py'
       - 'ods/config/extensions-catalog.json'
       - 'ods/config/chat-templates/**'
       - 'ods/scripts/validate-chat-templates.py'
@@ -17,7 +19,9 @@ on:
     branches: [main]
     paths:
       - 'ods/extensions/library/services/*/manifest.yaml'
+      - 'ods/extensions/services/*/manifest.yaml'
       - 'ods/scripts/generate-extensions-catalog.py'
+      - 'ods/tests/test-catalog-invalid-manifest.py'
       - 'ods/config/extensions-catalog.json'
       - 'ods/config/chat-templates/**'
       - 'ods/scripts/validate-chat-templates.py'
@@ -41,8 +45,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install PyYAML
-        run: pip install pyyaml
+      - name: Install catalog test dependencies
+        run: python -m pip install 'PyYAML==6.0.3' 'pytest==8.4.2'
+
+      - name: Catalog generation refusal and shipped-entry contracts
+        run: python -m pytest -q ods/tests/test-catalog-invalid-manifest.py
 
       - name: Regenerate catalog and diff
         run: |
