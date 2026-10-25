@@ -453,6 +453,9 @@ jobs:
       - name: CLI Install Directory Resolution Tests
         run: bash tests/test-cli-install-dir-resolution.sh
 
+      - name: Unattended CLI confirmation cancellation
+        run: bash tests/test-cli-prompts-noninteractive.sh
+
       - name: CLI Model List and Activation Contracts
         run: |
           bash tests/test-ods-cli-model-list.sh
