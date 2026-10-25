@@ -1171,7 +1171,7 @@ _compose_run_with_summary() {
 
     log_error "${_verb} failed:"
     local _surfaced
-    _surfaced=$(grep -iE 'error|unhealthy|failed|dependency|permission denied|docker API|docker daemon|docker\.sock|/var/run/docker\.sock' "$_compose_log" \
+    _surfaced=$(grep -iE 'error|unhealthy|failed|dependency|permission denied|docker API|docker daemon|docker\.sock|/var/run/docker\.sock|no such service:' "$_compose_log" \
         | sed 's/^/  /' \
         | head -20 || true)
     if [[ -n "$_surfaced" ]]; then
@@ -3757,19 +3757,18 @@ cmd_preset() {
             for sid in "${SERVICE_IDS[@]}"; do
                 local cat="${SERVICE_CATEGORIES[$sid]}"
                 [[ "$cat" == "core" ]] && continue
-                local cf="${SERVICE_COMPOSE[$sid]}"
                 # Match restore and Dashboard: a user extension shadows the
                 # bundled extension with the same service ID.
-                local user_ext_dir="$INSTALL_DIR/data/user-extensions/$sid"
-                [[ -L "$user_ext_dir" ]] && error "Invalid user extension: $sid"
-                if [[ -d "$user_ext_dir" ]]; then
-                    cf="$user_ext_dir/compose.yaml"
-                fi
-                if [[ -n "$cf" && -f "$cf" ]]; then
+                local ext_dir="$INSTALL_DIR/data/user-extensions/$sid"
+                [[ -L "$ext_dir" ]] && error "Invalid user extension: $sid"
+                [[ -d "$ext_dir" ]] || ext_dir="$INSTALL_DIR/extensions/services/$sid"
+                if [[ -f "$ext_dir/compose.yaml" ]]; then
                     echo "enabled:$sid" >> "$state_file"
-                else
+                elif [[ -f "$ext_dir/compose.yaml.disabled" ]]; then
                     echo "disabled:$sid" >> "$state_file"
                 fi
+                # Host-managed services (no Compose file) have no selection
+                # marker; the restore helper would reject them.
             done
 
             # Save metadata
@@ -6503,6 +6502,36 @@ _gpu_reassign_update_amd_arch_env() {
     fi
 }
 
+# VRAM held on each GPU by this installation's own llama-server, printed as
+# "<gpu-uuid> <MiB>" lines. Reassignment recreates that container, so its
+# allocation is free for the new plan; counting it as used made the loaded
+# model fail to fit its own reassignment (#8087). Ownership must be proven:
+# the container is this installation's llama-server Compose service and each
+# GPU process runs in its cgroup. Anything not proven is not credited.
+_gpu_reassign_owned_llama_vram() {
+    local container="${SERVICE_CONTAINERS[llama-server]:-ods-llama-server}"
+    local proc_root="${ODS_PROC_ROOT:-/proc}"
+    local inspected container_id workdir config_files service running install_real
+    # No such container (or no Docker access) means nothing of ours to credit.
+    inspected=$(docker inspect -f '{{.Id}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}' \
+        "$container" 2>/dev/null) || return 0
+    IFS='|' read -r container_id workdir config_files service running <<< "$inspected"
+    [[ "$container_id" =~ ^[0-9a-f]{64}$ && "$service" == llama-server && "$running" == true ]] || return 0
+    install_real=$(cd -P "$INSTALL_DIR" && pwd)
+    [[ "$workdir" == "$INSTALL_DIR" || "$workdir" == "$install_real" ]] || return 0
+    [[ ",$config_files," == *",$workdir/docker-compose.base.yml,"* ]] || return 0
+    local apps pid uuid used
+    # A driver that cannot list compute processes leaves the budget as it was.
+    apps=$(nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory \
+        --format=csv,noheader,nounits 2>/dev/null) || return 0
+    while IFS=', ' read -r pid uuid used; do
+        [[ "$pid" =~ ^[0-9]+$ && "$used" =~ ^[0-9]+$ && -n "$uuid" ]] || continue
+        # A process that exited since the listing has nothing left to credit.
+        grep -Fq -- "$container_id" "$proc_root/$pid/cgroup" 2>/dev/null || continue
+        printf '%s %s\n' "$uuid" "$used"
+    done <<< "$apps"
+}
+
 _gpu_reassign() {
     local auto_mode=0 dry_run=0 manual_mode=0
     while [[ $# -gt 0 ]]; do
@@ -6591,11 +6620,31 @@ _gpu_reassign() {
         fi
     fi
 
+    # The assignment budgets each GPU by its free VRAM. Credit back what this
+    # installation's llama-server holds (capped at the GPU's total) so the
+    # loaded model can be reassigned; config/gpu-topology.json keeps the
+    # driver's figures.
+    local assign_topo_json="$topo_json" reclaimed=""
+    if [[ "$backend" == "nvidia" ]]; then
+        reclaimed=$(_gpu_reassign_owned_llama_vram)
+    fi
+    if [[ -n "$reclaimed" ]]; then
+        assign_topo_json=$(jq --arg reclaimed "$reclaimed" '
+            ($reclaimed | split("\n") | map(select(length > 0) | split(" "))
+                | reduce .[] as $row ({}; .[$row[0]] += ($row[1] | tonumber))) as $credit
+            | .gpus |= map(
+                if ($credit[.uuid] // 0) > 0 and .memory_free_gb != null then
+                    .memory_free_gb = ([.memory_free_gb + $credit[.uuid] / 1024, .memory_gb]
+                        | min | . * 10 | round / 10)
+                else . end)' <<< "$topo_json")
+        log "Counting $(awk '{ total += $2 } END { print total }' <<< "$reclaimed") MiB held by this installation's llama-server as available; reassignment recreates it."
+    fi
+
     # Write topology to tmpfile and run assignment
     local tmpdir
     tmpdir=$(mktemp -d)
     trap "rm -rf '$tmpdir'" RETURN
-    echo "$topo_json" > "$tmpdir/topo.json"
+    echo "$assign_topo_json" > "$tmpdir/topo.json"
     local env_backup="$tmpdir/env.before"
     cp "$INSTALL_DIR/.env" "$env_backup"
 
@@ -7391,6 +7440,7 @@ PYEOF
 
     log "Applying template: $template_id"
     local svc
+    local -a failed=() not_installed=()
     for svc in $services; do
         # Skip core services (no compose toggle needed)
         local cat="${SERVICE_CATEGORIES[$svc]:-optional}"
@@ -7403,10 +7453,35 @@ PYEOF
             continue
         fi
 
+        # The CLI cannot install Library extensions; the dashboard's template
+        # apply does. Name them instead of reporting an unknown service.
+        if [[ ! -d "$INSTALL_DIR/extensions/services/$svc" && ! -d "$INSTALL_DIR/data/user-extensions/$svc" \
+            && ( -d "$INSTALL_DIR/data/extensions-library/$svc" \
+                || -d "$INSTALL_DIR/extensions/library/services/$svc" ) ]]; then
+            warn "  $svc is a Library extension that is not installed"
+            not_installed+=("$svc")
+            continue
+        fi
+
         log "  Enabling $svc..."
-        ( cmd_enable "$svc" ) || warn "  Failed to enable $svc (continuing)"
+        if ! ( cmd_enable "$svc" ); then
+            warn "  Failed to enable $svc (continuing)"
+            failed+=("$svc")
+        fi
     done
-    success "Template applied: $template_id"
+    if [[ ${#failed[@]} -eq 0 && ${#not_installed[@]} -eq 0 ]]; then
+        success "Template applied: $template_id"
+        return 0
+    fi
+    # Additive: services enabled above stay enabled, but the template is not
+    # in effect until the rest are, so do not report success.
+    if [[ ${#not_installed[@]} -gt 0 ]]; then
+        warn "Not installed: ${not_installed[*]}. Apply '$template_id' from the dashboard's Extensions page, which installs Library extensions."
+    fi
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        warn "Could not enable: ${failed[*]} (see the errors above)."
+    fi
+    error "Template $template_id was only partly applied."
 }
 
 cmd_template() {

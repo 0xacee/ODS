@@ -122,6 +122,7 @@ tests/test-macos-cli-update-verification.sh
 tests/test-macos-config-show-secret-mask.sh
 tests/test-macos-config-without-docker.sh
 tests/test-macos-dashboard-private-state-launch.sh
+tests/test-macos-docker-cpu-budget.sh
 tests/test-macos-doctor-honest-failure.sh
 tests/test-macos-download-retries.sh
 tests/test-macos-env-quote-strip.sh
@@ -172,6 +173,7 @@ tests/test-ods-doctor-docker-access.sh
 tests/test-ods-list-json-escaping.sh
 tests/test-ods-test-complete-run.sh
 tests/test-ods-test-http-code.sh
+tests/test-ods-test-tool-calling.sh
 tests/test-ods-test.sh
 tests/test-ods-update-runtime-compose.sh
 tests/test-offline-embedding-gate.sh
@@ -197,6 +199,7 @@ tests/test-pre-download-tier-noninteractive.sh
 tests/test-preflight.sh
 tests/test-preset-compatibility.sh
 tests/test-preset-diff.sh
+tests/test-preset-host-only-services.sh
 tests/test-preset-import-export.sh
 tests/test-preset-import-transaction.sh
 tests/test-preview-inspection.mjs
@@ -314,6 +317,7 @@ tests/test_uninstall_validate_install_dir.py
 tests/test-preset-completion.sh
 tests/test-remote-provider-directory-permissions.py
 tests/test-remote-provider-installer-directories.sh
+tests/test-open-interpreter-llm-port.sh
 tests/test-cli-chat-route.py
 tests/test_host_agent_process_shutdown.py
 tests/test-cli-chat-error-exit.py
