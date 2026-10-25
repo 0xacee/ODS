@@ -26,9 +26,17 @@ def test_recorded_receipts_reach_authenticated_minute_api_without_private_fields
     test_client, recorded_usage, monkeypatch,
 ):
     import routers.usage as route
+    import usage_timeline
 
     db = recorded_usage
     now = datetime.now(timezone.utc)
+
+    class ReceiptClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(usage_timeline, "datetime", ReceiptClock)
     stamp = now.replace(second=0, microsecond=0).isoformat()
     # Real writes include optional cache buckets, a discriminator and private
     # attribution. Neither helper-only fixtures nor a mocked final response
