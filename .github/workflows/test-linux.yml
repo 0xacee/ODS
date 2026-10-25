@@ -644,6 +644,9 @@ jobs:
           bash tests/test-backup-restore-roundtrip.sh
           python3 tests/test-rsync-transfer-failures.py
 
+      - name: Backup and restore CLI behavioral contracts
+        run: bash tests/test-backup-restore-cli.sh
+
       - name: Backup retention and integrity
         run: |
           sudo apt-get update
